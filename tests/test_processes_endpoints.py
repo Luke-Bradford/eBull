@@ -775,3 +775,192 @@ def test_partial_flag_when_adapter_throws(
     # bootstrap survived; scheduled_jobs are absent.
     assert "bootstrap" in process_ids
     assert JOB_RETRY_DEFERRED not in process_ids
+
+
+# ---------------------------------------------------------------------------
+# PR6 (#1078) — orchestrator cancel + ingest_sweep + DAG endpoint
+# ---------------------------------------------------------------------------
+
+
+def _wipe_orchestrator_state(conn: psycopg.Connection[tuple]) -> None:
+    conn.execute("DELETE FROM sync_layer_progress")
+    conn.execute("DELETE FROM sync_runs")
+    conn.execute("DELETE FROM process_stop_requests WHERE target_run_kind = 'sync_run'")
+
+
+def _seed_running_sync_run(
+    conn: psycopg.Connection[tuple],
+    *,
+    layers: list[tuple[str, str]],
+) -> int:
+    """Insert a running sync_runs row + per-layer rows.
+
+    ``layers`` is a list of ``(layer_name, status)`` so each test can
+    pin the cohort it wants.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO sync_runs (scope, scope_detail, trigger, layers_planned, status)
+        VALUES ('full', NULL, 'manual', %s, 'running')
+        RETURNING sync_run_id
+        """,
+        (len(layers),),
+    ).fetchone()
+    assert row is not None
+    sync_run_id = int(row[0])
+    for name, layer_status in layers:
+        conn.execute(
+            """
+            INSERT INTO sync_layer_progress (sync_run_id, layer_name, status,
+                                              started_at, finished_at,
+                                              items_total, items_done)
+            VALUES (%s, %s, %s,
+                    CASE WHEN %s IN ('pending') THEN NULL ELSE now() END,
+                    CASE WHEN %s IN ('complete', 'failed', 'skipped', 'cancelled', 'partial') THEN now() ELSE NULL END,
+                    100, 50)
+            """,
+            (sync_run_id, name, layer_status, layer_status, layer_status),
+        )
+    return sync_run_id
+
+
+def test_cancel_orchestrator_full_sync_targets_sync_run_kind(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    sync_run_id = _seed_running_sync_run(ebull_test_conn, layers=[("universe", "running")])
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/orchestrator_full_sync/cancel",
+        json={"mode": "cooperative"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["target_run_kind"] == "sync_run"
+    assert body["target_run_id"] == sync_run_id
+
+    # Stop row written + sync_runs.cancel_requested_at populated.
+    stop_row = ebull_test_conn.execute(
+        """
+        SELECT process_id, mechanism, target_run_kind, target_run_id, mode
+          FROM process_stop_requests
+         WHERE target_run_kind = 'sync_run' AND target_run_id = %s
+         ORDER BY id DESC LIMIT 1
+        """,
+        (sync_run_id,),
+    ).fetchone()
+    assert stop_row is not None
+    assert stop_row[0] == "orchestrator_full_sync"
+    assert stop_row[1] == "scheduled_job"
+    assert stop_row[4] == "cooperative"
+
+    sync_row = ebull_test_conn.execute(
+        "SELECT cancel_requested_at FROM sync_runs WHERE sync_run_id = %s",
+        (sync_run_id,),
+    ).fetchone()
+    assert sync_row is not None
+    assert sync_row[0] is not None
+
+
+def test_cancel_orchestrator_full_sync_no_active_returns_409(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/orchestrator_full_sync/cancel",
+        json={"mode": "cooperative"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "no_active_run"
+
+
+def test_get_orchestrator_dag_returns_run_summary_and_layers(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    sync_run_id = _seed_running_sync_run(
+        ebull_test_conn,
+        layers=[("universe", "complete"), ("candles", "running"), ("fundamentals", "pending")],
+    )
+    ebull_test_conn.commit()
+
+    resp = client.get("/system/processes/orchestrator_full_sync/dag")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sync_run"] is not None
+    assert body["sync_run"]["sync_run_id"] == sync_run_id
+    assert body["sync_run"]["status"] == "running"
+    layer_names = {r["name"] for r in body["layers"]}
+    assert {"universe", "candles", "fundamentals"} <= layer_names
+    # display_name + tier come from the LAYERS registry.
+    universe_row = next(r for r in body["layers"] if r["name"] == "universe")
+    assert universe_row["display_name"] == "Tradable Universe"
+    assert universe_row["tier"] == 0
+
+
+def test_get_orchestrator_dag_empty_when_no_recent_run(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    resp = client.get("/system/processes/orchestrator_full_sync/dag")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sync_run"] is None
+    assert body["layers"] == []
+
+
+def test_get_orchestrator_dag_404_for_non_orchestrator(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    resp = client.get("/system/processes/sec_form4_sweep/dag")
+    assert resp.status_code == 404
+
+
+def test_trigger_ingest_sweep_returns_409_trigger_not_supported(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/sec_form4_sweep/trigger",
+        json={"mode": "iterate"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "trigger_not_supported"
+
+
+def test_cancel_ingest_sweep_returns_409_cancel_not_supported(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    resp = client.post(
+        "/system/processes/sec_form4_sweep/cancel",
+        json={"mode": "cooperative"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "cancel_not_supported"
+
+
+def test_get_ingest_sweep_returns_process_row(conn_override: None, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """Sanity: after PR6, ingest_sweep ids resolve via _resolve_mechanism
+    and the GET /system/processes/{id} read endpoint returns the row."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    resp = client.get("/system/processes/sec_form4_sweep")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["process_id"] == "sec_form4_sweep"
+    assert body["mechanism"] == "ingest_sweep"
+    assert body["can_iterate"] is False
+    assert body["can_full_wash"] is False
+    assert body["can_cancel"] is False

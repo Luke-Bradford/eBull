@@ -486,6 +486,59 @@ _CUSTOM_RESOLVERS: dict[str, Callable[[psycopg.Connection[Any]], ProcessWatermar
 
 
 # ---------------------------------------------------------------------------
+# Ingest-sweep dispatch (PR6 #1078)
+# ---------------------------------------------------------------------------
+#
+# The sweep registry lives in ``app.services.processes.ingest_sweep_adapter``
+# (one source of truth for the sweep -> source mapping). To avoid a circular
+# import (the adapter imports ``resolve_watermark`` from this module), the
+# dispatch reads the ``_SWEEP_BY_ID`` mapping via a lazy import.
+#
+# Manifest sweeps (Form 4 / 13F-HR / NPORT) report the manifest accession
+# cursor — the operator-visible "newest accession we have on file".
+# Freshness-only sweeps (Form 3 / DEF 14A / 8-K) report the freshness max
+# filed_at — same cursor as the equivalent scheduled_adapter row.
+
+_SWEEP_DISPLAY_OVERRIDES: dict[str, str] = {
+    "sec_form3_sweep": "Form 3",
+    "sec_form4_sweep": "Form 4",
+    "sec_def14a_sweep": "DEF 14A",
+    "sec_8k_sweep": "8-K",
+    "sec_13f_sweep": "13F-HR",
+    "nport_sweep": "N-PORT",
+}
+
+
+def _resolve_ingest_sweep(
+    conn: psycopg.Connection[Any],
+    process_id: str | None = None,
+) -> ProcessWatermark | None:
+    """Lookup the sweep's source(s) + dispatch to manifest/freshness resolver.
+
+    Caller is ``resolve_watermark`` which always passes ``process_id`` via
+    the closure capture in ``_safely``. The optional second arg keeps the
+    Callable signature compatible with the other resolvers.
+    """
+    if process_id is None:
+        # Defensive: ``_safely`` always passes process_id but the optional
+        # signature lets pyright relax — explicit None branch keeps the
+        # contract honest.
+        return None
+    # Lazy-import to avoid circular dep with ingest_sweep_adapter.
+    from app.services.processes.ingest_sweep_adapter import _SWEEP_BY_ID
+
+    spec = _SWEEP_BY_ID.get(process_id)
+    if spec is None:
+        return None
+    display = _SWEEP_DISPLAY_OVERRIDES.get(process_id, spec.display_name)
+    if spec.manifest_source is not None:
+        return _resolve_manifest_accession(conn, source=spec.manifest_source, display=display)
+    if spec.freshness_source is not None:
+        return _resolve_filed_at(conn, source=spec.freshness_source, display=display)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Public API — watermark
 # ---------------------------------------------------------------------------
 
@@ -515,9 +568,12 @@ def resolve_watermark(
     if mechanism == "bootstrap":
         return _safely(_resolve_bootstrap_stage_index, conn, process_id)
     if mechanism == "ingest_sweep":
-        # PR6 wires per-source ingest sweep rows; PR4 has nothing to
-        # surface here.
-        return None
+        # PR6 #1078: dispatch to the manifest / freshness resolver based
+        # on the sweep's source registry. The sweep registry lives in
+        # ``ingest_sweep_adapter`` to avoid a circular import; we look
+        # the spec up via a lazy import inside ``_resolve_ingest_sweep``.
+        sweep_id = process_id
+        return _safely(lambda c: _resolve_ingest_sweep(c, sweep_id), conn, process_id)
     spec = _JOB_REGISTRY.get(process_id)
     if spec is None:
         return None

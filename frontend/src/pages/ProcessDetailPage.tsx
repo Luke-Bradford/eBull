@@ -11,18 +11,22 @@
  * page surfaces inline rather than escaping back to the table view.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
 import {
   cancelProcess,
+  fetchOrchestratorDag,
   fetchProcess,
   fetchProcessRuns,
   triggerProcess,
 } from "@/api/processes";
 import type {
   CancelMode,
+  OrchestratorDagLayerResponse,
+  OrchestratorDagResponse,
+  OrchestratorDagSyncRunResponse,
   ProcessRowResponse,
   ProcessRunSummaryResponse,
 } from "@/api/types";
@@ -40,7 +44,9 @@ import {
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
 
-type TabKey = "overview" | "history" | "errors";
+type TabKey = "overview" | "history" | "errors" | "dag";
+
+const ORCHESTRATOR_FULL_SYNC_ID = "orchestrator_full_sync";
 
 export function ProcessDetailPage() {
   const params = useParams<{ id: string }>();
@@ -55,22 +61,48 @@ export function ProcessDetailPage() {
   // useAsync captures fn via a ref — fresh arrow per render is fine.
   const detail = useAsync(() => fetchProcess(id), [id]);
   const runs = useAsync(() => fetchProcessRuns(id, 7), [id]);
+  // DAG drill-in fetcher (#1078). Gated on BOTH (process_id is the
+  // orchestrator) AND (active tab is DAG) so non-orchestrator detail
+  // pages never call /dag and the orchestrator page does not fetch
+  // the DAG until the operator opens the tab. `preserveOnRefetch`
+  // keeps the rendered grid stable while a tick re-fetches (the
+  // useAsync default is false — Codex pre-impl review M2).
+  const isOrchestrator = id === ORCHESTRATOR_FULL_SYNC_ID;
+  const dag = useAsync<OrchestratorDagResponse | null>(
+    () =>
+      tab === "dag" && isOrchestrator
+        ? fetchOrchestratorDag(id)
+        : Promise.resolve(null),
+    [id, tab, isOrchestrator],
+    { preserveOnRefetch: true },
+  );
+
+  // Reset tab to overview if currently on DAG and the route param
+  // changes to a non-orchestrator id (operator clicked a different
+  // process row from the table). Codex pre-impl review M-r2-2.
+  useEffect(() => {
+    if (tab === "dag" && !isOrchestrator) {
+      setTab("overview");
+    }
+  }, [tab, isOrchestrator]);
 
   // Extract the refetch refs as local const bindings so ESLint can
   // see their identity and verify the dep array — `useAsync` wraps
   // refetch in `useCallback([], [])` (see useAsync.test.ts which
   // pins that invariant) so these references are stable across
-  // renders. Listing the full `detail` / `runs` hook-return objects
-  // in deps would re-derive `refetchAll` every render and propagate
-  // the identity churn through every `handleX` below — PR #1077
-  // review WARNING.
+  // renders. Listing the full `detail` / `runs` / `dag` hook-return
+  // objects in deps would re-derive `refetchAll` every render and
+  // propagate the identity churn through every `handleX` below —
+  // PR #1077 review WARNING / PREVENTION-log #1209.
   const refetchDetail = detail.refetch;
   const refetchRuns = runs.refetch;
+  const refetchDag = dag.refetch;
 
   const refetchAll = useCallback(() => {
     refetchDetail();
     refetchRuns();
-  }, [refetchDetail, refetchRuns]);
+    refetchDag();
+  }, [refetchDetail, refetchRuns, refetchDag]);
 
   const handleIterate = useCallback(async () => {
     setTriggerError(null);
@@ -164,7 +196,7 @@ export function ProcessDetailPage() {
         ) : null}
       </div>
 
-      <TabBar tab={tab} setTab={setTab} />
+      <TabBar tab={tab} setTab={setTab} showDag={isOrchestrator} />
 
       <Section title={tabTitle(tab)}>
         {tab === "overview" ? (
@@ -181,12 +213,19 @@ export function ProcessDetailPage() {
             error={runs.error}
             onRetry={runs.refetch}
           />
-        ) : (
+        ) : tab === "errors" ? (
           <ErrorsTab
             row={detail.data}
             loading={detail.loading}
             error={detail.error}
             onRetry={detail.refetch}
+          />
+        ) : (
+          <DagTab
+            payload={dag.data}
+            loading={dag.loading}
+            error={dag.error}
+            onRetry={dag.refetch}
           />
         )}
       </Section>
@@ -298,14 +337,17 @@ function ActionBar({
 function TabBar({
   tab,
   setTab,
+  showDag,
 }: {
   tab: TabKey;
   setTab: (t: TabKey) => void;
+  showDag: boolean;
 }) {
   const tabs: { key: TabKey; label: string }[] = [
     { key: "overview", label: "Overview" },
     { key: "history", label: "History" },
     { key: "errors", label: "Errors" },
+    ...(showDag ? [{ key: "dag" as TabKey, label: "DAG" }] : []),
   ];
   return (
     <div role="tablist" className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
@@ -337,7 +379,9 @@ function tabTitle(tab: TabKey): string {
     ? "Overview"
     : tab === "history"
       ? "Run history (last 7 days)"
-      : "Errors (latest terminal run)";
+      : tab === "errors"
+        ? "Errors (latest terminal run)"
+        : "DAG (latest sync run)";
 }
 
 function OverviewTab({
@@ -508,6 +552,167 @@ function ErrorsTab({
         </li>
       ))}
     </ul>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DAG drill-in tab (#1078 — orchestrator_full_sync only)
+// ---------------------------------------------------------------------------
+
+const LAYER_STATUS_TONE: Record<string, string> = {
+  pending: "border-slate-300 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300",
+  running: "border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300",
+  complete: "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300",
+  failed: "border-red-300 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300",
+  skipped: "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
+  partial: "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
+  cancelled: "border-slate-300 bg-slate-50 text-slate-500 line-through dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
+};
+
+function DagTab({
+  payload,
+  loading,
+  error,
+  onRetry,
+}: {
+  payload: OrchestratorDagResponse | null;
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+}) {
+  if (loading) return <SectionSkeleton rows={6} />;
+  if (error) return <SectionError onRetry={onRetry} />;
+  if (!payload || payload.sync_run === null) {
+    return (
+      <p className="text-sm text-slate-500 dark:text-slate-400">
+        No recent sync run. Trigger a sync from the action bar above to populate the DAG.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      <DagRunSummary run={payload.sync_run} />
+      <DagLayerTable layers={payload.layers} />
+    </div>
+  );
+}
+
+function DagRunSummary({ run }: { run: OrchestratorDagSyncRunResponse }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <Cell label="Run id" value={`#${run.sync_run_id}`} />
+      <Cell
+        label="Scope"
+        value={`${run.scope}${run.scope_detail ? ` · ${run.scope_detail}` : ""}`}
+      />
+      <Cell label="Trigger" value={run.trigger} />
+      <Cell label="Status" value={run.status} />
+      <Cell label="Started" value={formatDateTime(run.started_at)} />
+      <Cell
+        label="Finished"
+        value={run.finished_at ? formatDateTime(run.finished_at) : "—"}
+      />
+      <Cell
+        label="Layers"
+        value={`${run.layers_done}/${run.layers_planned} done · ${run.layers_failed} failed · ${run.layers_skipped} skipped`}
+      />
+      <Cell
+        label="Cancel signal"
+        value={run.cancel_requested_at ? formatDateTime(run.cancel_requested_at) : "—"}
+      />
+    </div>
+  );
+}
+
+function Cell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded border border-slate-200 bg-slate-50 p-2 text-sm dark:border-slate-800 dark:bg-slate-900/40">
+      <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        {label}
+      </div>
+      <div className="mt-0.5 truncate text-slate-700 dark:text-slate-200" title={value}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function DagLayerTable({ layers }: { layers: OrchestratorDagLayerResponse[] }) {
+  if (layers.length === 0) {
+    return (
+      <p className="text-sm text-slate-500 dark:text-slate-400">
+        No layer rows recorded for this run.
+      </p>
+    );
+  }
+  // Group by tier so the operator sees source / raw / computed /
+  // decisions ordering. ``null`` tier (defensive, registry drift)
+  // sinks to the end.
+  const sorted = [...layers].sort((a, b) => {
+    const at = a.tier ?? 99;
+    const bt = b.tier ?? 99;
+    if (at !== bt) return at - bt;
+    return a.display_name.localeCompare(b.display_name);
+  });
+  return (
+    <table className="w-full text-left text-sm">
+      <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        <tr>
+          <th className="px-2 py-2">Layer</th>
+          <th className="px-2 py-2">Tier</th>
+          <th className="px-2 py-2">Status</th>
+          <th className="px-2 py-2">Items</th>
+          <th className="px-2 py-2">Finished</th>
+          <th className="px-2 py-2">Detail</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+        {sorted.map((layer) => {
+          const tone =
+            LAYER_STATUS_TONE[layer.status] ??
+            "border-slate-300 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300";
+          const items =
+            layer.items_total === null && layer.items_done === null
+              ? "—"
+              : `${layer.items_done ?? 0}/${layer.items_total ?? "?"}`;
+          const detail =
+            layer.error_message ??
+            layer.skip_reason ??
+            (layer.error_category ? `category: ${layer.error_category}` : "—");
+          return (
+            <tr key={layer.name} className="text-sm align-top">
+              <td className="px-2 py-2 text-slate-700 dark:text-slate-200">
+                <div className="font-medium">{layer.display_name}</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  {layer.name}
+                </div>
+              </td>
+              <td className="px-2 py-2 text-slate-600 dark:text-slate-400">
+                {layer.tier === null ? "—" : `T${layer.tier}`}
+              </td>
+              <td className="px-2 py-2">
+                <span
+                  className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tone}`}
+                >
+                  {layer.status}
+                </span>
+              </td>
+              <td className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400">
+                {items}
+              </td>
+              <td className="px-2 py-2 text-xs text-slate-500 dark:text-slate-400">
+                {layer.finished_at ? formatDateTime(layer.finished_at) : "—"}
+              </td>
+              <td className="px-2 py-2 text-xs text-slate-600 dark:text-slate-400">
+                <span className="break-words" title={detail}>
+                  {detail}
+                </span>
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 

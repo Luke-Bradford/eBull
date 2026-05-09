@@ -1,5 +1,5 @@
 /**
- * Admin page — triage-first rewrite (issue #323).
+ * Admin page — control-hub rewrite (#1064).
  *
  * Three-section composition:
  *   1. Problems panel — failing layers + failing jobs + coverage
@@ -7,25 +7,27 @@
  *      combined problem list is empty.
  *   2. Fund data row — four live cells + three pending placeholders
  *      for summaries we don't yet have endpoints for.
- *   3. Collapsed-by-default details: orchestrator (15-layer grid +
- *      recent runs), background jobs, filings coverage.
+ *   3. Processes table — unified view of bootstrap + scheduled jobs +
+ *      ingest sweeps. Drill-in lives at /admin/processes/{id}.
+ *      Background-tasks table + filings coverage stay during PR6/PR7
+ *      migration; PR9 decommissions the rest.
  *
- * AdminPage owns the auto-refresh loop (10s when a sync is running,
- * 60s otherwise) for its five top-level fetches. It also instantiates
- * the shared `useSyncTrigger` hook and passes it to both the
- * top-level Sync-now button and the inner `SyncDashboard`, so both
- * buttons reflect one piece of state and a second click never fires
- * a second POST (spec §11).
+ * #1078 — admin control hub PR6. The legacy SyncDashboard (Sync-now
+ * button + 15-layer grid + recent-runs feed) and LayerHealthList have
+ * been decommissioned: the orchestrator surfaces as one row in the
+ * Processes table and its DAG drill-in lives on
+ * /admin/processes/orchestrator_full_sync. SeedProgressPanel +
+ * BootstrapPanel + Background-tasks table stay until PR7 / PR9.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchSystemStatus } from "@/api/system";
-import { fetchSyncLayersV2, fetchSyncStatus, setLayerEnabled } from "@/api/sync";
+import { fetchSyncLayersV2, fetchSyncStatus } from "@/api/sync";
 import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
@@ -34,7 +36,6 @@ import type {
 import { BootstrapPanel } from "@/components/admin/BootstrapPanel";
 import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
-import { LayerHealthList } from "@/components/admin/LayerHealthList";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import { ProcessesTable } from "@/components/admin/ProcessesTable";
 import { SeedProgressPanel } from "@/components/admin/SeedProgressPanel";
@@ -45,8 +46,6 @@ import {
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
 import { useProcesses } from "@/lib/useProcesses";
-import { useSyncTrigger } from "@/lib/useSyncTrigger";
-import { SyncDashboard } from "@/pages/SyncDashboard";
 
 type RowState =
   | { kind: "idle" }
@@ -86,9 +85,9 @@ export function AdminPage() {
   );
 
   // Admin control hub processes view (#1076 / #1064). Self-polls via
-  // its own cadence-flip interval (5s while running, 30s otherwise);
-  // mounted alongside the legacy panels during the migration window.
-  // PR6/PR7 decommission BootstrapPanel + LayerHealthList + SyncDashboard.
+  // its own cadence-flip interval (5s while running, 30s otherwise).
+  // PR6 decommissioned the legacy SyncDashboard + LayerHealthList —
+  // the orchestrator surfaces here as one row + DAG drill-in.
   const processes = useProcesses();
 
   // Extract the refetch refs as local const bindings so ESLint can
@@ -126,70 +125,8 @@ export function AdminPage() {
     return () => window.clearInterval(id);
   }, [refreshInterval]);
 
-  // Shared sync-trigger — single source of truth for both the
-  // top-level button here and the inner button inside SyncDashboard.
-  const syncTrigger = useSyncTrigger(refetchAll);
-  // Destructure once — `useSyncTrigger` returns a plain object
-  // literal, so the outer reference changes every render. Using
-  // the stable member refs in hook deps below prevents effects
-  // from re-arming on every render (most visibly: the fallback
-  // timer below, which would otherwise reset every render and
-  // could never actually fire).
-  const {
-    kind: triggerKind,
-    message: triggerMessage,
-    trigger: triggerSync_,
-    clearQueued: triggerClearQueued,
-  } = syncTrigger;
-
-  // Drive the `queued → idle` transition off the top-level status
-  // poll. Previously only SyncDashboard called clearQueued, which
-  // meant a click on the top button with the orchestrator section
-  // collapsed left the hook stuck in `queued` forever (button stays
-  // disabled until reload). With the top-level status fetch here we
-  // can advance the trigger state independently. Also clears via a
-  // one-off timer for the fast-run case where a sync finishes
-  // before the next /sync/status tick ever observes is_running=true.
-  useEffect(() => {
-    triggerClearQueued(isRunning);
-  }, [triggerClearQueued, isRunning]);
-
-  useEffect(() => {
-    if (triggerKind !== "queued" && triggerKind !== "conflict") return;
-    // Fallback: if the server-side sync finishes before we ever see
-    // is_running=true, recover the idle state after the next refresh
-    // tick. Otherwise the button would stay disabled indefinitely in
-    // the queued case, or the amber "Another sync is already running"
-    // pill would stick indefinitely in the conflict case.
-    const id = window.setTimeout(
-      () => triggerClearQueued(true),
-      refreshInterval + 2_000,
-    );
-    return () => window.clearTimeout(id);
-  }, [triggerKind, triggerClearQueued, refreshInterval]);
-
-  const [orchestratorOpen, setOrchestratorOpen] = useState(false);
   const [processesOpen, setProcessesOpen] = useState(true);
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
-  const [toast, setToast] = useState<string | null>(null);
-
-  const handleLayerToggle = useCallback(
-    async (layerName: string, enabled: boolean) => {
-      try {
-        const resp = await setLayerEnabled(layerName, enabled);
-        refetchV2();
-        if (resp.warning !== null) {
-          setToast(resp.warning);
-          window.setTimeout(() => setToast(null), 6000);
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setToast(`Failed to update ${layerName}: ${msg}`);
-        window.setTimeout(() => setToast(null), 6000);
-      }
-    },
-    [refetchV2],
-  );
 
   const handleRun = useCallback(
     async (name: string) => {
@@ -213,52 +150,27 @@ export function AdminPage() {
     [refetchJobs],
   );
 
-  const openOrchestratorFor = useCallback((layerName: string) => {
-    setOrchestratorOpen(true);
-    // Let the section mount before we scroll, so the target exists.
-    // scrollIntoView is undefined in jsdom so we guard defensively —
-    // the browser behaviour is unchanged.
-    requestAnimationFrame(() => {
-      const layerEl = document.getElementById(`admin-layer-${layerName}`);
-      if (layerEl && typeof layerEl.scrollIntoView === "function") {
-        layerEl.scrollIntoView({ behavior: "smooth", block: "start" });
-        return;
-      }
-      const sectionEl = document.getElementById("admin-orchestrator-details");
-      if (sectionEl && typeof sectionEl.scrollIntoView === "function") {
-        sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-    });
-  }, []);
-
   const backgroundJobs = (jobs.data?.jobs ?? []).filter(
     (j) => !ORCHESTRATOR_OWNED.has(j.name),
   );
 
-  const unhealthyLayerCount = (v2.data?.layers ?? []).filter(
-    (l) => l.state !== "healthy" && l.state !== "disabled",
-  ).length;
+  // ProblemsPanel surfaces failing layers with a drill-through; PR6
+  // moves the orchestrator detail behind /admin/processes/orchestrator_full_sync
+  // so the click navigates there with the DAG tab pre-selected via
+  // the route's hash.
+  const navigate = useNavigate();
+  const openOrchestratorFor = useCallback(
+    (_layerName: string) => {
+      navigate("/admin/processes/orchestrator_full_sync");
+    },
+    [navigate],
+  );
 
   return (
     <div className="space-y-4 pt-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Admin</h1>
-        <SyncNowButton
-          triggerKind={triggerKind}
-          message={triggerMessage}
-          isRunning={isRunning}
-          onClick={() => void triggerSync_()}
-        />
       </div>
-
-      {toast !== null ? (
-        <div
-          role="status"
-          className="rounded-md border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800"
-        >
-          {toast}
-        </div>
-      ) : null}
 
       <ProblemsPanel
         v2={v2.data}
@@ -298,38 +210,6 @@ export function AdminPage() {
         recommendationsError={recs.error !== null}
       />
 
-      <CollapsibleSection
-        title="Layer health"
-        summary={
-          v2.data === null
-            ? undefined
-            : unhealthyLayerCount > 0
-              ? `${unhealthyLayerCount} layer${unhealthyLayerCount === 1 ? "" : "s"} catching up or need attention`
-              : "all layers healthy"
-        }
-      >
-        {v2.loading ? (
-          <SectionSkeleton rows={15} />
-        ) : v2.error !== null ? (
-          <SectionError onRetry={v2.refetch} />
-        ) : v2.data ? (
-          <LayerHealthList
-            layers={v2.data.layers}
-            onToggle={handleLayerToggle}
-          />
-        ) : null}
-      </CollapsibleSection>
-
-      <CollapsibleSection
-        title="Orchestrator details"
-        summary="sync history"
-        open={orchestratorOpen}
-        onOpenChange={setOrchestratorOpen}
-        sectionId="admin-orchestrator-details"
-      >
-        <SyncDashboard syncTrigger={syncTrigger} />
-      </CollapsibleSection>
-
       <SeedProgressPanel />
 
       <CollapsibleSection
@@ -368,51 +248,6 @@ export function AdminPage() {
           <CoverageSummaryCard summary={coverage.data} />
         ) : null}
       </CollapsibleSection>
-    </div>
-  );
-}
-
-function SyncNowButton({
-  triggerKind,
-  message,
-  isRunning,
-  onClick,
-}: {
-  triggerKind: "idle" | "running" | "queued" | "conflict" | "error";
-  message: string | null;
-  isRunning: boolean;
-  onClick: () => void;
-}) {
-  const disabled =
-    triggerKind === "running" || triggerKind === "queued" || isRunning;
-  const label =
-    triggerKind === "running"
-      ? "Triggering…"
-      : triggerKind === "queued"
-        ? "Queued"
-        : isRunning
-          ? "Running"
-          : "Sync now";
-  return (
-    <div className="flex items-center gap-2">
-      {triggerKind === "error" && message !== null ? (
-        <span className="text-xs text-red-600">{message}</span>
-      ) : triggerKind === "conflict" && message !== null ? (
-        <span
-          className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-800"
-          role="status"
-        >
-          {message}
-        </span>
-      ) : null}
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={disabled}
-        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700 disabled:bg-slate-300"
-      >
-        {label}
-      </button>
     </div>
   );
 }

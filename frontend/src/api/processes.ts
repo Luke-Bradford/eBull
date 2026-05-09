@@ -11,6 +11,7 @@ import type {
   CancelRequestBody,
   CancelResponse,
   ErrorClassSummaryResponse,
+  OrchestratorDagResponse,
   ProcessListResponse,
   ProcessRowResponse,
   ProcessRunSummaryResponse,
@@ -64,5 +65,21 @@ export function cancelProcess(
   return apiFetch<CancelResponse>(
     `/system/processes/${encodeURIComponent(processId)}/cancel`,
     { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/**
+ * Orchestrator full-sync DAG drill-in (#1078).
+ *
+ * Restricted endpoint: returns 404 for any process_id other than
+ * `orchestrator_full_sync`. Callers MUST gate on the process_id
+ * before calling — `ProcessDetailPage` does this via the DAG-tab
+ * fetch closure.
+ */
+export function fetchOrchestratorDag(
+  processId: string,
+): Promise<OrchestratorDagResponse> {
+  return apiFetch<OrchestratorDagResponse>(
+    `/system/processes/${encodeURIComponent(processId)}/dag`,
   );
 }

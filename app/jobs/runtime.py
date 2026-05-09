@@ -55,6 +55,7 @@ from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
 from app.services.process_stop import acquire_prelude_lock
+from app.services.sync_orchestrator.types import OrchestratorFenceHeld
 from app.workers.scheduler import (
     JOB_ATTRIBUTION_SUMMARY,
     JOB_CUSIP_EXTID_SWEEP,
@@ -319,7 +320,20 @@ _FENCE_HELD_ERROR_MSG = "full-wash in progress for this process"
 # enforce against scheduled-job mechanisms (where ``process_id`` ==
 # ``job_name``), and bootstrap stays governed by its own state machine.
 
-_PRELUDE_OPT_OUT_JOBS: frozenset[str] = frozenset({_bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR})
+_PRELUDE_OPT_OUT_JOBS: frozenset[str] = frozenset(
+    {
+        _bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR,
+        # #1078 — admin control hub PR6. Orchestrator full / HF sync
+        # write ``sync_runs``, not ``job_runs``. Routing them through
+        # the runtime prelude would orphan a ``job_runs`` row with no
+        # finaliser (the orchestrator's invoker never writes job_runs).
+        # The fence-check + advisory lock for orchestrator runs lives
+        # in ``_start_sync_run`` (spec §"sync_runs analogue") so the
+        # fence covers both code paths without double-write.
+        JOB_ORCHESTRATOR_FULL_SYNC,
+        JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+    }
+)
 
 
 # Carries the prelude-allocated run_id into ``_tracked_job``. Module-
@@ -328,6 +342,18 @@ _PRELUDE_OPT_OUT_JOBS: frozenset[str] = frozenset({_bootstrap_orchestrator.JOB_B
 # thread runs one invoker at a time and the var lives only for the
 # duration of that invoker call.
 _prelude_run_id: contextvars.ContextVar[int | None] = contextvars.ContextVar("_prelude_run_id", default=None)
+
+
+# #1078 — admin control hub PR6. Plumbs the listener-decoded
+# ``(linked_request_id, mode)`` into prelude-opt-out invokers. The
+# orchestrator's wrapper (``orchestrator_full_sync()``) consumes this
+# and passes through to ``run_sync(linked_request_id=..., request_mode=...)``
+# so ``_start_sync_run`` can bypass its own fence when the run IS the
+# fence holder. Scheduled-fire path leaves the var unset → wrappers
+# get ``(None, None)`` and ``run_sync`` defaults apply.
+_invoker_request_context: contextvars.ContextVar[tuple[int | None, str | None]] = contextvars.ContextVar(
+    "_invoker_request_context", default=(None, None)
+)
 
 
 def consume_prelude_run_id() -> int | None:
@@ -343,6 +369,26 @@ def consume_prelude_run_id() -> int | None:
     if run_id is not None:
         _prelude_run_id.set(None)
     return run_id
+
+
+def consume_invoker_request_context() -> tuple[int | None, str | None]:
+    """Pop the listener-dispatched ``(linked_request_id, mode)`` context.
+
+    Issue #1078 (umbrella #1064) — admin control hub PR6.
+
+    Prelude-opt-out invokers (orchestrator full / HF sync) call this on
+    entry to plumb the listener-decoded request context into their own
+    fence-handling code (e.g. ``run_sync(linked_request_id=...,
+    request_mode=...)``). Scheduled fires + legacy direct calls return
+    ``(None, None)``; orchestrator's defaults then apply.
+
+    Idempotent — clears the contextvar after read so a nested invoker
+    cannot reuse the same context.
+    """
+    ctx = _invoker_request_context.get()
+    if ctx != (None, None):
+        _invoker_request_context.set((None, None))
+    return ctx
 
 
 def _run_prelude(
@@ -1155,6 +1201,17 @@ class JobRuntime:
                     "earlier overrunning fire)",
                     job_name,
                 )
+            except OrchestratorFenceHeld as exc:
+                # #1078 — admin control hub PR6. Orchestrator opt-out
+                # invokers raise this on fence held. Log INFO (an
+                # expected fence skip is not an error) so APScheduler
+                # doesn't surface a noisy traceback (Codex round 3
+                # nit).
+                logger.info(
+                    "scheduled fire of %r skipped: orchestrator fence held by %r",
+                    job_name,
+                    exc.holder_process_id,
+                )
             except Exception:
                 logger.exception(
                     "scheduled fire of %r raised; will run again at next cadence",
@@ -1221,8 +1278,16 @@ class JobRuntime:
                         # Self-tracked invoker; running the prelude
                         # would orphan a ``job_runs`` row the invoker
                         # never finalises. Bootstrap's fence is
-                        # ``bootstrap_state.status``, not a queue row.
-                        invoker()
+                        # ``bootstrap_state.status``; orchestrator's
+                        # fence lives in ``_start_sync_run`` (#1078).
+                        # Plumb (request_id, mode) via contextvar so the
+                        # invoker can pass through to its own fence
+                        # handling.
+                        token = _invoker_request_context.set((request_id, mode))
+                        try:
+                            invoker()
+                        finally:
+                            _invoker_request_context.reset(token)
                         invoked = True
                     else:
                         invoked = run_with_prelude(
@@ -1248,6 +1313,31 @@ class JobRuntime:
                     elif request_id is not None:
                         with psycopg.connect(self._database_url, autocommit=True) as conn:
                             mark_request_completed(conn, request_id)
+            except OrchestratorFenceHeld as exc:
+                # #1078 — admin control hub PR6. Orchestrator opt-out
+                # invoker raised on fence held. Listener-dispatched
+                # path → mark_request_rejected so the queue row reflects
+                # reality (PREVENTION-log #1199 — mark_request_completed
+                # after fence-skip masks the audit trail). Scheduled-
+                # fire path has no request_id; just log INFO.
+                logger.info(
+                    "manual trigger of %r skipped: orchestrator fence held by %r",
+                    job_name,
+                    exc.holder_process_id,
+                )
+                if request_id is not None:
+                    try:
+                        with psycopg.connect(self._database_url, autocommit=True) as conn:
+                            mark_request_rejected(
+                                conn,
+                                request_id,
+                                error_msg=(f"orchestrator fence held by {exc.holder_process_id!r}"),
+                            )
+                    except Exception:
+                        logger.exception(
+                            "failed to mark manual request_id=%d rejected after orchestrator fence",
+                            request_id,
+                        )
             except JobAlreadyRunning:
                 # Logged at INFO -- this is an expected race (manual
                 # trigger landed during a scheduled fire or peer

@@ -28,6 +28,7 @@ from uuid import UUID
 
 import psycopg
 import psycopg.errors
+import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel
 
@@ -71,6 +72,7 @@ from app.services.processes import (
     ingest_sweep_adapter,
     scheduled_adapter,
 )
+from app.services.processes.ingest_sweep_adapter import is_sweep
 from app.services.processes.watermarks import (
     acquire_shared_source_locks,
     atom_etag_target_for,
@@ -80,6 +82,8 @@ from app.services.processes.watermarks import (
     manifest_source_for,
 )
 from app.services.sync_orchestrator.dispatcher import NOTIFY_CHANNEL
+
+JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +191,57 @@ class CancelRequest(BaseModel):
 class CancelResponse(BaseModel):
     target_run_kind: Literal["bootstrap_run", "job_run", "sync_run"]
     target_run_id: int
+
+
+class OrchestratorDagSyncRunResponse(BaseModel):
+    """Latest ``sync_runs`` row surfaced on the orchestrator drill-in DAG tab.
+
+    Issue #1078 (umbrella #1064) — admin control hub PR6.
+    """
+
+    sync_run_id: int
+    scope: str
+    scope_detail: str | None
+    trigger: str
+    started_at: datetime
+    finished_at: datetime | None
+    status: Literal["running", "complete", "partial", "failed", "cancelled"]
+    layers_planned: int
+    layers_done: int
+    layers_failed: int
+    layers_skipped: int
+    error_category: str | None
+    cancel_requested_at: datetime | None
+
+
+class OrchestratorDagLayerResponse(BaseModel):
+    """One row from ``sync_layer_progress`` joined to the ``LAYERS`` registry.
+
+    ``display_name`` + ``tier`` come from
+    ``app/services/sync_orchestrator/registry.py::LAYERS``; layer rows
+    that are NOT in the static registry (defensive for future drift)
+    fall back to ``display_name=name`` and ``tier=None``.
+    """
+
+    name: str
+    display_name: str
+    tier: int | None
+    status: Literal["pending", "running", "complete", "failed", "skipped", "partial", "cancelled"]
+    started_at: datetime | None
+    finished_at: datetime | None
+    items_total: int | None
+    items_done: int | None
+    row_count: int | None
+    error_category: str | None
+    skip_reason: str | None
+    error_message: str | None
+
+
+class OrchestratorDagResponse(BaseModel):
+    """DAG drill-in payload for ``orchestrator_full_sync``."""
+
+    sync_run: OrchestratorDagSyncRunResponse | None
+    layers: list[OrchestratorDagLayerResponse]
 
 
 # ---------------------------------------------------------------------------
@@ -303,12 +358,14 @@ def _resolve_mechanism(process_id: str) -> ProcessMechanism | None:
 
     process_id == 'bootstrap' → bootstrap mechanism.
     process_id == any name in ``VALID_JOB_NAMES`` → scheduled_job.
-    Anything else (PR6: ingest sweeps) → None for now.
+    process_id == any sweep registered in ingest_sweep_adapter → ingest_sweep.
     """
     if process_id == "bootstrap":
         return "bootstrap"
     if process_id in VALID_JOB_NAMES:
         return "scheduled_job"
+    if is_sweep(process_id):
+        return "ingest_sweep"
     return None
 
 
@@ -377,6 +434,115 @@ def list_process_runs(
     adapter = _adapter_for(mechanism)
     runs = adapter.list_runs(conn, process_id=process_id, days=days)
     return [_convert_run(r) for r in runs]
+
+
+@router.get("/{process_id}/dag", response_model=OrchestratorDagResponse)
+def get_orchestrator_dag(
+    process_id: str = Path(..., min_length=1),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> OrchestratorDagResponse:
+    """DAG drill-in for ``orchestrator_full_sync`` — restricted endpoint.
+
+    Issue #1078 (umbrella #1064) — admin control hub PR6.
+    Spec §"Sync-orchestrator surface": orchestrator surfaces as ONE
+    scheduled_job row + a custom drill-in tab rendering the 10-LAYERS
+    DAG state for the latest run.
+
+    Returns ``{sync_run: null, layers: []}`` when no sync run exists
+    yet (e.g. fresh install pre-first-trigger). Returns 404 for any
+    process_id other than ``orchestrator_full_sync`` — the endpoint
+    is intentionally restricted because no other process has the
+    multi-layer DAG drill-in shape in v1.
+    """
+    if process_id != JOB_ORCHESTRATOR_FULL_SYNC:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"DAG drill-in not available for {process_id!r}",
+        )
+
+    # Lazy import keeps the registry import out of the API process's
+    # cold-start path (the orchestrator package pulls in
+    # planner / executor / adapters).
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    with snapshot_read(conn):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT sync_run_id, scope, scope_detail, trigger,
+                       started_at, finished_at, status,
+                       layers_planned, layers_done, layers_failed, layers_skipped,
+                       error_category, cancel_requested_at
+                  FROM sync_runs
+                 ORDER BY started_at DESC
+                 LIMIT 1
+                """
+            )
+            sync_run_row = cur.fetchone()
+
+        if sync_run_row is None:
+            return OrchestratorDagResponse(sync_run=None, layers=[])
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT layer_name, status, started_at, finished_at,
+                       items_total, items_done, row_count,
+                       error_category, skip_reason, error_message
+                  FROM sync_layer_progress
+                 WHERE sync_run_id = %s
+                 ORDER BY layer_name
+                """,
+                (int(sync_run_row["sync_run_id"]),),
+            )
+            layer_rows = cur.fetchall()
+
+    sync_run_payload = OrchestratorDagSyncRunResponse(
+        sync_run_id=int(sync_run_row["sync_run_id"]),
+        scope=str(sync_run_row["scope"]),
+        scope_detail=sync_run_row.get("scope_detail"),
+        trigger=str(sync_run_row["trigger"]),
+        started_at=sync_run_row["started_at"],
+        finished_at=sync_run_row.get("finished_at"),
+        status=sync_run_row["status"],
+        layers_planned=int(sync_run_row["layers_planned"]),
+        layers_done=int(sync_run_row["layers_done"]),
+        layers_failed=int(sync_run_row["layers_failed"]),
+        layers_skipped=int(sync_run_row["layers_skipped"]),
+        error_category=sync_run_row.get("error_category"),
+        cancel_requested_at=sync_run_row.get("cancel_requested_at"),
+    )
+
+    layers_payload: list[OrchestratorDagLayerResponse] = []
+    for row in layer_rows:
+        layer_name = str(row["layer_name"])
+        registry_entry = LAYERS.get(layer_name)
+        if registry_entry is not None:
+            display_name = registry_entry.display_name
+            tier: int | None = registry_entry.tier
+        else:
+            # Defensive: layer rows that don't match the static registry
+            # (e.g. a future composite emit) fall back rather than 500.
+            display_name = layer_name
+            tier = None
+        layers_payload.append(
+            OrchestratorDagLayerResponse(
+                name=layer_name,
+                display_name=display_name,
+                tier=tier,
+                status=row["status"],
+                started_at=row.get("started_at"),
+                finished_at=row.get("finished_at"),
+                items_total=row.get("items_total"),
+                items_done=row.get("items_done"),
+                row_count=row.get("row_count"),
+                error_category=row.get("error_category"),
+                skip_reason=row.get("skip_reason"),
+                error_message=row.get("error_message"),
+            )
+        )
+
+    return OrchestratorDagResponse(sync_run=sync_run_payload, layers=layers_payload)
 
 
 @router.get(
@@ -858,10 +1024,13 @@ def trigger_process(
             detail=f"unknown process: {process_id!r}",
         )
     if mechanism == "ingest_sweep":
-        # Stub adapter — no triggers wired in PR3.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"unknown process: {process_id!r}",
+        # #1078 — admin control hub PR6. Sweeps are READ-ONLY surfaces:
+        # the operator triggers / cancels via the underlying scheduled
+        # job (e.g. ``sec_filing_documents_ingest`` for the Form 4
+        # sweep). Source-level iterate / full_wash deferred to v2.
+        raise _conflict(
+            "trigger_not_supported",
+            advice="trigger via the underlying scheduled job",
         )
 
     requested_by, operator_uuid = _identify_requestor(request)
@@ -930,6 +1099,86 @@ def trigger_process(
     return TriggerResponse(request_id=request_id, mode=body.mode)
 
 
+def _resolve_active_sync_run(conn: psycopg.Connection[Any]) -> int | None:
+    """Lock + return the latest running sync_runs row.
+
+    Issue #1078 (umbrella #1064) — admin control hub PR6.
+    Spec §"Cancel — cooperative" — orchestrator_full_sync cancel writes
+    ``target_run_kind='sync_run'`` against the locked sync_run_id.
+    Caller MUST be inside ``conn.transaction()`` so the row stays locked
+    until the cancel insert + cancel_requested_at update commit.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sync_run_id
+              FROM sync_runs
+             WHERE status = 'running'
+             ORDER BY started_at DESC
+             LIMIT 1
+             FOR UPDATE
+            """
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return int(row[0])
+
+
+def _cancel_orchestrator_full_sync(
+    conn: psycopg.Connection[Any],
+    *,
+    body: CancelRequest,
+    operator_uuid: UUID | None,
+) -> CancelResponse:
+    """Cancel handler for the ``orchestrator_full_sync`` scheduled job.
+
+    Issue #1078 (umbrella #1064). The orchestrator writes ``sync_runs``,
+    not ``job_runs``, so the cancel signal must target
+    ``target_run_kind='sync_run'``. The cancel checkpoint inside
+    ``_run_layers_loop`` polls ``process_stop_requests`` keyed on
+    ``(target_run_kind='sync_run', target_run_id=<sync_run_id>)``.
+
+    ``mechanism`` on ``process_stop_requests`` is ``'scheduled_job'``
+    because the orchestrator surfaces as one ``mechanism="scheduled_job"``
+    row in the Processes table (spec §"Sync-orchestrator surface").
+    """
+    with conn.transaction():
+        sync_run_id = _resolve_active_sync_run(conn)
+        if sync_run_id is None:
+            raise _conflict("no_active_run")
+        try:
+            request_stop(
+                conn,
+                process_id=JOB_ORCHESTRATOR_FULL_SYNC,
+                mechanism="scheduled_job",
+                target_run_kind="sync_run",
+                target_run_id=sync_run_id,
+                mode=body.mode,
+                requested_by_operator_id=operator_uuid,
+            )
+        except NoActiveRunError as exc:
+            raise _conflict("no_active_run") from exc
+        except StopAlreadyPendingError as exc:
+            raise _conflict("stop_already_pending") from exc
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sync_runs
+                   SET cancel_requested_at = now()
+                 WHERE sync_run_id = %s
+                """,
+                (sync_run_id,),
+            )
+            # Single-row UPDATE-by-PK invariant (prevention-log #145):
+            # the row was locked under SELECT FOR UPDATE in this same tx.
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"cancel: expected 1 sync_runs row for sync_run_id={sync_run_id}, got rowcount={cur.rowcount}"
+                )
+    return CancelResponse(target_run_kind="sync_run", target_run_id=sync_run_id)
+
+
 def _resolve_active_job_run(conn: psycopg.Connection[Any], *, job_name: str) -> int | None:
     """Lock + return the latest running job_runs row for a scheduled job.
 
@@ -980,13 +1229,24 @@ def cancel_process(
     boot-recovery sweeps. Spec §Cancel — terminate (escape hatch).
     """
     mechanism = _resolve_mechanism(process_id)
-    if mechanism is None or mechanism == "ingest_sweep":
+    if mechanism is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"unknown process: {process_id!r}",
         )
+    if mechanism == "ingest_sweep":
+        # #1078 — admin control hub PR6. Sweeps have no in-flight
+        # state of their own; cancel the underlying scheduled job
+        # instead.
+        raise _conflict(
+            "cancel_not_supported",
+            advice="cancel via the underlying scheduled job",
+        )
 
     _, operator_uuid = _identify_requestor(request)
+
+    if mechanism == "scheduled_job" and process_id == JOB_ORCHESTRATOR_FULL_SYNC:
+        return _cancel_orchestrator_full_sync(conn, body=body, operator_uuid=operator_uuid)
 
     if mechanism == "bootstrap":
         try:

@@ -102,6 +102,10 @@ export const REASON_TOOLTIP: Record<TriggerConflictReason, string> = {
     "A sibling job has an active full-wash. Wait for it to complete.",
   no_active_run: "Nothing to cancel — no active run.",
   stop_already_pending: "A cancel is already pending for this run.",
+  trigger_not_supported:
+    "Sweeps are read-only — trigger via the underlying scheduled job.",
+  cancel_not_supported:
+    "Sweeps have no in-flight state — cancel the underlying scheduled job.",
 };
 
 const KNOWN_REASONS = new Set<string>(Object.keys(REASON_TOOLTIP));
