@@ -1,0 +1,252 @@
+/**
+ * ProcessRow — one row of the admin ProcessesTable (#1076 / #1064).
+ *
+ * Renders the unified `ProcessRowResponse` envelope. Trigger buttons
+ * delegate to the parent (which owns the confirm-modal state); 409s
+ * raised by the parent's POST handler are surfaced via
+ * `triggerError` and rendered through `reasonTooltip`.
+ *
+ * Visible-motion (spec §"Visible-motion rules"): a pulsing left border
+ * marks `running` and `stale` rows. Pure CSS, no progress data needed.
+ * `motion-reduce:` Tailwind variant respects the operator's
+ * `prefers-reduced-motion` setting.
+ */
+
+import { Link } from "react-router-dom";
+
+import type { ProcessRowResponse } from "@/api/types";
+import { formatDateTime } from "@/lib/format";
+
+import {
+  REASON_TOOLTIP,
+  STATUS_VISUAL,
+  reasonTooltip,
+} from "@/components/admin/processStatus";
+
+export interface ProcessRowProps {
+  readonly row: ProcessRowResponse;
+  readonly triggerError: unknown;
+  readonly cancelError: unknown;
+  readonly busy: boolean;
+  readonly onIterate: (row: ProcessRowResponse) => void;
+  readonly onFullWash: (row: ProcessRowResponse) => void;
+  readonly onCancel: (row: ProcessRowResponse) => void;
+}
+
+const PENDING_RETRY_TOOLTIP =
+  "hiding prior errors during retry — re-shown if retry also fails or fails to reattempt failed subjects.";
+
+export function ProcessRow({
+  row,
+  triggerError,
+  cancelError,
+  busy,
+  onIterate,
+  onFullWash,
+  onCancel,
+}: ProcessRowProps) {
+  const visual = STATUS_VISUAL[row.status];
+  const pulseBorder =
+    visual.pulse
+      ? "border-l-4 border-l-sky-500 animate-pulse motion-reduce:animate-none"
+      : "border-l-4 border-l-transparent";
+
+  const lastRunLabel = row.last_run
+    ? `${formatDateTime(row.last_run.finished_at)} · ${formatDuration(row.last_run.duration_seconds)} · ${
+        row.last_run.status
+      }`
+    : "never";
+
+  const watermarkTooltip = row.watermark?.human ?? "no resume cursor";
+
+  const iterateDisabled = !row.can_iterate || busy;
+  const iterateTooltip = row.can_iterate
+    ? watermarkTooltip
+    : "Iterate is not available right now — open the process detail page for the precondition that is blocking it.";
+
+  const fullWashDisabled = !row.can_full_wash || busy;
+  const fullWashTooltip = row.can_full_wash
+    ? "Reset watermark and re-fetch from epoch (typed-name confirm required)."
+    : "Full-wash is not available right now.";
+
+  const cancelDisabled = !row.can_cancel || busy;
+  const cancelTooltip = row.can_cancel
+    ? "Cooperative cancel — the worker stops at its next checkpoint."
+    : "No active run to cancel.";
+
+  return (
+    <tr
+      data-process-id={row.process_id}
+      data-status={row.status}
+      className={`align-top text-sm ${pulseBorder}`}
+    >
+      <td className="px-2 py-2">
+        <Link
+          to={`/admin/processes/${encodeURIComponent(row.process_id)}`}
+          className="font-medium text-blue-700 hover:underline dark:text-blue-300"
+        >
+          {row.display_name}
+        </Link>
+        <div className="text-xs text-slate-500 dark:text-slate-400">
+          {row.process_id} · {row.mechanism}
+        </div>
+        {row.status === "failed" && row.last_n_errors.length > 0 ? (
+          <ErrorPreview errors={row.last_n_errors} />
+        ) : null}
+      </td>
+      <td className="px-2 py-2">
+        <span
+          className="inline-flex rounded-full border bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+        >
+          {row.lane}
+        </span>
+      </td>
+      <td className="px-2 py-2">
+        <StatusPill row={row} />
+      </td>
+      <td className="px-2 py-2 text-xs text-slate-600 dark:text-slate-400">
+        {lastRunLabel}
+      </td>
+      <td className="px-2 py-2 text-xs text-slate-600 dark:text-slate-400">
+        <div>{row.cadence_human}</div>
+        {row.next_fire_at ? (
+          <div className="text-slate-500 dark:text-slate-500">
+            next: {formatDateTime(row.next_fire_at)}
+          </div>
+        ) : null}
+      </td>
+      <td className="px-2 py-2 text-right">
+        <div className="flex flex-wrap items-center justify-end gap-1">
+          <ActionButton
+            label="Iterate"
+            tooltip={iterateTooltip}
+            disabled={iterateDisabled}
+            onClick={() => onIterate(row)}
+          />
+          <ActionButton
+            label="Full-wash"
+            tooltip={fullWashTooltip}
+            disabled={fullWashDisabled}
+            onClick={() => onFullWash(row)}
+            tone="danger"
+          />
+          <ActionButton
+            label="Cancel"
+            tooltip={cancelTooltip}
+            disabled={cancelDisabled}
+            onClick={() => onCancel(row)}
+          />
+        </div>
+        {triggerError ? (
+          <div
+            role="status"
+            className="mt-1 text-right text-[11px] text-red-700 dark:text-red-300"
+            title={reasonTooltip(triggerError)}
+          >
+            trigger rejected
+          </div>
+        ) : null}
+        {cancelError ? (
+          <div
+            role="status"
+            className="mt-1 text-right text-[11px] text-red-700 dark:text-red-300"
+            title={reasonTooltip(cancelError)}
+          >
+            cancel rejected
+          </div>
+        ) : null}
+      </td>
+    </tr>
+  );
+}
+
+function StatusPill({ row }: { row: ProcessRowResponse }) {
+  const visual = STATUS_VISUAL[row.status];
+  const tooltip =
+    row.status === "pending_retry" ? PENDING_RETRY_TOOLTIP : undefined;
+  return (
+    <span
+      title={tooltip}
+      className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${visual.toneClass}`}
+    >
+      {visual.label}
+    </span>
+  );
+}
+
+function ActionButton({
+  label,
+  tooltip,
+  disabled,
+  onClick,
+  tone = "default",
+}: {
+  label: string;
+  tooltip: string;
+  disabled: boolean;
+  onClick: () => void;
+  tone?: "default" | "danger";
+}) {
+  const toneClass =
+    tone === "danger"
+      ? "border-red-300 bg-white text-red-700 hover:bg-red-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
+      : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800/40";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={tooltip}
+      className={`rounded border px-2 py-0.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function ErrorPreview({
+  errors,
+}: {
+  errors: ProcessRowResponse["last_n_errors"];
+}) {
+  // Spec §"Error display rules" — inline preview is always visible
+  // (no click-to-reveal); drill-in shows the full list on the Errors
+  // tab. Show up to two error classes inline; truncate the rest with
+  // a `+N more` link to the drill-in.
+  const head = errors.slice(0, 2);
+  const remainder = errors.length - head.length;
+  return (
+    <ul className="mt-1 space-y-0.5 text-xs text-red-700 dark:text-red-300">
+      {head.map((e) => (
+        <li key={e.error_class} className="truncate" title={e.sample_message}>
+          <span className="font-medium">{e.error_class}</span>{" "}
+          <span className="text-slate-500 dark:text-slate-400">
+            (×{e.count})
+          </span>
+          {e.sample_subject ? (
+            <span className="ml-1 text-slate-500 dark:text-slate-400">
+              · {e.sample_subject}
+            </span>
+          ) : null}
+        </li>
+      ))}
+      {remainder > 0 ? (
+        <li className="text-[11px] text-slate-500 dark:text-slate-400">
+          +{remainder} more
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds - m * 60);
+  return `${m}m ${s.toString().padStart(2, "0")}s`;
+}
+
+// Re-export so test files can assert on the canonical mapping rather
+// than duplicating it.
+export { REASON_TOOLTIP };

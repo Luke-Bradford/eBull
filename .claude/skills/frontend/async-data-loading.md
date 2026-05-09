@@ -100,6 +100,47 @@ timingState.refetch();
 
 Rule of thumb: if a sibling `useAsync` call reads any backend state the mutation touches (directly or transitively), include it in the refetch list. Write a test that asserts every expected `refetch` was called.
 
+### Destructure hook returns into stable refs before listing them in `useCallback` deps
+
+A `useAsync` consumer that wraps multiple `refetch` calls in a `useCallback`
+must list the **stable sub-fields** in deps, not the full hook-return objects:
+
+```tsx
+// WRONG — listing the full state objects
+const detail = useAsync(() => fetchDetail(id), [id]);
+const runs = useAsync(() => fetchRuns(id), [id]);
+const refetchAll = useCallback(() => {
+  detail.refetch();
+  runs.refetch();
+}, [detail, runs]);   // ← `detail` and `runs` are fresh objects every render
+```
+
+Even though `useAsync` returns `refetch` wrapped in `useCallback([], [])` so
+`refetch` itself is stable, the surrounding `{data, error, loading, refetch}`
+literal is a new object each render. ESLint cannot prove which member you
+actually depend on, so the safest reading is "every render". Every render
+recreates `refetchAll`, which recreates every downstream handler that lists
+it as a dep. The chain ends in unstable handlers passed into children, which
+re-render unnecessarily.
+
+```tsx
+// RIGHT — destructure the stable refs first
+const refetchDetail = detail.refetch;
+const refetchRuns = runs.refetch;
+const refetchAll = useCallback(() => {
+  refetchDetail();
+  refetchRuns();
+}, [refetchDetail, refetchRuns]);
+```
+
+The `useAsync` `refetch` identity invariant is pinned by
+`src/lib/useAsync.test.ts` ("refetch identity is stable across renders") —
+this destructuring pattern is what lets ESLint see the contract.
+
+`AdminPage.tsx` is the canonical example (lines 91-95 — "Extract the refetch
+refs as local const bindings so ESLint can see their identity..."). Mirror it
+on every page that aggregates multiple `useAsync` calls.
+
 ### Cancellation
 
 Every effect that resolves async data must check a `cancelled` flag before calling state setters, so a stale resolution cannot overwrite a newer one. If you write a new async hook, this is non-negotiable.

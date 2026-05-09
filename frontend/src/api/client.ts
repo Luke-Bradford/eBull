@@ -24,12 +24,23 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
 }
 
 export class ApiError extends Error {
+  /**
+   * Raw `detail` body from the backend, when the response was JSON. The
+   * shape is endpoint-specific — most legacy endpoints return a string,
+   * but `/system/processes/*` returns `{reason, advice?}` dicts so the
+   * FE can render structured 409 tooltips. Callers narrow with their
+   * own type guard before reading; never assume a shape blindly.
+   */
+  public readonly detail: unknown;
+
   constructor(
     public readonly status: number,
     message: string,
+    detail: unknown = undefined,
   ) {
     super(message);
     this.name = "ApiError";
+    this.detail = detail;
   }
 }
 
@@ -63,14 +74,16 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   }
 
   if (!res.ok) {
-    let detail = res.statusText;
+    let message = res.statusText;
+    let detailRaw: unknown = undefined;
     try {
       const body = (await res.json()) as { detail?: unknown };
-      if (typeof body.detail === "string") detail = body.detail;
+      detailRaw = body.detail;
+      if (typeof body.detail === "string") message = body.detail;
     } catch {
       // non-JSON error body — keep statusText
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, message, detailRaw);
   }
   // 202 Accepted (e.g. POST /jobs/{name}/run) and 204 No Content
   // (e.g. /auth/logout) both have empty bodies in this codebase.

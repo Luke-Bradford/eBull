@@ -1096,3 +1096,146 @@ export interface CoverageStatusDropsResponse {
   unseen_count: number;
   drops: CoverageStatusDrop[];
 }
+
+// ---------------------------------------------------------------------------
+// #1076 / #1064 admin control hub (app/api/processes.py)
+// ---------------------------------------------------------------------------
+//
+// Mirrors the Pydantic response models in app/api/processes.py at PR4
+// (commit f6a9ac4). Drift from this shape silently breaks the
+// ProcessesTable; keep the two in sync — see api-shape-and-types.md.
+
+export type ProcessLane =
+  | "setup"
+  | "universe"
+  | "candles"
+  | "sec"
+  | "ownership"
+  | "fundamentals"
+  | "ops"
+  | "ai";
+
+export type ProcessMechanism = "bootstrap" | "scheduled_job" | "ingest_sweep";
+
+export type ProcessStatus =
+  | "idle"
+  | "pending_first_run"
+  | "running"
+  | "ok"
+  | "failed"
+  | "stale"
+  | "pending_retry"
+  | "cancelled"
+  | "disabled";
+
+export type ProcessRunStatus =
+  | "success"
+  | "failure"
+  | "partial"
+  | "cancelled"
+  | "skipped";
+
+export type CursorKind =
+  | "filed_at"
+  | "accession"
+  | "instrument_offset"
+  | "stage_index"
+  | "epoch"
+  | "atom_etag";
+
+export interface ErrorClassSummaryResponse {
+  error_class: string;
+  count: number;
+  last_seen_at: string;
+  sample_message: string;
+  sample_subject: string | null;
+}
+
+export interface ProcessRunSummaryResponse {
+  run_id: number;
+  started_at: string;
+  finished_at: string;
+  duration_seconds: number;
+  rows_processed: number | null;
+  rows_skipped_by_reason: Record<string, number>;
+  rows_errored: number;
+  status: ProcessRunStatus;
+  cancelled_by_operator_id: string | null;
+}
+
+export interface ActiveRunSummaryResponse {
+  run_id: number;
+  started_at: string;
+  rows_processed_so_far: number | null;
+  progress_units_done: number | null;
+  progress_units_total: number | null;
+  expected_p95_seconds: number | null;
+  is_cancelling: boolean;
+  is_stale: boolean;
+}
+
+export interface ProcessWatermarkResponse {
+  cursor_kind: CursorKind;
+  cursor_value: string;
+  human: string;
+  last_advanced_at: string;
+}
+
+export interface ProcessRowResponse {
+  process_id: string;
+  display_name: string;
+  lane: ProcessLane;
+  mechanism: ProcessMechanism;
+  status: ProcessStatus;
+  last_run: ProcessRunSummaryResponse | null;
+  active_run: ActiveRunSummaryResponse | null;
+  cadence_human: string;
+  cadence_cron: string | null;
+  next_fire_at: string | null;
+  watermark: ProcessWatermarkResponse | null;
+  can_iterate: boolean;
+  can_full_wash: boolean;
+  can_cancel: boolean;
+  last_n_errors: ErrorClassSummaryResponse[];
+}
+
+export interface ProcessListResponse {
+  rows: ProcessRowResponse[];
+  partial: boolean;
+}
+
+export type TriggerMode = "iterate" | "full_wash";
+export type CancelMode = "cooperative" | "terminate";
+
+export interface TriggerRequestBody {
+  mode: TriggerMode;
+}
+
+export interface TriggerResponse {
+  request_id: number | null;
+  mode: TriggerMode;
+}
+
+export interface CancelRequestBody {
+  mode: CancelMode;
+}
+
+export interface CancelResponse {
+  target_run_kind: "bootstrap_run" | "job_run" | "sync_run";
+  target_run_id: number;
+}
+
+// Reasons emitted by app/api/processes.py 409 paths. The FE renders one
+// tooltip per reason — anything else falls back to a generic copy.
+export type TriggerConflictReason =
+  | "kill_switch_active"
+  | "bootstrap_already_running"
+  | "bootstrap_state_missing"
+  | "bootstrap_not_resumable"
+  | "iterate_already_pending"
+  | "full_wash_already_pending"
+  | "active_run_in_progress"
+  | "shared_source_active_run"
+  | "shared_source_full_wash_pending"
+  | "no_active_run"
+  | "stop_already_pending";
