@@ -1238,4 +1238,70 @@ export type TriggerConflictReason =
   | "shared_source_active_run"
   | "shared_source_full_wash_pending"
   | "no_active_run"
-  | "stop_already_pending";
+  | "stop_already_pending"
+  // PR6 (#1078) — ingest_sweep rows are READ-ONLY; trigger / cancel
+  // surface these reasons to point the operator at the underlying
+  // scheduled job.
+  | "trigger_not_supported"
+  | "cancel_not_supported";
+
+// ---------------------------------------------------------------------------
+// Orchestrator DAG drill-in (#1078, umbrella #1064 — PR6)
+// ---------------------------------------------------------------------------
+//
+// Mirrors app/api/processes.py::OrchestratorDagResponse. Only used on
+// the /admin/processes/orchestrator_full_sync detail page; the fetch is
+// gated on (process_id === "orchestrator_full_sync") AND (tab === "dag")
+// so non-orchestrator detail pages never hit the endpoint.
+
+export type OrchestratorSyncRunStatus =
+  | "running"
+  | "complete"
+  | "partial"
+  | "failed"
+  | "cancelled";
+
+export type OrchestratorLayerStatus =
+  | "pending"
+  | "running"
+  | "complete"
+  | "failed"
+  | "skipped"
+  | "partial"
+  | "cancelled";
+
+export interface OrchestratorDagSyncRunResponse {
+  sync_run_id: number;
+  scope: string;
+  scope_detail: string | null;
+  trigger: string;
+  started_at: string;
+  finished_at: string | null;
+  status: OrchestratorSyncRunStatus;
+  layers_planned: number;
+  layers_done: number;
+  layers_failed: number;
+  layers_skipped: number;
+  error_category: string | null;
+  cancel_requested_at: string | null;
+}
+
+export interface OrchestratorDagLayerResponse {
+  name: string;
+  display_name: string;
+  tier: number | null;
+  status: OrchestratorLayerStatus;
+  started_at: string | null;
+  finished_at: string | null;
+  items_total: number | null;
+  items_done: number | null;
+  row_count: number | null;
+  error_category: string | null;
+  skip_reason: string | null;
+  error_message: string | null;
+}
+
+export interface OrchestratorDagResponse {
+  sync_run: OrchestratorDagSyncRunResponse | null;
+  layers: OrchestratorDagLayerResponse[];
+}

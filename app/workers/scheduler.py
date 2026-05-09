@@ -3385,11 +3385,25 @@ def orchestrator_full_sync() -> None:
     is recorded in `sync_runs` / `sync_layer_progress`; the
     `_safe_run_and_finalize` wrapper ensures the partial unique index
     gate always releases, even on crash.
+
+    #1078 — admin control hub PR6. Listener-dispatched manual_job
+    runs (operator clicks Iterate / Full-wash on the
+    `orchestrator_full_sync` row) plumb `(linked_request_id, mode)`
+    via the invoker contextvar so `_start_sync_run`'s fence-check can
+    bypass on `mode='full_wash'` (the run IS the fence holder).
+    Scheduled fires + tests pass `(None, None)` → defaults apply.
     """
+    from app.jobs.runtime import consume_invoker_request_context
     from app.services.sync_orchestrator import SyncScope, run_sync
 
+    linked_request_id, request_mode = consume_invoker_request_context()
     logger.info("orchestrator_full_sync: starting")
-    result = run_sync(SyncScope.full(), trigger="scheduled")
+    result = run_sync(
+        SyncScope.full(),
+        trigger="scheduled",
+        linked_request_id=linked_request_id,
+        request_mode=request_mode,
+    )
     logger.info(
         "orchestrator_full_sync complete: sync_run_id=%d outcomes=%d",
         result.sync_run_id,
@@ -3405,14 +3419,21 @@ def orchestrator_high_frequency_sync() -> None:
     overlap with a still-running FULL sync — it returns early via
     SyncAlreadyRunning, which this wrapper catches and logs.
     """
+    from app.jobs.runtime import consume_invoker_request_context
     from app.services.sync_orchestrator import (
         SyncAlreadyRunning,
         SyncScope,
         run_sync,
     )
 
+    linked_request_id, request_mode = consume_invoker_request_context()
     try:
-        result = run_sync(SyncScope.high_frequency(), trigger="scheduled")
+        result = run_sync(
+            SyncScope.high_frequency(),
+            trigger="scheduled",
+            linked_request_id=linked_request_id,
+            request_mode=request_mode,
+        )
         logger.info(
             "orchestrator_high_frequency_sync complete: sync_run_id=%d outcomes=%d",
             result.sync_run_id,

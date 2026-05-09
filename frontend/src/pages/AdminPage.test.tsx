@@ -1,16 +1,17 @@
 /**
- * Tests for AdminPage after the #323 triage rewrite.
+ * Tests for AdminPage after the #1064 admin control hub rewrite.
  *
- * AdminPage now has:
- *   1. Problems panel (collapsed/hidden semantics per per-source
- *      cached snapshots — see ProblemsPanel).
- *   2. Fund data row (5 live-or-pending cells plus 3 pending-only).
- *   3. Collapsible "Orchestrator details" (SyncDashboard), "Background
- *      tasks" (JobsTable), "Filings coverage" (CoverageSummaryCard).
+ * Post-PR6 (#1078) AdminPage shape:
+ *   1. ProblemsPanel — failing layers + failing jobs + coverage anomalies.
+ *   2. BootstrapPanel — kept verbatim (PR7 decommissions).
+ *   3. Processes table — unified mechanism rows + DAG drill-in route.
+ *   4. FundDataRow + SeedProgressPanel + Background tasks + Filings coverage.
  *
- * The legacy Run-Now tests are preserved but updated to expand the
- * Background tasks section first (the existing always-visible layout
- * is gone).
+ * Decommissioned in PR6 (no longer covered here):
+ *   - Sync-now button (top-level)
+ *   - Orchestrator details collapsible (SyncDashboard)
+ *   - Layer health collapsible (LayerHealthList)
+ *   - Layer toggle wire (setLayerEnabled)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -22,8 +23,6 @@ import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
   JobsListResponse,
-  LayerEnabledResponse,
-  LayerEntry,
   RecommendationsListResponse,
   ConfigResponse,
   SyncLayersV2Response,
@@ -31,13 +30,9 @@ import type {
 
 vi.mock("@/api/jobs", () => ({ fetchJobsOverview: vi.fn(), runJob: vi.fn() }));
 vi.mock("@/api/sync", () => ({
-  fetchSyncLayers: vi.fn(),
   fetchSyncLayersV2: vi.fn(),
   fetchSyncStatus: vi.fn(),
-  fetchSyncRuns: vi.fn(),
-  triggerSync: vi.fn(),
-  setLayerEnabled: vi.fn(),
-  // #418 ingest observability — SeedProgressPanel mounts on AdminPage.
+  // SeedProgressPanel still mounts on AdminPage (decommission in PR9).
   fetchSeedProgress: vi.fn().mockResolvedValue({
     sources: [],
     latest_run: null,
@@ -57,29 +52,26 @@ vi.mock("@/api/sync", () => ({
 vi.mock("@/api/coverage", () => ({ fetchCoverageSummary: vi.fn() }));
 vi.mock("@/api/recommendations", () => ({ fetchRecommendations: vi.fn() }));
 vi.mock("@/api/config", () => ({ fetchConfig: vi.fn() }));
+vi.mock("@/api/system", () => ({ fetchSystemStatus: vi.fn() }));
+vi.mock("@/api/processes", () => ({ fetchProcesses: vi.fn() }));
 
 import { fetchJobsOverview, runJob } from "@/api/jobs";
-import {
-  fetchSyncLayers,
-  fetchSyncLayersV2,
-  fetchSyncRuns,
-  fetchSyncStatus,
-  setLayerEnabled,
-} from "@/api/sync";
+import { fetchSyncLayersV2, fetchSyncStatus } from "@/api/sync";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchConfig } from "@/api/config";
+import { fetchSystemStatus } from "@/api/system";
+import { fetchProcesses } from "@/api/processes";
 
 const mockedJobs = vi.mocked(fetchJobsOverview);
 const mockedRun = vi.mocked(runJob);
-const mockedLayers = vi.mocked(fetchSyncLayers);
 const mockedV2 = vi.mocked(fetchSyncLayersV2);
 const mockedStatus = vi.mocked(fetchSyncStatus);
-const mockedSyncRuns = vi.mocked(fetchSyncRuns);
 const mockedCoverage = vi.mocked(fetchCoverageSummary);
 const mockedRecs = vi.mocked(fetchRecommendations);
 const mockedConfig = vi.mocked(fetchConfig);
-const mockedSetLayerEnabled = vi.mocked(setLayerEnabled);
+const mockedSystem = vi.mocked(fetchSystemStatus);
+const mockedProcesses = vi.mocked(fetchProcesses);
 
 function demoConfig(): ConfigResponse {
   return {
@@ -182,27 +174,37 @@ function emptyV2(): SyncLayersV2Response {
 beforeEach(() => {
   mockedJobs.mockReset();
   mockedRun.mockReset();
-  mockedLayers.mockReset();
   mockedV2.mockReset();
   mockedStatus.mockReset();
-  mockedSyncRuns.mockReset();
   mockedCoverage.mockReset();
   mockedRecs.mockReset();
   mockedConfig.mockReset();
-  mockedSetLayerEnabled.mockReset();
+  mockedSystem.mockReset();
+  mockedProcesses.mockReset();
 
   mockedConfig.mockResolvedValue(demoConfig());
   mockedJobs.mockResolvedValue(jobsResponse());
-  mockedLayers.mockResolvedValue({ layers: [] });
   mockedV2.mockResolvedValue(emptyV2());
   mockedStatus.mockResolvedValue({
     is_running: false,
     current_run: null,
     active_layer: null,
   });
-  mockedSyncRuns.mockResolvedValue({ runs: [] });
   mockedCoverage.mockResolvedValue(coverageHealthy());
   mockedRecs.mockResolvedValue(recsEmpty());
+  mockedSystem.mockResolvedValue({
+    checked_at: "2026-04-19T00:00:00Z",
+    overall_status: "ok",
+    layers: [],
+    jobs: [],
+    kill_switch: { active: false, activated_at: null, activated_by: null, reason: null },
+    credential_health: {
+      state: "valid",
+      last_recovered_at: null,
+      last_error: null,
+    },
+  });
+  mockedProcesses.mockResolvedValue({ rows: [], partial: false });
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -216,15 +218,6 @@ function renderPage() {
 }
 
 describe("AdminPage — top-level composition", () => {
-  it("renders a top-level Sync-now button", async () => {
-    renderPage();
-    // Multiple buttons (top-level + inner once expanded) will exist;
-    // here we just assert the top one is present.
-    expect(
-      await screen.findByRole("button", { name: /Sync now/ }),
-    ).toBeInTheDocument();
-  });
-
   it("renders the fund-data row with universe + analysable cells", async () => {
     renderPage();
     await waitFor(() => {
@@ -236,8 +229,6 @@ describe("AdminPage — top-level composition", () => {
   });
 
   it("hides the problems panel when no sources surface any problem", async () => {
-    // Override the default fixture: no failing jobs, no layer
-    // failures, no null coverage rows → hidden state.
     mockedJobs.mockReset();
     mockedJobs.mockResolvedValue({
       checked_at: "2026-04-16T01:00:00Z",
@@ -257,13 +248,11 @@ describe("AdminPage — top-level composition", () => {
       ],
     });
     renderPage();
-    // Wait for all three sources to resolve.
     await waitFor(() => {
       expect(mockedV2).toHaveBeenCalled();
       expect(mockedJobs).toHaveBeenCalled();
       expect(mockedCoverage).toHaveBeenCalled();
     });
-    // Once resolved, the panel should be hidden (no "problems" text).
     await waitFor(() => {
       expect(
         screen.queryByText(/need.*attention/i),
@@ -273,11 +262,6 @@ describe("AdminPage — top-level composition", () => {
 
   it("shows problems panel when a job has failed", async () => {
     renderPage();
-    // The alert title `attribution_summary — last run failed` is the
-    // only place where that exact phrase appears (the "Clears when the
-    // next run of attribution_summary succeeds." line introduced in
-    // #415 contains `attribution_summary` too, so a bare regex matches
-    // twice — scope to the combined phrase).
     expect(
       await screen.findByText(/attribution_summary — last run failed/),
     ).toBeInTheDocument();
@@ -304,56 +288,6 @@ describe("AdminPage — top-level composition", () => {
     expect(
       await screen.findByText(/CIK mapping — 3 consecutive failures/),
     ).toBeInTheDocument();
-  });
-});
-
-describe("AdminPage — collapsible sections", () => {
-  it("keeps Orchestrator details collapsed on mount", async () => {
-    renderPage();
-    await waitFor(() => screen.getByText("Orchestrator details"));
-    // SyncDashboard's recent-runs-table heading should NOT be in DOM
-    // while the section is collapsed.
-    expect(screen.queryByText("Recent sync runs")).toBeNull();
-  });
-
-  it("expands Orchestrator details on chevron click", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await user.click(
-      await screen.findByRole("button", { name: /Orchestrator details/ }),
-    );
-    await waitFor(() => {
-      expect(screen.getByText("Recent sync runs")).toBeInTheDocument();
-    });
-  });
-
-  it("expands Orchestrator details when a layer problem's action fires", async () => {
-    const v2WithProblem = emptyV2();
-    v2WithProblem.system_state = "needs_attention";
-    v2WithProblem.action_needed = [
-      {
-        root_layer: "cik_mapping",
-        display_name: "CIK mapping",
-        category: "db_constraint",
-        operator_message: "3 consecutive failures",
-        operator_fix: null,
-        self_heal: false,
-        consecutive_failures: 3,
-        affected_downstream: [],
-      },
-    ];
-    mockedV2.mockReset();
-    mockedV2.mockResolvedValue(v2WithProblem);
-    const user = userEvent.setup();
-    renderPage();
-    await user.click(
-      await screen.findByRole("button", {
-        name: /Open orchestrator details for cik_mapping/,
-      }),
-    );
-    await waitFor(() => {
-      expect(screen.getByText("Recent sync runs")).toBeInTheDocument();
-    });
   });
 });
 
@@ -424,164 +358,22 @@ describe("AdminPage — Background tasks collapsible", () => {
   });
 });
 
-describe("AdminPage — layer toggle wire", () => {
-  function mkLayer(overrides: Partial<LayerEntry>): LayerEntry {
-    return {
-      layer: overrides.layer ?? "candles",
-      display_name: overrides.display_name ?? "Daily Price Candles",
-      state: overrides.state ?? "healthy",
-      last_updated: overrides.last_updated ?? null,
-      plain_language_sla: overrides.plain_language_sla ?? "Refreshed nightly.",
-    };
-  }
-
-  function v2WithLayers(layers: LayerEntry[]): SyncLayersV2Response {
-    return {
-      generated_at: new Date().toISOString(),
-      system_state: "ok",
-      system_summary: "All layers healthy",
-      action_needed: [],
-      degraded: [],
-      secret_missing: [],
-      healthy: [],
-      disabled: [],
-      cascade_groups: [],
-      layers,
-    };
-  }
-
-  it("wires LayerHealthList onToggle to setLayerEnabled + refetches when no warning", async () => {
-    const user = userEvent.setup();
-    mockedV2.mockResolvedValue(v2WithLayers([mkLayer({ layer: "candles" })]));
-    const resp: LayerEnabledResponse = {
-      layer: "candles",
-      display_name: "Daily Price Candles",
-      is_enabled: false,
-      warning: null,
-    };
-    mockedSetLayerEnabled.mockResolvedValue(resp);
-
+describe("AdminPage — PR6 decommission", () => {
+  it("does not render the legacy Sync-now button", async () => {
     renderPage();
-    // Expand Layer health section.
-    await user.click(await screen.findByRole("button", { name: /Layer health/ }));
-    // Open ⋯ menu and click Disable layer.
-    await user.click(await screen.findByLabelText("candles actions"));
-    await user.click(await screen.findByText("Disable layer"));
-
-    await waitFor(() => {
-      expect(mockedSetLayerEnabled).toHaveBeenCalledWith("candles", false);
-    });
-    // v2.refetch fires — mockedV2 should be called again.
-    await waitFor(() => {
-      expect(mockedV2.mock.calls.length).toBeGreaterThan(1);
-    });
-    // No toast when warning is null.
-    expect(screen.queryByRole("status")).toBeNull();
+    await waitFor(() => screen.getByText("Admin"));
+    expect(screen.queryByRole("button", { name: /^Sync now$/i })).toBeNull();
   });
 
-  it("shows warning toast when backend returns a warning", async () => {
-    const user = userEvent.setup();
-    mockedV2.mockResolvedValue(
-      v2WithLayers([mkLayer({ layer: "fx_rates", display_name: "FX Rates" })]),
-    );
-    const resp: LayerEnabledResponse = {
-      layer: "fx_rates",
-      display_name: "FX Rates",
-      is_enabled: false,
-      warning: "FX rates disabled — portfolio valuations and P&L will drift.",
-    };
-    mockedSetLayerEnabled.mockResolvedValue(resp);
-
-    // Auto-accept the safety-critical confirm.
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-
+  it("does not render the Orchestrator details collapsible", async () => {
     renderPage();
-    await user.click(await screen.findByRole("button", { name: /Layer health/ }));
-    await user.click(await screen.findByLabelText("fx_rates actions"));
-    await user.click(await screen.findByText("Disable layer"));
-
-    await waitFor(() => {
-      expect(screen.getByRole("status")).toBeInTheDocument();
-    });
-    expect(screen.getByRole("status")).toHaveTextContent(/drift/i);
-
-    confirmSpy.mockRestore();
+    await waitFor(() => screen.getByText("Admin"));
+    expect(screen.queryByText("Orchestrator details")).toBeNull();
   });
 
-  it("shows error toast when setLayerEnabled rejects", async () => {
-    const user = userEvent.setup();
-    mockedV2.mockResolvedValue(v2WithLayers([mkLayer({ layer: "candles" })]));
-    mockedSetLayerEnabled.mockRejectedValue(new Error("Network error"));
-
+  it("does not render the Layer health collapsible", async () => {
     renderPage();
-    await user.click(await screen.findByRole("button", { name: /Layer health/ }));
-    await user.click(await screen.findByLabelText("candles actions"));
-    await user.click(await screen.findByText("Disable layer"));
-
-    await waitFor(() => {
-      expect(screen.getByRole("status")).toBeInTheDocument();
-    });
-    expect(screen.getByRole("status")).toHaveTextContent(/Failed to update candles/);
-  });
-});
-
-describe("AdminPage v2 integration", () => {
-  it("renders ProblemsPanel hidden and LayerHealthList rows when v2 is ok", async () => {
-    const mockV2: SyncLayersV2Response = {
-      generated_at: new Date().toISOString(),
-      system_state: "ok",
-      system_summary: "All layers healthy",
-      action_needed: [],
-      degraded: [],
-      secret_missing: [],
-      healthy: [],
-      disabled: [],
-      cascade_groups: [],
-      layers: [
-        {
-          layer: "universe",
-          display_name: "Tradable Universe",
-          state: "healthy",
-          last_updated: new Date().toISOString(),
-          plain_language_sla: "Refreshed weekly.",
-        },
-        {
-          layer: "candles",
-          display_name: "Daily Price Candles",
-          state: "healthy",
-          last_updated: new Date().toISOString(),
-          plain_language_sla: "Refreshed every trading day after market close.",
-        },
-      ],
-    };
-    mockedV2.mockReset();
-    mockedV2.mockResolvedValue(mockV2);
-    // All other sources clean to ensure ProblemsPanel hides.
-    mockedJobs.mockReset();
-    mockedJobs.mockResolvedValue({
-      checked_at: new Date().toISOString(),
-      jobs: [],
-    });
-
-    const user = userEvent.setup();
-    renderPage();
-
-    // Wait for v2 fetch to complete.
-    await waitFor(() => {
-      expect(mockedV2).toHaveBeenCalled();
-    });
-
-    // ProblemsPanel must be hidden (no error banner text).
-    await waitFor(() => {
-      expect(screen.queryByRole("region", { name: "Current problems" })).toBeNull();
-    });
-
-    // Expand Layer health section to see LayerHealthList rows.
-    await user.click(await screen.findByRole("button", { name: /Layer health/ }));
-
-    await waitFor(() => {
-      expect(screen.getByText("Tradable Universe")).toBeInTheDocument();
-      expect(screen.getByText("Daily Price Candles")).toBeInTheDocument();
-    });
+    await waitFor(() => screen.getByText("Admin"));
+    expect(screen.queryByText("Layer health")).toBeNull();
   });
 });

@@ -180,3 +180,43 @@ class SyncAlreadyRunning(RuntimeError):
         super().__init__(f"sync already running (scope={scope.kind}, active_id={active_sync_run_id})")
         self.scope = scope
         self.active_sync_run_id = active_sync_run_id
+
+
+class OrchestratorFenceHeld(RuntimeError):
+    """Raised by ``_start_sync_run`` when a full-wash fence row is held.
+
+    Issue #1078 (umbrella #1064) — admin control hub PR6.
+    Spec §"sync_runs analogue" + §"Full-wash execution fence".
+
+    Identifies the holder ``process_id`` so audit logs make the
+    cross-process skip visible — same shape as the runtime prelude's
+    fence-skip ``error_msg``. Listener-dispatched ``manual_job`` paths
+    propagate this exception so ``_run_manual``'s existing
+    ``except Exception`` branch ``mark_request_rejected``s the queue
+    row (PREVENTION-log #1199 — ``mark_request_completed`` after a
+    fence-skipped run masks the audit trail). Scheduled-fire wrappers
+    catch it specifically and log INFO (an expected fence skip is not
+    an error).
+    """
+
+    def __init__(self, holder_process_id: str) -> None:
+        super().__init__(f"orchestrator fence held by {holder_process_id!r}")
+        self.holder_process_id = holder_process_id
+
+
+class SyncCancelled(RuntimeError):
+    """Raised by the cancel checkpoint inside ``_run_layers_loop``.
+
+    Issue #1078 (umbrella #1064) — admin control hub PR6.
+    Spec §"Cancel — cooperative" / §"sync_runs analogue".
+
+    Caught by ``_safe_run_and_finalize`` to route to the cancel-branch
+    finalizer (`_finalize_cancelled_sync_run`) instead of the crash-
+    branch one. The cancel checkpoint already wrote
+    ``sync_runs.status='cancelled'`` and called ``mark_completed``
+    on the stop request before raising.
+    """
+
+    def __init__(self, sync_run_id: int) -> None:
+        super().__init__(f"sync run {sync_run_id} cancelled by operator")
+        self.sync_run_id = sync_run_id
