@@ -58,8 +58,6 @@ const SKIP_DIRS = new Set(["test", "__mocks__"]);
  * Do NOT add new files here. Fix the violation in the same PR.
  */
 const CHECK_F_SKIP_FILES = new Set([
-  "src/components/admin/LayerHealthList.tsx",
-  "src/components/admin/SeedProgressPanel.tsx",
   "src/components/broker/ValidationResultDisplay.tsx",
   "src/components/dashboard/AlertsStrip.tsx",
   "src/components/dashboard/RecentRecommendations.tsx",
@@ -92,7 +90,6 @@ const CHECK_F_SKIP_FILES = new Set([
   "src/pages/ReportsPage.tsx",
   "src/pages/SettingsPage.tsx",
   "src/pages/SetupPage.tsx",
-  "src/pages/SyncDashboard.tsx",
 ]);
 
 function walk(dir) {

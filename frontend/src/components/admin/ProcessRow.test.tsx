@@ -225,4 +225,75 @@ describe("ProcessRow", () => {
     expect(tr.className).toContain("border-l-amber-500");
     expect(tr.className).not.toContain("border-l-sky-500");
   });
+
+  // ---------------------------------------------------------------------
+  // PR9 (#1085) — a11y: lane chip + status pill + stale chips carry
+  // an `aria-label` so screen readers announce a labelled phrase
+  // ("Lane: sec", "Status: running", "Stale reason: schedule missed")
+  // rather than a bare token. Tests assert via `toHaveAccessibleName`
+  // — the jest-dom matcher resolves the WAI-ARIA accessible-name
+  // algorithm and short-circuits on `aria-label`, which is closer to
+  // assistive-tech behaviour than reading the raw attribute.
+  // ---------------------------------------------------------------------
+
+  it("lane chip's accessible name includes the lane key with screen-reader prefix", () => {
+    const { container } = renderRow({ row: makeProcessRow({ lane: "sec" }) });
+    const chip = container.querySelector(
+      "[data-testid='lane-chip']",
+    ) as HTMLElement;
+    expect(chip).toHaveAccessibleName("Lane: sec");
+  });
+
+  it("status pill's accessible name includes the human label with screen-reader prefix", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({ status: "running" }),
+    });
+    const pill = container.querySelector(
+      "[data-testid='status-pill']",
+    ) as HTMLElement;
+    expect(pill).toHaveAccessibleName("Status: running");
+  });
+
+  it("stale chip's accessible name carries the reason with screen-reader prefix", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "ok",
+        stale_reasons: ["schedule_missed", "queue_stuck"],
+      }),
+    });
+    const scheduleChip = container.querySelector(
+      "[data-stale-reason='schedule_missed']",
+    ) as HTMLElement;
+    const queueChip = container.querySelector(
+      "[data-stale-reason='queue_stuck']",
+    ) as HTMLElement;
+    expect(scheduleChip).toHaveAccessibleName("Stale reason: schedule missed");
+    expect(queueChip).toHaveAccessibleName("Stale reason: queue stuck");
+  });
+
+  it("mid_flight_stuck stale chip's accessible name includes the elapsed suffix", () => {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "running",
+        stale_reasons: ["mid_flight_stuck"],
+        active_run: {
+          run_id: 99,
+          started_at: fiveMinutesAgo,
+          rows_processed_so_far: 0,
+          progress_units_done: null,
+          progress_units_total: null,
+          last_progress_at: fiveMinutesAgo,
+          is_cancelling: false,
+        },
+      }),
+    });
+    const chip = container.querySelector(
+      "[data-stale-reason='mid_flight_stuck']",
+    ) as HTMLElement;
+    // Visible text is `no progress 5m`; the accessible name layers the
+    // `Stale reason:` prefix on top so a screen reader announces the
+    // full meaning rather than the bare phrase.
+    expect(chip).toHaveAccessibleName(/^Stale reason: no progress\s+\d+m$/);
+  });
 });

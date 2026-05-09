@@ -8,15 +8,11 @@
  *   2. Fund data row — four live cells + three pending placeholders
  *      for summaries we don't yet have endpoints for.
  *   3. Processes table — unified view of bootstrap + scheduled jobs +
- *      ingest sweeps. Drill-in lives at /admin/processes/{id}.
- *      Background-tasks table + filings coverage stay during the
- *      migration; PR9 decommissions the rest.
- *
- * #1080 — admin control hub PR7. The legacy BootstrapPanel has been
- * decommissioned: the bootstrap row surfaces in the Processes table
- * and its parallel-lane Timeline drill-in lives on
- * /admin/processes/bootstrap. SeedProgressPanel + Background-tasks
- * table stay until PR9.
+ *      ingest sweeps. Drill-in lives at /admin/processes/{id}. SEC
+ *      ingest seed progress + per-CIK timing now surface as the SEC
+ *      ingest process rows; the legacy SeedProgressPanel was
+ *      decommissioned in PR9 (#1085). Background-tasks table +
+ *      filings coverage remain.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -36,7 +32,6 @@ import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import { ProcessesTable } from "@/components/admin/ProcessesTable";
-import { SeedProgressPanel } from "@/components/admin/SeedProgressPanel";
 import {
   SectionError,
   SectionSkeleton,
@@ -205,8 +200,6 @@ export function AdminPage() {
         recommendations={recs.data}
         recommendationsError={recs.error !== null}
       />
-
-      <SeedProgressPanel />
 
       <CollapsibleSection
         title="Background tasks"
