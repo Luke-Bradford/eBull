@@ -219,24 +219,98 @@ def test_cancel_invalid_mode_returns_422(conn_override: None) -> None:
     assert resp.status_code == 422
 
 
-def test_full_wash_resets_bootstrap_stages_before_enqueue(
+def test_full_wash_creates_fresh_bootstrap_run_and_flips_state(
     conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
 ) -> None:
-    """PR4 §Full-wash semantics step 5 — bootstrap full-wash flips
-    every non-pending stage on the latest run back to ``pending`` AND
-    inserts the durable fence row, all inside the same advisory-lock-
-    held transaction.
+    """PR4 §Full-wash semantics — bootstrap full-wash creates a fresh
+    ``bootstrap_runs`` row + seeds pending stages + flips
+    ``bootstrap_state.status='running'``. The orchestrator no-ops
+    unless the latest run is in ``running`` status; an in-place
+    UPDATE of stages on the prior run leaves
+    ``bootstrap_runs.status='partial_error'`` and the orchestrator
+    silently does nothing (review bot BLOCKING).
     """
     _ensure_kill_switch_off(ebull_test_conn)
-    run_row = ebull_test_conn.execute(
+    prior = ebull_test_conn.execute(
         """
         INSERT INTO bootstrap_runs (status, completed_at)
         VALUES ('partial_error', now())
         RETURNING id
         """
     ).fetchone()
-    assert run_row is not None
-    run_id = int(run_row[0])
+    assert prior is not None
+    prior_run_id = int(prior[0])
+    ebull_test_conn.execute(
+        """
+        INSERT INTO bootstrap_stages
+            (bootstrap_run_id, stage_key, stage_order, lane, job_name,
+             status, started_at, completed_at, last_error)
+        VALUES (%s, 'init', 0, 'init', 'job_x', 'success', now(), now(), NULL),
+               (%s, 'sec_form4', 5, 'sec', 'job_x', 'error', now(), now(),
+                'EDGAR 503')
+        """,
+        (prior_run_id, prior_run_id),
+    )
+    _seed_bootstrap_state(ebull_test_conn, "partial_error")
+    ebull_test_conn.execute(
+        "UPDATE bootstrap_state SET last_run_id = %s WHERE id = 1",
+        (prior_run_id,),
+    )
+    ebull_test_conn.commit()
+
+    resp = client.post("/system/processes/bootstrap/trigger", json={"mode": "full_wash"})
+    assert resp.status_code == 200, resp.text
+
+    state_row = ebull_test_conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1").fetchone()
+    assert state_row is not None
+    assert state_row[0] == "running"
+    new_run_id = int(state_row[1])
+    assert new_run_id != prior_run_id
+
+    new_run_status = ebull_test_conn.execute(
+        "SELECT status FROM bootstrap_runs WHERE id = %s",
+        (new_run_id,),
+    ).fetchone()
+    assert new_run_status is not None
+    assert new_run_status[0] == "running"
+
+    new_stage_statuses = {
+        row[0]
+        for row in ebull_test_conn.execute(
+            "SELECT DISTINCT status FROM bootstrap_stages WHERE bootstrap_run_id = %s",
+            (new_run_id,),
+        ).fetchall()
+    }
+    assert new_stage_statuses == {"pending"}
+
+    # Prior run's stages are untouched — they retain forensic history.
+    prior_init = ebull_test_conn.execute(
+        "SELECT status FROM bootstrap_stages WHERE bootstrap_run_id = %s AND stage_key = 'init'",
+        (prior_run_id,),
+    ).fetchone()
+    assert prior_init is not None
+    assert prior_init[0] == "success"
+
+
+def test_bootstrap_iterate_resets_failed_stages_and_flips_state(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """PR4 §Iterate semantics — bootstrap iterate flips failed stages
+    back to pending AND flips ``bootstrap_state.status='running'`` so
+    the orchestrator picks them up. PR3 enqueued without flipping
+    state, leaving the orchestrator no-op'd silently (review bot
+    BLOCKING).
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    run = ebull_test_conn.execute(
+        """
+        INSERT INTO bootstrap_runs (status, completed_at)
+        VALUES ('partial_error', now())
+        RETURNING id
+        """
+    ).fetchone()
+    assert run is not None
+    run_id = int(run[0])
     ebull_test_conn.execute(
         """
         INSERT INTO bootstrap_stages
@@ -255,22 +329,82 @@ def test_full_wash_resets_bootstrap_stages_before_enqueue(
     )
     ebull_test_conn.commit()
 
-    resp = client.post("/system/processes/bootstrap/trigger", json={"mode": "full_wash"})
+    resp = client.post("/system/processes/bootstrap/trigger", json={"mode": "iterate"})
     assert resp.status_code == 200, resp.text
 
-    statuses = {
-        row[0]: row[1]
-        for row in ebull_test_conn.execute(
-            "SELECT stage_key, status FROM bootstrap_stages WHERE bootstrap_run_id = %s",
-            (run_id,),
-        ).fetchall()
-    }
-    assert statuses == {"init": "pending", "sec_form4": "pending"}
-    last_error = ebull_test_conn.execute(
-        "SELECT last_error FROM bootstrap_stages WHERE stage_key = 'sec_form4'"
+    state_row = ebull_test_conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1").fetchone()
+    assert state_row is not None
+    assert state_row[0] == "running"
+    assert int(state_row[1]) == run_id  # iterate reuses the same run
+
+    sec_status = ebull_test_conn.execute(
+        "SELECT status, last_error FROM bootstrap_stages WHERE bootstrap_run_id = %s AND stage_key = 'sec_form4'",
+        (run_id,),
     ).fetchone()
-    assert last_error is not None
-    assert last_error[0] is None
+    assert sec_status is not None
+    assert sec_status[0] == "pending"
+    assert sec_status[1] is None
+
+
+def test_full_wash_blocked_when_sibling_has_pending_full_wash_fence(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """Codex review round 5 BLOCKING: the partial UNIQUE on
+    ``pending_job_requests_active_full_wash_idx`` only dedupes by
+    ``process_id``. Two siblings sharing a freshness source can both
+    enqueue full-washes concurrently — each carries its own
+    ``process_id`` — and reset the same scheduler rows. The shared-
+    source check must also probe sibling fences, not just sibling
+    active runs.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status)
+        VALUES ('manual_job', 'fundamentals_sync', 'fundamentals_sync',
+                'full_wash', 'pending')
+        """
+    )
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/daily_financial_facts/trigger",
+        json={"mode": "full_wash"},
+    )
+    assert resp.status_code == 409
+    body = resp.json()["detail"]
+    assert body["reason"] == "shared_source_full_wash_pending"
+    assert "fundamentals_sync" in body["advice"]
+
+
+def test_full_wash_blocked_when_sibling_sharing_freshness_source_is_running(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """Codex review BLOCKING: ``daily_financial_facts``,
+    ``fundamentals_sync``, ``sec_business_summary_ingest`` all share
+    ``freshness_source='sec_xbrl_facts'``. A full-wash on one of them
+    resets the shared scheduler rows under any sibling that is
+    currently mid-run. Refuse with ``shared_source_active_run`` until
+    every sibling is idle.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, status)
+        VALUES ('fundamentals_sync', now(), 'running')
+        """
+    )
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/daily_financial_facts/trigger",
+        json={"mode": "full_wash"},
+    )
+    assert resp.status_code == 409
+    body = resp.json()["detail"]
+    assert body["reason"] == "shared_source_active_run"
+    assert "fundamentals_sync" in body["advice"]
 
 
 def test_bootstrap_full_wash_blocked_while_running(

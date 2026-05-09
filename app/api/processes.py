@@ -35,12 +35,19 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.db.snapshot import snapshot_read
 from app.jobs.runtime import VALID_JOB_NAMES
-from app.services.bootstrap_orchestrator import JOB_BOOTSTRAP_ORCHESTRATOR
+from app.services.bootstrap_orchestrator import JOB_BOOTSTRAP_ORCHESTRATOR, get_bootstrap_stage_specs
 from app.services.bootstrap_state import (
+    BootstrapAlreadyRunning,
     BootstrapNotRunning,
 )
 from app.services.bootstrap_state import (
     cancel_run as bootstrap_cancel_run,
+)
+from app.services.bootstrap_state import (
+    reset_failed_stages_for_retry as bootstrap_reset_failed_stages,
+)
+from app.services.bootstrap_state import (
+    start_run as bootstrap_start_run,
 )
 from app.services.ops_monitor import get_kill_switch_status
 from app.services.process_stop import (
@@ -65,8 +72,11 @@ from app.services.processes import (
     scheduled_adapter,
 )
 from app.services.processes.watermarks import (
+    acquire_shared_source_locks,
     atom_etag_target_for,
     freshness_source_for,
+    jobs_sharing_freshness_source,
+    jobs_sharing_manifest_source,
     manifest_source_for,
 )
 from app.services.sync_orchestrator.dispatcher import NOTIFY_CHANNEL
@@ -587,77 +597,152 @@ def _check_scheduled_job_preconditions(conn: psycopg.Connection[Any], *, job_nam
         )
 
 
-def _apply_full_wash_reset(
+def _check_full_wash_shared_source_clear(
+    conn: psycopg.Connection[Any],
+    *,
+    job_name: str,
+) -> None:
+    """Refuse a scheduled-job full-wash while a sibling sharing the
+    same freshness/manifest source is mid-run.
+
+    Codex pre-push BLOCKING: a full-wash on ``daily_financial_facts``
+    resets ``data_freshness_index`` rows for ``sec_xbrl_facts``, which
+    is also consumed by ``fundamentals_sync`` and
+    ``sec_business_summary_ingest``. The per-job advisory lock + the
+    per-job ``_has_active_job_run`` are scoped to ``job_name`` and
+    cannot see a sibling running under a different name. Walk the
+    registry, take ``_has_active_job_run`` for every sibling sharing
+    the same scheduler source, and 409 if any is running.
+    """
+    siblings: set[str] = set()
+    fresh = freshness_source_for(job_name)
+    if fresh is not None:
+        siblings.update(jobs_sharing_freshness_source(fresh))
+    manifest = manifest_source_for(job_name)
+    if manifest is not None:
+        siblings.update(jobs_sharing_manifest_source(manifest))
+    siblings.discard(job_name)
+    for sibling in sorted(siblings):
+        if _has_active_job_run(conn, job_name=sibling):
+            raise _conflict(
+                "shared_source_active_run",
+                advice=(
+                    f"sibling job {sibling!r} consumes the same scheduler source; cancel that run before full-wash"
+                ),
+            )
+        # Codex review BLOCKING: also reject concurrent full-wash POSTs
+        # across siblings. The partial UNIQUE on
+        # ``pending_job_requests_active_full_wash_idx`` only dedupes by
+        # ``process_id``; a sibling's fence row carries a different
+        # ``process_id`` and wouldn't hit the index. Probe each sibling's
+        # fence row explicitly so two full-washes targeting the same
+        # scheduler source cannot race past this gate. (Runtime-prelude
+        # sibling-fence enforcement — needed when an APScheduler fire of
+        # `fundamentals_sync` arrives during a queued
+        # `daily_financial_facts` full-wash — is filed as a follow-up
+        # under #1064 since it requires changes to
+        # ``app/jobs/runtime.py`` outside PR4's watermark scope.)
+        if _has_pending_full_wash_fence(conn, process_id=sibling):
+            raise _conflict(
+                "shared_source_full_wash_pending",
+                advice=(f"sibling job {sibling!r} already has an active full-wash; wait for it to complete"),
+            )
+
+
+def _apply_bootstrap_iterate_reset(conn: psycopg.Connection[Any]) -> None:
+    """Bootstrap iterate: reset failed stages + flip state to 'running'.
+
+    Reuses ``bootstrap_state.reset_failed_stages_for_retry`` — the
+    same helper the legacy ``POST /system/bootstrap/retry-failed``
+    endpoint uses. The helper takes ``SELECT ... FOR UPDATE`` on the
+    bootstrap_state singleton internally, so a concurrent ``start_run``
+    racing in between the precondition gate and this call surfaces as
+    ``BootstrapAlreadyRunning`` and we map it to 409.
+    """
+    state_row = conn.execute("SELECT last_run_id FROM bootstrap_state WHERE id = 1").fetchone()
+    if state_row is None:
+        raise _conflict("bootstrap_state_missing", advice="run sql/129 migration")
+    last_run_id = state_row[0]
+    if last_run_id is None:
+        raise _conflict(
+            "bootstrap_not_resumable",
+            advice="no prior bootstrap run to retry",
+        )
+    try:
+        bootstrap_reset_failed_stages(conn, run_id=int(last_run_id))
+    except BootstrapAlreadyRunning as exc:
+        raise _conflict("bootstrap_already_running") from exc
+
+
+def _apply_bootstrap_full_wash_reset(
+    conn: psycopg.Connection[Any],
+    *,
+    operator_uuid: UUID | None,
+) -> None:
+    """Bootstrap full-wash: create a fresh bootstrap_runs + flip state.
+
+    Codex review BLOCKING: PR3 enqueued the orchestrator after a
+    naive ``UPDATE bootstrap_stages`` reset; the orchestrator's
+    invoker (``run_bootstrap_orchestrator``) no-ops unless
+    ``bootstrap_runs.status == 'running'``. ``start_run`` is the same
+    helper the legacy ``POST /system/bootstrap/run`` endpoint calls;
+    it inserts a new ``bootstrap_runs`` row, seeds 17 pending
+    ``bootstrap_stages`` rows, and flips the singleton state to
+    ``running``, all in one transaction.
+
+    The precondition gate already rejected the trigger if state was
+    'running'; ``start_run``'s internal ``FOR UPDATE`` is the
+    defence-in-depth against a concurrent ``start_run`` slipping in.
+    """
+    operator_id = str(operator_uuid) if operator_uuid is not None else None
+    try:
+        bootstrap_start_run(
+            conn,
+            operator_id=operator_id,
+            stage_specs=get_bootstrap_stage_specs(),
+        )
+    except BootstrapAlreadyRunning as exc:
+        raise _conflict("bootstrap_already_running") from exc
+
+
+def _apply_scheduled_full_wash_reset(
     conn: psycopg.Connection[Any],
     *,
     process_id: str,
-    mechanism: ProcessMechanism,
 ) -> None:
-    """Reset the watermark to mechanism-specific minimum BEFORE INSERT.
+    """Reset scheduled-job watermark to mechanism-specific minimum.
 
     Spec §"Full-wash semantics" step 5 + §"Full-wash execution fence"
     step 5. Caller MUST be inside ``conn.transaction()`` and MUST hold
-    the per-process advisory lock acquired by
-    ``acquire_prelude_lock`` so the reset + the durable fence INSERT
-    are atomic against any racing scheduled prelude / iterate trigger.
+    the per-process advisory lock so the reset + the durable fence
+    INSERT are atomic against any racing scheduled prelude / iterate
+    trigger.
 
-    Reset shape per mechanism:
+    Reset shape:
 
-    * **bootstrap** — `UPDATE bootstrap_stages SET status='pending',
-      started_at=NULL, completed_at=NULL, last_error=NULL WHERE
-      bootstrap_run_id = (latest) AND status IN
-      ('success','error','blocked','skipped')`. Pending+running rows
-      are NOT touched (precondition gate already rejected the trigger
-      if status='running'); a stage in 'pending' is the natural
-      starting state and overwriting it would just rewrite the same
-      values.
-    * **scheduled_job** with freshness source — full epoch reset:
-      ``UPDATE data_freshness_index SET last_known_filed_at = NULL,
-      last_known_filing_id = NULL, expected_next_at = NULL,
-      next_recheck_at = NULL, state = 'unknown' WHERE source = ?``.
+    * Freshness source — full epoch reset of ``data_freshness_index``
+      (clears ``last_known_filed_at``, ``last_known_filing_id``,
+      ``expected_next_at``, ``next_recheck_at``, ``state_reason``,
+      ``new_filings_since`` and flips ``state`` to ``unknown``).
       Codex pre-push BLOCKING: clearing only ``last_known_filed_at``
-      leaves the prior filing_id pointer + future
-      ``expected_next_at`` / ``next_recheck_at``, so the next poll
-      may not run immediately AND ``check_freshness`` would skip
-      historical filings against the stale ``last_known_filing_id``.
-      The full reset gives the freshness sweeper a clean slate; rows
-      qualify for ``idx_freshness_due_for_poll`` immediately
-      (``state='unknown'`` AND ``expected_next_at IS NULL``).
-    * **scheduled_job** with manifest source — `UPDATE
-      sec_filing_manifest SET ingest_status='pending',
-      last_attempted_at=NULL, next_retry_at=NULL WHERE source = ?`.
-      ON CONFLICT idempotency on the per-source ingester provides the
-      de-dupe guarantee — no row corruption from the re-fetch.
-    * **scheduled_job** with atom ETag target — `DELETE FROM
-      external_data_watermarks WHERE source = ? AND key = ?`. A
-      missing row is the "no prior state, do full backfill" signal
-      consumed by ``app/services/watermarks.py::get_watermark``.
-    * **scheduled_job** with no registered source — no-op. Full-wash
-      on a no-watermark job is just "rerun"; the queue INSERT alone
-      is sufficient.
-    * **ingest_sweep** — never reaches this code path (caller 404s
-      ingest_sweep triggers in PR3).
+      leaves the prior filing_id pointer + future poll cadence, so
+      the next poll may not run immediately AND ``check_freshness``
+      would skip historical filings against the stale filing_id.
+    * Manifest source — flips all rows for the source to ``pending``,
+      clears ``last_attempted_at`` / ``next_retry_at``. ON CONFLICT
+      idempotency on the per-source ingester is the de-dupe layer.
+    * Atom ETag target — DELETEs the watermark row. A missing row is
+      the "no prior state, do full backfill" signal consumed by
+      ``app/services/watermarks.py::get_watermark``.
+    * No registered source — no-op. Full-wash on a no-watermark job
+      is just "rerun"; the queue INSERT alone is sufficient.
+
+    Bootstrap full-wash is handled separately in ``trigger_process``
+    via ``bootstrap_start_run`` so the orchestrator picks up a
+    fresh ``bootstrap_runs`` row + ``bootstrap_state.status='running'``
+    on dispatch (Codex review BLOCKING — the orchestrator no-ops
+    unless ``bootstrap_runs.status='running'``).
     """
-    if mechanism == "bootstrap":
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE bootstrap_stages
-                   SET status='pending',
-                       started_at=NULL,
-                       completed_at=NULL,
-                       last_error=NULL
-                 WHERE bootstrap_run_id = (
-                       SELECT MAX(id) FROM bootstrap_runs
-                 )
-                   AND status IN ('success', 'error', 'blocked', 'skipped')
-                """
-            )
-        return
-    if mechanism == "ingest_sweep":
-        # Stub adapter — caller already 404'd. Defence-in-depth no-op.
-        return
-    # mechanism == 'scheduled_job'
     freshness_source = freshness_source_for(process_id)
     if freshness_source is not None:
         with conn.cursor() as cur:
@@ -779,7 +864,7 @@ def trigger_process(
             detail=f"unknown process: {process_id!r}",
         )
 
-    requested_by, _ = _identify_requestor(request)
+    requested_by, operator_uuid = _identify_requestor(request)
     if mechanism == "bootstrap":
         target_process_id = "bootstrap"
         target_job_name = JOB_BOOTSTRAP_ORCHESTRATOR
@@ -797,17 +882,39 @@ def trigger_process(
     try:
         with conn.transaction():
             acquire_prelude_lock(conn, target_process_id)
+            # Codex pre-push round 7 BLOCKING: per-process advisory lock
+            # only serialises operations under the same ``process_id``.
+            # Multi-job shared scheduler sources (e.g. XBRL) need a
+            # source-keyed lock so a sibling prelude waits for the
+            # full-wash trigger's fence INSERT to commit before it can
+            # query and proceed.
+            if mechanism == "scheduled_job":
+                acquire_shared_source_locks(conn, process_id=target_process_id)
             if mechanism == "bootstrap":
                 _check_bootstrap_preconditions(conn, mode=body.mode)
+                # Bootstrap iterate / full_wash both need to flip the
+                # underlying state machine BEFORE the orchestrator is
+                # dispatched — the invoker no-ops unless the latest
+                # bootstrap_runs.status == 'running' (orchestrator
+                # `read_latest_run_with_stages` short-circuit). Codex
+                # review BLOCKING: PR3 enqueued without flipping state,
+                # so the orchestrator quietly returned without doing
+                # the requested work. start_run / reset_failed_stages
+                # both flip bootstrap_state.status + bootstrap_runs.
+                if body.mode == "iterate":
+                    _apply_bootstrap_iterate_reset(conn)
+                else:
+                    _apply_bootstrap_full_wash_reset(conn, operator_uuid=operator_uuid)
             else:
                 _check_scheduled_job_preconditions(conn, job_name=target_job_name)
-            # PR4: full-wash resets the watermark BEFORE enqueueing
-            # the worker. The reset + fence INSERT happen in the same
-            # advisory-lock-held tx so a racing scheduled prelude /
-            # iterate either sees the reset state + the fence row, or
-            # neither (Codex round 4 R4-B1 invariant).
-            if body.mode == "full_wash":
-                _apply_full_wash_reset(conn, process_id=target_process_id, mechanism=mechanism)
+                if body.mode == "full_wash":
+                    # Refuse if any sibling job sharing the freshness
+                    # or manifest source is mid-run — full-wash mutates
+                    # source-scoped scheduler rows, not job-scoped
+                    # ones, so a sibling holds no per-job advisory lock
+                    # under our key (Codex review BLOCKING).
+                    _check_full_wash_shared_source_clear(conn, job_name=target_job_name)
+                    _apply_scheduled_full_wash_reset(conn, process_id=target_process_id)
             request_id = _publish_within_tx(
                 conn,
                 job_name=target_job_name,

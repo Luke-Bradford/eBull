@@ -620,9 +620,84 @@ def atom_etag_target_for(process_id: str) -> tuple[str, str] | None:
     return (spec.atom_etag.source, spec.atom_etag.key)
 
 
+def jobs_sharing_freshness_source(source: str) -> tuple[str, ...]:
+    """Return every process_id whose ``freshness_source`` equals ``source``.
+
+    Used by the trigger handler's full-wash precondition to refuse a
+    reset while ANY sibling job consuming the same scheduler source is
+    mid-run. Several jobs intentionally consume the same XBRL feed
+    (``daily_financial_facts`` / ``fundamentals_sync`` /
+    ``sec_business_summary_ingest`` all → ``sec_xbrl_facts``); a
+    full-wash on one of them resets the shared
+    ``data_freshness_index`` rows under the others' feet without this
+    sibling check.
+    """
+    return tuple(pid for pid, spec in _JOB_REGISTRY.items() if spec.freshness_source == source)
+
+
+def jobs_sharing_manifest_source(source: str) -> tuple[str, ...]:
+    """Return every process_id whose ``manifest_source`` equals ``source``.
+
+    Counterpart to ``jobs_sharing_freshness_source`` for the
+    ``sec_filing_manifest`` reset path.
+    """
+    return tuple(pid for pid, spec in _JOB_REGISTRY.items() if spec.manifest_source == source)
+
+
+def acquire_shared_source_locks(
+    conn: psycopg.Connection[Any],
+    *,
+    process_id: str,
+) -> None:
+    """Take advisory locks for every scheduler source ``process_id`` consumes.
+
+    The per-process advisory lock acquired by
+    ``app.services.process_stop.acquire_prelude_lock`` only serialises
+    operations under the SAME ``process_id``. When multiple jobs share
+    a freshness/manifest source (e.g. ``daily_financial_facts``,
+    ``fundamentals_sync``, ``sec_business_summary_ingest`` all
+    consume ``sec_xbrl_facts``), a full-wash trigger on one and a
+    prelude for another hold DIFFERENT per-process locks and can race
+    on the shared scheduler rows.
+
+    This helper takes ``pg_advisory_xact_lock`` on a per-source key
+    (``hashtext('source:freshness:<src>')`` /
+    ``hashtext('source:manifest:<src>')``) so every code path that
+    touches a shared scheduler source serialises against every other
+    code path that touches it — regardless of ``process_id``.
+
+    Locks are acquired in deterministic order (sorted source label) to
+    rule out deadlocks across pairs of callers acquiring different
+    permutations of the same set. Caller MUST be inside an open
+    transaction; locks are released at COMMIT/ROLLBACK like the
+    per-process variant.
+
+    Codex pre-push round 7 BLOCKING: without source-keyed locking,
+    the trigger handler's fence INSERT and the sibling prelude's
+    fence-check race in opposite-tx-order — sibling reads pre-INSERT
+    state, writes ``job_runs.running``, commits AFTER the full-wash
+    fence commits, then runs against the reset source.
+    """
+    sources: list[str] = []
+    fresh = freshness_source_for(process_id)
+    if fresh is not None:
+        sources.append(f"source:freshness:{fresh}")
+    manifest = manifest_source_for(process_id)
+    if manifest is not None:
+        sources.append(f"source:manifest:{manifest}")
+    if not sources:
+        return
+    with conn.cursor() as cur:
+        for key in sorted(sources):
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)", (key,))
+
+
 __all__ = [
+    "acquire_shared_source_locks",
     "atom_etag_target_for",
     "freshness_source_for",
+    "jobs_sharing_freshness_source",
+    "jobs_sharing_manifest_source",
     "manifest_source_for",
     "resolve_watermark",
 ]
