@@ -310,3 +310,44 @@ class TestJobInternalKeysRegistry:
         registry = get_job_name_to_source()
         for job_name in JOB_INTERNAL_KEYS:
             assert job_name in registry, f"JOB_INTERNAL_KEYS lists {job_name!r} but it's not in the source registry"
+
+
+class TestBootstrapOnlyMetadataLookup:
+    """Review-bot PR1a [PREVENTION] — _lookup_metadata must not raise on
+    bootstrap-only job_names (otherwise PR1b dispatch breaks for
+    sec_bulk_download / nightly_universe_sync / etc).
+    """
+
+    def test_validate_succeeds_for_bootstrap_only_job_with_no_params(self) -> None:
+        """PR1b will dispatch bootstrap-only jobs through validate_job_params
+        with metadata=None. The lookup must return () (no operator-exposable
+        params), not raise."""
+        out = validate_job_params(
+            "sec_bulk_download",  # bootstrap-only invoker, NOT in SCHEDULED_JOBS
+            {},
+            allow_internal_keys=True,
+            metadata=None,
+        )
+        assert out == {}
+
+    def test_validate_rejects_unknown_keys_for_bootstrap_only_job_manual_path(self) -> None:
+        """Manual API path against a bootstrap-only job rejects everything —
+        empty metadata + allow_internal_keys=False = every key unknown."""
+        with pytest.raises(ParamValidationError, match="unknown param"):
+            validate_job_params(
+                "nightly_universe_sync",
+                {"force_full": True},
+                allow_internal_keys=False,
+                metadata=None,
+            )
+
+    def test_validate_rejects_internal_keys_not_in_allow_list(self) -> None:
+        """Bootstrap-only job with allow_internal_keys=True still rejects keys
+        not in JOB_INTERNAL_KEYS for that job."""
+        with pytest.raises(ParamValidationError, match="unknown param"):
+            validate_job_params(
+                "sec_bulk_download",
+                {"random_key": "x"},  # not in JOB_INTERNAL_KEYS["sec_bulk_download"]
+                allow_internal_keys=True,
+                metadata=None,
+            )

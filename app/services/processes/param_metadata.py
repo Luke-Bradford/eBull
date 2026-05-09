@@ -332,6 +332,19 @@ def materialise_scheduled_params(
 def _lookup_metadata(job_name: str) -> tuple[ParamMetadata, ...]:
     """Look up a job's ``params_metadata`` from the scheduler registry.
 
+    Returns the job's ``params_metadata`` tuple if registered in
+    ``SCHEDULED_JOBS``. Returns an empty tuple for bootstrap-only
+    invokers (job_names present in ``_BOOTSTRAP_STAGE_SPECS`` but not
+    in ``SCHEDULED_JOBS``) — those have no operator-exposable params
+    today (the bootstrap dispatcher passes internal-only keys via
+    ``JOB_INTERNAL_KEYS`` + ``allow_internal_keys=True``). PR1c may
+    promote some of these to ``SCHEDULED_JOBS`` with their own
+    ``params_metadata``.
+
+    The bootstrap-only fallback addresses the PR1a review-bot WARNING:
+    raising on unregistered job_names would break PR1b's bootstrap
+    dispatch wiring (e.g. ``sec_bulk_download`` is bootstrap-only).
+
     Local import to avoid a module-load cycle (scheduler imports this
     module for the ``ParamMetadata`` type; this function is only called
     at runtime, so the lazy import is safe).
@@ -341,7 +354,16 @@ def _lookup_metadata(job_name: str) -> tuple[ParamMetadata, ...]:
     for job in SCHEDULED_JOBS:
         if job.name == job_name:
             return job.params_metadata
-    raise ParamValidationError(f"job {job_name!r} not found in SCHEDULED_JOBS registry")
+    # Fallback for bootstrap-only invokers. Empty tuple means:
+    #   - Manual API path (allow_internal_keys=False): every supplied key
+    #     is rejected as unknown — operators cannot manually trigger
+    #     bootstrap-only jobs through the standard /jobs/<name>/run path
+    #     with arbitrary params (correct: bootstrap-only jobs are
+    #     orchestrator-owned).
+    #   - Bootstrap path (allow_internal_keys=True): only keys in
+    #     JOB_INTERNAL_KEYS[job_name] are accepted; the StageSpec.params
+    #     dict carries the internal-only knobs.
+    return ()
 
 
 __all__ = [
