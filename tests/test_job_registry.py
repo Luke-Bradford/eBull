@@ -351,3 +351,42 @@ class TestBootstrapOnlyMetadataLookup:
                 allow_internal_keys=True,
                 metadata=None,
             )
+
+
+class TestParamMetadataMisconfiguration:
+    """Review-bot PR1a [PREVENTION] — misconfigured metadata must raise
+    ParamValidationError (mapped to 400), not AssertionError (escapes to
+    500 and silently skipped under ``python -O``).
+    """
+
+    def test_enum_without_enum_values_raises_param_validation_error(self) -> None:
+        """field_type='enum' with enum_values=None raises ParamValidationError."""
+        meta = (
+            ParamMetadata.model_validate(
+                {
+                    "name": "broken",
+                    "label": "x",
+                    "help_text": "x",
+                    "field_type": "enum",
+                    "enum_values": None,  # misconfigured — enum requires values
+                }
+            ),
+        )
+        with pytest.raises(ParamValidationError, match="requires enum_values"):
+            validate_job_params("anyjob", {"broken": "x"}, allow_internal_keys=False, metadata=meta)
+
+    def test_multi_enum_without_enum_values_raises_param_validation_error(self) -> None:
+        """field_type='multi_enum' with enum_values=None raises ParamValidationError."""
+        meta = (
+            ParamMetadata.model_validate(
+                {
+                    "name": "broken",
+                    "label": "x",
+                    "help_text": "x",
+                    "field_type": "multi_enum",
+                    "enum_values": None,
+                }
+            ),
+        )
+        with pytest.raises(ParamValidationError, match="requires enum_values"):
+            validate_job_params("anyjob", {"broken": ["x"]}, allow_internal_keys=False, metadata=meta)

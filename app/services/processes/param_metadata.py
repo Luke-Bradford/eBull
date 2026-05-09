@@ -229,16 +229,24 @@ def _coerce_value(meta: ParamMetadata, raw: Any) -> Any:
 
 
 def _check_bounds(meta: ParamMetadata, value: Any) -> None:
-    """Validate enum membership + min/max bounds. ``None`` skips."""
+    """Validate enum membership + min/max bounds. ``None`` skips.
+
+    Misconfigured ParamMetadata (e.g. ``field_type='enum'`` with
+    ``enum_values=None``) raises ``ParamValidationError`` so the API layer
+    maps to 400, not ``AssertionError`` which would escape to 500 (and be
+    silently skipped under ``python -O``). Review-bot PR1a BLOCKING.
+    """
     if value is None:
         return
     if meta.field_type == "enum":
-        assert meta.enum_values is not None
+        if meta.enum_values is None:
+            raise ParamValidationError(f"param {meta.name!r}: field_type='enum' requires enum_values to be set")
         if value not in meta.enum_values:
             raise ParamValidationError(f"param {meta.name!r}: value {value!r} not in enum_values {meta.enum_values}")
         return
     if meta.field_type == "multi_enum":
-        assert meta.enum_values is not None
+        if meta.enum_values is None:
+            raise ParamValidationError(f"param {meta.name!r}: field_type='multi_enum' requires enum_values to be set")
         for item in value:
             if item not in meta.enum_values:
                 raise ParamValidationError(f"param {meta.name!r}: item {item!r} not in enum_values {meta.enum_values}")
