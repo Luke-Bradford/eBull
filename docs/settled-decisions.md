@@ -346,6 +346,41 @@ screen'?"* — else rewrite or drop. Plan + backlog still at
 Do not re-introduce in-process scheduling in the API. Do not add a third
 pool with raw `ConnectionPool(...)` — use `open_pool`.
 
+## Cancel UX (#1064, settled 2026-05-09)
+
+- **Decision:** Cancel is cooperative-with-checkpoints, never faked
+  hard-kill. The Cancel button writes a row into
+  `process_stop_requests`; the worker observes the signal at a
+  well-defined checkpoint, completes the in-flight item (writes are
+  idempotent), then transitions the run row to `cancelled`. The next
+  Iterate reads the watermark and re-fetches anything not committed.
+- **Why:** Hard-kill mid-write leaves partial rows on disk, and the
+  next run reads a watermark that incorrectly suggests "we got that
+  far" — masking the gap. Cooperative cancel + watermark-aware resume
+  guarantees the next iterate reads a clean cursor and re-fetches
+  anything not committed. The hard-kill failure mode was identified
+  in #1064 design discussion (operator quote §3.5: "restarting jobs
+  but the jobs are still running").
+- **Originally:** "Cancel out of scope for v1" (placeholder noted in
+  the umbrella spec at line 982). AMENDED 2026-05-09 by #1064 as
+  cooperative cancel becomes a v1 affordance — watermarks ensure
+  resume is safe by construction.
+- **Cancel-mode choice is at cancel time, not an upgrade path:** the
+  modal exposes "Cooperative" (default) and "Terminate (mark for
+  cleanup)" via the More disclosure. A second cancel against the same
+  in-flight run is rejected by the partial-unique active-stop index
+  (sql/135) — the escape hatch for a wedged worker is the
+  jobs-process restart + boot-recovery sweep, not a re-cancel.
+- **Enforced in:** `app/services/process_stop.py` (request / observe /
+  complete state machine with partial-unique active-stop slot,
+  cooperative + terminate `StopMode` Literal); `app/services/sync_orchestrator/executor.py::_check_cancel_signal`
+  (in-tx late-cancel probe); FE `CancelConfirmDialog` (cooperative
+  default; terminate is a controlled disclosure, not a primary
+  affordance).
+- **Spec:** `docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md`
+  §"Cancel semantics — cooperative" + Codex round 1 amendment B4 +
+  round 2 R2-W2.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

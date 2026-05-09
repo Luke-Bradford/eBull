@@ -29,10 +29,16 @@ link to the authoritative source.
 ### Day-to-day
 - [`runbooks/runbook-after-parser-change.md`](runbooks/runbook-after-parser-change.md)
   — what to do after a PR lands that changes parser semantics.
+- [`runbooks/runbook-cancel-and-resume.md`](runbooks/runbook-cancel-and-resume.md)
+  — when to use Iterate / Full-wash / Cancel; cooperative-cancel state
+  machine; resume from watermark.
 - [`runbooks/runbook-data-freshness.md`](runbooks/runbook-data-freshness.md)
   — verifying ingest cadence + spotting stale data.
 - [`runbooks/runbook-job-failures.md`](runbooks/runbook-job-failures.md)
   — diagnosing a failed scheduled job.
+- [`runbooks/runbook-stuck-process-triage.md`](runbooks/runbook-stuck-process-triage.md)
+  — four-case stale model; heartbeat + thresholds; jobs-process
+  restart; missing-CIK diagnosis chain.
 
 ### Reference
 - [`glossary.md`](glossary.md) — CIK, CUSIP, 13F-HR, NPORT-P,
