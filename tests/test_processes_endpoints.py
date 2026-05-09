@@ -273,6 +273,31 @@ def test_full_wash_resets_bootstrap_stages_before_enqueue(
     assert last_error[0] is None
 
 
+def test_bootstrap_full_wash_blocked_while_running(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """Review bot BLOCKING rebuttal: bootstrap's active-run gate is
+    ``bootstrap_state.status='running'`` (not ``_has_active_job_run``).
+    The check happens before ``_apply_full_wash_reset`` so the running
+    orchestrator's bootstrap_stages cannot be reset under it. Pin the
+    behaviour with an explicit test so the symmetry with scheduled-job
+    full-wash protection is auditable.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO bootstrap_runs (status, completed_at)
+        VALUES ('running', NULL)
+        """
+    )
+    _seed_bootstrap_state(ebull_test_conn, "running")
+    ebull_test_conn.commit()
+
+    resp = client.post("/system/processes/bootstrap/trigger", json={"mode": "full_wash"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "bootstrap_already_running"
+
+
 def test_trigger_active_scheduled_run_returns_409(
     conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
 ) -> None:
