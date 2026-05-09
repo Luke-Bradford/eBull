@@ -443,3 +443,32 @@ def test_admin_control_hub_schema_present() -> None:
         assert "cancelled" in row[0], (
             f"sync_runs_status_check does not include 'cancelled': {row[0]!r}; sql/139 did not widen the constraint."
         )
+
+
+def test_per_run_progress_telemetry_schema_present() -> None:
+    """Recovery gate for sql/140 (#1069 PR2 of #1064).
+
+    Operator amendment A3 adds parity progress columns onto job_runs,
+    bootstrap_stages, sync_runs so the Processes table envelope (PR3)
+    can render the same UX across mechanisms. Schema-only here;
+    producer + consumer wiring lands in PR3.
+    """
+    import psycopg
+
+    from app.config import settings
+
+    progress_columns = (
+        "processed_count",
+        "target_count",
+        "last_progress_at",
+        "warnings_count",
+        "warning_classes",
+    )
+    with psycopg.connect(settings.database_url) as conn:
+        for table in ("job_runs", "bootstrap_stages", "sync_runs"):
+            for col in progress_columns:
+                row = conn.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name=%s AND column_name=%s",
+                    (table, col),
+                ).fetchone()
+                assert row is not None, f"{table}.{col} missing — sql/140 did not apply."

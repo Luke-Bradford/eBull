@@ -48,6 +48,7 @@ from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
 from app.services.bootstrap_state import (
     StageSpec,
     finalize_run,
+    mark_run_cancelled,
     mark_stage_blocked,
     mark_stage_error,
     mark_stage_running,
@@ -55,6 +56,9 @@ from app.services.bootstrap_state import (
     mark_stage_success,
     read_latest_run_with_stages,
 )
+from app.services.process_stop import is_stop_requested
+from app.services.process_stop import mark_completed as mark_stop_completed
+from app.services.process_stop import mark_observed as mark_stop_observed
 
 logger = logging.getLogger(__name__)
 
@@ -416,27 +420,45 @@ def _phase_batched_dispatch(
     runnable: list[_RunnableStage],
     database_url: str,
     preexisting_statuses: dict[str, str] | None = None,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], bool]:
     """Dispatch ``runnable`` stages in phase-batched fashion with lane concurrency.
 
-    Returns ``{stage_key: terminal_status}`` (success / error / blocked /
-    skipped) for every input stage.
+    Returns a tuple ``(statuses, cancelled)``:
+
+    * ``statuses`` — ``{stage_key: terminal_status}`` (success / error /
+      blocked / skipped) for every input stage.
+    * ``cancelled`` — True if the dispatcher exited early due to an
+      observed cooperative-cancel signal at a checkpoint. The caller
+      uses this to skip ``finalize_run`` (the run is already in the
+      terminal ``cancelled`` state).
 
     Algorithm:
 
       1. Build per-stage status map (initially ``pending``).
-      2. While any stage is pending: collect every pending stage whose
+      2. **Cancel checkpoint** — at the top of each iteration check
+         ``is_stop_requested`` against ``(target_run_kind='bootstrap_run',
+         target_run_id=run_id)``. On observed cancel: mark stop
+         request observed, call ``mark_run_cancelled`` (terminalises
+         run + state + sweeps remaining stages), mark stop request
+         completed, and return early. This is the operator-cancel
+         observation point per spec §Cancel semantics — cooperative.
+      3. While any stage is pending: collect every pending stage whose
          ``requires`` are all ``success`` → "ready batch". Stages
          whose any required dep is ``error``/``blocked`` →
          immediately propagate to ``blocked`` (no invocation).
-      3. Group the ready batch by lane. For each lane, run up to
+      4. Group the ready batch by lane. For each lane, run up to
          ``_LANE_MAX_CONCURRENCY[lane]`` stages concurrently via a
          per-lane ``ThreadPoolExecutor``.
-      4. Join all lane workers; refresh status from the DB; loop.
-      5. Stop when no stage is pending.
+      5. Join all lane workers; refresh status from the DB; loop.
+      6. Stop when no stage is pending.
 
     Stages with no `requires` start in the first batch. The dispatcher
     is fully data-driven by ``_STAGE_REQUIRES`` + ``_STAGE_LANE_OVERRIDES``.
+
+    Cancel observation latency: at most the duration of the longest
+    in-flight batch (a 13F sweep is ~30 min; CIK refresh ~30s).
+    Mid-stage work runs to completion — the watermark advances on
+    commit and the next Iterate resumes from there.
     """
     from concurrent.futures import ThreadPoolExecutor, wait
 
@@ -450,6 +472,41 @@ def _phase_batched_dispatch(
                 statuses[key] = status
 
     while True:
+        # Cancel checkpoint — covers (W1) "before submitting Phase A's
+        # first batch", "between any two ready batches", "before
+        # kicking off Phase B lanes", and "between stages within a
+        # lane" (the loop body re-enters here after every wait()).
+        #
+        # Single-tx atomicity (Codex pre-push round 1 WARNING W4):
+        # observation, cancellation, and stop-completion all commit
+        # together. A worker crash between two of three separate
+        # commits would otherwise leave the stop row observed-but-
+        # unfinished with the run still ``running``. Boot-recovery
+        # would still clean up after the next jobs restart, but
+        # collapsing into one tx makes the happy path clean.
+        with psycopg.connect(database_url) as cancel_conn:
+            stop = is_stop_requested(
+                cancel_conn,
+                target_run_kind="bootstrap_run",
+                target_run_id=run_id,
+            )
+            if stop is not None:
+                logger.info(
+                    "bootstrap dispatcher: cancel observed at checkpoint (run_id=%d, stop_id=%d, mode=%s)",
+                    run_id,
+                    stop.id,
+                    stop.mode,
+                )
+                with cancel_conn.transaction():
+                    mark_stop_observed(cancel_conn, stop.id)
+                    mark_run_cancelled(
+                        cancel_conn,
+                        run_id=run_id,
+                        notes_line="cancelled by operator at dispatcher checkpoint",
+                    )
+                    mark_stop_completed(cancel_conn, stop.id)
+                return statuses, True
+
         pending_keys = [k for k, s in statuses.items() if s == "pending"]
         if not pending_keys:
             break
@@ -576,7 +633,7 @@ def _phase_batched_dispatch(
                 statuses[stage_key] = "error"
                 logger.warning("bootstrap dispatcher: %s ERROR (%s)", stage_key, outcome.error)
 
-    return statuses
+    return statuses, False
 
 
 def run_bootstrap_orchestrator() -> None:
@@ -658,12 +715,19 @@ def run_bootstrap_orchestrator() -> None:
         {lane: sum(1 for r in runnable if r.lane == lane) for lane in _LANE_MAX_CONCURRENCY},
     )
 
-    _phase_batched_dispatch(
+    _statuses, cancelled = _phase_batched_dispatch(
         run_id=run_id,
         runnable=runnable,
         database_url=database_url,
         preexisting_statuses=preexisting_statuses,
     )
+
+    if cancelled:
+        # The cancel checkpoint already terminalised the run via
+        # mark_run_cancelled; finalize_run would no-op against the
+        # status='running' guard, but skipping it is clearer.
+        logger.info("bootstrap dispatcher: run_id=%d cancelled by operator", run_id)
+        return
 
     with psycopg.connect(database_url) as conn:
         terminal = finalize_run(conn, run_id=run_id)

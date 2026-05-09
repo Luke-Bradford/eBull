@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -36,12 +37,15 @@ from app.services.bootstrap_orchestrator import (
 )
 from app.services.bootstrap_state import (
     BootstrapAlreadyRunning,
+    BootstrapNotRunning,
+    cancel_run,
     force_mark_complete,
     read_latest_run_with_stages,
     read_state,
     reset_failed_stages_for_retry,
     start_run,
 )
+from app.services.process_stop import StopAlreadyPendingError
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request
 
 logger = logging.getLogger(__name__)
@@ -59,7 +63,7 @@ router = APIRouter(
 # ---------------------------------------------------------------------------
 
 
-BootstrapApiStatus = Literal["pending", "running", "complete", "partial_error"]
+BootstrapApiStatus = Literal["pending", "running", "complete", "partial_error", "cancelled"]
 LaneApi = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
 StageApiStatus = Literal["pending", "running", "success", "error", "skipped", "blocked"]
 
@@ -142,6 +146,31 @@ def _identify_requestor(request: Request) -> str:
     if op:
         return f"operator:{op}"
     return "operator:anonymous"
+
+
+def _operator_uuid(request: Request) -> UUID | None:
+    """Extract the request's authenticated operator UUID, if any.
+
+    Returns ``None`` when middleware has not populated
+    ``request.state.operator_id`` (service-token paths or unauth'd
+    callers — the audit field is nullable, so a NULL row is the
+    correct shape, not a 500).
+
+    Codex pre-push round 1 WARNING W5: cancel_run takes
+    ``requested_by_operator_id``; the API previously hard-coded None.
+    Wire it through honestly so the FK populates the moment the
+    middleware lands the operator id on request state.
+    """
+    op = getattr(request.state, "operator_id", None)
+    if op is None:
+        return None
+    if isinstance(op, UUID):
+        return op
+    try:
+        return UUID(str(op))
+    except ValueError, TypeError:
+        logger.warning("bootstrap: request.state.operator_id %r is not a UUID; auditing as NULL", op)
+        return None
 
 
 def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusResponse:
@@ -444,6 +473,92 @@ def retry_failed(
 
 class BootstrapMarkCompleteResponse(BaseModel):
     status: BootstrapApiStatus
+
+
+class BootstrapCancelResponse(BaseModel):
+    """Response for ``POST /system/bootstrap/cancel``.
+
+    Operator-visible payload: which run got the stop signal so the FE
+    can pin the cancel-pending UI to that run id (rather than the
+    eventual ``last_run_id`` from a future re-run).
+    """
+
+    run_id: int
+    status: Literal["cancel_requested"]
+
+
+@router.post(
+    "/cancel",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=BootstrapCancelResponse,
+)
+def cancel_bootstrap(
+    request: Request,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> BootstrapCancelResponse:
+    """Cooperatively cancel the in-flight bootstrap run.
+
+    Spec §Cancel semantics — cooperative + §PR2.
+
+    Atomic flow inside ``cancel_run`` (one tx, runs-row-only locking
+    to avoid lock-order inversion against ``finalize_run`` — Codex
+    pre-push round 1 BLOCKING B1):
+      1. ``SELECT id FROM bootstrap_runs WHERE status='running'
+         FOR UPDATE`` — pins the active run via the partial-unique
+         index ``bootstrap_runs_one_running_idx``. No row → 409
+         ``no_active_run``.
+      2. INSERT ``process_stop_requests`` row (target_run_kind=
+         'bootstrap_run', mode='cooperative'). Partial-unique violation
+         (operator double-clicked) raises ``StopAlreadyPendingError``
+         → 409 ``stop_already_pending``.
+      3. UPDATE ``bootstrap_runs.cancel_requested_at = now()`` for
+         worker fast-path observation.
+
+    The orchestrator's per-batch checkpoint observes the stop row,
+    transitions the run + state to ``cancelled``, and exits cleanly.
+    If the dispatcher loop already exited before the cancel arrived,
+    ``finalize_run`` reads ``cancel_requested_at`` under the same row
+    lock and routes the terminal state to ``cancelled`` instead of
+    ``complete`` (Codex pre-push round 1 BLOCKING B2).
+    Worst-case observation latency = duration of the longest
+    in-flight stage (~30 min for 13F sweep, ~30s for CIK refresh).
+
+    Returns 202 with the run id. The FE polls ``/status`` and shows
+    ``cancelling…`` until the worker observes the stop, then
+    ``cancelled``.
+    """
+    requested_by = _identify_requestor(request)
+    operator_uuid = _operator_uuid(request)
+    try:
+        run_id = cancel_run(conn, requested_by_operator_id=operator_uuid)
+    except BootstrapNotRunning as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "no_active_run",
+                "message": str(exc),
+            },
+        ) from exc
+    except StopAlreadyPendingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "stop_already_pending",
+                "message": str(exc),
+            },
+        ) from exc
+
+    logger.warning(
+        "bootstrap: cancel requested run_id=%d requested_by=%s",
+        run_id,
+        requested_by,
+    )
+    return BootstrapCancelResponse(run_id=run_id, status="cancel_requested")
+
+
+# ---------------------------------------------------------------------------
+# POST /mark-complete
+# ---------------------------------------------------------------------------
 
 
 @router.post("/mark-complete", response_model=BootstrapMarkCompleteResponse)

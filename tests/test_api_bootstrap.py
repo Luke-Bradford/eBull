@@ -290,6 +290,49 @@ def test_mark_complete_returns_409_while_running(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# POST /system/bootstrap/cancel
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_returns_202_when_running(client: TestClient) -> None:
+    _install_conn()
+    with patch("app.api.bootstrap.cancel_run", return_value=42) as cancel_mock:
+        resp = client.post("/system/bootstrap/cancel")
+
+    assert resp.status_code == 202
+    assert resp.json() == {"run_id": 42, "status": "cancel_requested"}
+    cancel_mock.assert_called_once()
+
+
+def test_cancel_returns_409_when_not_running(client: TestClient) -> None:
+    from app.services.bootstrap_state import BootstrapNotRunning
+
+    _install_conn()
+    with patch(
+        "app.api.bootstrap.cancel_run",
+        side_effect=BootstrapNotRunning("nothing running"),
+    ):
+        resp = client.post("/system/bootstrap/cancel")
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "no_active_run"
+
+
+def test_cancel_returns_409_when_double_clicked(client: TestClient) -> None:
+    from app.services.process_stop import StopAlreadyPendingError
+
+    _install_conn()
+    with patch(
+        "app.api.bootstrap.cancel_run",
+        side_effect=StopAlreadyPendingError("already pending"),
+    ):
+        resp = client.post("/system/bootstrap/cancel")
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "stop_already_pending"
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
