@@ -56,10 +56,21 @@ export function ProcessDetailPage() {
   const detail = useAsync(() => fetchProcess(id), [id]);
   const runs = useAsync(() => fetchProcessRuns(id, 7), [id]);
 
+  // Extract the refetch refs as local const bindings so ESLint can
+  // see their identity and verify the dep array — `useAsync` wraps
+  // refetch in `useCallback([], [])` (see useAsync.test.ts which
+  // pins that invariant) so these references are stable across
+  // renders. Listing the full `detail` / `runs` hook-return objects
+  // in deps would re-derive `refetchAll` every render and propagate
+  // the identity churn through every `handleX` below — PR #1077
+  // review WARNING.
+  const refetchDetail = detail.refetch;
+  const refetchRuns = runs.refetch;
+
   const refetchAll = useCallback(() => {
-    detail.refetch();
-    runs.refetch();
-  }, [detail, runs]);
+    refetchDetail();
+    refetchRuns();
+  }, [refetchDetail, refetchRuns]);
 
   const handleIterate = useCallback(async () => {
     setTriggerError(null);
@@ -84,6 +95,11 @@ export function ProcessDetailPage() {
       setShowFullWash(false);
       refetchAll();
     } catch (err) {
+      // On error, dismiss the modal and surface the structured 409
+      // reason in the ActionBar — keeping the modal up alongside an
+      // out-of-context error pill would be confusing. Operator
+      // remediation lives on the row (see ApiError.detail.reason →
+      // reasonTooltip mapping in ActionBar).
       setTriggerError(err);
       setShowFullWash(false);
       if (!(err instanceof ApiError))
@@ -102,6 +118,8 @@ export function ProcessDetailPage() {
         setShowCancel(false);
         refetchAll();
       } catch (err) {
+        // Same pattern as full-wash above — dismiss modal, surface
+        // the reason in the ActionBar tooltip via reasonTooltip.
         setCancelError(err);
         setShowCancel(false);
         if (!(err instanceof ApiError))
