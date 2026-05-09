@@ -50,6 +50,7 @@ from app.services.sync_orchestrator.dispatcher import (
 )
 from app.services.sync_orchestrator.executor import run_sync
 from app.services.sync_orchestrator.types import SyncTrigger
+from app.workers.scheduler import SCHEDULED_JOBS
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,59 @@ def _dispatch_manual_job(
                 error_msg=f"unknown job name: {job_name!r}",
             )
         return
+
+    # PR1b #1064 — extend per-job prerequisite check to the manual-queue
+    # path. The scheduled-fire path in app/jobs/runtime.py::_wrap_invoker
+    # has always honoured ScheduledJob.prerequisite (e.g.
+    # _bootstrap_complete on every SEC + fundamentals job). Pre-PR1b the
+    # manual-queue path bypassed this — operators could fire any SEC
+    # ingest from the admin panel during a half-installed dev DB,
+    # getting confusing "instruments=0" log lines + empty results.
+    #
+    # Bootstrap-internal jobs (bootstrap_orchestrator + its stage jobs)
+    # are NOT in SCHEDULED_JOBS, so the lookup returns no prerequisite
+    # and the manual queue path proceeds unchanged. Operator-tunable
+    # SEC/fundamentals jobs WITH the prerequisite get the same
+    # "first-install bootstrap not complete" rejection scheduled fires
+    # already produce. Manual queue uses mark_request_rejected (NOT
+    # mark_request_completed — PREVENTION-grade per data-engineer skill
+    # §6.5.7 step 8).
+    job = next((j for j in SCHEDULED_JOBS if j.name == job_name), None)
+    if job is not None and job.prerequisite is not None:
+        # Fail-open posture covers BOTH connection-open failures AND
+        # prerequisite-callable raises. Codex round-2 BLOCKING fix —
+        # the try MUST wrap psycopg.connect because if connection-open
+        # raises while inside the `with`, the exception escapes the
+        # listener's _dispatch_manual_job entirely and _route_claim's
+        # broad except marks the request rejected — silent divergence
+        # from the scheduled-fire posture (which fails-open on the
+        # same class of errors at app/jobs/runtime.py::_wrap_invoker).
+        try:
+            with psycopg.connect(settings.database_url, autocommit=True) as conn:
+                met, reason = job.prerequisite(conn)
+                if not met:
+                    logger.info(
+                        "listener: rejecting manual_job request_id=%d for %r — prerequisite not met: %s",
+                        request_id,
+                        job_name,
+                        reason,
+                    )
+                    mark_request_rejected(
+                        conn,
+                        request_id,
+                        error_msg=reason,
+                    )
+                    return
+        except Exception:
+            # Mirrors scheduled-fire posture — silently dropping a real
+            # run is worse than running against a partial DB where the
+            # body itself can detect + skip. Logged loud so ops_monitor
+            # surfaces a repeating failure pattern.
+            logger.warning(
+                "listener: prerequisite check for %r failed (connect or callable raised); running anyway",
+                job_name,
+                exc_info=True,
+            )
 
     # Submit to the runtime's manual executor. The runtime's own
     # wrapper handles the linked_request_id / dispatched / completed
