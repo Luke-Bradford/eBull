@@ -110,6 +110,50 @@ def test_prelude_fence_held_writes_skipped_and_does_not_run_invoker(
     assert invoked_signal is False
 
 
+def test_prelude_fence_held_by_sibling_sharing_freshness_source(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR4 (#1075 / #1073 Codex round 5/6): the prelude fence check
+    must walk sibling jobs sharing the same scheduler source.
+
+    A full-wash fence on ``daily_financial_facts`` (process_id) must
+    cause an APScheduler fire of ``fundamentals_sync`` (sibling on
+    ``freshness_source='sec_xbrl_facts'``) to self-skip — otherwise
+    the sibling worker reads the just-reset ``data_freshness_index``
+    rows under the holder's feet.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status)
+        VALUES ('manual_job', 'daily_financial_facts',
+                'daily_financial_facts', 'full_wash', 'dispatched')
+        """
+    )
+    ebull_test_conn.commit()
+
+    invoked: list[bool] = []
+
+    def _invoker() -> None:
+        invoked.append(True)
+
+    invoked_signal = jobs_runtime.run_with_prelude(
+        test_database_url(),
+        "fundamentals_sync",
+        _invoker,
+    )
+
+    ebull_test_conn.rollback()
+    _, status, error_msg = _read_latest_job_run(ebull_test_conn, job_name="fundamentals_sync")
+    assert status == "skipped"
+    assert error_msg is not None
+    assert "shared scheduler source" in error_msg
+    assert "daily_financial_facts" in error_msg
+    assert invoked == []
+    assert invoked_signal is False
+
+
 def test_prelude_bypass_fence_runs_invoker_even_with_fence_row(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

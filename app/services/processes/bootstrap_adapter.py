@@ -37,6 +37,7 @@ from app.services.processes import (
     ProcessStatus,
     RunStatus,
 )
+from app.services.processes.watermarks import resolve_watermark
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +329,11 @@ def get_row(conn: psycopg.Connection[Any]) -> ProcessRow | None:
     if process_status == "failed":
         last_n_errors = _build_error_summaries(failed_stages)
 
+    # PR4: stage_index cursor of last successful stage per lane
+    # (etoro / sec / init). Returns None on a fresh install pre-first-
+    # success or when bootstrap_runs is empty.
+    watermark = resolve_watermark(conn, process_id=_PROCESS_ID, mechanism="bootstrap")
+
     return ProcessRow(
         process_id=_PROCESS_ID,
         display_name=_DISPLAY_NAME,
@@ -339,7 +345,7 @@ def get_row(conn: psycopg.Connection[Any]) -> ProcessRow | None:
         cadence_human="on demand",
         cadence_cron=None,
         next_fire_at=None,
-        watermark=None,  # PR4 wires a stage_index cursor
+        watermark=watermark,
         # Iterate = retry-failed; only meaningful when something failed
         # OR was cancelled mid-flight (resume from the failed stage).
         can_iterate=(state_status in ("partial_error", "cancelled")) and not fence_held,

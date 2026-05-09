@@ -376,24 +376,82 @@ def _run_prelude(
     # and ROLLBACKs on exception — same shape as the bootstrap cancel
     # path and the snapshot_read read path.
     fence_held = False
+    fence_holder = process_id
     with psycopg.connect(database_url) as conn:
         with conn.transaction():
             acquire_prelude_lock(conn, process_id)
+            # Lazy-import to avoid a top-level cycle (api/processes
+            # imports app.jobs.runtime.VALID_JOB_NAMES).
+            from app.services.processes.watermarks import (
+                acquire_shared_source_locks as _acquire_shared_source_locks,
+            )
+            from app.services.processes.watermarks import (
+                freshness_source_for as _freshness_source_for,
+            )
+            from app.services.processes.watermarks import (
+                jobs_sharing_freshness_source,
+                jobs_sharing_manifest_source,
+            )
+            from app.services.processes.watermarks import (
+                manifest_source_for as _manifest_source_for,
+            )
+
+            # Codex pre-push round 7 BLOCKING: take source-keyed
+            # advisory locks BEFORE the fence-check query. A full-wash
+            # trigger holds these locks while it INSERTs the durable
+            # fence row; the prelude blocks here until that trigger
+            # commits, then sees the committed fence row when it
+            # queries below. Without these locks, the prelude can read
+            # the pre-INSERT state, write ``job_runs.running``, and
+            # start the body against the just-reset shared scheduler
+            # source.
+            _acquire_shared_source_locks(conn, process_id=process_id)
+
             with conn.cursor() as cur:
                 if not bypass_fence_check:
+                    fence_candidates: list[str] = [process_id]
+                    fresh = _freshness_source_for(process_id)
+                    if fresh is not None:
+                        for sibling in jobs_sharing_freshness_source(fresh):
+                            if sibling != process_id:
+                                fence_candidates.append(sibling)
+                    manifest = _manifest_source_for(process_id)
+                    if manifest is not None:
+                        for sibling in jobs_sharing_manifest_source(manifest):
+                            if sibling != process_id and sibling not in fence_candidates:
+                                fence_candidates.append(sibling)
+                    # PR4 #1075 fix (Codex review): a sibling job sharing
+                    # the same scheduler source can hold the fence under
+                    # a different ``process_id``. Probe each candidate
+                    # so an APScheduler fire of ``fundamentals_sync`` self-
+                    # skips while ``daily_financial_facts`` has a queued
+                    # full-wash over ``sec_xbrl_facts``.
                     cur.execute(
                         """
-                        SELECT 1
+                        SELECT process_id
                           FROM pending_job_requests
-                         WHERE process_id = %s
+                         WHERE process_id = ANY(%s)
                            AND mode       = 'full_wash'
                            AND status     IN ('pending', 'claimed', 'dispatched')
                          LIMIT 1
                         """,
-                        (process_id,),
+                        (fence_candidates,),
                     )
-                    fence_held = cur.fetchone() is not None
+                    holder_row = cur.fetchone()
+                    if holder_row is not None:
+                        fence_held = True
+                        fence_holder = str(holder_row[0])
                 if fence_held:
+                    # When a sibling holds the fence, surface the holder
+                    # in the audit row so the operator can see WHY this
+                    # job skipped (e.g. ``fundamentals_sync`` skipped
+                    # because ``daily_financial_facts`` is mid-wash on
+                    # the shared XBRL source).
+                    error_msg = (
+                        _FENCE_HELD_ERROR_MSG
+                        if fence_holder == process_id
+                        else f"full-wash in progress on shared scheduler source (held by {fence_holder!r})"
+                    )
                     cur.execute(
                         """
                         INSERT INTO job_runs (
@@ -404,7 +462,7 @@ def _run_prelude(
                         )
                         RETURNING run_id
                         """,
-                        (job_name, _FENCE_HELD_ERROR_MSG, linked_request_id),
+                        (job_name, error_msg, linked_request_id),
                     )
                 else:
                     cur.execute(

@@ -290,6 +290,52 @@ def test_aggregates_skip_reasons_across_archives(
     }
 
 
+def test_watermark_surfaces_stage_index_after_success(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR4: bootstrap row carries a ``stage_index`` watermark with the
+    last successful stage_order per lane."""
+    run_id = _create_run(ebull_test_conn, status="partial_error", completed=True)
+    _create_stage(
+        ebull_test_conn,
+        run_id=run_id,
+        stage_key="init",
+        stage_order=0,
+        lane="init",
+        status="success",
+        completed=True,
+    )
+    _create_stage(
+        ebull_test_conn,
+        run_id=run_id,
+        stage_key="etoro_meta",
+        stage_order=1,
+        lane="etoro",
+        status="success",
+        completed=True,
+    )
+    _create_stage(
+        ebull_test_conn,
+        run_id=run_id,
+        stage_key="sec_form4",
+        stage_order=5,
+        lane="sec",
+        status="error",
+        completed=True,
+    )
+    _seed_state(ebull_test_conn, status="partial_error", last_run_id=run_id)
+    ebull_test_conn.commit()
+
+    row = bootstrap_adapter.get_row(ebull_test_conn)
+    assert row is not None
+    assert row.watermark is not None
+    assert row.watermark.cursor_kind == "stage_index"
+    # Failed sec_form4 stage NOT counted; etoro/init successes ARE.
+    assert "etoro:1" in row.watermark.cursor_value
+    assert "init:0" in row.watermark.cursor_value
+    assert "sec:" not in row.watermark.cursor_value
+
+
 def test_full_wash_fence_disables_buttons(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

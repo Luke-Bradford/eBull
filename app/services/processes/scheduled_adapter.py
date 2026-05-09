@@ -41,6 +41,11 @@ from app.services.processes import (
     ProcessStatus,
     RunStatus,
 )
+from app.services.processes.watermarks import (
+    freshness_source_for,
+    manifest_source_for,
+    resolve_watermark,
+)
 from app.workers.scheduler import (
     SCHEDULED_JOBS,
     Cadence,
@@ -164,6 +169,7 @@ def _status_for(
     last_terminal_status: str | None,
     has_inflight_request: bool,
     kill_switch_active: bool,
+    failed_scope_covered: bool,
 ) -> ProcessStatus:
     """Compute ProcessRow.status from the per-job inputs.
 
@@ -173,8 +179,13 @@ def _status_for(
       until it flips back).
     * ``running`` wins when a job_runs row is in flight, OR when the
       latest terminal was a failure AND a retry is in flight (auto-hide).
+    * ``pending_retry`` when the latest terminal was failure, no retry
+      is in flight, but the next scheduled fire provably covers the
+      failed scope (freshness recheck or manifest retry within the
+      next-fire window — spec §"Auto-hide-on-retry rule" / "Covered"
+      check). Caller surfaces empty ``last_n_errors`` for this state.
     * ``failed`` wins when the latest terminal is failure with no retry
-      in flight.
+      in flight AND the failed scope is not covered.
     * ``ok`` for success; ``cancelled`` for cancelled; ``idle`` /
       ``pending_first_run`` when no terminal exists.
     """
@@ -186,6 +197,10 @@ def _status_for(
         if has_inflight_request:
             # Auto-hide: caller will set last_n_errors=(), status=running
             return "running"
+        if failed_scope_covered:
+            # Auto-hide: next scheduled fire will reattempt the failed
+            # scope; caller surfaces last_n_errors=().
+            return "pending_retry"
         return "failed"
     if last_terminal_status == "success":
         return "ok"
@@ -293,6 +308,107 @@ def _has_pending_full_wash_fence(conn: psycopg.Connection[Any], *, process_id: s
         return cur.fetchone() is not None
 
 
+def _freshness_failure_counts(
+    conn: psycopg.Connection[Any],
+    *,
+    source: str,
+    deadline: datetime,
+) -> tuple[int, int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE state = 'error') AS total,
+                COUNT(*) FILTER (
+                  WHERE state = 'error'
+                    AND (next_recheck_at IS NULL OR next_recheck_at > %(deadline)s)
+                ) AS uncovered
+              FROM data_freshness_index
+             WHERE source = %(source)s
+            """,
+            {"source": source, "deadline": deadline},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return (0, 0)
+    return (int(row[0]), int(row[1]))
+
+
+def _manifest_failure_counts(
+    conn: psycopg.Connection[Any],
+    *,
+    source: str,
+    deadline: datetime,
+) -> tuple[int, int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE ingest_status = 'failed') AS total,
+                COUNT(*) FILTER (
+                  WHERE ingest_status = 'failed'
+                    AND (next_retry_at IS NULL OR next_retry_at > %(deadline)s)
+                ) AS uncovered
+              FROM sec_filing_manifest
+             WHERE source = %(source)s
+            """,
+            {"source": source, "deadline": deadline},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return (0, 0)
+    return (int(row[0]), int(row[1]))
+
+
+def _is_failed_scope_covered(
+    conn: psycopg.Connection[Any],
+    *,
+    process_id: str,
+    next_fire_at: datetime | None,
+    kill_switch_active: bool,
+) -> bool:
+    """True when the next scheduled fire provably reattempts the failed scope.
+
+    Spec §"Auto-hide-on-retry rule" / "Covered" check (post-W2).
+
+    Codex pre-push round 1 BLOCKING: the check must prove EVERY
+    failed row has retry coverage; an existential probe was wrong.
+
+    Codex pre-push round 2 BLOCKING: for jobs with BOTH a
+    ``freshness_source`` and a ``manifest_source`` (e.g.
+    ``sec_filing_documents_ingest`` post-WARNING fix), the check must
+    consider ALL applicable sources together. A short-circuit on the
+    first covered source could auto-hide errors while another source's
+    failed rows remain uncovered.
+
+    Final shape: enumerate every applicable source. Any uncovered
+    failure on any applicable source → False. At least one source
+    must contribute a positive ``total`` (otherwise nothing is
+    actionable and there is no scope to cover).
+
+    Kill-switch + no-cadence both short-circuit to False so a paused
+    or one-shot job never enters auto-hide.
+    """
+    if kill_switch_active or next_fire_at is None:
+        return False
+    freshness_source = freshness_source_for(process_id)
+    manifest_source = manifest_source_for(process_id)
+    if freshness_source is None and manifest_source is None:
+        return False
+    cumulative_total = 0
+    if freshness_source is not None:
+        total, uncovered = _freshness_failure_counts(conn, source=freshness_source, deadline=next_fire_at)
+        if uncovered > 0:
+            return False
+        cumulative_total += total
+    if manifest_source is not None:
+        total, uncovered = _manifest_failure_counts(conn, source=manifest_source, deadline=next_fire_at)
+        if uncovered > 0:
+            return False
+        cumulative_total += total
+    return cumulative_total > 0
+
+
 # ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------
@@ -376,37 +492,57 @@ def _build_error_summaries(
 def _build_row(
     job: ScheduledJob,
     *,
+    conn: psycopg.Connection[Any],
     active_row: dict[str, Any] | None,
     terminal_row: dict[str, Any] | None,
     has_inflight_request: bool,
     fence_held: bool,
     kill_switch_active: bool,
 ) -> ProcessRow:
+    # next_fire_at: always compute against ``now`` rather than the last
+    # successful run — the operator wants "when will this fire next?",
+    # which APScheduler answers identically regardless of the prior
+    # outcome. ``compute_next_run`` is pure cadence math so it is safe to
+    # call from the API process (no APScheduler consult). PR4 needs it
+    # before status computation so the covered-check can compare against
+    # the next-fire deadline.
+    next_fire_at: datetime | None = compute_next_run(job.cadence, datetime.now(UTC))
+
     last_terminal_status = terminal_row["status"] if terminal_row is not None else None
+    failed_scope_covered = False
+    if last_terminal_status == "failure" and not has_inflight_request:
+        # Only probe the per-source covered check when it could affect
+        # the status (last terminal failed AND no explicit retry is
+        # already in flight).
+        failed_scope_covered = _is_failed_scope_covered(
+            conn,
+            process_id=job.name,
+            next_fire_at=next_fire_at,
+            kill_switch_active=kill_switch_active,
+        )
+
     process_status = _status_for(
         has_running_row=active_row is not None,
         last_terminal_status=last_terminal_status,
         has_inflight_request=has_inflight_request,
         kill_switch_active=kill_switch_active,
+        failed_scope_covered=failed_scope_covered,
     )
 
     last_run = _build_last_run(terminal_row) if terminal_row is not None else None
     active_run = _build_active_run(active_row) if active_row is not None else None
 
-    # Auto-hide-on-retry: hide error chips while a retry covers the failed
-    # scope. PR3 only knows about explicit Iterate-in-flight; the
-    # "next-fire-within-window" branch lands in PR4 with the watermark
-    # resolver.
+    # Auto-hide-on-retry: hide error chips when status is running (retry
+    # in flight) or pending_retry (next fire covers failed scope). Only
+    # surface grouped errors in the actionable ``failed`` state.
     last_n_errors: tuple[ErrorClassSummary, ...] = ()
     if process_status == "failed" and terminal_row is not None:
         last_n_errors = _build_error_summaries(terminal_row.get("error_classes"))
 
-    # next_fire_at: always compute against ``now`` rather than the last
-    # successful run — the operator wants "when will this fire next?",
-    # which APScheduler answers identically regardless of the prior
-    # outcome. ``compute_next_run`` is pure cadence math so it is safe to
-    # call from the API process (no APScheduler consult).
-    next_fire_at: datetime | None = compute_next_run(job.cadence, datetime.now(UTC))
+    # PR4 watermark — surface the resume cursor on the FE tooltip.
+    # Returns None for jobs without a registered source (heartbeat,
+    # monitor_positions, …); the FE renders that as "no resume cursor".
+    watermark = resolve_watermark(conn, process_id=job.name, mechanism="scheduled_job")
 
     can_cancel = (
         active_run is not None and active_run.run_id is not None and process_status == "running"
@@ -427,7 +563,7 @@ def _build_row(
         cadence_human=job.cadence.label,
         cadence_cron=_cron_for(job.cadence),
         next_fire_at=next_fire_at,
-        watermark=None,  # PR4
+        watermark=watermark,
         can_iterate=(
             not kill_switch_active and not has_inflight_request and not fence_held and process_status != "running"
         ),
@@ -459,6 +595,7 @@ def list_rows(conn: psycopg.Connection[Any]) -> list[ProcessRow]:
         rows.append(
             _build_row(
                 job,
+                conn=conn,
                 active_row=active_row,
                 terminal_row=terminal_row,
                 has_inflight_request=has_inflight_request,
@@ -476,6 +613,7 @@ def get_row(conn: psycopg.Connection[Any], *, process_id: str) -> ProcessRow | N
         return None
     return _build_row(
         job,
+        conn=conn,
         active_row=_read_running_run(conn, job_name=job.name),
         terminal_row=_read_latest_terminal_run(conn, job_name=job.name),
         has_inflight_request=_has_inflight_manual_request(conn, job_name=job.name),
