@@ -1,0 +1,289 @@
+"""Scheduled adapter round-trip tests (#1071, umbrella #1064 PR3).
+
+DB-backed against the worker ``ebull_test`` template.
+"""
+
+from __future__ import annotations
+
+import psycopg
+from psycopg.types.json import Jsonb
+
+from app.services.processes import scheduled_adapter
+from app.workers.scheduler import JOB_FUNDAMENTALS_SYNC, JOB_RETRY_DEFERRED
+
+
+def _ensure_kill_switch_off(conn: psycopg.Connection[tuple]) -> None:
+    conn.execute(
+        """
+        INSERT INTO kill_switch (id, is_active, activated_at, activated_by, reason)
+        VALUES (TRUE, FALSE, NULL, NULL, NULL)
+        ON CONFLICT (id) DO UPDATE
+        SET is_active = FALSE, activated_at = NULL, activated_by = NULL, reason = NULL
+        """
+    )
+
+
+def _make_run(
+    conn: psycopg.Connection[tuple],
+    *,
+    job_name: str,
+    status: str = "running",
+    error_classes: dict[str, dict[str, object]] | None = None,
+    rows_skipped_by_reason: dict[str, int] | None = None,
+    rows_errored: int = 0,
+    finished: bool = False,
+    cancel_requested: bool = False,
+    processed_count: int = 0,
+    target_count: int | None = None,
+) -> int:
+    row = conn.execute(
+        """
+        INSERT INTO job_runs
+               (job_name, started_at, finished_at, status, row_count,
+                error_classes, rows_skipped_by_reason, rows_errored,
+                cancel_requested_at, processed_count, target_count)
+        VALUES (%s, now() - interval '5 minutes',
+                CASE WHEN %s THEN now() ELSE NULL END,
+                %s, NULL, %s, %s, %s,
+                CASE WHEN %s THEN now() ELSE NULL END,
+                %s, %s)
+        RETURNING run_id
+        """,
+        (
+            job_name,
+            finished,
+            status,
+            Jsonb(error_classes or {}),
+            Jsonb(rows_skipped_by_reason or {}),
+            rows_errored,
+            cancel_requested,
+            processed_count,
+            target_count,
+        ),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_no_history_yields_pending_first_run(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.process_id == JOB_RETRY_DEFERRED
+    assert row.mechanism == "scheduled_job"
+    assert row.status == "pending_first_run"
+    assert row.last_run is None
+    assert row.active_run is None
+    # Cron string + next_fire_at always populated for a registered job.
+    assert row.cadence_cron is not None
+    assert row.next_fire_at is not None
+
+
+def test_latest_success_yields_ok(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "ok"
+    assert row.last_run is not None
+    assert row.last_run.status == "success"
+    assert row.can_iterate is True
+    assert row.last_n_errors == ()
+
+
+def test_latest_failure_no_retry_in_flight_shows_failed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        status="failure",
+        finished=True,
+        rows_errored=2,
+        error_classes={
+            "ConnectionTimeout": {
+                "count": 2,
+                "sample_message": "timed out",
+                "last_subject": "ECB",
+                "last_seen_at": "2026-05-09T11:00:00+00:00",
+            }
+        },
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "failed"
+    assert len(row.last_n_errors) == 1
+    assert row.last_n_errors[0].error_class == "ConnectionTimeout"
+    assert row.last_n_errors[0].count == 2
+
+
+def test_failure_with_retry_in_flight_auto_hides_errors(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """spec §Auto-hide-on-retry rule: a retry currently in flight covers
+    the failed scope, so the row renders as `running` with empty errors."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        status="failure",
+        finished=True,
+        rows_errored=5,
+        error_classes={
+            "RateLimited": {
+                "count": 5,
+                "sample_message": "429",
+                "last_subject": None,
+                "last_seen_at": "2026-05-09T11:00:00+00:00",
+            }
+        },
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status)
+        VALUES ('manual_job', %s, %s, 'iterate', 'pending')
+        """,
+        (JOB_RETRY_DEFERRED, JOB_RETRY_DEFERRED),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "running"
+    assert row.last_n_errors == ()
+
+
+def test_active_run_with_progress(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(
+        ebull_test_conn,
+        job_name=JOB_FUNDAMENTALS_SYNC,
+        status="running",
+        processed_count=312,
+        target_count=1547,
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_FUNDAMENTALS_SYNC)
+    assert row is not None
+    assert row.status == "running"
+    assert row.active_run is not None
+    assert row.active_run.rows_processed_so_far == 312
+    assert row.active_run.progress_units_done == 312
+    assert row.active_run.progress_units_total == 1547
+
+
+def test_kill_switch_active_disables_row(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    ebull_test_conn.execute(
+        """
+        INSERT INTO kill_switch (id, is_active, activated_at, activated_by, reason)
+        VALUES (TRUE, TRUE, now(), 'test', 'pause everything')
+        ON CONFLICT (id) DO UPDATE
+        SET is_active = TRUE, activated_at = now(), activated_by = 'test',
+            reason = 'pause everything'
+        """
+    )
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "disabled"
+    assert row.can_iterate is False
+    assert row.can_full_wash is False
+
+
+def test_full_wash_fence_disables_iterate_and_full_wash(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status)
+        VALUES ('manual_job', %s, %s, 'full_wash', 'dispatched')
+        """,
+        (JOB_RETRY_DEFERRED, JOB_RETRY_DEFERRED),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.can_iterate is False
+    assert row.can_full_wash is False
+
+
+def test_list_rows_returns_one_per_scheduled_job(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    from app.workers.scheduler import SCHEDULED_JOBS
+
+    rows = scheduled_adapter.list_rows(ebull_test_conn)
+    assert len(rows) == len(SCHEDULED_JOBS)
+    process_ids = {r.process_id for r in rows}
+    assert {j.name for j in SCHEDULED_JOBS} == process_ids
+
+
+def test_unknown_process_id_returns_none(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="not_a_real_job")
+    assert row is None
+
+
+def test_list_runs_returns_terminal_history(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="failure", finished=True)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="running")  # excluded
+    ebull_test_conn.commit()
+
+    runs = scheduled_adapter.list_runs(ebull_test_conn, process_id=JOB_RETRY_DEFERRED, days=7)
+    assert len(runs) == 2
+    statuses = {r.status for r in runs}
+    assert statuses == {"success", "failure"}
+
+
+def test_list_run_errors_decodes_jsonb(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    run_id = _make_run(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        status="failure",
+        finished=True,
+        error_classes={
+            "X": {
+                "count": 3,
+                "sample_message": "boom",
+                "last_subject": "subj",
+                "last_seen_at": "2026-05-09T11:00:00+00:00",
+            }
+        },
+    )
+    ebull_test_conn.commit()
+
+    errors = scheduled_adapter.list_run_errors(ebull_test_conn, process_id=JOB_RETRY_DEFERRED, run_id=run_id)
+    assert len(errors) == 1
+    assert errors[0].error_class == "X"
+    assert errors[0].count == 3
+    assert errors[0].sample_subject == "subj"
