@@ -407,6 +407,7 @@ _DAILY_JOB = ScheduledJob(
     name="daily_job",
     description="test daily",
     cadence=Cadence.daily(hour=2, minute=0),
+    source="db",  # PR1a — required field; arbitrary safe choice for test fixture
     catch_up_on_boot=True,
 )
 
@@ -414,6 +415,7 @@ _NO_CATCHUP_JOB = ScheduledJob(
     name="no_catchup_job",
     description="test no catchup",
     cadence=Cadence.daily(hour=2, minute=0),
+    source="db",
     catch_up_on_boot=False,
 )
 
@@ -421,6 +423,7 @@ _PREREQ_MET_JOB = ScheduledJob(
     name="prereq_met_job",
     description="test with met prerequisite",
     cadence=Cadence.daily(hour=2, minute=0),
+    source="db",
     catch_up_on_boot=True,
     prerequisite=lambda _conn: (True, ""),
 )
@@ -429,6 +432,7 @@ _PREREQ_UNMET_JOB = ScheduledJob(
     name="prereq_unmet_job",
     description="test with unmet prerequisite",
     cadence=Cadence.daily(hour=2, minute=0),
+    source="db",
     catch_up_on_boot=True,
     prerequisite=lambda _conn: (False, "no coverage rows"),
 )
@@ -622,6 +626,7 @@ class TestCatchUpOnBoot:
             name="hourly_job",
             description="test hourly",
             cadence=Cadence.hourly(minute=5),
+            source="db",  # PR1a — required field; arbitrary safe choice for test fixture
             catch_up_on_boot=True,
         )
 

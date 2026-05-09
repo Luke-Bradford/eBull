@@ -220,6 +220,16 @@ def serve(stop_event: threading.Event | None = None) -> int:
     fence_conn = _acquire_singleton_fence(settings.database_url)
     logger.info("jobs entrypoint: singleton fence acquired")
 
+    # PR1a #1064 — fail-fast at jobs entrypoint if SCHEDULED_JOBS and
+    # _BOOTSTRAP_STAGE_SPECS disagree on a job_name's source. Mirrors
+    # the FastAPI lifespan guard in app/main.py — surfaces conflicts
+    # before any APScheduler fire or queue dispatch can mark a stage
+    # 'running' against a misresolved lock.
+    from app.jobs.sources import get_job_name_to_source
+
+    get_job_name_to_source()
+    logger.info("jobs entrypoint: source registry validated")
+
     _bootstrap_master_key(pool)
 
     sync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jobs-sync")

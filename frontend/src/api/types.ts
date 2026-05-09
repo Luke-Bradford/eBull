@@ -124,6 +124,43 @@ export interface JobsListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// ParamMetadata (PR1a #1064 — operator-exposable parameter declarations)
+// ---------------------------------------------------------------------------
+//
+// Mirror of ``app/services/processes/param_metadata.py::ParamMetadata``.
+// Drift between the two is a PREVENTION-grade risk — PR2's Advanced
+// disclosure renders one form field per entry based on ``field_type``,
+// so a contract drift means operators see wrong inputs or no inputs at all.
+//
+// Round-trip test: ``frontend/src/api/types.test.ts`` covers one canonical
+// job's metadata round-tripping through JSON. Full coverage gated by review
+// bot reading both files.
+
+export type ParamFieldType =
+  | "string"
+  | "int"
+  | "float"
+  | "date"
+  | "quarter"
+  | "ticker"
+  | "cik"
+  | "bool"
+  | "enum"
+  | "multi_enum";
+
+export interface ParamMetadata {
+  name: string;
+  label: string;
+  help_text: string;
+  field_type: ParamFieldType;
+  default: unknown | null;
+  advanced_group: boolean;
+  enum_values: readonly string[] | null;
+  min_value: number | null;
+  max_value: number | null;
+}
+
+// ---------------------------------------------------------------------------
 // /jobs/runs (app/api/jobs.py — issue #13 PR B)
 // ---------------------------------------------------------------------------
 

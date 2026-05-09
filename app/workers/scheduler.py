@@ -33,6 +33,7 @@ import psycopg.sql
 from psycopg.types.json import Jsonb
 
 from app.config import settings
+from app.jobs.sources import Lane
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
@@ -60,6 +61,7 @@ from app.services.position_monitor import (
     check_position_health,
     persist_position_alerts,
 )
+from app.services.processes.param_metadata import ParamMetadata
 from app.services.refresh_cascade import (
     demote_to_rerank_needed,
     instrument_lock,
@@ -196,6 +198,11 @@ class ScheduledJob:
     name: str
     description: str
     cadence: Cadence
+    # PR1a #1064 — source-level JobLock bucket. Operator-locked decision:
+    # same-source jobs serialise; cross-source run parallel. Required.
+    # See app/jobs/sources.py::Lane for the bucket vocabulary and
+    # docs/wiki/job-registry-audit.md §1 for the per-job source mapping.
+    source: Lane
     # When True, the job runtime will trigger this job at startup if it
     # is overdue (last successful run's next scheduled fire <= now, or
     # no successful run exists at all).  Set to False for jobs that are
@@ -207,6 +214,18 @@ class ScheduledJob:
     # the check returns (False, reason), the job is skipped and a
     # ``job_runs`` row with status='skipped' is recorded.
     prerequisite: PrerequisiteFn | None = None
+    # PR1a #1064 — operator-exposable parameter surface. Empty tuple =
+    # no operator-tunable params. Populated per audit doc §2; PR1b's
+    # validate_job_params reads this; PR2's FE Advanced disclosure
+    # renders one form field per entry. Consumed via the deferred
+    # ParamMetadata import to avoid an import cycle (param_metadata
+    # itself doesn't import scheduler).
+    params_metadata: tuple[ParamMetadata, ...] = ()
+    # PR1a #1064 — operator-facing label. PR4 (#1082) renders this in
+    # the admin ProcessesTable next to the ⓘ tooltip; populated now to
+    # avoid a separate registry-touching pass later. ``None`` falls
+    # back to ``name`` at render time.
+    display_name: str | None = None
 
 
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
@@ -460,6 +479,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # only before Phase 4 — it remains in _INVOKERS for the Admin UI.
     ScheduledJob(
         name=JOB_ORCHESTRATOR_FULL_SYNC,
+        source="db",
         description="Orchestrator full sync — walks the DAG and refreshes stale layers.",
         cadence=Cadence.daily(hour=3, minute=0),
         # Never catch up on boot. A full sync runs ~45min (research refresh
@@ -480,6 +500,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # sync — the wrapper catches SyncAlreadyRunning and logs.
     ScheduledJob(
         name=JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+        source="db",
         description="Orchestrator high-frequency sync — portfolio_sync + fx_rates every 5 minutes.",
         cadence=Cadence.every_n_minutes(interval=5),
         catch_up_on_boot=False,
@@ -489,6 +510,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # scheduled; they do not participate in the orchestrator DAG.
     ScheduledJob(
         name=JOB_EXECUTE_APPROVED_ORDERS,
+        source="etoro",
         description="Guard and execute actionable trade recommendations.",
         cadence=Cadence.daily(hour=6, minute=30),
         prerequisite=_has_actionable_recommendations,
@@ -498,6 +520,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_RETRY_DEFERRED,
+        source="db",
         description="Re-evaluate timing_deferred recommendations with fresh TA data.",
         cadence=Cadence.hourly(minute=30),
         prerequisite=_has_deferred_recommendations,
@@ -505,6 +528,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_MONITOR_POSITIONS,
+        source="db",
         description="Check open positions for SL/TP breaches and thesis breaks.",
         cadence=Cadence.hourly(minute=15),
         prerequisite=_has_open_positions,
@@ -512,6 +536,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_FUNDAMENTALS_SYNC,
+        source="db",
         description=(
             "Daily fundamentals research refresh: re-classify every "
             "tradable instrument's coverage.filings_status, backfill "
@@ -548,6 +573,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # can still manually fire it from Admin "Run now" if needed.
     ScheduledJob(
         name=JOB_SEC_DIVIDEND_CALENDAR_INGEST,
+        source="sec_rate",
         description=(
             "Parse 8-K Item 8.01 announcements into ``dividend_events`` "
             "(#434). Runs 03:00 UTC — 30 min after fundamentals_sync so "
@@ -562,6 +588,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_BUSINESS_SUMMARY_INGEST,
+        source="sec_rate",
         description=(
             "Extract 10-K Item 1 'Business' narratives into "
             "``instrument_business_summary`` (#428). Runs 03:15 UTC "
@@ -582,6 +609,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
+        source="sec_rate",
         description=(
             "Parse SEC Form 4 filings into ``insider_transactions`` "
             "(#429). Runs hourly because Form 4 is filed within two "
@@ -596,6 +624,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_FILING_DOCUMENTS_INGEST,
+        source="sec_rate",
         description=(
             "Parse SEC filing-index JSON (``{accession}-index.json``) "
             "into the filing_documents manifest table (#452). Captures "
@@ -610,6 +639,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_8K_EVENTS_INGEST,
+        source="sec_rate",
         description=(
             "Parse SEC 8-K filings into structured eight_k_filings + "
             "eight_k_items + eight_k_exhibits (#450). Runs hourly; "
@@ -624,6 +654,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
+        source="sec_rate",
         description=(
             "One-shot drain of the 10-K Item 1 candidate set (#535). "
             "Loops the standard ingester at a higher chunk limit "
@@ -639,6 +670,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL,
+        source="sec_rate",
         description=(
             "Round-robin backfill of Form 4 filings for instruments "
             "with deep historical backlogs (#456). Complements the "
@@ -655,6 +687,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_FORM3_INGEST,
+        source="sec_rate",
         description=(
             "Parse SEC Form 3 filings into ``insider_initial_holdings`` "
             "(#768). Form 3 is the per-officer initial-snapshot filing "
@@ -673,6 +706,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_DEF14A_INGEST,
+        source="sec_rate",
         description=(
             "Parse SEC DEF 14A proxy statements into "
             "``def14a_beneficial_holdings`` (#769 / #805). DEF 14A is "
@@ -694,6 +728,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_SYNC,
+        source="db",
         description=(
             "Self-healing repair sweep for ownership_*_current (#892). "
             "Live ingesters now write observations + refresh _current "
@@ -709,6 +744,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
+        source="db",
         description=(
             "One-shot legacy → ownership_*_observations backfill (#909). "
             "Phase 1 write-through (#888-#891) only fires on new "
@@ -735,6 +771,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_CUSIP_EXTID_SWEEP,
+        source="db",
         description=(
             "Sweep ``unresolved_13f_cusips`` for rows whose CUSIP "
             "already has a matching ``external_identifiers`` row, mark "
@@ -757,6 +794,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_DEF14A_BOOTSTRAP,
+        source="sec_rate",
         description=(
             "One-shot drain of the DEF 14A candidate set (#839). "
             "Loops ``ingest_def14a`` at chunk_limit=500 until the "
@@ -779,6 +817,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_RAW_DATA_RETENTION_SWEEP,
+        source="db",
         description=(
             "Per-source compaction + age-based sweep of data/raw/**. Reclaims "
             "disk from byte-identical duplicates and (per-source) ages-out old "
@@ -793,6 +832,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_EXCHANGES_METADATA_REFRESH,
+        source="etoro",
         description=(
             "Weekly refresh of the eToro exchanges catalogue. Pulls "
             "/api/v1/market-data/exchanges and upserts ``description`` "
@@ -812,6 +852,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_CUSIP_UNIVERSE_BACKFILL,
+        source="sec_rate",
         description=(
             "Quarterly CUSIP coverage backfill (#914 / #841 PR3). "
             "Walks SEC's Official List of Section 13(f) Securities "
@@ -841,6 +882,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_13F_QUARTERLY_SWEEP,
+        source="sec_rate",
         description=(
             "Quarterly sweep — walk every CIK in ``institutional_filers`` "
             "(populated by sec_13f_filer_directory_sync #912) and ingest "
@@ -868,6 +910,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_13F_FILER_DIRECTORY_SYNC,
+        source="sec_rate",
         description=(
             "Discovery sweep of SEC's quarterly form.idx for every "
             "active 13F-HR filer (#912 / #841 PR1). Pre-Phase-2 the "
@@ -896,6 +939,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
+        source="sec_rate",
         description=(
             "Discovery sweep — populate ``sec_nport_filer_directory`` "
             "from SEC's quarterly form.idx (#963). N-PORT files under "
@@ -920,6 +964,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_SEC_N_PORT_INGEST,
+        source="sec_rate",
         description=(
             "Monthly NPORT-P fund-holdings sweep (#917 — Phase 3 PR1). "
             "Walks ``sec_nport_filer_directory`` (#963 — the RIC trust "
@@ -940,6 +985,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_ETORO_LOOKUPS_REFRESH,
+        source="etoro",
         description=(
             "Weekly refresh of eToro's instrument-types + "
             "stocks-industries lookup catalogues into "
