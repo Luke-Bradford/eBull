@@ -296,4 +296,63 @@ describe("ProcessRow", () => {
     // full meaning rather than the bare phrase.
     expect(chip).toHaveAccessibleName(/^Stale reason: no progress\s+\d+m$/);
   });
+
+  // ---------------------------------------------------------------------
+  // PR3a #1064 — bootstrap mechanism action verbs + no cadence
+  // ---------------------------------------------------------------------
+
+  it("bootstrap row labels Iterate as 'Re-run failed' and Full-wash as 'Re-run all'", () => {
+    renderRow({
+      row: makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        display_name: "First-install bootstrap",
+        can_iterate: true,
+        can_full_wash: true,
+      }),
+    });
+    expect(
+      screen.getByRole("button", { name: "Re-run failed" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Re-run all" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Iterate" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Full-wash" })).toBeNull();
+  });
+
+  it("scheduled_job row keeps Iterate / Full-wash labels", () => {
+    renderRow({
+      row: makeProcessRow({
+        process_id: "daily_cik_refresh",
+        mechanism: "scheduled_job",
+      }),
+    });
+    expect(screen.getByRole("button", { name: "Iterate" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Full-wash" })).toBeTruthy();
+  });
+
+  it("bootstrap row omits cadence (stages are a fixed sequence, not scheduled)", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        cadence_human: "every 5m",
+        next_fire_at: "2026-05-10T14:00:00+00:00",
+      }),
+    });
+    expect(container.textContent).not.toContain("every 5m");
+    expect(container.textContent).not.toContain("next:");
+  });
+
+  it("scheduled_job row keeps cadence visible", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({
+        process_id: "daily_cik_refresh",
+        mechanism: "scheduled_job",
+        cadence_human: "every 5m",
+      }),
+    });
+    expect(container.textContent).toContain("every 5m");
+  });
 });

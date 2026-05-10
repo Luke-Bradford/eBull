@@ -194,6 +194,35 @@ describe("ProcessDetailPage", () => {
       mode: "cooperative",
     });
   });
+
+  // PR3a #1064 — bootstrap mechanism uses different action verbs.
+  it("bootstrap mechanism labels Iterate as 'Re-run failed' and Full-wash as 'Re-run all'", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        display_name: "First-install bootstrap",
+        can_iterate: true,
+        can_full_wash: true,
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    render(
+      <MemoryRouter initialEntries={["/admin/processes/bootstrap"]}>
+        <Routes>
+          <Route path="admin/processes/:id" element={<ProcessDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Re-run failed" }),
+      ).toBeTruthy(),
+    );
+    expect(screen.getByRole("button", { name: "Re-run all" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Iterate" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Full-wash" })).toBeNull();
+  });
 });
 
 

@@ -313,4 +313,157 @@ describe("ProcessesTable", () => {
       screen.getByRole("button", { name: "Cancel" }),
     );
   });
+
+  // ---------------------------------------------------------------------
+  // PR3a #1064 — bootstrap-only render mode
+  // ---------------------------------------------------------------------
+  // Per data-engineer skill §7.1, when bootstrap_state.status !=
+  // 'complete' the ProcessesTable hides every non-bootstrap row so the
+  // operator's only path forward is the bootstrap row. Lane filter
+  // hidden in this mode (one-row list).
+
+  function renderTableWithStatus(
+    rows: Parameters<typeof makeProcessList>[0],
+    bootstrapStatus:
+      | "pending"
+      | "running"
+      | "complete"
+      | "partial_error"
+      | null,
+  ) {
+    return render(
+      <MemoryRouter>
+        <ProcessesTable
+          snapshot={makeProcessList(rows, false)}
+          onMutationSuccess={vi.fn()}
+          bootstrapStatus={bootstrapStatus}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it("hides non-bootstrap rows + lane filter when bootstrap is partial_error", () => {
+    renderTableWithStatus(
+      [
+        makeProcessRow({
+          process_id: "bootstrap",
+          mechanism: "bootstrap",
+          display_name: "First-install bootstrap",
+        }),
+        makeProcessRow({
+          process_id: "daily_cik_refresh",
+          mechanism: "scheduled_job",
+          display_name: "CIK refresh",
+        }),
+        makeProcessRow({
+          process_id: "form4_sweep",
+          mechanism: "ingest_sweep",
+          display_name: "Form 4 sweep",
+        }),
+      ],
+      "partial_error",
+    );
+    expect(
+      screen.getByRole("link", { name: "First-install bootstrap" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "CIK refresh" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Form 4 sweep" })).toBeNull();
+    expect(
+      screen.getByText(/Other categories are gated until bootstrap reaches/i),
+    ).toBeTruthy();
+    // Lane chip filter (LaneFilter, role="toolbar") is suppressed in this mode.
+    expect(
+      screen.queryByRole("toolbar", { name: /Filter processes by lane/i }),
+    ).toBeNull();
+  });
+
+  it("renders all rows when bootstrap status is complete", () => {
+    renderTableWithStatus(
+      [
+        makeProcessRow({
+          process_id: "bootstrap",
+          mechanism: "bootstrap",
+          display_name: "First-install bootstrap",
+        }),
+        makeProcessRow({
+          process_id: "daily_cik_refresh",
+          mechanism: "scheduled_job",
+          display_name: "CIK refresh",
+        }),
+      ],
+      "complete",
+    );
+    expect(
+      screen.getByRole("link", { name: "First-install bootstrap" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
+    expect(
+      screen.queryByText(/Other categories are gated/i),
+    ).toBeNull();
+  });
+
+  it("bootstrap full-wash modal uses 'Re-run all' heading + replay copy", async () => {
+    renderTableWithStatus(
+      [
+        makeProcessRow({
+          process_id: "bootstrap",
+          mechanism: "bootstrap",
+          display_name: "First-install bootstrap",
+          can_iterate: true,
+          can_full_wash: true,
+        }),
+      ],
+      "partial_error",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Re-run all" }));
+    expect(
+      await screen.findByRole("heading", { name: /Confirm Re-run all/i }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/replays the full first-install bootstrap/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/resets the watermark/i)).toBeNull();
+  });
+
+  it("scheduled_job full-wash modal keeps original watermark copy", async () => {
+    renderTableWithStatus(
+      [
+        makeProcessRow({
+          process_id: "daily_cik_refresh",
+          mechanism: "scheduled_job",
+          display_name: "CIK refresh",
+          can_iterate: true,
+          can_full_wash: true,
+        }),
+      ],
+      "complete",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Full-wash" }));
+    expect(
+      await screen.findByRole("heading", { name: /Confirm full-wash/i }),
+    ).toBeTruthy();
+    expect(screen.getByText(/resets the watermark/i)).toBeTruthy();
+  });
+
+  it("fail-open: renders all rows when bootstrapStatus is null (fetch pending/errored)", () => {
+    renderTableWithStatus(
+      [
+        makeProcessRow({
+          process_id: "bootstrap",
+          mechanism: "bootstrap",
+          display_name: "First-install bootstrap",
+        }),
+        makeProcessRow({
+          process_id: "daily_cik_refresh",
+          mechanism: "scheduled_job",
+          display_name: "CIK refresh",
+        }),
+      ],
+      null,
+    );
+    expect(
+      screen.getByRole("link", { name: "First-install bootstrap" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
+  });
 });

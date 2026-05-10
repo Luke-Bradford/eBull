@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
+import { fetchBootstrapStatus } from "@/api/bootstrap";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
@@ -82,6 +83,11 @@ export function AdminPage() {
   // PR6 decommissioned the legacy SyncDashboard + LayerHealthList —
   // the orchestrator surfaces here as one row + DAG drill-in.
   const processes = useProcesses();
+  // PR3a #1064 — bootstrap-only render mode. When bootstrap_state.status
+  // is anything other than 'complete' the ProcessesTable hides every
+  // non-bootstrap category. Single read on mount; if a re-run flips
+  // status to 'complete' the operator's next refetchAll catches it.
+  const bootstrap = useAsync(fetchBootstrapStatus, []);
 
   // Extract the refetch refs as local const bindings so ESLint can
   // see their identity and verify the dep array without the suppression
@@ -93,6 +99,11 @@ export function AdminPage() {
   const refetchCoverage = coverage.refetch;
   const refetchJobs = jobs.refetch;
   const refetchRecs = recs.refetch;
+  // PR3a #1064 — re-poll bootstrap status on every refresh so a
+  // 'partial_error' → 'complete' transition surfaces without a page
+  // reload. Without this the operator stays in bootstrap-only render
+  // mode after a successful Re-run all (Codex pre-push round 1).
+  const refetchBootstrap = bootstrap.refetch;
 
   const refetchAll = useCallback(() => {
     refetchV2();
@@ -100,7 +111,15 @@ export function AdminPage() {
     refetchCoverage();
     refetchJobs();
     refetchRecs();
-  }, [refetchV2, refetchStatus, refetchCoverage, refetchJobs, refetchRecs]);
+    refetchBootstrap();
+  }, [
+    refetchV2,
+    refetchStatus,
+    refetchCoverage,
+    refetchJobs,
+    refetchRecs,
+    refetchBootstrap,
+  ]);
 
   const isRunning = status.data?.is_running ?? false;
   const refreshInterval = isRunning ? 10_000 : 60_000;
@@ -189,7 +208,18 @@ export function AdminPage() {
         ) : processes.data ? (
           <ProcessesTable
             snapshot={processes.data}
-            onMutationSuccess={processes.refetch}
+            onMutationSuccess={() => {
+              // After a trigger / cancel re-poll BOTH the processes
+              // snapshot AND bootstrap status — a successful Re-run
+              // all on the bootstrap row may flip status to
+              // 'complete', which lifts the bootstrap-only render
+              // gate. Refetching only `processes` would leave the
+              // table in bootstrap-only mode until the next cadence
+              // tick (Codex pre-push round 1).
+              processes.refetch();
+              refetchBootstrap();
+            }}
+            bootstrapStatus={bootstrap.data?.status ?? null}
           />
         ) : null}
       </CollapsibleSection>

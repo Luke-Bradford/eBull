@@ -38,6 +38,20 @@ import {
 export interface ProcessesTableProps {
   readonly snapshot: ProcessListResponse;
   readonly onMutationSuccess: () => void;
+  // PR3a #1064 — bootstrap-incomplete render mode. When the
+  // operator's first-install bootstrap is not yet ``complete`` the
+  // table hides every non-bootstrap category so the only path
+  // forward is the bootstrap row's "Re-run failed" / "Re-run all"
+  // buttons. Pass ``null`` to render every row regardless (e.g. when
+  // the bootstrap-status fetch is pending or errored — fail-open).
+  // See ``.claude/skills/data-engineer/SKILL.md`` §7.1 for the
+  // operator design intent.
+  readonly bootstrapStatus?:
+    | "pending"
+    | "running"
+    | "complete"
+    | "partial_error"
+    | null;
 }
 
 interface RowErrorState {
@@ -48,6 +62,7 @@ interface RowErrorState {
 export function ProcessesTable({
   snapshot,
   onMutationSuccess,
+  bootstrapStatus = null,
 }: ProcessesTableProps) {
   const [selectedLane, setSelectedLane] = useState<ProcessLane | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -60,21 +75,39 @@ export function ProcessesTable({
     null,
   );
 
+  // PR3a #1064 — bootstrap-only mode. When bootstrap is not complete
+  // every other lane / mechanism is hidden so the operator sees only
+  // the bootstrap row and its child stages. The lane filter is also
+  // hidden in this mode (no point filtering a one-row list). The
+  // ``null`` fallback (status fetch pending or errored) is fail-open:
+  // render the full table so a bootstrap-status hiccup doesn't lock
+  // the operator out of every other category.
+  const bootstrapOnly =
+    bootstrapStatus !== null && bootstrapStatus !== "complete";
+
+  const baseRows = useMemo(
+    () =>
+      bootstrapOnly
+        ? snapshot.rows.filter((r) => r.mechanism === "bootstrap")
+        : snapshot.rows,
+    [snapshot.rows, bootstrapOnly],
+  );
+
   const counts = useMemo(() => {
     const out: Partial<Record<ProcessLane, number>> = {};
-    for (const r of snapshot.rows) {
+    for (const r of baseRows) {
       out[r.lane] = (out[r.lane] ?? 0) + 1;
     }
     return out;
-  }, [snapshot.rows]);
+  }, [baseRows]);
 
   const visibleRows = useMemo(() => {
     const rows =
       selectedLane === null
-        ? snapshot.rows
-        : snapshot.rows.filter((r) => r.lane === selectedLane);
+        ? baseRows
+        : baseRows.filter((r) => r.lane === selectedLane);
     return [...rows].sort(compareRows);
-  }, [snapshot.rows, selectedLane]);
+  }, [baseRows, selectedLane]);
 
   const setRowError = useCallback(
     (processId: string, patch: RowErrorState) => {
@@ -163,18 +196,35 @@ export function ProcessesTable({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <LaneFilter
-          selected={selectedLane}
-          counts={counts}
-          onSelect={setSelectedLane}
-        />
-        <div className="text-xs text-slate-500 dark:text-slate-400">
-          {visibleRows.length} of {snapshot.rows.length} processes
+      {/* In bootstrap-only mode the lane chips would offer one option
+          (whichever lane the bootstrap row sits in) — hide them and use
+          the freed space for the explanatory banner. */}
+      {bootstrapOnly ? (
+        <div
+          role="status"
+          aria-label="Bootstrap incomplete — only the bootstrap row is shown"
+          className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200"
+        >
+          First-install bootstrap is{" "}
+          <span className="font-semibold">{bootstrapStatus}</span>. Other
+          categories are gated until bootstrap reaches{" "}
+          <span className="font-semibold">complete</span> — re-run failed
+          stages or re-run all from the bootstrap row.
         </div>
-      </div>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <LaneFilter
+            selected={selectedLane}
+            counts={counts}
+            onSelect={setSelectedLane}
+          />
+          <div className="text-xs text-slate-500 dark:text-slate-400">
+            {visibleRows.length} of {snapshot.rows.length} processes
+          </div>
+        </div>
+      )}
 
-      <StaleBanner rows={snapshot.rows} />
+      <StaleBanner rows={baseRows} />
 
       {snapshot.partial ? (
         <div
@@ -283,6 +333,15 @@ function FullWashConfirmDialog({
 }) {
   const [typed, setTyped] = useState("");
   const matches = typed === row.display_name;
+  // PR3a #1064 — bootstrap mechanism uses different verbs per
+  // data-engineer skill §7.3. Modal heading + body + confirm-button
+  // copy follow the same swap; the underlying POST stays mode='full_wash'.
+  const isBootstrap = row.mechanism === "bootstrap";
+  const heading = isBootstrap ? "Confirm Re-run all" : "Confirm full-wash";
+  const verb = isBootstrap ? "Re-run all" : "Full-wash";
+  const description = isBootstrap
+    ? `Re-run all resets every stage of ${row.display_name} to pending and replays the full first-install bootstrap. Stages re-run from scratch; ingested rows are deduped at the destination by ON CONFLICT.`
+    : `Full-wash resets the watermark for ${row.display_name} and re-fetches from epoch. ON CONFLICT idempotency prevents row duplication; the cost is bandwidth and rate-budget.`;
   return (
     <Modal
       isOpen={true}
@@ -293,13 +352,10 @@ function FullWashConfirmDialog({
         id="full-wash-confirm-title"
         className="text-sm font-semibold text-slate-800 dark:text-slate-100"
       >
-        Confirm full-wash
+        {heading}
       </h2>
       <p className="mt-2 text-sm text-slate-700 dark:text-slate-300">
-        Full-wash resets the watermark for{" "}
-        <span className="font-medium">{row.display_name}</span> and re-fetches
-        from epoch. ON CONFLICT idempotency prevents row duplication; the
-        cost is bandwidth and rate-budget.
+        {description}
       </p>
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
         Type the process name exactly to enable the confirm button.
@@ -330,7 +386,7 @@ function FullWashConfirmDialog({
           disabled={!matches || busy}
           className="rounded border border-red-400 bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-700 dark:bg-red-700 dark:hover:bg-red-800"
         >
-          {busy ? "Triggering…" : "Full-wash"}
+          {busy ? "Triggering…" : verb}
         </button>
       </div>
     </Modal>

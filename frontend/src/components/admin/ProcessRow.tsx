@@ -68,15 +68,29 @@ export function ProcessRow({
 
   const watermarkTooltip = row.watermark?.human ?? "no resume cursor";
 
+  // Per data-engineer skill §7.3 — bootstrap mechanism uses different
+  // verbs because iterate / full_wash semantics map to "resume incomplete
+  // stages" vs "reset every stage to pending" rather than the
+  // watermark-aware fetch on scheduled jobs. Underlying mechanics
+  // (iterate / full_wash modes on the trigger endpoint) unchanged; only
+  // the operator-visible label changes per mechanism.
+  const isBootstrap = row.mechanism === "bootstrap";
+  const iterateLabel = isBootstrap ? "Re-run failed" : "Iterate";
+  const fullWashLabel = isBootstrap ? "Re-run all" : "Full-wash";
+
   const iterateDisabled = !row.can_iterate || busy;
   const iterateTooltip = row.can_iterate
-    ? watermarkTooltip
-    : "Iterate is not available right now — open the process detail page for the precondition that is blocking it.";
+    ? isBootstrap
+      ? "Resume incomplete + failed stages from where they stopped."
+      : watermarkTooltip
+    : `${iterateLabel} is not available right now — open the process detail page for the precondition that is blocking it.`;
 
   const fullWashDisabled = !row.can_full_wash || busy;
   const fullWashTooltip = row.can_full_wash
-    ? "Reset watermark and re-fetch from epoch (typed-name confirm required)."
-    : "Full-wash is not available right now.";
+    ? isBootstrap
+      ? "Reset every stage to pending; full first-install replay (typed-name confirm required)."
+      : "Reset watermark and re-fetch from epoch (typed-name confirm required)."
+    : `${fullWashLabel} is not available right now.`;
 
   const cancelDisabled = !row.can_cancel || busy;
   const cancelTooltip = row.can_cancel
@@ -120,23 +134,32 @@ export function ProcessRow({
         {lastRunLabel}
       </td>
       <td className="px-2 py-2 text-xs text-slate-600 dark:text-slate-400">
-        <div>{row.cadence_human}</div>
-        {row.next_fire_at ? (
-          <div className="text-slate-500 dark:text-slate-500">
-            next: {formatDateTime(row.next_fire_at)}
-          </div>
-        ) : null}
+        {isBootstrap ? (
+          // Bootstrap stages run as a fixed sequence, not on a cadence
+          // (data-engineer skill §7.2). Show a placeholder rather than
+          // a phantom schedule.
+          <span className="text-slate-400 dark:text-slate-500">—</span>
+        ) : (
+          <>
+            <div>{row.cadence_human}</div>
+            {row.next_fire_at ? (
+              <div className="text-slate-500 dark:text-slate-500">
+                next: {formatDateTime(row.next_fire_at)}
+              </div>
+            ) : null}
+          </>
+        )}
       </td>
       <td className="px-2 py-2 text-right">
         <div className="flex flex-wrap items-center justify-end gap-1">
           <ActionButton
-            label="Iterate"
+            label={iterateLabel}
             tooltip={iterateTooltip}
             disabled={iterateDisabled}
             onClick={() => onIterate(row)}
           />
           <ActionButton
-            label="Full-wash"
+            label={fullWashLabel}
             tooltip={fullWashTooltip}
             disabled={fullWashDisabled}
             onClick={() => onFullWash(row)}
