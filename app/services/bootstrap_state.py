@@ -691,10 +691,21 @@ def cancel_run(
     conn: psycopg.Connection[Any],
     *,
     requested_by_operator_id: UUID | None,
+    mode: Literal["cooperative", "terminate"] = "cooperative",
 ) -> int:
-    """Cooperatively cancel the in-flight bootstrap run.
+    """Cancel the in-flight bootstrap run.
 
     Spec §Cancel semantics — cooperative + §PR2.
+
+    Issue #1092 (PR3b #1064): ``mode`` plumbed through from the FE
+    cancel modal selection. Pre-fix the helper hardcoded
+    ``mode='cooperative'`` regardless of operator choice. ``terminate``
+    in v1 still writes the same stop row — the worker observes it at
+    the next checkpoint and acts cooperatively. The operator-visible
+    distinction lives in ``process_stop_requests.mode`` so post-mortem
+    auditing can tell what the operator asked for vs what the worker
+    did. Genuine terminate (forcibly kill stuck worker) requires a
+    jobs-process restart per the cancel runbook.
 
     One-transaction flow. Lock-order discipline (Codex pre-push round
     1 BLOCKING B1): we acquire the bootstrap_runs row lock FIRST and
@@ -751,7 +762,7 @@ def cancel_run(
             mechanism="bootstrap",
             target_run_kind="bootstrap_run",
             target_run_id=run_id,
-            mode="cooperative",
+            mode=mode,
             requested_by_operator_id=requested_by_operator_id,
         )
 

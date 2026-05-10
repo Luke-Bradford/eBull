@@ -1462,18 +1462,26 @@ def cancel_process(
 
     if mechanism == "bootstrap":
         try:
-            run_id = bootstrap_cancel_run(conn, requested_by_operator_id=operator_uuid)
+            # PR3b #1092 #1064 — thread the operator's modal selection
+            # through to ``cancel_run``. Pre-fix the helper hardcoded
+            # ``mode='cooperative'`` regardless of choice; the FE's
+            # terminate disclosure was honest copy ("worker treats as
+            # cooperative; restart jobs to kill") but the durable
+            # ``process_stop_requests.mode`` row recorded ``cooperative``
+            # so post-mortem audits couldn't tell what the operator
+            # actually asked for. Worker behaviour stays cooperative
+            # (genuine terminate requires a jobs-process restart per
+            # the cancel runbook); the durable mode signal records
+            # operator intent.
+            run_id = bootstrap_cancel_run(
+                conn,
+                requested_by_operator_id=operator_uuid,
+                mode=body.mode,
+            )
         except BootstrapNotRunning as exc:
             raise _conflict("no_active_run") from exc
         except StopAlreadyPendingError as exc:
             raise _conflict("stop_already_pending") from exc
-        # bootstrap_state.cancel_run wraps everything in conn.transaction()
-        # which auto-commits on clean exit; ``mode`` is currently always
-        # 'cooperative' in the helper. PR3's body validates 'terminate'
-        # input but the bootstrap cancel helper does not yet distinguish
-        # — PR2 only landed cooperative. The bootstrap cancel runbook
-        # (PR10) documents the operator path: cooperative cancel +
-        # restart jobs is the equivalent of terminate.
         return CancelResponse(target_run_kind="bootstrap_run", target_run_id=run_id)
 
     # mechanism == 'scheduled_job'

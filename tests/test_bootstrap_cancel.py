@@ -11,6 +11,8 @@ against the truncated test DB.
 
 from __future__ import annotations
 
+from typing import Any
+
 import psycopg
 import pytest
 
@@ -120,6 +122,85 @@ def test_cancel_run_raises_when_not_running(
     # state='pending'
     with pytest.raises(BootstrapNotRunning):
         cancel_run(ebull_test_conn, requested_by_operator_id=None)
+
+
+def test_cancel_run_records_terminate_mode_when_requested(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR3b #1092 — operator's modal selection (cooperative vs terminate)
+    flows through to ``process_stop_requests.mode``.
+
+    Pre-fix the helper hardcoded ``mode='cooperative'``, masking what
+    the operator actually asked for. Worker behaviour stays cooperative
+    in both cases (genuine terminate requires a jobs-process restart
+    per the cancel runbook); only the durable mode signal differs.
+    """
+    _reset_state(ebull_test_conn)
+    run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=_SPECS)
+    ebull_test_conn.commit()
+
+    cancelled_run_id = cancel_run(
+        ebull_test_conn,
+        requested_by_operator_id=None,
+        mode="terminate",
+    )
+    ebull_test_conn.commit()
+
+    assert cancelled_run_id == run_id
+    stop = is_stop_requested(
+        ebull_test_conn,
+        target_run_kind="bootstrap_run",
+        target_run_id=run_id,
+    )
+    assert stop is not None
+    assert stop.mode == "terminate"
+
+
+def test_processes_bootstrap_cancel_api_persists_terminate_mode(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR3b #1092 — POST /system/processes/bootstrap/cancel with
+    ``mode='terminate'`` reaches the helper which persists
+    ``terminate`` on the durable stop row.
+
+    Codex pre-push round 1 — the helper-level test alone would still
+    pass if the API path reverted to a hardcoded cooperative call;
+    this test pins the wiring at the request boundary.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.db import get_conn
+    from app.main import app
+
+    _reset_state(ebull_test_conn)
+    run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=_SPECS)
+    ebull_test_conn.commit()
+
+    def _yield_conn() -> Any:
+        yield ebull_test_conn
+
+    app.dependency_overrides[get_conn] = _yield_conn
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/system/processes/bootstrap/cancel",
+            json={"mode": "terminate"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["target_run_kind"] == "bootstrap_run"
+    assert body["target_run_id"] == run_id
+
+    stop = is_stop_requested(
+        ebull_test_conn,
+        target_run_kind="bootstrap_run",
+        target_run_id=run_id,
+    )
+    assert stop is not None
+    assert stop.mode == "terminate"
 
 
 def test_cancel_run_raises_when_complete(
