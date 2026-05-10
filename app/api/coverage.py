@@ -84,6 +84,38 @@ class InsufficientListResponse(BaseModel):
     rows: list[InsufficientRow]
 
 
+# #1067 — CIK coverage audit.
+
+
+class CikGapRowResponse(BaseModel):
+    """One unmapped instrument in the CIK gap detail."""
+
+    instrument_id: int
+    symbol: str
+    company_name: str | None
+    category: str  # "suffix_variant" | "other"
+
+
+class CikCoverageGapResponse(BaseModel):
+    """Aggregate counters + capped sample for the CIK gap report.
+
+    Cohort is the us_equity tradable producer cohort (matches
+    ``daily_cik_refresh``'s scope). ``unmapped_suffix_variants``
+    rows are operational-duplicate variants (``.RTH``, ``.US`` etc)
+    that legitimately lack their own CIK row; ``unmapped_other`` is
+    the real gap signal — typically ETFs, funds, merger CVRs, or
+    a genuine missing mapping.
+    """
+
+    checked_at: datetime
+    cohort_total: int
+    mapped: int
+    unmapped: int
+    unmapped_suffix_variants: int
+    unmapped_other: int
+    sample: list[CikGapRowResponse]
+
+
 # ---------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------
@@ -233,3 +265,45 @@ def get_coverage_insufficient(
         )
 
     return InsufficientListResponse(checked_at=datetime.now(tz=UTC), rows=out)
+
+
+@router.get("/cik-gap", response_model=CikCoverageGapResponse)
+def get_cik_gap(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CikCoverageGapResponse:
+    """#1067 — CIK coverage audit for the us_equity tradable cohort.
+
+    Operator-visible gap report. Cohort matches ``daily_cik_refresh``
+    so the ``mapped`` + ``unmapped`` split correlates with the
+    bridge's hit / miss rate. Unmapped rows are bucketed:
+
+    * ``suffix_variants`` — symbol contains ``.`` (operational
+      duplicates like ``AAPL.RTH``). Pre-#819 these would render
+      empty pages; post-#819 the canonical-redirect mechanism
+      ensures they don't need their own CIK.
+    * ``other`` — ETFs, funds, merger CVRs, and any genuine gap
+      worth operator triage.
+
+    See ``docs/wiki/runbooks/runbook-diagnosing-missing-cik.md`` for
+    the runbook that interprets this report.
+    """
+    from app.services.cik_coverage_audit import compute_cik_gap_report
+
+    report = compute_cik_gap_report(conn)  # type: ignore[arg-type]
+    return CikCoverageGapResponse(
+        checked_at=datetime.now(tz=UTC),
+        cohort_total=report.cohort_total,
+        mapped=report.mapped,
+        unmapped=report.unmapped,
+        unmapped_suffix_variants=report.unmapped_suffix_variants,
+        unmapped_other=report.unmapped_other,
+        sample=[
+            CikGapRowResponse(
+                instrument_id=r.instrument_id,
+                symbol=r.symbol,
+                company_name=r.company_name,
+                category=r.category,
+            )
+            for r in report.sample
+        ],
+    )
