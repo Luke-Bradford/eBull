@@ -368,7 +368,7 @@ def get_manifest_parser_audit(
     from app.services.manifest_parser_audit import compute_manifest_parser_audit
 
     registered = frozenset(str(s) for s in registered_parser_sources())
-    report = compute_manifest_parser_audit(conn, registered_sources=registered)  # type: ignore[arg-type]
+    report = compute_manifest_parser_audit(conn, registered_sources=registered)
     return ManifestParserAuditResponse(
         checked_at=datetime.now(tz=UTC),
         sources=[
