@@ -285,7 +285,7 @@ class BootstrapTimelineStageResponse(BaseModel):
     stage_order: int
     lane: str
     job_name: str
-    status: Literal["pending", "running", "success", "error", "skipped", "blocked"]
+    status: Literal["pending", "running", "success", "error", "skipped", "blocked", "cancelled"]
     started_at: datetime | None
     completed_at: datetime | None
     last_error: str | None

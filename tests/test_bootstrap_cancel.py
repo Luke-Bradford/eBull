@@ -183,10 +183,13 @@ def test_mark_run_cancelled_terminalises_run_and_state(
     assert snap.run_status == "cancelled"
     by_key = {s.stage_key: s for s in snap.stages}
     assert by_key["alpha"].status == "success"
-    # Running stage swept to error so re-Iterate retries it.
-    assert by_key["bravo"].status == "error"
-    # Pending stage swept to error too — retry-failed picks it up.
-    assert by_key["charlie"].status == "error"
+    # PR3c #1093: running + pending stages swept to ``cancelled``
+    # instead of ``error`` so the Timeline can tone gray (operator
+    # cancel) rather than red (genuine failure). Re-Iterate's
+    # ``reset_failed_stages_for_retry`` resets cancelled stages too,
+    # so retry semantics stay intact.
+    assert by_key["bravo"].status == "cancelled"
+    assert by_key["charlie"].status == "cancelled"
 
     state = read_state(ebull_test_conn)
     assert state.status == "cancelled"
@@ -306,6 +309,95 @@ def test_reap_orphaned_running_routes_cancel_requested_to_cancelled(
     assert notes is not None
     assert notes[1] == "cancelled"
     assert "terminated by operator before jobs restart" in (notes[0] or "")
+
+
+def test_reap_orphaned_running_cancel_path_writes_cancelled_stage_status(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR3c #1093 — when boot-recovery routes the cancel path, running
+    + pending stages get ``status='cancelled'`` not ``status='error'``.
+    The Timeline tones cancelled stages gray (operator-driven) instead
+    of red (genuine failure).
+    """
+    _reset_state(ebull_test_conn)
+    run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=_SPECS)
+    mark_stage_running(ebull_test_conn, run_id=run_id, stage_key="alpha")
+    cancel_run(ebull_test_conn, requested_by_operator_id=None)
+    ebull_test_conn.commit()
+
+    reap_orphaned_running(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    rows = ebull_test_conn.execute(
+        "SELECT stage_key, status FROM bootstrap_stages WHERE bootstrap_run_id = %s",
+        (run_id,),
+    ).fetchall()
+    by_key = dict(rows)
+    # alpha was running → cancelled (operator-cancel branch)
+    assert by_key["alpha"] == "cancelled"
+    # bravo + charlie were pending → cancelled
+    assert by_key["bravo"] == "cancelled"
+    assert by_key["charlie"] == "cancelled"
+
+
+def test_reap_orphaned_running_no_cancel_path_keeps_error_stage_status(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Generic crash recovery (no operator cancel) still writes
+    ``status='error'`` on running + pending stages — these were
+    server-side failures, not operator-driven termination.
+    """
+    _reset_state(ebull_test_conn)
+    run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=_SPECS)
+    mark_stage_running(ebull_test_conn, run_id=run_id, stage_key="alpha")
+    ebull_test_conn.commit()
+
+    reap_orphaned_running(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    rows = ebull_test_conn.execute(
+        "SELECT stage_key, status FROM bootstrap_stages WHERE bootstrap_run_id = %s",
+        (run_id,),
+    ).fetchall()
+    by_key = dict(rows)
+    assert by_key["alpha"] == "error"
+    assert by_key["bravo"] == "error"
+    assert by_key["charlie"] == "error"
+
+
+def test_reset_failed_for_retry_picks_up_cancelled_stages(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR3c #1093 — re-Iterate after operator cancel resets cancelled
+    stages back to pending so the retry can pick them up. Without this,
+    a cancelled stage would stay terminal and the retry would never
+    reach it.
+    """
+    _reset_state(ebull_test_conn)
+    run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=_SPECS)
+    mark_stage_running(ebull_test_conn, run_id=run_id, stage_key="alpha")
+    mark_stage_success(ebull_test_conn, run_id=run_id, stage_key="alpha")
+    mark_stage_running(ebull_test_conn, run_id=run_id, stage_key="bravo")
+    ebull_test_conn.commit()
+
+    mark_run_cancelled(ebull_test_conn, run_id=run_id)
+    ebull_test_conn.commit()
+
+    # Bravo + charlie are now ``cancelled``; retry-failed should reset
+    # them to ``pending`` (cancelled is treated like error/blocked for
+    # the lane-min-order logic).
+    reset = reset_failed_stages_for_retry(ebull_test_conn, run_id=run_id)
+    ebull_test_conn.commit()
+    assert reset > 0
+
+    rows = ebull_test_conn.execute(
+        "SELECT stage_key, status FROM bootstrap_stages WHERE bootstrap_run_id = %s",
+        (run_id,),
+    ).fetchall()
+    by_key = dict(rows)
+    assert by_key["alpha"] == "success"  # untouched, prior success
+    assert by_key["bravo"] == "pending"
+    assert by_key["charlie"] == "pending"
 
 
 def test_reap_orphaned_running_partial_error_when_no_cancel(

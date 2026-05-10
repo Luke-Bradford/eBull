@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 BootstrapStatus = Literal["pending", "running", "complete", "partial_error", "cancelled"]
 RunStatus = Literal["running", "complete", "partial_error", "cancelled"]
-StageStatus = Literal["pending", "running", "success", "error", "skipped", "blocked"]
+StageStatus = Literal["pending", "running", "success", "error", "skipped", "blocked", "cancelled"]
 Lane = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
 
 
@@ -528,7 +528,7 @@ def finalize_run(
             """
             SELECT COUNT(*) FROM bootstrap_stages
              WHERE bootstrap_run_id = %(run_id)s
-               AND status IN ('error', 'blocked')
+               AND status IN ('error', 'blocked', 'cancelled')
             """,
             {"run_id": run_id},
         ).fetchone()
@@ -604,7 +604,7 @@ def reset_failed_stages_for_retry(
             SELECT lane, MIN(stage_order)
               FROM bootstrap_stages
              WHERE bootstrap_run_id = %(run_id)s
-               AND status IN ('error', 'blocked')
+               AND status IN ('error', 'blocked', 'cancelled')
              GROUP BY lane
             """,
             {"run_id": run_id},
@@ -821,10 +821,15 @@ def mark_run_cancelled(
                 f"state {current_status!r}; cannot cancel a finalised run"
             )
 
+        # PR3c #1093: operator cancel-mid-run sweeps running + pending
+        # stages to ``cancelled`` (not ``error``) so the Timeline can
+        # tone gray rather than red. Genuine error stages stay red. The
+        # ``cancelled by operator`` reason still lands in ``last_error``
+        # for audit clarity.
         conn.execute(
             """
             UPDATE bootstrap_stages
-               SET status       = 'error',
+               SET status       = 'cancelled',
                    completed_at = now(),
                    last_error   = COALESCE(last_error, %(reason)s)
              WHERE bootstrap_run_id = %(run_id)s
@@ -835,7 +840,7 @@ def mark_run_cancelled(
         conn.execute(
             """
             UPDATE bootstrap_stages
-               SET status       = 'error',
+               SET status       = 'cancelled',
                    completed_at = now(),
                    last_error   = %(reason)s
              WHERE bootstrap_run_id = %(run_id)s
@@ -891,6 +896,13 @@ def reap_orphaned_running(
 
     All in one transaction. Idempotent on a state that is not
     ``running``; returns True if a sweep occurred, False otherwise.
+
+    PR3c #1093: when the boot-recovery sweep observes
+    ``cancel_requested_at IS NOT NULL`` (operator clicked Cancel
+    before the jobs process died), running + pending stages are swept
+    to ``cancelled`` rather than ``error`` so the Timeline tones them
+    gray (operator-driven termination) instead of red (genuine
+    failure).
     """
     with conn.transaction():
         state = conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1 FOR UPDATE").fetchone()
@@ -912,27 +924,41 @@ def reap_orphaned_running(
         ).fetchone()
         cancel_requested = bool(run_meta[0]) if run_meta is not None else False
 
+        # PR3c #1093: cancel-driven boot recovery writes ``cancelled``;
+        # generic crash recovery still writes ``error`` (server died,
+        # not operator intent). Branch on cancel_requested up-front so
+        # both UPDATEs use the matching status value.
+        terminal_status = "cancelled" if cancel_requested else "error"
+        running_reason = (
+            "cancelled by operator before jobs restart" if cancel_requested else "jobs process restarted mid-run"
+        )
+        pending_reason = (
+            "cancelled by operator before jobs restart"
+            if cancel_requested
+            else "orchestrator did not dispatch before restart"
+        )
+
         conn.execute(
             """
             UPDATE bootstrap_stages
-               SET status       = 'error',
+               SET status       = %(status)s,
                    completed_at = now(),
-                   last_error   = 'jobs process restarted mid-run'
+                   last_error   = %(reason)s
              WHERE bootstrap_run_id = %(run_id)s
                AND status           = 'running'
             """,
-            {"run_id": last_run_id},
+            {"run_id": last_run_id, "status": terminal_status, "reason": running_reason},
         )
         conn.execute(
             """
             UPDATE bootstrap_stages
-               SET status       = 'error',
+               SET status       = %(status)s,
                    completed_at = now(),
-                   last_error   = 'orchestrator did not dispatch before restart'
+                   last_error   = %(reason)s
              WHERE bootstrap_run_id = %(run_id)s
                AND status           = 'pending'
             """,
-            {"run_id": last_run_id},
+            {"run_id": last_run_id, "status": terminal_status, "reason": pending_reason},
         )
 
         if cancel_requested:
