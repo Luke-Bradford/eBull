@@ -307,3 +307,82 @@ def get_cik_gap(
             for r in report.sample
         ],
     )
+
+
+# #935 §5 — manifest-parser audit.
+
+
+class ManifestParserSourceRowResponse(BaseModel):
+    """One row per ``ManifestSource`` in the parser audit."""
+
+    source: str
+    has_registered_parser: bool
+    rows_pending: int
+    rows_fetched: int
+    rows_parsed: int
+    rows_failed: int
+    rows_tombstoned: int
+    stuck_no_parser: int
+
+
+class ManifestParserAuditResponse(BaseModel):
+    """Operator-visible report of manifest sources without a parser.
+
+    Pre-#935 §5 the worker debug-skipped rows whose ``source`` had no
+    registered parser — silent on every tick. This endpoint joins
+    ``sec_filing_manifest`` against the API process's parser registry
+    so the operator sees the stuck-row count per source.
+    ``stuck_no_parser`` is the actionable number: rows the worker
+    would silently skip until a parser lands.
+
+    Process-boundary caveat (Codex pre-push round 1): the parser
+    registry is module-global and populated at module import time.
+    The API process reads its OWN registry. Today nothing registers
+    parsers in either API or worker process (pre-#873), so the
+    audit's ``has_registered_parser=False`` is correct everywhere
+    and the stuck-row count surfaces the entire manifest. Once #873
+    lands parsers in the worker process, the API's registry will
+    DIVERGE — the audit becomes misleading until the worker
+    publishes its registry into a DB table the API can read.
+    Track this as a follow-up before #873 ships.
+    """
+
+    checked_at: datetime
+    sources: list[ManifestParserSourceRowResponse]
+    total_stuck_no_parser: int
+
+
+@router.get("/manifest-parsers", response_model=ManifestParserAuditResponse)
+def get_manifest_parser_audit(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ManifestParserAuditResponse:
+    """#935 §5 — surface no-parser manifest rows.
+
+    For every ``ManifestSource``, returns whether a parser is
+    registered and the per-status row count in
+    ``sec_filing_manifest``. ``stuck_no_parser`` (pending + fetched
+    on a source with no parser) is the actionable count — operator
+    must register the parser or tombstone the rows.
+    """
+    from app.jobs.sec_manifest_worker import registered_parser_sources
+    from app.services.manifest_parser_audit import compute_manifest_parser_audit
+
+    registered = frozenset(str(s) for s in registered_parser_sources())
+    report = compute_manifest_parser_audit(conn, registered_sources=registered)  # type: ignore[arg-type]
+    return ManifestParserAuditResponse(
+        checked_at=datetime.now(tz=UTC),
+        sources=[
+            ManifestParserSourceRowResponse(
+                source=r.source,
+                has_registered_parser=r.has_registered_parser,
+                rows_pending=r.rows_pending,
+                rows_fetched=r.rows_fetched,
+                rows_parsed=r.rows_parsed,
+                rows_failed=r.rows_failed,
+                rows_tombstoned=r.rows_tombstoned,
+                stuck_no_parser=r.stuck_no_parser,
+            )
+            for r in report.sources
+        ],
+        total_stuck_no_parser=report.total_stuck_no_parser,
+    )

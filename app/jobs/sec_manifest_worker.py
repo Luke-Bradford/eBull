@@ -307,3 +307,16 @@ def clear_registered_parsers() -> None:
     production code paths. The registry is module-global so tests that
     register fakes leak into subsequent tests without this hook."""
     _PARSERS.clear()
+
+
+def registered_parser_sources() -> frozenset[ManifestSource]:
+    """Return the set of ``ManifestSource`` values that have a parser
+    registered with the worker right now.
+
+    #935 §5: the audit endpoint at ``/coverage/manifest-parsers``
+    reads this to flag manifest rows whose source has no parser and
+    would therefore be silently debug-skipped on every worker tick.
+    Returning a ``frozenset`` keeps the registry read-only at the
+    caller boundary.
+    """
+    return frozenset(_PARSERS.keys())
