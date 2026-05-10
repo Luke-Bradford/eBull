@@ -111,3 +111,43 @@ class TestReconcile:
         row = get_manifest_row(ebull_test_conn, "0000320193-26-000042")
         assert row is not None
         assert row.ingest_status == "parsed"  # preserved
+
+    def test_amendment_detection_handles_non_suffix_form(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #935 §4 regression pin. Pre-fix the daily-index path used
+        # ``form.endswith("/A")``, which misses non-suffix amendment
+        # forms like ``DEFA14A`` and ``DEFR14A`` (PROXY amendments
+        # whose form names contain ``A`` but don't end in ``/A``).
+        # The canonical helper ``is_amendment_form`` recognises both
+        # families; the daily-index parser routes through it.
+        #
+        # Asserts: a DEFA14A row from the daily-index lands in
+        # sec_filing_manifest with ``is_amendment=TRUE`` AND a
+        # plain ``DEF 14A`` non-amendment lands with FALSE.
+        _seed_aapl(ebull_test_conn)
+        body = (
+            b"Description:           Master Index of EDGAR Dissemination Feed\n"
+            b"\n"
+            b"CIK|Company Name|Form Type|Date Filed|Filename\n"
+            b"---\n"
+            b"320193|Apple Inc.|DEFA14A|2026-04-30|edgar/data/320193/0000320193-26-000050.txt\n"
+            b"320193|Apple Inc.|DEF 14A|2026-04-30|edgar/data/320193/0000320193-26-000051.txt\n"
+            b"320193|Apple Inc.|8-K/A|2026-04-30|edgar/data/320193/0000320193-26-000052.txt\n"
+        )
+        run_daily_index_reconcile(
+            ebull_test_conn,
+            http_get=_fake_get(200, body),
+            when=date(2026, 4, 30),
+            subject_resolver=_aapl_resolver,
+        )
+        ebull_test_conn.commit()
+
+        defa = get_manifest_row(ebull_test_conn, "0000320193-26-000050")
+        defp = get_manifest_row(ebull_test_conn, "0000320193-26-000051")
+        eightka = get_manifest_row(ebull_test_conn, "0000320193-26-000052")
+
+        assert defa is not None and defa.is_amendment is True
+        assert defp is not None and defp.is_amendment is False
+        assert eightka is not None and eightka.is_amendment is True
