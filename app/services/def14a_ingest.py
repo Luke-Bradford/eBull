@@ -55,6 +55,7 @@ from app.services.ownership_observations import (
     refresh_def14a_current,
     refresh_esop_current,
 )
+from app.services.sec_identity import siblings_for_issuer_cik
 
 _PARSER_VERSION_DEF14A = "def14a-v1"
 
@@ -442,49 +443,64 @@ def _ingest_single_accession(
     inserted = 0
     updated = 0
 
-    for holder in parsed.rows:
-        outcome = _upsert_holding(
-            conn,
-            accession_number=ref.accession_number,
-            issuer_cik=issuer_cik,
-            instrument_id=ref.instrument_id,
-            as_of_date=parsed.as_of_date,
-            holder=holder,
-        )
-        if outcome == "inserted":
-            inserted += 1
-        else:
-            updated += 1
+    # Per-share-class fan-out (#1117 PR-B). Same DEF 14A document
+    # describes the same issuer; each share-class sibling renders
+    # its own copy of the per-instrument tables. Bulk path covered
+    # by sec_submissions_ingest multimap; per-filing parser path
+    # covered here.
+    if issuer_cik != _CIK_MISSING_SENTINEL:
+        siblings = siblings_for_issuer_cik(conn, issuer_cik)
+        if not siblings:
+            siblings = [ref.instrument_id]
+    else:
+        siblings = [ref.instrument_id]
+
+    for sibling_iid in siblings:
+        for holder in parsed.rows:
+            outcome = _upsert_holding(
+                conn,
+                accession_number=ref.accession_number,
+                issuer_cik=issuer_cik,
+                instrument_id=sibling_iid,
+                as_of_date=parsed.as_of_date,
+                holder=holder,
+            )
+            if outcome == "inserted":
+                inserted += 1
+            else:
+                updated += 1
 
     # Write-through observations + refresh _current (#891 / spec
     # §"Eliminate periodic re-scan jobs"). Replaces nightly
     # ownership_observations_sync.sync_def14a read-from-typed-tables
     # path. record_def14a_observation is itself UPSERT so re-ingest
     # of the same accession (parser bump) refreshes existing rows
-    # in place.
+    # in place. Fan out across share-class siblings post-#1117.
     if parsed.rows:
-        _record_def14a_observations_for_filing(
-            conn,
-            instrument_id=ref.instrument_id,
-            accession_number=ref.accession_number,
-            as_of_date=parsed.as_of_date,
-            holders=parsed.rows,
-        )
-        refresh_def14a_current(conn, instrument_id=ref.instrument_id)
-        # ESOP write-through (#843). Mirrors the def14a write-through
-        # above but lands rows in ``ownership_esop_observations`` for
-        # the dedicated funds-slice overlay path (#961). Same accession
-        # / as_of semantics so the two slices reconcile against one
-        # provenance.
-        esop_rows_written = _record_esop_observations_for_filing(
-            conn,
-            instrument_id=ref.instrument_id,
-            accession_number=ref.accession_number,
-            as_of_date=parsed.as_of_date,
-            holders=parsed.rows,
-        )
-        if esop_rows_written > 0:
-            refresh_esop_current(conn, instrument_id=ref.instrument_id)
+        for sibling_iid in siblings:
+            _record_def14a_observations_for_filing(
+                conn,
+                instrument_id=sibling_iid,
+                accession_number=ref.accession_number,
+                as_of_date=parsed.as_of_date,
+                holders=parsed.rows,
+            )
+            refresh_def14a_current(conn, instrument_id=sibling_iid)
+            # ESOP write-through (#843). Mirrors the def14a
+            # write-through above but lands rows in
+            # ``ownership_esop_observations`` for the dedicated
+            # funds-slice overlay path (#961). Same accession /
+            # as_of semantics so the two slices reconcile against
+            # one provenance.
+            esop_rows_written = _record_esop_observations_for_filing(
+                conn,
+                instrument_id=sibling_iid,
+                accession_number=ref.accession_number,
+                as_of_date=parsed.as_of_date,
+                holders=parsed.rows,
+            )
+            if esop_rows_written > 0:
+                refresh_esop_current(conn, instrument_id=sibling_iid)
 
     return _AccessionOutcome(
         status="success",

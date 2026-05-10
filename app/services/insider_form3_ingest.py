@@ -53,6 +53,7 @@ from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
 )
+from app.services.sec_identity import siblings_for_issuer_cik
 
 logger = logging.getLogger(__name__)
 
@@ -318,14 +319,30 @@ def upsert_form_3_filing(
     # periodic re-scan jobs"). Mirrors the Form 4 path —
     # one observation per (filer_cik, direct_indirect), shares = the
     # holding's reported share count, period_end = period_of_report.
-    _record_form3_observations_for_filing(
-        conn,
-        instrument_id=instrument_id,
-        accession_number=accession_number,
-        primary_document_url=primary_document_url,
-        parsed=parsed,
-    )
-    refresh_insiders_current(conn, instrument_id=instrument_id)
+    #
+    # Per-share-class fan-out (#1117 PR-B): same Form 3 describes the
+    # same issuer; each share-class sibling carries its own
+    # ownership_insiders_observations rows. Entity-level tables
+    # (insider_filings, insider_initial_holdings) stay PK=accession.
+    issuer_cik = parsed.issuer_cik or ""
+    if issuer_cik:
+        try:
+            siblings = siblings_for_issuer_cik(conn, issuer_cik)
+        except ValueError:
+            siblings = [instrument_id]
+        if not siblings:
+            siblings = [instrument_id]
+    else:
+        siblings = [instrument_id]
+    for sibling_iid in siblings:
+        _record_form3_observations_for_filing(
+            conn,
+            instrument_id=sibling_iid,
+            accession_number=accession_number,
+            primary_document_url=primary_document_url,
+            parsed=parsed,
+        )
+        refresh_insiders_current(conn, instrument_id=sibling_iid)
 
 
 def _record_form3_observations_for_filing(

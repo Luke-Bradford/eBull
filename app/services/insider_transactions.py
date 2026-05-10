@@ -55,6 +55,7 @@ from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
 )
+from app.services.sec_identity import siblings_for_issuer_cik
 
 _PARSER_VERSION_FORM4 = "form4-v1"
 
@@ -1139,14 +1140,32 @@ def upsert_filing(
     # ownership_observations_sync read-from-typed-tables path with an
     # inline call so the operator-visible rollup reflects the new filing
     # without waiting for the next sync cycle.
-    _record_form4_observations_for_filing(
-        conn,
-        instrument_id=instrument_id,
-        accession_number=accession_number,
-        primary_document_url=primary_document_url,
-        parsed=parsed,
-    )
-    refresh_insiders_current(conn, instrument_id=instrument_id)
+    #
+    # Per-share-class fan-out (#1117 PR-B): same Form 4 describes the
+    # same issuer; each share-class sibling carries its own
+    # ownership_insiders_observations rows. Entity-level tables
+    # (insider_filings, insider_transactions, insider_filers,
+    # insider_transaction_footnotes) stay PK=accession — siblings see
+    # them via filing_events bridge in read paths.
+    issuer_cik = parsed.issuer_cik or ""
+    if issuer_cik:
+        try:
+            siblings = siblings_for_issuer_cik(conn, issuer_cik)
+        except ValueError:
+            siblings = [instrument_id]
+        if not siblings:
+            siblings = [instrument_id]
+    else:
+        siblings = [instrument_id]
+    for sibling_iid in siblings:
+        _record_form4_observations_for_filing(
+            conn,
+            instrument_id=sibling_iid,
+            accession_number=accession_number,
+            primary_document_url=primary_document_url,
+            parsed=parsed,
+        )
+        refresh_insiders_current(conn, instrument_id=sibling_iid)
 
 
 def _record_form4_observations_for_filing(
