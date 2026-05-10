@@ -172,12 +172,29 @@ _PRESENCE_QUERIES: dict[tuple[str, str], str] = {
         "SELECT EXISTS(SELECT 1 FROM instrument_dividend_summary d WHERE d.instrument_id = %s)"
     ),
     ("corporate_events", "sec_8k_events"): (
-        "SELECT EXISTS(SELECT 1 FROM eight_k_filings e WHERE e.instrument_id = %s)"
+        # Per-#1117 PR-B: eight_k_filings is entity-level (PK
+        # accession, denormalised instrument_id is the discovery
+        # sibling). Route through filing_events bridge so share-
+        # class siblings (GOOG/GOOGL) BOTH show the capability when
+        # an 8-K exists for the issuer.
+        "SELECT EXISTS(SELECT 1 FROM filing_events fe "
+        "WHERE fe.provider = 'sec' "
+        "AND fe.filing_type IN ('8-K', '8-K/A') "
+        "AND fe.instrument_id = %s)"
     ),
     ("business_summary", "sec_10k_item1"): (
         "SELECT EXISTS(SELECT 1 FROM instrument_business_summary b WHERE b.instrument_id = %s)"
     ),
-    ("insider", "sec_form4"): ("SELECT EXISTS(SELECT 1 FROM insider_transactions t WHERE t.instrument_id = %s)"),
+    ("insider", "sec_form4"): (
+        # Per-#1117 PR-B: insider_transactions is entity-level
+        # (PK accession+txn_row_num); the per-instrument signal lives
+        # in ownership_insiders_observations (which IS fanned out
+        # across siblings). Use the observation table for the
+        # capability check.
+        "SELECT EXISTS(SELECT 1 FROM ownership_insiders_current oc "
+        "WHERE oc.instrument_id = %s "
+        "AND oc.source IN ('form4', 'form3'))"
+    ),
     # ``ownership`` panel — wired via the post-#788 ``ownership_*_current``
     # tables (#905 read-path cutover). Without these entries, the
     # ownership panel stayed permanently hidden even when the

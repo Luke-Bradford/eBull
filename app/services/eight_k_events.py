@@ -568,6 +568,11 @@ def list_8k_filings(
     """Return recent 8-K filings for an instrument with items +
     exhibits attached. Tombstoned filings excluded."""
     with conn.cursor() as cur:
+        # Per-share-class read bridge (#1117 PR-B): eight_k_filings is
+        # entity-level (PK accession, child FKs anchor on it). Reads
+        # for share-class siblings route through filing_events as the
+        # per-instrument bridge so both GOOG and GOOGL render the
+        # same 8-K event without duplicating eight_k_filings rows.
         cur.execute(
             """
             SELECT
@@ -576,8 +581,14 @@ def list_8k_filings(
                 f.signature_name, f.signature_title, f.signature_date,
                 f.primary_document_url
             FROM eight_k_filings f
-            WHERE f.instrument_id = %s
-              AND f.is_tombstone = FALSE
+            WHERE f.is_tombstone = FALSE
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe
+                  WHERE fe.provider_filing_id = f.accession_number
+                    AND fe.provider = 'sec'
+                    AND fe.instrument_id = %s
+                    AND fe.filing_type IN ('8-K', '8-K/A')
+              )
             ORDER BY f.date_of_report DESC NULLS LAST, f.fetched_at DESC
             LIMIT %s
             """,
