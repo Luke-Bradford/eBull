@@ -12,7 +12,7 @@
  * `prefers-reduced-motion` setting.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { ProcessRowResponse, StaleReason } from "@/api/types";
@@ -370,6 +370,7 @@ function DescriptionTooltip({ description }: { description: string }) {
   const [hovered, setHovered] = useState(false);
   const [pinned, setPinned] = useState(false);
   const containerRef = useRef<HTMLSpanElement>(null);
+  const tooltipId = useId();
 
   // Click outside closes the pinned popover. Idle when not pinned so
   // the listener doesn't run for every row in the table.
@@ -398,6 +399,12 @@ function DescriptionTooltip({ description }: { description: string }) {
         type="button"
         aria-label={description}
         aria-expanded={visible}
+        // PR4 round 3 a11y fix — link the trigger to the rendered
+        // tooltip via aria-describedby so AT announces the popover
+        // when it surfaces. Always reference the id (tooltip span is
+        // rendered conditionally; AT just sees no descriptor while
+        // the span is unmounted, which is the correct quiet state).
+        aria-describedby={visible ? tooltipId : undefined}
         data-testid="process-description-tooltip"
         onClick={() => setPinned((p) => !p)}
         className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-400 text-[10px] font-bold text-slate-500 hover:border-slate-600 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 dark:border-slate-500 dark:text-slate-400 dark:hover:border-slate-300 dark:hover:text-slate-200"
@@ -406,6 +413,7 @@ function DescriptionTooltip({ description }: { description: string }) {
       </button>
       {visible ? (
         <span
+          id={tooltipId}
           role="tooltip"
           className="absolute left-5 top-0 z-10 w-64 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-normal normal-case tracking-normal text-slate-700 shadow-lg dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
         >

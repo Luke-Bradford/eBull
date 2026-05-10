@@ -409,6 +409,24 @@ describe("ProcessRow", () => {
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
 
+  it("popover's role='tooltip' is linked to the trigger via aria-describedby", () => {
+    // Round 3 review WARNING: ARIA spec requires explicit linkage
+    // between the trigger and the popover for AT to announce the
+    // expanded content. Pin: when the tooltip is visible, the
+    // trigger's aria-describedby points at the tooltip's id.
+    renderRow({
+      row: makeProcessRow({ description: "linkage content." }),
+    });
+    const tooltip = screen.getByTestId("process-description-tooltip");
+    expect(tooltip.getAttribute("aria-describedby")).toBeNull();
+
+    fireEvent.click(tooltip);
+    const describedBy = tooltip.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const popover = screen.getByRole("tooltip");
+    expect(popover.id).toBe(describedBy);
+  });
+
   it("hides ⓘ tooltip when description is empty", () => {
     renderRow({
       row: makeProcessRow({ description: "" }),
