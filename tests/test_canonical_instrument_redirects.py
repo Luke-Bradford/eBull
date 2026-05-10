@@ -259,3 +259,7 @@ def test_check_constraint_blocks_self_loop(
             (8190501, 8190501),
         )
         conn.commit()
+    # PR #1121 NITPICK fix: after the CheckViolation the tx is in an
+    # aborted state. Rollback explicitly so fixture teardown's
+    # TRUNCATE doesn't trip the aborted-tx guard.
+    conn.rollback()

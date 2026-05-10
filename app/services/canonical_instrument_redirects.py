@@ -101,6 +101,12 @@ def populate_canonical_redirects(
     or already points at the rule's computed base.
 
     Returns counters so the operator runbook can audit each invocation.
+
+    The caller owns ``conn``'s commit. PR #1121 round 1 (Claude bot
+    WARNING): a service that accepts an external connection MUST NOT
+    commit on its own — doing so silently flushes any earlier
+    mutations the caller staged on the same connection. The job
+    wrapper below opens its own connection and commits explicitly.
     """
     variants_scanned = 0
     redirects_set = 0
@@ -241,8 +247,7 @@ def populate_canonical_redirects(
                 base_symbol,
             )
 
-    conn.commit()
-
+    # Caller commits. PR #1121 WARNING fix — see docstring.
     logger.info(
         "canonical_redirects: scanned=%d set=%d already_correct=%d "
         "skipped_no_base=%d skipped_ambiguous=%d "
@@ -278,4 +283,7 @@ def populate_canonical_redirects_job() -> None:
 
     with psycopg.connect(settings.database_url) as conn:
         stats = populate_canonical_redirects(conn)
+        # PR #1121 WARNING fix — the service is caller-owns-conn, so
+        # the job wrapper that owns the connection commits explicitly.
+        conn.commit()
         logger.info("populate_canonical_redirects_job: %s", stats)
