@@ -10,8 +10,9 @@ universe:
    ownerOrg, addresses, exchanges, etc) flow through the existing
    ``parse_entity_profile()`` + ``upsert_entity_profile()`` helpers.
 
-This replaces the per-CIK HTTP walk that S5 (`bootstrap_filings_history_seed`)
-issues at 7 req/s on a fresh install. Per-CIK ``filings.files[]``
+This replaces the per-CIK HTTP walk that S5 (``filings_history_seed``;
+formerly the bespoke ``bootstrap_filings_history_seed`` wrapper, lifted
+in PR1c #1064) issues at 7 req/s on a fresh install. Per-CIK ``filings.files[]``
 secondary-page coverage is the responsibility of C1.b, a separate
 stage.
 

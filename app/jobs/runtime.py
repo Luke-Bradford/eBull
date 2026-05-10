@@ -239,7 +239,10 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_OWNERSHIP_OBSERVATIONS_SYNC: _adapt_zero_arg(ownership_observations_sync),
     JOB_OWNERSHIP_OBSERVATIONS_BACKFILL: _adapt_zero_arg(ownership_observations_backfill),
     JOB_SEC_13F_FILER_DIRECTORY_SYNC: _adapt_zero_arg(sec_13f_filer_directory_sync),
-    JOB_SEC_13F_QUARTERLY_SWEEP: _adapt_zero_arg(sec_13f_quarterly_sweep),
+    # PR1c #1064 — sec_13f_quarterly_sweep migrated to native JobInvoker
+    # (params-aware). No _adapt_zero_arg wrap; bootstrap stage 21 passes
+    # ``min_period_of_report`` + ``source_label`` via StageSpec.params.
+    JOB_SEC_13F_QUARTERLY_SWEEP: sec_13f_quarterly_sweep,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC: _adapt_zero_arg(sec_nport_filer_directory_sync),
     JOB_SEC_N_PORT_INGEST: _adapt_zero_arg(sec_n_port_ingest),
     # Registered for #994 (first-install bootstrap orchestrator) — these
@@ -270,16 +273,23 @@ _INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _adapt_zero_arg(_sec_bulk_
 _INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR] = _adapt_zero_arg(
     _bootstrap_orchestrator.run_bootstrap_orchestrator
 )
-_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_FILINGS_HISTORY_SEED] = _adapt_zero_arg(
-    _bootstrap_orchestrator.bootstrap_filings_history_seed
-)
-_INVOKERS[_bootstrap_orchestrator.JOB_SEC_FIRST_INSTALL_DRAIN] = _adapt_zero_arg(
-    _bootstrap_orchestrator.sec_first_install_drain_job
-)
-# #1008 — recency-bounded 13F sweep for first-install bootstrap.
-_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP] = _adapt_zero_arg(
-    _bootstrap_orchestrator.bootstrap_sec_13f_recent_sweep_job
-)
+# PR1c #1064 — promoted bodies (params-aware natively, no
+# ``_adapt_zero_arg``). Replace the three deleted bespoke wrappers:
+#
+#   * ``bootstrap_filings_history_seed`` → ``filings_history_seed``
+#   * ``sec_first_install_drain_job``    → ``sec_first_install_drain``
+#   * ``bootstrap_sec_13f_recent_sweep_job`` → existing
+#     ``sec_13f_quarterly_sweep`` (params-aware, honours
+#     ``min_period_of_report`` + ``source_label``)
+#
+# The third no longer needs a separate registry entry — bootstrap
+# stage 21 dispatches ``sec_13f_quarterly_sweep`` with a bootstrap-
+# scoped params dict, the same body the weekly cron fires with no
+# params.
+from app.workers import scheduler as _scheduler  # noqa: E402
+
+_INVOKERS[_scheduler.JOB_FILINGS_HISTORY_SEED] = _scheduler.filings_history_seed
+_INVOKERS[_scheduler.JOB_SEC_FIRST_INSTALL_DRAIN] = _scheduler.sec_first_install_drain
 
 # ---------------------------------------------------------------------------
 # Bulk-archive Phase C ingester invokers (#1027 — #1020)
@@ -566,8 +576,13 @@ def _run_prelude(
                 # branches (running + skipped). Passing ``None`` falls back
                 # to the column default ``'{}'`` so the legacy paths stay
                 # forward-compatible. Jsonb wraps the dict for psycopg's
-                # JSONB adapter.
-                snapshot_json = Jsonb(dict(params_snapshot)) if params_snapshot is not None else None
+                # JSONB adapter; ``_jsonable_params`` materialises ``date``
+                # values as ISO strings (PR1c #1064 — stage 21 + manual
+                # ``sec_13f_quarterly_sweep`` carry a ``min_period_of_report``
+                # ``date`` that ``json.dumps`` cannot serialize natively).
+                from app.services.ops_monitor import _jsonable_params
+
+                snapshot_json = Jsonb(_jsonable_params(dict(params_snapshot))) if params_snapshot is not None else None
                 if fence_held:
                     # When a sibling holds the fence, surface the holder
                     # in the audit row so the operator can see WHY this

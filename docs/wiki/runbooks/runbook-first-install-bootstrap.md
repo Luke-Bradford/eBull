@@ -41,9 +41,12 @@ Phases in order; spec §"Stages and lanes" is the source of truth:
    - ``sec_13f_filer_directory_sync``
    - ``sec_nport_filer_directory_sync``
    - ``cik_refresh`` (``daily_cik_refresh``)
-   - ``filings_history_seed`` (``bootstrap_filings_history_seed`` —
-     2-year window, all form types)
-   - ``sec_first_install_drain`` (~60min for ~12k filers)
+   - ``filings_history_seed`` (PR1c #1064 — promoted from the bespoke
+     ``bootstrap_filings_history_seed`` wrapper; bootstrap stage 14
+     dispatches with ``params={days_back: 730, filing_types: <three-tier
+     allow-list>}``)
+   - ``sec_first_install_drain`` (~60min for ~12k filers; bootstrap
+     stage 15 dispatches with ``params={max_subjects: None}``)
    - ``sec_def14a_bootstrap`` / ``sec_business_summary_bootstrap`` /
      insider/Form 3/8-K typed parsers
    - ``sec_13f_quarterly_sweep`` / ``sec_n_port_ingest``

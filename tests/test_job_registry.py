@@ -67,13 +67,29 @@ class TestStageSpecParamsField:
         for stage in _BOOTSTRAP_STAGE_SPECS:
             assert hasattr(stage, "params"), f"stage {stage.stage_key} missing params"
 
-    def test_default_params_is_empty(self) -> None:
-        # PR1a leaves all stages with default empty params; PR1c will populate
-        # stages 14, 15, 21 with the bespoke wrapper overrides.
+    def test_only_bootstrap_lifted_stages_have_params(self) -> None:
+        """PR1c populated stages 14, 15, 21 (the bespoke-wrapper lift targets);
+        every other stage stays with the empty default until a future
+        ParamMetadata expansion lands."""
+        # PR1c #1064 — lifted bespoke wrappers. The job registry audit
+        # §4 enumerates these three; any addition must update the audit
+        # and this assertion in lockstep.
+        lifted_stage_keys = {
+            "filings_history_seed",
+            "sec_first_install_drain",
+            "sec_13f_recent_sweep",
+        }
         for stage in _BOOTSTRAP_STAGE_SPECS:
-            assert stage.params == {}, (
-                f"stage {stage.stage_key} has unexpected params {stage.params!r}; PR1a should leave all stages empty"
-            )
+            if stage.stage_key in lifted_stage_keys:
+                assert stage.params, (
+                    f"stage {stage.stage_key} should carry the bespoke-wrapper params dict; "
+                    "PR1c populated this stage to retire the duplicate wrapper body"
+                )
+            else:
+                assert stage.params == {}, (
+                    f"stage {stage.stage_key} has unexpected params {stage.params!r}; "
+                    "only PR1c-lifted stages should carry non-empty params"
+                )
 
 
 class TestSourceRegistry:
