@@ -1291,7 +1291,13 @@ export type TriggerConflictReason =
   // surface these reasons to point the operator at the underlying
   // scheduled job.
   | "trigger_not_supported"
-  | "cancel_not_supported";
+  | "cancel_not_supported"
+  // PR1b-2 (#1064) — universal bootstrap-state gate. Emitted by the
+  // jobs-process listener (NOT a synchronous API 409) when a manual
+  // job request is rejected because bootstrap_state.status !=
+  // 'complete' and no override flag was set. Surfaces to the operator
+  // via the rejected pending_job_requests row's error_msg.
+  | "bootstrap_not_complete";
 
 // ---------------------------------------------------------------------------
 // Orchestrator DAG drill-in (#1078, umbrella #1064 — PR6)

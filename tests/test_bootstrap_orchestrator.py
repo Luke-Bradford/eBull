@@ -150,7 +150,7 @@ def test_run_one_stage_records_success(
 
     calls: list[str] = []
 
-    def alpha_invoker() -> None:
+    def alpha_invoker(_params: object = None) -> None:
         calls.append("alpha")
 
     outcome = _run_one_stage(
@@ -180,7 +180,7 @@ def test_run_one_stage_records_error_on_invoker_exception(
     run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=specs)
     ebull_test_conn.commit()
 
-    def bravo_invoker() -> None:
+    def bravo_invoker(_params: object = None) -> None:
         raise RuntimeError("kaboom")
 
     outcome = _run_one_stage(
@@ -222,8 +222,12 @@ def _patch_invokers_with_fakes(
     calls: dict[str, list[str]] = {"order": []}
     failing = failing_jobs or set()
 
-    def _make_fake(name: str) -> Callable[[], None]:
-        def _fake() -> None:
+    def _make_fake(name: str) -> Callable[..., None]:
+        # PR1b-2 (#1064) widened JobInvoker to ``(Mapping) -> None``;
+        # bootstrap dispatch now calls invoker({}). Accept-and-ignore
+        # the params kwarg so this fake satisfies both the legacy
+        # zero-arg and the post-PR1b-2 signature without test churn.
+        def _fake(_params: object = None) -> None:
             calls["order"].append(name)
             if name in failing:
                 raise RuntimeError(f"forced {name} failure")

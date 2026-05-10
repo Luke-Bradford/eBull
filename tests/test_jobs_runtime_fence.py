@@ -61,7 +61,7 @@ def test_prelude_no_fence_writes_running_row_and_runs_invoker(
 
     captured_run_id: list[int | None] = []
 
-    def _invoker() -> None:
+    def _invoker(_p=None) -> None:
         captured_run_id.append(jobs_runtime.consume_prelude_run_id())
 
     invoked_signal = jobs_runtime.run_with_prelude(test_database_url(), "fence_test_no_fence", _invoker)
@@ -94,7 +94,7 @@ def test_prelude_fence_held_writes_skipped_and_does_not_run_invoker(
 
     invoked = []
 
-    def _invoker() -> None:
+    def _invoker(_p=None) -> None:
         invoked.append(True)
 
     invoked_signal = jobs_runtime.run_with_prelude(test_database_url(), "fence_test_held", _invoker)
@@ -135,7 +135,7 @@ def test_prelude_fence_held_by_sibling_sharing_freshness_source(
 
     invoked: list[bool] = []
 
-    def _invoker() -> None:
+    def _invoker(_p=None) -> None:
         invoked.append(True)
 
     invoked_signal = jobs_runtime.run_with_prelude(
@@ -173,7 +173,7 @@ def test_prelude_bypass_fence_runs_invoker_even_with_fence_row(
 
     invoked = []
 
-    def _invoker() -> None:
+    def _invoker(_p=None) -> None:
         invoked.append(True)
 
     jobs_runtime.run_with_prelude(
@@ -233,7 +233,7 @@ def test_prelude_propagates_linked_request_id_to_job_runs(
 
     invoked = []
 
-    def _invoker() -> None:
+    def _invoker(_p=None) -> None:
         invoked.append(True)
 
     jobs_runtime.run_with_prelude(
@@ -267,7 +267,7 @@ def test_prelude_failure_propagates_does_not_run_invoker(
     active full-wash."""
     invoked = []
 
-    def _invoker() -> None:
+    def _invoker(_p=None) -> None:
         invoked.append(True)
 
     def _explode(*_args: object, **_kw: object) -> int | None:
@@ -288,7 +288,7 @@ def test_invoker_can_use_telemetry_aggregator_against_pre_allocated_run(
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.commit()
 
-    def _invoker() -> None:
+    def _invoker(_p=None) -> None:
         run_id = jobs_runtime.consume_prelude_run_id()
         assert run_id is not None
         agg = JobTelemetryAggregator()

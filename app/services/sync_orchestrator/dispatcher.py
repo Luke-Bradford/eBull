@@ -108,6 +108,7 @@ def publish_manual_job_request(
     requested_by: str | None = None,
     process_id: str | None = None,
     mode: Literal["iterate", "full_wash"] | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> int:
     """Publish a manual job request through the durable queue.
 
@@ -122,6 +123,14 @@ def publish_manual_job_request(
     not migrated leave them ``None`` so the columns stay nullable for
     pre-existing rows.
 
+    ``payload`` (#1064 PR1b-2) carries the canonical
+    ``{params, control}`` envelope into ``pending_job_requests.payload``.
+    The listener extracts ``payload['params']`` for invoker dispatch and
+    ``payload['control']['override_bootstrap_gate']`` for gate control.
+    Legacy callers leave it ``None`` and the column writes ``NULL`` (no
+    params, no control flags). Callers MUST validate the params dict
+    before calling this helper — the listener trusts the envelope.
+
     UNIQUE partial index ``pending_job_requests_active_full_wash_idx``
     catches a concurrent INSERT racing past the trigger handler's
     fence-check as ``UniqueViolation`` — handler maps to 409.
@@ -131,13 +140,14 @@ def publish_manual_job_request(
             cur.execute(
                 """
                 INSERT INTO pending_job_requests
-                    (request_kind, job_name, requested_by, process_id, mode)
-                VALUES ('manual_job', %(job_name)s, %(requested_by)s,
+                    (request_kind, job_name, payload, requested_by, process_id, mode)
+                VALUES ('manual_job', %(job_name)s, %(payload)s, %(requested_by)s,
                         %(process_id)s, %(mode)s)
                 RETURNING request_id
                 """,
                 {
                     "job_name": job_name,
+                    "payload": Jsonb(payload) if payload is not None else None,
                     "requested_by": requested_by,
                     "process_id": process_id,
                     "mode": mode,

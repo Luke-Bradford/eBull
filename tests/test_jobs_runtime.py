@@ -80,19 +80,67 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     # Tests in this module pass a stub URL ("postgresql://stub/stub")
     # and exercise the JobRuntime shape without staging a real DB —
     # bypass the prelude entirely so the invoker still runs.
+    # PR1b-2 (#1064) widened the JobInvoker contract to accept a params
+    # Mapping; the fake forwards an empty dict so tests remain agnostic.
     monkeypatch.setattr(
         "app.jobs.runtime.run_with_prelude",
-        lambda _url, _name, invoker, **_kw: invoker(),
+        lambda _url, _name, invoker, **_kw: invoker(_kw.get("params") or {}) or True,
+    )
+    # _wrap_invoker also runs check_bootstrap_state_gate before the
+    # prereq check; tests with a stub URL never seed the bootstrap_state
+    # singleton, so allow by default. PR1b-2.
+    monkeypatch.setattr(
+        "app.jobs.runtime.check_bootstrap_state_gate",
+        lambda _conn, **_kw: (True, ""),
+    )
+    # _wrap_invoker materialises + validates registry-default params
+    # before the gate. Stub both so tests can use lambda invokers
+    # registered under arbitrary names not in SCHEDULED_JOBS.
+    monkeypatch.setattr(
+        "app.jobs.runtime.materialise_scheduled_params",
+        lambda _name: {},
+    )
+    monkeypatch.setattr(
+        "app.jobs.runtime.validate_job_params",
+        lambda _name, params, **_kw: dict(params),
     )
 
 
 def _make_runtime(invokers: dict[str, object]) -> JobRuntime:
     # The mypy/pyright complaint about object vs Callable is silenced
     # by the cast at construction; the test invokers are all callables.
+    # PR1b-2 (#1064) widened the JobInvoker contract to accept a params
+    # Mapping; tests pass zero-arg callables so we adapt them here so
+    # individual cases stay focused on the runtime shape under test.
+    from app.jobs.runtime import _adapt_zero_arg
+
+    adapted: dict[str, object] = {
+        name: _adapt_zero_arg(fn)  # type: ignore[arg-type]
+        if callable(fn) and _is_zero_arg(fn)
+        else fn
+        for name, fn in invokers.items()
+    }
     return JobRuntime(
         database_url="postgresql://stub/stub",
-        invokers=invokers,  # type: ignore[arg-type]
+        invokers=adapted,  # type: ignore[arg-type]
     )
+
+
+def _is_zero_arg(fn: object) -> bool:
+    """Return True when the callable's positional arity is zero.
+
+    Used to distinguish legacy zero-arg test invokers (which we adapt)
+    from PR1b-2-shaped invokers (``Callable[[Mapping], None]``) that
+    would double-wrap if adapted again.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(fn)  # type: ignore[arg-type]
+    except TypeError, ValueError:
+        return False
+    positional = [p for p in sig.parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(positional) == 0
 
 
 class TestUnknownJob:
@@ -184,20 +232,25 @@ class TestScheduledFireWrapper:
             invocations.append(1)
 
         rt = _make_runtime({"j": invoker})
+        # PR1b-2 widened JobInvoker; _wrap_invoker calls invoker(params).
+        # Adapt for direct invocation through the wrapper.
+        from app.jobs.runtime import _adapt_zero_arg
+
+        adapted = _adapt_zero_arg(invoker)
 
         # Hold the fake lock externally to simulate a manual run in
         # flight.
         held = _FakeLock("ignored", "j")
         held.__enter__()
         try:
-            wrapped = rt._wrap_invoker("j", invoker)
+            wrapped = rt._wrap_invoker("j", adapted)
             wrapped()  # must not raise
             assert invocations == []  # invoker did not run
         finally:
             held.__exit__()
 
         # After release, the wrapper should run the invoker normally.
-        wrapped = rt._wrap_invoker("j", invoker)
+        wrapped = rt._wrap_invoker("j", adapted)
         wrapped()
         assert invocations == [1]
 
@@ -209,7 +262,9 @@ class TestScheduledFireWrapper:
             raise RuntimeError("boom")
 
         rt = _make_runtime({"boom_job": boom})
-        wrapped = rt._wrap_invoker("boom_job", boom)
+        from app.jobs.runtime import _adapt_zero_arg
+
+        wrapped = rt._wrap_invoker("boom_job", _adapt_zero_arg(boom))
         wrapped()  # must not raise
 
 
@@ -460,9 +515,29 @@ def _make_catchup_runtime(
     )
 
     # Stub record_job_skip so catch-up can record skips without a real DB.
+    # PR1b-2 (#1064): widened to accept ``params_snapshot`` kwarg.
     monkeypatch.setattr(
         "app.jobs.runtime.record_job_skip",
-        lambda _conn, _name, _reason: 0,
+        lambda _conn, _name, _reason, **_kw: 0,
+    )
+
+    # PR1b-2 (#1064): stub the universal bootstrap_state gate to allow
+    # so the per-job prereq path under test still executes. Tests for
+    # the gate path itself live in tests/test_pr1b2_envelope_and_gate.py.
+    monkeypatch.setattr(
+        "app.jobs.runtime.check_bootstrap_state_gate",
+        lambda _conn, **_kw: (True, ""),
+    )
+    # PR1b-2 (#1064): stub registry-default params materialiser +
+    # validator so the catch-up loop's pre-skip path doesn't choke on
+    # synthetic test job names not registered in SCHEDULED_JOBS.
+    monkeypatch.setattr(
+        "app.jobs.runtime.materialise_scheduled_params",
+        lambda _name: {},
+    )
+    monkeypatch.setattr(
+        "app.jobs.runtime.validate_job_params",
+        lambda _name, params, **_kw: dict(params),
     )
 
     # Stub psycopg.connect so _catch_up gets a no-op connection.
@@ -474,9 +549,11 @@ def _make_catchup_runtime(
     # fixture's mocked psycopg.connect would otherwise return a
     # MagicMock whose ``cur.fetchone()`` reads as truthy and triggers
     # a false "fence held" branch, skipping every catch-up invoker.
+    # PR1b-2 widened the JobInvoker contract; forward an empty params
+    # dict to the test invoker.
     monkeypatch.setattr(
         "app.jobs.runtime.run_with_prelude",
-        lambda _url, _name, invoker, **_kw: invoker(),
+        lambda _url, _name, invoker, **_kw: invoker(_kw.get("params") or {}) or True,
     )
 
     # Pin the clock.
@@ -485,9 +562,20 @@ def _make_catchup_runtime(
         type("_FakeDT", (), {"now": staticmethod(lambda tz: _NOW)}),
     )
 
+    # PR1b-2 (#1064): adapt zero-arg test invokers to the widened
+    # JobInvoker contract. The catch-up loop calls invoker(params).
+    from app.jobs.runtime import _adapt_zero_arg
+
+    adapted = {
+        name: _adapt_zero_arg(fn)  # type: ignore[arg-type]
+        if callable(fn) and _is_zero_arg(fn)
+        else fn
+        for name, fn in invokers.items()
+    }
+
     rt = JobRuntime(
         database_url="postgresql://stub/stub",
-        invokers=invokers,  # type: ignore[arg-type]
+        invokers=adapted,  # type: ignore[arg-type]
     )
 
     # The caller tracks invocations via side-effects in the invoker
@@ -759,7 +847,7 @@ class TestCatchUpPrerequisites:
         )
         monkeypatch.setattr(
             "app.jobs.runtime.record_job_skip",
-            lambda _conn, name, reason: skip_calls.append((name, reason)) or 0,
+            lambda _conn, name, reason, **_kw: skip_calls.append((name, reason)) or 0,
         )
 
         mock_conn = MagicMock()
@@ -771,9 +859,11 @@ class TestCatchUpPrerequisites:
             type("_FakeDT", (), {"now": staticmethod(lambda tz: _NOW)}),
         )
 
+        from app.jobs.runtime import _adapt_zero_arg
+
         rt = JobRuntime(
             database_url="postgresql://stub/stub",
-            invokers={"prereq_unmet_job": lambda: None},  # type: ignore[dict-item]
+            invokers={"prereq_unmet_job": _adapt_zero_arg(lambda: None)},  # type: ignore[dict-item]
         )
         rt._catch_up()
         rt._manual_executor.shutdown(wait=True)
@@ -802,7 +892,7 @@ class TestScheduledFirePrerequisite:
         # Stub record_job_skip.
         monkeypatch.setattr(
             "app.jobs.runtime.record_job_skip",
-            lambda _conn, _name, _reason: 0,
+            lambda _conn, _name, _reason, **_kw: 0,
         )
 
         # Stub psycopg.connect for the prerequisite check.
@@ -813,7 +903,9 @@ class TestScheduledFirePrerequisite:
         monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_PREREQ_UNMET_JOB])
 
         rt = _make_runtime({"prereq_unmet_job": invoker})
-        wrapped = rt._wrap_invoker("prereq_unmet_job", invoker)
+        from app.jobs.runtime import _adapt_zero_arg
+
+        wrapped = rt._wrap_invoker("prereq_unmet_job", _adapt_zero_arg(invoker))
         wrapped()
         assert invocations == []  # invoker was NOT called
 
@@ -834,7 +926,10 @@ class TestScheduledFirePrerequisite:
         monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_PREREQ_MET_JOB])
 
         rt = _make_runtime({"prereq_met_job": invoker})
-        wrapped = rt._wrap_invoker("prereq_met_job", invoker)
+        # PR1b-2 widened JobInvoker; adapt for direct _wrap_invoker call.
+        from app.jobs.runtime import _adapt_zero_arg
+
+        wrapped = rt._wrap_invoker("prereq_met_job", _adapt_zero_arg(invoker))
         wrapped()
         assert invocations == [1]
 

@@ -46,6 +46,105 @@ class TestRunJob:
         assert pub.call_count == 0
 
 
+class TestRunJobEnvelope:
+    """PR1b-2 (#1064) — envelope + control + override on POST /jobs/<name>/run."""
+
+    def test_canonical_envelope_publishes_canonical_payload(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request", return_value=11) as pub:
+            resp = client.post(
+                "/jobs/nightly_universe_sync/run",
+                json={"params": {}, "control": {}},
+            )
+        assert resp.status_code == 202
+        kwargs = pub.call_args.kwargs
+        assert kwargs["payload"] == {"params": {}, "control": {}}
+
+    def test_legacy_flat_dict_normalised_to_params(self) -> None:
+        """Pre-PR1b-2 ergonomic shape — entire body becomes params."""
+        # nightly_universe_sync has no declared ParamMetadata, so the only
+        # legitimate flat-dict body is empty. Use an empty body to verify
+        # the legacy → envelope normalisation produces ``{params: {}}``.
+        with patch("app.api.jobs.publish_manual_job_request", return_value=12) as pub:
+            resp = client.post("/jobs/nightly_universe_sync/run", json={})
+        assert resp.status_code == 202
+        kwargs = pub.call_args.kwargs
+        assert kwargs["payload"] == {"params": {}, "control": {}}
+
+    def test_no_body_treated_as_empty_params(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request", return_value=13) as pub:
+            resp = client.post("/jobs/nightly_universe_sync/run")
+        assert resp.status_code == 202
+        kwargs = pub.call_args.kwargs
+        assert kwargs["payload"] == {"params": {}, "control": {}}
+
+    def test_unknown_control_key_400(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request") as pub:
+            resp = client.post(
+                "/jobs/nightly_universe_sync/run",
+                json={"params": {}, "control": {"force_kill": True}},
+            )
+        assert resp.status_code == 400
+        assert "force_kill" in resp.json()["detail"]
+        pub.assert_not_called()
+
+    def test_invalid_param_400(self) -> None:
+        """ParamValidationError → 400 (not 500)."""
+        with patch("app.api.jobs.publish_manual_job_request") as pub:
+            resp = client.post(
+                "/jobs/nightly_universe_sync/run",
+                json={"params": {"unknown_field": "x"}},
+            )
+        assert resp.status_code == 400
+        assert "unknown" in resp.json()["detail"].lower()
+        pub.assert_not_called()
+
+    def test_query_param_override_propagates_to_payload(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request", return_value=14) as pub:
+            resp = client.post(
+                "/jobs/nightly_universe_sync/run?override_bootstrap_gate=true",
+                json={"params": {}},
+            )
+        assert resp.status_code == 202
+        kwargs = pub.call_args.kwargs
+        assert kwargs["payload"]["control"]["override_bootstrap_gate"] is True
+
+    def test_body_override_propagates_to_payload(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request", return_value=15) as pub:
+            resp = client.post(
+                "/jobs/nightly_universe_sync/run",
+                json={"params": {}, "control": {"override_bootstrap_gate": True}},
+            )
+        assert resp.status_code == 202
+        kwargs = pub.call_args.kwargs
+        assert kwargs["payload"]["control"]["override_bootstrap_gate"] is True
+
+    def test_non_dict_body_400(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request") as pub:
+            resp = client.post("/jobs/nightly_universe_sync/run", json=[1, 2, 3])
+        assert resp.status_code == 400
+        pub.assert_not_called()
+
+    def test_envelope_params_non_dict_400(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request") as pub:
+            resp = client.post(
+                "/jobs/nightly_universe_sync/run",
+                json={"params": "not an object", "control": {}},
+            )
+        assert resp.status_code == 400
+        pub.assert_not_called()
+
+    def test_override_must_be_strict_bool_400(self) -> None:
+        """Codex pre-push round 2 BLOCKING — truthy strings cannot grant override."""
+        with patch("app.api.jobs.publish_manual_job_request") as pub:
+            resp = client.post(
+                "/jobs/nightly_universe_sync/run",
+                json={"params": {}, "control": {"override_bootstrap_gate": "true"}},
+            )
+        assert resp.status_code == 400
+        assert "boolean" in resp.json()["detail"].lower()
+        pub.assert_not_called()
+
+
 class TestListJobRequests:
     """Smoke for the new GET /jobs/requests endpoint (#719)."""
 

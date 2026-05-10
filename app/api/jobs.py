@@ -49,6 +49,10 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.jobs.runtime import VALID_JOB_NAMES
+from app.services.processes.param_metadata import (
+    ParamValidationError,
+    validate_job_params,
+)
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request
 
 logger = logging.getLogger(__name__)
@@ -128,13 +132,32 @@ class JobRunQueuedResponse(BaseModel):
     request_id: int
 
 
+# #1064 PR1b-2 — control allow-list. Any other key on ``body.control``
+# is a 400. Keep this tight: every entry is an operator-control flag the
+# dispatcher knows how to interpret. Adding a key requires a matching
+# dispatcher branch, otherwise the flag silently no-ops and the
+# operator's intent is lost.
+_ALLOWED_CONTROL_KEYS: frozenset[str] = frozenset({"override_bootstrap_gate"})
+
+
 @router.post(
     "/{job_name}/run",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=JobRunQueuedResponse,
     dependencies=[Depends(require_session_or_service_token)],
 )
-def run_job(job_name: str, request: Request) -> Response:
+async def run_job(
+    job_name: str,
+    request: Request,
+    override_bootstrap_gate: bool = Query(
+        default=False,
+        description=(
+            "Operator escape hatch — when true, the bootstrap_state "
+            "gate is bypassed for this run and a decision_audit row "
+            "is written. Equivalent to body.control.override_bootstrap_gate."
+        ),
+    ),
+) -> Response:
     """Publish a manual run of *job_name* to the durable queue.
 
     The jobs process picks the request up via NOTIFY (or its 5s poll
@@ -145,6 +168,32 @@ def run_job(job_name: str, request: Request) -> Response:
     Validates ``job_name`` against the imported invoker registry
     BEFORE the INSERT — unknown names return 404 and never write a
     queue row.
+
+    Body envelope (#1064 PR1b-2):
+
+    ::
+
+        {
+          "params":  { ... validated job params ... },
+          "control": { "override_bootstrap_gate": true }   // optional
+        }
+
+    Legacy callers POSTing a flat dict (e.g. ``{"start_date": "..."}``)
+    are normalised to ``{"params": <body>, "control": {}}`` BEFORE
+    validation so existing operator scripts keep working without code
+    changes. ``params`` flows to the invoker AND
+    ``job_runs.params_snapshot``; ``control`` is consumed by the
+    dispatcher only and never reaches the invoker.
+
+    Validation:
+
+    * ``params`` is run through ``validate_job_params(allow_internal_keys=False)``.
+      Failures raise 400 with the offending field name.
+    * ``control`` keys are validated against
+      ``_ALLOWED_CONTROL_KEYS``. Unknown keys raise 400.
+    * The ``?override_bootstrap_gate=true`` query param is the
+      ergonomic shortcut for body.control.override_bootstrap_gate; both
+      ORed together drive the dispatcher's gate decision.
     """
     if job_name not in VALID_JOB_NAMES:
         raise HTTPException(
@@ -152,13 +201,127 @@ def run_job(job_name: str, request: Request) -> Response:
             detail=f"unknown job: {job_name}",
         )
 
+    raw_body = await _safe_read_json_body(request)
+    params, control = _normalise_envelope(raw_body)
+
+    try:
+        validated_params = validate_job_params(
+            job_name,
+            params,
+            allow_internal_keys=False,
+        )
+    except ParamValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    unknown_control = set(control) - _ALLOWED_CONTROL_KEYS
+    if unknown_control:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown control key(s): {sorted(unknown_control)}",
+        )
+
+    # Strict-bool check (Codex pre-push round 2 BLOCKING): truthy
+    # strings ("false", "0", "no") would otherwise grant the override.
+    # Require the JSON value to be exactly the boolean ``true``.
+    body_override_raw = control.get("override_bootstrap_gate", False)
+    if body_override_raw is not False and body_override_raw is not True:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="control.override_bootstrap_gate must be a boolean",
+        )
+    body_override = body_override_raw is True
+    # Query-param shortcut + body flag OR together — either path the
+    # operator chose surfaces in the durable payload.
+    effective_override = override_bootstrap_gate or body_override
+    canonical_control: dict[str, Any] = dict(control)
+    if effective_override:
+        canonical_control["override_bootstrap_gate"] = True
+
+    payload: dict[str, Any] = {
+        "params": validated_params,
+        "control": canonical_control,
+    }
+
     requested_by = _identify_requestor(request)
-    request_id = publish_manual_job_request(job_name, requested_by=requested_by)
+    request_id = publish_manual_job_request(
+        job_name,
+        requested_by=requested_by,
+        payload=payload,
+    )
     return Response(
         content=JobRunQueuedResponse(request_id=request_id).model_dump_json(),
         media_type="application/json",
         status_code=status.HTTP_202_ACCEPTED,
     )
+
+
+async def _safe_read_json_body(request: Request) -> Any:
+    """Read the request body as JSON, returning ``{}`` on empty body.
+
+    A POST with no body is the legitimate "no params" path — every
+    job that does not declare ``ParamMetadata`` accepts an empty
+    dict. We do not want to require operators to send ``{}`` to
+    trigger such jobs.
+    """
+    raw = await request.body()
+    if not raw:
+        return {}
+    try:
+        import json
+
+        return json.loads(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"request body must be valid JSON: {exc}",
+        ) from exc
+
+
+def _normalise_envelope(raw_body: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Normalise the request body into ``(params, control)``.
+
+    Two accepted shapes:
+
+    1. Canonical envelope: ``{"params": {...}, "control": {...}}``.
+       Either key may be omitted (treated as ``{}``).
+    2. Legacy flat dict: ``{"start_date": "..."}`` etc. — the entire
+       body is treated as ``params`` with empty ``control``. This
+       keeps operator scripts that predate the envelope working.
+
+    Disambiguation: a body containing ``"params"`` OR ``"control"``
+    keys is interpreted as the canonical envelope; otherwise the
+    legacy flat-dict path is taken. A flat dict that legitimately
+    has a ``params`` field collides with the envelope shape — that
+    collision is acceptable for PR1b-2 because no current job's
+    ``ParamMetadata`` declares a param named ``params`` or
+    ``control``.
+
+    Raises 400 on any non-dict body (lists, strings, numbers).
+    """
+    if not isinstance(raw_body, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"request body must be a JSON object (got {type(raw_body).__name__})",
+        )
+
+    has_envelope_keys = "params" in raw_body or "control" in raw_body
+    if has_envelope_keys:
+        params = raw_body.get("params", {})
+        control = raw_body.get("control", {})
+        if not isinstance(params, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="body.params must be a JSON object",
+            )
+        if not isinstance(control, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="body.control must be a JSON object",
+            )
+        return dict(params), dict(control)
+
+    # Legacy flat-dict — entire body is params.
+    return dict(raw_body), {}
 
 
 def _identify_requestor(request: Request) -> str:

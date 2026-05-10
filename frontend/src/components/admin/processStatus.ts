@@ -110,6 +110,8 @@ export const REASON_TOOLTIP: Record<TriggerConflictReason, string> = {
     "Sweeps are read-only — trigger via the underlying scheduled job.",
   cancel_not_supported:
     "Sweeps have no in-flight state — cancel the underlying scheduled job.",
+  bootstrap_not_complete:
+    "First-install bootstrap is not complete — finish or override before triggering this job.",
 };
 
 const KNOWN_REASONS = new Set<string>(Object.keys(REASON_TOOLTIP));
