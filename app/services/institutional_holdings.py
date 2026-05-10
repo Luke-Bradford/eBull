@@ -957,9 +957,36 @@ def ingest_all_active_filers(
     accession_failures = 0
     first_accession_error: str | None = None
     deadline_hit = False
+    cancelled_by_operator = False
     filers_attempted = 0
+    # PR3d #1064 follow-up — poll the bootstrap cancel signal between
+    # filers. The 13F-HR universe is ~11k filers @ ~30s each; a
+    # cooperative cancel from the operator's modal lands within one
+    # filer-iteration (~30s) instead of waiting on the soft 6h deadline.
+    # Outside a bootstrap dispatch the contextvar is unset and the
+    # helper short-circuits to False, so the standalone weekly sweep
+    # and operator manual-trigger paths are unaffected.
+    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+
     try:
         for cik in ciks:
+            # Cancel ranks above deadline: the operator-cancel branch
+            # raises BootstrapStageCancelled to flip the bootstrap_stage
+            # to ``cancelled``, while deadline returns normally
+            # (status='success' on bootstrap_stage, partial in
+            # data_ingestion_runs). If both signals fire on the same
+            # iteration, taking the deadline branch first would silently
+            # treat the cancel as "success — incremental progress" and
+            # the bootstrap row would never reach ``cancelled``. Codex
+            # pre-push round 1.
+            if bootstrap_cancel_requested():
+                cancelled_by_operator = True
+                logger.info(
+                    "13F ingest: cancel signal observed after %d/%d filers; bookkeeping then raising",
+                    filers_attempted,
+                    len(ciks),
+                )
+                break
             if deadline_ts is not None and time.monotonic() >= deadline_ts:
                 deadline_hit = True
                 logger.info(
@@ -1003,7 +1030,12 @@ def ingest_all_active_filers(
         # crash-only `failed` branch so an interrupted sweep with
         # incidental per-filer crashes is correctly classified as
         # resumable partial work.
-        if deadline_hit:
+        # Cancel + deadline both produce resumable-partial state; cancel
+        # ranks above deadline so the audit trail names the operator
+        # action rather than a clock that never actually expired.
+        if cancelled_by_operator:
+            status = "partial"
+        elif deadline_hit:
             status = "partial"
         elif crash_error and not summaries:
             status = "failed"
@@ -1030,6 +1062,8 @@ def ingest_all_active_filers(
             # Surface the deadline interruption explicitly so the
             # operator knows the next sweep should resume the tail.
             error_parts.append(f"deadline reached after {filers_attempted}/{len(ciks)} filers")
+        if cancelled_by_operator:
+            error_parts.append(f"cancelled by operator after {filers_attempted}/{len(ciks)} filers")
         finish_ingestion_run(
             conn,
             run_id=run_id,
@@ -1039,6 +1073,19 @@ def ingest_all_active_filers(
             error="; ".join(error_parts) or None,
         )
         conn.commit()
+
+    if cancelled_by_operator:
+        # Raise after bookkeeping so data_ingestion_runs records the
+        # partial state. The orchestrator's _run_one_stage catches
+        # BootstrapStageCancelled and writes a ``cancelled`` row to
+        # bootstrap_stages (PR3c #1093 status); outside bootstrap the
+        # contextvar guard means we never enter this branch.
+        from app.services.bootstrap_state import BootstrapStageCancelled
+
+        raise BootstrapStageCancelled(
+            f"13F quarterly sweep cancelled by operator after {filers_attempted}/{len(ciks)} filers",
+            stage_key="sec_13f_quarterly_sweep",
+        )
 
     return summaries
 
