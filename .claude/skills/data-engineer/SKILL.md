@@ -594,3 +594,76 @@ Every job in `SCHEDULED_JOBS` declares a `prerequisite: PrerequisiteFn | None`. 
 - **CI pytest job dropped (#928)**: pre-push hook is sole test gate.
 - **AS-OF semantics**: `as_of_date` everywhere = period end, never fetch time. `ingested_at` is system-time watermark for repair sweep. `known_from`/`known_to` are valid-time. Don't mix.
 - **N-PORT validation cliff (#932)**: EdgarTools' Pydantic `FundReport.parse_fund_xml` rejects synthetic test fixtures the bespoke parser tolerates. Bespoke stdlib-ElementTree parser remains shipped; rewrite parked.
+
+## 7. Admin / ETL page — operator UX FAQ
+
+This section is the answer key for "the admin processes page should behave like X — does it?" questions. Operator design intent (locked 2026-05-10):
+
+### 7.1 Bootstrap-incomplete state — visibility
+
+**Question:** "Bootstrap is in `partial_error` / `running` / not `complete`. Why am I seeing every other category disabled? They shouldn't even be on screen yet."
+
+**Answer:** Operator decision — when `bootstrap_state.status != 'complete'`, the ProcessesTable hides every non-bootstrap category. Bootstrap is the only row visible, expanded to show its child stages. Other lanes (universe / candles / sec / ownership / fundamentals / ops / ai) are not just disabled — they are filtered out of the list entirely so the operator's only path forward is the bootstrap row.
+
+Implementation surface: FE filter at `frontend/src/pages/AdminPage.tsx` or `useProcesses` consumer; BE `list_processes` continues returning all rows (BE stays mechanism-agnostic). The gate lives in the FE so bootstrap-as-overlay behaviour can change later without a schema migration.
+
+### 7.2 Bootstrap stages — schedules
+
+**Question:** "Why do bootstrap stages show a cadence? They're not scheduled."
+
+**Answer:** They aren't. Bootstrap stages are a fixed sequence (init → etoro → sec_rate → sec_bulk_download → db lanes) declared in `_BOOTSTRAP_STAGE_SPECS`. They run when the orchestrator runs, period. Any cadence rendered next to a stage row is a FE bug. Stages render with a status indicator only ("pending" / "running" / "complete" / "failed" / "cancelled"); `cadence_human` / `cadence_cron` / `next_fire_at` must be omitted at render-time for `mechanism === 'bootstrap'`.
+
+### 7.3 Bootstrap row — action verbs
+
+**Question:** "The action buttons say 'Iterate' and 'Full-wash'. What do those mean for bootstrap?"
+
+**Answer:** Wrong labels for bootstrap. Operator-locked verbs:
+
+| Mechanism | Iterate label | Full-wash label |
+|---|---|---|
+| `scheduled_job` | "Iterate" (catch up since watermark) | "Full-wash" (reset watermark + re-fetch) |
+| `bootstrap` | **"Re-run failed"** (resume incomplete + failed stages from where they stopped) | **"Re-run all"** (reset every stage to pending; full first-install replay) |
+| `ingest_sweep` | (read-only — no buttons) | (read-only — no buttons) |
+
+The underlying mechanics map: bootstrap "Re-run failed" = current `iterate` mode (`reset_failed_stages_for_retry` path); "Re-run all" = current `full_wash` mode (`start_run` flips bootstrap_state + every stage to pending). Only the labels change, not the fence-row + advisory-lock plumbing.
+
+### 7.4 Cancel — bootstrap level wraps the running stages
+
+**Question:** "Cancel today seems to be per-job. Bootstrap is N stages — I want one cancel that takes down whatever's running underneath."
+
+**Answer:** Operator-locked: the bootstrap row's Cancel button is the canonical cancel for the entire run. Clicking it sets `bootstrap_runs.cancel_requested_at` (today already does this for the bootstrap process_id). The cancel signal must propagate to whichever stage's job is actively running — that propagation is the work in PR7 (#1064 follow-up sequence). Today the orchestrator checks `cancel_requested_at` between stages but does NOT signal a stage that's mid-flight. PR7 plumbs the signal through `_invoker_request_context` so the stage's checkpoint loop sees it and exits cooperatively.
+
+UX expectation: when the bootstrap row says "running" and a stage is mid-flight, clicking Cancel on the bootstrap row should:
+1. Mark `bootstrap_runs.cancel_requested_at`.
+2. Signal the running stage (cooperative — no SIGKILL).
+3. Stage exits at next checkpoint, marks itself `cancelled` (NOT `error` — see #1093).
+4. Orchestrator sees the cancel between iterations, marks the run `cancelled`, every pending stage rolls forward as not-attempted.
+
+`terminate` (SIGKILL) mode is hidden behind the More disclosure on the bootstrap row — same as scheduled jobs (#1092 fix wires the modal selection through to `cancel_mode`; today hardcoded `cooperative` at `bootstrap_state.py:742`).
+
+### 7.5 Cancelled vs errored stages
+
+**Question:** "After cancel, all the stages went red. They didn't error — I cancelled them. The Timeline doesn't tell me which is which."
+
+**Answer:** Today `mark_run_cancelled` sweeps incomplete stages to `status='error'`. Wrong — they were never attempted (or were cooperatively interrupted). Operator-locked: cancelled stages need their own status value. Two paths considered:
+
+1. **Tone-only synthesis (FE):** keep `status='error'` in DB but tone the row gray when the parent run is `cancelled`. Cheap. Loses the distinction in any direct DB query.
+2. **New `status='cancelled'` on `bootstrap_stages`:** schema migration. Surfaces the distinction everywhere — FE, audit queries, runbook tooling. Costlier today.
+
+Path 2 is the correct one. Filed as #1093. Tone synthesis is a stopgap if #1093 takes more than a sprint.
+
+### 7.6 Why is everything on the page disabled when I just want to fix the bootstrap?
+
+**Answer:** Two paths are conflated:
+
+1. **Bootstrap-state gate** (`PR1b` / `PR1b-2`): when bootstrap != `complete`, scheduled jobs are gated — both scheduled fires AND manual triggers are rejected with `bootstrap_not_complete` reason. This is correct: you don't want `daily_candle_refresh` running while bootstrap is partway through `init`. Manual override exists (`?override_bootstrap_gate=true` + `decision_audit` audit row) for triage.
+
+2. **FE rendering of disabled rows** (current bug): the page shows every category, all greyed out, with the "rejected" tooltip. Operator-correct UX hides them entirely (§7.1) — operator's sole path forward when bootstrap is broken should be the bootstrap row's "Re-run failed" / "Re-run all" buttons.
+
+Today's UI shows you the locked door with a "no entry" sign on every category. The fix shows you only the bootstrap door. The gate logic doesn't change — only the rendering.
+
+### 7.7 First-install bootstrap drains slowly — what's happening?
+
+**Answer:** SEC bulk-download stages (12-15 in the sequence) fetch ~12,000 SEC per-CIK pages at a 10-req/s rate-limit. The bootstrap's `sec_first_install_drain` stage (#909 / PR1c) is the long pole — bounded by SEC's published rate limit, not eBull. Re-run all on a fresh DB is roughly 20+ minutes of bandwidth.
+
+Operator-helpful surface (deferred, NOT scheduled): a pre-flight estimate "this will issue ~12,000 SEC requests over ~20 minutes" before kick-off. Tracked as a future operator-UX ticket; not blocking PR7.
