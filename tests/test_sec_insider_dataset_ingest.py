@@ -406,3 +406,74 @@ class TestIngestInsiderDatasetArchive:
 
         assert result.rows_written == 0
         assert result.rows_skipped_unresolved_cik == 1
+
+    def test_share_class_siblings_both_receive_observations(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """#1117 — GOOG + GOOGL co-bind one CIK; both must receive
+        insider observations. Pre-#1117 the dict-collapse kept only
+        the last-seen sibling.
+        """
+        iid_goog = _seed_universe(ebull_test_conn, symbol="GOOG", cik_padded="0001652044")
+        iid_googl = _seed_universe(ebull_test_conn, symbol="GOOGL", cik_padded="0001652044")
+
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000099",
+                    "ISSUERCIK": "1652044",
+                    "DOCUMENT_TYPE": "4",
+                    "FILING_DATE": "2025-11-14",
+                    "PERIOD_OF_REPORT": "2025-11-12",
+                },
+            ],
+            owners=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000099",
+                    "RPTOWNERCIK": "1234567",
+                    "RPTOWNERNAME": "Pichai Sundar",
+                    "RPTOWNER_RELATIONSHIP": "Officer",
+                },
+            ],
+            transactions=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000099",
+                    "NONDERIV_TRANS_SK": "1",
+                    "TRANS_DATE": "2025-11-12",
+                    "SHRS_OWND_FOLWNG_TRANS": "5000",
+                },
+            ],
+            holdings=[],
+        )
+        archive_path = tmp_path / "form345.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_insider_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        # 1 transaction × 1 owner × 2 siblings = 2 rows written.
+        assert result.rows_written == 2
+        assert result.rows_skipped_unresolved_cik == 0
+        assert {iid_goog, iid_googl} <= result.touched_instrument_ids
+
+        with ebull_test_conn.cursor() as cur:
+            for iid, label in ((iid_goog, "GOOG"), (iid_googl, "GOOGL")):
+                cur.execute(
+                    """
+                    SELECT holder_name, source, shares
+                    FROM ownership_insiders_observations
+                    WHERE instrument_id = %s
+                    """,
+                    (iid,),
+                )
+                row = cur.fetchone()
+                assert row is not None, f"{label} missing observation row"
+                assert row[0] == "Pichai Sundar"
+                assert row[1] == "form4"
+                assert row[2] == Decimal("5000.0000")

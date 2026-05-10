@@ -93,9 +93,15 @@ def _cik_from_filename(name: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _load_cik_to_instrument(conn: psycopg.Connection[Any]) -> dict[str, int]:
-    """Return ``{cik_padded: instrument_id}`` for every CIK-mapped instrument."""
-    out: dict[str, int] = {}
+def _load_cik_to_instrument(conn: psycopg.Connection[Any]) -> dict[str, list[int]]:
+    """Return ``{cik_padded: [instrument_id, ...]}`` for every CIK-mapped instrument.
+
+    Multimap shape — share-class siblings (GOOG/GOOGL, BRK.A/BRK.B) co-bind
+    a single SEC CIK per #1102. Collapsing to ``dict[str, int]`` would
+    silently drop one sibling on every bulk run, leaving it without
+    fundamentals.
+    """
+    out: dict[str, list[int]] = {}
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -107,7 +113,7 @@ def _load_cik_to_instrument(conn: psycopg.Connection[Any]) -> dict[str, int]:
         for row in cur.fetchall():
             instrument_id, identifier = row
             cik = str(identifier).zfill(10)
-            out[cik] = int(instrument_id)
+            out.setdefault(cik, []).append(int(instrument_id))
     return out
 
 
@@ -115,7 +121,7 @@ def ingest_companyfacts_archive(
     *,
     conn: psycopg.Connection[Any],
     archive_path: Path,
-    cik_to_instrument: dict[str, int] | None = None,
+    cik_to_instrument: dict[str, list[int]] | None = None,
 ) -> CompanyFactsIngestResult:
     """Walk every ``CIK<10>.json`` entry in ``archive_path`` and upsert
     XBRL facts into ``financial_facts_raw`` for matching universe instruments.
@@ -157,17 +163,18 @@ def ingest_companyfacts_archive(
                 if cik is None:
                     continue
                 result.archive_entries_seen += 1
-                instrument_id = cik_to_instrument.get(cik)
-                if instrument_id is None:
+                matched_instruments = cik_to_instrument.get(cik, [])
+                if not matched_instruments:
                     result.archive_entries_skipped_universe_gap += 1
                     continue
-                result.instruments_matched += 1
 
                 # Per-CIK savepoint: a parse error or DB-write failure
                 # for one CIK must not abort the surrounding
                 # transaction. Without this, a single corrupted entry
                 # poisons the rest of the archive (Codex pre-push
-                # round 1, finding 3).
+                # round 1, finding 3). Share-class siblings on the
+                # same CIK share one savepoint — failure rolls back
+                # all sibling writes for that entry together (#1117).
                 try:
                     with conn.transaction():
                         try:
@@ -186,14 +193,16 @@ def ingest_companyfacts_archive(
                         if not facts:
                             raise _SkipEntry  # roll back savepoint cleanly
 
-                        upserted, skipped = upsert_facts_for_instrument(
-                            conn,
-                            instrument_id=instrument_id,
-                            facts=facts,
-                            ingestion_run_id=run_id,
-                        )
-                        result.facts_upserted += upserted
-                        result.facts_skipped += skipped
+                        for instrument_id in matched_instruments:
+                            result.instruments_matched += 1
+                            upserted, skipped = upsert_facts_for_instrument(
+                                conn,
+                                instrument_id=instrument_id,
+                                facts=facts,
+                                ingestion_run_id=run_id,
+                            )
+                            result.facts_upserted += upserted
+                            result.facts_skipped += skipped
                 except _SkipEntry:
                     # Savepoint already rolled back; advance to next entry.
                     continue

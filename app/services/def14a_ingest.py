@@ -312,8 +312,7 @@ def _upsert_holding(
                 %(name)s, %(role)s, %(shares)s, %(pct)s,
                 %(as_of)s
             )
-            ON CONFLICT (accession_number, holder_name) DO UPDATE SET
-                instrument_id = EXCLUDED.instrument_id,
+            ON CONFLICT (instrument_id, accession_number, holder_name) DO UPDATE SET
                 issuer_cik = EXCLUDED.issuer_cik,
                 holder_role = EXCLUDED.holder_role,
                 shares = EXCLUDED.shares,

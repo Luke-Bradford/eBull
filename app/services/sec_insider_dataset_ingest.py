@@ -62,9 +62,15 @@ class InsiderIngestResult:
 # ---------------------------------------------------------------------------
 
 
-def _load_cik_to_instrument(conn: psycopg.Connection[Any]) -> dict[str, int]:
-    """Return ``{cik_padded: instrument_id}`` for every CIK-mapped instrument."""
-    out: dict[str, int] = {}
+def _load_cik_to_instrument(conn: psycopg.Connection[Any]) -> dict[str, list[int]]:
+    """Return ``{cik_padded: [instrument_id, ...]}`` for every CIK-mapped instrument.
+
+    Multimap shape — share-class siblings (GOOG/GOOGL, BRK.A/BRK.B) co-bind
+    a single SEC CIK per #1102. Collapsing to ``dict[str, int]`` would
+    silently drop one sibling on every bulk run, leaving it without
+    insider observations.
+    """
+    out: dict[str, list[int]] = {}
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -76,7 +82,7 @@ def _load_cik_to_instrument(conn: psycopg.Connection[Any]) -> dict[str, int]:
         for row in cur.fetchall():
             instrument_id, identifier = row
             cik = str(identifier).zfill(10)
-            out[cik] = int(instrument_id)
+            out.setdefault(cik, []).append(int(instrument_id))
     return out
 
 
@@ -237,7 +243,7 @@ def ingest_insider_dataset_archive(
     *,
     conn: psycopg.Connection[Any],
     archive_path: Path,
-    cik_to_instrument: dict[str, int] | None = None,
+    cik_to_instrument: dict[str, list[int]] | None = None,
     ingest_run_id: UUID | None = None,
 ) -> InsiderIngestResult:
     """Walk one Insider Transactions Data Set ZIP and append observations.
@@ -297,8 +303,8 @@ def ingest_insider_dataset_archive(
 
             issuer_cik_raw = sub.get("ISSUERCIK") or sub.get("ISSUER_CIK") or ""
             issuer_cik = str(issuer_cik_raw).strip().zfill(10) if issuer_cik_raw.strip() else ""
-            instrument_id = cik_to_instrument.get(issuer_cik) if issuer_cik else None
-            if instrument_id is None:
+            matched_instruments = cik_to_instrument.get(issuer_cik, []) if issuer_cik else []
+            if not matched_instruments:
                 result.rows_skipped_unresolved_cik += 1
                 continue
 
@@ -320,21 +326,23 @@ def ingest_insider_dataset_archive(
             trans_sk = (trans.get("NONDERIV_TRANS_SK") or trans.get("NON_DERIV_TRANS_SK") or "").strip() or "0"
             source_document_id = f"{accn}:NDT:{trans_sk}"
 
-            _write_for_owners(
-                conn,
-                owner_list=owner_list,
-                instrument_id=instrument_id,
-                issuer_cik=issuer_cik,
-                accn=accn,
-                source=source,
-                source_document_id=source_document_id,
-                source_field=trans_sk if trans_sk != "0" else None,
-                filed_at=filed_at,
-                period_end=period_end,
-                ingest_run_id=ingest_run_id,
-                shares=shares,
-                result=result,
-            )
+            # Fan-out across share-class siblings on the same CIK (#1117).
+            for instrument_id in matched_instruments:
+                _write_for_owners(
+                    conn,
+                    owner_list=owner_list,
+                    instrument_id=instrument_id,
+                    issuer_cik=issuer_cik,
+                    accn=accn,
+                    source=source,
+                    source_document_id=source_document_id,
+                    source_field=trans_sk if trans_sk != "0" else None,
+                    filed_at=filed_at,
+                    period_end=period_end,
+                    ingest_run_id=ingest_run_id,
+                    shares=shares,
+                    result=result,
+                )
 
         # ─── Secondary write path: NONDERIV_HOLDING ─────────────
         # For accessions WITHOUT transactions (Form 3 initial-holdings
@@ -354,8 +362,8 @@ def ingest_insider_dataset_archive(
 
             issuer_cik_raw = sub.get("ISSUERCIK") or sub.get("ISSUER_CIK") or ""
             issuer_cik = str(issuer_cik_raw).strip().zfill(10) if issuer_cik_raw.strip() else ""
-            instrument_id = cik_to_instrument.get(issuer_cik) if issuer_cik else None
-            if instrument_id is None:
+            matched_instruments = cik_to_instrument.get(issuer_cik, []) if issuer_cik else []
+            if not matched_instruments:
                 result.rows_skipped_unresolved_cik += 1
                 continue
 
@@ -378,21 +386,23 @@ def ingest_insider_dataset_archive(
             ).strip() or "0"
             source_document_id = f"{accn}:NDH:{holding_sk}"
 
-            _write_for_owners(
-                conn,
-                owner_list=owner_list,
-                instrument_id=instrument_id,
-                issuer_cik=issuer_cik,
-                accn=accn,
-                source=source,
-                source_document_id=source_document_id,
-                source_field=holding_sk if holding_sk != "0" else None,
-                filed_at=filed_at,
-                period_end=period_end,
-                ingest_run_id=ingest_run_id,
-                shares=shares,
-                result=result,
-            )
+            # Fan-out across share-class siblings on the same CIK (#1117).
+            for instrument_id in matched_instruments:
+                _write_for_owners(
+                    conn,
+                    owner_list=owner_list,
+                    instrument_id=instrument_id,
+                    issuer_cik=issuer_cik,
+                    accn=accn,
+                    source=source,
+                    source_document_id=source_document_id,
+                    source_field=holding_sk if holding_sk != "0" else None,
+                    filed_at=filed_at,
+                    period_end=period_end,
+                    ingest_run_id=ingest_run_id,
+                    shares=shares,
+                    result=result,
+                )
     return result
 
 

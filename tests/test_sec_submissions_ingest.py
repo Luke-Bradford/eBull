@@ -233,3 +233,81 @@ class TestIngestSubmissionsArchive:
 
         assert result.parse_errors == 1
         assert result.filings_upserted == 0
+
+    def test_share_class_siblings_both_receive_filings_and_profile(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """#1117 — GOOG + GOOGL co-bind one CIK; both must receive
+        filings + entity profile.
+        """
+        iid_goog = _seed_universe(ebull_test_conn, symbol="GOOG", cik_padded="0001652044")
+        iid_googl = _seed_universe(ebull_test_conn, symbol="GOOGL", cik_padded="0001652044")
+
+        # Reuse AAPL submissions payload shape — _normalise_submissions_block
+        # is content-agnostic; we care that the same archive entry
+        # produces filings rows for both siblings.
+        archive_bytes = _build_archive({"0001652044": _aapl_payload()})
+        archive_path = tmp_path / "submissions.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_submissions_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+        )
+        ebull_test_conn.commit()
+
+        assert result.archive_entries_seen == 1
+        assert result.instruments_matched == 2
+        assert result.parse_errors == 0
+        # 2 filings × 2 siblings = 4 filings; 1 profile × 2 siblings = 2.
+        assert result.filings_upserted == 4
+        assert result.profiles_upserted == 2
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM filing_events WHERE instrument_id = %s AND provider = 'sec'",
+                (iid_goog,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 2, f"GOOG expected 2 filings, got {row[0]}"
+
+            cur.execute(
+                "SELECT COUNT(*) FROM filing_events WHERE instrument_id = %s AND provider = 'sec'",
+                (iid_googl,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 2, f"GOOGL expected 2 filings, got {row[0]}"
+
+            # Each sibling carries its own ticker on the filing_events
+            # row — Codex review BLOCKING for PR #1030 (the canonical
+            # symbol must NOT be a stringified instrument_id, and must
+            # NOT cross-contaminate between siblings).
+            cur.execute(
+                "SELECT raw_payload_json->>'symbol' FROM filing_events "
+                "WHERE instrument_id = %s LIMIT 1",
+                (iid_goog,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == "GOOG", f"GOOG row carrying wrong symbol {row[0]!r}"
+
+            cur.execute(
+                "SELECT raw_payload_json->>'symbol' FROM filing_events "
+                "WHERE instrument_id = %s LIMIT 1",
+                (iid_googl,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == "GOOGL", f"GOOGL row carrying wrong symbol {row[0]!r}"
+
+            cur.execute(
+                "SELECT COUNT(*) FROM instrument_sec_profile WHERE instrument_id IN (%s, %s)",
+                (iid_goog, iid_googl),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 2, f"expected 2 profiles, got {row[0]}"

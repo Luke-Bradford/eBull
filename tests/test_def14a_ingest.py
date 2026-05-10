@@ -116,7 +116,7 @@ def _seed_filing_event(
             instrument_id, filing_date, filing_type,
             provider, provider_filing_id, primary_document_url
         ) VALUES (%s, %s, %s, 'sec', %s, %s)
-        ON CONFLICT (provider, provider_filing_id) DO NOTHING
+        ON CONFLICT (provider, provider_filing_id, instrument_id) DO NOTHING
         """,
         (instrument_id, filing_date, filing_type, accession, primary_document_url),
     )
