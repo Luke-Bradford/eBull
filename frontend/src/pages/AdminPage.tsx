@@ -359,10 +359,11 @@ function JobsTable({
         <tbody className="divide-y divide-slate-100">
           {items.map((job) => {
             const state = rowState[job.name] ?? { kind: "idle" };
+            const label = job.display_name ?? job.name;
             return (
               <tr key={job.name} className="align-top">
                 <td className="py-2 pr-4">
-                  <div className="font-medium text-slate-700">{job.name}</div>
+                  <div className="font-medium text-slate-700">{label}</div>
                   <div className="text-xs text-slate-500">{job.description}</div>
                 </td>
                 <td className="py-2 pr-4 text-xs text-slate-600">{job.cadence}</td>
@@ -384,6 +385,7 @@ function JobsTable({
                 <td className="py-2 pr-0 text-right">
                   <RunButton
                     name={job.name}
+                    label={label}
                     state={state}
                     onClick={() => onRun(job.name)}
                   />
@@ -399,15 +401,17 @@ function JobsTable({
 
 function RunButton({
   name,
+  label,
   state,
   onClick,
 }: {
   name: string;
+  label: string;
   state: RowState;
   onClick: () => void;
 }) {
   const disabled = state.kind === "running";
-  const label =
+  const buttonLabel =
     state.kind === "running"
       ? "Triggering…"
       : state.kind === "queued"
@@ -426,10 +430,11 @@ function RunButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      aria-label={`Run ${name} now`}
+      aria-label={`Run ${label} now`}
+      data-job-name={name}
       className={`rounded border px-2 py-1 text-xs font-medium disabled:opacity-50 ${tone}`}
     >
-      {label}
+      {buttonLabel}
     </button>
   );
 }

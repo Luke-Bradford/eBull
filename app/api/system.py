@@ -131,6 +131,13 @@ class SystemStatusResponse(BaseModel):
 
 class JobOverviewResponse(BaseModel):
     name: str
+    # Operator-facing label populated from
+    # ``ScheduledJob.display_name`` (registry single-source-of-truth at
+    # ``app/workers/scheduler.py::SCHEDULED_JOBS``). FE renders this in
+    # the legacy "Background tasks" JobsTable + ProblemsPanel failure
+    # copy in place of the raw ``name`` slug. ``None`` falls back to
+    # ``name`` at render time, matching the scheduled_adapter contract.
+    display_name: str | None
     description: str
     cadence: str
     cadence_kind: Literal["every_n_minutes", "hourly", "daily", "weekly", "monthly"]
@@ -261,6 +268,7 @@ def _build_jobs_overview(
         overviews.append(
             JobOverviewResponse(
                 name=job.name,
+                display_name=job.display_name,
                 description=job.description,
                 cadence=job.cadence.label,
                 cadence_kind=job.cadence.kind,

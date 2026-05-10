@@ -326,6 +326,7 @@ describe("ProblemsPanel", () => {
       jobs: [
         {
           name: "test_job",
+          display_name: null,
           description: "test job",
           cadence: "daily",
           cadence_kind: "daily",
@@ -351,6 +352,7 @@ describe("ProblemsPanel", () => {
       jobs: [
         {
           name: "fundamentals_sync",
+          display_name: null,
           description: "",
           cadence: "weekly",
           cadence_kind: "weekly",
@@ -379,6 +381,7 @@ describe("ProblemsPanel", () => {
       jobs: [
         {
           name: "etl/fundamentals_sync",
+          display_name: null,
           description: "",
           cadence: "weekly",
           cadence_kind: "weekly",
@@ -429,6 +432,7 @@ describe("ProblemsPanel", () => {
       jobs: [
         {
           name: "fundamentals_sync",
+          display_name: null,
           description: "",
           cadence: "weekly",
           cadence_kind: "weekly",
