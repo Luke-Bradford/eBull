@@ -66,10 +66,18 @@ def _bind_settings_to_test_db(monkeypatch: pytest.MonkeyPatch) -> str:
     return url
 
 
+# Three stage placeholders that exercise the dispatcher's lane
+# scheduling without binding to any one production stage shape. Each
+# ``job_name`` is a real entry in JOB_NAME_TO_SOURCE so JobLock's
+# source resolver works without the ``test_only_per_name`` escape
+# hatch (which the dispatcher does not wire). Lane choices keep alpha
+# on ``init`` and bravo / charlie on ``sec_rate`` so the
+# alpha→bravo / pending-charlie ordering used by the cancel tests is
+# preserved.
 _SPECS = (
-    StageSpec(stage_key="alpha", stage_order=1, lane="init", job_name="alpha_job"),
-    StageSpec(stage_key="bravo", stage_order=2, lane="sec", job_name="bravo_job"),
-    StageSpec(stage_key="charlie", stage_order=3, lane="sec", job_name="charlie_job"),
+    StageSpec(stage_key="alpha", stage_order=1, lane="init", job_name="nightly_universe_sync"),
+    StageSpec(stage_key="bravo", stage_order=2, lane="sec_rate", job_name="daily_cik_refresh"),
+    StageSpec(stage_key="charlie", stage_order=3, lane="sec_rate", job_name="cusip_universe_backfill"),
 )
 
 
@@ -525,15 +533,15 @@ def test_dispatcher_observes_cancel_at_top_of_loop_and_returns_cancelled(
     runnable = [
         _RunnableStage(
             stage_key="alpha",
-            job_name="alpha_job",
+            job_name="nightly_universe_sync",
             lane="init",
             invoker=lambda _params: calls.append("alpha"),
             requires=(),
         ),
         _RunnableStage(
             stage_key="bravo",
-            job_name="bravo_job",
-            lane="sec",
+            job_name="daily_cik_refresh",
+            lane="sec_rate",
             invoker=lambda _params: calls.append("bravo"),
             requires=("alpha",),
         ),
@@ -587,15 +595,15 @@ def test_dispatcher_observes_cancel_between_batches(
     runnable = [
         _RunnableStage(
             stage_key="alpha",
-            job_name="alpha_job",
+            job_name="nightly_universe_sync",
             lane="init",
             invoker=alpha_invoker,
             requires=(),
         ),
         _RunnableStage(
             stage_key="bravo",
-            job_name="bravo_job",
-            lane="sec",
+            job_name="daily_cik_refresh",
+            lane="sec_rate",
             invoker=bravo_invoker,
             requires=("alpha",),
         ),
@@ -615,9 +623,12 @@ def test_dispatcher_observes_cancel_between_batches(
     assert snap is not None
     by_key = {s.stage_key: s for s in snap.stages}
     assert by_key["alpha"].status == "success"
-    # bravo: was 'pending' when cancel observed; mark_run_cancelled
-    # sweeps pending → error so retry-failed picks it up.
-    assert by_key["bravo"].status == "error"
+    # bravo: was 'pending' when cancel observed. PR3c #1093 split
+    # cancelled out of the legacy ``error`` bucket; mark_run_cancelled
+    # now sweeps pending → cancelled. ``reset_failed_stages_for_retry``
+    # picks up cancelled rows on the next Iterate (covered by
+    # ``test_cancel_then_iterate_resumes_via_reset_failed``).
+    assert by_key["bravo"].status == "cancelled"
     assert read_state(ebull_test_conn).status == "cancelled"
 
 
