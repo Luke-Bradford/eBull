@@ -61,6 +61,50 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   globalThis.ResizeObserver = NoopObserver as unknown as typeof ResizeObserver;
 }
 
+// jsdom 25 + vitest 2 + pool='forks' returns a plain object for
+// `window.localStorage` whose Storage prototype methods are missing
+// (`getItem` / `setItem` / `clear` / `removeItem` / `length` all
+// undefined). The theme tests at `src/lib/theme.test.tsx` and
+// `src/lib/useChartTheme.test.tsx` call `window.localStorage.clear()`
+// in `beforeEach` and crash on
+// `TypeError: window.localStorage.clear is not a function`.
+//
+// Install a minimal in-memory Storage polyfill on window so the
+// production code path (`window.localStorage.getItem(STORAGE_KEY)`
+// in `lib/theme.tsx`) works under tests without per-test mocks.
+// The polyfill resets between tests because the wrapping `Map`
+// instance lives on the per-file module scope and `cleanup()` plus
+// the test-file's own `beforeEach(() => window.localStorage.clear())`
+// keeps state from leaking.
+if (typeof window !== "undefined") {
+  const memory = new Map<string, string>();
+  const polyfill: Storage = {
+    get length(): number {
+      return memory.size;
+    },
+    clear(): void {
+      memory.clear();
+    },
+    getItem(key: string): string | null {
+      return memory.get(key) ?? null;
+    },
+    key(index: number): string | null {
+      return Array.from(memory.keys())[index] ?? null;
+    },
+    removeItem(key: string): void {
+      memory.delete(key);
+    },
+    setItem(key: string, value: string): void {
+      memory.set(key, String(value));
+    },
+  };
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    writable: false,
+    value: polyfill,
+  });
+}
+
 if (typeof window !== "undefined" && typeof window.matchMedia === "undefined") {
   Object.defineProperty(window, "matchMedia", {
     writable: true,
