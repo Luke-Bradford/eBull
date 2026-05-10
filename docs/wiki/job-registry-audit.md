@@ -402,7 +402,7 @@ Notes:
 - Bootstrap orchestration spec: [`docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md`](../superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md)
 - First-install bootstrap spec: [`docs/superpowers/specs/2026-05-07-first-install-bootstrap.md`](../superpowers/specs/2026-05-07-first-install-bootstrap.md)
 - Settled-decisions (process topology #719, cancel UX): [`docs/settled-decisions.md`](../settled-decisions.md)
-- Data-engineer skill (PR0 §10 update target): [`.claude/skills/ebull/data-engineer.md`](../../.claude/skills/ebull/data-engineer.md)
+- Data-engineer skill (PR0 §10 update target): [`.claude/skills/data-engineer/SKILL.md`](../../.claude/skills/data-engineer/SKILL.md)
 - ScheduledJob declarations: [`app/workers/scheduler.py:453`](../../app/workers/scheduler.py#L453)
 - Bootstrap stage declarations: [`app/services/bootstrap_orchestrator.py:202`](../../app/services/bootstrap_orchestrator.py#L202)
 - Bespoke wrappers: [`app/services/bootstrap_orchestrator.py:751,847,897`](../../app/services/bootstrap_orchestrator.py#L751)

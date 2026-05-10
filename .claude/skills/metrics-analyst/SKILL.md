@@ -514,4 +514,4 @@ After backfill, hit the relevant rollup endpoint and confirm the figure renders 
 
 - `.claude/skills/data-sources/sec-edgar.md` — where the source data comes from.
 - `.claude/skills/data-sources/edgartools.md` — the parsing library.
-- `.claude/skills/ebull/data-engineer.md` — schema invariants + write/read patterns.
+- `.claude/skills/data-engineer/SKILL.md` — schema invariants + write/read patterns.
