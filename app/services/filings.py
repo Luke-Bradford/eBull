@@ -271,18 +271,27 @@ def refresh_filings(
     # operator manual-trigger path is unaffected — this same
     # ``refresh_filings`` body powers many non-bootstrap flows.
     from app.services.bootstrap_state import BootstrapStageCancelled
-    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+    from app.services.processes.bootstrap_cancel_signal import (
+        active_bootstrap_stage_key,
+        bootstrap_cancel_requested,
+    )
 
     _cancel_poll_every_n = 50
     iter_index = 0
 
     for instrument_id, identifier_value in resolved.items():
         if iter_index % _cancel_poll_every_n == 0 and bootstrap_cancel_requested():
+            # #1114: read stage_key from contextvar so a future stage
+            # that invokes refresh_filings doesn't misattribute the
+            # cancel to filings_history_seed. The orchestrator's
+            # _run_one_stage uses its OWN local stage_key when writing
+            # the cancelled row, but the exception's stage_key is the
+            # audit-log breadcrumb that names which stage observed it.
             raise BootstrapStageCancelled(
                 f"refresh_filings cancelled by operator after "
                 f"{iter_index}/{len(resolved)} instruments "
                 f"(provider={provider_name}, identifier={identifier_type})",
-                stage_key="filings_history_seed",
+                stage_key=active_bootstrap_stage_key() or "",
             )
         iter_index += 1
         try:

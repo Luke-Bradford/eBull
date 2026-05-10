@@ -966,7 +966,10 @@ def ingest_all_active_filers(
     # Outside a bootstrap dispatch the contextvar is unset and the
     # helper short-circuits to False, so the standalone weekly sweep
     # and operator manual-trigger paths are unaffected.
-    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+    from app.services.processes.bootstrap_cancel_signal import (
+        active_bootstrap_stage_key,
+        bootstrap_cancel_requested,
+    )
 
     try:
         for cik in ciks:
@@ -1082,9 +1085,10 @@ def ingest_all_active_filers(
         # contextvar guard means we never enter this branch.
         from app.services.bootstrap_state import BootstrapStageCancelled
 
+        # #1114: stage_key sourced from contextvar.
         raise BootstrapStageCancelled(
             f"13F quarterly sweep cancelled by operator after {filers_attempted}/{len(ciks)} filers",
-            stage_key="sec_13f_quarterly_sweep",
+            stage_key=active_bootstrap_stage_key() or "",
         )
 
     return summaries

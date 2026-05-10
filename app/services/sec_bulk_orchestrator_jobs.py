@@ -304,7 +304,10 @@ def sec_13f_ingest_from_dataset_job() -> None:
     # boundary; raising on observed cancel preserves whatever ran
     # before the signal landed.
     from app.services.bootstrap_state import BootstrapStageCancelled
-    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+    from app.services.processes.bootstrap_cancel_signal import (
+        active_bootstrap_stage_key,
+        bootstrap_cancel_requested,
+    )
 
     failed_archives: list[str] = []
     total_written = 0
@@ -313,9 +316,10 @@ def sec_13f_ingest_from_dataset_job() -> None:
     touched_ids: set[int] = set()
     for archive in archives:
         if bootstrap_cancel_requested():
+            # #1114: stage_key sourced from contextvar.
             raise BootstrapStageCancelled(
                 f"sec_13f_ingest_from_dataset cancelled by operator after {len(succeeded)}/{len(archives)} archives",
-                stage_key="sec_13f_ingest_from_dataset",
+                stage_key=active_bootstrap_stage_key() or "",
             )
         with psycopg.connect(settings.database_url) as conn:
             try:
@@ -374,9 +378,10 @@ def sec_13f_ingest_from_dataset_job() -> None:
         # stage finish + delete archives + return success while the
         # dispatcher waits for the next stage boundary.
         if bootstrap_cancel_requested():
+            # #1114: stage_key sourced from contextvar.
             raise BootstrapStageCancelled(
                 f"sec_13f_ingest_from_dataset cancelled by operator before refresh of {len(touched_ids)} instruments",
-                stage_key="sec_13f_ingest_from_dataset",
+                stage_key=active_bootstrap_stage_key() or "",
             )
 
         from app.services.ownership_observations import refresh_institutions_current
@@ -385,10 +390,11 @@ def sec_13f_ingest_from_dataset_job() -> None:
         with psycopg.connect(settings.database_url) as conn:
             for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
                 if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
+                    # #1114: stage_key sourced from contextvar.
                     raise BootstrapStageCancelled(
                         f"sec_13f_ingest_from_dataset cancelled by operator after "
                         f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
-                        stage_key="sec_13f_ingest_from_dataset",
+                        stage_key=active_bootstrap_stage_key() or "",
                     )
                 # Per-iteration savepoint — refresh_institutions_current
                 # owns its own ``with conn.transaction()`` (sql/.py:404),
@@ -463,7 +469,10 @@ def sec_insider_ingest_from_dataset_job() -> None:
     # PR3d #1064 follow-up — see sec_13f_ingest_from_dataset_job for
     # the cancel-poll rationale; same pattern applies per-archive.
     from app.services.bootstrap_state import BootstrapStageCancelled
-    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+    from app.services.processes.bootstrap_cancel_signal import (
+        active_bootstrap_stage_key,
+        bootstrap_cancel_requested,
+    )
 
     failed_archives: list[str] = []
     total_written = 0
@@ -471,10 +480,11 @@ def sec_insider_ingest_from_dataset_job() -> None:
     touched_ids: set[int] = set()
     for archive in archives:
         if bootstrap_cancel_requested():
+            # #1114: stage_key sourced from contextvar.
             raise BootstrapStageCancelled(
                 f"sec_insider_ingest_from_dataset cancelled by operator after "
                 f"{len(succeeded)}/{len(archives)} archives",
-                stage_key="sec_insider_ingest_from_dataset",
+                stage_key=active_bootstrap_stage_key() or "",
             )
         with psycopg.connect(settings.database_url) as conn:
             try:
@@ -522,10 +532,11 @@ def sec_insider_ingest_from_dataset_job() -> None:
     if touched_ids:
         # Codex round 1 — cancel poll before + during refresh loop.
         if bootstrap_cancel_requested():
+            # #1114: stage_key sourced from contextvar.
             raise BootstrapStageCancelled(
                 f"sec_insider_ingest_from_dataset cancelled by operator before "
                 f"refresh of {len(touched_ids)} instruments",
-                stage_key="sec_insider_ingest_from_dataset",
+                stage_key=active_bootstrap_stage_key() or "",
             )
 
         from app.services.ownership_observations import refresh_insiders_current
@@ -534,10 +545,11 @@ def sec_insider_ingest_from_dataset_job() -> None:
         with psycopg.connect(settings.database_url) as conn:
             for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
                 if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
+                    # #1114: stage_key sourced from contextvar.
                     raise BootstrapStageCancelled(
                         f"sec_insider_ingest_from_dataset cancelled by operator after "
                         f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
-                        stage_key="sec_insider_ingest_from_dataset",
+                        stage_key=active_bootstrap_stage_key() or "",
                     )
                 try:
                     with conn.transaction():
@@ -606,7 +618,10 @@ def sec_nport_ingest_from_dataset_job() -> None:
     # PR3d #1064 follow-up — see sec_13f_ingest_from_dataset_job for
     # the cancel-poll rationale; same pattern applies per-archive.
     from app.services.bootstrap_state import BootstrapStageCancelled
-    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+    from app.services.processes.bootstrap_cancel_signal import (
+        active_bootstrap_stage_key,
+        bootstrap_cancel_requested,
+    )
 
     failed_archives: list[str] = []
     total_written = 0
@@ -614,9 +629,10 @@ def sec_nport_ingest_from_dataset_job() -> None:
     touched_ids: set[int] = set()
     for archive in archives:
         if bootstrap_cancel_requested():
+            # #1114: stage_key sourced from contextvar.
             raise BootstrapStageCancelled(
                 f"sec_nport_ingest_from_dataset cancelled by operator after {len(succeeded)}/{len(archives)} archives",
-                stage_key="sec_nport_ingest_from_dataset",
+                stage_key=active_bootstrap_stage_key() or "",
             )
         with psycopg.connect(settings.database_url) as conn:
             try:
@@ -668,9 +684,10 @@ def sec_nport_ingest_from_dataset_job() -> None:
     if touched_ids:
         # Codex round 1 — cancel poll before + during refresh loop.
         if bootstrap_cancel_requested():
+            # #1114: stage_key sourced from contextvar.
             raise BootstrapStageCancelled(
                 f"sec_nport_ingest_from_dataset cancelled by operator before refresh of {len(touched_ids)} instruments",
-                stage_key="sec_nport_ingest_from_dataset",
+                stage_key=active_bootstrap_stage_key() or "",
             )
 
         from app.services.ownership_observations import refresh_funds_current
@@ -679,10 +696,11 @@ def sec_nport_ingest_from_dataset_job() -> None:
         with psycopg.connect(settings.database_url) as conn:
             for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
                 if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
+                    # #1114: stage_key sourced from contextvar.
                     raise BootstrapStageCancelled(
                         f"sec_nport_ingest_from_dataset cancelled by operator after "
                         f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
-                        stage_key="sec_nport_ingest_from_dataset",
+                        stage_key=active_bootstrap_stage_key() or "",
                     )
                 try:
                     with conn.transaction():
