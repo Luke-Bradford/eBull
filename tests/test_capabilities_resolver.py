@@ -80,7 +80,9 @@ def _seed_sec_cik(
             INSERT INTO external_identifiers
                 (instrument_id, provider, identifier_type, identifier_value, is_primary)
             VALUES (%s, 'sec', 'cik', %s, %s)
-            ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+            ON CONFLICT (provider, identifier_type, identifier_value, instrument_id)
+                WHERE provider = 'sec' AND identifier_type = 'cik'
+            DO NOTHING
             """,
             (instrument_id, cik, is_primary),
         )
@@ -346,7 +348,9 @@ def test_non_cik_sec_identifier_does_not_augment(
             INSERT INTO external_identifiers
                 (instrument_id, provider, identifier_type, identifier_value, is_primary)
             VALUES (%s, 'sec', 'accession_no', '0001234567-26-000001', TRUE)
-            ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+            ON CONFLICT (provider, identifier_type, identifier_value)
+                WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+            DO NOTHING
             """,
             (960006,),
         )

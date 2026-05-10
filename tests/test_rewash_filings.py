@@ -999,7 +999,9 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
         ) VALUES
             (%s, 'sec', 'cusip', 'OLDCUSIP', FALSE),
             (%s, 'sec', 'cusip', 'NEWCUSIP', FALSE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
         """,
         (old_iid, new_iid),
     )
@@ -1263,7 +1265,9 @@ def test_13f_infotable_apply_replaces_holdings_with_re_resolved_instrument(
         ) VALUES
             (%s, 'sec', 'cusip', 'OLD13FCSP', FALSE),
             (%s, 'sec', 'cusip', 'NEW13FCSP', FALSE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
         """,
         (old_iid, new_iid),
     )
@@ -1359,7 +1363,9 @@ def test_13f_infotable_apply_returns_false_when_cusip_unresolved(
         INSERT INTO external_identifiers (
             instrument_id, provider, identifier_type, identifier_value, is_primary
         ) VALUES (%s, 'sec', 'cusip', 'KNOWNCSP', FALSE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
         """,
         (iid,),
     )
@@ -1474,7 +1480,9 @@ def test_13f_infotable_apply_rescues_tombstoned_accession(
         INSERT INTO external_identifiers (
             instrument_id, provider, identifier_type, identifier_value, is_primary
         ) VALUES (%s, 'sec', 'cusip', 'RESCUECSP', FALSE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
         """,
         (iid,),
     )
@@ -1779,7 +1787,9 @@ def test_13f_infotable_apply_preserves_existing_when_some_cusips_unresolved(
         INSERT INTO external_identifiers (
             instrument_id, provider, identifier_type, identifier_value, is_primary
         ) VALUES (%s, 'sec', 'cusip', 'RESOLVED1', TRUE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
         """,
         (iid_existing_a,),
     )

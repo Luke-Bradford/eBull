@@ -76,7 +76,9 @@ def _seed_cusip_mapping(conn: psycopg.Connection[tuple], *, instrument_id: int, 
             instrument_id, provider, identifier_type, identifier_value, is_primary
         )
         VALUES (%s, 'sec', 'cusip', %s, TRUE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
         """,
         (instrument_id, cusip.upper()),
     )

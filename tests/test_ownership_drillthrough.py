@@ -189,7 +189,9 @@ def test_blockholder_state_counts_partials_with_null_instrument(
         INSERT INTO external_identifiers (
             instrument_id, provider, identifier_type, identifier_value, is_primary
         ) VALUES (%s, 'sec', 'cusip', 'BHCUSIP1', FALSE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
         """,
         (970_007,),
     )
