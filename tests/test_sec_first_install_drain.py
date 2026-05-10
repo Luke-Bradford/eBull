@@ -131,8 +131,10 @@ class TestDrain:
         assert stats.manifest_rows_upserted == 2
         # AAPL recent has two distinct sources: sec_8k + sec_def14a.
         # Each (issuer, instrument_id, source) triple gets one
-        # data_freshness_index row.
-        assert stats.scheduler_rows_seeded >= 2
+        # data_freshness_index row. #959 round 1: pin EXACT count
+        # so a future regression that under- or over-counts the
+        # inline-seeded triples is caught.
+        assert stats.scheduler_rows_seeded == 2
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -318,3 +320,20 @@ class TestSeedFromFilingEvents:
         # ciks_skipped picks up the issuer subject the loop short-circuited.
         assert stats.ciks_skipped >= 1
         assert stats.manifest_rows_upserted >= 1
+        # #959 round 1: the fast path's record_manifest_entry calls
+        # inline-seed data_freshness_index too, and the fast-path
+        # seeder now records into the inline_seeded_triples accumulator.
+        # Pin BOTH the scheduler_rows_seeded counter AND a direct
+        # query against data_freshness_index so a regression in either
+        # the counter wiring or the inline-seed plumbing is caught.
+        assert stats.scheduler_rows_seeded == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT source FROM data_freshness_index
+                WHERE subject_type = 'issuer' AND subject_id = '1701'
+                ORDER BY source
+                """
+            )
+            sources = [row[0] for row in cur.fetchall()]
+        assert sources == ["sec_8k"]
