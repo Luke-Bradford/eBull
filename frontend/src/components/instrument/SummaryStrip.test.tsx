@@ -32,6 +32,7 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
       country: "United States",
       currency: "USD",
       market_cap: "3000000000000",
+      canonical_symbol: null,
     },
     price: {
       current: "200.50",

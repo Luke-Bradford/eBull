@@ -14,7 +14,12 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import {
+  Navigate,
+  useLocation,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 
 import { fetchFilings } from "@/api/filings";
 import {
@@ -473,6 +478,7 @@ function FilingsTab({ instrumentId }: { instrumentId: number }) {
 
 export function InstrumentPage() {
   const { symbol = "" } = useParams<{ symbol: string }>();
+  const location = useLocation();
 
   const summaryAsync = useAsync<InstrumentSummary>(
     () => fetchInstrumentSummary(symbol),
@@ -483,6 +489,27 @@ export function InstrumentPage() {
   if (summaryAsync.error !== null) return <ErrorView error={summaryAsync.error} />;
   if (!summaryAsync.data)
     return <EmptyState title="No data" description={`No data for ${symbol}.`} />;
+
+  // #819: operational-duplicate redirect. When the loaded summary
+  // names a canonical symbol that differs from the URL slug, the
+  // instrument is a ``.RTH``-style variant; the chart / ownership /
+  // fundamentals all live under the canonical row, so redirect there.
+  // ``<Navigate replace>`` blocks further render — the canonical page
+  // mounts fresh on the new URL, no flash of empty variant.
+  //
+  // The CHECK constraint on instruments.canonical_instrument_id rules
+  // out self-loops; an upper-cased symbol comparison handles the
+  // case-mismatch input cleanly. The current search string is
+  // preserved so dashboard drill-ins (``?tab=positions``) survive.
+  const canonical = summaryAsync.data.identity.canonical_symbol;
+  if (canonical && canonical.toUpperCase() !== symbol.toUpperCase()) {
+    return (
+      <Navigate
+        to={`/instrument/${encodeURIComponent(canonical)}${location.search}`}
+        replace
+      />
+    );
+  }
 
   // Per-instrument state (thesis, position, tab, modals) lives in a
   // child so its useAsync hooks only fire when we have a real
