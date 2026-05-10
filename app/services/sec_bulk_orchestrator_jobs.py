@@ -294,12 +294,29 @@ def sec_13f_ingest_from_dataset_job() -> None:
     # the WHOLE stage has succeeded — if a later archive fails,
     # retry needs all manifest archives on disk (Codex sweep
     # BLOCKING).
+    # PR3d #1064 follow-up — poll the bootstrap cancel signal between
+    # archives. Each archive ingests in 5-20 min; without a poll the
+    # operator's cancel is observed only at the next bootstrap-stage
+    # boundary, well after the C-stage commits a long-running archive.
+    # Outside ``active_bootstrap_run`` (manual trigger / no-run path)
+    # the helper short-circuits to False, so non-bootstrap callers are
+    # unaffected. Per-archive commits already drop a clean rollback
+    # boundary; raising on observed cancel preserves whatever ran
+    # before the signal landed.
+    from app.services.bootstrap_state import BootstrapStageCancelled
+    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+
     failed_archives: list[str] = []
     total_written = 0
     total_skipped = 0
     succeeded: list[Path] = []
     touched_ids: set[int] = set()
     for archive in archives:
+        if bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"sec_13f_ingest_from_dataset cancelled by operator after {len(succeeded)}/{len(archives)} archives",
+                stage_key="sec_13f_ingest_from_dataset",
+            )
         with psycopg.connect(settings.database_url) as conn:
             try:
                 result = ingest_13f_dataset_archive(conn=conn, archive_path=archive)
@@ -351,11 +368,28 @@ def sec_13f_ingest_from_dataset_job() -> None:
     # observations land but _current is stale AND archives are deleted,
     # leaving no retry input. Codex pre-push BLOCKING for #1020.
     if touched_ids:
+        # Codex pre-push round 1: cancel must outrank the post-loop
+        # refresh too, otherwise a signal that lands between the last
+        # archive's poll and the refresh loop entry would let the
+        # stage finish + delete archives + return success while the
+        # dispatcher waits for the next stage boundary.
+        if bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"sec_13f_ingest_from_dataset cancelled by operator before refresh of {len(touched_ids)} instruments",
+                stage_key="sec_13f_ingest_from_dataset",
+            )
+
         from app.services.ownership_observations import refresh_institutions_current
 
         refresh_failures: list[str] = []
         with psycopg.connect(settings.database_url) as conn:
-            for instrument_id in sorted(touched_ids):
+            for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
+                if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
+                    raise BootstrapStageCancelled(
+                        f"sec_13f_ingest_from_dataset cancelled by operator after "
+                        f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
+                        stage_key="sec_13f_ingest_from_dataset",
+                    )
                 # Per-iteration savepoint — refresh_institutions_current
                 # owns its own ``with conn.transaction()`` (sql/.py:404),
                 # so this is defence-in-depth against a future refactor
@@ -426,11 +460,22 @@ def sec_insider_ingest_from_dataset_job() -> None:
         logger.info("sec_insider_ingest_from_dataset: no insider_*.zip cached, skipping (no run)")
         return
 
+    # PR3d #1064 follow-up — see sec_13f_ingest_from_dataset_job for
+    # the cancel-poll rationale; same pattern applies per-archive.
+    from app.services.bootstrap_state import BootstrapStageCancelled
+    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+
     failed_archives: list[str] = []
     total_written = 0
     succeeded: list[Path] = []
     touched_ids: set[int] = set()
     for archive in archives:
+        if bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"sec_insider_ingest_from_dataset cancelled by operator after "
+                f"{len(succeeded)}/{len(archives)} archives",
+                stage_key="sec_insider_ingest_from_dataset",
+            )
         with psycopg.connect(settings.database_url) as conn:
             try:
                 result = ingest_insider_dataset_archive(conn=conn, archive_path=archive)
@@ -475,11 +520,25 @@ def sec_insider_ingest_from_dataset_job() -> None:
     # — refresh failures propagate before disk cleanup so the archives
     # remain available for retry. Codex pre-push BLOCKING for #1020.
     if touched_ids:
+        # Codex round 1 — cancel poll before + during refresh loop.
+        if bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"sec_insider_ingest_from_dataset cancelled by operator before "
+                f"refresh of {len(touched_ids)} instruments",
+                stage_key="sec_insider_ingest_from_dataset",
+            )
+
         from app.services.ownership_observations import refresh_insiders_current
 
         refresh_failures: list[str] = []
         with psycopg.connect(settings.database_url) as conn:
-            for instrument_id in sorted(touched_ids):
+            for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
+                if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
+                    raise BootstrapStageCancelled(
+                        f"sec_insider_ingest_from_dataset cancelled by operator after "
+                        f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
+                        stage_key="sec_insider_ingest_from_dataset",
+                    )
                 try:
                     with conn.transaction():
                         refresh_insiders_current(conn, instrument_id=instrument_id)
@@ -544,11 +603,21 @@ def sec_nport_ingest_from_dataset_job() -> None:
         logger.info("sec_nport_ingest_from_dataset: no nport_*.zip cached, skipping (no run)")
         return
 
+    # PR3d #1064 follow-up — see sec_13f_ingest_from_dataset_job for
+    # the cancel-poll rationale; same pattern applies per-archive.
+    from app.services.bootstrap_state import BootstrapStageCancelled
+    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+
     failed_archives: list[str] = []
     total_written = 0
     succeeded: list[Path] = []
     touched_ids: set[int] = set()
     for archive in archives:
+        if bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"sec_nport_ingest_from_dataset cancelled by operator after {len(succeeded)}/{len(archives)} archives",
+                stage_key="sec_nport_ingest_from_dataset",
+            )
         with psycopg.connect(settings.database_url) as conn:
             try:
                 result = ingest_nport_dataset_archive(conn=conn, archive_path=archive)
@@ -597,11 +666,24 @@ def sec_nport_ingest_from_dataset_job() -> None:
     # failures propagate before disk cleanup so archives stay
     # retryable. Codex pre-push BLOCKING for #1020.
     if touched_ids:
+        # Codex round 1 — cancel poll before + during refresh loop.
+        if bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"sec_nport_ingest_from_dataset cancelled by operator before refresh of {len(touched_ids)} instruments",
+                stage_key="sec_nport_ingest_from_dataset",
+            )
+
         from app.services.ownership_observations import refresh_funds_current
 
         refresh_failures: list[str] = []
         with psycopg.connect(settings.database_url) as conn:
-            for instrument_id in sorted(touched_ids):
+            for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
+                if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
+                    raise BootstrapStageCancelled(
+                        f"sec_nport_ingest_from_dataset cancelled by operator after "
+                        f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
+                        stage_key="sec_nport_ingest_from_dataset",
+                    )
                 try:
                     with conn.transaction():
                         refresh_funds_current(conn, instrument_id=instrument_id)
