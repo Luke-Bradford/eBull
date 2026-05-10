@@ -1386,7 +1386,12 @@ export type BootstrapStageStatus =
   | "success"
   | "error"
   | "skipped"
-  | "blocked";
+  | "blocked"
+  // PR3c #1093: operator-cancelled mid-run. Distinct from ``error`` so
+  // the Timeline can tone gray (operator-driven termination) instead
+  // of red (genuine failure). Mirrors ``app/services/bootstrap_state.py``
+  // sql/142 CHECK constraint extension.
+  | "cancelled";
 
 export interface BootstrapTimelineArchiveResponse {
   archive_name: string;

@@ -21,7 +21,11 @@ export type BootstrapStageStatus =
   | "skipped"
   // ``blocked`` (#1020): orchestrator never invoked the stage because
   // a `requires` upstream stage finished error/blocked.
-  | "blocked";
+  | "blocked"
+  // ``cancelled`` (PR3c #1093): operator-cancelled mid-run. Distinct
+  // from ``error`` so the Timeline can tone gray (operator-driven
+  // termination) instead of red (genuine failure).
+  | "cancelled";
 
 export type BootstrapLane =
   | "init"

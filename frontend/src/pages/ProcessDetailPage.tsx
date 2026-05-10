@@ -906,6 +906,14 @@ const STAGE_STATUS_TONE: Record<string, string> = {
     "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
   blocked:
     "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
+  // PR3c #1093: operator-cancelled stage. Gray tone — visually
+  // distinct from red (genuine failure) so the operator can tell at a
+  // glance which stages were stopped by their own cancel vs which
+  // failed on their own. Slightly darker than ``pending`` / ``skipped``
+  // gray so the cancelled stage doesn't look interchangeable with
+  // not-yet-attempted.
+  cancelled:
+    "border-slate-400 bg-slate-100 text-slate-700 dark:border-slate-600 dark:bg-slate-800/60 dark:text-slate-300 italic",
 };
 
 const ARCHIVE_TONE: Record<string, string> = {
