@@ -853,6 +853,206 @@ class TestUniverseSweep:
         assert row is not None
         assert row[0] == "sec_edgar_13f_directory"
 
+    def test_bootstrap_cancel_signal_stops_loop_and_raises(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PR3d follow-up #1064 — ``ingest_all_active_filers`` polls the
+        bootstrap cancel-signal between filers when invoked under
+        ``active_bootstrap_run``. The cooperative cancel observation
+        latency drops from the 6h soft deadline to one filer-iteration
+        (~30s in production).
+
+        The bookkeeping path runs before the raise so
+        ``data_ingestion_runs`` records ``status='partial'`` with the
+        operator-cancel reason, and the orchestrator's
+        ``BootstrapStageCancelled`` handler then writes the
+        ``cancelled`` row to ``bootstrap_stages``.
+        """
+        from app.config import settings as app_settings
+        from app.services.bootstrap_state import (
+            BootstrapStageCancelled,
+            StageSpec,
+            cancel_run,
+            start_run,
+        )
+        from app.services.processes.bootstrap_cancel_signal import (
+            active_bootstrap_run,
+        )
+        from tests.fixtures.ebull_test_db import test_database_url
+
+        # bootstrap_cancel_requested() opens a fresh autocommit
+        # connection from settings.database_url to probe the stop
+        # request row. Point that at the test DB so the probe sees the
+        # cancel_run we issue below (without the rebind it queries the
+        # dev DB and finds nothing).
+        monkeypatch.setattr(app_settings, "database_url", test_database_url())
+        conn = ebull_test_conn
+        # Reset bootstrap_state so start_run is allowed.
+        conn.execute(
+            """
+            UPDATE bootstrap_state
+               SET status='pending', last_run_id=NULL, last_completed_at=NULL
+             WHERE id=1
+            """
+        )
+        # One real registered job per stage so JobLock's source resolver
+        # would work; the test never enters JobLock since
+        # ingest_all_active_filers itself is the unit under test.
+        run_id = start_run(
+            conn,
+            operator_id=None,
+            stage_specs=(
+                StageSpec(
+                    stage_key="sec_13f_quarterly_sweep",
+                    stage_order=1,
+                    lane="sec_rate",
+                    job_name="sec_13f_quarterly_sweep",
+                ),
+            ),
+        )
+        cancel_run(conn, requested_by_operator_id=None)
+        conn.commit()
+
+        _seed_instrument(conn, iid=1064001, symbol="AAPL")
+        _seed_cusip_mapping(conn, instrument_id=1064001, cusip="037833100")
+        conn.commit()
+
+        ciks = ["0000000010", "0000000020", "0000000030"]
+        payloads: dict[str, str | None] = {}
+        for c in ciks:
+            payloads.update(self._build_filer_payloads(cik=c, accession=f"{c}-25-000001", period="2024-12-31"))
+        fetcher = _InMemoryFetcher(payloads)
+
+        with active_bootstrap_run(run_id):
+            with pytest.raises(BootstrapStageCancelled) as exc_info:
+                ingest_all_active_filers(
+                    conn,
+                    fetcher,
+                    ciks=ciks,
+                    source_label="sec_edgar_13f_directory",
+                )
+
+        assert "cancelled by operator" in str(exc_info.value)
+
+        # Bookkeeping path ran before the raise: data_ingestion_runs
+        # carries the partial state + cancel reason.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, error FROM data_ingestion_runs "
+                "WHERE source = 'sec_edgar_13f_directory' "
+                "ORDER BY ingestion_run_id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "partial"
+        assert row[1] is not None
+        assert "cancelled by operator" in row[1].lower()
+
+        # Cancel was observed on the very first iteration, so no filer
+        # should have been contacted.
+        contacted_ciks = {c for c in ciks if any(c in url for url in fetcher.calls)}
+        assert contacted_ciks == set()
+
+    def test_bootstrap_cancel_outranks_deadline_when_both_fire(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Codex pre-push round 1 — when the soft deadline AND the
+        operator-cancel signal both fire on the same iteration, cancel
+        must win. Otherwise the deadline branch returns normally,
+        BootstrapStageCancelled is never raised, and the orchestrator
+        marks the stage ``success`` instead of ``cancelled``.
+        """
+        from app.config import settings as app_settings
+        from app.services import institutional_holdings as svc
+        from app.services.bootstrap_state import (
+            BootstrapStageCancelled,
+            StageSpec,
+            cancel_run,
+            start_run,
+        )
+        from app.services.processes.bootstrap_cancel_signal import (
+            active_bootstrap_run,
+        )
+        from tests.fixtures.ebull_test_db import test_database_url
+
+        monkeypatch.setattr(app_settings, "database_url", test_database_url())
+        conn = ebull_test_conn
+        conn.execute(
+            """
+            UPDATE bootstrap_state
+               SET status='pending', last_run_id=NULL, last_completed_at=NULL
+             WHERE id=1
+            """
+        )
+        run_id = start_run(
+            conn,
+            operator_id=None,
+            stage_specs=(
+                StageSpec(
+                    stage_key="sec_13f_quarterly_sweep",
+                    stage_order=1,
+                    lane="sec_rate",
+                    job_name="sec_13f_quarterly_sweep",
+                ),
+            ),
+        )
+        cancel_run(conn, requested_by_operator_id=None)
+        conn.commit()
+
+        # Stub time.monotonic so the deadline IS expired by the
+        # first loop iteration's check, while the deadline_ts
+        # computation at function entry sees t=0.
+        #   call 1 (deadline_ts setup):     0.0    → deadline_ts = 1.0
+        #   call 2+ (loop iter checks):     5.0    → 5.0 >= 1.0, expired
+        # Last value sticks if extra calls land. Codex round 2.
+        clock_ticks = [0.0, 5.0]
+        clock_idx = [0]
+
+        def _fake_monotonic() -> float:
+            i = min(clock_idx[0], len(clock_ticks) - 1)
+            clock_idx[0] += 1
+            return clock_ticks[i]
+
+        monkeypatch.setattr(svc.time, "monotonic", _fake_monotonic)
+
+        ciks = ["0000000010", "0000000020"]
+        payloads: dict[str, str | None] = {}
+        for c in ciks:
+            payloads.update(self._build_filer_payloads(cik=c, accession=f"{c}-25-000001", period="2024-12-31"))
+        fetcher = _InMemoryFetcher(payloads)
+
+        with active_bootstrap_run(run_id):
+            with pytest.raises(BootstrapStageCancelled):
+                ingest_all_active_filers(
+                    conn,
+                    fetcher,
+                    ciks=ciks,
+                    deadline_seconds=1.0,
+                    source_label="sec_edgar_13f_directory",
+                )
+
+        # data_ingestion_runs.error mentions cancellation but NOT
+        # deadline — proves the cancel branch fired before the
+        # deadline check on the same iteration. With the previous
+        # ordering (deadline first) this assertion would invert.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, error FROM data_ingestion_runs "
+                "WHERE source = 'sec_edgar_13f_directory' "
+                "ORDER BY ingestion_run_id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "partial"
+        assert row[1] is not None
+        error_lower = row[1].lower()
+        assert "cancelled by operator" in error_lower
+        assert "deadline" not in error_lower
+
     def test_deadline_budget_stops_loop_cleanly_and_records_partial(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
