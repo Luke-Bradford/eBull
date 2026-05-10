@@ -185,6 +185,31 @@ describe("AdvancedParamsForm", () => {
     expect(onSubmit).toHaveBeenCalledWith({ m: ["x", "z"] });
   });
 
+  it("multi_enum: group's aria-labelledby targets a real element id", () => {
+    // Review-bot WARNING from PR #1100 — the group div previously
+    // referenced ``id`` (the input id, never assigned to anything),
+    // breaking SR association. Pin: the referenced id resolves to a
+    // rendered <label> in the document.
+    render(
+      <AdvancedParamsForm
+        metadata={[
+          meta({
+            name: "m",
+            field_type: "multi_enum",
+            label: "M",
+            enum_values: ["a"],
+          }),
+        ]}
+        busy={false}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const group = screen.getByRole("group");
+    const labelledBy = group.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    expect(document.getElementById(labelledBy!)?.textContent).toBe("M");
+  });
+
   it("empty optional string fields are omitted from submit", async () => {
     const { onSubmit } = renderForm([
       meta({ name: "left_blank", field_type: "string", label: "Blank" }),

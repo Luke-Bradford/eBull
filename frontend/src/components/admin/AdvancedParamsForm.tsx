@@ -195,15 +195,30 @@ function FieldRow({
   onChange: (v: FieldValue) => void;
 }) {
   const id = `advanced-param-${meta.name}`;
+  const labelId = `${id}-label`;
+  const isGroup = meta.field_type === "multi_enum";
+  // multi_enum has no single focusable input — assistive tech relies on
+  // ``aria-labelledby={labelId}`` on the wrapping group div pointing at
+  // the label's id. Drop ``htmlFor`` for that case so the label isn't
+  // pointing at a non-existent id (review-bot WARNING from PR #1100).
+  // For all other field types ``htmlFor`` keeps click-to-focus working.
   return (
     <div className="space-y-1">
       <label
-        htmlFor={id}
+        id={labelId}
+        htmlFor={isGroup ? undefined : id}
         className="block text-sm font-medium text-slate-700 dark:text-slate-200"
       >
         {meta.label}
       </label>
-      <FieldInput id={id} meta={meta} value={value} busy={busy} onChange={onChange} />
+      <FieldInput
+        id={id}
+        labelId={labelId}
+        meta={meta}
+        value={value}
+        busy={busy}
+        onChange={onChange}
+      />
       <p className="text-xs text-slate-500 dark:text-slate-400">
         {meta.help_text}
       </p>
@@ -213,12 +228,14 @@ function FieldRow({
 
 function FieldInput({
   id,
+  labelId,
   meta,
   value,
   busy,
   onChange,
 }: {
   id: string;
+  labelId: string;
   meta: ParamMetadata;
   value: FieldValue;
   busy: boolean;
@@ -296,7 +313,7 @@ function FieldInput({
       }
       const selected = new Set(Array.isArray(value) ? value : []);
       return (
-        <div role="group" aria-labelledby={id} className="flex flex-wrap gap-3">
+        <div role="group" aria-labelledby={labelId} className="flex flex-wrap gap-3">
           {meta.enum_values.map((opt) => {
             const checkboxId = `${id}-${opt}`;
             return (
