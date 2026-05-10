@@ -315,6 +315,15 @@ _INVOKERS[_bulk_jobs.JOB_SEC_INSIDER_INGEST_FROM_DATASET] = _adapt_zero_arg(
 _INVOKERS[_bulk_jobs.JOB_SEC_NPORT_INGEST_FROM_DATASET] = _adapt_zero_arg(_bulk_jobs.sec_nport_ingest_from_dataset_job)
 _INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _adapt_zero_arg(_files_walk.sec_submissions_files_walk_job)
 
+# #819 — canonical-instrument redirect populate. Idempotent one-shot
+# the operator triggers after a universe sync introduces new
+# ``.RTH``-style variants. The job opens its own connection + commits.
+from app.services import canonical_instrument_redirects as _canonical_redirects  # noqa: E402
+
+_INVOKERS[_canonical_redirects.JOB_POPULATE_CANONICAL_REDIRECTS] = _adapt_zero_arg(
+    _canonical_redirects.populate_canonical_redirects_job
+)
+
 
 # Public registry of valid job names. The API layer (#719) imports this
 # to validate ``POST /jobs/{name}/run`` before writing a queue row, so

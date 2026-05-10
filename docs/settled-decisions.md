@@ -422,7 +422,8 @@ a follow-up to introduce a proper `entities` layer (Option B from the
 
 `canonical_instrument_id` (#819) is a **different** mechanism for `.RTH`
 operational duplicates — same security, two ticker variants. Don't
-conflate.
+conflate. See "Canonical-instrument redirect (#819, settled 2026-05-11)"
+below for the operational-duplicate redirect semantics.
 
 - **PR-A:** sql/143 migration + filings.py upsert + ON CONFLICT predicate
   sweep across ~25 production + test sites + `tests/test_upsert_cik_mapping.py`
@@ -435,6 +436,57 @@ conflate.
   rather than flapping (strict improvement).
 
 **Spec:** `docs/superpowers/specs/2026-05-10-share-class-cik-uniqueness.md`.
+
+## Canonical-instrument redirect (#819, settled 2026-05-11)
+
+Operational-duplicate ticker variants (e.g. `AAPL` vs `AAPL.RTH`,
+eToro's regular-trading-hours suffix) are stored as separate
+`instruments` rows but represent the same security. SEC filings,
+dividends, ownership, fundamentals all live under the base
+instrument's CIK; the variant has no CIK row (cik_discovery resolves
+to the underlying, the partial-unique CIK index in `sql/143` blocks a
+second instrument from claiming the same CIK).
+
+`instruments.canonical_instrument_id` (migration `sql/145`) is a
+nullable FK to self:
+
+- NULL = this row IS canonical (the default for every row).
+- Non-NULL = this row is an operational duplicate; the FE should
+  render the canonical row's page instead.
+
+The redirect mechanic is **client-side `<Navigate replace>`** at
+`InstrumentPage`'s mount, gated on `identity.canonical_symbol`
+differing from the URL slug. Server-side 307 was rejected because
+the per-stock research page hits ~20 endpoints; routing each through
+a redirect layer is more surface area than a single FE check.
+`useEffect`-based navigation was rejected because it flashes an
+empty variant page before redirecting. The pattern mirrors the
+existing `InstrumentDetailRedirect` shim.
+
+CHECK constraint `instruments_canonical_not_self_chk` (in `sql/145`)
+rules out self-loops at the DB layer — guards the FE redirect from
+infinite-loop on a programming bug.
+
+**Scope clarification:** `canonical_instrument_id` is for
+**operational duplicates only** (.RTH and any future similar suffix
+variants). **Share-class siblings** (GOOG/GOOGL, BRK.A/BRK.B) MUST
+NOT use this mechanism — those are distinct securities (distinct
+CUSIPs) that legitimately share an issuer CIK. See "CIK = entity,
+CUSIP = security (#1102)" above.
+
+Population: `populate_canonical_redirects_job` (registered job,
+idempotent). Operator triggers after a universe sync introduces new
+`.RTH`-style variants. Match rule:
+
+- Variant symbol ends in `.RTH` (case-insensitive).
+- Base symbol == variant minus suffix.
+- Base lives on a DIFFERENT exchange (RTH variants live on eToro's
+  operational-duplicate exchange).
+- Single base, OR exactly one with `is_primary_listing=TRUE`.
+- Multi-primary-listing matches are skipped with a warning; operator
+  hand-binds via `UPDATE instruments` from the runbook.
+
+**Spec:** issue #819 + `sql/145_canonical_instrument_id.sql` header.
 
 ## Maintenance rule
 

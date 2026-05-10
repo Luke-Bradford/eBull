@@ -115,6 +115,14 @@ class InstrumentIdentity(BaseModel):
     country: str | None
     currency: str | None
     market_cap: Decimal | None
+    # #819: when set, this instrument is an operational duplicate
+    # (e.g. ``AAPL.RTH``) of the named canonical symbol
+    # (``AAPL``). The frontend should redirect to the canonical
+    # symbol's page so chart / ownership / fundamentals render
+    # under the security with the actual SEC filings. NULL = this
+    # instrument IS canonical (the default). See sql/145 +
+    # docs/settled-decisions.md "Canonical-instrument redirect".
+    canonical_symbol: str | None = None
 
 
 class InstrumentPrice(BaseModel):
@@ -2962,6 +2970,9 @@ def get_instrument_summary(
     # `symbol` is not UNIQUE across exchanges (see migration 043);
     # ORDER BY `is_primary_listing DESC, instrument_id ASC` makes the
     # winner deterministic when two listings share a ticker.
+    # #819: LEFT JOIN canonical row so the response can advertise the
+    # canonical symbol for operational-duplicate variants (e.g.
+    # ``AAPL.RTH`` -> ``AAPL``). NULL when this row IS canonical.
     if instrument_id is not None:
         # instrument_id is the PK so the lookup is already unique; no
         # ORDER BY / LIMIT needed.
@@ -2969,10 +2980,13 @@ def get_instrument_summary(
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                    i.currency, i.sector, i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
-                   q.bid, q.ask, q.last
+                   q.bid, q.ask, q.last,
+                   canonical.symbol AS canonical_symbol
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
             LEFT JOIN quotes q USING (instrument_id)
+            LEFT JOIN instruments canonical
+              ON canonical.instrument_id = i.canonical_instrument_id
             WHERE i.instrument_id = %(id)s AND UPPER(i.symbol) = %(symbol)s
         """
         params: dict[str, object] = {"id": instrument_id, "symbol": symbol_clean}
@@ -2981,10 +2995,13 @@ def get_instrument_summary(
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                    i.currency, i.sector, i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
-                   q.bid, q.ask, q.last
+                   q.bid, q.ask, q.last,
+                   canonical.symbol AS canonical_symbol
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
             LEFT JOIN quotes q USING (instrument_id)
+            LEFT JOIN instruments canonical
+              ON canonical.instrument_id = i.canonical_instrument_id
             WHERE UPPER(i.symbol) = %(symbol)s
             ORDER BY i.is_primary_listing DESC, i.instrument_id ASC
             LIMIT 1
@@ -3008,6 +3025,7 @@ def get_instrument_summary(
         country=row["country"],  # type: ignore[arg-type]
         currency=row["currency"],  # type: ignore[arg-type]
         market_cap=None,
+        canonical_symbol=row.get("canonical_symbol"),  # type: ignore[arg-type]
     )
 
     # Price: ``quotes`` row. ``last`` is preferred, ``bid`` is the

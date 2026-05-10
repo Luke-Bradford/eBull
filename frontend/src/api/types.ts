@@ -255,6 +255,12 @@ export interface InstrumentIdentity {
   country: string | null;
   currency: string | null;
   market_cap: string | null;
+  /** #819: when set, this instrument is an operational duplicate
+   * (e.g. ``AAPL.RTH``) of the named canonical symbol (``AAPL``).
+   * The frontend redirects to the canonical symbol's page so
+   * chart / ownership / fundamentals render under the security
+   * with the actual SEC filings. */
+  canonical_symbol: string | null;
 }
 
 export interface InstrumentPrice {

@@ -418,3 +418,75 @@ def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
     # (Codex review on PR for #499).
     assert body["source"]["key_stats"] == "sec_dividend_summary"
     assert body["key_stats"]["field_source"]["dividend_yield"] == "sec_dividend_summary"
+
+
+# ---------------------------------------------------------------------------
+# #819 — canonical_symbol redirect surface
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_symbol_surfaced_for_rth_variant(client: TestClient) -> None:
+    """#819: when the instrument row has a populated
+    ``canonical_instrument_id`` (e.g. ``AAPL.RTH`` -> ``AAPL``), the
+    summary response carries the canonical symbol so the frontend can
+    redirect. The variant itself has no SEC coverage, so key stats /
+    market cap stay null — but the canonical_symbol is the only
+    operator-visible signal needed to drive the redirect."""
+    row = {
+        "instrument_id": 8754,
+        "symbol": "AAPL.RTH",
+        "company_name": "Apple (RTH)",
+        "exchange": "33",
+        "currency": None,
+        "sector": None,
+        "industry": None,
+        "country": None,
+        "is_tradable": True,
+        "coverage_tier": None,
+        "bid": None,
+        "ask": None,
+        "last": None,
+        # The canonical row's symbol surfaces via the LEFT JOIN.
+        "canonical_symbol": "AAPL",
+    }
+    conn = _make_conn(row=row)
+    _install_conn(conn)
+    try:
+        resp = client.get("/instruments/AAPL.RTH/summary")
+    finally:
+        _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["identity"]["symbol"] == "AAPL.RTH"
+    assert body["identity"]["canonical_symbol"] == "AAPL"
+
+
+def test_canonical_symbol_null_for_canonical_instrument(client: TestClient) -> None:
+    """#819: a canonical row carries ``canonical_symbol=None`` so the
+    frontend renders the page in place rather than redirect-looping."""
+    row = {
+        "instrument_id": 1001,
+        "symbol": "AAPL",
+        "company_name": "Apple Inc",
+        "exchange": "4",
+        "currency": "USD",
+        "sector": "Technology",
+        "industry": "Consumer Electronics",
+        "country": "US",
+        "is_tradable": True,
+        "coverage_tier": 1,
+        "bid": None,
+        "ask": None,
+        "last": Decimal("180.00"),
+        "canonical_symbol": None,
+    }
+    conn = _make_conn(row=row)
+    _install_conn(conn)
+    try:
+        resp = client.get("/instruments/AAPL/summary")
+    finally:
+        _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["identity"]["canonical_symbol"] is None
