@@ -23,9 +23,7 @@ from typing import Any
 import psycopg
 
 
-def siblings_for_issuer_cik(
-    conn: psycopg.Connection[Any], cik: str
-) -> list[int]:
+def siblings_for_issuer_cik(conn: psycopg.Connection[Any], cik: str) -> list[int]:
     """Return all instrument_ids sharing this issuer CIK.
 
     The CIK is normalised (strip + zero-pad to 10 digits) before

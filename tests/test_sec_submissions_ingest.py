@@ -287,8 +287,7 @@ class TestIngestSubmissionsArchive:
             # symbol must NOT be a stringified instrument_id, and must
             # NOT cross-contaminate between siblings).
             cur.execute(
-                "SELECT raw_payload_json->>'symbol' FROM filing_events "
-                "WHERE instrument_id = %s LIMIT 1",
+                "SELECT raw_payload_json->>'symbol' FROM filing_events WHERE instrument_id = %s LIMIT 1",
                 (iid_goog,),
             )
             row = cur.fetchone()
@@ -296,8 +295,7 @@ class TestIngestSubmissionsArchive:
             assert row[0] == "GOOG", f"GOOG row carrying wrong symbol {row[0]!r}"
 
             cur.execute(
-                "SELECT raw_payload_json->>'symbol' FROM filing_events "
-                "WHERE instrument_id = %s LIMIT 1",
+                "SELECT raw_payload_json->>'symbol' FROM filing_events WHERE instrument_id = %s LIMIT 1",
                 (iid_googl,),
             )
             row = cur.fetchone()
