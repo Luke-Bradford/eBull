@@ -396,6 +396,12 @@ class _StageOutcome:
     success: bool
     error: str | None
     skipped: bool = False
+    # PR3d #1064 — operator-cancel observed mid-stage. The dispatcher
+    # maps this onto stage status='cancelled' (not 'error') so the
+    # Timeline tones gray instead of red. The next dispatcher
+    # iteration's run-level cancel checkpoint then sweeps remaining
+    # stages and terminalises the run.
+    cancelled: bool = False
 
 
 def _run_one_stage(
@@ -440,8 +446,17 @@ def _run_one_stage(
     # cutoff + ``source_label`` override.
     from app.jobs.runtime import _params_snapshot_var
 
+    # PR3d #1064 — expose the cancel signal to long-running invokers.
+    # Stages with multi-minute loops poll
+    # ``bootstrap_cancel_requested()`` and raise
+    # ``BootstrapStageCancelled`` to bail out cooperatively. The
+    # context manager scopes the contextvar so scheduled / manual
+    # triggers of the same job (outside bootstrap) see no signal.
+    from app.services.bootstrap_state import BootstrapStageCancelled, mark_stage_cancelled
+    from app.services.processes.bootstrap_cancel_signal import active_bootstrap_run
+
     try:
-        with JobLock(database_url, job_name):
+        with JobLock(database_url, job_name), active_bootstrap_run(run_id):
             snap_token = _params_snapshot_var.set(effective_params)
             try:
                 invoker(effective_params)
@@ -456,6 +471,22 @@ def _run_one_stage(
             mark_stage_error(conn, run_id=run_id, stage_key=stage_key, error_message=message)
             conn.commit()
         return _StageOutcome(stage_key=stage_key, success=False, error=message)
+    except BootstrapStageCancelled as exc:
+        # PR3d #1064 — operator clicked Cancel mid-stage; the invoker
+        # observed the signal at one of its checkpoints and bailed
+        # out. Mark the stage ``cancelled`` (not ``error``) so the
+        # Timeline tones gray. The next dispatcher iteration's
+        # run-level cancel checkpoint terminalises remaining stages.
+        message = str(exc) or "stage cancelled by operator"
+        logger.info(
+            "bootstrap stage %s observed cancel signal; marking cancelled (%s)",
+            stage_key,
+            message,
+        )
+        with psycopg.connect(database_url) as conn:
+            mark_stage_cancelled(conn, run_id=run_id, stage_key=stage_key, reason=message)
+            conn.commit()
+        return _StageOutcome(stage_key=stage_key, success=False, error=message, cancelled=True)
     except BootstrapPhaseSkipped as exc:
         # Operator-policy skip: A3 wrote a fallback manifest because
         # bandwidth was below threshold, and the legacy chain handles
@@ -814,6 +845,15 @@ def _phase_batched_dispatch(
             if outcome.skipped:
                 statuses[stage_key] = "skipped"
                 logger.info("bootstrap dispatcher: %s SKIPPED", stage_key)
+            elif outcome.cancelled:
+                # PR3d #1064 — stage observed operator cancel
+                # mid-loop and exited cooperatively. Status maps to
+                # 'cancelled' so the Timeline tones gray; the
+                # outer cancel checkpoint at the next loop iteration
+                # picks up the run-level cancel signal and sweeps
+                # remaining stages.
+                statuses[stage_key] = "cancelled"
+                logger.info("bootstrap dispatcher: %s CANCELLED (%s)", stage_key, outcome.error)
             elif outcome.success:
                 statuses[stage_key] = "success"
                 logger.info("bootstrap dispatcher: %s OK", stage_key)

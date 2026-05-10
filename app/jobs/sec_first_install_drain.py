@@ -44,7 +44,9 @@ from app.providers.implementations.sec_submissions import (
     check_freshness,
     parse_submissions_page,
 )
+from app.services.bootstrap_state import BootstrapStageCancelled
 from app.services.data_freshness import seed_scheduler_from_manifest
+from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
 from app.services.sec_manifest import is_amendment_form, map_form_to_source, record_manifest_entry
 
 logger = logging.getLogger(__name__)
@@ -283,7 +285,19 @@ def run_first_install_drain(
         )
 
     skip_issuer_http = rows_seeded_from_filing_events > 0
-    for subject, cik in _iter_in_universe_subjects(conn):  # type: ignore[misc]
+    # PR3d #1064 — cancel-poll cadence. The drain iterates ~12k CIKs
+    # at 10 req/s, ~21 minutes wall-clock. Polling for the bootstrap
+    # cancel signal every 50 CIKs keeps observation latency under
+    # ~5 seconds without flooding the DB. Outside a bootstrap dispatch
+    # the helper short-circuits to False (contextvar unset), so
+    # scheduled / manual triggers of this job are unaffected.
+    _CANCEL_POLL_EVERY_N = 50
+    for n, (subject, cik) in enumerate(_iter_in_universe_subjects(conn)):  # type: ignore[misc]
+        if n % _CANCEL_POLL_EVERY_N == 0 and bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"first-install drain cancelled by operator after {ciks_processed} CIKs",
+                stage_key="sec_first_install_drain",
+            )
         if max_subjects is not None and ciks_processed >= max_subjects:
             break
         # #1044 fast-path: when filing_events seeded the issuer manifest
