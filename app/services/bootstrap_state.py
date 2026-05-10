@@ -68,6 +68,28 @@ class BootstrapNotRunning(RuntimeError):
     """
 
 
+class BootstrapStageCancelled(RuntimeError):
+    """Raised by a long-running stage invoker when it observes the
+    bootstrap-run cancel signal at one of its checkpoints.
+
+    Issue #1064 PR3d. Stages with multi-minute loops (the SEC drain,
+    the 13F sweep) poll ``bootstrap_cancel_requested()`` periodically;
+    when the operator clicks Cancel the helper returns True and the
+    invoker raises this exception to bail out cooperatively. The
+    bootstrap orchestrator's ``_run_one_stage`` catches it, marks the
+    stage as ``cancelled`` (PR3c #1093), and the next dispatcher
+    iteration's run-level checkpoint terminalises the entire run.
+
+    The exception carries the stage_key (when known) so the operator
+    audit log can name the stage that observed the cancel; default
+    empty string for stages that don't thread the key through.
+    """
+
+    def __init__(self, message: str = "stage cancelled by operator", stage_key: str = "") -> None:
+        super().__init__(message)
+        self.stage_key = stage_key
+
+
 @dataclass(frozen=True)
 class StageSpec:
     """Static definition of a stage. Lives in code, not DB.
@@ -413,6 +435,43 @@ def mark_stage_skipped(
         """
         UPDATE bootstrap_stages
            SET status       = 'skipped',
+               completed_at = now(),
+               last_error   = %(reason)s
+         WHERE bootstrap_run_id = %(run_id)s
+           AND stage_key        = %(stage_key)s
+           AND status           IN ('running', 'pending')
+        """,
+        {
+            "run_id": run_id,
+            "stage_key": stage_key,
+            "reason": reason[:1000],
+        },
+    )
+
+
+def mark_stage_cancelled(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+    stage_key: str,
+    reason: str,
+) -> None:
+    """Mark a stage as ``cancelled`` — operator clicked Cancel mid-stage.
+
+    Issue #1064 PR3d (#1093 schema migration). Distinct from ``error``
+    (genuine failure) and ``skipped`` (operator-policy bypass) — this
+    fires when the stage's invoker observes ``cancel_requested_at``
+    at one of its long-loop checkpoints and raises
+    ``BootstrapStageCancelled``. The orchestrator's
+    ``_run_one_stage`` catches the exception and calls this helper.
+
+    Refuses to overwrite terminal states; allows the same
+    ``running``/``pending`` transition window as ``mark_stage_skipped``.
+    """
+    conn.execute(
+        """
+        UPDATE bootstrap_stages
+           SET status       = 'cancelled',
                completed_at = now(),
                last_error   = %(reason)s
          WHERE bootstrap_run_id = %(run_id)s
@@ -1021,6 +1080,7 @@ def reap_orphaned_running(
 __all__ = [
     "BootstrapAlreadyRunning",
     "BootstrapNotRunning",
+    "BootstrapStageCancelled",
     "BootstrapState",
     "BootstrapStatus",
     "Lane",
@@ -1035,6 +1095,7 @@ __all__ = [
     "force_mark_complete",
     "mark_run_cancelled",
     "mark_stage_blocked",
+    "mark_stage_cancelled",
     "mark_stage_error",
     "mark_stage_running",
     "mark_stage_skipped",
