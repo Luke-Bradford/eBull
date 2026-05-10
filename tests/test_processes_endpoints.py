@@ -86,11 +86,54 @@ def test_list_processes_returns_envelope_shape(conn_override: None, ebull_test_c
     for row in payload["rows"]:
         assert "stale_reasons" in row
         assert isinstance(row["stale_reasons"], list)
+        # PR2 #1064 — every row carries ``params_metadata``. Empty list
+        # for bootstrap + ingest_sweep + scheduled jobs without metadata.
+        assert "params_metadata" in row
+        assert isinstance(row["params_metadata"], list)
         if row["active_run"] is not None:
             active = row["active_run"]
             assert "is_stale" not in active
             assert "expected_p95_seconds" not in active
             assert "last_progress_at" in active
+
+
+def test_get_process_returns_params_metadata_for_declared_job(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """PR2 #1064 — a job with declared ``params_metadata`` surfaces it
+    on ``/system/processes/{id}`` so the FE Advanced disclosure
+    renders one form field per entry.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    resp = client.get("/system/processes/sec_13f_quarterly_sweep")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["mechanism"] == "scheduled_job"
+    metadata = payload["params_metadata"]
+    assert isinstance(metadata, list) and len(metadata) == 1
+    entry = metadata[0]
+    assert entry["name"] == "min_period_of_report"
+    assert entry["field_type"] == "date"
+    assert entry["advanced_group"] is True
+    assert entry["help_text"]
+
+
+def test_get_process_returns_empty_metadata_for_bootstrap(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """Bootstrap mechanism has no operator-exposable params (stages own
+    their hardcoded params dict via ``StageSpec.params``); the FE
+    keys off the empty list to hide the Advanced tab.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _seed_bootstrap_state(ebull_test_conn, "pending")
+    ebull_test_conn.commit()
+
+    resp = client.get("/system/processes/bootstrap")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["params_metadata"] == []
 
 
 def test_get_process_unknown_returns_404(conn_override: None) -> None:

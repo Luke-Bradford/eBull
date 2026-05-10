@@ -576,13 +576,15 @@ def _run_prelude(
                 # branches (running + skipped). Passing ``None`` falls back
                 # to the column default ``'{}'`` so the legacy paths stay
                 # forward-compatible. Jsonb wraps the dict for psycopg's
-                # JSONB adapter; ``_jsonable_params`` materialises ``date``
+                # JSONB adapter; ``to_jsonsafe_params`` materialises ``date``
                 # values as ISO strings (PR1c #1064 — stage 21 + manual
                 # ``sec_13f_quarterly_sweep`` carry a ``min_period_of_report``
                 # ``date`` that ``json.dumps`` cannot serialize natively).
-                from app.services.ops_monitor import _jsonable_params
+                from app.services.processes.json_safe import to_jsonsafe_params
 
-                snapshot_json = Jsonb(_jsonable_params(dict(params_snapshot))) if params_snapshot is not None else None
+                snapshot_json = (
+                    Jsonb(to_jsonsafe_params(dict(params_snapshot))) if params_snapshot is not None else None
+                )
                 if fence_held:
                     # When a sibling holds the fence, surface the holder
                     # in the audit row so the operator can see WHY this

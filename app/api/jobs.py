@@ -49,6 +49,7 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.jobs.runtime import VALID_JOB_NAMES
+from app.services.processes.json_safe import to_jsonsafe_params
 from app.services.processes.param_metadata import (
     ParamValidationError,
     validate_job_params,
@@ -237,8 +238,13 @@ async def run_job(
     if effective_override:
         canonical_control["override_bootstrap_gate"] = True
 
+    # ``validate_job_params`` returns native ``date`` / ``datetime`` for the
+    # corresponding ``field_type``; ``Jsonb`` will raise ``TypeError`` at
+    # adapt time without JSON-safe coercion. The listener re-validates after
+    # dequeue (``app/jobs/listener.py:157``) so writing ISO strings here
+    # round-trips back to native types for the invoker. PR2 #1064.
     payload: dict[str, Any] = {
-        "params": validated_params,
+        "params": to_jsonsafe_params(validated_params),
         "control": canonical_control,
     }
 

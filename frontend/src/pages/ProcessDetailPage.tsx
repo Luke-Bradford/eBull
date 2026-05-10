@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
+import { runJob } from "@/api/jobs";
 import {
   cancelProcess,
   fetchBootstrapTimeline,
@@ -40,6 +41,7 @@ import {
   SectionSkeleton,
 } from "@/components/dashboard/Section";
 import { Modal } from "@/components/ui/Modal";
+import { AdvancedParamsForm } from "@/components/admin/AdvancedParamsForm";
 import {
   REASON_TOOLTIP,
   STATUS_VISUAL,
@@ -48,7 +50,7 @@ import {
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
 
-type TabKey = "overview" | "history" | "errors" | "dag" | "timeline";
+type TabKey = "overview" | "history" | "errors" | "dag" | "timeline" | "advanced";
 
 const ORCHESTRATOR_FULL_SYNC_ID = "orchestrator_full_sync";
 const BOOTSTRAP_PROCESS_ID = "bootstrap";
@@ -76,6 +78,8 @@ export function ProcessDetailPage() {
   const [cancelError, setCancelError] = useState<unknown>(null);
   const [showFullWash, setShowFullWash] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
+  const [advancedError, setAdvancedError] = useState<unknown>(null);
+  const [advancedRequestId, setAdvancedRequestId] = useState<number | null>(null);
 
   // useAsync captures fn via a ref — fresh arrow per render is fine.
   const detail = useAsync(() => fetchProcess(id), [id]);
@@ -110,18 +114,29 @@ export function ProcessDetailPage() {
     { preserveOnRefetch: true },
   );
 
+  // PR2 #1064 — Advanced tab visibility. Only shown for scheduled
+  // jobs that declare params_metadata. Bootstrap + ingest_sweep
+  // mechanisms own no operator-exposable params; scheduled jobs with
+  // an empty metadata tuple (the majority today) also hide the tab.
+  const showAdvanced =
+    detail.data?.mechanism === "scheduled_job" &&
+    (detail.data?.params_metadata?.length ?? 0) > 0;
+
   // Reset tab to overview if currently on a process-specific tab and the
   // route param changes to an id that no longer owns that tab (operator
   // clicked a different process row from the table). Codex pre-impl
   // review M-r2-2 originally pinned the DAG variant; PR7 extends to
-  // timeline.
+  // timeline. PR2 extends to advanced — when the operator pivots from a
+  // scheduled job with metadata to a process that has none, fall back.
   useEffect(() => {
     if (tab === "dag" && !isOrchestrator) {
       setTab("overview");
     } else if (tab === "timeline" && !isBootstrap) {
       setTab("overview");
+    } else if (tab === "advanced" && !showAdvanced) {
+      setTab("overview");
     }
-  }, [tab, isOrchestrator, isBootstrap]);
+  }, [tab, isOrchestrator, isBootstrap, showAdvanced]);
 
   // Extract the refetch refs as local const bindings so ESLint can
   // see their identity and verify the dep array — `useAsync` wraps
@@ -179,6 +194,29 @@ export function ProcessDetailPage() {
       setBusy(false);
     }
   }, [id, refetchAll]);
+
+  const handleAdvancedSubmit = useCallback(
+    async (params: Record<string, unknown>) => {
+      setAdvancedError(null);
+      setAdvancedRequestId(null);
+      setBusy(true);
+      try {
+        // For scheduled_job mechanism, process_id is the job_name verbatim
+        // (see app/api/processes.py::trigger_process: target_job_name = process_id).
+        const result = await runJob(id, { params });
+        setAdvancedRequestId(result?.request_id ?? null);
+        refetchAll();
+      } catch (err) {
+        setAdvancedError(err);
+        if (!(err instanceof ApiError))
+          // eslint-disable-next-line no-console
+          console.error("runJob (advanced) failed", err);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [id, refetchAll],
+  );
 
   const handleCancelConfirmed = useCallback(
     async (mode: CancelMode) => {
@@ -240,6 +278,7 @@ export function ProcessDetailPage() {
         setTab={setTab}
         showDag={isOrchestrator}
         showTimeline={isBootstrap}
+        showAdvanced={showAdvanced}
       />
 
       <Section title={tabTitle(tab)}>
@@ -277,6 +316,14 @@ export function ProcessDetailPage() {
             loading={timeline.loading}
             error={timeline.error}
             onRetry={timeline.refetch}
+          />
+        ) : tab === "advanced" && showAdvanced && detail.data ? (
+          <AdvancedTab
+            row={detail.data}
+            busy={busy}
+            error={advancedError}
+            requestId={advancedRequestId}
+            onSubmit={handleAdvancedSubmit}
           />
         ) : null}
       </Section>
@@ -390,11 +437,13 @@ function TabBar({
   setTab,
   showDag,
   showTimeline,
+  showAdvanced,
 }: {
   tab: TabKey;
   setTab: (t: TabKey) => void;
   showDag: boolean;
   showTimeline: boolean;
+  showAdvanced: boolean;
 }) {
   const tabs: { key: TabKey; label: string }[] = [
     { key: "overview", label: "Overview" },
@@ -402,6 +451,9 @@ function TabBar({
     { key: "errors", label: "Errors" },
     ...(showDag ? [{ key: "dag" as TabKey, label: "DAG" }] : []),
     ...(showTimeline ? [{ key: "timeline" as TabKey, label: "Timeline" }] : []),
+    ...(showAdvanced
+      ? [{ key: "advanced" as TabKey, label: "Advanced" }]
+      : []),
   ];
   return (
     <div role="tablist" className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
@@ -440,6 +492,8 @@ function tabTitle(tab: TabKey): string {
       return "DAG (latest sync run)";
     case "timeline":
       return "Bootstrap timeline (latest run)";
+    case "advanced":
+      return "Advanced — re-fetch with custom params";
   }
 }
 
@@ -627,6 +681,55 @@ const LAYER_STATUS_TONE: Record<string, string> = {
   partial: "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
   cancelled: "border-slate-300 bg-slate-50 text-slate-500 line-through dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
 };
+
+function AdvancedTab({
+  row,
+  busy,
+  error,
+  requestId,
+  onSubmit,
+}: {
+  row: ProcessRowResponse;
+  busy: boolean;
+  error: unknown;
+  requestId: number | null;
+  onSubmit: (params: Record<string, unknown>) => Promise<void>;
+}) {
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-slate-500 dark:text-slate-400">
+        Submits to <code>POST /jobs/{row.process_id}/run</code> with the
+        validated params envelope. The job is queued; track outcome on
+        the requests panel.
+      </p>
+      <AdvancedParamsForm
+        metadata={row.params_metadata}
+        busy={busy}
+        onSubmit={onSubmit}
+      />
+      {requestId !== null ? (
+        <p
+          role="status"
+          className="text-xs text-emerald-700 dark:text-emerald-300"
+        >
+          queued as request #{requestId}
+        </p>
+      ) : null}
+      {error ? (
+        <p
+          role="alert"
+          className="text-xs text-red-700 dark:text-red-300"
+          title={reasonTooltip(error)}
+        >
+          trigger rejected
+          {error instanceof ApiError && typeof error.detail === "string"
+            ? `: ${error.detail}`
+            : null}
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 function DagTab({
   payload,

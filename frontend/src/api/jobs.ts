@@ -8,9 +8,12 @@
  *     imports from one module.
  *   - fetchJobRuns(jobName?, limit?) — recent rows from job_runs,
  *     newest-first; backs the admin page recent-runs panel.
- *   - runJob(jobName) — POST /jobs/{name}/run. Returns void on 202;
- *     ApiError on 404 (unknown job) or 409 (already running). Other
- *     statuses bubble up unchanged.
+ *   - runJob(jobName, body?) — POST /jobs/{name}/run. Returns
+ *     {request_id} on 202 (PR1b-2 #1064 added the body); ApiError on
+ *     404 (unknown job) or 400 (invalid params / control). Other
+ *     statuses bubble up unchanged. PR2 #1064 widens to accept the
+ *     {params, control} envelope so the Advanced disclosure form can
+ *     submit operator-supplied params.
  */
 
 import { apiFetch } from "@/api/client";
@@ -34,11 +37,32 @@ export function fetchJobRuns(
   return apiFetch<JobRunsListResponse>(`/jobs/runs?${params.toString()}`);
 }
 
-export function runJob(jobName: string): Promise<void> {
-  // The 202 path returns no body; apiFetch short-circuits at the
-  // status check (see client.ts). 404 / 409 surface as ApiError so
-  // the page can render a status-specific message.
-  return apiFetch<void>(`/jobs/${encodeURIComponent(jobName)}/run`, {
-    method: "POST",
-  });
+export interface RunJobBody {
+  params?: Record<string, unknown>;
+  control?: { override_bootstrap_gate?: boolean };
+}
+
+export interface RunJobQueuedResponse {
+  request_id: number;
+}
+
+export function runJob(
+  jobName: string,
+  body?: RunJobBody,
+): Promise<RunJobQueuedResponse | undefined> {
+  // PR1b-2 #1064 made the 202 body carry {request_id} so the operator
+  // can pivot to the queue row. apiFetch reads JSON when present and
+  // falls back to undefined on empty body — defensive on the
+  // never-supposed-to-fire case where BE drops the body.
+  //
+  // Zero-arg calls preserve the pre-PR2 shape: no body sent, BE
+  // _safe_read_json_body returns {} which legacy-flat-dict-normalises
+  // to {params: {}, control: {}}.
+  return apiFetch<RunJobQueuedResponse | undefined>(
+    `/jobs/${encodeURIComponent(jobName)}/run`,
+    {
+      method: "POST",
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    },
+  );
 }

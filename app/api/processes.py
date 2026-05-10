@@ -30,7 +30,7 @@ import psycopg
 import psycopg.errors
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
@@ -74,6 +74,7 @@ from app.services.processes import (
     scheduled_adapter,
 )
 from app.services.processes.ingest_sweep_adapter import is_sweep
+from app.services.processes.param_metadata import ParamMetadata
 from app.services.processes.watermarks import (
     acquire_shared_source_locks,
     atom_etag_target_for,
@@ -163,6 +164,13 @@ class ProcessRowResponse(BaseModel):
     can_cancel: bool
     last_n_errors: list[ErrorClassSummaryResponse]
     stale_reasons: list[StaleReason]
+    # PR2 #1064 — operator-exposable params for the Advanced disclosure
+    # tab on /admin/processes/{id}. Empty list for bootstrap +
+    # ingest_sweep mechanisms; non-empty only for scheduled jobs that
+    # declare ``ScheduledJob.params_metadata``. The FE renders one
+    # form field per entry. ``Field(default_factory=list)`` keeps the
+    # default per-instance, not a shared mutable.
+    params_metadata: list[ParamMetadata] = Field(default_factory=list)
 
 
 class ProcessListResponse(BaseModel):
@@ -372,6 +380,7 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         can_cancel=row.can_cancel,
         last_n_errors=[_convert_error(e) for e in row.last_n_errors],
         stale_reasons=list(row.stale_reasons),
+        params_metadata=list(row.params_metadata),
     )
 
 

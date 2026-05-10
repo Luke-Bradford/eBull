@@ -3,6 +3,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/api/client";
+import { runJob } from "@/api/jobs";
 import {
   cancelProcess,
   fetchBootstrapTimeline,
@@ -14,6 +15,7 @@ import {
 import type {
   BootstrapTimelineResponse,
   OrchestratorDagResponse,
+  ParamMetadata,
 } from "@/api/types";
 import {
   makeProcessRow,
@@ -35,12 +37,20 @@ vi.mock("@/api/processes", async () => {
   };
 });
 
+vi.mock("@/api/jobs", async () => {
+  const actual = await vi.importActual<typeof import("@/api/jobs")>(
+    "@/api/jobs",
+  );
+  return { ...actual, runJob: vi.fn() };
+});
+
 const mockedDetail = vi.mocked(fetchProcess);
 const mockedRuns = vi.mocked(fetchProcessRuns);
 const mockedTrigger = vi.mocked(triggerProcess);
 const mockedCancel = vi.mocked(cancelProcess);
 const mockedDag = vi.mocked(fetchOrchestratorDag);
 const mockedTimeline = vi.mocked(fetchBootstrapTimeline);
+const mockedRunJob = vi.mocked(runJob);
 
 beforeEach(() => {
   mockedDetail.mockReset();
@@ -49,6 +59,7 @@ beforeEach(() => {
   mockedCancel.mockReset();
   mockedDag.mockReset();
   mockedTimeline.mockReset();
+  mockedRunJob.mockReset();
 });
 
 function renderAt(path = "/admin/processes/sec_form4_ingest") {
@@ -485,5 +496,127 @@ describe("ProcessDetailPage — Timeline tab (bootstrap)", () => {
     const dialog = await screen.findByRole("dialog");
     expect(dialog.textContent).toContain("cik_index_2026Q2.zip");
     expect(dialog.textContent).toContain("unresolved_cik");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Advanced tab — params disclosure renderer (#1064 PR2)
+// ---------------------------------------------------------------------------
+
+const SAMPLE_DATE_METADATA: ParamMetadata = {
+  name: "min_period_of_report",
+  label: "Recency floor",
+  help_text: "Skip 13F accessions whose period_of_report is older than this date.",
+  field_type: "date",
+  default: null,
+  advanced_group: true,
+  enum_values: null,
+  min_value: null,
+  max_value: null,
+};
+
+describe("ProcessDetailPage — Advanced tab", () => {
+  function renderAtAdvanced(processId = "sec_13f_quarterly_sweep") {
+    return render(
+      <MemoryRouter initialEntries={[`/admin/processes/${processId}`]}>
+        <Routes>
+          <Route path="admin/processes/:id" element={<ProcessDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("hidden when row is bootstrap mechanism (no operator-exposable params)", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        params_metadata: [],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAtAdvanced("bootstrap");
+    await waitFor(() => expect(mockedDetail).toHaveBeenCalled());
+    expect(screen.queryByRole("tab", { name: "Advanced" })).toBeNull();
+  });
+
+  it("hidden when scheduled job has empty params_metadata", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "daily_cik_refresh",
+        mechanism: "scheduled_job",
+        params_metadata: [],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAtAdvanced("daily_cik_refresh");
+    await waitFor(() => expect(mockedDetail).toHaveBeenCalled());
+    expect(screen.queryByRole("tab", { name: "Advanced" })).toBeNull();
+  });
+
+  it("visible when scheduled job has at least one param declaration", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "sec_13f_quarterly_sweep",
+        mechanism: "scheduled_job",
+        params_metadata: [SAMPLE_DATE_METADATA],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAtAdvanced();
+    expect(
+      await screen.findByRole("tab", { name: "Advanced" }),
+    ).toBeTruthy();
+  });
+
+  it("submit calls runJob with {params} envelope and surfaces request_id", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "sec_13f_quarterly_sweep",
+        mechanism: "scheduled_job",
+        params_metadata: [SAMPLE_DATE_METADATA],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    mockedRunJob.mockResolvedValue({ request_id: 7 });
+    renderAtAdvanced();
+    fireEvent.click(await screen.findByRole("tab", { name: "Advanced" }));
+    fireEvent.change(screen.getByLabelText("Recency floor"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /run with these params/i }),
+    );
+    await waitFor(() =>
+      expect(mockedRunJob).toHaveBeenCalledWith("sec_13f_quarterly_sweep", {
+        params: { min_period_of_report: "2024-01-01" },
+      }),
+    );
+    await screen.findByText(/queued as request #7/i);
+  });
+
+  it("surfaces 400 ApiError detail inline", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "sec_13f_quarterly_sweep",
+        mechanism: "scheduled_job",
+        params_metadata: [SAMPLE_DATE_METADATA],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    mockedRunJob.mockRejectedValue(
+      new ApiError(400, "param 'min_period_of_report': cannot coerce ...", "param 'min_period_of_report': cannot coerce ..."),
+    );
+    renderAtAdvanced();
+    fireEvent.click(await screen.findByRole("tab", { name: "Advanced" }));
+    fireEvent.change(screen.getByLabelText("Recency floor"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /run with these params/i }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/trigger rejected/);
+    expect(alert.textContent).toMatch(/cannot coerce/);
   });
 });

@@ -85,11 +85,26 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     }
     throw new ApiError(res.status, message, detailRaw);
   }
-  // 202 Accepted (e.g. POST /jobs/{name}/run) and 204 No Content
-  // (e.g. /auth/logout) both have empty bodies in this codebase.
-  // Calling res.json() on either would throw "Unexpected end of
-  // JSON input"; the contract for both endpoints is "no body, the
-  // status code is the response".
-  if (res.status === 202 || res.status === 204) return undefined as T;
+  // 204 No Content always has an empty body — auth logout, cancel
+  // dispatcher rows, etc. Calling res.json() on it throws "Unexpected
+  // end of JSON input".
+  if (res.status === 204) return undefined as T;
+  // 202 Accepted is split: PR1b-2 #1064 made POST /jobs/{name}/run
+  // return JobRunQueuedResponse ({"request_id": N}) on 202 so the FE
+  // Advanced disclosure (PR2) can pivot the operator to the queue
+  // row. Other 202 callers may still send an empty body. Read the
+  // response as text once, parse JSON only when non-empty, and fall
+  // back to undefined on either an empty body or invalid JSON. This
+  // preserves the pre-PR2 contract for callers that expected
+  // undefined while unlocking the body for new endpoints.
+  if (res.status === 202) {
+    const text = await res.text();
+    if (!text) return undefined as T;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return undefined as T;
+    }
+  }
   return (await res.json()) as T;
 }

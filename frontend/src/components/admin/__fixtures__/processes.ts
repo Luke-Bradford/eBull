@@ -72,6 +72,7 @@ export function makeProcessRow(
     can_cancel: false,
     last_n_errors: [],
     stale_reasons: [],
+    params_metadata: [],
     ...overrides,
   };
 }
