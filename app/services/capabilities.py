@@ -174,13 +174,19 @@ _PRESENCE_QUERIES: dict[tuple[str, str], str] = {
     ("corporate_events", "sec_8k_events"): (
         # Per-#1117 PR-B: eight_k_filings is entity-level (PK
         # accession, denormalised instrument_id is the discovery
-        # sibling). Route through filing_events bridge so share-
-        # class siblings (GOOG/GOOGL) BOTH show the capability when
-        # an 8-K exists for the issuer.
-        "SELECT EXISTS(SELECT 1 FROM filing_events fe "
-        "WHERE fe.provider = 'sec' "
+        # sibling). Capability requires a PARSED row in
+        # eight_k_filings (so list_8k_filings has data to return);
+        # route through filing_events bridge so share-class
+        # siblings (GOOG/GOOGL) BOTH show the capability when an
+        # 8-K is parsed for the issuer. Codex pre-push P2 caught
+        # the prior over-claim where filing_events alone implied
+        # availability before parsing landed.
+        "SELECT EXISTS(SELECT 1 FROM eight_k_filings ekf "
+        "WHERE EXISTS (SELECT 1 FROM filing_events fe "
+        "WHERE fe.provider_filing_id = ekf.accession_number "
+        "AND fe.provider = 'sec' "
         "AND fe.filing_type IN ('8-K', '8-K/A') "
-        "AND fe.instrument_id = %s)"
+        "AND fe.instrument_id = %s))"
     ),
     ("business_summary", "sec_10k_item1"): (
         "SELECT EXISTS(SELECT 1 FROM instrument_business_summary b WHERE b.instrument_id = %s)"
