@@ -456,7 +456,7 @@ def _run_one_stage(
     from app.services.processes.bootstrap_cancel_signal import active_bootstrap_run
 
     try:
-        with JobLock(database_url, job_name), active_bootstrap_run(run_id):
+        with JobLock(database_url, job_name), active_bootstrap_run(run_id, stage_key):
             snap_token = _params_snapshot_var.set(effective_params)
             try:
                 invoker(effective_params)

@@ -81,12 +81,18 @@ def test_cancel_signal_aborts_before_first_archive(
 
     job = getattr(jobs, job_name)
 
+    # #1114: under bootstrap dispatch the contextvar carries (run_id,
+    # stage_key) so adopters read stage_key from it. Mirror that here so
+    # the asserted exc.stage_key reflects the new contract.
+    from app.services.processes.bootstrap_cancel_signal import active_bootstrap_run
+
     with (
         patch.object(jobs, "_bulk_dir", return_value=bulk_dir),
         patch.object(jobs, "_current_running_bootstrap_run_id", return_value=None),
         patch.object(jobs, "ingest_13f_dataset_archive", side_effect=_record),
         patch.object(jobs, "ingest_insider_dataset_archive", side_effect=_record),
         patch.object(jobs, "ingest_nport_dataset_archive", side_effect=_record),
+        active_bootstrap_run(99, stage_key),
     ):
         with pytest.raises(BootstrapStageCancelled) as exc_info:
             job()

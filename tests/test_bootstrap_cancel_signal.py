@@ -19,6 +19,7 @@ from app.services.bootstrap_state import (
 )
 from app.services.processes.bootstrap_cancel_signal import (
     active_bootstrap_run,
+    active_bootstrap_stage_key,
     bootstrap_cancel_requested,
 )
 
@@ -52,6 +53,21 @@ def test_returns_false_when_contextvar_unset() -> None:
     assert bootstrap_cancel_requested() is False
 
 
+def test_active_bootstrap_stage_key_returns_none_when_unset() -> None:
+    """#1114: outside ``active_bootstrap_run`` the reader returns None."""
+    assert active_bootstrap_stage_key() is None
+
+
+def test_active_bootstrap_stage_key_returns_stage_key_when_set() -> None:
+    """#1114: under ``active_bootstrap_run(run_id, stage_key)`` the
+    reader returns the stage_key so adopters can label their
+    ``BootstrapStageCancelled`` exceptions without hardcoding."""
+    with active_bootstrap_run(99, "filings_history_seed"):
+        assert active_bootstrap_stage_key() == "filings_history_seed"
+    # Reset on exit.
+    assert active_bootstrap_stage_key() is None
+
+
 def test_returns_false_when_no_cancel_pending(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
@@ -60,7 +76,7 @@ def test_returns_false_when_no_cancel_pending(
     run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=_SPECS)
     ebull_test_conn.commit()
 
-    with active_bootstrap_run(run_id):
+    with active_bootstrap_run(run_id, "alpha"):
         assert bootstrap_cancel_requested(conn=ebull_test_conn) is False
 
 
@@ -75,7 +91,7 @@ def test_returns_true_after_cancel_run(
     cancel_run(ebull_test_conn, requested_by_operator_id=None)
     ebull_test_conn.commit()
 
-    with active_bootstrap_run(run_id):
+    with active_bootstrap_run(run_id, "alpha"):
         assert bootstrap_cancel_requested(conn=ebull_test_conn) is True
 
 
@@ -91,7 +107,7 @@ def test_contextvar_resets_on_exit(
     cancel_run(ebull_test_conn, requested_by_operator_id=None)
     ebull_test_conn.commit()
 
-    with active_bootstrap_run(run_id):
+    with active_bootstrap_run(run_id, "alpha"):
         assert bootstrap_cancel_requested(conn=ebull_test_conn) is True
     # Outside the with-block: contextvar reset, helper returns False.
     assert bootstrap_cancel_requested(conn=ebull_test_conn) is False

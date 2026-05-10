@@ -46,7 +46,10 @@ from app.providers.implementations.sec_submissions import (
 )
 from app.services.bootstrap_state import BootstrapStageCancelled
 from app.services.data_freshness import seed_scheduler_from_manifest
-from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+from app.services.processes.bootstrap_cancel_signal import (
+    active_bootstrap_stage_key,
+    bootstrap_cancel_requested,
+)
 from app.services.sec_manifest import is_amendment_form, map_form_to_source, record_manifest_entry
 
 logger = logging.getLogger(__name__)
@@ -302,9 +305,10 @@ def run_first_install_drain(
     _CANCEL_POLL_EVERY_N = 50
     for n, (subject, cik) in enumerate(_iter_in_universe_subjects(conn)):  # type: ignore[misc]
         if n % _CANCEL_POLL_EVERY_N == 0 and bootstrap_cancel_requested():
+            # #1114: stage_key sourced from contextvar.
             raise BootstrapStageCancelled(
                 f"first-install drain cancelled by operator after {ciks_processed} CIKs",
-                stage_key="sec_first_install_drain",
+                stage_key=active_bootstrap_stage_key() or "",
             )
         if max_subjects is not None and ciks_processed >= max_subjects:
             break

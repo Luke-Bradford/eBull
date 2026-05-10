@@ -12,19 +12,29 @@ This module exposes the signal to long-running stages so they can
 poll periodically and bail out cooperatively. The pattern:
 
     from app.services.processes.bootstrap_cancel_signal import (
+        active_bootstrap_stage_key,
         bootstrap_cancel_requested,
     )
     from app.services.bootstrap_state import BootstrapStageCancelled
 
     for n, item in enumerate(big_iterable):
         if n % 50 == 0 and bootstrap_cancel_requested():
-            raise BootstrapStageCancelled(stage_key="sec_first_install_drain")
+            raise BootstrapStageCancelled(
+                stage_key=active_bootstrap_stage_key() or "",
+            )
         ...
 
-The bootstrap orchestrator's ``_run_one_stage`` sets the run id on
-this module's ContextVar around the invoker call; outside of a
-bootstrap dispatch the helper returns False (the contextvar is unset)
-so scheduled / manual triggers of the same job are unaffected.
+The bootstrap orchestrator's ``_run_one_stage`` sets the run id and
+the dispatching stage_key on this module's ContextVar around the
+invoker call; outside of a bootstrap dispatch the helpers return
+``False`` / ``None`` so scheduled / manual triggers of the same job
+are unaffected.
+
+Issue #1114: the contextvar carries both ``run_id`` AND ``stage_key``
+so adopters never hardcode the stage_key. If a future bootstrap
+stage invokes a helper that previously hardcoded its stage_key, the
+exception's ``stage_key`` attribute would otherwise misattribute the
+cancel to the wrong stage in the audit log.
 
 Polling cost: one SQL probe per call. Stage invokers should batch the
 polling (e.g. every 50 iterations) rather than calling on every loop
@@ -38,6 +48,7 @@ import contextlib
 import contextvars
 import logging
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import psycopg
@@ -48,29 +59,68 @@ from app.services.process_stop import is_stop_requested
 logger = logging.getLogger(__name__)
 
 
-# When set, identifies the in-flight bootstrap run that the calling
-# stage invoker is part of. Outside of bootstrap dispatch the value is
-# ``None`` and ``bootstrap_cancel_requested`` short-circuits to False.
-_active_bootstrap_run_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "_active_bootstrap_run_id", default=None
+@dataclass(frozen=True)
+class _BootstrapContext:
+    """Identifies the in-flight bootstrap run + dispatching stage.
+
+    Set by the orchestrator's ``_run_one_stage`` boundary so any
+    long-running invoker called from that stage can read both the
+    run_id (to probe for a cancel signal) and the stage_key (to
+    label the ``BootstrapStageCancelled`` exception with the
+    dispatching stage's name).
+    """
+
+    run_id: int
+    stage_key: str
+
+
+# When set, identifies the in-flight bootstrap run + dispatching
+# stage_key. Outside of bootstrap dispatch the value is ``None`` and
+# ``bootstrap_cancel_requested`` short-circuits to False.
+_active_bootstrap_context: contextvars.ContextVar[_BootstrapContext | None] = contextvars.ContextVar(
+    "_active_bootstrap_context", default=None
 )
 
 
 @contextlib.contextmanager
-def active_bootstrap_run(run_id: int) -> Iterator[None]:
-    """Context manager that exposes ``run_id`` to stage invokers.
+def active_bootstrap_run(run_id: int, stage_key: str) -> Iterator[None]:
+    """Context manager that exposes ``(run_id, stage_key)`` to stage invokers.
 
     The bootstrap orchestrator's ``_run_one_stage`` wraps the invoker
-    call in ``with active_bootstrap_run(run_id): invoker(...)`` so any
-    long-running loop inside the invoker can poll
-    ``bootstrap_cancel_requested()`` to check whether the operator
-    has cancelled the run.
+    call in ``with active_bootstrap_run(run_id, stage_key): invoker(...)``
+    so any long-running loop inside the invoker can poll
+    ``bootstrap_cancel_requested()`` to check whether the operator has
+    cancelled the run AND read ``active_bootstrap_stage_key()`` to
+    label the cancel exception with the dispatching stage.
+
+    Issue #1114: stage_key is now required (was implicit in caller
+    hardcoding). The orchestrator always knows its own stage_key at
+    the dispatch boundary; helpers should never hardcode it because
+    the same helper may be invoked from multiple stages in future.
     """
-    token = _active_bootstrap_run_id.set(run_id)
+    token = _active_bootstrap_context.set(_BootstrapContext(run_id=run_id, stage_key=stage_key))
     try:
         yield
     finally:
-        _active_bootstrap_run_id.reset(token)
+        _active_bootstrap_context.reset(token)
+
+
+def active_bootstrap_stage_key() -> str | None:
+    """Return the stage_key of the in-flight bootstrap stage, or None.
+
+    Issue #1114. Long-running helpers that raise
+    ``BootstrapStageCancelled`` read this to label the exception
+    with the dispatching stage's name instead of hardcoding their
+    own. Outside ``active_bootstrap_run`` the contextvar is unset
+    and this returns ``None``; callers should treat ``None`` as
+    "stage_key unknown" and pass an empty string to the exception
+    so audit log readers see a clear sentinel rather than a wrong
+    value.
+    """
+    ctx = _active_bootstrap_context.get()
+    if ctx is None:
+        return None
+    return ctx.stage_key
 
 
 def bootstrap_cancel_requested(
@@ -79,7 +129,7 @@ def bootstrap_cancel_requested(
 ) -> bool:
     """Return True iff the active bootstrap run has been cancelled.
 
-    Reads the ``_active_bootstrap_run_id`` contextvar; if unset (the
+    Reads the ``_active_bootstrap_context`` contextvar; if unset (the
     invoker is being called from a scheduled trigger, manual API
     POST, or test fixture rather than the bootstrap dispatcher),
     returns False without touching the DB. When set, opens a
@@ -96,9 +146,10 @@ def bootstrap_cancel_requested(
     observation falls back to the orchestrator's between-stage
     checkpoint at the next stage boundary.
     """
-    run_id = _active_bootstrap_run_id.get()
-    if run_id is None:
+    ctx = _active_bootstrap_context.get()
+    if ctx is None:
         return False
+    run_id = ctx.run_id
 
     try:
         if conn is not None:
@@ -131,5 +182,6 @@ def bootstrap_cancel_requested(
 
 __all__ = [
     "active_bootstrap_run",
+    "active_bootstrap_stage_key",
     "bootstrap_cancel_requested",
 ]

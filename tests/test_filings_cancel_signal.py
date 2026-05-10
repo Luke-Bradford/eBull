@@ -139,7 +139,7 @@ def test_refresh_filings_observes_bootstrap_cancel_signal(
 
     provider = _StubFilingsProvider({"0001064201": [], "0001064202": []})
 
-    with active_bootstrap_run(run_id):
+    with active_bootstrap_run(run_id, "filings_history_seed"):
         with pytest.raises(BootstrapStageCancelled) as exc_info:
             refresh_filings(
                 provider=provider,  # type: ignore[arg-type]
@@ -150,6 +150,9 @@ def test_refresh_filings_observes_bootstrap_cancel_signal(
             )
 
     assert "cancelled by operator" in str(exc_info.value)
+    # #1114: stage_key on the exception is read from the contextvar,
+    # not hardcoded inside refresh_filings.
+    assert exc_info.value.stage_key == "filings_history_seed"
     # Cancel observed on iteration 0 — provider untouched.
     assert provider.calls == []
 

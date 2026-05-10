@@ -927,7 +927,7 @@ class TestUniverseSweep:
             payloads.update(self._build_filer_payloads(cik=c, accession=f"{c}-25-000001", period="2024-12-31"))
         fetcher = _InMemoryFetcher(payloads)
 
-        with active_bootstrap_run(run_id):
+        with active_bootstrap_run(run_id, "sec_13f_quarterly_sweep"):
             with pytest.raises(BootstrapStageCancelled) as exc_info:
                 ingest_all_active_filers(
                     conn,
@@ -937,6 +937,8 @@ class TestUniverseSweep:
                 )
 
         assert "cancelled by operator" in str(exc_info.value)
+        # #1114: stage_key on exception read from contextvar, not hardcoded.
+        assert exc_info.value.stage_key == "sec_13f_quarterly_sweep"
 
         # Bookkeeping path ran before the raise: data_ingestion_runs
         # carries the partial state + cancel reason.
@@ -1027,7 +1029,7 @@ class TestUniverseSweep:
             payloads.update(self._build_filer_payloads(cik=c, accession=f"{c}-25-000001", period="2024-12-31"))
         fetcher = _InMemoryFetcher(payloads)
 
-        with active_bootstrap_run(run_id):
+        with active_bootstrap_run(run_id, "sec_13f_quarterly_sweep"):
             with pytest.raises(BootstrapStageCancelled):
                 ingest_all_active_filers(
                     conn,
