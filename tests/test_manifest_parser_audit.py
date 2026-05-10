@@ -67,9 +67,12 @@ def test_stuck_no_parser_counts_pending_and_fetched_on_unregistered_source(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
     """A source with no registered parser whose manifest rows are
-    pending/fetched reports them under ``stuck_no_parser``.
-    Parsed / tombstoned / failed are terminal-ish; they don't
-    contribute to the stuck count."""
+    pending reports them under ``stuck_no_parser``. (The full
+    pending + fetched + failed coverage is pinned in
+    ``test_fetched_and_failed_rows_count_as_stuck_too``; ``parsed``
+    and ``tombstoned`` are the only statuses that DON'T contribute,
+    matching the worker's iter_pending + iter_retryable scan
+    surface.)"""
     conn = ebull_test_conn
     _seed_aapl(conn)
     _seed_manifest_row(conn, accession="0000320193-26-000001", form="DEF 14A", source="sec_def14a")

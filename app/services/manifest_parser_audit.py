@@ -137,6 +137,19 @@ def compute_manifest_parser_audit(
         # unknown bucket so the operator sees it.
         if source not in by_source:
             by_source[source] = {st: 0 for st in known_statuses}
+        # Defensive (Codex pre-push round 2): the CHECK constraint on
+        # ``sec_filing_manifest.ingest_status`` rules out unknown
+        # values today, but a constraint relaxation or a direct DB
+        # edit could still produce one. Skip the unknown status
+        # rather than KeyError on the inner dict — the operator gets
+        # the rest of the report instead of a 500.
+        if status not in by_source[source]:
+            logger.warning(
+                "manifest_parser_audit: unknown ingest_status=%r on source=%s; skipping",
+                status,
+                source,
+            )
+            continue
         by_source[source][status] = int(count)
 
     out: list[ManifestParserSourceRow] = []
