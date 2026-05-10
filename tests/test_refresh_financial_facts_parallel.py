@@ -126,7 +126,9 @@ def _seed_instrument(conn: psycopg.Connection[tuple], instrument_id: int, symbol
         INSERT INTO external_identifiers
             (instrument_id, provider, identifier_type, identifier_value, is_primary)
         VALUES (%s, 'sec', 'cik', %s, TRUE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value, instrument_id)
+            WHERE provider = 'sec' AND identifier_type = 'cik'
+        DO NOTHING
         """,
         (instrument_id, cik),
     )

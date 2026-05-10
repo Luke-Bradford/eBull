@@ -344,16 +344,22 @@ def upsert_cik_mapping(
             if not cik:
                 logger.debug("CIK mapping: no CIK found for symbol %s", symbol)
                 continue
-            # external_identifiers has TWO uniqueness constraints:
-            #   (a) uq_external_identifiers_provider_value — UNIQUE(provider,
-            #       identifier_type, identifier_value)
-            #   (b) uq_external_identifiers_primary — partial UNIQUE
-            #       (instrument_id, provider, identifier_type) WHERE is_primary=TRUE
-            # ON CONFLICT can only target one. If an instrument already has a
-            # primary sec/cik row with a DIFFERENT value (e.g. the SEC ticker
-            # map changed), the INSERT below would violate (b) before (a)
-            # ever matched. Demote any mismatching primary row first so the
-            # upsert's own conflict target handles the rest.
+            # external_identifiers uniqueness invariants for sec/cik rows
+            # (post-#1102):
+            #   (a) uq_external_identifiers_cik_per_instrument — partial
+            #       UNIQUE(provider, identifier_type, identifier_value,
+            #       instrument_id) WHERE (provider='sec' AND
+            #       identifier_type='cik'). Allows N rows for the same CIK
+            #       across N siblings (GOOG + GOOGL, BRK.A + BRK.B).
+            #   (b) uq_external_identifiers_primary — partial
+            #       UNIQUE(instrument_id, provider, identifier_type) WHERE
+            #       is_primary=TRUE. Demote any mismatching primary row on
+            #       this instrument first so this insert's own conflict
+            #       target handles the same-CIK-already-mapped case.
+            # The instrument_id column is part of the conflict target so a
+            # hit means the same (CIK, instrument) row already exists; we
+            # only refresh the primary flag + last_verified_at and don't
+            # rewrite instrument_id.
             conn.execute(
                 """
                 UPDATE external_identifiers
@@ -376,8 +382,9 @@ def upsert_cik_mapping(
                     %(instrument_id)s, 'sec', 'cik', %(cik)s,
                     TRUE, NOW()
                 )
-                ON CONFLICT (provider, identifier_type, identifier_value) DO UPDATE SET
-                    instrument_id    = EXCLUDED.instrument_id,
+                ON CONFLICT (provider, identifier_type, identifier_value, instrument_id)
+                    WHERE provider = 'sec' AND identifier_type = 'cik'
+                DO UPDATE SET
                     is_primary       = TRUE,
                     last_verified_at = NOW()
                 """,

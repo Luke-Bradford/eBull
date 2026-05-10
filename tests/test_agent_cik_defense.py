@@ -165,7 +165,9 @@ def _seed(
         INSERT INTO external_identifiers
             (instrument_id, provider, identifier_type, identifier_value, is_primary)
         VALUES (%s, 'sec', 'cik', %s, %s)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value, instrument_id)
+            WHERE provider = 'sec' AND identifier_type = 'cik'
+        DO NOTHING
         """,
         (instrument_id, cik, is_primary),
     )
@@ -195,10 +197,10 @@ def test_audit_excludes_secondary_by_default(
     #
     # Use a *different* agent CIK from the sibling test
     # ``test_audit_finds_primary_agent_cik_contamination`` so the
-    # ``ON CONFLICT (provider, identifier_type, identifier_value) DO
-    # NOTHING`` partial unique index doesn't silently skip this seed
-    # if test ordering leaves the prior test's row alive (PR #765
-    # review BLOCKING).
+    # ``ON CONFLICT ... DO NOTHING`` partial unique index
+    # ``uq_external_identifiers_cik_per_instrument`` doesn't silently
+    # skip this seed if test ordering leaves the prior test's row alive
+    # for the same (CIK, instrument) pair (PR #765 review BLOCKING).
     _seed(ebull_test_conn, 992_001, "ACD_SEC", "0001213900", is_primary=False)
     rows = find_contaminated(ebull_test_conn, include_secondary=False)
     assert 992_001 not in {r[0] for r in rows}

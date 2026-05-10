@@ -1,16 +1,24 @@
-"""Regression tests for upsert_cik_mapping — pins #257 / #267 fix.
+"""Regression tests for upsert_cik_mapping.
 
-external_identifiers has two uniqueness constraints:
+Pins #257 / #267 (original constraint design) and #1102 (share-class
+CIK relaxation). Post-#1102 ``external_identifiers`` enforces:
 
-- uq_external_identifiers_provider_value — UNIQUE(provider, identifier_type,
-  identifier_value)
-- uq_external_identifiers_primary — partial UNIQUE(instrument_id, provider,
-  identifier_type) WHERE is_primary=TRUE
+- uq_external_identifiers_provider_value_non_cik — partial UNIQUE
+  (provider, identifier_type, identifier_value) WHERE NOT (sec/cik).
+  CUSIP / symbol / accession_no remain globally unique.
+- uq_external_identifiers_cik_per_instrument — partial UNIQUE
+  (provider, identifier_type, identifier_value, instrument_id) WHERE
+  (sec/cik). Multiple instruments may share a CIK (share-class
+  siblings: GOOG/GOOGL, BRK.A/BRK.B); each (CIK, instrument) pair is
+  unique.
+- uq_external_identifiers_primary — partial UNIQUE
+  (instrument_id, provider, identifier_type) WHERE is_primary=TRUE.
 
-ON CONFLICT in upsert_cik_mapping targets the first. The partial UNIQUE is
-handled by demoting any mismatching primary row first. These tests lock that
-behaviour so a future refactor cannot reintroduce the UniqueViolation that
-crashed daily_cik_refresh on every repeat run (#257).
+upsert_cik_mapping's ON CONFLICT targets the per-instrument CIK index;
+the partial primary UNIQUE is handled by demoting any mismatching
+primary row first. Tests lock the new behaviour so a future refactor
+cannot reintroduce the flap (#1102) that left one share-class sibling
+without 10-K / fundamentals / filings.
 """
 
 from __future__ import annotations
@@ -113,11 +121,77 @@ def test_cik_change_demotes_prior_primary(ebull_test_conn: psycopg.Connection[tu
     ]
 
 
-def test_cik_reassigned_to_different_instrument(ebull_test_conn: psycopg.Connection[tuple]) -> None:
-    """Same CIK moves from instrument A to instrument B.
+def test_same_cik_co_binds_to_two_instruments(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#1102: share-class siblings legitimately share a CIK.
 
-    Exercises the (provider, identifier_type, identifier_value) conflict path:
-    ON CONFLICT updates instrument_id to the new owner.
+    Pre-#1102 the global UNIQUE on (provider, type, value) flapped the
+    binding between siblings on every ``daily_cik_refresh`` — one
+    sibling always lost its 10-K / fundamentals.
+
+    Post-#1102 the per-instrument partial unique index allows two
+    rows for the same CIK as long as ``instrument_id`` differs. Both
+    instruments hold the CIK as primary; neither flaps.
+    """
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="GOOG")
+    _seed_instrument(conn, instrument_id=2, symbol="GOOGL")
+
+    upsert_cik_mapping(conn, {"GOOG": "0001652044"}, [("GOOG", "1")])
+    upsert_cik_mapping(conn, {"GOOGL": "0001652044"}, [("GOOGL", "2")])
+
+    # BOTH instruments hold the CIK as primary. Pre-#1102 the second
+    # call would have rewritten instrument 1's row to instrument 2.
+    assert _all_rows(conn, 1) == [("0001652044", True)]
+    assert _all_rows(conn, 2) == [("0001652044", True)]
+    assert _primary_cik(conn, 1) == "0001652044"
+    assert _primary_cik(conn, 2) == "0001652044"
+
+
+def test_share_class_repeat_run_is_idempotent(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """A second pass over the same panel adds zero rows; both
+    instruments still hold the CIK as primary and ``last_verified_at``
+    advances on the in-place UPDATE (asserted explicitly).
+    """
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="GOOG")
+    _seed_instrument(conn, instrument_id=2, symbol="GOOGL")
+
+    upsert_cik_mapping(conn, {"GOOG": "0001652044"}, [("GOOG", "1")])
+    upsert_cik_mapping(conn, {"GOOGL": "0001652044"}, [("GOOGL", "2")])
+
+    last_verified_before = conn.execute(
+        "SELECT instrument_id, last_verified_at FROM external_identifiers "
+        "WHERE provider='sec' AND identifier_type='cik' "
+        "AND identifier_value='0001652044' ORDER BY instrument_id"
+    ).fetchall()
+
+    # Second pass — no new rows, just refreshes.
+    upsert_cik_mapping(conn, {"GOOG": "0001652044"}, [("GOOG", "1")])
+    upsert_cik_mapping(conn, {"GOOGL": "0001652044"}, [("GOOGL", "2")])
+
+    assert _all_rows(conn, 1) == [("0001652044", True)]
+    assert _all_rows(conn, 2) == [("0001652044", True)]
+
+    last_verified_after = conn.execute(
+        "SELECT instrument_id, last_verified_at FROM external_identifiers "
+        "WHERE provider='sec' AND identifier_type='cik' "
+        "AND identifier_value='0001652044' ORDER BY instrument_id"
+    ).fetchall()
+    assert len(last_verified_before) == 2
+    assert len(last_verified_after) == 2
+    for (iid_b, ts_b), (iid_a, ts_a) in zip(last_verified_before, last_verified_after, strict=True):
+        assert iid_b == iid_a
+        assert ts_a >= ts_b, f"last_verified_at did not advance for iid={iid_a}: {ts_b} → {ts_a}"
+
+
+def test_cik_reassignment_does_not_remove_prior_instrument_binding(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Post-#1102 the rename / reassignment scenario no longer rewrites
+    the prior instrument's row. Instrument 1 keeps its CIK; instrument
+    2 also acquires the CIK as primary. If the rename intent is
+    genuine the prior row must be cleaned up by an explicit operator
+    action (not a side effect of upsert_cik_mapping).
     """
     conn = ebull_test_conn
     _seed_instrument(conn, instrument_id=1, symbol="OLD")
@@ -126,22 +200,19 @@ def test_cik_reassigned_to_different_instrument(ebull_test_conn: psycopg.Connect
     upsert_cik_mapping(conn, {"OLD": "0000555555"}, [("OLD", "1")])
     upsert_cik_mapping(conn, {"NEW": "0000555555"}, [("NEW", "2")])
 
-    # Instrument 1 must have no rows at all — the ON CONFLICT path rewrites
-    # the single (sec, cik, 0000555555) row in place from instrument 1 to 2.
-    assert _all_rows(conn, 1) == []
+    assert _all_rows(conn, 1) == [("0000555555", True)]
     assert _all_rows(conn, 2) == [("0000555555", True)]
 
 
-def test_cik_reassigned_to_instrument_with_existing_different_cik(
+def test_cik_change_demotes_prior_primary_when_target_already_holds_different_cik(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """Combined conflict: target instrument already holds a different primary CIK,
-    and the incoming CIK is currently primary on a different instrument.
-
-    Exercises both conflict paths in one call: the demote UPDATE must fire for
-    the target instrument's stale primary row, and the ON CONFLICT must fire on
-    the (provider, identifier_type, identifier_value) triple to move the
-    existing row to the target.
+    """Combined: instrument 2 already holds CIK 0000999999 as primary;
+    incoming map says it should hold CIK 0000555555 instead. The
+    demote UPDATE fires (0000999999 → is_primary=FALSE) and the
+    incoming CIK is inserted as primary. Instrument 1's row is
+    untouched (it still holds 0000555555 from a prior pass —
+    share-class co-binding).
     """
     conn = ebull_test_conn
     _seed_instrument(conn, instrument_id=1, symbol="OLD")
@@ -151,7 +222,7 @@ def test_cik_reassigned_to_instrument_with_existing_different_cik(
     upsert_cik_mapping(conn, {"NEW": "0000999999"}, [("NEW", "2")])
     upsert_cik_mapping(conn, {"NEW": "0000555555"}, [("NEW", "2")])
 
-    assert _primary_cik(conn, 1) is None
+    assert _all_rows(conn, 1) == [("0000555555", True)]
     assert _primary_cik(conn, 2) == "0000555555"
     assert _all_rows(conn, 2) == [
         ("0000555555", True),

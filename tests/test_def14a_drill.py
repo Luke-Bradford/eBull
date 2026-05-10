@@ -42,7 +42,9 @@ def _seed_instrument_with_cik(
         INSERT INTO external_identifiers (
             instrument_id, provider, identifier_type, identifier_value, is_primary
         ) VALUES (%s, 'sec', 'cik', %s, TRUE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        ON CONFLICT (provider, identifier_type, identifier_value, instrument_id)
+            WHERE provider = 'sec' AND identifier_type = 'cik'
+        DO NOTHING
         """,
         (iid, cik),
     )

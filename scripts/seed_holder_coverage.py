@@ -382,7 +382,9 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
             INSERT INTO external_identifiers (
                 instrument_id, provider, identifier_type, identifier_value, is_primary
             ) VALUES (%s, 'sec', 'cusip', %s, TRUE)
-            ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+            ON CONFLICT (provider, identifier_type, identifier_value)
+                WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+            DO NOTHING
             """,
             (instrument_id, cusip),
         )

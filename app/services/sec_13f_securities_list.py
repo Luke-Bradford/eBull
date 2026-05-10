@@ -396,11 +396,15 @@ def _insert_external_identifier(
          violation on the INSERT rolls back this row only, not the
          entire backfill batch.
       3. ``ON CONFLICT (provider, identifier_type, identifier_value)
-         DO NOTHING RETURNING xmax`` — distinguishes fresh INSERT
-         from same-CUSIP-already-mapped without a second probe.
+         WHERE NOT (provider='sec' AND identifier_type='cik')
+         DO NOTHING RETURNING instrument_id`` — distinguishes fresh
+         INSERT from same-CUSIP-already-mapped without a second probe.
          Re-probe on no-row-returned tells us whether the conflict
          is same-instrument (already_mapped) or different
-         (conflict).
+         (conflict). The partial-index predicate is required by
+         Postgres ON CONFLICT inference post-#1102 (the global
+         unique-on-value constraint was replaced with two partial
+         indexes; CUSIP rows live under the non-CIK partial index).
     """
     cusip_norm = cusip.strip().upper()
 
@@ -427,7 +431,9 @@ def _insert_external_identifier(
                 INSERT INTO external_identifiers (
                     instrument_id, provider, identifier_type, identifier_value, is_primary
                 ) VALUES (%(iid)s, 'sec', 'cusip', %(cusip)s, FALSE)
-                ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+                ON CONFLICT (provider, identifier_type, identifier_value)
+                    WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+                DO NOTHING
                 RETURNING instrument_id
                 """,
                 {"iid": instrument_id, "cusip": cusip_norm},

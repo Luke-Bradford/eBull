@@ -381,6 +381,61 @@ pool with raw `ConnectionPool(...)` — use `open_pool`.
   §"Cancel semantics — cooperative" + Codex round 1 amendment B4 +
   round 2 R2-W2.
 
+## CIK = entity, CUSIP = security (#1102, settled 2026-05-10)
+
+Share-class siblings (GOOG/GOOGL, BRK.A/BRK.B, …) legitimately share an SEC
+CIK — the CIK identifies the issuer (legal entity), not the security. The
+CUSIP identifies the security (per-share-class). Every reputable feed (CRSP,
+Bloomberg, Yahoo, IEX, OpenFIGI, SEC EDGAR itself) encodes this shape.
+
+`external_identifiers` enforces this in two partial unique indexes
+(migration `sql/143`):
+
+- `uq_external_identifiers_provider_value_non_cik` — global UNIQUE on
+  `(provider, identifier_type, identifier_value)` for every NON-CIK
+  identifier. CUSIP / symbol / accession_no remain globally unique.
+- `uq_external_identifiers_cik_per_instrument` — UNIQUE on `(provider,
+  identifier_type, identifier_value, instrument_id)` for `(sec, cik)` rows.
+  Multiple instruments may share a CIK; each (CIK, instrument) pair is
+  unique.
+
+`upsert_cik_mapping` (`app/services/filings.py`) claims the CIK
+independently per instrument — there is no flap. Pre-#1102 the global
+constraint forced ON CONFLICT to rewrite the row's `instrument_id` to
+the last writer, so `daily_cik_refresh` ping-ponged the binding between
+siblings on every run, leaving one without 10-K / fundamentals.
+
+Postgres ON CONFLICT inference against partial unique indexes requires
+the predicate be supplied on the upsert. Empirically verified against
+Postgres 17 — without the predicate, the insert fails with
+"no unique or exclusion constraint matching the ON CONFLICT specification".
+All `INSERT ... ON CONFLICT (provider, identifier_type, identifier_value) DO ...`
+sites must attach the matching predicate (CIK target gets the 4-tuple
++ `WHERE provider='sec' AND identifier_type='cik'`; non-CIK gets the
+3-tuple + `WHERE NOT (provider='sec' AND identifier_type='cik')`).
+
+Entity-level data (10-K text, business summary, financial facts) is
+denormalised across siblings — acceptable for the small share-class
+population (~10 known instruments). If the population grows to 50+, file
+a follow-up to introduce a proper `entities` layer (Option B from the
+#1094 design discussion).
+
+`canonical_instrument_id` (#819) is a **different** mechanism for `.RTH`
+operational duplicates — same security, two ticker variants. Don't
+conflate.
+
+- **PR-A:** sql/143 migration + filings.py upsert + ON CONFLICT predicate
+  sweep across ~25 production + test sites + `tests/test_upsert_cik_mapping.py`
+  flips.
+- **PR-B (deferred):** fan-out CIK→instrument multimap in
+  `sec_companyfacts_ingest.py`, `sec_submissions_ingest.py`,
+  `sec_insider_dataset_ingest.py` so share-class siblings BOTH receive
+  bulk-ingest data. Until PR-B lands, only one of two siblings has
+  fundamentals / submissions / insider data — but the binding is stable
+  rather than flapping (strict improvement).
+
+**Spec:** `docs/superpowers/specs/2026-05-10-share-class-cik-uniqueness.md`.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
