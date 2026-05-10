@@ -260,7 +260,31 @@ def refresh_filings(
     upserted = 0
     skipped_provider_error = 0
 
+    # PR3d #1064 follow-up — poll the bootstrap cancel signal between
+    # instruments. ``filings_history_seed`` (bootstrap stage 14) walks
+    # the full CIK-mapped tradable cohort (~2-12k instruments at
+    # ~150ms / SEC rate limit), so a cooperative cancel from the
+    # operator's modal otherwise waits up to ~30 minutes for the
+    # default window. Polling every 50 iterations bounds observation
+    # latency to ~7s. Outside a bootstrap dispatch the contextvar is
+    # unset and the helper short-circuits to False, so the scheduled /
+    # operator manual-trigger path is unaffected — this same
+    # ``refresh_filings`` body powers many non-bootstrap flows.
+    from app.services.bootstrap_state import BootstrapStageCancelled
+    from app.services.processes.bootstrap_cancel_signal import bootstrap_cancel_requested
+
+    _cancel_poll_every_n = 50
+    iter_index = 0
+
     for instrument_id, identifier_value in resolved.items():
+        if iter_index % _cancel_poll_every_n == 0 and bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"refresh_filings cancelled by operator after "
+                f"{iter_index}/{len(resolved)} instruments "
+                f"(provider={provider_name}, identifier={identifier_type})",
+                stage_key="filings_history_seed",
+            )
+        iter_index += 1
         try:
             results = provider.list_filings_by_identifier(
                 identifier_type=identifier_type,
