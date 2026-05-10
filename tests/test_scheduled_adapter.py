@@ -6,6 +6,7 @@ DB-backed against the worker ``ebull_test`` template.
 from __future__ import annotations
 
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
 from app.services.processes import scheduled_adapter
@@ -695,15 +696,17 @@ def test_display_name_prefers_scheduled_job_label_over_raw_name(
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.commit()
 
-    # Find any job that has a non-None display_name. If every entry's
-    # display_name is None today, the adapter still falls back to
-    # job.name (defensive); this test guards the propagation path.
+    # Find any job that has a non-None display_name. ``pytest.skip`` if
+    # none are populated yet so CI surfaces the gap (Codex review
+    # WARNING from PR #1108 round 2 — bare ``return`` silently passes
+    # with zero assertions).
     job_with_label = next(
         (j for j in SCHEDULED_JOBS if j.display_name is not None),
         None,
     )
     if job_with_label is None:
-        return  # nothing to assert until at least one entry populates display_name
+        pytest.skip("no ScheduledJob declares display_name yet")
+    assert job_with_label is not None  # narrow Optional for pyright
     row = scheduled_adapter.get_row(ebull_test_conn, process_id=job_with_label.name)
     assert row is not None
     assert row.display_name == job_with_label.display_name

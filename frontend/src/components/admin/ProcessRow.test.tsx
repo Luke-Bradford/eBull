@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -360,7 +360,7 @@ describe("ProcessRow", () => {
   // PR4 #1082 — ⓘ tooltip rendering description
   // ---------------------------------------------------------------------
 
-  it("renders ⓘ tooltip when description is non-empty", () => {
+  it("renders ⓘ tooltip button when description is non-empty", () => {
     renderRow({
       row: makeProcessRow({
         description: "Refreshes SEC CIK mappings nightly.",
@@ -368,12 +368,45 @@ describe("ProcessRow", () => {
     });
     const tooltip = screen.getByTestId("process-description-tooltip");
     expect(tooltip).toBeTruthy();
-    expect(tooltip.getAttribute("title")).toBe(
-      "Refreshes SEC CIK mappings nightly.",
-    );
+    // Accessible name carries the description for screen readers
+    // (replaces the prior native ``title`` after operator feedback
+    // that the native delay + click-to-hide were poor UX).
     expect(tooltip).toHaveAccessibleName(
       "Refreshes SEC CIK mappings nightly.",
     );
+    // Popover starts collapsed; aria-expanded reflects it.
+    expect(tooltip.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("clicking the ⓘ pins the tooltip open; second click collapses", () => {
+    renderRow({
+      row: makeProcessRow({ description: "pinned popover content." }),
+    });
+    const tooltip = screen.getByTestId("process-description-tooltip");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    fireEvent.click(tooltip);
+    expect(tooltip.getAttribute("aria-expanded")).toBe("true");
+    const pop = screen.getByRole("tooltip");
+    expect(pop.textContent).toBe("pinned popover content.");
+
+    fireEvent.click(tooltip);
+    expect(tooltip.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("hovering the ⓘ surfaces the popover immediately (no native title delay)", () => {
+    renderRow({
+      row: makeProcessRow({ description: "hover content." }),
+    });
+    const tooltip = screen.getByTestId("process-description-tooltip");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    fireEvent.pointerEnter(tooltip.parentElement!);
+    expect(screen.getByRole("tooltip").textContent).toBe("hover content.");
+
+    fireEvent.pointerLeave(tooltip.parentElement!);
+    expect(screen.queryByRole("tooltip")).toBeNull();
   });
 
   it("hides ⓘ tooltip when description is empty", () => {

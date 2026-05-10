@@ -12,6 +12,7 @@
  * `prefers-reduced-motion` setting.
  */
 
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { ProcessRowResponse, StaleReason } from "@/api/types";
@@ -352,29 +353,66 @@ function formatElapsedSince(iso: string): string {
 /**
  * ⓘ tooltip showing operator-facing description (PR4 #1082).
  *
- * Native ``title`` attribute on a small inline-flex ⓘ glyph. Operating
- * systems render the title as a tooltip on hover/long-press; assistive
- * technology reads the same string via ``aria-label``. No JS modal,
- * no portal — just the browser's tooltip surface so the row stays
- * focus-stable + keyboard-traversable.
+ * Hover-or-click popover. Native ``title`` was the original
+ * implementation but operator feedback flagged two problems:
+ *   - ~1.5s browser-default delay before the title surfaces
+ *   - Clicking the icon (a natural expectation) hid the title
+ *     instead of pinning it
+ *
+ * The replacement is a small CSS-driven popover triggered by
+ * ``onPointerEnter`` / ``onPointerLeave`` (no delay) and a click
+ * toggle that pins it open until clicked again or focus leaves the
+ * row. ``aria-label`` still carries the description for screen
+ * readers; the popover is also reachable by Tab so keyboard-only
+ * operators can press Enter/Space to pin it.
  */
 function DescriptionTooltip({ description }: { description: string }) {
+  const [hovered, setHovered] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const containerRef = useRef<HTMLSpanElement>(null);
+
+  // Click outside closes the pinned popover. Idle when not pinned so
+  // the listener doesn't run for every row in the table.
+  useEffect(() => {
+    if (!pinned) return;
+    function handlePointerDown(e: PointerEvent) {
+      const target = e.target as Node | null;
+      if (target && containerRef.current && !containerRef.current.contains(target)) {
+        setPinned(false);
+      }
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () =>
+      document.removeEventListener("pointerdown", handlePointerDown);
+  }, [pinned]);
+
+  const visible = hovered || pinned;
   return (
-    // ``<button type="button">`` rather than a bare span so keyboard
-    // users can Tab to the icon and trigger the browser's native
-    // tooltip surface (and screen readers announce it via
-    // ``aria-label``). Codex pre-push PR4 a11y finding: a non-focusable
-    // span left keyboard-only operators with no way to reach the
-    // tooltip.
-    <button
-      type="button"
-      aria-label={description}
-      title={description}
-      data-testid="process-description-tooltip"
-      className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-400 text-[10px] font-bold text-slate-500 hover:border-slate-600 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 dark:border-slate-500 dark:text-slate-400 dark:hover:border-slate-300 dark:hover:text-slate-200"
+    <span
+      ref={containerRef}
+      className="relative inline-flex"
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
     >
-      i
-    </button>
+      <button
+        type="button"
+        aria-label={description}
+        aria-expanded={visible}
+        data-testid="process-description-tooltip"
+        onClick={() => setPinned((p) => !p)}
+        className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-400 text-[10px] font-bold text-slate-500 hover:border-slate-600 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 dark:border-slate-500 dark:text-slate-400 dark:hover:border-slate-300 dark:hover:text-slate-200"
+      >
+        i
+      </button>
+      {visible ? (
+        <span
+          role="tooltip"
+          className="absolute left-5 top-0 z-10 w-64 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-normal normal-case tracking-normal text-slate-700 shadow-lg dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+        >
+          {description}
+        </span>
+      ) : null}
+    </span>
   );
 }
 

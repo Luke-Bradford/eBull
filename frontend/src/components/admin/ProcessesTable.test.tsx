@@ -283,7 +283,11 @@ describe("ProcessesTable", () => {
   // row's own DOM order.
   // ---------------------------------------------------------------------
 
-  it("row keyboard order: link → Iterate → Full-wash → Cancel (all enabled)", async () => {
+  it("row keyboard order: link → ⓘ tooltip → Iterate → Full-wash → Cancel (all enabled)", async () => {
+    // PR4 #1082: the ⓘ description tooltip is a focusable button so
+    // keyboard-only operators can reach it; it slots in between the
+    // row link and the Iterate button. The order pin protects the
+    // operator's expected focus path through the row.
     const user = userEvent.setup();
     renderTable([
       makeProcessRow({
@@ -292,11 +296,17 @@ describe("ProcessesTable", () => {
         can_iterate: true,
         can_full_wash: true,
         can_cancel: true,
+        description: "kbd row description",
       }),
     ]);
     const link = screen.getByRole("link", { name: "Keyboard Row" });
     link.focus();
     expect(document.activeElement).toBe(link);
+
+    await user.tab();
+    expect(document.activeElement).toBe(
+      screen.getByTestId("process-description-tooltip"),
+    );
 
     await user.tab();
     expect(document.activeElement).toBe(
