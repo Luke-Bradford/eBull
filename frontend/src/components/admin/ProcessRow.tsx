@@ -371,7 +371,6 @@ function DescriptionTooltip({ description }: { description: string }) {
       aria-label={description}
       title={description}
       data-testid="process-description-tooltip"
-      onClick={(e) => e.preventDefault()}
       className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-400 text-[10px] font-bold text-slate-500 hover:border-slate-600 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 dark:border-slate-500 dark:text-slate-400 dark:hover:border-slate-300 dark:hover:text-slate-200"
     >
       i
