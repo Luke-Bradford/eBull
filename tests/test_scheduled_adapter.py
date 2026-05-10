@@ -6,7 +6,6 @@ DB-backed against the worker ``ebull_test`` template.
 from __future__ import annotations
 
 import psycopg
-import pytest
 from psycopg.types.json import Jsonb
 
 from app.services.processes import scheduled_adapter
@@ -687,29 +686,32 @@ def test_description_surfaces_from_scheduled_job(
 def test_display_name_prefers_scheduled_job_label_over_raw_name(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """PR4 #1082 — when ``ScheduledJob.display_name`` is populated
-    (PR1a populated every entry), the adapter surfaces it instead of
-    the raw ``job.name``.
+    """PR4 #1082 — every ``ScheduledJob`` declares a non-empty
+    ``display_name`` distinct from the raw ``name`` slug, and the
+    adapter forwards it verbatim.
+
+    Iterates every registered entry rather than spot-checking the first
+    one — without this the test passes on a partial population.
     """
     from app.workers.scheduler import SCHEDULED_JOBS
 
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.commit()
 
-    # Find any job that has a non-None display_name. ``pytest.skip`` if
-    # none are populated yet so CI surfaces the gap (Codex review
-    # WARNING from PR #1108 round 2 — bare ``return`` silently passes
-    # with zero assertions).
-    job_with_label = next(
-        (j for j in SCHEDULED_JOBS if j.display_name is not None),
-        None,
-    )
-    if job_with_label is None:
-        pytest.skip("no ScheduledJob declares display_name yet")
-    assert job_with_label is not None  # narrow Optional for pyright
-    row = scheduled_adapter.get_row(ebull_test_conn, process_id=job_with_label.name)
-    assert row is not None
-    assert row.display_name == job_with_label.display_name
+    missing = [j.name for j in SCHEDULED_JOBS if j.display_name is None]
+    assert missing == [], f"jobs missing display_name: {missing}"
+
+    for job in SCHEDULED_JOBS:
+        assert job.display_name is not None  # narrow Optional for pyright
+        assert job.display_name.strip() != "", f"{job.name}: display_name is blank"
+        assert job.display_name != job.name, (
+            f"{job.name}: display_name equals raw slug — supply a distinct operator-facing label"
+        )
+        row = scheduled_adapter.get_row(ebull_test_conn, process_id=job.name)
+        assert row is not None, f"{job.name}: adapter returned no row"
+        assert row.display_name == job.display_name, (
+            f"{job.name}: adapter surfaced {row.display_name!r} but registry declares {job.display_name!r}"
+        )
 
 
 def test_params_metadata_default_empty_for_jobs_without_declarations(

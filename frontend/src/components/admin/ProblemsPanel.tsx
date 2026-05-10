@@ -198,29 +198,32 @@ export function ProblemsPanel({
         {secretMissing.map((item) => (
           <SecretMissingRow key={item.layer} item={item} />
         ))}
-        {failingJobs.map((job) => (
-          <li key={`job-${job.name}`} className="px-4 py-2 text-sm">
-            <div className="flex items-start gap-2">
-              <span aria-hidden className="mt-1 inline-block h-2 w-2 rounded-full bg-red-500" />
-              <div className="flex-1">
-                <div className="font-medium text-red-800">{job.name} — last run failed</div>
-                {job.last_finished_at !== null ? (
-                  <div className="text-xs text-slate-600">Failed at {formatDateTime(job.last_finished_at)}</div>
-                ) : null}
-                <div className="text-xs text-slate-600">
-                  Clears when the next run of {job.name} succeeds.
+        {failingJobs.map((job) => {
+          const label = job.display_name ?? job.name;
+          return (
+            <li key={`job-${job.name}`} className="px-4 py-2 text-sm">
+              <div className="flex items-start gap-2">
+                <span aria-hidden className="mt-1 inline-block h-2 w-2 rounded-full bg-red-500" />
+                <div className="flex-1">
+                  <div className="font-medium text-red-800">{label} — last run failed</div>
+                  {job.last_finished_at !== null ? (
+                    <div className="text-xs text-slate-600">Failed at {formatDateTime(job.last_finished_at)}</div>
+                  ) : null}
+                  <div className="text-xs text-slate-600">
+                    Clears when the next run of {label} succeeds.
+                  </div>
                 </div>
+                <Link
+                  to={`/admin/jobs/${encodeURIComponent(job.name)}`}
+                  className="shrink-0 text-xs font-medium text-blue-700 hover:underline"
+                  aria-label={`View runs for ${label}`}
+                >
+                  View runs →
+                </Link>
               </div>
-              <Link
-                to={`/admin/jobs/${encodeURIComponent(job.name)}`}
-                className="shrink-0 text-xs font-medium text-blue-700 hover:underline"
-                aria-label={`View runs for ${job.name}`}
-              >
-                View runs →
-              </Link>
-            </div>
-          </li>
-        ))}
+            </li>
+          );
+        })}
         {coverageNullRows > 0 ? (
           <li className="px-4 py-2 text-sm">
             <div className="flex items-start gap-2">

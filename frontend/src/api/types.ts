@@ -104,6 +104,10 @@ export interface SystemStatusResponse {
 
 export interface JobOverviewResponse {
   name: string;
+  // Operator-facing label populated from `ScheduledJob.display_name`.
+  // Render `display_name ?? name` — `null` means the job has no
+  // dedicated label and falls back to the raw slug.
+  display_name: string | null;
   description: string;
   cadence: string;
   cadence_kind: CadenceKind;

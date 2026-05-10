@@ -109,6 +109,7 @@ function jobsResponse(): JobsListResponse {
     jobs: [
       {
         name: "orchestrator_full_sync",
+        display_name: "Orchestrator full sync",
         description: "orchestrator sweep",
         cadence: "daily",
         cadence_kind: "daily",
@@ -121,6 +122,7 @@ function jobsResponse(): JobsListResponse {
       },
       {
         name: "execute_approved_orders",
+        display_name: "Execute approved orders",
         description: "execute orders",
         cadence: "every 1 minutes",
         cadence_kind: "every_n_minutes",
@@ -133,6 +135,7 @@ function jobsResponse(): JobsListResponse {
       },
       {
         name: "attribution_summary",
+        display_name: null,
         description: "attribution",
         cadence: "daily",
         cadence_kind: "daily",
@@ -226,6 +229,7 @@ describe("AdminPage — top-level composition", () => {
       jobs: [
         {
           name: "execute_approved_orders",
+          display_name: "Execute approved orders",
           description: "execute orders",
           cadence: "every 1 minutes",
           cadence_kind: "every_n_minutes",
@@ -291,10 +295,10 @@ describe("AdminPage — Background tasks collapsible", () => {
     );
 
     await screen.findByRole("button", {
-      name: "Run execute_approved_orders now",
+      name: "Run Execute approved orders now",
     });
     expect(
-      screen.queryByRole("button", { name: "Run orchestrator_full_sync now" }),
+      screen.queryByRole("button", { name: "Run Orchestrator full sync now" }),
     ).toBeNull();
   });
 
@@ -306,7 +310,7 @@ describe("AdminPage — Background tasks collapsible", () => {
       await screen.findByRole("button", { name: /Background tasks/ }),
     );
     const btn = await screen.findByRole("button", {
-      name: "Run execute_approved_orders now",
+      name: "Run Execute approved orders now",
     });
 
     const callsBefore = mockedJobs.mock.calls.length;
@@ -328,7 +332,7 @@ describe("AdminPage — Background tasks collapsible", () => {
       await screen.findByRole("button", { name: /Background tasks/ }),
     );
     const btn = await screen.findByRole("button", {
-      name: "Run execute_approved_orders now",
+      name: "Run Execute approved orders now",
     });
     await user.click(btn);
     expect(btn).toHaveTextContent("Already running");
@@ -342,7 +346,7 @@ describe("AdminPage — Background tasks collapsible", () => {
       await screen.findByRole("button", { name: /Background tasks/ }),
     );
     const btn = await screen.findByRole("button", {
-      name: "Run execute_approved_orders now",
+      name: "Run Execute approved orders now",
     });
     await user.click(btn);
     expect(btn).toHaveTextContent("Unknown job");
