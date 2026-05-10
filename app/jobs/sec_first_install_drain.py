@@ -45,7 +45,6 @@ from app.providers.implementations.sec_submissions import (
     parse_submissions_page,
 )
 from app.services.bootstrap_state import BootstrapStageCancelled
-from app.services.data_freshness import seed_scheduler_from_manifest
 from app.services.processes.bootstrap_cancel_signal import (
     active_bootstrap_stage_key,
     bootstrap_cancel_requested,
@@ -62,10 +61,15 @@ class DrainStats:
     secondary_pages_fetched: int
     manifest_rows_upserted: int
     errors: int
-    # Count of (subject_type, subject_id, source) triples written to
-    # ``data_freshness_index`` after the drain. Without this seeding
-    # step (#937), the steady-state per-CIK poll would silently no-op
-    # because the scheduler had no rows to poll.
+    # Count of DISTINCT (subject_type, subject_id, source) triples
+    # observed during the drain. Each triple corresponds to one
+    # ``data_freshness_index`` row — the inline seed in
+    # ``record_manifest_entry`` UPSERTs by triple (#956), so the
+    # number of distinct triples == the number of scheduler rows
+    # the drain caused to exist. Pre-#959 this was the count from
+    # a separate post-drain ``seed_scheduler_from_manifest`` bulk
+    # call, which was redundant with the inline seed and is now
+    # removed.
     scheduler_rows_seeded: int = 0
     # #1044: count of manifest rows seeded from filing_events without
     # any HTTP. Bulk path populates this; fallback path leaves it 0.
@@ -74,6 +78,8 @@ class DrainStats:
 
 def seed_manifest_from_filing_events(
     conn: psycopg.Connection[Any],
+    *,
+    seeded_triples: set[tuple[str, str, str]] | None = None,
 ) -> int:
     """Seed ``sec_filing_manifest`` from already-ingested ``filing_events``.
 
@@ -90,6 +96,12 @@ def seed_manifest_from_filing_events(
     No-op if filing_events is empty (e.g. fallback mode bypassed the
     bulk path entirely); the caller should follow up with the per-CIK
     HTTP drain in that case.
+
+    #959: when ``seeded_triples`` is supplied, every
+    ``record_manifest_entry`` call also records its
+    ``(subject_type, subject_id, source)`` triple into the set so the
+    caller can report a faithful ``scheduler_rows_seeded`` count
+    without re-querying ``data_freshness_index``.
     """
     upserted = 0
     skipped_unmapped_form = 0
@@ -184,6 +196,8 @@ def seed_manifest_from_filing_events(
                 is_amendment=is_amendment,
             )
             upserted += 1
+            if seeded_triples is not None:
+                seeded_triples.add(("issuer", str(int(instrument_id)), source))
         except ValueError as exc:
             logger.debug(
                 "seed_manifest_from_filing_events: rejected accession=%s: %s",
@@ -277,6 +291,10 @@ def run_first_install_drain(
     secondary_pages_fetched = 0
     manifest_upserted = 0
     errors = 0
+    # #959: track distinct (subject_type, subject_id, source) triples
+    # observed inline so we can report scheduler_rows_seeded without
+    # the redundant post-drain bulk seed.
+    inline_seeded_triples: set[tuple[str, str, str]] = set()
 
     # Fast path (#1044): if filing_events has rows for the SEC
     # provider (populated by C1.a + C1.b in the bulk path), seed the
@@ -287,7 +305,7 @@ def run_first_install_drain(
     # snapshot are picked up by the steady-state per-CIK poll
     # (#870), not this drain — running another full HTTP sweep here
     # would defeat the perf gain.
-    rows_seeded_from_filing_events = seed_manifest_from_filing_events(conn)
+    rows_seeded_from_filing_events = seed_manifest_from_filing_events(conn, seeded_triples=inline_seeded_triples)
     manifest_upserted += rows_seeded_from_filing_events
     if rows_seeded_from_filing_events > 0:
         logger.info(
@@ -355,6 +373,7 @@ def run_first_install_drain(
                     is_amendment=row.is_amendment,
                 )
                 manifest_upserted += 1
+                inline_seeded_triples.add((subject.subject_type, subject.subject_id, row.source))
             except ValueError as exc:
                 logger.warning(
                     "first-install drain: rejected accession=%s for cik=%s: %s",
@@ -370,23 +389,25 @@ def run_first_install_drain(
                 http_get=http_get,
                 cik=cik,
                 subject=subject,
+                seeded_triples=inline_seeded_triples,
             )
 
-    # #937: seed the scheduler from manifest after the drain commits
-    # rows. Without this, the per-CIK poll (#870) silently no-ops
-    # post-drain because data_freshness_index is empty for the drained
-    # scope. ``seed_scheduler_from_manifest`` is idempotent + UPSERTs
-    # by (subject_type, subject_id, source) so re-runs are safe.
+    # #959: post-#956 every ``record_manifest_entry`` call already
+    # inline-seeds the (subject_type, subject_id, source) triple via
+    # ``seed_freshness_for_manifest_row``. The post-drain bulk
+    # ``seed_scheduler_from_manifest`` call (#937 / PR #957) was a
+    # redundant second pass — on first-install drain it UPSERTed the
+    # same ~12k * ~10 forms ≈ 120k rows the inline path had already
+    # written. Dropping it.
     #
-    # Scope trade-off: ``seed_scheduler_from_manifest`` is full-table —
-    # ``SELECT DISTINCT ON ... FROM sec_filing_manifest``. With
-    # ``max_subjects=N`` (sample run) it still scans every prior
-    # manifest row, not just this drain's. Acceptable here because the
-    # drain runs rarely (first-install + explicit operator re-drain);
-    # the full-scan + ON CONFLICT UPSERT is bounded at ~12k subjects ×
-    # ~10 forms ≈ 120k rows, well under any pathological threshold. A
-    # scoped variant is filed as a follow-up if the scale ever grows.
-    scheduler_rows_seeded = seed_scheduler_from_manifest(conn)
+    # Counter wiring: every drain write path (per-CIK loop above,
+    # ``seed_manifest_from_filing_events`` fast path, and
+    # ``_drain_secondary_pages``) is threaded with the
+    # ``inline_seeded_triples`` set so the counter stays accurate
+    # across all paths (Codex pre-push round 1 — without these
+    # threads the counter materially under-reports when the fast
+    # path or pagination fires).
+    scheduler_rows_seeded = len(inline_seeded_triples)
 
     logger.info(
         "first-install drain: ciks=%d skipped=%d errors=%d secondary_pages=%d upserted=%d scheduler_seeded=%d",
@@ -414,6 +435,7 @@ def _drain_secondary_pages(
     http_get: HttpGet,
     cik: str,
     subject: ResolvedSubject,
+    seeded_triples: set[tuple[str, str, str]] | None = None,
 ) -> int:
     """Walk every ``filings.files[]`` page for one CIK.
 
@@ -422,6 +444,10 @@ def _drain_secondary_pages(
     ``files[]``. The drain follows them all once per CIK.
 
     Returns the count of pages fetched.
+
+    #959: when ``seeded_triples`` is supplied, every
+    ``record_manifest_entry`` call records its triple so the caller's
+    ``scheduler_rows_seeded`` counter stays accurate.
     """
     cik_padded = cik.zfill(10)
     primary_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
@@ -463,6 +489,8 @@ def _drain_secondary_pages(
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
                 )
+                if seeded_triples is not None:
+                    seeded_triples.add((subject.subject_type, subject.subject_id, row.source))
             except ValueError as exc:
                 logger.warning(
                     "first-install drain (secondary): rejected accession=%s: %s",
