@@ -40,6 +40,11 @@ import psycopg.sql
 
 from app.config import settings
 from app.jobs.runtime import VALID_JOB_NAMES, JobRuntime
+from app.services.processes.bootstrap_gate import check_bootstrap_state_gate
+from app.services.processes.param_metadata import (
+    ParamValidationError,
+    validate_job_params,
+)
 from app.services.sync_orchestrator.dispatcher import (
     NOTIFY_CHANNEL,
     claim_oldest_pending,
@@ -91,6 +96,7 @@ def _dispatch_manual_job(
     runtime: JobRuntime,
     request_id: int,
     job_name: str | None,
+    payload: Any = None,
     mode: str | None = None,
 ) -> None:
     """Inner-loop dispatch for ``request_kind='manual_job'``.
@@ -118,6 +124,98 @@ def _dispatch_manual_job(
                 error_msg=f"unknown job name: {job_name!r}",
             )
         return
+
+    # PR1b-2 #1064 — extract canonical envelope from durable payload.
+    # ``payload`` is the JSONB blob from ``pending_job_requests.payload``;
+    # ``None`` covers legacy queue rows written before PR1b-2 (and the
+    # synthetic "no body" path that publishes payload=NULL). Keys missing
+    # from the envelope default to empty dicts so downstream code can
+    # consume them uniformly. A structurally malformed envelope
+    # (params/control present but not a JSON object) is rejected with
+    # the contract message — silent coercion would mask the violation
+    # for direct queue inserts.
+    try:
+        raw_params, control = _extract_envelope(payload)
+    except _MalformedEnvelopeError as exc:
+        logger.info(
+            "listener: rejecting manual_job request_id=%d for %r — malformed envelope: %s",
+            request_id,
+            job_name,
+            exc,
+        )
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            mark_request_rejected(conn, request_id, error_msg=f"malformed payload: {exc}")
+        return
+
+    # Validate the durable payload's params dict against the registry.
+    # The API path (run_job) already validated when the queue row was
+    # written, but the listener must be defensive: a direct INSERT into
+    # the queue (operator script, batch tool) bypasses the API. Reject
+    # such rows BEFORE invoker dispatch so the operator sees the
+    # contract violation in the queue row's error_msg.
+    try:
+        validated_params = validate_job_params(
+            job_name,
+            raw_params,
+            allow_internal_keys=False,
+        )
+    except ParamValidationError as exc:
+        logger.info(
+            "listener: rejecting manual_job request_id=%d for %r — params invalid: %s",
+            request_id,
+            job_name,
+            exc,
+        )
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            mark_request_rejected(conn, request_id, error_msg=f"invalid params: {exc}")
+        return
+
+    # ``_extract_envelope`` already enforced strict-bool typing; we can
+    # safely read the value as-is without a coercion that would treat
+    # truthy strings as override.
+    override_present = control.get("override_bootstrap_gate", False) is True
+
+    # PR1b-2 #1064 — bootstrap_state gate at manual-queue dispatch.
+    # Mirrors the scheduled-fire path in app/jobs/runtime.py::_wrap_invoker.
+    # Bootstrap-internal jobs (orchestrator + its stage jobs) are NOT in
+    # SCHEDULED_JOBS, so the registry lookup returns no entry and the
+    # gate is skipped — the orchestrator MUST be able to run while
+    # bootstrap_state.status='running' or it would deadlock itself.
+    job_in_registry = any(j.name == job_name for j in SCHEDULED_JOBS)
+    if job_in_registry:
+        try:
+            with psycopg.connect(settings.database_url, autocommit=True) as conn:
+                allowed, reason = check_bootstrap_state_gate(
+                    conn,
+                    job_name=job_name,
+                    invocation_path="manual_queue",
+                    override_present=override_present,
+                )
+        except Exception:
+            # Fail-open mirrors the prereq check below — a transient
+            # bootstrap_state read failure should not silently drop a
+            # real run; the body-side guards still apply.
+            logger.warning(
+                "listener: bootstrap_state gate for %r failed; running anyway",
+                job_name,
+                exc_info=True,
+            )
+            allowed, reason = True, ""
+
+        if not allowed:
+            logger.info(
+                "listener: rejecting manual_job request_id=%d for %r — %s",
+                request_id,
+                job_name,
+                reason,
+            )
+            with psycopg.connect(settings.database_url, autocommit=True) as conn:
+                # PREVENTION-grade: data-engineer skill §6.5.7 step 8
+                # mandates mark_request_rejected (NOT _completed) for
+                # any prelude-skip path. A 'completed' row would falsely
+                # claim the job ran.
+                mark_request_rejected(conn, request_id, error_msg=reason)
+            return
 
     # PR1b #1064 — extend per-job prerequisite check to the manual-queue
     # path. The scheduled-fire path in app/jobs/runtime.py::_wrap_invoker
@@ -187,7 +285,87 @@ def _dispatch_manual_job(
     # Submit to the runtime's manual executor. The runtime's own
     # wrapper handles the linked_request_id / dispatched / completed
     # transitions inside the executor task.
-    runtime.submit_manual_with_request(job_name, request_id=request_id, mode=mode)
+    runtime.submit_manual_with_request(
+        job_name,
+        request_id=request_id,
+        mode=mode,
+        params=validated_params,
+    )
+
+
+class _MalformedEnvelopeError(ValueError):
+    """``pending_job_requests.payload`` is structurally invalid.
+
+    Raised by ``_extract_envelope`` when the payload has the canonical
+    envelope shape but ``body.params`` or ``body.control`` is not a
+    JSON object. The listener maps this to ``mark_request_rejected``
+    with the message body so the operator sees the contract violation
+    on ``GET /jobs/requests``. Codex pre-push round 1 WARNING.
+    """
+
+
+# Codex pre-push round 2 WARNING: control allow-list at the listener.
+# Mirrors ``_ALLOWED_CONTROL_KEYS`` in app/api/jobs.py so a direct
+# queue insert with a typo'd flag (``override_bootstrap_gates``) is
+# rejected at dispatch instead of silently no-opping the operator's
+# intent.
+_LISTENER_ALLOWED_CONTROL_KEYS: frozenset[str] = frozenset({"override_bootstrap_gate"})
+
+
+def _extract_envelope(payload: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Decode the durable payload into ``(params, control)``.
+
+    PR1b-2 (#1064): ``pending_job_requests.payload`` carries the
+    canonical envelope ``{"params": {...}, "control": {...}}``. This
+    helper tolerates three input shapes so the listener stays robust
+    against direct queue inserts and pre-PR1b-2 rows:
+
+    1. ``None`` — legacy row or empty body. Returns ``({}, {})``.
+    2. Canonical envelope dict — extract ``params`` and ``control``,
+       defaulting either to ``{}`` when absent. Raises
+       ``_MalformedEnvelopeError`` when the inner ``params`` /
+       ``control`` exists but is not a JSON object, when an unknown
+       control key is set, or when ``override_bootstrap_gate`` is not
+       a boolean — silent coercion would mask a real contract violation.
+    3. Flat dict (legacy ergonomic shape) — entire payload becomes
+       ``params`` with empty ``control``. Mirrors the API
+       ``_normalise_envelope`` helper so a directly-inserted row goes
+       through the same disambiguation rule.
+
+    Top-level non-dict payloads (lists, strings, numbers) raise
+    ``_MalformedEnvelopeError`` — the API rejects them at the boundary,
+    and a direct queue insert with the same shape is just as broken.
+    Codex pre-push round 2 WARNING.
+    """
+    if payload is None:
+        return ({}, {})
+    if not isinstance(payload, dict):
+        raise _MalformedEnvelopeError(f"payload must be a JSON object (got {type(payload).__name__})")
+
+    has_envelope_keys = "params" in payload or "control" in payload
+    if not has_envelope_keys:
+        return (dict(payload), {})
+
+    params = payload.get("params", {})
+    control = payload.get("control", {})
+    if params is None:
+        params = {}
+    if control is None:
+        control = {}
+    if not isinstance(params, dict):
+        raise _MalformedEnvelopeError(f"payload.params must be a JSON object (got {type(params).__name__})")
+    if not isinstance(control, dict):
+        raise _MalformedEnvelopeError(f"payload.control must be a JSON object (got {type(control).__name__})")
+
+    unknown = set(control) - _LISTENER_ALLOWED_CONTROL_KEYS
+    if unknown:
+        raise _MalformedEnvelopeError(f"unknown control key(s): {sorted(unknown)}")
+    # Strict-bool check (Codex pre-push round 2 BLOCKING): truthy strings
+    # like ``"false"`` would otherwise grant the override via ``bool(...)``.
+    raw_override = control.get("override_bootstrap_gate", False)
+    if raw_override is not False and raw_override is not True:
+        raise _MalformedEnvelopeError("control.override_bootstrap_gate must be a boolean")
+    return (dict(params), dict(control))
 
 
 def _dispatch_sync_request(
@@ -435,6 +613,7 @@ def _route_claim(
                 runtime=runtime,
                 request_id=request_id,
                 job_name=claim["job_name"],
+                payload=claim.get("payload"),
                 mode=claim.get("mode"),
             )
             state.claims_dispatched += 1

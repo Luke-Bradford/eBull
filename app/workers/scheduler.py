@@ -1103,9 +1103,14 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
     tracker = _JobTracker(job_name)
     # Function-local import: app.jobs.runtime imports this module's
     # invokers at top level, so the reverse import has to be lazy.
-    from app.jobs.runtime import consume_prelude_run_id
+    from app.jobs.runtime import consume_params_snapshot, consume_prelude_run_id
 
     pre_allocated_run_id = consume_prelude_run_id()
+    # Always consume the snapshot context so a nested ``_tracked_job``
+    # cannot reuse a stale value. Only used on the prelude-fallback path
+    # below (``record_job_start``); the prelude branch already wrote the
+    # snapshot in its own INSERT.
+    fallback_params_snapshot = consume_params_snapshot()
     if pre_allocated_run_id is not None:
         tracker.run_id = pre_allocated_run_id
         # Advance straight to the body — the prelude already wrote the
@@ -1153,7 +1158,11 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
 
     try:
         with psycopg.connect(settings.database_url) as conn:
-            tracker.run_id = record_job_start(conn, job_name)
+            tracker.run_id = record_job_start(
+                conn,
+                job_name,
+                params_snapshot=dict(fallback_params_snapshot) if fallback_params_snapshot is not None else None,
+            )
     except Exception:
         logger.error("Failed to record job start for %s", job_name, exc_info=True)
         # Still run the job even if tracking fails.

@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import psycopg
 import psycopg.rows
+from psycopg.types.json import Jsonb
 
 from app.services.runtime_config import write_kill_switch_audit
 
@@ -255,22 +256,48 @@ def record_job_start(
     job_name: str,
     *,
     now: datetime | None = None,
+    params_snapshot: dict[str, Any] | None = None,
 ) -> int:
     """
     Record the start of a scheduled job.  Returns the run_id.
 
     The caller should later call record_job_finish() with this run_id.
+
+    ``params_snapshot`` (#1064 PR1b-2) populates ``job_runs.params_snapshot``
+    with the validated effective params dict. Three populate paths:
+
+    * Manual queue: validated ``payload['params']`` from
+      ``pending_job_requests``.
+    * Scheduled fire: ``materialise_scheduled_params(job_name)`` after
+      validation.
+    * Bootstrap stage: the StageSpec params dict (PR1c lifts the
+      bespoke wrappers; PR1b-2 still carries ``{}`` for those).
+
+    ``None`` means the caller is on the legacy direct-invocation path
+    (tests, prelude-fallback) where the column's column-default
+    ``'{}'::jsonb`` is the right value — we omit the column from the
+    INSERT and let Postgres apply the default.
     """
     now = now or _utcnow()
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            INSERT INTO job_runs (job_name, started_at, status)
-            VALUES (%(name)s, %(started)s, 'running')
-            RETURNING run_id
-            """,
-            {"name": job_name, "started": now},
-        )
+        if params_snapshot is None:
+            cur.execute(
+                """
+                INSERT INTO job_runs (job_name, started_at, status)
+                VALUES (%(name)s, %(started)s, 'running')
+                RETURNING run_id
+                """,
+                {"name": job_name, "started": now},
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO job_runs (job_name, started_at, status, params_snapshot)
+                VALUES (%(name)s, %(started)s, 'running', %(params)s)
+                RETURNING run_id
+                """,
+                {"name": job_name, "started": now, "params": Jsonb(params_snapshot)},
+            )
         row = cur.fetchone()
     conn.commit()
 
@@ -319,6 +346,7 @@ def record_job_skip(
     reason: str,
     *,
     now: datetime | None = None,
+    params_snapshot: dict[str, Any] | None = None,
 ) -> int:
     """Record a skipped job run (prerequisite not met).
 
@@ -334,20 +362,42 @@ def record_job_skip(
     This is intentionally separate from the start/finish pair used by
     ``_tracked_job`` — a skipped job has no execution phase, so a
     single insert is the honest representation.
+
+    ``params_snapshot`` (#1064 PR1b-2) — when supplied, the validated
+    params dict is committed alongside the skip row so the operator
+    audit trail reflects the effective inputs even when the run never
+    executed. ``None`` lets the column default to ``'{}'``.
     """
     assert conn.autocommit, (
         "record_job_skip requires autocommit=True so conn.transaction() issues a real BEGIN/COMMIT, not a savepoint"
     )
     now = now or _utcnow()
     with conn.transaction():
-        row = conn.execute(
-            """
-            INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count, error_msg)
-            VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s)
-            RETURNING run_id
-            """,
-            {"name": job_name, "ts": now, "reason": reason},
-        ).fetchone()
+        if params_snapshot is None:
+            row = conn.execute(
+                """
+                INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count, error_msg)
+                VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s)
+                RETURNING run_id
+                """,
+                {"name": job_name, "ts": now, "reason": reason},
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                INSERT INTO job_runs (
+                    job_name, started_at, finished_at, status, row_count, error_msg, params_snapshot
+                )
+                VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s, %(params)s)
+                RETURNING run_id
+                """,
+                {
+                    "name": job_name,
+                    "ts": now,
+                    "reason": reason,
+                    "params": Jsonb(params_snapshot),
+                },
+            ).fetchone()
         if row is None:
             raise RuntimeError("job_runs INSERT returned no row")
         run_id = int(row[0])

@@ -42,19 +42,27 @@ import contextvars
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Final
+from typing import Any, Final
 
 import psycopg
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from psycopg.types.json import Jsonb
 
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
+from app.jobs.sources import JobInvoker
 from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
 from app.services.process_stop import acquire_prelude_lock
+from app.services.processes.bootstrap_gate import check_bootstrap_state_gate
+from app.services.processes.param_metadata import (
+    ParamValidationError,
+    materialise_scheduled_params,
+    validate_job_params,
+)
 from app.services.sync_orchestrator.types import OrchestratorFenceHeld
 from app.workers.scheduler import (
     JOB_ATTRIBUTION_SUMMARY,
@@ -165,54 +173,83 @@ logger = logging.getLogger(__name__)
 # this map with ``SCHEDULED_JOBS``, and ``test_jobs_runtime.py`` asserts
 # the two are equal so a job declared in the registry without an invoker
 # (or vice versa) fails the test rather than silently no-opping.
+#
+# Contract widening (#1064 PR1b-2): the registry stores ``JobInvoker``
+# (``Callable[[Mapping[str, Any]], None]``). Existing zero-arg bodies
+# are adapted at registration via ``_adapt_zero_arg`` — the body still
+# ignores params; PR1c lifts the bespoke bootstrap wrappers and
+# migrates the three affected bodies (``filings_history_seed``,
+# ``sec_first_install_drain``, ``sec_13f_quarterly_sweep``) to consume
+# the params dict directly. Adapting at the registration boundary keeps
+# the body diff zero for the ~35 jobs that PR1c will not touch.
 
-_INVOKERS: Final[dict[str, Callable[[], None]]] = {
-    JOB_NIGHTLY_UNIVERSE_SYNC: nightly_universe_sync,
-    JOB_DAILY_CANDLE_REFRESH: daily_candle_refresh,
-    JOB_ETORO_LOOKUPS_REFRESH: etoro_lookups_refresh,
-    JOB_EXCHANGES_METADATA_REFRESH: exchanges_metadata_refresh,
-    JOB_FX_RATES_REFRESH: fx_rates_refresh,
-    JOB_DAILY_RESEARCH_REFRESH: daily_research_refresh,
-    JOB_DAILY_PORTFOLIO_SYNC: daily_portfolio_sync,
-    JOB_EXECUTE_APPROVED_ORDERS: execute_approved_orders,
-    JOB_MORNING_CANDIDATE_REVIEW: morning_candidate_review,
-    JOB_FUNDAMENTALS_SYNC: fundamentals_sync,
-    JOB_DAILY_TAX_RECONCILIATION: daily_tax_reconciliation,
-    JOB_RETRY_DEFERRED: retry_deferred_recommendations_job,
-    JOB_MONITOR_POSITIONS: monitor_positions_job,
-    JOB_ATTRIBUTION_SUMMARY: attribution_summary_job,
-    JOB_SEED_COST_MODELS: seed_cost_models,
-    JOB_WEEKLY_REPORT: weekly_report,
-    JOB_MONTHLY_REPORT: monthly_report,
-    JOB_ORCHESTRATOR_FULL_SYNC: orchestrator_full_sync,
-    JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC: orchestrator_high_frequency_sync,
-    JOB_RAW_DATA_RETENTION_SWEEP: raw_data_retention_sweep,
-    JOB_SEC_BUSINESS_SUMMARY_INGEST: sec_business_summary_ingest,
-    JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP: sec_business_summary_bootstrap,
-    JOB_SEC_DIVIDEND_CALENDAR_INGEST: sec_dividend_calendar_ingest,
-    JOB_SEC_INSIDER_TRANSACTIONS_INGEST: sec_insider_transactions_ingest,
-    JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL: sec_insider_transactions_backfill,
-    JOB_SEC_FORM3_INGEST: sec_form3_ingest,
-    JOB_SEC_DEF14A_INGEST: sec_def14a_ingest,
-    JOB_SEC_DEF14A_BOOTSTRAP: sec_def14a_bootstrap,
-    JOB_SEC_8K_EVENTS_INGEST: sec_8k_events_ingest,
-    JOB_SEC_FILING_DOCUMENTS_INGEST: sec_filing_documents_ingest,
-    JOB_CUSIP_EXTID_SWEEP: cusip_extid_sweep,
-    JOB_CUSIP_UNIVERSE_BACKFILL: cusip_universe_backfill,
-    JOB_OWNERSHIP_OBSERVATIONS_SYNC: ownership_observations_sync,
-    JOB_OWNERSHIP_OBSERVATIONS_BACKFILL: ownership_observations_backfill,
-    JOB_SEC_13F_FILER_DIRECTORY_SYNC: sec_13f_filer_directory_sync,
-    JOB_SEC_13F_QUARTERLY_SWEEP: sec_13f_quarterly_sweep,
-    JOB_SEC_NPORT_FILER_DIRECTORY_SYNC: sec_nport_filer_directory_sync,
-    JOB_SEC_N_PORT_INGEST: sec_n_port_ingest,
+
+def _adapt_zero_arg(fn: Callable[[], None]) -> JobInvoker:
+    """Wrap a zero-arg invoker into the ``JobInvoker`` contract.
+
+    Discards the params dict and calls the underlying function. Used
+    only at the registration boundary so ``_INVOKERS`` keeps its
+    uniform ``JobInvoker`` shape without forcing a body-level rewrite
+    on every scheduled-job function. PR1c's bespoke-wrapper lift will
+    drop the adapter on the three jobs whose bodies start consuming
+    params; everything else keeps its zero-arg body indefinitely.
+    """
+
+    def _adapted(params: Mapping[str, Any]) -> None:
+        del params  # PR1b-2 widening; PR1c lifts adapter on consuming jobs.
+        fn()
+
+    _adapted.__wrapped__ = fn  # type: ignore[attr-defined]
+    return _adapted
+
+
+_INVOKERS: Final[dict[str, JobInvoker]] = {
+    JOB_NIGHTLY_UNIVERSE_SYNC: _adapt_zero_arg(nightly_universe_sync),
+    JOB_DAILY_CANDLE_REFRESH: _adapt_zero_arg(daily_candle_refresh),
+    JOB_ETORO_LOOKUPS_REFRESH: _adapt_zero_arg(etoro_lookups_refresh),
+    JOB_EXCHANGES_METADATA_REFRESH: _adapt_zero_arg(exchanges_metadata_refresh),
+    JOB_FX_RATES_REFRESH: _adapt_zero_arg(fx_rates_refresh),
+    JOB_DAILY_RESEARCH_REFRESH: _adapt_zero_arg(daily_research_refresh),
+    JOB_DAILY_PORTFOLIO_SYNC: _adapt_zero_arg(daily_portfolio_sync),
+    JOB_EXECUTE_APPROVED_ORDERS: _adapt_zero_arg(execute_approved_orders),
+    JOB_MORNING_CANDIDATE_REVIEW: _adapt_zero_arg(morning_candidate_review),
+    JOB_FUNDAMENTALS_SYNC: _adapt_zero_arg(fundamentals_sync),
+    JOB_DAILY_TAX_RECONCILIATION: _adapt_zero_arg(daily_tax_reconciliation),
+    JOB_RETRY_DEFERRED: _adapt_zero_arg(retry_deferred_recommendations_job),
+    JOB_MONITOR_POSITIONS: _adapt_zero_arg(monitor_positions_job),
+    JOB_ATTRIBUTION_SUMMARY: _adapt_zero_arg(attribution_summary_job),
+    JOB_SEED_COST_MODELS: _adapt_zero_arg(seed_cost_models),
+    JOB_WEEKLY_REPORT: _adapt_zero_arg(weekly_report),
+    JOB_MONTHLY_REPORT: _adapt_zero_arg(monthly_report),
+    JOB_ORCHESTRATOR_FULL_SYNC: _adapt_zero_arg(orchestrator_full_sync),
+    JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC: _adapt_zero_arg(orchestrator_high_frequency_sync),
+    JOB_RAW_DATA_RETENTION_SWEEP: _adapt_zero_arg(raw_data_retention_sweep),
+    JOB_SEC_BUSINESS_SUMMARY_INGEST: _adapt_zero_arg(sec_business_summary_ingest),
+    JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP: _adapt_zero_arg(sec_business_summary_bootstrap),
+    JOB_SEC_DIVIDEND_CALENDAR_INGEST: _adapt_zero_arg(sec_dividend_calendar_ingest),
+    JOB_SEC_INSIDER_TRANSACTIONS_INGEST: _adapt_zero_arg(sec_insider_transactions_ingest),
+    JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL: _adapt_zero_arg(sec_insider_transactions_backfill),
+    JOB_SEC_FORM3_INGEST: _adapt_zero_arg(sec_form3_ingest),
+    JOB_SEC_DEF14A_INGEST: _adapt_zero_arg(sec_def14a_ingest),
+    JOB_SEC_DEF14A_BOOTSTRAP: _adapt_zero_arg(sec_def14a_bootstrap),
+    JOB_SEC_8K_EVENTS_INGEST: _adapt_zero_arg(sec_8k_events_ingest),
+    JOB_SEC_FILING_DOCUMENTS_INGEST: _adapt_zero_arg(sec_filing_documents_ingest),
+    JOB_CUSIP_EXTID_SWEEP: _adapt_zero_arg(cusip_extid_sweep),
+    JOB_CUSIP_UNIVERSE_BACKFILL: _adapt_zero_arg(cusip_universe_backfill),
+    JOB_OWNERSHIP_OBSERVATIONS_SYNC: _adapt_zero_arg(ownership_observations_sync),
+    JOB_OWNERSHIP_OBSERVATIONS_BACKFILL: _adapt_zero_arg(ownership_observations_backfill),
+    JOB_SEC_13F_FILER_DIRECTORY_SYNC: _adapt_zero_arg(sec_13f_filer_directory_sync),
+    JOB_SEC_13F_QUARTERLY_SWEEP: _adapt_zero_arg(sec_13f_quarterly_sweep),
+    JOB_SEC_NPORT_FILER_DIRECTORY_SYNC: _adapt_zero_arg(sec_nport_filer_directory_sync),
+    JOB_SEC_N_PORT_INGEST: _adapt_zero_arg(sec_n_port_ingest),
     # Registered for #994 (first-install bootstrap orchestrator) — these
     # were callable as scheduled-only paths before but the orchestrator
     # needs them in _INVOKERS so it can dispatch them via JobLock.
     # ``daily_cik_refresh`` seeds external_identifiers SEC CIK rows;
     # ``daily_financial_facts`` walks the SEC daily master-index.
     # Both are also wired into SCHEDULED_JOBS unchanged.
-    JOB_DAILY_CIK_REFRESH: daily_cik_refresh,
-    JOB_DAILY_FINANCIAL_FACTS: daily_financial_facts,
+    JOB_DAILY_CIK_REFRESH: _adapt_zero_arg(daily_cik_refresh),
+    JOB_DAILY_FINANCIAL_FACTS: _adapt_zero_arg(daily_financial_facts),
 }
 
 
@@ -229,14 +266,18 @@ from app.services import sec_bulk_download as _sec_bulk_download  # noqa: E402
 
 # #1021 — bulk-archive download stage A3 of the bulk-datasets-first
 # bootstrap (#1020). Registered so the orchestrator can dispatch it.
-_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _sec_bulk_download.sec_bulk_download_job
-_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR] = _bootstrap_orchestrator.run_bootstrap_orchestrator
-_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_FILINGS_HISTORY_SEED] = (
+_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _adapt_zero_arg(_sec_bulk_download.sec_bulk_download_job)
+_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR] = _adapt_zero_arg(
+    _bootstrap_orchestrator.run_bootstrap_orchestrator
+)
+_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_FILINGS_HISTORY_SEED] = _adapt_zero_arg(
     _bootstrap_orchestrator.bootstrap_filings_history_seed
 )
-_INVOKERS[_bootstrap_orchestrator.JOB_SEC_FIRST_INSTALL_DRAIN] = _bootstrap_orchestrator.sec_first_install_drain_job
+_INVOKERS[_bootstrap_orchestrator.JOB_SEC_FIRST_INSTALL_DRAIN] = _adapt_zero_arg(
+    _bootstrap_orchestrator.sec_first_install_drain_job
+)
 # #1008 — recency-bounded 13F sweep for first-install bootstrap.
-_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP] = (
+_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP] = _adapt_zero_arg(
     _bootstrap_orchestrator.bootstrap_sec_13f_recent_sweep_job
 )
 
@@ -254,13 +295,15 @@ from app.services import sec_submissions_files_walk as _files_walk  # noqa: E402
 # Phase A3 — bulk archive download (#1021 / #1020). Registered here
 # so PR7 is self-consistent if PR #1029 has not yet landed; the
 # duplicate dict-key assignment when both PRs are merged is a no-op.
-_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _sec_bulk_download.sec_bulk_download_job
-_INVOKERS[_bulk_jobs.JOB_SEC_SUBMISSIONS_INGEST] = _bulk_jobs.sec_submissions_ingest_job
-_INVOKERS[_bulk_jobs.JOB_SEC_COMPANYFACTS_INGEST] = _bulk_jobs.sec_companyfacts_ingest_job
-_INVOKERS[_bulk_jobs.JOB_SEC_13F_INGEST_FROM_DATASET] = _bulk_jobs.sec_13f_ingest_from_dataset_job
-_INVOKERS[_bulk_jobs.JOB_SEC_INSIDER_INGEST_FROM_DATASET] = _bulk_jobs.sec_insider_ingest_from_dataset_job
-_INVOKERS[_bulk_jobs.JOB_SEC_NPORT_INGEST_FROM_DATASET] = _bulk_jobs.sec_nport_ingest_from_dataset_job
-_INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _files_walk.sec_submissions_files_walk_job
+_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _adapt_zero_arg(_sec_bulk_download.sec_bulk_download_job)
+_INVOKERS[_bulk_jobs.JOB_SEC_SUBMISSIONS_INGEST] = _adapt_zero_arg(_bulk_jobs.sec_submissions_ingest_job)
+_INVOKERS[_bulk_jobs.JOB_SEC_COMPANYFACTS_INGEST] = _adapt_zero_arg(_bulk_jobs.sec_companyfacts_ingest_job)
+_INVOKERS[_bulk_jobs.JOB_SEC_13F_INGEST_FROM_DATASET] = _adapt_zero_arg(_bulk_jobs.sec_13f_ingest_from_dataset_job)
+_INVOKERS[_bulk_jobs.JOB_SEC_INSIDER_INGEST_FROM_DATASET] = _adapt_zero_arg(
+    _bulk_jobs.sec_insider_ingest_from_dataset_job
+)
+_INVOKERS[_bulk_jobs.JOB_SEC_NPORT_INGEST_FROM_DATASET] = _adapt_zero_arg(_bulk_jobs.sec_nport_ingest_from_dataset_job)
+_INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _adapt_zero_arg(_files_walk.sec_submissions_files_walk_job)
 
 
 # Public registry of valid job names. The API layer (#719) imports this
@@ -344,6 +387,17 @@ _PRELUDE_OPT_OUT_JOBS: frozenset[str] = frozenset(
 _prelude_run_id: contextvars.ContextVar[int | None] = contextvars.ContextVar("_prelude_run_id", default=None)
 
 
+# #1064 PR1b-2 — carries the validated params snapshot into ``_tracked_job``
+# for the prelude-fallback path (``record_job_start``). The prelude itself
+# writes the snapshot inline in its ``INSERT INTO job_runs``; this var
+# covers invokers that bypass the prelude (bootstrap stage invokers,
+# direct test invocations) so their ``record_job_start`` call can persist
+# the same snapshot.
+_params_snapshot_var: contextvars.ContextVar[Mapping[str, Any] | None] = contextvars.ContextVar(
+    "_params_snapshot_var", default=None
+)
+
+
 # #1078 — admin control hub PR6. Plumbs the listener-decoded
 # ``(linked_request_id, mode)`` into prelude-opt-out invokers. The
 # orchestrator's wrapper (``orchestrator_full_sync()``) consumes this
@@ -369,6 +423,26 @@ def consume_prelude_run_id() -> int | None:
     if run_id is not None:
         _prelude_run_id.set(None)
     return run_id
+
+
+def consume_params_snapshot() -> Mapping[str, Any] | None:
+    """Pop the validated params snapshot for the current invoker call.
+
+    Issue #1064 PR1b-2 — admin control hub job-registry refactor.
+
+    ``_tracked_job`` calls this on entry from the prelude-fallback
+    path so ``record_job_start`` can persist the snapshot alongside
+    the new ``job_runs`` row. Returns ``None`` when the invoker was
+    started outside the runtime wrappers (direct test invocation)
+    — the column default ``'{}'`` then applies.
+
+    Idempotent: clears the contextvar after read so a nested
+    ``_tracked_job`` cannot reuse the same snapshot.
+    """
+    snapshot = _params_snapshot_var.get()
+    if snapshot is not None:
+        _params_snapshot_var.set(None)
+    return snapshot
 
 
 def consume_invoker_request_context() -> tuple[int | None, str | None]:
@@ -397,6 +471,7 @@ def _run_prelude(
     *,
     bypass_fence_check: bool = False,
     linked_request_id: int | None = None,
+    params_snapshot: Mapping[str, Any] | None = None,
 ) -> int | None:
     """One-tx prelude: acquire lock, check fence, write job_runs INSERT.
 
@@ -487,6 +562,12 @@ def _run_prelude(
                     if holder_row is not None:
                         fence_held = True
                         fence_holder = str(holder_row[0])
+                # PR1b-2 (#1064): write ``params_snapshot`` inline on both
+                # branches (running + skipped). Passing ``None`` falls back
+                # to the column default ``'{}'`` so the legacy paths stay
+                # forward-compatible. Jsonb wraps the dict for psycopg's
+                # JSONB adapter.
+                snapshot_json = Jsonb(dict(params_snapshot)) if params_snapshot is not None else None
                 if fence_held:
                     # When a sibling holds the fence, surface the holder
                     # in the audit row so the operator can see WHY this
@@ -498,28 +579,53 @@ def _run_prelude(
                         if fence_holder == process_id
                         else f"full-wash in progress on shared scheduler source (held by {fence_holder!r})"
                     )
-                    cur.execute(
-                        """
-                        INSERT INTO job_runs (
-                            job_name, started_at, finished_at, status, row_count,
-                            error_msg, linked_request_id
-                        ) VALUES (
-                            %s, now(), now(), 'skipped', 0, %s, %s
+                    if snapshot_json is None:
+                        cur.execute(
+                            """
+                            INSERT INTO job_runs (
+                                job_name, started_at, finished_at, status, row_count,
+                                error_msg, linked_request_id
+                            ) VALUES (
+                                %s, now(), now(), 'skipped', 0, %s, %s
+                            )
+                            RETURNING run_id
+                            """,
+                            (job_name, error_msg, linked_request_id),
                         )
-                        RETURNING run_id
-                        """,
-                        (job_name, error_msg, linked_request_id),
-                    )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO job_runs (
+                                job_name, started_at, finished_at, status, row_count,
+                                error_msg, linked_request_id, params_snapshot
+                            ) VALUES (
+                                %s, now(), now(), 'skipped', 0, %s, %s, %s
+                            )
+                            RETURNING run_id
+                            """,
+                            (job_name, error_msg, linked_request_id, snapshot_json),
+                        )
                 else:
-                    cur.execute(
-                        """
-                        INSERT INTO job_runs (
-                            job_name, started_at, status, linked_request_id
-                        ) VALUES (%s, now(), 'running', %s)
-                        RETURNING run_id
-                        """,
-                        (job_name, linked_request_id),
-                    )
+                    if snapshot_json is None:
+                        cur.execute(
+                            """
+                            INSERT INTO job_runs (
+                                job_name, started_at, status, linked_request_id
+                            ) VALUES (%s, now(), 'running', %s)
+                            RETURNING run_id
+                            """,
+                            (job_name, linked_request_id),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO job_runs (
+                                job_name, started_at, status, linked_request_id, params_snapshot
+                            ) VALUES (%s, now(), 'running', %s, %s)
+                            RETURNING run_id
+                            """,
+                            (job_name, linked_request_id, snapshot_json),
+                        )
                 row = cur.fetchone()
                 if row is None:
                     raise RuntimeError("prelude: job_runs INSERT returned no row")
@@ -538,10 +644,11 @@ def _run_prelude(
 def run_with_prelude(
     database_url: str,
     job_name: str,
-    invoker: Callable[[], None],
+    invoker: JobInvoker,
     *,
     bypass_fence_check: bool = False,
     linked_request_id: int | None = None,
+    params: Mapping[str, Any] | None = None,
 ) -> bool:
     """Run ``invoker`` after the lock+fence prelude.
 
@@ -577,19 +684,23 @@ def run_with_prelude(
     suppress double-replay of completed runs. Scheduled fires pass
     ``None``.
     """
+    effective_params: Mapping[str, Any] = params if params is not None else {}
     run_id = _run_prelude(
         database_url,
         job_name,
         bypass_fence_check=bypass_fence_check,
         linked_request_id=linked_request_id,
+        params_snapshot=effective_params,
     )
     if run_id is None:
         return False  # fence held; skipped row already committed
     token = _prelude_run_id.set(run_id)
+    snapshot_token = _params_snapshot_var.set(effective_params)
     try:
-        invoker()
+        invoker(effective_params)
     finally:
         _prelude_run_id.reset(token)
+        _params_snapshot_var.reset(snapshot_token)
     return True
 
 
@@ -659,11 +770,11 @@ class JobRuntime:
         self,
         *,
         database_url: str | None = None,
-        invokers: dict[str, Callable[[], None]] | None = None,
+        invokers: dict[str, JobInvoker] | None = None,
     ) -> None:
         self._database_url = database_url or settings.database_url
         # Copy so callers cannot mutate after construction.
-        self._invokers: dict[str, Callable[[], None]] = dict(invokers if invokers is not None else _INVOKERS)
+        self._invokers: dict[str, JobInvoker] = dict(invokers if invokers is not None else _INVOKERS)
         # Per-job in-process lock for synchronous 409 detection on
         # manual triggers. The advisory ``JobLock`` (Postgres) is the
         # cross-process source of truth and is acquired on the worker
@@ -838,11 +949,55 @@ class JobRuntime:
             with psycopg.connect(self._database_url, autocommit=True) as conn:
                 for name in overdue:
                     job = catch_up_jobs[name]
+                    # PR1b-2 (#1064): materialise + validate registry-default
+                    # params so any pre-skip path persists the same snapshot
+                    # the eventual run would have. Validation failure here is
+                    # treated as a skip with the validation message — same
+                    # posture as ``_wrap_invoker``.
+                    raw_defaults = materialise_scheduled_params(name)
+                    try:
+                        params_dict = validate_job_params(
+                            name,
+                            raw_defaults,
+                            allow_internal_keys=False,
+                        )
+                    except ParamValidationError as exc:
+                        processed.add(name)
+                        # Snapshot raw materialised defaults so the audit row
+                        # preserves the same shape as successful catch-up
+                        # fires (Codex pre-push round 2 NIT).
+                        record_job_skip(
+                            conn,
+                            name,
+                            f"registry default params invalid: {exc}",
+                            params_snapshot=dict(raw_defaults),
+                        )
+                        skipped.append((name, f"registry default params invalid: {exc}"))
+                        continue
+
+                    # PR1b-2 (#1064): universal bootstrap_state gate runs
+                    # BEFORE the per-job prereq so the actionable reason
+                    # ``bootstrap_not_complete`` wins when both would block.
+                    # Catch-up is the boot-time scheduled fire equivalent
+                    # — never an operator-driven path, so override is
+                    # never present.
+                    gate_allowed, gate_reason = check_bootstrap_state_gate(
+                        conn,
+                        job_name=name,
+                        invocation_path="scheduled",
+                        override_present=False,
+                    )
+                    if not gate_allowed:
+                        processed.add(name)
+                        record_job_skip(conn, name, gate_reason, params_snapshot=dict(params_dict))
+                        skipped.append((name, gate_reason))
+                        continue
+
                     if job.prerequisite is not None:
                         met, reason = job.prerequisite(conn)
                         if not met:
                             processed.add(name)
-                            record_job_skip(conn, name, reason)
+                            record_job_skip(conn, name, reason, params_snapshot=dict(params_dict))
                             skipped.append((name, reason))
                             continue
                     firing.append(name)
@@ -1046,7 +1201,7 @@ class JobRuntime:
         if not inflight.acquire(blocking=False):
             raise JobAlreadyRunning(job_name)
         try:
-            fut = self._manual_executor.submit(self._run_manual, job_name, invoker, None)
+            fut = self._manual_executor.submit(self._run_manual, job_name, invoker, None, None, {})
             fut.add_done_callback(self._log_future_exception)
         except Exception:
             # Submission failed before the worker took ownership --
@@ -1060,6 +1215,7 @@ class JobRuntime:
         *,
         request_id: int,
         mode: str | None = None,
+        params: Mapping[str, Any] | None = None,
     ) -> None:
         """Submit a manual run associated with a queue request_id (#719).
 
@@ -1112,7 +1268,14 @@ class JobRuntime:
             return
 
         try:
-            fut = self._manual_executor.submit(self._run_manual, job_name, invoker, request_id, mode)
+            fut = self._manual_executor.submit(
+                self._run_manual,
+                job_name,
+                invoker,
+                request_id,
+                mode,
+                params if params is not None else {},
+            )
             fut.add_done_callback(self._log_future_exception)
         except Exception:
             inflight.release()
@@ -1142,7 +1305,7 @@ class JobRuntime:
         if exc is not None:
             logger.error("executor future raised unexpectedly: %s", exc, exc_info=exc)
 
-    def _wrap_invoker(self, job_name: str, invoker: Callable[[], None]) -> Callable[[], None]:
+    def _wrap_invoker(self, job_name: str, invoker: JobInvoker) -> Callable[[], None]:
         """Wrap a scheduled invoker with prerequisite check + advisory lock.
 
         The scheduled fire path checks the prerequisite (if any) before
@@ -1154,11 +1317,92 @@ class JobRuntime:
         overlaps a still-running manual trigger -- and is logged at INFO
         and skipped, not raised, because APScheduler would otherwise log
         a noisy traceback for an expected race.
+
+        PR1b-2 (#1064) additions:
+
+        * ``check_bootstrap_state_gate`` runs BEFORE the per-job
+          prerequisite. Both write a ``status='skipped'`` ``job_runs``
+          row OUTSIDE ``_tracked_job`` (prevention-log L791). On gate
+          block the operator-actionable reason ``bootstrap_not_complete``
+          wins over any downstream prereq message.
+        * Validated registry-default params are materialised via
+          ``materialise_scheduled_params`` + ``validate_job_params``
+          and persisted as ``job_runs.params_snapshot`` on every entry
+          (running, prereq-skip, gate-skip).
         """
         database_url = self._database_url
         job = self._job_registry.get(job_name)
 
         def wrapped() -> None:
+            # Materialise + validate the registry-default params for this
+            # scheduled fire. ParamValidationError here means the
+            # registry itself is misconfigured (a default that violates
+            # its own bounds) — fail-closed by skipping with the error
+            # in the audit row, since running a misconfigured job risks
+            # incorrect downstream rows.
+            params: Mapping[str, Any]
+            raw_defaults = materialise_scheduled_params(job_name)
+            try:
+                params = validate_job_params(
+                    job_name,
+                    raw_defaults,
+                    allow_internal_keys=False,
+                )
+            except ParamValidationError as exc:
+                logger.error(
+                    "scheduled fire of %r aborted — registry default params failed validation: %s",
+                    job_name,
+                    exc,
+                )
+                try:
+                    with psycopg.connect(database_url, autocommit=True) as conn:
+                        # Snapshot the RAW materialised defaults so the
+                        # operator audit row preserves the same shape as
+                        # successful scheduled fires (Codex pre-push NIT).
+                        record_job_skip(
+                            conn,
+                            job_name,
+                            f"registry default params invalid: {exc}",
+                            params_snapshot=dict(raw_defaults),
+                        )
+                except Exception:
+                    logger.exception(
+                        "failed to record scheduled-fire skip for %r after param-validation error",
+                        job_name,
+                    )
+                return
+
+            # Bootstrap-state gate (#1064 PR1b-2). Runs BEFORE the per-job
+            # prereq so the operator-visible reason
+            # ``bootstrap_not_complete`` is the actionable signal when
+            # both would block. Scheduled fires never override.
+            try:
+                with psycopg.connect(database_url, autocommit=True) as conn:
+                    allowed, reason = check_bootstrap_state_gate(
+                        conn,
+                        job_name=job_name,
+                        invocation_path="scheduled",
+                        override_present=False,
+                    )
+                    if not allowed:
+                        record_job_skip(conn, job_name, reason, params_snapshot=dict(params))
+                        logger.info(
+                            "scheduled fire of %r skipped — %s",
+                            job_name,
+                            reason,
+                        )
+                        return
+            except Exception:
+                # Fail-open mirrors the prereq path below — silently
+                # dropping a real run is worse than running against a
+                # half-installed DB; the body's own checks then surface
+                # the issue.
+                logger.warning(
+                    "bootstrap_state gate for %r failed; running anyway",
+                    job_name,
+                    exc_info=True,
+                )
+
             # Prerequisite gate (scheduled fires only — manual triggers
             # bypass prerequisites so the operator can force a run).
             if job is not None and job.prerequisite is not None:
@@ -1166,7 +1410,12 @@ class JobRuntime:
                     with psycopg.connect(database_url, autocommit=True) as conn:
                         met, reason = job.prerequisite(conn)
                         if not met:
-                            record_job_skip(conn, job_name, reason)
+                            record_job_skip(
+                                conn,
+                                job_name,
+                                reason,
+                                params_snapshot=dict(params),
+                            )
                             logger.info(
                                 "scheduled fire of %r skipped — prerequisite not met: %s",
                                 job_name,
@@ -1191,9 +1440,15 @@ class JobRuntime:
                     # default ``bypass_fence_check=False`` applies.
                     # Self-tracked invokers opt out of the prelude.
                     if job_name in _PRELUDE_OPT_OUT_JOBS:
-                        invoker()
+                        # Set both contextvars so the opt-out invoker's
+                        # ``_tracked_job`` (if any) reuses the snapshot.
+                        snap_token = _params_snapshot_var.set(params)
+                        try:
+                            invoker(params)
+                        finally:
+                            _params_snapshot_var.reset(snap_token)
                     else:
-                        run_with_prelude(database_url, job_name, invoker)
+                        run_with_prelude(database_url, job_name, invoker, params=params)
             except JobAlreadyRunning:
                 logger.info(
                     "scheduled fire of %r skipped: another instance is "
@@ -1223,9 +1478,10 @@ class JobRuntime:
     def _run_manual(
         self,
         job_name: str,
-        invoker: Callable[[], None],
+        invoker: JobInvoker,
         request_id: int | None,
         mode: str | None = None,
+        params: Mapping[str, Any] | None = None,
     ) -> None:
         """Worker-thread entry point for manual triggers.
 
@@ -1271,6 +1527,7 @@ class JobRuntime:
         # this worker IS the fence holder, so bypass the fence check
         # (otherwise the worker would self-skip on its own queue row).
         bypass_fence_check = mode == "full_wash"
+        effective_params: Mapping[str, Any] = params if params is not None else {}
         try:
             try:
                 with JobLock(self._database_url, job_name):
@@ -1284,10 +1541,12 @@ class JobRuntime:
                         # invoker can pass through to its own fence
                         # handling.
                         token = _invoker_request_context.set((request_id, mode))
+                        snap_token = _params_snapshot_var.set(effective_params)
                         try:
-                            invoker()
+                            invoker(effective_params)
                         finally:
                             _invoker_request_context.reset(token)
+                            _params_snapshot_var.reset(snap_token)
                         invoked = True
                     else:
                         invoked = run_with_prelude(
@@ -1296,6 +1555,7 @@ class JobRuntime:
                             invoker,
                             bypass_fence_check=bypass_fence_check,
                             linked_request_id=request_id,
+                            params=effective_params,
                         )
                     if request_id is not None and not invoked:
                         # Prelude wrote a 'skipped' job_runs row +

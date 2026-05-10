@@ -18,6 +18,12 @@ bootstrap_state check, so:
   - jobs without _bootstrap_complete prereq (orchestrator_high_frequency_sync,
     execute_approved_orders, monitor_positions, ...) keep pre-PR1b
     semantics.
+
+PR1b-2 (#1064) layered the universal bootstrap_state gate ON TOP of
+the per-job prereq. Tests in this file pre-date PR1b-2 and exercise
+the prereq path in isolation — the bootstrap_state gate is patched to
+always allow so the original assertions still hold. PR1b-2's gate
+behaviour is covered in tests/test_bootstrap_gate_universal.py.
 """
 
 from __future__ import annotations
@@ -27,6 +33,17 @@ from unittest.mock import MagicMock, patch
 
 from app.jobs.listener import _dispatch_manual_job
 from app.workers.scheduler import SCHEDULED_JOBS
+
+
+def _allow_gate() -> Any:
+    """Patch ``check_bootstrap_state_gate`` to always allow (True, '').
+
+    Tests in TestPrereqEnforcement exercise the per-job prereq path,
+    not the universal bootstrap_state gate added in PR1b-2. With the
+    gate patched to allow, dispatch reaches the per-job prereq check
+    and the original assertions hold.
+    """
+    return patch("app.jobs.listener.check_bootstrap_state_gate", return_value=(True, ""))
 
 
 def _runtime_mock() -> MagicMock:
@@ -54,6 +71,7 @@ class TestPrereqEnforcement:
             "sec_form3_ingest", met=False, reason="first-install bootstrap not complete; visit /admin to run"
         )
         with (
+            _allow_gate(),
             patch("app.jobs.listener.SCHEDULED_JOBS", [fake_job]),
             patch("app.jobs.listener.VALID_JOB_NAMES", {"sec_form3_ingest"}),
             patch("app.jobs.listener.psycopg.connect") as mock_connect,
@@ -77,6 +95,7 @@ class TestPrereqEnforcement:
         runtime = _runtime_mock()
         fake_job = _job_with_prereq("sec_form3_ingest", met=True, reason="")
         with (
+            _allow_gate(),
             patch("app.jobs.listener.SCHEDULED_JOBS", [fake_job]),
             patch("app.jobs.listener.VALID_JOB_NAMES", {"sec_form3_ingest"}),
             patch("app.jobs.listener.psycopg.connect") as mock_connect,
@@ -89,7 +108,9 @@ class TestPrereqEnforcement:
                 job_name="sec_form3_ingest",
             )
         mock_reject.assert_not_called()
-        runtime.submit_manual_with_request.assert_called_once_with("sec_form3_ingest", request_id=42, mode=None)
+        runtime.submit_manual_with_request.assert_called_once_with(
+            "sec_form3_ingest", request_id=42, mode=None, params={}
+        )
 
     def test_no_prereq_proceeds_to_runtime(self) -> None:
         """Job with no prereq declared → runtime.submit_manual_with_request fires.
@@ -100,6 +121,7 @@ class TestPrereqEnforcement:
         """
         runtime = _runtime_mock()
         # Empty SCHEDULED_JOBS — bootstrap_orchestrator pattern.
+        # Gate is bypassed by job_in_registry=False; no _allow_gate() needed.
         with (
             patch("app.jobs.listener.SCHEDULED_JOBS", []),
             patch("app.jobs.listener.VALID_JOB_NAMES", {"bootstrap_orchestrator"}),
@@ -122,6 +144,7 @@ class TestPrereqEnforcement:
         bad_job.name = "fundamentals_sync"
         bad_job.prerequisite = MagicMock(side_effect=RuntimeError("DB unavailable"))
         with (
+            _allow_gate(),
             patch("app.jobs.listener.SCHEDULED_JOBS", [bad_job]),
             patch("app.jobs.listener.VALID_JOB_NAMES", {"fundamentals_sync"}),
             patch("app.jobs.listener.psycopg.connect") as mock_connect,
@@ -145,6 +168,7 @@ class TestPrereqEnforcement:
         runtime = _runtime_mock()
         fake_job = _job_with_prereq("sec_form3_ingest", met=False, reason="bootstrap not complete")
         with (
+            _allow_gate(),
             patch("app.jobs.listener.SCHEDULED_JOBS", [fake_job]),
             patch("app.jobs.listener.VALID_JOB_NAMES", {"sec_form3_ingest"}),
             patch("app.jobs.listener.psycopg.connect") as mock_connect,
@@ -174,6 +198,7 @@ class TestPrereqEnforcement:
         runtime = _runtime_mock()
         fake_job = _job_with_prereq("sec_form3_ingest", met=False, reason="should not be reached")
         with (
+            _allow_gate(),
             patch("app.jobs.listener.SCHEDULED_JOBS", [fake_job]),
             patch("app.jobs.listener.VALID_JOB_NAMES", {"sec_form3_ingest"}),
             patch("app.jobs.listener.psycopg.connect", side_effect=RuntimeError("connect failed")),

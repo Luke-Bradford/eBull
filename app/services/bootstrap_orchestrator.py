@@ -35,10 +35,10 @@ parallel manual / scheduled trigger cannot run twice simultaneously.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Final
+from typing import Any, Final
 
 import psycopg
 
@@ -277,7 +277,7 @@ def _run_one_stage(
     run_id: int,
     stage_key: str,
     job_name: str,
-    invoker: Callable[[], None],
+    invoker: Callable[[Mapping[str, Any]], None],
     database_url: str,
 ) -> _StageOutcome:
     """Execute one stage end-to-end with `JobLock` + bookkeeping.
@@ -295,7 +295,12 @@ def _run_one_stage(
 
     try:
         with JobLock(database_url, job_name):
-            invoker()
+            # PR1b-2 (#1064): invoker contract widened to JobInvoker
+            # (``Callable[[Mapping[str, Any]], None]``). Bootstrap stages
+            # pass ``{}`` here today; PR1c lifts the bespoke wrappers
+            # and populates ``StageSpec.params`` with the per-stage
+            # hardcoded values currently buried in the wrapper bodies.
+            invoker({})
     except JobAlreadyRunning:
         message = (
             f"another instance of {job_name!r} holds the advisory lock; "
@@ -372,7 +377,7 @@ def _should_run(stage_status: str) -> bool:
 def _run_lane(
     *,
     run_id: int,
-    lane_specs: Sequence[tuple[str, str, str, str, Callable[[], None]]],
+    lane_specs: Sequence[tuple[str, str, str, str, Callable[[Mapping[str, Any]], None]]],
     database_url: str,
     log_label: str,
 ) -> None:
@@ -410,7 +415,7 @@ class _RunnableStage:
     stage_key: str
     job_name: str
     lane: str
-    invoker: Callable[[], None]
+    invoker: Callable[[Mapping[str, Any]], None]
     requires: tuple[str, ...]
 
 

@@ -354,14 +354,14 @@ def test_dispatcher_observes_cancel_at_top_of_loop_and_returns_cancelled(
             stage_key="alpha",
             job_name="alpha_job",
             lane="init",
-            invoker=lambda: calls.append("alpha"),
+            invoker=lambda _params: calls.append("alpha"),
             requires=(),
         ),
         _RunnableStage(
             stage_key="bravo",
             job_name="bravo_job",
             lane="sec",
-            invoker=lambda: calls.append("bravo"),
+            invoker=lambda _params: calls.append("bravo"),
             requires=("alpha",),
         ),
     ]
@@ -401,14 +401,14 @@ def test_dispatcher_observes_cancel_between_batches(
 
     calls: list[str] = []
 
-    def alpha_invoker() -> None:
+    def alpha_invoker(_params: object = None) -> None:
         calls.append("alpha")
         # Simulate operator clicking Cancel during alpha's run.
         with psycopg.connect(test_db_url) as conn:
             cancel_run(conn, requested_by_operator_id=None)
             conn.commit()
 
-    def bravo_invoker() -> None:  # pragma: no cover — must NOT run
+    def bravo_invoker(_params: object = None) -> None:  # pragma: no cover — must NOT run
         calls.append("bravo")
 
     runnable = [
