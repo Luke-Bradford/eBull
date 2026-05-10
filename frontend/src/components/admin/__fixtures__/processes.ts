@@ -73,6 +73,7 @@ export function makeProcessRow(
     last_n_errors: [],
     stale_reasons: [],
     params_metadata: [],
+    description: "Operator-facing description for the Insider Form 4 ingest.",
     ...overrides,
   };
 }

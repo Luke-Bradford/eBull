@@ -259,6 +259,15 @@ export function ProcessDetailPage() {
               {detail.data.lane}
             </p>
           ) : null}
+          {/* PR4 #1082 — operator-facing description rendered inline
+              on the drill-in (vs the ⓘ tooltip on the table row). The
+              drill-in has the screen real estate; the table row uses
+              the icon to keep the column compact. */}
+          {detail.data?.description ? (
+            <p className="mt-1 max-w-3xl text-xs text-slate-600 dark:text-slate-300">
+              {detail.data.description}
+            </p>
+          ) : null}
         </div>
         {detail.data ? (
           <ActionBar

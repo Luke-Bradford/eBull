@@ -185,6 +185,12 @@ class ProcessRow:
     can_cancel: bool
     last_n_errors: tuple[ErrorClassSummary, ...]
     stale_reasons: tuple[StaleReason, ...]
+    # PR4 #1082 — operator-facing description. Renders as the ⓘ
+    # tooltip on the admin ProcessesTable. Empty for processes that
+    # don't have one declared (e.g. legacy fallback paths) — the FE
+    # hides the tooltip when this is empty rather than showing a
+    # blank popover.
+    description: str = ""
     # PR2 #1064 — operator-exposable params for the Advanced disclosure
     # tab on the drill-in. Bootstrap + ingest_sweep adapters keep the
     # default empty tuple; scheduled_adapter populates from the

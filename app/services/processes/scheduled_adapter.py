@@ -671,7 +671,11 @@ def _build_row(
 
     return ProcessRow(
         process_id=job.name,
-        display_name=job.name,
+        # PR4 #1082 — prefer the operator-facing label PR1a populated
+        # on every ScheduledJob; fall back to the raw name when an
+        # entry doesn't declare one (defensive — registry test pins
+        # display_name non-empty).
+        display_name=job.display_name or job.name,
         lane=_lane_for(job.name),
         mechanism="scheduled_job",
         status=process_status,
@@ -693,6 +697,8 @@ def _build_row(
         # Empty tuple for jobs with no operator-exposable params (the
         # default — every entry except ``sec_13f_quarterly_sweep`` today).
         params_metadata=job.params_metadata,
+        # PR4 #1082 — operator-visible description for the ⓘ tooltip.
+        description=job.description,
     )
 
 

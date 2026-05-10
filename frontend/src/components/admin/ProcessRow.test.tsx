@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -354,5 +354,85 @@ describe("ProcessRow", () => {
       }),
     });
     expect(container.textContent).toContain("every 5m");
+  });
+
+  // ---------------------------------------------------------------------
+  // PR4 #1082 — ⓘ tooltip rendering description
+  // ---------------------------------------------------------------------
+
+  it("renders ⓘ tooltip button when description is non-empty", () => {
+    renderRow({
+      row: makeProcessRow({
+        description: "Refreshes SEC CIK mappings nightly.",
+      }),
+    });
+    const tooltip = screen.getByTestId("process-description-tooltip");
+    expect(tooltip).toBeTruthy();
+    // Accessible name carries the description for screen readers
+    // (replaces the prior native ``title`` after operator feedback
+    // that the native delay + click-to-hide were poor UX).
+    expect(tooltip).toHaveAccessibleName(
+      "Refreshes SEC CIK mappings nightly.",
+    );
+    // Popover starts collapsed; aria-expanded reflects it.
+    expect(tooltip.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("clicking the ⓘ pins the tooltip open; second click collapses", () => {
+    renderRow({
+      row: makeProcessRow({ description: "pinned popover content." }),
+    });
+    const tooltip = screen.getByTestId("process-description-tooltip");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    fireEvent.click(tooltip);
+    expect(tooltip.getAttribute("aria-expanded")).toBe("true");
+    const pop = screen.getByRole("tooltip");
+    expect(pop.textContent).toBe("pinned popover content.");
+
+    fireEvent.click(tooltip);
+    expect(tooltip.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("hovering the ⓘ surfaces the popover immediately (no native title delay)", () => {
+    renderRow({
+      row: makeProcessRow({ description: "hover content." }),
+    });
+    const tooltip = screen.getByTestId("process-description-tooltip");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    fireEvent.pointerEnter(tooltip.parentElement!);
+    expect(screen.getByRole("tooltip").textContent).toBe("hover content.");
+
+    fireEvent.pointerLeave(tooltip.parentElement!);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("popover's role='tooltip' is linked to the trigger via aria-describedby", () => {
+    // Round 3 review WARNING: ARIA spec requires explicit linkage
+    // between the trigger and the popover for AT to announce the
+    // expanded content. Pin: when the tooltip is visible, the
+    // trigger's aria-describedby points at the tooltip's id.
+    renderRow({
+      row: makeProcessRow({ description: "linkage content." }),
+    });
+    const tooltip = screen.getByTestId("process-description-tooltip");
+    expect(tooltip.getAttribute("aria-describedby")).toBeNull();
+
+    fireEvent.click(tooltip);
+    const describedBy = tooltip.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const popover = screen.getByRole("tooltip");
+    expect(popover.id).toBe(describedBy);
+  });
+
+  it("hides ⓘ tooltip when description is empty", () => {
+    renderRow({
+      row: makeProcessRow({ description: "" }),
+    });
+    expect(
+      screen.queryByTestId("process-description-tooltip"),
+    ).toBeNull();
   });
 });
