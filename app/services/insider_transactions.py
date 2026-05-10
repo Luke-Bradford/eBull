@@ -1468,21 +1468,29 @@ def ingest_insider_transactions(
     """
     conn.commit()
 
+    # Per-#1117 PR-B: universe-wide selector requires inner-CTE
+    # DISTINCT ON dedup so N siblings sharing a CIK do not consume N
+    # slots of the LIMIT budget for the same accession.
     candidates: list[tuple[int, str, str]] = []
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT fe.instrument_id,
-                   fe.provider_filing_id,
-                   fe.primary_document_url
-            FROM filing_events fe
-            LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
-            WHERE fe.provider = 'sec'
-              AND fe.filing_type IN ('4', '4/A')
-              AND fe.primary_document_url IS NOT NULL
-              AND fil.accession_number IS NULL
-              AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
-            ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+            WITH per_accession AS (
+                SELECT DISTINCT ON (fe.provider_filing_id)
+                    fe.instrument_id, fe.provider_filing_id,
+                    fe.primary_document_url, fe.filing_date, fe.filing_event_id
+                FROM filing_events fe
+                LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type IN ('4', '4/A')
+                  AND fe.primary_document_url IS NOT NULL
+                  AND fil.accession_number IS NULL
+                  AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
+                ORDER BY fe.provider_filing_id, fe.instrument_id
+            )
+            SELECT instrument_id, provider_filing_id, primary_document_url
+            FROM per_accession
+            ORDER BY filing_date DESC, filing_event_id DESC
             LIMIT %(limit)s
             """,
             {"limit": limit, "floor_years": INSIDER_FORM4_BACKFILL_FLOOR_YEARS},
@@ -1626,18 +1634,31 @@ def ingest_insider_transactions_backfill(
     """
     conn.commit()
 
+    # Per-#1117 PR-B: dedup by accession before GROUP BY so a single
+    # share-class accession is not double-counted across siblings.
+    # The canonical-sibling parser fan-out (see upsert_filing) covers
+    # all siblings on parse, so picking the canonical sibling for the
+    # backfill drain is sufficient — the per-instrument fan-out
+    # reaches the others without scheduling them as separate
+    # candidates.
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT fe.instrument_id, COUNT(*) AS unfetched
-            FROM filing_events fe
-            LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
-            WHERE fe.provider = 'sec'
-              AND fe.filing_type IN ('4', '4/A')
-              AND fe.primary_document_url IS NOT NULL
-              AND fil.accession_number IS NULL
-              AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
-            GROUP BY fe.instrument_id
+            WITH per_accession AS (
+                SELECT DISTINCT ON (fe.provider_filing_id)
+                    fe.instrument_id, fe.provider_filing_id
+                FROM filing_events fe
+                LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type IN ('4', '4/A')
+                  AND fe.primary_document_url IS NOT NULL
+                  AND fil.accession_number IS NULL
+                  AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
+                ORDER BY fe.provider_filing_id, fe.instrument_id
+            )
+            SELECT instrument_id, COUNT(*) AS unfetched
+            FROM per_accession
+            GROUP BY instrument_id
             ORDER BY unfetched DESC
             LIMIT %(limit)s
             """,

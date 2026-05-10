@@ -99,9 +99,16 @@ def seed_manifest_from_filing_events(
         # Codex pre-push MED for #1044 — naive `is_primary = TRUE`
         # would drop valid rows whose only SEC CIK mapping isn't
         # flagged primary.
+        # Per-#1117 PR-B: filing_events fans out per share-class
+        # sibling under sql/144, so two rows can carry the same
+        # accession. sec_filing_manifest.accession_number is PK
+        # (entity-level), so the seeder dedups by accession picking
+        # the canonical (lowest instrument_id) sibling. Parser
+        # fan-out at parse time covers per-sibling observations;
+        # the manifest itself is one row per accession.
         cur.execute(
             """
-            SELECT
+            SELECT DISTINCT ON (fe.provider_filing_id)
                 fe.instrument_id,
                 fe.filing_date,
                 fe.filing_type,
@@ -119,6 +126,7 @@ def seed_manifest_from_filing_events(
                 LIMIT 1
             ) cik_map ON TRUE
             WHERE fe.provider = 'sec'
+            ORDER BY fe.provider_filing_id, fe.instrument_id
             """
         )
         rows = cur.fetchall()

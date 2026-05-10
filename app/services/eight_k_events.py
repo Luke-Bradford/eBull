@@ -719,20 +719,33 @@ def ingest_8k_events(
 
     candidates: list[tuple[int, str, str, tuple[str, ...]]] = []
     with conn.cursor() as cur:
+        # Per-#1117 PR-B: filing_events fans out per share-class
+        # sibling under sql/144. Universe-wide candidate selectors
+        # must dedup by accession (inner CTE) before applying the
+        # priority LIMIT, otherwise N siblings consume N slots of
+        # the LIMIT budget for the same accession AND the parser
+        # runs twice with different canonical instrument_ids
+        # (entity-level rows flap on each second pass).
         cur.execute(
             """
-            SELECT fe.instrument_id,
-                   fe.provider_filing_id,
-                   fe.primary_document_url,
-                   COALESCE(fe.items, ARRAY[]::TEXT[])
-            FROM filing_events fe
-            LEFT JOIN eight_k_filings ekf
-                ON ekf.accession_number = fe.provider_filing_id
-            WHERE fe.provider = 'sec'
-              AND fe.filing_type IN ('8-K', '8-K/A')
-              AND fe.primary_document_url IS NOT NULL
-              AND ekf.accession_number IS NULL
-            ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+            WITH per_accession AS (
+                SELECT DISTINCT ON (fe.provider_filing_id)
+                    fe.instrument_id, fe.provider_filing_id,
+                    fe.primary_document_url, fe.items, fe.filing_date,
+                    fe.filing_event_id
+                FROM filing_events fe
+                LEFT JOIN eight_k_filings ekf
+                    ON ekf.accession_number = fe.provider_filing_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type IN ('8-K', '8-K/A')
+                  AND fe.primary_document_url IS NOT NULL
+                  AND ekf.accession_number IS NULL
+                ORDER BY fe.provider_filing_id, fe.instrument_id
+            )
+            SELECT instrument_id, provider_filing_id, primary_document_url,
+                   COALESCE(items, ARRAY[]::TEXT[])
+            FROM per_accession
+            ORDER BY filing_date DESC, filing_event_id DESC
             LIMIT %s
             """,
             (limit,),

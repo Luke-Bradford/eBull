@@ -186,29 +186,61 @@ def discover_pending_def14a(
     issuer (used by ad-hoc re-ingest scripts and the per-instrument
     backfill in PR 3); ``None`` returns the full pending set.
     """
+    # Per-#1117 PR-B: targeted selectors (`fe.instrument_id = %s`)
+    # only match one sibling's rows in filing_events — no fan-out
+    # multiplies, dedup unnecessary. Universe-wide selectors require
+    # the inner-CTE DISTINCT ON pattern so N siblings sharing a CIK
+    # do not consume N slots of the LIMIT budget for one accession.
     where_iid = "AND fe.instrument_id = %(iid)s" if instrument_id is not None else ""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            f"""
-            SELECT fe.provider_filing_id, fe.instrument_id, fe.filing_date,
-                   fe.primary_document_url
-            FROM filing_events fe
-            LEFT JOIN def14a_ingest_log log
-                ON log.accession_number = fe.provider_filing_id
-            WHERE fe.provider = 'sec'
-              AND fe.filing_type = ANY(%(forms)s)
-              AND fe.primary_document_url IS NOT NULL
-              AND log.accession_number IS NULL
-              {where_iid}
-            ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
-            LIMIT %(limit)s
-            """,
-            {
-                "forms": list(_DEF14A_FORM_TYPES),
-                "iid": instrument_id,
-                "limit": limit,
-            },
-        )
+        if instrument_id is not None:
+            cur.execute(
+                f"""
+                SELECT fe.provider_filing_id, fe.instrument_id, fe.filing_date,
+                       fe.primary_document_url
+                FROM filing_events fe
+                LEFT JOIN def14a_ingest_log log
+                    ON log.accession_number = fe.provider_filing_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type = ANY(%(forms)s)
+                  AND fe.primary_document_url IS NOT NULL
+                  AND log.accession_number IS NULL
+                  {where_iid}
+                ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+                LIMIT %(limit)s
+                """,
+                {
+                    "forms": list(_DEF14A_FORM_TYPES),
+                    "iid": instrument_id,
+                    "limit": limit,
+                },
+            )
+        else:
+            cur.execute(
+                """
+                WITH per_accession AS (
+                    SELECT DISTINCT ON (fe.provider_filing_id)
+                        fe.provider_filing_id, fe.instrument_id, fe.filing_date,
+                        fe.primary_document_url, fe.filing_event_id
+                    FROM filing_events fe
+                    LEFT JOIN def14a_ingest_log log
+                        ON log.accession_number = fe.provider_filing_id
+                    WHERE fe.provider = 'sec'
+                      AND fe.filing_type = ANY(%(forms)s)
+                      AND fe.primary_document_url IS NOT NULL
+                      AND log.accession_number IS NULL
+                    ORDER BY fe.provider_filing_id, fe.instrument_id
+                )
+                SELECT provider_filing_id, instrument_id, filing_date, primary_document_url
+                FROM per_accession
+                ORDER BY filing_date DESC, filing_event_id DESC
+                LIMIT %(limit)s
+                """,
+                {
+                    "forms": list(_DEF14A_FORM_TYPES),
+                    "limit": limit,
+                },
+            )
         rows = cur.fetchall()
 
     return [
