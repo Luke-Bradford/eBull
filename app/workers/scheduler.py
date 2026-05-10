@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
@@ -275,6 +275,14 @@ JOB_SEC_N_PORT_INGEST = "sec_n_port_ingest"
 JOB_CUSIP_UNIVERSE_BACKFILL = "cusip_universe_backfill"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
+
+# PR1c #1064 — promoted from bespoke wrappers in
+# ``app/services/bootstrap_orchestrator.py``. Each is now a registered
+# ``JobInvoker`` (params-aware) so bootstrap dispatch and operator
+# manual-trigger share a single body. The bootstrap stage spec
+# carries the per-stage hardcoded values via ``StageSpec.params``.
+JOB_FILINGS_HISTORY_SEED = "filings_history_seed"
+JOB_SEC_FIRST_INSTALL_DRAIN = "sec_first_install_drain"
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +915,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # on every dev restart would burn SEC bandwidth + DB I/O.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
+        # PR1c #1064: ``min_period_of_report`` is operator-exposable so a
+        # triage operator can sweep "everything since 2024-01-01" without
+        # editing the bootstrap StageSpec. ``source_label`` is internal-
+        # only (declared in ``JOB_INTERNAL_KEYS`` per PR1a) so the
+        # bootstrap dispatch can override the audit tag while the
+        # operator API rejects it.
+        params_metadata=(
+            ParamMetadata(
+                name="min_period_of_report",
+                label="Recency floor",
+                help_text=(
+                    "Skip 13F accessions whose period_of_report is older "
+                    "than this date. Leave blank to sweep the full filer "
+                    "history. Bootstrap stage 21 sets this to today minus "
+                    "~380 days so the first-install sweep finishes in "
+                    "minutes rather than hours."
+                ),
+                field_type="date",
+                default=None,
+                advanced_group=True,
+            ),
+        ),
     ),
     ScheduledJob(
         name=JOB_SEC_13F_FILER_DIRECTORY_SYNC,
@@ -3994,7 +4024,7 @@ def cusip_universe_backfill() -> None:
         )
 
 
-def sec_13f_quarterly_sweep() -> None:
+def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
     """Quarterly sweep — walk every CIK in ``institutional_filers``
     (populated by ``sec_13f_filer_directory_sync`` #912) and ingest
     each filer's pending 13F-HR / 13F-HR/A accessions through the
@@ -4003,6 +4033,21 @@ def sec_13f_quarterly_sweep() -> None:
     Soft 6h deadline budget — already-ingested accessions are
     tombstoned in ``institutional_holdings_ingest_log`` so a
     deadline-interrupted sweep resumes the tail on the next fire.
+
+    Honoured params (PR1c #1064):
+
+    * ``min_period_of_report`` (date) — recency floor; accessions whose
+      ``period_of_report`` is older are skipped. Default ``None`` = no
+      floor (full historical sweep). Bootstrap stage 21 dispatches with
+      ``today() - 380d`` so first-install completes in ~30-45 min
+      instead of 11+h.
+    * ``source_label`` (str, audit-only) — provenance tag on each
+      ingested holding row. Default ``"sec_edgar_13f_directory"``;
+      bootstrap stage 21 overrides with
+      ``"sec_edgar_13f_directory_bootstrap"`` so audit history
+      distinguishes bootstrap-bounded sweeps from the standalone
+      weekly historical sweep. Operator-API path REJECTS this key
+      via ``JOB_INTERNAL_KEYS`` allow-list (#1064 PR1a).
     """
     from app.providers.implementations.sec_edgar import SecFilingsProvider
     from app.services.institutional_holdings import (
@@ -4011,6 +4056,16 @@ def sec_13f_quarterly_sweep() -> None:
     )
 
     deadline_seconds = settings.sec_13f_sweep_deadline_seconds
+    min_period_of_report_param = params.get("min_period_of_report")
+    min_period_of_report: date | None
+    if min_period_of_report_param is None:
+        min_period_of_report = None
+    elif isinstance(min_period_of_report_param, date):
+        min_period_of_report = min_period_of_report_param
+    else:
+        # Validator should have coerced; defensive against direct invocation.
+        min_period_of_report = date.fromisoformat(str(min_period_of_report_param))
+    source_label = str(params.get("source_label") or "sec_edgar_13f_directory")
 
     with _tracked_job(JOB_SEC_13F_QUARTERLY_SWEEP) as tracker:
         with (
@@ -4023,7 +4078,8 @@ def sec_13f_quarterly_sweep() -> None:
                 sec,
                 ciks=ciks,
                 deadline_seconds=deadline_seconds,
-                source_label="sec_edgar_13f_directory",
+                source_label=source_label,
+                min_period_of_report=min_period_of_report,
             )
 
         total_filers = len(ciks)
@@ -4035,13 +4091,198 @@ def sec_13f_quarterly_sweep() -> None:
         logger.info(
             "sec_13f_quarterly_sweep: filers=%d processed=%d "
             "accessions_ingested=%d holdings_inserted=%d "
-            "holdings_skipped_no_cusip=%d",
+            "holdings_skipped_no_cusip=%d "
+            "source_label=%s min_period_of_report=%s",
             total_filers,
             processed,
             accessions_ingested,
             rows_upserted,
             rows_skipped,
+            source_label,
+            min_period_of_report,
         )
+
+
+# ---------------------------------------------------------------------------
+# PR1c #1064 — promoted bodies (formerly bespoke wrappers in
+# app/services/bootstrap_orchestrator.py).
+# ---------------------------------------------------------------------------
+#
+# Each function below is registered in ``_INVOKERS`` directly under the
+# new (PR1c) job name and dispatched by the bootstrap orchestrator via
+# ``StageSpec.params``. The hardcoded values that used to live inside
+# the deleted wrapper bodies now live in the bootstrap stage spec as
+# data, so a single body serves both the bootstrap stage and the
+# operator manual-trigger path.
+
+# Default historical depth window for the broad filings sweep. Two
+# years matches what most operators want for first-install ranking;
+# the practical depth is bounded by SEC submissions.json's inline
+# ``recent`` block (typically ~12 months) since
+# ``SecFilingsProvider.list_filings`` does not currently walk
+# secondary submissions pages.
+_FILINGS_HISTORY_DAYS_DEFAULT = 730
+
+
+def filings_history_seed(params: Mapping[str, Any]) -> None:
+    """``_INVOKERS['filings_history_seed']`` — broad filings sweep.
+
+    Promoted from the deleted ``bootstrap_filings_history_seed``
+    bespoke wrapper (PR1c #1064). Walks each CIK-mapped tradable
+    instrument's submissions.json via ``refresh_filings`` with the
+    configured window and form-type allow-list, populating
+    ``filing_events`` for every form type. The typed-form parsers
+    later in the SEC lane (``sec_def14a_bootstrap``,
+    ``sec_business_summary_bootstrap``,
+    ``sec_insider_transactions_backfill``, etc.) read from
+    ``filing_events`` and would otherwise no-op on a fresh DB.
+
+    Honoured params:
+
+    * ``days_back`` (int) — historical window. Default 730.
+    * ``filing_types`` (multi_enum) — form-type allow-list. Default
+      ``sorted(SEC_INGEST_KEEP_FORMS)`` (the curated three-tier set).
+    * ``instrument_id`` (int) — narrow scope to a single instrument
+      (operator triage path). Default ``None`` = full
+      CIK-mapped-tradable universe.
+    """
+    from app.services.filings import SEC_INGEST_KEEP_FORMS
+
+    days_back = int(params.get("days_back", _FILINGS_HISTORY_DAYS_DEFAULT))
+    filing_types_param = params.get("filing_types") or sorted(SEC_INGEST_KEEP_FORMS)
+    filing_types = list(filing_types_param)
+    instrument_id_param = params.get("instrument_id")
+
+    with _tracked_job(JOB_FILINGS_HISTORY_SEED) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            if instrument_id_param is not None:
+                # Operator-triage path: single instrument, validated
+                # CIK-mapped tradable. We resolve through the same
+                # filter as the bulk path so an instrument without an
+                # SEC primary CIK row is rejected rather than silently
+                # producing zero filings.
+                cik_rows = conn.execute(
+                    """
+                    SELECT i.symbol, i.instrument_id::text
+                      FROM external_identifiers ei
+                      JOIN instruments i ON i.instrument_id = ei.instrument_id
+                     WHERE ei.provider = 'sec'
+                       AND ei.identifier_type = 'cik'
+                       AND ei.is_primary = TRUE
+                       AND i.is_tradable = TRUE
+                       AND i.instrument_id = %(iid)s
+                    """,
+                    {"iid": int(instrument_id_param)},
+                ).fetchall()
+            else:
+                cik_rows = conn.execute(
+                    """
+                    SELECT i.symbol, i.instrument_id::text
+                      FROM external_identifiers ei
+                      JOIN instruments i ON i.instrument_id = ei.instrument_id
+                     WHERE ei.provider = 'sec'
+                       AND ei.identifier_type = 'cik'
+                       AND ei.is_primary = TRUE
+                       AND i.is_tradable = TRUE
+                    """
+                ).fetchall()
+
+        if not cik_rows:
+            logger.info("filings_history_seed: no CIK-mapped instruments; ensure daily_cik_refresh ran first")
+            tracker.row_count = 0
+            return
+
+        instrument_ids = [row[1] for row in cik_rows]
+        from_date = date.today() - timedelta(days=days_back)
+        to_date = date.today()
+
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            summary = refresh_filings(
+                provider=sec,
+                provider_name="sec",
+                identifier_type="cik",
+                conn=conn,
+                instrument_ids=instrument_ids,
+                start_date=from_date,
+                end_date=to_date,
+                filing_types=filing_types,
+            )
+        tracker.row_count = summary.filings_upserted
+        logger.info(
+            "filings_history_seed: instruments=%d filings_upserted=%d skipped=%d days_back=%d",
+            summary.instruments_attempted,
+            summary.filings_upserted,
+            summary.instruments_skipped,
+            days_back,
+        )
+
+
+def sec_first_install_drain(params: Mapping[str, Any]) -> None:
+    """``_INVOKERS['sec_first_install_drain']`` — drain the SEC
+    submissions.json manifest backlog for first-install bootstrap.
+
+    Promoted from the deleted ``sec_first_install_drain_job`` bespoke
+    wrapper (PR1c #1064). The underlying ``run_first_install_drain``
+    takes an ``http_get`` callable that the wrapper adapts from the
+    SecFilingsProvider's ResilientClient (``HttpGet = Callable[[str,
+    dict[str, str]], tuple[int, bytes]]``).
+
+    Honoured params:
+
+    * ``max_subjects`` (int) — cap the number of CIKs processed.
+      Default ``None`` = full universe. Operator-triage path for
+      "iterate just N more CIKs from the queue head".
+
+    Internal-only invariants (NOT operator-exposed per audit §6):
+    ``follow_pagination=True`` (we want all pages), ``use_bulk_zip=False``
+    (slow-connection fallback bypassed Phase A3).
+    """
+    from app.jobs.sec_first_install_drain import run_first_install_drain
+
+    max_subjects_param = params.get("max_subjects")
+    max_subjects = int(max_subjects_param) if max_subjects_param is not None else None
+
+    with _tracked_job(JOB_SEC_FIRST_INSTALL_DRAIN) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            stats = run_first_install_drain(
+                conn,
+                http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
+                follow_pagination=True,
+                use_bulk_zip=False,
+                max_subjects=max_subjects,
+            )
+        tracker.row_count = stats.manifest_rows_upserted
+        logger.info(
+            "sec_first_install_drain: ciks_processed=%d skipped=%d manifest_rows=%d errors=%d max_subjects=%s",
+            stats.ciks_processed,
+            stats.ciks_skipped,
+            stats.manifest_rows_upserted,
+            stats.errors,
+            max_subjects,
+        )
+
+
+def _make_sec_http_get(sec_provider: object) -> Callable[[str, dict[str, str]], tuple[int, bytes]]:
+    """Adapt ``SecFilingsProvider._http`` (a ``ResilientClient``) into
+    the ``HttpGet`` callable shape the drain / poll / rebuild call
+    sites consume (see ``app/providers/implementations/sec_submissions.py``).
+
+    Lifted from the deleted ``sec_first_install_drain_job`` wrapper
+    (PR1c #1064). The closure routes through the rate-limited shared
+    client so SEC's 10 req/s bucket is honoured.
+    """
+
+    def _impl(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        response = sec_provider._http.get(url, headers=headers)  # type: ignore[attr-defined]
+        return response.status_code, response.content
+
+    return _impl
 
 
 def sec_13f_filer_directory_sync() -> None:

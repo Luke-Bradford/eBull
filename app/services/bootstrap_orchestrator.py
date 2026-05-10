@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Final
 
@@ -59,6 +59,10 @@ from app.services.bootstrap_state import (
 from app.services.process_stop import is_stop_requested
 from app.services.process_stop import mark_completed as mark_stop_completed
 from app.services.process_stop import mark_observed as mark_stop_observed
+from app.services.processes.param_metadata import (
+    ParamValidationError,
+    validate_job_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +73,22 @@ logger = logging.getLogger(__name__)
 
 # Job names registered in app/jobs/runtime.py:_INVOKERS that PR2 adds:
 JOB_BOOTSTRAP_ORCHESTRATOR = "bootstrap_orchestrator"
-JOB_BOOTSTRAP_FILINGS_HISTORY_SEED = "bootstrap_filings_history_seed"
-JOB_SEC_FIRST_INSTALL_DRAIN = "sec_first_install_drain"
-# #1008 — first-install-bounded 13F sweep that limits to recent quarters.
-# Distinct from JOB_SEC_13F_QUARTERLY_SWEEP (full historical sweep) so
-# the standalone weekly cron keeps full coverage.
-JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP = "bootstrap_sec_13f_recent_sweep"
+
+# PR1c #1064 — three bespoke wrappers (``bootstrap_filings_history_seed``,
+# ``sec_first_install_drain_job``, ``bootstrap_sec_13f_recent_sweep_job``)
+# were lifted into params-aware ``JobInvoker`` bodies in
+# ``app/workers/scheduler.py``. The hardcoded values that lived inside
+# the wrapper bodies (``days_back=730``, ``min_period_of_report=today-380d``,
+# ``source_label="sec_edgar_13f_directory_bootstrap"``, etc.) now live
+# in ``StageSpec.params`` for stages 14, 15, 21 below.
+#
+# Constants imported from the scheduler so the bootstrap-stage entries
+# below carry the canonical names and a future rename is single-site.
+from app.workers.scheduler import (  # noqa: E402  (after dataclass to avoid cycle)
+    JOB_FILINGS_HISTORY_SEED,
+    JOB_SEC_13F_QUARTERLY_SWEEP,
+    JOB_SEC_FIRST_INSTALL_DRAIN,
+)
 
 # These already exist as scheduled jobs but were not registered in
 # _INVOKERS until PR2; we re-use the existing job-name constants so
@@ -83,8 +97,68 @@ JOB_DAILY_CIK_REFRESH = "daily_cik_refresh"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 
 
-def _spec(stage_key: str, stage_order: int, lane: str, job_name: str) -> StageSpec:
-    return StageSpec(stage_key=stage_key, stage_order=stage_order, lane=lane, job_name=job_name)  # type: ignore[arg-type]
+# PR1c #1064 — bootstrap-bounded 13F sweep recency cut-off. Used to
+# live as a constant inside the deleted ``bootstrap_sec_13f_recent_sweep_job``
+# wrapper. 4 quarters (~380 days) = current + 3 prior periods, matches
+# the rolling ownership-card window. Older 13Fs add no value to
+# current-quarter ranking and pre-2013 ones don't have machine-readable
+# holdings (#1008).
+_BOOTSTRAP_13F_QUARTERS_BACK = 4
+_BOOTSTRAP_13F_RECENCY_DAYS = _BOOTSTRAP_13F_QUARTERS_BACK * 95
+
+# PR1c #1064 — filings_history_seed bootstrap default form-type
+# allow-list. Imported once at module load so the StageSpec.params
+# dict is plain data; the underlying constant lives in the canonical
+# owner (``app.services.filings``) so the three-tier allow-list stays
+# single-sourced. Tuple (not list) for hashable, frozen-stage-spec
+# compat.
+from app.services.filings import SEC_INGEST_KEEP_FORMS  # noqa: E402
+
+_FILINGS_HISTORY_KEEP_FORMS_TUPLE: tuple[str, ...] = tuple(sorted(SEC_INGEST_KEEP_FORMS))
+
+
+# Sentinel for params values that depend on dispatch-time state
+# (e.g. ``date.today()``). Module-load evaluation would freeze the
+# value into ``_BOOTSTRAP_STAGE_SPECS`` for the lifetime of the jobs
+# process; a long-lived process would dispatch stage 21 with a stale
+# cutoff. ``_resolve_dynamic_params`` materialises the absolute value
+# at dispatch time. The sentinel string is namespaced so it never
+# collides with a legitimate operator value.
+_PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF = "<dynamic:bootstrap_13f_cutoff>"
+
+
+def _resolve_dynamic_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Materialise dispatch-time dynamic values in a stage params dict.
+
+    Today the only dynamic value is the bootstrap-13F recency cutoff;
+    the helper is structured for forward extensibility (additional
+    sentinels can be added without touching call sites).
+
+    The dispatcher calls this immediately before invoking the
+    underlying ``JobInvoker`` so the absolute value is what flows
+    into ``job_runs.params_snapshot`` and the invoker body.
+    """
+    resolved: dict[str, Any] = dict(params)
+    if resolved.get("min_period_of_report") == _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF:
+        resolved["min_period_of_report"] = date.today() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS)
+    return resolved
+
+
+def _spec(
+    stage_key: str,
+    stage_order: int,
+    lane: str,
+    job_name: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+) -> StageSpec:
+    return StageSpec(
+        stage_key=stage_key,
+        stage_order=stage_order,
+        lane=lane,  # type: ignore[arg-type]
+        job_name=job_name,
+        params=params if params is not None else {},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +175,20 @@ _LANE_MAX_CONCURRENCY: Final[dict[str, int]] = {
     "sec": 1,  # legacy catch-all; preserved for migration compat
     "sec_rate": 1,  # SEC per-IP rate clock
     "sec_bulk_download": 1,
-    "db": 5,  # DB-bound, parallel-able
+    # PR1c #1064: every lane serialises now that JobLock is source-keyed
+    # (one ``JobLock(source)`` covers all jobs in the same lane). The
+    # operator-locked source-lock decision is unambiguous: same-source =
+    # serialised. Setting ``db`` to 1 retires the parallel-DB-stage claim
+    # from #1020 — a misleading dispatcher shape (5 db stages submitted,
+    # 4 immediately blocked on the source lock). The map structure is
+    # kept (rather than deleted) for one cycle so the
+    # ``_phase_batched_dispatch`` shape stays stable; a follow-up PR
+    # removes the map entirely.
+    #
+    # Tech-debt: first-install bootstrap wall-clock regresses from "5 db
+    # stages parallel" → "1 db stage at a time". Measure on dev and file
+    # follow-up if operator-visible — tracked in PR description.
+    "db": 1,
 }
 
 
@@ -226,8 +313,28 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # bulk pass these are largely idempotent DB no-ops on populated
     # observation tables; on the slow-connection bypass path they are
     # the primary write path.
-    _spec("filings_history_seed", 14, "sec_rate", JOB_BOOTSTRAP_FILINGS_HISTORY_SEED),
-    _spec("sec_first_install_drain", 15, "sec_rate", JOB_SEC_FIRST_INSTALL_DRAIN),
+    # PR1c #1064 — three bespoke wrappers in this module collapsed into
+    # the SCHEDULED_JOBS-side ``filings_history_seed`` /
+    # ``sec_first_install_drain`` / ``sec_13f_quarterly_sweep`` bodies.
+    # Bootstrap-only knobs ride here as ``StageSpec.params``; the bodies
+    # consume the same dict shape that the manual API publishes.
+    _spec(
+        "filings_history_seed",
+        14,
+        "sec_rate",
+        JOB_FILINGS_HISTORY_SEED,
+        params={
+            "days_back": 730,
+            "filing_types": tuple(_FILINGS_HISTORY_KEEP_FORMS_TUPLE),
+        },
+    ),
+    _spec(
+        "sec_first_install_drain",
+        15,
+        "sec_rate",
+        JOB_SEC_FIRST_INSTALL_DRAIN,
+        params={"max_subjects": None},
+    ),
     _spec("sec_def14a_bootstrap", 16, "sec_rate", "sec_def14a_bootstrap"),
     _spec("sec_business_summary_bootstrap", 17, "sec_rate", "sec_business_summary_bootstrap"),
     _spec("sec_insider_transactions_backfill", 18, "sec_rate", "sec_insider_transactions_backfill"),
@@ -237,11 +344,30 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # (last 4 quarters, ~12 months) instead of the full historical
     # sweep. Walking decades of pre-2013 filings yields zero rows
     # (no machine-readable primary_doc/infotable) and turns the
-    # bootstrap into an 11+ hour wait. Standalone weekly cron
-    # keeps the full historical sweep via JOB_SEC_13F_QUARTERLY_SWEEP.
-    # On the bulk path (#1020) C3 has already populated
+    # bootstrap into an 11+ hour wait. Standalone weekly cron keeps
+    # the full historical sweep — same job, no min_period_of_report
+    # bound. On the bulk path (#1020) C3 has already populated
     # ownership_institutions_observations; this stage tops up.
-    _spec("sec_13f_recent_sweep", 21, "sec_rate", JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP),
+    #
+    # PR1c #1064: bootstrap-only ``source_label`` overrides the default
+    # so audit history distinguishes this bounded sweep from the
+    # standalone weekly run. The validator allows ``source_label`` here
+    # via ``JOB_INTERNAL_KEYS`` (PR1a) — manual API rejects it.
+    _spec(
+        "sec_13f_recent_sweep",
+        21,
+        "sec_rate",
+        JOB_SEC_13F_QUARTERLY_SWEEP,
+        # ``min_period_of_report`` resolves to ``today() - 380d`` at
+        # dispatch time (see ``_resolve_dynamic_params``). Hardcoding
+        # ``date.today()`` here would freeze the cutoff at module-load,
+        # so a long-lived jobs process would dispatch stage 21 with a
+        # stale floor. The sentinel keeps the StageSpec data-only.
+        params={
+            "min_period_of_report": _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF,
+            "source_label": "sec_edgar_13f_directory_bootstrap",
+        },
+    ),
     _spec("sec_n_port_ingest", 22, "sec_rate", "sec_n_port_ingest"),
     _spec("ownership_observations_backfill", 23, "db", "ownership_observations_backfill"),
     _spec("fundamentals_sync", 24, "db", "fundamentals_sync"),
@@ -279,6 +405,7 @@ def _run_one_stage(
     job_name: str,
     invoker: Callable[[Mapping[str, Any]], None],
     database_url: str,
+    params: Mapping[str, Any] | None = None,
 ) -> _StageOutcome:
     """Execute one stage end-to-end with `JobLock` + bookkeeping.
 
@@ -288,19 +415,38 @@ def _run_one_stage(
     (e.g. the bookkeeping query fails) — those propagate so the
     orchestrator surfaces them, but the lane runner catches a broad
     ``Exception`` to keep going.
+
+    PR1c #1064: ``params`` carries the dispatcher-supplied stage
+    params dict (from ``StageSpec.params`` after dynamic-value
+    resolution + validation). The invoker consumes them through the
+    widened ``JobInvoker`` contract; bootstrap-only knobs like
+    ``min_period_of_report`` and ``source_label`` flow through here
+    instead of living inside bespoke wrapper bodies. Default
+    ``None`` = empty dict for backwards compat with any direct
+    test caller that hasn't migrated.
     """
+    effective_params: Mapping[str, Any] = params if params is not None else {}
     with psycopg.connect(database_url) as conn:
         mark_stage_running(conn, run_id=run_id, stage_key=stage_key)
         conn.commit()
 
+    # PR1c #1064 (Codex pre-push WARNING): the promoted scheduler-side
+    # invokers call ``_tracked_job`` which reads ``_params_snapshot_var``
+    # via ``consume_params_snapshot()`` to populate
+    # ``job_runs.params_snapshot``. Bootstrap dispatch bypasses
+    # ``run_with_prelude``'s contextvar set, so we plumb the snapshot
+    # here. Without this, stage 21's audit row would persist ``{}``
+    # even though the body executed with a real ``min_period_of_report``
+    # cutoff + ``source_label`` override.
+    from app.jobs.runtime import _params_snapshot_var
+
     try:
         with JobLock(database_url, job_name):
-            # PR1b-2 (#1064): invoker contract widened to JobInvoker
-            # (``Callable[[Mapping[str, Any]], None]``). Bootstrap stages
-            # pass ``{}`` here today; PR1c lifts the bespoke wrappers
-            # and populates ``StageSpec.params`` with the per-stage
-            # hardcoded values currently buried in the wrapper bodies.
-            invoker({})
+            snap_token = _params_snapshot_var.set(effective_params)
+            try:
+                invoker(effective_params)
+            finally:
+                _params_snapshot_var.reset(snap_token)
     except JobAlreadyRunning:
         message = (
             f"another instance of {job_name!r} holds the advisory lock; "
@@ -417,6 +563,10 @@ class _RunnableStage:
     lane: str
     invoker: Callable[[Mapping[str, Any]], None]
     requires: tuple[str, ...]
+    # PR1c #1064: per-stage params dict from ``StageSpec.params``.
+    # Default empty so existing test fixtures that build
+    # ``_RunnableStage`` directly without params keep working.
+    params: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _phase_batched_dispatch(
@@ -612,6 +762,38 @@ def _phase_batched_dispatch(
                 )
                 lane_executors.append(ex)
                 for stage in stages:
+                    # PR1c #1064: resolve dispatch-time dynamic values
+                    # (e.g. _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF →
+                    # ``today() - 380d``) and validate via the canonical
+                    # registry validator with allow_internal_keys=True
+                    # so audit-only keys (``source_label``) pass through.
+                    # Validation failure is a programmer error in the
+                    # stage spec — fail-fast, dispatch surfaces it as a
+                    # stage error.
+                    resolved = _resolve_dynamic_params(stage.params)
+                    try:
+                        validated_params = validate_job_params(
+                            stage.job_name,
+                            resolved,
+                            allow_internal_keys=True,
+                        )
+                    except ParamValidationError as exc:
+                        logger.error(
+                            "bootstrap dispatcher: stage %s params invalid: %s",
+                            stage.stage_key,
+                            exc,
+                        )
+                        with psycopg.connect(database_url) as conn:
+                            mark_stage_error(
+                                conn,
+                                run_id=run_id,
+                                stage_key=stage.stage_key,
+                                error_message=f"stage params invalid: {exc}",
+                            )
+                            conn.commit()
+                        statuses[stage.stage_key] = "error"
+                        continue
+
                     fut = ex.submit(
                         _run_one_stage,
                         run_id=run_id,
@@ -619,6 +801,7 @@ def _phase_batched_dispatch(
                         job_name=stage.job_name,
                         invoker=stage.invoker,
                         database_url=database_url,
+                        params=validated_params,
                     )
                     all_futures.append((stage.stage_key, fut))
             wait([f for _, f in all_futures])
@@ -671,6 +854,13 @@ def run_bootstrap_orchestrator() -> None:
         )
         return
 
+    # PR1c #1064 — build a stage_key → params lookup from the static
+    # ``_BOOTSTRAP_STAGE_SPECS`` so the per-stage params dict can be
+    # plumbed into ``_RunnableStage`` below. ``bootstrap_stages`` in
+    # DB doesn't store params (immutable across runs; lives in code),
+    # so the dispatch path consults the spec table at run time.
+    stage_params_by_key: dict[str, Mapping[str, Any]] = {spec.stage_key: spec.params for spec in _BOOTSTRAP_STAGE_SPECS}
+
     # Pre-populate statuses with stages already in a terminal state
     # so the dependency graph sees them when a downstream pending
     # stage's `requires` references them. Without this, a retry pass
@@ -710,6 +900,7 @@ def run_bootstrap_orchestrator() -> None:
                 lane=_effective_lane(stage.stage_key, stage.lane),
                 invoker=invoker,
                 requires=_STAGE_REQUIRES.get(stage.stage_key, ()),
+                params=stage_params_by_key.get(stage.stage_key, {}),
             )
         )
 
@@ -739,229 +930,23 @@ def run_bootstrap_orchestrator() -> None:
     logger.info("bootstrap dispatcher: run_id=%d finalised as %s", run_id, terminal)
 
 
-# ---------------------------------------------------------------------------
-# New invoker: bootstrap_filings_history_seed
-# ---------------------------------------------------------------------------
-
-
-# Historical depth window for the broad filings sweep. Two years
-# matches what most operators want for first-install ranking; the
-# practical depth is bounded by SEC submissions.json's inline
-# ``recent`` block (typically ~12 months) since
-# ``SecFilingsProvider.list_filings`` does not currently walk
-# secondary submissions pages.
-_FILINGS_HISTORY_DAYS = 730
-
-
-def bootstrap_filings_history_seed() -> None:
-    """``_INVOKERS['bootstrap_filings_history_seed']`` — broad filings sweep.
-
-    Walks each CIK-mapped tradable instrument's submissions.json via
-    ``refresh_filings`` with a 2-year window and no ``filing_types``
-    filter, populating ``filing_events`` for every form type. The
-    typed-form parsers later in the SEC lane (``sec_def14a_bootstrap``,
-    ``sec_business_summary_bootstrap``,
-    ``sec_insider_transactions_backfill``, etc.) read from
-    ``filing_events`` and would otherwise no-op on a fresh DB.
-
-    Bookkeeping: reuses ``_tracked_job`` from ``app.workers.scheduler``
-    (the same context manager every scheduled job uses) so
-    ``job_runs`` rows have a uniform shape regardless of whether the
-    invoker was triggered by bootstrap dispatch or manual operator
-    Run-now.
-    """
-    from app.providers.implementations.sec_edgar import SecFilingsProvider
-    from app.services.filings import SEC_INGEST_KEEP_FORMS, refresh_filings
-    from app.workers.scheduler import _tracked_job  # type: ignore[attr-defined]
-
-    with _tracked_job(JOB_BOOTSTRAP_FILINGS_HISTORY_SEED) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
-            cik_rows = conn.execute(
-                """
-                SELECT i.symbol, i.instrument_id::text
-                  FROM external_identifiers ei
-                  JOIN instruments i ON i.instrument_id = ei.instrument_id
-                 WHERE ei.provider = 'sec'
-                   AND ei.identifier_type = 'cik'
-                   AND ei.is_primary = TRUE
-                   AND i.is_tradable = TRUE
-                """
-            ).fetchall()
-
-        if not cik_rows:
-            logger.info("bootstrap_filings_history_seed: no CIK-mapped instruments; ensure daily_cik_refresh ran first")
-            tracker.row_count = 0
-            return
-
-        instrument_ids = [row[1] for row in cik_rows]
-        from_date = date.today() - timedelta(days=_FILINGS_HISTORY_DAYS)
-        to_date = date.today()
-
-        with (
-            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
-        ):
-            summary = refresh_filings(
-                provider=sec,
-                provider_name="sec",
-                identifier_type="cik",
-                conn=conn,
-                instrument_ids=instrument_ids,
-                start_date=from_date,
-                end_date=to_date,
-                # #1011 — three-tier form-type allow-list. Pre-fix
-                # this was ``None`` (all forms); first-install audit
-                # 2026-05-07 measured ~32% of resulting filing_events
-                # rows were forms no parser ever consumes.
-                filing_types=sorted(SEC_INGEST_KEEP_FORMS),
-            )
-        tracker.row_count = summary.filings_upserted
-        logger.info(
-            "bootstrap_filings_history_seed: instruments=%d filings_upserted=%d skipped=%d",
-            summary.instruments_attempted,
-            summary.filings_upserted,
-            summary.instruments_skipped,
-        )
-
-
-# ---------------------------------------------------------------------------
-# New invoker: sec_first_install_drain (zero-arg wrapper)
-# ---------------------------------------------------------------------------
-
-
-def _make_sec_http_get(sec_provider: object) -> Callable[[str, dict[str, str]], tuple[int, bytes]]:
-    """Adapt ``SecFilingsProvider._http`` (a ``ResilientClient``) into
-    an ``HttpGet = Callable[[str, dict[str, str]], tuple[int, bytes]]``.
-
-    The drain / poll / rebuild call sites all consume this narrowed
-    callable shape (see ``app/providers/implementations/sec_submissions.py``);
-    the closure routes through the rate-limited shared client so SEC's
-    10 req/s bucket is honoured.
-    """
-
-    def _impl(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
-        # ``_http`` is the ResilientClient wrapping the SEC httpx.Client
-        # with the shared process-wide token bucket. ``.get(...)`` returns
-        # a httpx.Response; the HttpGet contract is (status, body bytes).
-        response = sec_provider._http.get(url, headers=headers)  # type: ignore[attr-defined]
-        return response.status_code, response.content
-
-    return _impl
-
-
-def sec_first_install_drain_job() -> None:
-    """``_INVOKERS['sec_first_install_drain']`` — zero-arg drain wrapper.
-
-    The underlying ``run_first_install_drain`` takes an ``http_get``
-    callable, ``follow_pagination``, etc. so it cannot be registered
-    directly. This wrapper picks the bootstrap-default arguments
-    (full universe scope, paginate enabled) and adapts the
-    ``SecFilingsProvider._http`` ResilientClient into the
-    ``HttpGet = Callable[[str, dict[str, str]], tuple[int, bytes]]``
-    contract via ``_make_sec_http_get``.
-    """
-    from app.jobs.sec_first_install_drain import run_first_install_drain
-    from app.providers.implementations.sec_edgar import SecFilingsProvider
-    from app.workers.scheduler import _tracked_job  # type: ignore[attr-defined]
-
-    with _tracked_job(JOB_SEC_FIRST_INSTALL_DRAIN) as tracker:
-        with (
-            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
-        ):
-            stats = run_first_install_drain(
-                conn,
-                http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
-                follow_pagination=True,
-                use_bulk_zip=False,
-                max_subjects=None,
-            )
-        tracker.row_count = stats.manifest_rows_upserted
-        logger.info(
-            "sec_first_install_drain: ciks_processed=%d skipped=%d manifest_rows=%d errors=%d",
-            stats.ciks_processed,
-            stats.ciks_skipped,
-            stats.manifest_rows_upserted,
-            stats.errors,
-        )
-
-
-# ---------------------------------------------------------------------------
-# New invoker: bootstrap_sec_13f_recent_sweep
-# ---------------------------------------------------------------------------
-
-
-# Recency cut-off for the bootstrap-bounded 13F sweep. 13F-HRs file
-# ~quarterly so 4 quarters = current + 3 prior periods, matches the
-# rolling ownership-card window operators use today. Older 13Fs
-# add no value to current-quarter ranking and pre-2013 ones don't
-# have machine-readable holdings (#1008).
-_BOOTSTRAP_13F_QUARTERS_BACK = 4
-
-
-def bootstrap_sec_13f_recent_sweep_job() -> None:
-    """``_INVOKERS['bootstrap_sec_13f_recent_sweep']`` — recency-bounded
-    13F sweep for first-install bootstrap (#1008).
-
-    Walks the same ``institutional_filers`` directory as
-    ``sec_13f_quarterly_sweep`` but passes ``min_period_of_report``
-    so the parser skips accessions whose ``period_of_report`` is
-    older than the cut-off. On a fresh install with ~11k filers and
-    no prior tombstones this cuts the sweep from 11+ hours
-    (operator-killed in the 2026-05-07 smoke run) to ~30-45 min.
-
-    Standalone scheduled ``sec_13f_quarterly_sweep`` retains the
-    full historical sweep so an operator who wants deeper coverage
-    later can trigger it manually.
-    """
-    from datetime import timedelta
-
-    from app.providers.implementations.sec_edgar import SecFilingsProvider
-    from app.services.institutional_holdings import (
-        ingest_all_active_filers,
-        list_directory_filer_ciks,
-    )
-    from app.workers.scheduler import _tracked_job  # type: ignore[attr-defined]
-
-    cutoff = date.today() - timedelta(days=_BOOTSTRAP_13F_QUARTERS_BACK * 95)
-
-    with _tracked_job(JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP) as tracker:
-        with (
-            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
-        ):
-            ciks = list_directory_filer_ciks(conn)
-            summaries = ingest_all_active_filers(
-                conn,
-                sec,
-                ciks=ciks,
-                deadline_seconds=settings.sec_13f_sweep_deadline_seconds,
-                source_label="sec_edgar_13f_directory_bootstrap",
-                min_period_of_report=cutoff,
-            )
-        rows_upserted = sum(s.holdings_inserted for s in summaries)
-        tracker.row_count = rows_upserted
-        logger.info(
-            "bootstrap_sec_13f_recent_sweep: filers_total=%d processed=%d holdings_upserted=%d cutoff=%s",
-            len(ciks),
-            len(summaries),
-            rows_upserted,
-            cutoff,
-        )
+# PR1c #1064 — three bespoke wrappers
+# (``bootstrap_filings_history_seed``, ``sec_first_install_drain_job``,
+# ``bootstrap_sec_13f_recent_sweep_job``) deleted. Their bodies were
+# lifted into params-aware ``JobInvoker`` bodies in
+# ``app/workers/scheduler.py`` (``filings_history_seed``,
+# ``sec_first_install_drain``, extended ``sec_13f_quarterly_sweep``).
+# Bootstrap stages 14, 15, 21 dispatch the promoted bodies via
+# ``StageSpec.params``; the deleted JOB_* constants are gone too,
+# so any straggling reference fails fast on import.
 
 
 __all__ = [
-    "JOB_BOOTSTRAP_FILINGS_HISTORY_SEED",
     "JOB_BOOTSTRAP_ORCHESTRATOR",
-    "JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP",
     "JOB_DAILY_CIK_REFRESH",
     "JOB_DAILY_FINANCIAL_FACTS",
-    "JOB_SEC_FIRST_INSTALL_DRAIN",
-    "bootstrap_filings_history_seed",
-    "bootstrap_sec_13f_recent_sweep_job",
     "get_bootstrap_stage_specs",
     "run_bootstrap_orchestrator",
-    "sec_first_install_drain_job",
 ]
 
 

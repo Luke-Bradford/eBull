@@ -36,6 +36,38 @@ from psycopg.types.json import Jsonb
 
 from app.services.runtime_config import write_kill_switch_audit
 
+
+def _jsonable_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Convert non-JSON-native values in a params dict to JSON-safe scalars.
+
+    Codex pre-push round 2 BLOCKING (#1064 PR1c): ``date`` values
+    cannot pass through ``json.dumps`` without a default coercer, so
+    a ``date`` in ``params_snapshot`` would raise ``TypeError`` inside
+    ``psycopg.types.json.Jsonb``. The promoted
+    ``sec_13f_quarterly_sweep`` body and bootstrap stage 21 both pass
+    a ``min_period_of_report`` date; this helper materialises dates +
+    datetimes as ISO-8601 strings so the JSONB column sees a stable
+    text representation. Operator queries that read
+    ``params_snapshot->>'min_period_of_report'`` get the same string
+    shape regardless of who triggered the run.
+    """
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+
+    result: dict[str, Any] = {}
+    for key, value in params.items():
+        if isinstance(value, _datetime):
+            result[key] = value.isoformat()
+        elif isinstance(value, _date):
+            result[key] = value.isoformat()
+        elif isinstance(value, (list, tuple)):
+            # Preserve list/tuple semantics for multi_enum (filing_types, etc).
+            result[key] = list(value)
+        else:
+            result[key] = value
+    return result
+
+
 if TYPE_CHECKING:
     # layer_types sits at the bottom of the orchestrator import graph, but
     # the sync_orchestrator package __init__ re-exports executor/planner/
@@ -296,7 +328,11 @@ def record_job_start(
                 VALUES (%(name)s, %(started)s, 'running', %(params)s)
                 RETURNING run_id
                 """,
-                {"name": job_name, "started": now, "params": Jsonb(params_snapshot)},
+                {
+                    "name": job_name,
+                    "started": now,
+                    "params": Jsonb(_jsonable_params(params_snapshot)),
+                },
             )
         row = cur.fetchone()
     conn.commit()
@@ -395,7 +431,7 @@ def record_job_skip(
                     "name": job_name,
                     "ts": now,
                     "reason": reason,
-                    "params": Jsonb(params_snapshot),
+                    "params": Jsonb(_jsonable_params(params_snapshot)),
                 },
             ).fetchone()
         if row is None:

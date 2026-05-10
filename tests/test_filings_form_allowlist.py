@@ -5,8 +5,9 @@ Spec: docs/superpowers/specs/2026-05-08-filing-allow-list-and-raw-retention.md.
 Pins the three-tier model: every form an active parser consumes
 must be in ``SEC_PARSE_AND_RAW``; future-signal forms in
 ``SEC_METADATA_ONLY``; the union ``SEC_INGEST_KEEP_FORMS`` is what
-``bootstrap_filings_history_seed`` and ``daily_research_refresh``
-pass to ``refresh_filings``.
+``filings_history_seed`` (PR1c #1064 — formerly the bespoke
+``bootstrap_filings_history_seed`` wrapper) and
+``daily_research_refresh`` pass to ``refresh_filings``.
 """
 
 from __future__ import annotations

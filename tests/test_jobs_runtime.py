@@ -416,8 +416,11 @@ class TestProductionInvokerRegistry:
             # but registered in _INVOKERS so the orchestrator can call
             # them via JobLock + so admin Run-now still works:
             "bootstrap_orchestrator",
-            "bootstrap_filings_history_seed",
-            "bootstrap_sec_13f_recent_sweep",
+            # PR1c #1064 — promoted from bespoke wrappers:
+            #   bootstrap_filings_history_seed   → filings_history_seed
+            #   sec_first_install_drain_job      → sec_first_install_drain (same name)
+            #   bootstrap_sec_13f_recent_sweep   → folded into sec_13f_quarterly_sweep
+            "filings_history_seed",
             "sec_first_install_drain",
             # #994 also un-retired these for bootstrap dispatch. They
             # are NOT in SCHEDULED_JOBS — daily_cik_refresh and

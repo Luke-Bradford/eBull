@@ -275,14 +275,14 @@ These follow the same archetype: zero-arg body → calls `ingest_<thing>(conn, p
 | 11 | `sec_insider_ingest_from_dataset` | db | `sec_insider_ingest_from_dataset` | (sec_bulk_download, cik_refresh) | ✗ (bootstrap only) |
 | 12 | `sec_nport_ingest_from_dataset` | db | `sec_nport_ingest_from_dataset` | (sec_bulk_download, cusip_universe_backfill) | ✗ (bootstrap only) |
 | 13 | `sec_submissions_files_walk` | sec_rate | `sec_submissions_files_walk` | (sec_submissions_ingest) | ✗ (bootstrap only) |
-| 14 | `filings_history_seed` | sec_rate | `bootstrap_filings_history_seed` ← **bespoke wrapper** | (cik_refresh) | ✗ |
-| 15 | `sec_first_install_drain` | sec_rate | `sec_first_install_drain` ← **bespoke wrapper** | (cik_refresh) | ✗ |
+| 14 | `filings_history_seed` | sec_rate | `filings_history_seed` (PR1c #1064 — promoted from `bootstrap_filings_history_seed`) | (cik_refresh) | ✗ |
+| 15 | `sec_first_install_drain` | sec_rate | `sec_first_install_drain` (PR1c #1064 — promoted from `sec_first_install_drain_job`) | (cik_refresh) | ✗ |
 | 16 | `sec_def14a_bootstrap` | sec_rate | `sec_def14a_bootstrap` | (sec_submissions_ingest, sec_submissions_files_walk) | ✓ |
 | 17 | `sec_business_summary_bootstrap` | sec_rate | `sec_business_summary_bootstrap` | (sec_submissions_ingest, sec_submissions_files_walk) | ✓ |
 | 18 | `sec_insider_transactions_backfill` | sec_rate | `sec_insider_transactions_backfill` | (cik_refresh) | ✓ |
 | 19 | `sec_form3_ingest` | sec_rate | `sec_form3_ingest` | (cik_refresh) | ✓ |
 | 20 | `sec_8k_events_ingest` | sec_rate | `sec_8k_events_ingest` | (sec_submissions_ingest, sec_submissions_files_walk) | ✓ |
-| 21 | `sec_13f_recent_sweep` | sec_rate | `bootstrap_sec_13f_recent_sweep` ← **bespoke wrapper** | (cik_refresh) | ✗ |
+| 21 | `sec_13f_recent_sweep` | sec_rate | `sec_13f_quarterly_sweep` (PR1c #1064 — folded `bootstrap_sec_13f_recent_sweep` into the existing scheduled body via `min_period_of_report` + `source_label` params) | (cik_refresh) | ✓ |
 | 22 | `sec_n_port_ingest` | sec_rate | `sec_n_port_ingest` | (cik_refresh) | ✓ |
 | 23 | `ownership_observations_backfill` | db | `ownership_observations_backfill` | (5 bulk + legacy chain stages) | ✓ |
 | 24 | `fundamentals_sync` | db | `fundamentals_sync` | (sec_companyfacts_ingest) | ✓ |

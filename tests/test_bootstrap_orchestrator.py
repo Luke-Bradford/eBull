@@ -24,11 +24,9 @@ import psycopg
 import pytest
 
 from app.services.bootstrap_orchestrator import (
-    JOB_BOOTSTRAP_FILINGS_HISTORY_SEED,
     JOB_BOOTSTRAP_ORCHESTRATOR,
     JOB_DAILY_CIK_REFRESH,
     JOB_DAILY_FINANCIAL_FACTS,
-    JOB_SEC_FIRST_INSTALL_DRAIN,
     _run_one_stage,
     _should_run,
     get_bootstrap_stage_specs,
@@ -38,6 +36,10 @@ from app.services.bootstrap_state import (
     read_latest_run_with_stages,
     read_state,
     start_run,
+)
+from app.workers.scheduler import (
+    JOB_FILINGS_HISTORY_SEED,
+    JOB_SEC_FIRST_INSTALL_DRAIN,
 )
 
 
@@ -112,7 +114,9 @@ def test_stage_orders_are_unique_and_contiguous() -> None:
 def test_critical_constants_exposed() -> None:
     # Tests + frontend will import these; keep them stable.
     assert JOB_BOOTSTRAP_ORCHESTRATOR == "bootstrap_orchestrator"
-    assert JOB_BOOTSTRAP_FILINGS_HISTORY_SEED == "bootstrap_filings_history_seed"
+    # PR1c #1064 — bespoke wrapper job names retired; the promoted
+    # scheduler-side constants now own these strings.
+    assert JOB_FILINGS_HISTORY_SEED == "filings_history_seed"
     assert JOB_SEC_FIRST_INSTALL_DRAIN == "sec_first_install_drain"
     assert JOB_DAILY_CIK_REFRESH == "daily_cik_refresh"
     assert JOB_DAILY_FINANCIAL_FACTS == "daily_financial_facts"

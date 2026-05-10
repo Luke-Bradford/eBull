@@ -163,6 +163,18 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
     # operator never edits this — it lives in the bootstrap StageSpec's
     # params dict.
     "sec_13f_quarterly_sweep": frozenset({"source_label"}),
+    # PR1c #1064 — bootstrap-only invokers promoted from bespoke
+    # wrappers. These jobs are NOT in SCHEDULED_JOBS today (no cron
+    # cadence), so they have no operator-facing ``ParamMetadata``;
+    # the bootstrap dispatcher passes the wrapper's former hardcoded
+    # values via ``StageSpec.params`` and the validator permits the
+    # keys here under ``allow_internal_keys=True``. The manual API
+    # path uses ``allow_internal_keys=False`` and would therefore
+    # reject these keys — operator-tunability is deferred to a
+    # future PR that promotes the jobs into SCHEDULED_JOBS with
+    # proper ``ParamMetadata`` declarations.
+    "filings_history_seed": frozenset({"days_back", "filing_types", "instrument_id"}),
+    "sec_first_install_drain": frozenset({"max_subjects"}),
 }
 
 
