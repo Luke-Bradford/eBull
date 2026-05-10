@@ -419,6 +419,13 @@ def get_row(conn: psycopg.Connection[Any]) -> ProcessRow | None:
         can_cancel=(state_status == "running"),
         last_n_errors=last_n_errors,
         stale_reasons=stale_reasons,
+        # PR4 #1082 — bootstrap row description for the ⓘ tooltip.
+        description=(
+            "First-install bootstrap. Walks the 17-stage init → eToro → SEC "
+            "lane sequence to populate every dependent table. Re-run failed "
+            "resumes from the failed stage; Re-run all wipes + replays from "
+            "scratch."
+        ),
     )
 
 

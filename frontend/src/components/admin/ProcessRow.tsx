@@ -104,12 +104,17 @@ export function ProcessRow({
       className={`align-top text-sm ${pulseBorder}`}
     >
       <td className="px-2 py-2">
-        <Link
-          to={`/admin/processes/${encodeURIComponent(row.process_id)}`}
-          className="font-medium text-blue-700 hover:underline dark:text-blue-300"
-        >
-          {row.display_name}
-        </Link>
+        <div className="flex items-center gap-1">
+          <Link
+            to={`/admin/processes/${encodeURIComponent(row.process_id)}`}
+            className="font-medium text-blue-700 hover:underline dark:text-blue-300"
+          >
+            {row.display_name}
+          </Link>
+          {row.description ? (
+            <DescriptionTooltip description={row.description} />
+          ) : null}
+        </div>
         <div className="text-xs text-slate-500 dark:text-slate-400">
           {row.process_id} · {row.mechanism}
         </div>
@@ -342,6 +347,36 @@ function formatElapsedSince(iso: string): string {
   const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
   if (sec < 60) return `${sec}s`;
   return `${Math.round(sec / 60)}m`;
+}
+
+/**
+ * ⓘ tooltip showing operator-facing description (PR4 #1082).
+ *
+ * Native ``title`` attribute on a small inline-flex ⓘ glyph. Operating
+ * systems render the title as a tooltip on hover/long-press; assistive
+ * technology reads the same string via ``aria-label``. No JS modal,
+ * no portal — just the browser's tooltip surface so the row stays
+ * focus-stable + keyboard-traversable.
+ */
+function DescriptionTooltip({ description }: { description: string }) {
+  return (
+    // ``<button type="button">`` rather than a bare span so keyboard
+    // users can Tab to the icon and trigger the browser's native
+    // tooltip surface (and screen readers announce it via
+    // ``aria-label``). Codex pre-push PR4 a11y finding: a non-focusable
+    // span left keyboard-only operators with no way to reach the
+    // tooltip.
+    <button
+      type="button"
+      aria-label={description}
+      title={description}
+      data-testid="process-description-tooltip"
+      onClick={(e) => e.preventDefault()}
+      className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-400 text-[10px] font-bold text-slate-500 hover:border-slate-600 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 dark:border-slate-500 dark:text-slate-400 dark:hover:border-slate-300 dark:hover:text-slate-200"
+    >
+      i
+    </button>
+  );
 }
 
 // Re-export so test files can assert on the canonical mapping rather

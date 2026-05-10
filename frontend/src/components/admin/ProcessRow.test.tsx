@@ -355,4 +355,33 @@ describe("ProcessRow", () => {
     });
     expect(container.textContent).toContain("every 5m");
   });
+
+  // ---------------------------------------------------------------------
+  // PR4 #1082 — ⓘ tooltip rendering description
+  // ---------------------------------------------------------------------
+
+  it("renders ⓘ tooltip when description is non-empty", () => {
+    renderRow({
+      row: makeProcessRow({
+        description: "Refreshes SEC CIK mappings nightly.",
+      }),
+    });
+    const tooltip = screen.getByTestId("process-description-tooltip");
+    expect(tooltip).toBeTruthy();
+    expect(tooltip.getAttribute("title")).toBe(
+      "Refreshes SEC CIK mappings nightly.",
+    );
+    expect(tooltip).toHaveAccessibleName(
+      "Refreshes SEC CIK mappings nightly.",
+    );
+  });
+
+  it("hides ⓘ tooltip when description is empty", () => {
+    renderRow({
+      row: makeProcessRow({ description: "" }),
+    });
+    expect(
+      screen.queryByTestId("process-description-tooltip"),
+    ).toBeNull();
+  });
 });

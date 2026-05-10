@@ -661,6 +661,54 @@ def test_params_metadata_surfaces_for_sec_13f_quarterly_sweep(
     assert row.params_metadata[0].field_type == "date"
 
 
+def test_description_surfaces_from_scheduled_job(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR4 #1082 — ``ScheduledJob.description`` flows onto
+    ``ProcessRow.description`` so the FE ⓘ tooltip can render it.
+
+    Pins the foundation: every scheduled job declares a description
+    string; the adapter forwards verbatim. A regression that returns
+    empty would silently hide every ⓘ icon.
+    """
+    from app.workers.scheduler import SCHEDULED_JOBS
+
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    job = next(j for j in SCHEDULED_JOBS if j.name == JOB_RETRY_DEFERRED)
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.description == job.description
+    assert len(row.description) > 0
+
+
+def test_display_name_prefers_scheduled_job_label_over_raw_name(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR4 #1082 — when ``ScheduledJob.display_name`` is populated
+    (PR1a populated every entry), the adapter surfaces it instead of
+    the raw ``job.name``.
+    """
+    from app.workers.scheduler import SCHEDULED_JOBS
+
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    # Find any job that has a non-None display_name. If every entry's
+    # display_name is None today, the adapter still falls back to
+    # job.name (defensive); this test guards the propagation path.
+    job_with_label = next(
+        (j for j in SCHEDULED_JOBS if j.display_name is not None),
+        None,
+    )
+    if job_with_label is None:
+        return  # nothing to assert until at least one entry populates display_name
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=job_with_label.name)
+    assert row is not None
+    assert row.display_name == job_with_label.display_name
+
+
 def test_params_metadata_default_empty_for_jobs_without_declarations(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

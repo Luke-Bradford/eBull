@@ -1250,6 +1250,10 @@ export interface ProcessRowResponse {
   // Non-empty only for scheduled jobs that declare
   // ``ScheduledJob.params_metadata`` (e.g. sec_13f_quarterly_sweep).
   params_metadata: ParamMetadata[];
+  // PR4 #1082 — operator-facing description for the ⓘ tooltip. Empty
+  // when the registry entry has no description; the FE hides the
+  // icon on empty rather than showing a blank popover.
+  description: string;
 }
 
 export interface ProcessListResponse {

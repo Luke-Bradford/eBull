@@ -616,6 +616,15 @@ def _build_row(
         can_cancel=False,
         last_n_errors=last_n_errors,
         stale_reasons=stale_reasons,
+        # PR4 #1082 — describe the sweep + the underlying job that
+        # actually does the trigger work, so the operator's ⓘ tooltip
+        # answers "this is read-only — go trigger ``<underlying>``".
+        description=(
+            f"Read-only roll-up of {spec.display_name}. The underlying "
+            f"scheduled job ``{spec.underlying_job}`` is what actually runs; "
+            f"this row aggregates its progress over time. Iterate / "
+            f"full-wash from the {spec.underlying_job} row instead."
+        ),
     )
 
 

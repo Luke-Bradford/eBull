@@ -171,6 +171,11 @@ class ProcessRowResponse(BaseModel):
     # form field per entry. ``Field(default_factory=list)`` keeps the
     # default per-instance, not a shared mutable.
     params_metadata: list[ParamMetadata] = Field(default_factory=list)
+    # PR4 #1082 — operator-facing description for the ⓘ tooltip on the
+    # admin ProcessesTable. Empty string when the underlying registry
+    # entry has no description; the FE hides the icon on empty rather
+    # than showing a blank popover.
+    description: str = ""
 
 
 class ProcessListResponse(BaseModel):
@@ -381,6 +386,7 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         last_n_errors=[_convert_error(e) for e in row.last_n_errors],
         stale_reasons=list(row.stale_reasons),
         params_metadata=list(row.params_metadata),
+        description=row.description,
     )
 
 
