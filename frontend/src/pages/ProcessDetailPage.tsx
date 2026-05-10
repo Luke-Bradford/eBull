@@ -371,6 +371,21 @@ function ActionBar({
   onCancel: () => void;
 }) {
   const watermarkTooltip = row.watermark?.human ?? "no resume cursor";
+  // Mechanism-specific labels — bootstrap maps iterate/full_wash to
+  // "Re-run failed" / "Re-run all" per data-engineer skill §7.3.
+  const isBootstrap = row.mechanism === "bootstrap";
+  const iterateLabel = isBootstrap ? "Re-run failed" : "Iterate";
+  const fullWashLabel = isBootstrap ? "Re-run all" : "Full-wash";
+  const iterateTooltip = row.can_iterate
+    ? isBootstrap
+      ? "Resume incomplete + failed stages from where they stopped."
+      : watermarkTooltip
+    : `${iterateLabel} is not available right now.`;
+  const fullWashTooltip = row.can_full_wash
+    ? isBootstrap
+      ? "Reset every stage to pending; full first-install replay (typed-name confirm required)."
+      : "Reset watermark and re-fetch from epoch (typed-name confirm required)."
+    : `${fullWashLabel} is not available right now.`;
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex items-center gap-2">
@@ -378,23 +393,19 @@ function ActionBar({
           type="button"
           onClick={onIterate}
           disabled={!row.can_iterate || busy}
-          title={row.can_iterate ? watermarkTooltip : "Iterate is not available right now."}
+          title={iterateTooltip}
           className="rounded border border-slate-300 bg-white px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800/40"
         >
-          Iterate
+          {iterateLabel}
         </button>
         <button
           type="button"
           onClick={onFullWash}
           disabled={!row.can_full_wash || busy}
-          title={
-            row.can_full_wash
-              ? "Reset watermark and re-fetch from epoch (typed-name confirm required)."
-              : "Full-wash is not available right now."
-          }
+          title={fullWashTooltip}
           className="rounded border border-red-300 bg-white px-3 py-1 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
         >
-          Full-wash
+          {fullWashLabel}
         </button>
         <button
           type="button"
@@ -1203,18 +1214,34 @@ function FullWashConfirmDialog({
 }) {
   const [typed, setTyped] = useState("");
   const matches = typed === row.display_name;
+  // PR3a #1064 — bootstrap mechanism uses different verbs.
+  const isBootstrap = row.mechanism === "bootstrap";
+  const heading = isBootstrap ? "Confirm Re-run all" : "Confirm full-wash";
+  const verb = isBootstrap ? "Re-run all" : "Full-wash";
   return (
     <Modal isOpen={true} onRequestClose={onCancel} labelledBy="detail-fw-title">
       <h2
         id="detail-fw-title"
         className="text-sm font-semibold text-slate-800 dark:text-slate-100"
       >
-        Confirm full-wash
+        {heading}
       </h2>
       <p className="mt-2 text-sm text-slate-700 dark:text-slate-300">
-        Full-wash resets the watermark for{" "}
-        <span className="font-medium">{row.display_name}</span> and re-fetches
-        from epoch.
+        {isBootstrap ? (
+          <>
+            Re-run all resets every stage of{" "}
+            <span className="font-medium">{row.display_name}</span> to pending
+            and replays the full first-install bootstrap. Stages re-run from
+            scratch; ingested rows are deduped at the destination by ON
+            CONFLICT.
+          </>
+        ) : (
+          <>
+            Full-wash resets the watermark for{" "}
+            <span className="font-medium">{row.display_name}</span> and
+            re-fetches from epoch.
+          </>
+        )}
       </p>
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
         Type the process name exactly to enable the confirm button.
@@ -1245,7 +1272,7 @@ function FullWashConfirmDialog({
           disabled={!matches || busy}
           className="rounded border border-red-400 bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-700 dark:bg-red-700 dark:hover:bg-red-800"
         >
-          {busy ? "Triggering…" : "Full-wash"}
+          {busy ? "Triggering…" : verb}
         </button>
       </div>
     </Modal>
