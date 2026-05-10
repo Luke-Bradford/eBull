@@ -76,6 +76,7 @@ def test_process_row_carries_all_envelope_fields() -> None:
         "can_cancel",
         "last_n_errors",
         "stale_reasons",
+        "params_metadata",
     }
     assert set(row.__slots__) == expected
 

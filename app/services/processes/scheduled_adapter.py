@@ -688,6 +688,11 @@ def _build_row(
         can_cancel=can_cancel,
         last_n_errors=last_n_errors,
         stale_reasons=stale_reasons,
+        # PR2 #1064 — surface ``ScheduledJob.params_metadata`` so the FE
+        # Advanced disclosure renders one form field per declared param.
+        # Empty tuple for jobs with no operator-exposable params (the
+        # default — every entry except ``sec_13f_quarterly_sweep`` today).
+        params_metadata=job.params_metadata,
     )
 
 

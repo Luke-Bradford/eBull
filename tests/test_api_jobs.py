@@ -144,6 +144,25 @@ class TestRunJobEnvelope:
         assert "boolean" in resp.json()["detail"].lower()
         pub.assert_not_called()
 
+    def test_date_param_round_trips_as_iso_string_in_payload(self) -> None:
+        """PR2 #1064 — ``validate_job_params`` returns native ``date`` for
+        ``field_type='date'``; if the API path published the dict directly,
+        ``Jsonb`` would raise ``TypeError`` on adapt. ``to_jsonsafe_params``
+        coerces to ISO string before publish so the queue row's payload is
+        JSON-clean. The listener re-validates after dequeue, so the invoker
+        still receives a native ``date``.
+        """
+        with patch("app.api.jobs.publish_manual_job_request", return_value=99) as pub:
+            resp = client.post(
+                "/jobs/sec_13f_quarterly_sweep/run",
+                json={"params": {"min_period_of_report": "2024-01-01"}},
+            )
+        assert resp.status_code == 202
+        kwargs = pub.call_args.kwargs
+        # Pin: ISO string in payload, NOT a datetime.date instance.
+        assert kwargs["payload"]["params"]["min_period_of_report"] == "2024-01-01"
+        assert isinstance(kwargs["payload"]["params"]["min_period_of_report"], str)
+
 
 class TestListJobRequests:
     """Smoke for the new GET /jobs/requests endpoint (#719)."""

@@ -1245,6 +1245,11 @@ export interface ProcessRowResponse {
   can_cancel: boolean;
   last_n_errors: ErrorClassSummaryResponse[];
   stale_reasons: StaleReason[];
+  // PR2 #1064 — operator-exposable params for the drill-in Advanced
+  // disclosure. Empty list for bootstrap + ingest_sweep mechanisms.
+  // Non-empty only for scheduled jobs that declare
+  // ``ScheduledJob.params_metadata`` (e.g. sec_13f_quarterly_sweep).
+  params_metadata: ParamMetadata[];
 }
 
 export interface ProcessListResponse {

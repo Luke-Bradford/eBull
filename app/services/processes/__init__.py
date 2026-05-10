@@ -18,10 +18,12 @@ no async — because adapter callers serialise straight to JSON for the
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
+
+from app.services.processes.param_metadata import ParamMetadata
 
 ProcessLane = Literal[
     "setup",
@@ -183,6 +185,12 @@ class ProcessRow:
     can_cancel: bool
     last_n_errors: tuple[ErrorClassSummary, ...]
     stale_reasons: tuple[StaleReason, ...]
+    # PR2 #1064 — operator-exposable params for the Advanced disclosure
+    # tab on the drill-in. Bootstrap + ingest_sweep adapters keep the
+    # default empty tuple; scheduled_adapter populates from the
+    # underlying ``ScheduledJob.params_metadata`` so the FE knows
+    # which form fields to render.
+    params_metadata: tuple[ParamMetadata, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)

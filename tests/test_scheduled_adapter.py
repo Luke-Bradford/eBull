@@ -630,3 +630,49 @@ def test_queue_stuck_does_not_fire_on_recently_claimed_dispatched(
     row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
     assert row is not None
     assert "queue_stuck" not in row.stale_reasons
+
+
+# ---------------------------------------------------------------------------
+# PR2 #1064 — params_metadata surfacing for the Advanced disclosure tab
+# ---------------------------------------------------------------------------
+
+
+def test_params_metadata_surfaces_for_sec_13f_quarterly_sweep(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """ScheduledJob.params_metadata flows verbatim onto ProcessRow.
+
+    Pins the foundation that the FE Advanced tab depends on: a job that
+    declares ``params_metadata`` surfaces its full tuple on the row,
+    enabling the drill-in to render one form field per entry. Drift
+    here silently breaks the renderer.
+    """
+    from app.workers.scheduler import JOB_SEC_13F_QUARTERLY_SWEEP, SCHEDULED_JOBS
+
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_SEC_13F_QUARTERLY_SWEEP)
+    assert row is not None
+    job = next(j for j in SCHEDULED_JOBS if j.name == JOB_SEC_13F_QUARTERLY_SWEEP)
+    assert row.params_metadata == job.params_metadata
+    assert len(row.params_metadata) == 1
+    assert row.params_metadata[0].name == "min_period_of_report"
+    assert row.params_metadata[0].field_type == "date"
+
+
+def test_params_metadata_default_empty_for_jobs_without_declarations(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Jobs that do not declare ``params_metadata`` surface ``()``.
+
+    Today every scheduled job except ``sec_13f_quarterly_sweep`` falls
+    in this bucket. The empty tuple is what the FE keys off to hide
+    the Advanced tab.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.params_metadata == ()
