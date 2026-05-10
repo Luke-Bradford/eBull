@@ -284,14 +284,24 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
     insiders."""
     notes: list[str] = []
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Per-#1117 PR-B: insider_transactions + insider_filings are
+        # entity-level (PK accession or accession+txn_row_num); the
+        # per-instrument denormalised instrument_id points at the
+        # canonical sibling. Bridge via filing_events for per-sibling
+        # reads.
         cur.execute(
             """
             SELECT COUNT(*) AS row_count, MAX(f.period_of_report) AS latest_period
             FROM insider_transactions t
             JOIN insider_filings f ON f.accession_number = t.accession_number
-            WHERE t.instrument_id = %s
-              AND f.document_type = '4'
+            WHERE f.document_type = '4'
               AND f.is_tombstone = FALSE
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe
+                  WHERE fe.provider_filing_id = t.accession_number
+                    AND fe.provider = 'sec'
+                    AND fe.instrument_id = %s
+              )
             """,
             (instrument_id,),
         )
@@ -300,10 +310,15 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
         cur.execute(
             """
             SELECT COUNT(*) AS tombstone_count
-            FROM insider_filings
-            WHERE instrument_id = %s
-              AND document_type = '4'
-              AND is_tombstone = TRUE
+            FROM insider_filings i
+            WHERE i.document_type = '4'
+              AND i.is_tombstone = TRUE
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe
+                  WHERE fe.provider_filing_id = i.accession_number
+                    AND fe.provider = 'sec'
+                    AND fe.instrument_id = %s
+              )
             """,
             (instrument_id,),
         )
@@ -315,8 +330,13 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
             FROM filing_raw_documents r
             JOIN insider_filings i ON i.accession_number = r.accession_number
             WHERE r.document_kind = 'form4_xml'
-              AND i.instrument_id = %s
               AND i.is_tombstone = FALSE
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe
+                  WHERE fe.provider_filing_id = i.accession_number
+                    AND fe.provider = 'sec'
+                    AND fe.instrument_id = %s
+              )
             """,
             (instrument_id,),
         )
@@ -345,14 +365,21 @@ def _form3_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
     the prior header-count bug here too."""
     notes: list[str] = []
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Per-#1117 PR-B: same bridge pattern as Form 4 — entity-level
+        # tables route via filing_events for sibling visibility.
         cur.execute(
             """
             SELECT COUNT(*) AS row_count, MAX(f.period_of_report) AS latest_period
             FROM insider_initial_holdings h
             JOIN insider_filings f ON f.accession_number = h.accession_number
-            WHERE h.instrument_id = %s
-              AND f.document_type LIKE '3%%'
+            WHERE f.document_type LIKE '3%%'
               AND f.is_tombstone = FALSE
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe
+                  WHERE fe.provider_filing_id = h.accession_number
+                    AND fe.provider = 'sec'
+                    AND fe.instrument_id = %s
+              )
             """,
             (instrument_id,),
         )
@@ -361,10 +388,15 @@ def _form3_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
         cur.execute(
             """
             SELECT COUNT(*) AS tombstone_count
-            FROM insider_filings
-            WHERE instrument_id = %s
-              AND document_type LIKE '3%%'
-              AND is_tombstone = TRUE
+            FROM insider_filings i
+            WHERE i.document_type LIKE '3%%'
+              AND i.is_tombstone = TRUE
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe
+                  WHERE fe.provider_filing_id = i.accession_number
+                    AND fe.provider = 'sec'
+                    AND fe.instrument_id = %s
+              )
             """,
             (instrument_id,),
         )
@@ -376,8 +408,13 @@ def _form3_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
             FROM filing_raw_documents r
             JOIN insider_filings i ON i.accession_number = r.accession_number
             WHERE r.document_kind = 'form3_xml'
-              AND i.instrument_id = %s
               AND i.is_tombstone = FALSE
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe
+                  WHERE fe.provider_filing_id = i.accession_number
+                    AND fe.provider = 'sec'
+                    AND fe.instrument_id = %s
+              )
             """,
             (instrument_id,),
         )

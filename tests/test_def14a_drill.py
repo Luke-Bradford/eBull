@@ -422,7 +422,7 @@ def test_drill_tombstone_query_is_filing_distinct(
                 filing_date, primary_document_url, source_url
             ) VALUES (%s, 'sec', %s, 'DEF 14A', '2025-04-01',
                       'http://x', 'http://y')
-            ON CONFLICT (provider, provider_filing_id) DO NOTHING
+            ON CONFLICT (provider, provider_filing_id, instrument_id) DO NOTHING
             """,
             (972_020, accn),
         )

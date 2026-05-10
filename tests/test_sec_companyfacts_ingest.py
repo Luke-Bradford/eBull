@@ -211,3 +211,56 @@ class TestIngestCompanyFactsArchive:
 
         assert result.parse_errors == 1
         assert result.facts_upserted == 0
+
+    def test_share_class_siblings_both_receive_facts(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """#1117 — GOOG + GOOGL co-bind one CIK; both must receive facts.
+
+        Pre-#1117 the dict-collapse in ``_load_cik_to_instrument`` kept
+        only the last-seen sibling, leaving the other without
+        fundamentals on every bulk run. Multimap shape fans out one
+        archive entry to N siblings.
+        """
+        iid_goog = _seed_universe(ebull_test_conn, symbol="GOOG", cik_padded="0001652044")
+        iid_googl = _seed_universe(ebull_test_conn, symbol="GOOGL", cik_padded="0001652044")
+
+        # Reuse AAPL payload shape — XBRL semantics are independent of
+        # the issuer; the fan-out test cares about row presence per
+        # instrument, not the specific concept set.
+        archive_bytes = _build_archive({"0001652044": _aapl_companyfacts_payload()})
+        archive_path = tmp_path / "companyfacts.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_companyfacts_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+        )
+        ebull_test_conn.commit()
+
+        assert result.archive_entries_seen == 1
+        assert result.instruments_matched == 2  # GOOG + GOOGL
+        assert result.parse_errors == 0
+        assert result.facts_upserted >= 4  # 2 facts × 2 siblings
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM financial_facts_raw WHERE instrument_id = %s",
+                (iid_goog,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            goog_count = row[0]
+
+            cur.execute(
+                "SELECT COUNT(*) FROM financial_facts_raw WHERE instrument_id = %s",
+                (iid_googl,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            googl_count = row[0]
+
+        assert goog_count >= 2, f"GOOG expected >=2 facts, got {goog_count}"
+        assert googl_count >= 2, f"GOOGL expected >=2 facts, got {googl_count}"

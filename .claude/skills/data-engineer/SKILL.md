@@ -2,6 +2,34 @@
 
 > Read this when adding a new ingest path, schema migration, or operator-visible read endpoint. The non-negotiable directive from the operator: future agents must use this file to answer "where does X come from?" without guessing. Cross-reference: `docs/settled-decisions.md` for the decisions; `docs/review-prevention-log.md` for the recurring traps; `.claude/skills/data-sources/sec-edgar.md` for the source-of-truth knowledge.
 
+## 0.0 Before-spec gate — for any ETL / schema / parser / identity work
+
+If you are about to write a spec or implementation that touches schema, parsers, ingest paths, or identity resolution, complete this gate FIRST. Codex catching what this skill should have owned is a skill defect (operator-locked 2026-05-10).
+
+1. **Grep the actual shape, never paraphrase.** For every table you touch in writes:
+   - PK columns (column order matters for ON CONFLICT inference).
+   - Every UNIQUE / UNIQUE INDEX (full column list, in order).
+   - Every FK in (children pointing AT this table) and FK out.
+   - Every CHECK constraint on enum-shaped columns (allowed values).
+   - Generated columns / triggers.
+   The reference matrix in §11 is the in-skill shortcut for the load-bearing tables. If your table is not listed, run `psql \d <table>` or grep `sql/*.sql` and add it before writing the spec.
+2. **Identify the canonical-pick pattern for any "single canonical row" lookup.** CIK→canonical ext-identifier row, observation-priority winner, manifest source mapping, etc. Reference matrix §12. Re-using existing patterns verbatim avoids drift.
+3. **Identify FK cascade impact for any PK / UNIQUE relaxation.** A child FK keyed on the parent's old shape blocks the relaxation. The reference matrix §11.B lists every accession-keyed parent + its children. Check before proposing PK changes.
+4. **Identify the migration shape-check pattern.** `pg_constraint.contype + conkey` and `pg_index.indisunique + indkey` introspection are the canonical idempotency primitives — name-only checks miss partial-applies. Reference §12.D.
+5. **Confirm the actual writer ON CONFLICT syntax.** Never propose changing a conflict target without grepping every site that writes the table. The grep command:
+
+   ```bash
+   grep -rn "ON CONFLICT.*<table_or_constraint_name>" --include="*.py" --include="*.sql"
+   ```
+
+6. **Confirm the actual reader filter pattern per site.** A read site that filters on a column that becomes per-instrument fan-out will silently multiply rows. The grep command:
+
+   ```bash
+   grep -rn "FROM <table>\|JOIN <table>" --include="*.py" -A3 | grep "instrument_id"
+   ```
+
+If any step's answer disagrees with what your spec assumed, **fix the spec first, then run Codex**. The spec author owns this gate. Codex is the second opinion, not the first.
+
 ## 0. Top-of-mind invariants — the don't-break list
 
 | # | Rule | Enforced by |
@@ -667,3 +695,217 @@ Today's UI shows you the locked door with a "no entry" sign on every category. T
 **Answer:** SEC bulk-download stages (12-15 in the sequence) fetch ~12,000 SEC per-CIK pages at a 10-req/s rate-limit. The bootstrap's `sec_first_install_drain` stage (#909 / PR1c) is the long pole — bounded by SEC's published rate limit, not eBull. Re-run all on a fresh DB is roughly 20+ minutes of bandwidth.
 
 Operator-helpful surface (deferred, NOT scheduled): a pre-flight estimate "this will issue ~12,000 SEC requests over ~20 minutes" before kick-off. Tracked as a future operator-UX ticket; not blocking PR7.
+
+## 11. Integrity reference matrix — actual shapes per table
+
+> When in doubt, this section is the source of truth, not memory. Source: grep of `sql/*.sql` 2026-05-10. If a table's actual shape diverges from this matrix, the matrix is stale — fix it before continuing.
+
+### 11.A SEC filing-object tables — accession-keyed entity-level
+
+| Table | PK | UNIQUE / UNIQUE INDEX | Children with FK pointing here | CHECK enum cols |
+|---|---|---|---|---|
+| `eight_k_filings` (sql/061) | `(accession_number)` | n/a | `eight_k_items.accession_number → eight_k_filings.accession_number ON DELETE CASCADE` (UNIQUE on `(accession_number, item_code)`); `eight_k_exhibits.accession_number → eight_k_filings.accession_number ON DELETE CASCADE` (UNIQUE on `(accession_number, exhibit_number)`) | n/a |
+| `insider_filings` (sql/057) | `(accession_number)` | n/a | `insider_filers.accession_number → insider_filings.accession_number ON DELETE CASCADE` (UNIQUE on `(accession_number, filer_cik)`); `insider_transaction_footnotes.accession_number → insider_filings.accession_number ON DELETE CASCADE` (UNIQUE on `(accession_number, footnote_id)`); `insider_transactions.accession_number → insider_filings.accession_number` (PK on `(accession_number, txn_row_num)`); `insider_initial_holdings.accession_number → insider_filings.accession_number` (PK on `(accession_number, row_num)`) | n/a |
+| `def14a_ingest_log` (sql/097) | `(accession_number)` | n/a | n/a | `status IN ('success','partial','failed')` |
+| `n_port_ingest_log` (sql/125) | `(accession_number)` | n/a | n/a | (status enum — verify before write) |
+| `sec_filing_manifest` (sql/118) | `(accession_number)` | n/a | self-FK `amends_accession → sec_filing_manifest.accession_number ON DELETE SET NULL` | `source IN ('sec_form3','sec_form4','sec_form5','sec_13d','sec_13g','sec_13f_hr','sec_def14a','sec_n_port','sec_n_csr','sec_10k','sec_10q','sec_8k','sec_xbrl_facts','finra_short_interest')`; `subject_type IN ('issuer','institutional_filer','blockholder_filer','fund_series','finra_universe')`; `ingest_status IN ('pending','fetched','parsed','tombstoned','failed')`; `raw_status IN ('absent','stored','compacted')`; CHECK `(subject_type='issuer' AND instrument_id IS NOT NULL) OR (subject_type<>'issuer' AND instrument_id IS NULL)` |
+| `filing_raw_documents` (sql/107) | `(accession_number, document_kind)` | n/a | n/a | `document_kind` enum (extended in sql/122 to add `nport_xml` etc.) |
+| `cik_raw_documents` (sql/109) | (verify before write) | (verify) | (verify) | (verify) |
+| `sec_reference_documents` (sql/121) | `(document_kind, period_year, period_quarter)` | n/a | n/a | (verify) |
+
+**Implication:** `eight_k_filings` and `insider_filings` PK relaxation to `(accession, instrument_id)` is BLOCKED by their child tables' accession-only FKs. If you need per-sibling visibility, route reads through `filing_events` (the per-instrument bridge — see §11.C). Do NOT propose PK changes here without rewriting every child FK.
+
+### 11.B SEC bridge / per-instrument tables
+
+| Table | PK | UNIQUE / UNIQUE INDEX | Children with FK | CHECK enum cols |
+|---|---|---|---|---|
+| `filing_events` (sql/001 + sql/004) | `(filing_event_id)` BIGSERIAL | `uq_filing_events_provider_unique` UNIQUE on `(provider, provider_filing_id)` | n/a | n/a |
+| `external_identifiers` (sql/003) | `(external_identifier_id)` BIGSERIAL | (post-sql/143) partial UNIQUE INDEX `uq_external_identifiers_provider_value_non_cik` on `(provider, identifier_type, identifier_value) WHERE NOT (provider='sec' AND identifier_type='cik')` + partial UNIQUE INDEX `uq_external_identifiers_cik_per_instrument` on `(provider, identifier_type, identifier_value, instrument_id) WHERE provider='sec' AND identifier_type='cik'` | n/a | (verify identifier_type enum) |
+| `def14a_beneficial_holdings` (sql/097) | `(holding_id)` BIGSERIAL | `uq_def14a_holdings_accession_holder` UNIQUE INDEX on `(accession_number, holder_name)` | n/a | n/a |
+| `insider_transactions` (sql/056 + sql/057) | `(accession_number, txn_row_num)` | n/a | (FK to `insider_filings`) | n/a |
+| `insider_initial_holdings` (sql/093) | `(accession_number, row_num)` | n/a | (FK to `insider_filings`) | n/a |
+| `institutional_holdings` (sql/090) | `(holding_id)` BIGSERIAL | partial UNIQUE INDEX on `(accession_number, instrument_id, COALESCE(is_put_call,'EQUITY'))` | n/a | (verify) |
+| `institutional_filers` (sql/090) | `(institutional_filer_id)` BIGSERIAL | UNIQUE `(cik)` | n/a | `filer_type IN ('ETF','INV','INS','BD','OTHER')` |
+| `blockholder_filers` (sql/095) | `(blockholder_filer_id)` BIGSERIAL | UNIQUE `(cik)` | n/a | (verify) |
+| `blockholder_filings` (sql/095) | (verify) | (verify) | (verify) | (verify status_flag enum) |
+| `unresolved_13f_cusips` (sql/099) | (verify) | (verify) | n/a | `resolution_status IN ('unresolvable','ambiguous','conflict','manual_review','resolved_via_extid')` |
+| `data_freshness_index` (sql/120) | `(subject_type, subject_id, source)` | n/a | n/a | (state enum: `unknown,current,expected_filing_overdue,never_filed,error`) |
+| `instrument_cik_history` (sql/102) | (BIGSERIAL) | `btree_gist` exclusion forbids overlapping `(instrument_id, daterange(effective_from, effective_to))` ranges; partial UNIQUE INDEX on `(instrument_id) WHERE effective_to IS NULL` | n/a | n/a |
+| `instrument_symbol_history` (sql/103) | same shape as above | same | n/a | n/a |
+| `sec_fund_series` (sql/124) | `(fund_series_id)` | n/a | n/a | regex CHECK `fund_series_id ~ '^S[0-9]{9}$'` |
+| `sec_nport_filer_directory` (sql/126) | `(cik)` | n/a | n/a | (verify) |
+
+**Implication:** `def14a_beneficial_holdings` UNIQUE is `(accession_number, holder_name)`, NOT `(instrument_id, accession, holder_name)` as the spec author might assume. Per-instrument fan-out requires a UNIQUE shape change.
+
+### 11.C Two-layer ownership tables
+
+All `ownership_*_observations` partitioned `RANGE(period_end)` quarterly 2010-2030 + `_default` (must stay empty post-backfill).
+
+| Table | Per-instrument | Identity (`_current`) | source CHECK |
+|---|---|---|---|
+| `ownership_insiders_observations` / `_current` (sql/113) | yes | `(instrument_id, holder_identity_key, ownership_nature)` | source ∈ canonical list |
+| `ownership_institutions_observations` / `_current` (sql/114) | yes | `(instrument_id, filer_cik, ownership_nature, exposure_kind)` | `source='13f'` |
+| `ownership_blockholders_observations` / `_current` (sql/115) | yes | `(instrument_id, reporter_cik, ownership_nature)` | `source IN ('13d','13g')` |
+| `ownership_treasury_observations` / `_current` (sql/116) | yes | `(instrument_id)` | `source='xbrl_dei'` |
+| `ownership_def14a_observations` / `_current` (sql/116) | yes | `(instrument_id, holder_name_key, ownership_nature)` | `source='def14a'` |
+| `ownership_funds_observations` / `_current` (sql/123) | yes | `(instrument_id, fund_series_id)` | `source IN ('nport','ncsr')` |
+| `ownership_esop_observations` / `_current` (sql/127) | yes | `(instrument_id, plan_name)` | `source='def14a'`, `ownership_nature='beneficial'`, `shares > 0` |
+
+Canonical observations source enum (used in `record_*_observation` writers): `form4, form3, 13d, 13g, def14a, 13f, nport, ncsr, xbrl_dei, 10k_note, finra_si, derived`. Do not write a value not in this list — the per-table CHECK rejects.
+
+### 11.D What "matrix is stale" looks like
+
+Examples of integrity drift the matrix MUST catch before spec writing:
+
+- "I'll change `ON CONFLICT (accession_number, holder_name)` to `(instrument_id, accession_number, holder_name)`." — Cross-check matrix §11.B before writing the spec; you'll see the actual current UNIQUE shape, not paraphrased.
+- "I'll promote `eight_k_filings` PK to `(accession, instrument_id)`." — §11.A surfaces every accession-only child FK; you immediately see the cascade. Pivot to `filing_events`-bridge read pattern (§11.B) instead.
+- "I'll write `source='sec_submissions'` on a manifest seeder INSERT." — §11.A enum list rejects `'sec_submissions'`; canonical mapping is `sec_form4`, `sec_def14a`, `sec_8k`, etc. via `app/services/sec_manifest.py::map_form_to_source(form)`.
+
+If your spec proposal touches a table not yet in this matrix, ADD the row before writing the spec. The matrix grows; it does not shrink.
+
+## 12. Canonical patterns — name, code, callers
+
+### 12.A Canonical CIK pick (from external_identifiers)
+
+When you need a single canonical `external_identifier_value` for an instrument:
+
+```sql
+SELECT identifier_value
+  FROM external_identifiers
+ WHERE provider = 'sec' AND identifier_type = 'cik'
+   AND instrument_id = %s
+ ORDER BY is_primary DESC, external_identifier_id ASC
+ LIMIT 1
+```
+
+`is_primary DESC` prefers the primary mapping. `external_identifier_id ASC` is the deterministic tie-breaker — handles legacy multi-primary edge AND non-primary-only mappings. Used by [app/services/filings.py::upsert_cik_mapping](../../../app/services/filings.py) (and post-#1091 every site that needs a canonical CIK). Never `LIMIT 1` without the explicit ORDER BY.
+
+### 12.B Canonical sibling-fan-out lookup (post-#1102)
+
+When you need EVERY instrument sharing an issuer CIK (for per-instrument fan-out writes):
+
+```python
+def siblings_for_issuer_cik(conn, cik: str) -> list[int]:
+    cik_padded = str(cik).strip().zfill(10)
+    if not cik_padded.isdigit():
+        raise ValueError(f"non-numeric CIK: {cik!r}")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id
+            FROM external_identifiers
+            WHERE provider = 'sec'
+              AND identifier_type = 'cik'
+              AND identifier_value = %s
+            ORDER BY instrument_id
+            """,
+            (cik_padded,),
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+```
+
+Lives in `app/services/sec_identity.py` (post-#1117). Ordering is deterministic, NOT semantically primary — caller fans out across the full list. For "single canonical sibling" use §12.A on instrument_id ASC.
+
+### 12.C Manifest source mapping (form → source enum)
+
+Lives in [`app/services/sec_manifest.py::map_form_to_source`](../../../app/services/sec_manifest.py). Returns one of the §11.A enum values OR `None` for unsupported forms (`S-1`, `424B5`, etc. — discovery paths must skip).
+
+```python
+from app.services.sec_manifest import map_form_to_source
+
+source = map_form_to_source(filing_type)
+if source is None:
+    continue  # unsupported form — skip
+```
+
+NEVER hardcode `'sec_submissions'` or any other string not in the §11.A enum. The CHECK rejects.
+
+### 12.D Migration shape-check (idempotent re-runnability)
+
+Name-only constraint checks miss partial-applies. Use shape introspection:
+
+```sql
+-- For UNIQUE / PK constraints (pg_constraint):
+DO $$
+DECLARE
+    has_correct_shape BOOLEAN;
+BEGIN
+    SELECT EXISTS(
+        SELECT 1 FROM pg_constraint c
+        WHERE c.conname = '<name>'
+          AND c.contype = 'u'  -- 'u' UNIQUE, 'p' PRIMARY KEY, 'c' CHECK, 'f' FK
+          AND c.conrelid = '<table>'::regclass
+          AND (
+              SELECT array_agg(a.attname ORDER BY array_position(c.conkey, a.attnum))
+                FROM pg_attribute a
+               WHERE a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+          ) = ARRAY['<col1>','<col2>',...]::name[]
+    ) INTO has_correct_shape;
+
+    IF NOT has_correct_shape THEN
+        ALTER TABLE <table> DROP CONSTRAINT IF EXISTS <name>;
+        ALTER TABLE <table> ADD CONSTRAINT <name> UNIQUE (<col1>, <col2>, ...);
+    END IF;
+END$$;
+
+-- For CREATE UNIQUE INDEX (pg_index + pg_class):
+DO $$
+DECLARE
+    has_correct_shape BOOLEAN;
+BEGIN
+    SELECT EXISTS(
+        SELECT 1
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+         WHERE c.relname = '<index_name>'
+           AND i.indrelid = '<table>'::regclass
+           AND i.indisunique
+           AND (
+               SELECT array_agg(a.attname ORDER BY array_position(i.indkey::int[], a.attnum::int))
+                 FROM pg_attribute a
+                WHERE a.attrelid = i.indrelid
+                  AND a.attnum = ANY(i.indkey::int[])
+           ) = ARRAY['<col1>','<col2>',...]::name[]
+    ) INTO has_correct_shape;
+
+    IF NOT has_correct_shape THEN
+        DROP INDEX IF EXISTS <wrong_name>;
+        DROP INDEX IF EXISTS <index_name>;
+        CREATE UNIQUE INDEX <index_name> ON <table> (<col1>, <col2>, ...);
+    END IF;
+END$$;
+```
+
+Why: a partial-apply leaves the constraint name pointing at a WRONG-shape constraint. Name-only checks falsely skip. Shape-introspection re-runs cleanly.
+
+### 12.E Atomic _current refresh
+
+```python
+with conn.cursor() as cur:
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtext('<category>:%s' % instrument_id))"
+    )
+    cur.execute("DELETE FROM ownership_<cat>_current WHERE instrument_id = %s", (iid,))
+    cur.execute(
+        """
+        INSERT INTO ownership_<cat>_current (...)
+        SELECT DISTINCT ON (<identity-tuple>) ...
+        FROM ownership_<cat>_observations
+        WHERE instrument_id = %s AND known_to IS NULL
+        ORDER BY <identity-tuple>, <winner-priority-clause>
+        """,
+        (iid,),
+    )
+```
+
+Winner-priority order across categories: `source` priority (`form4 > form3 > 13d > 13g > def14a > 13f > nport > ncsr`) → `period_end DESC` → `filed_at DESC` (amendments win) → `source_document_id ASC`. Wrapped in `pg_advisory_xact_lock(<hash of instrument_id>)` so concurrent refreshes serialise; PK on `_current` is second-line guard.
+
+### 12.F Forbidden patterns — these are PR review BLOCKING
+
+- `ON CONFLICT (...) DO UPDATE SET <pk_col> = EXCLUDED.<pk_col>` — overwriting a column that's now in the conflict target is a smell. Hit means already correct; the SET drives nothing useful.
+- `LIMIT 1` without `ORDER BY` — leaks nondeterminism; #1117 caught one in `rewash_filings`. Always pair LIMIT with explicit ORDER BY.
+- `f-string interpolation into SQL` — parameterise. See §I2.
+- `record_*_observation()` without paired `refresh_*_current(instrument_id)` — leaves `_current` empty (prev-log L1162). Both are mandatory.
+- `ON DELETE CASCADE` on `*_audit` / `*_log` (prev-log L350).
+- `SELECT DISTINCT` over a multi-column row when the dedup target is one column — use `DISTINCT ON (col)`.
+- `dict[cik, instrument_id]` for any CIK→instrument lookup post-#1102 — must be `dict[cik, list[instrument_id]]` (the multimap pattern from #1117). Single-result collapse drops share-class siblings silently.

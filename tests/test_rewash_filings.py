@@ -1511,7 +1511,7 @@ def test_13f_infotable_apply_rescues_tombstoned_accession(
             instrument_id, provider, provider_filing_id, filing_type,
             filing_date, primary_document_url, source_url
         ) VALUES (%s, 'sec', %s, '13F-HR', %s, 'http://x', 'http://y')
-        ON CONFLICT (provider, provider_filing_id) DO NOTHING
+        ON CONFLICT (provider, provider_filing_id, instrument_id) DO NOTHING
         """,
         (iid, accession, sec_filing_date),
     )

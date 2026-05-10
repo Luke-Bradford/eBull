@@ -446,7 +446,7 @@ def _upsert_filing_event(
             %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
             %(raw_payload_json)s
         )
-        ON CONFLICT (provider, provider_filing_id) DO UPDATE SET
+        ON CONFLICT (provider, provider_filing_id, instrument_id) DO UPDATE SET
             filing_date          = EXCLUDED.filing_date,
             filing_type          = EXCLUDED.filing_type,
             source_url           = EXCLUDED.source_url,
@@ -496,7 +496,7 @@ def _upsert_filing(
             %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
             %(raw_payload_json)s
         )
-        ON CONFLICT (provider, provider_filing_id) DO UPDATE SET
+        ON CONFLICT (provider, provider_filing_id, instrument_id) DO UPDATE SET
             filing_date          = EXCLUDED.filing_date,
             filing_type          = EXCLUDED.filing_type,
             source_url           = EXCLUDED.source_url,

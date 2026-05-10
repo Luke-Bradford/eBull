@@ -53,6 +53,7 @@ from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
 )
+from app.services.sec_identity import siblings_for_issuer_cik
 
 logger = logging.getLogger(__name__)
 
@@ -318,14 +319,30 @@ def upsert_form_3_filing(
     # periodic re-scan jobs"). Mirrors the Form 4 path —
     # one observation per (filer_cik, direct_indirect), shares = the
     # holding's reported share count, period_end = period_of_report.
-    _record_form3_observations_for_filing(
-        conn,
-        instrument_id=instrument_id,
-        accession_number=accession_number,
-        primary_document_url=primary_document_url,
-        parsed=parsed,
-    )
-    refresh_insiders_current(conn, instrument_id=instrument_id)
+    #
+    # Per-share-class fan-out (#1117 PR-B): same Form 3 describes the
+    # same issuer; each share-class sibling carries its own
+    # ownership_insiders_observations rows. Entity-level tables
+    # (insider_filings, insider_initial_holdings) stay PK=accession.
+    issuer_cik = parsed.issuer_cik or ""
+    if issuer_cik:
+        try:
+            siblings = siblings_for_issuer_cik(conn, issuer_cik)
+        except ValueError:
+            siblings = [instrument_id]
+        if not siblings:
+            siblings = [instrument_id]
+    else:
+        siblings = [instrument_id]
+    for sibling_iid in siblings:
+        _record_form3_observations_for_filing(
+            conn,
+            instrument_id=sibling_iid,
+            accession_number=accession_number,
+            primary_document_url=primary_document_url,
+            parsed=parsed,
+        )
+        refresh_insiders_current(conn, instrument_id=sibling_iid)
 
 
 def _record_form3_observations_for_filing(
@@ -559,20 +576,29 @@ def ingest_form_3_filings(
     """
     conn.commit()
 
+    # Per-#1117 PR-B: dedup by accession before LIMIT so siblings
+    # don't consume budget for the same filing. Targeted variant
+    # above (`fe.instrument_id = %s`) skips dedup since only one
+    # sibling matches.
     candidates: list[tuple[int, str, str]] = []
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT fe.instrument_id,
-                   fe.provider_filing_id,
-                   fe.primary_document_url
-            FROM filing_events fe
-            LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
-            WHERE fe.provider = 'sec'
-              AND fe.filing_type IN ('3', '3/A')
-              AND fe.primary_document_url IS NOT NULL
-              AND (fil.accession_number IS NULL OR fil.parser_version < %s)
-            ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+            WITH per_accession AS (
+                SELECT DISTINCT ON (fe.provider_filing_id)
+                    fe.instrument_id, fe.provider_filing_id,
+                    fe.primary_document_url, fe.filing_date, fe.filing_event_id
+                FROM filing_events fe
+                LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type IN ('3', '3/A')
+                  AND fe.primary_document_url IS NOT NULL
+                  AND (fil.accession_number IS NULL OR fil.parser_version < %s)
+                ORDER BY fe.provider_filing_id, fe.instrument_id
+            )
+            SELECT instrument_id, provider_filing_id, primary_document_url
+            FROM per_accession
+            ORDER BY filing_date DESC, filing_event_id DESC
             LIMIT %s
             """,
             (_FORM3_PARSER_VERSION, limit),

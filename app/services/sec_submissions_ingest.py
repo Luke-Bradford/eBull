@@ -65,16 +65,21 @@ def _cik_from_filename(name: str) -> str | None:
 
 def _load_cik_to_instrument(
     conn: psycopg.Connection[Any],
-) -> dict[str, tuple[int, str]]:
-    """Return ``{cik_padded: (instrument_id, symbol)}`` for every CIK-mapped
-    instrument.
+) -> dict[str, list[tuple[int, str]]]:
+    """Return ``{cik_padded: [(instrument_id, symbol), ...]}`` for every
+    CIK-mapped instrument.
 
     Reads ``external_identifiers`` SEC CIK rows joined to ``instruments``
     so the writer below can pass the canonical ticker symbol — not a
     stringified instrument_id — to ``_normalise_submissions_block`` and
     ``_upsert_filing`` (Codex review BLOCKING for PR #1030).
+
+    Multimap shape — share-class siblings (GOOG/GOOGL, BRK.A/BRK.B)
+    co-bind a single SEC CIK per #1102. Collapsing to
+    ``dict[str, tuple[int, str]]`` would silently drop one sibling on
+    every bulk run, leaving it without filings or entity profile.
     """
-    out: dict[str, tuple[int, str]] = {}
+    out: dict[str, list[tuple[int, str]]] = {}
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -87,7 +92,7 @@ def _load_cik_to_instrument(
         for row in cur.fetchall():
             instrument_id, identifier, symbol = row
             cik = str(identifier).zfill(10)
-            out[cik] = (int(instrument_id), str(symbol or ""))
+            out.setdefault(cik, []).append((int(instrument_id), str(symbol or "")))
     return out
 
 
@@ -95,7 +100,7 @@ def ingest_submissions_archive(
     *,
     conn: psycopg.Connection[Any],
     archive_path: Path,
-    cik_to_instrument: dict[str, tuple[int, str]] | None = None,
+    cik_to_instrument: dict[str, list[tuple[int, str]]] | None = None,
 ) -> SubmissionsIngestResult:
     """Walk every ``CIK<10>.json`` entry in ``archive_path`` and upsert
     matching universe instruments into ``filing_events`` + ``instrument_sec_profile``.
@@ -124,20 +129,19 @@ def ingest_submissions_archive(
                 # noise we silently skip.
                 continue
             result.archive_entries_seen += 1
-            entry = cik_to_instrument.get(cik)
-            if entry is None:
+            matched_instruments = cik_to_instrument.get(cik, [])
+            if not matched_instruments:
                 # Universe gap — most CIKs in the archive are not in
                 # our universe. This is expected, not an error.
                 result.archive_entries_skipped += 1
                 continue
-            instrument_id, symbol = entry
-
-            result.instruments_matched += 1
 
             # Per-CIK savepoint: a parse error or DB-write failure for
             # one CIK must not abort the surrounding transaction or
             # block the rest of the archive (Codex pre-push round 1,
-            # finding 3).
+            # finding 3). Share-class siblings on the same CIK share
+            # one savepoint — failure rolls back all sibling writes
+            # for that entry together (#1117).
             try:
                 with conn.transaction():
                     try:
@@ -148,14 +152,16 @@ def ingest_submissions_archive(
                         result.parse_errors += 1
                         raise _SkipEntry from exc
 
-                    _ingest_one(
-                        conn,
-                        instrument_id=instrument_id,
-                        cik_padded=cik,
-                        symbol=symbol,
-                        payload=payload,
-                        result=result,
-                    )
+                    for instrument_id, symbol in matched_instruments:
+                        result.instruments_matched += 1
+                        _ingest_one(
+                            conn,
+                            instrument_id=instrument_id,
+                            cik_padded=cik,
+                            symbol=symbol,
+                            payload=payload,
+                            result=result,
+                        )
             except _SkipEntry:
                 continue
             except Exception as exc:  # noqa: BLE001

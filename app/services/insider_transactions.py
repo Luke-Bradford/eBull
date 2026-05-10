@@ -55,6 +55,7 @@ from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
 )
+from app.services.sec_identity import siblings_for_issuer_cik
 
 _PARSER_VERSION_FORM4 = "form4-v1"
 
@@ -1139,14 +1140,32 @@ def upsert_filing(
     # ownership_observations_sync read-from-typed-tables path with an
     # inline call so the operator-visible rollup reflects the new filing
     # without waiting for the next sync cycle.
-    _record_form4_observations_for_filing(
-        conn,
-        instrument_id=instrument_id,
-        accession_number=accession_number,
-        primary_document_url=primary_document_url,
-        parsed=parsed,
-    )
-    refresh_insiders_current(conn, instrument_id=instrument_id)
+    #
+    # Per-share-class fan-out (#1117 PR-B): same Form 4 describes the
+    # same issuer; each share-class sibling carries its own
+    # ownership_insiders_observations rows. Entity-level tables
+    # (insider_filings, insider_transactions, insider_filers,
+    # insider_transaction_footnotes) stay PK=accession — siblings see
+    # them via filing_events bridge in read paths.
+    issuer_cik = parsed.issuer_cik or ""
+    if issuer_cik:
+        try:
+            siblings = siblings_for_issuer_cik(conn, issuer_cik)
+        except ValueError:
+            siblings = [instrument_id]
+        if not siblings:
+            siblings = [instrument_id]
+    else:
+        siblings = [instrument_id]
+    for sibling_iid in siblings:
+        _record_form4_observations_for_filing(
+            conn,
+            instrument_id=sibling_iid,
+            accession_number=accession_number,
+            primary_document_url=primary_document_url,
+            parsed=parsed,
+        )
+        refresh_insiders_current(conn, instrument_id=sibling_iid)
 
 
 def _record_form4_observations_for_filing(
@@ -1449,21 +1468,29 @@ def ingest_insider_transactions(
     """
     conn.commit()
 
+    # Per-#1117 PR-B: universe-wide selector requires inner-CTE
+    # DISTINCT ON dedup so N siblings sharing a CIK do not consume N
+    # slots of the LIMIT budget for the same accession.
     candidates: list[tuple[int, str, str]] = []
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT fe.instrument_id,
-                   fe.provider_filing_id,
-                   fe.primary_document_url
-            FROM filing_events fe
-            LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
-            WHERE fe.provider = 'sec'
-              AND fe.filing_type IN ('4', '4/A')
-              AND fe.primary_document_url IS NOT NULL
-              AND fil.accession_number IS NULL
-              AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
-            ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+            WITH per_accession AS (
+                SELECT DISTINCT ON (fe.provider_filing_id)
+                    fe.instrument_id, fe.provider_filing_id,
+                    fe.primary_document_url, fe.filing_date, fe.filing_event_id
+                FROM filing_events fe
+                LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type IN ('4', '4/A')
+                  AND fe.primary_document_url IS NOT NULL
+                  AND fil.accession_number IS NULL
+                  AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
+                ORDER BY fe.provider_filing_id, fe.instrument_id
+            )
+            SELECT instrument_id, provider_filing_id, primary_document_url
+            FROM per_accession
+            ORDER BY filing_date DESC, filing_event_id DESC
             LIMIT %(limit)s
             """,
             {"limit": limit, "floor_years": INSIDER_FORM4_BACKFILL_FLOOR_YEARS},
@@ -1607,18 +1634,31 @@ def ingest_insider_transactions_backfill(
     """
     conn.commit()
 
+    # Per-#1117 PR-B: dedup by accession before GROUP BY so a single
+    # share-class accession is not double-counted across siblings.
+    # The canonical-sibling parser fan-out (see upsert_filing) covers
+    # all siblings on parse, so picking the canonical sibling for the
+    # backfill drain is sufficient — the per-instrument fan-out
+    # reaches the others without scheduling them as separate
+    # candidates.
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT fe.instrument_id, COUNT(*) AS unfetched
-            FROM filing_events fe
-            LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
-            WHERE fe.provider = 'sec'
-              AND fe.filing_type IN ('4', '4/A')
-              AND fe.primary_document_url IS NOT NULL
-              AND fil.accession_number IS NULL
-              AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
-            GROUP BY fe.instrument_id
+            WITH per_accession AS (
+                SELECT DISTINCT ON (fe.provider_filing_id)
+                    fe.instrument_id, fe.provider_filing_id
+                FROM filing_events fe
+                LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type IN ('4', '4/A')
+                  AND fe.primary_document_url IS NOT NULL
+                  AND fil.accession_number IS NULL
+                  AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
+                ORDER BY fe.provider_filing_id, fe.instrument_id
+            )
+            SELECT instrument_id, COUNT(*) AS unfetched
+            FROM per_accession
+            GROUP BY instrument_id
             ORDER BY unfetched DESC
             LIMIT %(limit)s
             """,
