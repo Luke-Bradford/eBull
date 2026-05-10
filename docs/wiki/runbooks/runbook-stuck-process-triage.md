@@ -149,10 +149,13 @@ The lookup chain (deterministic — no fuzzy fallback exists for CIK):
    - Defunct / delisted tickers.
    - Bonds / preferreds / warrants (separate ticker from common stock).
    - Operational duplicates with broker-side suffixes (e.g. `.RTH`).
-     The unused helper at `app/services/cik_discovery.py` has a
-     suffix-stripping fallback, but that helper is not on the live
-     production path; if a `.RTH` instrument lacks a CIK today, file
-     a ticket rather than relying on suffix-strip.
+     The legacy `app/services/cik_discovery.py` helper had a
+     suffix-stripping fallback but was deleted in #1091 (it was
+     never on the live production path and had divergent ON CONFLICT
+     semantics that flapped CIK ownership for share-class siblings).
+     If a `.RTH` instrument lacks a CIK today, file a ticket against
+     #819 (`.RTH` canonical-instrument-redirect) rather than
+     reaching for suffix-strip.
 3. **Share-class siblings (GOOG / GOOGL, BRK.A / BRK.B):**
    `external_identifiers` enforces a unique constraint on
    `(provider, identifier_type, identifier_value)`. Alphabet's CIK
