@@ -190,7 +190,7 @@ Service modules under `app/services/` (~96 modules). Canonical entry points by d
 
 ### 2.2 Identity / discovery
 
-`app/services/cik_discovery.py`, `sec_13f_filer_directory.py`, `sec_nport_filer_directory.py`, `sec_13f_securities_list.py`, `sec_entity_profile.py`, `cusip_resolver.py`, `holder_name_resolver.py`, `instrument_history.py`, `cik_raw_filings.py`, `filer_seed_verification.py`.
+`sec_13f_filer_directory.py`, `sec_nport_filer_directory.py`, `sec_13f_securities_list.py`, `sec_entity_profile.py`, `cusip_resolver.py`, `holder_name_resolver.py`, `instrument_history.py`, `cik_raw_filings.py`, `filer_seed_verification.py`. (CIK discovery now lives in the canonical `daily_cik_refresh` scheduled job + `app/services/filings.py::upsert_cik_mapping`; the legacy `cik_discovery.py` helper was deleted in #1091.)
 
 ### 2.3 SEC / filings ingest
 

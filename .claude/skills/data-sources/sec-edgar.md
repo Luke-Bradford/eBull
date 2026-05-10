@@ -29,7 +29,7 @@
 ```
 `cik_str` is **integer** in JSON, **not zero-padded**. Always pad to 10 digits with `f"CIK{cik:010d}"` before constructing API URLs.
 
-**Coverage gap**: `company_tickers.json` excludes pink-sheet/OTC, foreign-without-ADR, warrant-only, preferred-only. Layer `company_tickers_exchange.json` and `company_tickers_mf.json` to close gaps. eBull pattern at [app/services/cik_discovery.py:74-241](../../../app/services/cik_discovery.py#L74-L241).
+**Coverage gap**: `company_tickers.json` excludes pink-sheet/OTC, foreign-without-ADR, warrant-only, preferred-only. Layer `company_tickers_exchange.json` and `company_tickers_mf.json` to close gaps. eBull pattern lives in `daily_cik_refresh` (scheduled job, see `app/workers/scheduler.py`) calling `app/services/filings.py::upsert_cik_mapping`. The earlier `app/services/cik_discovery.py` helper was deleted in #1091.
 
 ### JSON APIs (`data.sec.gov`)
 
@@ -335,11 +335,13 @@ Required format: `<Name> <email>`. Email must be syntactically valid and routabl
 
 **Source**: `company_tickers.json` primary, `company_tickers_exchange.json` for exchange context. Refresh daily.
 
-Pattern at [app/services/cik_discovery.py](../../../app/services/cik_discovery.py):
+Pattern in the canonical `daily_cik_refresh` scheduled job (`app/workers/scheduler.py`) calling `app/services/filings.py::upsert_cik_mapping`:
 1. Pull both JSONs.
 2. Build CIK-keyed dict; canonical wins on collision.
 3. For each ticker store CIK + exchange + corporate name.
-4. Persist with watermark.
+4. Persist with watermark via `external_identifiers`.
+
+(The earlier `app/services/cik_discovery.py` helper was deleted in #1091; it had divergent ON CONFLICT semantics that flapped CIK ownership for share-class siblings — see #1094 / #1102 for the share-class fix.)
 
 **Edge cases**:
 - Multi-class issuers (GOOGL/GOOG): both share-class tickers map to same CIK. Store all rows.
@@ -493,7 +495,7 @@ Where this knowledge already lives in code:
 
 | Concern | File |
 |---|---|
-| CIK / ticker discovery | [app/services/cik_discovery.py](../../../app/services/cik_discovery.py) |
+| CIK / ticker discovery | `daily_cik_refresh` scheduled job in [app/workers/scheduler.py](../../../app/workers/scheduler.py) + [app/services/filings.py](../../../app/services/filings.py)::`upsert_cik_mapping` |
 | 13F XML per-filing parse | [app/providers/implementations/sec_13f.py](../../../app/providers/implementations/sec_13f.py) (EdgarTools, #925) |
 | 13F dataset bulk TSV | [app/services/sec_13f_dataset_ingest.py](../../../app/services/sec_13f_dataset_ingest.py) |
 | 13F filer directory walk | [app/services/sec_13f_quarterly_sweep.py](../../../app/services/sec_13f_quarterly_sweep.py) |
