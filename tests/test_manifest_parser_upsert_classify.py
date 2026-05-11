@@ -387,6 +387,58 @@ def test_backfill_conditional_update_detects_worker_race(
     assert row.error == "upsert error: stale"
 
 
+def test_backfill_commits_per_row_after_select_flush(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """PR #1132 review BLOCKING: the sweep must commit the implicit
+    transaction opened by the candidate SELECT before entering the
+    per-row UPDATE loop, otherwise every ``with conn.transaction():``
+    iteration becomes a SAVEPOINT (not a top-level commit) and a
+    mid-loop connection drop loses all in-flight tombstones.
+
+    Test contract: after the sweep returns, the tombstone is
+    visible on a *second* connection against the same test DB
+    without the caller needing to invoke ``conn.commit()`` first. If
+    the sweep had only issued savepoints, the second connection
+    would see the row still in ``failed`` (Postgres MVCC isolates
+    uncommitted writes from other transactions)."""
+    import psycopg as _psycopg
+
+    from tests.fixtures.ebull_test_db import test_database_url
+
+    _seed_instrument(ebull_test_conn, 8810080)
+    long_ago = datetime.now(tz=UTC) - timedelta(hours=48)
+    _seed_failed_manifest(
+        ebull_test_conn,
+        accession="0000111500-26-000001",
+        instrument_id=8810080,
+        error="upsert error: stale per-row commit",
+        last_attempted_at=long_ago,
+    )
+    ebull_test_conn.commit()
+
+    # Run the sweep on the shared connection but do NOT commit
+    # afterwards. The per-row commit inside the sweep is what we are
+    # verifying — if it were merely a savepoint release, a second
+    # connection would not see the tombstone.
+    result = tombstone_stale_failed_upserts(ebull_test_conn, age=timedelta(hours=24))
+
+    assert result.rows_tombstoned == 1
+
+    # Cross-connection visibility: open a second connection against
+    # the SAME test DB (not the operator's dev DB) and confirm the
+    # tombstone landed without ``ebull_test_conn.commit()`` having
+    # fired post-sweep.
+    with _psycopg.connect(test_database_url()) as racer_conn:
+        cur = racer_conn.execute(
+            "SELECT ingest_status FROM sec_filing_manifest WHERE accession_number = %s",
+            ("0000111500-26-000001",),
+        )
+        racer_row = cur.fetchone()
+    assert racer_row is not None
+    assert racer_row[0] == "tombstoned"
+
+
 def test_backfill_skipped_race_counter_uses_anchored_token_match(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:

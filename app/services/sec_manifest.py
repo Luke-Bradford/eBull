@@ -679,6 +679,18 @@ def tombstone_stale_failed_upserts(
             (str(row[0]), str(row[1] or ""), row[2]) for row in cur.fetchall()
         ]
 
+    # PR #1132 review BLOCKING: the SELECT above opened an implicit
+    # psycopg3 transaction that ``conn.cursor()`` does not commit. If
+    # we entered the per-row ``with conn.transaction():`` loop while
+    # that tx was still open, every iteration would issue SAVEPOINT
+    # (not BEGIN) and on exit RELEASE SAVEPOINT (not COMMIT) — all
+    # row updates would be buffered until the outer caller commits,
+    # so a connection drop mid-loop would lose every in-flight
+    # tombstone. Commit here to close the implicit tx so each
+    # subsequent ``with conn.transaction():`` starts a top-level
+    # transaction that commits on success.
+    conn.commit()
+
     for accession, error_text, sampled_attempted_at in candidates:
         rows_scanned += 1
         if _error_has_transient_class_prefix(error_text):
