@@ -460,6 +460,17 @@ def _record_ingest_attempt(
             %(status)s, %(holdings_inserted)s, %(holdings_skipped)s, %(error)s
         )
         ON CONFLICT (accession_number) DO UPDATE SET
+            -- PR #1133 Codex pre-push (Finding 3): a pre-parse log
+            -- row (fetch-404 / parse-error) carries period_of_report
+            -- NULL; the later success-path write supplies the real
+            -- period. COALESCE prefers the EXCLUDED value when it is
+            -- non-NULL, but falls back to the existing column so a
+            -- subsequent failure-row write (which lacks period) does
+            -- not erase a previously-known good period.
+            period_of_report = COALESCE(
+                EXCLUDED.period_of_report,
+                institutional_holdings_ingest_log.period_of_report
+            ),
             status = EXCLUDED.status,
             holdings_inserted = EXCLUDED.holdings_inserted,
             holdings_skipped = EXCLUDED.holdings_skipped,
