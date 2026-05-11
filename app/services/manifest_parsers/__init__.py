@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from app.services.manifest_parsers import def14a as _def14a
 from app.services.manifest_parsers import eight_k as _eight_k
+from app.services.manifest_parsers import sec_13dg as _sec_13dg
 
 
 def register_all_parsers() -> None:
@@ -44,6 +45,7 @@ def register_all_parsers() -> None:
     """
     _eight_k.register()
     _def14a.register()
+    _sec_13dg.register()  # registers BOTH sec_13d and sec_13g
 
 
 # Run once at package import.
