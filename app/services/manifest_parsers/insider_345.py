@@ -67,6 +67,10 @@ from app.services.insider_transactions import (
     parse_form_4_xml,
     upsert_filing,
 )
+from app.services.manifest_parsers._classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 from app.services.raw_filings import store_raw
 
 logger = logging.getLogger(__name__)
@@ -245,21 +249,26 @@ def _parse_form4(
                 parsed=parsed,
             )
     except Exception as exc:  # noqa: BLE001
-        # PR #1130 review WARNING: deterministic constraint failures
-        # on ``insider_filings`` / ``insider_transactions`` (bad date,
-        # FK miss, unique violation under unexpected state) MUST NOT
-        # retry hourly forever — the bad XML stays bad. Mirror the
-        # Form 3 policy (tombstone-on-upsert-fail) for symmetry across
-        # the insider lanes. Legacy Form 4 ingester at
-        # insider_transactions.py:1593 also has the retry-loop bug;
-        # that's tracked separately for a legacy patch + 8-K / 13D/G
-        # consistency sweep. Transient/deterministic discrimination
-        # via psycopg exception class is the proper long-term fix
-        # (deferred).
+        # PR #1131: transient-vs-deterministic discrimination on the
+        # upsert exception class. Transient ``OperationalError``
+        # (SerializationFailure / DeadlockDetected / connection drop)
+        # retries with a 1h backoff — the bad state is the DB, not the
+        # parsed XML. Deterministic constraint violations
+        # (IntegrityError / DataError / etc.) tombstone the row so a
+        # permanently broken accession stops re-fetching from SEC every
+        # tick; mirrors the legacy Form 3 / Form 4 ingester semantics
+        # plus tombstones the manifest entry so the worker's view
+        # matches ``insider_filings``.
         logger.exception(
-            "form4 manifest parser: upsert failed accession=%s; tombstoning per Form 3 parity",
+            "form4 manifest parser: upsert failed accession=%s",
             accession,
         )
+        if is_transient_upsert_error(exc):
+            return _failed_outcome(
+                format_upsert_error(exc),
+                parser_version=_PARSER_VERSION_FORM4,
+                raw_status="stored",
+            )
         try:
             with conn.transaction():
                 _write_tombstone(
@@ -274,7 +283,7 @@ def _parse_form4(
                 accession,
             )
             return _failed_outcome(
-                f"upsert+tombstone error: {exc}",
+                f"upsert+tombstone error: {type(exc).__name__}: {exc}",
                 parser_version=_PARSER_VERSION_FORM4,
                 raw_status="stored",
             )
@@ -282,7 +291,7 @@ def _parse_form4(
             status="tombstoned",
             parser_version=_PARSER_VERSION_FORM4,
             raw_status="stored",
-            error=f"upsert failed: {exc}",
+            error=format_upsert_error(exc),
         )
 
     return ParseOutcome(
@@ -440,18 +449,23 @@ def _parse_form3(
                 parsed=parsed,
             )
     except Exception as exc:  # noqa: BLE001
-        # Legacy Form 3 ingester (insider_form3_ingest.py:685) tombstones
-        # on upsert failure so a deterministic constraint violation
-        # doesn't loop the scheduler refetching the same dead XML on
-        # every tick. Mirror that policy here: write the tombstone in a
-        # fresh savepoint, then transition the manifest row to
-        # ``tombstoned`` (not ``failed``) so the worker doesn't schedule
-        # a 1h retry on a deterministic bug. A parser-version bump will
-        # re-pick the accession via the existing manifest rewash path.
+        # PR #1131: transient (OperationalError) → 1h retry; deterministic
+        # constraint violation → tombstone the manifest row so a
+        # permanently broken accession stops re-fetching every tick.
+        # Mirrors the legacy Form 3 ingester (insider_form3_ingest.py)
+        # which already tombstones on upsert failure; we additionally
+        # transition the manifest to ``tombstoned`` (not ``failed``) so
+        # the worker view matches.
         logger.exception(
-            "form3 manifest parser: upsert failed accession=%s; tombstoning per legacy parity",
+            "form3 manifest parser: upsert failed accession=%s",
             accession,
         )
+        if is_transient_upsert_error(exc):
+            return _failed_outcome(
+                format_upsert_error(exc),
+                parser_version=_FORM3_PARSER_VERSION_STR,
+                raw_status="stored",
+            )
         try:
             with conn.transaction():
                 _write_form_3_tombstone(
@@ -466,7 +480,7 @@ def _parse_form3(
                 accession,
             )
             return _failed_outcome(
-                f"upsert+tombstone error: {exc}",
+                f"upsert+tombstone error: {type(exc).__name__}: {exc}",
                 parser_version=_FORM3_PARSER_VERSION_STR,
                 raw_status="stored",
             )
@@ -474,7 +488,7 @@ def _parse_form3(
             status="tombstoned",
             parser_version=_FORM3_PARSER_VERSION_STR,
             raw_status="stored",
-            error=f"upsert failed: {exc}",
+            error=format_upsert_error(exc),
         )
 
     return ParseOutcome(

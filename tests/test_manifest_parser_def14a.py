@@ -431,12 +431,20 @@ def test_siblings_resolution_failure_preserves_stored_raw_status(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Codex pre-push BLOCKING: if siblings resolution raises AFTER
-    ``store_raw`` committed in its savepoint, the parser MUST return
-    ``_failed_outcome(raw_status='stored')`` so the manifest matches
-    filing_raw_documents. Without the fix the worker's exception
-    handler would mark the row failed with raw_status='absent' and
-    diverge from disk."""
+    """Codex pre-push BLOCKING (original): if siblings resolution raises
+    AFTER ``store_raw`` committed in its savepoint, the parser MUST
+    NOT mark the manifest ``raw_status='absent'`` — the raw body
+    physically exists in ``filing_raw_documents``. Manifest must
+    reflect that state regardless of which terminal outcome the
+    parser returns.
+
+    PR #1131 update: a synthetic ``RuntimeError`` from
+    ``_resolve_siblings`` is now classified as deterministic by
+    ``is_transient_upsert_error`` (non-DB Python exception → never
+    self-fixes on retry), so the row tombstones with
+    raw_status='stored' instead of staying ``failed``. The invariant
+    under test — raw_status reflects ground truth — still holds; the
+    only behavioural delta is the terminal manifest state."""
     from app.providers.implementations import sec_edgar
     from app.services.manifest_parsers import def14a as parser_module
 
@@ -464,17 +472,125 @@ def test_siblings_resolution_failure_preserves_stored_raw_status(
     stats = run_manifest_worker(ebull_test_conn, source="sec_def14a", max_rows=10)
     ebull_test_conn.commit()
 
-    assert stats.failed == 1
+    # PR #1131: deterministic exception → tombstoned (was failed).
+    assert stats.tombstoned == 1
+    assert stats.failed == 0
     row = get_manifest_row(ebull_test_conn, "0000555555-26-000070")
     assert row is not None
-    assert row.ingest_status == "failed"
-    # Critical: raw_status=stored because store_raw ran BEFORE the
-    # siblings raise. The fix moves _resolve_siblings INTO the same
-    # try block whose except returns raw_status='stored'.
+    assert row.ingest_status == "tombstoned"
+    # Invariant under test: raw_status=stored because store_raw ran
+    # BEFORE the siblings raise. The fix moves _resolve_siblings INTO
+    # the same try block whose except returns raw_status='stored'.
     assert row.raw_status == "stored"
     with ebull_test_conn.cursor() as cur:
         cur.execute("SELECT 1 FROM filing_raw_documents WHERE accession_number = '0000555555-26-000070'")
         assert cur.fetchone() is not None
+
+
+def test_deterministic_upsert_exception_tombstones_with_log_row(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1131: deterministic upsert exception tombstones the
+    manifest + writes a ``def14a_ingest_log`` row with status='failed'
+    (mirrors the existing empty-body / no-rows audit-log pattern)."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import def14a as parser_module
+
+    iid = 8740090
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="UFAIL", cik="0000666666")
+    _seed_pending_def14a(
+        ebull_test_conn,
+        accession="0000666666-26-000090",
+        instrument_id=iid,
+        cik="0000666666",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_DEF14A_HTML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("synthetic DEF 14A upsert violation")
+
+    monkeypatch.setattr(parser_module, "_upsert_holding", _raising_upsert)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_def14a", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    assert stats.failed == 0
+    row = get_manifest_row(ebull_test_conn, "0000666666-26-000090")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.raw_status == "stored"
+    assert row.error is not None
+    assert "RuntimeError" in row.error
+
+    # Ingest-log row pinned at status='failed' so audit-trail
+    # accounting matches legacy semantics.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT status, error FROM def14a_ingest_log WHERE accession_number = '0000666666-26-000090'")
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "failed"
+    assert log[1] is not None and "RuntimeError" in log[1]
+
+
+def test_transient_upsert_exception_retries(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1131: an ``OperationalError`` on the upsert phase keeps the
+    manifest in ``failed`` with a 1h backoff — no log-row write, no
+    tombstone — so the next retry sees a clean slate."""
+    import psycopg.errors
+
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import def14a as parser_module
+
+    iid = 8740091
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="UTRAN", cik="0000666667")
+    _seed_pending_def14a(
+        ebull_test_conn,
+        accession="0000666667-26-000091",
+        instrument_id=iid,
+        cik="0000666667",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_DEF14A_HTML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise psycopg.errors.DeadlockDetected("synthetic deadlock")
+
+    monkeypatch.setattr(parser_module, "_upsert_holding", _raising_upsert)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_def14a", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
+    assert stats.tombstoned == 0
+    row = get_manifest_row(ebull_test_conn, "0000666667-26-000091")
+    assert row is not None
+    assert row.ingest_status == "failed"
+    assert row.raw_status == "stored"
+    assert row.error is not None
+    assert "DeadlockDetected" in row.error
+
+    # No ingest-log entry written — transient must keep the retry path
+    # clean so a deterministic-resolution later doesn't see a stale
+    # 'failed' marker on this accession.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM def14a_ingest_log WHERE accession_number = '0000666667-26-000091'")
+        assert cur.fetchone() is None
 
 
 def test_parser_registered_via_register_all() -> None:

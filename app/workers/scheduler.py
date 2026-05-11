@@ -280,6 +280,13 @@ JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
 # for each row's source. Cadence is frequent (every 5 min) so atom-
 # discovered + per-CIK-polled new accessions are parsed promptly.
 JOB_SEC_MANIFEST_WORKER = "sec_manifest_worker"
+# #1131 — one-shot sweep that tombstones manifest rows stuck in
+# ``failed`` with a pre-#1131-shape ``upsert error:...`` message older
+# than 24h. Stops the legacy retry loop that hammered SEC every hour
+# for deterministic constraint violations on Form 4 / 8-K / 13D/G /
+# DEF 14A ingest. Operator-triggered + auto-fires once per day until
+# the legacy backlog drains.
+JOB_SEC_MANIFEST_TOMBSTONE_STALE = "sec_manifest_tombstone_stale"
 
 # PR1c #1064 — promoted from bespoke wrappers in
 # ``app/services/bootstrap_orchestrator.py``. Each is now a registered
@@ -1095,6 +1102,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # 5 min before processing any manifest backlog. The tick is
         # bounded at max_rows=100 so the boot cost is small.
         catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_MANIFEST_TOMBSTONE_STALE,
+        display_name="Manifest stale-failed sweep",
+        source="db",
+        description=(
+            "#1131 backfill: scan sec_filing_manifest for rows stuck in "
+            "ingest_status='failed' with a pre-#1131-shape "
+            "'upsert error:...' message older than 24h, promote them to "
+            "'tombstoned'. Skips post-#1131 transient-shape rows "
+            "(OperationalError / SerializationFailure / DeadlockDetected) "
+            "so genuine retries are not masked. Stops the legacy retry "
+            "loop where deterministic constraint violations refetched the "
+            "same dead XML from SEC every hour. Cadence: daily 05:30 UTC; "
+            "self-deactivates once the backlog drains (zero candidates = "
+            "no-op). Operator can also trigger via "
+            "POST /jobs/sec_manifest_tombstone_stale/run."
+        ),
+        cadence=Cadence.daily(hour=5, minute=30),
+        catch_up_on_boot=False,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are
@@ -3762,6 +3789,39 @@ def sec_manifest_worker_tick() -> None:
             stats.tombstoned,
             stats.failed,
             stats.skipped_no_parser,
+        )
+
+
+def sec_manifest_tombstone_stale() -> None:
+    """#1131 — promote stale-failed manifest rows to ``tombstoned``.
+
+    Pre-#1131 every per-source parser treated an upsert exception as
+    ``failed`` with a 1h retry. Deterministic constraint violations
+    looped against SEC on every tick for the same dead XML. PR #1131
+    split transient (OperationalError) from deterministic (everything
+    else); this job promotes the pre-#1131 retry-stuck rows to
+    ``tombstoned`` so the worker stops re-fetching them.
+
+    Heuristic: 24h continuous failure ≥ 24 retries at the 1h cadence
+    ≈ "not recovering". Skips post-#1131 transient-shape rows by
+    class-name match in the ``error`` text so genuine retries are not
+    masked. Self-deactivates: once the backlog drains, every run is a
+    no-op (zero scanned, zero tombstoned).
+    """
+    from app.services.sec_manifest import tombstone_stale_failed_upserts
+
+    with _tracked_job(JOB_SEC_MANIFEST_TOMBSTONE_STALE) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            result = tombstone_stale_failed_upserts(conn)
+            conn.commit()
+
+        tracker.row_count = result.rows_tombstoned
+        logger.info(
+            "sec_manifest_tombstone_stale: scanned=%d tombstoned=%d skipped_transient=%d skipped_race=%d",
+            result.rows_scanned,
+            result.rows_tombstoned,
+            result.rows_skipped_transient,
+            result.rows_skipped_race,
         )
 
 

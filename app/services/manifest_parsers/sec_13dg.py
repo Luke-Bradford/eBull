@@ -67,6 +67,10 @@ from app.services.blockholders import (
     _upsert_filer,
     _upsert_filing_row,
 )
+from app.services.manifest_parsers._classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 from app.services.ownership_observations import refresh_blockholders_current
 from app.services.raw_filings import store_raw
 
@@ -284,11 +288,45 @@ def _parse_13dg(
                 error=log_error,
             )
     except Exception as exc:  # noqa: BLE001
+        # #1131 transient-vs-deterministic discrimination — see
+        # ``_classify.is_transient_upsert_error`` for the policy.
+        # Transient (OperationalError) gets a 1h retry; deterministic
+        # constraint violations tombstone the manifest so a permanently
+        # broken accession stops re-fetching from SEC every tick.
+        # Tombstone for 13D/G means writing the ingest-log attempt with
+        # status='failed' (mirrors the empty-body branch above) +
+        # returning manifest ``tombstoned``.
         logger.exception(
             "13D/G manifest parser: upsert/observation batch failed accession=%s",
             accession,
         )
-        return _failed_outcome(f"upsert error: {exc}", raw_status="stored")
+        if is_transient_upsert_error(exc):
+            return _failed_outcome(format_upsert_error(exc), raw_status="stored")
+        try:
+            with conn.transaction():
+                _record_ingest_attempt(
+                    conn,
+                    filer_cik=filer_cik,
+                    accession_number=accession,
+                    submission_type=None,
+                    status="failed",
+                    error=format_upsert_error(exc),
+                )
+        except Exception:  # noqa: BLE001 — ingest-log failure shouldn't mask upsert failure
+            logger.exception(
+                "13D/G manifest parser: ingest-log INSERT failed after upsert error accession=%s",
+                accession,
+            )
+            return _failed_outcome(
+                f"upsert+log error: {type(exc).__name__}: {exc}",
+                raw_status="stored",
+            )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13DG,
+            raw_status="stored",
+            error=format_upsert_error(exc),
+        )
 
     return ParseOutcome(
         status="parsed",
