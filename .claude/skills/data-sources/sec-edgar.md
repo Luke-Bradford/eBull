@@ -295,6 +295,30 @@ Archive-URL CIK varies by form type:
 - Mutual-fund tickers map to **classId**, not seriesId. Two share classes share the same holdings → aggregate by seriesId, not classId.
 - Source: `company_tickers_mf.json` carries ticker → seriesId → classId chain.
 
+### 3.6 Form subject classification + fan-out rule
+
+The single rule that drives every write-path + read-path decision for share-class siblings, multi-class issuers, and per-security vs per-entity data. Derived from §3.1 (CIK = entity) + §3.2 (CUSIP = security).
+
+| Form | Filer is | Issuer dimension | Per-security data inside? | Fan-out at write time? |
+|---|---|---|---|---|
+| 10-K, 10-Q, 8-K, S-1, DEF 14A, DEFA14A | the issuer | filer IS the issuer | no (entity-level document) | issuer-scoped → fan out per-instrument writes across siblings sharing the issuer CIK |
+| Form 3, 4, 5 | the insider | named on `<issuer>/<issuerCik>` | no (entity-level event) | issuer-scoped → fan out per-instrument writes across siblings sharing the issuer CIK |
+| 13D, 13D/A, 13G, 13G/A | the blockholder | named on `<subjectCompany>/<cik>` | no | issuer-scoped → fan out across siblings |
+| 13F-HR | the institutional manager | per-row by CUSIP in INFOTABLE | yes — CUSIP per row | NOT needed — CUSIP → instrument is 1:1 per §3.2 |
+| N-PORT-P, N-CSR | the fund trust | per-row by CUSIP in `<invstOrSec>` | yes — CUSIP per row | NOT needed — CUSIP → instrument is 1:1 |
+| Companyfacts (XBRL) | the issuer | filer IS the issuer | no (entity-level financial facts) | issuer-scoped → fan out |
+| Submissions JSON | the issuer | filer IS the issuer | no | issuer-scoped → fan out |
+
+**The two derived rules:**
+
+1. **Write-side rule.** An issuer-scoped filing populating a per-instrument table (insider observations, def14a holdings, financial facts, instrument_sec_profile, filing_events) MUST fan out the per-instrument writes across every instrument sharing the issuer CIK (`siblings_for_issuer_cik(conn, cik)` in [app/services/sec_identity.py](../../../app/services/sec_identity.py)). Entity-level tables (eight_k_filings, insider_filings, def14a_ingest_log, sec_filing_manifest, filing_raw_documents) stay PK=accession — one row per filing regardless of how many share classes the issuer has.
+
+2. **Read-side rule.** A per-instrument table read filters by `WHERE instrument_id = X` directly. An entity-level table read bridges through `filing_events` (per-instrument post-sql/144) via `WHERE EXISTS (SELECT 1 FROM filing_events fe WHERE fe.provider_filing_id = <entity_table>.accession_number AND fe.instrument_id = X)`.
+
+CUSIP-resolved writes (13F-HR, N-PORT, N-CSR) need no fan-out because CUSIP → instrument is 1:1 at the SECURITY level (GOOG.CUSIP ≠ GOOGL.CUSIP even though both share the issuer CIK). Aggregation across share classes happens at the read layer when desired, never at the write layer.
+
+These two rules + the table above + §3.1/3.2 fully define every share-class scenario eBull handles. If a future code path doesn't fit, the form's subject classification (column 1-3 above) was misread — go back to §3.1/3.2 and re-derive.
+
 ## 4. Rate limits + access discipline
 
 ### Official limit (verbatim from SEC)

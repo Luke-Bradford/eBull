@@ -782,6 +782,8 @@ SELECT identifier_value
 
 ### 12.B Canonical sibling-fan-out lookup (post-#1102)
 
+Source-of-truth rule: [sec-edgar §3.6](../data-sources/sec-edgar.md). One-line summary: an issuer-scoped filing populating a per-instrument table fans out across every instrument sharing the issuer CIK; entity-level tables stay PK=accession.
+
 When you need EVERY instrument sharing an issuer CIK (for per-instrument fan-out writes):
 
 ```python
