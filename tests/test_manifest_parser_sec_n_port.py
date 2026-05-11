@@ -7,8 +7,9 @@ Mirrors ``test_manifest_parser_sec_13f_hr.py`` shape:
   holding → refresh_funds_current → ingest-log success.
 * Tombstone on fetch 404 (audit log 'failed').
 * Tombstone on ``NPortMissingSeriesError`` (audit log 'failed').
-* Tombstone on ``NPortParseError`` (audit log 'failed', raw_status
-  preserved).
+* Malformed XML raises ``NPortParseError`` — returns ``failed`` with
+  ``raw_status='stored'`` (NOT tombstoned, since a future amendment
+  or parser-version bump could resolve).
 * Fetch raise → ``failed`` with 1h backoff.
 * Deterministic upsert exception → tombstone + audit-log 'failed'.
 * Transient ``OperationalError`` on upsert → ``failed`` with 1h
@@ -236,10 +237,17 @@ def test_missing_series_tombstones_with_log(
     assert log is not None and log[0] == "failed"
 
 
-def test_malformed_xml_tombstones_with_log(
+def test_malformed_xml_marks_failed_preserving_raw_status(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Malformed XML raises ``NPortParseError`` AFTER ``store_raw``
+    committed. The parser returns ``_failed_outcome(raw_status='stored')``
+    so the worker retries on backoff (XML malformation could be
+    transient if a follow-up amendment lands) and the manifest's
+    ``raw_status`` matches the stored body. NOT tombstoned —
+    deliberate, because a parser-version bump or a future amendment
+    could resolve the parse failure."""
     accession = "0001234500-25-000702"
     filer_cik = "0000036405"
     _seed_pending_n_port(ebull_test_conn, accession=accession, filer_cik=filer_cik)
@@ -256,9 +264,6 @@ def test_malformed_xml_tombstones_with_log(
     assert stats.failed == 1
     row = get_manifest_row(ebull_test_conn, accession)
     assert row is not None
-    # NPortParseError leads to _failed_outcome (transient bucket per
-    # the parse-phase preserve-raw policy), not tombstone. raw_status
-    # is preserved as 'stored'.
     assert row.ingest_status == "failed"
     assert row.raw_status == "stored"
 
