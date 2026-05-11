@@ -33,6 +33,7 @@ module-body side effects don't re-fire.
 
 from __future__ import annotations
 
+from app.services.manifest_parsers import def14a as _def14a
 from app.services.manifest_parsers import eight_k as _eight_k
 
 
@@ -42,6 +43,7 @@ def register_all_parsers() -> None:
     callable again by tests after ``clear_registered_parsers()``.
     """
     _eight_k.register()
+    _def14a.register()
 
 
 # Run once at package import.
