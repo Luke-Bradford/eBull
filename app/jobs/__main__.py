@@ -49,6 +49,12 @@ from typing import Any
 
 import psycopg
 
+# #873: importing this package at the worker entry's module-import
+# time side-effect-populates ``sec_manifest_worker._PARSERS``. The
+# manifest worker dispatches parsers from that dict, so this import
+# is load-bearing — without it the worker debug-skips every manifest
+# row even when parser modules exist on disk.
+import app.services.manifest_parsers  # noqa: F401, E402
 from app.config import settings
 from app.db.pool import open_pool
 from app.jobs.boot_sweep import run_boot_freshness_sweep
