@@ -30,7 +30,13 @@
       "label": "stack: backend",
       "type": "shell",
       "windows": {
-        "command": "pwsh -NoProfile -File ./scripts/clear-port.ps1 8000; uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000"
+        "command": "./scripts/clear-port.ps1 8000; uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
       },
       "osx": {
         "command": "./scripts/clear-port.sh 8000 && uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000"
@@ -51,7 +57,13 @@
       "label": "stack: frontend",
       "type": "shell",
       "windows": {
-        "command": "pwsh -NoProfile -File ../scripts/clear-port.ps1 5173; pnpm dev"
+        "command": "../scripts/clear-port.ps1 5173; pnpm dev",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
       },
       "osx": {
         "command": "../scripts/clear-port.sh 5173 && pnpm dev"
@@ -75,7 +87,13 @@
       "label": "stack: jobs",
       "type": "shell",
       "windows": {
-        "command": "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'app\\.jobs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; uv run python -m app.jobs"
+        "command": "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'app\\.jobs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; uv run python -m app.jobs",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
       },
       "osx": {
         "command": "pgrep -f 'python -m app.jobs' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"

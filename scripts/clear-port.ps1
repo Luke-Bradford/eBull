@@ -24,9 +24,23 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Continue"
 
+# Parse netstat columns explicitly rather than substring-matching the
+# port number. A bare `:$Port\s` regex would match `:58000 ` when the
+# target port is 8000 only if the digits aligned (they don't, in
+# practice — `\s` anchors the right side), but the parsed form
+# anchors the port at the end of the local-address column and is
+# immune to future netstat layout changes / IPv6 brackets.
 $holders = netstat -ano |
-    Select-String ":$Port\s.*LISTENING" |
-    ForEach-Object { ($_ -split '\s+')[-1] } |
+    ForEach-Object {
+        $cols = ($_.Trim() -split '\s+')
+        # Expected layout: <proto> <local-addr:port> <foreign-addr:port> <state> <pid>
+        if ($cols.Count -ge 5 -and $cols[3] -eq "LISTENING") {
+            $localPort = ($cols[1] -split ':')[-1]
+            if ($localPort -eq "$Port") {
+                $cols[-1]
+            }
+        }
+    } |
     Sort-Object -Unique |
     Where-Object { $_ -and $_ -ne "0" }
 
