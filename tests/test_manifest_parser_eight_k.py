@@ -277,6 +277,107 @@ def test_parse_phase_exception_preserves_stored_raw_status(
         assert cur.fetchone() is not None
 
 
+def test_deterministic_upsert_exception_tombstones(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1131: a non-transient upsert exception
+    (``IntegrityError``-shape constraint violation, or any non-DB
+    Python exception) must tombstone the manifest row + the
+    ``eight_k_filings`` typed table — re-fetching the same dead HTML
+    every hour on a deterministic bug wastes SEC fair-use budget."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import eight_k as parser_module
+
+    _seed_instrument(ebull_test_conn, iid=8730050, symbol="UFAIL")
+    _seed_pending_8k(ebull_test_conn, accession="0000888888-26-000050", instrument_id=8730050)
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_8K_HTML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("synthetic 8-K upsert constraint violation")
+
+    monkeypatch.setattr(parser_module, "upsert_8k_filing", _raising_upsert)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_8k", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    assert stats.failed == 0
+    row = get_manifest_row(ebull_test_conn, "0000888888-26-000050")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.raw_status == "stored"
+    # Class name embedded so the backfill can discriminate.
+    assert row.error is not None
+    assert "RuntimeError" in row.error
+    assert "upsert error" in row.error
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT is_tombstone FROM eight_k_filings WHERE accession_number = '0000888888-26-000050'")
+        f = cur.fetchone()
+    assert f is not None and f[0] is True
+
+
+def test_transient_upsert_exception_retries(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1131: a transient psycopg ``OperationalError``
+    (SerializationFailure / DeadlockDetected / connection drop) on
+    the upsert must keep the manifest row in ``failed`` with a 1h
+    backoff so the worker retries on the next tick — the parsed XML
+    isn't the problem, the DB-side state is."""
+    import psycopg.errors
+
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import eight_k as parser_module
+
+    _seed_instrument(ebull_test_conn, iid=8730051, symbol="UTRAN")
+    _seed_pending_8k(ebull_test_conn, accession="0000888888-26-000051", instrument_id=8730051)
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_8K_HTML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise psycopg.errors.SerializationFailure("synthetic serialisation failure")
+
+    monkeypatch.setattr(parser_module, "upsert_8k_filing", _raising_upsert)
+
+    before = datetime.now(tz=UTC)
+    stats = run_manifest_worker(ebull_test_conn, source="sec_8k", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
+    assert stats.tombstoned == 0
+    row = get_manifest_row(ebull_test_conn, "0000888888-26-000051")
+    assert row is not None
+    assert row.ingest_status == "failed"
+    assert row.raw_status == "stored"
+    assert row.error is not None
+    assert "SerializationFailure" in row.error
+    # 1h backoff respected.
+    assert row.next_retry_at is not None
+    delta = (row.next_retry_at - before).total_seconds()
+    assert 3300 < delta < 3900
+
+    # No typed-table tombstone written — transient must keep the
+    # accession alive for retry. Without this guard a deadlock would
+    # tombstone the row + skip every future retry attempt.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM eight_k_filings WHERE accession_number = '0000888888-26-000051'")
+        assert cur.fetchone() is None
+
+
 def test_parser_registered_via_register_all() -> None:
     """``register_all_parsers()`` populates the worker registry with
     every production parser. Pins the architecture invariant that the

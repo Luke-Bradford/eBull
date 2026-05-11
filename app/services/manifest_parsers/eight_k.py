@@ -58,6 +58,10 @@ from app.services.eight_k_events import (
     parse_8k_filing,
     upsert_8k_filing,
 )
+from app.services.manifest_parsers._classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 from app.services.raw_filings import store_raw
 
 logger = logging.getLogger(__name__)
@@ -271,11 +275,44 @@ def _parse_eight_k(
                 item_labels=labels,
             )
     except Exception as exc:  # noqa: BLE001
+        # #1131 transient-vs-deterministic discrimination. A psycopg
+        # OperationalError (SerializationFailure / DeadlockDetected /
+        # connection drop) is worth retrying with a 1h backoff. A
+        # deterministic constraint violation (IntegrityError /
+        # DataError / etc.) won't self-fix on retry — refetching the
+        # same dead XML every hour wastes SEC fair-use budget. Tombstone
+        # the row instead so the worker stops re-fetching; a parser
+        # bump can re-pick the accession via the manifest rewash path.
         logger.exception(
             "eight_k manifest parser: upsert failed accession=%s",
             accession,
         )
-        return _failed_outcome(f"upsert error: {exc}", raw_status="stored")
+        if is_transient_upsert_error(exc):
+            return _failed_outcome(format_upsert_error(exc), raw_status="stored")
+        try:
+            with conn.transaction():
+                _write_tombstone(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession,
+                    primary_document_url=url,
+                    document_type="8-K",
+                )
+        except Exception:  # noqa: BLE001 — tombstone failure shouldn't mask upsert failure
+            logger.exception(
+                "eight_k manifest parser: tombstone INSERT failed after upsert error accession=%s",
+                accession,
+            )
+            return _failed_outcome(
+                f"upsert+tombstone error: {type(exc).__name__}: {exc}",
+                raw_status="stored",
+            )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=str(_PARSER_VERSION),
+            raw_status="stored",
+            error=format_upsert_error(exc),
+        )
 
     return ParseOutcome(
         status="parsed",

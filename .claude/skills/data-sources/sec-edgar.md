@@ -580,6 +580,26 @@ Bootstrap drains the horizon. Steady-state refresh fetches only new accessions d
 
 **Rewash retention exception:** a parser-version bump triggers re-parse of in-horizon raw bodies. Out-of-horizon bodies are NOT retained; if the rewash needs older accessions, the operator runs a targeted `sec_rebuild` with `discover=True` to re-fetch.
 
+### 11.3 Upsert exception discrimination — transient vs deterministic
+
+On the typed-table upsert phase of a manifest parser, the exception class decides whether the worker retries or tombstones. Pinned in `app/services/manifest_parsers/_classify.py`:
+
+- **Transient** — `psycopg.errors.OperationalError` (parent of `SerializationFailure` + `DeadlockDetected`, plus connection-drop / server-restart shapes). Return `_failed_outcome` with the 1h backoff. The parsed payload is fine; the DB is the problem.
+- **Deterministic** — anything else under `psycopg.Error` (`IntegrityError` / `DataError` / `ProgrammingError` and their subclasses) **plus** any non-DB Python exception (`ValueError`, `KeyError`, `TypeError`) that escapes the parser into the upsert path. Tombstone the row + return a `tombstoned` outcome. Retrying the same dead payload every hour wastes SEC fair-use budget.
+
+Tag the exception class into the manifest's `error` column via `format_upsert_error(exc)` so the one-shot `tombstone_stale_failed_upserts` backfill at [app/services/sec_manifest.py](../../../app/services/sec_manifest.py) can skip transient-shape rows precisely when promoting pre-#1131 retry-stuck rows to `tombstoned`.
+
+Every manifest parser MUST follow this contract on its upsert except: block. The shape per source is:
+
+| Parser | "Tombstone" write means |
+|---|---|
+| 8-K (`app/services/manifest_parsers/eight_k.py`) | `_write_tombstone` row in `eight_k_filings` |
+| Form 3 / Form 4 (`app/services/manifest_parsers/insider_345.py`) | `_write_tombstone` / `_write_form_3_tombstone` row in `insider_filings` |
+| 13D/G (`app/services/manifest_parsers/sec_13dg.py`) | `_record_ingest_attempt(status='failed')` in `blockholder_filings_ingest_log` |
+| DEF 14A (`app/services/manifest_parsers/def14a.py`) | `_record_ingest_attempt(status='failed')` in `def14a_ingest_log` |
+
+Legacy ingesters (`ingest_insider_transactions`) apply the same discrimination on the upsert phase: deterministic writes `_write_tombstone` in a fresh tx so the candidate selector doesn't re-pick the accession on every tick; transient rolls back and continues so the next tick retries.
+
 ## 10. Sources
 
 - SEC accessing-edgar-data: <https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data>

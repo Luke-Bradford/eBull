@@ -70,6 +70,10 @@ from app.services.def14a_ingest import (
     _resolve_issuer_cik,
     _upsert_holding,
 )
+from app.services.manifest_parsers._classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 from app.services.ownership_observations import (
     refresh_def14a_current,
     refresh_esop_current,
@@ -359,11 +363,44 @@ def _parse_def14a(
                 error=None,
             )
     except Exception as exc:  # noqa: BLE001
+        # #1131 transient-vs-deterministic discrimination — see
+        # ``_classify.is_transient_upsert_error``. Transient
+        # (OperationalError) keeps the 1h-retry contract; deterministic
+        # constraint violations tombstone the manifest so a permanently
+        # broken accession stops re-fetching from SEC every tick. For
+        # DEF 14A "tombstone" means writing the ingest-log row with
+        # status='failed' (mirrors the empty-body + no-rows branches
+        # above) + returning manifest ``tombstoned``.
         logger.exception(
             "def14a manifest parser: upsert/observation batch failed accession=%s",
             accession,
         )
-        return _failed_outcome(f"upsert error: {exc}", raw_status="stored")
+        if is_transient_upsert_error(exc):
+            return _failed_outcome(format_upsert_error(exc), raw_status="stored")
+        try:
+            with conn.transaction():
+                _record_ingest_attempt(
+                    conn,
+                    accession_number=accession,
+                    issuer_cik=issuer_cik,
+                    status="failed",
+                    error=format_upsert_error(exc),
+                )
+        except Exception:  # noqa: BLE001 — ingest-log failure shouldn't mask upsert failure
+            logger.exception(
+                "def14a manifest parser: ingest-log INSERT failed after upsert error accession=%s",
+                accession,
+            )
+            return _failed_outcome(
+                f"upsert+log error: {type(exc).__name__}: {exc}",
+                raw_status="stored",
+            )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_DEF14A,
+            raw_status="stored",
+            error=format_upsert_error(exc),
+        )
 
     return ParseOutcome(
         status="parsed",

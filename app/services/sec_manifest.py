@@ -3,6 +3,16 @@
 Issue #864 / spec §"sec_filing_manifest"
 (``docs/superpowers/specs/2026-05-04-etl-coverage-model.md``).
 
+#1131 backfill: :func:`tombstone_stale_failed_upserts` walks the
+manifest looking for rows stuck in ``failed`` with a pre-#1131-shape
+``upsert error:...`` message and promotes them to ``tombstoned`` once
+they have been failing continuously for longer than ``age_hours``. The
+sweep stops the legacy retry loop that hammered SEC every hour for
+deterministic constraint violations on Form 4 / 8-K / 13D/G / DEF 14A
+ingest before the manifest parsers learned to discriminate transient
+errors from deterministic ones (see
+``app/services/manifest_parsers/_classify.py``).
+
 The manifest replaces the per-source bespoke joins against
 ``def14a_ingest_log`` / ``institutional_holdings_ingest_log`` /
 ``insider_filings.is_tombstone`` / ``unresolved_13f_cusips`` with one
@@ -37,7 +47,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import psycopg
@@ -45,6 +55,52 @@ import psycopg.rows
 from psycopg import sql
 
 logger = logging.getLogger(__name__)
+
+
+# #1131 backfill heuristic + retry-loop discriminator. Old-format
+# manifest ``error`` strings from pre-#1131 parsers stored just
+# ``"upsert error: <message>"`` without the exception class name. New-
+# format strings carry ``"upsert error: <ExceptionClass>: <message>"``
+# (or ``"upsert+tombstone error: <Class>: ..."`` /
+# ``"upsert+log error: <Class>: ..."``). The sweep skips
+# transient-shaped failures (``OperationalError`` /
+# ``SerializationFailure`` / ``DeadlockDetected``) by *anchored prefix*
+# match — Codex pre-push round 1: a substring-anywhere match would
+# skip deterministic rows whose error message happened to mention the
+# token (e.g. ``upsert error: CheckViolation: value "OperationalError"
+# violates ...``). Mixed-format rows are tombstoned by age.
+_BACKFILL_TRANSIENT_CLASS_TOKENS: tuple[str, ...] = (
+    "OperationalError",
+    "SerializationFailure",
+    "DeadlockDetected",
+)
+_BACKFILL_ERROR_PREFIXES: tuple[str, ...] = (
+    "upsert error: ",
+    "upsert+tombstone error: ",
+    "upsert+log error: ",
+)
+_BACKFILL_DEFAULT_AGE = timedelta(hours=24)
+_BACKFILL_DEFAULT_LIMIT = 1000
+
+
+def _error_has_transient_class_prefix(error_text: str) -> bool:
+    """Return True iff ``error_text`` starts with one of the upsert
+    prefixes immediately followed by a transient-class token.
+
+    Anchored match per Codex pre-push round 1 — a plain
+    ``token in error_text`` lookup would skip a deterministic row whose
+    error message happened to *quote* the token (e.g. a CHECK
+    constraint message referencing a column value that includes the
+    literal string ``"OperationalError"``).
+    """
+    for prefix in _BACKFILL_ERROR_PREFIXES:
+        if not error_text.startswith(prefix):
+            continue
+        tail = error_text[len(prefix) :]
+        for token in _BACKFILL_TRANSIENT_CLASS_TOKENS:
+            if tail.startswith(f"{token}:"):
+                return True
+    return False
 
 
 ManifestSource = Literal[
@@ -522,6 +578,184 @@ def iter_retryable(
             )
         for row in cur.fetchall():
             yield ManifestRow(**row)
+
+
+@dataclass(frozen=True)
+class StaleFailedUpsertSweepResult:
+    """Summary of one :func:`tombstone_stale_failed_upserts` invocation."""
+
+    rows_scanned: int
+    rows_tombstoned: int
+    rows_skipped_transient: int
+    rows_skipped_race: int
+
+
+def tombstone_stale_failed_upserts(
+    conn: psycopg.Connection[Any],
+    *,
+    age: timedelta = _BACKFILL_DEFAULT_AGE,
+    limit: int = _BACKFILL_DEFAULT_LIMIT,
+) -> StaleFailedUpsertSweepResult:
+    """One-shot backfill (#1131): tombstone manifest rows that have
+    been *idle* in ``ingest_status='failed'`` with an upsert-error
+    shape for at least ``age``.
+
+    Why: pre-#1131 every per-source manifest parser treated an upsert
+    exception the same way — ``failed`` with a 1h backoff retry. A
+    deterministic constraint violation on the typed-table upsert (bad
+    date past a CHECK, malformed enum, FK miss) hammered SEC every
+    hour for the same dead XML forever. PR #1131 split transient from
+    deterministic at the *parser* level; this sweep is a one-shot
+    accelerator that promotes the pre-#1131 retry-stuck rows to
+    ``tombstoned`` so the worker stops re-fetching them while the new
+    parser code catches up.
+
+    Heuristic (Codex pre-push round 1 — precise semantics): a row is
+    eligible iff ``last_attempted_at < NOW() - age`` AND the
+    ``error`` column starts with one of the upsert-shape prefixes AND
+    does NOT begin with a transient-class prefix
+    (``upsert error: OperationalError:`` etc.). That selects rows
+    that have not been retried for ``age`` — NOT rows that retry
+    every hour and never escape ``failed``. The worker advances
+    ``last_attempted_at`` on every retry, so an actively-looping row
+    stays *young*. Once #1131's parser-level discrimination ships,
+    actively-looping rows will tombstone themselves on the very next
+    retry; this sweep handles the remaining backlog that the worker
+    is not actively processing (next_retry_at in the future, no
+    parser registered for that source, etc.).
+
+    Scope: ``error`` matches the anchored prefixes
+    ``"upsert error: "`` / ``"upsert+tombstone error: "`` /
+    ``"upsert+log error: "``. Fetch errors, parse errors, and
+    ingest-log failures stay in ``failed`` because they may genuinely
+    recover.
+
+    Race-safety (Codex pre-push round 1): the sweep is two-phase —
+    sample candidates with a non-locking SELECT, then per-row
+    conditional UPDATE that *only* fires when ``ingest_status`` is
+    still ``failed`` AND ``last_attempted_at`` matches the sampled
+    value. If a concurrent manifest worker advanced
+    ``last_attempted_at`` (succeeded, failed again, or tombstoned the
+    row itself) between sample and update, the conditional UPDATE
+    matches zero rows and the sweep records a ``rows_skipped_race``
+    instead of overwriting the worker's progress. This is the minimal
+    fix that doesn't require worker-side row-locking (out of scope);
+    the residual race window (worker holds the accession but has not
+    yet transitioned, sweep wins) is small enough that the operator
+    can recover by re-running the sweep.
+
+    Per-row commit so a connection drop mid-loop preserves earlier
+    progress. Returns counters so the caller (the job runner) can
+    record progress.
+    """
+    cutoff = datetime.now(tz=UTC) - age
+    rows_scanned = 0
+    rows_tombstoned = 0
+    rows_skipped_transient = 0
+    rows_skipped_race = 0
+
+    # Pull the candidate batch up-front (snapshot read). ``LIMIT``
+    # bounds memory. The per-row conditional UPDATE below carries the
+    # sampled ``last_attempted_at`` so a worker advance between sample
+    # and update is detected.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT accession_number, error, last_attempted_at
+            FROM sec_filing_manifest
+            WHERE ingest_status = 'failed'
+              AND (
+                  error LIKE 'upsert error:%%'
+                  OR error LIKE 'upsert+tombstone error:%%'
+                  OR error LIKE 'upsert+log error:%%'
+              )
+              AND last_attempted_at < %s
+            ORDER BY last_attempted_at ASC
+            LIMIT %s
+            """,
+            (cutoff, limit),
+        )
+        candidates: list[tuple[str, str, datetime | None]] = [
+            (str(row[0]), str(row[1] or ""), row[2]) for row in cur.fetchall()
+        ]
+
+    # PR #1132 review BLOCKING: the SELECT above opened an implicit
+    # psycopg3 transaction that ``conn.cursor()`` does not commit. If
+    # we entered the per-row ``with conn.transaction():`` loop while
+    # that tx was still open, every iteration would issue SAVEPOINT
+    # (not BEGIN) and on exit RELEASE SAVEPOINT (not COMMIT) — all
+    # row updates would be buffered until the outer caller commits,
+    # so a connection drop mid-loop would lose every in-flight
+    # tombstone. Commit here to close the implicit tx so each
+    # subsequent ``with conn.transaction():`` starts a top-level
+    # transaction that commits on success.
+    conn.commit()
+
+    for accession, error_text, sampled_attempted_at in candidates:
+        rows_scanned += 1
+        if _error_has_transient_class_prefix(error_text):
+            # Post-#1131 transient-shape row — leave alone, the
+            # operator can investigate manually. Sweeping these would
+            # mask genuine DB-side issues that retry would resolve.
+            rows_skipped_transient += 1
+            continue
+        # Conditional UPDATE: the WHERE clause carries the sampled
+        # ``last_attempted_at`` so a concurrent worker tick that
+        # advanced the timestamp (or moved the row out of ``failed``
+        # entirely) means our UPDATE matches zero rows. This bypasses
+        # ``transition_status`` but the equivalent state-machine move
+        # (``failed`` -> ``tombstoned``) is explicitly allowed per
+        # ``_ALLOWED_TRANSITIONS`` so the state machine stays honest.
+        # raw_status is intentionally NOT touched — the existing value
+        # carries forward (the #948 evidence-downgrade invariant is
+        # not at risk because we never write 'absent').
+        new_error = f"#1131 backfill: stale failed upsert (orig: {error_text})"
+        try:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE sec_filing_manifest
+                    SET ingest_status = 'tombstoned',
+                        error = %(new_error)s,
+                        next_retry_at = NULL,
+                        last_attempted_at = NOW()
+                    WHERE accession_number = %(accession)s
+                      AND ingest_status = 'failed'
+                      AND last_attempted_at IS NOT DISTINCT FROM %(expected_attempted_at)s
+                    RETURNING accession_number
+                    """,
+                    {
+                        "new_error": new_error,
+                        "accession": accession,
+                        "expected_attempted_at": sampled_attempted_at,
+                    },
+                )
+                won_race = cur.fetchone() is not None
+            if won_race:
+                rows_tombstoned += 1
+            else:
+                rows_skipped_race += 1
+        except Exception:  # noqa: BLE001 — per-row failure must not abort the sweep
+            logger.exception(
+                "tombstone_stale_failed_upserts: UPDATE failed accession=%s",
+                accession,
+            )
+            rows_skipped_race += 1
+
+    logger.info(
+        "tombstone_stale_failed_upserts: scanned=%d tombstoned=%d skipped_transient=%d skipped_race=%d age=%s",
+        rows_scanned,
+        rows_tombstoned,
+        rows_skipped_transient,
+        rows_skipped_race,
+        age,
+    )
+    return StaleFailedUpsertSweepResult(
+        rows_scanned=rows_scanned,
+        rows_tombstoned=rows_tombstoned,
+        rows_skipped_transient=rows_skipped_transient,
+        rows_skipped_race=rows_skipped_race,
+    )
 
 
 # Form-code → source mapping used by the discovery paths (Atom feed,

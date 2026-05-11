@@ -649,6 +649,110 @@ class TestIngestInsiderTransactions:
         assert result.filings_scanned == 0
         assert fetcher.calls == []
 
+    def test_deterministic_upsert_failure_writes_tombstone(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PR #1131: pre-#1131 the legacy ingester rolled back and
+        continued on an upsert exception. The candidate selector keys
+        on ``insider_filings.accession_number IS NULL`` so the same
+        accession got re-picked every scheduler tick, re-hammering SEC
+        for the same dead XML. New policy: a non-transient upsert
+        exception writes a filing-level tombstone so the next selector
+        run skips the row."""
+        from app.services import insider_transactions as ingest_module
+
+        iid = _seed_instrument(ebull_test_conn, iid=1000131, symbol="UFLEG")
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="LEGACY-DETERMINISTIC-1",
+            url="https://www.sec.gov/Archives/det.xml",
+            filing_date=date.today().isoformat(),
+        )
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/det.xml": _FORM_4_RICH_BUY.replace(
+                    "2024-06-15", date.today().isoformat()
+                ),
+            }
+        )
+
+        def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+            raise RuntimeError("synthetic deterministic upsert violation")
+
+        monkeypatch.setattr(ingest_module, "upsert_filing", _raising_upsert)
+
+        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        # Tombstone row exists so the next selector run skips this
+        # accession (LEFT JOIN no-longer-NULL).
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT is_tombstone FROM insider_filings WHERE accession_number = %s",
+                ("LEGACY-DETERMINISTIC-1",),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] is True
+
+        # Second pass: candidate selector now skips the row (no
+        # ``insider_filings.accession_number IS NULL`` match because the
+        # tombstone exists). Without the fix the retry loop would
+        # re-fetch the same dead XML every tick.
+        second_fetcher = _StubFetcher({})
+        second = ingest_insider_transactions(ebull_test_conn, cast("object", second_fetcher))  # type: ignore[arg-type]
+        assert second.filings_scanned == 0
+        assert second_fetcher.calls == []
+
+    def test_transient_upsert_failure_does_not_write_tombstone(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PR #1131: a transient ``OperationalError`` on the upsert
+        must NOT tombstone the accession — the next scheduler tick
+        re-picks it for retry. Tombstoning here would burn the row's
+        retry eligibility on a recoverable DB-side hiccup."""
+        import psycopg.errors
+
+        from app.services import insider_transactions as ingest_module
+
+        iid = _seed_instrument(ebull_test_conn, iid=1000132, symbol="UTLEG")
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="LEGACY-TRANSIENT-1",
+            url="https://www.sec.gov/Archives/tran.xml",
+            filing_date=date.today().isoformat(),
+        )
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/tran.xml": _FORM_4_RICH_BUY.replace(
+                    "2024-06-15", date.today().isoformat()
+                ),
+            }
+        )
+
+        def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+            raise psycopg.errors.SerializationFailure("synthetic serialisation failure")
+
+        monkeypatch.setattr(ingest_module, "upsert_filing", _raising_upsert)
+
+        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        # No insider_filings row exists — neither parsed nor tombstoned
+        # — so the candidate selector still picks this row on the next
+        # scheduler tick. That is the desired transient behaviour:
+        # retry, don't burn the slot.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM insider_filings WHERE accession_number = %s",
+                ("LEGACY-TRANSIENT-1",),
+            )
+            assert cur.fetchone() is None
+
 
 class TestGetInsiderSummary:
     def test_unique_filers_dedups_by_cik_not_name(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:

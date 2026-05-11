@@ -51,6 +51,10 @@ from psycopg.types.json import Jsonb
 
 from app.providers.concurrent_fetch import fetch_document_texts
 from app.services import raw_filings
+from app.services.manifest_parsers._classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
@@ -1590,13 +1594,46 @@ def _process_candidates(
                 parsed=parsed,
             )
             conn.commit()
-        except Exception:
+        except Exception as exc:
+            # #1131: pre-#1131 this branch just rolled back + continued.
+            # Candidate selector keys on ``insider_filings.accession_number
+            # IS NULL`` (see _process_candidates query above) so a
+            # deterministic constraint violation re-picked the same
+            # accession on every scheduler tick, re-hammering SEC for
+            # the same dead XML every hour. Discriminate by psycopg
+            # exception class: transient (OperationalError) keeps the
+            # legacy retry-loop behaviour (rollback + continue —
+            # scheduler picks it back up next tick); deterministic
+            # constraint violations write a tombstone in a fresh tx so
+            # the next selector run skips the row.
             conn.rollback()
             logger.warning(
-                "ingest_insider_transactions: upsert failed accession=%s",
+                "ingest_insider_transactions: upsert failed accession=%s (%s)",
                 accession,
+                type(exc).__name__,
                 exc_info=True,
             )
+            if not is_transient_upsert_error(exc):
+                try:
+                    _write_tombstone(
+                        conn,
+                        instrument_id=instrument_id,
+                        accession_number=accession,
+                        primary_document_url=url,
+                    )
+                    conn.commit()
+                    logger.info(
+                        "ingest_insider_transactions: tombstoned accession=%s after deterministic upsert error: %s",
+                        accession,
+                        format_upsert_error(exc),
+                    )
+                except Exception:
+                    conn.rollback()
+                    logger.exception(
+                        "ingest_insider_transactions: tombstone INSERT failed after deterministic upsert"
+                        " error accession=%s",
+                        accession,
+                    )
             continue
 
         filings_parsed += 1

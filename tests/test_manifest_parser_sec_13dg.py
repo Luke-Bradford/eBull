@@ -506,6 +506,109 @@ def test_unexpected_parse_exception_writes_ingest_log(
     assert log[1] is not None and "unexpected" in log[1]
 
 
+def test_deterministic_upsert_exception_tombstones_with_log_row(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1131: deterministic upsert exception tombstones the
+    manifest + writes a ``blockholder_filings_ingest_log`` row with
+    status='failed' (mirrors the empty-body audit-log pattern)."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import sec_13dg as parser_module
+
+    _seed_instrument_with_cusip(ebull_test_conn, iid=8750090, symbol="UFAIL", cusip="999990000")
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession="0009999999-26-000090",
+        filer_cik="0009999990",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("synthetic 13D upsert violation")
+
+    monkeypatch.setattr(parser_module, "_upsert_filing_row", _raising_upsert)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    assert stats.failed == 0
+    row = get_manifest_row(ebull_test_conn, "0009999999-26-000090")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.raw_status == "stored"
+    assert row.error is not None
+    assert "RuntimeError" in row.error
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error FROM blockholder_filings_ingest_log WHERE accession_number = '0009999999-26-000090'"
+        )
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "failed"
+    assert log[1] is not None and "RuntimeError" in log[1]
+
+
+def test_transient_upsert_exception_retries(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1131: an ``OperationalError`` on the upsert phase keeps the
+    manifest in ``failed`` with a 1h backoff — no log-row write, no
+    tombstone — so the next retry sees a clean slate."""
+    import psycopg.errors
+
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import sec_13dg as parser_module
+
+    _seed_instrument_with_cusip(ebull_test_conn, iid=8750091, symbol="UTRAN", cusip="999991111")
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession="0009999999-26-000091",
+        filer_cik="0009999991",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise psycopg.errors.SerializationFailure("synthetic serialisation failure")
+
+    monkeypatch.setattr(parser_module, "_upsert_filing_row", _raising_upsert)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
+    assert stats.tombstoned == 0
+    row = get_manifest_row(ebull_test_conn, "0009999999-26-000091")
+    assert row is not None
+    assert row.ingest_status == "failed"
+    assert row.raw_status == "stored"
+    assert row.error is not None
+    assert "SerializationFailure" in row.error
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM blockholder_filings_ingest_log WHERE accession_number = '0009999999-26-000091'")
+        assert cur.fetchone() is None
+
+
 def test_parser_registered_for_both_sources() -> None:
     """``register_all_parsers`` wires the SAME callable against
     sec_13d AND sec_13g."""
