@@ -49,7 +49,7 @@ def register_all_parsers() -> None:
     _eight_k.register()
     _def14a.register()
     _sec_13dg.register()  # registers BOTH sec_13d and sec_13g
-    _insider_345.register()  # registers sec_form3 + sec_form4 (Form 5 NYI)
+    _insider_345.register()  # registers sec_form3 + sec_form4 + sec_form5
     _sec_13f_hr.register()
     _sec_n_port.register()
 

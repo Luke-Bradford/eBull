@@ -281,7 +281,13 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
     pre-push review caught the prior version which counted
     ``insider_filings`` HEADERS (one per accession), giving the
     wrong "typed rows" count by orders of magnitude on busy
-    insiders."""
+    insiders.
+
+    Form 5 (annual statement) shares the ``insider_transactions``
+    table with ``document_type='5'``; both forms are included in the
+    counts so the operator-visible "insider transactions" pipeline
+    matches what's actually on file. Form 3 (initial holdings) lives
+    in ``insider_initial_holdings`` and gets its own pipeline state."""
     notes: list[str] = []
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         # Per-#1117 PR-B: insider_transactions + insider_filings are
@@ -294,7 +300,7 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
             SELECT COUNT(*) AS row_count, MAX(f.period_of_report) AS latest_period
             FROM insider_transactions t
             JOIN insider_filings f ON f.accession_number = t.accession_number
-            WHERE f.document_type = '4'
+            WHERE f.document_type IN ('4', '5', '5/A')
               AND f.is_tombstone = FALSE
               AND EXISTS (
                   SELECT 1 FROM filing_events fe
@@ -311,7 +317,7 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
             """
             SELECT COUNT(*) AS tombstone_count
             FROM insider_filings i
-            WHERE i.document_type = '4'
+            WHERE i.document_type IN ('4', '5', '5/A')
               AND i.is_tombstone = TRUE
               AND EXISTS (
                   SELECT 1 FROM filing_events fe
@@ -329,7 +335,7 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
             SELECT COUNT(DISTINCT r.accession_number) AS body_count
             FROM filing_raw_documents r
             JOIN insider_filings i ON i.accession_number = r.accession_number
-            WHERE r.document_kind = 'form4_xml'
+            WHERE r.document_kind IN ('form4_xml', 'form5_xml')
               AND i.is_tombstone = FALSE
               AND EXISTS (
                   SELECT 1 FROM filing_events fe
@@ -343,7 +349,7 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
         body = cur.fetchone() or {"body_count": 0}
 
     if rows["row_count"] == 0:
-        notes.append("no Form 4 transactions")
+        notes.append("no Form 4/5 transactions")
     if tomb["tombstone_count"]:
         notes.append(f"{tomb['tombstone_count']} tombstoned filing(s)")
     if body["body_count"] and not rows["row_count"]:

@@ -62,6 +62,12 @@ from app.services.ownership_observations import (
 from app.services.sec_identity import siblings_for_issuer_cik
 
 _PARSER_VERSION_FORM4 = "form4-v1"
+# Form 5 (annual statement of changes in beneficial ownership) reuses the
+# Form 4 ownership XML schema. parse_form_5_xml returns the same
+# ParsedFiling shape; the only delta is the documentType gate. Separate
+# manifest parser_version string lets the worker route Form 5 backlog
+# through ``rewash`` independently from Form 4.
+_PARSER_VERSION_FORM5 = "form5-v1"
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +268,107 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
     # Default filer_cik for transactions = first listed reporting
     # owner. Joint filings list all owners at filing-scope but don't
     # attribute individual transactions in the XML.
+    default_filer_cik = filers[0].filer_cik
+
+    transactions = _extract_transactions(root, default_filer_cik=default_filer_cik)
+
+    if not transactions:
+        return None
+
+    remarks = _text(root.find("./remarks"))
+    owner_sig = root.find("./ownerSignature")
+    signature_name = _text(owner_sig.find("./signatureName")) if owner_sig is not None else None
+    signature_date = _date(_text(owner_sig.find("./signatureDate"))) if owner_sig is not None else None
+
+    return ParsedFiling(
+        document_type=document_type,
+        period_of_report=period_of_report,
+        date_of_original_submission=date_of_original_submission,
+        not_subject_to_section_16=not_subject_to_section_16,
+        form3_holdings_reported=form3_holdings_reported,
+        form4_transactions_reported=form4_transactions_reported,
+        issuer_cik=issuer_cik,
+        issuer_name=issuer_name,
+        issuer_trading_symbol=issuer_trading_symbol,
+        remarks=remarks,
+        signature_name=signature_name,
+        signature_date=signature_date,
+        filers=filers,
+        footnotes=footnotes,
+        transactions=transactions,
+    )
+
+
+def parse_form_5_xml(raw_xml: str) -> ParsedFiling | None:
+    """Extract the structured transaction list from a Form 5 primary
+    document.
+
+    Form 5 is the annual statement of changes in beneficial ownership
+    (Rule 16a-3(f)) and uses the SAME EDGAR ownership XML schema as
+    Form 4. The parser shape mirrors :func:`parse_form_4_xml` byte-for-
+    byte except for the ``documentType`` gate. ``ParsedFiling`` is
+    intentionally the same dataclass — Form 5 transactions persist into
+    the same ``insider_filings`` + ``insider_transactions`` tables with
+    ``document_type='5'`` recording the provenance.
+
+    Form 5 holdings (the optional year-end balance reconciliation
+    section) are out of scope for this PR. The annual sections most
+    operators use are the late-Form-4 transactions in
+    ``<nonDerivativeTable>/<nonDerivativeTransaction>`` /
+    ``<derivativeTable>/<derivativeTransaction>``, which this parser
+    handles. A filing carrying ONLY holdings sections returns
+    ``None`` — the manifest adapter then writes a tombstone so the
+    worker stops re-fetching the same payload every tick.
+
+    Returns ``None`` when:
+
+    - Input is empty or fails to parse as XML.
+    - Document root is not ``ownershipDocument``.
+    - ``documentType`` is not ``5`` or ``5/A``.
+    - Zero reporting owners.
+    - Zero transactions across both the non-derivative and derivative
+      tables.
+
+    Observations: Form 5 transactions write through with
+    ``source='form4'``. The shared ``OwnershipSource`` enum on
+    ``ownership_*_observations`` does NOT include a ``form5`` value
+    (CHECK constraint, see sql/113-116); the operator-visible
+    provenance is preserved on ``insider_filings.document_type='5'``
+    via the JOIN at read time. Treating Form 5 transactions as Form 4
+    in the priority chain is correct semantically — they ARE late
+    Form 4 trades surfaced annually.
+    """
+    if not raw_xml:
+        return None
+    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
+    try:
+        root = ET.fromstring(cleaned_xml)
+    except ET.ParseError:
+        return None
+
+    if _localname(root.tag) != "ownershipDocument":
+        return None
+
+    document_type = _text(root.find("./documentType")) or "5"
+    if document_type not in ("5", "5/A"):
+        return None
+
+    period_of_report = _date(_text(root.find("./periodOfReport")))
+    date_of_original_submission = _date(_text(root.find("./dateOfOriginalSubmission")))
+    not_subject_to_section_16 = _flag(_text(root.find("./notSubjectToSection16")))
+    form3_holdings_reported = _flag(_text(root.find("./form3HoldingsReported")))
+    form4_transactions_reported = _flag(_text(root.find("./form4TransactionsReported")))
+
+    issuer_el = root.find("./issuer")
+    issuer_cik = _text(issuer_el.find("./issuerCik")) if issuer_el is not None else None
+    issuer_name = _text(issuer_el.find("./issuerName")) if issuer_el is not None else None
+    issuer_trading_symbol = _text(issuer_el.find("./issuerTradingSymbol")) if issuer_el is not None else None
+
+    filers = _extract_filers(root)
+    if not filers:
+        return None
+
+    footnotes = _extract_footnotes(root)
     default_filer_cik = filers[0].filer_cik
 
     transactions = _extract_transactions(root, default_filer_cik=default_filer_cik)
@@ -1305,7 +1412,7 @@ def _primary_filer_role(parsed: ParsedFiling, cik: str | None) -> str | None:
 # ---------------------------------------------------------------------
 
 
-_TOMBSTONE_DOC_TYPE = "4"  # keep shape legal even for tombstones
+_TOMBSTONE_DOC_TYPE = "4"  # default keeps Form 4 callers untouched
 
 
 def _write_tombstone(
@@ -1314,6 +1421,7 @@ def _write_tombstone(
     instrument_id: int,
     accession_number: str,
     primary_document_url: str,
+    document_type: str = _TOMBSTONE_DOC_TYPE,
 ) -> None:
     """Mark an accession as unfetchable / unparseable at the filing
     level so the next ingester pass skips it.
@@ -1322,7 +1430,12 @@ def _write_tombstone(
     children. The reader excludes them via ``is_tombstone = FALSE``
     in the summary query. A re-parse that succeeds for the same
     accession flips the row back to live via the ON CONFLICT DO
-    UPDATE branch of :func:`upsert_filing`."""
+    UPDATE branch of :func:`upsert_filing`.
+
+    ``document_type`` is plumbed so Form 5 tombstones land with
+    ``document_type='5'`` (vs the legacy Form 4 default). Operator
+    audits filtering by ``document_type`` shouldn't see Form 5
+    failures misattributed to Form 4."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1335,7 +1448,7 @@ def _write_tombstone(
             (
                 accession_number,
                 instrument_id,
-                _TOMBSTONE_DOC_TYPE,
+                document_type,
                 primary_document_url,
                 _PARSER_VERSION,
             ),
