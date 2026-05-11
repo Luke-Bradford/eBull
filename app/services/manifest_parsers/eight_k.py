@@ -44,7 +44,7 @@ from the manifest; downstream readers fan out via the bridge.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -62,22 +62,33 @@ from app.services.raw_filings import store_raw
 
 logger = logging.getLogger(__name__)
 
+# Explicit 1h backoff matches the worker's ``_backoff_for(0)`` return
+# value (Codex pre-push round 2 WARNING: importing a private symbol
+# from another module is brittle — if the worker renames or changes
+# the backoff signature, the parser breaks silently at runtime).
+# Duplicated here as a literal so the parser's contract with the
+# manifest worker is the PUBLIC ``ParseOutcome`` shape only.
+_FAILED_RETRY_DELAY = timedelta(hours=1)
+
 
 def _failed_outcome(error: str, raw_status: Any = None) -> Any:
-    """Build a ``failed`` ParseOutcome with the worker's standard 1h
-    backoff applied. Codex pre-push round 1: the worker only computes
-    backoff for parser-raised exceptions; a parser that RETURNS
+    """Build a ``failed`` ParseOutcome with a 1h backoff applied.
+
+    Codex pre-push round 1: the worker only computes backoff for
+    parser-raised exceptions; a parser that RETURNS
     ``ParseOutcome(status='failed')`` without ``next_retry_at`` would
-    get immediately retried, hammering SEC on every tick. Set it here
-    so every failed-return path is on the 1h cadence."""
-    from app.jobs.sec_manifest_worker import ParseOutcome, _backoff_for
+    get immediately retried, hammering SEC on every tick. Set it
+    here so every failed-return path is on the 1h cadence — matches
+    the worker's internal default at sec_manifest_worker.py:126.
+    """
+    from app.jobs.sec_manifest_worker import ParseOutcome
 
     return ParseOutcome(
         status="failed",
         parser_version=str(_PARSER_VERSION),
         raw_status=raw_status,
         error=error,
-        next_retry_at=datetime.now(tz=UTC) + _backoff_for(0),
+        next_retry_at=datetime.now(tz=UTC) + _FAILED_RETRY_DELAY,
     )
 
 
@@ -197,12 +208,30 @@ def _parse_eight_k(
         )
         return _failed_outcome(f"store_raw error: {exc}")
 
-    labels = _load_item_labels(conn)
-    # ``known_items`` is an OPTIONAL hint from filing_events used by
-    # the legacy bulk path to cross-check the parser's item extraction.
-    # The manifest row carries no items, so pass empty — the parser
-    # extracts items from the HTML body unaided.
-    parsed = parse_8k_filing(html, known_items=(), item_labels=labels)
+    # Codex pre-push round 2 BLOCKING: ``_load_item_labels`` and
+    # ``parse_8k_filing`` are pure DB read + pure-Python parse, but
+    # the raw body is already in ``filing_raw_documents`` by this
+    # point. An unhandled exception here would propagate to the
+    # worker, which would record ``raw_status='absent'`` on the
+    # manifest row even though raw IS stored — leaving a permanent
+    # split between the manifest's view and the raw table's view.
+    # Catch + return ``_failed_outcome`` with ``raw_status='stored'``
+    # so the manifest reflects ground truth and the worker retries
+    # the parse on the next tick without re-fetching from SEC.
+    try:
+        labels = _load_item_labels(conn)
+        # ``known_items`` is an OPTIONAL hint from filing_events used
+        # by the legacy bulk path to cross-check the parser's item
+        # extraction. The manifest row carries no items, so pass
+        # empty — the parser extracts items from the HTML body
+        # unaided.
+        parsed = parse_8k_filing(html, known_items=(), item_labels=labels)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "eight_k manifest parser: labels-load or parse raised accession=%s",
+            accession,
+        )
+        return _failed_outcome(f"parse error: {exc}", raw_status="stored")
     if parsed is None:
         try:
             with conn.transaction():

@@ -231,6 +231,52 @@ def test_fetch_exception_marks_failed(
     assert 3300 < delta < 3900
 
 
+def test_parse_phase_exception_preserves_stored_raw_status(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex pre-push round 2 BLOCKING: if the labels-load or
+    ``parse_8k_filing`` raises AFTER ``store_raw`` committed, the
+    parser MUST return ``_failed_outcome(raw_status='stored')`` so
+    the manifest reflects actual raw state. Otherwise the manifest
+    would say ``raw_status='absent'`` while the raw row physically
+    exists — permanent split between the two tables, plus store_raw
+    unique-conflict churn on every retry."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import eight_k as parser_module
+
+    _seed_instrument(ebull_test_conn, iid=8730004, symbol="SPLIT")
+    _seed_pending_8k(ebull_test_conn, accession="0000111111-26-000001", instrument_id=8730004)
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_8K_HTML,
+    )
+
+    def _raising_parse(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("synthetic parser crash")
+
+    monkeypatch.setattr(parser_module, "parse_8k_filing", _raising_parse)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_8k", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
+    row = get_manifest_row(ebull_test_conn, "0000111111-26-000001")
+    assert row is not None
+    assert row.ingest_status == "failed"
+    # Critical: raw_status=stored because store_raw ran BEFORE the
+    # parse exception. Without the fix this would be 'absent' and
+    # diverge from the filing_raw_documents row that physically exists.
+    assert row.raw_status == "stored"
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM filing_raw_documents WHERE accession_number = '0000111111-26-000001'")
+        assert cur.fetchone() is not None
+
+
 def test_parser_registered_via_register_all() -> None:
     """``register_all_parsers()`` populates the worker registry with
     every production parser. Pins the architecture invariant that the

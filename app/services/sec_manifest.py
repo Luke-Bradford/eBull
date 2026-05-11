@@ -355,6 +355,18 @@ def transition_status(
             params["error"] = error
             set_clauses.append(sql.SQL("next_retry_at = %(next_retry)s"))
             params["next_retry"] = next_retry_at
+            # PR #1126 Codex round 2 — a parser can store raw BEFORE
+            # the parse phase fails. Without honouring raw_status on
+            # the failed branch, the manifest column stays 'absent'
+            # while the raw body physically exists in
+            # ``filing_raw_documents``. That split breaks the audit
+            # invariant (raw_status reflects the table) and causes
+            # the worker to retry with `outcome.raw_status='absent'`
+            # forever — store_raw re-fires on every retry and the
+            # row never escapes the `failed` state.
+            if raw_status is not None:
+                set_clauses.append(sql.SQL("raw_status = %(raw_status)s"))
+                params["raw_status"] = raw_status
         elif ingest_status == "tombstoned":
             set_clauses.append(sql.SQL("error = %(error)s"))
             params["error"] = error
