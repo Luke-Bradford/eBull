@@ -15,6 +15,13 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Fail fast instead of silent port-hop to 5174/5175/... When 5173 is
+    // held by a zombie vite instance the operator notices immediately
+    // and the VS Code task pre-kill (.vscode/tasks.json) gets a chance
+    // to reap before the next launch. Without this, orphaned vite
+    // processes accumulate across sessions (each session takes the next
+    // free port) until lsof -iTCP:517[3-9] is a wall of zombies.
+    strictPort: true,
     proxy: {
       "/api": {
         target: "http://localhost:8000",

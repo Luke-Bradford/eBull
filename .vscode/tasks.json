@@ -29,7 +29,21 @@
     {
       "label": "stack: backend",
       "type": "shell",
-      "command": "uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000",
+      "windows": {
+        "command": "./scripts/clear-port.ps1 8000; uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "./scripts/clear-port.sh 8000 && uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000"
+      },
+      "linux": {
+        "command": "./scripts/clear-port.sh 8000 && uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000"
+      },
       "isBackground": true,
       "presentation": {
         "reveal": "always",
@@ -42,7 +56,21 @@
     {
       "label": "stack: frontend",
       "type": "shell",
-      "command": "pnpm dev",
+      "windows": {
+        "command": "../scripts/clear-port.ps1 5173; pnpm dev",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "../scripts/clear-port.sh 5173 && pnpm dev"
+      },
+      "linux": {
+        "command": "../scripts/clear-port.sh 5173 && pnpm dev"
+      },
       "options": {
         "cwd": "${workspaceFolder}/frontend"
       },
@@ -58,7 +86,21 @@
     {
       "label": "stack: jobs",
       "type": "shell",
-      "command": "uv run python -m app.jobs",
+      "windows": {
+        "command": "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'app\\.jobs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; uv run python -m app.jobs",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "pgrep -f 'python -m app.jobs' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"
+      },
+      "linux": {
+        "command": "pgrep -f 'python -m app.jobs' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"
+      },
       "isBackground": true,
       "presentation": {
         "reveal": "always",
