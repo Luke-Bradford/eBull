@@ -179,17 +179,22 @@ def _parse_13dg(
     # ET.ParseError covers malformed XML; ValueError covers schema
     # errors (missing field, unknown submissionType); broader Exception
     # covers unexpected raises (e.g. AttributeError in a tag walker).
+    # Every parse-failure branch writes an ingest-log row so the audit
+    # trail is consistent regardless of which exception type fires
+    # (#1129 review WARNING + PREVENTION).
     try:
         filing: BlockholderFiling = parse_primary_doc(primary_xml)
-    except (ValueError, ET.ParseError) as exc:
+    except Exception as exc:  # noqa: BLE001 — broad catch + audit-log write
+        # Tag the error string by exception class so operators reading
+        # blockholder_filings_ingest_log can distinguish expected
+        # schema/parse failures from unexpected parser crashes.
+        is_unexpected = not isinstance(exc, (ValueError, ET.ParseError))
+        kind = "parse error (unexpected)" if is_unexpected else "parse error"
         logger.exception(
-            "13D/G manifest parser: parse raised accession=%s",
+            "13D/G manifest parser: parse raised accession=%s (unexpected=%s)",
             accession,
+            is_unexpected,
         )
-        # Record the failed parse in the ingest-log so an operator
-        # can clear the row to force a retry once the parser is
-        # improved. Savepoint so log-write failure doesn't abort
-        # the outer worker tx.
         try:
             with conn.transaction():
                 _record_ingest_attempt(
@@ -198,20 +203,14 @@ def _parse_13dg(
                     accession_number=accession,
                     submission_type=None,
                     status="failed",
-                    error=f"parse failed: {exc}",
+                    error=f"{kind}: {exc}",
                 )
         except Exception:  # noqa: BLE001 — log failure shouldn't mask parse failure
             logger.exception(
                 "13D/G manifest parser: ingest-log INSERT failed after parse error accession=%s",
                 accession,
             )
-        return _failed_outcome(f"parse error: {exc}", raw_status="stored")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "13D/G manifest parser: parse raised (unexpected) accession=%s",
-            accession,
-        )
-        return _failed_outcome(f"parse error (unexpected): {exc}", raw_status="stored")
+        return _failed_outcome(f"{kind}: {exc}", raw_status="stored")
 
     # Resolve the filer's canonical name — pure-Python, no DB.
     filer_name = next(

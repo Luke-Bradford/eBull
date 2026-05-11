@@ -453,6 +453,59 @@ def test_parse_phase_exception_preserves_stored_raw_status(
         assert cur.fetchone() is not None
 
 
+def test_unexpected_parse_exception_writes_ingest_log(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1129 review WARNING: every parse-failure branch must write a
+    ``blockholder_filings_ingest_log`` row, regardless of exception
+    type. Tests that a non-ValueError/ET.ParseError crash (e.g.
+    RuntimeError) still produces an audit-log row with status='failed'
+    so dashboards see a consistent gap signal."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import sec_13dg as parser_module
+
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession="0005555555-25-000005",
+        filer_cik="0002093607",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    def _raising_parse(xml):  # noqa: ARG001
+        raise RuntimeError("synthetic unexpected parser crash")
+
+    monkeypatch.setattr(parser_module, "parse_primary_doc", _raising_parse)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
+    row = get_manifest_row(ebull_test_conn, "0005555555-25-000005")
+    assert row is not None
+    assert row.ingest_status == "failed"
+    assert row.raw_status == "stored"
+    assert row.error is not None and "unexpected" in row.error
+
+    # Critical: ingest-log row exists for the broad-except path too.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error FROM blockholder_filings_ingest_log WHERE accession_number = '0005555555-25-000005'"
+        )
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "failed"
+    assert log[1] is not None and "unexpected" in log[1]
+
+
 def test_parser_registered_for_both_sources() -> None:
     """``register_all_parsers`` wires the SAME callable against
     sec_13d AND sec_13g."""
