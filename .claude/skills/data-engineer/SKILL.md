@@ -909,3 +909,35 @@ Winner-priority order across categories: `source` priority (`form4 > form3 > 13d
 - `ON DELETE CASCADE` on `*_audit` / `*_log` (prev-log L350).
 - `SELECT DISTINCT` over a multi-column row when the dedup target is one column — use `DISTINCT ON (col)`.
 - `dict[cik, instrument_id]` for any CIK→instrument lookup post-#1102 — must be `dict[cik, list[instrument_id]]` (the multimap pattern from #1117). Single-result collapse drops share-class siblings silently.
+
+## 13. Per-source retention horizon
+
+eBull doesn't keep every historical filing forever. Each source has a backfill horizon (what bootstrap drains) and a steady-state cadence (how the scheduled job refreshes). Steady-state only fetches NEW accessions discovered via atom / daily-index / per-CIK poll — no re-fetch of in-horizon data unless explicit rewash.
+
+| Source | Backfill | Steady-state cadence | Storage budget per instrument |
+|---|---|---|---|
+| Form 4 / 3 / 5 | last 2 years | atom + daily-index | ~50-200 rows |
+| 13F-HR | last 4 quarters | quarterly bulk sweep | ~4 quarterly rollups |
+| N-PORT | last 4 quarters | monthly bulk + atom | ~4 quarterly rollups |
+| 13D / 13G | last 2 years | atom + daily-index | ~5-20 rows |
+| DEF 14A | last 2 years | atom + daily-index | ~1-2 proxy seasons |
+| 8-K | last 2 years | atom | ~30-100 events |
+| 10-K | last 3 annual | atom + daily-index | 3 filings |
+| 10-Q | last 8 quarterly | atom + daily-index | 8 filings |
+| FINRA short interest | last 2 years | bi-monthly per FINRA cadence | ~48 bi-monthly rows |
+| Form 144 | rolling 90 days (effective ≤ 90d post-filing) | atom | ephemeral |
+| SC 13E | last 2 years | atom + daily-index | rare event filings |
+
+### 13.A Backfill horizon enforcement
+
+The horizon is enforced at the **discovery layer**, not at the parser layer. Discovery sites (`check_freshness`, daily-index walker, per-CIK poll) filter by `filed_at >= cutoff` so older accessions never make it into the manifest. Once bootstrap completes, the steady-state poll's `last_known_filing_id` watermark naturally restricts to new accessions.
+
+**Rule:** when adding a new source, the discovery layer MUST apply the cutoff before writing to `sec_filing_manifest`. Filtering at the parser layer (i.e. discovery writes everything; parser drops old) is forbidden because it leaves dead manifest rows that the `/coverage/manifest-parsers` audit counts as `pending`.
+
+### 13.B Rewash retention exception
+
+A parser-version bump triggers re-parse of in-horizon raw bodies (`filing_raw_documents`). Out-of-horizon bodies are NOT retained; if a rewash needs older accessions, the operator runs targeted `sec_rebuild` with `discover=True` to re-fetch from SEC. This pattern is documented in [docs/settled-decisions.md](../../../docs/settled-decisions.md).
+
+### 13.C Adding a new source — derivable from this rule
+
+`(filing size per instrument) × (rows per instrument over the horizon)` must fit the storage budget for the universe (~12k tradable instruments). A source with 100k filings per instrument over 2 years would blow the budget — pick a shorter horizon or a coarser steady-state cadence. The horizon values in the table above are derived from this constraint; do not change them without re-computing the budget for that source.
