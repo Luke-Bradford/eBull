@@ -61,6 +61,7 @@ DocumentKind = Literal[
     "primary_doc_13dg",
     "form4_xml",
     "form3_xml",
+    "form5_xml",
     "def14a_body",
     "nport_xml",
 ]

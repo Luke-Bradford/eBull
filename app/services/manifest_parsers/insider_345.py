@@ -1,18 +1,25 @@
-"""Form 3 / Form 4 manifest-worker parser adapter (#873).
+"""Form 3 / Form 4 / Form 5 manifest-worker parser adapter (#873).
 
-Wraps the existing ``parse_form_3_xml`` / ``parse_form_4_xml`` + the
-matching upsert paths into the manifest-worker ``ParserFn`` contract.
-One callable is registered against each source — Form 3 and Form 4
-share the EDGAR ownership XML namespace but persist into different
-tables (``insider_initial_holdings`` vs ``insider_transactions``)
-and have separate parser_version watermarks, so they are kept as two
-sibling callables (not merged into one dispatch).
+Wraps ``parse_form_3_xml`` / ``parse_form_4_xml`` / ``parse_form_5_xml``
++ the matching upsert paths into the manifest-worker ``ParserFn``
+contract. Three callables registered against three sources — they
+share the EDGAR ownership XML namespace but Form 3 persists snapshot
+holdings into ``insider_initial_holdings`` while Form 4 / Form 5
+persist transactions into ``insider_transactions``. Separate
+parser_version watermarks let rewash target each form independently.
 
-Form 5 (annual statement of changes in beneficial ownership) is
-NOT covered by this PR — the legacy ingester does not parse Form 5
-and adding it requires a Form 5 parser + upsert path. Form 5
-manifest rows continue to skip with ``no parser`` until the
-legacy support lands.
+Form 5 (annual statement of changes in beneficial ownership, Rule
+16a-3(f)) shares the Form 4 ownership XML schema. The annual filing
+mainly captures late-reported Form 4 transactions; persistence reuses
+``insider_filings`` (with ``document_type='5'`` recording provenance)
+and ``insider_transactions``. Observation write-through emits
+``source='form4'`` since the ``OwnershipSource`` enum on the
+observations CHECK constraint does not include ``form5``;
+operator-visible provenance is preserved on ``insider_filings`` via
+the document_type JOIN. The optional Form 5 year-end holdings
+reconciliation section is out of scope — those filings return
+``None`` from the parser and tombstone via the standard manifest
+adapter path.
 
 ParseOutcome contract:
 
@@ -61,10 +68,12 @@ from app.services.insider_form3_ingest import (
 )
 from app.services.insider_transactions import (
     _PARSER_VERSION_FORM4,
+    _PARSER_VERSION_FORM5,
     _canonical_form_4_url,
     _write_tombstone,
     parse_form_3_xml,
     parse_form_4_xml,
+    parse_form_5_xml,
     upsert_filing,
 )
 from app.services.manifest_parsers._classify import (
@@ -498,14 +507,215 @@ def _parse_form3(
     )
 
 
-def register() -> None:
-    """Register Form 3 + Form 4 parsers with the manifest worker.
+def _parse_form5(
+    conn: psycopg.Connection[Any],
+    row: Any,  # ManifestRow
+) -> Any:  # ParseOutcome
+    """Manifest-worker parser for one Form 5 / 5/A accession.
 
-    Form 5 is intentionally NOT registered — the legacy ingester
-    has no Form 5 parser; Form 5 manifest rows continue to skip
-    until upstream support lands.
+    Same shape as ``_parse_form4`` but routes through
+    ``parse_form_5_xml``. Persistence reuses ``upsert_filing`` so the
+    transactions land in ``insider_transactions`` and the parent row
+    in ``insider_filings`` carries ``document_type='5'``. Tombstones
+    pass ``document_type='5'`` to ``_write_tombstone`` so operator
+    audits filtering by document_type see Form 5 failures distinctly.
+
+    ``document_kind='form5_xml'`` keeps the raw body distinct from
+    Form 4 in ``filing_raw_documents`` — a future Form 5 parser-
+    version bump rewashes only Form 5 rows.
     """
+    from app.jobs.sec_manifest_worker import ParseOutcome
+
+    accession = row.accession_number
+    instrument_id = row.instrument_id
+    url = row.primary_document_url
+
+    if instrument_id is None:
+        logger.warning(
+            "form5 manifest parser: accession=%s has no instrument_id; tombstoning",
+            accession,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM5,
+            error="missing instrument_id",
+        )
+    if not url:
+        logger.warning(
+            "form5 manifest parser: accession=%s has no primary_document_url; tombstoning",
+            accession,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM5,
+            error="missing primary_document_url",
+        )
+
+    # SEC XSL-rendering prefix strip — Atom discovery may carry the
+    # rendered URL. ``_canonical_form_4_url`` matches any of the
+    # ``/xslF345Xnn/`` prefixes used by Forms 3/4/5 (shared XSL).
+    canonical_url = _canonical_form_4_url(url)
+
+    try:
+        with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+            xml = provider.fetch_document_text(canonical_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "form5 manifest parser: fetch raised accession=%s url=%s: %s",
+            accession,
+            canonical_url,
+            exc,
+        )
+        return _failed_outcome(f"fetch error: {exc}", parser_version=_PARSER_VERSION_FORM5)
+
+    if not xml:
+        try:
+            with conn.transaction():
+                _write_tombstone(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession,
+                    primary_document_url=canonical_url,
+                    document_type="5",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "form5 manifest parser: tombstone INSERT failed accession=%s",
+                accession,
+            )
+            return _failed_outcome(f"tombstone error: {exc}", parser_version=_PARSER_VERSION_FORM5)
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM5,
+            error="empty or non-200 fetch",
+        )
+
+    try:
+        with conn.transaction():
+            store_raw(
+                conn,
+                accession_number=accession,
+                document_kind="form5_xml",
+                payload=xml,
+                parser_version=_PARSER_VERSION_FORM5,
+                source_url=canonical_url,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "form5 manifest parser: store_raw failed accession=%s",
+            accession,
+        )
+        return _failed_outcome(f"store_raw error: {exc}", parser_version=_PARSER_VERSION_FORM5)
+
+    try:
+        parsed = parse_form_5_xml(xml)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "form5 manifest parser: parse raised accession=%s",
+            accession,
+        )
+        try:
+            with conn.transaction():
+                _write_tombstone(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession,
+                    primary_document_url=canonical_url,
+                    document_type="5",
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "form5 manifest parser: tombstone INSERT failed after parse error accession=%s",
+                accession,
+            )
+        return _failed_outcome(f"parse error: {exc}", parser_version=_PARSER_VERSION_FORM5, raw_status="stored")
+
+    if parsed is None:
+        try:
+            with conn.transaction():
+                _write_tombstone(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession,
+                    primary_document_url=canonical_url,
+                    document_type="5",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "form5 manifest parser: tombstone INSERT failed accession=%s",
+                accession,
+            )
+            return _failed_outcome(f"tombstone error: {exc}", parser_version=_PARSER_VERSION_FORM5, raw_status="stored")
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM5,
+            raw_status="stored",
+            error="parser returned None (malformed XML, wrong document_type, or holdings-only filing)",
+        )
+
+    try:
+        with conn.transaction():
+            upsert_filing(
+                conn,
+                instrument_id=instrument_id,
+                accession_number=accession,
+                primary_document_url=canonical_url,
+                parsed=parsed,
+            )
+    except Exception as exc:  # noqa: BLE001
+        # PR #1131 discrimination: transient ``OperationalError`` →
+        # 1h retry; deterministic constraint violation → tombstone so
+        # the worker stops re-fetching a permanently broken accession.
+        logger.exception(
+            "form5 manifest parser: upsert failed accession=%s",
+            accession,
+        )
+        if is_transient_upsert_error(exc):
+            return _failed_outcome(
+                format_upsert_error(exc),
+                parser_version=_PARSER_VERSION_FORM5,
+                raw_status="stored",
+            )
+        try:
+            with conn.transaction():
+                _write_tombstone(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession,
+                    primary_document_url=canonical_url,
+                    document_type="5",
+                )
+        except Exception:  # noqa: BLE001 — tombstone failure shouldn't mask upsert failure
+            logger.exception(
+                "form5 manifest parser: tombstone INSERT failed after upsert error accession=%s",
+                accession,
+            )
+            return _failed_outcome(
+                f"upsert+tombstone error: {type(exc).__name__}: {exc}",
+                parser_version=_PARSER_VERSION_FORM5,
+                raw_status="stored",
+            )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM5,
+            raw_status="stored",
+            error=format_upsert_error(exc),
+        )
+
+    return ParseOutcome(
+        status="parsed",
+        parser_version=_PARSER_VERSION_FORM5,
+        raw_status="stored",
+    )
+
+
+def register() -> None:
+    """Register Form 3 + Form 4 + Form 5 parsers with the manifest
+    worker. All three share the EDGAR ownership XML schema but route
+    to distinct typed-table writes and carry independent
+    parser_version watermarks."""
     from app.jobs.sec_manifest_worker import register_parser
 
     register_parser("sec_form4", _parse_form4, requires_raw_payload=True)
     register_parser("sec_form3", _parse_form3, requires_raw_payload=True)
+    register_parser("sec_form5", _parse_form5, requires_raw_payload=True)

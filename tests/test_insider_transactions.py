@@ -23,6 +23,7 @@ from app.services.insider_transactions import (
     _canonical_form_4_url,
     filer_role_string,
     parse_form_4_xml,
+    parse_form_5_xml,
 )
 
 
@@ -635,3 +636,147 @@ class TestFilerRoleString:
 
     def test_no_flags_returns_none(self) -> None:
         assert filer_role_string(self._filer()) is None
+
+
+def _wrap_form5(inner_body: str, *, document_type: str = "5") -> str:
+    return f"""<?xml version="1.0"?>
+<ownershipDocument>
+  <documentType>{document_type}</documentType>
+  <periodOfReport>2025-12-31</periodOfReport>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Apple Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000005</rptOwnerCik>
+      <rptOwnerName>Form Five Filer</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isDirector>1</isDirector>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  {inner_body}
+</ownershipDocument>
+"""
+
+
+_FORM5_GIFT_TXN = """
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2025-11-15</value></transactionDate>
+      <transactionCoding>
+        <transactionCode>G</transactionCode>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>500</value></transactionShares>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>4500</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+"""
+
+
+class TestParseForm5Xml:
+    """parse_form_5_xml mirrors parse_form_4_xml structurally — the
+    same EDGAR ownership XML schema, the same ParsedFiling shape. The
+    documentType gate is the only delta."""
+
+    def test_basic_form5_gift_transaction(self) -> None:
+        parsed = parse_form_5_xml(_wrap_form5(_FORM5_GIFT_TXN))
+        assert parsed is not None
+        assert parsed.document_type == "5"
+        assert parsed.issuer_trading_symbol == "AAPL"
+        assert len(parsed.transactions) == 1
+        txn = parsed.transactions[0]
+        assert txn.txn_code == "G"
+        assert txn.shares == Decimal("500")
+        assert txn.acquired_disposed_code == "D"
+        assert txn.post_transaction_shares == Decimal("4500")
+
+    def test_amendment_accepted(self) -> None:
+        parsed = parse_form_5_xml(_wrap_form5(_FORM5_GIFT_TXN, document_type="5/A"))
+        assert parsed is not None
+        assert parsed.document_type == "5/A"
+
+    def test_form4_document_type_rejected(self) -> None:
+        # Mis-routed Form 4 → parser returns None so the adapter
+        # tombstones rather than mis-categorising the row.
+        assert parse_form_5_xml(_wrap_form5(_FORM5_GIFT_TXN, document_type="4")) is None
+
+    def test_form3_document_type_rejected(self) -> None:
+        assert parse_form_5_xml(_wrap_form5(_FORM5_GIFT_TXN, document_type="3")) is None
+
+    def test_empty_transactions_returns_none(self) -> None:
+        # Form 5 with only a holdings reconciliation section — out of
+        # scope for this PR; parser returns None so manifest adapter
+        # tombstones.
+        body = """
+          <nonDerivativeTable>
+            <nonDerivativeHolding>
+              <securityTitle><value>Common Stock</value></securityTitle>
+              <postTransactionAmounts>
+                <sharesOwnedFollowingTransaction><value>5000</value></sharesOwnedFollowingTransaction>
+              </postTransactionAmounts>
+              <ownershipNature>
+                <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+              </ownershipNature>
+            </nonDerivativeHolding>
+          </nonDerivativeTable>
+        """
+        assert parse_form_5_xml(_wrap_form5(body)) is None
+
+    def test_malformed_xml_returns_none(self) -> None:
+        assert parse_form_5_xml("<not actually xml") is None
+        assert parse_form_5_xml("") is None
+
+    def test_non_ownership_root_returns_none(self) -> None:
+        assert parse_form_5_xml("<?xml version='1.0'?><somethingElse/>") is None
+
+    def test_missing_document_type_defaults_to_5(self) -> None:
+        """Parity with parse_form_4_xml / parse_form_3_xml: when
+        ``<documentType>`` is absent the parser defaults to the form
+        the manifest adapter routed to. Production XML missing the
+        element is rare; the manifest source ('sec_form5') is the
+        authoritative router so the default matches the route."""
+        xml = """<?xml version="1.0"?>
+<ownershipDocument>
+  <periodOfReport>2025-12-31</periodOfReport>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Apple Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000005</rptOwnerCik>
+      <rptOwnerName>Form Five Filer</rptOwnerName>
+    </reportingOwnerId>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2025-11-15</value></transactionDate>
+      <transactionCoding><transactionCode>G</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>100</value></transactionShares>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>
+"""
+        parsed = parse_form_5_xml(xml)
+        assert parsed is not None
+        assert parsed.document_type == "5"

@@ -1,30 +1,30 @@
-"""Tests for the Form 3 / Form 4 manifest-worker parser adapter (#873).
+"""Tests for the Form 3 / Form 4 / Form 5 manifest-worker parser
+adapter (#873).
 
-One callable registered per source — Form 3 and Form 4 share the
-EDGAR ownership XML namespace but persist into different tables
-(``insider_initial_holdings`` vs ``insider_transactions``) and
-carry separate parser_version watermarks. Form 5 is intentionally
-unregistered (no legacy support yet) and continues to skip.
+Three callables registered against three sources — they share the
+EDGAR ownership XML schema but persist into different tables
+(``insider_initial_holdings`` for Form 3 holdings;
+``insider_transactions`` for Form 4 + Form 5 transactions) and
+carry separate parser_version watermarks. Form 5 transactions
+write through with ``source='form4'`` (the observations CHECK enum
+lacks ``form5``); provenance is preserved on
+``insider_filings.document_type='5'``.
 
 Tests cover:
 
-- Happy path Form 4: XML fetch → store_raw → parse → upsert
-  ``insider_filings`` + ``insider_transactions`` rows → observation
-  write-through.
-- Happy path Form 3: XML fetch → store_raw → parse → upsert
-  ``insider_initial_holdings`` rows.
+- Happy path Form 4 / Form 3 / Form 5: XML fetch → store_raw →
+  parse → upsert + (for txn forms) observation write-through.
 - Tombstone on empty fetch: writes a tombstone row in
-  ``insider_filings`` so legacy discovery skips the accession.
+  ``insider_filings`` with the appropriate ``document_type``.
 - Tombstone on parse-None (malformed XML): same tombstone path,
   raw_status='stored' so manifest matches filing_raw_documents.
 - Parse-phase exception preserves raw_status='stored'.
 - Fetch raises: returns failed + 1h backoff.
-- Form 5 unregistered: sec_form5 source is debug-skipped by the
-  worker (no parser).
+- Deterministic upsert error tombstones; transient retries.
 - URL canonicalisation: SEC XSL-rendered URL → raw XML URL via
   ``_canonical_form_4_url``.
 - Registration: register_all_parsers wires sec_form3 + sec_form4
-  but NOT sec_form5.
+  + sec_form5.
 """
 
 from __future__ import annotations
@@ -82,6 +82,51 @@ _FAKE_FORM_4_XML = dedent("""<?xml version="1.0"?>
   <ownerSignature>
     <signatureName>Jane Smith</signatureName>
     <signatureDate>2026-04-16</signatureDate>
+  </ownerSignature>
+</ownershipDocument>
+""")
+
+
+_FAKE_FORM_5_XML = dedent("""<?xml version="1.0"?>
+<ownershipDocument>
+  <documentType>5</documentType>
+  <periodOfReport>2026-02-14</periodOfReport>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Apple Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000005</rptOwnerCik>
+      <rptOwnerName>Form Five Filer</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isDirector>1</isDirector>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2025-12-30</value></transactionDate>
+      <transactionCoding>
+        <transactionCode>G</transactionCode>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1000</value></transactionShares>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>9000</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+  <ownerSignature>
+    <signatureName>Form Five Filer</signatureName>
+    <signatureDate>2026-02-14</signatureDate>
   </ownerSignature>
 </ownershipDocument>
 """)
@@ -692,48 +737,361 @@ def test_xsl_url_canonicalised_before_fetch(
     assert "/xslF345X05/" not in fetched_urls[0]
 
 
-def test_form5_unregistered_skips(
+def test_form5_happy_path(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Form 5 (annual statement) has no registered parser. The worker
-    debug-skips the row and the manifest stays pending so a future
-    Form 5 onboarding sees the same backlog."""
+    """Form 5 routes through parse_form_5_xml + upsert_filing →
+    insider_filings(document_type='5') + insider_transactions row."""
     import app.services.manifest_parsers  # noqa: F401 — register
 
-    iid = 8760008
-    _seed_instrument(ebull_test_conn, iid=iid, symbol="ANN5")
+    iid = 8760080
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPL5")
     _seed_pending(
         ebull_test_conn,
-        accession="0000444444-26-000010",
+        accession="0000320193-26-000050",
         instrument_id=iid,
         source="sec_form5",
         form="5",
     )
     ebull_test_conn.commit()
 
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_FORM_5_XML,
+    )
+
     stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
     ebull_test_conn.commit()
 
-    assert stats.skipped_no_parser == 1
-    assert stats.parsed == 0
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, "0000320193-26-000050")
+    assert row is not None and row.ingest_status == "parsed"
+    assert row.raw_status == "stored"
+    assert row.parser_version == "form5-v1"
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT document_type, is_tombstone FROM insider_filings WHERE accession_number = '0000320193-26-000050'"
+        )
+        f = cur.fetchone()
+    assert f is not None
+    assert f[0] == "5"
+    assert f[1] is False
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM insider_transactions WHERE accession_number = '0000320193-26-000050'")
+        c = cur.fetchone()
+    assert c is not None and c[0] >= 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT byte_count FROM filing_raw_documents "
+            "WHERE accession_number = '0000320193-26-000050' AND document_kind = 'form5_xml'"
+        )
+        r = cur.fetchone()
+    assert r is not None and r[0] > 0
+
+    # Observation write-through emits source='form4' (no 'form5' in the
+    # ownership_*_observations source CHECK enum). The
+    # insider_filings.document_type='5' JOIN preserves operator-visible
+    # provenance.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT source FROM ownership_insiders_observations WHERE source_accession = '0000320193-26-000050'"
+        )
+        obs = cur.fetchall()
+    assert obs
+    assert all(o[0] == "form4" for o in obs)
+
+
+def test_form5_empty_fetch_tombstones(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty/404 → manifest tombstoned + insider_filings tombstone with
+    document_type='5' (audit attribution stays Form 5, not Form 4)."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    iid = 8760081
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="DEAD5")
+    _seed_pending(
+        ebull_test_conn,
+        accession="0000999999-26-000050",
+        instrument_id=iid,
+        source="sec_form5",
+        form="5",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: None,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    row = get_manifest_row(ebull_test_conn, "0000999999-26-000050")
+    assert row is not None and row.ingest_status == "tombstoned"
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT is_tombstone, document_type FROM insider_filings WHERE accession_number = '0000999999-26-000050'"
+        )
+        f = cur.fetchone()
+    assert f is not None
+    assert f[0] is True
+    assert f[1] == "5"
+
+
+def test_form5_parse_none_tombstones_with_stored_raw(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed XML → parser returns None → manifest tombstoned with
+    raw_status='stored' since store_raw committed BEFORE the parse."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    iid = 8760082
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="MAL5")
+    _seed_pending(
+        ebull_test_conn,
+        accession="0000888888-26-000050",
+        instrument_id=iid,
+        source="sec_form5",
+        form="5",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: "<not-ownership-xml/>",
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    row = get_manifest_row(ebull_test_conn, "0000888888-26-000050")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.raw_status == "stored"
+
+
+def test_form5_parse_phase_exception_preserves_stored_raw_status(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parse raise AFTER store_raw → failed + raw_status='stored'."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import insider_345 as parser_module
+
+    iid = 8760083
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="CRASH5")
+    _seed_pending(
+        ebull_test_conn,
+        accession="0000666666-26-000050",
+        instrument_id=iid,
+        source="sec_form5",
+        form="5",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_FORM_5_XML,
+    )
+
+    def _raising_parse(xml):  # noqa: ARG001
+        raise RuntimeError("synthetic Form 5 parser crash")
+
+    monkeypatch.setattr(parser_module, "parse_form_5_xml", _raising_parse)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
+    row = get_manifest_row(ebull_test_conn, "0000666666-26-000050")
+    assert row is not None
+    assert row.ingest_status == "failed"
+    assert row.raw_status == "stored"
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM filing_raw_documents "
+            "WHERE accession_number = '0000666666-26-000050' AND document_kind = 'form5_xml'"
+        )
+        assert cur.fetchone() is not None
+
+
+def test_form5_fetch_exception_marks_failed_with_backoff(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fetch raise → failed + 1h backoff so worker doesn't hammer SEC."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    iid = 8760084
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="BOOM5")
+    _seed_pending(
+        ebull_test_conn,
+        accession="0000777777-26-000050",
+        instrument_id=iid,
+        source="sec_form5",
+        form="5",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    def _boom(self, url):  # noqa: ARG001
+        raise RuntimeError("network kaput")
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _boom)
+
+    before = datetime.now(tz=UTC)
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
+    row = get_manifest_row(ebull_test_conn, "0000777777-26-000050")
+    assert row is not None and row.ingest_status == "failed"
+    assert row.error is not None and "fetch error" in row.error
+    assert row.next_retry_at is not None
+    delta = (row.next_retry_at - before).total_seconds()
+    assert 3300 < delta < 3900
+
+
+def test_form5_upsert_failure_tombstones(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1131 discrimination: deterministic upsert error tombstones
+    the manifest row + writes a Form 5 tombstone in insider_filings so
+    the worker stops re-fetching dead XML hourly."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import insider_345 as parser_module
+
+    iid = 8760085
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="UFAIL5")
+    _seed_pending(
+        ebull_test_conn,
+        accession="0000222222-26-000050",
+        instrument_id=iid,
+        source="sec_form5",
+        form="5",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_FORM_5_XML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("synthetic Form 5 upsert constraint violation")
+
+    monkeypatch.setattr(parser_module, "upsert_filing", _raising_upsert)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    assert stats.failed == 0
+    row = get_manifest_row(ebull_test_conn, "0000222222-26-000050")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.raw_status == "stored"
+    assert row.error is not None
+    assert "upsert error" in row.error
+    assert "RuntimeError" in row.error
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT is_tombstone, document_type FROM insider_filings WHERE accession_number = '0000222222-26-000050'"
+        )
+        f = cur.fetchone()
+    assert f is not None
+    assert f[0] is True
+    assert f[1] == "5"
+
+
+def test_form5_transient_upsert_exception_retries(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1131: ``OperationalError`` on Form 5 upsert keeps the manifest
+    in ``failed`` with a 1h backoff — the DB-side state is the problem,
+    not the parsed XML. No insider_filings tombstone written."""
+    import psycopg.errors
+
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import insider_345 as parser_module
+
+    iid = 8760086
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="TFAIL5")
+    _seed_pending(
+        ebull_test_conn,
+        accession="0000222222-26-000086",
+        instrument_id=iid,
+        source="sec_form5",
+        form="5",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_FORM_5_XML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise psycopg.errors.SerializationFailure("synthetic serialisation failure")
+
+    monkeypatch.setattr(parser_module, "upsert_filing", _raising_upsert)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
     assert stats.tombstoned == 0
-    row = get_manifest_row(ebull_test_conn, "0000444444-26-000010")
-    assert row is not None and row.ingest_status == "pending"
+    row = get_manifest_row(ebull_test_conn, "0000222222-26-000086")
+    assert row is not None
+    assert row.ingest_status == "failed"
+    assert row.raw_status == "stored"
+    assert row.error is not None
+    assert "SerializationFailure" in row.error
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM insider_filings WHERE accession_number = '0000222222-26-000086'")
+        assert cur.fetchone() is None
 
 
-def test_parser_registered_form3_and_form4_but_not_form5() -> None:
-    """sec_form3 + sec_form4 wired; sec_form5 deliberately NOT."""
+def test_parser_registers_form3_form4_form5() -> None:
+    """sec_form3 + sec_form4 + sec_form5 all wired by register_all_parsers."""
     from app.jobs.sec_manifest_worker import registered_parser_sources
     from app.services.manifest_parsers import register_all_parsers
 
     sources = registered_parser_sources()
     assert "sec_form3" in sources
     assert "sec_form4" in sources
-    assert "sec_form5" not in sources
+    assert "sec_form5" in sources
 
     clear_registered_parsers()
     assert "sec_form3" not in registered_parser_sources()
     register_all_parsers()
     assert "sec_form3" in registered_parser_sources()
     assert "sec_form4" in registered_parser_sources()
-    assert "sec_form5" not in registered_parser_sources()
+    assert "sec_form5" in registered_parser_sources()
