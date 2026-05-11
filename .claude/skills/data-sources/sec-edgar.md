@@ -516,6 +516,46 @@ Where this knowledge already lives in code:
 | Raw-filing cache | [app/services/raw_filings.py](../../../app/services/raw_filings.py) |
 | Schedulers (conditional fetch) | [app/workers/scheduler.py:1460-1574](../../../app/workers/scheduler.py#L1460-L1574) |
 
+## 11. Manifest-worker parser onboarding
+
+### 11.1 Architecture rule
+
+Every SEC source has a registered parser in `app/services/manifest_parsers/<source>.py`. The package's `register_all_parsers()` runs at module-import time from both `app/main.py` and `app/jobs/__main__.py` so API + worker share the same registry view. If a source has no parser, the worker debug-skips its manifest rows and `GET /coverage/manifest-parsers` reports `has_registered_parser=False` for that source.
+
+Adding a new source is a five-step contract — anything beyond these is over-engineering:
+
+1. Add a `register()` call to `app/services/manifest_parsers/<source>.py`. The parser receives `(conn, ManifestRow)` and returns `ParseOutcome`.
+2. Add `from . import <source> as _<source>` to `app/services/manifest_parsers/__init__.py` and a `_<source>.register()` line in `register_all_parsers()`.
+3. Use `requires_raw_payload=True` for any payload-backed source (Form 4 XML, 13F infotable, 13D/G primary doc, DEF 14A HTML, NPORT-P XML, 10-K/Q/8-K HTML). The worker rejects parsed outcomes with `raw_status='absent'` for these.
+4. Wrap every DB write (`store_raw`, observation upsert, tombstone insert) in `conn.transaction()` so a partial failure doesn't leave the worker's outer tx aborted before `transition_status` fires.
+5. Failed outcomes from fetch/store/upsert errors set `next_retry_at = now + _backoff_for(0)` explicitly (the worker only computes backoff for parser-raised exceptions; returned `failed` outcomes pass through as-is).
+
+The legacy ingest job for the same source can run in parallel during cutover — parent UPSERTs are idempotent. The legacy job retires once the manifest path catches up.
+
+### 11.2 Per-source backfill horizon
+
+Bootstrap drains the horizon. Steady-state refresh fetches only new accessions discovered via atom / daily-index / per-CIK poll — no re-fetch of in-horizon data unless explicit rewash (§3.7).
+
+| Source | Backfill | Steady-state cadence |
+|---|---|---|
+| Form 4 / 3 / 5 | last 2 years | atom + daily-index |
+| 13F-HR | last 4 quarters | quarterly bulk sweep |
+| N-PORT | last 4 quarters | monthly bulk + atom |
+| 13D / 13G | last 2 years | atom + daily-index |
+| DEF 14A | last 2 years | atom + daily-index |
+| 8-K | last 2 years | atom |
+| 10-K | last 3 annual | atom + daily-index |
+| 10-Q | last 8 quarterly | atom + daily-index |
+| FINRA short interest | last 2 years | bi-monthly per FINRA cadence |
+| Form 144 | rolling 90 days (filing → effective ≤ 90d) | atom |
+| SC 13E | last 2 years | atom + daily-index |
+
+**Why per-source rather than uniform:** Form 4 has tens of millions of accessions in a 2-year window but is small per filing (~10 KB XML); the cost is well within bounds. 13F has fewer but heavier filings — limiting to 4 quarters keeps disk + parse cost bounded. Per-filing-size × per-source-cadence determines retention; arbitrary cutoffs cost storage without informing decisions.
+
+**Bootstrap drain implementation:** scheduler stages with `min_period_of_report` / `start_date` params per source. The horizon is enforced at the discovery layer (`check_freshness` + daily-index walker filter by `filed_at >= cutoff`) so older accessions never make it into the manifest. Once bootstrap completes, the steady-state poll's `last_known_filing_id` watermark naturally restricts to new accessions.
+
+**Rewash retention exception:** a parser-version bump triggers re-parse of in-horizon raw bodies. Out-of-horizon bodies are NOT retained; if the rewash needs older accessions, the operator runs a targeted `sec_rebuild` with `discover=True` to re-fetch.
+
 ## 10. Sources
 
 - SEC accessing-edgar-data: <https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data>
