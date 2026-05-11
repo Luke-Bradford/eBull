@@ -442,6 +442,56 @@ def test_form4_parse_phase_exception_preserves_stored_raw_status(
         assert cur.fetchone() is not None
 
 
+def test_form4_upsert_failure_tombstones(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #1130 review WARNING: Form 4 upsert failure must tombstone
+    (not failed+1h retry) so deterministic constraint violations on
+    insider_filings/insider_transactions don't loop the worker
+    refetching the same dead XML hourly. Symmetry with Form 3 policy."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import insider_345 as parser_module
+
+    iid = 8760010
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="UFAIL4")
+    _seed_pending(
+        ebull_test_conn,
+        accession="0000222222-26-000010",
+        instrument_id=iid,
+        source="sec_form4",
+        form="4",
+    )
+    ebull_test_conn.commit()
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_FORM_4_XML,
+    )
+
+    def _raising_upsert(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("synthetic Form 4 upsert constraint violation")
+
+    monkeypatch.setattr(parser_module, "upsert_filing", _raising_upsert)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    assert stats.failed == 0
+    row = get_manifest_row(ebull_test_conn, "0000222222-26-000010")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.raw_status == "stored"
+    assert row.error is not None and "upsert failed" in row.error
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT is_tombstone FROM insider_filings WHERE accession_number = '0000222222-26-000010'")
+        f = cur.fetchone()
+    assert f is not None and f[0] is True
+
+
 def test_form3_upsert_failure_tombstones_per_legacy_parity(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

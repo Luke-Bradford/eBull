@@ -245,11 +245,45 @@ def _parse_form4(
                 parsed=parsed,
             )
     except Exception as exc:  # noqa: BLE001
+        # PR #1130 review WARNING: deterministic constraint failures
+        # on ``insider_filings`` / ``insider_transactions`` (bad date,
+        # FK miss, unique violation under unexpected state) MUST NOT
+        # retry hourly forever — the bad XML stays bad. Mirror the
+        # Form 3 policy (tombstone-on-upsert-fail) for symmetry across
+        # the insider lanes. Legacy Form 4 ingester at
+        # insider_transactions.py:1593 also has the retry-loop bug;
+        # that's tracked separately for a legacy patch + 8-K / 13D/G
+        # consistency sweep. Transient/deterministic discrimination
+        # via psycopg exception class is the proper long-term fix
+        # (deferred).
         logger.exception(
-            "form4 manifest parser: upsert failed accession=%s",
+            "form4 manifest parser: upsert failed accession=%s; tombstoning per Form 3 parity",
             accession,
         )
-        return _failed_outcome(f"upsert error: {exc}", parser_version=_PARSER_VERSION_FORM4, raw_status="stored")
+        try:
+            with conn.transaction():
+                _write_tombstone(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession,
+                    primary_document_url=canonical_url,
+                )
+        except Exception:  # noqa: BLE001 — tombstone failure shouldn't mask upsert failure
+            logger.exception(
+                "form4 manifest parser: tombstone INSERT failed after upsert error accession=%s",
+                accession,
+            )
+            return _failed_outcome(
+                f"upsert+tombstone error: {exc}",
+                parser_version=_PARSER_VERSION_FORM4,
+                raw_status="stored",
+            )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM4,
+            raw_status="stored",
+            error=f"upsert failed: {exc}",
+        )
 
     return ParseOutcome(
         status="parsed",
