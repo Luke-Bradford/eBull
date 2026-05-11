@@ -13,6 +13,13 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+# #873: importing this package side-effect-populates
+# ``sec_manifest_worker._PARSERS`` so the ``/coverage/manifest-parsers``
+# audit endpoint reads the same registry the worker process sees.
+# Without this import the API would always report
+# ``has_registered_parser=False`` while the worker actually parses,
+# producing a false-stuck operator signal.
+import app.services.manifest_parsers  # noqa: F401, E402
 from app.api._debug_ws import router as debug_ws_router
 from app.api.alerts import router as alerts_router
 from app.api.attribution import router as attribution_router

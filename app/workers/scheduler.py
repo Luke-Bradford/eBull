@@ -275,6 +275,11 @@ JOB_SEC_N_PORT_INGEST = "sec_n_port_ingest"
 JOB_CUSIP_UNIVERSE_BACKFILL = "cusip_universe_backfill"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
+# #873 — manifest worker tick. Drains pending + retryable
+# ``sec_filing_manifest`` rows by dispatching the registered parser
+# for each row's source. Cadence is frequent (every 5 min) so atom-
+# discovered + per-CIK-polled new accessions are parsed promptly.
+JOB_SEC_MANIFEST_WORKER = "sec_manifest_worker"
 
 # PR1c #1064 — promoted from bespoke wrappers in
 # ``app/services/bootstrap_orchestrator.py``. Each is now a registered
@@ -1058,6 +1063,37 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # exchanges refresh: fresh DB picks up labels without waiting
         # a week.
         cadence=Cadence.weekly(weekday=6, hour=4, minute=30),
+        catch_up_on_boot=True,
+    ),
+    # #873 — Manifest worker tick.
+    #
+    # Drains pending + retryable ``sec_filing_manifest`` rows by
+    # dispatching the registered parser for each row's source. Without
+    # this entry the worker is module-imported but never invoked, so
+    # every atom-discovered / per-CIK-polled / daily-index-reconciled
+    # manifest row sits in ``pending`` forever and the ``/coverage/
+    # manifest-parsers`` audit shows the full backlog as stuck.
+    #
+    # Cadence: every 5 min so fresh accessions parse within minutes of
+    # discovery. The worker self-bounds to ``max_rows=100`` per tick,
+    # so a single fire is short. Pre-#873 nothing registered any
+    # parser, so this scheduler entry was deferred until at least one
+    # parser is wired.
+    ScheduledJob(
+        name=JOB_SEC_MANIFEST_WORKER,
+        display_name="SEC manifest worker tick",
+        source="sec_rate",
+        description=(
+            "Drain pending + retryable sec_filing_manifest rows. "
+            "Per-tick dispatch fetches the body, persists raw, parses, "
+            "and writes typed observation rows for every source with a "
+            "registered parser. Sources without a parser are debug-"
+            "skipped and surface in /coverage/manifest-parsers."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
+        # Catch-up on boot: a fresh dev stack would otherwise wait
+        # 5 min before processing any manifest backlog. The tick is
+        # bounded at max_rows=100 so the boot cost is small.
         catch_up_on_boot=True,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
@@ -3695,6 +3731,37 @@ def sec_dividend_calendar_ingest() -> None:
             result.rows_updated,
             result.fetch_errors,
             result.parse_misses,
+        )
+
+
+def sec_manifest_worker_tick() -> None:
+    """#873 — One drain pass over ``sec_filing_manifest``.
+
+    Reads up to 100 pending / retryable rows (across all sources),
+    dispatches the registered parser for each row's source, and lets
+    the worker handle the manifest state transitions. Sources with
+    no parser are debug-skipped and surface in
+    ``GET /coverage/manifest-parsers``.
+
+    Bounded at ``max_rows=100`` per tick so each fire is short.
+    Backlog drains across successive ticks at the every-5-min cadence
+    declared in ``SCHEDULED_JOBS``.
+    """
+    from app.jobs.sec_manifest_worker import run_manifest_worker
+
+    with _tracked_job(JOB_SEC_MANIFEST_WORKER) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            stats = run_manifest_worker(conn, source=None, max_rows=100)
+            conn.commit()
+
+        tracker.row_count = stats.parsed + stats.tombstoned + stats.failed
+        logger.info(
+            "sec_manifest_worker tick: processed=%d parsed=%d tombstoned=%d failed=%d skipped_no_parser=%d",
+            stats.rows_processed,
+            stats.parsed,
+            stats.tombstoned,
+            stats.failed,
+            stats.skipped_no_parser,
         )
 
 
