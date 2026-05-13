@@ -155,6 +155,53 @@ def test_trigger_bootstrap_iterate_from_pending_returns_409(
     assert detail["reason"] == "bootstrap_not_resumable"
 
 
+def test_trigger_bootstrap_iterate_no_failed_stages_does_not_enqueue(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """#1139 — iterate against a partial_error run that has no failed
+    stages (synthetic edge case from manual operator fixes) must NOT
+    enqueue a no-op orchestrator round. Surface as 409
+    ``bootstrap_no_failed_stages`` instead.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    run = ebull_test_conn.execute(
+        """
+        INSERT INTO bootstrap_runs (status, completed_at)
+        VALUES ('partial_error', now())
+        RETURNING id
+        """
+    ).fetchone()
+    assert run is not None
+    run_id = int(run[0])
+    ebull_test_conn.execute(
+        """
+        INSERT INTO bootstrap_stages
+            (bootstrap_run_id, stage_key, stage_order, lane, job_name,
+             status, started_at, completed_at, last_error)
+        VALUES (%s, 'init', 0, 'init', 'job_x', 'success', now(), now(), NULL)
+        """,
+        (run_id,),
+    )
+    _seed_bootstrap_state(ebull_test_conn, "partial_error")
+    ebull_test_conn.execute(
+        "UPDATE bootstrap_state SET last_run_id = %s WHERE id = 1",
+        (run_id,),
+    )
+    ebull_test_conn.execute("DELETE FROM pending_job_requests WHERE job_name = 'bootstrap_orchestrator'")
+    ebull_test_conn.commit()
+
+    resp = client.post("/system/processes/bootstrap/trigger", json={"mode": "iterate"})
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "bootstrap_no_failed_stages"
+
+    # Pin the actual no-op guarantee: NO orchestrator queue row landed.
+    count_row = ebull_test_conn.execute(
+        "SELECT COUNT(*) FROM pending_job_requests WHERE job_name = 'bootstrap_orchestrator'"
+    ).fetchone()
+    assert count_row is not None
+    assert int(count_row[0]) == 0
+
+
 def test_trigger_bootstrap_full_wash_inserts_fence_row(
     conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
 ) -> None:

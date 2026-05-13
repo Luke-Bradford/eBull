@@ -37,6 +37,8 @@ from app.services.bootstrap_orchestrator import (
 )
 from app.services.bootstrap_state import (
     BootstrapAlreadyRunning,
+    BootstrapNoPriorRun,
+    BootstrapNotResettable,
     BootstrapNotRunning,
     cancel_run,
     force_mark_complete,
@@ -46,7 +48,7 @@ from app.services.bootstrap_state import (
     start_run,
 )
 from app.services.process_stop import StopAlreadyPendingError
-from app.services.sync_orchestrator.dispatcher import publish_manual_job_request
+from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 
 logger = logging.getLogger(__name__)
 
@@ -365,18 +367,42 @@ def run_bootstrap(
     in depth via the partial unique index on
     ``bootstrap_runs(status='running')``.
 
-    On success: creates a new ``bootstrap_runs`` row, seeds 17
-    pending ``bootstrap_stages`` rows, flips the singleton state to
+    #1139 — ``start_run`` and the ``pending_job_requests`` insert
+    share one outer transaction on the request's pooled connection.
+    psycopg3 nests ``start_run``'s own ``with conn.transaction():``
+    as a SAVEPOINT, so a publish failure rolls both the SAVEPOINT
+    and the outer transaction back — the singleton cannot strand at
+    ``status='running'`` with no queue row.
+
+    On success: creates a new ``bootstrap_runs`` row (with the
+    request operator's UUID stamped on
+    ``triggered_by_operator_id`` for audit), seeds the pending
+    ``bootstrap_stages`` rows, flips the singleton state to
     ``running``, then publishes a ``manual_job`` queue row pointing
     at the ``bootstrap_orchestrator`` invoker. Returns 202 with the
     new ``run_id`` and the queue ``request_id``.
     """
+    requested_by = _identify_requestor(request)
+    operator_uuid = _operator_uuid(request)
     try:
-        run_id = start_run(
-            conn,
-            operator_id=None,
-            stage_specs=get_bootstrap_stage_specs(),
-        )
+        with conn.transaction():
+            run_id = start_run(
+                conn,
+                operator_id=operator_uuid,
+                stage_specs=get_bootstrap_stage_specs(),
+            )
+            try:
+                request_id = publish_manual_job_request_with_conn(
+                    conn,
+                    JOB_BOOTSTRAP_ORCHESTRATOR,
+                    requested_by=requested_by,
+                )
+            except psycopg.OperationalError as exc:
+                logger.exception("bootstrap: queue publish failed (transient)")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={"error": "queue_publish_failed"},
+                ) from exc
     except BootstrapAlreadyRunning as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -386,13 +412,12 @@ def run_bootstrap(
             },
         ) from exc
 
-    requested_by = _identify_requestor(request)
-    request_id = publish_manual_job_request(JOB_BOOTSTRAP_ORCHESTRATOR, requested_by=requested_by)
     logger.info(
-        "bootstrap: queued run_id=%d request_id=%d requested_by=%s",
+        "bootstrap: queued run_id=%d request_id=%d requested_by=%s operator_id=%s",
         run_id,
         request_id,
         requested_by,
+        operator_uuid,
     )
     return BootstrapRunQueuedResponse(run_id=run_id, request_id=request_id)
 
@@ -413,57 +438,71 @@ def retry_failed(
 ) -> BootstrapRunQueuedResponse:
     """Re-run failed stages (and their downstream same-lane peers).
 
-    For a ``partial_error`` state. Reuses the latest
-    ``bootstrap_runs.id`` rather than creating a new run.
+    For a ``partial_error`` / ``cancelled`` state. Reuses the latest
+    ``bootstrap_runs.id`` rather than creating a new run; the
+    original ``triggered_by_operator_id`` is NOT overwritten (#1139).
 
     409 if a run is already in flight. 404 if there is no prior run
     or the latest run has no failed stages to retry.
+
+    #1139 — helper + publish share one transaction; if publish fails
+    the stage reset rolls back. The pre-lock ``read_state`` is gone:
+    the helper is the sole authoritative gate inside the singleton
+    ``FOR UPDATE`` lock, so a stale ``last_run_id`` race is no
+    longer possible.
     """
-    state = read_state(conn)
-    if state.status == "running":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": "bootstrap_running",
-                "current_run_id": state.last_run_id,
-            },
-        )
-    if state.last_run_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="no prior bootstrap run to retry",
-        )
-
-    try:
-        reset_count = reset_failed_stages_for_retry(conn, run_id=state.last_run_id)
-    except BootstrapAlreadyRunning as exc:
-        # Concurrent ``start_run`` flipped state to ``running`` between
-        # our pre-check above and the FOR UPDATE acquisition inside
-        # ``reset_failed_stages_for_retry``. Treat as 409 — same
-        # contract as the /run handler.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": "bootstrap_running",
-                "current_run_id": exc.run_id,
-            },
-        ) from exc
-    if reset_count == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="latest run has no failed stages to retry",
-        )
-
     requested_by = _identify_requestor(request)
-    request_id = publish_manual_job_request(JOB_BOOTSTRAP_ORCHESTRATOR, requested_by=requested_by)
+    with conn.transaction():
+        try:
+            run_id, reset_count = reset_failed_stages_for_retry(conn)
+        except BootstrapNoPriorRun as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="no prior bootstrap run to retry",
+            ) from exc
+        except BootstrapAlreadyRunning as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "bootstrap_running",
+                    "current_run_id": exc.run_id,
+                },
+            ) from exc
+        except BootstrapNotResettable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "bootstrap_not_resettable",
+                    "current_status": exc.status,
+                },
+            ) from exc
+        if reset_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="latest run has no failed stages to retry",
+            )
+
+        try:
+            request_id = publish_manual_job_request_with_conn(
+                conn,
+                JOB_BOOTSTRAP_ORCHESTRATOR,
+                requested_by=requested_by,
+            )
+        except psycopg.OperationalError as exc:
+            logger.exception("bootstrap: queue publish failed (transient)")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"error": "queue_publish_failed"},
+            ) from exc
+
     logger.info(
         "bootstrap: retry-failed run_id=%d reset_count=%d request_id=%d requested_by=%s",
-        state.last_run_id,
+        run_id,
         reset_count,
         request_id,
         requested_by,
     )
-    return BootstrapRunQueuedResponse(run_id=state.last_run_id, request_id=request_id)
+    return BootstrapRunQueuedResponse(run_id=run_id, request_id=request_id)
 
 
 # ---------------------------------------------------------------------------

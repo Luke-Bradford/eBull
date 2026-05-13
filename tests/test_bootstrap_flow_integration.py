@@ -207,7 +207,8 @@ def test_bootstrap_partial_error_then_retry_failed(
     pass2_invokers = {spec.job_name: _make_pass2(spec.job_name) for spec in get_bootstrap_stage_specs()}
     monkeypatch.setattr(runtime_module, "_INVOKERS", pass2_invokers)
 
-    reset_count = reset_failed_stages_for_retry(ebull_test_conn, run_id=run_id)
+    helper_run_id, reset_count = reset_failed_stages_for_retry(ebull_test_conn)
+    assert helper_run_id == run_id
     assert reset_count > 0
     ebull_test_conn.commit()
 

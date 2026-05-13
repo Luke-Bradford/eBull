@@ -39,6 +39,8 @@ from app.jobs.runtime import VALID_JOB_NAMES
 from app.services.bootstrap_orchestrator import JOB_BOOTSTRAP_ORCHESTRATOR, get_bootstrap_stage_specs
 from app.services.bootstrap_state import (
     BootstrapAlreadyRunning,
+    BootstrapNoPriorRun,
+    BootstrapNotResettable,
     BootstrapNotRunning,
 )
 from app.services.bootstrap_state import (
@@ -1039,23 +1041,44 @@ def _apply_bootstrap_iterate_reset(conn: psycopg.Connection[Any]) -> None:
     Reuses ``bootstrap_state.reset_failed_stages_for_retry`` — the
     same helper the legacy ``POST /system/bootstrap/retry-failed``
     endpoint uses. The helper takes ``SELECT ... FOR UPDATE`` on the
-    bootstrap_state singleton internally, so a concurrent ``start_run``
-    racing in between the precondition gate and this call surfaces as
-    ``BootstrapAlreadyRunning`` and we map it to 409.
+    bootstrap_state singleton internally and is the sole authoritative
+    gate (#1139). All state/eligibility checks happen under that
+    lock; this caller passes no ``run_id`` argument and surfaces the
+    helper's three typed exceptions:
+
+      * ``BootstrapAlreadyRunning``  → 409 ``bootstrap_already_running``
+        (concurrent ``start_run`` slipped in between the precondition
+        gate and the FOR UPDATE acquisition).
+      * ``BootstrapNoPriorRun``      → 409 ``bootstrap_not_resumable``
+        (preserves the pre-#1139 detail string).
+      * ``BootstrapNotResettable``   → 409 ``bootstrap_not_resettable``
+        (singleton in a status that's not in {partial_error, cancelled}).
+
+    Returns silently on success. If the helper returns
+    ``reset_count == 0`` (latest run had no failed stages), raises
+    ``bootstrap_no_failed_stages`` so the trigger does NOT enqueue
+    the orchestrator for a no-op round (#1139 — pre-fix the caller
+    enqueued regardless).
     """
-    state_row = conn.execute("SELECT last_run_id FROM bootstrap_state WHERE id = 1").fetchone()
-    if state_row is None:
-        raise _conflict("bootstrap_state_missing", advice="run sql/129 migration")
-    last_run_id = state_row[0]
-    if last_run_id is None:
+    try:
+        _run_id, reset_count = bootstrap_reset_failed_stages(conn)
+    except BootstrapAlreadyRunning as exc:
+        raise _conflict("bootstrap_already_running") from exc
+    except BootstrapNoPriorRun as exc:
         raise _conflict(
             "bootstrap_not_resumable",
             advice="no prior bootstrap run to retry",
+        ) from exc
+    except BootstrapNotResettable as exc:
+        raise _conflict(
+            "bootstrap_not_resettable",
+            advice=f"singleton status {exc.status!r} is not resettable",
+        ) from exc
+    if reset_count == 0:
+        raise _conflict(
+            "bootstrap_no_failed_stages",
+            advice="latest run has no failed stages to iterate",
         )
-    try:
-        bootstrap_reset_failed_stages(conn, run_id=int(last_run_id))
-    except BootstrapAlreadyRunning as exc:
-        raise _conflict("bootstrap_already_running") from exc
 
 
 def _apply_bootstrap_full_wash_reset(
@@ -1078,11 +1101,10 @@ def _apply_bootstrap_full_wash_reset(
     'running'; ``start_run``'s internal ``FOR UPDATE`` is the
     defence-in-depth against a concurrent ``start_run`` slipping in.
     """
-    operator_id = str(operator_uuid) if operator_uuid is not None else None
     try:
         bootstrap_start_run(
             conn,
-            operator_id=operator_id,
+            operator_id=operator_uuid,
             stage_specs=get_bootstrap_stage_specs(),
         )
     except BootstrapAlreadyRunning as exc:
