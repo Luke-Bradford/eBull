@@ -36,7 +36,7 @@ import html
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, time
 from typing import Any, Literal, Protocol
 
 import psycopg
@@ -886,40 +886,75 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
 # ---------------------------------------------------------------------
 
 
+UpsertOutcome = Literal["inserted", "updated", "suppressed"]
+
+
 def upsert_business_summary(
     conn: psycopg.Connection[Any],
     *,
     instrument_id: int,
     body: str,
     source_accession: str,
-) -> bool:
+    filed_at: datetime | None,
+) -> UpsertOutcome:
     """Insert or update one ``instrument_business_summary`` row.
 
-    Returns ``True`` on INSERT, ``False`` on UPDATE. The UPDATE path
-    overwrites the body + source_accession + timestamps so a later
-    10-K supersedes an older one cleanly. Resets the failure-tracking
-    columns (#533) so a previously-quarantined instrument that now
-    parses successfully exits quarantine cleanly."""
+    Returns the trinary outcome:
+
+    - ``'inserted'`` — no prior row; new row written.
+    - ``'updated'`` — prior row existed; row replaced.
+    - ``'suppressed'`` — prior row existed AND was newer (per the
+      ``(filed_at, source_accession)`` gate); no write performed.
+
+    The conditional ``ON CONFLICT`` gate (#1151) keeps the manifest-
+    driven path safe under filed_at-ASC drain order: an older
+    accession arriving after a newer one is already in the DB is a
+    no-op, so the operator never sees stale-then-fresh. SEC accession
+    numbers are temporally ordered within an issuer, so they serve as
+    a deterministic same-day tie-breaker.
+
+    NULL handling:
+
+    - Incumbent ``filed_at`` is NULL (legacy / pre-#1151 row) → any
+      new write wins. The first dated write re-baselines the row.
+    - Incoming ``filed_at`` is NULL against a dated incumbent →
+      ``'suppressed'``. No legitimate caller passes NULL after this
+      change; failing closed preserves the dated incumbent rather
+      than silently re-baselining on a bug surface.
+
+    The UPDATE path resets the failure-tracking columns (#533) so a
+    previously-quarantined instrument that now parses successfully
+    exits quarantine cleanly.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO instrument_business_summary
-                (instrument_id, body, source_accession)
-            VALUES (%s, %s, %s)
+                (instrument_id, body, source_accession, filed_at)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (instrument_id) DO UPDATE SET
                 body                = EXCLUDED.body,
                 source_accession    = EXCLUDED.source_accession,
+                filed_at            = EXCLUDED.filed_at,
                 fetched_at          = NOW(),
                 last_parsed_at      = NOW(),
                 attempt_count       = 0,
                 last_failure_reason = NULL,
                 next_retry_at       = NULL
+            WHERE
+                instrument_business_summary.filed_at IS NULL
+                OR (EXCLUDED.filed_at IS NOT NULL
+                    AND (EXCLUDED.filed_at, EXCLUDED.source_accession)
+                        >= (instrument_business_summary.filed_at,
+                            instrument_business_summary.source_accession))
             RETURNING (xmax = 0) AS inserted
             """,
-            (instrument_id, body, source_accession),
+            (instrument_id, body, source_accession, filed_at),
         )
         row = cur.fetchone()
-        return bool(row[0]) if row else False
+    if row is None:
+        return "suppressed"
+    return "inserted" if bool(row[0]) else "updated"
 
 
 def upsert_business_sections(
@@ -1348,13 +1383,15 @@ def _find_prior_plain_10k(
     *,
     instrument_id: int,
     before_accession: str,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, date] | None:
     """Find the most recent plain ``10-K`` (NOT ``10-K/A``) filing for
     ``instrument_id`` strictly older than the filing keyed by
     ``before_accession``.
 
-    Returns ``(provider_filing_id, primary_document_url)`` or ``None``
-    when no prior plain 10-K exists.
+    Returns ``(provider_filing_id, primary_document_url, filing_date)``
+    or ``None`` when no prior plain 10-K exists. The ``filing_date``
+    is threaded through so callers can persist the fallback's
+    ``filed_at`` on ``instrument_business_summary`` (#1151).
 
     Used by the 10-K/A fallback path (#534): when the latest filing is
     an amendment that omits Item 1 (Part-III amendments do this
@@ -1367,7 +1404,8 @@ def _find_prior_plain_10k(
         cur.execute(
             """
             SELECT fe.provider_filing_id,
-                   fe.primary_document_url
+                   fe.primary_document_url,
+                   fe.filing_date
               FROM filing_events fe
              WHERE fe.provider = 'sec'
                AND fe.filing_type = '10-K'
@@ -1386,7 +1424,17 @@ def _find_prior_plain_10k(
         row = cur.fetchone()
     if row is None:
         return None
-    return str(row[0]), str(row[1])
+    return str(row[0]), str(row[1]), row[2]
+
+
+def _filing_date_to_filed_at(filing_date: date | None) -> datetime | None:
+    """Coerce a ``filing_events.filing_date`` (DATE) to TIMESTAMPTZ at
+    midnight UTC for the ``instrument_business_summary.filed_at``
+    column. Returns None on None passthrough so legacy callers can
+    propagate "unknown" without inventing a sentinel."""
+    if filing_date is None:
+        return None
+    return datetime.combine(filing_date, time.min, tzinfo=UTC)
 
 
 def bootstrap_business_summaries(
@@ -1522,7 +1570,7 @@ def ingest_business_summaries(
     """
     conn.commit()
 
-    candidates: list[tuple[int, str, str, str]] = []
+    candidates: list[tuple[int, str, str, str, date]] = []
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1543,7 +1591,8 @@ def ingest_business_summaries(
             SELECT lpi.instrument_id,
                    lpi.provider_filing_id,
                    lpi.primary_document_url,
-                   lpi.filing_type
+                   lpi.filing_type,
+                   lpi.filing_date
             FROM latest_per_instrument lpi
             LEFT JOIN instrument_business_summary bs
                    ON bs.instrument_id = lpi.instrument_id
@@ -1572,7 +1621,7 @@ def ingest_business_summaries(
             (limit,),
         )
         for row in cur.fetchall():
-            candidates.append((int(row[0]), str(row[1]), str(row[2]), str(row[3])))
+            candidates.append((int(row[0]), str(row[1]), str(row[2]), str(row[3]), row[4]))
     conn.commit()
 
     inserted = 0
@@ -1593,7 +1642,7 @@ def ingest_business_summaries(
         cache = prefetch_document_texts(urls, user_agent=ua)
         fetcher = _CachedDocFetcher(fetcher, cache)  # type: ignore[assignment]
 
-    for instrument_id, accession, url, filing_type in candidates:
+    for instrument_id, accession, url, filing_type, filing_date in candidates:
         try:
             html = fetcher.fetch_document_text(url)
         except Exception as exc:
@@ -1662,7 +1711,7 @@ def ingest_business_summaries(
                     before_accession=accession,
                 )
                 if prior is not None:
-                    fallback_acc, fallback_url = prior
+                    fallback_acc, fallback_url, fallback_filing_date = prior
                     logger.info(
                         "ingest_business_summaries: 10-K/A fallback accession=%s -> prior plain 10-K accession=%s",
                         accession,
@@ -1690,14 +1739,15 @@ def ingest_business_summaries(
                             fallback_body = None
                         if fallback_body is not None and len(fallback_body) >= _MIN_BODY_LEN:
                             try:
-                                did_insert = upsert_business_summary(
+                                outcome = upsert_business_summary(
                                     conn,
                                     instrument_id=instrument_id,
                                     body=fallback_body,
                                     source_accession=fallback_acc,
+                                    filed_at=_filing_date_to_filed_at(fallback_filing_date),
                                 )
                                 fallback_sections = extract_business_sections(fallback_html)
-                                if fallback_sections:
+                                if fallback_sections and outcome != "suppressed":
                                     try:
                                         upsert_business_sections(
                                             conn,
@@ -1713,9 +1763,9 @@ def ingest_business_summaries(
                                             exc_info=True,
                                         )
                                 conn.commit()
-                                if did_insert:
+                                if outcome == "inserted":
                                     inserted += 1
-                                else:
+                                elif outcome == "updated":
                                     updated += 1
                                 fallback_used = True
                             except Exception:
@@ -1749,11 +1799,12 @@ def ingest_business_summaries(
             continue
 
         try:
-            did_insert = upsert_business_summary(
+            outcome = upsert_business_summary(
                 conn,
                 instrument_id=instrument_id,
                 body=body,
                 source_accession=accession,
+                filed_at=_filing_date_to_filed_at(filing_date),
             )
             # #449 — also populate the sections table. We re-run the
             # sections extractor over the same HTML so the two writes
@@ -1762,22 +1813,28 @@ def ingest_business_summaries(
             # the extractor returns a single "general" block and the
             # blob view still renders. A failure inside the sections
             # upsert must not roll back the blob write.
-            sections = extract_business_sections(html)
-            if sections:
-                try:
-                    upsert_business_sections(
-                        conn,
-                        instrument_id=instrument_id,
-                        source_accession=accession,
-                        sections=sections,
-                    )
-                except Exception:
-                    logger.warning(
-                        "ingest_business_summaries: section upsert failed accession=%s "
-                        "(blob already stored; rendering degrades to blob-only)",
-                        accession,
-                        exc_info=True,
-                    )
+            #
+            # #1151 — sections only write when the parent upsert
+            # actually ran (inserted/updated). On 'suppressed' the
+            # parent's incumbent body is newer; rewriting sections
+            # under an older accession would dangle them.
+            if outcome != "suppressed":
+                sections = extract_business_sections(html)
+                if sections:
+                    try:
+                        upsert_business_sections(
+                            conn,
+                            instrument_id=instrument_id,
+                            source_accession=accession,
+                            sections=sections,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "ingest_business_summaries: section upsert failed accession=%s "
+                            "(blob already stored; rendering degrades to blob-only)",
+                            accession,
+                            exc_info=True,
+                        )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1795,10 +1852,12 @@ def ingest_business_summaries(
             conn.commit()
             continue
 
-        if did_insert:
+        if outcome == "inserted":
             inserted += 1
-        else:
+        elif outcome == "updated":
             updated += 1
+        # 'suppressed' is no-op counter-wise (#1151) — newer incumbent
+        # was already in place. Logged at DEBUG only.
 
     return IngestResult(
         filings_scanned=len(candidates),
