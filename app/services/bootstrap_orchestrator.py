@@ -53,7 +53,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import psycopg
 
@@ -207,57 +207,337 @@ _LANE_MAX_CONCURRENCY: Final[dict[str, int]] = {
 }
 
 
-# Stage-key dependency graph: which `requires` keys must be `success`
-# before this stage can run. If any required stage is `error` or
-# `blocked`, this stage transitions to `blocked` (orchestrator
-# never invokes the underlying job).
-_STAGE_REQUIRES: Final[dict[str, tuple[str, ...]]] = {
-    # Phase A
-    "universe_sync": (),
-    "candle_refresh": ("universe_sync",),
-    "cusip_universe_backfill": ("universe_sync",),
-    "sec_13f_filer_directory_sync": ("universe_sync",),
-    "sec_nport_filer_directory_sync": ("universe_sync",),
-    "cik_refresh": ("universe_sync",),
-    "sec_bulk_download": ("universe_sync",),
-    # Phase C — DB-bound bulk ingesters (parallel-able in db lane)
-    "sec_submissions_ingest": ("sec_bulk_download", "cik_refresh"),
-    "sec_companyfacts_ingest": ("sec_bulk_download", "cik_refresh"),
-    "sec_13f_ingest_from_dataset": ("sec_bulk_download", "cusip_universe_backfill"),
-    "sec_insider_ingest_from_dataset": ("sec_bulk_download", "cik_refresh"),
-    "sec_nport_ingest_from_dataset": ("sec_bulk_download", "cusip_universe_backfill"),
-    # Phase C' — secondary-pages walker (rate-bound)
-    "sec_submissions_files_walk": ("sec_submissions_ingest",),
-    # Legacy chain — fallback when bulk path failed.
-    # All require cik_refresh because their per-CIK fetches need
-    # the CIK mapping populated first (Codex sweep BLOCKING).
-    "filings_history_seed": ("cik_refresh",),
-    "sec_first_install_drain": ("cik_refresh",),
-    "sec_def14a_bootstrap": ("sec_submissions_ingest", "sec_submissions_files_walk"),
-    "sec_business_summary_bootstrap": ("sec_submissions_ingest", "sec_submissions_files_walk"),
-    "sec_insider_transactions_backfill": ("cik_refresh",),
-    "sec_form3_ingest": ("cik_refresh",),
-    "sec_8k_events_ingest": ("sec_submissions_ingest", "sec_submissions_files_walk"),
-    "sec_13f_recent_sweep": ("cik_refresh",),
-    "sec_n_port_ingest": ("cik_refresh",),
-    "ownership_observations_backfill": (
-        # Bulk path — direct writes to ownership_*_observations.
-        "sec_13f_ingest_from_dataset",
-        "sec_insider_ingest_from_dataset",
-        "sec_nport_ingest_from_dataset",
-        # Legacy chain — populates the legacy typed tables
-        # (insider_transactions, institutional_holdings, n_port_*) that
-        # the backfill mirrors into observations. In fallback mode the
-        # bulk stages skip, so the legacy chain becomes the sole source;
-        # without these requires the backfill could fire BEFORE the
-        # legacy chain populates rows. Codex pre-push BLOCKING for #1041.
-        "sec_insider_transactions_backfill",
-        "sec_form3_ingest",
-        "sec_13f_recent_sweep",
-        "sec_n_port_ingest",
-    ),
-    "fundamentals_sync": ("sec_companyfacts_ingest",),
+# ---------------------------------------------------------------------------
+# Capability layer (#1138 / Task A of #1136 audit)
+# ---------------------------------------------------------------------------
+#
+# Stages declare capabilities they ``provide`` on success. Downstream
+# stages declare a ``CapRequirement`` (all_of / any_of) over those
+# capabilities rather than over concrete stage-key predecessors.
+# This decouples the dependency graph from the bulk-vs-legacy
+# topology so a partial bulk failure can be recovered via the legacy
+# chain when both paths feed the same capability.
+#
+# Spec: docs/superpowers/specs/2026-05-13-bootstrap-capability-layer.md.
+
+Capability = Literal[
+    "universe_seeded",
+    "cik_mapping_ready",
+    "cusip_mapping_ready",
+    "bulk_archives_ready",
+    "filing_events_seeded",
+    "submissions_secondary_pages_walked",
+    "insider_inputs_seeded",
+    "form3_inputs_seeded",
+    "institutional_inputs_seeded",
+    "nport_inputs_seeded",
+    "fundamentals_raw_seeded",
+]
+
+
+@dataclass(frozen=True)
+class CapRequirement:
+    """All-of / any-of (DNF) dependency requirement over capabilities.
+
+    Satisfied iff every cap in ``all_of`` is present in the satisfied
+    set AND (``any_of`` is empty OR at least one inner tuple is
+    fully ⊆ satisfied set).
+    """
+
+    all_of: tuple[Capability, ...] = ()
+    any_of: tuple[tuple[Capability, ...], ...] = ()
+
+
+# Each stage's capabilities provided on ``success``. Stages absent
+# from this map provide nothing (e.g. ``candle_refresh``, filer
+# directory syncs, typed parsers, final derivations).
+_STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
+    "universe_sync": ("universe_seeded",),
+    "cusip_universe_backfill": ("cusip_mapping_ready",),
+    "cik_refresh": ("cik_mapping_ready",),
+    # S7 bulk download provides bulk_archives_ready ONLY on real bulk
+    # mode. The fallback path in sec_bulk_download_job() raises
+    # BootstrapPhaseSkipped (#1138 §4.3) so the stage transitions to
+    # `skipped` and this provider entry never fires.
+    "sec_bulk_download": ("bulk_archives_ready",),
+    "sec_submissions_ingest": ("filing_events_seeded",),
+    "sec_companyfacts_ingest": ("fundamentals_raw_seeded",),
+    # Bulk ownership ingester covers both insider transactions + Form 3.
+    "sec_insider_ingest_from_dataset": ("insider_inputs_seeded", "form3_inputs_seeded"),
+    "sec_13f_ingest_from_dataset": ("institutional_inputs_seeded",),
+    "sec_nport_ingest_from_dataset": ("nport_inputs_seeded",),
+    "sec_submissions_files_walk": ("submissions_secondary_pages_walked",),
+    "filings_history_seed": ("filing_events_seeded",),
+    # sec_first_install_drain runs with follow_pagination=True
+    # (app/workers/scheduler.py) so it walks the same
+    # filings.files[] surface as the dedicated walker (S13). Providing
+    # both caps lets typed parsers run on the legacy / slow-connection
+    # path where S13 is cascade-skipped or self-skipped.
+    "sec_first_install_drain": ("filing_events_seeded", "submissions_secondary_pages_walked"),
+    "sec_insider_transactions_backfill": ("insider_inputs_seeded",),
+    "sec_form3_ingest": ("form3_inputs_seeded",),
+    "sec_13f_recent_sweep": ("institutional_inputs_seeded",),
+    "sec_n_port_ingest": ("nport_inputs_seeded",),
 }
+
+
+# Per-stage caps provided on ``skipped`` status. Intentionally empty
+# by default — skipped stages do NOT provide capabilities. The
+# slow-connection fallback (#1041) relies on the *legacy* chain
+# providing the same caps, not on a skipped bulk stage masquerading
+# as a provider. Add an entry here only when a skip is semantically
+# equivalent to success.
+_STAGE_PROVIDES_ON_SKIP: Final[dict[str, tuple[Capability, ...]]] = {}
+
+
+# Stage-key → CapRequirement. Replaces the old AND-only
+# ``_STAGE_REQUIRES`` (#1138 Task A). Every entry in
+# ``_BOOTSTRAP_STAGE_SPECS`` must appear here (enforced by the
+# catalogue-invariant test).
+_STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
+    # Phase A
+    "universe_sync": CapRequirement(),
+    "candle_refresh": CapRequirement(all_of=("universe_seeded",)),
+    "cusip_universe_backfill": CapRequirement(all_of=("universe_seeded",)),
+    "sec_13f_filer_directory_sync": CapRequirement(all_of=("universe_seeded",)),
+    "sec_nport_filer_directory_sync": CapRequirement(all_of=("universe_seeded",)),
+    "cik_refresh": CapRequirement(all_of=("universe_seeded",)),
+    "sec_bulk_download": CapRequirement(all_of=("universe_seeded",)),
+    # Phase C — DB-bound bulk ingesters
+    "sec_submissions_ingest": CapRequirement(all_of=("bulk_archives_ready", "cik_mapping_ready")),
+    "sec_companyfacts_ingest": CapRequirement(all_of=("bulk_archives_ready", "cik_mapping_ready")),
+    "sec_13f_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cusip_mapping_ready")),
+    "sec_insider_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cik_mapping_ready")),
+    "sec_nport_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cusip_mapping_ready")),
+    # Phase C' — walker
+    "sec_submissions_files_walk": CapRequirement(all_of=("filing_events_seeded",)),
+    # Legacy chain
+    "filings_history_seed": CapRequirement(all_of=("cik_mapping_ready",)),
+    "sec_first_install_drain": CapRequirement(all_of=("cik_mapping_ready",)),
+    "sec_def14a_bootstrap": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
+    "sec_business_summary_bootstrap": CapRequirement(
+        all_of=("filing_events_seeded", "submissions_secondary_pages_walked")
+    ),
+    "sec_insider_transactions_backfill": CapRequirement(all_of=("cik_mapping_ready",)),
+    "sec_form3_ingest": CapRequirement(all_of=("cik_mapping_ready",)),
+    "sec_8k_events_ingest": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
+    "sec_13f_recent_sweep": CapRequirement(all_of=("cik_mapping_ready",)),
+    "sec_n_port_ingest": CapRequirement(all_of=("cik_mapping_ready",)),
+    # Phase E — final derivations. Per-family caps in §4 of the spec
+    # encode the bulk-OR-legacy alternative at the *provider* side
+    # (each cap has both a bulk and a legacy producer), so the
+    # consumer can simply require all four families with `all_of`.
+    "ownership_observations_backfill": CapRequirement(
+        all_of=(
+            "cik_mapping_ready",
+            "insider_inputs_seeded",
+            "form3_inputs_seeded",
+            "institutional_inputs_seeded",
+            "nport_inputs_seeded",
+        ),
+    ),
+    "fundamentals_sync": CapRequirement(all_of=("fundamentals_raw_seeded",)),
+}
+
+
+def _build_capability_providers(
+    provides: Mapping[str, tuple[Capability, ...]],
+    provides_on_skip: Mapping[str, tuple[Capability, ...]],
+) -> dict[Capability, tuple[str, ...]]:
+    """Inverse map ``Capability → tuple of provider stage_keys``."""
+    out: dict[Capability, list[str]] = {}
+    for stage_key, caps in provides.items():
+        for cap in caps:
+            out.setdefault(cap, []).append(stage_key)
+    for stage_key, caps in provides_on_skip.items():
+        for cap in caps:
+            existing = out.setdefault(cap, [])
+            if stage_key not in existing:
+                existing.append(stage_key)
+    return {cap: tuple(keys) for cap, keys in out.items()}
+
+
+_CAPABILITY_PROVIDERS: Final[dict[Capability, tuple[str, ...]]] = _build_capability_providers(
+    _STAGE_PROVIDES,
+    _STAGE_PROVIDES_ON_SKIP,
+)
+
+
+# ---------------------------------------------------------------------------
+# Capability-evaluation helpers (#1138 §6)
+# ---------------------------------------------------------------------------
+
+
+def _satisfied_capabilities(
+    statuses: Mapping[str, str],
+    *,
+    provides: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES,
+    provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
+) -> set[Capability]:
+    """Cap set derived from current stage statuses.
+
+    Production callers omit ``provides`` / ``provides_on_skip`` (the
+    module-level maps are used). Tests can pass overrides to register
+    synthetic caps for fixture stage_keys.
+    """
+    caps: set[Capability] = set()
+    for stage_key, status in statuses.items():
+        if status == "success":
+            caps.update(provides.get(stage_key, ()))
+        elif status == "skipped":
+            caps.update(provides_on_skip.get(stage_key, ()))
+    return caps
+
+
+def _capability_is_dead(
+    cap: Capability,
+    statuses: Mapping[str, str],
+    *,
+    providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
+    provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
+) -> bool:
+    """A cap is dead iff every registered provider is in a state where
+    it cannot now (or in the future) provide the cap.
+
+    Cannot-provide states: ``error`` / ``blocked`` / ``cancelled``, or
+    ``skipped`` without an explicit ``provides_on_skip`` entry.
+
+    Can-still-provide states: ``pending`` / ``running`` (provider
+    hasn't decided yet), ``success`` (cap satisfied), or ``skipped``
+    with the cap in ``provides_on_skip``.
+    """
+    providers = providers_map.get(cap, ())
+    if not providers:
+        # Cap with no provider — dead by construction. The catalogue
+        # invariant test should have caught this at test time; runtime
+        # check is defence-in-depth.
+        return True
+    for provider_key in providers:
+        status = statuses.get(provider_key)
+        if status is None:
+            continue
+        if status in ("pending", "running", "success"):
+            return False
+        if status == "skipped":
+            on_skip = provides_on_skip.get(provider_key, ())
+            if cap in on_skip:
+                return False
+    return True
+
+
+def _classify_dead_cap(
+    cap: Capability,
+    statuses: Mapping[str, str],
+    *,
+    providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
+) -> Literal["skip_only", "error"]:
+    """Return the failure mode that killed a (confirmed-dead) cap.
+
+    Precondition: ``_capability_is_dead(cap, statuses)`` is True.
+
+    Returns ``"error"`` (block downstream) when ANY provider is in
+    ``error`` / ``blocked`` / ``cancelled``. Returns ``"skip_only"``
+    only when every dead provider is ``skipped`` without an explicit
+    ``provides_on_skip`` entry.
+
+    Defensive default: a cap with zero registered providers, or a
+    cap with NO ``skipped`` provider (only unknown/pending), is
+    classified ``"error"`` so the dispatcher hard-blocks rather than
+    silently cascading skip on a malformed catalogue.
+    """
+    providers = providers_map.get(cap, ())
+    if not providers:
+        return "error"
+    saw_skipped = False
+    for provider_key in providers:
+        status = statuses.get(provider_key)
+        if status is None:
+            continue
+        if status in ("error", "blocked", "cancelled"):
+            return "error"
+        if status == "skipped":
+            saw_skipped = True
+    return "skip_only" if saw_skipped else "error"
+
+
+def _requirement_satisfied(req: CapRequirement, caps: set[Capability]) -> bool:
+    if not all(c in caps for c in req.all_of):
+        return False
+    if not req.any_of:
+        return True
+    return any(all(c in caps for c in group) for group in req.any_of)
+
+
+def _classify_requirement_unsatisfiable(
+    req: CapRequirement,
+    statuses: Mapping[str, str],
+    *,
+    providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
+    provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
+) -> tuple[Literal["skip_only", "error"], list[Capability]] | None:
+    """If ``req`` is unsatisfiable now, return ``(classification, dead_caps)``.
+
+    Returns ``None`` when the requirement is still potentially
+    satisfiable (some provider remains pending/running).
+
+    Classification rules:
+    * If any cap in ``all_of`` is dead → unsatisfiable.
+    * If ``any_of`` is non-empty AND every alternative group contains
+      at least one dead cap → unsatisfiable.
+    * Else → still satisfiable; return None.
+
+    Per #1138 §6.3: when unsatisfiable, classify ``"error"`` if any
+    contributing dead cap is error-classified; otherwise
+    ``"skip_only"``.
+    """
+    is_dead = lambda c: _capability_is_dead(  # noqa: E731
+        c, statuses, providers_map=providers_map, provides_on_skip=provides_on_skip
+    )
+    dead_in_all: list[Capability] = [c for c in req.all_of if is_dead(c)]
+
+    dead_in_any_groups: list[list[Capability]] = []
+    any_group_live = not req.any_of  # vacuously true when any_of is empty
+    if req.any_of:
+        for group in req.any_of:
+            dead_in_group: list[Capability] = [c for c in group if is_dead(c)]
+            if not dead_in_group:
+                any_group_live = True
+            else:
+                dead_in_any_groups.append(dead_in_group)
+
+    if not dead_in_all and any_group_live:
+        return None
+
+    all_dead_caps: list[Capability] = list(dead_in_all)
+    if not any_group_live:
+        for group_deads in dead_in_any_groups:
+            for cap in group_deads:
+                if cap not in all_dead_caps:
+                    all_dead_caps.append(cap)
+
+    for cap in all_dead_caps:
+        if _classify_dead_cap(cap, statuses, providers_map=providers_map) == "error":
+            return ("error", all_dead_caps)
+    return ("skip_only", all_dead_caps)
+
+
+def _format_block_reason(
+    dead_caps: list[Capability],
+    statuses: Mapping[str, str],
+    *,
+    providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
+) -> str:
+    parts: list[str] = []
+    for cap in dead_caps:
+        providers = providers_map.get(cap, ())
+        provider_states = ", ".join(f"{p}={statuses.get(p, '?')}" for p in providers) or "(no providers)"
+        parts.append(f"missing capability {cap}; no surviving provider (providers: {provider_states})")
+    return "; ".join(parts)
+
+
+def _format_cascade_skip_reason(dead_caps: list[Capability]) -> str:
+    cap_str = ", ".join(dead_caps)
+    return f"cascaded skip: required capability {cap_str} provided only by skipped upstream(s)"
 
 
 # Lane override map — stage_key → lane name, used by the
@@ -610,7 +890,9 @@ class _RunnableStage:
     job_name: str
     lane: str
     invoker: Callable[[Mapping[str, Any]], None]
-    requires: tuple[str, ...]
+    # #1138 Task A — requires is now a CapRequirement (DNF over named
+    # capabilities) instead of a tuple of predecessor stage keys.
+    requires: CapRequirement = field(default_factory=CapRequirement)
     # PR1c #1064: per-stage params dict from ``StageSpec.params``.
     # Default empty so existing test fixtures that build
     # ``_RunnableStage`` directly without params keep working.
@@ -623,6 +905,8 @@ def _phase_batched_dispatch(
     runnable: list[_RunnableStage],
     database_url: str,
     preexisting_statuses: dict[str, str] | None = None,
+    provides_map: Mapping[str, tuple[Capability, ...]] | None = None,
+    provides_on_skip_map: Mapping[str, tuple[Capability, ...]] | None = None,
 ) -> tuple[dict[str, str], bool]:
     """Dispatch ``runnable`` stages in phase-batched fashion with lane concurrency.
 
@@ -645,10 +929,21 @@ def _phase_batched_dispatch(
          run + state + sweeps remaining stages), mark stop request
          completed, and return early. This is the operator-cancel
          observation point per spec §Cancel semantics — cooperative.
-      3. While any stage is pending: collect every pending stage whose
-         ``requires`` are all ``success`` → "ready batch". Stages
-         whose any required dep is ``error``/``blocked`` →
-         immediately propagate to ``blocked`` (no invocation).
+      3. While any stage is pending: compute the satisfied-capability
+         set from current stage statuses (via ``_STAGE_PROVIDES`` +
+         ``_STAGE_PROVIDES_ON_SKIP``; #1138 Task A). For each pending
+         stage:
+         * If its ``CapRequirement`` is satisfied → "ready batch".
+         * If unsatisfiable AND any contributing cap is error-dead
+           (some provider in ``error``/``blocked``/``cancelled``) →
+           propagate to ``blocked`` with structured "missing capability"
+           reason.
+         * If unsatisfiable AND every contributing dead cap is
+           skip-only (providers only ``skipped`` without explicit
+           ``provides_on_skip``) → cascade to ``skipped`` (no
+           invocation). This is the slow-connection-fallback path.
+         * Else → leave as ``pending`` and wait for upstream
+           ``pending``/``running`` providers to terminalise.
       4. Group the ready batch by lane. For each lane, run up to
          ``_LANE_MAX_CONCURRENCY[lane]`` stages concurrently via a
          per-lane ``ThreadPoolExecutor``.
@@ -656,7 +951,8 @@ def _phase_batched_dispatch(
       6. Stop when no stage is pending.
 
     Stages with no `requires` start in the first batch. The dispatcher
-    is fully data-driven by ``_STAGE_REQUIRES`` + ``_STAGE_LANE_OVERRIDES``.
+    is fully data-driven by ``_STAGE_REQUIRES_CAPS`` (capability-based
+    DNF dependency graph; #1138 Task A) + ``_STAGE_LANE_OVERRIDES``.
 
     Cancel observation latency: at most the duration of the longest
     in-flight batch (a 13F sweep is ~30 min; CIK refresh ~30s).
@@ -664,6 +960,24 @@ def _phase_batched_dispatch(
     commit and the next Iterate resumes from there.
     """
     from concurrent.futures import ThreadPoolExecutor, wait
+
+    # #1138 Task A — cap-evaluation map overrides. Production callers
+    # omit these (the module-level _STAGE_PROVIDES / _STAGE_PROVIDES_ON_SKIP
+    # are used). Test fixtures can pass overrides to register synthetic
+    # caps for fixture stage_keys. The inverse map is rebuilt from the
+    # union of base + override.
+    effective_provides: Mapping[str, tuple[Capability, ...]] = (
+        {**_STAGE_PROVIDES, **provides_map} if provides_map else _STAGE_PROVIDES
+    )
+    effective_provides_on_skip: Mapping[str, tuple[Capability, ...]] = (
+        {**_STAGE_PROVIDES_ON_SKIP, **provides_on_skip_map} if provides_on_skip_map else _STAGE_PROVIDES_ON_SKIP
+    )
+    if provides_map or provides_on_skip_map:
+        effective_providers_inverse: Mapping[Capability, tuple[str, ...]] = _build_capability_providers(
+            effective_provides, effective_provides_on_skip
+        )
+    else:
+        effective_providers_inverse = _CAPABILITY_PROVIDERS
 
     by_key = {r.stage_key: r for r in runnable}
     statuses: dict[str, str] = {r.stage_key: "pending" for r in runnable}
@@ -714,38 +1028,74 @@ def _phase_batched_dispatch(
         if not pending_keys:
             break
 
-        # Propagate blocked status from upstream failure.
+        # #1138 Task A — capability-based runnability + cascade-skip /
+        # error-block classification. Compute the satisfied cap set
+        # once per dispatcher iteration, then decide per pending
+        # stage whether to (a) dispatch, (b) block with structured
+        # reason, (c) cascade-skip with structured reason, or (d)
+        # wait for upstream pending/running providers.
+        caps = _satisfied_capabilities(
+            statuses,
+            provides=effective_provides,
+            provides_on_skip=effective_provides_on_skip,
+        )
         ready: list[_RunnableStage] = []
+        cascade_transitioned = False
         for key in pending_keys:
             stage = by_key[key]
-            # Stages whose required upstream is unknown to this run
-            # (not in `statuses`) are treated as a failed dependency
-            # too — without this guard, a typo in _STAGE_REQUIRES
-            # would let the stage dispatch as if the dep were
-            # satisfied. Codex review BLOCKING (PR #1039).
-            unknown_reqs = [req for req in stage.requires if req not in statuses]
-            failed_reqs = [req for req in stage.requires if req in statuses and statuses[req] in ("error", "blocked")]
-            unmet_reqs = [req for req in stage.requires if req in statuses and statuses[req] == "pending"]
-            if unknown_reqs or failed_reqs:
-                reason_parts = list(failed_reqs) + [f"{r} (unknown to run)" for r in unknown_reqs]
+            req = stage.requires
+            if _requirement_satisfied(req, caps):
+                ready.append(stage)
+                continue
+            classification = _classify_requirement_unsatisfiable(
+                req,
+                statuses,
+                providers_map=effective_providers_inverse,
+                provides_on_skip=effective_provides_on_skip,
+            )
+            if classification is None:
+                continue  # still potentially satisfiable; wait
+            kind, dead_caps = classification
+            if kind == "error":
+                reason = _format_block_reason(
+                    dead_caps,
+                    statuses,
+                    providers_map=effective_providers_inverse,
+                )
                 with psycopg.connect(database_url) as conn:
                     mark_stage_blocked(
                         conn,
                         run_id=run_id,
                         stage_key=key,
-                        reason=f"upstream stage(s) failed/blocked: {', '.join(reason_parts)}",
+                        reason=reason,
                     )
                     conn.commit()
                 statuses[key] = "blocked"
-                logger.warning(
-                    "bootstrap dispatcher: %s BLOCKED (upstream %s)",
-                    key,
-                    reason_parts,
-                )
-                continue
-            if unmet_reqs:
-                continue  # wait for next iteration
-            ready.append(stage)
+                cascade_transitioned = True
+                logger.warning("bootstrap dispatcher: %s BLOCKED (%s)", key, reason)
+            else:  # skip_only
+                reason = _format_cascade_skip_reason(dead_caps)
+                with psycopg.connect(database_url) as conn:
+                    mark_stage_skipped(
+                        conn,
+                        run_id=run_id,
+                        stage_key=key,
+                        reason=reason,
+                    )
+                    conn.commit()
+                statuses[key] = "skipped"
+                cascade_transitioned = True
+                logger.info("bootstrap dispatcher: %s SKIPPED (cascade: %s)", key, reason)
+
+        # Codex pre-push WARNING: if a stage was cascade-blocked or
+        # cascade-skipped within this inner loop, an EARLIER pending
+        # key may have been evaluated against a still-pending upstream
+        # and left as pending. Restart the outer loop so caps are
+        # recomputed and the now-terminalised upstream propagates to
+        # those downstream pendings instead of dropping them into the
+        # "deadlock" branch below.
+        if cascade_transitioned and not ready:
+            continue
 
         if not ready:
             # No stage advanced this iteration. Any stage still in
@@ -887,7 +1237,8 @@ def run_bootstrap_orchestrator() -> None:
 
     Replaces the prior "init thread + 2 lane threads" model with a
     data-driven dependency-graph dispatcher: stages declare
-    ``requires`` in ``_STAGE_REQUIRES``; dispatcher fans out ready
+    ``requires`` via ``_STAGE_REQUIRES_CAPS`` (a CapRequirement DNF
+    over named capabilities; #1138 Task A); dispatcher fans out ready
     batches respecting per-lane ``max_concurrency``.
     """
     # Lazy import: app.jobs.runtime imports app.services.bootstrap_orchestrator
@@ -929,7 +1280,7 @@ def run_bootstrap_orchestrator() -> None:
     for stage in sorted(snapshot.stages, key=lambda s: s.stage_order):
         # Skip stages already in a terminal state (re-runs); record
         # their status so dispatch dependency checks see them.
-        if stage.status in ("success", "error", "blocked", "skipped"):
+        if stage.status in ("success", "error", "blocked", "skipped", "cancelled"):
             preexisting_statuses[stage.stage_key] = stage.status
             logger.info("bootstrap dispatcher: skipping %s (already %s)", stage.stage_key, stage.status)
             continue
@@ -956,7 +1307,7 @@ def run_bootstrap_orchestrator() -> None:
                 job_name=stage.job_name,
                 lane=_effective_lane(stage.stage_key, stage.lane),
                 invoker=invoker,
-                requires=_STAGE_REQUIRES.get(stage.stage_key, ()),
+                requires=_STAGE_REQUIRES_CAPS.get(stage.stage_key, CapRequirement()),
                 params=stage_params_by_key.get(stage.stage_key, {}),
             )
         )
