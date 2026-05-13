@@ -290,6 +290,61 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
 _STAGE_PROVIDES_ON_SKIP: Final[dict[str, tuple[Capability, ...]]] = {}
 
 
+# #1140 / Task C of #1136 audit — strict-gate row-count floors.
+#
+# For caps in this map: a provider stage's ``success`` status alone
+# does NOT advertise the cap; the provider's ``rows_processed`` must
+# also be ``>= min_rows``. Caps absent from this map fall back to
+# status-only gating (Task A behaviour preserved).
+#
+# Default ``min_rows = 1`` for the cap-providing stages whose
+# downstream consumers (``fundamentals_sync``,
+# ``ownership_observations_backfill``) MUST observe non-zero ingest
+# to be useful. The audit (#1136 §2 acceptance) requires this for
+# fundamentals + every ownership family.
+#
+# Threshold ``1`` is the cheapest non-trivial floor: any positive
+# write counts. Higher floors (e.g. universe-coverage ratios) are
+# out of scope for v1 — the structural hook stays the per-cap int
+# knob, no hardcoded percentages.
+#
+_CAPABILITY_MIN_ROWS: Final[dict[Capability, int]] = {
+    "fundamentals_raw_seeded": 1,
+    "insider_inputs_seeded": 1,
+    "form3_inputs_seeded": 1,
+    "institutional_inputs_seeded": 1,
+    "nport_inputs_seeded": 1,
+}
+
+
+# #1140 / Task C of #1136 audit — strict-gate provider exclusions.
+#
+# For a strict-gate cap, providers listed here CANNOT contribute to
+# satisfying the floor via their aggregate ``rows_processed``. Used
+# when a multi-cap provider's aggregate row count can't be split per
+# advertised cap. The provider's ``success`` still keeps the cap
+# alive (i.e. doesn't kill it) but doesn't satisfy the strict floor
+# either — the cap must be carried by other (single-cap) providers.
+#
+# Today the only entry is the bulk insider ingester
+# (``sec_insider_ingest_from_dataset``): it advertises both
+# ``insider_inputs_seeded`` and ``form3_inputs_seeded`` from a single
+# aggregate ``rows_processed`` (bulk maps rows to form3 vs form4
+# internally but records the sum). A bulk wash that landed 10 Form 4
+# + 0 Form 3 rows would otherwise falsely advertise
+# ``form3_inputs_seeded`` under the strict rule. Excluding the bulk
+# provider for ``form3_inputs_seeded`` forces the legacy
+# ``sec_form3_ingest`` (single-cap, scoped to form3) to validate the
+# form3 path — Codex pre-push round 2 BLOCKING.
+#
+# When per-family bulk row counts land (follow-up ticket) this map
+# entry can be dropped and the bulk provider can satisfy form3
+# directly.
+_STRICT_CAP_PROVIDER_EXCLUSIONS: Final[dict[Capability, frozenset[str]]] = {
+    "form3_inputs_seeded": frozenset({"sec_insider_ingest_from_dataset"}),
+}
+
+
 # Stage-key → CapRequirement. Replaces the old AND-only
 # ``_STAGE_REQUIRES`` (#1138 Task A). Every entry in
 # ``_BOOTSTRAP_STAGE_SPECS`` must appear here (enforced by the
@@ -368,22 +423,73 @@ _CAPABILITY_PROVIDERS: Final[dict[Capability, tuple[str, ...]]] = _build_capabil
 # ---------------------------------------------------------------------------
 
 
+def _provider_meets_floor(
+    cap: Capability,
+    provider_key: str,
+    rows_processed: int | None,
+    min_rows: Mapping[Capability, int],
+    *,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
+) -> bool:
+    """Return True iff a ``success`` provider's row count satisfies the
+    cap's strict-gate floor (if any).
+
+    Non-strict caps (absent from ``min_rows``) are always satisfied by
+    ``success`` — preserves Task A behaviour. Strict-gate caps require
+    ``rows_processed`` to be non-None AND ``>= floor``.
+
+    A provider in ``exclusions[cap]`` (e.g. a multi-cap bulk ingester
+    whose aggregate ``rows_processed`` can't be split per cap) cannot
+    satisfy a strict-gate floor — even with non-zero rows. The
+    provider is treated as if its row count was always below the
+    floor; the cap must be carried by another (single-cap) provider.
+    See ``_STRICT_CAP_PROVIDER_EXCLUSIONS`` for the rationale.
+
+    #1140 Task C.
+    """
+    floor = min_rows.get(cap)
+    if floor is None:
+        return True
+    if provider_key in exclusions.get(cap, frozenset()):
+        return False
+    if rows_processed is None:
+        return False
+    return rows_processed >= floor
+
+
 def _satisfied_capabilities(
     statuses: Mapping[str, str],
+    rows_processed: Mapping[str, int | None] | None = None,
     *,
     provides: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES,
     provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
+    min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> set[Capability]:
-    """Cap set derived from current stage statuses.
+    """Cap set derived from current stage statuses + per-stage rows.
 
-    Production callers omit ``provides`` / ``provides_on_skip`` (the
-    module-level maps are used). Tests can pass overrides to register
+    For a cap ``C`` with ``min_rows[C] = N``: a provider ``P`` satisfies
+    ``C`` iff ``statuses[P] == 'success'`` AND ``rows_processed[P]``
+    is not None AND ``>= N``. ``skipped`` providers still satisfy via
+    ``provides_on_skip`` (the skip path is never row-counted).
+
+    For a cap ``C`` NOT in ``min_rows``: a provider ``P`` satisfies
+    ``C`` iff ``statuses[P] == 'success'`` (legacy Task A behaviour
+    preserved).
+
+    Production callers can omit ``rows_processed`` (defaults to an
+    empty mapping; strict-gate caps then fall to "below floor" since
+    every lookup returns None). Tests can pass overrides for
+    ``provides`` / ``provides_on_skip`` / ``min_rows`` to register
     synthetic caps for fixture stage_keys.
     """
+    rows = rows_processed or {}
     caps: set[Capability] = set()
     for stage_key, status in statuses.items():
         if status == "success":
-            caps.update(provides.get(stage_key, ()))
+            for cap in provides.get(stage_key, ()):
+                if _provider_meets_floor(cap, stage_key, rows.get(stage_key), min_rows, exclusions=exclusions):
+                    caps.add(cap)
         elif status == "skipped":
             caps.update(provides_on_skip.get(stage_key, ()))
     return caps
@@ -392,19 +498,28 @@ def _satisfied_capabilities(
 def _capability_is_dead(
     cap: Capability,
     statuses: Mapping[str, str],
+    rows_processed: Mapping[str, int | None] | None = None,
     *,
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
     provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
+    min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> bool:
     """A cap is dead iff every registered provider is in a state where
     it cannot now (or in the future) provide the cap.
 
-    Cannot-provide states: ``error`` / ``blocked`` / ``cancelled``, or
-    ``skipped`` without an explicit ``provides_on_skip`` entry.
+    Cannot-provide states:
+    * ``error`` / ``blocked`` / ``cancelled`` — terminal failure.
+    * ``skipped`` without an explicit ``provides_on_skip`` entry.
+    * For strict-gate caps (``cap in min_rows``): ``success`` with
+      ``rows_processed`` either ``None`` or below ``min_rows[cap]``.
+      The provider already terminalised so no future write will
+      change its row count — the cap can never be satisfied via
+      this provider (#1140 Task C).
 
     Can-still-provide states: ``pending`` / ``running`` (provider
-    hasn't decided yet), ``success`` (cap satisfied), or ``skipped``
-    with the cap in ``provides_on_skip``.
+    hasn't decided yet); ``success`` meeting the floor (or no floor);
+    ``skipped`` with the cap in ``provides_on_skip``.
     """
     providers = providers_map.get(cap, ())
     if not providers:
@@ -412,12 +527,20 @@ def _capability_is_dead(
         # invariant test should have caught this at test time; runtime
         # check is defence-in-depth.
         return True
+    rows = rows_processed or {}
     for provider_key in providers:
         status = statuses.get(provider_key)
         if status is None:
             continue
-        if status in ("pending", "running", "success"):
+        if status in ("pending", "running"):
             return False
+        if status == "success":
+            if _provider_meets_floor(cap, provider_key, rows.get(provider_key), min_rows, exclusions=exclusions):
+                return False
+            # Below floor (or excluded multi-cap provider) — this
+            # provider cannot satisfy a strict cap. Keep checking the
+            # others (a parallel provider may still be alive).
+            continue
         if status == "skipped":
             on_skip = provides_on_skip.get(provider_key, ())
             if cap in on_skip:
@@ -428,17 +551,25 @@ def _capability_is_dead(
 def _classify_dead_cap(
     cap: Capability,
     statuses: Mapping[str, str],
+    rows_processed: Mapping[str, int | None] | None = None,
     *,
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
+    min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> Literal["skip_only", "error"]:
     """Return the failure mode that killed a (confirmed-dead) cap.
 
-    Precondition: ``_capability_is_dead(cap, statuses)`` is True.
+    Precondition: ``_capability_is_dead(cap, statuses, rows_processed)``
+    is True.
 
     Returns ``"error"`` (block downstream) when ANY provider is in
-    ``error`` / ``blocked`` / ``cancelled``. Returns ``"skip_only"``
-    only when every dead provider is ``skipped`` without an explicit
-    ``provides_on_skip`` entry.
+    ``error`` / ``blocked`` / ``cancelled`` OR (for strict-gate caps)
+    in ``success`` with row count below the floor — a provider that
+    ran and produced too few rows is a failure mode, not a deliberate
+    bypass, so the operator should see ``blocked`` not ``skipped``.
+
+    Returns ``"skip_only"`` only when every dead provider is
+    ``skipped`` without an explicit ``provides_on_skip`` entry.
 
     Defensive default: a cap with zero registered providers, or a
     cap with NO ``skipped`` provider (only unknown/pending), is
@@ -448,12 +579,28 @@ def _classify_dead_cap(
     providers = providers_map.get(cap, ())
     if not providers:
         return "error"
+    rows = rows_processed or {}
     saw_skipped = False
     for provider_key in providers:
         status = statuses.get(provider_key)
         if status is None:
             continue
         if status in ("error", "blocked", "cancelled"):
+            return "error"
+        if status == "success" and not _provider_meets_floor(
+            cap, provider_key, rows.get(provider_key), min_rows, exclusions=exclusions
+        ):
+            # #1140 Task C — provider succeeded but its row count
+            # didn't meet the strict floor. Excluded multi-cap providers
+            # (e.g. bulk insider for form3) are NEUTRAL — they cannot
+            # satisfy the floor but they shouldn't drive the
+            # classification either; the cap death is whatever the
+            # OTHER providers tell us. Skip them.
+            if provider_key in exclusions.get(cap, frozenset()):
+                continue
+            # Non-excluded provider under floor → classify as error so
+            # the consumer transitions to ``blocked`` with a structured
+            # reason naming the under-floor provider.
             return "error"
         if status == "skipped":
             saw_skipped = True
@@ -471,9 +618,12 @@ def _requirement_satisfied(req: CapRequirement, caps: set[Capability]) -> bool:
 def _classify_requirement_unsatisfiable(
     req: CapRequirement,
     statuses: Mapping[str, str],
+    rows_processed: Mapping[str, int | None] | None = None,
     *,
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
     provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
+    min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> tuple[Literal["skip_only", "error"], list[Capability]] | None:
     """If ``req`` is unsatisfiable now, return ``(classification, dead_caps)``.
 
@@ -488,10 +638,18 @@ def _classify_requirement_unsatisfiable(
 
     Per #1138 §6.3: when unsatisfiable, classify ``"error"`` if any
     contributing dead cap is error-classified; otherwise
-    ``"skip_only"``.
+    ``"skip_only"``. #1140 Task C extends "error-classified" to include
+    strict-gate caps whose only surviving provider hit ``success`` but
+    under the row floor.
     """
     is_dead = lambda c: _capability_is_dead(  # noqa: E731
-        c, statuses, providers_map=providers_map, provides_on_skip=provides_on_skip
+        c,
+        statuses,
+        rows_processed,
+        providers_map=providers_map,
+        provides_on_skip=provides_on_skip,
+        min_rows=min_rows,
+        exclusions=exclusions,
     )
     dead_in_all: list[Capability] = [c for c in req.all_of if is_dead(c)]
 
@@ -516,7 +674,17 @@ def _classify_requirement_unsatisfiable(
                     all_dead_caps.append(cap)
 
     for cap in all_dead_caps:
-        if _classify_dead_cap(cap, statuses, providers_map=providers_map) == "error":
+        if (
+            _classify_dead_cap(
+                cap,
+                statuses,
+                rows_processed,
+                providers_map=providers_map,
+                min_rows=min_rows,
+                exclusions=exclusions,
+            )
+            == "error"
+        ):
             return ("error", all_dead_caps)
     return ("skip_only", all_dead_caps)
 
@@ -524,14 +692,42 @@ def _classify_requirement_unsatisfiable(
 def _format_block_reason(
     dead_caps: list[Capability],
     statuses: Mapping[str, str],
+    rows_processed: Mapping[str, int | None] | None = None,
     *,
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
+    min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> str:
+    """Build the structured ``last_error`` string for a blocked stage.
+
+    For strict-gate caps the per-provider annotation includes
+    ``rows_processed=N`` or ``rows_processed=NULL`` so the operator
+    timeline reads exactly which provider fell short of the floor
+    (#1140 Task C).
+    """
+    rows = rows_processed or {}
     parts: list[str] = []
     for cap in dead_caps:
         providers = providers_map.get(cap, ())
-        provider_states = ", ".join(f"{p}={statuses.get(p, '?')}" for p in providers) or "(no providers)"
-        parts.append(f"missing capability {cap}; no surviving provider (providers: {provider_states})")
+        excluded_for_cap = exclusions.get(cap, frozenset())
+        annotated: list[str] = []
+        for p in providers:
+            status = statuses.get(p, "?")
+            if status == "success" and cap in min_rows:
+                value = rows.get(p)
+                rows_str = "NULL" if value is None else str(value)
+                marker = " [excluded]" if p in excluded_for_cap else ""
+                annotated.append(f"{p}=success [rows_processed={rows_str}]{marker}")
+            else:
+                annotated.append(f"{p}={status}")
+        provider_states = ", ".join(annotated) or "(no providers)"
+        floor = min_rows.get(cap)
+        if floor is not None:
+            parts.append(
+                f"missing capability {cap}; no surviving provider met rows floor {floor} (providers: {provider_states})"
+            )
+        else:
+            parts.append(f"missing capability {cap}; no surviving provider (providers: {provider_states})")
     return "; ".join(parts)
 
 
@@ -699,6 +895,115 @@ class _StageOutcome:
     # iteration's run-level cancel checkpoint then sweeps remaining
     # stages and terminalises the run.
     cancelled: bool = False
+    # #1140 Task C — resolved rows_processed for the stage's
+    # invocation. ``None`` when no side-channel has data (the cap-eval
+    # layer treats ``None`` as "below floor" for strict-gate caps,
+    # status-only for non-strict caps).
+    rows_processed: int | None = None
+
+
+def _snapshot_job_runs_max_id(
+    conn: psycopg.Connection[Any],
+    *,
+    job_name: str,
+) -> int:
+    """Return ``COALESCE(MAX(run_id), 0) FROM job_runs WHERE job_name = ...``.
+
+    Used by ``_run_one_stage`` to bracket the ``job_runs`` window
+    (see ``_resolve_stage_rows``). #1140 / Task C of #1136 audit.
+
+    ``job_runs.run_id`` (BIGSERIAL PRIMARY KEY per sql/014) is the
+    canonical id column — there is no ``id`` alias.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(MAX(run_id), 0) FROM job_runs WHERE job_name = %s",
+            (job_name,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+
+def _resolve_stage_rows(
+    conn: psycopg.Connection[Any],
+    *,
+    bootstrap_run_id: int,
+    stage_key: str,
+    job_name: str,
+    job_runs_id_before: int,
+    job_runs_id_after: int,
+) -> int | None:
+    """Resolve ``rows_processed`` for a freshly-succeeded stage.
+
+    Returns ``None`` when no side-channel has data. Resolution order:
+
+    1. Per-archive ``bootstrap_archive_results`` (non-``__job__``). If
+       ``COUNT > 0`` → return ``SUM(rows_written)``, preserving 0.
+       Phase C ingester shape (e.g. ``sec_companyfacts_ingest``).
+    2. ``__job__`` row with operator-set ``rows_written > 0``. Service-
+       invoker shape (e.g. ``sec_submissions_files_walk`` overloads
+       the provenance row with ``filings_upserted``). The default
+       orchestrator-written ``__job__`` row carries ``rows_written=0``
+       (with the new ``record_archive_result_if_absent`` it only fires
+       when the service invoker didn't already write); a ``0`` here
+       falls through to source 3.
+    3. ``job_runs.row_count`` for the latest matching run in the
+       ``id > job_runs_id_before AND id <= job_runs_id_after`` window.
+       The double bound pins to rows created while the dispatcher held
+       ``JobLock`` for this stage; the upper bound rejects same-
+       ``job_name`` scheduled fires that landed after lock release.
+
+    #1140 / Task C of #1136 audit (spec at
+    docs/superpowers/specs/2026-05-13-precondition-final-data-gates.md).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(rows_written), 0)
+              FROM bootstrap_archive_results
+             WHERE bootstrap_run_id = %s
+               AND stage_key = %s
+               AND archive_name <> '__job__'
+            """,
+            (bootstrap_run_id, stage_key),
+        )
+        row = cur.fetchone()
+        archive_count = int(row[0]) if row else 0
+        archive_sum = int(row[1]) if row and row[1] is not None else 0
+        if archive_count > 0:
+            return archive_sum
+
+        cur.execute(
+            """
+            SELECT rows_written
+              FROM bootstrap_archive_results
+             WHERE bootstrap_run_id = %s
+               AND stage_key = %s
+               AND archive_name = '__job__'
+            """,
+            (bootstrap_run_id, stage_key),
+        )
+        row = cur.fetchone()
+        if row is not None and row[0] is not None and int(row[0]) > 0:
+            return int(row[0])
+
+        cur.execute(
+            """
+            SELECT row_count
+              FROM job_runs
+             WHERE job_name = %s
+               AND run_id > %s
+               AND run_id <= %s
+               AND status  = 'success'
+             ORDER BY run_id DESC
+             LIMIT 1
+            """,
+            (job_name, job_runs_id_before, job_runs_id_after),
+        )
+        row = cur.fetchone()
+        if row is not None and row[0] is not None:
+            return int(row[0])
+    return None
 
 
 def _run_one_stage(
@@ -733,6 +1038,16 @@ def _run_one_stage(
         mark_stage_running(conn, run_id=run_id, stage_key=stage_key)
         conn.commit()
 
+    # #1140 Task C — snapshot the job_runs MAX(id) BEFORE acquiring
+    # ``JobLock`` so the row resolver can pin its fallback window to
+    # rows created during this stage's run. ``job_runs_id_after`` is
+    # captured INSIDE the lock (after the invoker returns, before lock
+    # release) so a same-``job_name`` scheduled fire that lands after
+    # release cannot pollute the pick.
+    with psycopg.connect(database_url) as conn:
+        job_runs_id_before = _snapshot_job_runs_max_id(conn, job_name=job_name)
+    job_runs_id_after = job_runs_id_before  # set below; default if invoker raises
+
     # PR1c #1064 (Codex pre-push WARNING): the promoted scheduler-side
     # invokers call ``_tracked_job`` which reads ``_params_snapshot_var``
     # via ``consume_params_snapshot()`` to populate
@@ -759,6 +1074,28 @@ def _run_one_stage(
                 invoker(effective_params)
             finally:
                 _params_snapshot_var.reset(snap_token)
+            # #1140 Task C — capture the upper bound while still
+            # holding ``JobLock``. Any job_runs row created here must
+            # belong to our invocation; same-source serialisation
+            # prevents a parallel same-job_name fire from sneaking in.
+            #
+            # Wrapped in try/except so a snapshot failure (transient DB
+            # blip, pool exhausted) does NOT mark a successful invoker
+            # as error (Codex pre-push round 2 WARNING). The resolver
+            # falls back to ``job_runs_id_before`` window (which is the
+            # same value as ``job_runs_id_after`` initialised above) →
+            # an empty window → ``rows_processed = None``. The stage
+            # still records ``success``; cap-eval handles the None per
+            # the strict-gate rule.
+            try:
+                with psycopg.connect(database_url) as snap_conn:
+                    job_runs_id_after = _snapshot_job_runs_max_id(snap_conn, job_name=job_name)
+            except Exception as snap_exc:  # noqa: BLE001 — snapshot is best-effort
+                logger.warning(
+                    "bootstrap stage %s: failed to capture job_runs_id_after: %s",
+                    stage_key,
+                    snap_exc,
+                )
     except JobAlreadyRunning:
         message = (
             f"another instance of {job_name!r} holds the advisory lock; "
@@ -807,12 +1144,19 @@ def _run_one_stage(
     # downstream stages can verify provenance via the precondition
     # checker. C-stages write their own per-archive rows; this catches
     # the B-stages and any other invoker that doesn't self-record.
-    # Idempotent ON CONFLICT — no-op if the C-stage already wrote.
-    from app.services.bootstrap_preconditions import record_archive_result
+    #
+    # #1140 Task C — uses ``record_archive_result_if_absent`` (ON
+    # CONFLICT DO NOTHING) so a service invoker that already wrote
+    # ``__job__`` with a real ``rows_written`` count (e.g.
+    # ``sec_submissions_files_walk`` overloads the provenance row
+    # with ``filings_upserted``) is preserved. The pre-1140 helper
+    # was last-write-wins which clobbered the invoker's value back
+    # to 0.
+    from app.services.bootstrap_preconditions import record_archive_result_if_absent
 
     with psycopg.connect(database_url) as conn:
         try:
-            record_archive_result(
+            record_archive_result_if_absent(
                 conn,
                 bootstrap_run_id=run_id,
                 stage_key=stage_key,
@@ -827,10 +1171,41 @@ def _run_one_stage(
                 exc,
             )
 
+    # #1140 Task C — resolve rows_processed from the side-channels and
+    # commit it onto the stage row so the cap-eval layer + the
+    # operator panel aggregate read real numbers instead of NULL.
+    resolved_rows: int | None = None
+    try:
+        with psycopg.connect(database_url) as conn:
+            resolved_rows = _resolve_stage_rows(
+                conn,
+                bootstrap_run_id=run_id,
+                stage_key=stage_key,
+                job_name=job_name,
+                job_runs_id_before=job_runs_id_before,
+                job_runs_id_after=job_runs_id_after,
+            )
+    except Exception as exc:  # noqa: BLE001 — auditing must not fail the stage
+        logger.warning(
+            "bootstrap stage %s: failed to resolve rows_processed: %s",
+            stage_key,
+            exc,
+        )
+
     with psycopg.connect(database_url) as conn:
-        mark_stage_success(conn, run_id=run_id, stage_key=stage_key)
+        mark_stage_success(
+            conn,
+            run_id=run_id,
+            stage_key=stage_key,
+            rows_processed=resolved_rows,
+        )
         conn.commit()
-    return _StageOutcome(stage_key=stage_key, success=True, error=None)
+    return _StageOutcome(
+        stage_key=stage_key,
+        success=True,
+        error=None,
+        rows_processed=resolved_rows,
+    )
 
 
 def _should_run(stage_status: str) -> bool:
@@ -905,8 +1280,11 @@ def _phase_batched_dispatch(
     runnable: list[_RunnableStage],
     database_url: str,
     preexisting_statuses: dict[str, str] | None = None,
+    preexisting_rows_processed: dict[str, int | None] | None = None,
     provides_map: Mapping[str, tuple[Capability, ...]] | None = None,
     provides_on_skip_map: Mapping[str, tuple[Capability, ...]] | None = None,
+    min_rows_map: Mapping[Capability, int] | None = None,
+    exclusions_map: Mapping[Capability, frozenset[str]] | None = None,
 ) -> tuple[dict[str, str], bool]:
     """Dispatch ``runnable`` stages in phase-batched fashion with lane concurrency.
 
@@ -972,6 +1350,12 @@ def _phase_batched_dispatch(
     effective_provides_on_skip: Mapping[str, tuple[Capability, ...]] = (
         {**_STAGE_PROVIDES_ON_SKIP, **provides_on_skip_map} if provides_on_skip_map else _STAGE_PROVIDES_ON_SKIP
     )
+    effective_min_rows: Mapping[Capability, int] = (
+        {**_CAPABILITY_MIN_ROWS, **min_rows_map} if min_rows_map else _CAPABILITY_MIN_ROWS
+    )
+    effective_exclusions: Mapping[Capability, frozenset[str]] = (
+        {**_STRICT_CAP_PROVIDER_EXCLUSIONS, **exclusions_map} if exclusions_map else _STRICT_CAP_PROVIDER_EXCLUSIONS
+    )
     if provides_map or provides_on_skip_map:
         effective_providers_inverse: Mapping[Capability, tuple[str, ...]] = _build_capability_providers(
             effective_provides, effective_provides_on_skip
@@ -981,12 +1365,21 @@ def _phase_batched_dispatch(
 
     by_key = {r.stage_key: r for r in runnable}
     statuses: dict[str, str] = {r.stage_key: "pending" for r in runnable}
+    # #1140 Task C — parallel dict tracking rows_processed for each
+    # stage. Seeded from preexisting terminal stages (so a retry-pass
+    # respects what a prior pass wrote) and updated from each
+    # _StageOutcome as stages complete. The cap-eval helpers consult
+    # this to decide whether strict-gate caps are satisfied.
+    rows_processed: dict[str, int | None] = {r.stage_key: None for r in runnable}
     # Merge in upstream stages already in a terminal state so the
     # dependency check sees them.
     if preexisting_statuses:
         for key, status in preexisting_statuses.items():
             if key not in statuses:
                 statuses[key] = status
+    if preexisting_rows_processed:
+        for key, value in preexisting_rows_processed.items():
+            rows_processed[key] = value
 
     while True:
         # Cancel checkpoint — covers (W1) "before submitting Phase A's
@@ -1036,8 +1429,11 @@ def _phase_batched_dispatch(
         # wait for upstream pending/running providers.
         caps = _satisfied_capabilities(
             statuses,
+            rows_processed,
             provides=effective_provides,
             provides_on_skip=effective_provides_on_skip,
+            min_rows=effective_min_rows,
+            exclusions=effective_exclusions,
         )
         ready: list[_RunnableStage] = []
         cascade_transitioned = False
@@ -1050,8 +1446,11 @@ def _phase_batched_dispatch(
             classification = _classify_requirement_unsatisfiable(
                 req,
                 statuses,
+                rows_processed,
                 providers_map=effective_providers_inverse,
                 provides_on_skip=effective_provides_on_skip,
+                min_rows=effective_min_rows,
+                exclusions=effective_exclusions,
             )
             if classification is None:
                 continue  # still potentially satisfiable; wait
@@ -1060,7 +1459,10 @@ def _phase_batched_dispatch(
                 reason = _format_block_reason(
                     dead_caps,
                     statuses,
+                    rows_processed,
                     providers_map=effective_providers_inverse,
+                    min_rows=effective_min_rows,
+                    exclusions=effective_exclusions,
                 )
                 with psycopg.connect(database_url) as conn:
                     mark_stage_blocked(
@@ -1209,6 +1611,10 @@ def _phase_batched_dispatch(
 
         for stage_key, fut in all_futures:
             outcome = fut.result()
+            # #1140 Task C — refresh the per-stage row count from the
+            # outcome so the next dispatcher iteration's cap-eval
+            # reads it.
+            rows_processed[stage_key] = outcome.rows_processed
             if outcome.skipped:
                 statuses[stage_key] = "skipped"
                 logger.info("bootstrap dispatcher: %s SKIPPED", stage_key)
@@ -1223,7 +1629,11 @@ def _phase_batched_dispatch(
                 logger.info("bootstrap dispatcher: %s CANCELLED (%s)", stage_key, outcome.error)
             elif outcome.success:
                 statuses[stage_key] = "success"
-                logger.info("bootstrap dispatcher: %s OK", stage_key)
+                logger.info(
+                    "bootstrap dispatcher: %s OK (rows_processed=%s)",
+                    stage_key,
+                    outcome.rows_processed,
+                )
             else:
                 statuses[stage_key] = "error"
                 logger.warning("bootstrap dispatcher: %s ERROR (%s)", stage_key, outcome.error)
@@ -1276,12 +1686,18 @@ def run_bootstrap_orchestrator() -> None:
     # because that upstream was filtered out of `runnable`. Codex
     # review BLOCKING for #1020 PR2.
     preexisting_statuses: dict[str, str] = {}
+    # #1140 Task C — seed rows_processed for preexisting terminal
+    # stages so the cap-eval layer can read them on retry passes.
+    # ``StageRow.rows_processed`` is already projected by
+    # ``read_latest_run_with_stages``.
+    preexisting_rows_processed: dict[str, int | None] = {}
     runnable: list[_RunnableStage] = []
     for stage in sorted(snapshot.stages, key=lambda s: s.stage_order):
         # Skip stages already in a terminal state (re-runs); record
         # their status so dispatch dependency checks see them.
         if stage.status in ("success", "error", "blocked", "skipped", "cancelled"):
             preexisting_statuses[stage.stage_key] = stage.status
+            preexisting_rows_processed[stage.stage_key] = stage.rows_processed
             logger.info("bootstrap dispatcher: skipping %s (already %s)", stage.stage_key, stage.status)
             continue
         invoker = _INVOKERS.get(stage.job_name)
@@ -1324,6 +1740,7 @@ def run_bootstrap_orchestrator() -> None:
         runnable=runnable,
         database_url=database_url,
         preexisting_statuses=preexisting_statuses,
+        preexisting_rows_processed=preexisting_rows_processed,
     )
 
     if cancelled:

@@ -1428,6 +1428,11 @@ export interface BootstrapTimelineStageResponse {
   processed_count: number;
   target_count: number | null;
   archives: BootstrapTimelineArchiveResponse[];
+  // #1140 Task C — set when stage finished `success` but its
+  // rows_processed fell short of a strict-gate capability floor it
+  // provides. Frontend renders an amber chip + tooltip alongside the
+  // success tick when present.
+  warning: string | null;
 }
 
 export interface BootstrapTimelineRunResponse {
@@ -1436,6 +1441,11 @@ export interface BootstrapTimelineRunResponse {
   triggered_at: string;
   completed_at: string | null;
   cancel_requested_at: string | null;
+  // #1140 Task C — derived: true iff any stage in the run carries a
+  // non-null `warning`. Frontend renders an amber dot beside a
+  // `complete` status when set; suppressed for `partial_error` runs
+  // (the red signal is louder).
+  has_warnings: boolean;
 }
 
 export interface BootstrapTimelineResponse {

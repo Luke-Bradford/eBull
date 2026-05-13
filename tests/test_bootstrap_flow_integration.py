@@ -60,6 +60,24 @@ def _override_get_conn(conn: psycopg.Connection[tuple]) -> None:
     app.dependency_overrides[get_conn] = _dep
 
 
+def _record_job_runs_success(job_name: str, *, row_count: int = 1) -> None:
+    """Mirror _tracked_job's job_runs write so the orchestrator's
+    rows_processed resolver (#1140 Task C) finds a real row_count.
+    Without this every fake-invoker stage would have rows_processed=NULL
+    and the strict-gate caps (per-family ownership + fundamentals_raw_seeded)
+    would block downstream consumers.
+    """
+    from app.config import settings as app_settings
+
+    with psycopg.connect(app_settings.database_url) as conn:
+        conn.execute(
+            "INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count) "
+            "VALUES (%s, now(), now(), 'success', %s)",
+            (job_name, row_count),
+        )
+        conn.commit()
+
+
 def _patch_orchestrator_invokers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> dict[str, list[str]]:
@@ -77,6 +95,7 @@ def _patch_orchestrator_invokers(
     def _make_fake(name: str) -> Callable[..., None]:
         def _fake(_params: object = None) -> None:
             calls["order"].append(name)
+            _record_job_runs_success(name)
 
         return _fake
 
@@ -177,6 +196,7 @@ def test_bootstrap_partial_error_then_retry_failed(
             calls_pass1["order"].append(name)
             if name in failing:
                 raise RuntimeError(f"forced {name} failure")
+            _record_job_runs_success(name)
 
         return _fake
 
@@ -201,6 +221,7 @@ def test_bootstrap_partial_error_then_retry_failed(
     def _make_pass2(name: str) -> Callable[..., None]:
         def _fake(_params: object = None) -> None:
             calls_pass2["order"].append(name)
+            _record_job_runs_success(name)
 
         return _fake
 

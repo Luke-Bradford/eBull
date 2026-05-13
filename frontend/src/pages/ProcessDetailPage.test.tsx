@@ -383,6 +383,7 @@ function makeTimelinePayload(): BootstrapTimelineResponse {
       triggered_at: "2026-05-09T10:00:00Z",
       completed_at: null,
       cancel_requested_at: null,
+      has_warnings: false,
     },
     stages: [
       {
@@ -406,6 +407,7 @@ function makeTimelinePayload(): BootstrapTimelineResponse {
             completed_at: "2026-05-09T10:00:30Z",
           },
         ],
+        warning: null,
       },
       {
         stage_key: "cik_refresh",
@@ -420,6 +422,7 @@ function makeTimelinePayload(): BootstrapTimelineResponse {
         rows_processed: null,
         processed_count: 12,
         target_count: null,
+        warning: null,
         archives: [
           {
             archive_name: "cik_index_2026Q2.zip",
@@ -507,6 +510,56 @@ describe("ProcessDetailPage — Timeline tab (bootstrap)", () => {
     renderBootstrap();
     fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
     expect(await screen.findByText(/No bootstrap run yet/i)).toBeTruthy();
+  });
+
+  // #1140 Task C — warning chip on success+zero-rows strict-cap stage.
+  it("renders an amber warning chip on a success+rows=0 strict-cap stage", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    const payload = makeTimelinePayload();
+    // Override the universe_sync stage to carry a warning.
+    payload.stages[0]!.warning =
+      "stage succeeded but rows_processed=0; strict-gate capability fundamentals_raw_seeded cannot be satisfied";
+    mockedTimeline.mockResolvedValueOnce(payload);
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    const chip = await screen.findByTestId("stage-warning-chip");
+    expect(chip).toBeTruthy();
+    expect(chip.getAttribute("title")).toContain("fundamentals_raw_seeded");
+  });
+
+  // #1140 Task C — run-level amber dot on complete + has_warnings.
+  it("renders the run amber dot when run is complete AND has_warnings", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    const payload = makeTimelinePayload();
+    payload.run!.status = "complete";
+    payload.run!.has_warnings = true;
+    mockedTimeline.mockResolvedValueOnce(payload);
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    expect(await screen.findByTestId("run-warning-dot")).toBeTruthy();
+  });
+
+  // Control: run-level dot suppressed when run is partial_error (red signal
+  // already louder than amber warning).
+  it("does NOT render the run amber dot for partial_error runs even when has_warnings", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    const payload = makeTimelinePayload();
+    payload.run!.status = "partial_error";
+    payload.run!.has_warnings = true;
+    mockedTimeline.mockResolvedValueOnce(payload);
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    await screen.findByText("Universe Sync");
+    expect(screen.queryByTestId("run-warning-dot")).toBeNull();
   });
 
   it("opens the archive-detail modal when an archive square is clicked", async () => {
