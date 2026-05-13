@@ -53,6 +53,23 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "app/services/def14a_ingest.py",
         "app/services/ncen_classifier.py",
         "app/services/n_port_ingest.py",
+        # Manifest-worker adapters (#1126 / #1128 / #1129 / #1130 /
+        # #1133 / #1134 / #1151). Each one wraps a legacy service-layer
+        # ingester whose SQL normalisation already lives on this allow-
+        # list — the adapter is a thin per-accession driver, not a new
+        # disk-only persistence path.
+        "app/services/manifest_parsers/def14a.py",
+        "app/services/manifest_parsers/eight_k.py",
+        "app/services/manifest_parsers/insider_345.py",
+        "app/services/manifest_parsers/sec_10k.py",
+        "app/services/manifest_parsers/sec_13dg.py",
+        "app/services/manifest_parsers/sec_13f_hr.py",
+        "app/services/manifest_parsers/sec_n_port.py",
+        # Bounded pipelined fetcher (#1045) — concurrent transport
+        # wrapper used by ``ingest_business_summaries`` to prefetch
+        # primary docs. Doesn't persist anything itself; the wrapped
+        # caller (business_summary) owns the SQL normalisation.
+        "app/services/sec_pipelined_fetcher.py",
         # Provider implementation owns the method itself.
         "app/providers/implementations/sec_edgar.py",
         # Bounded-concurrency wrapper (#726). Calls the method via a
@@ -78,6 +95,16 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "tests/test_def14a_ingest.py",
         "tests/test_ncen_classifier.py",
         "tests/test_n_port_ingest.py",
+        # Manifest-worker adapter tests — exercise the adapters above
+        # and naturally reference fetch_document_text via monkeypatch.
+        "tests/test_manifest_parser_def14a.py",
+        "tests/test_manifest_parser_eight_k.py",
+        "tests/test_manifest_parser_insider_345.py",
+        "tests/test_manifest_parser_sec_10k.py",
+        "tests/test_manifest_parser_sec_13dg.py",
+        "tests/test_manifest_parser_sec_13f_hr.py",
+        "tests/test_manifest_parser_sec_n_port.py",
+        "tests/test_sec_pipelined_fetcher.py",
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",
