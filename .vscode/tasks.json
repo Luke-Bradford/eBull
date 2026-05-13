@@ -51,7 +51,15 @@
         "group": "ebull-stack",
         "clear": false
       },
-      "problemMatcher": []
+      "problemMatcher": {
+        "owner": "ebull-backend",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\x00$",
+          "endsPattern": "^\\x00$"
+        }
+      }
     },
     {
       "label": "stack: frontend",
@@ -81,7 +89,15 @@
         "group": "ebull-stack",
         "clear": false
       },
-      "problemMatcher": []
+      "problemMatcher": {
+        "owner": "ebull-frontend",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\x00$",
+          "endsPattern": "^\\x00$"
+        }
+      }
     },
     {
       "label": "stack: jobs",
@@ -108,7 +124,15 @@
         "group": "ebull-stack",
         "clear": false
       },
-      "problemMatcher": []
+      "problemMatcher": {
+        "owner": "ebull-jobs",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\x00$",
+          "endsPattern": "^\\x00$"
+        }
+      }
     },
     {
       "label": "stack: backend+frontend",
