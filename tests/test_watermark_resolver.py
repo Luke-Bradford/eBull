@@ -502,7 +502,9 @@ def test_source_helpers_round_trip() -> None:
     assert freshness_source_for("sec_8k_events_ingest") == "sec_8k"
     assert freshness_source_for("daily_financial_facts") == "sec_xbrl_facts"
     assert freshness_source_for("fundamentals_sync") == "sec_xbrl_facts"
-    assert freshness_source_for("sec_business_summary_ingest") == "sec_xbrl_facts"
+    # sec_business_summary_ingest retired post-#1155; manifest worker +
+    # sec_10k.py parser (#1152) carry 10-K Item 1 writes.
+    assert freshness_source_for("sec_business_summary_ingest") is None
     assert freshness_source_for("sec_n_port_ingest") == "sec_n_port"
     # Unmapped jobs must return None — the trigger handler treats None
     # as "no freshness reset to issue".

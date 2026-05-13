@@ -117,7 +117,6 @@ _JOB_REGISTRY: dict[str, _JobSpec] = {
     "sec_8k_events_ingest": _JobSpec(display="8-K", freshness_source="sec_8k"),
     "daily_financial_facts": _JobSpec(display="XBRL facts", freshness_source="sec_xbrl_facts"),
     "fundamentals_sync": _JobSpec(display="XBRL facts", freshness_source="sec_xbrl_facts"),
-    "sec_business_summary_ingest": _JobSpec(display="XBRL facts", freshness_source="sec_xbrl_facts"),
     # NPORT (accession cursor via n_port_ingest_log; full-wash uses
     # freshness_source='sec_n_port' so the freshness scheduler reseeds
     # NPORT subjects from scratch).
@@ -682,11 +681,12 @@ def jobs_sharing_freshness_source(source: str) -> tuple[str, ...]:
     Used by the trigger handler's full-wash precondition to refuse a
     reset while ANY sibling job consuming the same scheduler source is
     mid-run. Several jobs intentionally consume the same XBRL feed
-    (``daily_financial_facts`` / ``fundamentals_sync`` /
-    ``sec_business_summary_ingest`` all → ``sec_xbrl_facts``); a
-    full-wash on one of them resets the shared
+    (``daily_financial_facts`` + ``fundamentals_sync`` → ``sec_xbrl_facts``);
+    a full-wash on one of them resets the shared
     ``data_freshness_index`` rows under the others' feet without this
-    sibling check.
+    sibling check. (``sec_business_summary_ingest`` was a third sibling
+    pre-#1155; retired in the legacy-cron sweep — manifest worker +
+    ``sec_10k.py`` parser (#1152) now carry that path.)
     """
     return tuple(pid for pid, spec in _JOB_REGISTRY.items() if spec.freshness_source == source)
 
@@ -710,11 +710,10 @@ def acquire_shared_source_locks(
     The per-process advisory lock acquired by
     ``app.services.process_stop.acquire_prelude_lock`` only serialises
     operations under the SAME ``process_id``. When multiple jobs share
-    a freshness/manifest source (e.g. ``daily_financial_facts``,
-    ``fundamentals_sync``, ``sec_business_summary_ingest`` all
-    consume ``sec_xbrl_facts``), a full-wash trigger on one and a
-    prelude for another hold DIFFERENT per-process locks and can race
-    on the shared scheduler rows.
+    a freshness/manifest source (e.g. ``daily_financial_facts`` +
+    ``fundamentals_sync`` both consume ``sec_xbrl_facts``), a full-wash
+    trigger on one and a prelude for another hold DIFFERENT per-process
+    locks and can race on the shared scheduler rows.
 
     This helper takes ``pg_advisory_xact_lock`` on a per-source key
     (``hashtext('source:freshness:<src>')`` /

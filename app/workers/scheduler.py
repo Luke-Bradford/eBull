@@ -256,7 +256,6 @@ JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
 JOB_SEC_DIVIDEND_CALENDAR_INGEST = "sec_dividend_calendar_ingest"
-JOB_SEC_BUSINESS_SUMMARY_INGEST = "sec_business_summary_ingest"
 JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP = "sec_business_summary_bootstrap"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
@@ -622,28 +621,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
-    ScheduledJob(
-        name=JOB_SEC_BUSINESS_SUMMARY_INGEST,
-        display_name="SEC 10-K business-summary ingest",
-        source="sec_rate",
-        description=(
-            "Extract 10-K Item 1 'Business' narratives into "
-            "``instrument_business_summary`` (#428). Runs 03:15 UTC "
-            "— 45 min after fundamentals_sync so new 10-K filings are "
-            "visible. Bounded to 200 instruments per run with a 7-day "
-            "TTL on ``last_parsed_at`` so a backlog drains without "
-            "re-fetching already-parsed instruments."
-        ),
-        cadence=Cadence.daily(hour=3, minute=15),
-        # #476: catch up on boot so an empty ``instrument_business_summary``
-        # table populates on the next operator restart instead of waiting
-        # for the daily 03:15 UTC window. Cost is bounded — the ingester
-        # TTL-gates already-parsed instruments and caps at 200 filings
-        # per run (~22s at the SEC 9 req/s floor), so the worst case is
-        # one 22s burst of requests per boot per 24h window.
-        catch_up_on_boot=True,
-        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
-    ),
+    # `sec_business_summary_ingest` retired post-#1155: Layer 1/2/3
+    # discovery + `sec_manifest_worker` + `manifest_parsers/sec_10k.py`
+    # (#1152) carry every 10-K Item 1 write to `instrument_business_summary`
+    # + `instrument_business_summary_sections`. The weekly Sunday safety-net
+    # bootstrap (`sec_business_summary_bootstrap` below) stays for
+    # one-shot drain + operator manual backfill.
     ScheduledJob(
         name=JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
         display_name="SEC Form 4 ingest",
@@ -3924,9 +3907,10 @@ def sec_business_summary_bootstrap() -> None:
         ):
             # #1045: prefetch cohort URLs via PipelinedSecFetcher for
             # 4-way concurrent in-flight fetches at the shared 7 req/s
-            # ceiling. Bootstrap-only — the steady-state daily ingest
-            # path (sec_business_summary_ingest) keeps the per-filing
-            # serial fetch since it processes ~200 candidates / day.
+            # ceiling. Bootstrap-only — steady-state per-filing path
+            # now runs through the manifest worker + `sec_10k.py` parser
+            # (#1152, post-#1155 retirement of `sec_business_summary_ingest`),
+            # which the worker rate-limits at its own per-tick budget.
             result = bootstrap_business_summaries(
                 conn,
                 provider,
@@ -3938,36 +3922,6 @@ def sec_business_summary_bootstrap() -> None:
         logger.info(
             "sec_business_summary_bootstrap complete: "
             "scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
-            result.filings_scanned,
-            result.rows_inserted,
-            result.rows_updated,
-            result.fetch_errors,
-            result.parse_misses,
-        )
-
-
-def sec_business_summary_ingest() -> None:
-    """Extract 10-K Item 1 into ``instrument_business_summary`` (#428).
-
-    Same shape as :func:`sec_dividend_calendar_ingest` (#434) — scans
-    10-K filings, fetches the primary document, parses Item 1, and
-    upserts. Bounded per run (``limit=200``) with a 7-day
-    ``last_parsed_at`` TTL so steady-state daily runs don't hammer
-    SEC for already-parsed instruments.
-    """
-    from app.providers.implementations.sec_edgar import SecFilingsProvider
-    from app.services.business_summary import ingest_business_summaries
-
-    with _tracked_job(JOB_SEC_BUSINESS_SUMMARY_INGEST) as tracker:
-        with (
-            psycopg.connect(settings.database_url) as conn,
-            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
-        ):
-            result = ingest_business_summaries(conn, provider)
-
-        tracker.row_count = result.rows_inserted + result.rows_updated
-        logger.info(
-            "sec_business_summary_ingest complete: scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
             result.filings_scanned,
             result.rows_inserted,
             result.rows_updated,

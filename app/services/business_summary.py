@@ -1454,9 +1454,11 @@ def bootstrap_business_summaries(
     invocations no-op fast once the queue is empty.
 
     Designed for first-time backfill of the 4031-instrument SEC-CIK
-    universe (#535). Steady-state daily ingest (limit=200) is too
-    slow at first-time bootstrap; this drain processes the entire
-    backlog in one bounded session under SEC fair-use limits.
+    universe (#535). The steady-state per-filing path runs through
+    the manifest worker + ``sec_10k.py`` parser (#1152, post-#1155
+    retirement of ``sec_business_summary_ingest``), which is too slow
+    at first-time bootstrap; this drain processes the entire backlog
+    in one bounded session under SEC fair-use limits.
 
     Returns aggregate :class:`IngestResult` summing every chunk's
     counts. Quarantined rows (next_retry_at > NOW()) stay excluded

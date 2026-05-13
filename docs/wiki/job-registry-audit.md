@@ -100,7 +100,7 @@ These follow the same archetype: zero-arg body → calls `ingest_<thing>(conn, p
 | Job | Display name | Cadence | Prereq | Body calls | Current internal limits |
 |---|---|---|---|---|---|
 | `sec_dividend_calendar_ingest` | SEC dividend calendar ingest | daily 03:00 | `_bootstrap_complete` | `ingest_dividend_calendar(conn, provider)` | bounded 500/run |
-| `sec_business_summary_ingest` | SEC 10-K business-summary ingest | daily 03:15 | `_bootstrap_complete` | `ingest_business_summaries(conn, provider)` | bounded 200/run, 7d TTL |
+| ~~`sec_business_summary_ingest`~~ | ~~SEC 10-K business-summary ingest~~ | ~~daily 03:15~~ | — | — | **retired post-#1155; Layer 1/2/3 + manifest worker + `sec_10k.py` (#1152) carry the path. Weekly `sec_business_summary_bootstrap` safety-net kept.** |
 | `sec_insider_transactions_ingest` | SEC Form 4 ingest | hourly :30 | `_bootstrap_complete` | `ingest_insider_transactions(conn, provider)` | bounded 500/run |
 | `sec_filing_documents_ingest` | SEC filing-documents manifest ingest | hourly :35 | `_bootstrap_complete` | `ingest_filing_documents(conn, provider)` | bounded 500/run |
 | `sec_8k_events_ingest` | SEC 8-K events ingest | hourly :20 | `_bootstrap_complete` | `ingest_8k_events(conn, provider)` | bounded 200/run |
