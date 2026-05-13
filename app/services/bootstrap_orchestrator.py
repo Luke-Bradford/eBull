@@ -1,28 +1,43 @@
 """First-install bootstrap orchestrator.
 
-Runs the 17-stage end-to-end first-install backfill described in
-``docs/superpowers/specs/2026-05-07-first-install-bootstrap.md``.
+Runs the 24-stage end-to-end first-install backfill described in
+``docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md``
+(supersedes the original 17-stage shape in
+``docs/superpowers/specs/2026-05-07-first-install-bootstrap.md``).
 
-Three phases:
+Phases (S-numbers match the runbook stage list):
 
-1. **Phase A — init** (sequential, single thread): runs the universe
-   sync (A1). Every Phase B stage depends on a populated
-   ``instruments`` table.
-2. **Phase B — lanes** (two threads in parallel): the eToro lane
-   (E1: candle refresh) runs alongside the SEC lane (S1..S15:
-   filer directories, CIK refresh, filing-events seed, manifest
-   drain, typed parsers, ownership rollup, fundamentals).
-3. **Phase C — finalize** (sequential): inspects per-stage outcomes
-   and transitions ``bootstrap_state`` to ``complete`` or
-   ``partial_error``.
+1. **Phase A — init** (sequential, ``init`` lane): S1 ``universe_sync``.
+   Every later stage depends on a populated ``instruments`` table.
+2. **Phase B — lanes** (parallel by source lock): the eToro lane
+   (S2 ``candle_refresh``) runs alongside the SEC reference lane
+   (S3..S6: filer directories, CIK refresh).
+3. **Phase A3 — bulk archive download** (``sec_bulk_download`` lane):
+   S7 ``sec_bulk_download`` ships fixed-URL SEC archives in one
+   request, disjoint from the per-IP ``sec_rate`` budget.
+4. **Phase C — DB-bound bulk ingest** (``db`` lane): S8..S12 ingest
+   the bulk archives into ``filing_events`` / ``ownership_*`` /
+   ``company_facts``.
+5. **Phase C' — secondary-pages walker** (``sec_rate``): S13
+   ``sec_submissions_files_walk`` covers deep-history submission
+   pages the bulk archive truncates.
+6. **Legacy / fallback chain** (``sec_rate``): S14..S22 ingest the
+   per-filing path. Idempotent no-ops when Phase C populated rows;
+   primary write path on the slow-connection bypass (see #1041).
+7. **Phase E — final derivations** (``db`` lane): S23
+   ``ownership_observations_backfill`` + S24 ``fundamentals_sync``.
+8. **Finalize**: inspects per-stage outcomes and transitions
+   ``bootstrap_state`` to ``complete`` or ``partial_error``.
 
 Per-stage execution contract (every stage):
 
 1. Pre-check stage status; skip if ``success``.
 2. Mark stage ``running``.
 3. Acquire ``JobLock(database_url, job_name)`` — same primitive
-   that scheduled + manual paths use.
-4. Invoke ``_INVOKERS[job_name]()``.
+   that scheduled + manual paths use; resolves to a per-source
+   advisory lock (PR1a #1064).
+4. Invoke ``_INVOKERS[job_name](params)`` (PR1b-2 #1064 widened the
+   contract from zero-arg to ``(Mapping) -> None``).
 5. Catch exceptions; record ``error`` with truncated message.
 6. On success record ``success`` + ``rows_processed``.
 
@@ -245,9 +260,11 @@ _STAGE_REQUIRES: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-# Lane override map — stage_key → lane name, used by the new
+# Lane override map — stage_key → lane name, used by the
 # concurrency dispatcher. Stages NOT in this map default to their
-# StageSpec.lane field (so existing 17-stage runs still work).
+# ``StageSpec.lane`` field; the override map lets the dispatcher
+# refine the lane (e.g. retire ``etoro`` for SEC-lane stages) without
+# rewriting every spec.
 _STAGE_LANE_OVERRIDES: Final[dict[str, str]] = {
     "cusip_universe_backfill": "sec_rate",
     "sec_13f_filer_directory_sync": "sec_rate",
@@ -992,9 +1009,10 @@ __all__ = [
 
 # Stage count assertion — pin so a future refactor that adds /
 # removes a spec deliberately surfaces in code review and doesn't
-# silently break the tests + frontend that hardcode "17 stages".
+# silently break the tests + frontend + runbook that hardcode the
+# current 24-stage shape.
 assert len(_BOOTSTRAP_STAGE_SPECS) == 24, (
     f"_BOOTSTRAP_STAGE_SPECS expected 24 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
-    "update the spec, frontend, and stage_count tests in lockstep. "
+    "update the spec, frontend, runbook, and stage_count tests in lockstep. "
     "#1027 added 7 bulk-archive stages (sec_bulk_download + C1.a/C2/C3/C4/C5 ingesters + C1.b walker)."
 )

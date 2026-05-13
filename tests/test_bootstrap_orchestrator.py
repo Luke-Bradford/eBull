@@ -74,6 +74,25 @@ def _bind_settings_to_test_db(monkeypatch: pytest.MonkeyPatch) -> str:
     return url
 
 
+def _register_synthetic_jobs(monkeypatch: pytest.MonkeyPatch, mapping: dict[str, str]) -> None:
+    """Add synthetic ``job_name -> Lane`` entries to the source-lock
+    registry so ``JobLock(database_url, job_name)`` resolves without
+    raising ``KeyError`` for fixture-only job names.
+
+    PR1a #1064 made ``JobLock`` eagerly resolve job_name -> source via
+    ``app.jobs.sources.source_for``; tests that construct synthetic
+    stage specs (e.g. ``alpha_job``, ``bravo_job``) must therefore
+    register the name. The registry is a process-wide dict cached
+    behind ``get_job_name_to_source``; monkeypatch.setitem reverses
+    each insert at teardown.
+    """
+    from app.jobs.sources import get_job_name_to_source
+
+    registry = get_job_name_to_source()
+    for name, lane in mapping.items():
+        monkeypatch.setitem(registry, name, lane)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # Catalogue invariants
 # ---------------------------------------------------------------------------
@@ -146,6 +165,7 @@ def test_run_one_stage_records_success(
 ) -> None:
     _reset_state(ebull_test_conn)
     test_db_url = _bind_settings_to_test_db(monkeypatch)
+    _register_synthetic_jobs(monkeypatch, {"alpha_job": "init"})
     from app.services.bootstrap_state import StageSpec
 
     specs = (StageSpec(stage_key="alpha", stage_order=1, lane="init", job_name="alpha_job"),)
@@ -178,6 +198,7 @@ def test_run_one_stage_records_error_on_invoker_exception(
 ) -> None:
     _reset_state(ebull_test_conn)
     test_db_url = _bind_settings_to_test_db(monkeypatch)
+    _register_synthetic_jobs(monkeypatch, {"bravo_job": "init"})
     from app.services.bootstrap_state import StageSpec
 
     specs = (StageSpec(stage_key="bravo", stage_order=1, lane="init", job_name="bravo_job"),)

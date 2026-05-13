@@ -27,34 +27,56 @@ Click "Run bootstrap" on the admin page when:
 Do **not** run it as part of routine ops: scheduled jobs handle
 incremental refresh once bootstrap is complete.
 
-## 2. What runs (17 stages)
+## 2. What runs (24 stages)
 
-Phases in order; spec §"Stages and lanes" is the source of truth:
+Phases in order; the catalogue lives in
+``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS`` and
+is the source of truth (asserted == 24 at module load). Spec:
+``docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md``.
 
-1. **Phase A — init** (sequential, single thread): ``universe_sync``
-   (~30s, ~1.5k rows).
-2. **Phase B — eToro lane** (parallel with SEC lane):
-   ``candle_refresh`` (full universe; minutes).
-3. **Phase B — SEC lane** (sequential, shared 11 req/s bucket; 15
-   stages):
-   - ``cusip_universe_backfill``
-   - ``sec_13f_filer_directory_sync``
-   - ``sec_nport_filer_directory_sync``
-   - ``cik_refresh`` (``daily_cik_refresh``)
-   - ``filings_history_seed`` (PR1c #1064 — promoted from the bespoke
-     ``bootstrap_filings_history_seed`` wrapper; bootstrap stage 14
-     dispatches with ``params={days_back: 730, filing_types: <three-tier
-     allow-list>}``)
-   - ``sec_first_install_drain`` (~60min for ~12k filers; bootstrap
-     stage 15 dispatches with ``params={max_subjects: None}``)
-   - ``sec_def14a_bootstrap`` / ``sec_business_summary_bootstrap`` /
-     insider/Form 3/8-K typed parsers
-   - ``sec_13f_quarterly_sweep`` / ``sec_n_port_ingest``
-   - ``ownership_observations_backfill``
-   - ``fundamentals_sync``
+1. **Phase A — init** (sequential, ``init`` lane, single thread):
+   - S1 ``universe_sync`` (``nightly_universe_sync``; ~30s, ~1.5k rows).
+1. **Phase B — eToro lane** (parallel with SEC):
+   - S2 ``candle_refresh`` (``daily_candle_refresh``; full universe).
+1. **Phase B — SEC reference lane** (``sec_rate``; shared 10 req/s bucket):
+   - S3 ``cusip_universe_backfill``
+   - S4 ``sec_13f_filer_directory_sync``
+   - S5 ``sec_nport_filer_directory_sync``
+   - S6 ``cik_refresh`` (``daily_cik_refresh``)
+1. **Phase A3 — bulk archive download** (``sec_bulk_download`` lane;
+   disjoint from ``sec_rate``):
+   - S7 ``sec_bulk_download`` (#1020; fixed-URL SEC archives).
+1. **Phase C — DB-bound bulk ingesters** (``db`` lane; same-source
+   serialisation under one ``JobLock`` per #1064):
+   - S8 ``sec_submissions_ingest``
+   - S9 ``sec_companyfacts_ingest``
+   - S10 ``sec_13f_ingest_from_dataset``
+   - S11 ``sec_insider_ingest_from_dataset``
+   - S12 ``sec_nport_ingest_from_dataset``
+1. **Phase C' — secondary-pages walker** (``sec_rate``):
+   - S13 ``sec_submissions_files_walk``
+1. **Legacy / fallback chain** (``sec_rate``; idempotent no-ops when
+   Phase C populated rows; primary write path on the slow-connection
+   bypass — see #1041):
+   - S14 ``filings_history_seed`` (``params={days_back: 730,
+     filing_types: <three-tier allow-list>}``)
+   - S15 ``sec_first_install_drain`` (``params={max_subjects: None}``)
+   - S16 ``sec_def14a_bootstrap``
+   - S17 ``sec_business_summary_bootstrap``
+   - S18 ``sec_insider_transactions_backfill``
+   - S19 ``sec_form3_ingest``
+   - S20 ``sec_8k_events_ingest``
+   - S21 ``sec_13f_recent_sweep`` (``sec_13f_quarterly_sweep`` with
+     ``min_period_of_report`` ≈ today − 380d; #1008 bound)
+   - S22 ``sec_n_port_ingest``
+1. **Phase E — final derivations** (``db`` lane):
+   - S23 ``ownership_observations_backfill``
+   - S24 ``fundamentals_sync``
 
-Total wall-clock: typically **60–90 minutes**, dominated by the SEC
-manifest drain (``sec_first_install_drain``).
+Total wall-clock: typically **60–90 minutes** on the bulk path,
+dominated by ``sec_bulk_download`` + ``sec_submissions_files_walk``.
+The legacy ``sec_first_install_drain`` path (slow-connection fallback)
+dominates wall-clock when the bulk archives are skipped.
 
 ## 3. Watching it
 
@@ -90,7 +112,7 @@ After the run finalises with at least one error,
   Re-publishes the orchestrator queue row. Successful prior stages
   stay ``success`` and are skipped.
 - **Re-run all** — creates a brand-new ``bootstrap_runs`` row +
-  freshly seeds 17 ``bootstrap_stages`` rows. Use when an operator
+  freshly seeds 24 ``bootstrap_stages`` rows. Use when an operator
   wants to widen historical depth or after a config change that
   affects upstream ingest (e.g. CIK universe expansion).
 - **Mark complete** — operator escape hatch. Forces
@@ -143,19 +165,26 @@ will summarise; per-CIK detail is in the underlying
 
 ### Typed parsers — `instruments=0` after the drain
 
-If S6/S7/S8/etc parsers report 0 instruments processed, check that
-``filings_history_seed`` (S5) actually populated ``filing_events`` —
-without ``filing_events`` rows for the relevant form type, the
-parser candidate selectors find nothing.
+If S16/S17/S18/S19/S20 typed parsers (def14a / business summary /
+insider txns / Form 3 / 8-K) report 0 instruments processed, check
+that S14 ``filings_history_seed`` actually populated ``filing_events``
+— without ``filing_events`` rows for the relevant form type, the
+parser candidate selectors find nothing. On the bulk path (#1020),
+S8 ``sec_submissions_ingest`` + S13 ``sec_submissions_files_walk``
+seed the same ``filing_events`` rows; verify those completed before
+suspecting the legacy chain.
 
 ## 7. Scheduler gate behaviour
 
 While ``bootstrap_state.status`` is anything other than ``complete``,
-14 scheduled jobs skip-and-log instead of firing:
+the SCHEDULED_JOBS entries with ``prerequisite=_bootstrap_complete``
+skip-and-log instead of firing. Grep
+``app/workers/scheduler.py`` for ``_bootstrap_complete`` for the
+current list; representative members:
 
 - ``orchestrator_full_sync`` (entire DAG-walk path)
 - ``fundamentals_sync`` (also gated by ``_has_any_coverage``)
-- 12 SEC ingest / bootstrap / backfill jobs
+- SEC ingest / bootstrap / backfill jobs
 
 A skip writes a ``job_runs`` row with ``status='skipped'`` and the
 reason ``"first-install bootstrap not complete; visit /admin to
@@ -163,6 +192,8 @@ run"``. Manual triggers (``POST /jobs/{name}/run``) bypass the gate
 deliberately so an operator override stays available pre-bootstrap.
 
 The bootstrap orchestrator itself dispatches stage jobs by direct
-invocation (``_INVOKERS[name]()``), bypassing the scheduler-side
-gate but acquiring the per-job ``JobLock`` so manual / scheduled
-triggers cannot run twice simultaneously.
+invocation (``_INVOKERS[name](params)``; PR1b #1064 widened the
+contract from zero-arg to ``(Mapping) -> None``), bypassing the
+scheduler-side gate but acquiring the per-source ``JobLock``
+(PR1a #1064) so manual / scheduled triggers cannot run twice
+simultaneously.

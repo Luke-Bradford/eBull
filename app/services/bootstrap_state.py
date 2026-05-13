@@ -7,7 +7,9 @@ singleton scheduler-gate state. Spec:
 Three tables (sql/129_bootstrap_state.sql):
 
   - ``bootstrap_runs``    — one row per "Run bootstrap" click.
-  - ``bootstrap_stages``  — one row per stage in a run (18 stages today).
+  - ``bootstrap_stages``  — one row per stage in a run (24 stages today;
+                            catalogue lives in
+                            ``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS``).
   - ``bootstrap_state``   — singleton row (id=1) with the canonical
                             ``_bootstrap_complete`` gate status.
 
@@ -95,8 +97,10 @@ class StageSpec:
     """Static definition of a stage. Lives in code, not DB.
 
     The orchestrator service builds the canonical ordered list of
-    18 specs (1 init + 1 eToro + 16 SEC) and passes it to ``start_run``,
-    which materialises one ``bootstrap_stages`` row per spec.
+    24 specs (1 init + 1 eToro + 1 sec_bulk_download + 7 db + 14 sec_rate;
+    see ``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS``)
+    and passes it to ``start_run``, which materialises one
+    ``bootstrap_stages`` row per spec.
     """
 
     stage_key: str
