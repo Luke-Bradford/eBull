@@ -464,6 +464,7 @@ def _satisfied_capabilities(
     provides: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES,
     provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
     min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> set[Capability]:
     """Cap set derived from current stage statuses + per-stage rows.
 
@@ -487,7 +488,7 @@ def _satisfied_capabilities(
     for stage_key, status in statuses.items():
         if status == "success":
             for cap in provides.get(stage_key, ()):
-                if _provider_meets_floor(cap, stage_key, rows.get(stage_key), min_rows):
+                if _provider_meets_floor(cap, stage_key, rows.get(stage_key), min_rows, exclusions=exclusions):
                     caps.add(cap)
         elif status == "skipped":
             caps.update(provides_on_skip.get(stage_key, ()))
@@ -502,6 +503,7 @@ def _capability_is_dead(
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
     provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
     min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> bool:
     """A cap is dead iff every registered provider is in a state where
     it cannot now (or in the future) provide the cap.
@@ -533,7 +535,7 @@ def _capability_is_dead(
         if status in ("pending", "running"):
             return False
         if status == "success":
-            if _provider_meets_floor(cap, provider_key, rows.get(provider_key), min_rows):
+            if _provider_meets_floor(cap, provider_key, rows.get(provider_key), min_rows, exclusions=exclusions):
                 return False
             # Below floor (or excluded multi-cap provider) — this
             # provider cannot satisfy a strict cap. Keep checking the
@@ -553,6 +555,7 @@ def _classify_dead_cap(
     *,
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
     min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> Literal["skip_only", "error"]:
     """Return the failure mode that killed a (confirmed-dead) cap.
 
@@ -584,14 +587,16 @@ def _classify_dead_cap(
             continue
         if status in ("error", "blocked", "cancelled"):
             return "error"
-        if status == "success" and not _provider_meets_floor(cap, provider_key, rows.get(provider_key), min_rows):
+        if status == "success" and not _provider_meets_floor(
+            cap, provider_key, rows.get(provider_key), min_rows, exclusions=exclusions
+        ):
             # #1140 Task C — provider succeeded but its row count
             # didn't meet the strict floor. Excluded multi-cap providers
             # (e.g. bulk insider for form3) are NEUTRAL — they cannot
             # satisfy the floor but they shouldn't drive the
             # classification either; the cap death is whatever the
             # OTHER providers tell us. Skip them.
-            if provider_key in _STRICT_CAP_PROVIDER_EXCLUSIONS.get(cap, frozenset()):
+            if provider_key in exclusions.get(cap, frozenset()):
                 continue
             # Non-excluded provider under floor → classify as error so
             # the consumer transitions to ``blocked`` with a structured
@@ -618,6 +623,7 @@ def _classify_requirement_unsatisfiable(
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
     provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
     min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> tuple[Literal["skip_only", "error"], list[Capability]] | None:
     """If ``req`` is unsatisfiable now, return ``(classification, dead_caps)``.
 
@@ -643,6 +649,7 @@ def _classify_requirement_unsatisfiable(
         providers_map=providers_map,
         provides_on_skip=provides_on_skip,
         min_rows=min_rows,
+        exclusions=exclusions,
     )
     dead_in_all: list[Capability] = [c for c in req.all_of if is_dead(c)]
 
@@ -674,6 +681,7 @@ def _classify_requirement_unsatisfiable(
                 rows_processed,
                 providers_map=providers_map,
                 min_rows=min_rows,
+                exclusions=exclusions,
             )
             == "error"
         ):
@@ -688,6 +696,7 @@ def _format_block_reason(
     *,
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
     min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
+    exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> str:
     """Build the structured ``last_error`` string for a blocked stage.
 
@@ -700,7 +709,7 @@ def _format_block_reason(
     parts: list[str] = []
     for cap in dead_caps:
         providers = providers_map.get(cap, ())
-        excluded_for_cap = _STRICT_CAP_PROVIDER_EXCLUSIONS.get(cap, frozenset())
+        excluded_for_cap = exclusions.get(cap, frozenset())
         annotated: list[str] = []
         for p in providers:
             status = statuses.get(p, "?")
@@ -1275,6 +1284,7 @@ def _phase_batched_dispatch(
     provides_map: Mapping[str, tuple[Capability, ...]] | None = None,
     provides_on_skip_map: Mapping[str, tuple[Capability, ...]] | None = None,
     min_rows_map: Mapping[Capability, int] | None = None,
+    exclusions_map: Mapping[Capability, frozenset[str]] | None = None,
 ) -> tuple[dict[str, str], bool]:
     """Dispatch ``runnable`` stages in phase-batched fashion with lane concurrency.
 
@@ -1342,6 +1352,9 @@ def _phase_batched_dispatch(
     )
     effective_min_rows: Mapping[Capability, int] = (
         {**_CAPABILITY_MIN_ROWS, **min_rows_map} if min_rows_map else _CAPABILITY_MIN_ROWS
+    )
+    effective_exclusions: Mapping[Capability, frozenset[str]] = (
+        {**_STRICT_CAP_PROVIDER_EXCLUSIONS, **exclusions_map} if exclusions_map else _STRICT_CAP_PROVIDER_EXCLUSIONS
     )
     if provides_map or provides_on_skip_map:
         effective_providers_inverse: Mapping[Capability, tuple[str, ...]] = _build_capability_providers(
@@ -1420,6 +1433,7 @@ def _phase_batched_dispatch(
             provides=effective_provides,
             provides_on_skip=effective_provides_on_skip,
             min_rows=effective_min_rows,
+            exclusions=effective_exclusions,
         )
         ready: list[_RunnableStage] = []
         cascade_transitioned = False
@@ -1436,6 +1450,7 @@ def _phase_batched_dispatch(
                 providers_map=effective_providers_inverse,
                 provides_on_skip=effective_provides_on_skip,
                 min_rows=effective_min_rows,
+                exclusions=effective_exclusions,
             )
             if classification is None:
                 continue  # still potentially satisfiable; wait
@@ -1447,6 +1462,7 @@ def _phase_batched_dispatch(
                     rows_processed,
                     providers_map=effective_providers_inverse,
                     min_rows=effective_min_rows,
+                    exclusions=effective_exclusions,
                 )
                 with psycopg.connect(database_url) as conn:
                     mark_stage_blocked(

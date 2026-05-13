@@ -306,13 +306,13 @@ Strategy:
   upper bound to "rows created while we held the lock" — without
   it, another scheduled fire of the same `job_name` could acquire
   the lock immediately after our release and insert a higher id
-  before the resolver reads, polluting the `id DESC LIMIT 1`
+  before the resolver reads, polluting the `run_id DESC LIMIT 1`
   pick (Codex R2 BLOCKING §1).
 - After `JobLock` releases (BEFORE the orchestrator's auto
   `__job__` write), call `_resolve_stage_rows` with the captured
   `(job_runs_id_before, job_runs_id_after)` window. The
   resolver's `job_runs` fallback restricts to
-  `id > job_runs_id_before AND id <= job_runs_id_after`.
+  `run_id > job_runs_id_before AND run_id <= job_runs_id_after`.
 - The resolved integer (or `None` if no source has data) is
   passed to `mark_stage_success(rows_processed=N)` exactly as
   today.
@@ -357,8 +357,8 @@ def _resolve_stage_rows(
          right thing via source 3).
       3. job_runs.row_count from _tracked_job.
          SELECT row_count FROM job_runs WHERE job_name = %s AND
-         id > job_runs_id_before AND id <= job_runs_id_after AND
-         status = 'success' ORDER BY id DESC LIMIT 1. The
+         run_id > job_runs_id_before AND run_id <= job_runs_id_after AND
+         status = 'success' ORDER BY run_id DESC LIMIT 1. The
          double-bound `id > before AND id <= after` window pins the
          match to rows created while the dispatcher held the
          JobLock (the bounds are captured before lock acquisition
@@ -403,10 +403,10 @@ def _resolve_stage_rows(
             SELECT row_count
               FROM job_runs
              WHERE job_name = %s
-               AND id > %s
-               AND id <= %s
-               AND status = 'success'
-             ORDER BY id DESC
+               AND run_id > %s
+               AND run_id <= %s
+               AND status  = 'success'
+             ORDER BY run_id DESC
              LIMIT 1
             """,
             (job_name, job_runs_id_before, job_runs_id_after),
