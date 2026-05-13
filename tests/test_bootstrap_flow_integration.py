@@ -70,8 +70,12 @@ def _patch_orchestrator_invokers(
 
     calls: dict[str, list[str]] = {"order": []}
 
-    def _make_fake(name: str) -> Callable[[], None]:
-        def _fake() -> None:
+    # PR1b-2 #1064 widened ``JobInvoker`` to ``(Mapping) -> None``;
+    # bootstrap dispatch passes ``effective_params`` positionally.
+    # Fakes accept-and-ignore so the test stub satisfies the runtime
+    # contract.
+    def _make_fake(name: str) -> Callable[..., None]:
+        def _fake(_params: object = None) -> None:
             calls["order"].append(name)
 
         return _fake
@@ -168,8 +172,8 @@ def test_bootstrap_partial_error_then_retry_failed(
     calls_pass1: dict[str, list[str]] = {"order": []}
     failing = {"sec_def14a_bootstrap"}
 
-    def _make_pass1(name: str) -> Callable[[], None]:
-        def _fake() -> None:
+    def _make_pass1(name: str) -> Callable[..., None]:
+        def _fake(_params: object = None) -> None:
             calls_pass1["order"].append(name)
             if name in failing:
                 raise RuntimeError(f"forced {name} failure")
@@ -194,8 +198,8 @@ def test_bootstrap_partial_error_then_retry_failed(
     # Second pass: replace invokers with a successful set + reset failed stages.
     calls_pass2: dict[str, list[str]] = {"order": []}
 
-    def _make_pass2(name: str) -> Callable[[], None]:
-        def _fake() -> None:
+    def _make_pass2(name: str) -> Callable[..., None]:
+        def _fake(_params: object = None) -> None:
             calls_pass2["order"].append(name)
 
         return _fake
