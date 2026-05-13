@@ -33,7 +33,16 @@ export type BootstrapLane =
   | "sec"
   | "sec_rate"
   | "sec_bulk_download"
-  | "db";
+  | "db"
+  // #1141 — Phase C bulk-ingest family lanes. Each owns exactly one
+  // Phase C stage; the lane split exists so disjoint table-family
+  // writes dispatch cross-source-parallel under separate JobLocks
+  // (see docs/superpowers/specs/2026-05-13-db-lane-family-split.md).
+  | "db_filings"
+  | "db_fundamentals_raw"
+  | "db_ownership_inst"
+  | "db_ownership_insider"
+  | "db_ownership_funds";
 
 export interface BootstrapArchiveResultResponse {
   archive_name: string;

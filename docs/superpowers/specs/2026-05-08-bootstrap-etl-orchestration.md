@@ -319,18 +319,78 @@ Refactor:
   - `sec_rate` (B1, B2, B3, B4, C1.b, D1, D2, D3): **1** —
     serialise against shared SEC clock.
   - `sec_bulk_download` (A3): 1 — only one bulk downloader at a time.
-  - `db` (C1.a, C2, C3, C4, C5, E1, E2): **N** (default 5) —
-    DB-bound stages with separate `psycopg.connect()` calls; no
-    shared rate budget; write different table families so no
-    row-level lock contention. `statement_timeout='10min'` per
-    connection bounds runaway. Concurrent execution within this
-    lane is the design intent.
+  - `db_filings` (C1.a) / `db_fundamentals_raw` (C2) /
+    `db_ownership_inst` (C3) / `db_ownership_insider` (C4) /
+    `db_ownership_funds` (C5): **1 each**. Parallelism is
+    **cross-lane** under separate `JobLock`s — see #1141 / Task E
+    sub-section below.
+  - `db` (E1, E2 + scheduler catch-all): 1. Phase E derivations
+    serialise within `db`; their wall-clock cost is dwarfed by
+    Phase C so splitting them was deferred.
 
 Across lanes: parallel. Within a lane: `max_concurrency` bounds
 the ready-batch fan-out.
 
-Phase C5 (5 ingesters): all in `db` lane with `max_concurrency=5`
-→ run concurrently. E1 + E2 same.
+Phase C (5 ingesters): each on its own `db_*` family source. The
+five `pg_try_advisory_lock` keys are disjoint so the dispatcher
+fires them concurrently via per-lane `ThreadPoolExecutor`s.
+
+## DB-lane source split (#1141 / Task E of audit #1136)
+
+PR1c #1064 collapsed Phase C onto a single `db` source +
+`max_concurrency=1`, retiring the parallel-DB-stage claim above.
+This was a deliberate step toward source-keyed `JobLock`s but
+re-introduced ~4 h of sequential first-install wall-clock.
+
+Measured on `bootstrap_run_id=3` (the only completed real run on
+dev DB; `partial_error` 2026-05-09 09:16 UTC):
+
+| stage_order | stage_key                            | wall_min |
+|------------:|--------------------------------------|---------:|
+|  8 | sec_submissions_ingest                       |  47.3 |
+|  9 | sec_companyfacts_ingest                      |  36.9 |
+| 10 | sec_13f_ingest_from_dataset                  | 110.4 |
+| 11 | sec_insider_ingest_from_dataset              |  26.6 |
+| 12 | sec_nport_ingest_from_dataset                |  61.6 |
+
+Serial sum (status quo path (a)): **283 min**. Max single stage
+(parallel-5 floor under path (b)): **110 min**. Including
+Phase C' (`sec_submissions_files_walk`, 90 min, gates only on
+stage 8 via `filing_events_seeded` cap): path (b) saves **~236 min
+(~3 h 56 min)** to "C' done" vs path (a).
+
+Decision: **path (b)**. The `db` source is split by table family
+so the five Phase C bulk ingesters dispatch cross-source-parallel
+under disjoint `JobLock`s. Each new family lane owns exactly one
+Phase C stage:
+
+| family lane            | Phase C stage                     | write target |
+|------------------------|-----------------------------------|---|
+| `db_filings`           | `sec_submissions_ingest`          | `filing_events`, `instrument_sec_profile` |
+| `db_fundamentals_raw`  | `sec_companyfacts_ingest`         | `company_facts` |
+| `db_ownership_inst`    | `sec_13f_ingest_from_dataset`     | `ownership_institutions_observations` |
+| `db_ownership_insider` | `sec_insider_ingest_from_dataset` | `insider_transactions`, `form3_holdings_initial` |
+| `db_ownership_funds`   | `sec_nport_ingest_from_dataset`   | `n_port_*`, `sec_fund_series` |
+
+The `db` source persists for Phase E derivations
+(`fundamentals_sync`, `ownership_observations_backfill`) and every
+scheduler `db`-source job — their serialisation contract is
+unchanged.
+
+Accepted side effect: scheduler `db`-source jobs that fire
+mid-bootstrap (`orchestrator_high_frequency_sync` @5 min,
+`retry_deferred` @hourly, `monitor_positions` @hourly) no longer
+contend with Phase C ingesters under the same `db` lock. The
+table sets are disjoint and the previously-incidental
+serialisation conflated unrelated rate buckets — the same
+anti-pattern PR1a #1064 fixed for SEC. Bootstrap-completion-gated
+jobs (`orchestrator_full_sync`, `fundamentals_sync`,
+`ownership_observations_sync`) continue not to fire during
+bootstrap (`prerequisite=_bootstrap_complete`).
+
+Spec: `docs/superpowers/specs/2026-05-13-db-lane-family-split.md`.
+Migration: `sql/147_bootstrap_stages_lane_family_split.sql`.
+Test: `tests/test_db_lane_family_split.py`.
 
 ## Stage status (status enum semantics)
 

@@ -59,7 +59,18 @@ from typing import Any, Literal
 # Type aliases — used across scheduler, bootstrap_orchestrator, locks, runtime.
 # ---------------------------------------------------------------------------
 
-Lane = Literal["init", "etoro", "sec_rate", "sec_bulk_download", "db"]
+Lane = Literal[
+    "init",
+    "etoro",
+    "sec_rate",
+    "sec_bulk_download",
+    "db",
+    "db_filings",
+    "db_fundamentals_raw",
+    "db_ownership_inst",
+    "db_ownership_insider",
+    "db_ownership_funds",
+]
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
 jobs serialise under one ``JobLock``; cross-source jobs run in parallel.
 
@@ -71,9 +82,29 @@ jobs serialise under one ``JobLock``; cross-source jobs run in parallel.
   per-accession SEC fetch competes here.
 * ``sec_bulk_download`` — fixed-URL SEC archive downloads. Disjoint
   from ``sec_rate`` — large fixed downloads, no per-issuer iteration.
-* ``db`` — DB-bound bulk ingest of pre-staged data. Same-source
-  serialise under the source lock (no parallel-DB-stage parallelism;
-  ``_LANE_MAX_CONCURRENCY`` from #1020 is retired in PR1c).
+* ``db`` — DB-bound stages NOT owned by a finer family lane — Phase E
+  derivations (``fundamentals_sync``, ``ownership_observations_backfill``)
+  + scheduler catch-all (``orchestrator_full_sync``,
+  ``orchestrator_high_frequency_sync``, ``retry_deferred``,
+  ``monitor_positions``, ``ownership_observations_sync``).
+
+The next five are bootstrap Phase C bulk-ingest family lanes
+(#1141 / Task E of audit #1136). Each owns a disjoint write
+target so the five Phase C stages can dispatch cross-source in
+parallel during first-install bootstrap, recovering the
+~4-hour wall-clock saving the May 8 design called out before
+PR1c #1064 collapsed everything onto a single ``db`` source.
+
+* ``db_filings`` — ``sec_submissions_ingest``; writes
+  ``filing_events`` + ``instrument_sec_profile``.
+* ``db_fundamentals_raw`` — ``sec_companyfacts_ingest``; writes
+  ``company_facts`` via ``upsert_facts_for_instrument``.
+* ``db_ownership_inst`` — ``sec_13f_ingest_from_dataset``; writes
+  ``ownership_institutions_observations``.
+* ``db_ownership_insider`` — ``sec_insider_ingest_from_dataset``;
+  writes ``insider_transactions`` + ``form3_holdings_initial``.
+* ``db_ownership_funds`` — ``sec_nport_ingest_from_dataset``;
+  writes ``n_port_*`` + ``sec_fund_series``.
 """
 
 
