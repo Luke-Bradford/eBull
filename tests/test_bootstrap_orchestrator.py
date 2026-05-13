@@ -24,10 +24,15 @@ import psycopg
 import pytest
 
 from app.services.bootstrap_orchestrator import (
+    _BOOTSTRAP_STAGE_SPECS,
+    _CAPABILITY_PROVIDERS,
+    _STAGE_PROVIDES,
+    _STAGE_REQUIRES_CAPS,
     JOB_BOOTSTRAP_ORCHESTRATOR,
     JOB_DAILY_CIK_REFRESH,
     JOB_DAILY_FINANCIAL_FACTS,
     _run_one_stage,
+    _satisfied_capabilities,
     _should_run,
     get_bootstrap_stage_specs,
     run_bootstrap_orchestrator,
@@ -474,3 +479,332 @@ def test_orchestrator_returns_within_reasonable_time(
     thread.start()
     thread.join(timeout=30.0)
     assert done.is_set(), "run_bootstrap_orchestrator() did not return within 30s"
+
+
+# ---------------------------------------------------------------------------
+# Capability layer (#1138 Task A) — fallback shapes + catalogue invariants
+# ---------------------------------------------------------------------------
+
+
+def test_every_required_capability_has_a_provider() -> None:
+    """Every cap referenced in `_STAGE_REQUIRES_CAPS` must be provided
+    by at least one stage. Catches typo-style drift in the requires
+    table before the dispatcher tries to evaluate a never-satisfiable
+    requirement at runtime.
+    """
+    referenced: set[str] = set()
+    for req in _STAGE_REQUIRES_CAPS.values():
+        for cap in req.all_of:
+            referenced.add(cap)
+        for group in req.any_of:
+            for cap in group:
+                referenced.add(cap)
+    missing = [c for c in referenced if not _CAPABILITY_PROVIDERS.get(c)]  # type: ignore[arg-type]
+    assert not missing, f"capabilities with no provider: {missing}"
+
+
+def test_every_stage_appears_in_requires_caps() -> None:
+    """Every stage in `_BOOTSTRAP_STAGE_SPECS` must have a
+    `_STAGE_REQUIRES_CAPS` entry (even if `CapRequirement()`). Catches
+    missing entries — a stage absent from the requires map would fall
+    back to the no-deps default, silently bypassing intended gates.
+    """
+    spec_keys = {spec.stage_key for spec in _BOOTSTRAP_STAGE_SPECS}
+    requires_keys = set(_STAGE_REQUIRES_CAPS.keys())
+    missing = spec_keys - requires_keys
+    assert not missing, f"stages without _STAGE_REQUIRES_CAPS entry: {missing}"
+
+
+def test_partial_bulk_failure_legacy_recovers(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1138 §8 test 1 — `sec_bulk_download` errors (NOT skips). Every
+    legacy ownership stage succeeds. Per-family ownership caps are
+    satisfied by their legacy providers, so
+    `ownership_observations_backfill` reaches `success`. The 5 Phase C
+    bulk ingesters cascade to `blocked` (error-classified) because
+    `bulk_archives_ready` is error-dead.
+    """
+    _reset_state(ebull_test_conn)
+    _bind_settings_to_test_db(monkeypatch)
+    calls = _patch_invokers_with_fakes(
+        monkeypatch,
+        failing_jobs={"sec_bulk_download"},
+    )
+
+    start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
+    ebull_test_conn.commit()
+
+    run_bootstrap_orchestrator()
+
+    snap = read_latest_run_with_stages(ebull_test_conn)
+    assert snap is not None
+    statuses = {stage.stage_key: stage.status for stage in snap.stages}
+
+    # S7 error.
+    assert statuses["sec_bulk_download"] == "error"
+    # 5 Phase C bulk ingesters cascade-blocked (error-dead bulk_archives_ready).
+    phase_c_bulk = {
+        "sec_submissions_ingest",
+        "sec_companyfacts_ingest",
+        "sec_13f_ingest_from_dataset",
+        "sec_insider_ingest_from_dataset",
+        "sec_nport_ingest_from_dataset",
+    }
+    for key in phase_c_bulk:
+        assert statuses[key] == "blocked", f"{key} expected blocked, got {statuses[key]}"
+    # Phase C invokers NOT called (cascade-block transitions directly).
+    for key in phase_c_bulk:
+        assert key not in calls["order"], f"{key} should not have been invoked"
+    # Legacy ownership stages succeeded → per-family caps satisfied.
+    assert statuses["ownership_observations_backfill"] == "success"
+    # Fundamentals also blocks because S9 (its sole provider) is blocked.
+    assert statuses["fundamentals_sync"] == "blocked"
+
+    state = read_state(ebull_test_conn)
+    assert state.status == "partial_error"
+
+
+def test_intentional_slow_connection_skip_cascade(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1138 §8 test 2 — `sec_bulk_download` raises
+    `BootstrapPhaseSkipped` (the new fallback path). Phase C cascades
+    to `skipped` per §6.3; legacy chain succeeds; downstream reaches
+    `success` via legacy per-family caps. Walker S13 runs to success
+    because legacy drain S15 provides `filing_events_seeded`.
+    """
+    from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
+
+    _reset_state(ebull_test_conn)
+    _bind_settings_to_test_db(monkeypatch)
+
+    calls: dict[str, list[str]] = {"order": []}
+
+    def _make_fake(name: str) -> Callable[..., None]:
+        def _fake(_params: object = None) -> None:
+            calls["order"].append(name)
+            if name == "sec_bulk_download":
+                raise BootstrapPhaseSkipped("slow connection; fallback path")
+
+        return _fake
+
+    from app.jobs import runtime as runtime_module
+
+    fake_invokers = {spec.job_name: _make_fake(spec.job_name) for spec in get_bootstrap_stage_specs()}
+    monkeypatch.setattr(runtime_module, "_INVOKERS", fake_invokers)
+
+    start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
+    ebull_test_conn.commit()
+
+    run_bootstrap_orchestrator()
+
+    snap = read_latest_run_with_stages(ebull_test_conn)
+    assert snap is not None
+    statuses = {stage.stage_key: stage.status for stage in snap.stages}
+
+    # S7 transitioned to `skipped` via BootstrapPhaseSkipped.
+    assert statuses["sec_bulk_download"] == "skipped"
+
+    # 5 Phase C bulk ingesters cascade to skipped without invocation.
+    phase_c_bulk = {
+        "sec_submissions_ingest",
+        "sec_companyfacts_ingest",
+        "sec_13f_ingest_from_dataset",
+        "sec_insider_ingest_from_dataset",
+        "sec_nport_ingest_from_dataset",
+    }
+    for key in phase_c_bulk:
+        assert statuses[key] == "skipped", f"{key} expected skipped, got {statuses[key]}"
+        assert key not in calls["order"], f"{key} should not have been invoked under cascade"
+
+    # S24 fundamentals_sync cascades skipped (sole provider S9 skipped).
+    assert statuses["fundamentals_sync"] == "skipped"
+
+    # Legacy chain runs.
+    assert statuses["filings_history_seed"] == "success"
+    assert statuses["sec_first_install_drain"] == "success"
+    # Walker runs to success via filing_events_seeded from legacy drain.
+    assert statuses["sec_submissions_files_walk"] == "success"
+    # Typed parsers run via submissions_secondary_pages_walked from drain.
+    assert statuses["sec_def14a_bootstrap"] == "success"
+    assert statuses["sec_business_summary_bootstrap"] == "success"
+    assert statuses["sec_8k_events_ingest"] == "success"
+    # Ownership backfill reaches success via legacy per-family providers.
+    assert statuses["ownership_observations_backfill"] == "success"
+
+    # Caps invariant — skipped S7 does NOT advertise bulk_archives_ready.
+    caps = _satisfied_capabilities(statuses)
+    assert "bulk_archives_ready" not in caps
+
+    state = read_state(ebull_test_conn)
+    # All-success-or-skip → complete.
+    assert state.status == "complete"
+
+
+def test_both_ownership_paths_fail_blocks_final_stage(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1138 §8 test 3 — bulk AND legacy ownership stages all error,
+    so every per-family ownership cap is error-dead.
+    `ownership_observations_backfill` transitions to `blocked` with
+    a structured "missing capability" reason naming at least one
+    per-family cap.
+    """
+    _reset_state(ebull_test_conn)
+    _bind_settings_to_test_db(monkeypatch)
+
+    # Fail S7 AND every legacy ownership stage. Bulk Phase C is then
+    # error-blocked from S7 (error-dead bulk_archives_ready); legacy
+    # ownership stages fail directly.
+    #
+    # Resolve job_name from stage_key via the catalogue so a future
+    # rename (e.g. JOB_SEC_13F_QUARTERLY_SWEEP underlies stage_key
+    # `sec_13f_recent_sweep`) doesn't silently no-op the failing set.
+    # Claude review WARNING for #1138: hardcoded `"sec_13f_quarterly_sweep"`
+    # with only a comment would mask a job-name drift; resolving
+    # through `get_bootstrap_stage_specs()` raises on a typo.
+    _job_by_stage = {spec.stage_key: spec.job_name for spec in get_bootstrap_stage_specs()}
+    failing_stage_keys = {
+        "sec_bulk_download",
+        "sec_insider_transactions_backfill",
+        "sec_form3_ingest",
+        "sec_13f_recent_sweep",
+        "sec_n_port_ingest",
+    }
+    failing = {_job_by_stage[key] for key in failing_stage_keys}
+    _patch_invokers_with_fakes(monkeypatch, failing_jobs=failing)
+
+    start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
+    ebull_test_conn.commit()
+
+    run_bootstrap_orchestrator()
+
+    snap = read_latest_run_with_stages(ebull_test_conn)
+    assert snap is not None
+    statuses = {stage.stage_key: stage.status for stage in snap.stages}
+    last_errors = {stage.stage_key: stage.last_error for stage in snap.stages}
+
+    assert statuses["ownership_observations_backfill"] == "blocked"
+    reason = last_errors["ownership_observations_backfill"] or ""
+    assert "missing capability" in reason
+    # The reason should name at least one per-family ownership cap.
+    family_caps = (
+        "insider_inputs_seeded",
+        "form3_inputs_seeded",
+        "institutional_inputs_seeded",
+        "nport_inputs_seeded",
+    )
+    assert any(c in reason for c in family_caps), f"expected per-family cap in reason, got: {reason!r}"
+
+    state = read_state(ebull_test_conn)
+    assert state.status == "partial_error"
+
+
+def test_phase_c_provides_are_per_family() -> None:
+    """Sanity: bulk insider ingester provides BOTH insider+form3 caps;
+    the per-family split keeps bulk-vs-legacy alternatives expressible
+    at the provider side (no consumer-side any_of needed).
+    """
+    bulk_insider = _STAGE_PROVIDES["sec_insider_ingest_from_dataset"]
+    assert "insider_inputs_seeded" in bulk_insider
+    assert "form3_inputs_seeded" in bulk_insider
+    # Legacy insider txns covers Form 4 only.
+    legacy_insider = _STAGE_PROVIDES["sec_insider_transactions_backfill"]
+    assert legacy_insider == ("insider_inputs_seeded",)
+    # Legacy Form 3 covers Form 3 only.
+    legacy_form3 = _STAGE_PROVIDES["sec_form3_ingest"]
+    assert legacy_form3 == ("form3_inputs_seeded",)
+
+
+def test_cascade_recompute_on_non_topological_pending_order(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex pre-push WARNING regression — when a downstream stage is
+    evaluated earlier in pending_keys than its upstream provider, and
+    the upstream then cascade-skips later in the same inner loop, the
+    dispatcher must recompute caps on the next outer iteration rather
+    than dropping the downstream into the deadlock "abandoned" branch.
+
+    Builds a synthetic 3-stage scenario via ``_phase_batched_dispatch``
+    directly with reverse-topological ``runnable`` order: downstream
+    first, upstream last. Upstream raises ``BootstrapPhaseSkipped``;
+    downstream must end in ``skipped`` (cascade), not ``blocked``
+    ("abandoned").
+    """
+    from app.services.bootstrap_orchestrator import (
+        CapRequirement,
+        _phase_batched_dispatch,
+        _RunnableStage,
+    )
+    from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
+    from app.services.bootstrap_state import StageSpec
+
+    _reset_state(ebull_test_conn)
+    test_db_url = _bind_settings_to_test_db(monkeypatch)
+    _register_synthetic_jobs(
+        monkeypatch,
+        {"alpha_job": "init", "bravo_job": "init"},
+    )
+
+    specs = (
+        # Downstream first in stage_order — non-topological w.r.t.
+        # the cap dependency below.
+        StageSpec(stage_key="downstream", stage_order=1, lane="init", job_name="bravo_job"),
+        StageSpec(stage_key="upstream", stage_order=2, lane="init", job_name="alpha_job"),
+    )
+    run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=specs)
+    ebull_test_conn.commit()
+
+    # Upstream raises BootstrapPhaseSkipped → cascades to skipped.
+    # Downstream requires the cap upstream would have provided.
+    def upstream_invoker(_params: object = None) -> None:
+        raise BootstrapPhaseSkipped("simulated bypass")
+
+    def downstream_invoker(_params: object = None) -> None:  # pragma: no cover
+        raise AssertionError("downstream must not invoke when upstream skips")
+
+    runnable = [
+        # Order matters for the regression: downstream BEFORE upstream
+        # in the runnable list → pending_keys iteration sees downstream
+        # first.
+        _RunnableStage(
+            stage_key="downstream",
+            job_name="bravo_job",
+            lane="init",
+            invoker=downstream_invoker,
+            requires=CapRequirement(all_of=("synthetic_upstream_done",)),  # type: ignore[arg-type]
+        ),
+        _RunnableStage(
+            stage_key="upstream",
+            job_name="alpha_job",
+            lane="init",
+            invoker=upstream_invoker,
+            requires=CapRequirement(),
+        ),
+    ]
+
+    statuses, cancelled = _phase_batched_dispatch(
+        run_id=run_id,
+        runnable=runnable,
+        database_url=test_db_url,
+        provides_map={"upstream": ("synthetic_upstream_done",)},  # type: ignore[dict-item]
+    )
+
+    assert cancelled is False
+    # Upstream completed via BootstrapPhaseSkipped → skipped.
+    assert statuses["upstream"] == "skipped"
+    # Downstream cascaded to skipped (the bug would have left it
+    # blocked/abandoned). Cap is skip-only-dead because upstream
+    # skipped without an explicit provides_on_skip entry.
+    assert statuses["downstream"] == "skipped"
+
+    snap = read_latest_run_with_stages(ebull_test_conn)
+    assert snap is not None
+    downstream_row = next(s for s in snap.stages if s.stage_key == "downstream")
+    assert downstream_row.last_error is not None
+    assert "cascaded skip" in downstream_row.last_error

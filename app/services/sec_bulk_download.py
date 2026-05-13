@@ -48,6 +48,8 @@ from typing import Any, Final, Literal
 
 import httpx
 
+from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
+
 logger = logging.getLogger(__name__)
 
 
@@ -989,17 +991,26 @@ def sec_bulk_download_job() -> None:
             result.measured_mbps,
             result.error,
         )
-        # Fallback manifest is part of the success contract — without
-        # it Phase C cannot detect intentional bypass and would error
-        # as "manifest missing". Refuse to mark stage success without
-        # a writable run_id, matching the bulk-mode contract above.
-        # Codex pre-push MEDIUM for #1041.
+        # Fallback manifest is written for ops-monitor / audit
+        # provenance — preserves the historical contract even though
+        # the capability layer (#1138 Task A) no longer reads it for
+        # downstream dispatch. Refuse to proceed without a writable
+        # run_id, matching the bulk-mode contract above (Codex
+        # pre-push MEDIUM for #1041).
         if run_id is None:
             raise BootstrapPartialDownloadError(
-                "sec_bulk_download: could not determine current bootstrap_run_id; "
-                "fallback manifest cannot be written. Refuse to mark stage success."
+                "sec_bulk_download: could not determine current bootstrap_run_id; fallback manifest cannot be written."
             )
         write_run_manifest(target_dir, bootstrap_run_id=run_id, archives=[], mode="fallback")
+        # #1138 Task A — raise BootstrapPhaseSkipped so the bootstrap
+        # orchestrator transitions S7 to `skipped` instead of
+        # `success`. Without this, `bulk_archives_ready` would be
+        # falsely advertised even though no archives were downloaded;
+        # the cascade-skip rule in the dispatcher relies on the
+        # `skipped` status to correctly cascade Phase C C-stages.
+        raise BootstrapPhaseSkipped(
+            f"slow-connection fallback (mbps={result.measured_mbps}); fallback manifest written, bulk archives bypassed"
+        )
     elif result.mode == "skipped_disk":
         # Disk pre-flight refused — surface as error so operator
         # knows to free space; downstream Phase C will be `blocked`.

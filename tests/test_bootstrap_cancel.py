@@ -17,6 +17,7 @@ import psycopg
 import pytest
 
 from app.services.bootstrap_orchestrator import (
+    CapRequirement,
     _phase_batched_dispatch,
     _RunnableStage,
     run_bootstrap_orchestrator,
@@ -536,14 +537,14 @@ def test_dispatcher_observes_cancel_at_top_of_loop_and_returns_cancelled(
             job_name="nightly_universe_sync",
             lane="init",
             invoker=lambda _params: calls.append("alpha"),
-            requires=(),
+            requires=CapRequirement(),
         ),
         _RunnableStage(
             stage_key="bravo",
             job_name="daily_cik_refresh",
             lane="sec_rate",
             invoker=lambda _params: calls.append("bravo"),
-            requires=("alpha",),
+            requires=CapRequirement(all_of=("test_alpha_done",)),  # type: ignore[arg-type]
         ),
     ]
 
@@ -551,6 +552,7 @@ def test_dispatcher_observes_cancel_at_top_of_loop_and_returns_cancelled(
         run_id=run_id,
         runnable=runnable,
         database_url=test_db_url,
+        provides_map={"alpha": ("test_alpha_done",)},  # type: ignore[dict-item]
     )
 
     assert cancelled is True
@@ -598,14 +600,14 @@ def test_dispatcher_observes_cancel_between_batches(
             job_name="nightly_universe_sync",
             lane="init",
             invoker=alpha_invoker,
-            requires=(),
+            requires=CapRequirement(),
         ),
         _RunnableStage(
             stage_key="bravo",
             job_name="daily_cik_refresh",
             lane="sec_rate",
             invoker=bravo_invoker,
-            requires=("alpha",),
+            requires=CapRequirement(all_of=("test_alpha_done",)),  # type: ignore[arg-type]
         ),
     ]
 
@@ -613,6 +615,7 @@ def test_dispatcher_observes_cancel_between_batches(
         run_id=run_id,
         runnable=runnable,
         database_url=test_db_url,
+        provides_map={"alpha": ("test_alpha_done",)},  # type: ignore[dict-item]
     )
 
     assert cancelled is True
