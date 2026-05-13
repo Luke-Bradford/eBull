@@ -190,20 +190,26 @@ _LANE_MAX_CONCURRENCY: Final[dict[str, int]] = {
     "sec": 1,  # legacy catch-all; preserved for migration compat
     "sec_rate": 1,  # SEC per-IP rate clock
     "sec_bulk_download": 1,
-    # PR1c #1064: every lane serialises now that JobLock is source-keyed
-    # (one ``JobLock(source)`` covers all jobs in the same lane). The
-    # operator-locked source-lock decision is unambiguous: same-source =
-    # serialised. Setting ``db`` to 1 retires the parallel-DB-stage claim
-    # from #1020 — a misleading dispatcher shape (5 db stages submitted,
-    # 4 immediately blocked on the source lock). The map structure is
-    # kept (rather than deleted) for one cycle so the
-    # ``_phase_batched_dispatch`` shape stays stable; a follow-up PR
-    # removes the map entirely.
+    # Each lane serialises within itself; cross-lane is parallel.
+    # PR1c #1064 collapsed Phase C onto a single ``db`` source +
+    # ``db=1``, which retired #1020's parallel-DB-stage claim and
+    # added ~4 h to first-install wall-clock (measured on
+    # ``bootstrap_run_id=3``: 5 db-lane stages serial summed to 283
+    # min vs 110 min if cross-source-parallel).
     #
-    # Tech-debt: first-install bootstrap wall-clock regresses from "5 db
-    # stages parallel" → "1 db stage at a time". Measure on dev and file
-    # follow-up if operator-visible — tracked in PR description.
+    # #1141 / Task E of audit #1136 restores Phase C parallelism by
+    # splitting the ``db`` source by table family — see
+    # ``docs/superpowers/specs/2026-05-13-db-lane-family-split.md``.
+    # The five family lanes below each carry exactly one stage; the
+    # parallelism win is cross-lane, not intra-lane. ``db`` stays
+    # the catch-all for Phase E derivations + scheduler ``db``-source
+    # jobs (no change to their serialisation).
     "db": 1,
+    "db_filings": 1,
+    "db_fundamentals_raw": 1,
+    "db_ownership_inst": 1,
+    "db_ownership_insider": 1,
+    "db_ownership_funds": 1,
 }
 
 
@@ -747,11 +753,18 @@ _STAGE_LANE_OVERRIDES: Final[dict[str, str]] = {
     "sec_nport_filer_directory_sync": "sec_rate",
     "cik_refresh": "sec_rate",
     "sec_bulk_download": "sec_bulk_download",
-    "sec_submissions_ingest": "db",
-    "sec_companyfacts_ingest": "db",
-    "sec_13f_ingest_from_dataset": "db",
-    "sec_insider_ingest_from_dataset": "db",
-    "sec_nport_ingest_from_dataset": "db",
+    # #1141 — Phase C bulk ingesters split off ``db`` into per-family
+    # source lanes so disjoint table-family writes run cross-source-
+    # parallel under separate ``JobLock``s. Each new lane is registered
+    # in ``Lane`` (``app/jobs/sources.py``) + ``_LANE_MAX_CONCURRENCY``
+    # above + the ``bootstrap_stages.lane`` CHECK constraint
+    # (sql/147_bootstrap_stages_lane_family_split.sql). See
+    # ``docs/superpowers/specs/2026-05-13-db-lane-family-split.md``.
+    "sec_submissions_ingest": "db_filings",
+    "sec_companyfacts_ingest": "db_fundamentals_raw",
+    "sec_13f_ingest_from_dataset": "db_ownership_inst",
+    "sec_insider_ingest_from_dataset": "db_ownership_insider",
+    "sec_nport_ingest_from_dataset": "db_ownership_funds",
     "sec_submissions_files_walk": "sec_rate",
     "sec_def14a_bootstrap": "sec_rate",
     "sec_business_summary_bootstrap": "sec_rate",

@@ -67,6 +67,14 @@ const BOOTSTRAP_LANE_ORDER = [
   "sec_rate",
   "sec_bulk_download",
   "db",
+  // #1141 — Phase C bulk-ingest family lanes. Render adjacent to the
+  // generic `db` lane so the operator sees the parallel family bucket
+  // grouped with the other DB-bound stages.
+  "db_filings",
+  "db_fundamentals_raw",
+  "db_ownership_inst",
+  "db_ownership_insider",
+  "db_ownership_funds",
   "sec",
 ] as const;
 

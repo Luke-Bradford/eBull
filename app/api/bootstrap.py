@@ -66,7 +66,19 @@ router = APIRouter(
 
 
 BootstrapApiStatus = Literal["pending", "running", "complete", "partial_error", "cancelled"]
-LaneApi = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
+LaneApi = Literal[
+    "init",
+    "etoro",
+    "sec",
+    "sec_rate",
+    "sec_bulk_download",
+    "db",
+    "db_filings",
+    "db_fundamentals_raw",
+    "db_ownership_inst",
+    "db_ownership_insider",
+    "db_ownership_funds",
+]
 StageApiStatus = Literal["pending", "running", "success", "error", "skipped", "blocked", "cancelled"]
 
 

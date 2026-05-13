@@ -47,7 +47,24 @@ logger = logging.getLogger(__name__)
 BootstrapStatus = Literal["pending", "running", "complete", "partial_error", "cancelled"]
 RunStatus = Literal["running", "complete", "partial_error", "cancelled"]
 StageStatus = Literal["pending", "running", "success", "error", "skipped", "blocked", "cancelled"]
-Lane = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
+Lane = Literal[
+    "init",
+    "etoro",
+    "sec",
+    "sec_rate",
+    "sec_bulk_download",
+    "db",
+    "db_filings",
+    "db_fundamentals_raw",
+    "db_ownership_inst",
+    "db_ownership_insider",
+    "db_ownership_funds",
+]
+"""Row-shape Literal for ``bootstrap_stages.lane`` reads. Mirrors
+``app/jobs/sources.py::Lane`` plus the legacy ``"sec"`` catch-all
+preserved for pre-#1020 rows. New family lanes added by #1141 /
+Task E of #1136 audit (see
+``docs/superpowers/specs/2026-05-13-db-lane-family-split.md``)."""
 
 
 class BootstrapAlreadyRunning(RuntimeError):

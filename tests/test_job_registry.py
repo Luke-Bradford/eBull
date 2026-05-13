@@ -34,7 +34,23 @@ from app.services.processes.param_metadata import (
 )
 from app.workers.scheduler import SCHEDULED_JOBS
 
-_ALLOWED_SOURCES: frozenset[Lane] = frozenset({"init", "etoro", "sec_rate", "sec_bulk_download", "db"})
+_ALLOWED_SOURCES: frozenset[Lane] = frozenset(
+    {
+        "init",
+        "etoro",
+        "sec_rate",
+        "sec_bulk_download",
+        "db",
+        # #1141 — Phase C bulk-ingest family sources. Bootstrap-only
+        # stages today; surfaced here so the Lane-validity assertion
+        # stays in lockstep with ``app/jobs/sources.py::Lane``.
+        "db_filings",
+        "db_fundamentals_raw",
+        "db_ownership_inst",
+        "db_ownership_insider",
+        "db_ownership_funds",
+    }
+)
 
 
 class TestScheduledJobSourceField:
