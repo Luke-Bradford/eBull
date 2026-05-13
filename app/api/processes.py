@@ -1041,10 +1041,9 @@ def _check_full_wash_shared_source_clear(
 
     Codex pre-push BLOCKING: a full-wash on ``daily_financial_facts``
     resets ``data_freshness_index`` rows for ``sec_xbrl_facts``, which
-    is also consumed by ``fundamentals_sync`` and
-    ``sec_business_summary_ingest``. The per-job advisory lock + the
-    per-job ``_has_active_job_run`` are scoped to ``job_name`` and
-    cannot see a sibling running under a different name. Walk the
+    is also consumed by ``fundamentals_sync``. The per-job advisory
+    lock + the per-job ``_has_active_job_run`` are scoped to ``job_name``
+    and cannot see a sibling running under a different name. Walk the
     registry, take ``_has_active_job_run`` for every sibling sharing
     the same scheduler source, and 409 if any is running.
     """

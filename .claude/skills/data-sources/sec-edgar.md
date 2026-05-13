@@ -654,7 +654,7 @@ The #863-#873 freshness redesign's three steady-state discovery layers are coded
 
 None have a `_INVOKERS[]` entry in `app/jobs/runtime.py`. None have a `ScheduledJob` row in `app/workers/scheduler.py:SCHEDULED_JOBS`. Tickets #867 / #868 / #870 are **reopened** as of the audit; umbrella wiring under **#1155**.
 
-Steady-state filings discovery runs through the legacy per-form ingest crons (`sec_form3_ingest`, `sec_def14a_ingest`, `sec_8k_events_ingest`, `sec_insider_transactions_ingest`, `sec_business_summary_ingest`, `sec_dividend_calendar_ingest`, `sec_n_port_ingest`, `sec_13f_quarterly_sweep`) which the redesign was meant to retire. Full per-endpoint wiring at `.claude/skills/data-engineer/etl-endpoint-coverage.md` §3.
+Steady-state filings discovery runs through the legacy per-form ingest crons (`sec_form3_ingest`, `sec_def14a_ingest`, `sec_8k_events_ingest`, `sec_insider_transactions_ingest`, `sec_dividend_calendar_ingest`, `sec_n_port_ingest`, `sec_13f_quarterly_sweep`) which the redesign was meant to retire — `sec_business_summary_ingest` was the first retired (post-#1155 sweep; manifest worker + `sec_10k.py` parser now sole steady-state writer to `instrument_business_summary`). Full per-endpoint wiring at `.claude/skills/data-engineer/etl-endpoint-coverage.md` §3.
 
 ## 10. Sources
 

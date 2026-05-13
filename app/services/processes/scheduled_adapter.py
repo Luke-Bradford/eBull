@@ -104,7 +104,6 @@ _LANE_BY_JOB: dict[str, ProcessLane] = {
     "sec_n_port_ingest": "ownership",
     # Fundamentals
     "fundamentals_sync": "fundamentals",
-    "sec_business_summary_ingest": "fundamentals",
     "sec_business_summary_bootstrap": "fundamentals",
     # Ops
     "monitor_positions": "ops",

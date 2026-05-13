@@ -42,7 +42,7 @@ Definition: `app/services/sec_manifest.py:106-121` + CHECK constraint `sql/118:3
 | `sec_form5` | Stage 18 legacy backfill | `JOB_SEC_INSIDER_TRANSACTIONS_INGEST` cron + manifest worker | 365d | both | `sec_rate` | ✅ `insider_345.py` `_parse_form5` (#1134) | **WIRED**, observation `source='form4'` (enum lacks form5; provenance via `insider_filings.document_type='5'` JOIN) |
 | `sec_13f_hr` | Stage 10 bulk + Stage 21 recent-sweep | `JOB_SEC_13F_QUARTERLY_SWEEP` cron (`scheduler.py:926`) + manifest worker | 120d | both | `sec_rate` | ✅ `sec_13f_hr.py` (#1133) | **WIRED**, PRN drop + 2023-01-03 VALUE cutover applied parser-side |
 | `sec_n_port` | Stage 12 bulk + Stage 22 legacy ingest | `JOB_SEC_N_PORT_INGEST` cron (`scheduler.py:1033`) + manifest worker | 90d | both | `sec_rate` | ✅ `sec_n_port.py` (#1133) | **WIRED** |
-| `sec_10k` | Stage 17 `sec_business_summary_bootstrap` | `JOB_SEC_BUSINESS_SUMMARY_INGEST` cron (`scheduler.py:617`) + manifest worker | 120d | both | `sec_rate` | ✅ `sec_10k.py` (#1152, 2026-05-13) | **WIRED** — Option C `(filed_at, source_accession)` gate applied (sql/148) |
+| `sec_10k` | Stage 17 `sec_business_summary_bootstrap` | manifest worker (post-#1155 retirement of legacy `sec_business_summary_ingest` cron) + weekly `sec_business_summary_bootstrap` safety net | 120d | both | `sec_rate` | ✅ `sec_10k.py` (#1152, 2026-05-13) | **WIRED** — Option C `(filed_at, source_accession)` gate applied (sql/148). Legacy daily 03:15 cron retired in the first #1155 cron-retirement sweep — manifest path is sole steady-state writer. |
 | `sec_10q` | — | — | 60d | manifest only | — | ❌ blocked on **#414** | **GAP** — 10-Q parser owned by fundamentals ingest redesign (#414); manifest rows drain to "no parser" |
 | `sec_n_csr` | — | — | 200d | manifest only | — | ❌ pending re-spike **#918 REOPENED 2026-05-13** | **GAP** — original close cited only EdgarTools surface; operator wants sample-driven evidence on raw payloads + HTML SoI layout + commercial-use survey before "infeasible". Tech-debt #1153 on hold. |
 | `sec_xbrl_facts` | Stage 9 `sec_companyfacts_ingest` (bulk-zip) + Stage 24 `fundamentals_sync` | `JOB_FUNDAMENTALS_SYNC` cron (`scheduler.py:562`) | 120d | manifest only (rows discovered but parser is bulk-path, not manifest dispatch) | `sec_rate` | ❌ by design — Company Facts API bulk path | **WIRED**, not a parser gap. Manifest rows may accumulate without drain; tracked tech-debt: either remove from enum or register synth no-op parser. |
@@ -72,7 +72,7 @@ Steady-state filings discovery currently runs through the legacy per-form ingest
 | `sec_form3_ingest` | `scheduler.py:722` | Blanket scan |
 | `sec_def14a_ingest` | `scheduler.py:742` | Blanket scan |
 | `sec_8k_events_ingest` | `scheduler.py:671` | Blanket scan |
-| `sec_business_summary_ingest` | `scheduler.py:617` | 200 instruments/day |
+| ~~`sec_business_summary_ingest`~~ | — | **retired post-#1155 — first legacy cron retired; manifest worker now sole steady-state writer for 10-K Item 1** |
 | `sec_dividend_calendar_ingest` | `scheduler.py:601` | 500 filings/day |
 | `sec_n_port_ingest` | `scheduler.py:1033` | Blanket scan |
 | `sec_13f_quarterly_sweep` | `scheduler.py:926` | Weekly sweep |

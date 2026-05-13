@@ -483,12 +483,15 @@ def test_full_wash_blocked_when_sibling_has_pending_full_wash_fence(
 def test_full_wash_blocked_when_sibling_sharing_freshness_source_is_running(
     conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
 ) -> None:
-    """Codex review BLOCKING: ``daily_financial_facts``,
-    ``fundamentals_sync``, ``sec_business_summary_ingest`` all share
-    ``freshness_source='sec_xbrl_facts'``. A full-wash on one of them
-    resets the shared scheduler rows under any sibling that is
-    currently mid-run. Refuse with ``shared_source_active_run`` until
-    every sibling is idle.
+    """Codex review BLOCKING: ``daily_financial_facts`` +
+    ``fundamentals_sync`` share ``freshness_source='sec_xbrl_facts'``.
+    A full-wash on one resets the shared scheduler rows under any
+    sibling that is currently mid-run. Refuse with
+    ``shared_source_active_run`` until every sibling is idle.
+
+    (``sec_business_summary_ingest`` was a third sibling pre-#1155;
+    retired in the legacy-cron sweep — manifest worker + sec_10k.py
+    parser (#1152) now carry that path.)
     """
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.execute(
