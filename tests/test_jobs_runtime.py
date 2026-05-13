@@ -444,6 +444,19 @@ class TestProductionInvokerRegistry:
             "sec_13f_ingest_from_dataset",
             "sec_insider_ingest_from_dataset",
             "sec_nport_ingest_from_dataset",
+            # #1155 — manual-trigger-only operator triage. Registered in
+            # _INVOKERS so POST /jobs/sec_rebuild/run works; intentionally
+            # NOT in SCHEDULED_JOBS (no cadence). Params declared in
+            # MANUAL_TRIGGER_JOB_METADATA; source-lock in
+            # MANUAL_TRIGGER_JOB_SOURCES.
+            "sec_rebuild",
+            # #819 — canonical-instrument redirect populate. Idempotent
+            # one-shot the operator triggers after a universe sync
+            # introduces new .RTH-style variants. Registered in
+            # _INVOKERS for "Run now"; NOT in SCHEDULED_JOBS (manual
+            # trigger only). Pre-existing drift fixed in #1155's
+            # registry guard sweep.
+            "populate_canonical_redirects",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "

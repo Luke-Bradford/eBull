@@ -135,12 +135,36 @@ class JobSourceRegistryError(RuntimeError):
 
     Two failure modes:
 
-    * Conflict: the same job_name appears in both registries with
-      different effective sources.
+    * Conflict: the same job_name appears in multiple registries
+      (SCHEDULED_JOBS / _BOOTSTRAP_STAGE_SPECS / MANUAL_TRIGGER_JOB_SOURCES)
+      with different effective sources.
     * Coverage gap: a bootstrap stage references a job_name not in
       either registry (only triggerable if the bootstrap stage table
       is hand-edited inconsistently).
     """
+
+
+# ---------------------------------------------------------------------------
+# MANUAL_TRIGGER_JOB_SOURCES — source-lock coverage for manual-only jobs.
+# ---------------------------------------------------------------------------
+#
+# Sibling to the bootstrap stage registry: jobs that are operator-
+# triggered (not scheduled, not bootstrap-dispatched) still need a
+# source-lock binding so JobLock acquisition succeeds. Without this,
+# source_for() KeyErrors at dispatch and the manual API path 202s but
+# fails before the wrapper body runs.
+#
+# Companion param-metadata registry lives at
+# app/services/processes/param_metadata.py MANUAL_TRIGGER_JOB_METADATA.
+# Every entry needs an _INVOKERS registration + matching metadata entry;
+# tests/test_layer_123_wiring.py covers the triangle.
+
+MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
+    # sec_rebuild — operator manual triage (#1155). Per-CIK
+    # check_freshness probes against SEC submissions.json; shares the
+    # 10 req/s SEC fair-use budget with every other sec_rate consumer.
+    "sec_rebuild": "sec_rate",
+}
 
 
 def _build_job_name_to_source() -> dict[str, Lane]:
@@ -178,11 +202,26 @@ def _build_job_name_to_source() -> dict[str, Lane]:
                 f"job_name={stage.job_name!r}: scheduled.source={existing!r} vs bootstrap.lane={bootstrap_source!r}"
             )
 
+    # Pass 3: manual-trigger-only jobs (#1155). sec_rebuild + future
+    # operator-triggered tools without a cadence — they need source-lock
+    # coverage because JobLock acquisition resolves through source_for(),
+    # which would otherwise KeyError. Companion param-metadata registry
+    # lives at app/services/processes/param_metadata.py
+    # MANUAL_TRIGGER_JOB_METADATA.
+    for job_name, manual_source in MANUAL_TRIGGER_JOB_SOURCES.items():
+        existing = registry.get(job_name)
+        if existing is None:
+            registry[job_name] = manual_source
+        elif existing != manual_source:
+            conflicts.append(
+                f"job_name={job_name!r}: registered.source={existing!r} vs manual-trigger.source={manual_source!r}"
+            )
+
     if conflicts:
         raise JobSourceRegistryError(
-            "Source/lane conflict between SCHEDULED_JOBS and _BOOTSTRAP_STAGE_SPECS:\n  - "
+            "Source/lane conflict between SCHEDULED_JOBS, _BOOTSTRAP_STAGE_SPECS, and MANUAL_TRIGGER_JOB_SOURCES:\n  - "
             + "\n  - ".join(conflicts)
-            + "\nFix the offending entries so a job_name resolves to the same source from both paths."
+            + "\nFix the offending entries so a job_name resolves to the same source from every path."
         )
 
     return registry
@@ -236,6 +275,7 @@ def source_for(job_name: str) -> Lane:
 
 
 __all__ = [
+    "MANUAL_TRIGGER_JOB_SOURCES",
     "JobInvoker",
     "JobSourceRegistryError",
     "Lane",

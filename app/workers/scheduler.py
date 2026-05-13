@@ -296,6 +296,15 @@ JOB_SEC_MANIFEST_TOMBSTONE_STALE = "sec_manifest_tombstone_stale"
 JOB_FILINGS_HISTORY_SEED = "filings_history_seed"
 JOB_SEC_FIRST_INSTALL_DRAIN = "sec_first_install_drain"
 
+# #1155 — Layer 1 / 2 / 3 freshness redesign wiring + sec_rebuild
+# manual triage. Implementation entrypoints existed since #867/#868/#870
+# (Layer wrappers) and the #863-#873 spec (sec_rebuild) but were never
+# registered with _INVOKERS or SCHEDULED_JOBS until this PR.
+JOB_SEC_ATOM_FAST_LANE = "sec_atom_fast_lane"
+JOB_SEC_DAILY_INDEX_RECONCILE = "sec_daily_index_reconcile"
+JOB_SEC_PER_CIK_POLL = "sec_per_cik_poll"
+JOB_SEC_REBUILD = "sec_rebuild"
+
 
 # ---------------------------------------------------------------------------
 # Prerequisite checks
@@ -1102,6 +1111,71 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # 5 min before processing any manifest backlog. The tick is
         # bounded at max_rows=100 so the boot cost is small.
         catch_up_on_boot=True,
+    ),
+    # -- #1155 Layer 1 / 2 / 3 freshness redesign wiring -------------------
+    ScheduledJob(
+        name=JOB_SEC_ATOM_FAST_LANE,
+        display_name="SEC Atom fast lane (Layer 1)",
+        source="sec_rate",
+        description=(
+            "#1155 — Layer 1 of the #863-#873 freshness redesign. "
+            "Every 5 min polls SEC's getcurrent Atom feed; filters to "
+            "(cik IN data_freshness_index.cik) + (form mapped to "
+            "ManifestSource); UPSERTs sec_filing_manifest rows for the "
+            "manifest worker to drain. Single ~1 KB HTTP call covers the "
+            "entire SEC universe — fastest discovery layer for 8-K / "
+            "Form 4 / 13D/G."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
+        # Missed 5-min window = next fire picks up; no catch-up needed.
+        catch_up_on_boot=False,
+        # Gated until bootstrap completes — until then the universe is
+        # empty and every Atom row's subject_resolver returns None, but
+        # the gate saves the wasted HTTP fetch.
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_DAILY_INDEX_RECONCILE,
+        display_name="SEC daily-index reconcile (Layer 2)",
+        source="sec_rate",
+        description=(
+            "#1155 — Layer 2 of the #863-#873 freshness redesign. "
+            "Daily 04:00 UTC reconcile reads yesterday's daily-index "
+            "master.idx (~1 MB), filters to (cik IN universe) + (form "
+            "mapped to ManifestSource), UPSERTs any sec_filing_manifest "
+            "rows the Atom feed missed. Safety net against transient "
+            "Atom outages."
+        ),
+        cadence=Cadence.daily(hour=4, minute=0),
+        # Catch up on boot is the ENTIRE POINT of this safety net — a
+        # stack restart at 06:00 UTC after a missed 04:00 fire must
+        # still reconcile yesterday's index.
+        catch_up_on_boot=True,
+        # NO _bootstrap_complete prereq — JobRuntime evaluates
+        # catch_up_on_boot only at process start, so a prereq-blocked
+        # catch-up cannot re-fire when bootstrap completes later. Daily-
+        # index against an empty universe is a natural no-op
+        # (subject_resolver filters every CIK). See spec #1155 §1.4.
+        prerequisite=None,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_PER_CIK_POLL,
+        display_name="SEC per-CIK poll (Layer 3)",
+        source="sec_rate",
+        description=(
+            "#1155 — Layer 3 of the #863-#873 freshness redesign. "
+            "Hourly per-CIK reconcile reads data_freshness_index for "
+            "subjects past expected_next_at (poll path) AND past "
+            "next_recheck_at (recheck path for never_filed/error rows "
+            "— #1155 G13). For each due subject calls submissions.json "
+            "and UPSERTs new manifest rows. Bounded total budget split "
+            "2/3 poll + ~1/3 recheck (default max_subjects=100 → "
+            "66+34) so error/never_filed backlog cannot starve "
+            "scheduled polls."
+        ),
+        cadence=Cadence.hourly(minute=0),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_SEC_MANIFEST_TOMBSTONE_STALE,
@@ -4419,6 +4493,153 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
             stats.manifest_rows_upserted,
             stats.errors,
             max_subjects,
+        )
+
+
+def sec_atom_fast_lane() -> None:
+    """``_INVOKERS['sec_atom_fast_lane']`` — Layer 1 (5-min Atom).
+
+    #1155 wiring. Polls SEC's getcurrent Atom feed, filters to
+    (cik IN universe) + (form mapped to ManifestSource), UPSERTs
+    sec_filing_manifest rows for the worker to drain. Idempotent —
+    accession PK + ON CONFLICT preserves any in-flight ingest_status.
+    """
+    from app.jobs.sec_atom_fast_lane import run_atom_fast_lane
+
+    with _tracked_job(JOB_SEC_ATOM_FAST_LANE) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            stats = run_atom_fast_lane(conn, http_get=_make_sec_http_get(sec))  # type: ignore[arg-type]
+            conn.commit()
+        tracker.row_count = stats.upserted
+        logger.info(
+            "sec_atom_fast_lane: feed=%d matched=%d upserted=%d unmapped_form=%d unknown_subject=%d",
+            stats.feed_rows,
+            stats.matched_in_universe,
+            stats.upserted,
+            stats.skipped_unmapped_form,
+            stats.skipped_unknown_subject,
+        )
+
+
+def sec_daily_index_reconcile() -> None:
+    """``_INVOKERS['sec_daily_index_reconcile']`` — Layer 2 (daily 04:00 UTC).
+
+    #1155 wiring. Reads yesterday's daily-index master.idx, filters
+    to (cik IN universe) + (form mapped to ManifestSource), UPSERTs
+    sec_filing_manifest rows for accessions the Atom feed missed.
+
+    NO ``_bootstrap_complete`` prereq + ``catch_up_on_boot=true``:
+    JobRuntime evaluates ``catch_up_on_boot`` only at boot; a
+    prereq-blocked catch-up cannot re-fire when bootstrap completes
+    later. Without this exception a stack that boots mid-bootstrap
+    loses yesterday's reconcile permanently. Daily-index against an
+    empty universe is a natural no-op (subject_resolver filters every
+    CIK).
+    """
+    from app.jobs.sec_daily_index_reconcile import run_daily_index_reconcile
+
+    with _tracked_job(JOB_SEC_DAILY_INDEX_RECONCILE) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            stats = run_daily_index_reconcile(conn, http_get=_make_sec_http_get(sec))  # type: ignore[arg-type]
+            conn.commit()
+        tracker.row_count = stats.upserted
+        logger.info(
+            "sec_daily_index_reconcile: index=%d matched=%d upserted=%d unmapped_form=%d unknown_subject=%d",
+            stats.index_rows,
+            stats.matched_in_universe,
+            stats.upserted,
+            stats.skipped_unmapped_form,
+            stats.skipped_unknown_subject,
+        )
+
+
+def sec_per_cik_poll() -> None:
+    """``_INVOKERS['sec_per_cik_poll']`` — Layer 3 (hourly per-CIK).
+
+    #1155 wiring. Reads ``data_freshness_index`` for subjects past
+    their ``expected_next_at`` (poll path) AND past ``next_recheck_at``
+    (recheck path for never_filed/error rows — #1155 G13). For each
+    due subject calls submissions.json and UPSERTs new manifest rows.
+
+    Bounded total budget: poll=2/3, recheck=~1/3 of ``max_subjects``
+    (default 100 → 66+34).
+    """
+    from app.jobs.sec_per_cik_poll import run_per_cik_poll
+
+    with _tracked_job(JOB_SEC_PER_CIK_POLL) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            stats = run_per_cik_poll(conn, http_get=_make_sec_http_get(sec))  # type: ignore[arg-type]
+            conn.commit()
+        tracker.row_count = stats.new_filings_recorded + stats.recheck_new_filings_recorded
+        logger.info(
+            "sec_per_cik_poll: poll_subjects=%d poll_new=%d errors=%d recheck_subjects=%d recheck_new=%d",
+            stats.subjects_polled,
+            stats.new_filings_recorded,
+            stats.poll_errors,
+            stats.recheck_subjects_polled,
+            stats.recheck_new_filings_recorded,
+        )
+
+
+def sec_rebuild(params: Mapping[str, Any]) -> None:
+    """``_INVOKERS['sec_rebuild']`` — operator manual triage (#1155).
+
+    Resets manifest + scheduler rows for a scope and (default) runs a
+    discovery pass via SEC submissions.json to fill missed accessions.
+    The manifest worker drains the resulting pending rows.
+
+    Honoured params (declared in ``MANUAL_TRIGGER_JOB_METADATA``):
+
+    * ``instrument_id`` (int, optional) — issuer scope
+    * ``filer_cik`` (str, optional) — institutional / blockholder filer scope
+    * ``source`` (str, optional) — ManifestSource literal
+    * ``discover`` (bool, default true) — run history-scan discovery pass
+
+    At least one of instrument_id / filer_cik / source must be set;
+    ``_resolve_scope`` raises ValueError otherwise (surfaces in
+    ``job_runs.status='error'``).
+    """
+    from app.jobs.sec_rebuild import RebuildScope, run_sec_rebuild
+
+    instrument_id_raw = params.get("instrument_id")
+    filer_cik_raw = params.get("filer_cik")
+    source_raw = params.get("source")
+    discover = bool(params.get("discover", True))
+
+    scope = RebuildScope(
+        instrument_id=int(instrument_id_raw) if instrument_id_raw is not None else None,
+        filer_cik=str(filer_cik_raw) if filer_cik_raw is not None else None,
+        source=source_raw,  # type: ignore[arg-type]
+    )
+
+    with _tracked_job(JOB_SEC_REBUILD) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            stats = run_sec_rebuild(
+                conn,
+                scope,
+                http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
+                discover=discover,
+            )
+            conn.commit()
+        tracker.row_count = stats.scope_triples
+        logger.info(
+            "sec_rebuild: triples=%d manifest_reset=%d scheduler_reset=%d discovery_new=%d",
+            stats.scope_triples,
+            stats.manifest_rows_reset,
+            stats.scheduler_rows_reset,
+            stats.discovery_new_manifest_rows,
         )
 
 

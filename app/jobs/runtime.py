@@ -297,6 +297,16 @@ from app.workers import scheduler as _scheduler  # noqa: E402
 _INVOKERS[_scheduler.JOB_FILINGS_HISTORY_SEED] = _scheduler.filings_history_seed
 _INVOKERS[_scheduler.JOB_SEC_FIRST_INSTALL_DRAIN] = _scheduler.sec_first_install_drain
 
+# #1155 — Layer 1 / 2 / 3 freshness redesign wiring + sec_rebuild
+# manual triage. Layers 1/2/3 are scheduled (SCHEDULED_JOBS rows in
+# scheduler.py); sec_rebuild is manual-trigger-only (params declared
+# in MANUAL_TRIGGER_JOB_METADATA at param_metadata.py; source-lock
+# binding in MANUAL_TRIGGER_JOB_SOURCES at sources.py).
+_INVOKERS[_scheduler.JOB_SEC_ATOM_FAST_LANE] = _adapt_zero_arg(_scheduler.sec_atom_fast_lane)
+_INVOKERS[_scheduler.JOB_SEC_DAILY_INDEX_RECONCILE] = _adapt_zero_arg(_scheduler.sec_daily_index_reconcile)
+_INVOKERS[_scheduler.JOB_SEC_PER_CIK_POLL] = _adapt_zero_arg(_scheduler.sec_per_cik_poll)
+_INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking, no _adapt_zero_arg
+
 # ---------------------------------------------------------------------------
 # Bulk-archive Phase C ingester invokers (#1027 — #1020)
 # ---------------------------------------------------------------------------

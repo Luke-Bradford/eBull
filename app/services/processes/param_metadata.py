@@ -178,6 +178,108 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# MANUAL_TRIGGER_JOB_METADATA — operator params for manual-only jobs.
+# ---------------------------------------------------------------------------
+#
+# Sibling to JOB_INTERNAL_KEYS for the inverse case: jobs that are
+# operator-triggered (not orchestrator-dispatched) AND need full
+# ParamMetadata validation via the manual API path, but have no
+# cadence so they don't belong in SCHEDULED_JOBS. _lookup_metadata
+# falls through to this dict so validate_job_params(allow_internal_keys=
+# False) accepts the declared keys.
+#
+# Companion source-lock registry lives at app/jobs/sources.py
+# MANUAL_TRIGGER_JOB_SOURCES — JobLock would otherwise KeyError at
+# acquisition because its registry is built only from SCHEDULED_JOBS +
+# _BOOTSTRAP_STAGE_SPECS.
+#
+# Adding to this dict crosses no discipline boundary by itself, but
+# every entry needs a matching MANUAL_TRIGGER_JOB_SOURCES entry +
+# _INVOKERS registration; tests/test_layer_123_wiring.py covers the
+# triangle.
+
+MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
+    # sec_rebuild — operator manual triage (#1155). Resets manifest +
+    # scheduler rows for a scope, then (default) runs a discovery pass
+    # against SEC submissions.json to fill missed accessions.
+    "sec_rebuild": (
+        ParamMetadata(
+            name="instrument_id",
+            label="Instrument ID",
+            help_text=(
+                "Numeric instrument_id from the instruments table. "
+                "Triggers rebuild for every (subject, source) triple "
+                "associated with this instrument."
+            ),
+            field_type="int",
+            default=None,
+            advanced_group=False,
+            min_value=1,
+        ),
+        ParamMetadata(
+            name="filer_cik",
+            label="Filer CIK",
+            help_text=(
+                "CIK of an institutional or blockholder filer. Triggers "
+                "rebuild for all that filer's 13F-HR / 13D / 13G "
+                "history. Typeahead resolves company-name/symbol to CIK."
+            ),
+            field_type="cik",
+            default=None,
+            advanced_group=False,
+        ),
+        ParamMetadata(
+            name="source",
+            label="ManifestSource",
+            help_text=(
+                "Universe-wide rebuild for one source "
+                "(sec_form4 / sec_13d / etc). Most expensive option. "
+                "Note: sec_xbrl_facts / sec_n_csr / sec_10q / "
+                "finra_short_interest may resolve to zero triples if "
+                "data_freshness_index has no rows for that source, OR "
+                "reset triples that the manifest worker then "
+                "debug-skips (no parser registered yet). Operator-"
+                "visible outcome is scope_triples=N + "
+                "discovery_new=0 in the job log."
+            ),
+            field_type="enum",
+            enum_values=(
+                "sec_form3",
+                "sec_form4",
+                "sec_form5",
+                "sec_13d",
+                "sec_13g",
+                "sec_13f_hr",
+                "sec_def14a",
+                "sec_n_port",
+                "sec_n_csr",
+                "sec_10k",
+                "sec_10q",
+                "sec_8k",
+                "sec_xbrl_facts",
+                "finra_short_interest",
+            ),
+            default=None,
+            advanced_group=False,
+        ),
+        ParamMetadata(
+            name="discover",
+            label="Run discovery pass",
+            help_text=(
+                "If true (default), runs check_freshness against every "
+                "CIK in scope to fill missed accessions. Set false to "
+                "skip the SEC fetches and only flip already-known "
+                "accessions back to pending."
+            ),
+            field_type="bool",
+            default=True,
+            advanced_group=True,
+        ),
+    ),
+}
+
+
 class ParamValidationError(ValueError):
     """Raised by ``validate_job_params`` on contract violation.
 
@@ -374,6 +476,10 @@ def _lookup_metadata(job_name: str) -> tuple[ParamMetadata, ...]:
     for job in SCHEDULED_JOBS:
         if job.name == job_name:
             return job.params_metadata
+    # Pass 2: manual-trigger-only jobs (sec_rebuild and future
+    # operator-triggered tools). #1155.
+    if job_name in MANUAL_TRIGGER_JOB_METADATA:
+        return MANUAL_TRIGGER_JOB_METADATA[job_name]
     # Fallback for bootstrap-only invokers. Empty tuple means:
     #   - Manual API path (allow_internal_keys=False): every supplied key
     #     is rejected as unknown — operators cannot manually trigger
@@ -388,6 +494,7 @@ def _lookup_metadata(job_name: str) -> tuple[ParamMetadata, ...]:
 
 __all__ = [
     "JOB_INTERNAL_KEYS",
+    "MANUAL_TRIGGER_JOB_METADATA",
     "ParamFieldType",
     "ParamMetadata",
     "ParamValidationError",
