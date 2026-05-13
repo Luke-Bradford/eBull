@@ -660,13 +660,22 @@ def test_both_ownership_paths_fail_blocks_final_stage(
     # Fail S7 AND every legacy ownership stage. Bulk Phase C is then
     # error-blocked from S7 (error-dead bulk_archives_ready); legacy
     # ownership stages fail directly.
-    failing = {
+    #
+    # Resolve job_name from stage_key via the catalogue so a future
+    # rename (e.g. JOB_SEC_13F_QUARTERLY_SWEEP underlies stage_key
+    # `sec_13f_recent_sweep`) doesn't silently no-op the failing set.
+    # Claude review WARNING for #1138: hardcoded `"sec_13f_quarterly_sweep"`
+    # with only a comment would mask a job-name drift; resolving
+    # through `get_bootstrap_stage_specs()` raises on a typo.
+    _job_by_stage = {spec.stage_key: spec.job_name for spec in get_bootstrap_stage_specs()}
+    failing_stage_keys = {
         "sec_bulk_download",
         "sec_insider_transactions_backfill",
         "sec_form3_ingest",
-        "sec_13f_quarterly_sweep",  # underlying job_name for S21
+        "sec_13f_recent_sweep",
         "sec_n_port_ingest",
     }
+    failing = {_job_by_stage[key] for key in failing_stage_keys}
     _patch_invokers_with_fakes(monkeypatch, failing_jobs=failing)
 
     start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
