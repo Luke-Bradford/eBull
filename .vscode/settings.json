@@ -1,4 +1,5 @@
 {
   "powershell.integratedConsole.showOnStartup": false,
-  "powershell.integratedConsole.startInBackground": true
+  "powershell.integratedConsole.startInBackground": true,
+  "task.allowAutomaticTasks": "on"
 }
