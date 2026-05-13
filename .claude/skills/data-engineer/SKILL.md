@@ -526,6 +526,8 @@ Notable triggers: `POST /jobs/sec_rebuild/run`, `POST /jobs/ownership_observatio
 - `docs/superpowers/specs/2026-05-07-first-install-bootstrap.md` (#993)
 - `docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md`
 
+**Endpoint coverage matrix**: `.claude/skills/data-engineer/etl-endpoint-coverage.md` — per-endpoint wiring across bootstrap + standard refresh + freshness + watermark + rate-limit + parser. Read this when answering "are we covered for source X?" or "why isn't endpoint Y firing on cadence?". Last audit 2026-05-13.
+
 **Settled decisions**: `docs/settled-decisions.md`.
 **Review prevention log**: `docs/review-prevention-log.md`.
 

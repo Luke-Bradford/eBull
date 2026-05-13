@@ -644,6 +644,18 @@ Adopted in #1152 (`instrument_business_summary` + `filed_at` column added by sql
 
 `finra_short_interest` is not stranded — split tickets #915 (bimonthly) + #916 (RegSHO daily) are open. Parent #845 closed.
 
+### 11.6 Discovery layer wiring (Layer 1 / 2 / 3) — audit 2026-05-13
+
+The #863-#873 freshness redesign's three steady-state discovery layers are coded but **NOT scheduled** as of 2026-05-13:
+
+- `run_atom_fast_lane` at `app/jobs/sec_atom_fast_lane.py:104` — Layer 1 (5-min Atom).
+- `run_daily_index_reconcile` at `app/jobs/sec_daily_index_reconcile.py:46` — Layer 2 (daily-index 04:00 UTC).
+- `run_per_cik_poll` at `app/jobs/sec_per_cik_poll.py:39` — Layer 3 (per-CIK cadence).
+
+None have a `_INVOKERS[]` entry in `app/jobs/runtime.py`. None have a `ScheduledJob` row in `app/workers/scheduler.py:SCHEDULED_JOBS`. Tickets #867 / #868 / #870 are **reopened** as of the audit; umbrella wiring under **#1155**.
+
+Steady-state filings discovery runs through the legacy per-form ingest crons (`sec_form3_ingest`, `sec_def14a_ingest`, `sec_8k_events_ingest`, `sec_insider_transactions_ingest`, `sec_business_summary_ingest`, `sec_dividend_calendar_ingest`, `sec_n_port_ingest`, `sec_13f_quarterly_sweep`) which the redesign was meant to retire. Full per-endpoint wiring at `.claude/skills/data-engineer/etl-endpoint-coverage.md` §3.
+
 ## 10. Sources
 
 - SEC accessing-edgar-data: <https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data>
