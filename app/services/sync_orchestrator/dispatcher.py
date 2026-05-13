@@ -136,31 +136,68 @@ def publish_manual_job_request(
     fence-check as ``UniqueViolation`` — handler maps to 409.
     """
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO pending_job_requests
-                    (request_kind, job_name, payload, requested_by, process_id, mode)
-                VALUES ('manual_job', %(job_name)s, %(payload)s, %(requested_by)s,
-                        %(process_id)s, %(mode)s)
-                RETURNING request_id
-                """,
-                {
-                    "job_name": job_name,
-                    "payload": Jsonb(payload) if payload is not None else None,
-                    "requested_by": requested_by,
-                    "process_id": process_id,
-                    "mode": mode,
-                },
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise RuntimeError("INSERT...RETURNING produced no row")
-            request_id = int(row[0])
-            cur.execute(
-                "SELECT pg_notify(%s, %s)",
-                (NOTIFY_CHANNEL, str(request_id)),
-            )
+        return publish_manual_job_request_with_conn(
+            conn,
+            job_name,
+            requested_by=requested_by,
+            process_id=process_id,
+            mode=mode,
+            payload=payload,
+        )
+
+
+def publish_manual_job_request_with_conn(
+    conn: psycopg.Connection[Any],
+    job_name: str,
+    *,
+    requested_by: str | None = None,
+    process_id: str | None = None,
+    mode: Literal["iterate", "full_wash"] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> int:
+    """Same as ``publish_manual_job_request`` but uses the caller's
+    connection. Caller is responsible for the surrounding transaction
+    and commit.
+
+    Issue #1139: the bootstrap API needs the queue INSERT to live in
+    the same transaction as ``start_run`` / ``reset_failed_stages_for_retry``
+    so a publish failure rolls the state mutation back. The old
+    autocommit-only helper splits the work across two connections,
+    which strands the singleton at ``status='running'`` whenever the
+    publish step fails after the state commit lands.
+
+    NOTIFY semantics under a shared txn: PostgreSQL flushes the
+    notification queue at commit boundary, so the listener observes
+    the wakeup exactly when (and only when) the queue row is durable.
+    Strictly safer than the autocommit shape, which could fire NOTIFY
+    in a separate txn before the queue row's own commit returned to
+    the client.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO pending_job_requests
+                (request_kind, job_name, payload, requested_by, process_id, mode)
+            VALUES ('manual_job', %(job_name)s, %(payload)s, %(requested_by)s,
+                    %(process_id)s, %(mode)s)
+            RETURNING request_id
+            """,
+            {
+                "job_name": job_name,
+                "payload": Jsonb(payload) if payload is not None else None,
+                "requested_by": requested_by,
+                "process_id": process_id,
+                "mode": mode,
+            },
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("INSERT...RETURNING produced no row")
+        request_id = int(row[0])
+        cur.execute(
+            "SELECT pg_notify(%s, %s)",
+            (NOTIFY_CHANNEL, str(request_id)),
+        )
     return request_id
 
 
@@ -363,6 +400,7 @@ __all__ = [
     "mark_request_dispatched",
     "mark_request_rejected",
     "publish_manual_job_request",
+    "publish_manual_job_request_with_conn",
     "publish_sync_request",
     "reset_stale_in_flight",
     "scope_from_json",

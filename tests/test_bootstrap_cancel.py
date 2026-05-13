@@ -476,8 +476,9 @@ def test_reset_failed_for_retry_picks_up_cancelled_stages(
     # Bravo + charlie are now ``cancelled``; retry-failed should reset
     # them to ``pending`` (cancelled is treated like error/blocked for
     # the lane-min-order logic).
-    reset = reset_failed_stages_for_retry(ebull_test_conn, run_id=run_id)
+    helper_run_id, reset = reset_failed_stages_for_retry(ebull_test_conn)
     ebull_test_conn.commit()
+    assert helper_run_id == run_id
     assert reset > 0
 
     rows = ebull_test_conn.execute(
@@ -660,11 +661,12 @@ def test_cancel_then_iterate_resumes_via_reset_failed(
     assert read_state(ebull_test_conn).status == "cancelled"
 
     # Operator clicks Iterate (= reset failed/pending + republish).
-    reset_count = reset_failed_stages_for_retry(ebull_test_conn, run_id=run_id)
+    helper_run_id, reset_count = reset_failed_stages_for_retry(ebull_test_conn)
     ebull_test_conn.commit()
 
     # alpha success preserved; bravo + charlie were swept to error
     # and reset back to pending.
+    assert helper_run_id == run_id
     assert reset_count == 2
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None

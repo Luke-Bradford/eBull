@@ -70,6 +70,30 @@ class BootstrapNotRunning(RuntimeError):
     """
 
 
+class BootstrapNoPriorRun(RuntimeError):
+    """Raised by ``reset_failed_stages_for_retry`` when the singleton's
+    ``last_run_id`` is NULL — no prior bootstrap run exists to retry.
+
+    Maps to 404. Precedes the status-check inside the helper so a fresh
+    install (`status='pending', last_run_id IS NULL`) returns the same
+    operator message as the wipe-then-mark-partial edge case. Issue #1139.
+    """
+
+
+class BootstrapNotResettable(RuntimeError):
+    """Raised by ``reset_failed_stages_for_retry`` when the singleton's
+    ``status`` is not in the resettable set (``partial_error`` or
+    ``cancelled``) but a prior run does exist.
+
+    Maps to 409 ``bootstrap_not_resettable``. Carries the current status
+    so the API response detail can name it. Issue #1139.
+    """
+
+    def __init__(self, status: str) -> None:
+        super().__init__(f"bootstrap state {status!r} is not resettable")
+        self.status = status
+
+
 class BootstrapStageCancelled(RuntimeError):
     """Raised by a long-running stage invoker when it observes the
     bootstrap-run cancel signal at one of its checkpoints.
@@ -245,7 +269,7 @@ def read_latest_run_with_stages(
 def start_run(
     conn: psycopg.Connection[Any],
     *,
-    operator_id: str | None,
+    operator_id: UUID | None,
     stage_specs: Sequence[StageSpec],
 ) -> int:
     """Create a new bootstrap run + seed pending stage rows.
@@ -257,6 +281,13 @@ def start_run(
     then flips ``bootstrap_state.status`` to ``running``.
 
     Returns the new ``bootstrap_runs.id``.
+
+    ``operator_id`` populates ``bootstrap_runs.triggered_by_operator_id``
+    for audit. ``None`` is correct for service-token initiated runs;
+    only operator-session callers populate the column. The retry path
+    must NOT overwrite this column on the existing row (#1139 — that
+    would corrupt original-run audit); only fresh runs created here
+    take a value.
 
     All work happens inside one transaction so a partial commit cannot
     leave a half-seeded run.
@@ -625,42 +656,47 @@ def finalize_run(
 
 def reset_failed_stages_for_retry(
     conn: psycopg.Connection[Any],
-    *,
-    run_id: int,
-) -> int:
+) -> tuple[int, int]:
     """Reset failed + later-numbered same-lane stages for retry.
 
-    Spec §"retry-failed dependency-aware reset". Returns the number
-    of rows reset to ``pending``.
+    Derives the target ``run_id`` from ``bootstrap_state.last_run_id``
+    under the same ``FOR UPDATE`` lock that gates status — callers
+    pass no ``run_id`` argument, so the stale-id race (#1139) is
+    structurally impossible.
 
-    Algorithm (one transaction, ``SELECT ... FOR UPDATE`` on the
-    singleton up front to prevent a concurrent ``start_run`` from
-    transitioning state to ``running`` between the API's earlier
-    status read and this reset — TOCTOU avoidance):
+    Returns ``(run_id, reset_count)`` on success. ``reset_count == 0``
+    means the singleton was in a resettable status but the latest run
+    had no failed stages — the helper does NOT flip state in that
+    case (nothing to retry); the API maps to 404.
 
-    1. Lock the bootstrap_state singleton row (``FOR UPDATE``).
-    2. Raise ``BootstrapAlreadyRunning`` if status flipped to
-       ``running`` since the API's pre-check; the API maps this to
-       a 409 response.
-    3. Find all failed (error) stages on the latest run.
-    4. For each lane that has at least one failed stage, find the
-       smallest ``stage_order`` of a failed stage in that lane.
-    5. Reset every stage in that lane with ``stage_order >=`` the
-       smallest-failed-order to ``pending``, regardless of current
-       status. The orchestrator's per-stage pre-check skips stages
-       already in ``success`` so only re-running re-enqueued
-       pending stages happens.
-    6. Flip bootstrap_state.status back to ``running``.
+    Raises (precedence — first match wins inside the lock):
+      * ``BootstrapNoPriorRun``     — singleton.last_run_id IS NULL
+                                      (any status). API → 404.
+      * ``BootstrapAlreadyRunning`` — singleton.status == 'running'.
+                                      API → 409 ``bootstrap_running``.
+      * ``BootstrapNotResettable``  — singleton.status in
+                                      {pending, complete} (i.e. not
+                                      in {partial_error, cancelled}).
+                                      API → 409 ``bootstrap_not_resettable``.
 
-    If no failed stages exist, returns 0 and leaves state untouched.
+    No-prior-run precedence means a fresh install
+    (``pending + last_run_id NULL``) returns the same 404 as the
+    wipe-then-mark-partial edge case — preserves the original
+    /retry-failed contract.
     """
     with conn.transaction():
         state_row = conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1 FOR UPDATE").fetchone()
         if state_row is None:
             raise RuntimeError("bootstrap_state singleton row missing")
         current_status, current_last_run_id = state_row
+        if current_last_run_id is None:
+            raise BootstrapNoPriorRun()
         if current_status == "running":
-            raise BootstrapAlreadyRunning(run_id=current_last_run_id or 0)
+            raise BootstrapAlreadyRunning(run_id=current_last_run_id)
+        if current_status not in ("partial_error", "cancelled"):
+            raise BootstrapNotResettable(status=current_status)
+
+        run_id = int(current_last_run_id)
 
         failed_rows = conn.execute(
             """
@@ -673,7 +709,7 @@ def reset_failed_stages_for_retry(
             {"run_id": run_id},
         ).fetchall()
         if not failed_rows:
-            return 0
+            return (run_id, 0)
 
         total_reset = 0
         for lane, min_order in failed_rows:
@@ -712,7 +748,7 @@ def reset_failed_stages_for_retry(
             {"run_id": run_id},
         )
 
-    return total_reset
+    return (run_id, total_reset)
 
 
 def force_mark_complete(
@@ -1083,6 +1119,8 @@ def reap_orphaned_running(
 
 __all__ = [
     "BootstrapAlreadyRunning",
+    "BootstrapNoPriorRun",
+    "BootstrapNotResettable",
     "BootstrapNotRunning",
     "BootstrapStageCancelled",
     "BootstrapState",

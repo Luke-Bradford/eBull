@@ -185,7 +185,8 @@ def test_reset_failed_stages_resets_failed_and_downstream_in_lane(
     finalize_run(ebull_test_conn, run_id=run_id)
     assert read_state(ebull_test_conn).status == "partial_error"
 
-    reset_count = reset_failed_stages_for_retry(ebull_test_conn, run_id=run_id)
+    helper_run_id, reset_count = reset_failed_stages_for_retry(ebull_test_conn)
+    assert helper_run_id == run_id
     # s2 (failed) + s3 (downstream same lane) = 2 stages reset.
     assert reset_count == 2
     ebull_test_conn.commit()
@@ -204,9 +205,15 @@ def test_reset_failed_stages_resets_failed_and_downstream_in_lane(
     assert state.status == "running"
 
 
-def test_reset_failed_stages_no_op_when_no_failures(
+def test_reset_failed_stages_raises_when_singleton_complete(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
+    """After finalize_run lands a successful run, the singleton is
+    'complete'. The helper must reject (not silently 0-return)
+    because 'complete' is outside the resettable status set
+    {partial_error, cancelled} (#1139 — helper is now sole gate)."""
+    from app.services.bootstrap_state import BootstrapNotResettable
+
     _reset_state(ebull_test_conn)
     run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=_SPECS)
     ebull_test_conn.commit()
@@ -217,7 +224,9 @@ def test_reset_failed_stages_no_op_when_no_failures(
     finalize_run(ebull_test_conn, run_id=run_id)
     ebull_test_conn.commit()
 
-    assert reset_failed_stages_for_retry(ebull_test_conn, run_id=run_id) == 0
+    with pytest.raises(BootstrapNotResettable) as exc_info:
+        reset_failed_stages_for_retry(ebull_test_conn)
+    assert exc_info.value.status == "complete"
     assert read_state(ebull_test_conn).status == "complete"
 
 
