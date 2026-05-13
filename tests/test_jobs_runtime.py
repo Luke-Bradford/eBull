@@ -411,6 +411,12 @@ class TestProductionInvokerRegistry:
             # (no UI consumer). Function stays in _INVOKERS for manual
             # trigger from Admin "Run now".
             "attribution_summary",
+            # #1155 legacy-cron retirement sweep — moved from
+            # SCHEDULED_JOBS to on-demand. Steady-state writes now come
+            # from manifest worker + per-source parsers. Function bodies
+            # + _INVOKERS entries kept so Admin "Run now" + sweep-adapter
+            # + bootstrap-stage dispatch continue to work.
+            "sec_def14a_ingest",
             # #994 (first-install bootstrap orchestrator) — these jobs
             # are dispatched by the bootstrap orchestrator (not SCHEDULED)
             # but registered in _INVOKERS so the orchestrator can call

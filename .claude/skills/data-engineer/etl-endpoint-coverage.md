@@ -34,7 +34,7 @@ Definition: `app/services/sec_manifest.py:106-121` + CHECK constraint `sql/118:3
 | Source | Bootstrap stage | Standard refresh | Freshness cadence | Watermark | Pool | Parser | Status |
 |---|---|---|---|---|---|---|---|
 | `sec_8k` | Stage 20 `sec_8k_events_ingest` | `JOB_SEC_8K_EVENTS_INGEST` cron (`scheduler.py:671`) + manifest worker | 14d | `data_freshness_index` + `sec_filing_manifest.next_retry_at` | `sec_rate` | ✅ `eight_k.py` (#1126) | **WIRED** |
-| `sec_def14a` | Stage 16 `sec_def14a_bootstrap` | `JOB_SEC_DEF14A_INGEST` cron (`scheduler.py:742`) + manifest worker | 365d | both | `sec_rate` | ✅ `def14a.py` (#1128) | **WIRED** |
+| `sec_def14a` | Stage 16 `sec_def14a_bootstrap` | manifest worker (post-#1155 — `JOB_SEC_DEF14A_INGEST` moved to on-demand) + weekly `sec_def14a_bootstrap` safety net | 365d | both | `sec_rate` | ✅ `def14a.py` (#1128) | **WIRED** |
 | `sec_13d` | Stage 14 `filings_history_seed` (730d) | manifest worker only | 90d | both | `sec_rate` | ✅ `sec_13dg.py` (#1129) | **WIRED**, but only manifest worker (no dedicated cron — depends on Layer 1/2/3, see §3) |
 | `sec_13g` | Stage 14 | manifest worker only | 90d | both | `sec_rate` | ✅ `sec_13dg.py` (#1129) | **WIRED**, same caveat |
 | `sec_form3` | Stage 19 `sec_form3_ingest` | `JOB_SEC_FORM3_INGEST` cron (`scheduler.py:722`) + manifest worker | 30d | both | `sec_rate` | ✅ `insider_345.py` (#1130) | **WIRED** |

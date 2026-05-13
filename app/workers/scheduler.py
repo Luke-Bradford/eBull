@@ -730,29 +730,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
-    ScheduledJob(
-        name=JOB_SEC_DEF14A_INGEST,
-        display_name="SEC DEF 14A ingest",
-        source="sec_rate",
-        description=(
-            "Parse SEC DEF 14A proxy statements into "
-            "``def14a_beneficial_holdings`` (#769 / #805). DEF 14A is "
-            "the canonical annual reconciliation point for both insiders "
-            "(officers + directors with proxy-disclosed beneficial "
-            "ownership) and 5%+ blockholders. Without this ingest, the "
-            "ownership rollup's def14a_unmatched slice is always empty "
-            "and the DEF 14A drift detector has nothing to reconcile "
-            "against — surfacing 0 rows in dev DB on operator audit "
-            "2026-05-03. Cadence: daily — proxy filings appear "
-            "~quarterly per issuer so daily catches them within a day "
-            "of EDGAR availability without burning bandwidth. Idempotent "
-            "via the (accession, holder_name) UNIQUE on the holdings "
-            "table + the def14a_ingest_log tombstone."
-        ),
-        cadence=Cadence.daily(hour=4, minute=35),
-        catch_up_on_boot=False,
-        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
-    ),
+    # `sec_def14a_ingest` retired from SCHEDULED_JOBS post-#1155:
+    # Layer 1/2/3 discovery + `sec_manifest_worker` + `manifest_parsers/
+    # def14a.py` (#1128) carry every DEF 14A write to
+    # `def14a_beneficial_holdings`. Weekly `sec_def14a_bootstrap` Sunday
+    # safety-net stays for one-shot drain. Function body + `_INVOKERS`
+    # entry + sweep-adapter `sec_def14a_sweep` kept so Admin "Run now"
+    # + the per-source sweep UI remain operator-callable.
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_SYNC,
         display_name="Ownership repair sweep",
