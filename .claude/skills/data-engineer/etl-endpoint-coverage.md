@@ -77,7 +77,9 @@ Steady-state filings discovery currently runs through the legacy per-form ingest
 | `sec_n_port_ingest` | `scheduler.py:1033` | Blanket scan |
 | `sec_13f_quarterly_sweep` | `scheduler.py:926` | Weekly sweep |
 
-`data_freshness._CADENCE` at `app/services/data_freshness.py:69` is queried by the per-CIK seeder (`seed_freshness_for_manifest_row`) on every manifest write, but never read for poll scheduling — no caller selects `next_recheck_at <= now()` and dispatches a fetch. The table is a write-only ledger today.
+`data_freshness._CADENCE` at `app/services/data_freshness.py:69` is queried by the per-CIK seeder (`seed_freshness_for_manifest_row`) on every manifest write, populating `expected_next_at`. `subjects_due_for_poll` at `app/services/data_freshness.py:485` is the consumer reader. `run_per_cik_poll` calls it correctly. But because Layer 3 is unwired (no `_INVOKERS[]` / `SCHEDULED_JOBS` row), no scheduled caller reaches that path. The table is read by tests + ad-hoc rebuild scripts only, not steady-state polling.
+
+**Sub-gap G13:** even after Layer 3 is wired, `run_per_cik_poll` reads only `subjects_due_for_poll`. The companion `subjects_due_for_recheck` at `app/services/data_freshness.py:533` (handles `never_filed` + `error` state rechecks) is referenced only by tests — production never reaches it. `#1155` acceptance should require both reader paths to fire.
 
 Once #1155 lands, the legacy crons above can be retired per spec §6. Each retirement is one PR + smoke per cron.
 
@@ -89,13 +91,13 @@ These endpoints don't have a `ManifestSource` because they're not per-filing dis
 
 | Endpoint | Code | Bootstrap stage | Steady-state | Pool | Notes |
 |---|---|---|---|---|---|
-| `www.sec.gov/files/company_tickers.json` | `app/providers/implementations/sec_edgar.py:52` | Stage 6 `cik_refresh` (`JOB_DAILY_CIK_REFRESH`) | `JOB_DAILY_CIK_REFRESH` (daily) | `sec_rate` | Ticker → CIK bridge, ~10k operating-co rows; conditional GET ETag-aware |
+| `www.sec.gov/files/company_tickers.json` | `app/providers/implementations/sec_edgar.py:52` | Stage 6 `cik_refresh` (`JOB_DAILY_CIK_REFRESH`) | `JOB_FUNDAMENTALS_SYNC` daily (`scheduler.py:562`) calls `daily_cik_refresh()` inline at `scheduler.py:3051` | `sec_rate` | Ticker → CIK bridge, ~10k operating-co rows; conditional GET ETag-aware. **Note:** `JOB_DAILY_CIK_REFRESH` is in `_INVOKERS` (manual trigger only) but absent from `SCHEDULED_JOBS` — the daily cadence lives inside the fundamentals_sync body, not as a standalone scheduled job. |
 | `www.sec.gov/files/company_tickers_exchange.json` | NOT CONSUMED | — | — | — | ❌ **GAP** — sec-edgar skill §1 cites this as reference bridge; coverage closes pink-sheet/OTC/foreign-without-ADR gap left by `company_tickers.json`. No code consumer. Eligible for tech-debt ticket. |
 | `www.sec.gov/files/company_tickers_mf.json` | NOT CONSUMED | — | — | — | ❌ **GAP** — same shape, ~28k mutual-fund rows with `seriesId` + `classId`. No consumer. Tech-debt eligible. |
 | `www.sec.gov/files/investment/13flist{year}q{quarter}.txt` | `app/services/sec_13f_securities_list.py:77` | Stage 3 `cusip_universe_backfill` | `JOB_CUSIP_UNIVERSE_BACKFILL` (`scheduler.py:925`) | `sec_rate` | 13F Official List, ~24k rows; CUSIP → issuer-name authoritative bridge |
 | `data.sec.gov/submissions/CIK*.json` | `app/providers/implementations/sec_submissions.py:239` | Stage 8 `sec_submissions_ingest` (bulk-zip) + Stage 13 `sec_submissions_files_walk` | manifest worker (when Layer 3 wired) + `JOB_SEC_INSIDER_TRANSACTIONS_INGEST` watermark walk | `sec_rate` | Per-CIK 1000-most-recent + overflow pages via `filings.files[]` |
 | `data.sec.gov/submissions/CIK*-submissions-NNN.json` | `app/services/sec_submissions_files_walk.py` + `app/jobs/sec_rebuild.py:335` | Stage 13 | manual rebuild via `POST /jobs/sec_rebuild/run` | `sec_rate` | Overflow paging for deep-history parity |
-| `data.sec.gov/api/xbrl/companyfacts/CIK*.json` | `app/providers/implementations/sec_fundamentals.py:57` | Stage 9 `sec_companyfacts_ingest` (bulk-zip) | `JOB_FUNDAMENTALS_SYNC` (per-CIK API path) | `sec_rate` | All XBRL concepts |
+| `data.sec.gov/api/xbrl/companyfacts/CIK*.json` | `app/providers/implementations/sec_fundamentals.py:594` (path built; `_BASE_URL` at :57) | Stage 9 `sec_companyfacts_ingest` (bulk-zip) | `JOB_FUNDAMENTALS_SYNC` (per-CIK API path) | `sec_rate` | All XBRL concepts |
 | `data.sec.gov/api/xbrl/companyconcept/CIK*/{taxonomy}/{tag}.json` | NOT CONSUMED | — | — | — | ❌ **GAP** — single-tag smaller payload; would let `fundamentals_sync` avoid full Companyfacts when only N tags needed. Tech-debt eligible. |
 | `data.sec.gov/api/xbrl/frames/...` | NOT CONSUMED | — | — | — | ❌ **GAP** — cross-sectional one-fact-per-filer; useful for sector aggregates. Not currently in the v1 metrics surface. Tech-debt eligible. |
 | Bulk `submissions.zip` (~1.54 GB) | `app/services/sec_bulk_download.py:225-227` | Stage 7 `sec_bulk_download` | — (one-shot per bootstrap) | `sec_bulk_download` lane | Initial-install drain only |
@@ -175,6 +177,7 @@ These endpoints don't have a `ManifestSource` because they're not per-filing dis
 | G10 | `companyconcept` API not consumed | OPEN (low) | — | Smaller-payload alternative to Companyfacts for known-tag pulls. Eligible. |
 | G11 | `frames` API not consumed | OPEN (low) | — | Cross-sectional one-fact-per-filer; sector aggregates use case. Eligible. |
 | G12 | Full-index `master.idx` quarterly not consumed | OPEN (low) | — | Cross-quarter discovery; only `form.idx` is consumed today. Eligible if cross-quarter walks become needed. |
+| G13 | `subjects_due_for_recheck` reader unused | OPEN | **#1155** (sub-finding) | `app/services/data_freshness.py:533` — handles `never_filed` + `error` state rechecks. Only tests reference it; runtime Layer 3 (when wired) reads only `subjects_due_for_poll` at `:485`. #1155 acceptance must require BOTH reader paths to fire. |
 
 G1-G3 are the **headline finding** of this audit — the freshness redesign's three steady-state polling layers are coded but never scheduled. Without them, the table at §3 (legacy per-form ingest crons) carries discovery; `data_freshness._CADENCE` is a write-only ledger.
 
