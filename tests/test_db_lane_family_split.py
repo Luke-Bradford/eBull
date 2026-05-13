@@ -164,18 +164,42 @@ class TestLaneCheckConstraint:
 
     def test_garbage_lane_rejected(self, ebull_test_conn) -> None:  # type: ignore[no-untyped-def]
         """A lane name outside the CHECK vocabulary must raise
-        ``CheckViolation`` — the migration's defensive boundary."""
+        ``CheckViolation`` — the migration's defensive boundary.
+
+        The failing INSERT is wrapped in ``ebull_test_conn.transaction()``
+        so the resulting tx-abort is scoped to a SAVEPOINT, NOT the
+        outer implicit psycopg3 tx. Without the savepoint, raising
+        ``CheckViolation`` inside an already-open implicit tx leaves
+        the connection in ``InFailedSqlTransaction`` state — the
+        fixture's per-test ``conn.rollback()`` teardown clears it, but
+        any further statement on this cursor inside the same test
+        would fail silently. PR #1150 review WARNING. See
+        ``docs/review-prevention-log.md`` —
+        "Aborted tx after pytest.raises(CheckViolation) inside an
+        open implicit psycopg3 tx".
+        """
         with ebull_test_conn.cursor() as cur:
             cur.execute("INSERT INTO bootstrap_runs DEFAULT VALUES RETURNING id")
             row = cur.fetchone()
             assert row is not None
             run_id = row[0]
             with pytest.raises(psycopg_errors.CheckViolation):
-                cur.execute(
-                    """
-                    INSERT INTO bootstrap_stages
-                        (bootstrap_run_id, stage_key, stage_order, lane, job_name)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (run_id, "fixture_garbage_lane", 1, "garbage_lane", "fixture_job"),
-                )
+                with ebull_test_conn.transaction():
+                    cur.execute(
+                        """
+                        INSERT INTO bootstrap_stages
+                            (bootstrap_run_id, stage_key, stage_order, lane, job_name)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (run_id, "fixture_garbage_lane", 1, "garbage_lane", "fixture_job"),
+                    )
+            # Outer tx still alive — the SAVEPOINT absorbed the abort.
+            # Prove it: a subsequent statement on the same cursor must
+            # succeed against the un-aborted bootstrap_runs row.
+            cur.execute(
+                "SELECT 1 FROM bootstrap_runs WHERE id = %s",
+                (run_id,),
+            )
+            assert cur.fetchone() is not None, (
+                "outer tx was aborted by the CheckViolation — savepoint did not contain the failure"
+            )
