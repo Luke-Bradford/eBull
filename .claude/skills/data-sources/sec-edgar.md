@@ -595,10 +595,54 @@ Every manifest parser MUST follow this contract on its upsert except: block. The
 |---|---|
 | 8-K (`app/services/manifest_parsers/eight_k.py`) | `_write_tombstone` row in `eight_k_filings` |
 | Form 3 / Form 4 (`app/services/manifest_parsers/insider_345.py`) | `_write_tombstone` / `_write_form_3_tombstone` row in `insider_filings` |
+| Form 5 (`app/services/manifest_parsers/insider_345.py`, `_parse_form5`) | `_write_tombstone(document_type='5')` row in `insider_filings`; observations land as `source='form4'` (enum lacks `form5`) — provenance preserved via `insider_filings.document_type='5'` JOIN |
 | 13D/G (`app/services/manifest_parsers/sec_13dg.py`) | `_record_ingest_attempt(status='failed')` in `blockholder_filings_ingest_log` |
 | DEF 14A (`app/services/manifest_parsers/def14a.py`) | `_record_ingest_attempt(status='failed')` in `def14a_ingest_log` |
+| 13F-HR (`app/services/manifest_parsers/sec_13f_hr.py`) | `_record_ingest_attempt(status='failed')` in `institutional_holdings_ingest_log`; PRN drop + 2023-01-03 VALUE cutover applied at parser layer |
+| NPORT-P (`app/services/manifest_parsers/sec_n_port.py`) | `_record_ingest_attempt(status='failed')` in `n_port_ingest_log` |
+| 10-K (`app/services/manifest_parsers/sec_10k.py`) | Returns `ParseOutcome(status='tombstoned')` only; manifest path does NOT call `record_parse_attempt` (the legacy helper mutates `source_accession` on UPDATE and would corrupt incumbent provenance). Manifest row's `tombstoned` state owns retry semantics. |
 
 Legacy ingesters (`ingest_insider_transactions`) apply the same discrimination on the upsert phase: deterministic writes `_write_tombstone` in a fresh tx so the candidate selector doesn't re-pick the accession on every tick; transient rolls back and continues so the next tick retries.
+
+### 11.4 Option C — `(filed_at, source_accession)` ON CONFLICT gate (#1151)
+
+The manifest worker drains `filed_at ASC` (oldest first; pinned in `iter_pending`). When a manifest adapter writes to a typed table keyed PER INSTRUMENT (one row per instrument across many filings, not one row per accession), a naive `ON CONFLICT (instrument_id) DO UPDATE` would render OLDEST → NEWEST per-instrument during first-install drain — final state correct but operator briefly sees stale-then-fresh.
+
+The fix: gate the UPDATE on the `(filed_at, source_accession)` tuple. SEC accession numbers are temporally ordered within an issuer, so they serve as a deterministic same-day tie-breaker.
+
+```sql
+ON CONFLICT (instrument_id) DO UPDATE SET ...
+WHERE
+    target_table.filed_at IS NULL
+    OR (EXCLUDED.filed_at IS NOT NULL
+        AND (EXCLUDED.filed_at, EXCLUDED.source_accession)
+            >= (target_table.filed_at, target_table.source_accession))
+RETURNING (xmax = 0) AS inserted
+```
+
+NULL handling:
+- Incumbent NULL → any dated write wins (legacy row re-baseline).
+- Incoming NULL against dated incumbent → suppressed (fail closed; no legitimate caller passes NULL post-Option-C).
+
+Return shape: `Literal['inserted', 'updated', 'suppressed']`. `cur.fetchone() is None` ⇒ suppressed; else `row[0]` distinguishes insert vs update.
+
+When to apply:
+- Adapter writes to a typed table keyed by instrument_id (not accession). Examples: `instrument_business_summary`.
+- NOT needed for adapters whose typed table is keyed by accession + child rows (Form 4, 13F, 13D/G, NPORT-P, DEF 14A — no per-instrument single-row collapse, no overwrite hazard).
+
+Adopted in #1152 (`instrument_business_summary` + `filed_at` column added by sql/148). If a future adapter writes a per-instrument typed table, apply the same gate.
+
+### 11.5 Stranded ManifestSource entries
+
+`ManifestSource` enum (sql/118 CHECK + `app/services/sec_manifest.py:106`) lists 14 values. Three carry no manifest parser by design:
+
+| Source | Why no parser |
+|---|---|
+| `sec_xbrl_facts` | XBRL Company Facts ingested via bulk Company Facts API path, NOT per-filing manifest dispatch. |
+| `sec_n_csr` | EdgarTools `FundShareholderReport` exposes only OEF iXBRL fund-level facts (NAV / expense ratio / top-holdings %); per-issuer Schedule of Investments lives in free-form HTML/PDF, not XBRL. CUSIP-resolved per-issuer holdings unextractable. Resolved as "not technically feasible as scoped" — see #918 closing comment. Discovery may still write manifest rows that never drain. Tech-debt eligible: either remove from `ManifestSource` Literal + `_FORM_TO_SOURCE` map, OR register a synth "no-op tombstone" parser. |
+| `sec_10q` | Blocked on #414 — the fundamentals ingest redesign owns the 10-Q parser. |
+
+`finra_short_interest` is not stranded — split tickets #915 (bimonthly) + #916 (RegSHO daily) are open. Parent #845 closed.
 
 ## 10. Sources
 
