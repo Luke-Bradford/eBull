@@ -558,3 +558,47 @@ def record_archive_result(
                 "rows_skipped": json.dumps(rows_skipped or {}),
             },
         )
+
+
+def record_archive_result_if_absent(
+    conn: psycopg.Connection[Any],
+    *,
+    bootstrap_run_id: int,
+    stage_key: str,
+    archive_name: str,
+    rows_written: int,
+    rows_skipped: dict[str, int] | None = None,
+) -> None:
+    """Insert a ``bootstrap_archive_results`` row only if absent.
+
+    Same shape as ``record_archive_result`` but with
+    ``ON CONFLICT ... DO NOTHING`` semantics. Used by the orchestrator's
+    auto ``__job__`` provenance write at the end of ``_run_one_stage``
+    so a service invoker that already wrote ``__job__`` with a real
+    ``rows_written`` count (e.g. ``sec_submissions_files_walk``
+    overloads the provenance row with ``filings_upserted``) is NOT
+    clobbered by the orchestrator's subsequent default-zero write.
+
+    The shared ``record_archive_result`` upsert helper stays unchanged
+    because Phase C ingesters and retry paths still need last-write-
+    wins semantics on per-archive rows (#1140 / Task C of #1136).
+    """
+    import json
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO bootstrap_archive_results
+                (bootstrap_run_id, stage_key, archive_name, rows_written, rows_skipped, completed_at)
+            VALUES
+                (%(run_id)s, %(stage)s, %(archive)s, %(rows_written)s, %(rows_skipped)s::jsonb, NOW())
+            ON CONFLICT (bootstrap_run_id, stage_key, archive_name) DO NOTHING
+            """,
+            {
+                "run_id": bootstrap_run_id,
+                "stage": stage_key,
+                "archive": archive_name,
+                "rows_written": rows_written,
+                "rows_skipped": json.dumps(rows_skipped or {}),
+            },
+        )

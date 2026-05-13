@@ -300,6 +300,11 @@ class BootstrapTimelineStageResponse(BaseModel):
     processed_count: int
     target_count: int | None
     archives: list[BootstrapTimelineArchiveResponse]
+    # #1140 Task C — operator-readable warning string when the stage
+    # finished ``success`` but its ``rows_processed`` failed to satisfy
+    # a strict-gate capability floor it provides. ``None`` for healthy
+    # stages and for stages that don't provide a strict-gate cap.
+    warning: str | None = None
 
 
 class BootstrapTimelineRunResponse(BaseModel):
@@ -310,6 +315,13 @@ class BootstrapTimelineRunResponse(BaseModel):
     triggered_at: datetime
     completed_at: datetime | None
     cancel_requested_at: datetime | None
+    # #1140 Task C — derived view: True iff at least one stage in the
+    # run carries a non-None ``warning``. Frontend renders an amber
+    # dot next to the run-level status when this is True and the
+    # status is ``complete`` (the partial_error red signal is louder
+    # than the amber warning, so the warning is suppressed for
+    # already-red runs).
+    has_warnings: bool = False
 
 
 class BootstrapTimelineResponse(BaseModel):
@@ -720,7 +732,21 @@ def get_bootstrap_timeline(
             )
         )
 
+    # #1140 Task C — derive per-stage `warning` from the cap layer.
+    # A stage that finished `success` but provides a strict-gate cap
+    # AND wrote 0 (or NULL) rows raises an operator-visible warning
+    # because its downstream consumers cannot be satisfied off this
+    # stage's contribution. Excluded multi-cap providers (e.g. bulk
+    # insider for form3) don't warn — they're neutral, not the
+    # responsible party for the cap.
+    from app.services.bootstrap_orchestrator import (
+        _CAPABILITY_MIN_ROWS,
+        _STAGE_PROVIDES,
+        _STRICT_CAP_PROVIDER_EXCLUSIONS,
+    )
+
     stage_payload: list[BootstrapTimelineStageResponse] = []
+    has_warnings = False
     for row in stage_rows:
         stage_key = str(row["stage_key"])
         display_name = _humanise_stage_key(stage_key)
@@ -735,6 +761,26 @@ def get_bootstrap_timeline(
             # historical truth — the catalogue is the deployable contract.
             stage_order = int(row["stage_order"])
             job_name = str(row["job_name"])
+
+        warning: str | None = None
+        if row["status"] == "success":
+            provided_caps = _STAGE_PROVIDES.get(stage_key, ())
+            strict_caps_unmet = [
+                cap
+                for cap in provided_caps
+                if cap in _CAPABILITY_MIN_ROWS
+                and stage_key not in _STRICT_CAP_PROVIDER_EXCLUSIONS.get(cap, frozenset())
+                and (row.get("rows_processed") is None or int(row["rows_processed"]) < _CAPABILITY_MIN_ROWS[cap])
+            ]
+            if strict_caps_unmet:
+                rows_val = row.get("rows_processed")
+                rows_str = "NULL" if rows_val is None else str(int(rows_val))
+                caps_str = ", ".join(strict_caps_unmet)
+                warning = (
+                    f"stage succeeded but rows_processed={rows_str}; "
+                    f"strict-gate capability {caps_str} cannot be satisfied"
+                )
+                has_warnings = True
 
         stage_payload.append(
             BootstrapTimelineStageResponse(
@@ -751,6 +797,7 @@ def get_bootstrap_timeline(
                 processed_count=int(row.get("processed_count") or 0),
                 target_count=row.get("target_count"),
                 archives=archives_by_stage.get(stage_key, []),
+                warning=warning,
             )
         )
 
@@ -760,6 +807,7 @@ def get_bootstrap_timeline(
         triggered_at=run_row["triggered_at"],
         completed_at=run_row.get("completed_at"),
         cancel_requested_at=run_row.get("cancel_requested_at"),
+        has_warnings=has_warnings,
     )
 
     return BootstrapTimelineResponse(run=run_payload, stages=stage_payload)

@@ -239,6 +239,8 @@ def _patch_invokers_with_fakes(
     monkeypatch: pytest.MonkeyPatch,
     *,
     failing_jobs: set[str] | None = None,
+    phase_skip_jobs: set[str] | None = None,
+    rows_by_job: dict[str, int] | None = None,
 ) -> dict[str, list[str]]:
     """Replace every _INVOKERS entry the orchestrator might dispatch
     with a deterministic in-process fake. Returns a calls dict so
@@ -248,9 +250,25 @@ def _patch_invokers_with_fakes(
     orchestrator service itself does (mark stage running / success /
     error). This keeps the test runtime well under one second per
     case.
+
+    #1140 Task C — each fake also inserts a ``job_runs`` row with
+    ``row_count = rows_by_job.get(job_name, 1)`` so the orchestrator's
+    ``_resolve_stage_rows`` source-3 fallback resolves to a real
+    number. Without this every stage's ``rows_processed`` would be
+    NULL and the strict-gate caps (per-family ownership +
+    ``fundamentals_raw_seeded``) would block downstream consumers in
+    every existing test. Tests that want to simulate "ran but wrote
+    zero" pass ``rows_by_job={"some_job_name": 0}``.
     """
+    import psycopg as _psycopg
+
+    from app.config import settings as _app_settings
+    from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
+
     calls: dict[str, list[str]] = {"order": []}
     failing = failing_jobs or set()
+    phase_skipping = phase_skip_jobs or set()
+    rows = rows_by_job or {}
 
     def _make_fake(name: str) -> Callable[..., None]:
         # PR1b-2 (#1064) widened JobInvoker to ``(Mapping) -> None``;
@@ -261,6 +279,22 @@ def _patch_invokers_with_fakes(
             calls["order"].append(name)
             if name in failing:
                 raise RuntimeError(f"forced {name} failure")
+            if name in phase_skipping:
+                raise BootstrapPhaseSkipped(f"forced {name} phase skip")
+            # #1140 Task C — mirror _tracked_job's job_runs write so
+            # _resolve_stage_rows source 3 finds a real row_count for
+            # this stage. Capture started_at/finished_at as now() so
+            # the row's run_id falls inside the JobLock window.
+            row_count = rows.get(name, 1)
+            with _psycopg.connect(_app_settings.database_url) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count)
+                    VALUES (%s, now(), now(), 'success', %s)
+                    """,
+                    (name, row_count),
+                )
+                conn.commit()
 
         return _fake
 
@@ -576,25 +610,13 @@ def test_intentional_slow_connection_skip_cascade(
     `success` via legacy per-family caps. Walker S13 runs to success
     because legacy drain S15 provides `filing_events_seeded`.
     """
-    from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
-
     _reset_state(ebull_test_conn)
     _bind_settings_to_test_db(monkeypatch)
 
-    calls: dict[str, list[str]] = {"order": []}
-
-    def _make_fake(name: str) -> Callable[..., None]:
-        def _fake(_params: object = None) -> None:
-            calls["order"].append(name)
-            if name == "sec_bulk_download":
-                raise BootstrapPhaseSkipped("slow connection; fallback path")
-
-        return _fake
-
-    from app.jobs import runtime as runtime_module
-
-    fake_invokers = {spec.job_name: _make_fake(spec.job_name) for spec in get_bootstrap_stage_specs()}
-    monkeypatch.setattr(runtime_module, "_INVOKERS", fake_invokers)
+    calls = _patch_invokers_with_fakes(
+        monkeypatch,
+        phase_skip_jobs={"sec_bulk_download"},
+    )
 
     start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
     ebull_test_conn.commit()
@@ -808,3 +830,197 @@ def test_cascade_recompute_on_non_topological_pending_order(
     downstream_row = next(s for s in snap.stages if s.stage_key == "downstream")
     assert downstream_row.last_error is not None
     assert "cascaded skip" in downstream_row.last_error
+
+
+# ---------------------------------------------------------------------------
+# #1140 Task C — strict-gate row-count cap-eval widening
+# ---------------------------------------------------------------------------
+
+
+def test_strict_cap_blocks_consumer_on_zero_rows(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-provider strict cap with the provider succeeding at
+    rows_processed=0 transitions the consumer to ``blocked`` with a
+    structured "no surviving provider met rows floor" reason. Run
+    finalises ``partial_error``.
+
+    Exercises the real dispatcher end-to-end: the bulk
+    ``sec_companyfacts_ingest`` lands ``success`` with ``rows_processed=0``
+    (via the fake invoker's rows_by_job override); its sole cap
+    ``fundamentals_raw_seeded`` is strict-gated at min_rows=1; the
+    downstream ``fundamentals_sync`` blocks.
+    """
+    _reset_state(ebull_test_conn)
+    _bind_settings_to_test_db(monkeypatch)
+    _patch_invokers_with_fakes(
+        monkeypatch,
+        rows_by_job={"sec_companyfacts_ingest": 0},
+    )
+
+    start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
+    ebull_test_conn.commit()
+
+    run_bootstrap_orchestrator()
+
+    snap = read_latest_run_with_stages(ebull_test_conn)
+    assert snap is not None
+    statuses = {stage.stage_key: stage.status for stage in snap.stages}
+
+    assert statuses["sec_companyfacts_ingest"] == "success"
+    assert statuses["fundamentals_sync"] == "blocked"
+
+    fundamentals_row = next(s for s in snap.stages if s.stage_key == "fundamentals_sync")
+    assert fundamentals_row.last_error is not None
+    assert "fundamentals_raw_seeded" in fundamentals_row.last_error
+    assert "rows floor 1" in fundamentals_row.last_error
+    assert "rows_processed=0" in fundamentals_row.last_error
+
+    state = read_state(ebull_test_conn)
+    assert state.status == "partial_error"
+
+
+def test_strict_cap_satisfied_by_one_of_two_providers(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-family ownership cap with two providers (bulk + legacy):
+    one lands ``success`` with ``rows_processed=0`` (under floor), the
+    other lands ``success`` with ``rows_processed > 0``. The cap is
+    satisfied via the surviving provider so ``ownership_observations_backfill``
+    runs to success. Run finalises ``complete``.
+    """
+    _reset_state(ebull_test_conn)
+    _bind_settings_to_test_db(monkeypatch)
+    _patch_invokers_with_fakes(
+        monkeypatch,
+        # Bulk insider wash lands but writes 0 rows; legacy backfill
+        # writes rows. insider_inputs_seeded cap stays alive via legacy.
+        rows_by_job={"sec_insider_ingest_from_dataset": 0},
+    )
+
+    start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
+    ebull_test_conn.commit()
+
+    run_bootstrap_orchestrator()
+
+    snap = read_latest_run_with_stages(ebull_test_conn)
+    assert snap is not None
+    statuses = {stage.stage_key: stage.status for stage in snap.stages}
+
+    assert statuses["sec_insider_ingest_from_dataset"] == "success"
+    assert statuses["sec_insider_transactions_backfill"] == "success"
+    # All four per-family caps satisfied → backfill runs.
+    assert statuses["ownership_observations_backfill"] == "success"
+
+    state = read_state(ebull_test_conn)
+    assert state.status == "complete"
+
+
+def test_strict_cap_dead_on_zero_rows_classifies_error_not_skip() -> None:
+    """Unit test for the cap-eval helpers — confirms a strict cap
+    where the only provider is ``success`` with under-floor rows is
+    classified as error-dead (so consumer blocks), not skip-only-dead
+    (which would cascade-skip).
+    """
+    from app.services.bootstrap_orchestrator import (
+        _capability_is_dead,
+        _classify_dead_cap,
+    )
+
+    statuses = {"sec_companyfacts_ingest": "success"}
+    rows = {"sec_companyfacts_ingest": 0}
+    assert _capability_is_dead("fundamentals_raw_seeded", statuses, rows) is True
+    assert _classify_dead_cap("fundamentals_raw_seeded", statuses, rows) == "error"
+
+
+def test_non_strict_cap_unchanged_by_zero_rows() -> None:
+    """A cap NOT in ``_CAPABILITY_MIN_ROWS`` is satisfied by a
+    ``success`` provider regardless of ``rows_processed``. Legacy
+    Task A behaviour preserved — confirms the new strict-gate rule
+    doesn't widen to caps it shouldn't touch.
+
+    ``universe_seeded`` is not in the strict set; a ``universe_sync``
+    success with rows=0 still satisfies it.
+    """
+    from app.services.bootstrap_orchestrator import _satisfied_capabilities
+
+    caps = _satisfied_capabilities(
+        {"universe_sync": "success"},
+        {"universe_sync": 0},
+    )
+    assert "universe_seeded" in caps
+
+
+def test_strict_caps_have_at_least_one_provider() -> None:
+    """Every cap in ``_CAPABILITY_MIN_ROWS`` must have at least one
+    registered provider in ``_CAPABILITY_PROVIDERS``. Catches a stale
+    entry that names a removed cap before the dispatcher tries to
+    evaluate a never-satisfiable strict-gate requirement at runtime.
+    """
+    from app.services.bootstrap_orchestrator import _CAPABILITY_MIN_ROWS
+
+    missing = [c for c in _CAPABILITY_MIN_ROWS if not _CAPABILITY_PROVIDERS.get(c)]  # type: ignore[arg-type]
+    assert not missing, f"strict-gate caps with no provider: {missing}"
+
+
+def test_strict_cap_exclusion_neutral_provider_does_not_satisfy_or_kill() -> None:
+    """Codex pre-push round 2 BLOCKING regression — bulk insider
+    (excluded provider for ``form3_inputs_seeded``) is NEUTRAL for the
+    strict cap.
+
+    Scenarios:
+    1. Bulk insider success+rows=10, legacy form3 absent → cap dead
+       (no non-excluded provider met the floor). Classification is
+       "error" (the legacy provider hasn't been reached yet → fall
+       through to "error" default since no skipped provider exists).
+    2. Bulk insider success+rows=10, legacy form3 success+rows=5 →
+       cap alive (legacy meets floor).
+    3. Bulk insider success+rows=10, legacy form3 success+rows=0 →
+       cap dead, classified error (legacy under floor — that's the
+       responsible signal). Bulk's success+rows=10 is neutral, NOT
+       a satisfier, NOT a killer.
+    """
+    from app.services.bootstrap_orchestrator import (
+        _capability_is_dead,
+        _classify_dead_cap,
+        _satisfied_capabilities,
+    )
+
+    # Scenario 1: only bulk ran (legacy still pending unmodelled).
+    statuses_only_bulk = {"sec_insider_ingest_from_dataset": "success"}
+    rows_only_bulk = {"sec_insider_ingest_from_dataset": 10}
+    caps = _satisfied_capabilities(statuses_only_bulk, rows_only_bulk)
+    assert "form3_inputs_seeded" not in caps
+    # form3_inputs_seeded providers: bulk insider + legacy form3. Only
+    # bulk has reported — legacy is unknown (treated as no-info, not
+    # alive). With bulk neutral and no live legacy → cap dead.
+    assert _capability_is_dead("form3_inputs_seeded", statuses_only_bulk, rows_only_bulk) is True
+
+    # Scenario 2: bulk + legacy succeed with rows.
+    statuses_both = {
+        "sec_insider_ingest_from_dataset": "success",
+        "sec_form3_ingest": "success",
+    }
+    rows_both = {"sec_insider_ingest_from_dataset": 10, "sec_form3_ingest": 5}
+    caps = _satisfied_capabilities(statuses_both, rows_both)
+    assert "form3_inputs_seeded" in caps  # legacy carries it
+    assert _capability_is_dead("form3_inputs_seeded", statuses_both, rows_both) is False
+
+    # Scenario 3: bulk rows>0, legacy rows=0 → cap dead via legacy.
+    statuses_legacy_zero = {
+        "sec_insider_ingest_from_dataset": "success",
+        "sec_form3_ingest": "success",
+    }
+    rows_legacy_zero = {"sec_insider_ingest_from_dataset": 10, "sec_form3_ingest": 0}
+    caps = _satisfied_capabilities(statuses_legacy_zero, rows_legacy_zero)
+    assert "form3_inputs_seeded" not in caps
+    assert _capability_is_dead("form3_inputs_seeded", statuses_legacy_zero, rows_legacy_zero) is True
+    # Classification: bulk is excluded (skipped), legacy under floor → error.
+    assert _classify_dead_cap("form3_inputs_seeded", statuses_legacy_zero, rows_legacy_zero) == "error"
+
+    # Bonus: insider_inputs_seeded is NOT excluded for the bulk provider
+    # (the exclusion is form3-specific), so scenario-1 rows satisfy it.
+    caps = _satisfied_capabilities(statuses_only_bulk, rows_only_bulk)
+    assert "insider_inputs_seeded" in caps

@@ -11,6 +11,7 @@
  * page surfaces inline rather than escaping back to the table view.
  */
 
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -806,13 +807,22 @@ function DagRunSummary({ run }: { run: OrchestratorDagSyncRunResponse }) {
   );
 }
 
-function Cell({ label, value }: { label: string; value: string }) {
+function Cell({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | ReactNode;
+}) {
+  // `title` is set only when value is a plain string — ReactNode
+  // values (#1140 Task C run-warning chip) render their own tooltip.
+  const title = typeof value === "string" ? value : undefined;
   return (
     <div className="rounded border border-slate-200 bg-slate-50 p-2 text-sm dark:border-slate-800 dark:bg-slate-900/40">
       <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
         {label}
       </div>
-      <div className="mt-0.5 truncate text-slate-700 dark:text-slate-200" title={value}>
+      <div className="mt-0.5 truncate text-slate-700 dark:text-slate-200" title={title}>
         {value}
       </div>
     </div>
@@ -990,10 +1000,27 @@ function TimelineRunSummary({
 }: {
   run: NonNullable<BootstrapTimelineResponse["run"]>;
 }) {
+  // #1140 Task C — surface the run-level warning state when the run
+  // is `complete` AND at least one stage carries a warning. Red runs
+  // already shout; the amber dot is suppressed for them.
+  const showWarningDot = run.has_warnings && run.status === "complete";
+  const statusValue = showWarningDot ? (
+    <span className="inline-flex items-center gap-1">
+      <span>{run.status}</span>
+      <span
+        aria-label="Run completed with warnings"
+        title="One or more stages succeeded with rows_processed=0 — open Timeline tab for detail."
+        data-testid="run-warning-dot"
+        className="inline-block h-2 w-2 rounded-full bg-amber-500"
+      />
+    </span>
+  ) : (
+    run.status
+  );
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       <Cell label="Run id" value={`#${run.run_id}`} />
-      <Cell label="Status" value={run.status} />
+      <Cell label="Status" value={statusValue} />
       <Cell label="Triggered" value={formatDateTime(run.triggered_at)} />
       <Cell
         label="Completed"
@@ -1103,6 +1130,16 @@ function TimelineStageRow({
             >
               {stage.status}
             </span>
+            {stage.warning ? (
+              <span
+                className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800 dark:border-amber-400/30 dark:bg-amber-950/60 dark:text-amber-200"
+                title={stage.warning}
+                aria-label={`Warning: ${stage.warning}`}
+                data-testid="stage-warning-chip"
+              >
+                warning
+              </span>
+            ) : null}
             <span
               className="truncate font-medium text-slate-700 dark:text-slate-200"
               title={stage.display_name}
@@ -1113,6 +1150,14 @@ function TimelineStageRow({
           <div className="text-xs text-slate-500 dark:text-slate-400">
             {stage.job_name || stage.stage_key}
           </div>
+          {stage.warning ? (
+            <div
+              className="mt-1 truncate text-xs text-amber-700 dark:text-amber-300"
+              title={stage.warning}
+            >
+              {stage.warning}
+            </div>
+          ) : null}
           {stage.last_error ? (
             <div
               className="mt-1 truncate text-xs text-red-700 dark:text-red-300"

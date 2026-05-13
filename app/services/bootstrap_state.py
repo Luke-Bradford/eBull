@@ -716,10 +716,15 @@ def reset_failed_stages_for_retry(
             cursor = conn.execute(
                 """
                 UPDATE bootstrap_stages
-                   SET status       = 'pending',
-                       started_at   = NULL,
-                       completed_at = NULL,
-                       last_error   = NULL
+                   SET status         = 'pending',
+                       started_at     = NULL,
+                       completed_at   = NULL,
+                       last_error     = NULL,
+                       -- #1140 Task C: reset rows_processed alongside
+                       -- the rest of the stage row so the operator
+                       -- timeline / bootstrap_adapter aggregate don't
+                       -- show stale counts from the prior failed pass.
+                       rows_processed = NULL
                  WHERE bootstrap_run_id = %(run_id)s
                    AND lane             = %(lane)s
                    AND stage_order      >= %(min_order)s
