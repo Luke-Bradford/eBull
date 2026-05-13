@@ -105,7 +105,7 @@ These follow the same archetype: zero-arg body → calls `ingest_<thing>(conn, p
 | `sec_filing_documents_ingest` | SEC filing-documents manifest ingest | hourly :35 | `_bootstrap_complete` | `ingest_filing_documents(conn, provider)` | bounded 500/run |
 | `sec_8k_events_ingest` | SEC 8-K events ingest | hourly :20 | `_bootstrap_complete` | `ingest_8k_events(conn, provider)` | bounded 200/run |
 | `sec_form3_ingest` | SEC Form 3 ingest | daily 04:20 | `_bootstrap_complete` | `ingest_form_3_filings(conn, provider)` | bounded |
-| `sec_def14a_ingest` | SEC DEF 14A ingest | daily 04:35 | `_bootstrap_complete` | `ingest_def14a(conn, provider)` | bounded 100/run |
+| ~~`sec_def14a_ingest`~~ | ~~SEC DEF 14A ingest~~ | **on-demand** post-#1155 | — | `ingest_def14a(conn, provider)` | bounded 100/run; manifest worker + `def14a.py` (#1128) carry steady-state. Weekly `sec_def14a_bootstrap` safety-net + sweep-adapter `sec_def14a_sweep` kept. |
 
 **Proposed PR1 surface (per job):**
 - `instrument_id: int | None` (primary) — single-instrument targeting.
