@@ -650,22 +650,14 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
-    ScheduledJob(
-        name=JOB_SEC_8K_EVENTS_INGEST,
-        display_name="SEC 8-K events ingest",
-        source="sec_rate",
-        description=(
-            "Parse SEC 8-K filings into structured eight_k_filings + "
-            "eight_k_items + eight_k_exhibits (#450). Runs hourly; "
-            "8-K is the fastest filing flow (event within 4 business "
-            "days), so stale structured capture is low-value. Bounded "
-            "to 200 filings per run; idempotent on the filing UNIQUE "
-            "key."
-        ),
-        cadence=Cadence.hourly(minute=20),
-        catch_up_on_boot=False,
-        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
-    ),
+    # `sec_8k_events_ingest` retired from SCHEDULED_JOBS post-#1155:
+    # Layer 1/2/3 + sec_manifest_worker + manifest_parsers/eight_k.py
+    # (#1126) carry every 8-K write to eight_k_filings / eight_k_items
+    # / eight_k_exhibits. Function body + _INVOKERS entry preserved —
+    # bootstrap stage 20 dispatches this job_name via _INVOKERS, plus
+    # sweep-adapter sec_8k_sweep + Admin "Run now" remain operator-
+    # callable. Note: dividend_events extraction is still owned by
+    # sec_dividend_calendar_ingest (parser-gap tracked in #1158).
     ScheduledJob(
         name=JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
         display_name="SEC business-summary bootstrap drain",
