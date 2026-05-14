@@ -701,26 +701,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
-    ScheduledJob(
-        name=JOB_SEC_FORM3_INGEST,
-        display_name="SEC Form 3 ingest",
-        source="sec_rate",
-        description=(
-            "Parse SEC Form 3 filings into ``insider_initial_holdings`` "
-            "(#768). Form 3 is the per-officer initial-snapshot filing "
-            "(once per appointment); volume per issuer is bounded "
-            "(~5-30 lifetime) and the data isn't time-sensitive once "
-            "captured, so a daily cadence is plenty. Idempotent via "
-            "the (accession, row_num) UNIQUE key on the holdings table; "
-            "parser-version-bump triggers re-parse via the candidate "
-            "selector. Fills the ownership-card gap where insiders who "
-            "held a Form 3 grant but never traded after appointment "
-            "were invisible to the per-filer ring."
-        ),
-        cadence=Cadence.daily(hour=4, minute=20),
-        catch_up_on_boot=False,
-        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
-    ),
+    # `sec_form3_ingest` retired from SCHEDULED_JOBS post-#1155:
+    # Layer 1/2/3 + sec_manifest_worker + manifest_parsers/insider_345.py
+    # (#1130) carry every Form 3 write to insider_initial_holdings.
+    # Function body + _INVOKERS entry preserved — bootstrap stage 19
+    # (sec_form3_ingest) dispatches via _INVOKERS[job_name], plus
+    # sweep-adapter sec_form3_sweep + Admin "Run now" remain
+    # operator-callable.
     # `sec_def14a_ingest` retired from SCHEDULED_JOBS post-#1155:
     # Layer 1/2/3 discovery + `sec_manifest_worker` + `manifest_parsers/
     # def14a.py` (#1128) carry every DEF 14A write to
