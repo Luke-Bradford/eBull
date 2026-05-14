@@ -6,7 +6,7 @@
 
 **Maintenance.** When a new endpoint is added, add a row and link the wiring layers to file:line. When a layer is wired or unwired, update the row and update [[us-source-coverage]] in memory.
 
-Last audit pass: 2026-05-13 (post #1152 / #1154 / 10-K manifest adapter shipped).
+Last audit pass: 2026-05-14 (post #1168 / sec_10q synth no-op parser shipped — closes G4).
 
 ---
 
@@ -43,7 +43,7 @@ Definition: `app/services/sec_manifest.py:106-121` + CHECK constraint `sql/118:3
 | `sec_13f_hr` | Stage 10 bulk + Stage 21 recent-sweep | manifest worker (post-#1155 — `JOB_SEC_13F_QUARTERLY_SWEEP` moved to on-demand; bootstrap stage 21 still dispatches it via `_INVOKERS` with `min_period_of_report` from `MANUAL_TRIGGER_JOB_METADATA`) | 120d | both | `sec_rate` | ✅ `sec_13f_hr.py` (#1133) | **WIRED**, PRN drop + 2023-01-03 VALUE cutover applied parser-side |
 | `sec_n_port` | Stage 12 bulk + Stage 22 legacy ingest | manifest worker (post-#1155 — `JOB_SEC_N_PORT_INGEST` moved to on-demand; bootstrap stage 22 still dispatches via `_INVOKERS`) | 90d | both | `sec_rate` | ✅ `sec_n_port.py` (#1133) | **WIRED** |
 | `sec_10k` | Stage 17 `sec_business_summary_bootstrap` | manifest worker (post-#1155 retirement of legacy `sec_business_summary_ingest` cron) + weekly `sec_business_summary_bootstrap` safety net | 120d | both | `sec_rate` | ✅ `sec_10k.py` (#1152, 2026-05-13) | **WIRED** — Option C `(filed_at, source_accession)` gate applied (sql/148). Legacy daily 03:15 cron retired in the first #1155 cron-retirement sweep — manifest path is sole steady-state writer. |
-| `sec_10q` | — | — | 60d | manifest only | — | ❌ blocked on **#414** | **GAP** — 10-Q parser owned by fundamentals ingest redesign (#414); manifest rows drain to "no parser" |
+| `sec_10q` | — | manifest worker (synth no-op per #1168) | 60d | both | `sec_rate` (unused by parser) | ✅ `sec_10q.py` (#1168) | **WIRED** — synth no-op (sec-edgar §11.5.1). Financial data lands via Companyfacts XBRL; narrative HTML has no v1 consumer. Parser body is `return ParseOutcome(status='parsed', parser_version='10q-noop-v1')`. Closes G4. |
 | `sec_n_csr` | — | — | 200d | manifest only | — | ❌ pending re-spike **#918 REOPENED 2026-05-13** | **GAP** — original close cited only EdgarTools surface; operator wants sample-driven evidence on raw payloads + HTML SoI layout + commercial-use survey before "infeasible". Tech-debt #1153 on hold. |
 | `sec_xbrl_facts` | Stage 9 `sec_companyfacts_ingest` (bulk-zip) + Stage 24 `fundamentals_sync` | `JOB_FUNDAMENTALS_SYNC` cron (`scheduler.py:562`) | 120d | manifest only (rows discovered but parser is bulk-path, not manifest dispatch) | `sec_rate` | ❌ by design — Company Facts API bulk path | **WIRED**, not a parser gap. Manifest rows may accumulate without drain; tracked tech-debt: either remove from enum or register synth no-op parser. |
 | `finra_short_interest` | — | — | 20d | manifest only | — (FINRA host has no pool) | ❌ pending **#915** (bimonthly) + **#916** (RegSHO daily) | **GAP** — parent #845 closed but PR1/PR2 split open. ManifestSource enum entry has no fetcher anywhere. |
@@ -168,7 +168,7 @@ These endpoints don't have a `ManifestSource` because they're not per-filing dis
 | G1 | Layer 1 Atom fast-lane unwired | OPEN | **#867 REOPENED 2026-05-13** | Wire under #1155 |
 | G2 | Layer 2 daily-index reconcile unwired | OPEN | **#868 REOPENED 2026-05-13** | Wire under #1155 |
 | G3 | Layer 3 per-CIK poll unwired | OPEN | **#870 REOPENED 2026-05-13** | Wire under #1155 |
-| G4 | `sec_10q` parser | BLOCKED | **#414** | Owned by fundamentals ingest redesign |
+| G4 | `sec_10q` parser | ✅ CLOSED 2026-05-14 | **#1168** | Synth no-op parser registered (sec-edgar §11.5.1). Owner-attribution to #414 was stale; #414 is the fundamentals_sync redesign, not a 10-Q parser ticket. |
 | G5 | `sec_n_csr` parser feasibility | PENDING SPIKE | **#918 REOPENED 2026-05-13** | Sample-driven spike pending |
 | G6 | `finra_short_interest` ingest | OPEN | **#915 + #916** | Bimonthly + RegSHO daily; parent #845 closed |
 | G7 | `sec_xbrl_facts` ManifestSource has no parser | BY DESIGN | — | Company Facts API bulk path; tech-debt: either remove from enum or register synth no-op parser |

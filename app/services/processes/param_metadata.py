@@ -256,7 +256,7 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
             help_text=(
                 "Universe-wide rebuild for one source "
                 "(sec_form4 / sec_13d / etc). Most expensive option. "
-                "Note: sec_xbrl_facts / sec_n_csr / sec_10q / "
+                "Note: sec_xbrl_facts / sec_n_csr / "
                 "finra_short_interest may resolve to zero triples if "
                 "data_freshness_index has no rows for that source, OR "
                 "reset triples that the manifest worker then "

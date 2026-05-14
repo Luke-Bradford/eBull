@@ -634,15 +634,40 @@ Adopted in #1152 (`instrument_business_summary` + `filed_at` column added by sql
 
 ### 11.5 Stranded ManifestSource entries
 
-`ManifestSource` enum (sql/118 CHECK + `app/services/sec_manifest.py:106`) lists 14 values. Three carry no manifest parser by design:
+`ManifestSource` enum (sql/118 CHECK + `app/services/sec_manifest.py:106`) lists 14 values. Two carry no manifest parser by design:
 
 | Source | Why no parser |
 |---|---|
-| `sec_xbrl_facts` | XBRL Company Facts ingested via bulk Company Facts API path, NOT per-filing manifest dispatch. |
-| `sec_n_csr` | EdgarTools `FundShareholderReport` exposes only OEF iXBRL fund-level facts (NAV / expense ratio / top-holdings %); per-issuer Schedule of Investments lives in free-form HTML/PDF, not XBRL. CUSIP-resolved per-issuer holdings unextractable. Resolved as "not technically feasible as scoped" — see #918 closing comment. Discovery may still write manifest rows that never drain. Tech-debt eligible: either remove from `ManifestSource` Literal + `_FORM_TO_SOURCE` map, OR register a synth "no-op tombstone" parser. |
-| `sec_10q` | Blocked on #414 — the fundamentals ingest redesign owns the 10-Q parser. |
+| `sec_xbrl_facts` | XBRL Company Facts ingested via bulk Company Facts API path, NOT per-filing manifest dispatch. Eligible to adopt the §11.5.1 synth no-op shape so manifest rows drain. |
+| `sec_n_csr` | EdgarTools `FundShareholderReport` exposes only OEF iXBRL fund-level facts (NAV / expense ratio / top-holdings %); per-issuer Schedule of Investments lives in free-form HTML/PDF, not XBRL. **#918 REOPENED 2026-05-13 pending sample-driven re-spike** (acceptance criteria in the reopen comment) — original close cited only the EdgarTools surface, operator wants raw N-CSR payload survey + commercial-use vendor check before "infeasible" is final. Discovery may still write manifest rows that never drain in the interim. If the spike returns INFEASIBLE: adopt the §11.5.1 synth no-op shape so manifest rows drain; if FEASIBLE: register a real parser and remove this row. Tech-debt #1153 on hold pending the spike. |
 
 `finra_short_interest` is not stranded — split tickets #915 (bimonthly) + #916 (RegSHO daily) are open. Parent #845 closed.
+
+### 11.5.1 Synth no-op parser pattern (`sec_10q` exemplar)
+
+`sec_10q` was historically listed in §11.5 as "blocked on #414". Audit (2026-05-14, #1168) found #414's actual scope is the `fundamentals_sync` cron redesign — not a 10-Q manifest parser. The 10-Q's financial data already lands via Companyfacts XBRL; its narrative HTML has no operator-visible consumer in v1. The right fix was a synth no-op parser, not a fetcher.
+
+`app/services/manifest_parsers/sec_10q.py` (PR for #1168) is the canonical reference. Shape:
+
+- `requires_raw_payload=False` (no payload).
+- Parser body returns `ParseOutcome(status='parsed', parser_version='<source>-noop-v1')` without DB writes, fetches, or typed-table touches.
+- Durability test (`tests/test_manifest_parser_sec_10q.py::test_parser_does_not_touch_db_or_fetch`) asserts via sentinel connection + monkeypatched `store_raw` (both service-layer + module-local paths) + monkeypatched `fetch_document_text` that the parser stays a no-op. A future regression into a fetcher fails the test loudly.
+- `register_parser('<source>', _parse_<source>, requires_raw_payload=False)` in the source's `register()` callable.
+
+**When to use this pattern:**
+
+- A source's SQL coverage is complete via another path (e.g. Companyfacts XBRL).
+- The narrative payload has no operator-visible consumer in v1.
+- The manifest discovery row alone is sufficient audit.
+
+**When NOT to use this pattern:**
+
+- A typed-table consumer exists or is in scope (the parser must extract; see §11.1 for the full contract).
+- The narrative payload is the only source for an operator-visible figure (the parser must fetch + parse + write).
+
+If a future MD&A / risk-factor consumer for 10-Q materialises, that PR replaces the synth no-op with a full parser, adds the `fetch_document_text` allow-list entry + SQL normalisation path in lockstep per "Every structured field lands in SQL" (prevention-log #448).
+
+Eligible adoptions for the same shape: `sec_xbrl_facts` (companyfacts API is the per-period writer; manifest rows can drain via synth no-op); `sec_n_csr` if the #918 spike returns INFEASIBLE.
 
 ### 11.6 Discovery layer wiring (Layer 1 / 2 / 3) — audit 2026-05-13
 
