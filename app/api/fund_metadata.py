@@ -27,11 +27,15 @@ import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.api.auth import require_session_or_service_token
+from app.api.auth import require_service_token, require_session_or_service_token
 from app.db import get_conn
 
 logger = logging.getLogger(__name__)
 
+# Read endpoints (per-instrument) accept either session or service-token —
+# they're useful in the operator UI. The /coverage/fund-metadata audit
+# endpoint is service-token-only (spec §11.1) so the route declares a
+# stricter dependency individually.
 router = APIRouter(
     tags=["fund-metadata"],
     dependencies=[Depends(require_session_or_service_token)],
@@ -137,7 +141,9 @@ def get_fund_metadata(
     if row is None:
         raise HTTPException(status_code=404, detail=f"No fund metadata for symbol: {symbol}")
 
-    return FundMetadataResponse(instrument_id=instrument_id, symbol=symbol, **row)
+    # `SELECT *` already returns `instrument_id`; FundMetadataResponse requires
+    # `symbol` too. Build the response from the row dict + augment with `symbol`.
+    return FundMetadataResponse(symbol=symbol, **row)
 
 
 @router.get(
@@ -190,7 +196,11 @@ def get_fund_metadata_history(
     return [FundMetadataObservation(**r) for r in rows]
 
 
-@router.get("/coverage/fund-metadata", response_model=FundMetadataCoverageResponse)
+@router.get(
+    "/coverage/fund-metadata",
+    response_model=FundMetadataCoverageResponse,
+    dependencies=[Depends(require_service_token)],
+)
 def get_fund_metadata_coverage(
     conn: psycopg.Connection[Any] = Depends(get_conn),
 ) -> FundMetadataCoverageResponse:

@@ -142,16 +142,43 @@ CREATE TABLE IF NOT EXISTS fund_metadata_observations_default
 -- (known_to IS NOT NULL) are exempt so a parser-version rewash can
 -- supersede the prior row without violating uniqueness.
 --
--- Idempotency: use the pg_index introspection pattern (data-engineer
--- §0 step 4) — name-only IF NOT EXISTS fails to detect a partial-apply
--- where the index exists but has the wrong column set or predicate.
+-- Idempotency: use ``pg_index`` introspection (data-engineer §0 step 4)
+-- — name-only IF NOT EXISTS misses a partial-apply where the index
+-- exists but has the wrong column set or predicate. We assert:
+--   - ``indisunique = TRUE``
+--   - ``indkey`` matches the three expected attnums in order
+--   - ``indpred`` is non-null (a partial index with the WHERE clause)
+-- If any check fails we DROP + recreate so the schema converges to the
+-- intended shape.
 DO $$
+DECLARE
+    expected_attnums INT[];
+    actual_attnums   INT2VECTOR;
+    is_unique        BOOLEAN;
+    has_predicate    BOOLEAN;
+    idx_oid          OID;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'public'
-          AND indexname = 'uq_fund_metadata_observations_current'
-    ) THEN
+    SELECT array_agg(a.attnum ORDER BY ord)
+      INTO expected_attnums
+      FROM unnest(ARRAY['instrument_id', 'source_accession', 'period_end']) WITH ORDINALITY t(name, ord)
+      JOIN pg_attribute a
+        ON a.attrelid = 'fund_metadata_observations'::regclass
+       AND a.attname = t.name;
+
+    SELECT i.indexrelid, i.indisunique, i.indkey, i.indpred IS NOT NULL
+      INTO idx_oid, is_unique, actual_attnums, has_predicate
+      FROM pg_index i
+      JOIN pg_class c ON c.oid = i.indexrelid
+      WHERE c.relname = 'uq_fund_metadata_observations_current';
+
+    IF idx_oid IS NULL THEN
+        CREATE UNIQUE INDEX uq_fund_metadata_observations_current
+            ON fund_metadata_observations (instrument_id, source_accession, period_end)
+            WHERE known_to IS NULL;
+    ELSIF NOT is_unique
+       OR actual_attnums::INT[] IS DISTINCT FROM expected_attnums
+       OR NOT has_predicate THEN
+        DROP INDEX uq_fund_metadata_observations_current;
         CREATE UNIQUE INDEX uq_fund_metadata_observations_current
             ON fund_metadata_observations (instrument_id, source_accession, period_end)
             WHERE known_to IS NULL;

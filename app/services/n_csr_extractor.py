@@ -326,48 +326,69 @@ def _context_entity_cik(ctx_el: ET._Element) -> str | None:
 def _route_tier2(
     facts: FundMetadataFacts,
     concept_local: str,
-    axis_local: str | None,
-    member_local: str | None,
+    dims: dict[str, str],
     value: str | None,
     period: dict[str, str],
 ) -> bool:
-    """Return True iff the (concept, axis, member) tuple was bucketed into a Tier 2 column."""
+    """Return True iff the fact was bucketed into a Tier 2 column.
+
+    Routing inspects the FULL dimension map (Codex pre-push BLOCKING-2):
+    a context can carry BOTH ``srt:RangeAxis`` (period) AND
+    ``oef:BroadBasedIndexAxis`` (benchmark) — choosing only the first
+    non-Class axis would lose period information or misroute the
+    benchmark. We look up each relevant axis by local name in ``dims``.
+    """
     decimal_value = _to_decimal(value)
     if decimal_value is None:
         return False
 
+    # Build local-name → member map for axis lookup (ignore ClassAxis which is
+    # handled by the upstream class-bucketing step).
+    local_axes: dict[str, str] = {}
+    for axis_qname, member_qname in dims.items():
+        local = _axis_localname(axis_qname)
+        if local and local != "ClassAxis":
+            local_axes[local] = member_qname
+
     if concept_local == "AvgAnnlRtrPct":
-        if axis_local in {"BroadBasedIndexAxis", "AdditionalIndexAxis"}:
-            bucket = "broad_based" if axis_local == "BroadBasedIndexAxis" else "additional"
-            label = member_local or "unknown"
-            facts.benchmark_returns_pct.setdefault(bucket, {})[label] = decimal_value
-            return True
-        # No axis or non-benchmark axis → return period via period_member if recognised.
-        if member_local and member_local in _PERIOD_MEMBER_ALLOWLIST:
-            facts.returns_pct[_PERIOD_MEMBER_ALLOWLIST[member_local]] = decimal_value
-            return True
+        # Benchmark route: AdditionalIndexAxis or BroadBasedIndexAxis present.
+        for bench_axis, bucket in (("BroadBasedIndexAxis", "broad_based"), ("AdditionalIndexAxis", "additional")):
+            if bench_axis in local_axes:
+                label = _member_localname(local_axes[bench_axis]) or "unknown"
+                facts.benchmark_returns_pct.setdefault(bucket, {})[label] = decimal_value
+                return True
+        # Period-only route: RangeAxis member ∈ allowlist.
+        if "RangeAxis" in local_axes:
+            member = _member_localname(local_axes["RangeAxis"])
+            if member and member in _PERIOD_MEMBER_ALLOWLIST:
+                facts.returns_pct[_PERIOD_MEMBER_ALLOWLIST[member]] = decimal_value
+                return True
         return False
 
     # Both PctOfNav (Vanguard / Fidelity style) and PctOfTotalInv (iShares
-    # style) route to the same allocation columns — they are different
-    # denominators (NAV vs total invested capital) but per spec §5 we treat
-    # them as the same operator-visible signal. Tracking which denominator
-    # was used is preserved via the parser_version (future-iteration: split
-    # into separate columns if the distinction becomes operator-relevant).
-    if concept_local in {"PctOfNav", "PctOfTotalInv"} and axis_local:
-        if axis_local == "IndustrySectorAxis":
-            facts.sector_allocation[member_local or "unknown"] = decimal_value
-            return True
-        if axis_local == "GeographicRegionAxis":
-            facts.region_allocation[member_local or "unknown"] = decimal_value
-            return True
-        if axis_local == "CreditQualityAxis":
-            facts.credit_quality_allocation[member_local or "unknown"] = decimal_value
-            return True
+    # style) route to the same allocation columns — different denominators
+    # (NAV vs total invested capital) but per spec §5 treated as the same
+    # operator-visible signal.
+    if concept_local in {"PctOfNav", "PctOfTotalInv"}:
+        for axis_local, target_attr in (
+            ("IndustrySectorAxis", "sector_allocation"),
+            ("GeographicRegionAxis", "region_allocation"),
+            ("CreditQualityAxis", "credit_quality_allocation"),
+        ):
+            if axis_local in local_axes:
+                label = _member_localname(local_axes[axis_local]) or "unknown"
+                getattr(facts, target_attr)[label] = decimal_value
+                return True
 
     if concept_local == "AccmVal":
         instant = period.get("instant") or period.get("endDate")
         if instant:
+            # Member from any benchmark axis if present; falls back to None.
+            member_local = None
+            for axis_qname, member_qname in dims.items():
+                if _axis_localname(axis_qname) in {"AdditionalIndexAxis", "BroadBasedIndexAxis"}:
+                    member_local = _member_localname(member_qname)
+                    break
             facts.growth_curve.append(
                 {
                     "period_end": instant,
@@ -524,8 +545,14 @@ def extract_fund_metadata_facts(ixbrl_xml: bytes) -> list[FundMetadataFacts]:
         # First-write-wins; consistent series_id per class_id assumed by spec §8 step 5.
         class_to_series.setdefault(class_id, series_id)
 
-    # 3. Collect all facts grouped by class_id (or filing-level if no ClassAxis).
+    # 3. Collect facts into three buckets based on context dimensions
+    # (Codex pre-push BLOCKING-1 fix — prevents multi-series bleed):
+    #   - filing_level_facts: NO segment dimensions at all.
+    #   - series_facts[series_id]: SeriesAxis present, NO ClassAxis.
+    #     Applied to every class belonging to that series.
+    #   - class_facts[class_id]: ClassAxis present. Applied only to that class.
     filing_level_facts: list[dict[str, Any]] = []
+    series_facts: dict[str, list[dict[str, Any]]] = {}
     class_facts: dict[str, list[dict[str, Any]]] = {cid: [] for cid in class_to_series}
 
     for el in doc.iter():
@@ -544,29 +571,22 @@ def extract_fund_metadata_facts(ixbrl_xml: bytes) -> list[FundMetadataFacts]:
         if ctx is None:
             continue
 
-        # Identify the class context-tag (if any).
         dims = ctx["dims"]
-        class_member = None
-        axis_qname_active: str | None = None
-        member_qname_active: str | None = None
+        class_member: str | None = None
+        series_member: str | None = None
         for axis_qname, member_qname in dims.items():
             axis_local = _axis_localname(axis_qname)
             if axis_local == "ClassAxis":
                 class_member = member_qname
-            else:
-                # Track the first non-Class axis for Tier 2 routing decision.
-                if axis_qname_active is None:
-                    axis_qname_active = axis_qname
-                    member_qname_active = member_qname
+            elif axis_local == "SeriesAxis":
+                series_member = member_qname
 
         record = {
             "concept_qname": f"{qname.namespace}:{qname.localname}",
             "concept_local": qname.localname,
             "value": el.text,
             "context_ref": cref,
-            "axis_qname": axis_qname_active,
-            "axis_local": _axis_localname(axis_qname_active),
-            "member_local": _member_localname(member_qname_active),
+            "dims": dims,
             "period": ctx["period"],
         }
 
@@ -574,38 +594,59 @@ def extract_fund_metadata_facts(ixbrl_xml: bytes) -> list[FundMetadataFacts]:
             m = _CLASS_ID_PATTERN.search(class_member)
             if m and m.group(0) in class_facts:
                 class_facts[m.group(0)].append(record)
+            # else: classId not in our enumerated set — drop.
+        elif series_member:
+            sm = _SERIES_ID_PATTERN.search(series_member)
+            if sm:
+                series_facts.setdefault(sm.group(0), []).append(record)
         else:
+            # No class, no series → truly filing-level.
             filing_level_facts.append(record)
 
-    # 4. Build per-class FundMetadataFacts.
+    # 4. Build per-class FundMetadataFacts. Series-level facts are applied
+    # ONLY to classes whose series_id matches the fact's series_id.
     out: list[FundMetadataFacts] = []
     for class_id, series_id in sorted(class_to_series.items()):
         facts = FundMetadataFacts(class_id=class_id, trust_cik=trust_cik_resolved, series_id=series_id)
 
-        # Apply filing-level facts (DocumentType, AmendmentFlag, EntityRegistrantName,
-        # EntityInvCompanyType, DocumentPeriodEndDate, EntityCentralIndexKey, etc.).
+        # 4a. Filing-level facts (DocumentType, AmendmentFlag, EntityRegistrantName,
+        # EntityInvCompanyType, DocumentPeriodEndDate, etc.) apply to every class.
         for r in filing_level_facts:
             if r["concept_local"] in _BOILERPLATE_BLOCKLIST:
                 continue
-            if not _apply_tier1(facts, r["concept_local"], r["value"]):
-                # Filing-level dimensional fact (rare). Route to raw_facts.
-                if r["concept_local"] not in _BOILERPLATE_BLOCKLIST:
-                    _route_tier3(
-                        facts, r["concept_qname"], r["concept_local"], r["axis_qname"], r["member_local"], r["value"]
-                    )
+            if _apply_tier1(facts, r["concept_local"], r["value"]):
+                continue
+            # Route any non-Tier-1 filing-level dimensional fact to raw_facts.
+            _route_tier3(facts, r["concept_qname"], r["concept_local"], None, None, r["value"])
 
-        # Apply per-class facts.
+        # 4b. Series-level facts apply only when this class belongs to the series.
+        if series_id and series_id in series_facts:
+            for r in series_facts[series_id]:
+                if r["concept_local"] in _BOILERPLATE_BLOCKLIST:
+                    continue
+                # Tier 1 single-value series fact.
+                if _apply_tier1(facts, r["concept_local"], r["value"]):
+                    continue
+                # Tier 2 dimensional (e.g. PctOfNav × IndustrySectorAxis).
+                if _route_tier2(facts, r["concept_local"], r["dims"], r["value"], r["period"]):
+                    continue
+                # Tier 3 fallback.
+                _route_tier3(facts, r["concept_qname"], r["concept_local"], None, None, r["value"])
+
+        # 4c. Class-level facts.
         for r in class_facts[class_id]:
             if r["concept_local"] in _BOILERPLATE_BLOCKLIST:
                 continue
-            # Tier 1: single-value class fact (no non-Class axis).
-            if r["axis_local"] is None and _apply_tier1(facts, r["concept_local"], r["value"]):
+            # Tier 1 single-value (no non-Class axis).
+            non_class_axes = {_axis_localname(a) for a in r["dims"] if _axis_localname(a) != "ClassAxis"}
+            non_class_axes.discard(None)
+            if not non_class_axes and _apply_tier1(facts, r["concept_local"], r["value"]):
                 continue
-            # Tier 2: dimensional class fact.
-            if _route_tier2(facts, r["concept_local"], r["axis_local"], r["member_local"], r["value"], r["period"]):
+            # Tier 2 dimensional class fact (uses full dims).
+            if _route_tier2(facts, r["concept_local"], r["dims"], r["value"], r["period"]):
                 continue
             # Tier 3 fallback.
-            _route_tier3(facts, r["concept_qname"], r["concept_local"], r["axis_qname"], r["member_local"], r["value"])
+            _route_tier3(facts, r["concept_qname"], r["concept_local"], None, None, r["value"])
 
         out.append(facts)
 

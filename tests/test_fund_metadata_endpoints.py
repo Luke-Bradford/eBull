@@ -62,17 +62,19 @@ def client(
     Override the ``require_session_or_service_token`` dependency so endpoint
     tests don't need full operator auth setup.
     """
-    from app.api.auth import require_session_or_service_token
+    from app.api.auth import require_service_token, require_session_or_service_token
 
     def _bypass_auth() -> None:
         return None
 
     app.dependency_overrides[require_session_or_service_token] = _bypass_auth
+    app.dependency_overrides[require_service_token] = _bypass_auth
     try:
         with TestClient(app) as c:
             yield c
     finally:
         app.dependency_overrides.pop(require_session_or_service_token, None)
+        app.dependency_overrides.pop(require_service_token, None)
 
 
 def test_get_fund_metadata_404_unknown_symbol(client: TestClient) -> None:

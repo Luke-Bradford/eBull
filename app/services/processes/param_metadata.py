@@ -260,11 +260,12 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
                 "resolve to zero triples if data_freshness_index has "
                 "no rows for that source, OR reset triples that the "
                 "manifest worker then debug-skips (no parser "
-                "registered yet). sec_n_csr has a synth no-op parser "
-                "registered (#918 verdict, 2026-05-14) — manifest "
-                "rows drain to `parsed` without DB or fetch work. "
-                "Operator-visible outcome is scope_triples=N + "
-                "discovery_new=0 in the job log."
+                "registered yet). sec_n_csr now has a real fund-"
+                "metadata parser (#1171, 2026-05-15) — manifest rows "
+                "drain to `parsed` after writing per-class observations "
+                "to `fund_metadata_observations`. Operator-visible "
+                "outcome is scope_triples=N + discovery_new=0 in the "
+                "job log."
             ),
             field_type="enum",
             enum_values=(
