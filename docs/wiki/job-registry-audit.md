@@ -104,7 +104,7 @@ These follow the same archetype: zero-arg body → calls `ingest_<thing>(conn, p
 | ~~`sec_insider_transactions_ingest`~~ | ~~SEC Form 4 ingest~~ | **on-demand** post-#1155 | — | `ingest_insider_transactions(conn, provider)` | bounded 500/run; manifest worker + `insider_345.py` (#1130) carry steady-state. Round-robin `sec_insider_transactions_backfill` kept for deep-tail drain. |
 | `sec_filing_documents_ingest` | SEC filing-documents manifest ingest | hourly :35 | `_bootstrap_complete` | `ingest_filing_documents(conn, provider)` | bounded 500/run |
 | `sec_8k_events_ingest` | SEC 8-K events ingest | hourly :20 | `_bootstrap_complete` | `ingest_8k_events(conn, provider)` | bounded 200/run |
-| `sec_form3_ingest` | SEC Form 3 ingest | daily 04:20 | `_bootstrap_complete` | `ingest_form_3_filings(conn, provider)` | bounded |
+| ~~`sec_form3_ingest`~~ | ~~SEC Form 3 ingest~~ | **on-demand** post-#1155 | — | `ingest_form_3_filings(conn, provider)` | bounded; manifest worker + `insider_345.py` (#1130) carry steady-state. Bootstrap stage 19 + sweep-adapter `sec_form3_sweep` + Admin Run-now kept. |
 | ~~`sec_def14a_ingest`~~ | ~~SEC DEF 14A ingest~~ | **on-demand** post-#1155 | — | `ingest_def14a(conn, provider)` | bounded 100/run; manifest worker + `def14a.py` (#1128) carry steady-state. Weekly `sec_def14a_bootstrap` safety-net + sweep-adapter `sec_def14a_sweep` kept. |
 
 **Proposed PR1 surface (per job):**
