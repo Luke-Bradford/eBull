@@ -76,8 +76,13 @@ from app.services.manifest_parsers._classify import (
     format_upsert_error,
     is_transient_upsert_error,
 )
+from app.services.manifest_parsers._siblings import (
+    CIK_MISSING_SENTINEL as _CIK_MISSING_SENTINEL,
+)
+from app.services.manifest_parsers._siblings import (
+    resolve_siblings as _resolve_siblings,
+)
 from app.services.raw_filings import store_raw
-from app.services.sec_identity import siblings_for_issuer_cik
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +98,6 @@ _PARSER_VERSION_10K = "10k-v1"
 # ``_backoff_for(0)`` value — see eight_k.py for the rationale
 # (importing the private worker symbol couples to internal layout).
 _FAILED_RETRY_DELAY = timedelta(hours=1)
-
-# Sentinel matches def14a / insider_345 pattern: when CIK is missing
-# from the manifest row we still want to write the canonical sibling
-# rather than drop the row entirely.
-_CIK_MISSING_SENTINEL = "__missing__"
 
 
 def _failed_outcome(error: str, raw_status: Any = None) -> Any:
@@ -115,31 +115,6 @@ def _failed_outcome(error: str, raw_status: Any = None) -> Any:
         error=error,
         next_retry_at=datetime.now(tz=UTC) + _FAILED_RETRY_DELAY,
     )
-
-
-def _resolve_siblings(
-    conn: psycopg.Connection[Any],
-    *,
-    instrument_id: int,
-    issuer_cik: str,
-) -> list[int]:
-    """Resolve share-class siblings for fan-out.
-
-    Always includes ``instrument_id`` in the returned set (Codex
-    checkpoint 2 HIGH): if ``siblings_for_issuer_cik`` returns a non-
-    empty but incomplete set because the canonical sibling's
-    ``external_identifiers`` row is missing or stale, dropping it from
-    fan-out leaves the operator-visible page empty for the canonical
-    listing. Failing closed by union-ing the manifest's
-    ``instrument_id`` in keeps the canonical sibling's write safe even
-    on a data-quality gap elsewhere.
-
-    Sentinel branch returns just the canonical sibling because we
-    have no CIK to query siblings against."""
-    if issuer_cik == _CIK_MISSING_SENTINEL:
-        return [instrument_id]
-    siblings = siblings_for_issuer_cik(conn, issuer_cik)
-    return sorted(set(siblings) | {instrument_id})
 
 
 def _fetch_html(

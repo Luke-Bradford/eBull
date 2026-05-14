@@ -34,6 +34,15 @@ import psycopg
 logger = logging.getLogger(__name__)
 
 
+# Bump when the regex/extraction logic tightens. Consumed by the
+# 8-K manifest adapter (`app/services/manifest_parsers/eight_k.py`)
+# to compose the manifest-row `parser_version` string. Bumping
+# changes the composite version on every 8-K manifest row, so an
+# operator-triggered `POST /jobs/sec_rebuild/run {"source": "sec_8k"}`
+# re-pends every 8-K accession through the new dividend regex.
+_PARSER_VERSION_DIVIDEND = 1
+
+
 class _DocFetcher(Protocol):
     """Minimal subset of ``SecFilingsProvider`` the ingester needs.
 

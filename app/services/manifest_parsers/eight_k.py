@@ -51,6 +51,11 @@ import psycopg
 
 from app.config import settings
 from app.providers.implementations.sec_edgar import SecFilingsProvider
+from app.services.dividend_calendar import (
+    _PARSER_VERSION_DIVIDEND,
+    parse_dividend_announcement,
+    upsert_dividend_event,
+)
 from app.services.eight_k_events import (
     _PARSER_VERSION,
     _load_item_labels,
@@ -61,6 +66,12 @@ from app.services.eight_k_events import (
 from app.services.manifest_parsers._classify import (
     format_upsert_error,
     is_transient_upsert_error,
+)
+from app.services.manifest_parsers._siblings import (
+    CIK_MISSING_SENTINEL as _CIK_MISSING_SENTINEL,
+)
+from app.services.manifest_parsers._siblings import (
+    resolve_siblings as _resolve_siblings,
 )
 from app.services.raw_filings import store_raw
 
@@ -73,6 +84,24 @@ logger = logging.getLogger(__name__)
 # Duplicated here as a literal so the parser's contract with the
 # manifest worker is the PUBLIC ``ParseOutcome`` shape only.
 _FAILED_RETRY_DELAY = timedelta(hours=1)
+
+# Composite parser version stamped on ``sec_filing_manifest.parser_version``
+# only. Mirrors the sec_13f_hr.py:88-89 pattern: encoding two sub-
+# versions into one string lets a bump to either trigger a manifest
+# rewash via parser_version mismatch (operator-driven via
+# ``POST /jobs/sec_rebuild/run {"source": "sec_8k"}``).
+#
+# IMPORTANT: this composite ONLY drives the manifest column. The typed
+# ``eight_k_filings.parser_version`` (written by ``upsert_8k_filing``
+# / ``_write_tombstone`` in eight_k_events.py) intentionally stays at
+# the bare ``_PARSER_VERSION`` integer — that column is provenance
+# for the typed-table writer and is not consumed by rewash logic.
+# Likewise ``store_raw(... parser_version=str(_PARSER_VERSION))``
+# below stays bare — that column is raw-document provenance, not a
+# rewash signal; tying it to dividend regex versions would invalidate
+# the raw HTML cache on every regex bump for no integrity benefit
+# (#1158 Codex pre-spec round 2 HIGH).
+_PARSER_VERSION_EIGHT_K = f"8k:{_PARSER_VERSION}+dividend:{_PARSER_VERSION_DIVIDEND}"
 
 
 def _failed_outcome(error: str, raw_status: Any = None) -> Any:
@@ -89,11 +118,72 @@ def _failed_outcome(error: str, raw_status: Any = None) -> Any:
 
     return ParseOutcome(
         status="failed",
-        parser_version=str(_PARSER_VERSION),
+        parser_version=_PARSER_VERSION_EIGHT_K,
         raw_status=raw_status,
         error=error,
         next_retry_at=datetime.now(tz=UTC) + _FAILED_RETRY_DELAY,
     )
+
+
+def _maybe_extract_dividend(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    issuer_cik: str | None,
+    accession: str,
+    html: str,
+) -> None:
+    """Best-effort dividend_events extraction from a parsed 8-K body.
+
+    NOT gated on ``parsed.items``: ``parse_8k_filing`` extracts items
+    from the HTML body itself, and there is real divergence between
+    submissions-declared items and HTML-extracted items. The pure
+    function ``parse_dividend_announcement`` already gates on its
+    internal ``_DIVIDEND_CONTEXT_RE`` (requires ``$N.NN per share``
+    in proximity to the word ``dividend``); false positives on
+    non-dividend bodies are extremely unlikely. Net effect: equal-or-
+    better coverage than the legacy
+    ``sec_dividend_calendar_ingest`` cron, since amendments (8-K/A)
+    and items-array-misclassified filings now get extraction too.
+    (#1158 Codex pre-spec round 1 BLOCKING.)
+
+    Fans out to share-class siblings via ``_resolve_siblings``
+    (#1102 / #1117). The legacy cron iterated ``filing_events``
+    rows so siblings naturally got their own row each; the manifest
+    row carries one anchor instrument_id and must fan out
+    explicitly. Fail-closed union (``set(siblings) | {instrument_id}``)
+    preserves the canonical sibling on stale ``external_identifiers``
+    state.
+
+    Idempotent: ``upsert_dividend_event``'s
+    ``ON CONFLICT (instrument_id, source_accession) DO UPDATE`` makes
+    re-runs harmless (last_parsed_at bumps, other columns rewrite
+    to identical values when regex output is unchanged). Re-running
+    after ``_PARSER_VERSION_DIVIDEND`` bump rewrites partial rows
+    with the new regex output.
+    """
+    announcement = parse_dividend_announcement(html)
+    if announcement is None:
+        # Non-dividend body. Item 8.01 covers buybacks / litigation /
+        # JVs; some dividend announcements live under other items
+        # (7.01 has been observed). The regex gate in
+        # parse_dividend_announcement handles all cases. No tombstone:
+        # the manifest row's ``parsed`` status caps re-fetch cadence
+        # to operator-triggered rewash, equivalent to the legacy
+        # cron's 7-day TTL but operator-controlled.
+        return
+    siblings = _resolve_siblings(
+        conn,
+        instrument_id=instrument_id,
+        issuer_cik=(issuer_cik or "").strip() or _CIK_MISSING_SENTINEL,
+    )
+    for sibling_iid in siblings:
+        upsert_dividend_event(
+            conn,
+            instrument_id=sibling_iid,
+            source_accession=accession,
+            announcement=announcement,
+        )
 
 
 def _parse_eight_k(
@@ -135,7 +225,7 @@ def _parse_eight_k(
         )
         return ParseOutcome(
             status="tombstoned",
-            parser_version=str(_PARSER_VERSION),
+            parser_version=_PARSER_VERSION_EIGHT_K,
             error="missing primary_document_url",
         )
     if instrument_id is None:
@@ -145,7 +235,7 @@ def _parse_eight_k(
         )
         return ParseOutcome(
             status="tombstoned",
-            parser_version=str(_PARSER_VERSION),
+            parser_version=_PARSER_VERSION_EIGHT_K,
             error="missing instrument_id",
         )
 
@@ -184,7 +274,7 @@ def _parse_eight_k(
             return _failed_outcome(f"tombstone error: {exc}")
         return ParseOutcome(
             status="tombstoned",
-            parser_version=str(_PARSER_VERSION),
+            parser_version=_PARSER_VERSION_EIGHT_K,
             error="empty or non-200 fetch",
         )
 
@@ -254,7 +344,7 @@ def _parse_eight_k(
             return _failed_outcome(f"tombstone error: {exc}", raw_status="stored")
         return ParseOutcome(
             status="tombstoned",
-            parser_version=str(_PARSER_VERSION),
+            parser_version=_PARSER_VERSION_EIGHT_K,
             raw_status="stored",
             error="parser returned no header fields or items",
         )
@@ -309,14 +399,48 @@ def _parse_eight_k(
             )
         return ParseOutcome(
             status="tombstoned",
-            parser_version=str(_PARSER_VERSION),
+            parser_version=_PARSER_VERSION_EIGHT_K,
             raw_status="stored",
             error=format_upsert_error(exc),
         )
 
+    # Dividend_events extraction (#1158). Runs on every parsed 8-K
+    # body; ``parse_dividend_announcement`` has its own internal
+    # gate. Wrapped in a savepoint so a deterministic dividend-side
+    # failure (IntegrityError, etc.) doesn't abort the worker's
+    # outer transaction or block the subsequent ``transition_status``
+    # write. Transient OperationalError → ``_failed_outcome`` (the
+    # whole 8-K row retries on the next tick — upsert_8k_filing is
+    # idempotent so the redo is safe). Deterministic exceptions →
+    # log + drop the dividend write but PRESERVE the parsed
+    # outcome: the 8-K filing/items/exhibits rows already landed
+    # successfully and tombstoning the manifest row would lose
+    # operator-visible 8-K data over a dividend-extraction bug.
+    try:
+        with conn.transaction():
+            _maybe_extract_dividend(
+                conn,
+                instrument_id=instrument_id,
+                issuer_cik=row.cik,
+                accession=accession,
+                html=html,
+            )
+    except Exception as exc:  # noqa: BLE001
+        if is_transient_upsert_error(exc):
+            logger.warning(
+                "eight_k manifest parser: dividend extraction transient failure accession=%s: %s",
+                accession,
+                exc,
+            )
+            return _failed_outcome(format_upsert_error(exc), raw_status="stored")
+        logger.exception(
+            "eight_k manifest parser: dividend extraction failed accession=%s",
+            accession,
+        )
+
     return ParseOutcome(
         status="parsed",
-        parser_version=str(_PARSER_VERSION),
+        parser_version=_PARSER_VERSION_EIGHT_K,
         raw_status="stored",
     )
 
