@@ -654,7 +654,7 @@ The #863-#873 freshness redesign's three steady-state discovery layers are coded
 
 None have a `_INVOKERS[]` entry in `app/jobs/runtime.py`. None have a `ScheduledJob` row in `app/workers/scheduler.py:SCHEDULED_JOBS`. Tickets #867 / #868 / #870 are **reopened** as of the audit; umbrella wiring under **#1155**.
 
-Steady-state filings discovery runs through the legacy per-form ingest crons (`sec_form3_ingest`, `sec_def14a_ingest`, `sec_8k_events_ingest`, `sec_insider_transactions_ingest`, `sec_dividend_calendar_ingest`, `sec_n_port_ingest`, `sec_13f_quarterly_sweep`) which the redesign was meant to retire — `sec_business_summary_ingest` was the first retired (post-#1155 sweep; manifest worker + `sec_10k.py` parser now sole steady-state writer to `instrument_business_summary`). Full per-endpoint wiring at `.claude/skills/data-engineer/etl-endpoint-coverage.md` §3.
+Post-#1155 legacy-cron retirement sweep COMPLETE (2026-05-14). All 8 legacy per-form ingest crons retired: `sec_business_summary_ingest` (#1159, full-delete), `sec_def14a_ingest` (#1160, on-demand), `sec_insider_transactions_ingest` (#1161, on-demand), `sec_form3_ingest` (#1162, on-demand), `sec_8k_events_ingest` (#1163, on-demand), `sec_13f_quarterly_sweep` (#1164, on-demand), `sec_n_port_ingest` (#1165, on-demand), `sec_dividend_calendar_ingest` (#1166, full-delete — unblocked by #1158 dividend-extraction in `eight_k.py`). Manifest worker + per-source parsers (`manifest_parsers/*.py`) carry every steady-state write. Full per-endpoint wiring at `.claude/skills/data-engineer/etl-endpoint-coverage.md` §3.
 
 ## 10. Sources
 
