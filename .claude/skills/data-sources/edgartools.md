@@ -160,8 +160,8 @@ Default pages every historical filing. For Berkshire / BlackRock that's dozens o
 ### G11 — Pre-2024-12-19 13D/G is HTML, not XML
 `Schedule13D.from_filing(old_filing)` returns `None` because `parse_xml` requires `<edgarSubmission>` root which only exists in post-rule structured XML. Filter ingest by filing date `>= 2024-12-19`.
 
-### G12 — N-CSR has no CUSIP
-OEF iXBRL N-CSR taxonomy publishes only fund-level identifiers — no holding-level CUSIPs. #918 closed for this reason. Don't use N-CSR for security-level rollups.
+### G12 — N-CSR has no per-holding identifier of any kind
+OEF iXBRL N-CSR taxonomy publishes fund-level + class-level + sector-axis facts ONLY. There is no holding-level CUSIP / ISIN / SEDOL / ticker / portfolio-issuer CIK in the iXBRL. The N-CSR primary HTML's Schedule of Investments lists positions as `Name`-`Shares`-`Value` columns with no machine-readable identifier. The N-CSR itself directs readers to N-PORT for structured per-issuer holdings. Don't use N-CSR for security-level rollups under any path (iXBRL, HTML, exhibit). Verified by raw-payload spike `docs/superpowers/spikes/2026-05-14-n-csr-feasibility.md` (4 iXBRL companions + 52 MB primary HTML across 3 sampled OEF families). #918 closed (synth no-op landed); the gap is a real taxonomy limitation, not an EdgarTools surface limitation.
 
 ### G13 — Internal module path is the only stability contract
 13F static parsers live under `edgar.thirteenf.parsers` — internal-looking. Library may reorganise. Mitigation: pin tight, keep golden-replay tests, audit on every minor bump.

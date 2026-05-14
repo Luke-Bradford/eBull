@@ -256,12 +256,14 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
             help_text=(
                 "Universe-wide rebuild for one source "
                 "(sec_form4 / sec_13d / etc). Most expensive option. "
-                "Note: sec_xbrl_facts / sec_n_csr / "
-                "finra_short_interest may resolve to zero triples if "
-                "data_freshness_index has no rows for that source, OR "
-                "reset triples that the manifest worker then "
-                "debug-skips (no parser registered yet). Operator-"
-                "visible outcome is scope_triples=N + "
+                "Note: sec_xbrl_facts / finra_short_interest may "
+                "resolve to zero triples if data_freshness_index has "
+                "no rows for that source, OR reset triples that the "
+                "manifest worker then debug-skips (no parser "
+                "registered yet). sec_n_csr has a synth no-op parser "
+                "registered (#918 verdict, 2026-05-14) — manifest "
+                "rows drain to `parsed` without DB or fetch work. "
+                "Operator-visible outcome is scope_triples=N + "
                 "discovery_new=0 in the job log."
             ),
             field_type="enum",

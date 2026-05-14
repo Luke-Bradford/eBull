@@ -33,8 +33,12 @@ docstrings.
 - **NPORT-P** — Mutual fund quarterly holdings snapshot. Public
   60-day-lagged version of monthly NPORT-MFP (which stays
   confidential).
-- **N-CSR** — Mutual fund semi-annual + annual report. Audited.
-  Beats NPORT-P within same period.
+- **N-CSR** — Mutual fund semi-annual + annual report. Audited at
+  year-end (N-CSR); semi-annual (N-CSRS) is unaudited. NOT a v1
+  holdings source: the OEF iXBRL has no per-holding identifier and
+  the HTML SoI carries no CUSIP — see spike #918 / `docs/superpowers/spikes/2026-05-14-n-csr-feasibility.md`.
+  eBull's manifest worker drains N-CSR rows via a synth no-op
+  parser.
 - **DEF 14A** — Proxy statement. Annual; carries director +
   officer compensation tables, treasury shares, beneficial ownership
   consolidated table.

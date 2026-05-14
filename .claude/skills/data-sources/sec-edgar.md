@@ -632,14 +632,15 @@ When to apply:
 
 Adopted in #1152 (`instrument_business_summary` + `filed_at` column added by sql/148). If a future adapter writes a per-instrument typed table, apply the same gate.
 
-### 11.5 Stranded ManifestSource entries
+### 11.5 ManifestSource entries with no real parser (synth no-op or out-of-band path)
 
-`ManifestSource` enum (sql/118 CHECK + `app/services/sec_manifest.py:106`) lists 14 values. Two carry no manifest parser by design:
+`ManifestSource` enum (sql/118 CHECK + `app/services/sec_manifest.py:106`) lists 14 values. As of 2026-05-14, every SEC source EITHER has a real parser registered (drains via the manifest worker) OR adopts the §11.5.1 synth no-op shape (drains as `parsed` without DB or fetch work because another path covers the SQL surface) OR is intentionally out-of-band (bulk API path, not manifest-dispatched). Catalogue:
 
-| Source | Why no parser |
-|---|---|
-| `sec_xbrl_facts` | XBRL Company Facts ingested via bulk Company Facts API path, NOT per-filing manifest dispatch. Eligible to adopt the §11.5.1 synth no-op shape so manifest rows drain. |
-| `sec_n_csr` | EdgarTools `FundShareholderReport` exposes only OEF iXBRL fund-level facts (NAV / expense ratio / top-holdings %); per-issuer Schedule of Investments lives in free-form HTML/PDF, not XBRL. **#918 REOPENED 2026-05-13 pending sample-driven re-spike** (acceptance criteria in the reopen comment) — original close cited only the EdgarTools surface, operator wants raw N-CSR payload survey + commercial-use vendor check before "infeasible" is final. Discovery may still write manifest rows that never drain in the interim. If the spike returns INFEASIBLE: adopt the §11.5.1 synth no-op shape so manifest rows drain; if FEASIBLE: register a real parser and remove this row. Tech-debt #1153 on hold pending the spike. |
+| Source | Status | Why no real parser |
+|---|---|---|
+| `sec_xbrl_facts` | ⏳ eligible for synth no-op | XBRL Company Facts ingested via bulk Company Facts API path, NOT per-filing manifest dispatch. Adopting the §11.5.1 synth no-op shape would drain accumulated manifest rows; tech-debt-eligible. |
+| `sec_10q` | ✅ synth no-op (#1168, PR #1169) | Financial data lands via Companyfacts XBRL; narrative HTML has no v1 consumer. First exemplar of §11.5.1. |
+| `sec_n_csr` | ✅ synth no-op (#918, 2026-05-14) | Spike `docs/superpowers/spikes/2026-05-14-n-csr-feasibility.md` confirmed INFEASIBLE for v1 by raw-payload inspection: OEF iXBRL publishes fund-level + class-level + sector-axis facts only (zero CUSIP / ISIN / SEDOL / ticker / portfolio-issuer CIK across 4 iXBRL companions and 52 MB of primary HTML across 3 sampled families). The N-CSR primary HTML's Schedule of Investments carries no machine-readable identifier; the N-CSR itself directs readers to N-PORT for structured per-issuer holdings. Cross-source overlay (N-CSR-name × N-PORT-CUSIP 4-part match) is technically possible but unmeasured and product-visibility-negative (no operator-discriminating signal vs N-PORT-P we already ingest). Second exemplar of §11.5.1. Tech-debt #1153 closed as REBUTTED. |
 
 `finra_short_interest` is not stranded — split tickets #915 (bimonthly) + #916 (RegSHO daily) are open. Parent #845 closed.
 
