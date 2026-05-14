@@ -421,6 +421,7 @@ class TestProductionInvokerRegistry:
             "sec_def14a_ingest",
             "sec_form3_ingest",
             "sec_insider_transactions_ingest",
+            "sec_n_port_ingest",
             # #994 (first-install bootstrap orchestrator) — these jobs
             # are dispatched by the bootstrap orchestrator (not SCHEDULED)
             # but registered in _INVOKERS so the orchestrator can call

@@ -934,28 +934,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # benefit from firing on every dev restart.
         catch_up_on_boot=False,
     ),
-    ScheduledJob(
-        name=JOB_SEC_N_PORT_INGEST,
-        display_name="N-PORT monthly fund-holdings sweep",
-        source="sec_rate",
-        description=(
-            "Monthly NPORT-P fund-holdings sweep (#917 — Phase 3 PR1). "
-            "Walks ``sec_nport_filer_directory`` (#963 — the RIC trust "
-            "CIK universe; populated by ``sec_nport_filer_directory_sync``) "
-            "and ingests every pending NPORT-P / NPORT-P/A accession into "
-            "ownership_funds_observations + ownership_funds_current. "
-            "Equity-common-Long write-side guard filters debt / preferred / "
-            "derivative / short positions; only pie-eligible holdings land. "
-            "Cadence: monthly day 22 03:00 UTC — NPORT-P has a 60-day "
-            "post-quarter publication deadline; running on the 22nd of each "
-            "month catches the bulk of new filings 1-2 weeks after they "
-            "publish. Soft 6h deadline; resumable via n_port_ingest_log "
-            "tombstones."
-        ),
-        cadence=Cadence.monthly(day=22, hour=3, minute=0),
-        catch_up_on_boot=False,
-        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
-    ),
+    # `sec_n_port_ingest` retired from SCHEDULED_JOBS post-#1155:
+    # Layer 1/2/3 + sec_manifest_worker + manifest_parsers/sec_n_port.py
+    # (#1133) carry every NPORT-P write to ownership_funds_observations
+    # + ownership_funds_current. Function body + _INVOKERS entry
+    # preserved — bootstrap stage 22 dispatches this job_name via
+    # _INVOKERS, plus sweep-adapter nport_sweep + Admin "Run now"
+    # remain operator-callable.
     ScheduledJob(
         name=JOB_ETORO_LOOKUPS_REFRESH,
         display_name="eToro lookup catalogues refresh",
