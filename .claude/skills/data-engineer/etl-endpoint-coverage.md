@@ -73,7 +73,7 @@ Steady-state filings discovery currently runs through the legacy per-form ingest
 | `sec_def14a_ingest` | `scheduler.py:742` | Blanket scan |
 | `sec_8k_events_ingest` | `scheduler.py:671` | Blanket scan |
 | ~~`sec_business_summary_ingest`~~ | — | **retired post-#1155 — first legacy cron retired; manifest worker now sole steady-state writer for 10-K Item 1** |
-| `sec_dividend_calendar_ingest` | `scheduler.py:601` | 500 filings/day |
+| ~~`sec_dividend_calendar_ingest`~~ | — | **retired post-#1155 (#1166) — manifest worker + `eight_k.py` (#1158) sole steady-state writer; 8th and final retirement in the sweep** |
 | `sec_n_port_ingest` | `scheduler.py:1033` | Blanket scan |
 | `sec_13f_quarterly_sweep` | `scheduler.py:926` | Weekly sweep |
 

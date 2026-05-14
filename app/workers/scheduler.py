@@ -255,7 +255,6 @@ JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
-JOB_SEC_DIVIDEND_CALENDAR_INGEST = "sec_dividend_calendar_ingest"
 JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP = "sec_business_summary_bootstrap"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
@@ -605,22 +604,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # 2026-04-19 research-tool refocus — no UI consumer today. The
     # function body stays in scheduler.py + _INVOKERS so the operator
     # can still manually fire it from Admin "Run now" if needed.
-    ScheduledJob(
-        name=JOB_SEC_DIVIDEND_CALENDAR_INGEST,
-        display_name="SEC dividend calendar ingest",
-        source="sec_rate",
-        description=(
-            "Parse 8-K Item 8.01 announcements into ``dividend_events`` "
-            "(#434). Runs 03:00 UTC — 30 min after fundamentals_sync so "
-            "newly-populated ``filing_events.items[]`` rows are visible. "
-            "Bounded to 500 filings per run; the ingester's LEFT JOIN "
-            "guard skips already-processed filings, so a backlog drains "
-            "over several runs without duplicating work."
-        ),
-        cadence=Cadence.daily(hour=3, minute=0),
-        catch_up_on_boot=False,
-        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
-    ),
+    # `sec_dividend_calendar_ingest` retired post-#1155 (#1166):
+    # Layer 1/2/3 + sec_manifest_worker + manifest_parsers/eight_k.py
+    # (#1158, PR #1166) carry every 8-K dividend extraction. The
+    # legacy daily 03:00 UTC cron + its `ingest_dividend_events`
+    # service path is full-deleted — `sec_rebuild` covers operator
+    # manual backfill via re-pending 8-K manifest rows.
     # `sec_business_summary_ingest` retired post-#1155: Layer 1/2/3
     # discovery + `sec_manifest_worker` + `manifest_parsers/sec_10k.py`
     # (#1152) carry every 10-K Item 1 write to `instrument_business_summary`
@@ -653,11 +642,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # `sec_8k_events_ingest` retired from SCHEDULED_JOBS post-#1155:
     # Layer 1/2/3 + sec_manifest_worker + manifest_parsers/eight_k.py
     # (#1126) carry every 8-K write to eight_k_filings / eight_k_items
-    # / eight_k_exhibits. Function body + _INVOKERS entry preserved —
-    # bootstrap stage 20 dispatches this job_name via _INVOKERS, plus
-    # sweep-adapter sec_8k_sweep + Admin "Run now" remain operator-
-    # callable. Note: dividend_events extraction is still owned by
-    # sec_dividend_calendar_ingest (parser-gap tracked in #1158).
+    # / eight_k_exhibits + (#1158, PR #1166) dividend_events. Function
+    # body + _INVOKERS entry preserved — bootstrap stage 20 dispatches
+    # this job_name via _INVOKERS, plus sweep-adapter sec_8k_sweep +
+    # Admin "Run now" remain operator-callable.
     ScheduledJob(
         name=JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
         display_name="SEC business-summary bootstrap drain",
@@ -3679,40 +3667,6 @@ def raw_data_retention_sweep() -> None:
             total_deleted,
             total_bytes,
             dry_run,
-        )
-
-
-def sec_dividend_calendar_ingest() -> None:
-    """Parse 8-K Item 8.01 announcements into ``dividend_events`` (#434).
-
-    Scans filings where ``items`` contains ``'8.01'`` and no
-    ``dividend_events`` row exists yet, fetches the primary document
-    from SEC via :class:`SecFilingsProvider.fetch_document_text`,
-    parses the dividend calendar, and upserts one row per filing.
-
-    Bounded per run (``limit=500``) so a freshly-populated items[]
-    backlog doesn't tie up the SEC rate-limiter or the worker. The
-    ingester's LEFT JOIN guard makes re-runs idempotent — a backlog
-    drains over successive daily runs.
-    """
-    from app.providers.implementations.sec_edgar import SecFilingsProvider
-    from app.services.dividend_calendar import ingest_dividend_events
-
-    with _tracked_job(JOB_SEC_DIVIDEND_CALENDAR_INGEST) as tracker:
-        with (
-            psycopg.connect(settings.database_url) as conn,
-            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
-        ):
-            result = ingest_dividend_events(conn, provider)
-
-        tracker.row_count = result.rows_inserted + result.rows_updated
-        logger.info(
-            "sec_dividend_calendar_ingest complete: scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
-            result.filings_scanned,
-            result.rows_inserted,
-            result.rows_updated,
-            result.fetch_errors,
-            result.parse_misses,
         )
 
 

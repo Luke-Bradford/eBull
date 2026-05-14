@@ -78,9 +78,6 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # own the SQL normalisation as before. The helper is
         # transport-only.
         "app/providers/concurrent_fetch.py",
-        # Docstring-only reference in the scheduler job that invokes
-        # one of the ingesters. No runtime call site.
-        "app/workers/scheduler.py",
         # Tests that exercise the ingesters use stub _DocFetcher classes
         # that shadow the method name — these are test-only and don't
         # persist to disk.
