@@ -37,6 +37,7 @@ from app.services.manifest_parsers import def14a as _def14a
 from app.services.manifest_parsers import eight_k as _eight_k
 from app.services.manifest_parsers import insider_345 as _insider_345
 from app.services.manifest_parsers import sec_10k as _sec_10k
+from app.services.manifest_parsers import sec_10q as _sec_10q
 from app.services.manifest_parsers import sec_13dg as _sec_13dg
 from app.services.manifest_parsers import sec_13f_hr as _sec_13f_hr
 from app.services.manifest_parsers import sec_n_port as _sec_n_port
@@ -50,6 +51,7 @@ def register_all_parsers() -> None:
     _eight_k.register()
     _def14a.register()
     _sec_10k.register()
+    _sec_10q.register()  # synth no-op per sec-edgar §11.5.1 (#1168)
     _sec_13dg.register()  # registers BOTH sec_13d and sec_13g
     _insider_345.register()  # registers sec_form3 + sec_form4 + sec_form5
     _sec_13f_hr.register()

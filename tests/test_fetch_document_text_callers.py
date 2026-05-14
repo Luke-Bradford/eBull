@@ -102,6 +102,14 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "tests/test_manifest_parser_sec_13f_hr.py",
         "tests/test_manifest_parser_sec_n_port.py",
         "tests/test_sec_pipelined_fetcher.py",
+        # Synth no-op manifest parser (#1168). NOT a caller — the
+        # parser body explicitly returns ParseOutcome(parsed) without
+        # any fetch. The grep matches only the docstring + module
+        # name, which reference the symbol to document the
+        # non-caller invariant. Adjacent test patches the method
+        # with a raising sentinel to enforce non-call at runtime.
+        "app/services/manifest_parsers/sec_10q.py",
+        "tests/test_manifest_parser_sec_10q.py",
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",
