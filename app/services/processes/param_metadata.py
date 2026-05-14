@@ -200,6 +200,27 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
 # triangle.
 
 MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
+    # sec_13f_quarterly_sweep — post-#1155 retirement of the weekly
+    # scheduled row; bootstrap stage 21 still dispatches it via
+    # _INVOKERS, and the sweep-adapter / Admin Run-now paths surface
+    # min_period_of_report as an operator-exposable triage param.
+    # source_label stays in JOB_INTERNAL_KEYS (bootstrap-only).
+    "sec_13f_quarterly_sweep": (
+        ParamMetadata(
+            name="min_period_of_report",
+            label="Recency floor",
+            help_text=(
+                "Skip 13F accessions whose period_of_report is older "
+                "than this date. Leave blank to sweep the full filer "
+                "history. Bootstrap stage 21 sets this to today minus "
+                "~380 days so the first-install sweep finishes in "
+                "minutes rather than hours."
+            ),
+            field_type="date",
+            default=None,
+            advanced_group=True,
+        ),
+    ),
     # sec_rebuild — operator manual triage (#1155). Resets manifest +
     # scheduler rows for a scope, then (default) runs a discovery pass
     # against SEC submissions.json to fill missed accessions.

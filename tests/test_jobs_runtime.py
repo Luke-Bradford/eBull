@@ -417,6 +417,7 @@ class TestProductionInvokerRegistry:
             # + _INVOKERS entries kept so Admin "Run now" + sweep-adapter
             # + bootstrap-stage dispatch continue to work.
             "sec_8k_events_ingest",
+            "sec_13f_quarterly_sweep",
             "sec_def14a_ingest",
             "sec_form3_ingest",
             "sec_insider_transactions_ingest",

@@ -868,57 +868,16 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # (~10s wall-clock).
         catch_up_on_boot=True,
     ),
-    ScheduledJob(
-        name=JOB_SEC_13F_QUARTERLY_SWEEP,
-        display_name="13F quarterly holdings sweep",
-        source="sec_rate",
-        description=(
-            "Quarterly sweep — walk every CIK in ``institutional_filers`` "
-            "(populated by sec_13f_filer_directory_sync #912) and ingest "
-            "each filer's pending 13F-HRs through ``ingest_filer_13f`` "
-            "(#913 / #841 PR2). Universe-expansion entrypoint: AAPL "
-            "institutional rollup pre-sweep is 5.94%; gurufocus parity "
-            "~62% requires every active filer's holdings to land. "
-            "Per-filer crashes are isolated; already-ingested accessions "
-            "are tombstoned in institutional_holdings_ingest_log so a "
-            "deadline-interrupted sweep resumes the tail on the next "
-            "fire. Cadence: weekly Saturday 02:00 UTC — 13F-HRs have a "
-            "45-day filing deadline so weekly catches new accessions "
-            "within a week of the universe filing them. ~30 min "
-            "wall-clock in steady state (most filers up-to-date), up "
-            "to ~6h on a cold first sweep against an 11k-filer "
-            "directory. Soft 6h deadline budget keeps the job from "
-            "running unbounded; the next sweep resumes."
-        ),
-        cadence=Cadence.weekly(weekday=5, hour=2, minute=0),
-        # Don't catch up on boot — a missed window costs at most 7 days
-        # of staleness on quarterly-cadence data, and firing a 6h sweep
-        # on every dev restart would burn SEC bandwidth + DB I/O.
-        catch_up_on_boot=False,
-        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
-        # PR1c #1064: ``min_period_of_report`` is operator-exposable so a
-        # triage operator can sweep "everything since 2024-01-01" without
-        # editing the bootstrap StageSpec. ``source_label`` is internal-
-        # only (declared in ``JOB_INTERNAL_KEYS`` per PR1a) so the
-        # bootstrap dispatch can override the audit tag while the
-        # operator API rejects it.
-        params_metadata=(
-            ParamMetadata(
-                name="min_period_of_report",
-                label="Recency floor",
-                help_text=(
-                    "Skip 13F accessions whose period_of_report is older "
-                    "than this date. Leave blank to sweep the full filer "
-                    "history. Bootstrap stage 21 sets this to today minus "
-                    "~380 days so the first-install sweep finishes in "
-                    "minutes rather than hours."
-                ),
-                field_type="date",
-                default=None,
-                advanced_group=True,
-            ),
-        ),
-    ),
+    # `sec_13f_quarterly_sweep` retired from SCHEDULED_JOBS post-#1155:
+    # Layer 1/2/3 + sec_manifest_worker + manifest_parsers/sec_13f_hr.py
+    # (#1133) carry every 13F-HR write to institutional_holdings.
+    # Function body + _INVOKERS entry preserved — bootstrap stage 21
+    # dispatches this job_name (with min_period_of_report +
+    # source_label params) via _INVOKERS. Operator-API params now live
+    # in MANUAL_TRIGGER_JOB_METADATA (`min_period_of_report`);
+    # `source_label` stays in JOB_INTERNAL_KEYS (bootstrap-only).
+    # Sweep-adapter `sec_13f_sweep` + Admin "Run now" remain
+    # operator-callable.
     ScheduledJob(
         name=JOB_SEC_13F_FILER_DIRECTORY_SYNC,
         display_name="13F filer-directory sync",
