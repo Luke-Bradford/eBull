@@ -110,6 +110,11 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # with a raising sentinel to enforce non-call at runtime.
         "app/services/manifest_parsers/sec_10q.py",
         "tests/test_manifest_parser_sec_10q.py",
+        # Second synth no-op manifest parser (#918 verdict). Same
+        # non-caller invariant as sec_10q above — docstring + sentinel
+        # patch reference the symbol; no runtime call.
+        "app/services/manifest_parsers/sec_n_csr.py",
+        "tests/test_manifest_parser_sec_n_csr.py",
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",
