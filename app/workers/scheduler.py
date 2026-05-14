@@ -627,22 +627,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # + `instrument_business_summary_sections`. The weekly Sunday safety-net
     # bootstrap (`sec_business_summary_bootstrap` below) stays for
     # one-shot drain + operator manual backfill.
-    ScheduledJob(
-        name=JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
-        display_name="SEC Form 4 ingest",
-        source="sec_rate",
-        description=(
-            "Parse SEC Form 4 filings into ``insider_transactions`` "
-            "(#429). Runs hourly because Form 4 is filed within two "
-            "business days of a trade — insider sentiment is only "
-            "useful timely. Bounded to 500 filings per run. Idempotent "
-            "via (accession, row_num) UNIQUE so hour-to-hour re-runs "
-            "cost nothing when nothing new has landed."
-        ),
-        cadence=Cadence.hourly(minute=30),
-        catch_up_on_boot=False,
-        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
-    ),
+    # `sec_insider_transactions_ingest` retired from SCHEDULED_JOBS
+    # post-#1155: Layer 1/2/3 + sec_manifest_worker + manifest_parsers/
+    # insider_345.py (#1130) carry every Form 4 write to
+    # insider_transactions + insider_filings + insider_filers. The
+    # round-robin `sec_insider_transactions_backfill` cron stays
+    # scheduled for the deep-historical-tail drain. Function body +
+    # _INVOKERS entry preserved for Admin "Run now".
     ScheduledJob(
         name=JOB_SEC_FILING_DOCUMENTS_INGEST,
         display_name="SEC filing-documents manifest ingest",
