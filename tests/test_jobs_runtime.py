@@ -417,6 +417,7 @@ class TestProductionInvokerRegistry:
             # + _INVOKERS entries kept so Admin "Run now" + sweep-adapter
             # + bootstrap-stage dispatch continue to work.
             "sec_def14a_ingest",
+            "sec_insider_transactions_ingest",
             # #994 (first-install bootstrap orchestrator) — these jobs
             # are dispatched by the bootstrap orchestrator (not SCHEDULED)
             # but registered in _INVOKERS so the orchestrator can call
