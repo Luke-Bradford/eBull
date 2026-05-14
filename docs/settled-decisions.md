@@ -87,6 +87,15 @@ Before designing or coding for an issue:
 - full raw filing text is out of scope for v1
 - if full text is needed later, use a separate table, not `filing_events`
 
+### Source priority for fund metadata (#1171)
+- Within `(instrument_id, period_end)`, the winning N-CSR / N-CSRS observation is selected by:
+  `ORDER BY period_end DESC, filed_at DESC, source_accession DESC LIMIT 1` (filter `known_to IS NULL`).
+- N-CSR (annual, fiscal-year-end) and N-CSRS (semi-annual, mid-year) have disjoint `period_end` values per SEC rule §31a-29 so they do NOT compete at the same period_end.
+- At the same period_end, amendments (N-CSR/A, N-CSRS/A) naturally win because they are filed later than the original.
+- `source_accession DESC` is the final deterministic tie-break for unlikely same-filed_at collisions.
+- Parser-version bump is orthogonal — rewash flows through `known_to` supersession (immutable observations + soft-delete) and the priority chain re-evaluates against the new currently-valid row set.
+- **Scope:** applies to `fund_metadata_observations → fund_metadata_current` only. Does NOT apply to holdings (N-CSR holdings are not ingested; spike #918 §10.5 stands).
+
 ### Filing dedupe
 - filing identity is provider-scoped
 - provider filing identity must be stable and idempotent

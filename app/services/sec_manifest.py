@@ -809,6 +809,10 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     "NPORT-P/A": "sec_n_port",
     "N-CSR": "sec_n_csr",
     "N-CSR/A": "sec_n_csr",
+    # #1171 — N-CSRS (semi-annual) was previously absent so manifest writes
+    # silently dropped them. Real fund-metadata parser handles both variants.
+    "N-CSRS": "sec_n_csr",
+    "N-CSRS/A": "sec_n_csr",
     # Periodic
     "10-K": "sec_10k",
     "10-K/A": "sec_10k",

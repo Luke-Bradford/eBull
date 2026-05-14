@@ -179,6 +179,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "bootstrap_runs",
     # #1065 — admin control hub cooperative-cancel signals.
     "process_stop_requests",
+    # #1171 — N-CSR / N-CSRS fund-metadata extraction (sql/149).
+    "fund_metadata_current",
+    "fund_metadata_observations",
+    "cik_refresh_mf_directory",
 )
 
 
