@@ -128,10 +128,17 @@ def refresh_mf_directory(
                 continue
             instrument_id = inst_row[0]
 
+            # Set ``is_primary = TRUE`` explicitly. The resolver
+            # (``_fund_class_resolver.resolve_class_id_to_instrument``)
+            # filters ``is_primary = TRUE``; relying on the column DEFAULT
+            # is brittle if the default changes — set explicitly so the
+            # writer-vs-resolver contract is locked at this site.
             cur.execute(
                 """
-                INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value)
-                VALUES (%s, 'sec', 'class_id', %s)
+                INSERT INTO external_identifiers (
+                    instrument_id, provider, identifier_type, identifier_value, is_primary
+                )
+                VALUES (%s, 'sec', 'class_id', %s, TRUE)
                 ON CONFLICT DO NOTHING
                 """,
                 (instrument_id, class_id),

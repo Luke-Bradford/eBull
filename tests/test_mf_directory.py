@@ -71,13 +71,16 @@ def test_refresh_mf_directory_first_run(
 
     # external_identifier created for in-universe symbol.
     cur = ebull_test_conn.execute(
-        "SELECT instrument_id FROM external_identifiers "
+        "SELECT instrument_id, is_primary FROM external_identifiers "
         "WHERE provider='sec' AND identifier_type='class_id' AND identifier_value=%s",
         ("C000010048",),
     )
     _row = cur.fetchone()
     assert _row is not None
     assert _row[0] == 4001
+    # PREVENTION: writer MUST set is_primary=TRUE because the resolver filters on it.
+    # Relying on the column DEFAULT is brittle (Codex PR #1172 review BLOCKING).
+    assert _row[1] is True
 
 
 def test_refresh_mf_directory_idempotent_second_run(
