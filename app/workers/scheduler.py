@@ -294,6 +294,9 @@ JOB_SEC_MANIFEST_TOMBSTONE_STALE = "sec_manifest_tombstone_stale"
 # carries the per-stage hardcoded values via ``StageSpec.params``.
 JOB_FILINGS_HISTORY_SEED = "filings_history_seed"
 JOB_SEC_FIRST_INSTALL_DRAIN = "sec_first_install_drain"
+# #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap drain.
+JOB_MF_DIRECTORY_SYNC = "mf_directory_sync"
+JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
 
 # #1155 — Layer 1 / 2 / 3 freshness redesign wiring + sec_rebuild
 # manual triage. Implementation entrypoints existed since #867/#868/#870
@@ -4317,6 +4320,87 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
             stats.manifest_rows_upserted,
             stats.errors,
             max_subjects,
+        )
+
+
+def mf_directory_sync(params: Mapping[str, Any]) -> None:
+    """``_INVOKERS['mf_directory_sync']`` — dedicated bootstrap-side
+    MF directory refresh (#1174 / S25).
+
+    Calls :func:`refresh_mf_directory` in a fresh provider + conn
+    context. **No fail-soft on this path**: if the fetch fails, the
+    stage transitions to ``error``, the ``class_id_mapping_ready``
+    capability is not advertised, and S26
+    (``sec_n_csr_bootstrap_drain``) transitions to ``blocked``.
+
+    The daily cron ``daily_cik_refresh`` retains its bundled
+    ``refresh_mf_directory`` call (with fail-soft preserved) as the
+    drift-heal safety net — this dedicated stage is the bootstrap-side
+    truthful-capability provider.
+
+    No operator-tweakable params.
+    """
+    del params  # No params honoured.
+    with _tracked_job(JOB_MF_DIRECTORY_SYNC) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            result = refresh_mf_directory(conn, provider=provider)
+        tracker.row_count = int(result["directory_rows"])
+        logger.info(
+            "mf_directory_sync: fetched=%s directory_rows=%s ext_id_rows=%s",
+            result["fetched"],
+            result["directory_rows"],
+            result["external_identifier_rows"],
+        )
+
+
+def sec_n_csr_bootstrap_drain(params: Mapping[str, Any]) -> None:
+    """``_INVOKERS['sec_n_csr_bootstrap_drain']`` — fund-scoped manifest
+    bootstrap drain for N-CSR / N-CSRS (#1174 / T8 deferred from #1171).
+
+    Walks distinct trust CIKs from ``cik_refresh_mf_directory`` +
+    enqueues last-``horizon_days`` (default 730) N-CSR + N-CSRS
+    accessions per trust to ``sec_filing_manifest``. The manifest
+    worker drains via the #1171 fund-metadata parser.
+
+    Subject identity at every enqueue:
+    ``subject_type='institutional_filer'`` + ``subject_id=trust_cik`` +
+    ``instrument_id=None`` (matches the manifest CHECK constraint
+    ``chk_manifest_issuer_has_instrument`` + N-PORT precedent).
+
+    Honoured params:
+
+    * ``horizon_days`` (int) — retention window in days. Default 730
+      (matches ``filings_history_seed.days_back``).
+    """
+    from app.jobs.sec_first_install_drain import bootstrap_n_csr_drain
+
+    horizon_days_param = params.get("horizon_days", 730)
+    horizon_days = int(horizon_days_param) if horizon_days_param is not None else 730
+
+    with _tracked_job(JOB_SEC_N_CSR_BOOTSTRAP_DRAIN) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            stats = bootstrap_n_csr_drain(
+                conn,
+                http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
+                horizon_days=horizon_days,
+            )
+        tracker.row_count = stats.manifest_rows_upserted
+        logger.info(
+            "sec_n_csr_bootstrap_drain: trusts=%d skipped=%d manifest_rows=%d "
+            "errors=%d secondary_pages=%d outside_horizon=%d horizon_days=%d",
+            stats.trusts_processed,
+            stats.trusts_skipped,
+            stats.manifest_rows_upserted,
+            stats.errors,
+            stats.secondary_pages_fetched,
+            stats.accessions_outside_horizon,
+            horizon_days,
         )
 
 

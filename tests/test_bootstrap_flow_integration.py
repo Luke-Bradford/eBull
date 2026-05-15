@@ -124,7 +124,7 @@ def test_bootstrap_end_to_end(
     assert met is False
     assert "first-install bootstrap not complete" in reason
 
-    # 2. start_run seeds 24 stages atomically.
+    # 2. start_run seeds 26 stages atomically (#1174 added S25 + S26).
     run_id = start_run(
         ebull_test_conn,
         operator_id=None,
@@ -135,7 +135,7 @@ def test_bootstrap_end_to_end(
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None
     assert snap.run_id == run_id
-    assert len(snap.stages) == 24
+    assert len(snap.stages) == 26
     assert all(s.status == "pending" for s in snap.stages)
 
     # 3. State is running, gate stays closed.
@@ -148,7 +148,7 @@ def test_bootstrap_end_to_end(
     run_bootstrap_orchestrator()
 
     # 5. Every fake invoker fired once.
-    assert len(calls["order"]) == 24
+    assert len(calls["order"]) == 26
 
     # 6. State is complete; gate releases.
     state = read_state(ebull_test_conn)

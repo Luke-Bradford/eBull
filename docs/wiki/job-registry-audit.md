@@ -254,7 +254,15 @@ These follow the same archetype: zero-arg body → calls `ingest_<thing>(conn, p
 
 ---
 
-## 3. _BOOTSTRAP_STAGE_SPECS audit (24 stages)
+## 3. _BOOTSTRAP_STAGE_SPECS audit (26 stages)
+
+> #1174 added S25 `mf_directory_sync` (dedicated MF-directory refresh,
+> advertises `class_id_mapping_ready`; daily cron retains the bundled
+> call in `daily_cik_refresh` as drift-heal) + S26
+> `sec_n_csr_bootstrap_drain` (fund-scoped manifest enqueue for N-CSR /
+> N-CSRS). The audit narrative below is pinned to the 24-stage shape at
+> the time the doc was written; the two new stages do not change the
+> earlier analysis.
 
 `StageSpec` shape: `stage_key`, `stage_order`, `lane`, `job_name`. The orchestrator dispatches each stage's `job_name` through the standard `_INVOKERS` registry. Stages 14, 15, 21 currently invoke bespoke wrappers (see §4); stages 1-13, 16-20, 22-24 invoke jobs that ALSO appear in `SCHEDULED_JOBS` with the same name.
 
