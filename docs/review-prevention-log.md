@@ -1304,3 +1304,11 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
   ```
   Add the post-raises sanity SELECT so a future regression that drops the savepoint wrapping fails the assertion instead of silently breaking. Self-review prompt: grep test bodies for `pytest.raises(psycopg` — every one needs a containing `conn.transaction()` and ideally a post-raises sanity statement that proves the outer tx survived.
 - Enforced in: this prevention log; PR #1150 rewrites `test_garbage_lane_rejected` to wrap the failing INSERT in `ebull_test_conn.transaction()` and assert the parent `bootstrap_runs` row is still readable on the same connection after the raise.
+
+---
+
+### Writer-vs-resolver `is_primary` mismatch on `external_identifiers`
+- First seen in: PR #1172
+- Symptom: `mf_directory.refresh_mf_directory` INSERTed into `external_identifiers` without specifying `is_primary`. The matching resolver `_fund_class_resolver.resolve_class_id_to_instrument` filters `is_primary = TRUE`. If the column DEFAULT were ever changed to `FALSE`, every `class_id` resolution would silently return `None` and every N-CSR observation would tombstone as `EXT_ID_NOT_YET_WRITTEN` forever.
+- Prevention: When writing to a table whose readers filter on a flag column (`is_primary`, `is_active`, `is_default`, etc.), set the flag explicitly at the INSERT site — relying on the column DEFAULT couples the writer's correctness to a column-level decision that may be revisited. Grep `INSERT INTO external_identifiers` to verify every writer specifies `is_primary` explicitly. Add an integration-test assertion that round-trips a writer call + a resolver call to lock the contract.
+- Enforced in: this prevention log; PR #1172 sets `is_primary = TRUE` explicitly in `mf_directory.refresh_mf_directory` and asserts the flag in `tests/test_mf_directory.py::test_refresh_mf_directory_first_run`.

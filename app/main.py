@@ -38,6 +38,7 @@ from app.api.config import router as config_router
 from app.api.copy_trading import router as copy_trading_router
 from app.api.coverage import router as coverage_router
 from app.api.filings import router as filings_router
+from app.api.fund_metadata import router as fund_metadata_router
 from app.api.instruments import router as instruments_router
 from app.api.jobs import router as jobs_router
 from app.api.news import router as news_router
@@ -384,6 +385,7 @@ app.include_router(config_router)
 app.include_router(copy_trading_router)
 app.include_router(coverage_router)
 app.include_router(business_summary_admin_router)
+app.include_router(fund_metadata_router)  # #1171 fund-metadata endpoints
 # Debug router is dev/test-only — exposes operator-credentialled
 # pass-throughs to eToro (`/_debug/etoro-candles-probe`,
 # `/_debug/etoro-instrument-raw`) plus internal subscriber state

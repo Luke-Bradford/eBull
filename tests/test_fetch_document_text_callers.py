@@ -110,11 +110,22 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # with a raising sentinel to enforce non-call at runtime.
         "app/services/manifest_parsers/sec_10q.py",
         "tests/test_manifest_parser_sec_10q.py",
-        # Second synth no-op manifest parser (#918 verdict). Same
-        # non-caller invariant as sec_10q above — docstring + sentinel
-        # patch reference the symbol; no runtime call.
+        # #1171 — real N-CSR / N-CSRS fund-metadata parser. Fetches
+        # iXBRL companion via SecFilingsProvider.fetch_document_text
+        # and normalises every structured field into SQL
+        # (fund_metadata_observations + fund_metadata_current).
+        # The matching test file does NOT directly reference
+        # fetch_document_text — it monkeypatches the module-local
+        # `_fetch_ixbrl` wrapper one level up — so the test file is
+        # intentionally NOT in this allow-list.
         "app/services/manifest_parsers/sec_n_csr.py",
-        "tests/test_manifest_parser_sec_n_csr.py",
+        # #1171 — bundled company_tickers_mf.json ingest. Fetches the
+        # MF directory JSON via SecFilingsProvider.fetch_document_text
+        # and normalises every (cik, seriesId, classId, symbol) row into
+        # cik_refresh_mf_directory + external_identifiers (the structured
+        # SQL surface the resolver consumes).
+        "app/services/mf_directory.py",
+        "tests/test_mf_directory.py",
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",

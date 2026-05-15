@@ -48,6 +48,7 @@ from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
+from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
     record_job_finish,
@@ -1758,6 +1759,23 @@ def daily_cik_refresh() -> None:
                     watermark=result.last_modified or "",
                     response_hash=result.body_hash,
                 )
+
+            # #1171 — bundled mutual-fund / ETF classId directory refresh.
+            # Populates cik_refresh_mf_directory + external_identifiers
+            # (identifier_type='class_id') for the N-CSR fund-metadata
+            # parser. Logged-but-not-raised on failure: a directory-refresh
+            # error MUST NOT block the equity-side CIK refresh.
+            try:
+                mf_result = refresh_mf_directory(conn, provider=provider)
+                logger.info(
+                    "mf_directory refresh: fetched=%s directory_rows=%s ext_ids=%s",
+                    mf_result["fetched"],
+                    mf_result["directory_rows"],
+                    mf_result["external_identifier_rows"],
+                )
+            except Exception:  # noqa: BLE001 — fail-soft for #1171 bundling
+                logger.exception("mf_directory refresh failed; equity CIK refresh result preserved")
+
         tracker.row_count = upserted
 
     logger.info(

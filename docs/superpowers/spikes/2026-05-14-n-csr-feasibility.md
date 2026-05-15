@@ -437,13 +437,30 @@ The Step-4 status is recorded for completeness; the practical recommendation is 
 - **UIT-structured ETFs (QQQ, SPY) do not file N-CSR/N-CSRS regularly.** Holdings disclosure for UITs is structured differently. Update `data-sources/sec-edgar.md` or `data-engineer/etl-endpoint-coverage.md` to note that UITs are a structural gap in the N-CSR/N-PORT lane — track separately if operator visibility for UIT holdings ever becomes required.
 - **The 2024 TSR rule reshaped N-CSR content.** Post-TSR N-CSR primary HTML is a 2-3 page shareholder report + Item 7 financial statements with text-form SoI. Anyone reopening this spike must read the SEC TSR rule (effective 2024-07-24) before designing alternative tie-back paths — the iXBRL taxonomy covers the new TSR section, not the financial-statements section.
 
-### 10.5 Product-visibility-test answer (binding)
+### 10.5 Product-visibility-test answer (binding — scoped to audit-attestation lane)
 
-The operator-visible question: *"Would building an audited-fund-holdings ingest move the product closer to 'I can manage my fund from this screen'?"*
+The operator-visible question (this spike's scope): *"Would building an audited-fund-holdings ingest move the product closer to 'I can manage my fund from this screen'?"*
 
 Answer: **No.** Fund holdings via N-PORT-P are already ingested at monthly cadence with structured CUSIP grain. The audit credential (annual N-CSR) is uniform across registered funds — it has no operator-discriminating signal for ranking, thesis, or execution. The marginal value of a per-row "audited" badge does not justify the schema delta, name-matching code, or per-PR fragility maintenance.
 
-Synth no-op is the right v1 disposition. The spike doc + commit SHA + the §11.5.1 reference let any future operator re-examine the verdict if priorities shift.
+Synth no-op is the right v1 disposition **for the audit-attestation lane**. The spike doc + commit SHA + the §11.5.1 reference let any future operator re-examine the verdict if priorities shift.
+
+### 10.6 Scope narrowing — fund-metadata extraction tracked separately under #1171
+
+> Added 2026-05-15 alongside #1171 PR. Operator-mandated reconciliation.
+
+The §10.5 answer evaluates the **audit-attestation lane** — badging N-PORT-P rows as "audited" or replicating N-PORT holdings from N-CSR. It does **NOT** evaluate the **fund-metadata extraction lane** (per-class expense ratio, NAV, returns, sector / region / credit allocation, portfolio turnover, holdings count, material-change events).
+
+The two lanes are orthogonal product surfaces. The fund-metadata lane:
+
+- Extracts OEF iXBRL fields the spike confirmed are present at class-level grain (§8.2).
+- Has no overlap with N-PORT-P (which is per-issuer holdings only).
+- Discriminates strongly across funds (expense ratio 0.03% – 1.5%, NAV $1B – $500B, turnover 1% – 200%, etc.) — operator filter "ER < 0.10%" is a textbook fund-ranking action.
+- Resolves via the structured `oef:ClassAxis` member → classId bridge, not name-matching.
+
+The §10.3 settled-decisions row "Product-visibility pivot test: ANSWERED" is **narrowed** to apply to the audit-attestation lane only. The fund-metadata lane's product-visibility test was answered separately during #1171 spec authorship — yes, ranking + filtering + thesis input — and the parser shipped in #1171.
+
+This spike's verdict (INFEASIBLE-CONFIRMED for holdings + synth-no-op recommendation for the audit-attestation lane) **stands**. #1171 introduced a separate parser at `app/services/manifest_parsers/sec_n_csr.py` that handles the fund-metadata surface independently, without re-ingesting holdings.
 
 ## 11. Execution constraints
 
