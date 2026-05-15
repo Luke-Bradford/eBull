@@ -103,15 +103,16 @@ def _register_synthetic_jobs(monkeypatch: pytest.MonkeyPatch, mapping: dict[str,
 # ---------------------------------------------------------------------------
 
 
-def test_stage_catalogue_has_twenty_four_stages() -> None:
+def test_stage_catalogue_has_twenty_six_stages() -> None:
     """Catalogue size pinned to surface adds/removes in code review.
 
-    24 = 1 init + 1 etoro + 4 sec_rate (B-stages) + 1 sec_bulk_download
+    26 = 1 init + 1 etoro + 4 sec_rate (B-stages) + 1 sec_bulk_download
     + 5 db (Phase C ingesters) + 1 sec_rate (C1.b) + 7 sec_rate (legacy
-    chain) + 2 sec_rate (legacy 13F/N-PORT recent sweeps) + 2 db (E-stages).
+    chain) + 2 sec_rate (legacy 13F/N-PORT recent sweeps) + 2 db (E-stages)
+    + 2 sec_rate (#1174: S25 mf_directory_sync + S26 sec_n_csr_bootstrap_drain).
     """
     specs = get_bootstrap_stage_specs()
-    assert len(specs) == 24
+    assert len(specs) == 26
 
 
 def test_stage_catalogue_lane_composition() -> None:
@@ -119,11 +120,12 @@ def test_stage_catalogue_lane_composition() -> None:
     by_lane: dict[str, int] = {}
     for spec in specs:
         by_lane[spec.lane] = by_lane.get(spec.lane, 0) + 1
-    # 1 + 1 + (4 + 1 + 7 + 2) + 1 + (5 + 2) = 24
+    # 1 + 1 + (4 + 1 + 7 + 2 + 2) + 1 + (5 + 2) = 26
+    # The "+ 2" at the end is #1174's two new sec_rate stages.
     assert by_lane == {
         "init": 1,
         "etoro": 1,
-        "sec_rate": 14,
+        "sec_rate": 16,
         "sec_bulk_download": 1,
         "db": 7,
     }
@@ -331,8 +333,8 @@ def test_orchestrator_happy_path_completes(
     state = read_state(ebull_test_conn)
     assert state.status == "complete"
 
-    # All 24 invokers called.
-    assert len(calls["order"]) == 24
+    # All 26 invokers called (#1174 added S25 + S26).
+    assert len(calls["order"]) == 26
     # Phase A's universe sync was first.
     assert calls["order"][0] == "nightly_universe_sync"
 

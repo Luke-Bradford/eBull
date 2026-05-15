@@ -33,7 +33,7 @@ import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -44,6 +44,7 @@ from app.providers.implementations.sec_submissions import (
     check_freshness,
     parse_submissions_page,
 )
+from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
 from app.services.bootstrap_state import BootstrapStageCancelled
 from app.services.processes.bootstrap_cancel_signal import (
     active_bootstrap_stage_key,
@@ -505,3 +506,325 @@ def _drain_headers() -> dict[str, str]:
         "User-Agent": "eBull research/1.0 contact@example.com",
         "Accept-Encoding": "gzip, deflate",
     }
+
+
+# ---------------------------------------------------------------------------
+# #1174 — N-CSR / N-CSRS fund-scoped bootstrap drain (T8 deferred from #1171).
+#
+# Walks distinct trust CIKs from ``cik_refresh_mf_directory`` (populated by
+# the S25 ``mf_directory_sync`` bootstrap stage) + enqueues last-2-years
+# N-CSR + N-CSRS accessions per trust to ``sec_filing_manifest`` so the
+# manifest worker can drain them via the #1171 fund-metadata parser.
+#
+# Subject identity: ``subject_type='institutional_filer'`` with
+# ``subject_id=trust_cik`` and ``instrument_id=None``. Matches N-PORT
+# precedent + the manifest CHECK constraint ``chk_manifest_issuer_has_instrument``
+# (institutional_filer rows must have ``instrument_id IS NULL``). The
+# parser fans out per-(series, class) at parse time when writing
+# fund_metadata_observations.
+#
+# This stage is OUT-OF-BAND vs the existing first-install drain at
+# :167 (which explicitly excludes sec_n_csr from the issuer-scoped seed).
+# See spec docs/superpowers/specs/2026-05-15-n-csr-bootstrap-drain.md.
+# ---------------------------------------------------------------------------
+
+
+_N_CSR_DRAIN_CANCEL_POLL_EVERY_N = 50
+_N_CSR_SOURCE: str = "sec_n_csr"
+
+
+@dataclass(frozen=True)
+class NCsrDrainStats:
+    trusts_processed: int
+    trusts_skipped: int
+    secondary_pages_fetched: int
+    manifest_rows_upserted: int
+    accessions_outside_horizon: int
+    errors: int
+
+
+@dataclass(frozen=True)
+class _TrustDrainOutcome:
+    rows_upserted: int
+    accessions_outside_horizon: int
+    secondary_pages_fetched: int
+    skipped: bool
+    errored: bool
+
+
+def _iter_trust_ciks(conn: psycopg.Connection[Any]) -> Iterable[str]:
+    """Yield distinct trust_cik values from cik_refresh_mf_directory.
+
+    Deterministic ORDER BY for crash-resume + test reproducibility; the
+    manifest UPSERT idempotency carries actual safety across re-runs.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT trust_cik
+            FROM cik_refresh_mf_directory
+            WHERE trust_cik IS NOT NULL
+            ORDER BY trust_cik
+            """
+        )
+        for (cik,) in cur.fetchall():
+            yield str(cik)
+
+
+def _within_horizon(filed_at: datetime, cutoff: datetime) -> bool:
+    """True iff ``filed_at`` is on or after ``cutoff``. Both must be tz-aware."""
+    return filed_at >= cutoff
+
+
+def _enqueue_n_csr_for_trust(
+    conn: psycopg.Connection[Any],
+    *,
+    http_get: HttpGet,
+    trust_cik: str,
+    cutoff: datetime,
+) -> _TrustDrainOutcome:
+    """Fetch ``submissions.json`` for ``trust_cik`` (primary + secondary
+    pages), filter to ``source='sec_n_csr'`` rows within horizon, enqueue
+    manifest rows with ``subject_type='institutional_filer'`` +
+    ``subject_id=trust_cik`` + ``instrument_id=None``.
+
+    Returns counters; caller aggregates into ``NCsrDrainStats``. 404 maps
+    to ``skipped=True``; fetch / parse exception maps to ``errored=True``;
+    neither bubbles.
+    """
+    rows_upserted = 0
+    outside_horizon = 0
+    pages_fetched = 0
+
+    # Primary page via the shared freshness helper — it returns a
+    # ``FreshnessDelta`` already filtered to ``source='sec_n_csr'`` plus
+    # the ``filings.files[]`` page names for secondary pagination.
+    try:
+        delta = check_freshness(
+            http_get,
+            cik=trust_cik,
+            last_known_filing_id=None,
+            sources={_N_CSR_SOURCE},  # type: ignore[arg-type]
+        )
+    except Exception as exc:  # noqa: BLE001 — bubbling errored counter
+        logger.warning("bootstrap_n_csr_drain: check_freshness raised cik=%s: %s", trust_cik, exc)
+        return _TrustDrainOutcome(
+            rows_upserted=0,
+            accessions_outside_horizon=0,
+            secondary_pages_fetched=0,
+            skipped=False,
+            errored=True,
+        )
+
+    primary_empty = not delta.new_filings
+    no_pagination = not (delta.has_more_in_files and delta.files_pages)
+
+    # 404 returns an empty delta + no pagination (sec_submissions.py:246).
+    # Treat that as "skipped" so the caller distinguishes 'observed
+    # but no in-horizon work' from a clean 0-N-CSR trust.
+    if primary_empty and no_pagination:
+        return _TrustDrainOutcome(
+            rows_upserted=0,
+            accessions_outside_horizon=0,
+            secondary_pages_fetched=0,
+            skipped=True,
+            errored=False,
+        )
+
+    for row in delta.new_filings:
+        # Defensive — check_freshness already filtered, but the contract
+        # is "rows with the right source"; we re-assert at the
+        # write boundary.
+        if row.source != _N_CSR_SOURCE:
+            continue
+        if not _within_horizon(row.filed_at, cutoff):
+            outside_horizon += 1
+            continue
+        try:
+            record_manifest_entry(
+                conn,
+                row.accession_number,
+                cik=row.cik,
+                form=row.form,
+                source=_N_CSR_SOURCE,  # type: ignore[arg-type]
+                subject_type="institutional_filer",
+                subject_id=trust_cik,
+                instrument_id=None,
+                filed_at=row.filed_at,
+                accepted_at=row.accepted_at,
+                primary_document_url=row.primary_document_url,
+                is_amendment=row.is_amendment,
+            )
+            rows_upserted += 1
+        except ValueError as exc:
+            logger.warning(
+                "bootstrap_n_csr_drain: rejected accession=%s for trust=%s: %s",
+                row.accession_number,
+                trust_cik,
+                exc,
+            )
+
+    # Secondary-page walk — full traversal, filtered at row level.
+    # Spec §3.3: submissions.json is keyed by accession (not date), so
+    # secondary pages may carry both in-horizon and out-of-horizon rows;
+    # we accept the full walk + row-filter.
+    if delta.has_more_in_files and delta.files_pages:
+        for name in delta.files_pages:
+            page_url = f"https://data.sec.gov/submissions/{name}"
+            try:
+                status, body = http_get(page_url, _drain_headers())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "bootstrap_n_csr_drain: secondary fetch raised cik=%s page=%s: %s",
+                    trust_cik,
+                    name,
+                    exc,
+                )
+                continue
+            if status != 200:
+                logger.info(
+                    "bootstrap_n_csr_drain: secondary non-200 cik=%s page=%s status=%s",
+                    trust_cik,
+                    name,
+                    status,
+                )
+                continue
+            try:
+                page_rows, _ = parse_submissions_page(body, cik=trust_cik)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "bootstrap_n_csr_drain: secondary parse raised cik=%s page=%s: %s",
+                    trust_cik,
+                    name,
+                    exc,
+                )
+                continue
+            pages_fetched += 1
+            for row in page_rows:
+                # Explicit source filter — parse_submissions_page does NOT
+                # filter, so we must apply ``source='sec_n_csr'`` per
+                # spec §3.3 (Codex 1a WARNING).
+                if row.source != _N_CSR_SOURCE:
+                    continue
+                if not _within_horizon(row.filed_at, cutoff):
+                    outside_horizon += 1
+                    continue
+                try:
+                    record_manifest_entry(
+                        conn,
+                        row.accession_number,
+                        cik=row.cik,
+                        form=row.form,
+                        source=_N_CSR_SOURCE,  # type: ignore[arg-type]
+                        subject_type="institutional_filer",
+                        subject_id=trust_cik,
+                        instrument_id=None,
+                        filed_at=row.filed_at,
+                        accepted_at=row.accepted_at,
+                        primary_document_url=row.primary_document_url,
+                        is_amendment=row.is_amendment,
+                    )
+                    rows_upserted += 1
+                except ValueError as exc:
+                    logger.warning(
+                        "bootstrap_n_csr_drain: secondary rejected accession=%s trust=%s page=%s: %s",
+                        row.accession_number,
+                        trust_cik,
+                        name,
+                        exc,
+                    )
+
+    return _TrustDrainOutcome(
+        rows_upserted=rows_upserted,
+        accessions_outside_horizon=outside_horizon,
+        secondary_pages_fetched=pages_fetched,
+        skipped=False,
+        errored=False,
+    )
+
+
+def bootstrap_n_csr_drain(
+    conn: psycopg.Connection[Any],
+    *,
+    http_get: HttpGet,
+    horizon_days: int = 730,
+) -> NCsrDrainStats:
+    """Walk fund-trust CIKs from ``cik_refresh_mf_directory`` + enqueue
+    last-``horizon_days`` N-CSR + N-CSRS accessions per trust to
+    ``sec_filing_manifest``.
+
+    Pre-condition: ``class_id_mapping_ready`` capability (S25
+    ``mf_directory_sync`` populates ``cik_refresh_mf_directory``). Raises
+    ``BootstrapPhaseSkipped`` if the directory is empty (manual-trigger
+    guard — the capability gate catches this in the normal bootstrap
+    path, but operators can trigger this stage directly).
+
+    Cancel-cooperative: polls ``bootstrap_cancel_requested()`` every
+    ``_N_CSR_DRAIN_CANCEL_POLL_EVERY_N`` trusts; raises
+    ``BootstrapStageCancelled`` on observed cancel (cancel raises
+    instead of returning stats — caller must wrap in ``try``).
+
+    Subject identity at every ``record_manifest_entry`` call site:
+    ``subject_type='institutional_filer'`` + ``subject_id=trust_cik`` +
+    ``instrument_id=None``. The parser fans out per-(series, class) at
+    parse time.
+    """
+    # Entry guard — manual-trigger before S25 has ever fired.
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM cik_refresh_mf_directory")
+        row = cur.fetchone()
+        directory_count = int(row[0]) if row else 0
+    if directory_count == 0:
+        raise BootstrapPhaseSkipped("class_id_mapping_ready unsatisfied — cik_refresh_mf_directory empty")
+
+    cutoff = datetime.now(UTC) - timedelta(days=horizon_days)
+    trusts_processed = 0
+    trusts_skipped = 0
+    secondary_pages_fetched = 0
+    manifest_rows_upserted = 0
+    accessions_outside_horizon = 0
+    errors = 0
+
+    for n, trust_cik in enumerate(_iter_trust_ciks(conn)):
+        if n % _N_CSR_DRAIN_CANCEL_POLL_EVERY_N == 0 and bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"bootstrap_n_csr_drain cancelled by operator after {trusts_processed} trusts",
+                stage_key=active_bootstrap_stage_key() or "",
+            )
+
+        outcome = _enqueue_n_csr_for_trust(
+            conn,
+            http_get=http_get,
+            trust_cik=trust_cik,
+            cutoff=cutoff,
+        )
+
+        trusts_processed += 1
+        if outcome.errored:
+            errors += 1
+            continue
+        if outcome.skipped:
+            trusts_skipped += 1
+            continue
+        manifest_rows_upserted += outcome.rows_upserted
+        accessions_outside_horizon += outcome.accessions_outside_horizon
+        secondary_pages_fetched += outcome.secondary_pages_fetched
+
+    logger.info(
+        "bootstrap_n_csr_drain: trusts=%d skipped=%d errors=%d secondary_pages=%d upserted=%d outside_horizon=%d",
+        trusts_processed,
+        trusts_skipped,
+        errors,
+        secondary_pages_fetched,
+        manifest_rows_upserted,
+        accessions_outside_horizon,
+    )
+
+    return NCsrDrainStats(
+        trusts_processed=trusts_processed,
+        trusts_skipped=trusts_skipped,
+        secondary_pages_fetched=secondary_pages_fetched,
+        manifest_rows_upserted=manifest_rows_upserted,
+        accessions_outside_horizon=accessions_outside_horizon,
+        errors=errors,
+    )

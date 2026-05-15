@@ -126,6 +126,14 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # SQL surface the resolver consumes).
         "app/services/mf_directory.py",
         "tests/test_mf_directory.py",
+        # #1174 — wrapper-effect test for the dedicated S25
+        # ``mf_directory_sync`` bootstrap stage. The wrapper itself
+        # does NOT call fetch_document_text (it delegates to
+        # ``refresh_mf_directory``, already allow-listed above) but
+        # the test monkeypatches SecFilingsProvider.fetch_document_text
+        # to inject a fake mf.json body and assert the no-fail-soft +
+        # tracker.row_count + capability contracts.
+        "tests/test_mf_directory_sync_wrapper.py",
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",

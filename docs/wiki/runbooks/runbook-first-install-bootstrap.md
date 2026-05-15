@@ -27,12 +27,17 @@ Click "Run bootstrap" on the admin page when:
 Do **not** run it as part of routine ops: scheduled jobs handle
 incremental refresh once bootstrap is complete.
 
-## 2. What runs (24 stages)
+## 2. What runs (26 stages)
 
 Phases in order; the catalogue lives in
 ``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS`` and
-is the source of truth (asserted == 24 at module load). Spec:
+is the source of truth (asserted == 26 at module load). Spec:
 ``docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md``.
+
+#1174 added S25 ``mf_directory_sync`` (dedicated MF-directory refresh
+for N-CSR classId resolution) + S26 ``sec_n_csr_bootstrap_drain``
+(fund-scoped manifest enqueue for the #1171 fund-metadata parser).
+Both ride the ``sec_rate`` lane.
 
 1. **Phase A — init** (sequential, ``init`` lane, single thread):
    - S1 ``universe_sync`` (``nightly_universe_sync``; ~30s, ~1.5k rows).

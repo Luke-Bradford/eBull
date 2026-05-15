@@ -157,7 +157,7 @@ def test_run_commits_state_and_queue_row_together(
     _reset_state(ebull_test_conn)
     _wipe_pending_requests(ebull_test_conn)
 
-    # Skip the real spec list (24 stages); patch the spec factory to
+    # Skip the real spec list (26 stages); patch the spec factory to
     # the minimal triple above so this test doesn't depend on the
     # production lane shape.
     from app.api import bootstrap as bootstrap_api

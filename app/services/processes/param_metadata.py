@@ -175,6 +175,11 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
     # proper ``ParamMetadata`` declarations.
     "filings_history_seed": frozenset({"days_back", "filing_types", "instrument_id"}),
     "sec_first_install_drain": frozenset({"max_subjects"}),
+    # #1174 — bootstrap S26 dispatches sec_n_csr_bootstrap_drain with a
+    # hardcoded ``horizon_days=730`` matching filings_history_seed's
+    # days_back. Internal-only — the operator does not tune the
+    # bootstrap-time retention window through the standard UX.
+    "sec_n_csr_bootstrap_drain": frozenset({"horizon_days"}),
 }
 
 

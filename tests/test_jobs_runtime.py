@@ -468,6 +468,13 @@ class TestProductionInvokerRegistry:
             # trigger only). Pre-existing drift fixed in #1155's
             # registry guard sweep.
             "populate_canonical_redirects",
+            # #1174 — bootstrap-only fund-stages. The daily cron path
+            # for the MF directory refresh is bundled into
+            # ``daily_cik_refresh``; ``mf_directory_sync`` is the
+            # dedicated bootstrap-stage path (no fail-soft). The N-CSR
+            # drain is bootstrap-only (no scheduled cadence).
+            "mf_directory_sync",
+            "sec_n_csr_bootstrap_drain",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "
@@ -1177,3 +1184,87 @@ class TestShutdownDoesNotBlockOnInflightJobs:
             f"shutdown default timeout is {default}s — should be <=10s so "
             f"the uvicorn --reload supervisor does not abandon the relaunch"
         )
+
+
+# ---------------------------------------------------------------------------
+# #1174 — fund-stage invoker registration (R1-R4)
+# ---------------------------------------------------------------------------
+
+
+class TestFundStageInvokerRegistration:
+    """Spec §6 R1-R4: the two new fund-stage invokers (``mf_directory_sync``
+    + ``sec_n_csr_bootstrap_drain``) are registered in ``_INVOKERS`` BEFORE
+    ``VALID_JOB_NAMES`` is derived, so the listener boundary at
+    ``app/jobs/listener.py:114`` (which validates against ``VALID_JOB_NAMES``)
+    accepts both job names.
+    """
+
+    def test_r1_mf_directory_sync_registered(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+        from app.workers.scheduler import (
+            JOB_MF_DIRECTORY_SYNC,
+            mf_directory_sync,
+        )
+
+        assert JOB_MF_DIRECTORY_SYNC in _INVOKERS
+        assert _INVOKERS[JOB_MF_DIRECTORY_SYNC] is mf_directory_sync
+
+    def test_r2_sec_n_csr_bootstrap_drain_registered(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+        from app.workers.scheduler import (
+            JOB_SEC_N_CSR_BOOTSTRAP_DRAIN,
+            sec_n_csr_bootstrap_drain,
+        )
+
+        assert JOB_SEC_N_CSR_BOOTSTRAP_DRAIN in _INVOKERS
+        assert _INVOKERS[JOB_SEC_N_CSR_BOOTSTRAP_DRAIN] is sec_n_csr_bootstrap_drain
+
+    def test_r3_both_in_valid_job_names(self) -> None:
+        from app.jobs.runtime import VALID_JOB_NAMES
+
+        assert "mf_directory_sync" in VALID_JOB_NAMES
+        assert "sec_n_csr_bootstrap_drain" in VALID_JOB_NAMES
+
+    def test_r4_listener_boundary_accepts_both_job_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Exercise the actual listener dispatch boundary at
+        ``app/jobs/listener.py:_dispatch_manual_job``.
+
+        The listener rejects unknown job names via
+        ``mark_request_rejected`` before reaching the runtime; accepted
+        names land at ``runtime.submit_manual_with_request``. We patch
+        both branches and assert each new job name reaches the
+        accepted path.
+
+        Codex 2 WARNING — the prior R4 only checked membership/callability,
+        not the dispatch boundary itself.
+        """
+        from app.jobs import listener as listener_module
+
+        rejected_calls: list[tuple[int, str]] = []
+        accepted_calls: list[str] = []
+
+        def fake_reject(conn, request_id, *, error_msg):
+            del conn
+            rejected_calls.append((request_id, error_msg))
+
+        def fake_submit_manual_with_request(job_name, *, request_id, mode, params):
+            del request_id, mode, params
+            accepted_calls.append(job_name)
+
+        monkeypatch.setattr(listener_module, "mark_request_rejected", fake_reject)
+
+        fake_runtime = MagicMock(spec=listener_module.JobRuntime)
+        fake_runtime.submit_manual_with_request = fake_submit_manual_with_request
+
+        for i, name in enumerate(("mf_directory_sync", "sec_n_csr_bootstrap_drain")):
+            listener_module._dispatch_manual_job(
+                runtime=fake_runtime,
+                request_id=1000 + i,
+                job_name=name,
+                payload=None,
+                mode=None,
+            )
+
+        # Both names reached the runtime — neither rejected at the listener gate.
+        assert sorted(accepted_calls) == ["mf_directory_sync", "sec_n_csr_bootstrap_drain"]
+        assert rejected_calls == []

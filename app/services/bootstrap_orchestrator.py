@@ -1,6 +1,6 @@
 """First-install bootstrap orchestrator.
 
-Runs the 24-stage end-to-end first-install backfill described in
+Runs the 26-stage end-to-end first-install backfill described in
 ``docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md``
 (supersedes the original 17-stage shape in
 ``docs/superpowers/specs/2026-05-07-first-install-bootstrap.md``).
@@ -110,6 +110,9 @@ from app.workers.scheduler import (  # noqa: E402  (after dataclass to avoid cyc
 # operator records / job_runs trail stays consistent.
 JOB_DAILY_CIK_REFRESH = "daily_cik_refresh"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
+# #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap drain.
+JOB_MF_DIRECTORY_SYNC = "mf_directory_sync"
+JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
 
 
 # PR1c #1064 — bootstrap-bounded 13F sweep recency cut-off. Used to
@@ -238,6 +241,10 @@ Capability = Literal[
     "institutional_inputs_seeded",
     "nport_inputs_seeded",
     "fundamentals_raw_seeded",
+    # #1174 — classId → instrument_id mapping + fund-trust directory.
+    # Provided by S25 ``mf_directory_sync``; required by S26
+    # ``sec_n_csr_bootstrap_drain``.
+    "class_id_mapping_ready",
 ]
 
 
@@ -284,6 +291,9 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
     "sec_form3_ingest": ("form3_inputs_seeded",),
     "sec_13f_recent_sweep": ("institutional_inputs_seeded",),
     "sec_n_port_ingest": ("nport_inputs_seeded",),
+    # #1174 — dedicated MF directory refresh advertises class_id_mapping_ready.
+    # S26 ``sec_n_csr_bootstrap_drain`` is terminal (no provides entry).
+    "mf_directory_sync": ("class_id_mapping_ready",),
 }
 
 
@@ -320,6 +330,12 @@ _CAPABILITY_MIN_ROWS: Final[dict[Capability, int]] = {
     "form3_inputs_seeded": 1,
     "institutional_inputs_seeded": 1,
     "nport_inputs_seeded": 1,
+    # #1174 — refresh_mf_directory returns directory_rows=0 on an empty
+    # or malformed mf.json without raising (fail-soft for the daily
+    # cron path). Strict-gate floor of 1 ensures S25 success advertises
+    # ``class_id_mapping_ready`` only when cik_refresh_mf_directory was
+    # actually populated — Codex 2 BLOCKING.
+    "class_id_mapping_ready": 1,
 }
 
 
@@ -384,6 +400,9 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     "sec_8k_events_ingest": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
     "sec_13f_recent_sweep": CapRequirement(all_of=("cik_mapping_ready",)),
     "sec_n_port_ingest": CapRequirement(all_of=("cik_mapping_ready",)),
+    # #1174 — dedicated MF directory refresh + N-CSR drain (S25 + S26).
+    "mf_directory_sync": CapRequirement(all_of=("universe_seeded",)),
+    "sec_n_csr_bootstrap_drain": CapRequirement(all_of=("class_id_mapping_ready",)),
     # Phase E — final derivations. Per-family caps in §4 of the spec
     # encode the bulk-OR-legacy alternative at the *provider* side
     # (each cap has both a bulk and a legacy producer), so the
@@ -877,6 +896,18 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     _spec("sec_n_port_ingest", 22, "sec_rate", "sec_n_port_ingest"),
     _spec("ownership_observations_backfill", 23, "db", "ownership_observations_backfill"),
     _spec("fundamentals_sync", 24, "db", "fundamentals_sync"),
+    # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap
+    # drain (T8 deferred from #1171). S25 advertises class_id_mapping_ready;
+    # S26 (terminal) drains N-CSR + N-CSRS accessions per trust for the
+    # #1171 fund-metadata parser to consume.
+    _spec("mf_directory_sync", 25, "sec_rate", JOB_MF_DIRECTORY_SYNC),
+    _spec(
+        "sec_n_csr_bootstrap_drain",
+        26,
+        "sec_rate",
+        JOB_SEC_N_CSR_BOOTSTRAP_DRAIN,
+        params={"horizon_days": 730},
+    ),
 )
 
 
@@ -1783,6 +1814,8 @@ __all__ = [
     "JOB_BOOTSTRAP_ORCHESTRATOR",
     "JOB_DAILY_CIK_REFRESH",
     "JOB_DAILY_FINANCIAL_FACTS",
+    "JOB_MF_DIRECTORY_SYNC",
+    "JOB_SEC_N_CSR_BOOTSTRAP_DRAIN",
     "get_bootstrap_stage_specs",
     "run_bootstrap_orchestrator",
 ]
@@ -1791,9 +1824,10 @@ __all__ = [
 # Stage count assertion — pin so a future refactor that adds /
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
-# current 24-stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 24, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 24 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+# current 26-stage shape.
+assert len(_BOOTSTRAP_STAGE_SPECS) == 26, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 26 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
     "update the spec, frontend, runbook, and stage_count tests in lockstep. "
-    "#1027 added 7 bulk-archive stages (sec_bulk_download + C1.a/C2/C3/C4/C5 ingesters + C1.b walker)."
+    "#1027 added 7 bulk-archive stages (sec_bulk_download + C1.a/C2/C3/C4/C5 ingesters + C1.b walker); "
+    "#1174 added 2 fund-stages (S25 mf_directory_sync + S26 sec_n_csr_bootstrap_drain)."
 )

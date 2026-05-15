@@ -291,6 +291,13 @@ from app.workers import scheduler as _scheduler  # noqa: E402
 _INVOKERS[_scheduler.JOB_FILINGS_HISTORY_SEED] = _scheduler.filings_history_seed
 _INVOKERS[_scheduler.JOB_SEC_FIRST_INSTALL_DRAIN] = _scheduler.sec_first_install_drain
 
+# #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap
+# drain. Both invokers are params-aware natively (no ``_adapt_zero_arg``);
+# ``mf_directory_sync`` discards params, ``sec_n_csr_bootstrap_drain``
+# consumes ``horizon_days``.
+_INVOKERS[_scheduler.JOB_MF_DIRECTORY_SYNC] = _scheduler.mf_directory_sync
+_INVOKERS[_scheduler.JOB_SEC_N_CSR_BOOTSTRAP_DRAIN] = _scheduler.sec_n_csr_bootstrap_drain
+
 # #1155 — Layer 1 / 2 / 3 freshness redesign wiring + sec_rebuild
 # manual triage. Layers 1/2/3 are scheduled (SCHEDULED_JOBS rows in
 # scheduler.py); sec_rebuild is manual-trigger-only (params declared
