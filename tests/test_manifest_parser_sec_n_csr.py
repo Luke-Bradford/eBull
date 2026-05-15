@@ -58,10 +58,14 @@ def _seed_instrument(
         """,
         (iid, symbol, f"{symbol} fund"),
     )
+    # PREVENTION: set is_primary=TRUE explicitly. Resolver filters on it; do
+    # not rely on column DEFAULT (review-prevention-log entry from PR #1172).
     conn.execute(
         """
-        INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value)
-        VALUES (%s, 'sec', 'class_id', %s)
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        )
+        VALUES (%s, 'sec', 'class_id', %s, TRUE)
         ON CONFLICT DO NOTHING
         """,
         (iid, class_id),
