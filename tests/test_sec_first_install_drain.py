@@ -418,35 +418,110 @@ def _by_url(mapping: dict[str, dict | bytes | Exception | int]):
 
 
 def _seed_trust(conn: psycopg.Connection[tuple], trust_cik: str) -> None:
-    """Seed one row in ``cik_refresh_mf_directory`` for a trust."""
-    conn.execute(
-        """
-        INSERT INTO cik_refresh_mf_directory (class_id, series_id, symbol, trust_cik)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (class_id) DO NOTHING
-        """,
-        (f"C{trust_cik[-9:]}", f"S{trust_cik[-9:]}", "VFIAX", trust_cik),
-    )
+    """Seed one universe-mapped trust.
+
+    Per #1176: bootstrap_n_csr_drain filters trusts via JOIN against
+    ``external_identifiers (provider='sec', identifier_type='class_id')``,
+    so a test trust needs BOTH the directory row AND an ext-id row
+    referencing an instrument to be walked. Helper creates the full
+    chain: instrument + directory row + ext-id row.
+    """
+    class_id = f"C{trust_cik[-9:]}"
+    series_id = f"S{trust_cik[-9:]}"
+    symbol = "VFIAX"
+    # Use a stable instrument_id derived from the CIK so multiple
+    # trusts coexist without collision.
+    instrument_id = 9000 + int(trust_cik[-4:])
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+            VALUES (%s, %s, %s, '4', 'USD', TRUE)
+            ON CONFLICT (instrument_id) DO NOTHING
+            """,
+            (instrument_id, symbol, f"{symbol} fund"),
+        )
+        cur.execute(
+            """
+            INSERT INTO cik_refresh_mf_directory (class_id, series_id, symbol, trust_cik)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (class_id) DO NOTHING
+            """,
+            (class_id, series_id, symbol, trust_cik),
+        )
+        cur.execute(
+            """
+            INSERT INTO external_identifiers (
+                instrument_id, provider, identifier_type, identifier_value, is_primary
+            )
+            VALUES (%s, 'sec', 'class_id', %s, TRUE)
+            ON CONFLICT DO NOTHING
+            """,
+            (instrument_id, class_id),
+        )
     conn.commit()
 
 
 def _seed_n_trusts(conn: psycopg.Connection[tuple], n: int) -> list[str]:
-    """Seed N distinct trusts with synthetic CIKs."""
+    """Seed N distinct universe-mapped trusts.
+
+    Each trust gets instrument + directory row + ext-id row (#1176
+    JOIN requires the full chain).
+    """
     ciks: list[str] = []
     with conn.cursor() as cur:
         for i in range(n):
             cik = str(100000 + i).zfill(10)
             ciks.append(cik)
+            class_id = f"C{cik[-9:]}"
+            series_id = f"S{cik[-9:]}"
+            symbol = f"FUND{i:04d}"
+            instrument_id = 8000 + i
+            cur.execute(
+                """
+                INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+                VALUES (%s, %s, %s, '4', 'USD', TRUE)
+                ON CONFLICT (instrument_id) DO NOTHING
+                """,
+                (instrument_id, symbol, f"{symbol} fund"),
+            )
             cur.execute(
                 """
                 INSERT INTO cik_refresh_mf_directory (class_id, series_id, symbol, trust_cik)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (class_id) DO NOTHING
                 """,
-                (f"C{cik[-9:]}", f"S{cik[-9:]}", f"FUND{i:04d}", cik),
+                (class_id, series_id, symbol, cik),
+            )
+            cur.execute(
+                """
+                INSERT INTO external_identifiers (
+                    instrument_id, provider, identifier_type, identifier_value, is_primary
+                )
+                VALUES (%s, 'sec', 'class_id', %s, TRUE)
+                ON CONFLICT DO NOTHING
+                """,
+                (instrument_id, class_id),
             )
     conn.commit()
     return ciks
+
+
+def _seed_non_universe_trust(conn: psycopg.Connection[tuple], trust_cik: str) -> None:
+    """Seed a trust in cik_refresh_mf_directory WITHOUT an ext-id row.
+
+    Used to verify #1176 JOIN filter excludes non-universe trusts.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO cik_refresh_mf_directory (class_id, series_id, symbol, trust_cik)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (class_id) DO NOTHING
+            """,
+            (f"C{trust_cik[-9:]}", f"S{trust_cik[-9:]}", f"X{trust_cik[-3:]}", trust_cik),
+        )
+    conn.commit()
 
 
 def _submissions_url(cik: str) -> str:
@@ -864,3 +939,46 @@ class TestNCsrBootstrapDrain:
         assert row is not None
         # #956 contract — one row per (subject_type, subject_id, source).
         assert int(row[0]) == 1
+
+    # ------------------------------------------------------------------
+    # Case 14 — #1176: cohort filter to trusts with universe-mapped classes
+    # ------------------------------------------------------------------
+    def test_universe_class_filter_excludes_unmapped_trusts(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#1176 — drain must skip trusts whose mf_directory rows have no
+        matching ``external_identifiers (identifier_type='class_id')``
+        row. Non-universe trusts produce only INSTRUMENT_NOT_IN_UNIVERSE
+        tombstones; enqueueing them wastes SEC rate-budget + parser
+        wall-clock.
+        """
+        universe_trust = "0000036405"  # Vanguard — gets full chain
+        non_universe_a = "0000999991"  # mf_directory only, no ext-id
+        non_universe_b = "0000999992"  # mf_directory only, no ext-id
+
+        _seed_trust(ebull_test_conn, universe_trust)
+        _seed_non_universe_trust(ebull_test_conn, non_universe_a)
+        _seed_non_universe_trust(ebull_test_conn, non_universe_b)
+
+        today = date.today()
+        rows = [("0001104659-26-000080", today.isoformat(), "N-CSR", "n.htm")]
+        payload = _make_submissions_payload(cik=universe_trust, rows=rows)
+
+        # Track which trust URLs the drain visits.
+        visited_urls: list[str] = []
+
+        def tracking_http(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+            visited_urls.append(url)
+            # Only the universe trust's URL should be requested.
+            if url == _submissions_url(universe_trust):
+                return 200, json.dumps(payload).encode("utf-8")
+            raise AssertionError(f"drain visited non-universe trust URL: {url}")
+
+        stats = bootstrap_n_csr_drain(ebull_test_conn, http_get=tracking_http)
+        ebull_test_conn.commit()
+
+        # Only the universe trust was fetched.
+        assert stats.trusts_processed == 1
+        assert visited_urls == [_submissions_url(universe_trust)]
+        assert stats.manifest_rows_upserted == 1

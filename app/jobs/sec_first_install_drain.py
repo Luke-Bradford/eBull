@@ -553,18 +553,42 @@ class _TrustDrainOutcome:
 
 
 def _iter_trust_ciks(conn: psycopg.Connection[Any]) -> Iterable[str]:
-    """Yield distinct trust_cik values from cik_refresh_mf_directory.
+    """Yield distinct trust_cik values for trusts with at least one
+    universe-mapped class (#1176).
 
-    Deterministic ORDER BY for crash-resume + test reproducibility; the
-    manifest UPSERT idempotency carries actual safety across re-runs.
+    Filters via INNER JOIN against ``external_identifiers
+    (provider='sec', identifier_type='class_id')`` — only trusts whose
+    mf-directory class_id resolves to an in-universe instrument are
+    walked. Non-universe trusts can never produce parseable
+    fund-metadata observations (the parser would fetch their iXBRL +
+    tombstone with ``INSTRUMENT_NOT_IN_UNIVERSE``), so enqueueing them
+    burns SEC rate-budget + parser wall-clock for guaranteed-tombstone
+    rows.
+
+    Atomicity rationale: ``refresh_mf_directory`` populates
+    ``cik_refresh_mf_directory`` AND
+    ``external_identifiers (identifier_type='class_id')`` in the same
+    transaction (``app/services/mf_directory.py``), so there is no
+    race window where a class_id appears in the directory before its
+    ext-id row lands. The JOIN is therefore exhaustive of every
+    drain-relevant trust at any consistent read snapshot.
+
+    Deterministic ORDER BY for crash-resume + test reproducibility;
+    the manifest UPSERT idempotency carries actual safety across
+    re-runs.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT trust_cik
-            FROM cik_refresh_mf_directory
-            WHERE trust_cik IS NOT NULL
-            ORDER BY trust_cik
+            SELECT DISTINCT mf.trust_cik
+            FROM cik_refresh_mf_directory mf
+            JOIN external_identifiers ei
+              ON ei.identifier_value = mf.class_id
+             AND ei.provider = 'sec'
+             AND ei.identifier_type = 'class_id'
+             AND ei.is_primary = TRUE
+            WHERE mf.trust_cik IS NOT NULL
+            ORDER BY mf.trust_cik
             """
         )
         for (cik,) in cur.fetchall():
