@@ -65,6 +65,7 @@ def test_refresh_mf_directory_first_run(
         ("C000010048",),
     )
     row = cur.fetchone()
+    assert row is not None
     assert row[0] == "0000036405"  # zero-padded
     assert row[1] == "VFIAX"
 
@@ -74,7 +75,9 @@ def test_refresh_mf_directory_first_run(
         "WHERE provider='sec' AND identifier_type='class_id' AND identifier_value=%s",
         ("C000010048",),
     )
-    assert cur.fetchone()[0] == 4001
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == 4001
 
 
 def test_refresh_mf_directory_idempotent_second_run(

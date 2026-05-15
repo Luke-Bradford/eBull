@@ -144,13 +144,17 @@ def test_parsed_with_one_class(
         "SELECT COUNT(*) FROM fund_metadata_observations WHERE instrument_id = %s AND known_to IS NULL",
         (3001,),
     )
-    assert cur.fetchone()[0] == 1
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == 1
 
     cur = ebull_test_conn.execute(
         "SELECT expense_ratio_pct FROM fund_metadata_current WHERE instrument_id = %s",
         (3001,),
     )
-    assert cur.fetchone()[0] == Decimal("0.00040000")
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == Decimal("0.00040000")
 
 
 def test_parser_version_rewash_supersedes_prior(
@@ -182,19 +186,25 @@ def test_parser_version_rewash_supersedes_prior(
         "SELECT COUNT(*) FROM fund_metadata_observations WHERE instrument_id = %s",
         (3002,),
     )
-    assert cur.fetchone()[0] == 2
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == 2
 
     cur = ebull_test_conn.execute(
         "SELECT COUNT(*) FROM fund_metadata_observations WHERE instrument_id = %s AND known_to IS NULL",
         (3002,),
     )
-    assert cur.fetchone()[0] == 1
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == 1
 
     cur = ebull_test_conn.execute(
         "SELECT expense_ratio_pct FROM fund_metadata_current WHERE instrument_id = %s",
         (3002,),
     )
-    assert cur.fetchone()[0] == Decimal("0.00050000")
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == Decimal("0.00050000")
 
 
 def test_partial_success_mixed_misses(
@@ -229,7 +239,9 @@ def test_partial_success_mixed_misses(
         "SELECT COUNT(*) FROM fund_metadata_observations WHERE source_accession = %s AND known_to IS NULL",
         ("0001-26-PART",),
     )
-    assert cur.fetchone()[0] == 2
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == 2
 
 
 def test_zero_resolution_unanimous_deterministic_tombstones(

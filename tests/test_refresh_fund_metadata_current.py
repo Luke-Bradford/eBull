@@ -127,7 +127,9 @@ def test_updated_newer_period_end(
         "SELECT source_accession FROM fund_metadata_current WHERE instrument_id = %s",
         (2002,),
     )
-    assert cur.fetchone()[0] == "0001-26-000020"
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == "0001-26-000020"
 
 
 def test_filed_at_tie_break_amendment_wins(
@@ -160,6 +162,7 @@ def test_filed_at_tie_break_amendment_wins(
         (2003,),
     )
     row = cur.fetchone()
+    assert row is not None
     assert row[0] == "0001-26-AMD"
     assert row[1] == "N-CSR/A"
 
@@ -191,7 +194,9 @@ def test_source_accession_tie_break_degenerate(
         "SELECT source_accession FROM fund_metadata_current WHERE instrument_id = %s",
         (2004,),
     )
-    assert cur.fetchone()[0] == "0001-26-ZZZ"
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == "0001-26-ZZZ"
 
 
 def test_idempotent_second_refresh_returns_updated(
@@ -243,7 +248,9 @@ def test_known_to_filter_excludes_superseded(
         "SELECT source_accession FROM fund_metadata_current WHERE instrument_id = %s",
         (2006,),
     )
-    assert cur.fetchone()[0] == "0001-26-NEW"
+    _row = cur.fetchone()
+    assert _row is not None
+    assert _row[0] == "0001-26-NEW"
 
 
 def test_deleted_when_no_currently_valid_observations(
