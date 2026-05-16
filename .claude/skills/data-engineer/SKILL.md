@@ -593,6 +593,8 @@ Pre-PR3 history: scheduled-fire honoured `_bootstrap_complete` prerequisite; man
 
 The 409 surfaces with reason `bootstrap_not_complete` and copy "Bootstrap is not complete. Finish first-install before triggering scheduled jobs." in [`frontend/src/components/admin/processStatus.ts::REASON_TOOLTIP`](../../../frontend/src/components/admin/processStatus.ts).
 
+**Carve-outs (#1181):** registered jobs with `exempt_from_universal_bootstrap_gate=True` BYPASS the gate on all three dispatch paths — scheduled fire, catch-up, manual-queue. No `decision_audit` row is written for exempt fires (distinct from the operator-override path which does write audit). Current allow-list: `sec_daily_index_reconcile` only. Adding a new exempt job requires a spec + Codex review + update to `tests/test_universal_gate_carve_out.py::test_exempt_allowlist_is_explicit`. See settled-decisions §"Safety-net catch-up gate carve-out (#1181)" + §7.8 runbook below.
+
 ### 6.5.5 `job_runs.params_snapshot JSONB`
 
 Every job_runs row records the params dict that produced it. Manual triggers write the operator-supplied dict; scheduled fires write the registry default + cadence-derived overrides. Operator history visibility — clicking a row in the admin process table reveals "this run used `chunk_limit=200, since=2026-01-01`" rather than just "ran for 47s".
@@ -697,6 +699,77 @@ Today's UI shows you the locked door with a "no entry" sign on every category. T
 **Answer:** SEC bulk-download stages (12-15 in the sequence) fetch ~12,000 SEC per-CIK pages at a 10-req/s rate-limit. The bootstrap's `sec_first_install_drain` stage (#909 / PR1c) is the long pole — bounded by SEC's published rate limit, not eBull. Re-run all on a fresh DB is roughly 20+ minutes of bandwidth.
 
 Operator-helpful surface (deferred, NOT scheduled): a pre-flight estimate "this will issue ~12,000 SEC requests over ~20 minutes" before kick-off. Tracked as a future operator-UX ticket; not blocking PR7.
+
+### 7.8 Discovery-layer end-to-end smoke (Lane B — #1181)
+
+**Use when:** verifying that Layer 1/2/3 discovery jobs are actually wired + firing + ingesting end-to-end. Authoritative smoke for "did the steady-state discovery path survive my change?"
+
+**Pre-condition:** jobs process running. `bootstrap_state.status` may be incomplete (Layer 2 carve-out fires regardless; Layer 1/3 require `override_bootstrap_gate=true` when bootstrap is not complete).
+
+For each of (`sec_atom_fast_lane`, `sec_daily_index_reconcile`, `sec_per_cik_poll`):
+
+**Step 1 — Snapshot baseline.** Capture the last `run_id` (any status) so the next fire is provably ours, not a coincidental scheduled fire. COALESCE guards the zero-prior-rows case:
+
+```sql
+SELECT COALESCE(MAX(run_id), 0) FROM job_runs WHERE job_name = '<job_name>';
+```
+
+**Step 2 — Fire via manual queue.** Override is required when `bootstrap_state.status != 'complete'` AND the job is not exempt. Layer 2 fires without override regardless:
+
+```text
+POST /jobs/<job_name>/run
+body: {"control": {"override_bootstrap_gate": true}}
+```
+
+**Step 3 — Confirm the fire succeeded.** Within 60s:
+
+```sql
+SELECT run_id, status, started_at, finished_at, row_count,
+       params_snapshot, linked_request_id
+FROM job_runs
+WHERE job_name = '<job_name>' AND run_id > <baseline_run_id_from_step_1>
+ORDER BY run_id DESC LIMIT 1;
+```
+
+Pass criteria: exactly one new row with `status='success'` AND populated `linked_request_id` matching the manual-queue request from step 2. `row_count` may be 0 (no new accessions to ingest is a valid success path for atom/daily-index in steady state); the proof is `status='success'` + `finished_at` populated.
+
+**Step 4 — Discovery-attribution check (atom + daily-index only).** `sec_filing_manifest.source` records the parser-source enum NOT the discovery origin. Attribute via the run's started/finished window:
+
+```sql
+SELECT source, COUNT(*) AS new_rows
+FROM sec_filing_manifest
+WHERE created_at BETWEEN <run.started_at> AND <run.finished_at> + INTERVAL '5 seconds'
+GROUP BY source;
+```
+
+Non-zero result during a known-active window proves discovery wrote rows. Zero result is INCONCLUSIVE for atom (no new accessions in 5 min is normal) — fall back to the jobs-process log line: `sec_atom_fast_lane: feed=X matched=Y upserted=Z ...`.
+
+**Step 5 — Per-cik poll scheduler-write check (`sec_per_cik_poll` only).** Confirm the poll updated freshness scheduler state:
+
+```sql
+SELECT subject_type, source, last_polled_at, next_recheck_at
+FROM data_freshness_index
+WHERE last_polled_at BETWEEN <run.started_at> AND <run.finished_at> + INTERVAL '5 seconds'
+LIMIT 5;
+```
+
+Expect non-zero rows when the poll had subjects in-budget.
+
+**Step 6 — Confirm scheduled-fire registration.** Manual fire proves the invoker body works. Scheduled-fire registration is proved via:
+
+```text
+GET /system/jobs    (admin endpoint; reports next_run_time)
+```
+
+Expected `next_run_time`:
+
+- `sec_atom_fast_lane`: within ~5 min.
+- `sec_daily_index_reconcile`: next 04:00 UTC.
+- `sec_per_cik_poll`: top of next hour.
+
+**Step 7 — Wait for natural scheduled fire (atom + per-cik only).** For atom (5 min) and per-cik (hourly): wait one cadence, re-run step 3. A scheduled fire's row has `linked_request_id IS NULL` — that's the proof APScheduler is dispatching.
+
+For daily-index (04:00 UTC): scheduled-fire confirmation is the registration check in step 6; waiting 24h is not viable. The full end-to-end is proved by (manual-fire success in step 3) + (registration populated in step 6); the carve-out (#1181) is what makes the next scheduled fire succeed regardless of `bootstrap_state`.
 
 ## 11. Integrity reference matrix — actual shapes per table
 
