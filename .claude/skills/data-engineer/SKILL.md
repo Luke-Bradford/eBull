@@ -337,7 +337,7 @@ SEC-specific jobs:
 - `sec_daily_index_reconcile.py` — daily-index reconciliation.
 - `sec_per_cik_poll.py` — per-CIK submissions.json poller (cadence-driven from `data_freshness_index`).
 - `sec_first_install_drain.py` — first-install drain (#871).
-- `sec_manifest_worker.py` — pulls `pending` + `failed AND next_retry_at<=NOW()` from manifest, dispatches to parsers.
+- `sec_manifest_worker.py` — pulls `pending` + `failed AND next_retry_at<=NOW()` from manifest, dispatches to parsers. **Fairness contract (#1179)**: the unscoped tick (`source=None`) allocates a per-source quota via `compute_quotas(sources, max_rows, tick_id)` (Phase A), then tops up residual budget against the global oldest tail (`iter_pending_topup` / `iter_retryable_topup` — Phase B). Both top-up queries are scoped to `registered_parser_sources()` only — `sec_xbrl_facts` / `finra_short_interest` rows never reach the dispatch loop via the unscoped path. `tick_id` advances by +1 per tick (module-global `itertools.count(0)` for production; tests inject explicitly) so rotation visits every source within `n - remainder + 1` ticks regardless of scheduler cadence. The per-source rebuild path (`source='sec_form4'` etc.) is unchanged — full `max_rows` budget consumed by the requested source.
 - `sec_rebuild.py` — `POST /jobs/sec_rebuild/run` (operator-triggered targeted re-ingest).
 - `ownership_observations_repair.py` — daily 03:30 UTC drift sweep.
 

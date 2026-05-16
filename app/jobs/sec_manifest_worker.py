@@ -33,9 +33,10 @@ batch sizes predictable.
 
 from __future__ import annotations
 
+import itertools
 import logging
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -47,11 +48,47 @@ from app.services.sec_manifest import (
     ManifestRow,
     ManifestSource,
     iter_pending,
+    iter_pending_topup,
     iter_retryable,
+    iter_retryable_topup,
     transition_status,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Tick counter for Phase A `lead` rotation (#1179). Module-global
+# because the production scheduled tick wrapper passes
+# ``tick_id=None`` and the worker must advance by exactly +1 per
+# call regardless of scheduler cadence (avoids the
+# ``gcd(tick_step, n) > 1`` regime that would visit only a subset
+# of lead offsets). Tests inject ``tick_id`` explicitly so the
+# counter is irrelevant under test.
+_TICK_COUNTER = itertools.count(0)
+
+
+def compute_quotas(
+    sources: Sequence[ManifestSource],
+    max_rows: int,
+    tick_id: int,
+) -> dict[ManifestSource, int]:
+    """Per-source quota with tick-rotated lead (#1179).
+
+    Returns a ``{source: slot_count}`` mapping such that
+    ``sum(quotas.values()) == max_rows`` for non-empty ``sources``.
+    Rotation: ``lead = tick_id % len(sources)``; the first
+    ``max_rows mod n`` sources at rotated index get ``base + 1``
+    slots, the rest get ``base = max_rows // n``. Every source
+    receives a Phase A slot within ``n - remainder + 1`` consecutive
+    ticks regardless of scheduler cadence (independent of
+    ``gcd(tick_step, n)``).
+    """
+    n = len(sources)
+    if n == 0:
+        return {}
+    base, remainder = divmod(max_rows, n)
+    lead = tick_id % n
+    return {s: base + (1 if (i - lead) % n < remainder else 0) for i, s in enumerate(sources)}
 
 
 ParseStatus = Literal["parsed", "tombstoned", "failed"]
@@ -148,6 +185,12 @@ class WorkerStats:
     # exactly which manifest sources are dropping work because no
     # parser is registered (#940). Empty when ``skipped_no_parser=0``.
     skipped_no_parser_by_source: dict[ManifestSource, int] = field(default_factory=dict)
+    # Per-source breakdown of dispatched rows (#1179). Bumped once
+    # per row reaching the parser dispatch entry point (i.e. rows
+    # that exit via parsed / tombstoned / failed /
+    # raw_payload_violations). Sum equals
+    # ``rows_processed - skipped_no_parser``.
+    processed_by_source: dict[ManifestSource, int] = field(default_factory=dict)
 
 
 def run_manifest_worker(
@@ -156,39 +199,123 @@ def run_manifest_worker(
     source: ManifestSource | None = None,
     max_rows: int = 100,
     now: datetime | None = None,
+    tick_id: int | None = None,
 ) -> WorkerStats:
     """One worker tick: drain pending + retryable manifest rows.
 
-    Strategy:
-      1. iter_pending(source, max_rows) — newest backlog by filed_at
-      2. iter_retryable(source, max_rows - pending_count) — failed
-         rows past their retry window
-      3. For each row, look up registered parser by source. Skip with
-         a debug log if no parser is registered.
-      4. Invoke parser. On exception, mark row failed with the
-         exception text + 1h backoff.
-      5. Otherwise transition_status from the ParseOutcome.
+    Two paths:
 
-    ``source=None`` drains across all sources up to ``max_rows`` total.
-    Per-source filtering (``source='sec_form4'``) is the operator-
-    triggered path used by the targeted-rebuild job (#872).
+    - ``source is None`` (scheduled tick): per-source Phase A slice
+      via :func:`compute_quotas` + Phase B residual top-up. This is
+      the fairness path (#1179) that prevents the globally-oldest
+      source from starving every other source. ``tick_id`` rotates
+      Phase A's lead window by +1 per tick — defaults to a
+      process-local :data:`_TICK_COUNTER` for production callers;
+      tests inject explicitly.
+    - ``source is not None`` (per-source rebuild): unchanged shape;
+      drains ``max_rows`` from one source (pending then retryable).
 
-    Returns a WorkerStats summary for logs / job_runs persistence.
+    Returns a :class:`WorkerStats` summary including a
+    ``processed_by_source`` per-source breakdown.
     """
+    # Normalise ``now`` BEFORE branching so the dispatch helper
+    # always has a tz-aware UTC value for parser-exception +
+    # raw-payload-violation backoff math (``now + _backoff_for(0)``).
     if now is None:
         now = datetime.now(tz=UTC)
 
-    rows: list[ManifestRow] = []
-    rows.extend(iter_pending(conn, source=source, limit=max_rows))
-    if len(rows) < max_rows:
-        rows.extend(iter_retryable(conn, source=source, limit=max_rows - len(rows)))
+    if source is not None:
+        # Per-source rebuild path — unchanged shape.
+        rows: list[ManifestRow] = list(iter_pending(conn, source=source, limit=max_rows))
+        if len(rows) < max_rows:
+            rows.extend(iter_retryable(conn, source=source, limit=max_rows - len(rows)))
+        return _dispatch_rows(conn, rows, now=now)
 
+    # Fairness path (#1179) — Phase A per-source slice + Phase B
+    # top-up across the global oldest tail.
+    sources = sorted(registered_parser_sources())
+    n = len(sources)
+    if n == 0:
+        return WorkerStats(
+            rows_processed=0,
+            parsed=0,
+            tombstoned=0,
+            failed=0,
+            skipped_no_parser=0,
+        )
+
+    if tick_id is None:
+        tick_id = next(_TICK_COUNTER)
+    quotas = compute_quotas(sources, max_rows, tick_id)
+
+    rows = []
+
+    # Phase A — per-source quota slice (pending first, retryable
+    # within the same per-source budget).
+    for s in sources:
+        q = quotas[s]
+        if q == 0:
+            continue
+        per_source: list[ManifestRow] = list(iter_pending(conn, source=s, limit=q))
+        if len(per_source) < q:
+            per_source.extend(iter_retryable(conn, source=s, limit=q - len(per_source)))
+        rows.extend(per_source)
+
+    # Phase B — top-up pending, then retryable, both scoped to
+    # registered sources, excluding Phase A picks.
+    seen: set[str] = {r.accession_number for r in rows}
+    remaining = max_rows - len(rows)
+    if remaining > 0:
+        topup_pending = list(
+            iter_pending_topup(
+                conn,
+                sources=sources,
+                exclude_accessions=sorted(seen),
+                limit=remaining,
+            )
+        )
+        rows.extend(topup_pending)
+        seen.update(r.accession_number for r in topup_pending)
+        remaining = max_rows - len(rows)
+    if remaining > 0:
+        topup_retryable = list(
+            iter_retryable_topup(
+                conn,
+                sources=sources,
+                exclude_accessions=sorted(seen),
+                limit=remaining,
+            )
+        )
+        rows.extend(topup_retryable)
+
+    return _dispatch_rows(conn, rows, now=now)
+
+
+def _dispatch_rows(
+    conn: psycopg.Connection[Any],
+    rows: list[ManifestRow],
+    *,
+    now: datetime,
+) -> WorkerStats:
+    """Per-row dispatch loop shared by both worker paths.
+
+    For each row: skip if no parser registered, else invoke parser
+    and translate :class:`ParseOutcome` into a ``transition_status``
+    call. Parser-internal exceptions → ``failed`` + 1h backoff.
+    #938 raw-payload audit invariant fires here (payload-backed
+    parsers cannot transition ``parsed + raw_status='absent'``).
+
+    Returns a :class:`WorkerStats` summary; the caller has already
+    decided WHICH rows to dispatch (fairness allocation or per-source
+    rebuild).
+    """
     parsed = 0
     tombstoned = 0
     failed = 0
     skipped = 0
     raw_violations = 0
     skipped_by_source: dict[ManifestSource, int] = defaultdict(int)
+    processed_by_source: dict[ManifestSource, int] = defaultdict(int)
 
     for row in rows:
         spec = _PARSERS.get(row.source)
@@ -201,6 +328,13 @@ def run_manifest_worker(
             skipped += 1
             skipped_by_source[row.source] += 1
             continue
+
+        # #1179: bump processed-by-source ONCE per dispatched row,
+        # BEFORE parser invocation. Every code path below exits via
+        # parsed / tombstoned / failed / raw-payload-violation — the
+        # counter must not double-count for the raw-violation path
+        # (which writes both ``failed += 1`` and ``raw_violations += 1``).
+        processed_by_source[row.source] += 1
 
         try:
             outcome = spec.fn(conn, row)
@@ -299,6 +433,7 @@ def run_manifest_worker(
         skipped_no_parser=skipped,
         raw_payload_violations=raw_violations,
         skipped_no_parser_by_source=dict(skipped_by_source),
+        processed_by_source=dict(processed_by_source),
     )
 
 

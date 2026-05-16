@@ -45,7 +45,7 @@ during the migration window.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -503,7 +503,7 @@ def iter_pending(
                        last_attempted_at, next_retry_at, error
                 FROM sec_filing_manifest
                 WHERE ingest_status = 'pending'
-                ORDER BY filed_at ASC
+                ORDER BY filed_at ASC, accession_number ASC
                 LIMIT %s
                 """,
                 (limit,),
@@ -519,7 +519,7 @@ def iter_pending(
                        last_attempted_at, next_retry_at, error
                 FROM sec_filing_manifest
                 WHERE ingest_status = 'pending' AND source = %s
-                ORDER BY filed_at ASC
+                ORDER BY filed_at ASC, accession_number ASC
                 LIMIT %s
                 """,
                 (source, limit),
@@ -553,7 +553,8 @@ def iter_retryable(
                 FROM sec_filing_manifest
                 WHERE ingest_status = 'failed'
                   AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-                ORDER BY COALESCE(next_retry_at, last_attempted_at, filed_at) ASC
+                ORDER BY COALESCE(next_retry_at, last_attempted_at, filed_at) ASC,
+                         accession_number ASC
                 LIMIT %s
                 """,
                 (limit,),
@@ -571,11 +572,91 @@ def iter_retryable(
                 WHERE ingest_status = 'failed'
                   AND (next_retry_at IS NULL OR next_retry_at <= NOW())
                   AND source = %s
-                ORDER BY COALESCE(next_retry_at, last_attempted_at, filed_at) ASC
+                ORDER BY COALESCE(next_retry_at, last_attempted_at, filed_at) ASC,
+                         accession_number ASC
                 LIMIT %s
                 """,
                 (source, limit),
             )
+        for row in cur.fetchall():
+            yield ManifestRow(**row)
+
+
+def iter_pending_topup(
+    conn: psycopg.Connection[Any],
+    *,
+    sources: Sequence[ManifestSource],
+    exclude_accessions: Sequence[str],
+    limit: int,
+) -> Iterator[ManifestRow]:
+    """Global oldest-pending top-up, scoped to registered sources +
+    excluding accessions already picked in Phase A (#1179).
+
+    Used by ``run_manifest_worker`` Phase B to fill leftover budget
+    after per-source quotas. Both array params are explicitly cast
+    ``%s::text[]`` so psycopg3 type inference handles empty lists.
+    Empty ``sources`` short-circuits without firing SQL.
+    """
+    if not sources:
+        return
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT accession_number, cik, form, source,
+                   subject_type, subject_id, instrument_id,
+                   filed_at, accepted_at, primary_document_url,
+                   is_amendment, amends_accession,
+                   ingest_status, parser_version, raw_status,
+                   last_attempted_at, next_retry_at, error
+            FROM sec_filing_manifest
+            WHERE ingest_status = 'pending'
+              AND source = ANY(%s::text[])
+              AND accession_number != ALL(%s::text[])
+            ORDER BY filed_at ASC, accession_number ASC
+            LIMIT %s
+            """,
+            (list(sources), list(exclude_accessions), limit),
+        )
+        for row in cur.fetchall():
+            yield ManifestRow(**row)
+
+
+def iter_retryable_topup(
+    conn: psycopg.Connection[Any],
+    *,
+    sources: Sequence[ManifestSource],
+    exclude_accessions: Sequence[str],
+    limit: int,
+) -> Iterator[ManifestRow]:
+    """Global oldest-retryable top-up, mirroring
+    :func:`iter_pending_topup` (#1179).
+
+    Predicate matches :func:`iter_retryable`:
+    ``ingest_status='failed' AND (next_retry_at IS NULL OR
+    next_retry_at <= NOW())``.
+    """
+    if not sources:
+        return
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT accession_number, cik, form, source,
+                   subject_type, subject_id, instrument_id,
+                   filed_at, accepted_at, primary_document_url,
+                   is_amendment, amends_accession,
+                   ingest_status, parser_version, raw_status,
+                   last_attempted_at, next_retry_at, error
+            FROM sec_filing_manifest
+            WHERE ingest_status = 'failed'
+              AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+              AND source = ANY(%s::text[])
+              AND accession_number != ALL(%s::text[])
+            ORDER BY COALESCE(next_retry_at, last_attempted_at, filed_at) ASC,
+                     accession_number ASC
+            LIMIT %s
+            """,
+            (list(sources), list(exclude_accessions), limit),
+        )
         for row in cur.fetchall():
             yield ManifestRow(**row)
 
