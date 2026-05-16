@@ -1024,17 +1024,26 @@ class JobRuntime:
                     # Catch-up is the boot-time scheduled fire equivalent
                     # — never an operator-driven path, so override is
                     # never present.
-                    gate_allowed, gate_reason = check_bootstrap_state_gate(
-                        conn,
-                        job_name=name,
-                        invocation_path="scheduled",
-                        override_present=False,
-                    )
-                    if not gate_allowed:
-                        processed.add(name)
-                        record_job_skip(conn, name, gate_reason, params_snapshot=dict(params_dict))
-                        skipped.append((name, gate_reason))
-                        continue
+                    #
+                    # #1181 carve-out: exempt jobs bypass the gate
+                    # entirely. ``job`` here is ``catch_up_jobs[name]``
+                    # (always non-None inside the overdue loop), so the
+                    # bare ``not job.exempt...`` guard is safe. See
+                    # spec
+                    # docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md
+                    # §4.2.
+                    if not job.exempt_from_universal_bootstrap_gate:
+                        gate_allowed, gate_reason = check_bootstrap_state_gate(
+                            conn,
+                            job_name=name,
+                            invocation_path="scheduled",
+                            override_present=False,
+                        )
+                        if not gate_allowed:
+                            processed.add(name)
+                            record_job_skip(conn, name, gate_reason, params_snapshot=dict(params_dict))
+                            skipped.append((name, gate_reason))
+                            continue
 
                     if job.prerequisite is not None:
                         met, reason = job.prerequisite(conn)
@@ -1419,32 +1428,42 @@ class JobRuntime:
             # prereq so the operator-visible reason
             # ``bootstrap_not_complete`` is the actionable signal when
             # both would block. Scheduled fires never override.
-            try:
-                with psycopg.connect(database_url, autocommit=True) as conn:
-                    allowed, reason = check_bootstrap_state_gate(
-                        conn,
-                        job_name=job_name,
-                        invocation_path="scheduled",
-                        override_present=False,
-                    )
-                    if not allowed:
-                        record_job_skip(conn, job_name, reason, params_snapshot=dict(params))
-                        logger.info(
-                            "scheduled fire of %r skipped — %s",
-                            job_name,
-                            reason,
+            #
+            # #1181 carve-out: exempt registered jobs bypass the gate
+            # entirely (no ``decision_audit`` row). Applies only when
+            # the job is BOTH registered AND flagged exempt — the
+            # ``job is None`` registry-drift case continues to gate
+            # (preserves today's fail-closed posture). See spec
+            # docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md
+            # §4.2.
+            is_exempt = job is not None and job.exempt_from_universal_bootstrap_gate
+            if not is_exempt:
+                try:
+                    with psycopg.connect(database_url, autocommit=True) as conn:
+                        allowed, reason = check_bootstrap_state_gate(
+                            conn,
+                            job_name=job_name,
+                            invocation_path="scheduled",
+                            override_present=False,
                         )
-                        return
-            except Exception:
-                # Fail-open mirrors the prereq path below — silently
-                # dropping a real run is worse than running against a
-                # half-installed DB; the body's own checks then surface
-                # the issue.
-                logger.warning(
-                    "bootstrap_state gate for %r failed; running anyway",
-                    job_name,
-                    exc_info=True,
-                )
+                        if not allowed:
+                            record_job_skip(conn, job_name, reason, params_snapshot=dict(params))
+                            logger.info(
+                                "scheduled fire of %r skipped — %s",
+                                job_name,
+                                reason,
+                            )
+                            return
+                except Exception:
+                    # Fail-open mirrors the prereq path below — silently
+                    # dropping a real run is worse than running against a
+                    # half-installed DB; the body's own checks then surface
+                    # the issue.
+                    logger.warning(
+                        "bootstrap_state gate for %r failed; running anyway",
+                        job_name,
+                        exc_info=True,
+                    )
 
             # Prerequisite gate (scheduled fires only — manual triggers
             # bypass prerequisites so the operator can force a run).
