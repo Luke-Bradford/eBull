@@ -485,7 +485,10 @@ class TestRetryablePath:
 # #1179 — fairness: per-source quota + Phase B residual top-up.
 # --------------------------------------------------------------------------- #
 
-from app.jobs.sec_manifest_worker import compute_quotas  # noqa: E402
+from app.jobs.sec_manifest_worker import (  # noqa: E402
+    compute_quotas,
+    registered_parser_sources,
+)
 from app.services.sec_manifest import (  # noqa: E402
     ManifestSource,
     iter_pending_topup,
@@ -674,8 +677,13 @@ class TestFairness:
         assert "sec_form4" in sources_dispatched
         assert "sec_n_csr" in sources_dispatched
 
-        # Per-source counts match the quota for tick_id=0.
-        quotas = compute_quotas(_ALL_SOURCES, max_rows=100, tick_id=0)
+        # Per-source counts match the quota for tick_id=0. Derive
+        # expected quotas from the SAME sort the worker uses
+        # (sorted(registered_parser_sources())) — using the unsorted
+        # _ALL_SOURCES tuple would produce different per-source `i`
+        # indices and therefore different quota values (review bot
+        # PREVENTION on #1180).
+        quotas = compute_quotas(sorted(registered_parser_sources()), max_rows=100, tick_id=0)
         for source in ("sec_form4", "sec_n_csr"):
             assert stats.processed_by_source[source] >= quotas[source]
 
@@ -888,7 +896,13 @@ class TestFairness:
         # Seed N rows in one source where N < per_source_quota.
         # Phase A picks all N; Phase B SQL's `!= ALL` excludes them.
         # Assert no accession appears twice.
-        quotas = compute_quotas(_ALL_SOURCES, max_rows=100, tick_id=0)
+        captures: list[tuple[str, ManifestSource]] = []
+        self._register_all_fakes(captures)
+        # Derive expected quota from the SAME sort the worker uses
+        # (sorted(registered_parser_sources())) — review bot PREVENTION
+        # on #1180. Must register fakes first so the registry matches
+        # what the worker will see.
+        quotas = compute_quotas(sorted(registered_parser_sources()), max_rows=100, tick_id=0)
         ncsr_quota = quotas["sec_n_csr"]
         _seed_pending_n(
             ebull_test_conn,
@@ -899,9 +913,6 @@ class TestFairness:
             cik="0000000011",
         )
         ebull_test_conn.commit()
-
-        captures: list[tuple[str, ManifestSource]] = []
-        self._register_all_fakes(captures)
 
         run_manifest_worker(ebull_test_conn, source=None, max_rows=100, tick_id=0)
         ebull_test_conn.commit()

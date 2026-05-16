@@ -1307,6 +1307,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Test-side quota expectations must derive from the worker's sort, not a hand-ordered constant
+
+- First seen in: PR #1180 review round 1 (Claude bot WARNING + PREVENTION). `tests/test_sec_manifest_worker.py` test cases for #1179 fairness computed expected quotas via `compute_quotas(_ALL_SOURCES, max_rows=100, tick_id=0)` against a module-level tuple in registration order, but the worker calls `compute_quotas(sorted(registered_parser_sources()), ...)`. The `_ALL_SOURCES` ordering and the lexicographic sort differ — same N, same max_rows, same tick_id, but different per-source `i` indices and therefore different `+1` slot recipients. The `>=` assertion only passed accidentally because total seeded rows (40) < `max_rows` (100), so Phase B filled the budget regardless of the quota floor. Cardinality changes in the seed would have surfaced the false-positive.
+- Prevention: in any test that compares `WorkerStats.processed_by_source` (or any per-source quota allocation) against expected counts, derive the expected mapping by calling `compute_quotas(sorted(registered_parser_sources()), max_rows, tick_id)` AFTER registering the same parsers the worker will see. Hand-ordered constants for the `sources` argument silently drift from the worker's `sorted(...)` call. Self-review prompt: grep test bodies for `compute_quotas(` — every call site that derives an expected mapping for assertions must pass `sorted(registered_parser_sources())` (or another expression that matches the worker's exact sort), not a literal tuple in registration-order shape. Same applies to any future helper whose contract depends on a deterministic sort over a registry.
+- Enforced in: this prevention log; PR #1180 round 2 patches `test_case1_every_source_progresses` + `test_case7_topup_no_double_dispatch` to derive quotas from `sorted(registered_parser_sources())` AFTER `_register_all_fakes`.
+
 ### Writer-vs-resolver `is_primary` mismatch on `external_identifiers`
 - First seen in: PR #1172
 - Symptom: `mf_directory.refresh_mf_directory` INSERTed into `external_identifiers` without specifying `is_primary`. The matching resolver `_fund_class_resolver.resolve_class_id_to_instrument` filters `is_primary = TRUE`. If the column DEFAULT were ever changed to `FALSE`, every `class_id` resolution would silently return `None` and every N-CSR observation would tombstone as `EXT_ID_NOT_YET_WRITTEN` forever.
