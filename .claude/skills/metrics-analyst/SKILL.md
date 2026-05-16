@@ -98,6 +98,19 @@
 | Volume (daily) | Market data | `price_daily.volume` | `/instruments/{symbol}/candles` |
 | VWAP | Market data | (deferred) | — |
 | Yield-on-cost | Capital returns | derived FE | dividends drilldown |
+| **Fund expense ratio** | Fund metadata | `fund_metadata_current.expense_ratio_pct` | `/instruments/{symbol}/fund-metadata` (no UI consumer yet) |
+| **Fund net assets (NAV)** | Fund metadata | `fund_metadata_current.net_assets_amt` | `/instruments/{symbol}/fund-metadata` (no UI consumer yet) |
+| **Fund returns (1Y/3Y/5Y/10Y/since-inception)** | Fund metadata | `fund_metadata_current.returns_pct` (JSONB) | `/instruments/{symbol}/fund-metadata` (no UI consumer yet) |
+| **Fund benchmark returns** | Fund metadata | `fund_metadata_current.benchmark_returns_pct` (JSONB) | `/instruments/{symbol}/fund-metadata` (no UI consumer yet) |
+| **Fund portfolio turnover %** | Fund metadata | `fund_metadata_current.portfolio_turnover_pct` | `/instruments/{symbol}/fund-metadata` (no UI consumer yet) |
+| **Fund holdings count** | Fund metadata | `fund_metadata_current.holdings_count` | `/instruments/{symbol}/fund-metadata` (no UI consumer yet) |
+| **Fund inception date** | Fund metadata | `fund_metadata_current.inception_date` | `/instruments/{symbol}/fund-metadata` (no UI consumer yet) |
+| **Fund sector allocation** | Fund metadata | `fund_metadata_current.sector_allocation` (JSONB) | `/instruments/{symbol}/fund-metadata` (no UI consumer yet; equity ETFs only) |
+| **Fund region allocation** | Fund metadata | `fund_metadata_current.region_allocation` (JSONB) | `/instruments/{symbol}/fund-metadata` (no UI consumer yet; equity ETFs only) |
+| **Fund credit-quality allocation** | Fund metadata | `fund_metadata_current.credit_quality_allocation` (JSONB) | `/instruments/{symbol}/fund-metadata` (no UI consumer yet; bond funds only) |
+| **Fund growth-of-$10k curve** | Fund metadata | `fund_metadata_current.growth_curve` (JSONB array) | `/instruments/{symbol}/fund-metadata` (no UI consumer yet) |
+| **Fund metadata coverage** | Fund metadata | `fund_metadata_current` row count vs universe | `/coverage/fund-metadata` (no UI consumer yet) |
+| **Fund metadata history** | Fund metadata | `fund_metadata_observations` (partitioned by `period_end`, latest per `(instrument_id, period_end)`) | `/instruments/{symbol}/fund-metadata/history` (no UI consumer yet) |
 
 ## 1. Ownership metrics (Phase 1–3 of #788)
 
@@ -515,3 +528,79 @@ After backfill, hit the relevant rollup endpoint and confirm the figure renders 
 - `.claude/skills/data-sources/sec-edgar.md` — where the source data comes from.
 - `.claude/skills/data-sources/edgartools.md` — the parsing library.
 - `.claude/skills/data-engineer/SKILL.md` — schema invariants + write/read patterns.
+
+## 12. Fund metadata (#1171, #1174, #1176)
+
+Fund-level + class-level metadata extracted from N-CSR / N-CSRS iXBRL companions for in-universe ETFs + mutual funds. Source-priority chain `period_end DESC, filed_at DESC, source_accession DESC` settled per [docs/settled-decisions.md](../../../docs/settled-decisions.md) §"Source priority for fund metadata".
+
+**Pipeline**: bootstrap S25 [`mf_directory_sync`](../../../app/workers/scheduler.py#L4326) populates `cik_refresh_mf_directory` + `external_identifiers (provider='sec', identifier_type='class_id')`. Bootstrap S26 [`sec_n_csr_bootstrap_drain`](../../../app/jobs/sec_first_install_drain.py#L744) walks distinct trust CIKs **filtered to universe-mapped trusts only** (#1176 cohort filter at `:582-593`) and enqueues last-2-years N-CSR + N-CSRS accessions to `sec_filing_manifest`. Manifest worker dispatches the [`sec_n_csr.py`](../../../app/services/manifest_parsers/sec_n_csr.py) parser which fans out per-(series, class) → [`fund_metadata_observations`](../../../sql/149_fund_metadata.sql) (partitioned by `period_end`) → [`refresh_fund_metadata_current`](../../../app/services/fund_metadata.py#L57) write-through to `fund_metadata_current`.
+
+**Cohort scope**: 77 fund trusts on dev DB, 432 universe-mapped instruments (99% of `external_identifiers (class_id, is_primary=TRUE)` cohort). Coverage ceiling capped by symbols present in `instruments` AND `company_tickers_mf.json`. Expanding cohort = expanding `instruments` (out of scope).
+
+### Operator-visible figures (12 columns + raw fallback)
+
+#### Tier 1 — typed scalar columns
+
+- **expense_ratio_pct** — annual fund expense ratio. Vanguard VOO: 0.03%. Cross-source: vendor factsheet (Vanguard, iShares, BlackRock, etc.). Validation: exact match required (±0%).
+- **net_assets_amt** — fund NAV as of period_end. Vanguard VOO 2025-12-31: $1.48T. Cross-source: vendor factsheet. Validation: ±1% (period_end vs vendor publish-date snapshot may drift).
+- **portfolio_turnover_pct** — annual portfolio turnover. Equity ETFs typically <5%; active funds 30-100%.
+- **holdings_count** — number of distinct securities held at period_end.
+- **inception_date** — fund / class inception.
+- **contact_email**, **contact_phone**, **contact_address** — fund administrator contact.
+- **document_type** — `'N-CSR'` (annual) or `'N-CSRS'` (semi-annual). N-CSR/A and N-CSRS/A amendments collapse to base type via `is_amendment_form()`.
+
+#### Tier 2 — dimensional JSONB columns
+
+- **returns_pct** — `{period_label: pct}` for AvgAnnlRtrPct + AccmVal. Period labels: `1Y`, `3Y`, `5Y`, `10Y`, `since_inception`. Routed by `(concept, axis)` tuple (spec §5.B). Filer-specific period encodings fall through to `raw_facts`.
+- **benchmark_returns_pct** — same shape but per-benchmark: `{benchmark_label: {period_label: pct}}`.
+- **sector_allocation** — `{sector_label: pct_of_nav}`. **Equity ETFs only** (NULL for bond funds).
+- **region_allocation** — `{region_label: pct_of_nav}`. **Equity ETFs only**.
+- **credit_quality_allocation** — `{rating_label: pct_of_nav}` (e.g. `{"AAA": 22.5, "AA": 18.0, ...}`). **Bond funds only** (NULL for equity ETFs).
+- **growth_curve** — `[{instant: date, value: $}]` time-ordered ASC. The "growth of $10k" chart series.
+
+#### Tier 3 — fallback
+
+- **raw_facts** — `{concept: [fact_dict, ...]}` for unrouted iXBRL concepts. 8 KB cap with `__truncated__` sentinel. Inspect when a Tier 2 column is unexpectedly NULL.
+
+### Per-fund-type UI branching
+
+Per #1174 spec §3 + smoke results:
+
+- **Equity ETFs** (VOO / IVV / VTV / VUG): populate `sector_allocation` + `region_allocation`; `credit_quality_allocation` is NULL.
+- **Bond funds** (AGG): populate `credit_quality_allocation`; `sector_allocation` + `region_allocation` are NULL or thin.
+- **Multi-asset / target-date**: may populate all three (rare).
+
+UI consumer must branch on `IS NOT NULL` rather than fund-type lookup. The parser writes whatever the iXBRL emits per the OEF taxonomy axis allowlist (spec §5.A).
+
+### Cadence
+
+- Source: SEC publishes N-CSR (annual) + N-CSRS (semi-annual) within 70 days of period_end. Per-trust cadence = 200 days (matches `app/services/data_freshness.py:_CADENCE`).
+- Bootstrap: S25 + S26 fire once per first-install (~60-90s combined for 77 trusts + ~565 secondary pages).
+- Steady-state: Layer 2 daily-index reconciler picks up new accessions; manifest worker drains via per-source dispatch.
+- Rewash: `POST /jobs/sec_rebuild/run -d '{"source": "sec_n_csr"}'` for cohort-wide; `{"source": "sec_n_csr", "subject_id": "<trust_cik>"}` for one trust.
+
+### Validation runbook (operator)
+
+For any landing PR touching `sec_n_csr` parser / drain / write-through:
+
+1. **Smoke panel** — verify `fund_metadata_current` populated for: VOO (Vanguard 36405), IVV (iShares 1100663), AGG (iShares 1100663), VTV (Vanguard 36405), VUG (Vanguard 36405).
+2. **Cross-source spot-check** — pick one fund, compare `expense_ratio_pct` against vendor factsheet:
+   - VOO: investor.vanguard.com → "Expense ratio" — should match 0.03% exactly.
+   - IVV: ishares.com/us/products/239726/ — should match 0.03%.
+   - AGG: ishares.com/us/products/239458/ — should match 0.03%.
+   - VTV: investor.vanguard.com — should match 0.04%.
+   - VUG: investor.vanguard.com — should match 0.04%.
+3. **Cross-source NAV** — NAV may drift (period_end vs publish date); ±1% acceptable.
+4. **Bond fund credit_quality_allocation** — AGG should populate; sum should be ≈ 100%.
+5. **Equity ETF sector_allocation** — VOO should populate; sum should be ≈ 100% (Information Technology ~30%, Financials ~13%, Healthcare ~12%).
+
+### Downstream consumer status
+
+**No UI consumer landed.** Three endpoints exist on backend (`/instruments/{symbol}/fund-metadata`, `/history`, `/coverage/fund-metadata`) but `frontend/src` has zero references. Data is operator-invisible until a UI consumer ticket is filed. Tracked: planned panel for the instrument drill page (#TODO when filed).
+
+### Caveats
+
+- Coverage = 432 / ~436 universe-mapped classes. The ~4 missing match the 39 transient-failed manifest rows (1h backoff retry). Spot-check via `SELECT error FROM sec_filing_manifest WHERE source='sec_n_csr' AND ingest_status='failed' LIMIT 5`.
+- N-CSR is fund-trust-scoped: `sec_filing_manifest.subject_type='institutional_filer'` + `subject_id=trust_cik` + `instrument_id=NULL`. The per-instrument fan-out happens at parse time inside the parser.
+- Holdings-level data is **NOT** in `fund_metadata` — see #918 spike. Holdings come from N-PORT-P (`ownership_funds_observations`).
+- Mutual funds outside the eToro universe (e.g. VFIAX, FXAIX) appear in `cik_refresh_mf_directory` but NOT in `fund_metadata_current` — they have no instrument row to attach observations to.
