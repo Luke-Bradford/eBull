@@ -3708,17 +3708,22 @@ def sec_manifest_worker_tick() -> None:
 
     with _tracked_job(JOB_SEC_MANIFEST_WORKER) as tracker:
         with psycopg.connect(settings.database_url) as conn:
-            stats = run_manifest_worker(conn, source=None, max_rows=100)
+            # tick_id=None → run_manifest_worker pulls next value from
+            # the module-global _TICK_COUNTER (per-process +1-per-tick
+            # rotation). Tests inject explicitly via the helper signature.
+            stats = run_manifest_worker(conn, source=None, max_rows=100, tick_id=None)
             conn.commit()
 
         tracker.row_count = stats.parsed + stats.tombstoned + stats.failed
         logger.info(
-            "sec_manifest_worker tick: processed=%d parsed=%d tombstoned=%d failed=%d skipped_no_parser=%d",
+            "sec_manifest_worker tick: processed=%d parsed=%d tombstoned=%d "
+            "failed=%d skipped_no_parser=%d processed_by_source=%s",
             stats.rows_processed,
             stats.parsed,
             stats.tombstoned,
             stats.failed,
             stats.skipped_no_parser,
+            dict(sorted(stats.processed_by_source.items())),
         )
 
 
