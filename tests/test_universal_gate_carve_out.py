@@ -358,9 +358,7 @@ class TestExemptRuntimePath:
         assert len(skips) == 1
         assert skips[0][1] == "bootstrap_not_complete"
 
-    def test_scheduled_fire_with_unregistered_job_still_calls_gate(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_scheduled_fire_with_unregistered_job_still_calls_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Codex 2 WARNING — fail-closed contract for the `job is None` case.
 
         When an invoker is in ``_INVOKERS`` but the job-name is NOT in
