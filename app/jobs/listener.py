@@ -175,14 +175,30 @@ def _dispatch_manual_job(
     # truthy strings as override.
     override_present = control.get("override_bootstrap_gate", False) is True
 
+    # #1181 — single registry lookup at the top of dispatch. ``job``
+    # is consumed by both the universal-gate short-circuit (below)
+    # and the per-job prereq check (further down). The pre-#1181
+    # listener did two scans — `job_in_registry = any(...)` here,
+    # then `job = next(...)` later — which made it easy to miss the
+    # exemption guard on the gate path.
+    job = next((j for j in SCHEDULED_JOBS if j.name == job_name), None)
+
     # PR1b-2 #1064 — bootstrap_state gate at manual-queue dispatch.
     # Mirrors the scheduled-fire path in app/jobs/runtime.py::_wrap_invoker.
-    # Bootstrap-internal jobs (orchestrator + its stage jobs) are NOT in
-    # SCHEDULED_JOBS, so the registry lookup returns no entry and the
-    # gate is skipped — the orchestrator MUST be able to run while
-    # bootstrap_state.status='running' or it would deadlock itself.
-    job_in_registry = any(j.name == job_name for j in SCHEDULED_JOBS)
-    if job_in_registry:
+    # Skipped when:
+    #   - ``job is None``: bootstrap-internal jobs (orchestrator + its
+    #     stage jobs) are NOT in SCHEDULED_JOBS — the orchestrator
+    #     MUST be able to run while bootstrap_state.status='running'
+    #     or it would deadlock itself.
+    #   - ``job.exempt_from_universal_bootstrap_gate``: #1181 carve-
+    #     out for safety-net jobs (currently Layer 2 daily-index
+    #     reconcile). See spec
+    #     docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md
+    #     §4.2. The override flag is meaningless for exempt jobs —
+    #     the carve-out is an "unaudited design bypass", distinct
+    #     from the manual-queue override which writes
+    #     ``decision_audit`` for non-exempt jobs.
+    if job is not None and not job.exempt_from_universal_bootstrap_gate:
         try:
             with psycopg.connect(settings.database_url, autocommit=True) as conn:
                 allowed, reason = check_bootstrap_state_gate(
@@ -233,7 +249,6 @@ def _dispatch_manual_job(
     # already produce. Manual queue uses mark_request_rejected (NOT
     # mark_request_completed — PREVENTION-grade per data-engineer skill
     # §6.5.7 step 8).
-    job = next((j for j in SCHEDULED_JOBS if j.name == job_name), None)
     if job is not None and job.prerequisite is not None:
         # Two-stage try/except (review-bot PR1b BLOCKING fix):
         #   1. Inner try wraps ONLY the prereq evaluation (connect +

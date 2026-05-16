@@ -239,10 +239,16 @@ class TestRealRegistryCoverage:
     on the SEC + fundamentals jobs (the ones that would have hit the gate
     in the original PR1b design). Spot-check that those jobs would gate."""
 
-    def test_sec_form3_has_bootstrap_complete_prereq(self) -> None:
+    def test_sec_atom_fast_lane_has_bootstrap_complete_prereq(self) -> None:
+        """Pre-#1162: this test pinned ``sec_form3_ingest``. That cron
+        was retired 2026-05-14 (PR #1162, commit baa3856) — moved to
+        on-demand only. Sub in Layer 1 (``sec_atom_fast_lane``) as the
+        representative SEC scheduled job with ``_bootstrap_complete``
+        prereq.
+        """
         from app.workers.scheduler import _bootstrap_complete
 
-        job = next(j for j in SCHEDULED_JOBS if j.name == "sec_form3_ingest")
+        job = next(j for j in SCHEDULED_JOBS if j.name == "sec_atom_fast_lane")
         assert job.prerequisite is _bootstrap_complete
 
     def test_fundamentals_sync_has_bootstrap_complete_in_compose(self) -> None:

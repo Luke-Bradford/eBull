@@ -497,6 +497,75 @@ idempotent). Operator triggers after a universe sync introduces new
 
 **Spec:** issue #819 + `sql/145_canonical_instrument_id.sql` header.
 
+## Universal bootstrap-state gate (#1064 PR1b-2, settled 2026-05-09)
+
+`check_bootstrap_state_gate` at `app/services/processes/bootstrap_gate.py`
+is the install-state gate that runs BEFORE any per-job
+`ScheduledJob.prerequisite` in three call sites:
+
+- `app/jobs/runtime.py::JobRuntime._wrap_invoker` (scheduled fire).
+- `app/jobs/runtime.py::JobRuntime._run_catchup` (boot catch-up loop).
+- `app/jobs/listener.py::_dispatch` (manual-queue).
+
+The gate blocks every job whose registered `ScheduledJob` is not
+exempt while `bootstrap_state.status != 'complete'`. On block, the
+operator-visible reason `bootstrap_not_complete` is what the operator
+sees + can fix (retry/iterate bootstrap from admin).
+
+**Override semantics:**
+
+- Scheduled fires + catch-up: NEVER override. There is no operator
+  at the keyboard for a cron tick.
+- Manual-queue dispatch: override via the
+  `{control:{override_bootstrap_gate:true}}` envelope. On override, a
+  `decision_audit` row with `stage='bootstrap_gate_override'` records
+  the bypass with the operator id.
+- Bootstrap-internal jobs (`bootstrap_orchestrator` + its stage jobs)
+  are NOT registered in `SCHEDULED_JOBS`, so they bypass the gate
+  unconditionally — the orchestrator MUST be able to run while
+  `bootstrap_state.status='running'` or it would deadlock itself.
+
+Adding a new `ScheduledJob` is to opt-in to the gate by default.
+Opting out requires the carve-out below.
+
+## Safety-net catch-up gate carve-out (#1181, settled 2026-05-16)
+
+A `ScheduledJob` may set `exempt_from_universal_bootstrap_gate=True`
+to bypass the universal gate above on ALL three dispatch paths.
+Exempt jobs are an "unaudited design bypass" — no `decision_audit`
+row is written; the static registry allow-list is the audit trail.
+
+**Eligibility (enforced by `tests/test_universal_gate_carve_out.py`
+allow-list + invariant assertions):**
+
+1. `catch_up_on_boot=True` — carve-out exists for the boot-time-only
+   `catch_up` evaluation trap (a prereq-blocked catch-up cannot
+   re-fire when bootstrap completes later).
+2. `prerequisite is None` — carve-out rests on body-safe-against-
+   empty-DB; a non-None prereq creates two opinions on the same
+   install-state question.
+3. Body is empty-DB safe (natural no-op against an empty/partial DB,
+   no destructive write, no expensive fetch loop).
+4. Bounded cost per fire (single-digit MB fetch max).
+
+**Current carve-out members:**
+
+- `sec_daily_index_reconcile` — Layer 2 of the #863-#873 ETL freshness
+  redesign. Daily 04:00 UTC reads yesterday's ~1MB daily-index
+  master.idx; `subject_resolver` filters every unknown CIK so an
+  empty/partial-bootstrap universe is a natural no-op. Missed
+  cadence = lost-forever reconcile.
+
+**Adding a new carve-out requires:**
+
+- New spec entry + Codex 1a-equivalent review.
+- Update to the allow-list assertion in
+  `tests/test_universal_gate_carve_out.py::test_exempt_allowlist_is_explicit`.
+- Update to this settled-decisions section.
+
+Unilateral flag-flip is mechanically forbidden by the CI invariant
+test.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

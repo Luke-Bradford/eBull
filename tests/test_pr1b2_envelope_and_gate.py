@@ -107,6 +107,10 @@ def _job_no_prereq(name: str) -> Any:
     job = MagicMock()
     job.name = name
     job.prerequisite = None
+    # #1181 — MagicMock auto-creates truthy attributes for any access;
+    # set the carve-out flag to False explicitly so the listener's
+    # gate-bypass check evaluates the non-exempt path.
+    job.exempt_from_universal_bootstrap_gate = False
     return job
 
 

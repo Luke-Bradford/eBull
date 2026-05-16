@@ -58,6 +58,23 @@ gate handles the rest identically.
 The module reads ``bootstrap_state``; it does NOT mutate. The
 read-only contract means callers can supply any psycopg connection
 (autocommit or transactional) without changing semantics.
+
+## Carve-outs (#1181)
+
+A registered ``ScheduledJob`` may opt out of this gate entirely by
+setting ``exempt_from_universal_bootstrap_gate=True``. When exempt,
+all three dispatch paths (scheduled fire, catch-up, manual-queue)
+MUST short-circuit BEFORE calling :func:`check_bootstrap_state_gate`
+— no ``decision_audit`` row is written. The carve-out is an
+"unaudited design bypass", distinct from the manual-queue operator
+override which does write an audit row for non-exempt jobs.
+
+The carve-out exists for safety-net jobs whose missed cadence
+cannot be recovered (currently ``sec_daily_index_reconcile`` — daily
+04:00 UTC daily-index reconcile against ~1MB master.idx). See spec
+docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md §4.2
+for the eligibility contract and
+tests/test_universal_gate_carve_out.py for the enforced allow-list.
 """
 
 from __future__ import annotations
@@ -96,6 +113,13 @@ def check_bootstrap_state_gate(
     operator_id: UUID | str | None = None,
 ) -> tuple[bool, str]:
     """Decide whether ``job_name`` may run given ``bootstrap_state.status``.
+
+    **#1181 carve-out (caller responsibility):** registered jobs whose
+    ``ScheduledJob.exempt_from_universal_bootstrap_gate=True`` MUST
+    short-circuit BEFORE invoking this helper. The exempt-bypass is
+    handled in the caller — this function has no knowledge of the
+    registry. See the module docstring "Carve-outs" section and spec
+    docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md §4.2.
 
     Returns ``(allowed, reason)``:
 

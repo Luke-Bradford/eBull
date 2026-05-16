@@ -215,6 +215,26 @@ class ScheduledJob:
     # the check returns (False, reason), the job is skipped and a
     # ``job_runs`` row with status='skipped' is recorded.
     prerequisite: PrerequisiteFn | None = None
+    # #1181 — opt-out from the universal ``check_bootstrap_state_gate``
+    # (PR1b-2 of #1064). When True, every dispatch path (scheduled
+    # fire, catch-up, manual-queue) BYPASSES the install-state gate.
+    # Per-job ``prerequisite`` still runs. The carve-out is an
+    # "unaudited design bypass" — no ``decision_audit`` row is
+    # written; the static registry allow-list is the audit trail.
+    #
+    # Eligibility (enforced by
+    # ``tests/test_universal_gate_carve_out.py`` allow-list +
+    # invariant assertions):
+    #   1. ``catch_up_on_boot=True`` (carve-out exists for the
+    #      boot-time-only catch_up evaluation trap).
+    #   2. ``prerequisite is None``.
+    #   3. Body is empty-DB safe (natural no-op).
+    #   4. Bounded cost per fire (single-digit MB fetch max).
+    # Adding a new exempt job requires a new spec + Codex review +
+    # update to ``test_exempt_allowlist_is_explicit``. See spec
+    # docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md
+    # §4.2.
+    exempt_from_universal_bootstrap_gate: bool = False
     # PR1a #1064 — operator-exposable parameter surface. Empty tuple =
     # no operator-tunable params. Populated per audit doc §2; PR1b's
     # validate_job_params reads this; PR2's FE Advanced disclosure
@@ -1024,12 +1044,19 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # stack restart at 06:00 UTC after a missed 04:00 fire must
         # still reconcile yesterday's index.
         catch_up_on_boot=True,
-        # NO _bootstrap_complete prereq — JobRuntime evaluates
-        # catch_up_on_boot only at process start, so a prereq-blocked
-        # catch-up cannot re-fire when bootstrap completes later. Daily-
-        # index against an empty universe is a natural no-op
-        # (subject_resolver filters every CIK). See spec #1155 §1.4.
+        # NO per-job prereq AND exempt from the universal bootstrap-
+        # state gate (#1181). Layer 2 is the safety net against
+        # missed Atom windows; daily-04:00-UTC cadence +
+        # ``catch_up_on_boot`` means missing a fire = losing
+        # yesterday's reconcile permanently. The universal gate
+        # (PR1b-2 of #1064) would otherwise block every fire while
+        # ``bootstrap_state != 'complete'``. Daily-index against an
+        # empty/partial universe is a natural no-op
+        # (``subject_resolver`` filters every unknown CIK). See spec
+        # docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md
+        # §4.2 for the carve-out eligibility contract.
         prerequisite=None,
+        exempt_from_universal_bootstrap_gate=True,
     ),
     ScheduledJob(
         name=JOB_SEC_PER_CIK_POLL,
