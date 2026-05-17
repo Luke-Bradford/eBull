@@ -61,13 +61,43 @@ code never calls this constructor.
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar, Token
 from types import TracebackType
 
 import psycopg
 
-from app.jobs.sources import source_for
+from app.jobs.sources import Lane, source_for
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-call-context held-source set (#1184)
+# ---------------------------------------------------------------------------
+#
+# Process-local registry of source-lock buckets currently held by a
+# ``JobLock`` instance in this call context. Same-source nested acquires
+# in the same context are treated as re-entrant: the inner ``JobLock``
+# detects the source is already held and skips the Postgres acquire that
+# would otherwise self-collide (different psycopg session → Postgres
+# rejects → ``JobAlreadyRunning``).
+#
+# The mechanism is process-wide and not orchestrator-specific. Today the
+# only nesting pattern in the codebase is the orchestrator dispatch path
+# (outer ``JobLock(orchestrator_*_sync, source='db')`` → inner adapter
+# ``JobLock(<db-lane-job>, source='db')``), so this scope choice has no
+# observable side effect today. Any future code path that nests JobLock
+# acquires against the same source benefits from the correct re-entrant
+# behaviour without an additional opt-in.
+#
+# Cross-thread / cross-process serialisation is unchanged: a new thread
+# starts with an empty ``_HELD_SOURCES`` (Python ContextVar is NOT
+# auto-propagated across ``threading.Thread``), so an acquire on a
+# sibling thread goes to the real Postgres advisory lock and collides
+# normally. See spec
+# ``docs/superpowers/specs/2026-05-17-orchestrator-inner-lock-removal.md``
+# §6.1 and tests/test_job_lock_reentrancy.py for the regression gate.
+_HELD_SOURCES: ContextVar[frozenset[Lane]] = ContextVar("_joblock_held_sources", default=frozenset())
 
 
 # ---------------------------------------------------------------------------
@@ -128,18 +158,19 @@ class JobLock:
     def __init__(self, database_url: str, job_name: str) -> None:
         self._database_url = database_url
         self._job_name = job_name
-        self._lock_key = self._lock_key_for(job_name)
+        # Lane | None — None ONLY for :meth:`test_only_per_name` acquires
+        # (raw-job_name escape hatch that intentionally opts out of the
+        # #1184 re-entrancy bypass). Production callers always have a
+        # non-None Lane resolved via ``source_for``.
+        self._source: Lane | None = source_for(job_name)
+        self._lock_key = f"job_source:{self._source}"
         self._conn: psycopg.Connection[object] | None = None
-
-    @staticmethod
-    def _lock_key_for(job_name: str) -> str:
-        """Resolve the source-level lock key for ``job_name``.
-
-        Production path. Raises ``KeyError`` for unknown job_name —
-        the registry is the single source of truth and silent fallback
-        violates the source-lock decision (Codex round-1 BLOCKING).
-        """
-        return f"job_source:{source_for(job_name)}"
+        # #1184 re-entrancy state. Set in ``__enter__``; consulted in
+        # ``__exit__`` to choose between no-op release (re-entrant
+        # bypass — no Postgres acquire happened) and the full release
+        # path (unlock + close + contextvar reset).
+        self._reentrant: bool = False
+        self._held_token: Token[frozenset[Lane]] | None = None
 
     @classmethod
     def test_only_per_name(cls, database_url: str, job_name: str) -> JobLock:
@@ -148,15 +179,38 @@ class JobLock:
         Reproduces the pre-PR1a per-name behaviour for unit tests that
         construct synthetic job names. Production code MUST NOT call
         this — the registry is the source of truth.
+
+        ``self._source`` is set to ``None`` so the #1184 re-entrancy
+        bypass NEVER fires for ``test_only_per_name`` acquires; the
+        per-name semantics is the whole point of the escape hatch.
+        Two sibling ``test_only_per_name(url, "x")`` acquires open
+        distinct psycopg sessions and collide normally at the Postgres
+        layer.
         """
         instance = cls.__new__(cls)
         instance._database_url = database_url
         instance._job_name = job_name
+        instance._source = None
         instance._lock_key = job_name  # raw, not source-prefixed
         instance._conn = None
+        instance._reentrant = False
+        instance._held_token = None
         return instance
 
     def __enter__(self) -> JobLock:
+        # #1184 — re-entrant short-circuit. If our source is already
+        # held by an outer ``JobLock`` in the same call context, treat
+        # this acquire as a no-op. Postgres would otherwise reject the
+        # second pg_try_advisory_lock from a different session (the
+        # outer holds the lock on its own connection); the application-
+        # layer bypass prevents the redundant self-collision. The
+        # ``None``-source case (``test_only_per_name``) NEVER takes
+        # this branch — its short-circuit on ``is not None`` is
+        # intentional.
+        held = _HELD_SOURCES.get()
+        if self._source is not None and self._source in held:
+            self._reentrant = True
+            return self
         # autocommit=True so we do NOT hold an implicit transaction
         # open for the entire job duration (PR #131 round 1 review
         # WARNING 1). The advisory lock is session-scoped, not
@@ -181,6 +235,12 @@ class JobLock:
                 conn.close()
             raise
         self._conn = conn
+        # Set the contextvar ONLY after the Postgres acquire succeeds
+        # so an acquisition that raises does not leak a stale entry.
+        # Restored in ``__exit__`` via the saved token.
+        if self._source is not None:
+            new_held: frozenset[Lane] = held | frozenset[Lane]({self._source})
+            self._held_token = _HELD_SOURCES.set(new_held)
         return self
 
     def __exit__(
@@ -189,6 +249,21 @@ class JobLock:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        if self._reentrant:
+            # Re-entrant acquire opened no connection and did not
+            # mutate the contextvar. Nothing to release.
+            return
+        # Restore the contextvar FIRST (cheap, infallible), then run
+        # the Postgres release. Ordering matters for the
+        # ``test_reset_restores_prior_held_set_on_exception`` invariant:
+        # even if release itself raised we'd still want the contextvar
+        # restored. The try/finally in the unlock path keeps the
+        # close defended; the contextvar reset is independently safe.
+        if self._held_token is not None:
+            try:
+                _HELD_SOURCES.reset(self._held_token)
+            finally:
+                self._held_token = None
         conn = self._conn
         self._conn = None
         if conn is None:

@@ -106,19 +106,67 @@ class TestCrossFamilyConcurrency:
 class TestIntraFamilySerialisation:
     """Splitting the source MUST NOT relax same-source serialisation."""
 
-    def test_same_family_source_still_serialises(self) -> None:
-        """Two acquires of the same family source must contend.
+    def test_same_family_source_still_serialises_cross_thread(self) -> None:
+        """Two acquires of the same family source must contend
+        across thread boundaries.
 
         Each family source today owns exactly one job (see
         ``TestSourceRegistry::test_each_family_source_has_exactly_one_job``)
         so the only way to acquire the same source twice is to lock the
-        same job_name twice. Exercises the source-keyed JobLock
-        invariant (#1064) inside the family lane.
+        same job_name twice. Same-context re-entrancy is intentional
+        post-#1184; cross-thread acquires still go to Postgres and
+        collide normally — exercises the family-source-keyed JobLock
+        invariant (#1064) under #1184 semantics.
         """
-        with JobLock(settings.database_url, "sec_submissions_ingest"):
-            with pytest.raises(JobAlreadyRunning):
+        import queue
+        import threading
+
+        # Pre-check the job name resolves BEFORE spawning threads. A
+        # registry-absent name would KeyError inside ``JobLock.__init__``
+        # on a worker thread, be caught by the BLE001 handler, and
+        # surface as a misleading ``TimeoutError`` from the main thread
+        # (mirrors the Claude bot WARNING fix in
+        # ``tests/test_joblock_per_source.py::_assert_cross_thread_serialises``).
+        assert source_for("sec_submissions_ingest") == "db_filings"
+
+        outer_holding = threading.Event()
+        inner_done = threading.Event()
+        outer_errors: queue.Queue[BaseException] = queue.Queue()
+        inner_result: queue.Queue[BaseException | str] = queue.Queue()
+
+        def hold_outer() -> None:
+            try:
                 with JobLock(settings.database_url, "sec_submissions_ingest"):
-                    pytest.fail("re-acquiring db_filings source should have raised")
+                    outer_holding.set()
+                    if not inner_done.wait(timeout=10.0):
+                        raise TimeoutError("inner thread did not complete within 10s")
+            except BaseException as exc:  # noqa: BLE001
+                outer_errors.put(exc)
+
+        def try_inner() -> None:
+            try:
+                if not outer_holding.wait(timeout=10.0):
+                    raise TimeoutError("outer thread did not acquire within 10s")
+                try:
+                    with JobLock(settings.database_url, "sec_submissions_ingest"):
+                        inner_result.put("acquired unexpectedly")
+                except JobAlreadyRunning as exc:
+                    inner_result.put(exc)
+            finally:
+                inner_done.set()
+
+        t1 = threading.Thread(target=hold_outer, daemon=True)
+        t2 = threading.Thread(target=try_inner, daemon=True)
+        t1.start()
+        t2.start()
+        t1.join(timeout=15.0)
+        t2.join(timeout=15.0)
+        assert not t1.is_alive() and not t2.is_alive(), "test threads hung"
+
+        if not outer_errors.empty():
+            raise outer_errors.get()
+        result = inner_result.get_nowait()
+        assert isinstance(result, JobAlreadyRunning), f"expected JobAlreadyRunning from inner thread, got {result!r}"
 
 
 _FAMILY_LANES: tuple[str, ...] = tuple(source for _job, source in _FAMILY_ASSIGNMENTS)
