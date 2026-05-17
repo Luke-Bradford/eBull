@@ -4612,11 +4612,11 @@ def sec_master_idx_quarterly_sweep() -> None:
 
     Failure surfacing: any per-quarter failure surfaces as a
     ``RuntimeError`` from the invoker so ``_tracked_job`` records
-    ``job_runs.status='error'`` with the failed-quarter detail. Without
-    this, /system/processes would show success with row_count=0 even
-    when every quarter 404'd / 5xx'd (Codex 2 pre-push HIGH-2).
+    ``job_runs.status='failure'`` with the failed-quarter detail.
+    Without this, /system/processes would show success with row_count=0
+    even when every quarter 404'd / 5xx'd (Codex 2 pre-push HIGH-2).
     Successful quarters still commit before the raise — partial work
-    is durable; the error signal is for operator visibility only.
+    is durable; the failure signal is for operator visibility only.
     """
     from app.jobs.sec_master_idx_quarterly_sweep import (
         run_master_idx_quarterly_sweep,
@@ -4640,9 +4640,7 @@ def sec_master_idx_quarterly_sweep() -> None:
         )
         if stats.failed_quarters > 0:
             failed_details = [
-                f"{q.year}Q{q.quarter}: {q.error_detail or 'unknown'}"
-                for q in stats.quarters
-                if q.failed
+                f"{q.year}Q{q.quarter}: {q.error_detail or 'unknown'}" for q in stats.quarters if q.failed
             ]
             raise RuntimeError(
                 f"sec_master_idx_quarterly_sweep: {stats.failed_quarters} of "
