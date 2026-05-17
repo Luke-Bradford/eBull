@@ -25,6 +25,7 @@ import pytest
 
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
+from app.jobs.sources import source_for
 
 # Postgres advisory locks are cluster-wide, not database-scoped. With pytest-xdist
 # running tests in parallel workers against the same dev DB cluster, two tests
@@ -41,7 +42,20 @@ def _assert_cross_thread_serialises(outer_job: str, inner_job: str) -> None:
     Cross-thread is the post-#1184 way to exercise same-source
     contention — same-context same-source is intentionally re-entrant
     and would silently bypass without raising.
+
+    Pre-check both job names resolve via ``source_for`` BEFORE spawning
+    threads. Without this, a registry-absent job name would KeyError
+    inside ``JobLock.__init__`` on a worker thread, be caught by the
+    ``BLE001`` handler, and ultimately surface as a misleading
+    ``TimeoutError`` from the main thread (Claude bot WARNING on PR
+    #1186) rather than the underlying registry error.
     """
+    outer_source = source_for(outer_job)
+    inner_source = source_for(inner_job)
+    assert outer_source == inner_source, (
+        f"helper requires same-source job pair; got {outer_job!r}={outer_source!r} vs {inner_job!r}={inner_source!r}"
+    )
+
     outer_holding = threading.Event()
     inner_done = threading.Event()
     outer_errors: queue.Queue[BaseException] = queue.Queue()

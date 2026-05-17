@@ -121,6 +121,14 @@ class TestIntraFamilySerialisation:
         import queue
         import threading
 
+        # Pre-check the job name resolves BEFORE spawning threads. A
+        # registry-absent name would KeyError inside ``JobLock.__init__``
+        # on a worker thread, be caught by the BLE001 handler, and
+        # surface as a misleading ``TimeoutError`` from the main thread
+        # (mirrors the Claude bot WARNING fix in
+        # ``tests/test_joblock_per_source.py::_assert_cross_thread_serialises``).
+        assert source_for("sec_submissions_ingest") == "db_filings"
+
         outer_holding = threading.Event()
         inner_done = threading.Event()
         outer_errors: queue.Queue[BaseException] = queue.Queue()
