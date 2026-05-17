@@ -240,6 +240,35 @@ Operator runs bootstrap completion in parallel — independent track, no enginee
 - **Phase 1, PR 3 — G13 (`subjects_due_for_recheck` reader verification).** Plan §2 Phase 1 — AST audit + integration test verifying `subjects_due_for_recheck` reader path actually fires in Layer 3's `run_per_cik_poll`. If wiring exists per memory `[[us-source-coverage]]` "G13 recheck path added" — close G13 with test only. If wiring missing — fix in-scope.
 - **Operator: post-merge follow-up.** Once PR #1190 + #1191 land, the admin "Retry failed" path can drop the direct-Python workaround. Confirm the remaining 5 bootstrap stages from #1187 retry land `bootstrap_state.status='complete'` end-to-end via the proper queue-listener path.
 
+### Handover — PR #1193 (merged 2026-05-17)
+
+- Phase: 1
+- Gap / ticket closed: **G13** (`subjects_due_for_recheck` reader verification — sub-finding of #1155)
+- Branch: `feat/g13-verify-recheck-reader-wiring`
+- Merge SHA: `078a5e68bf9690a8b5ed6db2d9bd118a05895232`
+- Tests added:
+  - `tests/test_g13_recheck_reader_invariants.py` — 4 tests (imports invariant, consumed-call invariant, local-rebind invariant, return-annotation + `PerCikPollStats.recheck_*` fields invariant) under a single `_RunPerCikPollVisitor` traversal with symmetric nested-scope skips.
+- Plan-defined acceptance: **closed-with-tests-only.** Wiring already exists at `app/jobs/sec_per_cik_poll.py:195-198` (added in #1155); integration coverage already at `tests/test_sec_per_cik_poll.py::TestG13RecheckPath`; hourly cadence + prereq + source already at `tests/test_layer_123_wiring.py::test_layer3_per_cik_poll_registered`. The PR added the static AST safety-net only.
+- Scope discoveries handled in-scope:
+  - Codex round 1 (medium): naive `ast.walk(fn)` recursed into nested scopes; reader-call result not checked as consumed. Both addressed by `_ConsumedReaderVisitor` with nested-scope skips + materialiser / iteration-shape check.
+  - Codex round 2 (medium): local-rebind gap (a future stub `subjects_due_for_recheck = lambda: iter([])` would defeat the consumed-call invariant). Addressed by `test_reader_names_not_locally_rebound`.
+  - Codex round 2 (note): `if False:` reachability — REBUTTED in PR body (full Python reachability is undecidable; the contrived form does not reflect a realistic regression; runtime reachability is owned by the integration suite).
+  - Bot review round 1 (WARNING): rebind check used `ast.walk(stmt)` which recursed into nested scopes — asymmetric with the consumed-call visitor that skipped them. **FIXED** by merging both invariants into a single `_RunPerCikPollVisitor` (one traversal, one scope-skip rule). Module docstring records the scope-walk discipline so future intra-function AST checks reuse the unified visitor.
+  - Bot review round 1 (PREVENTION): scope-walk asymmetry. **EXTRACTED** in-file (test module docstring "Scope-walk discipline" section). Not yet repo-wide-extracted to `docs/review-prevention-log.md` because this is currently a single-file pattern; if a second test file ever adds the same pattern, escalate.
+- Matrix delta:
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §3 sub-gap G13 narrative — "production never reaches it" → ✅ CLOSED narrative.
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §7 gap register G13 row — `OPEN` → `✅ CLOSED 2026-05-17`.
+- ETL clauses #8-#12 — N/A (test-only PR, no parser / schema / data-path change; documented in PR body).
+
+### Phase 1 close-out — all three PRs merged
+
+PR 1 (G7 #1190) + PR 2 (G14 #1191) + PR 3 (G13 #1193) all merged. Phase 1 complete.
+
+### Next phase (Phase 2 entry)
+
+- **Phase 2, PR 4 — G8 (`company_tickers_exchange.json` consumer).** Plan §2 Phase 2 — closes pink-sheet / OTC / foreign-without-ADR gap in CIK ↔ ticker bridge. Endpoint: `https://www.sec.gov/files/company_tickers_exchange.json`. Decide: extend `daily_cik_refresh` body with the supplemental enrichment fetch, OR add new dedicated `ScheduledJob daily_cik_exchange_refresh`. Persistence: extend `external_identifiers` with exchange metadata OR new `instrument_exchange` table — design TBD. Matrix update on close: §4 row + §7 G8 → CLOSED.
+- **Phase 2, PR 5 — G9 (`company_tickers_mf.json` consumer).** Likely bundles with PR 4 if cohesion holds. May be doc-only if #1174's `mf_directory_sync` already covers the seed path — verify first.
+
 ## 6. Definition of done — for the whole plan
 
 Plan is COMPLETE when:
