@@ -195,6 +195,75 @@ def test_enforce_pg_locks_with_cleanup_swallows_secondary_close_errors(
         _enforce_pg_locks_with_cleanup(fence_conn, pool)
 
 
+def test_lifespan_has_no_bare_sync_psycopg_connect() -> None:
+    """PREVENTION (Claude bot, PR #1188 round-2): ``app/main.py``'s
+    ``async def lifespan`` must NOT call ``psycopg.connect`` synchronously
+    — that blocks the event loop during startup. Every sync DB probe
+    in the lifespan body must be wrapped in ``asyncio.to_thread`` or
+    use ``psycopg.AsyncConnection.connect`` instead.
+
+    AST walk:
+
+    1. Find the ``lifespan`` AsyncFunctionDef.
+    2. Walk every ``Call`` node in its direct body.
+    3. Flag any ``psycopg.connect(...)`` call found at the event-loop
+       level. Skip nested ``FunctionDef`` / ``AsyncFunctionDef``
+       bodies — those represent sync workers that get scheduled via
+       ``asyncio.to_thread`` / ``run_in_executor`` and run outside
+       event-loop discipline by construction.
+    """
+    import ast
+    from pathlib import Path
+
+    main_path = Path(__file__).resolve().parent.parent / "app" / "main.py"
+    tree = ast.parse(main_path.read_text())
+
+    lifespan = next(
+        (node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan"),
+        None,
+    )
+    assert lifespan is not None, "app/main.py::lifespan not found — refactored?"
+
+    violations: list[str] = []
+
+    class _Visitor(ast.NodeVisitor):
+        def _is_psycopg_connect(self, call: ast.Call) -> bool:
+            func = call.func
+            return (
+                isinstance(func, ast.Attribute)
+                and func.attr == "connect"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "psycopg"
+            )
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802 — ast API
+            # Nested sync helpers are off-loop by construction (operator
+            # passes them to asyncio.to_thread / run_in_executor). Skip.
+            return
+
+        def visit_AsyncFunctionDef(  # noqa: N802 — ast API
+            self,
+            node: ast.AsyncFunctionDef,
+        ) -> None:
+            if node is lifespan:
+                self.generic_visit(node)
+            # Nested async defs would have their own walk semantics;
+            # not a pattern in lifespan today.
+
+        def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 — ast API
+            if self._is_psycopg_connect(node):
+                violations.append(
+                    f"line {node.lineno}: bare psycopg.connect() at event-loop level in async lifespan "
+                    f"— wrap in asyncio.to_thread or use psycopg.AsyncConnection.connect"
+                )
+            self.generic_visit(node)
+
+    visitor = _Visitor()
+    visitor.visit(lifespan)
+
+    assert not violations, "\n".join(violations)
+
+
 def test_enforce_pg_locks_with_cleanup_no_op_when_floor_satisfied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
