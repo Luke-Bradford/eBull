@@ -79,7 +79,7 @@ Steady-state filings discovery currently runs through the legacy per-form ingest
 
 `data_freshness._CADENCE` at `app/services/data_freshness.py:69` is queried by the per-CIK seeder (`seed_freshness_for_manifest_row`) on every manifest write, populating `expected_next_at`. `subjects_due_for_poll` at `app/services/data_freshness.py:485` is the consumer reader. `run_per_cik_poll` calls it correctly. But because Layer 3 is unwired (no `_INVOKERS[]` / `SCHEDULED_JOBS` row), no scheduled caller reaches that path. The table is read by tests + ad-hoc rebuild scripts only, not steady-state polling.
 
-**Sub-gap G13:** even after Layer 3 is wired, `run_per_cik_poll` reads only `subjects_due_for_poll`. The companion `subjects_due_for_recheck` at `app/services/data_freshness.py:533` (handles `never_filed` + `error` state rechecks) is referenced only by tests — production never reaches it. `#1155` acceptance should require both reader paths to fire.
+**Sub-gap G13:** ✅ CLOSED 2026-05-17 — `run_per_cik_poll` drains BOTH `subjects_due_for_poll` AND `subjects_due_for_recheck` per tick (`app/jobs/sec_per_cik_poll.py:195-198`) with a bounded 2/3 + ~1/3 budget split (`max_subjects=100` → poll=66, recheck=34). Integration coverage at `tests/test_sec_per_cik_poll.py::TestG13RecheckPath` proves the never_filed-stays-in-queue contract + alongside-poll drain; static AST invariants at `tests/test_g13_recheck_reader_invariants.py` guarantee a future refactor cannot silently drop one reader path. Hourly cadence asserted at `tests/test_layer_123_wiring.py::test_layer3_per_cik_poll_registered`.
 
 Once #1155 lands, the legacy crons above can be retired per spec §6. Each retirement is one PR + smoke per cron.
 
@@ -177,7 +177,7 @@ These endpoints don't have a `ManifestSource` because they're not per-filing dis
 | G10 | `companyconcept` API not consumed | OPEN (low) | — | Smaller-payload alternative to Companyfacts for known-tag pulls. Eligible. |
 | G11 | `frames` API not consumed | OPEN (low) | — | Cross-sectional one-fact-per-filer; sector aggregates use case. Eligible. |
 | G12 | Full-index `master.idx` quarterly not consumed | OPEN (low) | — | Cross-quarter discovery; only `form.idx` is consumed today. Eligible if cross-quarter walks become needed. |
-| G13 | `subjects_due_for_recheck` reader unused | OPEN | **#1155** (sub-finding) | `app/services/data_freshness.py:533` — handles `never_filed` + `error` state rechecks. Only tests reference it; runtime Layer 3 (when wired) reads only `subjects_due_for_poll` at `:485`. #1155 acceptance must require BOTH reader paths to fire. |
+| G13 | `subjects_due_for_recheck` reader unused | ✅ CLOSED 2026-05-17 | **#1155** (sub-finding) + verification PR | Both readers drained per tick at `app/jobs/sec_per_cik_poll.py:195-198` with bounded 2/3+1/3 budget split. Static AST invariants at `tests/test_g13_recheck_reader_invariants.py` guard the wiring against future refactor; integration drain proved by `tests/test_sec_per_cik_poll.py::TestG13RecheckPath`. |
 
 G1-G3 are the **headline finding** of this audit — the freshness redesign's three steady-state polling layers are coded but never scheduled. Without them, the table at §3 (legacy per-form ingest crons) carries discovery; `data_freshness._CADENCE` is a write-only ledger.
 
