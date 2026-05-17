@@ -129,6 +129,44 @@ pnpm --dir frontend install
 git config core.hooksPath .githooks   # one-time per clone
 ```
 
+### PostgreSQL tuning (required — #1187)
+
+eBull's ownership schema partitions 8 observation tables quarterly
+(2010q1 → 2030q4 + default = 85 partitions per parent × 3-5 indexes).
+A single unpruned SELECT on a partitioned parent reserves ~431
+distinct relation locks. With Postgres's default
+`max_locks_per_transaction=64`, bootstrap and heavy ownership ingest
+exhaust the shared lock table and fail with
+`OutOfMemory: out of shared memory`.
+
+Both the API process (FastAPI lifespan) and the jobs process
+entrypoint HARD-FAIL at boot when `max_locks_per_transaction < 1024`.
+
+Tune via:
+
+```bash
+uv run python -c "
+import psycopg
+from app.config import settings
+with psycopg.connect(settings.database_url, autocommit=True) as c:
+    c.execute('ALTER SYSTEM SET max_locks_per_transaction = 1024')
+"
+docker restart ebull-postgres
+uv run python -c "
+import psycopg
+from app.config import settings
+with psycopg.connect(settings.database_url) as c:
+    print(c.execute('SHOW max_locks_per_transaction').fetchone()[0])
+"
+# Expect 1024.
+```
+
+Override for niche dev / CI only (expect OOM under load):
+`export EBULL_ALLOW_LOW_PG_LOCKS=1`.
+
+Spec:
+[`docs/superpowers/specs/2026-05-17-pg-max-locks-per-tx-guard.md`](docs/superpowers/specs/2026-05-17-pg-max-locks-per-tx-guard.md).
+
 Three processes side by side (a VS Code task pre-bakes this):
 
 ```bash
