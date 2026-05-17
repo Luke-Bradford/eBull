@@ -145,25 +145,88 @@ class JobSourceRegistryError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# MANUAL_TRIGGER_JOB_SOURCES — source-lock coverage for manual-only jobs.
+# MANUAL_TRIGGER_JOB_SOURCES — source-lock coverage for jobs outside
+# SCHEDULED_JOBS + _BOOTSTRAP_STAGE_SPECS.
 # ---------------------------------------------------------------------------
 #
-# Sibling to the bootstrap stage registry: jobs that are operator-
-# triggered (not scheduled, not bootstrap-dispatched) still need a
-# source-lock binding so JobLock acquisition succeeds. Without this,
-# source_for() KeyErrors at dispatch and the manual API path 202s but
-# fails before the wrapper body runs.
+# Historical name (predates #1183) — now covers TWO classes:
 #
-# Companion param-metadata registry lives at
-# app/services/processes/param_metadata.py MANUAL_TRIGGER_JOB_METADATA.
-# Every entry needs an _INVOKERS registration + matching metadata entry;
-# tests/test_layer_123_wiring.py covers the triangle.
+# 1. Operator manual-trigger-only jobs (e.g. ``sec_rebuild``). Companion
+#    param-metadata registry lives at
+#    ``app/services/processes/param_metadata.py::MANUAL_TRIGGER_JOB_METADATA``;
+#    every entry needs an _INVOKERS registration + matching metadata entry;
+#    ``tests/test_layer_123_wiring.py`` covers the triangle.
+#
+# 2. Orchestrator-adapter inner-lock targets (#1183). These jobs lost
+#    their ScheduledJob row in #260 (cadence moved to orchestrator) but
+#    ``app/services/sync_orchestrator/adapters.py::_run_with_lock`` still
+#    acquires a per-job-name JobLock, so source_for() needs to resolve.
+#    Companion metadata is NOT required for this class.
+#
+# Both classes share the same outcome: source_for() must not KeyError.
+# Naming clean-up tracked at #1184.
 
 MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
+    # Despite the historical name, this map now covers TWO classes of
+    # job that need source-registry coverage outside SCHEDULED_JOBS +
+    # _BOOTSTRAP_STAGE_SPECS (#1183):
+    #
+    # 1. Operator manual-trigger-only jobs (e.g. ``sec_rebuild``).
+    # 2. Orchestrator-adapter inner-lock targets — jobs whose
+    #    ``ScheduledJob`` row was removed by #260 when their cadence
+    #    moved into orchestrator (``orchestrator_full_sync`` /
+    #    ``orchestrator_high_frequency_sync``) but whose
+    #    ``app/services/sync_orchestrator/adapters.py::_run_with_lock``
+    #    inner-lock dispatch still needs source_for() to resolve.
+    #
+    # See #1184 for the broader naming + architectural clean-up.
+    #
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.
     "sec_rebuild": "sec_rate",
+    # ----- Orchestrator-adapter targets (#1183 partial fix) ----------
+    # #260 (PR #262) moved these 6 jobs from standalone ScheduledJob
+    # rows into orchestrator's FULL / HIGH_FREQUENCY cadences. The
+    # standalone ScheduledJob rows were removed; PR1a #1064 later
+    # introduced the source-registry requirement, orphaning these
+    # job_names from coverage. ``adapters.py`` still calls
+    # ``_run_with_lock(<job_name>, ...)`` → JobLock → source_for(),
+    # which KeyErrors on each missing entry.
+    #
+    # See ``tests/test_job_registry.py::TestOrchestratorAdapterSourceCoverage``
+    # for the CI-enforced invariant.
+    #
+    # **Known partial-fix limitation (#1184):** the orchestrator's
+    # outer ``JobLock(orchestrator_*_sync, source='db')`` holds the
+    # ``db`` source-lock for the entire orchestrator run. Any inner
+    # adapter mapped to ``db`` self-skips with ``JobAlreadyRunning`` →
+    # ``PREREQ_SKIP``. This entry adds graceful skip in place of the
+    # current KeyError crash. The architectural fix (drop the inner
+    # _run_with_lock JobLock, since orchestrator's outer lock +
+    # sync_runs gate already serialise) is tracked in #1184.
+    #
+    # Lane assignments below are chosen to AVOID the ``db`` collision
+    # where the body's resource semantics support a non-``db`` lane.
+    #
+    # Frankfurter HTTP (unbucketed) + live_fx_rates write. ``db`` lane
+    # known to self-skip per #1184 limitation above.
+    "fx_rates_refresh": "db",
+    # EtoroBrokerProvider — competes with execute_approved_orders +
+    # daily_candle_refresh for the eToro REST budget. Lane choice
+    # also avoids the ``db`` self-skip.
+    "daily_portfolio_sync": "etoro",
+    # Per-CIK SEC fetches (Companies House too) — semantically
+    # ``sec_rate`` per Lane docs ("Every per-CIK + per-accession SEC
+    # fetch"). Lane choice also avoids the ``db`` self-skip.
+    "daily_research_refresh": "sec_rate",
+    # Cost-model writes derived from existing quote spreads. ``db``
+    # lane known to self-skip per #1184 limitation above.
+    "seed_cost_models": "db",
+    # Internal report generation (DB-bound read + write). ``db`` lane
+    # known to self-skip per #1184 limitation above.
+    "weekly_report": "db",
+    "monthly_report": "db",
 }
 
 

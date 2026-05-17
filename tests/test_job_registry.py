@@ -57,7 +57,12 @@ class TestScheduledJobSourceField:
     """ScheduledJob.source is required and from the Lane vocabulary."""
 
     def test_every_scheduled_job_has_source(self) -> None:
-        assert len(SCHEDULED_JOBS) >= 27, "audit doc records 27 scheduled jobs"
+        # Floor was 27 at the PR1a audit; #1159-#1167 legacy-cron retirement
+        # sweep (2026-05-14) dropped the count to 24. Floor relaxed to 22 to
+        # tolerate one more retirement without immediate test drift.
+        assert len(SCHEDULED_JOBS) >= 22, (
+            f"expected >= 22 scheduled jobs (24 as of 2026-05-14 post-#1159-#1167); got {len(SCHEDULED_JOBS)}"
+        )
         missing = [j.name for j in SCHEDULED_JOBS if not j.source]
         assert not missing, f"jobs missing source: {missing}"
 
@@ -94,6 +99,9 @@ class TestStageSpecParamsField:
             "filings_history_seed",
             "sec_first_install_drain",
             "sec_13f_recent_sweep",
+            # PR #1175 (#1174) — N-CSR/S fund-scoped bootstrap drain
+            # added with horizon_days=730 params.
+            "sec_n_csr_bootstrap_drain",
         }
         for stage in _BOOTSTRAP_STAGE_SPECS:
             if stage.stage_key in lifted_stage_keys:
@@ -151,6 +159,117 @@ class TestSourceRegistry:
         # sec_bulk_download is a bootstrap-only invoker mapped to its
         # own source bucket per _STAGE_LANE_OVERRIDES.
         assert source_for("sec_bulk_download") == "sec_bulk_download"
+
+
+class TestOrchestratorAdapterSourceCoverage:
+    """#1183 — every orchestrator adapter's ``_run_with_lock(job_name, ...)``
+    call site must have a source-registry entry. ``JobLock`` resolves the
+    source bucket via ``source_for(job_name)`` which KeyErrors on miss.
+
+    #260 (PR #262) moved 8 jobs from standalone ScheduledJob rows into
+    orchestrator's FULL / HIGH_FREQUENCY cadences. 2 are covered by
+    bootstrap stage entries (nightly_universe_sync, daily_candle_refresh);
+    the other 6 were orphaned from the source registry until #1183 added
+    them to MANUAL_TRIGGER_JOB_SOURCES. This test pins the contract so a
+    new adapter call site without matching registry coverage fails CI.
+    """
+
+    @staticmethod
+    def _extract_adapter_job_names() -> set[str]:
+        """Parse adapters.py via AST to find every ``job_name=<literal>``
+        keyword argument. Single source of truth for what the adapter
+        actually dispatches — avoids the test going stale relative to
+        hand-maintained lists."""
+        import ast
+        from pathlib import Path
+
+        adapter_path = Path(__file__).resolve().parent.parent / "app" / "services" / "sync_orchestrator" / "adapters.py"
+        tree = ast.parse(adapter_path.read_text())
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == "job_name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                        names.add(kw.value.value)
+        return names
+
+    def test_every_adapter_job_name_resolves(self) -> None:
+        registry = get_job_name_to_source()
+        adapter_names = self._extract_adapter_job_names()
+        assert adapter_names, "AST extraction returned no adapter job_names — parser likely broken"
+        missing = sorted(n for n in adapter_names if n not in registry)
+        assert not missing, (
+            f"Orchestrator adapter dispatches to {missing!r} but the source registry has no entry. "
+            "Add to MANUAL_TRIGGER_JOB_SOURCES (or a bootstrap stage) so JobLock can resolve "
+            "the source bucket. #1183."
+        )
+
+    def test_run_with_lock_uses_keyword_job_name(self) -> None:
+        """Bot WARNING — guard the AST extractor's keyword-only assumption.
+
+        ``_extract_adapter_job_names`` only sees ``job_name=<literal>``
+        keyword form. A positional ``_run_with_lock("foo", legacy_fn)``
+        call would silently bypass the invariant. This test fails if
+        anyone writes a positional ``_run_with_lock`` call so the
+        extractor's blind spot stays CI-enforced rather than implicit.
+        """
+        import ast
+        from pathlib import Path
+
+        adapter_path = Path(__file__).resolve().parent.parent / "app" / "services" / "sync_orchestrator" / "adapters.py"
+        tree = ast.parse(adapter_path.read_text())
+        violations: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            callee_name: str | None
+            if isinstance(func, ast.Attribute):
+                callee_name = func.attr
+            elif isinstance(func, ast.Name):
+                callee_name = func.id
+            else:
+                callee_name = None
+            if callee_name != "_run_with_lock":
+                continue
+            # _run_with_lock(job_name, legacy_fn, progress=...). The
+            # first positional arg IS job_name by the function signature
+            # at app/services/sync_orchestrator/adapters.py:87, so we
+            # require ALL job_name passes to be keyword form for AST
+            # discoverability.
+            if node.args:
+                violations.append(
+                    f"line {node.lineno}: positional arg to _run_with_lock — "
+                    f"must pass job_name=<literal> as a keyword so the AST "
+                    f"invariant test can find it"
+                )
+            has_job_name_kw = any(kw.arg == "job_name" for kw in node.keywords)
+            if not has_job_name_kw:
+                violations.append(f"line {node.lineno}: _run_with_lock call missing job_name= keyword")
+        assert not violations, "\n".join(violations)
+
+    def test_known_orchestrator_adapter_targets_covered(self) -> None:
+        """Pinned-list regression for the 6 jobs #1183 added.
+
+        Mirrors the audit table in the #1183 issue body. If any of these
+        regresses, the test catches it before CI runs the AST sweep above.
+        """
+        registry = get_job_name_to_source()
+        expected: dict[str, Lane] = {
+            "fx_rates_refresh": "db",
+            "daily_portfolio_sync": "etoro",
+            # daily_research_refresh → sec_rate (Codex BLOCKING 2):
+            # body performs per-CIK SEC fetches; Lane docs reserve
+            # sec_rate for "every per-CIK + per-accession SEC fetch".
+            "daily_research_refresh": "sec_rate",
+            "seed_cost_models": "db",
+            "weekly_report": "db",
+            "monthly_report": "db",
+        }
+        for job_name, expected_source in expected.items():
+            assert registry.get(job_name) == expected_source, (
+                f"{job_name} mapped to {registry.get(job_name)!r}, expected {expected_source!r}"
+            )
 
 
 class TestRegistryConflictDetection:

@@ -157,7 +157,10 @@ def _wrap_single(
     progress: ProgressCallback | None = None,
 ) -> Sequence[tuple[str, RefreshResult]]:
     """Common pattern for single-emit adapters."""
-    result = _run_with_lock(job_name, legacy_fn, progress=progress)
+    # #1183 — keyword form so tests/test_job_registry.py::
+    # TestOrchestratorAdapterSourceCoverage's AST invariant can resolve
+    # the literal job_name through each call site.
+    result = _run_with_lock(job_name=job_name, legacy_fn=legacy_fn, progress=progress)
     if isinstance(result, str):
         return _single_emit_result(layer_name, LayerOutcome.PREREQ_SKIP, 0, result)
     outcome, row_count, error_category = result
