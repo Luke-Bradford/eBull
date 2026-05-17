@@ -53,6 +53,7 @@ def _db_reachable() -> bool:
 # Lifespan — driven through TestClient; dev-DB-required path
 # ---------------------------------------------------------------------------
 
+
 @contextlib.contextmanager
 def _dev_db_lifespan_lock() -> Iterator[None]:
     """Serialise lifespan migrations across concurrent pytest invocations.
