@@ -32,6 +32,7 @@ from app.services.processes.param_metadata import (
 from app.workers.scheduler import (
     JOB_SEC_ATOM_FAST_LANE,
     JOB_SEC_DAILY_INDEX_RECONCILE,
+    JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP,
     JOB_SEC_PER_CIK_POLL,
     JOB_SEC_REBUILD,
     SCHEDULED_JOBS,
@@ -80,6 +81,22 @@ class TestLayer123Registry:
         assert job.cadence == Cadence.hourly(minute=0)
         assert job.catch_up_on_boot is False
         assert job.prerequisite is not None
+        assert job.source == "sec_rate"
+
+    def test_layer4_master_idx_quarterly_sweep_registered(self) -> None:
+        """G12 — cross-quarter discovery walker. Weekly Sun 05:15 UTC.
+
+        Sibling Layer-3 shape (source=sec_rate, prereq=_bootstrap_complete,
+        catch_up_on_boot=False). The "Layer 4" label is informal —
+        keeps the test file mental model coherent.
+        """
+        assert JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP in VALID_JOB_NAMES
+        job = _job_by_name(JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP)
+        assert job is not None
+        assert job.cadence == Cadence.weekly(weekday=6, hour=5, minute=15)
+        assert job.catch_up_on_boot is False
+        assert job.prerequisite is not None
+        assert job.exempt_from_universal_bootstrap_gate is False
         assert job.source == "sec_rate"
 
 

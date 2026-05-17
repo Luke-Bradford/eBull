@@ -35,6 +35,7 @@ from app.jobs.runtime import _INVOKERS, JobRuntime
 from app.workers.scheduler import (
     JOB_SEC_ATOM_FAST_LANE,
     JOB_SEC_DAILY_INDEX_RECONCILE,
+    JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP,
     JOB_SEC_PER_CIK_POLL,
     SCHEDULED_JOBS,
     Cadence,
@@ -531,6 +532,13 @@ class TestLayer123ExemptionWiring:
     def test_layer3_per_cik_poll_not_exempt(self) -> None:
         """Layer 3's _bootstrap_complete prereq IS the right gate."""
         job = _job_by_name(JOB_SEC_PER_CIK_POLL)
+        assert job is not None
+        assert job.exempt_from_universal_bootstrap_gate is False
+
+    def test_layer4_master_idx_quarterly_sweep_not_exempt(self) -> None:
+        """G12 carve-out eligibility check — weekly cadence + per-job
+        prereq make the gate the right behaviour. See spec §3.1."""
+        job = _job_by_name(JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP)
         assert job is not None
         assert job.exempt_from_universal_bootstrap_gate is False
 
