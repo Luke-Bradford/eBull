@@ -70,6 +70,7 @@ Lane = Literal[
     "db_ownership_inst",
     "db_ownership_insider",
     "db_ownership_funds",
+    "bootstrap",
 ]
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
 jobs serialise under one ``JobLock``; cross-source jobs run in parallel.
@@ -105,6 +106,24 @@ PR1c #1064 collapsed everything onto a single ``db`` source.
   writes ``insider_transactions`` + ``form3_holdings_initial``.
 * ``db_ownership_funds`` — ``sec_nport_ingest_from_dataset``;
   writes ``n_port_*`` + ``sec_fund_series``.
+
+The final lane is bootstrap-only:
+
+* ``bootstrap`` — ``bootstrap_orchestrator`` (G14). Deliberately
+  disjoint from every per-stage lane so the outer
+  ``JobLock(bootstrap_orchestrator)`` held by the queue listener
+  (``_run_manual``) cannot collide with the inner per-stage
+  ``JobLock(<stage_job>)`` acquisitions that bootstrap submits to a
+  ``ThreadPoolExecutor`` (``app/services/bootstrap_orchestrator.py:1603``).
+  Cross-thread ``ContextVar`` propagation is NOT automatic (see
+  ``tests/test_job_lock_reentrancy.py::test_threads_do_not_inherit_held_sources``),
+  so the #1184 same-context re-entrancy bypass cannot fire from inside
+  an executor worker thread. Picking a fresh lane is the surgical fix:
+  no stage owns ``bootstrap``, so cross-thread inner acquisitions never
+  contend with the outer lock. Multiple bootstrap triggers still
+  serialise on the ``bootstrap`` lane's Postgres advisory lock — the
+  ``bootstrap_state.status='running'`` fence is the primary serializer
+  at trigger-publish time; this is belt-and-braces at dispatch time.
 """
 
 
@@ -174,6 +193,32 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.
     "sec_rebuild": "sec_rate",
+    # bootstrap_orchestrator — first-install + admin retry trigger (G14).
+    # POST /system/bootstrap/run + POST /system/bootstrap/retry-failed
+    # publish_manual_job_request(JOB_BOOTSTRAP_ORCHESTRATOR); the queue
+    # listener routes through ``_run_manual`` which acquires
+    # ``JobLock(job_name)``. Without a registry entry the JobLock
+    # constructor's ``source_for(...)`` raised ``KeyError`` and the
+    # retry handler had to bypass JobLock via direct-Python invocation
+    # (PR #1188 T9-POST).
+    #
+    # Lane = ``bootstrap`` (NOT ``init``). Bootstrap submits its
+    # per-stage invokers to a ``ThreadPoolExecutor``
+    # (``app/services/bootstrap_orchestrator.py:1603``); Python's
+    # ``ContextVar`` is NOT auto-propagated to executor worker threads
+    # (regression-pinned by
+    # ``tests/test_job_lock_reentrancy.py::test_threads_do_not_inherit_held_sources``),
+    # so the #1184 same-context re-entrancy short-circuit CANNOT fire
+    # inside an executor worker. Picking any source that an inner stage
+    # also uses (``init`` collides with ``nightly_universe_sync``;
+    # ``db`` collides with several Phase E stages) would have the worker
+    # thread hit ``pg_try_advisory_lock`` on a lock the listener thread
+    # already holds, and the inner stage would fail with
+    # ``JobAlreadyRunning``. A fresh ``bootstrap`` lane is disjoint from
+    # every per-stage lane — no cross-thread contention is possible by
+    # construction. Disjointness invariant pinned by
+    # ``tests/test_bootstrap_orchestrator_source_registry.py::test_bootstrap_lane_disjoint_from_all_stage_lanes``.
+    "bootstrap_orchestrator": "bootstrap",
     # --- Orchestrator-adapter + manual-queue reach (#1183, #1184) ---
     # #260 (PR #262) moved the jobs below from standalone ScheduledJob
     # rows into orchestrator FULL / HIGH_FREQUENCY cadences. PR1a #1064
