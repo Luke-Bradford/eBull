@@ -43,6 +43,7 @@ from app.services.coverage import bootstrap_missing_coverage_rows, review_covera
 from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.entry_timing import evaluate_entry_conditions
 from app.services.etoro_lookups import refresh_etoro_lookups
+from app.services.exchange_directory import refresh_exchange_directory
 from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
@@ -1684,6 +1685,13 @@ def daily_cik_refresh() -> None:
     # cannot produce an UnboundLocalError under an exception path.
     upserted = 0
     mapping_size = 0
+    # G8: explicit skip flag replaces the prior `return`-based early
+    # exits. The early returns silently skipped Stage 6 (MF) and would
+    # have skipped Stage 7 (exchange) on every warm-watermark day.
+    # Sibling enrichments now ALWAYS run regardless of which equity
+    # branch was taken — see the unconditional try/except blocks at
+    # the end of the body.
+    skip_equity_upsert = False
 
     with _tracked_job(JOB_DAILY_CIK_REFRESH) as tracker:
         with (
@@ -1722,19 +1730,16 @@ def daily_cik_refresh() -> None:
                         "daily_cik_refresh: provider returned 304 despite empty destination "
                         "(no If-Modified-Since header sent). Refusing to skip upsert — investigate."
                     )
-                # 304 — nothing changed.
-                logger.info("daily_cik_refresh: 304 Not Modified, skipping upsert")
-                tracker.row_count = 0
-                return
-
-            mapping_size = len(result.mapping)
-
-            if not dest_empty and prior and prior.response_hash == result.body_hash:
+                # 304 — nothing changed. Equity-side skip; sibling
+                # enrichments below still fire (G8 restructure).
+                logger.info("daily_cik_refresh: 304 Not Modified, skipping equity upsert")
+                skip_equity_upsert = True
+            elif not dest_empty and prior and prior.response_hash == result.body_hash:
                 # 200 with identical bytes AND destination already has
                 # rows — advance fetched_at only. When destination is
                 # empty we MUST upsert regardless of hash (the data
                 # was wiped; the hash-skip branch would leave it empty).
-                logger.info("daily_cik_refresh: 200 but body hash unchanged, skipping upsert")
+                logger.info("daily_cik_refresh: 200 but body hash unchanged, skipping equity upsert")
                 with conn.transaction():
                     set_watermark(
                         conn,
@@ -1743,58 +1748,85 @@ def daily_cik_refresh() -> None:
                         watermark=result.last_modified or prior.watermark,
                         response_hash=result.body_hash,
                     )
-                tracker.row_count = 0
-                return
-            if dest_empty:
-                logger.warning(
-                    "daily_cik_refresh: destination external_identifiers (sec/cik) is empty — "
-                    "forcing full upsert regardless of watermark / body hash."
-                )
+                mapping_size = len(result.mapping)
+                skip_equity_upsert = True
 
-            # #475: Scope to US-listed exchanges only. SEC's
-            # company_tickers.json only covers US-registered companies;
-            # the mapper used to match every tradable instrument by
-            # symbol, which stamped unrelated US-company CIKs onto
-            # eToro crypto coins that happened to share a ticker
-            # (e.g. BTC crypto got Grayscale Bitcoin Mini Trust's
-            # CIK because both answer to "BTC").
+            if not skip_equity_upsert:
+                # Narrowed by branches above: `result is None` set the
+                # skip flag (then raised or fell through), and the
+                # hash-unchanged elif also set the skip flag. The only
+                # surviving path here has `result is not None`. The
+                # assert keeps pyright honest and locks the invariant.
+                assert result is not None  # narrowing for type-checker
+
+                if dest_empty:
+                    logger.warning(
+                        "daily_cik_refresh: destination external_identifiers (sec/cik) is empty — "
+                        "forcing full upsert regardless of watermark / body hash."
+                    )
+
+                mapping_size = len(result.mapping)
+
+                # #475: Scope to US-listed exchanges only. SEC's
+                # company_tickers.json only covers US-registered companies;
+                # the mapper used to match every tradable instrument by
+                # symbol, which stamped unrelated US-company CIKs onto
+                # eToro crypto coins that happened to share a ticker
+                # (e.g. BTC crypto got Grayscale Bitcoin Mini Trust's
+                # CIK because both answer to "BTC").
+                #
+                # #503 PR 3: filter migrates from a hardcoded list to the
+                # ``exchanges`` table (sql/067) so adding / correcting
+                # an exchange's classification is a single row update.
+                # Crypto (asset_class='crypto'), unknown ids
+                # (asset_class='unknown'), and non-US classes are
+                # excluded by the join.
+                rows = conn.execute(
+                    "SELECT i.symbol, i.instrument_id::text FROM instruments i "
+                    "JOIN exchanges e ON e.exchange_id = i.exchange "
+                    "WHERE i.is_tradable = TRUE "
+                    "AND e.asset_class = 'us_equity'"
+                ).fetchall()
+                instrument_symbols = [(row[0], row[1]) for row in rows]
+
+                # Upsert + watermark advance must land atomically — if the
+                # watermark committed but the upserts didn't (crash), the
+                # next run would skip and the data would drift.
+                with conn.transaction():
+                    upserted = upsert_cik_mapping(conn, result.mapping, instrument_symbols)
+                    set_watermark(
+                        conn,
+                        source=SOURCE,
+                        key=WATERMARK_KEY,
+                        # Empty string when Last-Modified is absent is the
+                        # "no validator available" sentinel — next run's
+                        # truthy check above will fall back to no-header.
+                        # The body_hash still works for dedup in that case.
+                        watermark=result.last_modified or "",
+                        response_hash=result.body_hash,
+                    )
+
+            # --- Sibling enrichments — ALWAYS fire, fail-soft each ---
+            # G8 restructure: pre-fix, MF (Stage 6) only fired on the
+            # full-upsert branch; the 304 / hash-unchanged early
+            # returns silently skipped it. Stage 7 (exchange directory)
+            # inherits the always-fire contract from day one.
             #
-            # #503 PR 3: filter migrates from a hardcoded list to the
-            # ``exchanges`` table (sql/067) so adding / correcting
-            # an exchange's classification is a single row update.
-            # Crypto (asset_class='crypto'), unknown ids
-            # (asset_class='unknown'), and non-US classes are
-            # excluded by the join.
-            rows = conn.execute(
-                "SELECT i.symbol, i.instrument_id::text FROM instruments i "
-                "JOIN exchanges e ON e.exchange_id = i.exchange "
-                "WHERE i.is_tradable = TRUE "
-                "AND e.asset_class = 'us_equity'"
-            ).fetchall()
-            instrument_symbols = [(row[0], row[1]) for row in rows]
+            # Transaction structure (spec §2.1.2): psycopg3's outer
+            # `with psycopg.connect(...) as conn:` autocommits at exit;
+            # inner `conn.transaction()` blocks are SAVEPOINTs. Equity +
+            # MF + exchange writes all land in one transaction. Per-
+            # sibling failure rolls back ONLY that sibling's SAVEPOINT
+            # via the try/except; the outer txn continues so equity
+            # writes survive. Conn-level catastrophe (network drop
+            # mid-transaction) still rolls everything back — that's a
+            # caveat MF has carried since #1171.
 
-            # Upsert + watermark advance must land atomically — if the
-            # watermark committed but the upserts didn't (crash), the
-            # next run would skip and the data would drift.
-            with conn.transaction():
-                upserted = upsert_cik_mapping(conn, result.mapping, instrument_symbols)
-                set_watermark(
-                    conn,
-                    source=SOURCE,
-                    key=WATERMARK_KEY,
-                    # Empty string when Last-Modified is absent is the
-                    # "no validator available" sentinel — next run's
-                    # truthy check above will fall back to no-header.
-                    # The body_hash still works for dedup in that case.
-                    watermark=result.last_modified or "",
-                    response_hash=result.body_hash,
-                )
-
-            # #1171 — bundled mutual-fund / ETF classId directory refresh.
+            # Stage 6 (#1171) — MF / ETF classId directory refresh.
             # Populates cik_refresh_mf_directory + external_identifiers
             # (identifier_type='class_id') for the N-CSR fund-metadata
-            # parser. Logged-but-not-raised on failure: a directory-refresh
-            # error MUST NOT block the equity-side CIK refresh.
+            # parser. Logged-but-not-raised on failure: a directory-
+            # refresh error MUST NOT block the equity-side CIK refresh.
             try:
                 mf_result = refresh_mf_directory(conn, provider=provider)
                 logger.info(
@@ -1805,6 +1837,19 @@ def daily_cik_refresh() -> None:
                 )
             except Exception:  # noqa: BLE001 — fail-soft for #1171 bundling
                 logger.exception("mf_directory refresh failed; equity CIK refresh result preserved")
+
+            # Stage 7 (G8) — exchange directory refresh. Populates
+            # cik_refresh_exchange_directory keyed by (cik, ticker).
+            # Same fail-soft contract as Stage 6.
+            try:
+                exch_result = refresh_exchange_directory(conn, provider=provider)
+                logger.info(
+                    "exchange_directory refresh: fetched=%s directory_rows=%s",
+                    exch_result["fetched"],
+                    exch_result["directory_rows"],
+                )
+            except Exception:  # noqa: BLE001 — fail-soft for G8 bundling
+                logger.exception("exchange_directory refresh failed; equity CIK refresh result preserved")
 
         tracker.row_count = upserted
 

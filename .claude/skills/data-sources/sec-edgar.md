@@ -29,7 +29,22 @@
 ```
 `cik_str` is **integer** in JSON, **not zero-padded**. Always pad to 10 digits with `f"CIK{cik:010d}"` before constructing API URLs.
 
-**Coverage gap**: `company_tickers.json` excludes pink-sheet/OTC, foreign-without-ADR, warrant-only, preferred-only. Layer `company_tickers_exchange.json` and `company_tickers_mf.json` to close gaps. eBull pattern lives in `daily_cik_refresh` (scheduled job, see `app/workers/scheduler.py`) calling `app/services/filings.py::upsert_cik_mapping`. The earlier `app/services/cik_discovery.py` helper was deleted in #1091.
+**Coverage** (corrected 2026-05-17 from empirical sample):
+
+- `company_tickers.json` and `company_tickers_exchange.json` share the same CIK row cohort COUNT (10,353 entries each as of 2026-05-17).
+- `company_tickers.json` is **CIK-grain**: one row per CIK, ticker is the primary symbol. Includes pink-sheet/OTC tickers (e.g. `PTPIF`, `EMCGF`) — earlier framing that these were "excluded" was inaccurate.
+- `company_tickers_exchange.json` is **ticker-grain**: 10,353 rows / 7,996 unique CIKs / 1,446 multi-ticker CIKs. Captures share-class siblings (GOOG/GOOGL), preferred-series tickers (BAC=17 variants, JPM=9, MS=10), and ADR+OTC siblings (BABA/BABAF/BBAAY). Adds the `exchange` enum (Nasdaq / NYSE / OTC / CBOE / NULL).
+- `company_tickers_mf.json` covers the mutual-fund universe (~28k rows with `seriesId` + `classId`) — disjoint from the two above.
+
+eBull pattern lives in `daily_cik_refresh` (`app/workers/scheduler.py`):
+
+- Equity path: `app/services/filings.py::upsert_cik_mapping` populates `external_identifiers (sec, cik)` from `company_tickers.json`.
+- Stage 6: `app/services/mf_directory.py::refresh_mf_directory` (#1171) populates `cik_refresh_mf_directory` + `external_identifiers (sec, class_id)` from `company_tickers_mf.json`.
+- Stage 7: `app/services/exchange_directory.py::refresh_exchange_directory` (G8, 2026-05-17) populates `cik_refresh_exchange_directory` keyed by `(cik, ticker)` from `company_tickers_exchange.json`.
+
+Sibling enrichments (Stage 6 + 7) fire on EVERY `daily_cik_refresh` invocation regardless of the equity-side 304 / hash-unchanged / full-upsert branch — G8 restructure fixed a latent skip in Stage 6 alongside adding Stage 7.
+
+The earlier `app/services/cik_discovery.py` helper was deleted in #1091.
 
 ### JSON APIs (`data.sec.gov`)
 

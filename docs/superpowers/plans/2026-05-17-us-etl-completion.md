@@ -266,8 +266,38 @@ PR 1 (G7 #1190) + PR 2 (G14 #1191) + PR 3 (G13 #1193) all merged. Phase 1 comple
 
 ### Next phase (Phase 2 entry)
 
-- **Phase 2, PR 4 — G8 (`company_tickers_exchange.json` consumer).** Plan §2 Phase 2 — closes pink-sheet / OTC / foreign-without-ADR gap in CIK ↔ ticker bridge. Endpoint: `https://www.sec.gov/files/company_tickers_exchange.json`. Decide: extend `daily_cik_refresh` body with the supplemental enrichment fetch, OR add new dedicated `ScheduledJob daily_cik_exchange_refresh`. Persistence: extend `external_identifiers` with exchange metadata OR new `instrument_exchange` table — design TBD. Matrix update on close: §4 row + §7 G8 → CLOSED.
-- **Phase 2, PR 5 — G9 (`company_tickers_mf.json` consumer).** Likely bundles with PR 4 if cohesion holds. May be doc-only if #1174's `mf_directory_sync` already covers the seed path — verify first.
+- **Phase 2, PR 5 — G9 (`company_tickers_mf.json` consumer).** Verify whether #1174's `mf_directory_sync` (S25) already canonically covers the seed path. If yes — close G9 with documentation only + matrix update. If no — wire dedicated consumer (likely doc-only outcome based on memory `[[us-source-coverage]]`).
+
+## Handover — PR #<G8> (open 2026-05-17)
+
+- Phase: 2
+- Gap / ticket closed: **G8** (`company_tickers_exchange.json` consumer)
+- Branch: `feat/g8-company-tickers-exchange-directory`
+- Merge SHA: pending (awaiting Claude review bot + CI on most recent commit)
+- Tests added:
+  - `tests/test_exchange_directory.py` — 12 service tests (happy-path / CIK zero-pad / multi-ticker CIK preserved / null exchange normalised / null ticker skipped / malformed row skipped / upsert idempotency / empty data / missing fields key / missing single field / field reordering / empty body raises).
+  - `tests/test_daily_cik_refresh_sibling_enrichments.py` — 6 integration tests (sibling enrichments fire on 304 / hash-unchanged / full-upsert paths × Stage 6 fail-soft / Stage 7 fail-soft / both fail-soft).
+  - `tests/test_daily_cik_refresh_scope.py` — added `_patch_sibling_enrichments` static method + applied to 2 non-raising tests (prevents live SEC fetch after T3 lands).
+  - `tests/test_fetch_document_text_callers.py` — 2 new allow-list entries (`app/services/exchange_directory.py` + `tests/test_exchange_directory.py`) per #453 contract.
+  - `tests/fixtures/ebull_test_db.py::_PLANNER_TABLES` — added `cik_refresh_exchange_directory` for cross-test cleanup.
+- Scope discoveries handled in-scope:
+  - **Cohort observation (empirical 2026-05-17):** `company_tickers_exchange.json` shares the same row cohort COUNT as `company_tickers.json` (10,353) but is **ticker-grain not CIK-grain** — 7,996 unique CIKs / 1,446 multi-ticker CIKs. Plan's pre-cohort framing of "closes pink-sheet/OTC/foreign-without-ADR cohort gap" was empirically wrong; basic file already includes pink-sheet/OTC CIKs. The real value-add is the `(ticker, exchange)` mapping for preferred series (BAC=17 variants, JPM=9, MS=10), share-class siblings (GOOG/GOOGL), and ADR + OTC siblings (BABA/BABAF/BBAAY). Spec §1 / matrix §4 / sec-edgar.md §1 all corrected.
+  - **MF Stage 6 latent skip fixed.** Pre-G8, Stage 6 MF refresh only fired on the full-upsert branch (304 / hash-unchanged early returns silently skipped it). The restructure makes Stage 6 + Stage 7 fire on every `daily_cik_refresh` invocation. Bootstrap-side authority remains `mf_directory_sync` (S25 #1174); this PR only fixes the daily-cron drift-heal path.
+  - **PK granularity correction (Codex 1a round 2 HIGH 2).** Initial design was `PRIMARY KEY (cik)`; corrected to `(cik, ticker)` after re-counting the live payload showed 1,446 multi-ticker CIKs. A `(cik)`-only PK would have collapsed ~2,357 rows on every refresh.
+  - **`fetch_document_text` allow-list update** added in-scope per #453 contract.
+  - **Existing `test_daily_cik_refresh_scope.py` patched** to monkeypatch sibling refreshes — prevents live SEC fetch on the 2 non-raising tests that drive the real `daily_cik_refresh` after T3 lands (Codex 1b round-2 §3).
+- Matrix delta:
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §2 Stage 6 `cik_refresh` row — appended "+ Stage 7 exchange directory (G8, 2026-05-17)".
+  - §4 reference endpoints row `www.sec.gov/files/company_tickers_exchange.json` — `❌ GAP` → `✅ WIRED 2026-05-17 (G8)` with full provenance.
+  - §7 gap register G8 row — `OPEN (low)` → `✅ CLOSED 2026-05-17`.
+  - `.claude/skills/data-sources/sec-edgar.md` §1 "Coverage gap" paragraph — rewritten with empirical ticker-grain correction + Stage 6/7 wiring map.
+- Codex iteration counts:
+  - Codex 1a (spec): 4 rounds to CLEAN — round-1 HIGH (early-return skip), HIGH (PK granularity), MED (txn ordering), MED (stale rows), MED (per-field tolerance), LOW (planner_tables), LOW (raw-payload-sink wording); round-2 HIGH (txn ordering wording precision); round-3 (allow-list update); round-4 CLEAN.
+  - Codex 1b (plan): 3 rounds to CLEAN — round-1 HIGH (DAG dep T3→T2), HIGH (db_url monkeypatch), HIGH (FK seed), MED (stub-must-write), MED (non-string field guard), LOW (_PLANNER_TABLES sort); round-2 §1-3 (fixture names + seed helpers + scope-test live-fetch risk); round-3 CLEAN.
+- ETL clauses #8-#12: Most N/A (reference-table snapshot, no per-instrument figure changes). Clause 9 spot-check: AAPL / GME / MSFT / JPM / HD against SEC live `company_tickers_exchange.json` — verification recorded in PR body.
+- **Prevention-log candidate (extract on review):** "Re-count empirical cohort BEFORE finalising PK granularity for snapshot tables — same-count-row sets can still be many-to-one along the dimension you're keying on." Spec §1 documents the trap; if Codex / bot cites a sibling entry it ALREADY_COVERED, else EXTRACTED on first review round.
+- Spec: `docs/superpowers/specs/2026-05-17-g8-company-tickers-exchange-directory.md` (v3 CLEAN).
+- Plan: `docs/superpowers/plans/2026-05-17-g8-company-tickers-exchange-directory-plan.md` (v3 CLEAN).
 
 ## 6. Definition of done — for the whole plan
 
