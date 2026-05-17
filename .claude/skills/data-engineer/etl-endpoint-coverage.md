@@ -50,15 +50,16 @@ Definition: `app/services/sec_manifest.py:106-121` + CHECK constraint `sql/118:3
 
 ---
 
-## 3. Discovery layer wiring — Layer 1 / Layer 2 / Layer 3
+## 3. Discovery layer wiring — Layer 1 / Layer 2 / Layer 3 / Layer 4
 
-The #863-#873 ETL freshness redesign (spec at `docs/superpowers/specs/2026-05-04-etl-coverage-model.md`) ships three steady-state discovery layers, cheapest-first. They sit BETWEEN the bootstrap drain and the manifest worker — discovering new accessions and inserting `sec_filing_manifest` rows for the worker to drain.
+The #863-#873 ETL freshness redesign (spec at `docs/superpowers/specs/2026-05-04-etl-coverage-model.md`) ships three steady-state discovery layers, cheapest-first. They sit BETWEEN the bootstrap drain and the manifest worker — discovering new accessions and inserting `sec_filing_manifest` rows for the worker to drain. **Layer 4** (G12, 2026-05-17) extends the family for cross-quarter recovery — the case Layer 1/2/3 cannot cover (tombstoned-CIK / deactivated-CIK / merged-CIK / late-amendment).
 
 | Layer | Endpoint | Code | Bootstrap-side caller | Steady-state caller | Status |
 |---|---|---|---|---|---|
 | 1 | Atom `getcurrent?action=getcurrent&output=atom` (every 5 min) | `run_atom_fast_lane` at `app/jobs/sec_atom_fast_lane.py:104` | — | — | ❌ **UNWIRED** — no `_INVOKERS[]` entry, no `SCHEDULED_JOBS` row, only test callers |
 | 2 | Daily `master.YYYYMMDD.idx` (04:00 UTC reconciliation) | `run_daily_index_reconcile` at `app/jobs/sec_daily_index_reconcile.py:46` | — | — | ❌ **UNWIRED** — same shape |
 | 3 | Per-CIK `submissions/CIK*.json` (per `data_freshness._CADENCE`) | `run_per_cik_poll` at `app/jobs/sec_per_cik_poll.py:39` | — | — | ❌ **UNWIRED** — same shape |
+| 4 | Full-index quarterly `master.idx` (weekly Sun 05:15 UTC; walks `[CQ, CQ-1]`) | `run_master_idx_quarterly_sweep` at `app/jobs/sec_master_idx_quarterly_sweep.py` | — | `sec_master_idx_quarterly_sweep` ScheduledJob (G12, 2026-05-17) | ✅ **WIRED 2026-05-17** — cross-quarter discovery safety net. Per-quarter txn isolation; strict-by-default 404; preloaded O(1) universe resolver. |
 
 Tickets #867 / #868 / #870 marked CLOSED 2026-05-06 by the implementation PRs, but the wiring layer was never added. Reopened with audit pointer 2026-05-13. **Umbrella: #1155.**
 
@@ -106,7 +107,7 @@ These endpoints don't have a `ManifestSource` because they're not per-filing dis
 | Bulk `insider-transactions-data-sets/{q}_form345.zip` | `app/services/sec_bulk_download.py:244` | Stage 7 + Stage 11 | — | `sec_bulk_download` lane | Bulk dataset |
 | Bulk `form-n-port-data-sets/{q}_nport.zip` | `app/services/sec_bulk_download.py:251` | Stage 7 + Stage 12 | — | `sec_bulk_download` lane | Bulk dataset |
 | Daily `master.YYYYMMDD.idx` | `app/providers/implementations/sec_edgar.py:565` | — (Layer 2, see §3) | ❌ unscheduled (Layer 2 gap #868) | `sec_rate` | Yesterday's filings reconciliation |
-| Full-index `master.idx` quarterly | NOT CONSUMED | — | — | — | ❌ **GAP** — cross-quarter discovery; sec-edgar skill §1 cites it but only `form.idx` is consumed (top-filer discovery at `top_filer_discovery.py:64`). Eligible for tech-debt if cross-quarter walks become needed. |
+| Full-index `master.idx` quarterly | `app/providers/implementations/sec_full_index.py:read_master_idx` | — (Layer 4, see §3) | weekly Sun 05:15 UTC `sec_master_idx_quarterly_sweep` (`scheduler.py` ScheduledJob) | `sec_rate` | ✅ **WIRED 2026-05-17 (G12)** — cross-quarter discovery safety net. Walks `[CQ, CQ-1]` each fire (~50 MB / quarter), filters to (cik IN universe) + (form mapped to ManifestSource), UPSERTs missed accessions into `sec_filing_manifest`. Per-quarter txn isolation (commit/rollback boundary). Strict-by-default 404 — only the current quarter tolerates 404. Preloaded universe resolver (O(1) lookups). >1-quarter outage recovery is a Python REPL runbook against `run_master_idx_quarterly_sweep(..., quarters=[(YYYY,Q), ...])`. |
 | Atom `getcurrent` | `app/providers/implementations/sec_getcurrent.py:50` | — | ❌ unscheduled (Layer 1 gap #867) | `sec_rate` | Live current-day filings; ISO-8859-1 |
 | Atom `getcompany?CIK={cik}&type={form}` | NOT CONSUMED | — | — | — | ❌ **GAP** — per-CIK Atom alternative. Not consumed; per-CIK Atom is via Layer 1 (universe-wide Atom + filter). Likely fine — submissions.json is authoritative. No ticket needed unless operator wants per-CIK polling. |
 | Filing-folder `/Archives/edgar/data/{cik}/{acc}/index.json` | `app/providers/implementations/sec_edgar.py:424` + `app/services/filing_documents.py` | — | `JOB_SEC_FILING_DOCUMENTS_INGEST` (`scheduler.py:655`) | `sec_rate` | Enumerate filing exhibits |
@@ -176,7 +177,7 @@ These endpoints don't have a `ManifestSource` because they're not per-filing dis
 | G9 | `company_tickers_mf.json` not consumed | ✅ CLOSED (predates audit) | **#1171 + #1174** | Stale audit entry corrected in same PR as G8. Consumed via `app/services/mf_directory.py::refresh_mf_directory` (Stage 6 sibling enrichment in `daily_cik_refresh`) + dedicated S25 `mf_directory_sync` bootstrap stage. Populates `cik_refresh_mf_directory` + `external_identifiers (sec, class_id)`. |
 | G10 | `companyconcept` API not consumed | OPEN (low) | — | Smaller-payload alternative to Companyfacts for known-tag pulls. Eligible. |
 | G11 | `frames` API not consumed | OPEN (low) | — | Cross-sectional one-fact-per-filer; sector aggregates use case. Eligible. |
-| G12 | Full-index `master.idx` quarterly not consumed | OPEN (low) | — | Cross-quarter discovery; only `form.idx` is consumed today. Eligible if cross-quarter walks become needed. |
+| G12 | Full-index `master.idx` quarterly not consumed | ✅ CLOSED 2026-05-17 | **G12 PR** | Wired via `app/providers/implementations/sec_full_index.py` + `app/jobs/sec_master_idx_quarterly_sweep.py` + ScheduledJob `sec_master_idx_quarterly_sweep` (weekly Sun 05:15 UTC, source=`sec_rate`, prereq=`_bootstrap_complete`). Walks `[CQ, CQ-1]` per fire; per-quarter txn isolation; strict-by-default 404 (current quarter only tolerates 404); preloaded O(1) universe resolver. >1-quarter outage recovery via Python REPL runbook against the `quarters` kwarg. |
 | G13 | `subjects_due_for_recheck` reader unused | ✅ CLOSED 2026-05-17 | **#1155** (sub-finding) + verification PR | Both readers drained per tick at `app/jobs/sec_per_cik_poll.py:195-198` with bounded 2/3+1/3 budget split. Static AST invariants at `tests/test_g13_recheck_reader_invariants.py` guard the wiring against future refactor; integration drain proved by `tests/test_sec_per_cik_poll.py::TestG13RecheckPath`. |
 
 G1-G3 are the **headline finding** of this audit — the freshness redesign's three steady-state polling layers are coded but never scheduled. Without them, the table at §3 (legacy per-form ingest crons) carries discovery; `data_freshness._CADENCE` is a write-only ledger.

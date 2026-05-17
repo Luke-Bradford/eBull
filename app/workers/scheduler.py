@@ -326,6 +326,7 @@ JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
 JOB_SEC_ATOM_FAST_LANE = "sec_atom_fast_lane"
 JOB_SEC_DAILY_INDEX_RECONCILE = "sec_daily_index_reconcile"
 JOB_SEC_PER_CIK_POLL = "sec_per_cik_poll"
+JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP = "sec_master_idx_quarterly_sweep"
 JOB_SEC_REBUILD = "sec_rebuild"
 
 
@@ -1075,6 +1076,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "scheduled polls."
         ),
         cadence=Cadence.hourly(minute=0),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP,
+        display_name="SEC master.idx quarterly sweep (G12)",
+        source="sec_rate",
+        description=(
+            "G12 — cross-quarter discovery safety net. Weekly Sun "
+            "05:15 UTC walks the current AND previous calendar "
+            "quarter master.idx files (~250-300k rows / ~50 MB each), "
+            "filters to (cik IN universe) + (form mapped to "
+            "ManifestSource), UPSERTs any sec_filing_manifest rows the "
+            "Atom + daily-index + per-CIK layers missed. Catches "
+            "late-arriving amendments + tombstoned-CIK accessions. "
+            ">1-quarter outage recovery is a Python REPL runbook — "
+            "see spec docs/superpowers/specs/2026-05-17-g12-"
+            "master-idx-quarterly-walker.md §3.1."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=5, minute=15),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -4573,6 +4594,60 @@ def sec_per_cik_poll() -> None:
             stats.recheck_subjects_polled,
             stats.recheck_new_filings_recorded,
         )
+
+
+def sec_master_idx_quarterly_sweep() -> None:
+    """``_INVOKERS['sec_master_idx_quarterly_sweep']`` — G12 cross-quarter sweep.
+
+    Walks ``[CQ, CQ-1]`` from the fire-time UTC moment. No operator
+    params. >1-quarter outage backfill is a Python REPL runbook
+    against ``run_master_idx_quarterly_sweep(conn, ..., quarters=...)``
+    — see spec docs/superpowers/specs/2026-05-17-g12-master-idx-
+    quarterly-walker.md §3.1.
+
+    Per-quarter commit / rollback isolation lives inside
+    ``run_master_idx_quarterly_sweep`` so the invoker's terminal
+    ``conn.commit()`` is intentionally omitted — whatever state remains
+    is already settled.
+
+    Failure surfacing: any per-quarter failure surfaces as a
+    ``RuntimeError`` from the invoker so ``_tracked_job`` records
+    ``job_runs.status='failure'`` with the failed-quarter detail.
+    Without this, /system/processes would show success with row_count=0
+    even when every quarter 404'd / 5xx'd (Codex 2 pre-push HIGH-2).
+    Successful quarters still commit before the raise — partial work
+    is durable; the failure signal is for operator visibility only.
+    """
+    from app.jobs.sec_master_idx_quarterly_sweep import (
+        run_master_idx_quarterly_sweep,
+    )
+
+    with _tracked_job(JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            stats = run_master_idx_quarterly_sweep(
+                conn,
+                http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
+            )
+        tracker.row_count = stats.total_upserted
+        logger.info(
+            "sec_master_idx_quarterly_sweep: quarters=%d total_upserted=%d failed=%d",
+            len(stats.quarters),
+            stats.total_upserted,
+            stats.failed_quarters,
+        )
+        if stats.failed_quarters > 0:
+            failed_details = [
+                f"{q.year}Q{q.quarter}: {q.error_detail or 'unknown'}" for q in stats.quarters if q.failed
+            ]
+            raise RuntimeError(
+                f"sec_master_idx_quarterly_sweep: {stats.failed_quarters} of "
+                f"{len(stats.quarters)} quarters failed; "
+                f"total_upserted={stats.total_upserted}; "
+                f"failed: {'; '.join(failed_details)}"
+            )
 
 
 def sec_rebuild(params: Mapping[str, Any]) -> None:

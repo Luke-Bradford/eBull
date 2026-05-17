@@ -306,6 +306,8 @@ _INVOKERS[_scheduler.JOB_SEC_N_CSR_BOOTSTRAP_DRAIN] = _scheduler.sec_n_csr_boots
 _INVOKERS[_scheduler.JOB_SEC_ATOM_FAST_LANE] = _adapt_zero_arg(_scheduler.sec_atom_fast_lane)
 _INVOKERS[_scheduler.JOB_SEC_DAILY_INDEX_RECONCILE] = _adapt_zero_arg(_scheduler.sec_daily_index_reconcile)
 _INVOKERS[_scheduler.JOB_SEC_PER_CIK_POLL] = _adapt_zero_arg(_scheduler.sec_per_cik_poll)
+# G12 — Layer-4 cross-quarter discovery (weekly Sun 05:15 UTC).
+_INVOKERS[_scheduler.JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP] = _adapt_zero_arg(_scheduler.sec_master_idx_quarterly_sweep)
 _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking, no _adapt_zero_arg
 
 # ---------------------------------------------------------------------------

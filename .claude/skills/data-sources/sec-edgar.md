@@ -88,7 +88,7 @@ Pattern at [app/services/institutional_holdings.py:189-220](../../../app/service
 
 | Endpoint | URL | Refresh | Use For |
 |---|---|---|---|
-| Full-index quarterly | `https://www.sec.gov/Archives/edgar/full-index/{YYYY}/QTR{n}/master.idx` | Weekly Sat (PAC rebuild) | Cross-quarter discovery |
+| Full-index quarterly | `https://www.sec.gov/Archives/edgar/full-index/{YYYY}/QTR{n}/master.idx` | Weekly Sat (PAC rebuild) | Cross-quarter discovery — consumed by `app/providers/implementations/sec_full_index.py` + `app/jobs/sec_master_idx_quarterly_sweep.py` (G12; weekly Sun 05:15 UTC) |
 | Daily-index | `https://www.sec.gov/Archives/edgar/daily-index/{YYYY}/QTR{n}/master.{YYYYMMDD}.idx` | Nightly ~22:00 ET | Yesterday's filings |
 | Atom getcurrent | `https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form}&output=atom` | Live | Hot polling for current-day filings |
 | Atom getcompany | `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form}&output=atom` | Live | Per-CIK Atom alternative |
