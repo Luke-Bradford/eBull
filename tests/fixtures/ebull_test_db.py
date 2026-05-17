@@ -183,6 +183,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "fund_metadata_current",
     "fund_metadata_observations",
     "cik_refresh_mf_directory",
+    # G8 — company_tickers_exchange.json snapshot (sql/150).
+    "cik_refresh_exchange_directory",
 )
 
 

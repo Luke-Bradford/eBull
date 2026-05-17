@@ -226,10 +226,32 @@ class TestDailyCikRefreshEmptyDest:
 
         monkeypatch.setattr(settings, "database_url", test_database_url())
 
+    @staticmethod
+    def _patch_sibling_enrichments(monkeypatch) -> None:
+        """G8 (sql/150) restructured daily_cik_refresh so Stage 6 (MF)
+        and new Stage 7 (exchange directory) always fire after the
+        equity branch. The non-raising tests below patch only
+        ``build_cik_mapping_conditional`` — without these no-op
+        sibling stubs the real services would call SEC live for the
+        MF + exchange URLs. Stub both to no-op + return zero-row
+        counts so the equity-branch assertions stay focused."""
+
+        def _noop_mf(conn, *, provider):
+            del conn, provider
+            return {"fetched": 0, "directory_rows": 0, "external_identifier_rows": 0}
+
+        def _noop_exchange(conn, *, provider):
+            del conn, provider
+            return {"fetched": 0, "directory_rows": 0}
+
+        monkeypatch.setattr("app.workers.scheduler.refresh_mf_directory", _noop_mf)
+        monkeypatch.setattr("app.workers.scheduler.refresh_exchange_directory", _noop_exchange)
+
     def test_empty_dest_omits_if_modified_since(self, ebull_test_conn, monkeypatch) -> None:
         """Stale watermark + empty dest → refresh sends no IMS so
         SEC can't return 304 against the stale validator."""
         self._patch_db_url(monkeypatch)
+        self._patch_sibling_enrichments(monkeypatch)
         from app.services.watermarks import set_watermark
         from app.workers.scheduler import daily_cik_refresh
 
@@ -274,6 +296,7 @@ class TestDailyCikRefreshEmptyDest:
         """Empty dest + 200-with-same-body-hash must still upsert.
         Pre-fix: the hash-skip branch fired and dest stayed empty."""
         self._patch_db_url(monkeypatch)
+        self._patch_sibling_enrichments(monkeypatch)
         from app.services.watermarks import set_watermark
         from app.workers.scheduler import daily_cik_refresh
 

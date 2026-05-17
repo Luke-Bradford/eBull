@@ -132,6 +132,15 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # SQL surface the resolver consumes).
         "app/services/mf_directory.py",
         "tests/test_mf_directory.py",
+        # G8 — bundled company_tickers_exchange.json ingest (Phase 2
+        # PR 4 of US-ETL completion plan). Fetches the exchange
+        # directory JSON via SecFilingsProvider.fetch_document_text
+        # and normalises every (cik, name, ticker, exchange) row into
+        # cik_refresh_exchange_directory (the structured SQL surface
+        # for future consumers). Spec:
+        # docs/superpowers/specs/2026-05-17-g8-company-tickers-exchange-directory.md
+        "app/services/exchange_directory.py",
+        "tests/test_exchange_directory.py",
         # #1174 — wrapper-effect test for the dedicated S25
         # ``mf_directory_sync`` bootstrap stage. The wrapper itself
         # does NOT call fetch_document_text (it delegates to
