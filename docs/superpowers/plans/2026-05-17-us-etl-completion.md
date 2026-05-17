@@ -268,6 +268,47 @@ PR 1 (G7 #1190) + PR 2 (G14 #1191) + PR 3 (G13 #1193) all merged. Phase 1 comple
 
 - **Phase 2, PR 5 — G9 (`company_tickers_mf.json` consumer).** ✅ CLOSED in-scope by PR #1194 (G8) — stale audit entry corrected. Consumer existed since #1171 (`refresh_mf_directory` bundled into `daily_cik_refresh` Stage 6) + #1174 (S25 `mf_directory_sync` dedicated bootstrap stage). Matrix §2 + §4 + §7 updated accordingly. No new code needed.
 
+## Handover — Phase 3 (PR 6, session 3)
+
+### Handover — PR #1196 (merged 2026-05-17)
+
+- Phase: 3
+- Gap / ticket closed: **G12** (`master.idx` quarterly cross-quarter walker)
+- Branch: `feat/g12-master-idx-quarterly-walker` (deleted post-merge)
+- Merge SHA: `e48eba3` (squash)
+- Tests added:
+  - `tests/test_sec_full_index_provider.py` — 11 unit tests (URL builder, quarter-start anchor, strict-vs-tolerant 404 contract, malformed-date fallback).
+  - `tests/test_sec_master_idx_quarterly_sweep.py` — 24 integration + resolver-priority tests against `ebull_test_conn` (quarter-boundary helpers parametrised, happy path, unmapped-form skipping, asymmetric 404 contract — CQ-tolerant vs CQ-1-strict, per-quarter txn isolation for both `sec_filing_manifest` AND `data_freshness_index`, commit-before-next-quarter durability, explicit `quarters` kwarg path, ON CONFLICT preserves `ingest_status`, preloaded-resolver priority chain `issuer > institutional_filer > blockholder_filer`, unknown-CIK None, blockholder-only cohort).
+  - `tests/test_sec_master_idx_scheduler_wiring.py` — 5 wiring invariants (constant value, ScheduledJob entry shape, `_INVOKERS.__wrapped__` identity, `source_for()` resolves).
+  - `tests/test_universal_gate_carve_out.py` — added positive assertion that G12 is NOT in the exempt allow-list.
+  - `tests/test_layer_123_wiring.py` — added Layer-4 row asserting full ScheduledJob shape.
+- Scope discoveries handled in-scope:
+  - **HIGH (Codex 1a r1)**: per-quarter txn cascade trap. Fixed via `conn.commit()` on success + `conn.rollback()` on failure inside the per-quarter try/except — preserves the per-quarter failure-isolation contract for BOTH `sec_filing_manifest` AND `data_freshness_index` writes (cross-table rollback proved by test 9). Tests 9 + 10 pin the contract.
+  - **HIGH (Codex 1a r1)**: 404-ambiguity trap. `read_master_idx` strict-by-default; only the current calendar quarter passes `allow_404=True`. Previous-quarter 404 surfaces as `QuarterStats(failed=True)`. Test 7 pins the asymmetric contract.
+  - **HIGH (Codex 1a r1)**: outage-window invariant ownership. >1-quarter recovery is an explicit Python REPL runbook against `run_master_idx_quarterly_sweep(conn, ..., quarters=[(YYYY,Q), ...])`. NO operator-facing `params_metadata` surface (avoids cross-cutting `multi_quarter` ParamFieldType extension).
+  - **MED (Codex 1a r1)**: resolver hot path. `build_preloaded_subject_resolver(conn)` materialises a `dict[cik, ResolvedSubject]` once per fire (~17k entries / ~1.5 MB), returns O(1) closure. Replaces the per-row 3-table default. Priority chain `issuer > institutional_filer > blockholder_filer` via `setdefault`. Tests 14 + 16 pin both priority steps.
+  - **MED (Codex 1a r1)**: cohort-correct smoke panel. AAPL ≠ 13F-HR (issuer-scoped CIK); 13F-HR is filer-scoped (Berkshire / BlackRock per `institutional_filers`). Spec acceptance §9 corrected.
+  - **HIGH (Codex 1b r1)**: FK seed order. Test helper `_seed_issuer` inserts into `instruments(instrument_id, symbol, company_name)` BEFORE `instrument_sec_profile(instrument_id, cik)` — verified against `sql/001_init.sql:1-4` after r2 caught the wrong-PK-name version.
+  - **HIGH (Codex 1b r1)**: blockholder cohort missing from tests. Added `_seed_blockholder_filer` helper + test 16 priority assertion + dedicated blockholder-only resolution test.
+  - **LOW (Codex 1b r1)**: `_INVOKERS` identity pin via `.__wrapped__ is sec_master_idx_quarterly_sweep` (NOT comparing against a fresh `_adapt_zero_arg(...)` call which returns a new closure each time).
+  - **HIGH (Codex 2 pre-push)**: partial-quarter failure was recorded as job success. Invoker now raises `RuntimeError` if `stats.failed_quarters > 0` so `_tracked_job` records `job_runs.status='failure'` with per-quarter detail. Successful quarters still commit before the raise — partial work is durable; the failure signal is for operator visibility only.
+  - **LOW (Codex 2 r2)**: docstring said `status='error'`; actual contract is `status='failure'` per `record_job_finish` + SQL CHECK. Fixed.
+- Matrix delta:
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §3 (new Layer-4 row) + §4 (full-index quarterly row `❌ GAP` → `✅ WIRED 2026-05-17 (G12)`) + §7 G12 row (`OPEN (low)` → `✅ CLOSED 2026-05-17 — PR #1196 merge e48eba3`).
+  - `.claude/skills/data-sources/sec-edgar.md` §1 (full-index quarterly row gets consumer annotation).
+- Codex iteration counts:
+  - 1a (spec): 3 rounds to CLEAN — round-1 3 HIGH + 3 MED + 1 LOW; round-2 1 residual stale text; round-3 minor wording residual.
+  - 1b (plan): 3 rounds to CLEAN — round-1 2 HIGH + 2 MED + 2 LOW; round-2 schema-correct seed helper + fixture name precision; round-3 CLEAN.
+  - 2 (pre-push): 2 rounds to CLEAN — round-1 1 BLOCKING (uncommitted) + 1 HIGH (partial-failure visibility); round-2 1 LOW (docstring `status='error'` → `'failure'`).
+- ETL clauses #8-#12: NOT APPLICABLE end-to-end. G12 is a discovery primitive — UPSERTs manifest rows that downstream parsers ingest. No per-instrument figure change (clauses 9-11 N/A). Clause 8 smoke: G12 invoker can be triggered manually post-merge via the admin UI; assert manifest rows materialise for the most recent quarter. Documented in PR body.
+- Spec: `docs/superpowers/specs/2026-05-17-g12-master-idx-quarterly-walker.md` (CLEAN v3).
+- Plan: `docs/superpowers/plans/2026-05-17-g12-master-idx-quarterly-walker-plan.md`.
+
+### Next phase (Phase 4 entry)
+
+- **Phase 4, PR 7 — G10 (`companyconcept` API consumer).** Plan §2 Phase 4. Endpoint: `https://data.sec.gov/api/xbrl/companyconcept/CIK*/{taxonomy}/{tag}.json`. Use case: smaller-payload alternative to Companyfacts for known-tag pulls. Implementation: extend `SecFundamentalsProvider` with a `fetch_concept(cik, taxonomy, tag)` method. fundamentals_sync opts in for the Tier-1 metric set; full Companyfacts remains the fallback. Performance audit: measure bandwidth + latency delta vs Companyfacts.
+- **Phase 4, PR 8 — G11 (`frames` API consumer).** Decision rule from plan: if `gh issue list --search "frames OR sector heatmap OR cross-sectional"` returns an open feature ticket, wire the consumer; otherwise close G11 as BY DESIGN with documentation.
+
 ## Handover — PR #1194 (merged 2026-05-17)
 
 - Phase: 2
