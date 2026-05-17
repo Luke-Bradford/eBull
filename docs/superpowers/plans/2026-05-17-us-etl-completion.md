@@ -266,14 +266,14 @@ PR 1 (G7 #1190) + PR 2 (G14 #1191) + PR 3 (G13 #1193) all merged. Phase 1 comple
 
 ### Next phase (Phase 2 entry)
 
-- **Phase 2, PR 5 — G9 (`company_tickers_mf.json` consumer).** Verify whether #1174's `mf_directory_sync` (S25) already canonically covers the seed path. If yes — close G9 with documentation only + matrix update. If no — wire dedicated consumer (likely doc-only outcome based on memory `[[us-source-coverage]]`).
+- **Phase 2, PR 5 — G9 (`company_tickers_mf.json` consumer).** ✅ CLOSED in-scope by PR #1194 (G8) — stale audit entry corrected. Consumer existed since #1171 (`refresh_mf_directory` bundled into `daily_cik_refresh` Stage 6) + #1174 (S25 `mf_directory_sync` dedicated bootstrap stage). Matrix §2 + §4 + §7 updated accordingly. No new code needed.
 
-## Handover — PR #<G8> (open 2026-05-17)
+## Handover — PR #1194 (merged 2026-05-17)
 
 - Phase: 2
-- Gap / ticket closed: **G8** (`company_tickers_exchange.json` consumer)
-- Branch: `feat/g8-company-tickers-exchange-directory`
-- Merge SHA: pending (awaiting Claude review bot + CI on most recent commit)
+- Gap / ticket closed: **G8** (`company_tickers_exchange.json` consumer) + in-scope correction of stale G9 + matrix `company_tickers_mf.json` rows (consumer existed since #1171 / #1174 — audit entry stale)
+- Branch: `feat/g8-company-tickers-exchange-directory` (deleted post-merge)
+- Merge SHA: `30cd582347467670dc2690462af4e3662cf27faa` (squash)
 - Tests added:
   - `tests/test_exchange_directory.py` — 12 service tests (happy-path / CIK zero-pad / multi-ticker CIK preserved / null exchange normalised / null ticker skipped / malformed row skipped / upsert idempotency / empty data / missing fields key / missing single field / field reordering / empty body raises).
   - `tests/test_daily_cik_refresh_sibling_enrichments.py` — 6 integration tests (sibling enrichments fire on 304 / hash-unchanged / full-upsert paths × Stage 6 fail-soft / Stage 7 fail-soft / both fail-soft).
