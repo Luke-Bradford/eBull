@@ -202,6 +202,44 @@ Surfaced from the May 17 session (#1184 + #1187 retrospective):
 
 Operator runs bootstrap completion in parallel — independent track, no engineering bottleneck.
 
+## Handover — Phase 1 (PRs 1+2, session 1)
+
+### Handover — PR #1190 (open 2026-05-17)
+
+- Phase: 1
+- Gap / ticket closed: **G7** (`sec_xbrl_facts` synth no-op manifest parser)
+- Branch: `feat/g7-sec-xbrl-facts-synth-noop`
+- Merge SHA: pending (awaiting Claude review bot + CI on most recent commit)
+- Tests added:
+  - `tests/test_manifest_parser_sec_xbrl_facts.py` — 4 tests (happy-path drain to `parsed`, form-agnostic seed (`10-K/A`), registry-wiring after `clear_registered_parsers` + `register_all_parsers`, durability gate proving the parser never calls `conn.execute` / `conn.cursor` / `conn.transaction` / `store_raw` / `fetch_document_text`).
+- Scope discoveries handled in-scope:
+  - `tests/test_fetch_document_text_callers.py` allow-list extension (Codex round-1 HIGH — the test would otherwise have flagged the parser/test pair as stale entries).
+  - Module docstring updated to explicitly state the non-caller invariant (mirrors the sec_10q.py #1168 contract symmetry).
+  - Cross-check table name corrected: `company_facts` → `financial_facts_raw` (the actual Companyfacts bulk-ingest target via `upsert_facts_for_instrument`).
+- Matrix delta:
+  - §2 row `sec_xbrl_facts` — `❌ by design` → `✅ sec_xbrl_facts.py (G7)`, status `WIRED`.
+  - §7 G7 — `BY DESIGN` → `✅ CLOSED 2026-05-17`.
+
+### Handover — PR #1191 (open 2026-05-17)
+
+- Phase: 1
+- Gap / ticket closed: **G14** (`bootstrap_orchestrator` source-registry entry)
+- Branch: `feat/g14-bootstrap-orchestrator-source-registry`
+- Merge SHA: pending (awaiting Claude review bot + CI on most recent commit)
+- Tests added:
+  - `tests/test_bootstrap_orchestrator_source_registry.py` — 5 tests (registry membership + value, `source_for` resolves without `KeyError`, `JobLock` constructs cleanly at the original KeyError site, `publish_manual_job_request` lands the queue row with no rejection, **disjointness invariant** walking `_BOOTSTRAP_STAGE_SPECS` directly + asserting no stage resolves to the `bootstrap` lane).
+- Scope discoveries handled in-scope:
+  - **Plan called for `init` source — that was wrong.** Codex round-1 BLOCKING surfaced the cross-thread `ContextVar` bug: bootstrap's `ThreadPoolExecutor` workers do NOT inherit `_HELD_SOURCES`, so the #1184 same-context re-entrancy bypass cannot fire from inside a stage worker. Any source shared with an inner stage (`init` with `nightly_universe_sync`; `db` with several Phase E stages; etc.) would have the worker thread hit `pg_try_advisory_lock` on a key the listener thread already holds → `JobAlreadyRunning` → stage fails.
+  - **Pivoted to a fresh `bootstrap` lane** added to the `Lane` Literal in `app/jobs/sources.py`. Disjoint from every per-stage lane by construction; cross-thread inner acquisitions never contend with the outer lock. Multiple bootstrap triggers still serialise via the `bootstrap` advisory lock; `bootstrap_state.status='running'` remains the primary trigger-publish-time fence.
+  - Added the disjointness invariant test that walks `_BOOTSTRAP_STAGE_SPECS` directly (Codex round-2 suggestion) so a future stage addition that uses `lane='bootstrap'` fails CI loudly.
+- Matrix delta: G14 closes US-source-coverage memory hole flagged as PR #1188 T9-POST follow-up. No `.claude/skills/data-engineer/etl-endpoint-coverage.md` row touched (G14 is registry plumbing, not a discovery/parser entry).
+- **Prevention-log candidate (extract on review)**: "ThreadPoolExecutor workers don't inherit `ContextVar`; pick a disjoint source for invokers that fan stages out to threads." Code/test comments capture this verbatim — extract to `docs/review-prevention-log.md` on first review round if the bot doesn't already cite a sibling entry.
+
+### Next phase
+
+- **Phase 1, PR 3 — G13 (`subjects_due_for_recheck` reader verification).** Plan §2 Phase 1 — AST audit + integration test verifying `subjects_due_for_recheck` reader path actually fires in Layer 3's `run_per_cik_poll`. If wiring exists per memory `[[us-source-coverage]]` "G13 recheck path added" — close G13 with test only. If wiring missing — fix in-scope.
+- **Operator: post-merge follow-up.** Once PR #1190 + #1191 land, the admin "Retry failed" path can drop the direct-Python workaround. Confirm the remaining 5 bootstrap stages from #1187 retry land `bootstrap_state.status='complete'` end-to-end via the proper queue-listener path.
+
 ## 6. Definition of done — for the whole plan
 
 Plan is COMPLETE when:
