@@ -53,15 +53,6 @@ def _db_reachable() -> bool:
 # Lifespan — driven through TestClient; dev-DB-required path
 # ---------------------------------------------------------------------------
 
-lifespan_pytestmark = [
-    pytest.mark.xdist_group("dev_db_smoke"),
-    pytest.mark.skipif(
-        not _db_reachable(),
-        reason="dev Postgres not reachable; lifespan test requires the real DB",
-    ),
-]
-
-
 @contextlib.contextmanager
 def _dev_db_lifespan_lock() -> Iterator[None]:
     """Serialise lifespan migrations across concurrent pytest invocations.
