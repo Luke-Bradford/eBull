@@ -38,6 +38,7 @@ resource has stopped.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import signal
@@ -197,6 +198,32 @@ def _drain_pending_at_boot(
         drained += 1
 
 
+def _enforce_pg_locks_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """Run the #1187 PG ``max_locks_per_transaction`` guard with
+    fence + pool cleanup on raise.
+
+    The guard runs BEFORE the jobs entrypoint's main try/finally
+    block. A raise here must release the singleton-fence advisory
+    lock + close the pool so the next jobs-process boot is not
+    blocked by stale resources. Extracted from the inline guard for
+    unit-testability (`tests/test_pg_settings_call_sites.py`).
+    """
+    from app.db.pg_settings import enforce_max_locks_floor
+
+    try:
+        with psycopg.connect(settings.database_url) as guard_conn:
+            enforce_max_locks_floor(guard_conn)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+        raise
+
+
 def _boot_id() -> str:
     """Per-process identifier used as ``claimed_by`` on queue rows.
 
@@ -235,6 +262,20 @@ def serve(stop_event: threading.Event | None = None) -> int:
 
     get_job_name_to_source()
     logger.info("jobs entrypoint: source registry validated")
+
+    # #1187 — fail-fast if PG ``max_locks_per_transaction`` is below the
+    # floor calibrated for eBull's quarterly-partitioned ownership
+    # schema. Spec
+    # ``docs/superpowers/specs/2026-05-17-pg-max-locks-per-tx-guard.md``.
+    # The guard runs BEFORE the main try/finally block below, so a
+    # raise must release the singleton fence + pool manually — else
+    # the next jobs-process boot is blocked by a stale advisory lock.
+    # The cleanup-on-raise pattern is extracted to
+    # ``_enforce_pg_locks_with_cleanup`` so the cleanup invariant is
+    # unit-testable; without that extraction, an in-place try/except
+    # could regress to leak the fence without any test catching it.
+    _enforce_pg_locks_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: max_locks_per_transaction guard passed")
 
     _bootstrap_master_key(pool)
 

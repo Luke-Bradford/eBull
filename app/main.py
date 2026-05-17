@@ -118,6 +118,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     get_job_name_to_source()
 
+    # #1187 — fail-fast if PG ``max_locks_per_transaction`` is below the
+    # floor calibrated for eBull's quarterly-partitioned ownership
+    # schema. Spec
+    # ``docs/superpowers/specs/2026-05-17-pg-max-locks-per-tx-guard.md``.
+    # ``asyncio.to_thread`` keeps the synchronous psycopg connect off
+    # the event loop (Claude bot WARNING on PR #1188 round-2). Mirrors
+    # the ``run_migrations`` invocation at the top of this function.
+    from app.db.pg_settings import enforce_max_locks_floor
+
+    def _probe_pg_locks_floor() -> None:
+        with psycopg.connect(settings.database_url) as guard_conn:
+            enforce_max_locks_floor(guard_conn)
+
+    await asyncio.to_thread(_probe_pg_locks_floor)
+
     # Open the connection pool after migrations so the schema is up to date.
     pool = open_pool("db_pool", min_size=1, max_size=10)
     logger.info("Connection pool opened (min=1, max=10).")
