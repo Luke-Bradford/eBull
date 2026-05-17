@@ -14,6 +14,16 @@ was swapped for an equivalent-shape stub.
 
 Closes G13 row in
 ``.claude/skills/data-engineer/etl-endpoint-coverage.md`` §7.
+
+**Scope-walk discipline (from #1193 review feedback):** any
+intra-function AST check in this file MUST use the
+``_RunPerCikPollVisitor`` (or a visitor that mirrors its nested-
+scope skips). Naive ``ast.walk(stmt)`` recurses into nested
+``FunctionDef`` / ``AsyncFunctionDef`` / ``Lambda`` / ``ClassDef``
+bodies, producing an *asymmetric* invariant — a legitimately-added
+nested helper would false-trigger one check while another remained
+silent. Symmetric scope exclusion across all visitors is non-
+negotiable.
 """
 
 from __future__ import annotations
@@ -56,25 +66,39 @@ class TestG13ReaderImports:
         )
 
 
-class _ConsumedReaderVisitor(ast.NodeVisitor):
-    """Collects reader-call names whose return value is *consumed*.
+class _RunPerCikPollVisitor(ast.NodeVisitor):
+    """Single visitor that collects *both* intra-function invariants
+    under one nested-scope-skipping traversal:
 
-    A bare ``subjects_due_for_recheck(...)`` whose result is discarded
-    would still match a naive ``ast.walk`` scan; this visitor only
-    records the call when its return value is wrapped in an eager
-    materialiser (``list`` / ``tuple`` / ``set``) or directly iterated
-    (``for x in reader(...)``, ``yield from reader(...)``). That
-    matches the bounded-budget drain pattern the production code uses.
+    1. ``consumed`` — reader-call names whose return value is wrapped
+       in an eager materialiser (``list`` / ``tuple`` / ``set``) or
+       directly iterated (``for``, ``async for``, ``yield from``). A
+       bare ``subjects_due_for_recheck(...)`` whose result is dropped
+       does NOT satisfy this.
+    2. ``rebinds`` — reader names that appear as the target of an
+       ``ast.Assign`` / ``ast.AnnAssign`` inside the function. A local
+       stub (``subjects_due_for_recheck = lambda: iter([])``) would
+       otherwise leave the dead module import in place while defeating
+       the consumed-call invariant.
+
+    Both invariants share the same scope-skipping logic. Splitting
+    them across two visitors would have introduced an asymmetric
+    invariant (#1193 review WARNING): a legitimately-added nested
+    helper that locally reuses a name would false-trigger one check
+    but not the other.
 
     Nested ``FunctionDef`` / ``AsyncFunctionDef`` / ``Lambda`` /
     ``ClassDef`` scopes are NOT recursed into — a dead nested helper
-    must not be able to satisfy the invariant for the outer function.
+    must not be able to satisfy *or violate* the invariant for the
+    outer function.
     """
 
     _MATERIALISERS = frozenset({"list", "tuple", "set"})
 
-    def __init__(self) -> None:
+    def __init__(self, watch_names: tuple[str, ...]) -> None:
+        self._watch: frozenset[str] = frozenset(watch_names)
         self.consumed: set[str] = set()
+        self.rebinds: list[str] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
         return  # skip nested function bodies
@@ -94,45 +118,63 @@ class _ConsumedReaderVisitor(ast.NodeVisitor):
             return node.func.id
         return None
 
+    def _record_consumed(self, node: ast.AST) -> None:
+        inner = self._inner_call_name(node)
+        if inner is not None and inner in self._watch:
+            self.consumed.add(inner)
+
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         # Pattern: list(<reader>(...)) / tuple(...) / set(...)
         if isinstance(node.func, ast.Name) and node.func.id in self._MATERIALISERS and node.args:
-            inner = self._inner_call_name(node.args[0])
-            if inner is not None:
-                self.consumed.add(inner)
+            self._record_consumed(node.args[0])
         self.generic_visit(node)
 
     def visit_For(self, node: ast.For) -> None:  # noqa: N802
-        inner = self._inner_call_name(node.iter)
-        if inner is not None:
-            self.consumed.add(inner)
+        self._record_consumed(node.iter)
         self.generic_visit(node)
 
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:  # noqa: N802
-        inner = self._inner_call_name(node.iter)
-        if inner is not None:
-            self.consumed.add(inner)
+        self._record_consumed(node.iter)
         self.generic_visit(node)
 
     def visit_YieldFrom(self, node: ast.YieldFrom) -> None:  # noqa: N802
-        inner = self._inner_call_name(node.value)
-        if inner is not None:
-            self.consumed.add(inner)
+        self._record_consumed(node.value)
         self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id in self._watch:
+                self.rebinds.append(target.id)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
+        if isinstance(node.target, ast.Name) and node.target.id in self._watch:
+            self.rebinds.append(node.target.id)
+        self.generic_visit(node)
+
+
+def _walk_run_per_cik_poll() -> _RunPerCikPollVisitor:
+    """Run the shared visitor against ``run_per_cik_poll``'s body."""
+    tree = _module_tree()
+    fn = _run_per_cik_poll_node(tree)
+    visitor = _RunPerCikPollVisitor(_REQUIRED_READERS)
+    for stmt in fn.body:
+        visitor.visit(stmt)
+    return visitor
 
 
 class TestG13ReaderCalls:
     """Both readers must be *called and consumed* inside
-    ``run_per_cik_poll``'s own body (not in a nested helper). A
-    stale import or a discarded-result call would let the recheck
-    path silently die."""
+    ``run_per_cik_poll``'s own body (not in a nested helper) and must
+    NOT be locally rebound to a stub. A stale import, discarded-result
+    call, or same-name stub would let the recheck path silently die.
+
+    Both assertions share one ``_RunPerCikPollVisitor`` traversal so
+    the nested-scope skip is applied symmetrically (see #1193 review
+    feedback)."""
 
     def test_both_readers_called_and_consumed_in_run_per_cik_poll(self) -> None:
-        tree = _module_tree()
-        fn = _run_per_cik_poll_node(tree)
-        visitor = _ConsumedReaderVisitor()
-        for stmt in fn.body:
-            visitor.visit(stmt)
+        visitor = _walk_run_per_cik_poll()
         missing = [name for name in _REQUIRED_READERS if name not in visitor.consumed]
         assert not missing, (
             f"run_per_cik_poll body missing CONSUMED reader calls: {missing}. "
@@ -151,21 +193,9 @@ class TestG13ReaderCalls:
         = lambda *a, **k: iter([])``) and the consumed-call invariant
         would still pass while production silently dropped the path.
         """
-        tree = _module_tree()
-        fn = _run_per_cik_poll_node(tree)
-        rebinds: list[str] = []
-        for stmt in fn.body:
-            for node in ast.walk(stmt):
-                if isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        if isinstance(target, ast.Name) and target.id in _REQUIRED_READERS:
-                            rebinds.append(target.id)
-                elif isinstance(node, ast.AnnAssign):
-                    target = node.target
-                    if isinstance(target, ast.Name) and target.id in _REQUIRED_READERS:
-                        rebinds.append(target.id)
-        assert not rebinds, (
-            f"run_per_cik_poll locally rebinds reader name(s): {rebinds}. "
+        visitor = _walk_run_per_cik_poll()
+        assert not visitor.rebinds, (
+            f"run_per_cik_poll locally rebinds reader name(s): {visitor.rebinds}. "
             "A local stub would defeat the consumed-call invariant while "
             "leaving the dead module import in place. Per #1155 G13."
         )
