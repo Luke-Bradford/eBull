@@ -249,10 +249,16 @@ class TestOrchestratorAdapterSourceCoverage:
         assert not violations, "\n".join(violations)
 
     def test_known_orchestrator_adapter_targets_covered(self) -> None:
-        """Pinned-list regression for the 6 jobs #1183 added.
+        """Pinned-list regression for the 6 jobs #1183 added + the 1
+        composite-adapter job #1184 added (morning_candidate_review).
 
-        Mirrors the audit table in the #1183 issue body. If any of these
-        regresses, the test catches it before CI runs the AST sweep above.
+        Mirrors the audit table in the #1183 issue body + the dormant-
+        defect found while writing #1184 (composite adapter
+        ``refresh_scoring_and_recommendations`` reaches
+        ``morning_candidate_review`` via direct ``JobLock(...)``, not
+        via ``_run_with_lock``, so the AST sweep below cannot catch a
+        missing entry). If any of these regresses, the test catches it
+        before CI runs the AST sweep above.
         """
         registry = get_job_name_to_source()
         expected: dict[str, Lane] = {
@@ -265,6 +271,8 @@ class TestOrchestratorAdapterSourceCoverage:
             "seed_cost_models": "db",
             "weekly_report": "db",
             "monthly_report": "db",
+            # #1184 — composite adapter reach; DB-bound read + write.
+            "morning_candidate_review": "db",
         }
         for job_name, expected_source in expected.items():
             assert registry.get(job_name) == expected_source, (
