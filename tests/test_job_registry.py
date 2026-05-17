@@ -204,6 +204,50 @@ class TestOrchestratorAdapterSourceCoverage:
             "the source bucket. #1183."
         )
 
+    def test_run_with_lock_uses_keyword_job_name(self) -> None:
+        """Bot WARNING — guard the AST extractor's keyword-only assumption.
+
+        ``_extract_adapter_job_names`` only sees ``job_name=<literal>``
+        keyword form. A positional ``_run_with_lock("foo", legacy_fn)``
+        call would silently bypass the invariant. This test fails if
+        anyone writes a positional ``_run_with_lock`` call so the
+        extractor's blind spot stays CI-enforced rather than implicit.
+        """
+        import ast
+        from pathlib import Path
+
+        adapter_path = Path(__file__).resolve().parent.parent / "app" / "services" / "sync_orchestrator" / "adapters.py"
+        tree = ast.parse(adapter_path.read_text())
+        violations: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            callee_name: str | None
+            if isinstance(func, ast.Attribute):
+                callee_name = func.attr
+            elif isinstance(func, ast.Name):
+                callee_name = func.id
+            else:
+                callee_name = None
+            if callee_name != "_run_with_lock":
+                continue
+            # _run_with_lock(job_name, legacy_fn, progress=...). The
+            # first positional arg IS job_name by the function signature
+            # at app/services/sync_orchestrator/adapters.py:87, so we
+            # require ALL job_name passes to be keyword form for AST
+            # discoverability.
+            if node.args:
+                violations.append(
+                    f"line {node.lineno}: positional arg to _run_with_lock — "
+                    f"must pass job_name=<literal> as a keyword so the AST "
+                    f"invariant test can find it"
+                )
+            has_job_name_kw = any(kw.arg == "job_name" for kw in node.keywords)
+            if not has_job_name_kw:
+                violations.append(f"line {node.lineno}: _run_with_lock call missing job_name= keyword")
+        assert not violations, "\n".join(violations)
+
     def test_known_orchestrator_adapter_targets_covered(self) -> None:
         """Pinned-list regression for the 6 jobs #1183 added.
 
