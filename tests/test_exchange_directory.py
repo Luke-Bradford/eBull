@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -235,17 +234,25 @@ def test_upsert_idempotency_advances_last_seen(
 
     # First pass.
     first = exchange_directory.refresh_exchange_directory(ebull_test_conn, provider=provider)
-    row1 = ebull_test_conn.execute(
-        "SELECT last_seen FROM cik_refresh_exchange_directory WHERE cik = %s AND ticker = %s",
-        ("0000320193", "AAPL"),
-    ).fetchone()
-    assert row1 is not None
-    ts1 = row1[0]
 
     # Force a deterministic clock advance via a stale UPDATE so the
     # next NOW() in the refresh transaction is unambiguously later.
     ebull_test_conn.execute("UPDATE cik_refresh_exchange_directory SET last_seen = last_seen - INTERVAL '1 minute'")
     ebull_test_conn.commit()
+
+    # Read the stale value AFTER the UPDATE, BEFORE the second refresh.
+    # This is the value the second refresh MUST advance past. Comparing
+    # against a Python-reconstructed `ts1 - delta` would be vacuously
+    # true (Codex review #1194 WARNING): even if the UPSERT's DO UPDATE
+    # never ran, ts2 would still equal ts1 ≈ NOW() which trivially
+    # exceeds `ts1 - 1 minute`. The assertion must read what is in the
+    # row right now and assert the next refresh strictly advances it.
+    stale_row = ebull_test_conn.execute(
+        "SELECT last_seen FROM cik_refresh_exchange_directory WHERE cik = %s AND ticker = %s",
+        ("0000320193", "AAPL"),
+    ).fetchone()
+    assert stale_row is not None
+    stale_ts = stale_row[0]
 
     # Second pass.
     second = exchange_directory.refresh_exchange_directory(ebull_test_conn, provider=provider)
@@ -258,8 +265,11 @@ def test_upsert_idempotency_advances_last_seen(
 
     # Row count stable.
     assert first == second == {"fetched": 1, "directory_rows": 1}
-    # Second pass advanced last_seen past the staled value.
-    assert ts2 > ts1 - timedelta(minutes=1)
+    # Second pass strictly advanced last_seen past the staled value the
+    # second refresh actually observed at start. If the UPSERT's
+    # DO UPDATE never fired, ts2 would equal stale_ts and this would
+    # fail loudly.
+    assert ts2 > stale_ts
 
 
 # ---------------------------------------------------------------------------
