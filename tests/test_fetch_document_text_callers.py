@@ -110,6 +110,12 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # with a raising sentinel to enforce non-call at runtime.
         "app/services/manifest_parsers/sec_10q.py",
         "tests/test_manifest_parser_sec_10q.py",
+        # Synth no-op manifest parser (G7). Same pattern as #1168 —
+        # the parser body returns ParseOutcome(parsed) without any
+        # fetch; the test patches fetch_document_text with a raising
+        # sentinel to enforce the non-call invariant.
+        "app/services/manifest_parsers/sec_xbrl_facts.py",
+        "tests/test_manifest_parser_sec_xbrl_facts.py",
         # #1171 — real N-CSR / N-CSRS fund-metadata parser. Fetches
         # iXBRL companion via SecFilingsProvider.fetch_document_text
         # and normalises every structured field into SQL
