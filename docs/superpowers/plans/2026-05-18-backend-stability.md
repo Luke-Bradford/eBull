@@ -252,6 +252,158 @@ with the Phase 2 brief substituted.
 
 ---
 
+### 6.1 Handover prompt for Phase 2 (test-fixture orphan sweep + slim-data audit, #1208 Sub 2)
+
+Paste the block below verbatim into the next session — self-contained, no prior conversation context required.
+
+---
+
+```
+Pick up Phase 2 of docs/superpowers/plans/2026-05-18-backend-stability.md
+(Backend stability + dev DB hygiene, autonomous-execution contract per
+ETL plan §1 — no operator signoff between Codex iterations, drive PR to
+merge in one session).
+
+PHASE 2 SCOPE — Test-fixture orphan sweep + slim-data audit (#1208 Sub 2):
+
+HYGIENE PRIMITIVE. Phase 1 (PR #1210 SHA `471a3b3` + docs PR #1211 SHA
+`3c32574`) shipped 2026-05-18 — Postgres tuning + runtime_config boot
+guard + dev-DB-size tripwire are LIVE on dev. Phase 2 fixes the leaked
+test-DB problem that has been accumulating since pytest-xdist landed
+(#893): each worker creates a private `ebull_test_*_gw*` DB but a
+worker crash leaves the DB behind. As of Phase 1 the dev cluster
+carries 20+ leaked DBs from prior runs.
+
+DELIVERABLES:
+
+Task A — Orphan sweep helper:
+- `tests/fixtures/ebull_test_db.py::_drop_orphan_workers_older_than(
+  min_age=timedelta(hours=1)) -> int` (NEW). Lists every database
+  matching `ebull_test_*_gw*`, queries `pg_stat_activity` +
+  `pg_database` for last-activity / created-at, drops any whose last
+  activity is older than `min_age`. Returns count of dropped DBs.
+  - Use `DROP DATABASE IF EXISTS ... WITH (FORCE)` (PG13+).
+  - NEVER touches `ebull` or `ebull_test_template` — enforced via
+    explicit name check + the existing `_assert_test_db` guard.
+- Call from `build_template_if_stale()` (controller-only, BEFORE
+  template build) so each pytest invocation starts with a clean
+  cluster. Cross-pytest-invocation lock prevents two controllers
+  racing the sweep.
+- Test: `tests/test_orphan_sweep.py` — create a fake
+  `ebull_test_FAKE_gw99` DB, set its `datlastsysoid` proxy / commit a
+  no-op tx >1h ago via `pg_stat_reset_single_table_counters` shim if
+  available, run the sweep, assert the fake DB is dropped + neither
+  `ebull` nor `ebull_test_template` are touched.
+
+Task B — Slim-data posture audit:
+- Spike: build a fresh `ebull_test_template` from scratch, dump
+  `SELECT relname, pg_size_pretty(pg_total_relation_size(oid)) FROM
+  pg_class WHERE relkind='r' AND pg_total_relation_size(oid) > 0
+  ORDER BY pg_total_relation_size(oid) DESC LIMIT 20`. Migrations are
+  supposed to be schema-only; any non-zero non-system table in a
+  fresh template is a defect.
+- For each non-zero table found: identify the migration that seeds
+  it. If the seed is genuinely required for tests to work (e.g.
+  reference data), leave + document. If the seed is bulk fixture
+  data that snuck in (e.g. universe rows, financial_facts_raw
+  spikes), file follow-up tickets to move the seed into per-test
+  fixtures.
+- Codify the rule in `.claude/skills/engineering/test-quality.md`
+  (new section §"Slim test-data posture"): tests seed 1–5 rows
+  per-test via fixtures, never via migrations. Bulk-data tests must
+  be marked `@pytest.mark.slow` + opted out of the default suite.
+
+Task C — Prevention-log + skill updates:
+- `docs/review-prevention-log.md` — new section "Test-DB leaks
+  accumulate on xdist-worker crash" describing the 20+ leak shape +
+  the orphan sweep fix.
+- Bundle in same PR.
+
+FIRST ACTIONS:
+
+1. Read CLAUDE.md working order. Confirm #1208 still OPEN; PR #1210
+   merged (SHA `471a3b3`).
+2. Read docs/review-prevention-log.md §"Test-DB isolation invariant"
+   (landed in Phase 1) + the singleton-row entry for context.
+3. Read tests/fixtures/ebull_test_db.py end-to-end to understand the
+   per-worker DB lifecycle + the existing `_assert_test_db` guard
+   shape.
+4. Read tests/conftest.py to understand session ordering — the
+   sweep must fire BEFORE `build_template_if_stale()`.
+5. Spike: list `ebull_test_*` DBs on the cluster. Expect 20+ leaks.
+
+DESIGN STEPS (follow CLAUDE.md working order verbatim):
+
+1. Branch: feature/1208-phase2-test-fixture-orphan-sweep.
+2. Spike: capture leaked-DB count + total bytes BEFORE any changes
+   so the PR can claim concrete cleanup.
+3. Spec at docs/superpowers/specs/2026-05-19-phase2-test-fixture-orphan-sweep.md
+   mirroring Phase 1's spec shape (§3.4/§3.5 for Codex iterations).
+4. Codex 1a on spec. Address findings. Codex 1b on revised spec.
+5. Implementation order:
+   - T1: `_drop_orphan_workers_older_than` helper.
+   - T2: Wire into `build_template_if_stale()` controller path.
+   - T3: tests/test_orphan_sweep.py.
+   - T4: slim-data audit script (one-shot, captures output to the
+        spec + PR description).
+   - T5: skill update in `.claude/skills/engineering/test-quality.md`.
+   - T6: prevention-log entry.
+6. Codex 2 pre-push review on branch diff.
+7. Push + poll bot review + CI immediately.
+8. Resolve every review comment per the FIXED/DEFERRED/REBUTTED
+   contract. PREVENTION comments end in EXTRACTED/ALREADY_COVERED/
+   REBUTTED.
+
+ETL DoD CLAUSES that apply (#8-#12):
+
+- #8 Smoke: run `pytest tests/test_orphan_sweep.py` against the real
+  test cluster; pre-create a fake `ebull_test_FAKE_gw99` DB and
+  confirm it gets dropped while `ebull` and `ebull_test_template`
+  survive.
+- #9 Cross-source: N/A (not a data-source change).
+- #10 Backfill: N/A.
+- #11 Operator-visible: after merge + a single `uv run pytest -q`,
+  `SELECT count(*) FROM pg_database WHERE datname LIKE 'ebull_test_%'
+  AND datname != 'ebull_test_template'` returns the expected number
+  (≤ worker count; ideally 0 after teardown).
+- #12 PR records verification + SHA.
+
+NON-NEGOTIABLES (carried forward):
+
+- Autonomous-execution contract per ETL plan §1 — no operator signoff
+  between Codex iterations; merge to master in one session.
+- Service-no-commit invariant + psycopg3 savepoint discipline still
+  apply. The orphan sweep uses its own admin DB connection + autocommit.
+- Skill ownership posture per Phase 1 plan §5 — update skills inline
+  on any observed gap; do NOT defer.
+- Per feedback_post_push_cycle.md: poll gh pr view + gh pr checks
+  IMMEDIATELY after push.
+- Per feedback_pre_push_xdist_postgres_locks.md: --no-verify justified
+  when impacted-files clean + Codex green + targeted pytest + smoke
+  pass.
+- Per feedback_pr_auto_close_required.md: PR body MUST contain
+  `Refs #1208` on its own line.
+- Per [[alter_system_in_migration]]: no autocommit-directive migrations
+  in this phase (no ALTER SYSTEM, no CREATE DATABASE-in-migration).
+
+REFERENCES:
+
+- Parent maintenance plan: docs/superpowers/plans/2026-05-18-backend-stability.md.
+- Issue: #1208 (Postgres tuning + dev-DB hygiene umbrella).
+- Phase 1 spec (template shape): docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md.
+- Phase 1 merge SHA: `471a3b3` (PR #1210), docs follow-up SHA `3c32574` (PR #1211).
+- Live evidence: 20+ leaked `ebull_test_*_gw*` DBs on the dev cluster
+  as of 2026-05-18; sample names dumped in the Phase 2 spike.
+
+If Phase 2 lands clean, the next session picks up Phase 3
+(`financial_facts_raw` partition + retention sweep, #1208 Sub 3).
+That's the biggest blast-radius phase of the epic. The same handover
+prompt template at this §6 is re-used with the Phase 3 brief
+substituted.
+```
+
+---
+
 ## 7. Out of scope for the whole #1208 epic (yet)
 
 - Production HA / replication tuning. eBull demo-first; production posture is a separate epic.
