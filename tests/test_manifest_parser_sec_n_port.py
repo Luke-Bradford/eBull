@@ -114,10 +114,17 @@ def test_happy_path_parses_and_writes_fund_observation(
 ) -> None:
     """Manifest worker drains an NPORT-P pending row: fetch →
     store_raw → parse → series upsert → fund observation per
-    resolvable Long-EC-NS holding → log success."""
-    iid_aapl = 8800001
-    _seed_instrument(ebull_test_conn, iid=iid_aapl, symbol="AAPL")
-    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid_aapl, cusip="037833100")
+    resolvable Long-EC-NS holding → log success.
+
+    Post-#932: the canonical fixture is a real Vanguard Value Index
+    Fund (series S000002840) NPORT-P with 323 holdings. The top
+    holding by value_usd is JPMorgan Chase (CUSIP 46625H100), which
+    is in the standard smoke panel; seed JPM and assert the JPM
+    observation lands.
+    """
+    iid_jpm = 8800001
+    _seed_instrument(ebull_test_conn, iid=iid_jpm, symbol="JPM")
+    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid_jpm, cusip="46625H100")
     accession = "0001234500-25-000603"
     filer_cik = "0000036405"
     _seed_pending_n_port(ebull_test_conn, accession=accession, filer_cik=filer_cik)
@@ -145,17 +152,35 @@ def test_happy_path_parses_and_writes_fund_observation(
         )
         assert cur.fetchone() is not None
 
-    # Series row persisted.
+    # Parser-version regression guard (#932): raw doc carries the
+    # bumped parser_version constant.
     with ebull_test_conn.cursor() as cur:
-        cur.execute("SELECT fund_filer_cik FROM sec_fund_series WHERE fund_series_id = 'S000002277'")
+        cur.execute(
+            """
+            SELECT parser_version
+            FROM filing_raw_documents
+            WHERE accession_number = %s AND document_kind = 'nport_xml'
+            """,
+            (accession,),
+        )
+        raw = cur.fetchone()
+    assert raw is not None
+    assert raw[0] == "nport-v2-edgartools"
+
+    # Series row persisted (real Vanguard Value Index Fund series
+    # post-#932 fixture replacement).
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT fund_filer_cik FROM sec_fund_series WHERE fund_series_id = 'S000002840'")
         series = cur.fetchone()
     assert series is not None and series[0] == filer_cik
 
-    # AAPL fund observation persisted.
+    # JPM fund observation persisted (the real Vanguard Value Index
+    # Fund fixture has JPMorgan Chase as its top holding by value_usd;
+    # CUSIP 46625H100 was seeded above).
     with ebull_test_conn.cursor() as cur:
         cur.execute(
             "SELECT instrument_id FROM ownership_funds_observations WHERE source_accession = %s AND instrument_id = %s",
-            (accession, iid_aapl),
+            (accession, iid_jpm),
         )
         assert cur.fetchone() is not None
 
@@ -167,8 +192,9 @@ def test_happy_path_parses_and_writes_fund_observation(
         )
         log = cur.fetchone()
     assert log is not None
-    # The golden fixture has 7 holdings; only 1 CUSIP (AAPL) resolves
-    # in this minimal seed. Others land in skipped buckets → partial.
+    # The real fixture has 323 holdings; only 1 CUSIP (JPM) resolves
+    # in this minimal seed. The other 322 land in skipped buckets
+    # (no-CUSIP) → partial.
     assert log[0] in ("success", "partial")
 
 
@@ -307,8 +333,12 @@ def test_deterministic_upsert_exception_tombstones_with_log(
     from app.services.manifest_parsers import sec_n_port as parser_module
 
     iid = 8800010
-    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPL")
-    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid, cusip="037833100")
+    # Seed JPM (the real Vanguard Value Index Fund fixture's top
+    # holding; CUSIP 46625H100) so the parser yields at least one
+    # resolvable row → record_fund_observation actually gets called →
+    # the monkeypatched raise fires.
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="JPM")
+    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid, cusip="46625H100")
     accession = "0001234500-25-000704"
     filer_cik = "0000036405"
     _seed_pending_n_port(ebull_test_conn, accession=accession, filer_cik=filer_cik)
@@ -357,8 +387,10 @@ def test_transient_upsert_exception_retries(
     from app.services.manifest_parsers import sec_n_port as parser_module
 
     iid = 8800011
-    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPL")
-    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid, cusip="037833100")
+    # Seed JPM (real fixture's top holding) so record_fund_observation
+    # gets called for at least one resolvable row.
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="JPM")
+    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid, cusip="46625H100")
     accession = "0001234500-25-000705"
     filer_cik = "0000036405"
     _seed_pending_n_port(ebull_test_conn, accession=accession, filer_cik=filer_cik)

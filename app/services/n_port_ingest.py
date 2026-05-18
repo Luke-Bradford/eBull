@@ -13,16 +13,22 @@ Spec:
 docs/superpowers/specs/2026-05-04-ownership-full-decomposition-design.md
 (Phase 3, §"Source matrix" + §"Per-category natural keys").
 
-## Parser posture — lxml-direct, NOT EdgarTools
+## Parser posture — EdgarTools FundReport wrapper (#932)
 
-The spec recommended EdgarTools as a parser dep. The codebase already
-parses 13F-HR / 13D/G / Form 4 with stdlib ``xml.etree.ElementTree``;
-extending that pattern to N-PORT keeps the parser self-contained,
-zero-dep, and offline-deterministic. The EdgarTools 13F drop-in is
-tracked separately as #925; if N-PORT parsing turns out to need
-EdgarTools' fallback heuristics, that's a follow-up — for now the
-hand-rolled parser covers every well-formed NPORT-P SEC publishes
-(per the EDGAR XSD).
+Wraps ``edgar.funds.reports.FundReport.parse_fund_xml`` (lazy-imported
+via :func:`_edgar_fund_report` per the #925 13F-HR drop-in pattern).
+Preserves the public :class:`NPortFiling` / :class:`NPortHolding`
+dataclass surface so the ingester body is unchanged.
+
+The previous stdlib-``xml.etree.ElementTree`` parser was replaced by
+this wrapper after the #932 spike (see
+``docs/superpowers/spikes/2026-05-18-n-port-edgartools-feasibility.md``)
+confirmed FEASIBLE for the probed real-SEC NPORT-P shape. The wrapper
+catches every EdgarTools failure mode (structural-block dereferences,
+internal ``pydantic.ValidationError`` on missing required Decimal
+fields, dict-shape drift on pin bump) and converts to
+:class:`NPortParseError` so accession-level tombstones fire via
+:func:`_ingest_single_accession`.
 
 Codex pre-impl review (2026-05-05) findings folded in:
 
@@ -47,7 +53,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-import xml.etree.ElementTree as ET  # noqa: S405 — we only use ET to catch ParseError on malformed input
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -71,8 +76,10 @@ logger = logging.getLogger(__name__)
 # affects what lands in ``ownership_funds_observations``. Re-wash
 # workflows compare against this constant and reset
 # ``filing_raw_documents.parser_version`` mismatches back to ``pending``
-# in the manifest worker (#869).
-_PARSER_VERSION_NPORT = "nport-v1"
+# in the manifest worker (#869). The bump propagates to the manifest
+# adapter (`app/services/manifest_parsers/sec_n_port.py`) via direct
+# symbol import.
+_PARSER_VERSION_NPORT = "nport-v2-edgartools"
 
 
 # Both spellings appear in the SEC submissions API. The current
@@ -313,145 +320,190 @@ def _safe_iso_datetime(text: str | None) -> datetime | None:
 
 
 # ---------------------------------------------------------------------------
-# N-PORT XML parser
+# N-PORT XML parser — EdgarTools FundReport wrapper (#932)
 # ---------------------------------------------------------------------------
-
-
-# N-PORT publishes XBRL-shaped XML under the SEC ``edgar/nport``
-# namespace. The relevant elements live under
-# ``{nport}genInfo`` (header) and ``{nport}invstOrSecs/invstOrSec``
-# (per-holding records). The parser is namespace-aware to defend
-# against SEC's namespace evolutions across N-PORT-1 → N-PORT-2 → etc.
-# ``ET.iterparse`` could be used for memory savings on >1MB files but
-# in practice N-PORT XMLs land at 200KB-2MB; ``fromstring`` is fine.
-def _stripns(tag: str) -> str:
-    """Drop XML namespace prefix: ``{ns}foo`` → ``foo``."""
-    if "}" in tag:
-        return tag.split("}", 1)[1]
-    return tag
-
-
-def _find_text(elem: ET.Element, *, local_name: str) -> str | None:
-    """Return the text of the first descendant whose local-name
-    (namespace-stripped) matches ``local_name``, or ``None``."""
-    for child in elem.iter():
-        if _stripns(child.tag) == local_name:
-            text = (child.text or "").strip()
-            return text or None
-    return None
-
-
-def _children_by_local_name(elem: ET.Element, *, local_name: str) -> list[ET.Element]:
-    """Direct-children filter by local name (not full descendant scan)."""
-    return [c for c in elem if _stripns(c.tag) == local_name]
-
-
-def _decimal_or_none(text: str | None) -> Decimal | None:
-    if not text:
-        return None
-    try:
-        return Decimal(text.strip())
-    except InvalidOperation, AttributeError:
-        return None
 
 
 def parse_n_port_payload(xml: str) -> NPortFiling:
     """Parse an NPORT-P primary doc XML into an :class:`NPortFiling`.
 
-    Pure XML-in / dataclass-out — no network calls, no DB access.
-    Raises :class:`NPortParseError` on malformed XML, or
-    :class:`NPortMissingSeriesError` if the filing has no ``seriesId``.
+    Wraps ``edgar.funds.reports.FundReport.parse_fund_xml`` (#932,
+    superseding the stdlib-ET parser from #917). EdgarTools is lazy-
+    imported at first call so module import stays side-effect-free
+    (#925 pattern; mirrors ``app/providers/implementations/sec_13f.py``
+    L76-80).
 
-    Holdings are emitted in document order. The ingester filters /
-    transforms downstream — this parser surfaces every well-formed
-    holding without applying business logic (debt / short / preferred
-    rows are surfaced; the ingester drops them via the equity-common
-    guard).
+    Catches every EdgarTools failure mode (structural-block dereferences,
+    internal Pydantic ``ValidationError`` on missing required Decimal
+    fields, dict-shape drift) and converts to :class:`NPortParseError`
+    so ``_ingest_single_accession``'s tombstone path fires.
+
+    Preserves all six #917 Codex pre-impl invariants:
+      * ``period_end`` mandatory → :class:`NPortParseError` if missing.
+      * ``series_id`` mandatory → :class:`NPortMissingSeriesError`
+        (distinct from generic :class:`NPortParseError`).
+      * ``cik`` mandatory, with ``regCik`` → header
+        ``issuer_credentials.cik`` fallback.
+      * ``filed_at`` returned as ``None`` from the parser — the ingester
+        layers in submissions-index ``filingDate`` before any midnight
+        fallback. EdgarTools' ``parse_fund_xml`` does not surface a
+        header-level filedAt field.
+      * ``units`` passthrough (strip-only; the ingester rejects non-NS).
+      * ``balance`` ``None`` → drop row.
+
+    EdgarTools field-name trap: ``general_info.fiscal_year_end`` stores
+    the ``repPdEnd`` text (period end), NOT the fund's fiscal-year-end.
+    Documented at the golden-replay test.
+
+    Pure XML-in / dataclass-out. No network calls, no DB access.
     """
+    fund_report = _edgar_fund_report()
+    pydantic_validation_error = _pydantic_validation_error()
+    xml_syntax_error = _lxml_syntax_error()
+
+    # Catch scope covers BOTH the EdgarTools parser call AND the
+    # post-parse normalisation. Any KeyError (dict-shape drift on pin
+    # bump), AttributeError (missing typed object attribute), or
+    # InvalidOperation / ValueError that fires during normalisation
+    # must surface as NPortParseError so the tombstone path fires.
+    # lxml.etree.XMLSyntaxError covers the edge case where both the
+    # primary lxml parse AND EdgarTools' recover=True fallback fail
+    # (e.g. empty payload, null-byte body): EdgarTools re-raises the
+    # raw XMLSyntaxError without classifying it. Codex 2 round 1.
+    # NPortMissingSeriesError / NPortParseError are re-raised
+    # explicitly to preserve their dedicated tombstone paths.
     try:
-        root = ET.fromstring(xml)  # noqa: S314 — we accept SEC-published XML; parser is stdlib, no DTD resolution
-    except ET.ParseError as exc:
-        raise NPortParseError(f"NPORT-P XML parse failed: {exc}") from exc
+        parsed = fund_report.parse_fund_xml(xml)
 
-    # ----- header (genInfo + filer identity) -----
-    # The NPORT-P XML carries:
-    #   formData/genInfo/regCik         — registered investment company CIK
-    #   formData/genInfo/seriesId       — SEC series identifier (S0000xxxxx)
-    #   formData/genInfo/seriesName     — fund series human-readable name
-    #   formData/genInfo/repPdEnd       — period_of_report end date
-    #   headerData/filerInfo/filer/issuerCredentials/cik (for the registrant)
-    # Walk by local-name to be robust to namespace versioning.
-    cik_text = _find_text(root, local_name="regCik") or _find_text(root, local_name="cik")
-    series_id = _find_text(root, local_name="seriesId")
-    series_name = _find_text(root, local_name="seriesName") or ""
-    period_end_text = _find_text(root, local_name="repPdEnd")
-    filed_at_text = _find_text(root, local_name="filedAt") or _find_text(root, local_name="acceptedDate")
+        general_info = parsed["general_info"]
+        cik_text = (general_info.cik or "").strip() or _header_issuer_cik(parsed.get("header"))
+        series_id_raw = (general_info.series_id or "").strip()
+        period_end_text = (general_info.fiscal_year_end or "").strip() or None
+        series_name = (general_info.series_name or "").strip()
 
-    if not cik_text:
-        raise NPortParseError("NPORT-P: missing regCik / cik in header")
-    if not series_id:
-        # Codex pre-impl review #2 — refuse to synthesise.
-        raise NPortMissingSeriesError(
-            "NPORT-P: missing seriesId in genInfo header; refusing to "
-            "synthesise an identity. Filing tombstoned for operator review."
-        )
-    if not period_end_text:
-        raise NPortParseError("NPORT-P: missing repPdEnd in genInfo header")
-
-    period_end = _safe_iso_date(period_end_text)
-    if period_end is None:
-        raise NPortParseError(f"NPORT-P: malformed repPdEnd={period_end_text!r}")
-
-    # Codex pre-push review #1: do NOT default ``filed_at`` to
-    # ``period_end`` midnight inside the parser. Two filings sharing a
-    # period (NPORT-P + NPORT-P/A) would then carry identical
-    # ``filed_at`` values and the ``_current`` refresh tie-break would
-    # pick the wrong one. The ingester layers in the submissions-index
-    # ``filingDate`` (always present in the ``recent`` array) before
-    # any midnight fallback — see ``_ingest_single_accession``.
-    filed_at = _safe_iso_datetime(filed_at_text)
-
-    # ----- holdings -----
-    holdings: list[NPortHolding] = []
-    for holding_elem in root.iter():
-        if _stripns(holding_elem.tag) != "invstOrSec":
-            continue
-        cusip = _find_text(holding_elem, local_name="cusip") or ""
-        issuer_name = _find_text(holding_elem, local_name="name") or ""
-        balance_text = _find_text(holding_elem, local_name="balance")
-        value_text = _find_text(holding_elem, local_name="valUSD")
-        payoff_profile = _find_text(holding_elem, local_name="payoffProfile") or ""
-        asset_cat = _find_text(holding_elem, local_name="assetCat") or ""
-        issuer_cat = _find_text(holding_elem, local_name="issuerCat") or ""
-        units = _find_text(holding_elem, local_name="units") or ""
-
-        balance = _decimal_or_none(balance_text)
-        if balance is None:
-            # No balance = unparseable holding; skip silently. The
-            # ingester counts these via the parser-failure path.
-            continue
-
-        holdings.append(
-            NPortHolding(
-                cusip=cusip.strip().upper(),
-                issuer_name=issuer_name,
-                shares=balance,
-                value_usd=_decimal_or_none(value_text),
-                payoff_profile=payoff_profile,
-                asset_category=asset_cat,
-                issuer_category=issuer_cat,
-                units=units,
+        if not cik_text:
+            raise NPortParseError("NPORT-P: missing regCik / header issuer_credentials.cik")
+        if not series_id_raw:
+            # Codex #917 pre-impl review #2 — refuse to synthesise.
+            raise NPortMissingSeriesError(
+                "NPORT-P: missing seriesId in genInfo header; refusing to "
+                "synthesise an identity. Filing tombstoned for operator review."
             )
-        )
+        if not period_end_text:
+            raise NPortParseError("NPORT-P: missing repPdEnd in genInfo header")
+        period_end = _safe_iso_date(period_end_text)
+        if period_end is None:
+            raise NPortParseError(f"NPORT-P: malformed repPdEnd={period_end_text!r}")
 
-    return NPortFiling(
-        filer_cik=_zero_pad_cik(cik_text),
-        series_id=series_id,
-        series_name=series_name,
-        period_end=period_end,
-        filed_at=filed_at,
-        holdings=tuple(holdings),
-    )
+        # Codex #917 pre-push review #1: do NOT default filed_at to
+        # period_end midnight inside the parser. Two filings sharing a
+        # period (NPORT-P + NPORT-P/A) would then carry identical
+        # filed_at values and the _current refresh tie-break would pick
+        # the wrong one. The ingester layers in the submissions-index
+        # filingDate before any midnight fallback.
+        filed_at: datetime | None = None
+
+        holdings: list[NPortHolding] = []
+        for investment in parsed["investments"]:
+            balance = investment.balance
+            if balance is None:
+                # No balance = unparseable holding; parser-level drop.
+                continue
+            # Strip + upper categorical fields. The downstream ingester
+            # guards (units != "NS", payoff_profile != "Long",
+            # asset_category != "EC") are exact-equality so a stray
+            # leading/trailing whitespace from a future EdgarTools
+            # whitespace-preservation change would mis-drop valid rows.
+            holdings.append(
+                NPortHolding(
+                    cusip=(investment.cusip or "").strip().upper(),
+                    issuer_name=(investment.name or "").strip(),
+                    shares=balance,
+                    value_usd=investment.value_usd,
+                    payoff_profile=(investment.payoff_profile or "").strip(),
+                    asset_category=(investment.asset_category or "").strip(),
+                    issuer_category=(investment.issuer_category or "").strip(),
+                    units=(investment.units or "").strip(),
+                )
+            )
+
+        return NPortFiling(
+            filer_cik=_zero_pad_cik(cik_text),
+            series_id=series_id_raw,
+            series_name=series_name,
+            period_end=period_end,
+            filed_at=filed_at,
+            holdings=tuple(holdings),
+        )
+    except NPortMissingSeriesError:
+        # Distinct from generic NPortParseError tombstone path.
+        raise
+    except NPortParseError:
+        # Already-classified parser error; preserve verbatim.
+        raise
+    except (
+        AttributeError,
+        KeyError,
+        InvalidOperation,
+        ValueError,
+        TypeError,
+        pydantic_validation_error,
+        xml_syntax_error,
+    ) as exc:
+        raise NPortParseError(f"NPORT-P EdgarTools parse failed: {exc}") from exc
+
+
+def _edgar_fund_report() -> Any:
+    """Lazy import: defer EdgarTools' filesystem-cache mkdir
+    (``~/.edgar/_tcache``) until first parse call. Mirrors the lazy
+    factory at ``app/providers/implementations/sec_13f.py``:76-80."""
+    from edgar.funds.reports import FundReport
+
+    return FundReport
+
+
+def _pydantic_validation_error() -> type[Exception]:
+    """Lazy import: ``pydantic.ValidationError`` for the wrapper's
+    catch list. Pydantic comes in transitively via edgartools but we
+    hold our own reference to its ValidationError type to keep the
+    catch clause explicit. Lazy to keep module import side-effect-free.
+    """
+    from pydantic import ValidationError
+
+    return ValidationError
+
+
+def _lxml_syntax_error() -> type[Exception]:
+    """Lazy import: ``lxml.etree.XMLSyntaxError`` for the wrapper's
+    catch list. EdgarTools' ``parse_fund_xml`` raw-parses with
+    ``etree.fromstring`` and falls back to ``recover=True`` on
+    ``XMLSyntaxError``; if the recover-mode parse ALSO fails (empty
+    body, null-byte body, etc.), the raw exception escapes without
+    classification. Lazy to keep module import side-effect-free.
+    """
+    from lxml.etree import XMLSyntaxError
+
+    return XMLSyntaxError
+
+
+def _header_issuer_cik(header: Any) -> str | None:
+    """Best-effort dereference of
+    ``parsed['header'].filer_info.issuer_credentials.cik``. ``None`` if
+    any intermediate is ``None`` or missing.
+
+    Mirrors the ``regCik`` → header ``cik`` fallback that the pre-#932
+    stdlib parser performed via
+    ``_find_text(root, local_name='cik')``.
+    """
+    if header is None:
+        return None
+    try:
+        cik = header.filer_info.issuer_credentials.cik
+    except AttributeError:
+        return None
+    if not cik:
+        return None
+    return cik.strip() or None
 
 
 # ---------------------------------------------------------------------------
