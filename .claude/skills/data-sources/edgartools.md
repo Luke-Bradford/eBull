@@ -20,7 +20,7 @@ Network-required (live filing fetch + identity required):
 | Form | Entry point | Notes |
 |---|---|---|
 | 10-K / 10-Q / 8-K / 6-K / 20-F / 40-F | `Company("AAPL").latest_tenk` or `filing.obj()` | XBRL-backed reports |
-| N-PORT (P / EX / /A) | `FundReport.parse_fund_xml(xml)` | **Pydantic strict — see Gotcha G3** |
+| N-PORT (P / EX / /A) | `FundReport.parse_fund_xml(xml)` (dict) | **Structural + internal Pydantic cliffs — see Gotcha G3.** Live wrapper at `app/services/n_port_ingest.py` (#932). |
 | N-CSR | `FundShareholderReport.from_filing(filing)` | iXBRL OEF taxonomy. **No CUSIP at holding level** (#918 closeout). |
 | N-CEN | `FundCensus.from_filing(filing)` | structured census |
 | N-MFP2/3 | `MoneyMarketFund.from_filing(filing)` | money-market holdings |
@@ -126,15 +126,16 @@ def _edgar_parsers() -> tuple[Any, Any]:
 ### G2 — Interactive identity prompt in batch contexts
 `unset EDGAR_IDENTITY; python -c "from edgar import get_filings; get_filings(2026,1)"` blocks 60s. Always export `EDGAR_IDENTITY` before HTTP-touching call.
 
-### G3 — N-PORT Pydantic validation cliff
-`FundReport(**parse_fund_xml(xml))` raises `pydantic.ValidationError` on synthetic fixtures missing required fields (`<regCik>`, `<regStreet1>`). Required fields are non-`Optional`. Punted #932.
+### G3 — N-PORT structural + Pydantic cliffs
 
-Workaround options:
-- **A** — use full real-world XML in fixtures (25KB+ each).
-- **B** — use the dict path: `report_dict = FundReport.parse_fund_xml(xml)` then walk `report_dict["investments"]` directly. Skip the model layer.
-- **C** — direct lxml parsing (`~150 LoC`, 10-20× faster, no validation cliff). Recommended for #932 if revisited.
+`FundReport.parse_fund_xml(xml)` returns a `Dict[str, Any]` with keys `header / general_info / fund_info / investments`. Two failure modes (#932 spike `docs/superpowers/spikes/2026-05-18-n-port-edgartools-feasibility.md` §4):
 
-**Rule of thumb**: if the form's module imports `from pydantic import BaseModel`, expect a validation cliff for synthetic fixtures. Spike fixture compatibility BEFORE committing to a drop-in.
+1. **Structural cliff (observed on synthetic fixtures)**: the parser unconditionally dereferences `<filerInfo>` + `<fundInfo>` + `<returnInfo>` + `<monthlyTotReturns>` blocks. Missing any block → `AttributeError: 'NoneType' object has no attribute 'find'`. Hand-trimmed fixtures must include all four blocks plus `GeneralInfo` non-Optional text fields (`<regName>`, `<regCik>`, `<regFileNumber>`, `<regStreet1>` with non-empty content), `<fundInfo>` 9 required Decimal fields, and empty `<othMon1/2/3/>` tags under `<returnInfo>`.
+2. **Internal Pydantic cliff (latent on real-world payloads)**: `InvestmentOrSecurity.value_usd: Decimal` is non-Optional at `edgar/funds/reports.py:346`. An NPORT-P row that omits `<valUSD>` raises `pydantic.ValidationError` mid-iteration, aborting the whole-accession parse. Unobserved on the Vanguard probe sample but theoretically possible.
+
+**Rule of thumb**: if a form's module imports `from pydantic import BaseModel`, expect a validation cliff for synthetic fixtures AND for real-world payloads with missing required Decimal cells. Wrap the parser call AND the post-parse dict-key dereferences in `try/except (AttributeError, KeyError, decimal.InvalidOperation, ValueError, TypeError, pydantic.ValidationError)` and convert to a parser-specific error type so accession-level tombstones fire. `KeyError` defends against dict-shape drift on pin bump.
+
+Pinned at edgartools 5.30.2 by `pyproject.toml:21` (#925). Live wrapper at `app/services/n_port_ingest.py::parse_n_port_payload` (#932). See `docs/superpowers/spikes/2026-05-18-n-port-edgartools-feasibility.md` for the full empirical analysis.
 
 ### G4 — Type-label rewrite (`SH` → `Shares`, `PRN` → `Principal`)
 `parse_infotable_xml` output's `Type` column has values `"Shares"` / `"Principal"`, NOT the SEC two-letter codes. eBull maps back at [app/providers/implementations/sec_13f.py:210-213](../../../app/providers/implementations/sec_13f.py#L210-L213) (`_TYPE_CODE_FROM_LABEL`).
@@ -180,7 +181,7 @@ Need to parse SEC data?
 │   ├─ Form 3/4/5                        → edgartools (BeautifulSoup, fixture-safe)
 │   ├─ Schedule 13D/G post-2024-12-19    → edgartools
 │   ├─ Form 144                          → edgartools
-│   ├─ N-PORT                            → roll our own (Pydantic cliff)
+│   ├─ N-PORT                            → edgartools wrapper (#932 — see G3 + spike doc)
 │   └─ Anything else                     → investigate first
 │
 ├─ Need live HTTP fetch + auth?
@@ -215,7 +216,7 @@ Need to parse SEC data?
 | 13F INFOTABLE → typed | **best** | partial (download only) | no | ~50 LoC |
 | Form 3/4/5 transactions | **best** (full insider model) | partial | no | hard |
 | 13D/13G structured XML | **best** (post-2024-12-19) | partial | no | possible |
-| N-PORT XML | yes (Pydantic strict) | no | no | ~150 LoC viable |
+| N-PORT XML | **best** (wrapper + tombstone catch, #932) | no | no | ~150 LoC viable |
 | 10-K/10-Q XBRL | **best** (full statements engine) | no | no | painful |
 | companyfacts JSON | wraps cleanly | no | no | ~20 LoC |
 | Bulk archive download | yes (`download_edgar_data()`) | yes (faster on AWS path) | no | manual |
@@ -231,8 +232,9 @@ Confirmed via `grep -rn "from edgar\b\|import edgar\b" app/ tests/`:
 | [app/providers/implementations/sec_13f.py:77-80](../../../app/providers/implementations/sec_13f.py#L77-L80) | lazy `_edgar_parsers()` factory imports both static parsers |
 | [app/providers/implementations/sec_13f.py:237](../../../app/providers/implementations/sec_13f.py#L237) | `parse_primary_doc()` calls `edgar_parse_primary(xml)` |
 | [app/providers/implementations/sec_13f.py:308-309](../../../app/providers/implementations/sec_13f.py#L308-L309) | `parse_infotable()` calls `edgar_parse_infotable(xml)` |
+| `app/services/n_port_ingest.py::parse_n_port_payload` (#932) | lazy `_edgar_fund_report()` + `_pydantic_validation_error()` factories; wraps `FundReport.parse_fund_xml(xml)` with `try/except` over all 6 failure classes (AttributeError / KeyError / InvalidOperation / ValueError / TypeError / pydantic.ValidationError) |
 
-**No other code in eBull imports `edgar`.** All other SEC paths (`sec_edgar.py`, `sec_submissions.py`, `sec_daily_index.py`, `sec_13dg.py`, `sec_fundamentals.py`, `sec_getcurrent.py`) are direct httpx/lxml.
+All other SEC paths (`sec_edgar.py`, `sec_submissions.py`, `sec_daily_index.py`, `sec_13dg.py`, `sec_fundamentals.py`, `sec_getcurrent.py`) remain direct httpx/lxml.
 
 ## Upgrade procedure
 

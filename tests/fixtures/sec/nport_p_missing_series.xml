@@ -1,21 +1,60 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-    Negative-test NPORT-P fixture for #917 — no seriesId.
+    Negative-test NPORT-P fixture for #932 — no seriesId.
 
-    The ingester must tombstone this accession as failed
-    (NPortMissingSeriesError) rather than synthesising a
-    collision-prone fallback identity. Codex pre-impl review #2.
+    Updated 2026-05-18 (#932) to clear EdgarTools' structural
+    requirements while still omitting <seriesId>. The wrapper must
+    tombstone this accession as NPortMissingSeriesError (not generic
+    NPortParseError) per Codex #917 pre-impl review #2.
+
+    Structural requirements verified empirically against edgartools
+    ==5.30.2 (edgar/funds/reports.py:1241-1348):
+      - headerData > filerInfo > filer > issuerCredentials (cik+ccc str)
+      - formData > genInfo with regName / regCik / regFileNumber /
+        regStreet1 non-empty text (Pydantic GeneralInfo non-Optional)
+      - formData > fundInfo with 9 required Decimal fields
+      - fundInfo > returnInfo > monthlyTotReturns (empty OK) + othMon1/2/3
+        (Pydantic ReturnInfo non-Optional RealizedChange)
+      - formData > invstOrSecs (empty OK)
 -->
 <edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
-    <headerData>
-        <submissionType>NPORT-P</submissionType>
-    </headerData>
-    <formData>
-        <genInfo>
-            <regCik>0000036405</regCik>
-            <seriesName>Mystery Fund No Series Id</seriesName>
-            <repPdEnd>2025-12-31</repPdEnd>
-        </genInfo>
-        <invstOrSecs/>
-    </formData>
+  <headerData>
+    <submissionType>NPORT-P</submissionType>
+    <filerInfo>
+      <filer>
+        <issuerCredentials>
+          <cik>0000036405</cik>
+          <ccc>XXXXXXXX</ccc>
+        </issuerCredentials>
+      </filer>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <genInfo>
+      <regName>Vanguard Index Funds</regName>
+      <regCik>0000036405</regCik>
+      <regFileNumber>811-02652</regFileNumber>
+      <regStreet1>PO Box 2600</regStreet1>
+      <seriesName>Mystery Fund No Series Id</seriesName>
+      <repPdEnd>2025-12-31</repPdEnd>
+    </genInfo>
+    <fundInfo>
+      <totAssets>0</totAssets>
+      <totLiabs>0</totLiabs>
+      <netAssets>0</netAssets>
+      <assetsAttrMiscSec>0</assetsAttrMiscSec>
+      <assetsInvested>0</assetsInvested>
+      <amtPayOneYrBanksBorr>0</amtPayOneYrBanksBorr>
+      <amtPayOneYrCtrldComp>0</amtPayOneYrCtrldComp>
+      <amtPayOneYrOthAffil>0</amtPayOneYrOthAffil>
+      <amtPayOneYrOther>0</amtPayOneYrOther>
+      <returnInfo>
+        <monthlyTotReturns/>
+        <othMon1/>
+        <othMon2/>
+        <othMon3/>
+      </returnInfo>
+    </fundInfo>
+    <invstOrSecs/>
+  </formData>
 </edgarSubmission>

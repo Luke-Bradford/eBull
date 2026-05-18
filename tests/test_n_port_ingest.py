@@ -1,24 +1,33 @@
-"""Tests for the N-PORT ingester (#917 — Phase 3 PR1).
+"""Tests for the N-PORT ingester (#917 + #932).
 
 Three boundaries:
 
-* Pure XML-in / dataclass-out parser (``parse_n_port_payload``).
+* EdgarTools-wrapped parser (``parse_n_port_payload``, #932) — pure
+  XML-in / dataclass-out.
 * DB write-through helpers (``record_fund_observation`` +
   ``refresh_funds_current``) — exercised against the real
   ``ebull_test`` DB.
 * SEC HTTP fetcher — abstracted as a :class:`Protocol` so tests
   use a deterministic in-memory fake.
 
-Codex pre-impl review (2026-05-05) findings exercised:
+Codex #917 pre-impl review findings exercised:
 
-* #1 — parser accepts ``NPORT-P`` / ``NPORT-P/A`` / ``N-PORT`` /
-  ``N-PORT/A`` form spellings.
+* #1 — submissions-index walker accepts ``NPORT-P`` / ``NPORT-P/A``
+  / ``N-PORT`` / ``N-PORT/A`` form spellings.
 * #2 — fixture missing seriesId tombstones as failed.
-* #3 + #4 — debt / preferred / short / no-cusip rows are dropped
-  by the equity-common-Long write-side guard.
+* #3 + #4 — debt / preferred / short / no-cusip / non-NS / zero-share
+  rows are dropped by the equity-common-Long write-side guard.
 * #5 — amendments win over originals in ``_current``.
 * #6 — parser runs offline (test asserts no network calls).
 * #11 — ingest log measures parsed accessions.
+
+Post-#932 (EdgarTools FundReport drop-in):
+
+* Parser tests use a real Vanguard Value Index Fund (S000002840)
+  NPORT-P primary doc; golden replay locks first-row + count + total.
+* Ingester filter-path tests monkeypatch ``parse_n_port_payload`` at
+  the module-local global with hand-constructed :class:`NPortFiling`
+  / :class:`NPortHolding` dataclass instances (no XML involved).
 """
 
 from __future__ import annotations
@@ -35,6 +44,8 @@ import pytest
 
 from app.services.n_port_ingest import (
     AccessionRef,
+    NPortFiling,
+    NPortHolding,
     NPortMissingSeriesError,
     NPortParseError,
     ingest_fund_n_port,
@@ -118,66 +129,231 @@ class _FakeFetcher:
         return self._payloads.get(absolute_url)
 
 
+def _make_filter_path_filing(
+    *,
+    filer_cik: str = "0000036405",
+    series_id: str = "S000099999",
+    series_name: str = "Test Fund Series",
+    period_end: date = date(2025, 12, 31),
+    filed_at: datetime | None = None,
+    aapl_balance: Decimal = Decimal("1000000"),
+) -> NPortFiling:
+    """Construct an :class:`NPortFiling` with the canonical
+    seven-row distribution used by the ingester filter-path tests.
+
+    The seven rows are designed to exercise each ingester guard
+    (`_ingest_single_accession` at `app/services/n_port_ingest.py:894-925`):
+
+    1. AAPL  — Long EC NS valid CUSIP  → WRITE
+    2. MSFT  — Long EC NS valid CUSIP  → WRITE
+    3. ACME  — Long DBT (non-equity)   → DROP (non_equity)
+    4. SHRT  — Short EC NS             → DROP (short)
+    5. ZZZZ  — Long EC NS unknown CUSIP→ DROP (no_cusip)
+    6. CVBND — Long EC PA (conv bond)  → DROP (non_share_units)
+    7. ZRO   — Long EC NS balance 0    → DROP (zero_shares)
+
+    Used post-#932 in place of XML-fixture-driven tests for the
+    filter-path coverage: the parser is monkeypatched at the
+    module-local global, so the bytes stored in ``filing_raw_documents``
+    are irrelevant. The wrapper itself is exercised against the real
+    Vanguard fixture in :class:`TestParseNPortPayload`.
+    """
+    return NPortFiling(
+        filer_cik=filer_cik,
+        series_id=series_id,
+        series_name=series_name,
+        period_end=period_end,
+        filed_at=filed_at,
+        holdings=(
+            NPortHolding(
+                cusip="037833100",
+                issuer_name="APPLE INC",
+                shares=aapl_balance,
+                value_usd=Decimal("225000000.00"),
+                payoff_profile="Long",
+                asset_category="EC",
+                issuer_category="CORP",
+                units="NS",
+            ),
+            NPortHolding(
+                cusip="594918104",
+                issuer_name="MICROSOFT CORP",
+                shares=Decimal("500000"),
+                value_usd=Decimal("210000000.00"),
+                payoff_profile="Long",
+                asset_category="EC",
+                issuer_category="CORP",
+                units="NS",
+            ),
+            NPortHolding(
+                cusip="000000ACM",
+                issuer_name="ACME CORP NOTE 5%",
+                shares=Decimal("1000000"),
+                value_usd=Decimal("1010000.00"),
+                payoff_profile="Long",
+                asset_category="DBT",
+                issuer_category="CORP",
+                units="PA",
+            ),
+            NPortHolding(
+                cusip="000000SHX",
+                issuer_name="SHORT TARGET INC",
+                shares=Decimal("50000"),
+                value_usd=Decimal("5000000.00"),
+                payoff_profile="Short",
+                asset_category="EC",
+                issuer_category="CORP",
+                units="NS",
+            ),
+            NPortHolding(
+                cusip="000000ZZZ",
+                issuer_name="UNRESOLVED CO",
+                shares=Decimal("10000"),
+                value_usd=Decimal("123456.00"),
+                payoff_profile="Long",
+                asset_category="EC",
+                issuer_category="CORP",
+                units="NS",
+            ),
+            NPortHolding(
+                cusip="000000CVB",
+                issuer_name="CONVERTIBLE BOND CO",
+                shares=Decimal("5000000"),
+                value_usd=Decimal("5500000.00"),
+                payoff_profile="Long",
+                asset_category="EC",
+                issuer_category="CORP",
+                units="PA",
+            ),
+            NPortHolding(
+                cusip="000000ZRO",
+                issuer_name="ZERO BALANCE CO",
+                shares=Decimal("0"),
+                value_usd=Decimal("0.00"),
+                payoff_profile="Long",
+                asset_category="EC",
+                issuer_category="CORP",
+                units="NS",
+            ),
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Parser unit tests (offline, no DB)
 # ---------------------------------------------------------------------------
 
 
 class TestParseNPortPayload:
+    """Tests against the canonical real-Vanguard fixture.
+
+    Fixture: ``tests/fixtures/sec/nport_p_test_fund.xml`` is a real
+    Vanguard Value Index Fund NPORT-P primary doc (accession
+    ``0000036405-26-000074``, filed ``2026-02-26``, period end
+    ``2025-12-31``, series ``S000002840``, 323 holdings, top holding
+    JPMorgan Chase CUSIP ``46625H100``). See plan doc T1-RESULTS for
+    the full anchor-value table.
+    """
+
     def test_extracts_header_and_holdings(self) -> None:
         xml = (_FIXTURE_DIR / "nport_p_test_fund.xml").read_text(encoding="utf-8")
         parsed = parse_n_port_payload(xml)
         assert parsed.filer_cik == "0000036405"
-        assert parsed.series_id == "S000002277"
-        assert parsed.series_name.startswith("Vanguard 500 Index Fund")
+        # T1-RESULTS series_id (S000002277 fallback fired during T1 —
+        # Vanguard 500's series is not under this CIK; locked to the
+        # Vanguard Value Index Fund actually fetched).
+        assert parsed.series_id == "S000002840"
+        # Case-tolerant assertion: SEC payload uses upper-case
+        # 'VANGUARD VALUE INDEX FUND'.
+        assert parsed.series_name.lower().startswith("vanguard value index fund")
         assert parsed.period_end == date(2025, 12, 31)
-        assert parsed.filed_at == datetime(2026, 2, 26, tzinfo=UTC)
-        # 7 holdings parsed total (the ingester filters down to
-        # equity-common Long NS with valid CUSIPs + positive shares;
-        # the parser surfaces all of them).
-        assert len(parsed.holdings) == 7
-        h = {h.cusip: h for h in parsed.holdings}
-        assert h["037833100"].shares == Decimal("1000000")
-        assert h["037833100"].asset_category == "EC"
-        assert h["037833100"].payoff_profile == "Long"
-        assert h["037833100"].units == "NS"
-        assert h["594918104"].asset_category == "EC"
-        # Debt holding is surfaced by the parser (its own assetCat='DBT').
-        assert h["000000ACM"].asset_category == "DBT"
-        # Short equity holding is surfaced.
-        assert h["000000SHX"].payoff_profile == "Short"
-        # Convertible bond — Long EC but units=PA (principal amount).
-        assert h["000000CVB"].asset_category == "EC"
-        assert h["000000CVB"].payoff_profile == "Long"
-        assert h["000000CVB"].units == "PA"
-        # Zero-balance equity-common.
-        assert h["000000ZRO"].shares == Decimal("0")
+        # EdgarTools' parse_fund_xml does not surface a header-level
+        # filedAt; the ingester layers in submissions-index filingDate.
+        assert parsed.filed_at is None
+        # T1-RESULTS holdings count.
+        assert len(parsed.holdings) == 323
+
+    def test_golden_replay_first_row_count_total(self) -> None:
+        """Golden-file replay: locks top-by-value holding + total
+        value_usd sum + holdings count to the T1-RESULTS anchor
+        values. Pin-bump regression guard — if EdgarTools renames a
+        field, changes Decimal coercion, or reorders investments in a
+        future minor bump, this test fails loudly.
+        """
+        xml = (_FIXTURE_DIR / "nport_p_test_fund.xml").read_text(encoding="utf-8")
+        parsed = parse_n_port_payload(xml)
+
+        assert len(parsed.holdings) == 323
+
+        top = max(
+            parsed.holdings,
+            key=lambda h: h.value_usd if h.value_usd is not None else Decimal(0),
+        )
+        assert top.cusip == "46625H100"  # JPMorgan Chase & Co
+        assert top.issuer_name == "JPMorgan Chase & Co"
+        assert top.shares == Decimal("24052035.00000000")
+        assert top.units == "NS"
+        assert top.value_usd == Decimal("7750046717.70000000")
+        assert top.payoff_profile == "Long"
+        assert top.asset_category == "EC"
+        assert top.issuer_category == "CORP"
+
+        total = sum(
+            (h.value_usd for h in parsed.holdings if h.value_usd is not None),
+            start=Decimal(0),
+        )
+        assert total == Decimal("217419611080.71000000")
+
+        # Holdings without value_usd (per T1-RESULTS: 0 on the
+        # canonical fixture). The Pydantic InvestmentOrSecurity model
+        # at edgartools 5.30.2 declares value_usd non-Optional; a
+        # value_usd=None would surface as a parse-time ValidationError
+        # before reaching here, so this is a defence-in-depth assert.
+        assert sum(1 for h in parsed.holdings if h.value_usd is None) == 0
 
     def test_raises_missing_series_id(self) -> None:
         xml = (_FIXTURE_DIR / "nport_p_missing_series.xml").read_text(encoding="utf-8")
         with pytest.raises(NPortMissingSeriesError):
             parse_n_port_payload(xml)
 
+    def test_raises_on_empty_xml(self) -> None:
+        # Codex 2 round 1 finding: ``FundReport.parse_fund_xml("")``
+        # raises ``lxml.etree.XMLSyntaxError`` (after EdgarTools'
+        # recover=True fallback also fails). Wrapper's catch list MUST
+        # include XMLSyntaxError so empty / null-byte payloads
+        # tombstone cleanly as NPortParseError rather than escaping
+        # ``_ingest_single_accession``'s accession-level handler.
+        with pytest.raises(NPortParseError):
+            parse_n_port_payload("")
+        with pytest.raises(NPortParseError):
+            parse_n_port_payload("\x00")
+
     def test_raises_on_malformed_xml(self) -> None:
+        # EdgarTools' lxml parser has recover=True fallback at
+        # edgar/funds/reports.py:1228-1230, so this input survives the
+        # raw parse step but fails downstream when the wrapper tries
+        # to access parsed["general_info"] / parsed["header"] (missing
+        # structural blocks raise AttributeError, caught by the
+        # wrapper's catch list and converted to NPortParseError).
         with pytest.raises(NPortParseError):
             parse_n_port_payload("<not><well><formed>")
 
     def test_runs_offline_no_network(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Codex pre-impl review #6: the parser must not reach the
-        network. Patch every HTTP entrypoint to raise; the parse must
-        still succeed."""
-        # ``urllib.request.urlopen`` is the stdlib HTTP client; patch
-        # at the public attribute so any code path that imports it
-        # raises immediately.
+        """Codex #917 pre-impl review #6: the parser must not reach
+        the network. Patch every HTTP entrypoint to raise; the parse
+        must still succeed.
+
+        Post-#932: EdgarTools' ``parse_fund_xml`` is documented as
+        pure-string-in / dict-out; this test guards against future
+        regressions where a refactor introduces an HTTP call inside
+        the lazy-import path.
+        """
         import urllib.request
 
         def _block(*args: object, **kwargs: object) -> object:
             raise AssertionError("parser made an HTTP request — must run offline")
 
         monkeypatch.setattr(urllib.request, "urlopen", _block)
-        # ``httpx`` may not be imported by the parser, but if a future
-        # change introduces it, the test must still trip. Use
-        # ``importlib`` to reach into it only if installed.
         try:
             import httpx
 
@@ -188,7 +364,8 @@ class TestParseNPortPayload:
 
         xml = (_FIXTURE_DIR / "nport_p_test_fund.xml").read_text(encoding="utf-8")
         parsed = parse_n_port_payload(xml)
-        assert parsed.series_id == "S000002277"
+        # T1-RESULTS series_id.
+        assert parsed.series_id == "S000002840"
 
 
 # ---------------------------------------------------------------------------
@@ -443,26 +620,43 @@ class TestIngestFundNPort:
         conn.commit()
         return conn
 
-    def test_ingest_drops_non_equity_short_unresolved(self, _setup: psycopg.Connection[tuple]) -> None:
+    def test_ingest_drops_non_equity_short_unresolved(
+        self, _setup: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Filter-path coverage via monkeypatched parser (#932).
+
+        The parser is patched at the module-local global
+        ``app.services.n_port_ingest.parse_n_port_payload`` so the
+        bytes stored in ``filing_raw_documents`` are irrelevant. The
+        ingester's filter logic is exercised against a hand-constructed
+        :class:`NPortFiling` from :func:`_make_filter_path_filing`.
+        """
         conn = _setup
         accession = "0000036405-26-000001"
         primary_url = _archive_url("0000036405", accession, "primary_doc.xml")
         submissions_url = "https://data.sec.gov/submissions/CIK0000036405.json"
-        fixture_xml = (_FIXTURE_DIR / "nport_p_test_fund.xml").read_text(encoding="utf-8")
+        filing = _make_filter_path_filing(series_id="S000002840")
+        # Bytes content is irrelevant — the parser is monkeypatched
+        # below. A non-empty stub is needed only because raw_filings.
+        # store_raw NOT NULL-rejects empty payloads.
+        stub_xml = b"<edgarSubmission/>".decode()
+        monkeypatch.setattr(
+            "app.services.n_port_ingest.parse_n_port_payload",
+            lambda _xml: filing,
+        )
         fetcher = _FakeFetcher(
             {
                 submissions_url: _submissions_json(accessions=[(accession, "NPORT-P", "2026-02-26", "2025-12-31")]),
-                primary_url: fixture_xml,
+                primary_url: stub_xml,
             }
         )
 
         summary = ingest_fund_n_port(conn, fetcher, filer_cik="0000036405")
         conn.commit()
 
-        # Fixture has 7 holdings: AAPL + MSFT pass guards. ACME-debt
-        # drops on assetCat, SHRT-X drops on Short, ZZZZ drops on
-        # missing CUSIP mapping, CVBND drops on units=PA, ZRO drops
-        # on zero shares.
+        # AAPL + MSFT pass guards. ACME drops on non-equity, SHRT
+        # drops on Short, ZZZZ drops on missing CUSIP mapping, CVBND
+        # drops on units=PA, ZRO drops on zero shares.
         assert summary.holdings_inserted == 2
         assert summary.holdings_skipped_non_equity == 1
         assert summary.holdings_skipped_short == 1
@@ -481,27 +675,32 @@ class TestIngestFundNPort:
             rows = cur.fetchall()
         assert len(rows) == 1
         assert rows[0]["shares"] == Decimal("1000000.0000")
-        assert rows[0]["fund_series_id"] == "S000002277"
+        assert rows[0]["fund_series_id"] == "S000002840"
 
         # sec_fund_series upserted.
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 "SELECT fund_series_name, fund_filer_cik FROM sec_fund_series WHERE fund_series_id = %s",
-                ("S000002277",),
+                ("S000002840",),
             )
             series_rows = cur.fetchall()
         assert len(series_rows) == 1
         assert series_rows[0]["fund_filer_cik"] == "0000036405"
 
-        # Raw payload stored before parse (prevention-log #1168).
-        with conn.cursor() as cur:
+        # Raw payload stored before parse (prevention-log #1168) +
+        # parser-version-bump regression guard (#932).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT COUNT(*) FROM filing_raw_documents WHERE accession_number = %s AND document_kind = %s",
+                """
+                SELECT parser_version
+                FROM filing_raw_documents
+                WHERE accession_number = %s AND document_kind = %s
+                """,
                 (accession, "nport_xml"),
             )
-            row = cur.fetchone()
-        assert row is not None
-        assert row[0] == 1
+            raw_rows = cur.fetchall()
+        assert len(raw_rows) == 1
+        assert raw_rows[0]["parser_version"] == "nport-v2-edgartools"
 
         # Tombstone log row written.
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -515,17 +714,22 @@ class TestIngestFundNPort:
         assert log_rows[0]["holdings_inserted"] == 2
         assert log_rows[0]["holdings_skipped"] == 5
 
-    def test_idempotent_reingest(self, _setup: psycopg.Connection[tuple]) -> None:
+    def test_idempotent_reingest(self, _setup: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch) -> None:
         """Re-running the same accession after the tombstone is stamped
         doesn't re-fetch primary_doc."""
         conn = _setup
         accession = "0000036405-26-000001"
         primary_url = _archive_url("0000036405", accession, "primary_doc.xml")
         submissions_url = "https://data.sec.gov/submissions/CIK0000036405.json"
-        fixture_xml = (_FIXTURE_DIR / "nport_p_test_fund.xml").read_text(encoding="utf-8")
+        filing = _make_filter_path_filing(series_id="S000002840")
+        stub_xml = b"<edgarSubmission/>".decode()
+        monkeypatch.setattr(
+            "app.services.n_port_ingest.parse_n_port_payload",
+            lambda _xml: filing,
+        )
         payloads = {
             submissions_url: _submissions_json(accessions=[(accession, "NPORT-P", "2026-02-26", "2025-12-31")]),
-            primary_url: fixture_xml,
+            primary_url: stub_xml,
         }
         fetcher_first = _FakeFetcher(payloads)
         ingest_fund_n_port(conn, fetcher_first, filer_cik="0000036405")
@@ -538,22 +742,48 @@ class TestIngestFundNPort:
         assert submissions_url in fetcher_second.fetch_log
         assert primary_url not in fetcher_second.fetch_log
 
-    def test_amendment_uses_submissions_filed_at_when_header_missing(self, _setup: psycopg.Connection[tuple]) -> None:
-        """Codex pre-push review #1: when the primary doc lacks a
-        header ``filedAt``, the ingester must fall back to the
-        submissions-index ``filingDate``. Otherwise an amendment
-        sharing a period with its original would silently tie on
-        ``filed_at`` (period_end midnight) and the older accession
-        would win the tie-break."""
+    def test_amendment_uses_submissions_filed_at_when_header_missing(
+        self, _setup: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex #917 pre-push review #1: when the parser returns
+        ``filed_at=None`` (always true post-#932 since EdgarTools'
+        parse_fund_xml doesn't surface a header filedAt), the ingester
+        must fall back to the submissions-index ``filingDate``.
+        Otherwise an amendment sharing a period with its original would
+        silently tie on ``filed_at`` (period_end midnight) and the
+        older accession would win the tie-break.
+        """
         conn = _setup
         accession_orig = "0000036405-26-000010"
         accession_amend = "0000036405-26-000011"
-        # Build a primary doc XML that lacks a <filedAt> header.
-        fixture_xml = (_FIXTURE_DIR / "nport_p_test_fund.xml").read_text(encoding="utf-8")
-        no_header_xml = fixture_xml.replace("<filedAt>2026-02-26</filedAt>", "")
-        # Also vary the AAPL share count between original and amendment
-        # so the test can prove which row wins.
-        amended_xml = no_header_xml.replace("<balance>1000000</balance>", "<balance>1234567</balance>", 1)
+        # Original + amendment differ on AAPL share count so the test
+        # can prove which row wins. Both parsers return filed_at=None
+        # to exercise the submissions-index fallback path.
+        filing_orig = _make_filter_path_filing(
+            series_id="S000002840",
+            aapl_balance=Decimal("1000000"),
+        )
+        filing_amend = _make_filter_path_filing(
+            series_id="S000002840",
+            aapl_balance=Decimal("1234567"),
+        )
+
+        # The fixture is keyed by accession in `_ingest_single_accession`
+        # via the XML bytes' identity (the wrapper is monkeypatched).
+        # Return the right NPortFiling per-accession by parsing the
+        # accession out of the URL we last looked up.
+        def _patched_parser(xml: str) -> NPortFiling:
+            if xml == _orig_marker:
+                return filing_orig
+            return filing_amend
+
+        _orig_marker = b"<edgarSubmission><id>orig</id></edgarSubmission>".decode()
+        _amend_marker = b"<edgarSubmission><id>amend</id></edgarSubmission>".decode()
+        monkeypatch.setattr(
+            "app.services.n_port_ingest.parse_n_port_payload",
+            _patched_parser,
+        )
+
         primary_url_orig = _archive_url("0000036405", accession_orig, "primary_doc.xml")
         primary_url_amend = _archive_url("0000036405", accession_amend, "primary_doc.xml")
         submissions_url = "https://data.sec.gov/submissions/CIK0000036405.json"
@@ -565,8 +795,8 @@ class TestIngestFundNPort:
                         (accession_amend, "NPORT-P/A", "2026-03-15", "2025-12-31"),
                     ]
                 ),
-                primary_url_orig: no_header_xml,
-                primary_url_amend: amended_xml,
+                primary_url_orig: _orig_marker,
+                primary_url_amend: _amend_marker,
             }
         )
         ingest_fund_n_port(conn, fetcher, filer_cik="0000036405")
