@@ -386,11 +386,14 @@ PR 7 (G10 #1198 `0ead989`) + PR 8 (G11 #1200 `c954c50`) both merged 2026-05-18. 
 - **Phase 5, PR 9 — #925 EdgarTools 13F-HR parser drop-in.** Status: **CLOSED 2026-05-18 by this PR** — pre-impl spike found #925 already shipped via PR #931 (merged 2026-05-05, commit `0428dbf`), and the plan §2 PR 9 alternative scope (manifest-adapter restructure on top of `Filing.obj()` / `ThirteenF`) is REBUTTED-INFEASIBLE on five binding grounds. See spike doc + handover block below.
 - **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Same spike-first shape; Pydantic validation cliff per memory `[[edgartools]]` + #932 is N-PORT-specific and remains live. Separate session.
 
-## Handover — PR (this PR) — Phase 5 PR 9 close-out (2026-05-18)
+## Handover — PR #1203 (merged 2026-05-18)
 
 - Phase: 5
 - Gap / ticket closed: **#925** (EdgarTools 13F-HR parser drop-in)
-- Branch: `fix/925-13f-edgartools-spike-closeout`
+- Branch: `fix/925-13f-edgartools-spike-closeout` (deleted post-merge)
+- Merge SHA: `68e56c1` (squash)
+- Bot review: APPROVE on first push — "No findings. docs + matrix + comment-only change; no logic, no audit trail, no execution guard surface touched."
+- CI: all 4 checks green on first push (lint, review, supply-chain, verify-issue-link).
 - Closure framing: **DONE-AS-FRAMED-PRE-DATED** — PR #931 (`feat(#925): adopt EdgarTools as 13F-HR parser drop-in`, merged 2026-05-05, commit `0428dbf`) shipped #925's full scope verbatim (`pyproject.toml` pin, parser internals wrapped at `app/providers/implementations/sec_13f.py:20-54`, Berkshire 2024Q3 golden replay at `tests/test_sec_13f_parser.py:380-441`). The issue remained administratively OPEN only because PR #931 predated the auto-close CI enforcement gate (#942).
 - Spike doc: `docs/superpowers/spikes/2026-05-18-13f-hr-edgartools-feasibility.md`. Same shape as `docs/superpowers/spikes/2026-05-14-n-csr-feasibility.md` per plan §3 precedent.
 - Tests added: **none.** The existing 20-test suite at `tests/test_sec_13f_parser.py` (incl. Berkshire 2024Q3 golden replay) already exercises the EdgarTools-wrapper path; `uv run pytest tests/test_sec_13f_parser.py -x -q` passes 20/0 against EdgarTools 5.30.2.
@@ -415,7 +418,7 @@ PR 7 (G10 #1198 `0ead989`) + PR 8 (G11 #1200 `c954c50`) both merged 2026-05-18. 
 
 ### Next phase (Phase 5 PR 10)
 
-- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Spike-first against existing N-PORT fixtures at `tests/fixtures/sec/nport_p_*.xml`; the Pydantic validation cliff per memory `[[edgartools]]` + #932 is structurally live for `FundReport.parse_fund_xml`. Decision rule: spike INFEASIBLE → close #932 REBUTTED + freeze the stdlib-ElementTree parser at `app/services/n_port_ingest.py::parse_n_port_payload`; spike OK → drop-in (parser-only scope per the #932 issue body — NOT the manifest-adapter restructure variant rejected in PR 9). Separate session.
+- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Spike-first; separate session. Empirical probe during the PR #1203 close-out session revealed that `FundReport.parse_fund_xml` crashes with `AttributeError: 'NoneType' object has no attribute 'find'` on the existing synthetic fixture at `tests/fixtures/sec/nport_p_test_fund.xml` — a parser-coverage cliff strictly worse than the documented Pydantic validation cliff (edgartools skill §G3, "Punted #932"). The synthetic hand-trimmed fixture uses the `http://www.sec.gov/edgar/nport` namespace but lacks the XBRL container EdgarTools' parser expects from real SEC NPORT-P payloads. Disambiguation requires a real-SEC-NPORT-P fixture (fetch via shared `SecFilingsProvider` rate-limit pool, per `feedback_data_source_constraints` + sec-edgar §4 normative rate-limit discipline). Decision rule unchanged: spike INFEASIBLE → close #932 REBUTTED + freeze stdlib-ElementTree at `app/services/n_port_ingest.py::parse_n_port_payload`; spike OK → drop-in (parser-only scope per #932 issue body — NOT the manifest-adapter restructure variant rejected in PR 9). Three workarounds enumerated at edgartools §G3 if Pydantic constructor is unreachable: (A) skip `FundReport(...)`, use `parse_fund_xml` dict path only; (B) walk the dict directly without the Pydantic layer; (C) direct lxml ~150 LoC re-write (the skill's recommended path for #932 if revisited).
 
 ## Handover — PR #1194 (merged 2026-05-17)
 
