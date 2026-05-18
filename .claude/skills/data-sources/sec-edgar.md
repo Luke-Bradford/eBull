@@ -613,7 +613,7 @@ Every manifest parser MUST follow this contract on its upsert except: block. The
 | Form 5 (`app/services/manifest_parsers/insider_345.py`, `_parse_form5`) | `_write_tombstone(document_type='5')` row in `insider_filings`; observations land as `source='form4'` (enum lacks `form5`) — provenance preserved via `insider_filings.document_type='5'` JOIN |
 | 13D/G (`app/services/manifest_parsers/sec_13dg.py`) | `_record_ingest_attempt(status='failed')` in `blockholder_filings_ingest_log` |
 | DEF 14A (`app/services/manifest_parsers/def14a.py`) | `_record_ingest_attempt(status='failed')` in `def14a_ingest_log` |
-| 13F-HR (`app/services/manifest_parsers/sec_13f_hr.py`) | `_record_ingest_attempt(status='failed')` in `institutional_holdings_ingest_log`; PRN drop + 2023-01-03 VALUE cutover applied at parser layer |
+| 13F-HR (`app/services/manifest_parsers/sec_13f_hr.py`) | `_record_ingest_attempt(status='failed')` in `institutional_holdings_ingest_log`; PRN drop at `sec_13f_hr.py:415-417`; 2023-01-03 VALUE cutover applied service-side at `sec_13f_hr.py:103, 397, 419-421` (manifest adapter) — the parser at `app/providers/implementations/sec_13f.py` is a pure EdgarTools wrapper that preserves raw values per the #931 contract |
 | NPORT-P (`app/services/manifest_parsers/sec_n_port.py`) | `_record_ingest_attempt(status='failed')` in `n_port_ingest_log` |
 | 10-K (`app/services/manifest_parsers/sec_10k.py`) | Returns `ParseOutcome(status='tombstoned')` only; manifest path does NOT call `record_parse_attempt` (the legacy helper mutates `source_accession` on UPDATE and would corrupt incumbent provenance). Manifest row's `tombstoned` state owns retry semantics. |
 

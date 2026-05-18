@@ -383,8 +383,39 @@ PR 7 (G10 #1198 `0ead989`) + PR 8 (G11 #1200 `c954c50`) both merged 2026-05-18. 
 
 ### Phase 5 entry
 
-- **Phase 5, PR 9 — #925 EdgarTools 13F-HR parser drop-in.** Plan §2 Phase 5. Pre-impl spike against existing 13F-HR golden fixtures (Pydantic validation cliff per memory `[[edgartools]]` + #932). If spike INFEASIBLE → close #925 REBUTTED + freeze hand-rolled parser. If OK → drop-in + remove ~200 lines + extend tests. Separate session.
-- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Same shape, separate session.
+- **Phase 5, PR 9 — #925 EdgarTools 13F-HR parser drop-in.** Status: **CLOSED 2026-05-18 by this PR** — pre-impl spike found #925 already shipped via PR #931 (merged 2026-05-05, commit `0428dbf`), and the plan §2 PR 9 alternative scope (manifest-adapter restructure on top of `Filing.obj()` / `ThirteenF`) is REBUTTED-INFEASIBLE on five binding grounds. See spike doc + handover block below.
+- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Same spike-first shape; Pydantic validation cliff per memory `[[edgartools]]` + #932 is N-PORT-specific and remains live. Separate session.
+
+## Handover — PR (this PR) — Phase 5 PR 9 close-out (2026-05-18)
+
+- Phase: 5
+- Gap / ticket closed: **#925** (EdgarTools 13F-HR parser drop-in)
+- Branch: `fix/925-13f-edgartools-spike-closeout`
+- Closure framing: **DONE-AS-FRAMED-PRE-DATED** — PR #931 (`feat(#925): adopt EdgarTools as 13F-HR parser drop-in`, merged 2026-05-05, commit `0428dbf`) shipped #925's full scope verbatim (`pyproject.toml` pin, parser internals wrapped at `app/providers/implementations/sec_13f.py:20-54`, Berkshire 2024Q3 golden replay at `tests/test_sec_13f_parser.py:380-441`). The issue remained administratively OPEN only because PR #931 predated the auto-close CI enforcement gate (#942).
+- Spike doc: `docs/superpowers/spikes/2026-05-18-13f-hr-edgartools-feasibility.md`. Same shape as `docs/superpowers/spikes/2026-05-14-n-csr-feasibility.md` per plan §3 precedent.
+- Tests added: **none.** The existing 20-test suite at `tests/test_sec_13f_parser.py` (incl. Berkshire 2024Q3 golden replay) already exercises the EdgarTools-wrapper path; `uv run pytest tests/test_sec_13f_parser.py -x -q` passes 20/0 against EdgarTools 5.30.2.
+- Scope discoveries handled in-scope:
+  - **Plan §2 PR 9 alternative scope REBUTTED on five binding grounds** (spike §7):
+    1. Rate-limit pool bypass — `Filing.obj()` triggers SEC fetches via EdgarTools' `HTTP_MGR` which does NOT participate in `_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK` (prevention-log:510-513 + `sec_edgar.py:54-80, 237-253`).
+    2. VALUE cutover semantics divergence — EdgarTools' `report_period`-keyed cutoff at `2022-09-30` regresses eBull's correct `filed_at`-keyed handling of post-2023-01-03 amendments (3-OOM regression on amendment cohorts).
+    3. No native PRN/SH drop — `parse_infotable_xml` preserves `Type='Principal'`; drop logic must remain in manifest adapter (confirmed at `edgar/thirteenf/parsers/infotable_xml.py:37, 102-103` + `models.py:458-462`).
+    4. No raw-payload persistence hook — `requires_raw_payload=True` contract (#1168) cannot be satisfied through `Filing.obj()` alone.
+    5. No transient-vs-deterministic error classification + ingest-log audit trail — eBull-specific service-layer concerns.
+  - **Fix-in-scope (small, coupled, unblocked)**: `app/services/manifest_parsers/sec_13f_hr.py:91-102` comment was internally contradictory ("Pre-cutover amendments filed late still report thousands" conflicted with the example "a 2022Q4 restatement landed in March 2023 would carry dollars"). Code was correct; only the comment was muddled. Rewrote the comment to mirror the unambiguous wording at `sec_13f_dataset_ingest.py:316-322`. The cutover constant is now at `sec_13f_hr.py:103`; the scaling-branch flag at `:397`; the per-row scaling at `:419-421`; the PRN drop at `:415-417`.
+  - **Matrix annotation stale**: `.claude/skills/data-engineer/etl-endpoint-coverage.md:43` said "PRN drop + 2023-01-03 VALUE cutover applied parser-side"; that's service-side (manifest-adapter), not parser-side. Same drift at `.claude/skills/data-sources/sec-edgar.md:616`. Both fixed in-scope with corrected file:line anchors + EdgarTools-wrapper provenance via #931.
+- Matrix delta:
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §2 `sec_13f_hr` row — annotated with EdgarTools-wrapper provenance (#931, 2026-05-05) + corrected service-side cutover/PRN-drop location + spike-doc citation.
+  - `.claude/skills/data-sources/sec-edgar.md` §11 (error-handling table) `13F-HR` row — same fix.
+- Codex iteration counts:
+  - 1a (spec): 2 rounds to CLEAN — round-1 2 MED + 2 LOW; round-2 CLEAN.
+  - 1b (plan / matrix delta): pending.
+  - 2 (pre-push): pending.
+- ETL clauses #8-#12 — N/A. This PR is docs + matrix + one comment-only code edit; no parser / schema / observations / rollup change. No per-instrument figure changes. The existing 20-test Berkshire 2024Q3 golden replay (`tests/test_sec_13f_parser.py`) re-exercises the EdgarTools-wrapper path through `uv run pytest`.
+- Operator follow-up: **none.** The EdgarTools-wrapper path has been live in production since PR #931 (2026-05-05); this PR only updates the documentation surface + closes #925.
+
+### Next phase (Phase 5 PR 10)
+
+- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Spike-first against existing N-PORT fixtures at `tests/fixtures/sec/nport_p_*.xml`; the Pydantic validation cliff per memory `[[edgartools]]` + #932 is structurally live for `FundReport.parse_fund_xml`. Decision rule: spike INFEASIBLE → close #932 REBUTTED + freeze the stdlib-ElementTree parser at `app/services/n_port_ingest.py::parse_n_port_payload`; spike OK → drop-in (parser-only scope per the #932 issue body — NOT the manifest-adapter restructure variant rejected in PR 9). Separate session.
 
 ## Handover — PR #1194 (merged 2026-05-17)
 
