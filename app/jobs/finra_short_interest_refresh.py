@@ -47,7 +47,6 @@ from app.providers.implementations.finra_short_interest import (
 )
 from app.services import raw_filings
 from app.services.finra_short_interest_ingest import (
-    HeaderCorruptionError,
     SettlementIngestStats,
     build_preloaded_symbol_resolver,
     ingest_settlement_file,
@@ -267,7 +266,8 @@ def run_finra_short_interest_refresh(
                     ingest_run_id,
                 )
             stats_list.append(per_file)
-        except (HeaderCorruptionError, Exception) as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Catches HeaderCorruptionError + any DB / decode error.
             # `with conn.transaction()` rolled back automatically on the
             # raised exception; raw payload is durable from the earlier
             # conn.commit() so a future re-ingest can re-attempt parse

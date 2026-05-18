@@ -199,8 +199,45 @@ Surfaced from the May 17 session (#1184 + #1187 retrospective):
 | 6 — FINRA | 2 | 2 | 8-10 |
 | 7 — #935 hardening | 1-2 | 1-2 | 10-12 |
 | 8 — Final validation | 0 | 0.5 | ~12 |
+| 9 — Backend stability + dev DB hygiene (#1208) | 1-3 | 2-3 | ~14-15 |
 
 Operator runs bootstrap completion in parallel — independent track, no engineering bottleneck.
+
+### Phase 9 — Backend stability + dev DB hygiene (#1208)
+
+> Added 2026-05-18 after the two Postgres PANICs (09:05 + 12:54 UTC) on the dev DB. Not caused by Phase 6 work — root cause is wrong container defaults + leaked test DBs + unpartitioned `financial_facts_raw` (28 GB / 62 M rows). User directive: "Tests should be quick and mechanical, not storing data in mass. We have logic to test."
+
+**Sub 1 — Postgres tuning** (one PR):
+- New migration `sql/NNN_postgres_runtime_tuning.sql` applying ALTER SYSTEM for `max_wal_size=4GB`, `min_wal_size=512MB`, `wal_compression=on`, `checkpoint_completion_target=0.9`, `shared_buffers=2GB`, `maintenance_work_mem=512MB`, `effective_cache_size=4GB`, `work_mem=32MB`. Migration issues `pg_reload_conf()`; restart required for `shared_buffers`.
+- `docker-compose.yml`: add `mem_limit: 4g` + `shm_size: 1g`.
+- Document tuning rationale.
+
+**Sub 2 — Test-fixture orphan sweep + slim test-data discipline** (one PR — the BIG one):
+- Investigate why per-worker test DBs are ~150 MB each. Hypothesis: template carries seed data from migrations that should not own user data.
+- Codify test-data discipline: minimal seeds (1-5 instruments per test), TRUNCATE-based teardown not whole-DB-rebuild. Tests test LOGIC, not data scale.
+- Orphan sweep: `_drop_orphan_workers_older_than(min_age='1h')` in `build_template_if_stale`. Snipes `ebull_test_*_gw*` graveyards.
+- Pre-push hook: warn if `pg_database_size('ebull') > 10 GB`.
+
+**Sub 3 — `financial_facts_raw` partition + retention review** (one PR):
+- Partition `financial_facts_raw` by `period_end` quarterly buckets. Autovacuum operates per-partition; WAL bursts shrink ~24×.
+- Per-table retention enforcement (skill §13 horizons): 10-K last 3 annual, 10-Q last 8 quarterly, etc. Spot-check `filing_raw_documents` (2.9 GB) compaction is firing.
+
+**Sub 4 — Observability** (in Sub 1 or Sub 3 PR):
+- `/system/postgres-health` endpoint exposing `pg_database_size`, leaked-DB count, current WAL size, last checkpoint time, autovacuum lag per top-10 tables.
+
+**Sub 5 — Prevention-log entry** (in any PR):
+- Document the "Postgres on Docker Desktop macOS defaults blow up partition-heavy workloads" trap with the specific knob list + the leaked-DB hazard.
+
+**Acceptance**:
+1. Postgres survives a heavy ingest cycle without WAL PANIC.
+2. Fresh pytest run leaves zero leaked test DBs.
+3. Dev-DB total < 5 GB after retention sweep.
+4. `/system/postgres-health` returns metrics + pre-push hook warns on bloat.
+5. Prevention-log entry merged.
+
+**Out of scope (yet)**: HA / replication, K8s migration, WAL archiving / PITR. eBull is demo-first; production-grade DB ops is a separate epic.
+
+**Ticket**: #1208 — full sub-ticket breakdown + operator runbook.
 
 ## Handover — Phase 1 (PRs 1+2, session 1)
 

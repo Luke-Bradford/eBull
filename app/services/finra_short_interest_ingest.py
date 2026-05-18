@@ -200,217 +200,217 @@ def ingest_settlement_file(
     skipped_ambiguous_symbol = 0
     skipped_invalid_row = 0
 
-    cur = conn.cursor()
-    for row in reader:
-        rows_parsed += 1
+    with conn.cursor() as cur:
+        for row in reader:
+            rows_parsed += 1
 
-        # Row-shape validation. ``csv.DictReader`` sets missing trailing
-        # fields to ``None``; truncated rows present as a dict with the
-        # expected keys but some values None/blank. Explicit required-
-        # field check (Codex 1b r2 MED 1).
-        symbol = (row.get("symbolCode") or "").strip()
-        current_short_raw = row.get("currentShortPositionQuantity")
-        settlement_raw = row.get("settlementDate")
-        if not symbol or current_short_raw in (None, "") or settlement_raw in (None, ""):
-            skipped_invalid_row += 1
-            continue
-        try:
-            current_short_int = int(current_short_raw)  # type: ignore[arg-type]
-        except ValueError, TypeError:
-            skipped_invalid_row += 1
-            continue
+            # Row-shape validation. ``csv.DictReader`` sets missing trailing
+            # fields to ``None``; truncated rows present as a dict with the
+            # expected keys but some values None/blank. Explicit required-
+            # field check (Codex 1b r2 MED 1).
+            symbol = (row.get("symbolCode") or "").strip()
+            current_short_raw = row.get("currentShortPositionQuantity")
+            settlement_raw = row.get("settlementDate")
+            if not symbol or current_short_raw in (None, "") or settlement_raw in (None, ""):
+                skipped_invalid_row += 1
+                continue
+            try:
+                current_short_int = int(current_short_raw)  # type: ignore[arg-type]
+            except ValueError, TypeError:
+                skipped_invalid_row += 1
+                continue
 
-        # Ambiguity check BEFORE resolver call (resolver returns None
-        # for both ambiguous + no-match; disambiguate for the counter).
-        key = normalise_symbol(symbol)
-        if key in ambiguous_keys:
-            skipped_ambiguous_symbol += 1
-            continue
-        instrument_id = resolver(symbol)
-        if instrument_id is None:
-            skipped_no_instrument_match += 1
-            continue
-        rows_resolved += 1
+            # Ambiguity check BEFORE resolver call (resolver returns None
+            # for both ambiguous + no-match; disambiguate for the counter).
+            key = normalise_symbol(symbol)
+            if key in ambiguous_keys:
+                skipped_ambiguous_symbol += 1
+                continue
+            instrument_id = resolver(symbol)
+            if instrument_id is None:
+                skipped_no_instrument_match += 1
+                continue
+            rows_resolved += 1
 
-        cur.execute(
-            """
-            INSERT INTO finra_short_interest_observations (
-                instrument_id, settlement_date, source_document_id,
-                current_short_interest, previous_short_interest,
-                average_daily_volume, days_to_cover, change_percent,
-                change_previous, accounting_yearmonth,
-                market_class_code, exchange_code, issue_name,
-                stock_split_flag, revision_flag,
-                source, source_url, filed_at, period_end,
-                known_from, ingest_run_id
-            ) VALUES (
-                %(instrument_id)s, %(settlement_date)s, %(source_document_id)s,
-                %(current_short_interest)s, %(previous_short_interest)s,
-                %(average_daily_volume)s, %(days_to_cover)s, %(change_percent)s,
-                %(change_previous)s, %(accounting_yearmonth)s,
-                %(market_class_code)s, %(exchange_code)s, %(issue_name)s,
-                %(stock_split_flag)s, %(revision_flag)s,
-                'finra_si', %(source_url)s, %(filed_at)s, %(period_end)s,
-                NOW(), %(ingest_run_id)s
-            )
-            ON CONFLICT (instrument_id, settlement_date, source_document_id)
-            DO UPDATE SET
-                current_short_interest = EXCLUDED.current_short_interest,
-                previous_short_interest = EXCLUDED.previous_short_interest,
-                average_daily_volume = EXCLUDED.average_daily_volume,
-                days_to_cover = EXCLUDED.days_to_cover,
-                change_percent = EXCLUDED.change_percent,
-                change_previous = EXCLUDED.change_previous,
-                accounting_yearmonth = EXCLUDED.accounting_yearmonth,
-                market_class_code = EXCLUDED.market_class_code,
-                exchange_code = EXCLUDED.exchange_code,
-                issue_name = EXCLUDED.issue_name,
-                stock_split_flag = EXCLUDED.stock_split_flag,
-                revision_flag = EXCLUDED.revision_flag,
-                source_url = EXCLUDED.source_url,
-                filed_at = EXCLUDED.filed_at,
-                period_end = EXCLUDED.period_end,
-                known_from = NOW(),
-                ingest_run_id = EXCLUDED.ingest_run_id
-            """,
-            {
-                "instrument_id": instrument_id,
-                "settlement_date": settlement_date,
-                "source_document_id": source_document_id,
-                "current_short_interest": current_short_int,
-                "previous_short_interest": _opt_int(row.get("previousShortPositionQuantity")),
-                "average_daily_volume": _opt_int(row.get("averageDailyVolumeQuantity")),
-                "days_to_cover": _opt_decimal(row.get("daysToCoverQuantity")),
-                "change_percent": _opt_decimal(row.get("changePercent")),
-                "change_previous": _opt_int(row.get("changePreviousNumber")),
-                "accounting_yearmonth": _opt_int(row.get("accountingYearMonthNumber")),
-                "market_class_code": row.get("marketClassCode"),
-                "exchange_code": row.get("issuerServicesGroupExchangeCode"),
-                "issue_name": row.get("issueName"),
-                "stock_split_flag": row.get("stockSplitFlag") or "",
-                "revision_flag": row.get("revisionFlag") or "",
-                "source_url": file_url,
-                "filed_at": filed_at,
-                "period_end": settlement_date,
-                "ingest_run_id": ingest_run_id,
-            },
-        )
-
-        cur.execute(
-            """
-            INSERT INTO finra_short_interest_current (
-                instrument_id, settlement_date, source_document_id,
-                current_short_interest, previous_short_interest,
-                average_daily_volume, days_to_cover, change_percent,
-                change_previous, market_class_code, exchange_code,
-                issue_name, source_url, filed_at, refreshed_at
-            ) VALUES (
-                %(instrument_id)s, %(settlement_date)s, %(source_document_id)s,
-                %(current_short_interest)s, %(previous_short_interest)s,
-                %(average_daily_volume)s, %(days_to_cover)s, %(change_percent)s,
-                %(change_previous)s, %(market_class_code)s, %(exchange_code)s,
-                %(issue_name)s, %(source_url)s, %(filed_at)s, NOW()
-            )
-            ON CONFLICT (instrument_id) DO UPDATE SET
-                settlement_date = EXCLUDED.settlement_date,
-                source_document_id = EXCLUDED.source_document_id,
-                current_short_interest = EXCLUDED.current_short_interest,
-                previous_short_interest = EXCLUDED.previous_short_interest,
-                average_daily_volume = EXCLUDED.average_daily_volume,
-                days_to_cover = EXCLUDED.days_to_cover,
-                change_percent = EXCLUDED.change_percent,
-                change_previous = EXCLUDED.change_previous,
-                market_class_code = EXCLUDED.market_class_code,
-                exchange_code = EXCLUDED.exchange_code,
-                issue_name = EXCLUDED.issue_name,
-                source_url = EXCLUDED.source_url,
-                filed_at = EXCLUDED.filed_at,
-                refreshed_at = NOW()
-            WHERE
-                EXCLUDED.settlement_date > finra_short_interest_current.settlement_date
-                OR (
-                    EXCLUDED.settlement_date = finra_short_interest_current.settlement_date
-                    AND NOW() > finra_short_interest_current.refreshed_at
+            cur.execute(
+                """
+                INSERT INTO finra_short_interest_observations (
+                    instrument_id, settlement_date, source_document_id,
+                    current_short_interest, previous_short_interest,
+                    average_daily_volume, days_to_cover, change_percent,
+                    change_previous, accounting_yearmonth,
+                    market_class_code, exchange_code, issue_name,
+                    stock_split_flag, revision_flag,
+                    source, source_url, filed_at, period_end,
+                    known_from, ingest_run_id
+                ) VALUES (
+                    %(instrument_id)s, %(settlement_date)s, %(source_document_id)s,
+                    %(current_short_interest)s, %(previous_short_interest)s,
+                    %(average_daily_volume)s, %(days_to_cover)s, %(change_percent)s,
+                    %(change_previous)s, %(accounting_yearmonth)s,
+                    %(market_class_code)s, %(exchange_code)s, %(issue_name)s,
+                    %(stock_split_flag)s, %(revision_flag)s,
+                    'finra_si', %(source_url)s, %(filed_at)s, %(period_end)s,
+                    NOW(), %(ingest_run_id)s
                 )
+                ON CONFLICT (instrument_id, settlement_date, source_document_id)
+                DO UPDATE SET
+                    current_short_interest = EXCLUDED.current_short_interest,
+                    previous_short_interest = EXCLUDED.previous_short_interest,
+                    average_daily_volume = EXCLUDED.average_daily_volume,
+                    days_to_cover = EXCLUDED.days_to_cover,
+                    change_percent = EXCLUDED.change_percent,
+                    change_previous = EXCLUDED.change_previous,
+                    accounting_yearmonth = EXCLUDED.accounting_yearmonth,
+                    market_class_code = EXCLUDED.market_class_code,
+                    exchange_code = EXCLUDED.exchange_code,
+                    issue_name = EXCLUDED.issue_name,
+                    stock_split_flag = EXCLUDED.stock_split_flag,
+                    revision_flag = EXCLUDED.revision_flag,
+                    source_url = EXCLUDED.source_url,
+                    filed_at = EXCLUDED.filed_at,
+                    period_end = EXCLUDED.period_end,
+                    known_from = NOW(),
+                    ingest_run_id = EXCLUDED.ingest_run_id
+                """,
+                {
+                    "instrument_id": instrument_id,
+                    "settlement_date": settlement_date,
+                    "source_document_id": source_document_id,
+                    "current_short_interest": current_short_int,
+                    "previous_short_interest": _opt_int(row.get("previousShortPositionQuantity")),
+                    "average_daily_volume": _opt_int(row.get("averageDailyVolumeQuantity")),
+                    "days_to_cover": _opt_decimal(row.get("daysToCoverQuantity")),
+                    "change_percent": _opt_decimal(row.get("changePercent")),
+                    "change_previous": _opt_int(row.get("changePreviousNumber")),
+                    "accounting_yearmonth": _opt_int(row.get("accountingYearMonthNumber")),
+                    "market_class_code": row.get("marketClassCode"),
+                    "exchange_code": row.get("issuerServicesGroupExchangeCode"),
+                    "issue_name": row.get("issueName"),
+                    "stock_split_flag": row.get("stockSplitFlag") or "",
+                    "revision_flag": row.get("revisionFlag") or "",
+                    "source_url": file_url,
+                    "filed_at": filed_at,
+                    "period_end": settlement_date,
+                    "ingest_run_id": ingest_run_id,
+                },
+            )
+
+            cur.execute(
+                """
+                INSERT INTO finra_short_interest_current (
+                    instrument_id, settlement_date, source_document_id,
+                    current_short_interest, previous_short_interest,
+                    average_daily_volume, days_to_cover, change_percent,
+                    change_previous, market_class_code, exchange_code,
+                    issue_name, source_url, filed_at, refreshed_at
+                ) VALUES (
+                    %(instrument_id)s, %(settlement_date)s, %(source_document_id)s,
+                    %(current_short_interest)s, %(previous_short_interest)s,
+                    %(average_daily_volume)s, %(days_to_cover)s, %(change_percent)s,
+                    %(change_previous)s, %(market_class_code)s, %(exchange_code)s,
+                    %(issue_name)s, %(source_url)s, %(filed_at)s, NOW()
+                )
+                ON CONFLICT (instrument_id) DO UPDATE SET
+                    settlement_date = EXCLUDED.settlement_date,
+                    source_document_id = EXCLUDED.source_document_id,
+                    current_short_interest = EXCLUDED.current_short_interest,
+                    previous_short_interest = EXCLUDED.previous_short_interest,
+                    average_daily_volume = EXCLUDED.average_daily_volume,
+                    days_to_cover = EXCLUDED.days_to_cover,
+                    change_percent = EXCLUDED.change_percent,
+                    change_previous = EXCLUDED.change_previous,
+                    market_class_code = EXCLUDED.market_class_code,
+                    exchange_code = EXCLUDED.exchange_code,
+                    issue_name = EXCLUDED.issue_name,
+                    source_url = EXCLUDED.source_url,
+                    filed_at = EXCLUDED.filed_at,
+                    refreshed_at = NOW()
+                WHERE
+                    EXCLUDED.settlement_date > finra_short_interest_current.settlement_date
+                    OR (
+                        EXCLUDED.settlement_date = finra_short_interest_current.settlement_date
+                        AND NOW() > finra_short_interest_current.refreshed_at
+                    )
+                """,
+                {
+                    "instrument_id": instrument_id,
+                    "settlement_date": settlement_date,
+                    "source_document_id": source_document_id,
+                    "current_short_interest": current_short_int,
+                    "previous_short_interest": _opt_int(row.get("previousShortPositionQuantity")),
+                    "average_daily_volume": _opt_int(row.get("averageDailyVolumeQuantity")),
+                    "days_to_cover": _opt_decimal(row.get("daysToCoverQuantity")),
+                    "change_percent": _opt_decimal(row.get("changePercent")),
+                    "change_previous": _opt_int(row.get("changePreviousNumber")),
+                    "market_class_code": row.get("marketClassCode"),
+                    "exchange_code": row.get("issuerServicesGroupExchangeCode"),
+                    "issue_name": row.get("issueName"),
+                    "source_url": file_url,
+                    "filed_at": filed_at,
+                },
+            )
+
+            rows_upserted += 1
+
+        # Manifest UPSERT — synthetic FINRA tuple per spec §7.3. Inside the
+        # caller's open transaction; rolls back atomically with observations
+        # if anything raises.
+        #
+        # NOT using ``record_manifest_entry`` + ``transition_status`` because
+        # the transition path (pending → parsed) is asymmetric with the
+        # revision-window re-fetch path (already-parsed re-write, which
+        # would raise on ``parsed → parsed`` per ``_ALLOWED_TRANSITIONS``).
+        # Manual UPSERT keeps the same idempotent semantics; the companion
+        # ``seed_freshness_for_manifest_row()`` call below replicates the
+        # freshness-index seeding that ``record_manifest_entry`` does
+        # internally (Codex 2 r1 HIGH 1).
+        cur.execute(
+            """
+            INSERT INTO sec_filing_manifest (
+                accession_number, cik, form, source,
+                subject_type, subject_id, instrument_id,
+                filed_at, accepted_at, primary_document_url,
+                is_amendment, amends_accession,
+                ingest_status, parser_version, raw_status,
+                last_attempted_at, next_retry_at, error
+            ) VALUES (
+                %(accession_number)s,
+                'FINRA_SI',
+                'SHRT',
+                'finra_short_interest',
+                'finra_universe',
+                'FINRA_SI',
+                NULL,
+                %(filed_at)s,
+                NULL,
+                %(primary_document_url)s,
+                FALSE,
+                NULL,
+                'parsed',
+                %(parser_version)s,
+                'stored',
+                NOW(),
+                NULL,
+                NULL
+            )
+            ON CONFLICT (accession_number) DO UPDATE SET
+                filed_at = EXCLUDED.filed_at,
+                primary_document_url = EXCLUDED.primary_document_url,
+                ingest_status = 'parsed',
+                parser_version = EXCLUDED.parser_version,
+                raw_status = 'stored',
+                last_attempted_at = NOW(),
+                next_retry_at = NULL,
+                error = NULL
             """,
             {
-                "instrument_id": instrument_id,
-                "settlement_date": settlement_date,
-                "source_document_id": source_document_id,
-                "current_short_interest": current_short_int,
-                "previous_short_interest": _opt_int(row.get("previousShortPositionQuantity")),
-                "average_daily_volume": _opt_int(row.get("averageDailyVolumeQuantity")),
-                "days_to_cover": _opt_decimal(row.get("daysToCoverQuantity")),
-                "change_percent": _opt_decimal(row.get("changePercent")),
-                "change_previous": _opt_int(row.get("changePreviousNumber")),
-                "market_class_code": row.get("marketClassCode"),
-                "exchange_code": row.get("issuerServicesGroupExchangeCode"),
-                "issue_name": row.get("issueName"),
-                "source_url": file_url,
+                "accession_number": accession,
                 "filed_at": filed_at,
+                "primary_document_url": file_url,
+                "parser_version": PARSER_VERSION,
             },
         )
-
-        rows_upserted += 1
-
-    # Manifest UPSERT — synthetic FINRA tuple per spec §7.3. Inside the
-    # caller's open transaction; rolls back atomically with observations
-    # if anything raises.
-    #
-    # NOT using ``record_manifest_entry`` + ``transition_status`` because
-    # the transition path (pending → parsed) is asymmetric with the
-    # revision-window re-fetch path (already-parsed re-write, which
-    # would raise on ``parsed → parsed`` per ``_ALLOWED_TRANSITIONS``).
-    # Manual UPSERT keeps the same idempotent semantics; the companion
-    # ``seed_freshness_for_manifest_row()`` call below replicates the
-    # freshness-index seeding that ``record_manifest_entry`` does
-    # internally (Codex 2 r1 HIGH 1).
-    cur.execute(
-        """
-        INSERT INTO sec_filing_manifest (
-            accession_number, cik, form, source,
-            subject_type, subject_id, instrument_id,
-            filed_at, accepted_at, primary_document_url,
-            is_amendment, amends_accession,
-            ingest_status, parser_version, raw_status,
-            last_attempted_at, next_retry_at, error
-        ) VALUES (
-            %(accession_number)s,
-            'FINRA_SI',
-            'SHRT',
-            'finra_short_interest',
-            'finra_universe',
-            'FINRA_SI',
-            NULL,
-            %(filed_at)s,
-            NULL,
-            %(primary_document_url)s,
-            FALSE,
-            NULL,
-            'parsed',
-            %(parser_version)s,
-            'stored',
-            NOW(),
-            NULL,
-            NULL
-        )
-        ON CONFLICT (accession_number) DO UPDATE SET
-            filed_at = EXCLUDED.filed_at,
-            primary_document_url = EXCLUDED.primary_document_url,
-            ingest_status = 'parsed',
-            parser_version = EXCLUDED.parser_version,
-            raw_status = 'stored',
-            last_attempted_at = NOW(),
-            next_retry_at = NULL,
-            error = NULL
-        """,
-        {
-            "accession_number": accession,
-            "filed_at": filed_at,
-            "primary_document_url": file_url,
-            "parser_version": PARSER_VERSION,
-        },
-    )
 
     # Freshness-index seed — replicates the side-effect that
     # ``record_manifest_entry`` performs inline via the same helper
