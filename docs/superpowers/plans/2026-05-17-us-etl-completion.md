@@ -306,8 +306,46 @@ PR 1 (G7 #1190) + PR 2 (G14 #1191) + PR 3 (G13 #1193) all merged. Phase 1 comple
 
 ### Next phase (Phase 4 entry)
 
-- **Phase 4, PR 7 — G10 (`companyconcept` API consumer).** Plan §2 Phase 4. Endpoint: `https://data.sec.gov/api/xbrl/companyconcept/CIK*/{taxonomy}/{tag}.json`. Use case: smaller-payload alternative to Companyfacts for known-tag pulls. Implementation: extend `SecFundamentalsProvider` with a `fetch_concept(cik, taxonomy, tag)` method. fundamentals_sync opts in for the Tier-1 metric set; full Companyfacts remains the fallback. Performance audit: measure bandwidth + latency delta vs Companyfacts.
+- **Phase 4, PR 7 — G10 (`companyconcept` API consumer).** ✅ MERGED 2026-05-18 PR #1198 `0ead989` — see handover block below.
 - **Phase 4, PR 8 — G11 (`frames` API consumer).** Decision rule from plan: if `gh issue list --search "frames OR sector heatmap OR cross-sectional"` returns an open feature ticket, wire the consumer; otherwise close G11 as BY DESIGN with documentation.
+
+## Handover — PR #1198 (merged 2026-05-18)
+
+- Phase: 4
+- Gap / ticket closed: **G10** (`companyconcept` API not consumed)
+- Branch: `feat/g10-companyconcept-api-consumer` (deleted post-merge)
+- Merge SHA: `0ead989` (squash)
+- Closure framing: **PROVIDER PRIMITIVE** (not WIRED) — `fetch_concept` + `extract_concept_facts` exposed on `SecFundamentalsProvider`; **no production consumer in v1 by design.**
+- Tests added:
+  - `tests/test_sec_fundamentals_companyconcept.py` — 35 tests (URL builder + 404 → None + 5xx → raise [with `Request` attached so `raise_for_status` fires cleanly] + taxonomy validation [10 bad cases incl. trailing dash + leading dash + trailing newline + 6 legitimate cases] + tag validation [6 bad + 3 legitimate] + extractor reuse with integer USD revenue fixture + `Decimal(str(...))` boundary on float `USD/shares` EPS [pins prevention-log #1174] + empty on 404 + missing-units warning [#1204 close-out] + taxonomy-mismatch warning [Codex 2 r1 LOW-2] + rate-limit clock identity assertion + back-to-back throttle behaviour via `httpx.MockTransport`).
+- Scope discoveries handled in-scope:
+  - **Plan called for `fundamentals_sync` opt-in. That was wrong.** Spec §3.1 audit: under the 10 req/s shared SEC rate budget (`min_request_interval_s = 0.11` enforced via process-wide `_PROCESS_RATE_LIMIT_CLOCK`), companyconcept LOSES wall-clock to companyfacts for any consumer needing ≥2 tags per CIK. Snapshot path = 18 × 0.11 s ≈ 2.0 s vs companyfacts 1 × 0.11 s + ~0.5 s payload ≈ 0.5-1.0 s. Full extract path (`refresh_financial_facts`) is 81 tag variants × 0.11 s ≈ 9 s/CIK + would drop the post-#451 "every concept lands in `financial_facts_raw`" semantics. Conclusion: primitive lands; no production wire-up. Future single-tag consumer tickets (#435 dilution tracker; operator probes) re-open the wiring question.
+  - **Closure framing `✅ WIRED` would overclaim** (Codex 1a r1 HIGH-1). Matrix §4 + §7 row carry `✅ PROVIDER PRIMITIVE 2026-05-17 (G10)` — distinct status from production-consumer-wired rows.
+  - **Future-consumer raw-payload invariant codified** (Codex 1a r1 HIGH-2). Spec §3.3 binds any subsequent caller PR that wires this primitive into a DB writer to land raw-payload persistence per prevention-log #1168 IN THE SAME PR. Provider docstring cites the spec so a future consumer-PR's self-review surfaces the obligation.
+  - **Taxonomy validation widened to SEC-syntax** (Codex 1a r1 MED-3). Original spec restricted to `{us-gaap, dei}`; widened to `^[a-z](?:[a-z0-9-]*[a-z0-9])?$` via `fullmatch` so the primitive accepts every published SEC taxonomy namespace (`srt`, `invest`, `country`, `ifrs-full`, …) — NOT bound to `TRACKED_CONCEPTS` / `DEI_TRACKED_CONCEPTS`. Those maps govern downstream normalisation, not arbitrary probe access. PR #1198 bot round-1 NITPICK on trailing-dash gap (`"us-gaap-"`) FIXED 504a070 by adding the trailing-alnum anchor.
+  - **`fullmatch` discipline** (Codex 1b r1 MED-1). `re.match` + `^...$` admits a trailing `\n` because `$` matches before final newline. Both `_TAXONOMY_RE` and `_CONCEPT_TAG_RE` use `fullmatch`. Tests parametrise `"us-gaap\n"`, `"Revenues\n"`, etc.
+  - **Test fixture realism** (Codex 1b r1 MED-2). Integer USD Revenues fixture stays integer; float-boundary exercise moved to dedicated EPS `USD/shares` test that pins prevention-log #1174.
+  - **5xx `Request` attachment** (Codex 1b r1 MED-3). Bare `httpx.Response(500)` has no `Request`; `raise_for_status()` then raises wrong-fixture error. Test now constructs `httpx.Response(500, request=httpx.Request("GET", "..."))`.
+  - **Rate-limit clock test cleanup** (Codex 1b r1 LOW-4). `_PROCESS_RATE_LIMIT_CLOCK[0]` reset to 0.0 in teardown so shared-clock mutation doesn't bleed into the rest of `uv run pytest`.
+  - **`ResilientClient` retry override in test wrapper** (Codex 2 r1 LOW-3). `_rewire_transport` accepts `max_retries=0` (default) — 5xx test drops from ~7 s (default exponential backoff) to ~0.1 s.
+  - **Tag-regex NCName overclaim narrowed** (Codex 2 r1 MED). Module comment now states the regex is "a deliberately tightened subset of legal XBRL NCName syntax — every SEC-observed concept name uses `[A-Za-z][A-Za-z0-9_]*`; widen + add regression test if SEC drift surfaces a legitimate NCName outside this subset" rather than claiming "every legal XBRL concept name."
+- Matrix delta:
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §4 row `data.sec.gov/api/xbrl/companyconcept/...` — `❌ GAP` → `✅ PROVIDER PRIMITIVE 2026-05-17 (G10)` with file:line + audit summary.
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §7 G10 row — `OPEN (low)` → `✅ CLOSED 2026-05-17 — G10 PR`.
+  - `.claude/skills/data-sources/sec-edgar.md` §1.6 Companyconcept row — consumer annotation added.
+- Codex iteration counts:
+  - 1a (spec): 3 rounds to CLEAN — round-1 2 HIGH + 4 MED + 2 LOW; round-2 2 MED + 2 LOW; round-3 2 LOW (header v2-vs-v3 + MockTransport injection).
+  - 1b (plan): 2 rounds to CLEAN — round-1 3 MED + 1 LOW + 3 LOW-confirmations; round-2 2 LOW (numbering drift + 5xx mechanics wording).
+  - 2 (pre-push): 1 round — 1 MED (NCName overclaim) + 2 LOW (mismatch test + retry override) all addressed.
+  - Bot review: round 1 APPROVE + 1 NITPICK (trailing-dash); round 2 APPROVE on format-fix; round 3 APPROVE on NITPICK-fix (504a070).
+- ETL clauses #8-#12 — N/A end-to-end. G10 is a provider primitive; no schema / parser / observations / rollup change; no per-instrument figure touched. Documented in PR body. Architectural audit in spec §3.1 is the audit-of-record.
+- Spec: `docs/superpowers/specs/2026-05-17-g10-companyconcept-api-consumer.md` (CLEAN v3 through Codex 1a r1+r2+r3 + Codex 2 r1).
+- Plan: `docs/superpowers/plans/2026-05-17-g10-companyconcept-api-consumer-plan.md` (CLEAN v2 through Codex 1b r1+r2 + Codex 2 r1).
+- **Operator follow-up:** none. The primitive has no DB / scheduler / lifespan touch. The smoke gate would test the same provider import path that the targeted test file already exercises.
+
+### Next phase (Phase 4 PR 8)
+
+- **Phase 4, PR 8 — G11 (`frames` API consumer).** Decision rule: `gh issue list --search "frames OR sector heatmap OR cross-sectional"` — if open feature ticket exists, wire the consumer; otherwise close G11 as BY DESIGN with documentation only.
 
 ## Handover — PR #1194 (merged 2026-05-17)
 
