@@ -1,6 +1,6 @@
 """Shared pytest configuration for eBull tests.
 
-Two responsibilities:
+Three responsibilities:
 
 1. Auth bypass for the broad set of pre-existing API tests
    (``require_session_or_service_token`` no-op override). The
@@ -10,6 +10,11 @@ Two responsibilities:
    ``ebull_test_template`` once in the controller, give every xdist
    worker a private DB derived from it, and route ``--basetemp``
    outside the repo so concurrent runs don't share locked tmp dirs.
+3. Session-wide dev-DB-size tripwire (#1208 Sub 6): record
+   ``pg_database_size('ebull')`` at session start, assert <1 MB growth
+   at session end. Catches a test that opens a raw
+   ``psycopg.connect(settings.database_url)`` outside the fixture and
+   writes through it. Tripwire only — see the fixture docstring.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import os
 import pathlib
 import shutil
 import tempfile
+from collections.abc import Iterator
 
 # Skip lifespan catch-up in every TestClient(app) enter/exit cycle.
 # Without this, each test that enters the FastAPI lifespan fires real
@@ -68,6 +74,72 @@ app.dependency_overrides[require_session_or_service_token] = _noop_auth
 @pytest.fixture(autouse=True)
 def _reassert_auth_bypass() -> None:
     app.dependency_overrides[require_session_or_service_token] = _noop_auth
+
+
+# #1208 Sub 6 — session-wide tripwire on dev DB growth.
+#
+# THIS IS A TRIPWIRE, NOT PROOF of no dev writes. Primary defense
+# remains ``tests/fixtures/ebull_test_db.py::assert_test_db`` (rejects
+# destructive ops against any DB not matching ``ebull_test_*``) +
+# ``tests/smoke/test_no_settings_url_in_destructive_paths.py`` (static
+# bug-shape grep). This fixture catches the residual case where a test
+# opens a raw ``psycopg.connect(settings.database_url)`` outside the
+# fixture path and writes through it — exactly the failure mode that
+# almost certainly nuked the ``runtime_config`` singleton on 2026-05-18.
+#
+# Limits: misses deletes (size flat or shrinks), HOT updates (in-place
+# page rewrites), and may false-positive on autovacuum / vacuum / stats
+# work running concurrently. When this tripwire fires, grep the tests
+# directory for raw ``psycopg.connect(settings.database_url)`` and
+# route each use through ``tests/fixtures/ebull_test_db.py::test_database_url``.
+# Never silence by raising the threshold — fix the offending test.
+_DEV_DB_GROWTH_TOLERANCE_BYTES = 1_000_000
+
+
+def _read_dev_db_size() -> int | None:
+    """Read ``pg_database_size('ebull')`` once.
+
+    Returns None if the dev DB is unreachable (CI, no Postgres, etc.) —
+    in that case the tripwire is silently skipped because there's
+    nothing to invariant-check.
+    """
+    try:
+        import psycopg  # local import; conftest must load even without psycopg
+
+        from app.config import settings
+
+        dev_db_url = settings.database_url
+        with psycopg.connect(dev_db_url, connect_timeout=2) as conn:
+            row = conn.execute("SELECT pg_database_size('ebull')").fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+    except Exception:
+        return None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _dev_db_size_tripwire() -> Iterator[None]:
+    if os.getenv("CI") == "true":
+        yield
+        return
+    start_size = _read_dev_db_size()
+    if start_size is None:
+        yield
+        return
+    yield
+    end_size = _read_dev_db_size()
+    if end_size is None:
+        return
+    delta_bytes = end_size - start_size
+    assert delta_bytes < _DEV_DB_GROWTH_TOLERANCE_BYTES, (
+        f"TRIPWIRE: dev DB 'ebull' grew by {delta_bytes} bytes during "
+        f"the test session (tolerance {_DEV_DB_GROWTH_TOLERANCE_BYTES}). "
+        "A test likely opened a raw psycopg.connect(settings.database_url) "
+        "and wrote to ebull instead of ebull_test_*. Grep tests/ for "
+        "`psycopg.connect(settings.database_url)` and route each use "
+        "through `tests/fixtures/ebull_test_db.py::test_database_url`."
+    )
 
 
 def _is_xdist_worker(config: pytest.Config) -> bool:

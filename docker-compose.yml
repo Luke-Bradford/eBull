@@ -3,6 +3,14 @@ services:
     image: postgres:17
     container_name: ebull-postgres
     restart: unless-stopped
+    # #1208 Sub 1 — bound container memory + give PG enough shared memory
+    # for parallel workers + autovacuum on partitioned ownership tables.
+    # shared_buffers=2GB + maintenance_work_mem=512MB (set in
+    # sql/155_postgres_runtime_tuning.sql) need the container to actually
+    # have memory available; default shm_size of 64MB starves PG17
+    # parallel workers under load.
+    mem_limit: 4g
+    shm_size: 1g
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ebull}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

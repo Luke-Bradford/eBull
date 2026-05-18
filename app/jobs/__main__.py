@@ -224,6 +224,37 @@ def _enforce_pg_locks_with_cleanup(
         raise
 
 
+def _ensure_runtime_config_singleton_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """Run the #1208 runtime_config singleton-vanish guard with fence
+    + pool cleanup on raise.
+
+    Mirrors ``_enforce_pg_locks_with_cleanup``: on raise, release the
+    singleton-fence advisory lock + close the pool so the next
+    jobs-process boot is not blocked by stale resources.
+
+    Pre-condition: ``run_migrations()`` has already applied
+    ``sql/015_runtime_config.sql`` (API-first migration contract — jobs
+    has not called ``run_migrations()`` since #719). On a totally fresh
+    DB the helper's SELECT will fail with ``UndefinedTable``, which is
+    the correct fail-loud signal that the operator launched jobs before
+    the API ever ran migrations.
+    """
+    from app.services.runtime_config import ensure_runtime_config_singleton
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_runtime_config_singleton(guard_conn)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+        raise
+
+
 def _boot_id() -> str:
     """Per-process identifier used as ``claimed_by`` on queue rows.
 
@@ -276,6 +307,14 @@ def serve(stop_event: threading.Event | None = None) -> int:
     # could regress to leak the fence without any test catching it.
     _enforce_pg_locks_with_cleanup(fence_conn, pool)
     logger.info("jobs entrypoint: max_locks_per_transaction guard passed")
+
+    # #1208 Sub 6 — defensive re-seed of runtime_config singleton in case
+    # it vanished after the API applied migrations. API-first contract
+    # (jobs does not call run_migrations since #719); helper raises
+    # ``UndefinedTable`` if migrations have not run, which is the
+    # correct fail-loud signal.
+    _ensure_runtime_config_singleton_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: runtime_config singleton guard passed")
 
     _bootstrap_master_key(pool)
 

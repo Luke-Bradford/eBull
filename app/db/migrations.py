@@ -27,6 +27,59 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 """
 
+# Per-file directive: when a migration's first non-blank line is exactly this
+# string, the runner opens an autocommit connection so each statement runs in
+# its own implicit transaction. Required for migrations containing commands
+# Postgres forbids inside a transaction block (notably ``ALTER SYSTEM``).
+# Strict line-1 check (Codex 1b LOW): looser parsing could false-positive on
+# a migration whose body literally contains the directive string.
+AUTOCOMMIT_DIRECTIVE = "-- runner: autocommit"
+
+
+def _wants_autocommit(sql: str) -> bool:
+    """Return True iff the migration file declares autocommit on line 1."""
+    lines = sql.lstrip().splitlines()
+    return bool(lines) and lines[0].strip() == AUTOCOMMIT_DIRECTIVE
+
+
+def _split_autocommit_statements(sql_text: str) -> list[str]:
+    """Split an autocommit migration into single statements.
+
+    Under autocommit mode, ``psycopg.ClientCursor.execute`` on a
+    multi-statement string still wraps the batch in an implicit
+    transaction (PG raises ``ALTER SYSTEM cannot run inside a
+    transaction block``). So autocommit migrations must execute each
+    statement separately.
+
+    Strategy: strip ``--`` line comments first (so any ``;`` characters
+    inside English prose comments don't false-split), then naive
+    ``;``-split. Autocommit migrations MUST NOT contain dollar-quoted
+    (``$$ ... $$``) blocks or string literals containing semicolons.
+    The reference migration ``sql/155_postgres_runtime_tuning.sql`` is
+    plain ``ALTER SYSTEM`` + ``SELECT pg_reload_conf()`` lines, so this
+    constraint is easy to meet; document the constraint in any new
+    autocommit migration.
+    """
+    # Strip ``--`` line comments first. A ``--`` inside a string literal
+    # would be miscategorised here, but autocommit migrations are
+    # forbidden from containing string literals with semicolons anyway,
+    # and the small target surface (ALTER SYSTEM, SELECT pg_reload_conf)
+    # never needs string literals with ``--``.
+    cleaned_lines: list[str] = []
+    for line in sql_text.splitlines():
+        idx = line.find("--")
+        if idx >= 0:
+            line = line[:idx]
+        cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines)
+
+    statements: list[str] = []
+    for chunk in cleaned.split(";"):
+        stripped = chunk.strip()
+        if stripped:
+            statements.append(stripped)
+    return statements
+
 
 def _migration_files() -> list[Path]:
     files = sorted(MIGRATIONS_DIR.glob("*.sql"))
@@ -67,20 +120,45 @@ def run_migrations() -> list[str]:
         # ClientCursor uses the simple query protocol, which allows multiple
         # statements in one execute() call. This is the correct way to run
         # real migration files in psycopg3.
-        with psycopg.connect(settings.database_url) as conn:
+        #
+        # autocommit-directive (#1208 T0): migrations whose first non-blank
+        # line is ``-- runner: autocommit`` are applied with autocommit=True
+        # so each statement runs in its own implicit transaction. Required
+        # for ALTER SYSTEM (forbidden inside a tx block). On partial failure
+        # (body succeeds, schema_migrations INSERT fails) the next boot
+        # re-runs the body; safe because such migrations must be idempotent.
+        autocommit = _wants_autocommit(sql)
+        with psycopg.connect(settings.database_url, autocommit=autocommit) as conn:
             try:
                 with psycopg.ClientCursor(conn) as cur:
-                    cur.execute(sql)  # type: ignore[call-overload]
+                    if autocommit:
+                        # Multi-statement execute under autocommit STILL
+                        # opens an implicit transaction at the protocol
+                        # level. Split and run each statement separately
+                        # so non-transactional commands like ALTER
+                        # SYSTEM are accepted.
+                        for stmt in _split_autocommit_statements(sql):
+                            cur.execute(stmt)  # type: ignore[call-overload]
+                    else:
+                        cur.execute(sql)  # type: ignore[call-overload]
                     cur.execute(  # type: ignore[call-overload]
                         "INSERT INTO schema_migrations (filename) VALUES (%s)",
                         (path.name,),
                     )
-                conn.commit()
-                logger.info("Applied: %s", path.name)
+                if not autocommit:
+                    conn.commit()
+                logger.info("Applied: %s%s", path.name, " (autocommit)" if autocommit else "")
                 applied.append(path.name)
             except Exception:
-                conn.rollback()
-                logger.exception("Migration failed: %s -- rolled back", path.name)
+                if not autocommit:
+                    conn.rollback()
+                logger.exception(
+                    "Migration failed: %s -- %s",
+                    path.name,
+                    "partial in autocommit mode (re-run will replay body; ensure migration is idempotent)"
+                    if autocommit
+                    else "rolled back",
+                )
                 raise
 
     return applied

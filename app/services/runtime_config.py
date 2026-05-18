@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import psycopg
 import psycopg.rows
@@ -40,6 +40,12 @@ AuditField = Literal["enable_auto_trading", "enable_live_trading", "kill_switch"
 # Validated currency codes for display_currency. Must match the frontend
 # SUPPORTED_CURRENCIES list in DisplayCurrencySection.tsx.
 SUPPORTED_CURRENCIES: frozenset[str] = frozenset({"GBP", "USD", "EUR"})
+
+# Boot-recovery audit attribution. Operators investigating the audit log can
+# search for this exact reason to find re-seed events caused by a vanished
+# singleton row (see ensure_runtime_config_singleton).
+BOOT_RECOVERY_CHANGED_BY = "boot_recovery"
+BOOT_RECOVERY_REASON = "singleton vanished — re-seeded by boot guard"
 
 
 class RuntimeConfigCorrupt(RuntimeError):
@@ -71,6 +77,114 @@ class RuntimeConfig:
 
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
+
+
+def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
+    """Re-seed the runtime_config singleton row if it vanished.
+
+    Migration sql/015_runtime_config.sql seeds the row via
+    ``INSERT ... ON CONFLICT DO NOTHING`` — a one-time write. If the row
+    is later lost (manual ``DELETE``, snapshot restore from pre-seed era,
+    future bootstrap reset script), every endpoint that reads
+    ``runtime_config`` fail-closes with ``RuntimeConfigCorrupt`` → 503.
+    This boot-time guard inspects the singleton and re-seeds with safe
+    defaults on absence, writing one ``runtime_config_audit`` row per
+    re-seeded field so the module-level audit invariant ("every mutation
+    writes one audit row per changed field, in the same transaction as
+    the UPDATE") still holds for boot recovery.
+
+    Posture: fail-closed defaults match the migration seed
+    (``enable_auto_trading=FALSE``, ``enable_live_trading=FALSE``,
+    ``display_currency='GBP'``). A WARNING is logged so the operator
+    notices the recovery.
+
+    Idempotent: no-op when exactly one row with ``id=TRUE`` exists.
+    Fail-loud when a non-canonical row exists (``id != TRUE``; possible
+    only under constraint corruption).
+
+    Connection contract: caller MUST supply a conn in autocommit mode
+    (e.g. ``psycopg.connect(url, autocommit=True)``). The helper opens
+    its own real new transaction via ``conn.transaction()`` to keep the
+    seed INSERT + the three audit INSERTs atomic. Because the caller's
+    conn has no outer tx open, ``conn.transaction()`` is a real BEGIN
+    (not a SAVEPOINT under an outer tx), so the
+    service-no-commit/SAVEPOINT-vs-COMMIT invariant is preserved.
+
+    Race: if another process re-seeds between this helper's SELECT and
+    INSERT, the ``ON CONFLICT DO NOTHING`` + ``RETURNING id`` pair
+    suppresses our insert AND skips the audit rows — no phantom audit
+    rows recorded for a recovery we didn't perform.
+    """
+    # Enforce the autocommit contract (Codex 2 MEDIUM): if a future
+    # caller passes a normal (non-autocommit) connection, psycopg's
+    # implicit ``BEGIN`` on the first execute will turn the helper's
+    # ``conn.transaction()`` into a SAVEPOINT under that outer tx,
+    # silently defeating the atomic-seed-plus-audit guarantee. Fail
+    # loud at the boundary instead.
+    if not conn.autocommit:
+        raise RuntimeError(
+            "ensure_runtime_config_singleton requires an autocommit "
+            "connection — pass psycopg.connect(url, autocommit=True). "
+            "The helper opens its own real BEGIN via conn.transaction(); "
+            "a non-autocommit caller would degrade that into a SAVEPOINT."
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM runtime_config")
+        rows = cur.fetchall()
+
+    if len(rows) == 1 and rows[0][0] is True:
+        return
+
+    if len(rows) > 1 or (rows and rows[0][0] is not True):
+        # CHECK (id = TRUE) PRIMARY KEY should forbid this. Fail-loud
+        # rather than mask constraint corruption.
+        raise RuntimeError(f"runtime_config singleton constraint violated — rows={rows!r}")
+
+    logger.warning(
+        "runtime_config singleton vanished — re-seeding with safe defaults "
+        "(enable_auto_trading=FALSE, enable_live_trading=FALSE, "
+        "display_currency='GBP'). See docs/review-prevention-log.md "
+        "section 'Singleton-row migrations need a boot-time presence guard'."
+    )
+    now = _utcnow()
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO runtime_config
+                    (id, enable_auto_trading, enable_live_trading,
+                     updated_at, updated_by, reason, display_currency)
+                VALUES
+                    (TRUE, FALSE, FALSE,
+                     %(at)s, %(by)s, %(reason)s, 'GBP')
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
+                """,
+                {"at": now, "by": BOOT_RECOVERY_CHANGED_BY, "reason": BOOT_RECOVERY_REASON},
+            )
+            inserted = cur.fetchone()
+
+        if inserted is None:
+            # Race: another process re-seeded between our SELECT and
+            # INSERT. Their seed row stands; don't write phantom audit
+            # rows for a recovery we didn't actually perform.
+            return
+
+        for field_name, new_value in (
+            ("enable_auto_trading", "false"),
+            ("enable_live_trading", "false"),
+            ("display_currency", "GBP"),
+        ):
+            _insert_audit_row(
+                conn,
+                changed_at=now,
+                changed_by=BOOT_RECOVERY_CHANGED_BY,
+                reason=BOOT_RECOVERY_REASON,
+                field=cast(AuditField, field_name),
+                old_value=None,
+                new_value=new_value,
+            )
 
 
 def get_runtime_config(conn: psycopg.Connection[Any]) -> RuntimeConfig:

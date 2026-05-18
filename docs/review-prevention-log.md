@@ -1338,3 +1338,35 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: an upsert-idempotency test asserted `ts2 > ts1 - timedelta(minutes=1)` to prove a second-pass UPSERT advanced `last_seen` past a staled prior value. The check is vacuously true: even if the UPSERT's `DO UPDATE SET last_seen = NOW()` never fired, `ts2 == ts1 ≈ NOW()` which trivially exceeds `ts1 - 1 minute`. The assertion passes regardless of whether the write actually fired, so a regression that drops the `DO UPDATE` clause (or guards it on a condition that never holds) would slip through.
 - Prevention: when asserting that a write advanced a monotonically-increasing column, read the actual post-stale DB value BEFORE the next write, then assert strict `>` against that. Never reconstruct the prior value via Python arithmetic on a captured timestamp (`ts1 - delta`) — that's the same value scaled, not the value the next write must beat. Self-review prompt: any `assert <new_ts> > <python_arithmetic_on_old_ts>` is suspect; replace with `stale = SELECT col FROM t WHERE ...` between the stale-update and the next write, then `assert <new_ts> > stale`.
 - Enforced in: this prevention log; pattern documented inline at the test site (`tests/test_exchange_directory.py::test_upsert_idempotency_advances_last_seen` post-fix).
+
+### Singleton-row migrations need a boot-time presence guard
+
+- First seen in: 2026-05-18 — operator-reported `/config` returns 503 + slow login. `runtime_config` table on dev DB had 0 rows (manual `SELECT count(*) FROM runtime_config = 0`). Migration `sql/015_runtime_config.sql` had applied successfully (`schema_migrations` row present, applied 2026-05-06) and seeds the singleton via `INSERT ... ON CONFLICT (id) DO NOTHING`. `runtime_config_audit` was also empty (no operator-driven mutations). Forensic dead-end on exact deletion event — most likely a manual `DELETE FROM` during operator triage OR a database restore from a snapshot taken before the seed line landed.
+- Symptom: every endpoint that depends on the singleton (`GET /config`, execution-guard for any BUY/ADD/EXIT, order client live-mode check) fails-closed with 503 + `runtime_config_corrupt`. FE polls `/config` on login + retries; user sees slow render.
+- Prevention: any migration that creates a singleton (single-row guarded by `CHECK (id = TRUE)` or similar) and uses `INSERT ... ON CONFLICT DO NOTHING` to seed is a **load-bearing one-time write**. Once that singleton vanishes (by operator mistake, snapshot restore from pre-seed era, future bootstrap reset script), nothing re-creates it. Boot-time guard is mandatory:
+  1. Add a `ensure_<singleton>_row_present(conn)` helper next to the service module that owns the table.
+  2. Call it from `app/main.py` lifespan startup AFTER `run_migrations()` and BEFORE the pool opens. Idempotent: counts rows, re-INSERTs safe-defaults on zero with a WARNING log. Same fail-closed posture (safe-default values).
+  3. Cover with a test: drop the row in `ebull_test_conn`; call the helper; assert row exists + values match the safe defaults + WARNING fired.
+- Verification step (for any future singleton-table PR): `psql -c "DELETE FROM <table>" -d ebull` (against dev DB) → restart app → `SELECT count(*) FROM <table> = 1` AND `GET /<endpoint-that-uses-it>` returns 200. If both hold, the boot guard is in place; if either fails, the migration is the only writer and a future restore/reset will lose the row.
+- Enforced in: this prevention log; `app/services/runtime_config.py::ensure_runtime_config_singleton`; wired into both `app/main.py` lifespan + `app/jobs/__main__.py` boot (`_ensure_runtime_config_singleton_with_cleanup`); tests `tests/test_runtime_config_boot_guard.py`. Spec `docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md`. Landed in #1208 Phase 1.
+
+### Postgres on Docker Desktop macOS — defaults blow up partition-heavy workloads
+
+- First seen in: 2026-05-18 — two PANIC events on dev container `ebull-postgres` at 09:05 + 12:54 UTC. `PANIC: could not create file "pg_wal/xlogtemp.NNN": No space left on device` despite host disk having free space. Recovery walked every relfile on fsync (relfile count on `ebull` = 4,723) and took 45+ min.
+- Symptom: WAL writer SIGABRTs under autovacuum bursts on the 28 GB unpartitioned `financial_facts_raw` table. WAL fills `pg_wal/` faster than the default `max_wal_size=1024 MB` can rotate. Docker Desktop macOS amplifies the cost because every relfile is fsynced on recovery.
+- Prevention: any Postgres container hosting eBull MUST set, at minimum:
+  - `max_wal_size >= 4GB`
+  - `min_wal_size >= 512MB`
+  - `wal_compression = on`
+  - `shared_buffers >= 1GB`
+  - `maintenance_work_mem >= 256MB`
+  - `work_mem >= 16MB`
+  - container `mem_limit >= 4g` + `shm_size >= 1g`
+- Enforced in: `sql/155_postgres_runtime_tuning.sql` (ALTER SYSTEM + `pg_reload_conf()`, applied via the `-- runner: autocommit` migration-runner directive added in this PR); `docker-compose.yml` (`mem_limit: 4g` + `shm_size: 1g`); spec `docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md`. Landed in #1208 Phase 1.
+- Verification step: after merge + container restart, confirm `SHOW max_wal_size;` returns `4GB` and `SHOW shared_buffers;` returns `2GB`. Re-run an ingest burst (e.g. `POST /jobs/finra_regsho_daily_refresh/run` with `backfill_window_days=14`) and verify no PANIC entries in `docker logs ebull-postgres`. New mega-tables (>1 M rows / >1 GB) MUST be partitioned at design time; retrofit is #1208 Sub 3.
+
+### Migrations containing ALTER SYSTEM (or other non-transactional commands) need an autocommit directive
+
+- First seen in: 2026-05-18 — Codex 1a review on the Phase 1 spec for #1208. `ALTER SYSTEM cannot run inside a transaction block` (`ERROR: ALTER SYSTEM cannot run inside a transaction block`). The migration runner at `app/db/migrations.py` uses `psycopg.connect()` (autocommit=False) which implicitly opens a tx on the first `cur.execute()`, so an ALTER SYSTEM body fails.
+- Prevention: any migration containing PG commands that cannot run inside a transaction block (`ALTER SYSTEM`, `CREATE DATABASE`, `VACUUM`, `REINDEX SYSTEM`, etc.) MUST start with the directive `-- runner: autocommit` on its first non-blank line. The runner detects the directive (strict line-1 check) and applies the file with `autocommit=True` so each statement runs in its own implicit transaction. The migration body MUST be idempotent because a partial failure (body succeeds, `schema_migrations` INSERT fails) re-runs the body on the next boot.
+- Enforced in: `app/db/migrations.py::_wants_autocommit` + the autocommit branch in `run_migrations`; `tests/test_migration_runner_autocommit.py` covers the directive parser; reference migration `sql/155_postgres_runtime_tuning.sql`.

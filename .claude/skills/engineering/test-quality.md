@@ -96,6 +96,20 @@ def test_post_ingest_enabled_unknown_key_404(clean_client: TestClient) -> None:
 
 Self-check before pushing: `grep -n "def test_.*\(clean_client" tests/` and assert each match is preceded by `@pytest.mark.integration`.
 
+## Dev-DB isolation invariant
+
+The test suite MUST point at `ebull_test_*` databases, never the operator dev DB at `settings.database_url` (= `ebull`). A test that writes to dev DB has at minimum two failure modes:
+
+1. **Singleton-row drops** — a test that `TRUNCATE`s or `DELETE`s from a singleton table (e.g. `runtime_config`, `kill_switch`) takes the live system into a fail-closed 503 state until an operator re-seeds. 2026-05-18 is on record.
+2. **Test pollution** — fixtures that mutate state run against a moving target, hiding non-determinism behind cross-suite interference.
+
+Defense in depth:
+
+1. **Primary:** `tests/fixtures/ebull_test_db.py::_assert_test_db` rejects any destructive op against a DB whose name does not match `ebull_test_*`. Every cursor obtained through `ebull_test_conn` goes through this guard.
+2. **Tripwire:** `tests/test_dev_db_no_test_writes.py` records `pg_database_size('ebull')` at session start + asserts <1 MB growth at session end. Catches the residual case where a test opens a raw `psycopg.connect(settings.database_url)` outside the fixture. Tripwire only — misses deletes and HOT updates; can false-positive on idle autovacuum.
+
+When the tripwire fires: grep the tests directory for `psycopg.connect(settings.database_url)` and route each use through `tests/fixtures/ebull_test_db.py::test_database_url`. Never silence the tripwire by raising the threshold — fix the offending test.
+
 ## Test naming
 
 Method names describe the scenario and expected outcome:
