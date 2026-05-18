@@ -36,14 +36,17 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 import warnings
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
 from urllib.parse import urlparse, urlunparse
 
 import psycopg
+import psycopg.errors
 import psycopg.rows
 import pytest
 from psycopg import sql
@@ -52,6 +55,30 @@ from app.config import settings
 
 TEMPLATE_DB_NAME = "ebull_test_template"
 _SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
+
+# #1208 Phase 2 — orphan sweep constants.
+#
+# DB-name layout produced by ``test_db_name()`` is fixed:
+#   ebull_test_{int(time.time())}_{token_hex(3)}_{worker_id}
+# The {10}-digit epoch holds until year 2286; widening would require a
+# co-located fixture-name bump, so the regex lives next to the producer.
+_ORPHAN_NAME_PATTERN = re.compile(
+    r"^ebull_test_(?P<epoch>\d{10})_[0-9a-f]{6}_(?:gw\d+|main|sanity\d*)$",
+)
+
+# Final literal guard against a future regex regression. Every entry
+# already fails ``_ORPHAN_NAME_PATTERN``; this is belt-on-belt safety
+# for the operator dev DB, the reusable template, and the maintenance
+# DBs PG would refuse to drop anyway.
+_NEVER_DROP: frozenset[str] = frozenset(
+    {
+        "ebull",
+        "ebull_test_template",
+        "postgres",
+        "template0",
+        "template1",
+    },
+)
 
 # Advisory lock keys. Cross-pytest-invocation locks live on the
 # maintenance ``postgres`` DB so they don't collide with application
@@ -307,6 +334,118 @@ def _drop_database_force(admin: psycopg.Connection[object], db_name: str) -> Non
         cur.execute(query)
 
 
+def _drop_orphan_workers_older_than(
+    min_age: timedelta = timedelta(hours=1),
+    *,
+    now: datetime | None = None,
+) -> list[str]:
+    """Drop ``ebull_test_<epoch>_<hex>_<suffix>`` databases older than ``min_age``.
+
+    Three independent rails decide eligibility (#1208 Phase 2 spec §4.3):
+
+    1. **Session-lifetime keepalive** (``_worker_db_keepalive``) gives
+       every live worker DB a backend in ``pg_stat_activity`` through
+       the whole pytest session — even between tests.
+    2. **Activity** — candidates with any ``pg_stat_activity`` row for
+       their datname are skipped.
+    3. **Age** — ``now - parsed_epoch >= min_age`` (default 1h) is the
+       backstop for leaked DBs whose backends have since drained.
+
+    Final literal guard ``_NEVER_DROP`` re-checks the name immediately
+    before the DROP and raises ``AssertionError`` on hit. The outer
+    try/except deliberately re-raises ``AssertionError`` so a regex
+    regression cannot silently fall through.
+
+    DROP runs without ``WITH (FORCE)``: plain DROP raises
+    ``ObjectInUse`` atomically if a backend reconnected in the
+    activity-check gap. Eviction-without-proof-of-ownership is the
+    failure mode this rail eliminates.
+
+    Returns the list of dropped DB names (for logging + test inspection).
+    Never raises on operational failure — orphan sweep is a hygiene
+    step, not a correctness gate.
+    """
+    if os.getenv("CI") == "true":
+        return []
+    try:
+        return _do_orphan_sweep(min_age=min_age, now=now)
+    except AssertionError:
+        raise
+    except Exception as exc:
+        warnings.warn(
+            f"Orphan sweep failed: {type(exc).__name__}: {exc}. "
+            f"Template build will continue; cleanup deferred to next "
+            f"pytest invocation.",
+            stacklevel=2,
+        )
+        return []
+
+
+def _do_orphan_sweep(
+    *,
+    min_age: timedelta,
+    now: datetime | None,
+) -> list[str]:
+    """Inner sweep body — see ``_drop_orphan_workers_older_than`` docstring."""
+    threshold = (now or datetime.now(UTC)) - min_age
+    threshold_epoch = int(threshold.timestamp())
+    dropped: list[str] = []
+
+    with psycopg.connect(_admin_database_url(), autocommit=True) as admin:
+        with admin.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+            # Rail 2 — candidates with NO backend in pg_stat_activity.
+            cur.execute(
+                "SELECT d.datname FROM pg_database d "
+                "WHERE d.datname LIKE 'ebull_test%' "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM pg_stat_activity a "
+                "  WHERE a.datname = d.datname"
+                ")"
+            )
+            candidates = [row[0] for row in cur.fetchall()]
+
+        for name in candidates:
+            # Rail 1 — name regex (epoch parse).
+            match = _ORPHAN_NAME_PATTERN.match(name)
+            if match is None:
+                continue
+            epoch = int(match.group("epoch"))
+
+            # Rail 3 — age backstop.
+            if epoch >= threshold_epoch:
+                continue
+
+            try:
+                # Rail 0 — final literal guard.
+                assert name not in _NEVER_DROP, (
+                    f"Refusing to DROP protected database {name!r}: "
+                    f"matched _ORPHAN_NAME_PATTERN AND age filter AND "
+                    f"_NEVER_DROP — regex regression."
+                )
+
+                query = sql.SQL("DROP DATABASE IF EXISTS {name}").format(
+                    name=sql.Identifier(name),
+                )
+                with admin.cursor() as cur:
+                    cur.execute(query)
+                dropped.append(name)
+            except AssertionError:
+                raise
+            except psycopg.errors.ObjectInUse:
+                # Backend reconnected in the gap between Rail 2 and
+                # DROP. Skip + try again next invocation. Expected
+                # under benign races, not a failure.
+                continue
+            except Exception as exc:
+                warnings.warn(
+                    f"Failed to drop orphan {name!r}: {type(exc).__name__}: {exc}",
+                    stacklevel=3,
+                )
+                continue
+
+    return dropped
+
+
 def _create_database_from_template(
     admin: psycopg.Connection[object],
     db_name: str,
@@ -413,6 +552,13 @@ def build_template_if_stale() -> None:
         with admin.cursor() as cur:
             cur.execute("SELECT pg_advisory_lock(%s)", (EBULL_TEMPLATE_LOCK,))
         try:
+            # #1208 Phase 2 — sweep orphan worker DBs from prior crashed
+            # invocations before any template work. Holds the
+            # template-build advisory lock so concurrent pytest
+            # controllers serialise sweep+rebuild as a unit. Best-effort;
+            # the helper never raises on operational failure.
+            _drop_orphan_workers_older_than()
+
             template_exists = _ensure_database(admin, TEMPLATE_DB_NAME)
             if template_exists and cached == current:
                 return
@@ -634,10 +780,62 @@ def ebull_test_conn() -> Iterator[psycopg.Connection[tuple]]:
             conn.close()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _worker_db_keepalive() -> Iterator[None]:
+    """Hold one autocommit connection to the worker's private DB for the whole session.
+
+    Rail 1 of the orphan-sweep safety model (#1208 Phase 2 spec §4.3).
+
+    Without this fixture, ``ebull_test_conn`` is function-scoped and a
+    worker DB has NO backend in ``pg_stat_activity`` between tests. A
+    sibling pytest controller's orphan sweep would then see the DB as
+    inactive and (if older than ``min_age``) drop it mid-suite. The
+    keepalive guarantees the worker DB shows up in
+    ``pg_stat_activity`` from session start to session end — the
+    activity rail then becomes load-bearing rather than aspirational.
+
+    Skip-silently posture: if ``test_db_available()`` returns False
+    (no Postgres, no CREATEDB privilege) we yield without the
+    keepalive; tests that need the DB will skip cleanly via the
+    existing fixture.
+
+    Must be re-exported from ``tests/conftest.py`` so pytest's
+    fixture discovery picks it up (only ``conftest.py`` is scanned,
+    not modules under ``tests/fixtures/``).
+    """
+    if not test_db_available():
+        yield
+        return
+    keepalive: psycopg.Connection[object] | None = None
+    try:
+        keepalive = psycopg.connect(
+            test_database_url(),
+            autocommit=True,
+            connect_timeout=2,
+        )
+    except Exception as exc:
+        warnings.warn(
+            f"Could not open _worker_db_keepalive on {test_db_name()!r}: "
+            f"{type(exc).__name__}: {exc}. The orphan-sweep activity "
+            f"rail is degraded for this worker.",
+            stacklevel=2,
+        )
+    try:
+        yield
+    finally:
+        if keepalive is not None:
+            try:
+                keepalive.close()
+            except Exception:  # pragma: no cover - best-effort
+                pass
+
+
 __all__ = [
     "EBULL_SMOKE_LIFESPAN_LOCK",
     "EBULL_TEMPLATE_LOCK",
     "TEMPLATE_DB_NAME",
+    "_drop_orphan_workers_older_than",
+    "_worker_db_keepalive",
     "assert_test_db",
     "build_template_if_stale",
     "drop_worker_database",

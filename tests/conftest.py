@@ -52,6 +52,9 @@ from tests.fixtures.ebull_test_db import (  # noqa: E402, F401
     drop_worker_database,
 )
 from tests.fixtures.ebull_test_db import (
+    _worker_db_keepalive as _worker_db_keepalive,  # noqa: F401 — autouse; #1208 Phase 2 Rail 1
+)
+from tests.fixtures.ebull_test_db import (
     ebull_test_conn as ebull_test_conn,
 )
 
@@ -176,6 +179,13 @@ def pytest_configure(config: pytest.Config) -> None:
 
     try:
         build_template_if_stale()
+    except AssertionError:
+        # #1208 Phase 2 — the orphan sweep's ``_NEVER_DROP`` rail
+        # raises ``AssertionError`` on a regex regression that could
+        # target the operator dev DB or the test template. MUST
+        # escape every outer handler so the failure is loud, not
+        # demoted to a warning.
+        raise
     except Exception as exc:  # pragma: no cover - best-effort
         # Don't crash the whole pytest invocation just because
         # Postgres is unreachable; tests that need the real DB will
