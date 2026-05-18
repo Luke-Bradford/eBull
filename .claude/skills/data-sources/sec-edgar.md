@@ -54,7 +54,7 @@ The earlier `app/services/cik_discovery.py` helper was deleted in #1091.
 | Submissions overflow | `https://data.sec.gov/submissions/CIK{padded}-submissions-{NNN}.json` | Real-time | Older filings, paginated |
 | Companyfacts | `https://data.sec.gov/api/xbrl/companyfacts/CIK{padded}.json` | Real-time, <1min | All XBRL concepts for a CIK |
 | Companyconcept | `https://data.sec.gov/api/xbrl/companyconcept/CIK{padded}/{taxonomy}/{tag}.json` | Real-time | One XBRL tag (smaller payload). Provider primitive: `app/providers/implementations/sec_fundamentals.py::fetch_concept` + `extract_concept_facts` (G10, 2026-05-17). No production consumer in v1 — under 10 req/s shared SEC budget, wiring as a `fundamentals_sync` / `daily_financial_facts` replacement is wall-clock net-negative for any consumer needing ≥2 tags per CIK. |
-| Frames | `https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json` | Real-time | Cross-sectional one-fact-per-filer |
+| Frames | `https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json` | Real-time | Cross-sectional one-fact-per-filer. Provider primitive: `app/providers/implementations/sec_fundamentals.py::fetch_frame` (G11, 2026-05-18). No production consumer in v1. Unit syntax uses `-per-` (e.g. `USD-per-shares`) NOT `/`. Period syntax: `CY{year}` annual / `CY{year}Q{n}` quarterly flow / `CY{year}Q{n}I` quarterly instantaneous; no annual-instantaneous frame. |
 
 **Submissions JSON top-level**: `cik, entityType, sic, name, tickers, exchanges, ein, lei, fiscalYearEnd, formerNames, addresses, filings`.
 
