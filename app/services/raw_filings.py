@@ -64,6 +64,10 @@ DocumentKind = Literal[
     "form5_xml",
     "def14a_body",
     "nport_xml",
+    # G6 / #915 — FINRA bimonthly short interest pipe-delim CSV
+    # (sql/151). Keyed by synthetic accession ``FINRA_SI_{YYYYMMDD}``;
+    # raw payload preserved per #1168 raw-payload-before-parse contract.
+    "finra_short_interest_csv",
 ]
 # submissions.json / companyfacts.json are keyed by CIK, not by SEC
 # accession number — they belong in their own per-CIK store, not in

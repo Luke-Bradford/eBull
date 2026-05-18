@@ -185,6 +185,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "cik_refresh_mf_directory",
     # G8 — company_tickers_exchange.json snapshot (sql/150).
     "cik_refresh_exchange_directory",
+    # G6 / #915 — FINRA bimonthly short interest (sql/152). Phase 6 PR 11.
+    "finra_short_interest_current",
+    "finra_short_interest_observations",
 )
 
 

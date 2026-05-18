@@ -30,6 +30,7 @@ from app.services.processes.param_metadata import (
     validate_job_params,
 )
 from app.workers.scheduler import (
+    JOB_FINRA_SHORT_INTEREST_REFRESH,
     JOB_SEC_ATOM_FAST_LANE,
     JOB_SEC_DAILY_INDEX_RECONCILE,
     JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP,
@@ -98,6 +99,23 @@ class TestLayer123Registry:
         assert job.prerequisite is not None
         assert job.exempt_from_universal_bootstrap_gate is False
         assert job.source == "sec_rate"
+
+    def test_finra_short_interest_refresh_registered(self) -> None:
+        """G6/#915 — FINRA bimonthly short interest refresh.
+
+        Not a Layer-1/2/3/4 SEC primitive; lives on a new ``finra``
+        lane disjoint from ``sec_rate`` (different host). Sibling
+        shape (daily 12:00 UTC, prereq=_bootstrap_complete,
+        catch_up_on_boot=False, NOT exempt from universal gate).
+        """
+        assert JOB_FINRA_SHORT_INTEREST_REFRESH in VALID_JOB_NAMES
+        job = _job_by_name(JOB_FINRA_SHORT_INTEREST_REFRESH)
+        assert job is not None
+        assert job.cadence == Cadence.daily(hour=12, minute=0)
+        assert job.catch_up_on_boot is False
+        assert job.prerequisite is not None
+        assert job.exempt_from_universal_bootstrap_gate is False
+        assert job.source == "finra"
 
 
 class TestSecRebuildRegistry:
