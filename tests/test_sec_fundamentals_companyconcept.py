@@ -197,6 +197,8 @@ _BAD_TAXONOMY = [
     "us-gaap\n",  # trailing newline — fullmatch discipline
     "us-gaap ",  # trailing space
     "\nus-gaap",  # leading newline
+    "us-gaap-",  # trailing dash (PR #1198 bot round-1 NITPICK fix)
+    "-",  # bare leading dash
 ]
 
 _GOOD_TAXONOMY = [

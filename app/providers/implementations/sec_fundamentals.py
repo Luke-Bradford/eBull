@@ -80,7 +80,12 @@ _BASE_URL = "https://data.sec.gov"
 # newline; ``fullmatch`` closes that hole. Spec
 # ``docs/superpowers/specs/2026-05-17-g10-companyconcept-api-consumer.md``
 # §4.2.
-_TAXONOMY_RE: Final[re.Pattern[str]] = re.compile(r"[a-z][a-z0-9-]*")
+# Trailing-character anchor: leading lowercase letter, optional
+# interior alnum-or-dash, MUST end in alnum (rejects ``us-gaap-`` and
+# any other trailing-dash form). Single-char taxonomies (``a``,
+# ``z``) remain legal via the optional trailing group. PR #1198 bot
+# round-1 NITPICK ownership.
+_TAXONOMY_RE: Final[re.Pattern[str]] = re.compile(r"[a-z](?:[a-z0-9-]*[a-z0-9])?")
 _CONCEPT_TAG_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
 # SEC rate-limit: 10 req/s. Funnelled through the same process-wide
