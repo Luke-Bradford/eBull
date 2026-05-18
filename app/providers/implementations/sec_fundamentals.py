@@ -33,10 +33,11 @@ Provider contract:
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 from decimal import Decimal
 from types import TracebackType
-from typing import Any
+from typing import Any, Final
 
 import httpx
 
@@ -55,6 +56,37 @@ from app.providers.resilient_client import ResilientClient
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://data.sec.gov"
+
+# Companyconcept API validation patterns (G10, 2026-05-17). The
+# primitive is intentionally a GENERAL SEC ``companyconcept`` consumer
+# — NOT bound to ``TRACKED_CONCEPTS`` / ``DEI_TRACKED_CONCEPTS``.
+# Those maps govern downstream normalisation / projection, not
+# arbitrary probe access.
+#
+# ``_TAXONOMY_RE`` accepts every published SEC taxonomy namespace
+# (``us-gaap``, ``dei``, ``srt``, ``invest``, ``country``,
+# ``ifrs-full``, etc.). ``_CONCEPT_TAG_RE`` is a deliberately
+# tightened subset of legal XBRL NCName syntax — XBRL formally
+# permits a leading underscore and ``-`` / ``.`` separators, but
+# every SEC-observed concept name uses ``[A-Za-z][A-Za-z0-9_]*``
+# (leading letter; optional underscore for custom taxonomies). The
+# tightening rejects URL-injection vectors (``foo/bar``,
+# ``foo bar``, ``../etc``) at the validator boundary. If a future
+# SEC drift surfaces a legitimate NCName outside this subset, the
+# fix is to widen the regex + add a regression test.
+#
+# ``fullmatch`` discipline is mandatory: ``re.match`` + ``^...$``
+# admits a trailing ``\n`` because ``$`` matches before a final
+# newline; ``fullmatch`` closes that hole. Spec
+# ``docs/superpowers/specs/2026-05-17-g10-companyconcept-api-consumer.md``
+# §4.2.
+# Trailing-character anchor: leading lowercase letter, optional
+# interior alnum-or-dash, MUST end in alnum (rejects ``us-gaap-`` and
+# any other trailing-dash form). Single-char taxonomies (``a``,
+# ``z``) remain legal via the optional trailing group. PR #1198 bot
+# round-1 NITPICK ownership.
+_TAXONOMY_RE: Final[re.Pattern[str]] = re.compile(r"[a-z](?:[a-z0-9-]*[a-z0-9])?")
+_CONCEPT_TAG_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
 # SEC rate-limit: 10 req/s. Funnelled through the same process-wide
 # clock as ``SecFilingsProvider`` so concurrent jobs (e.g. fundamentals
@@ -584,6 +616,124 @@ class SecFundamentalsProvider(FundamentalsProvider):
             facts.extend(_extract_facts_from_section(dei_section, taxonomy="dei"))
             entries.extend(_extract_catalog_from_section(dei_section, taxonomy="dei"))
         return facts, entries
+
+    # ------------------------------------------------------------------
+    # Companyconcept API — single-tag primitive (G10, 2026-05-17)
+    # ------------------------------------------------------------------
+
+    def fetch_concept(
+        self,
+        cik: str,
+        taxonomy: str,
+        tag: str,
+    ) -> dict[str, Any] | None:
+        """Fetch one XBRL concept for a CIK from the companyconcept API.
+
+        Returns parsed JSON or None on 404. Other HTTP errors propagate
+        via ``raise_for_status()``.
+
+        Args:
+          cik: 10-digit zero-padded OR int-able string; normalised via
+            ``_zero_pad_cik``.
+          taxonomy: SEC namespace identifier — ASCII regex
+            ``[a-z][a-z0-9-]*`` matched via ``fullmatch`` (e.g.
+            ``us-gaap``, ``dei``, ``srt``, ``invest``, ``ifrs-full``).
+            The primitive is intentionally a general SEC
+            ``companyconcept`` consumer, NOT bound to
+            ``TRACKED_CONCEPTS`` / ``DEI_TRACKED_CONCEPTS`` — those
+            maps govern downstream normalisation, not arbitrary probe
+            access. See spec
+            ``docs/superpowers/specs/2026-05-17-g10-companyconcept-api-consumer.md``
+            §4.2.
+          tag: XBRL concept name — ASCII regex
+            ``[A-Za-z][A-Za-z0-9_]*`` matched via ``fullmatch``
+            (e.g. ``Revenues``, ``EntityCommonStockSharesOutstanding``,
+            ``my_custom_concept``). Leading-letter anchored; rejects
+            bare numerics and non-ASCII alnum.
+
+        Raises:
+          ValueError: ``taxonomy`` or ``tag`` fails the regex.
+
+        Raw-payload invariant for future consumers (spec §3.3): if a
+        subsequent PR wires ``extract_concept_facts`` (or any helper
+        that consumes this payload) into a DB-writing job, that PR
+        MUST land raw-payload persistence per
+        ``docs/review-prevention-log.md`` #1168 IN THE SAME PR —
+        either by extending an existing raw table or by introducing
+        a sibling ``sec_companyconcept_raw`` table.
+        """
+        if not _TAXONOMY_RE.fullmatch(taxonomy):
+            raise ValueError(
+                f"invalid taxonomy {taxonomy!r}: expected lowercase "
+                "ASCII + dashes (regex [a-z][a-z0-9-]*) with no "
+                "leading dash, whitespace, or trailing newline"
+            )
+        if not _CONCEPT_TAG_RE.fullmatch(tag):
+            raise ValueError(
+                f"invalid tag {tag!r}: expected ASCII letters / digits "
+                "/ underscores starting with a letter (regex "
+                "[A-Za-z][A-Za-z0-9_]*) with no whitespace, slash, "
+                "or trailing newline"
+            )
+        cik_padded = _zero_pad_cik(cik)
+        path = f"/api/xbrl/companyconcept/CIK{cik_padded}/{taxonomy}/{tag}.json"
+        resp = self._http.get(path)
+        if resp.status_code == 404:
+            logger.info(
+                "SEC companyconcept: no data for CIK %s %s/%s (404)",
+                cik,
+                taxonomy,
+                tag,
+            )
+            return None
+        resp.raise_for_status()
+        raw = resp.json()
+        return raw  # type: ignore[no-any-return]
+
+    def extract_concept_facts(
+        self,
+        symbol: str,
+        cik: str,
+        taxonomy: str,
+        tag: str,
+    ) -> list[XbrlFact]:
+        """Single-concept variant of :meth:`extract_facts`.
+
+        Fetches the companyconcept response and returns the same
+        ``XbrlFact`` rows the existing extractor produces for one tag
+        inside a companyfacts payload. Empty list on 404 or empty
+        units.
+
+        Source-of-truth for the emitted ``XbrlFact.taxonomy`` is the
+        REQUEST argument, not the response field — the request was
+        validated, the response can shape-drift. A mismatch between
+        request and response taxonomy logs a warning before
+        proceeding with the request value.
+        """
+        payload = self.fetch_concept(cik, taxonomy, tag)
+        if payload is None:
+            return []
+        response_taxonomy = payload.get("taxonomy")
+        if response_taxonomy is not None and response_taxonomy != taxonomy:
+            logger.warning(
+                "companyconcept response taxonomy %r differs from request "
+                "%r for CIK %s tag %s — using request taxonomy",
+                response_taxonomy,
+                taxonomy,
+                cik,
+                tag,
+            )
+        units = payload.get("units")
+        if not isinstance(units, dict):
+            logger.warning(
+                "companyconcept payload for CIK %s %s/%s missing or non-dict units — returning empty fact list",
+                cik,
+                taxonomy,
+                tag,
+            )
+            units = {}
+        section = {tag: {"units": units}}
+        return _extract_facts_from_section(section, taxonomy=taxonomy)
 
     # ------------------------------------------------------------------
     # Private HTTP
