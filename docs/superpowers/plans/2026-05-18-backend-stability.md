@@ -82,15 +82,25 @@ Dependency order: P1 unlocks everything (tuning + boot resilience first). P2 + P
 
 Each phase follows the **same shape as the ETL plan**: spike → spec → Codex 1a → plan → Codex 1b → implementation → tests → local gates → Codex 2 → push → bot review → merge. **Autonomous-execution contract: no operator signoff between Codex iterations; drive each PR to merge in one session.**
 
-### Phase 1 — Postgres tuning + runtime_config boot guard (Subs 1 + 6)
+### Phase 1 — Postgres tuning + runtime_config boot guard (Subs 1 + 6) — **SHIPPED 2026-05-18 (PR #1210 merge SHA `471a3b3`)**
 
 Architectural sibling: G14 `bootstrap_orchestrator` source-registry (boot-time resilience pattern, PR #1191) + kill_switch fail-closed (sql/010).
 
-- `sql/NNN_postgres_runtime_tuning.sql` — `ALTER SYSTEM SET` knobs per #1208 Sub 1.
+- `sql/155_postgres_runtime_tuning.sql` — `ALTER SYSTEM SET` knobs per #1208 Sub 1. Applied via the new `-- runner: autocommit` migration-runner directive at `app/db/migrations.py` (multi-statement ClientCursor under autocommit still implicitly transacts — split + per-statement execute via `_split_autocommit_statements`). Test-template builder mirrored in `tests/fixtures/ebull_test_db.py`.
 - `docker-compose.yml` — `mem_limit: 4g` + `shm_size: 1g`.
-- `app/main.py` lifespan — `ensure_runtime_config_singleton()` helper called after migration sweep.
-- `tests/test_runtime_config_boot_guard.py` + `tests/test_dev_db_no_test_writes.py`.
-- Prevention-log + memory-note updates.
+- `app/services/runtime_config.py::ensure_runtime_config_singleton` — hard-enforces autocommit-conn contract; race-safe via `INSERT ON CONFLICT DO NOTHING RETURNING id`; 3 `runtime_config_audit` rows on re-seed in one `conn.transaction()`; fails loud on non-canonical row.
+- `app/main.py` lifespan + `app/jobs/__main__.py::_ensure_runtime_config_singleton_with_cleanup` — boot wiring with fence+pool cleanup-on-raise pattern. API-first migration contract (jobs has not called `run_migrations` since #719).
+- `tests/test_runtime_config_boot_guard.py` (5 cases incl. atomic rollback + non-autocommit rejection) + `tests/test_migration_runner_autocommit.py` (directive parser + splitter) + `tests/conftest.py::_dev_db_size_tripwire` (session-autouse — moved from inert standalone module per Codex 2).
+- `docs/review-prevention-log.md` — extended singleton-row entry + added Postgres-on-Docker + ALTER-SYSTEM-autocommit-directive sections.
+- `.claude/skills/engineering/test-quality.md` — new "Dev-DB isolation invariant" section.
+
+Codex iterations recorded inline in `docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md` §3.4 + §3.5.
+
+Operator runbook (post-merge):
+1. `docker compose up -d` to pick up `mem_limit` + `shm_size`.
+2. Restart `python -m app.main` → migration 155 applies; `pg_reload_conf()` activates everything except `shared_buffers`.
+3. `docker restart ebull-postgres` to pick up `shared_buffers=2GB`.
+4. Confirm `SHOW shared_buffers; SHOW max_wal_size; SHOW wal_compression;` reports the tuned values.
 
 ### Phase 2 — Test-fixture orphan sweep + slim-data posture (Sub 2)
 
