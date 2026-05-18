@@ -88,16 +88,18 @@ _FAILED_RETRY_DELAY = timedelta(hours=1)
 # Compose them so a rewash that bumps either triggers a re-parse.
 _PARSER_VERSION_13F_HR = f"13f-hr-primary:{_PARSER_VERSION_13F_PRIMARY}+infotable:{_PARSER_VERSION_13F_INFOTABLE}"
 
-# 13F-HR Column 4 (VALUE) unit cutover. Pre-cutover filings reported
-# VALUE in $thousands; post-cutover in $dollars (SEC EDGAR Release
-# 22.4.1, see sec-edgar skill §7.1). The bulk dataset path applies
-# this at app/services/sec_13f_dataset_ingest.py:325; the per-filing
-# parser at app/providers/implementations/sec_13f.py does NOT (it
-# preserves the raw value), so the service layer must branch on
-# ``filed_at``. Pre-cutover amendments filed late still report
-# thousands — a 2022Q4 restatement landed in March 2023 would carry
-# dollars even though its period_end is pre-cutover, so the cutover
-# is keyed by ``filed_at``, not ``period_of_report``.
+# 13F-HR Column 4 (VALUE) unit cutover. SEC EDGAR Release 22.4.1
+# switched VALUE from $thousands to whole $dollars effective
+# 2023-01-03 (see sec-edgar skill §7.1). The bulk dataset path
+# applies this at app/services/sec_13f_dataset_ingest.py:316-322;
+# the per-filing parser at app/providers/implementations/sec_13f.py
+# does NOT (it preserves the raw value), so the service layer must
+# branch on ``filed_at`` — the moment the filer reported — NOT on
+# ``period_of_report``. A 2022Q4 restatement filed in March 2023
+# was entered by the filer in whole dollars under the new regime
+# even though its period_end is pre-cutover; keying on filed_at
+# treats it correctly, while keying on period_of_report would
+# mis-scale by 1,000.
 _VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
 
 
