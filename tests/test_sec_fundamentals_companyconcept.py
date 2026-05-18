@@ -462,17 +462,14 @@ def test_extract_concept_facts_logs_warning_on_taxonomy_mismatch(
     _rewire_transport(provider, handler, preserve_throttle=False)
 
     with caplog.at_level(logging.WARNING):
-        facts = provider.extract_concept_facts(
-            "AAPL", "320193", "us-gaap", "Revenues"
-        )
+        facts = provider.extract_concept_facts("AAPL", "320193", "us-gaap", "Revenues")
 
     # Source-of-truth is the REQUEST taxonomy — emitted facts carry
     # 'us-gaap' even though response said 'srt'.
     assert len(facts) == 1
     assert facts[0].taxonomy == "us-gaap"
     assert any(
-        "response taxonomy 'srt' differs from request 'us-gaap'"
-        in rec.message
+        "response taxonomy 'srt' differs from request 'us-gaap'" in rec.message
         and "320193" in rec.message
         and "Revenues" in rec.message
         for rec in caplog.records
