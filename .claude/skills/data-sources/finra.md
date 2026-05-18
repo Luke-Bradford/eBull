@@ -9,7 +9,7 @@
 | Endpoint | Cadence | URL pattern | Status |
 |---|---|---|---|
 | Equity Short Interest (bimonthly) | 15th + last business day | `https://cdn.finra.org/equity/otcmarket/biweekly/shrt{YYYYMMDD}.csv` | ✅ WIRED 2026-05-18 (#915) |
-| RegSHO Daily Short Volume | Daily, EOD ~6pm ET | `https://cdn.finra.org/equity/regsho/daily/{PREFIX}shvol{YYYYMMDD}.txt` × 6 prefixes | ❌ pending #916 (PR 12) |
+| RegSHO Daily Short Volume | Daily, EOD ~6pm ET | `https://cdn.finra.org/equity/regsho/daily/{PREFIX}shvol{YYYYMMDD}.txt` × 6 prefixes | ✅ WIRED 2026-05-18 (#916) |
 
 Both endpoints are **anonymous CDN** — no OAuth, no API key, no developer-portal registration. The catalog page IS the contract; `cdn.finra.org/robots.txt` returns 403 but the public catalog page does not restrict programmatic anonymous download.
 
@@ -34,6 +34,23 @@ Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market
 ```
 
 Six prefixes per day (`CNMSshvol{YYYYMMDD}.txt`, `FNQCshvol...`, `FNRAshvol...`, `FNSQshvol...`, `FNYXshvol...`, `FORFshvol...`) — each represents a separate reporting facility (Consolidated NMS, FINRA/NASDAQ TRF Chicago, ADF, FINRA/NASDAQ TRF Carteret, FINRA/NYSE TRF, ORF respectively). Operator UI typically aggregates `CNMS` as the canonical figure; the others are facility-attribution detail.
+
+### 2.5 RegSHO daily — decimal volumes + comma-joined `Market` on CNMS (#916)
+
+Empirically verified 2026-05-18 in spike §3.3/§3.4: `ShortVolume`, `ShortExemptVolume`, `TotalVolume` are **DECIMAL** (6 decimal places), not integer. FINRA reports per-symbol weighted aggregates across reporting facilities. Schema column is `NUMERIC(18, 6)`.
+
+`Market` column shape:
+
+- Non-CNMS prefixes: single-character facility code (e.g. `B`, `Q`, `N`, `O`).
+- CNMS aggregate: **comma-joined union** of all facilities reporting volume for that `(symbol, trade_date)` (e.g. `B,Q,N`). PK on `finra_regsho_daily_observations` includes `market` so the CNMS aggregate row coexists with per-facility breakdown rows for the same `(instrument, trade_date)`.
+
+### 2.6 RegSHO daily — footer is single-int row count (#916)
+
+Every RegSHO daily file (CNMS + 5 per-facility prefixes) ends with a single line containing the integer count of body rows. Parser asserts `parsed_body_row_count == footer_int` and raises `HeaderCorruptionError` on mismatch (structural defect). Empty-body files (FNRA legitimate-empty shape) have header + footer `0` — success path with zero observations + manifest row still written.
+
+### 2.7 RegSHO daily — body `Date` must match URL/caller date (#916)
+
+For every body row, the parser asserts `row.Date == trade_date.strftime('%Y%m%d')`. A CDN path mistake or fixture seeded under the wrong date would silently write facts under the caller's `trade_date` while ignoring the body's date column. Mismatch raises `HeaderCorruptionError` mid-body — caller's txn rolls back atomically.
 
 ### 2.4 Symbol form — alphanumeric only, NO separators
 
@@ -68,6 +85,13 @@ FINRA bimonthly short interest:
 - **Manifest parser** `app/services/manifest_parsers/finra_short_interest.py` — **synth no-op** (sec_xbrl_facts G7 precedent). Manifest row dispatches only on `sec_rebuild --source=finra_short_interest`; the parser marks the row `parsed` without doing any real work.
 - **Backfill** — REPL runbook against `run_finra_short_interest_refresh(conn, backfill_window_days=N)`. v1 manual-trigger surface is zero-param (POST `/jobs/finra_short_interest_refresh/run` runs the default 400-day window).
 
+FINRA RegSHO daily short volume (#916):
+
+- **ScheduledJob** `finra_regsho_daily_refresh` (daily 23:00 UTC) — owns discovery + fetch + parse + UPSERT into `finra_regsho_daily_observations` (no `_current` snapshot; daily file IS the snapshot). Iterates `(weekday trade_date, prefix)` pairs across the 6 prefixes per day.
+- **Provider sibling** `app/providers/implementations/finra_regsho.py` — imports `_FINRA_RATE_LIMIT_CLOCK` + `_FINRA_RATE_LIMIT_LOCK` from the bimonthly module so combined bimonthly + daily fetch never exceeds 1 req/s in-process.
+- **Manifest parser** `app/services/manifest_parsers/finra_regsho_daily.py` — synth no-op (same G7 / #915 shape). `parser_version='finra-regsho-daily-v1'`. Subject_id singleton `FINRA_REGSHO`.
+- **Backfill** — REPL runbook against `run_finra_regsho_daily_refresh(conn, backfill_window_days=N)`. v1 manual-trigger surface is zero-param (default 30-day window). Extended backfill via REPL (~6 min per 90 days at 1 req/s × 6 prefixes × ~63 trading days).
+
 Per spec §4 + plan §5: the ScheduledJob owns commit/rollback ownership. The service emits SQL only and is wrapped in the JOB's `with conn.transaction():`. Raw-payload-before-parse contract (#1168): `raw_filings.store_raw` + explicit `conn.commit()` happens BEFORE the per-file txn.
 
 ## 5. Revision-window discipline
@@ -100,6 +124,28 @@ The synth no-op manifest parser doesn't re-ingest — it just re-marks `parsed`.
 3. `UPDATE sec_filing_manifest SET ingest_status='pending' WHERE accession_number = 'FINRA_SI_<YYYYMMDD>'` (cosmetic — gets re-set to `parsed` after the next ScheduledJob fire).
 4. Re-fire the ScheduledJob: `POST /jobs/finra_short_interest_refresh/run` (the date is in the revision window if recent, OR within the 400-day window for older dates).
 
+### 6.4 RegSHO daily — extended-window backfill (#916)
+
+```bash
+python -c "
+from psycopg import connect
+from app.config import Settings
+from app.jobs.finra_regsho_daily_refresh import run_finra_regsho_daily_refresh
+settings = Settings()
+with connect(settings.database_url) as c:
+    print(run_finra_regsho_daily_refresh(c, backfill_window_days=90))
+"
+```
+
+90 trading days × 6 prefixes ≈ 378 fetches at 1 req/s ≈ ~6 min wall-clock. Coexists with bimonthly throttle budget — the shared module-global clock serialises.
+
+### 6.5 RegSHO daily partition extension (deadline: before 2030-Q2)
+
+The static partition window in `sql/154` spans 2024-Q1 → 2030-Q1 inclusive (25 quarterly partitions). The daily cron will hard-fail on the first 2030-Q2 trade date unless another migration extends the window before then. Operator runbook:
+
+1. Author a new migration `sql/NNN_finra_regsho_daily_partition_extension.sql` that ALTERs `finra_regsho_daily_observations` to add `2030-Q2` → `2032-Q1` (or further) quarterly partitions.
+2. Apply via the standard migration path; verify partition count via `SELECT count(*) FROM pg_inherits WHERE inhparent='finra_regsho_daily_observations'::regclass`.
+
 ### 6.3 Cross-source sanity check (one ticker)
 
 After ingest, compare `current_short_interest` against:
@@ -119,5 +165,5 @@ After ingest, compare `current_short_interest` against:
 
 ## 8. Forward references
 
-- `#916` adds RegSHO daily ingest sibling — same `finra` Lane, separate cadence + schema.
+- ~~`#916` adds RegSHO daily ingest sibling — same `finra` Lane, separate cadence + schema.~~ ✅ Shipped 2026-05-18; see §4 daily entry + §6.4 runbook.
 - Memo overlay UI surface (ownership card "Short interest X% of float, days-to-cover Y") is OBSERVATIONS-PRIMITIVE-deferred per spec §1 closure framing — re-open when ownership-card UI revisit lands.

@@ -118,6 +118,7 @@ ManifestSource = Literal[
     "sec_8k",
     "sec_xbrl_facts",
     "finra_short_interest",
+    "finra_regsho_daily",
 ]
 
 ManifestSubjectType = Literal[

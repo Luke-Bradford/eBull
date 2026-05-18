@@ -1,0 +1,3 @@
+Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market
+20260516|AAPL|8714049.111124|41327|16275822.859084|B,Q,N
+1

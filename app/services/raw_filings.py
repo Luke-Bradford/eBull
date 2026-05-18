@@ -68,6 +68,10 @@ DocumentKind = Literal[
     # (sql/151). Keyed by synthetic accession ``FINRA_SI_{YYYYMMDD}``;
     # raw payload preserved per #1168 raw-payload-before-parse contract.
     "finra_short_interest_csv",
+    # G6 / #916 — FINRA RegSHO daily short volume pipe-delim TXT
+    # (sql/153). Keyed by synthetic accession
+    # ``FINRA_REGSHO_{PREFIX}_{YYYYMMDD}`` (6 prefixes × per trade-date).
+    "finra_regsho_daily_txt",
 ]
 # submissions.json / companyfacts.json are keyed by CIK, not by SEC
 # accession number — they belong in their own per-CIK store, not in

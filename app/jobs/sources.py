@@ -131,9 +131,11 @@ The final lane is bootstrap-only:
   interest catalog page; CDN robots.txt is 403). Disjoint from
   ``sec_rate`` by construction (different host, no shared per-IP
   budget). Module-global throttle clock + lock at
-  ``app/providers/implementations/finra_short_interest.py:46-48``.
-  v1 single job (``finra_short_interest_refresh``, G6/#915);
-  FINRA RegSHO daily (#916) adds a second job in the same lane.
+  ``app/providers/implementations/finra_short_interest.py:46-48``;
+  the daily RegSHO provider imports the same module-globals so
+  bimonthly + daily ingest share one in-process budget.
+  v1 jobs: ``finra_short_interest_refresh`` (G6/#915, bimonthly) +
+  ``finra_regsho_daily_refresh`` (G6/#916, daily).
 """
 
 
@@ -257,6 +259,11 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # (G6/#915). Daily 12:00 UTC cron + manual-trigger. Lane=``finra``
     # so it's disjoint from sec_rate (different host).
     "finra_short_interest_refresh": "finra",
+    # finra_regsho_daily_refresh — FINRA RegSHO daily short volume
+    # (G6/#916). Daily 23:00 UTC cron + manual-trigger. Same ``finra``
+    # Lane — module-global throttle clock shared with bimonthly so the
+    # in-process FINRA budget never exceeds 1 req/s combined.
+    "finra_regsho_daily_refresh": "finra",
 }
 
 

@@ -99,6 +99,10 @@ _CADENCE: dict[ManifestSource, timedelta] = {
     "sec_xbrl_facts": timedelta(days=120),  # piggybacks on 10-K/10-Q
     # FINRA short interest — bimonthly settlement schedule.
     "finra_short_interest": timedelta(days=20),
+    # FINRA RegSHO daily short volume — daily EOD publication (#916).
+    # 2-day cadence ceiling allows 1 weekend + 1 holiday slack before
+    # the freshness panel paints the slot as overdue.
+    "finra_regsho_daily": timedelta(days=2),
 }
 
 

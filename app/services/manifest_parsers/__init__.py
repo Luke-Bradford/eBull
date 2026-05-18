@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from app.services.manifest_parsers import def14a as _def14a
 from app.services.manifest_parsers import eight_k as _eight_k
+from app.services.manifest_parsers import finra_regsho_daily as _finra_regsho_daily
 from app.services.manifest_parsers import finra_short_interest as _finra_short_interest
 from app.services.manifest_parsers import insider_345 as _insider_345
 from app.services.manifest_parsers import sec_10k as _sec_10k
@@ -62,6 +63,7 @@ def register_all_parsers() -> None:
     _sec_n_port.register()
     _sec_xbrl_facts.register()  # synth no-op per sec-edgar §11.5.1 (G7)
     _finra_short_interest.register()  # synth no-op (G6/#915 — ScheduledJob owns writes)
+    _finra_regsho_daily.register()  # synth no-op (G6/#916 — ScheduledJob owns writes)
 
 
 # Run once at package import.
