@@ -4,3 +4,10 @@
 # Keep Windows batch files with CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# FINRA RegSHO daily fixtures — preserve CRLF to match the empirical
+# cdn.finra.org payload shape (verified 2026-05-18 in spike §3.2). The
+# ingest service decoder strips trailing \r + splits on \n so LF would
+# also parse cleanly, but committing CRLF keeps the fixtures faithful
+# to what FINRA actually serves.
+tests/fixtures/finra/regsho/*.txt text eol=crlf

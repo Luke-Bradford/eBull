@@ -312,6 +312,9 @@ _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking,
 # G6/#915 — FINRA bimonthly short interest (daily 12:00 UTC). Zero-param
 # manual surface; extended-window backfill via REPL runbook.
 _INVOKERS[_scheduler.JOB_FINRA_SHORT_INTEREST_REFRESH] = _adapt_zero_arg(_scheduler.finra_short_interest_refresh)
+# G6/#916 — FINRA RegSHO daily short volume (daily 23:00 UTC). Same
+# shape — zero-param manual surface; extended-window backfill via REPL.
+_INVOKERS[_scheduler.JOB_FINRA_REGSHO_DAILY_REFRESH] = _adapt_zero_arg(_scheduler.finra_regsho_daily_refresh)
 
 # ---------------------------------------------------------------------------
 # Bulk-archive Phase C ingester invokers (#1027 — #1020)

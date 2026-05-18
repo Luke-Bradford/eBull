@@ -99,6 +99,12 @@ _UNMAPPED_MANIFEST_SOURCES: dict[ManifestSource, str] = {
         "tag to ``CapabilityProvider`` and a mapping entry above when the "
         "panel goes live."
     ),
+    "finra_regsho_daily": (
+        "FINRA RegSHO daily short volume (#916). Same FINRA-not-SEC scope gap "
+        "as finra_short_interest — add a `finra_regsho_daily` tag to "
+        "``CapabilityProvider`` and a mapping entry above when the operator-"
+        "visible memo overlay sparkline lands."
+    ),
 }
 
 

@@ -30,6 +30,7 @@ from app.services.processes.param_metadata import (
     validate_job_params,
 )
 from app.workers.scheduler import (
+    JOB_FINRA_REGSHO_DAILY_REFRESH,
     JOB_FINRA_SHORT_INTEREST_REFRESH,
     JOB_SEC_ATOM_FAST_LANE,
     JOB_SEC_DAILY_INDEX_RECONCILE,
@@ -112,6 +113,23 @@ class TestLayer123Registry:
         job = _job_by_name(JOB_FINRA_SHORT_INTEREST_REFRESH)
         assert job is not None
         assert job.cadence == Cadence.daily(hour=12, minute=0)
+        assert job.catch_up_on_boot is False
+        assert job.prerequisite is not None
+        assert job.exempt_from_universal_bootstrap_gate is False
+        assert job.source == "finra"
+
+    def test_finra_regsho_daily_refresh_registered(self) -> None:
+        """G6/#916 — FINRA RegSHO daily short volume refresh.
+
+        Second job on the ``finra`` lane (shares the throttle clock +
+        the lane with the bimonthly G6/#915 job). Daily 23:00 UTC,
+        prereq=_bootstrap_complete, catch_up_on_boot=False, NOT exempt
+        from universal gate.
+        """
+        assert JOB_FINRA_REGSHO_DAILY_REFRESH in VALID_JOB_NAMES
+        job = _job_by_name(JOB_FINRA_REGSHO_DAILY_REFRESH)
+        assert job is not None
+        assert job.cadence == Cadence.daily(hour=23, minute=0)
         assert job.catch_up_on_boot is False
         assert job.prerequisite is not None
         assert job.exempt_from_universal_bootstrap_gate is False

@@ -188,6 +188,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # G6 / #915 — FINRA bimonthly short interest (sql/152). Phase 6 PR 11.
     "finra_short_interest_current",
     "finra_short_interest_observations",
+    # G6 / #916 — FINRA RegSHO daily short volume (sql/154). Phase 6 PR 12.
+    "finra_regsho_daily_observations",
 )
 
 

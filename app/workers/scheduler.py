@@ -329,6 +329,7 @@ JOB_SEC_PER_CIK_POLL = "sec_per_cik_poll"
 JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP = "sec_master_idx_quarterly_sweep"
 JOB_SEC_REBUILD = "sec_rebuild"
 JOB_FINRA_SHORT_INTEREST_REFRESH = "finra_short_interest_refresh"
+JOB_FINRA_REGSHO_DAILY_REFRESH = "finra_regsho_daily_refresh"
 
 
 # ---------------------------------------------------------------------------
@@ -1123,6 +1124,34 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "extended-window backfill (>400 days) via REPL runbook."
         ),
         cadence=Cadence.daily(hour=12, minute=0),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_FINRA_REGSHO_DAILY_REFRESH,
+        display_name="FINRA RegSHO daily short volume refresh (#916)",
+        source="finra",
+        description=(
+            "G6 — daily Short Sale Volume ingest. Daily 23:00 UTC "
+            "probes the FINRA RegSHO daily CDN for new (trade_date, "
+            "prefix) files at "
+            "https://cdn.finra.org/equity/regsho/daily/. Six prefixes "
+            "per trading day (CNMS / FNQC / FNRA / FNSQ / FNYX / "
+            "FORF). Skips manifest-parsed (trade_date, prefix) pairs "
+            "EXCEPT the two most-recent trade dates × 6 prefixes "
+            "(revision window — FINRA corrects daily files in-place "
+            "within 1-2 cycles). Per-file: store_raw (raw payload "
+            "before parse, #1168) → parse pipe-delim → preloaded "
+            "symbol resolver (~13k instruments) → bulk-UPSERT "
+            "finra_regsho_daily_observations → manifest UPSERT "
+            "'parsed' (synth no-op parser dispatch shape, G6/#915 + "
+            "G7 sec_xbrl_facts precedent). Per-file failure isolated. "
+            "Default backfill window 30 days; extended-window backfill "
+            "via REPL runbook. Reuses the `finra` Lane + module-global "
+            "throttle clock so combined bimonthly + daily fetch never "
+            "exceeds 1 req/s polite floor."
+        ),
+        cadence=Cadence.daily(hour=23, minute=0),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -4711,6 +4740,40 @@ def finra_short_interest_refresh() -> None:
         # run_finra_short_interest_refresh so _tracked_job records
         # status='failure'; this block just surfaces operator-visible
         # row_count + summary log.
+
+
+def finra_regsho_daily_refresh() -> None:
+    """``_INVOKERS['finra_regsho_daily_refresh']`` — G6/#916.
+
+    Daily 23:00 UTC; opens its own DB connection. Per-file commit /
+    rollback ownership lives inside ``run_finra_regsho_daily_refresh``
+    (mirror G6/#915 + G12 shapes). No operator params at v1 —
+    extended-window backfill is a REPL runbook against
+    ``run_finra_regsho_daily_refresh(conn, backfill_window_days=N)``.
+
+    Failure surfacing: any per-file failure inside the job raises
+    ``RuntimeError`` so ``_tracked_job`` records
+    ``job_runs.status='failure'`` with the failed-file detail.
+    Successful files still commit before the raise — partial work is
+    durable; the failure signal is for operator visibility only.
+    """
+    from app.jobs.finra_regsho_daily_refresh import (
+        run_finra_regsho_daily_refresh,
+    )
+
+    with _tracked_job(JOB_FINRA_REGSHO_DAILY_REFRESH) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            stats = run_finra_regsho_daily_refresh(conn)
+        tracker.row_count = stats.total_upserted
+        logger.info(
+            "finra_regsho_daily_refresh: files=%d total_upserted=%d failed=%d",
+            len(stats.daily_files),
+            stats.total_upserted,
+            stats.failed_files,
+        )
+        # RuntimeError on partial failure lives inside
+        # run_finra_regsho_daily_refresh so _tracked_job records
+        # status='failure'.
 
 
 def sec_rebuild(params: Mapping[str, Any]) -> None:
