@@ -57,36 +57,54 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://data.sec.gov"
 
-# Companyconcept API validation patterns (G10, 2026-05-17). The
-# primitive is intentionally a GENERAL SEC ``companyconcept`` consumer
-# — NOT bound to ``TRACKED_CONCEPTS`` / ``DEI_TRACKED_CONCEPTS``.
-# Those maps govern downstream normalisation / projection, not
-# arbitrary probe access.
+# XBRL API validation patterns shared by the G10 ``companyconcept``
+# primitive and the G11 ``frames`` primitive. Both primitives are
+# intentionally GENERAL SEC API consumers — NOT bound to
+# ``TRACKED_CONCEPTS`` / ``DEI_TRACKED_CONCEPTS``. Those maps govern
+# downstream normalisation / projection, not arbitrary probe access.
 #
 # ``_TAXONOMY_RE`` accepts every published SEC taxonomy namespace
 # (``us-gaap``, ``dei``, ``srt``, ``invest``, ``country``,
-# ``ifrs-full``, etc.). ``_CONCEPT_TAG_RE`` is a deliberately
-# tightened subset of legal XBRL NCName syntax — XBRL formally
-# permits a leading underscore and ``-`` / ``.`` separators, but
-# every SEC-observed concept name uses ``[A-Za-z][A-Za-z0-9_]*``
-# (leading letter; optional underscore for custom taxonomies). The
-# tightening rejects URL-injection vectors (``foo/bar``,
-# ``foo bar``, ``../etc``) at the validator boundary. If a future
-# SEC drift surfaces a legitimate NCName outside this subset, the
-# fix is to widen the regex + add a regression test.
+# ``ifrs-full``, etc.). Trailing-character anchor: leading lowercase
+# letter, optional interior alnum-or-dash, MUST end in alnum (rejects
+# ``us-gaap-`` and any other trailing-dash form). Single-char
+# taxonomies (``a``, ``z``) remain legal via the optional trailing
+# group. PR #1198 bot round-1 NITPICK ownership.
+#
+# ``_CONCEPT_TAG_RE`` is a deliberately tightened subset of legal
+# XBRL NCName syntax — XBRL formally permits a leading underscore and
+# ``-`` / ``.`` separators, but every SEC-observed concept name uses
+# ``[A-Za-z][A-Za-z0-9_]*`` (leading letter; optional underscore for
+# custom taxonomies). The tightening rejects URL-injection vectors
+# (``foo/bar``, ``foo bar``, ``../etc``) at the validator boundary.
+# If a future SEC drift surfaces a legitimate NCName outside this
+# subset, the fix is to widen the regex + add a regression test.
+#
+# ``_UNIT_RE`` (G11) uses an explicit ``token(-per-token)?`` grammar
+# — each token is leading-letter alnum, separated by exactly one
+# ``-per-`` if a denominator is present. Rejects double-dash
+# (``USD--per-shares``), bare ``-per`` (``USD-per``), and trailing
+# dash (``USD-per-``). SEC frames URLs use the ``-per-`` syntax;
+# slash would become an extra path segment. Lowercase tokens
+# admitted (``usd``) — primitive is general, not bound to a
+# known-unit allowlist.
+#
+# ``_PERIOD_RE`` (G11) admits ``CY####`` (annual flow), ``CY####Q#``
+# (quarterly flow), and ``CY####Q#I`` (quarterly instantaneous /
+# balance-sheet). Rejects ``CY####I`` (no annual-instantaneous frame
+# per SEC docs).
 #
 # ``fullmatch`` discipline is mandatory: ``re.match`` + ``^...$``
 # admits a trailing ``\n`` because ``$`` matches before a final
-# newline; ``fullmatch`` closes that hole. Spec
+# newline; ``fullmatch`` closes that hole. Specs:
 # ``docs/superpowers/specs/2026-05-17-g10-companyconcept-api-consumer.md``
+# §4.2 +
+# ``docs/superpowers/specs/2026-05-18-g11-frames-api-consumer.md``
 # §4.2.
-# Trailing-character anchor: leading lowercase letter, optional
-# interior alnum-or-dash, MUST end in alnum (rejects ``us-gaap-`` and
-# any other trailing-dash form). Single-char taxonomies (``a``,
-# ``z``) remain legal via the optional trailing group. PR #1198 bot
-# round-1 NITPICK ownership.
 _TAXONOMY_RE: Final[re.Pattern[str]] = re.compile(r"[a-z](?:[a-z0-9-]*[a-z0-9])?")
 _CONCEPT_TAG_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+_UNIT_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-per-[A-Za-z][A-Za-z0-9]*)?")
+_PERIOD_RE: Final[re.Pattern[str]] = re.compile(r"CY[0-9]{4}(?:Q[1-4]I?)?")
 
 # SEC rate-limit: 10 req/s. Funnelled through the same process-wide
 # clock as ``SecFilingsProvider`` so concurrent jobs (e.g. fundamentals
@@ -734,6 +752,104 @@ class SecFundamentalsProvider(FundamentalsProvider):
             units = {}
         section = {tag: {"units": units}}
         return _extract_facts_from_section(section, taxonomy=taxonomy)
+
+    # ------------------------------------------------------------------
+    # Frames API — cross-sectional primitive (G11, 2026-05-18)
+    # ------------------------------------------------------------------
+
+    def fetch_frame(
+        self,
+        taxonomy: str,
+        tag: str,
+        unit: str,
+        period: str,
+    ) -> dict[str, Any] | None:
+        """Fetch one cross-sectional frame from the SEC frames API.
+
+        Returns parsed JSON or None on 404. Other HTTP errors propagate
+        via ``raise_for_status()``.
+
+        Args:
+          taxonomy: SEC namespace identifier — ASCII regex
+            ``[a-z](?:[a-z0-9-]*[a-z0-9])?`` matched via ``fullmatch``
+            (e.g. ``us-gaap``, ``dei``, ``srt``, ``invest``,
+            ``ifrs-full``). Reuses ``_TAXONOMY_RE`` from the G10
+            primitive.
+          tag: XBRL concept name — ASCII regex
+            ``[A-Za-z][A-Za-z0-9_]*`` matched via ``fullmatch``.
+            Reuses ``_CONCEPT_TAG_RE`` from the G10 primitive.
+          unit: XBRL unit identifier — common values ``USD``,
+            ``shares``, ``pure``, ``USD-per-shares`` (NOT
+            ``USD/shares`` — SEC frames URLs use the ``-per-``
+            syntax; a slash becomes an extra path segment in the
+            f-string). Validated via ``_UNIT_RE.fullmatch`` against an
+            explicit ``token(-per-token)?`` grammar — rejects
+            ``USD-per-`` (trailing dash), ``USD-per`` (bare
+            ``-per``), ``USD--per-shares`` (double dash), slash, and
+            every URL-special character.
+          period: Calendar-period frame identifier per SEC frames
+            spec — ``CY{year}`` (annual flow), ``CY{year}Q{n}``
+            (quarterly flow), or ``CY{year}Q{n}I`` (quarterly
+            instantaneous / balance-sheet). Rejects ``CY{year}I``
+            (no annual-instantaneous frame per SEC docs). Validated
+            via ``_PERIOD_RE.fullmatch``.
+
+        Raises:
+          ValueError: any argument fails its regex.
+
+        Raw-payload invariant for future consumers (spec §3.2): if a
+        subsequent PR wires ``fetch_frame(...)`` payloads into a
+        DB-writing path (``sec_frames_*`` / ``sector_aggregate_*`` /
+        ``*_observations``), that PR MUST land raw-payload
+        persistence per ``docs/review-prevention-log.md`` #1168 IN
+        THE SAME PR — either by extending an existing raw table or
+        by introducing a sibling ``sec_frames_raw`` table keyed on
+        ``(taxonomy, tag, unit, period, fetched_at)``. Splitting
+        persistence into a follow-up is forbidden.
+        """
+        if not _TAXONOMY_RE.fullmatch(taxonomy):
+            raise ValueError(
+                f"invalid taxonomy {taxonomy!r}: expected lowercase "
+                "ASCII + dashes (regex [a-z](?:[a-z0-9-]*[a-z0-9])?) "
+                "with no leading/trailing dash, whitespace, or "
+                "trailing newline"
+            )
+        if not _CONCEPT_TAG_RE.fullmatch(tag):
+            raise ValueError(
+                f"invalid tag {tag!r}: expected ASCII letters / digits "
+                "/ underscores starting with a letter (regex "
+                "[A-Za-z][A-Za-z0-9_]*) with no whitespace, slash, "
+                "or trailing newline"
+            )
+        if not _UNIT_RE.fullmatch(unit):
+            raise ValueError(
+                f"invalid unit {unit!r}: expected ASCII "
+                "token(-per-token)? where each token is "
+                "[A-Za-z][A-Za-z0-9]* (e.g. 'USD', 'USD-per-shares', "
+                "'shares', 'pure'). SEC frames URLs use the `-per-` "
+                "syntax, NOT `/`."
+            )
+        if not _PERIOD_RE.fullmatch(period):
+            raise ValueError(
+                f"invalid period {period!r}: expected SEC frames "
+                "identifier CY{year} / CY{year}Q{n} / CY{year}Q{n}I "
+                "(no annual-instantaneous frame; regex "
+                "CY[0-9]{4}(?:Q[1-4]I?)?)"
+            )
+        path = f"/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json"
+        resp = self._http.get(path)
+        if resp.status_code == 404:
+            logger.info(
+                "SEC frames: no data for %s/%s/%s/%s (404)",
+                taxonomy,
+                tag,
+                unit,
+                period,
+            )
+            return None
+        resp.raise_for_status()
+        raw = resp.json()
+        return raw  # type: ignore[no-any-return]
 
     # ------------------------------------------------------------------
     # Private HTTP
