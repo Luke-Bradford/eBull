@@ -345,7 +345,46 @@ PR 1 (G7 #1190) + PR 2 (G14 #1191) + PR 3 (G13 #1193) all merged. Phase 1 comple
 
 ### Next phase (Phase 4 PR 8)
 
-- **Phase 4, PR 8 — G11 (`frames` API consumer).** Decision rule: `gh issue list --search "frames OR sector heatmap OR cross-sectional"` — if open feature ticket exists, wire the consumer; otherwise close G11 as BY DESIGN with documentation only.
+- **Phase 4, PR 8 — G11 (`frames` API consumer).** ✅ MERGED 2026-05-18 PR #1200 `c954c50` — see handover block below.
+
+## Handover — PR #1200 (merged 2026-05-18)
+
+- Phase: 4
+- Gap / ticket closed: **G11** (`frames` API not consumed)
+- Branch: `feat/g11-frames-api-consumer` (deleted post-merge)
+- Merge SHA: `c954c50` (squash)
+- Closure framing: **PROVIDER PRIMITIVE** (not WIRED) — `fetch_frame` exposed on `SecFundamentalsProvider`; **no production consumer in v1 by design.**
+- Decision-rule output: `gh issue list --search "frames OR sector heatmap OR cross-sectional"` returned #594 (peer-comparison radar + sector heatmap) — but #594 explicitly says "sector aggregates — needs sector median calculations server-side, OR client-side aggregation across the peer set." Frames is one option among several; #594 does NOT commit to it. Codex G11-scope review independently recommended primitive-only over full-pipeline wire. Refs #594.
+- Tests added:
+  - `tests/test_sec_fundamentals_frames.py` — 66 tests (9 logical with parametrise): URL builder + 404 → None + 5xx → raise (Request attached + `max_retries=0` drops test from ~7s to ~0.1s) + taxonomy validation (10 bad + 6 happy, G10 literals duplicated verbatim) + tag validation (6 bad + 3 happy) + unit validation (11 bad + 9 happy incl. `USD-per-shares`, `Y-per-shares`, lowercase `usd`) + period validation (10 bad incl. `CY####I` rejection + 5 happy) + payload-parsing fixture (Apple FY2024 Revenues `cik=320193`, `val=391035000000`) + rate-limit clock identity + back-to-back throttle smoke via `httpx.MockTransport`.
+- Scope discoveries handled in-scope:
+  - **`_UNIT_RE` grammar pivoted from char-class to `token(-per-token)?`** (Codex 1a r1 HIGH). Initial draft used `[A-Za-z][A-Za-z0-9-]*` which admitted `USD/shares` semantics under the wrong syntax — SEC frames URLs use `-per-` not `/`. Final grammar `[A-Za-z][A-Za-z0-9]*(?:-per-[A-Za-z][A-Za-z0-9]*)?` rejects double-dash (`USD--per-shares`), bare `-per` (`USD-per`), trailing dash (`USD-per-`), slash, and every URL-special character.
+  - **`CY####I` annual-instantaneous rejection** (Codex 1a r1 OK). SEC docs define `Q#I` as instantaneous (balance-sheet); no annual-instantaneous frame exists. `_PERIOD_RE` pins the rejection.
+  - **Lowercase `usd` admitted, not rejected** (Codex 1b r1 HIGH). Primitive is general SEC frames consumer, NOT bound to a known-unit allowlist. Moved to `_GOOD_UNIT`.
+  - **Fixture realism — `Revenues` paired with `CY####` annual not `CY####Q#I`** (Codex 1b r1 MED). `Q#I` is balance-sheet only; `Revenues` is a flow. Test 8 fixture uses `CY2024` annual with Apple FY2024 figure; test 1 URL pivoted to balance-sheet concept `Assets` paired with `CY2024Q1I`.
+  - **G10 test-literal counts pinned verbatim** (Codex 1b r1 LOW). Plan now says "duplicate G10 `_BAD_TAXONOMY` / `_GOOD_TAXONOMY` / `_BAD_TAG` / `_GOOD_TAG` literals verbatim" — exact-mirror prevents accidental coverage drift.
+  - **Module-level comment block generalised** (Codex 1a r1 LOW-4). `_TAXONOMY_RE` + `_CONCEPT_TAG_RE` + new `_UNIT_RE` + `_PERIOD_RE` all live under one comment block citing both G10 + G11 specs.
+- Matrix delta:
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §4 row `data.sec.gov/api/xbrl/frames/...` — `❌ GAP` → `✅ PROVIDER PRIMITIVE 2026-05-18 (G11)` with audit summary.
+  - `.claude/skills/data-engineer/etl-endpoint-coverage.md` §7 G11 row — `OPEN (low)` → `✅ CLOSED 2026-05-18 — G11 PR`.
+  - `.claude/skills/data-sources/sec-edgar.md` §1.6 Frames row — consumer annotation incl. `-per-` vs `/` syntax warning + period-shape reference.
+- Codex iteration counts:
+  - 1a (spec): 3 rounds to CLEAN — round-1 1 HIGH + 1 LOW + 2 OK; round-2 1 MED + 1 LOW; round-3 1 LOW (docstring sync).
+  - 1b (plan): 2 rounds to CLEAN — round-1 1 HIGH + 2 MED + 1 LOW + 3 OK; round-2 1 MED + 1 LOW (stale prose).
+  - 2 (pre-push): 1 round — NO FINDINGS, CLEAN.
+  - Bot review: round 1 APPROVE on first push, no findings.
+- ETL clauses #8-#12: N/A — provider primitive only.
+- Spec: `docs/superpowers/specs/2026-05-18-g11-frames-api-consumer.md` (CLEAN v4 through Codex 1a r1+r2+r3).
+- Plan: `docs/superpowers/plans/2026-05-18-g11-frames-api-consumer-plan.md` (CLEAN v2 through Codex 1b r1+r2).
+
+### Phase 4 close-out — PRs 7 + 8 merged
+
+PR 7 (G10 #1198 `0ead989`) + PR 8 (G11 #1200 `c954c50`) both merged 2026-05-18. Phase 4 complete. **All four `data.sec.gov/api/xbrl/*` endpoints (companyfacts, companyconcept, frames) now have provider surfaces; companyfacts is the only one with a production consumer in v1.**
+
+### Phase 5 entry
+
+- **Phase 5, PR 9 — #925 EdgarTools 13F-HR parser drop-in.** Plan §2 Phase 5. Pre-impl spike against existing 13F-HR golden fixtures (Pydantic validation cliff per memory `[[edgartools]]` + #932). If spike INFEASIBLE → close #925 REBUTTED + freeze hand-rolled parser. If OK → drop-in + remove ~200 lines + extend tests. Separate session.
+- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Same shape, separate session.
 
 ## Handover — PR #1194 (merged 2026-05-17)
 
