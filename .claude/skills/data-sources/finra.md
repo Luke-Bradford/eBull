@@ -52,6 +52,12 @@ Every RegSHO daily file (CNMS + 5 per-facility prefixes) ends with a single line
 
 For every body row, the parser asserts `row.Date == trade_date.strftime('%Y%m%d')`. A CDN path mistake or fixture seeded under the wrong date would silently write facts under the caller's `trade_date` while ignoring the body's date column. Mismatch raises `HeaderCorruptionError` mid-body — caller's txn rolls back atomically.
 
+### 2.8 RegSHO daily — CDN returns 403 (not 404) for not-yet-published files (#916)
+
+Empirically verified 2026-05-18 in live-smoke against `cdn.finra.org/equity/regsho/daily/`: requesting a file for a trade date BEFORE the EOD ~6 PM ET publication window returns **HTTP 403 Forbidden**, not 404. This is **different from the bimonthly CDN** (`/equity/otcmarket/biweekly/`) which returns 404 for missing files.
+
+Provider `FinraRegShoProvider.fetch_regsho_daily_file` maps **both 403 + 404 → `FinraNotFound`** so the cron can safely run before EOD publication. The bimonthly provider only maps 404 (no observed 403 behaviour). Future FINRA endpoints should default to 403+404 = not-found UNLESS empirically verified otherwise — FINRA appears to use 403 as a "missing object" idiom on the RegSHO sub-host.
+
 ### 2.4 Symbol form — alphanumeric only, NO separators
 
 FINRA strips dot / hyphen / underscore from share-class siblings + preferreds:

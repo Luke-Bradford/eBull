@@ -133,6 +133,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await asyncio.to_thread(_probe_pg_locks_floor)
 
+    # #1208 Sub 6 — runtime_config singleton vanish guard. Migration
+    # sql/015_runtime_config.sql seeds the singleton via
+    # ``INSERT ... ON CONFLICT DO NOTHING``; if the row is later lost
+    # (manual DELETE, snapshot restore from pre-seed era, future
+    # bootstrap reset script) every endpoint that reads runtime_config
+    # fail-closes with 503. Boot-time guard re-seeds with safe defaults
+    # so the live system tolerates losing the row. See
+    # docs/review-prevention-log.md section 'Singleton-row migrations
+    # need a boot-time presence guard'.
+    # ``autocommit=True`` at connect time so no implicit tx is opened
+    # before the helper's ``conn.transaction()`` BEGIN.
+    from app.services.runtime_config import ensure_runtime_config_singleton
+
+    def _ensure_runtime_config_singleton_probe() -> None:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_runtime_config_singleton(guard_conn)
+
+    await asyncio.to_thread(_ensure_runtime_config_singleton_probe)
+
     # Open the connection pool after migrations so the schema is up to date.
     pool = open_pool("db_pool", min_size=1, max_size=10)
     logger.info("Connection pool opened (min=1, max=10).")

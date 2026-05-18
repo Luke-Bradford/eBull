@@ -260,6 +260,18 @@ Read and apply these before pushing:
 - Persist enough structured evidence for auditability.
 - Use tech-debt issues when a review point is consciously deferred.
 
+## Skill ownership (project-local skills)
+
+Files under `.claude/skills/**` are **project-local engineering substrate**. The agent OWNS them:
+
+1. When a gap is observed mid-task (empirical finding contradicts the skill; new pattern emerges; recurring trap surfaces), update the skill **inline** in the same session, in the same PR. Do NOT defer with "I'll update the skill later" — that's how skills go stale.
+2. When a skill is found to make a claim the codebase no longer honours, correct it as a routine maintenance edit. No separate approval needed.
+3. When a new prevention-log lesson surfaces mid-task, extract it into the relevant skill AND `docs/review-prevention-log.md` in the SAME PR — never let the lesson live only in the PR description.
+4. New skills land at `.claude/skills/<area>/<name>.md` with a single-line `## When to use` heading + the actionable content. No frontmatter unless the skill is discoverable via the Skill tool (in which case YAML frontmatter with `name:` + `description:` is required).
+5. Skill edits do NOT need a separate ticket. Bundle them with whatever PR exposed the gap.
+
+The `permissions.allow` block in `.claude/settings.local.json` already grants `Edit` / `Write` on the whole tree — no per-skill approval prompt should appear. If one does, the friction is in the upstream skill-tool layer, not in project permissions; the answer is to update the skill FILE via Edit/Write rather than invoking the Skill tool.
+
 ## Output preference
 
 When implementing a module:

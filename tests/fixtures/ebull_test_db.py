@@ -352,21 +352,36 @@ def _apply_migrations(target_url: str) -> None:
             cur.execute("SELECT filename FROM schema_migrations")
             done = {row[0] for row in cur.fetchall()}
 
+    # Imported here (not at module top) so this fixture can be loaded
+    # by tooling that doesn't have the full ``app`` package on the path
+    # yet — keeps the test-helper import surface narrow.
+    from app.db.migrations import _split_autocommit_statements, _wants_autocommit
+
     for path in files:
         if path.name in done:
             continue
         sql_text = path.read_text(encoding="utf-8")
-        with psycopg.connect(target_url) as conn:
+        autocommit = _wants_autocommit(sql_text)
+        with psycopg.connect(target_url, autocommit=autocommit) as conn:
             try:
                 with psycopg.ClientCursor(conn) as cur:
-                    cur.execute(sql_text)  # type: ignore[call-overload]
+                    if autocommit:
+                        # Multi-statement batch under autocommit still
+                        # wraps in an implicit tx; split + per-statement.
+                        # See app/db/migrations._split_autocommit_statements.
+                        for stmt in _split_autocommit_statements(sql_text):
+                            cur.execute(stmt)  # type: ignore[call-overload]
+                    else:
+                        cur.execute(sql_text)  # type: ignore[call-overload]
                     cur.execute(  # type: ignore[call-overload]
                         "INSERT INTO schema_migrations (filename) VALUES (%s)",
                         (path.name,),
                     )
-                conn.commit()
+                if not autocommit:
+                    conn.commit()
             except Exception:
-                conn.rollback()
+                if not autocommit:
+                    conn.rollback()
                 raise
 
 
