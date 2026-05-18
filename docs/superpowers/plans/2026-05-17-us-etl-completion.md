@@ -383,8 +383,8 @@ PR 7 (G10 #1198 `0ead989`) + PR 8 (G11 #1200 `c954c50`) both merged 2026-05-18. 
 
 ### Phase 5 entry
 
-- **Phase 5, PR 9 — #925 EdgarTools 13F-HR parser drop-in.** Status: **CLOSED 2026-05-18 by this PR** — pre-impl spike found #925 already shipped via PR #931 (merged 2026-05-05, commit `0428dbf`), and the plan §2 PR 9 alternative scope (manifest-adapter restructure on top of `Filing.obj()` / `ThirteenF`) is REBUTTED-INFEASIBLE on five binding grounds. See spike doc + handover block below.
-- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Same spike-first shape; Pydantic validation cliff per memory `[[edgartools]]` + #932 is N-PORT-specific and remains live. Separate session.
+- **Phase 5, PR 9 — #925 EdgarTools 13F-HR parser drop-in.** ✅ CLOSED 2026-05-18 PR #1203 merge `68e56c1` — pre-impl spike found #925 already shipped via PR #931 (2026-05-05, commit `0428dbf`); plan §2 PR 9 alternative scope REBUTTED-INFEASIBLE.
+- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** ✅ SHIPPED 2026-05-18 PR #1205 merge `7826109` — see handover block below.
 
 ## Handover — PR #1203 (merged 2026-05-18)
 
@@ -416,9 +416,56 @@ PR 7 (G10 #1198 `0ead989`) + PR 8 (G11 #1200 `c954c50`) both merged 2026-05-18. 
 - ETL clauses #8-#12 — N/A. This PR is docs + matrix + one comment-only code edit; no parser / schema / observations / rollup change. No per-instrument figure changes. The existing 20-test Berkshire 2024Q3 golden replay (`tests/test_sec_13f_parser.py`) re-exercises the EdgarTools-wrapper path through `uv run pytest`.
 - Operator follow-up: **none.** The EdgarTools-wrapper path has been live in production since PR #931 (2026-05-05); this PR only updates the documentation surface + closes #925.
 
-### Next phase (Phase 5 PR 10)
+## Handover — PR #1205 (merged 2026-05-18)
 
-- **Phase 5, PR 10 — #932 EdgarTools N-PORT FundReport drop-in.** Spike-first; separate session. Empirical probe during the PR #1203 close-out session revealed that `FundReport.parse_fund_xml` crashes with `AttributeError: 'NoneType' object has no attribute 'find'` on the existing synthetic fixture at `tests/fixtures/sec/nport_p_test_fund.xml` — a parser-coverage cliff strictly worse than the documented Pydantic validation cliff (edgartools skill §G3, "Punted #932"). The synthetic hand-trimmed fixture uses the `http://www.sec.gov/edgar/nport` namespace but lacks the XBRL container EdgarTools' parser expects from real SEC NPORT-P payloads. Disambiguation requires a real-SEC-NPORT-P fixture (fetch via shared `SecFilingsProvider` rate-limit pool, per `feedback_data_source_constraints` + sec-edgar §4 normative rate-limit discipline). Decision rule unchanged: spike INFEASIBLE → close #932 REBUTTED + freeze stdlib-ElementTree at `app/services/n_port_ingest.py::parse_n_port_payload`; spike OK → drop-in (parser-only scope per #932 issue body — NOT the manifest-adapter restructure variant rejected in PR 9). Three workarounds enumerated at edgartools §G3 if Pydantic constructor is unreachable: (A) skip `FundReport(...)`, use `parse_fund_xml` dict path only; (B) walk the dict directly without the Pydantic layer; (C) direct lxml ~150 LoC re-write (the skill's recommended path for #932 if revisited).
+- Phase: 5
+- Gap / ticket closed: **#932** (EdgarTools N-PORT FundReport parser drop-in)
+- Branch: `fix/932-nport-edgartools-spike` (deleted post-merge)
+- Merge SHA: `7826109` (squash)
+- Bot review: APPROVE on first push — zero findings; all 4 checks green (lint/review/supply-chain/verify-issue-link).
+- CI: clean on first push.
+- Closure framing: **drop-in shipped** — lazy-imported wrapper over `edgar.funds.reports.FundReport.parse_fund_xml` at `app/services/n_port_ingest.py::parse_n_port_payload`. Preserves `NPortFiling` / `NPortHolding` public dataclass surface. Parser-version bumped `nport-v1` → `nport-v2-edgartools`; auto-propagates to `app/services/manifest_parsers/sec_n_port.py` via direct symbol import.
+- Spike doc: `docs/superpowers/spikes/2026-05-18-n-port-edgartools-feasibility.md` (CLEAN through Codex 1a r3).
+- Spec: `docs/superpowers/specs/2026-05-18-n-port-edgartools-dropin.md` (CLEAN through Codex 1a r4).
+- Plan: `docs/superpowers/plans/2026-05-18-n-port-edgartools-dropin-plan.md` (CLEAN through Codex 1b r4).
+- Tests added/modified:
+  - `tests/test_n_port_ingest.py::TestParseNPortPayload` rewritten against real Vanguard Value Index Fund fixture; **new golden replay** test (`test_golden_replay_first_row_count_total`) locks JPM top holding + total $217.4B + 323 count; **new** `test_raises_on_empty_xml` (Codex 2 r1 XMLSyntaxError edge case).
+  - `TestIngestFundNPort` 3-of-4 refactored to monkeypatch parser via `_make_filter_path_filing()` helper; 1 (missing-series) stays integration.
+  - `tests/test_manifest_parser_sec_n_port.py` retargeted at JPM (real-fixture top holding) + `parser_version == "nport-v2-edgartools"` assertion.
+- Scope discoveries handled in-scope:
+  - **Risk-register fallback fired (T1)**: `S000002277` (Vanguard 500 Index Fund per synthetic-fixture claim) NOT under CIK 36405. Iterated 313 NPORT-P refs; selected most recent with ≥100 holdings + complete `valUSD` coverage = Vanguard **Value** Index Fund (S000002840). T4/T5/T10 assertions derived verbatim from T1-RESULTS table; series_id literal locked to `S000002840`.
+  - **Codex 2 r1 MEDIUM (XMLSyntaxError)**: `FundReport.parse_fund_xml("")` raises `lxml.etree.XMLSyntaxError` AFTER recover=True fallback also fails. Added to wrapper catch list via `_lxml_syntax_error()` lazy-import factory. Regression test added.
+  - **Codex 1a r1 HIGH (catch scope too narrow)**: try/except now wraps BOTH `parse_fund_xml` call AND post-parse normalisation; `NPortMissingSeriesError` + `NPortParseError` re-raised explicitly.
+  - **Codex 1a r1 HIGH (fixture under-specified)**: missing-series fixture rewritten with all EdgarTools structural requirements (filerInfo + 9 fundInfo decimals + othMon1/2/3 + GeneralInfo non-Optional text fields) per `edgar/funds/reports.py:126-145` Pydantic model inspection.
+  - **Codex 1a r1 MED (whitespace normalisation)**: wrapper strips `units` / `payoff_profile` / `asset_category` / `issuer_category` / `issuer_name` (defence against future EdgarTools whitespace-preservation changes; the ingester's exact-equality guards would otherwise mis-drop valid rows).
+  - **Codex 1a r2 HIGH (GeneralInfo / ReturnInfo Pydantic-required fields)**: `regName` / `regCik` / `regFileNumber` / `regStreet1` non-Optional `str`; `<othMon1/2/3/>` non-Optional `RealizedChange`. Fixture extended.
+  - **Skill update**: `.claude/skills/data-sources/edgartools.md` §G3 rewritten with structural-vs-Pydantic cliff distinction; the original §G3 "Pydantic validation cliff on `FundReport(**dict)`" framing was empirically wrong for edgartools 5.30.2 — `parse_fund_xml` returns a `Dict[str, Any]`, not a wrapped Pydantic model, and the observed crash on synthetic fixtures is structural (`<filerInfo>` block missing) not Pydantic-validation.
+  - **Memory update**: `feedback_pydantic_validation_cliff.md` updated — Path A FEASIBLE shipped (NOT Path C lxml-rewrite as the stale memory recommended); two distinct cliff shapes documented (structural vs internal Pydantic).
+- Matrix delta:
+  - Live US source coverage matrix at `.claude/skills/data-engineer/etl-endpoint-coverage.md` — sec_n_port row already WIRED; no row status change. The change is parser-implementation, not coverage.
+- Codex iteration counts:
+  - 1a (spike): 3 rounds to CLEAN — round-1 5 findings; round-2 3 residuals; round-3 2 LOWs; round-4 CLEAN.
+  - 1a (spec): 4 rounds to CLEAN — round-1 7 findings (2H + 4M + 2L); round-2 6 findings (2H + 1M + 3L); round-3 3 LOWs; round-4 CLEAN.
+  - 1b (plan): 4 rounds to CLEAN — round-1 8 findings; round-2 2 residuals; round-3 2 LOWs; round-4 CLEAN.
+  - 2 (pre-push): 2 rounds — round-1 1 MED (XMLSyntaxError escape); round-2 CLEAN.
+  - Bot review: APPROVE on first push, zero findings.
+- ETL clauses #8-#12:
+  - #8 (smoke): N/A in operator-visible sense — N-PORT does not surface to standard smoke panel; rollup deferred to #919. Golden replay does exercise JPM (smoke-panel member) as canonical fixture's top holding.
+  - #9 (cross-source): Independent raw XML spot-check against SEC EDGAR primary doc — JPM `value_usd = Decimal('7750046717.70000000')` matches SEC raw. True cross-source N/A until #919.
+  - #10 (backfill): operator follow-up post-merge — `POST /jobs/sec_rebuild/run` body `{"source": "sec_n_port"}` resets manifest rows with `parser_version != 'nport-v2-edgartools'` to pending + redrains at 10 r/s shared budget.
+  - #11 (operator-visible figure): N/A — no rollup endpoint surfaces N-PORT in v1; deferred to #919.
+  - #12 (PR records verification + SHA): satisfied via PR body explicit N/A annotations + operator-trigger plan.
+- Operator follow-up: **single endpoint call** — `POST /jobs/sec_rebuild/run` body `{"source": "sec_n_port"}` after merge to redrain N-PORT manifest rows with the new parser-version. Estimated ~200-1000 accessions across active fund-filer universe; ~20-100 second wall-clock at 10 r/s shared budget. Post-drain spot-check one Vanguard NPORT-P observation lands in `ownership_funds_observations` with `parser_version='nport-v2-edgartools'`.
+- Prevention-log candidate: none — bot review found nothing; Codex 2 catch-list-scope finding was caught BEFORE push.
+
+### Phase 5 close-out — both PRs merged
+
+PR 9 (#925 closeout via #1203 `68e56c1`, 2026-05-18) + PR 10 (#932 drop-in via #1205 `7826109`, 2026-05-18) both merged. Phase 5 complete.
+
+### Next phase (Phase 6 entry)
+
+- **Phase 6, PR 11 — #915 FINRA bimonthly short interest ingest + schema.** Plan §2 Phase 6 — parent #796 + #845 (closed). Headline real coverage gap.
+- **Phase 6, PR 12 — #916 FINRA RegSHO daily short volume ingest.** Same shape as PR 11. May bundle with PR 11 if cohesion tight.
 
 ## Handover — PR #1194 (merged 2026-05-17)
 
