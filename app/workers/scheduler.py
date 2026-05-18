@@ -328,6 +328,7 @@ JOB_SEC_DAILY_INDEX_RECONCILE = "sec_daily_index_reconcile"
 JOB_SEC_PER_CIK_POLL = "sec_per_cik_poll"
 JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP = "sec_master_idx_quarterly_sweep"
 JOB_SEC_REBUILD = "sec_rebuild"
+JOB_FINRA_SHORT_INTEREST_REFRESH = "finra_short_interest_refresh"
 
 
 # ---------------------------------------------------------------------------
@@ -1096,6 +1097,32 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "master-idx-quarterly-walker.md §3.1."
         ),
         cadence=Cadence.weekly(weekday=6, hour=5, minute=15),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_FINRA_SHORT_INTEREST_REFRESH,
+        display_name="FINRA bimonthly short interest refresh (#915)",
+        source="finra",
+        description=(
+            "G6 — bimonthly Equity Short Interest ingest. Daily 12:00 "
+            "UTC probes the FINRA CDN for new settlement-date files at "
+            "https://cdn.finra.org/equity/otcmarket/biweekly/ (15th + "
+            "last business day of each month). Skips manifest-parsed "
+            "settlement dates EXCEPT the two most-recent (revision "
+            "window — FINRA publishes in-place revisionFlag='Y' "
+            "corrections within 1-2 cycles). Per-file: store_raw (raw "
+            "payload before parse, #1168) → conn.commit() → with "
+            "conn.transaction(): parse pipe-delim → preloaded symbol "
+            "resolver (~13k instruments) → bulk-UPSERT "
+            "finra_short_interest_observations + "
+            "finra_short_interest_current → manifest UPSERT 'parsed' "
+            "(synth no-op parser dispatch shape, G7 sec_xbrl_facts "
+            "precedent). Per-file failure isolated; partial success "
+            "durable. v1 manual-trigger surface is zero-param; "
+            "extended-window backfill (>400 days) via REPL runbook."
+        ),
+        cadence=Cadence.daily(hour=12, minute=0),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -4648,6 +4675,42 @@ def sec_master_idx_quarterly_sweep() -> None:
                 f"total_upserted={stats.total_upserted}; "
                 f"failed: {'; '.join(failed_details)}"
             )
+
+
+def finra_short_interest_refresh() -> None:
+    """``_INVOKERS['finra_short_interest_refresh']`` — G6/#915.
+
+    Daily 12:00 UTC; opens its own DB connection. Per-file commit /
+    rollback ownership lives inside ``run_finra_short_interest_refresh``
+    (mirror G12 sec_master_idx_quarterly_sweep shape). No operator
+    params at v1 — extended-window backfill is a REPL runbook against
+    ``run_finra_short_interest_refresh(conn, backfill_window_days=N)``
+    per spec §13 acceptance #8.
+
+    Failure surfacing: any per-file failure inside the job raises
+    ``RuntimeError`` so ``_tracked_job`` records
+    ``job_runs.status='failure'`` with the failed-file detail.
+    Successful files still commit before the raise — partial work is
+    durable; the failure signal is for operator visibility only.
+    """
+    from app.jobs.finra_short_interest_refresh import (
+        run_finra_short_interest_refresh,
+    )
+
+    with _tracked_job(JOB_FINRA_SHORT_INTEREST_REFRESH) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            stats = run_finra_short_interest_refresh(conn)
+        tracker.row_count = stats.total_upserted
+        logger.info(
+            "finra_short_interest_refresh: files=%d total_upserted=%d failed=%d",
+            len(stats.settlement_files),
+            stats.total_upserted,
+            stats.failed_files,
+        )
+        # RuntimeError on partial failure lives inside
+        # run_finra_short_interest_refresh so _tracked_job records
+        # status='failure'; this block just surfaces operator-visible
+        # row_count + summary log.
 
 
 def sec_rebuild(params: Mapping[str, Any]) -> None:

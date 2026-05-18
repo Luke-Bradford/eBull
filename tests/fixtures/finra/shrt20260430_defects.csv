@@ -1,0 +1,6 @@
+accountingYearMonthNumber|symbolCode|issueName|issuerServicesGroupExchangeCode|marketClassCode|currentShortPositionQuantity|previousShortPositionQuantity|stockSplitFlag|averageDailyVolumeQuantity|daysToCoverQuantity|revisionFlag|changePercent|changePreviousNumber|settlementDate
+20260430|COLLISION|Synthetic ambiguous-collapse|A|NYSE|1000|800||100|10.00||25.00|200|2026-04-30
+20260430|TRUNC1|Synthetic truncated row|A|NYSE
+20260430|NOTREAL12345|Synthetic no-match symbol|A|NYSE|500|400||50|10.00||25.00|100|2026-04-30
+20260430||Blank-symbol synthetic row|A|NYSE|1|1||1|1.00||0|0|2026-04-30
+20260430|BADINT|Malformed-int synthetic|A|NYSE|not_a_number|400|||10.00||25.00|100|2026-04-30

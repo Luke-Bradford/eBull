@@ -116,6 +116,16 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # sentinel to enforce the non-call invariant.
         "app/services/manifest_parsers/sec_xbrl_facts.py",
         "tests/test_manifest_parser_sec_xbrl_facts.py",
+        # G6/#915 — Synth no-op manifest parser for FINRA short
+        # interest. Same pattern as #1168 + G7 — the parser body
+        # returns ParseOutcome(parsed) without any fetch; the test
+        # patches fetch_document_text with a raising sentinel to
+        # enforce the non-call invariant. (The actual FINRA fetch
+        # path lives in `app/providers/implementations/finra_short_interest.py`
+        # which uses its own httpx.Client, NOT
+        # SecFilingsProvider.fetch_document_text.)
+        "app/services/manifest_parsers/finra_short_interest.py",
+        "tests/test_manifest_parser_finra_short_interest.py",
         # #1171 — real N-CSR / N-CSRS fund-metadata parser. Fetches
         # iXBRL companion via SecFilingsProvider.fetch_document_text
         # and normalises every structured field into SQL

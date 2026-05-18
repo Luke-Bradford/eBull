@@ -309,6 +309,9 @@ _INVOKERS[_scheduler.JOB_SEC_PER_CIK_POLL] = _adapt_zero_arg(_scheduler.sec_per_
 # G12 — Layer-4 cross-quarter discovery (weekly Sun 05:15 UTC).
 _INVOKERS[_scheduler.JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP] = _adapt_zero_arg(_scheduler.sec_master_idx_quarterly_sweep)
 _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking, no _adapt_zero_arg
+# G6/#915 — FINRA bimonthly short interest (daily 12:00 UTC). Zero-param
+# manual surface; extended-window backfill via REPL runbook.
+_INVOKERS[_scheduler.JOB_FINRA_SHORT_INTEREST_REFRESH] = _adapt_zero_arg(_scheduler.finra_short_interest_refresh)
 
 # ---------------------------------------------------------------------------
 # Bulk-archive Phase C ingester invokers (#1027 — #1020)

@@ -33,6 +33,7 @@ from app.jobs.listener import _dispatch_manual_job
 from app.jobs.locks import JobAlreadyRunning
 from app.jobs.runtime import _INVOKERS, JobRuntime
 from app.workers.scheduler import (
+    JOB_FINRA_SHORT_INTEREST_REFRESH,
     JOB_SEC_ATOM_FAST_LANE,
     JOB_SEC_DAILY_INDEX_RECONCILE,
     JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP,
@@ -539,6 +540,15 @@ class TestLayer123ExemptionWiring:
         """G12 carve-out eligibility check — weekly cadence + per-job
         prereq make the gate the right behaviour. See spec §3.1."""
         job = _job_by_name(JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP)
+        assert job is not None
+        assert job.exempt_from_universal_bootstrap_gate is False
+
+    def test_finra_short_interest_refresh_not_exempt(self) -> None:
+        """G6/#915 — FINRA bimonthly short interest. Daily cadence +
+        per-job ``_bootstrap_complete`` prereq make the universal-gate
+        the right behaviour. Carve-out is reserved for catch_up_on_boot
+        body-safe jobs only (spec §4.2)."""
+        job = _job_by_name(JOB_FINRA_SHORT_INTEREST_REFRESH)
         assert job is not None
         assert job.exempt_from_universal_bootstrap_gate is False
 

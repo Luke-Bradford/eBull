@@ -71,6 +71,7 @@ Lane = Literal[
     "db_ownership_insider",
     "db_ownership_funds",
     "bootstrap",
+    "finra",
 ]
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
 jobs serialise under one ``JobLock``; cross-source jobs run in parallel.
@@ -124,6 +125,15 @@ The final lane is bootstrap-only:
   serialise on the ``bootstrap`` lane's Postgres advisory lock — the
   ``bootstrap_state.status='running'`` fence is the primary serializer
   at trigger-publish time; this is belt-and-braces at dispatch time.
+
+* ``finra`` — FINRA CDN (cdn.finra.org). 1 req/s polite floor
+  (FINRA publishes no explicit rate limit on the equity short
+  interest catalog page; CDN robots.txt is 403). Disjoint from
+  ``sec_rate`` by construction (different host, no shared per-IP
+  budget). Module-global throttle clock + lock at
+  ``app/providers/implementations/finra_short_interest.py:46-48``.
+  v1 single job (``finra_short_interest_refresh``, G6/#915);
+  FINRA RegSHO daily (#916) adds a second job in the same lane.
 """
 
 
@@ -243,6 +253,10 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # partial-bootstrap dev DBs); without the entry, the orchestrator's
     # scoring layer KeyErrored once the deps started running.
     "morning_candidate_review": "db",
+    # finra_short_interest_refresh — FINRA bimonthly short interest
+    # (G6/#915). Daily 12:00 UTC cron + manual-trigger. Lane=``finra``
+    # so it's disjoint from sec_rate (different host).
+    "finra_short_interest_refresh": "finra",
 }
 
 
