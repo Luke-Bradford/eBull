@@ -465,15 +465,23 @@ def _create_empty_database(admin: psycopg.Connection[object], db_name: str) -> N
         cur.execute(query)
 
 
-def _apply_migrations(target_url: str) -> None:
+def _apply_migrations(target_url: str, *, stop_after: str | None = None) -> None:
     """Apply every ``sql/NNN_*.sql`` file to the target DB.
 
     Uses a per-file connection so a single transaction-hostile
     migration cannot poison the tracking state of earlier ones. Mirror
     of ``app/db/migrations.run_migrations`` but targeted at an
     arbitrary URL (the test template, not the dev DB).
+
+    ``stop_after`` (#1208 Phase 3): if provided, applies migrations
+    only up to and INCLUDING the file with that name (lexicographic
+    comparison via ``path.name <= stop_after``). Tests that need to
+    exercise a specific migration's swap shape pre-apply 1..N-1 then
+    invoke migration N separately.
     """
     files = sorted(_SQL_DIR.glob("*.sql"))
+    if stop_after is not None:
+        files = [p for p in files if p.name <= stop_after]
     if not files:
         return
 
