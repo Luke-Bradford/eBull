@@ -117,6 +117,35 @@ class TestResolveDynamicParams:
         out = _resolve_dynamic_params({"days_back": 365})
         assert out == {"days_back": 365}
 
+    def test_min_last_13f_hr_at_sentinel_resolves_to_utc_midnight(self) -> None:
+        """#1010 — HR-recency cutoff materialises as UTC start-of-day
+        ``today() - 380d``. Exact equality pins the invariant against
+        future time-of-day regressions (Codex 1b)."""
+        from datetime import UTC, datetime, time
+
+        from app.services.bootstrap_orchestrator import (
+            _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF,
+        )
+
+        out = _resolve_dynamic_params({"min_last_13f_hr_at": _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF})
+        # Mirror the resolver: UTC date, not local ``date.today()``.
+        # On a non-UTC dev host around the midnight boundary the two
+        # can differ by one day (Codex 2 MEDIUM).
+        expected = datetime.combine(
+            datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS),
+            time(0, 0),
+            tzinfo=UTC,
+        )
+        assert out["min_last_13f_hr_at"] == expected
+
+    def test_min_last_13f_hr_at_concrete_value_passes_through(self) -> None:
+        """Concrete datetime ≠ sentinel → returned unchanged."""
+        from datetime import UTC, datetime
+
+        fixed = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        out = _resolve_dynamic_params({"min_last_13f_hr_at": fixed})
+        assert out["min_last_13f_hr_at"] == fixed
+
 
 # ---------------------------------------------------------------------------
 # 3. Promoted invoker contract — params-aware bodies registered in _INVOKERS.
@@ -212,3 +241,74 @@ class TestSec13fSweepHonoursParams:
         kwargs = mock_ingest.call_args.kwargs
         assert kwargs["source_label"] == "sec_edgar_13f_directory_bootstrap"
         assert kwargs["min_period_of_report"] == cutoff
+
+    def test_sweep_params_propagate_min_last_13f_hr_at_to_cohort_listing(self) -> None:
+        """#1010 — ``sec_13f_quarterly_sweep`` body must thread
+        ``min_last_13f_hr_at`` into ``list_directory_filer_ciks`` so
+        the cohort filter actually runs."""
+        from datetime import UTC, datetime
+        from unittest.mock import MagicMock, patch
+
+        with (
+            patch("app.workers.scheduler._tracked_job") as mock_tracker,
+            patch("app.providers.implementations.sec_edgar.SecFilingsProvider"),
+            patch("app.workers.scheduler.psycopg.connect"),
+            patch("app.workers.scheduler.settings") as mock_settings,
+            patch(
+                "app.services.institutional_holdings.list_directory_filer_ciks",
+                return_value=[],
+            ) as mock_list_ciks,
+            patch(
+                "app.services.institutional_holdings.ingest_all_active_filers",
+                return_value=[],
+            ),
+        ):
+            mock_tracker.return_value.__enter__.return_value = MagicMock()
+            mock_tracker.return_value.__exit__.return_value = False
+            mock_settings.sec_user_agent = "test-agent"
+            mock_settings.sec_13f_sweep_deadline_seconds = 3600
+            mock_settings.database_url = "postgresql://stub/stub"
+
+            cutoff = datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
+            from app.workers.scheduler import sec_13f_quarterly_sweep
+
+            sec_13f_quarterly_sweep({"min_last_13f_hr_at": cutoff})
+
+        kwargs = mock_list_ciks.call_args.kwargs
+        assert kwargs["min_last_13f_hr_at"] == cutoff
+
+    def test_sweep_naive_datetime_min_last_13f_hr_at_gets_utc_tagged(self) -> None:
+        """#1010 Codex 1b — naive datetime is tagged UTC defensively
+        so psycopg never falls back to the server's local zone."""
+        from datetime import UTC, datetime
+        from unittest.mock import MagicMock, patch
+
+        with (
+            patch("app.workers.scheduler._tracked_job") as mock_tracker,
+            patch("app.providers.implementations.sec_edgar.SecFilingsProvider"),
+            patch("app.workers.scheduler.psycopg.connect"),
+            patch("app.workers.scheduler.settings") as mock_settings,
+            patch(
+                "app.services.institutional_holdings.list_directory_filer_ciks",
+                return_value=[],
+            ) as mock_list_ciks,
+            patch(
+                "app.services.institutional_holdings.ingest_all_active_filers",
+                return_value=[],
+            ),
+        ):
+            mock_tracker.return_value.__enter__.return_value = MagicMock()
+            mock_tracker.return_value.__exit__.return_value = False
+            mock_settings.sec_user_agent = "test-agent"
+            mock_settings.sec_13f_sweep_deadline_seconds = 3600
+            mock_settings.database_url = "postgresql://stub/stub"
+
+            naive = datetime(2025, 1, 1, 0, 0)  # noqa: DTZ001 — test of naive→UTC defensive tag
+            from app.workers.scheduler import sec_13f_quarterly_sweep
+
+            sec_13f_quarterly_sweep({"min_last_13f_hr_at": naive})
+
+        kwargs = mock_list_ciks.call_args.kwargs
+        passed = kwargs["min_last_13f_hr_at"]
+        assert passed.tzinfo is UTC
+        assert passed == datetime(2025, 1, 1, 0, 0, tzinfo=UTC)

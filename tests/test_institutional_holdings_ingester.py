@@ -815,6 +815,111 @@ class TestUniverseSweep:
         result = list_directory_filer_ciks(conn)
         assert result == ["0000000100", "0000000300", "0000000200", "0000000400"]
 
+    def test_list_directory_filer_ciks_filters_inactive_when_hr_cutoff_set(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#1010 — passing ``min_last_13f_hr_at`` filters cohort to
+        filers with HR-recency at or after the cutoff. NULL
+        ``last_13f_hr_at`` is excluded (NT-only / never-filed-HR)."""
+        from datetime import UTC, datetime, timedelta
+
+        from app.services.institutional_holdings import list_directory_filer_ciks
+
+        conn = ebull_test_conn
+        now = datetime(2026, 5, 5, 0, 0, tzinfo=UTC)
+        cutoff = now - timedelta(days=380)
+        recent = now - timedelta(days=30)
+        ancient = now - timedelta(days=800)
+        conn.execute(
+            "INSERT INTO institutional_filers (cik, name, filer_type, last_13f_hr_at) VALUES "
+            "('0000000700', 'RECENT HR', 'INV', %s), "
+            "('0000000800', 'ANCIENT HR', 'INV', %s), "
+            "('0000000900', 'NT ONLY', 'INV', NULL)",
+            (recent, ancient),
+        )
+        conn.commit()
+
+        result = list_directory_filer_ciks(conn, min_last_13f_hr_at=cutoff)
+        assert result == ["0000000700"]
+
+    def test_list_directory_filer_ciks_includes_exact_cutoff(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#1010 Codex 1b — boundary inclusive: ``last_13f_hr_at ==
+        cutoff`` must be returned. UTC start-of-day constructed
+        explicitly so a future cutoff change does not silently
+        regress the time-of-day invariant."""
+        from datetime import UTC, datetime, time
+
+        from app.services.institutional_holdings import list_directory_filer_ciks
+
+        cutoff = datetime.combine(date(2025, 5, 5), time(0, 0), tzinfo=UTC)
+        conn = ebull_test_conn
+        conn.execute(
+            "INSERT INTO institutional_filers (cik, name, filer_type, last_13f_hr_at) "
+            "VALUES ('0000001000', 'EXACT CUTOFF', 'INV', %s)",
+            (cutoff,),
+        )
+        conn.commit()
+
+        result = list_directory_filer_ciks(conn, min_last_13f_hr_at=cutoff)
+        assert result == ["0000001000"]
+
+    def test_upsert_filer_advances_last_13f_hr_at(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#1010 Codex 1a B-2 — the legacy per-filing ingest path
+        upserts ``institutional_filers`` and must advance
+        ``last_13f_hr_at`` because every accession reaching
+        ``_upsert_filer`` is a 13F-HR / HR-A (filtered in
+        parse_submissions_index)."""
+        from datetime import UTC
+        from datetime import date as _date
+        from datetime import datetime as _dt
+
+        from app.providers.implementations.sec_13f import ThirteenFFilerInfo
+        from app.services.institutional_holdings import _upsert_filer
+
+        conn = ebull_test_conn
+        conn.execute(
+            "INSERT INTO institutional_filers (cik, name, filer_type, last_13f_hr_at) "
+            "VALUES ('0000001100', 'FILER', 'INV', %s)",
+            (_dt(2025, 1, 1, 0, 0, tzinfo=UTC),),
+        )
+        conn.commit()
+
+        info = ThirteenFFilerInfo(
+            cik="0000001100",
+            name="FILER",
+            period_of_report=_date(2026, 3, 31),
+            filed_at=_dt(2026, 4, 15, 0, 0, tzinfo=UTC),
+            table_value_total_usd=None,
+        )
+        _upsert_filer(conn, info)
+        with conn.cursor() as cur:
+            cur.execute("SELECT last_13f_hr_at FROM institutional_filers WHERE cik = '0000001100'")
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == _dt(2026, 4, 15, 0, 0, tzinfo=UTC)
+
+        # Second upsert with an older filed_at must NOT regress.
+        older = ThirteenFFilerInfo(
+            cik="0000001100",
+            name="FILER",
+            period_of_report=_date(2024, 6, 30),
+            filed_at=_dt(2024, 6, 1, 0, 0, tzinfo=UTC),
+            table_value_total_usd=None,
+        )
+        _upsert_filer(conn, older)
+        with conn.cursor() as cur:
+            cur.execute("SELECT last_13f_hr_at FROM institutional_filers WHERE cik = '0000001100'")
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == _dt(2026, 4, 15, 0, 0, tzinfo=UTC)
+
     def test_explicit_ciks_list_overrides_seed_lookup(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

@@ -372,7 +372,11 @@ def _list_active_filer_seeds(conn: psycopg.Connection[tuple]) -> list[str]:
     return [_zero_pad_cik(row[0]) for row in cur.fetchall()]
 
 
-def list_directory_filer_ciks(conn: psycopg.Connection[tuple]) -> list[str]:
+def list_directory_filer_ciks(
+    conn: psycopg.Connection[tuple],
+    *,
+    min_last_13f_hr_at: datetime | None = None,
+) -> list[str]:
     """Walk every CIK in ``institutional_filers`` (the SEC 13F filer
     directory populated by ``sec_13f_filer_directory_sync`` #912).
 
@@ -382,14 +386,35 @@ def list_directory_filer_ciks(conn: psycopg.Connection[tuple]) -> list[str]:
     deadline-budget interruption then leaves the long-tail
     (low-activity filers) for the next sweep without losing the
     operator-relevant household names.
+
+    ``min_last_13f_hr_at`` (#1010) is an optional cohort filter for
+    the bootstrap-stage 21 dispatch. When set, the result is
+    restricted to filers with a known 13F-HR / 13F-HR/A filing on or
+    after the cutoff (NULL ``last_13f_hr_at`` is excluded). The
+    ordering also switches to ``last_13f_hr_at DESC NULLS LAST`` so
+    the bootstrap-bounded cohort is sorted by most-recent HR first —
+    the standalone (full-cohort) path's ``last_filing_at`` ordering
+    is preserved unchanged.
     """
-    cur = conn.execute(
-        """
-        SELECT cik
-        FROM institutional_filers
-        ORDER BY last_filing_at DESC NULLS LAST, cik
-        """
-    )
+    if min_last_13f_hr_at is None:
+        cur = conn.execute(
+            """
+            SELECT cik
+            FROM institutional_filers
+            ORDER BY last_filing_at DESC NULLS LAST, cik
+            """
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT cik
+            FROM institutional_filers
+            WHERE last_13f_hr_at IS NOT NULL
+              AND last_13f_hr_at >= %(cutoff)s
+            ORDER BY last_13f_hr_at DESC NULLS LAST, cik
+            """,
+            {"cutoff": min_last_13f_hr_at},
+        )
     return [_zero_pad_cik(row[0]) for row in cur.fetchall()]
 
 
@@ -633,16 +658,34 @@ def _upsert_filer(
     the latest-quarter holdings per filer on read.
     """
     filer_type = classify_filer_type(conn, info.cik)
+    # Per-filing ingest only reaches ``_upsert_filer`` for accessions
+    # whose form_type is 13F-HR or 13F-HR/A (filtered in
+    # ``parse_submissions_index`` at line 243), so ``info.filed_at``
+    # always represents an HR filing — safe to advance
+    # ``last_13f_hr_at`` unconditionally (#1010 Codex 1a B-2).
     cur = conn.execute(
         """
-        INSERT INTO institutional_filers (cik, name, filer_type, last_filing_at)
-        VALUES (%(cik)s, %(name)s, %(filer_type)s, %(last_filing_at)s)
+        INSERT INTO institutional_filers (
+            cik, name, filer_type, last_filing_at, last_13f_hr_at
+        )
+        VALUES (
+            %(cik)s, %(name)s, %(filer_type)s, %(filed_at)s, %(filed_at)s
+        )
         ON CONFLICT (cik) DO UPDATE SET
             name = EXCLUDED.name,
             filer_type = EXCLUDED.filer_type,
             last_filing_at = GREATEST(
                 COALESCE(institutional_filers.last_filing_at, '-infinity'),
                 COALESCE(EXCLUDED.last_filing_at, '-infinity')
+            ),
+            -- HR-only recency: NULLIF collapses the '-infinity' sentinel
+            -- back to NULL when both sides are NULL (#1010 Codex 1a B-1).
+            last_13f_hr_at = NULLIF(
+                GREATEST(
+                    COALESCE(institutional_filers.last_13f_hr_at, '-infinity'::timestamptz),
+                    COALESCE(EXCLUDED.last_13f_hr_at,            '-infinity'::timestamptz)
+                ),
+                '-infinity'::timestamptz
             ),
             fetched_at = NOW()
         RETURNING filer_id
@@ -651,7 +694,7 @@ def _upsert_filer(
             "cik": info.cik,
             "name": info.name,
             "filer_type": filer_type,
-            "last_filing_at": info.filed_at,
+            "filed_at": info.filed_at,
         },
     )
     row = cur.fetchone()

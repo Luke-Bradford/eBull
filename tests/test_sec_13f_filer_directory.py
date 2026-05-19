@@ -264,9 +264,10 @@ class TestSyncFilerDirectory:
             quarters: list[tuple[int, int]],
             *,
             fetch: object,
-        ) -> tuple[dict[str, str], dict[str, date], int]:
+        ) -> tuple[dict[str, str], dict[str, date], dict[str, date], int]:
             return (
                 {"0000000100": "VALID FILER", "0000000200": "   "},
+                {"0000000100": date(2026, 2, 14), "0000000200": date(2026, 2, 14)},
                 {"0000000100": date(2026, 2, 14), "0000000200": date(2026, 2, 14)},
                 0,
             )
@@ -337,6 +338,99 @@ class TestSyncFilerDirectory:
         assert row["name"] == "NEWER CANONICAL NAME"
         # GREATEST() keeps the newer timestamp.
         assert row["last_filing_at"].year == 2027
+
+    def test_nt_only_filer_does_not_set_last_13f_hr_at(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """13F-NT is notice-only (no holdings). It must advance
+        ``last_filing_at`` (all-form recency) but NOT
+        ``last_13f_hr_at`` (HR-only recency that bounds the
+        bootstrap-stage 21 cohort). #1010 spec §3.2."""
+        payload = _HEADER + _row("13F-NT", "NOTICE FILER LLC", 600, "2026-02-14", "edgar/data/600/a.txt")
+        sync_filer_directory(ebull_test_conn, quarters=1, today=date(2026, 5, 5), fetch=lambda *_: payload)
+
+        with ebull_test_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT last_filing_at, last_13f_hr_at FROM institutional_filers WHERE cik = '0000000600'")
+            row = cur.fetchone()
+        assert row is not None
+        assert row["last_filing_at"] is not None
+        assert row["last_filing_at"].date() == date(2026, 2, 14)
+        assert row["last_13f_hr_at"] is None
+
+    def test_hr_and_nt_same_filer_sets_last_13f_hr_at_from_hr_only(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Mixed payload: NT later, HR earlier. ``last_filing_at``
+        tracks the newer NT (all-form); ``last_13f_hr_at`` tracks
+        only the earlier HR. NT must not contaminate the HR column.
+        #1010 spec §3.2."""
+        payload = (
+            _HEADER
+            + _row("13F-HR", "FILER HR", 700, "2026-01-15", "edgar/data/700/a.txt")
+            + _row("13F-NT", "FILER NT", 700, "2026-02-14", "edgar/data/700/b.txt")
+        )
+        sync_filer_directory(ebull_test_conn, quarters=1, today=date(2026, 5, 5), fetch=lambda *_: payload)
+
+        with ebull_test_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT last_filing_at, last_13f_hr_at FROM institutional_filers WHERE cik = '0000000700'")
+            row = cur.fetchone()
+        assert row is not None
+        assert row["last_filing_at"].date() == date(2026, 2, 14)
+        assert row["last_13f_hr_at"] is not None
+        assert row["last_13f_hr_at"].date() == date(2026, 1, 15)
+
+    def test_existing_null_hr_with_incoming_nt_only_keeps_null(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Pre-existing row with NULL ``last_13f_hr_at``. Payload
+        carries only a 13F-NT for the same CIK. NULLIF guard must
+        collapse the ``'-infinity'`` sentinel back to NULL so the
+        row stays excluded from the cohort filter. Codex 1a B-1 +
+        1b boundary check."""
+        ebull_test_conn.execute(
+            "INSERT INTO institutional_filers (cik, name, filer_type, last_13f_hr_at) "
+            "VALUES ('0000000800', 'PRE-EXISTING', 'INV', NULL)"
+        )
+        ebull_test_conn.commit()
+
+        payload = _HEADER + _row("13F-NT", "NOTICE", 800, "2026-02-14", "edgar/data/800/a.txt")
+        sync_filer_directory(ebull_test_conn, quarters=1, today=date(2026, 5, 5), fetch=lambda *_: payload)
+
+        with ebull_test_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT last_13f_hr_at FROM institutional_filers WHERE cik = '0000000800'")
+            row = cur.fetchone()
+        assert row is not None
+        assert row["last_13f_hr_at"] is None
+
+    def test_existing_newer_last_13f_hr_at_preserved(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """GREATEST monotone: a pre-existing newer ``last_13f_hr_at``
+        (e.g. populated by the per-filing ingest from primary_doc.xml)
+        is not regressed by an older form.idx HR. Mirrors the existing
+        guard for ``last_filing_at``. #1010."""
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        ebull_test_conn.execute(
+            "INSERT INTO institutional_filers (cik, name, filer_type, last_13f_hr_at) "
+            "VALUES ('0000000900', 'NEWER HR FILER', 'INV', %s)",
+            (_dt(2027, 1, 15, 0, 0, tzinfo=UTC),),
+        )
+        ebull_test_conn.commit()
+
+        payload = _HEADER + _row("13F-HR", "OLDER HR", 900, "2026-02-14", "edgar/data/900/a.txt")
+        sync_filer_directory(ebull_test_conn, quarters=1, today=date(2026, 5, 5), fetch=lambda *_: payload)
+
+        with ebull_test_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT last_13f_hr_at FROM institutional_filers WHERE cik = '0000000900'")
+            row = cur.fetchone()
+        assert row is not None
+        assert row["last_13f_hr_at"].year == 2027
 
     def test_filer_type_preserved_on_update(
         self,
