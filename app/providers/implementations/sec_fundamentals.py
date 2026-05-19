@@ -132,18 +132,56 @@ _PERIOD_MAX: Final[date] = date(2100, 1, 1)
 _REJ_END_OUT_OF_WINDOW: Final[str] = "period_end_out_of_window"
 _REJ_START_OUT_OF_WINDOW: Final[str] = "period_start_out_of_window"
 _REJ_START_AFTER_END: Final[str] = "period_start_after_period_end"
+# #1233 — XBRL retention horizon. Pre-cutoff facts are rejected at the
+# parser so the bulk ingest never persists them. Independent of
+# _PERIOD_MIN (which is a data-shape sanity guard for parser bugs).
+_REJ_END_BEFORE_RETENTION_CUTOFF: Final[str] = "period_end_before_retention_cutoff"
+
+# #1233 — Spec `docs/superpowers/specs/2026-05-19-data-retention-rubric.md`
+# §4.1. Companyfacts retention cap is 20y of financial history per CIK.
+# Operators that need deeper history re-ingest via
+# `POST /jobs/sec_rebuild/run` with an explicit since override.
+_RETENTION_YEARS: Final[int] = 20
+
+
+def _default_retention_cutoff(*, today: date | None = None) -> date:
+    """Return the default companyfacts retention cutoff (``today - 20y``).
+
+    ``today`` is parametrised so tests can pin a stable reference
+    date without monkeypatching ``date.today()``. Production callers
+    omit it and the current UTC date is used.
+    """
+    from datetime import UTC, datetime
+
+    ref = today if today is not None else datetime.now(tz=UTC).date()
+    # date.replace handles leap-day source dates (Feb 29) by raising
+    # ValueError on non-leap target years; fall back to Mar 1 in that
+    # edge case so the cutoff is always well-defined.
+    try:
+        return ref.replace(year=ref.year - _RETENTION_YEARS)
+    except ValueError:
+        return date(ref.year - _RETENTION_YEARS, 3, 1)
 
 
 def _classify_period_rejection(
     period_start: date | None,
     period_end: date,
+    *,
+    retention_cutoff: date | None = None,
 ) -> str | None:
     """Return one of the ``_REJ_*`` reason constants if the
     ``(period_start, period_end)`` pair should be rejected, or
-    ``None`` if the pair is in-window and well-ordered.
+    ``None`` if the pair is in-window, well-ordered, and inside the
+    retention horizon.
 
     Pure date predicate — no logging, no XBRL-shape coupling, so the
     helper is trivially testable.
+
+    ``retention_cutoff`` (#1233) — when non-None, rejects facts whose
+    ``period_end`` is strictly before the cutoff (typically
+    ``_default_retention_cutoff()`` = today - 20y). Independent from
+    the ``_PERIOD_MIN`` / ``_PERIOD_MAX`` data-shape sanity guards
+    (#1218) which catch parser-bug junk like year-6016 / pre-1900.
     """
     if not (_PERIOD_MIN <= period_end < _PERIOD_MAX):
         return _REJ_END_OUT_OF_WINDOW
@@ -152,6 +190,8 @@ def _classify_period_rejection(
             return _REJ_START_OUT_OF_WINDOW
         if period_start > period_end:
             return _REJ_START_AFTER_END
+    if retention_cutoff is not None and period_end < retention_cutoff:
+        return _REJ_END_BEFORE_RETENTION_CUTOFF
     return None
 
 
@@ -359,6 +399,7 @@ def _extract_facts_from_section(
     *,
     taxonomy: str,
     allowed_tags: frozenset[str] | None = None,
+    retention_cutoff: date | None = None,
 ) -> list[XbrlFact]:
     """Extract XBRL facts from one ``facts.<taxonomy>`` section.
 
@@ -371,6 +412,16 @@ def _extract_facts_from_section(
     ``financial_facts_raw`` captures the full richness of each
     filing instead of the narrow ``TRACKED_CONCEPTS`` editorial
     subset.
+
+    ``retention_cutoff`` (#1233) — when set, rejects facts whose
+    ``period_end`` is strictly before the cutoff with a per-(accession,
+    reason) WARN. Bulk ingest callers
+    (:func:`app.services.sec_companyfacts_ingest.ingest_companyfacts_archive`)
+    pass ``_default_retention_cutoff()`` (= today - 20y) to honour
+    the spec at
+    ``docs/superpowers/specs/2026-05-19-data-retention-rubric.md`` §4.1.
+    Per-CIK API callers omit the cutoff to keep ad-hoc deep-dive
+    reads unbounded.
     """
     facts: list[XbrlFact] = []
     # Per-call WARN dedup on ``(accession, reason)`` — without this, a
@@ -411,7 +462,11 @@ def _extract_facts_from_section(
                 # has a 5000-row alarm; silently routing parser bugs into
                 # it is a non-actionable signal. Skip + WARN with reason
                 # + full provenance instead.
-                rejection_reason = _classify_period_rejection(period_start, period_end)
+                # #1233 — additionally rejects facts older than the 20y
+                # retention horizon when ``retention_cutoff`` is set.
+                rejection_reason = _classify_period_rejection(
+                    period_start, period_end, retention_cutoff=retention_cutoff
+                )
                 if rejection_reason is not None:
                     key = (accn, rejection_reason)
                     if key not in warned_rejections:
@@ -646,14 +701,15 @@ class SecFundamentalsProvider(FundamentalsProvider):
         employee count. Stamped with ``taxonomy='dei'`` so downstream
         normalisation routes them independently.
 
-        **#451 Phase A**: extractor no longer filters on the
-        editorial ``TRACKED_CONCEPTS`` allowlist. Every concept the
-        issuer reports lands in ``financial_facts_raw`` so segment
-        reporting, deferred-tax breakdown, lease liabilities, and
-        the rest of the long tail are queryable from SQL. The
-        ``TRACKED_CONCEPTS`` alias map is still used by downstream
-        ``financial_periods`` projection logic to select canonical
-        synonyms when aggregating.
+        **#1233**: applies the canonical companyfacts caps —
+        ``_ALL_TRACKED_TAGS`` (us-gaap whitelist) +
+        ``_ALL_TRACKED_DEI_TAGS`` (DEI whitelist) +
+        ``_default_retention_cutoff()`` (today - 20y). This is the
+        steady-state refresh path that runs after the bulk bootstrap;
+        without the caps here a subsequent refresh of any CIK would
+        re-populate pre-cutoff + off-whitelist rows in
+        ``financial_facts_raw`` and undo the bootstrap-time discipline
+        (Codex 2 P1 catch).
         """
         raw = self._fetch_company_facts(cik)
         if raw is None:
@@ -664,11 +720,26 @@ class SecFundamentalsProvider(FundamentalsProvider):
         if not gaap_section and not dei_section:
             logger.info("No us-gaap or dei facts for %s (CIK %s)", symbol, cik)
             return []
+        retention_cutoff = _default_retention_cutoff()
         facts: list[XbrlFact] = []
         if gaap_section:
-            facts.extend(_extract_facts_from_section(gaap_section, taxonomy="us-gaap"))
+            facts.extend(
+                _extract_facts_from_section(
+                    gaap_section,
+                    taxonomy="us-gaap",
+                    allowed_tags=_ALL_TRACKED_TAGS,
+                    retention_cutoff=retention_cutoff,
+                )
+            )
         if dei_section:
-            facts.extend(_extract_facts_from_section(dei_section, taxonomy="dei"))
+            facts.extend(
+                _extract_facts_from_section(
+                    dei_section,
+                    taxonomy="dei",
+                    allowed_tags=_ALL_TRACKED_DEI_TAGS,
+                    retention_cutoff=retention_cutoff,
+                )
+            )
         return facts
 
     def extract_concept_catalog(self, symbol: str, cik: str) -> list[XbrlConceptCatalogEntry]:
@@ -691,6 +762,14 @@ class SecFundamentalsProvider(FundamentalsProvider):
 
         Preferred call for the ingester path so we don't double
         round-trip SEC for facts + catalogue on every refresh.
+
+        **#1233**: applies the canonical companyfacts caps to the
+        fact stream (whitelist + 20y retention cutoff). Catalogue
+        entries stay uncapped — the catalogue is a per-concept
+        metadata snapshot (label, description, units) keyed on
+        concept name; capping the catalogue would orphan downstream
+        UI rendering for any concept that exists in catalogue but
+        was filtered from facts.
         """
         raw = self._fetch_company_facts(cik)
         if raw is None:
@@ -701,13 +780,28 @@ class SecFundamentalsProvider(FundamentalsProvider):
         if not gaap_section and not dei_section:
             logger.info("No us-gaap or dei facts for %s (CIK %s)", symbol, cik)
             return [], []
+        retention_cutoff = _default_retention_cutoff()
         facts: list[XbrlFact] = []
         entries: list[XbrlConceptCatalogEntry] = []
         if gaap_section:
-            facts.extend(_extract_facts_from_section(gaap_section, taxonomy="us-gaap"))
+            facts.extend(
+                _extract_facts_from_section(
+                    gaap_section,
+                    taxonomy="us-gaap",
+                    allowed_tags=_ALL_TRACKED_TAGS,
+                    retention_cutoff=retention_cutoff,
+                )
+            )
             entries.extend(_extract_catalog_from_section(gaap_section, taxonomy="us-gaap"))
         if dei_section:
-            facts.extend(_extract_facts_from_section(dei_section, taxonomy="dei"))
+            facts.extend(
+                _extract_facts_from_section(
+                    dei_section,
+                    taxonomy="dei",
+                    allowed_tags=_ALL_TRACKED_DEI_TAGS,
+                    retention_cutoff=retention_cutoff,
+                )
+            )
             entries.extend(_extract_catalog_from_section(dei_section, taxonomy="dei"))
         return facts, entries
 

@@ -30,7 +30,12 @@ from typing import Any
 import psycopg
 
 from app.providers.fundamentals import XbrlFact
-from app.providers.implementations.sec_fundamentals import _extract_facts_from_section
+from app.providers.implementations.sec_fundamentals import (
+    _ALL_TRACKED_DEI_TAGS,
+    _ALL_TRACKED_TAGS,
+    _default_retention_cutoff,
+    _extract_facts_from_section,
+)
 from app.services.fundamentals import (
     finish_ingestion_run,
     start_ingestion_run,
@@ -75,15 +80,38 @@ def extract_facts_from_companyfacts_payload(
     public ``extract_facts(symbol, cik)`` method on the provider
     self-fetches over HTTP; for bulk ingest we have the payload
     already.
+
+    #1233 — applies the canonical companyfacts caps at extraction:
+    `_ALL_TRACKED_TAGS` (us-gaap whitelist of ~50 numeric concepts) +
+    `_ALL_TRACKED_DEI_TAGS` (DEI shares-outstanding / public-float /
+    employees) + `_default_retention_cutoff()` (today - 20y). Per
+    spec `docs/superpowers/specs/2026-05-19-data-retention-rubric.md`
+    §4.1, bulk ingest is the canonical "must apply caps" path; the
+    per-CIK API extractor stays uncapped for ad-hoc deep-dive use.
     """
     raw_facts: dict[str, Any] = payload.get("facts", {})
     gaap_section = raw_facts.get("us-gaap", {})
     dei_section = raw_facts.get("dei", {})
+    retention_cutoff = _default_retention_cutoff()
     facts: list[XbrlFact] = []
     if gaap_section:
-        facts.extend(_extract_facts_from_section(gaap_section, taxonomy="us-gaap"))
+        facts.extend(
+            _extract_facts_from_section(
+                gaap_section,
+                taxonomy="us-gaap",
+                allowed_tags=_ALL_TRACKED_TAGS,
+                retention_cutoff=retention_cutoff,
+            )
+        )
     if dei_section:
-        facts.extend(_extract_facts_from_section(dei_section, taxonomy="dei"))
+        facts.extend(
+            _extract_facts_from_section(
+                dei_section,
+                taxonomy="dei",
+                allowed_tags=_ALL_TRACKED_DEI_TAGS,
+                retention_cutoff=retention_cutoff,
+            )
+        )
     return facts
 
 
