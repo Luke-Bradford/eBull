@@ -51,14 +51,27 @@ def test_autocommit_isolates_failed_probe_under_real_db(
     assert snapshot.wal_breached_warn is None
     assert any(e.startswith("wal_dir:") for e in snapshot.metric_errors)
 
-    # CRITICAL: subsequent probes — running on the SAME connection —
-    # MUST have succeeded. If autocommit=True is missing, the conn is
-    # in ABORTED state after the wal_dir probe and `db_size_bytes`
-    # would also be None (with a misleading
-    # `InFailedSqlTransaction` error). The non-None assertion below
-    # is the guard.
-    assert snapshot.db_size_bytes is not None, (
-        "subsequent probe failed — autocommit=True missing from psycopg.connect(...)?"
+    # CRITICAL: probes dispatched AFTER `_q_wal_dir` in
+    # `collect_postgres_health` MUST have succeeded — that's the real
+    # autocommit-isolation guard. Bot review #1216 prevention: assert
+    # on a probe N+k (k>=1), with N here = `_q_wal_dir`. Probes that
+    # come BEFORE `_q_wal_dir` (`_q_db_size`, `_q_leaked_test_dbs`)
+    # always succeed regardless of autocommit because the conn isn't
+    # aborted yet — asserting on them would be a false guard.
+    #
+    # Dispatch order in collect_postgres_health:
+    #   1. db_size            (before wal_dir — not a guard)
+    #   2. leaked_test_dbs    (before wal_dir — not a guard)
+    #   3. wal_dir            (PATCHED to raise)
+    #   4. wal_since_checkpoint (after wal_dir — load-bearing guard)
+    #   5. last_checkpoint     (after wal_dir — load-bearing guard)
+    #   6. autovacuum_top10    (after wal_dir — load-bearing guard)
+    #   7. default_partition_rows (after wal_dir — load-bearing guard)
+    assert snapshot.wal_since_checkpoint_bytes is not None, (
+        "post-wal_dir probe failed — autocommit=True missing from "
+        "psycopg.connect(...) leaves the conn in ABORTED state after "
+        "the patched probe raised."
     )
-    assert snapshot.leaked_test_db_count is not None
     assert snapshot.last_checkpoint_at is not None
+    assert snapshot.autovacuum_top10 is not None
+    assert snapshot.financial_facts_raw_default_rows is not None
