@@ -77,8 +77,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         cur.execute(f"DELETE FROM financial_facts_raw WHERE {_WINDOW_PREDICATE}")
+        # Report ``cur.rowcount`` (authoritative post-DELETE count) rather
+        # than the pre-DELETE ``n``: on a shared dev DB a row could be
+        # inserted between COUNT(*) and DELETE, so ``n`` is stale. Bot
+        # review NITPICK on PR #1220.
+        deleted = cur.rowcount
         conn.commit()
-        print(f"Deleted {n} rows.")
+        print(f"Deleted {deleted} rows.")
         return 0
 
 
