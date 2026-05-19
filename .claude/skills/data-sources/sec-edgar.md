@@ -512,6 +512,22 @@ Vanguard 500 Index has VFINX (Investor) + VFIAX (Admiral). Both share classes ho
 
 A manager can submit multiple rows per security (per share class / per discretion bucket / per managed sub-fund). Aggregating "manager X's AAPL position" requires summing across rows. PR #1054 caught this.
 
+### 7.16 XBRL `period_end` / `period_start` outside the sanity window (#1218)
+
+SEC's `xbrli:period` XSD typing is `xs:date`, which accepts year 1 → 9999 with no semantic bound. EDGAR submission-time checks reject most malformed contexts but not all — pre-#1218 dev DB observed:
+
+- `period_end='6016-06-30'` (digit-overflow on year — 4-digit `6016` instead of `2016`).
+- `period_start='205-01-01'` (3-digit year-truncation, `period_end` correct at `2025-03-31` — bug hides because partition routing keys on `period_end`).
+- `period_end` in `[1850, 1900)` (pre-EDGAR; impossible to be a real filing).
+
+**Without a parser guard these silently land in `financial_facts_raw` and `financial_facts_raw_default` partition (`sql/156`, #1208 P3) accumulates them until the 5000-row alarm in `app/services/postgres_health.py::DEFAULT_PARTITION_WARN_ROWS` fires hours later.** Bad `period_start` with good `period_end` is even worse — routes to a normal quarterly partition and hides entirely from the default-partition alarm.
+
+**Rule:** the canonical XBRL extractor `_extract_facts_from_section` at `app/providers/implementations/sec_fundamentals.py` rejects any fact failing `_classify_period_rejection`. Window `[1900-01-01, 2100-01-01)`; rejects negative-duration (`period_start > period_end`) too. Per-(accession, reason) WARN dedup at the log site so a single malformed filing doesn't fan out across hundreds of `concept × unit_key` rows.
+
+**Single chokepoint.** Per-CIK API (`extract_facts` / `extract_facts_and_catalog`), bulk archive (`ingest_companyfacts_archive` → `extract_facts_from_companyfacts_payload`), AND companyconcept primitive (`extract_concept_facts`) ALL route through `_extract_facts_from_section`. Adding any new XBRL ingest path: route through this extractor; do NOT add a parallel parser.
+
+Cleanup tool: `scripts/cleanup_1218_out_of_window_facts.py` (dry-run default, `--apply` to commit). Predicate MUST mirror the parser guard 1-to-1 — if you tune the window, tune both.
+
 ## 8. Operator checklist for new SEC integrations
 
 Before writing code that hits SEC EDGAR:
