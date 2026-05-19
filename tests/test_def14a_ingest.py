@@ -740,3 +740,33 @@ class TestBootstrapDef14a:
             == summary.accessions_succeeded + summary.accessions_partial + summary.accessions_failed
         )
         assert summary.accessions_failed >= 1
+
+    def test_exit_reason_drained_when_queue_empties(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#1234 — when the candidate query returns zero rows, the
+        loop exits with ``exit_reason='drained'``. Confirms the natural
+        completion path is signalled explicitly so downstream
+        observability can distinguish from deadline-bound exits."""
+        conn = _setup
+        fetcher = _InMemoryFetcher({})
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=100, max_runtime_seconds=10)
+        assert summary.accessions_seen == 0
+        assert summary.exit_reason == "drained"
+
+    def test_exit_reason_deadline_when_max_runtime_zero(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#1234 — when ``max_runtime_seconds=0`` the deadline expires
+        before the first chunk runs, so the loop never enters its body
+        and exits with ``exit_reason='deadline'`` (the default). Pin
+        the deadline-exit signal so a future regression that conflates
+        deadline-bound vs drained tripping is caught here."""
+        conn = _setup
+        fetcher = _InMemoryFetcher({})
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=100, max_runtime_seconds=0)
+        # Loop body never executed (deadline was 0); no work done.
+        assert summary.accessions_seen == 0
+        assert summary.exit_reason == "deadline"

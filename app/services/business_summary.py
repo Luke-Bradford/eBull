@@ -1370,6 +1370,12 @@ class IngestResult:
     rows_updated: int
     fetch_errors: int
     parse_misses: int
+    # #1234 — exit reason for deadline-bound bootstrap loops
+    # (``bootstrap_business_summaries``). ``None`` for single-chunk
+    # callers that don't loop. ``drained`` = candidate query returned
+    # zero rows. ``deadline`` = wall-clock cap fired before drain
+    # (silent undercoverage; operator re-trigger to finish).
+    exit_reason: Literal["drained", "deadline"] | None = None
 
 
 # Soft minimum body length below which the extractor is treated as a
@@ -1473,6 +1479,8 @@ def bootstrap_business_summaries(
     total_updated = 0
     total_fetch_errors = 0
     total_parse_misses = 0
+    # #1234 — track WHY the loop exits.
+    exit_reason: Literal["drained", "deadline"] = "deadline"
 
     while time.monotonic() < deadline:
         chunk = ingest_business_summaries(
@@ -1488,16 +1496,34 @@ def bootstrap_business_summaries(
         total_fetch_errors += chunk.fetch_errors
         total_parse_misses += chunk.parse_misses
         if chunk.filings_scanned == 0:
+            exit_reason = "drained"
             break
 
     logger.info(
-        "bootstrap_business_summaries complete: scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
+        "bootstrap_business_summaries complete: scanned=%d inserted=%d updated=%d "
+        "fetch_errors=%d parse_misses=%d exit=%s",
         total_scanned,
         total_inserted,
         total_updated,
         total_fetch_errors,
         total_parse_misses,
+        exit_reason,
     )
+    # #1234 — deadline exit = silent undercoverage. WARNING-level log
+    # so operators see "candidate set may not be fully drained" without
+    # grepping. Full warnings_count wiring through _JobTracker is a
+    # follow-up (touches every tracked-job site).
+    if exit_reason == "deadline":
+        logger.warning(
+            "bootstrap_business_summaries hit wall-clock deadline "
+            "(max_runtime_seconds=%d) — candidate set may not be fully "
+            "drained. Re-trigger the stage to process the remaining "
+            "backlog. scanned=%d inserted=%d updated=%d.",
+            max_runtime_seconds,
+            total_scanned,
+            total_inserted,
+            total_updated,
+        )
 
     return IngestResult(
         filings_scanned=total_scanned,
@@ -1505,6 +1531,7 @@ def bootstrap_business_summaries(
         rows_updated=total_updated,
         fetch_errors=total_fetch_errors,
         parse_misses=total_parse_misses,
+        exit_reason=exit_reason,
     )
 
 

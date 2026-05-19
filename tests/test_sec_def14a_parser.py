@@ -26,6 +26,7 @@ from decimal import Decimal
 
 from app.providers.implementations.sec_def14a import (
     Def14ABeneficialOwnershipTable,
+    _parse_percent,
     extract_plan_name_and_trustee,
     is_esop_plan,
     parse_beneficial_ownership_table,
@@ -615,3 +616,72 @@ def test_parser_overrides_role_to_esop_for_matching_holder_name() -> None:
     assert plan_holder.holder_role == "esop"
     assert plan_holder.shares == Decimal("2000000")
     assert plan_holder.percent_of_class == Decimal("6.5")
+
+
+# ---------------------------------------------------------------------------
+# #1228 — _parse_percent out-of-range clamp
+# ---------------------------------------------------------------------------
+
+
+class TestParsePercentRangeClamp:
+    """Regression for #1228 — DEF14A NUMERIC(8,4) overflow when a
+    column-resolver misfire routes a 7-digit shares value into the
+    percent cell. Schema rejects values > 9999.9999 and previously
+    aborted the entire batch in ``ingest_def14a``."""
+
+    def test_valid_low_percent_passes(self) -> None:
+        assert _parse_percent("0.5") == Decimal("0.5")
+
+    def test_valid_mid_percent_passes(self) -> None:
+        assert _parse_percent("12.34") == Decimal("12.34")
+
+    def test_valid_max_boundary_100_passes(self) -> None:
+        assert _parse_percent("100") == Decimal("100")
+
+    def test_valid_zero_passes(self) -> None:
+        assert _parse_percent("0") == Decimal("0")
+
+    def test_misrouted_shares_count_rejected(self) -> None:
+        # 9,000,000 — typical 7-digit shares count misrouted into
+        # percent slot via positional fallback in ``_resolve_columns``.
+        assert _parse_percent("9000000") is None
+
+    def test_just_above_100_rejected(self) -> None:
+        # Real percent ownership cannot exceed 100. A 100.01 value is
+        # almost certainly a parsing artefact, not a real holding.
+        assert _parse_percent("100.01") is None
+
+    def test_just_below_zero_rejected(self) -> None:
+        assert _parse_percent("-0.01") is None
+
+    def test_comma_thousand_separator_shares_rejected(self) -> None:
+        # "9,000,000" — same as above with the SEC-canonical comma
+        # separator. ``_parse_percent`` strips commas + parses;
+        # the clamp catches the resulting 9000000 Decimal.
+        assert _parse_percent("9,000,000") is None
+
+    def test_asterisk_less_than_one_still_passes(self) -> None:
+        # Industry-convention asterisk maps to 0.5 — must not regress
+        # under the new clamp.
+        from app.providers.implementations.sec_def14a import _LESS_THAN_ONE_PERCENT_VALUE
+
+        assert _parse_percent("*") == _LESS_THAN_ONE_PERCENT_VALUE
+
+    def test_dash_returns_none(self) -> None:
+        assert _parse_percent("—") is None
+
+    def test_empty_returns_none(self) -> None:
+        assert _parse_percent("") is None
+
+    def test_invalid_text_returns_none(self) -> None:
+        assert _parse_percent("N/A") is None
+
+    def test_nan_returns_none(self) -> None:
+        # ``Decimal("NaN")`` is a valid Decimal but comparing it
+        # against a finite Decimal raises ``InvalidOperation``. Guard
+        # explicitly so the clamp doesn't blow up on a malformed cell.
+        assert _parse_percent("NaN") is None
+
+    def test_infinity_returns_none(self) -> None:
+        assert _parse_percent("Infinity") is None
+        assert _parse_percent("-Infinity") is None
