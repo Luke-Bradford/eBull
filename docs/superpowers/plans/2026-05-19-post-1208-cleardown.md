@@ -50,17 +50,19 @@ Three deliverables. Each follows the #1208-shape cadence: spike → spec → Cod
 - **Outcome:** cohort 11,205 → 8,718 (78% have backfill) → 8,681 (within 380d). Subsequent `sec_13f_filer_directory_sync` runs converge to form.idx ground truth (NT-only filers re-revealed as NULL).
 - **Iteration:** Codex 1a (6 findings: NULLIF guard, `_upsert_filer` advance, UTC-midnight cutoff, backfill caveat, shared-cutoff justification, default ordering preserved), Codex 1b (4 follow-ups: exact-equality test, naive ISO UTC tag, retired-cron wording, boundary-test UTC midnight explicit), Codex 1c clean, Codex 2 MEDIUM (`date.today()` is local TZ → `datetime.now(tz=UTC).date()`). Bot APPROVE round 1 + APPROVE round 2 after NITPICK fix (`__import__("datetime").timezone.utc` → `from datetime import UTC`).
 
-### Phase A.3 — #1136 bootstrap state-machine audit (scope subset)
+### Phase A.3 — #1136 bootstrap state-machine audit (scope subset) — CLOSED 2026-05-19
 
-- **Symptom:** `bootstrap_state` is in `partial_error` post-2026-05-17 attempt. Audit ticket lists ~20 gaps — most are tracked elsewhere (#935, #1010, #1041, #1064/#1073, #649, #1020). The remaining bootstrap-blocking items are operator-visibility + retryability gaps.
-- **Scope (Phase 4 trim):**
-  - Audit current `bootstrap_stages` to identify which stage(s) failed in run_id=3.
-  - For each failed stage: confirm the underlying ETL is patched (Phase A.1, A.2, or a previous fix) + add a regression test that the stage now succeeds against a fresh DB.
-  - Operator-visible: `GET /system/bootstrap-status` (mirror of `/system/postgres-health` shape) returning `(stage, last_status, last_error, retryable)` per stage. Lets operator drive T9-POST without log-grepping.
-- **Why pre-bootstrap:** without operator visibility, T9-POST is "click retry, wait, hope" — slow + error-prone. The endpoint makes the drain self-documenting.
-- **Estimate:** ~300 LOC + 1 migration if new column needed. One PR.
-- **Defer:** larger items in #1136 (#1041 slow-connection, #649 self-healing freshness, #1064 admin hub) stay open; this Phase 4 trim picks only the operator-visibility + stage-retry gaps.
-- **Spec gate:** `docs/superpowers/specs/2026-05-NN-1136-bootstrap-state-audit.md` + Codex 1a/1b.
+**Merged:** PR #1223 / `bd6a0fc`.
+**Spec:** `docs/superpowers/specs/2026-05-19-1136-bootstrap-state-audit.md`.
+
+- **Symptom:** `bootstrap_state` was in `partial_error` post-2026-05-17 run_id=3 attempt.
+- **Scope (delivered):**
+  - Audit of run_id=3 failure classification (spec §3): S16 stuck `pending` (no fix possible inside scope); S17-S20 + S22 lock contention (retries clean); S21 stale `job_name` after PR1c rename (FIXED by dispatch hardening); S23/S24 blocked on bulk-provider `rows_processed=NULL` (separate follow-up #1225).
+  - New `GET /system/bootstrap-status` lean operator readout — per-stage `(status, last_error, retryable, attempt_count, completed_at)` + summary + `retry_available` / `retry_blocked_reason`. Pins on `bootstrap_state.last_run_id`. Surfaces stale-pointer case honestly.
+  - `compute_retryable_view` pure function mirroring `reset_failed_stages_for_retry` SQL exactly (lane MIN + `stage_order >= min`; own status irrelevant).
+  - Dispatch hardening — orchestrator resolves `job_name` from `_BOOTSTRAP_STAGE_SPECS` by `stage_key`, fails closed for trimmed stage_keys. `effective_job_name` flows through `_RunnableStage` so `validate_job_params` + `_run_one_stage` + row-resolution see the canonical name. DB column stays as audit snapshot.
+- **Outcome:** Codex 1a (6 findings) + 1b (5 findings) + 1c (1 MEDIUM) on spec; Codex 2 (1 NITPICK) on diff. Bot APPROVE on first push. CI green. mergeStateStatus=CLEAN.
+- **Follow-up tickets filed:** #1224 (S16 stuck-pending root cause), #1225 (bulk ingesters `rows_processed=NULL` defeating strict-gate floor), #1226 (lock-contention UX papercut). #1136 umbrella stays OPEN for #1041/#649/#1064 + above.
 
 ## 3. Phase B — Pre-bootstrap ETL nice-to-have (bundle into one PR if time)
 
@@ -184,59 +186,65 @@ When §D + §E land (any time):
 ## 12. Handover for next session
 
 ```
-Pick up Phase A.3 of docs/superpowers/plans/2026-05-19-post-1208-cleardown.md
-(post-#1208 clear-down + bootstrap completion, autonomous-execution
-contract per #1208 plan §1 — no operator signoff between Codex
-iterations, drive PR to merge in one session).
+Pick up Phase C of docs/superpowers/plans/2026-05-19-post-1208-cleardown.md
+(post-#1208 clear-down + bootstrap completion). This is the
+operator-action phase — no code, admin UI clicks + endpoint
+monitoring. If you (Claude) are reading this without an operator
+ready to drive, surface the prerequisite to the user before doing
+anything else.
 
-PHASE A.3 SCOPE — #1136 bootstrap state-machine audit (subset):
+PHASE C SCOPE — T9-POST bootstrap completion (operator action):
 
-- Audit current bootstrap_stages to identify which stage(s) failed in
-  run_id=3.
-- For each failed stage: confirm the underlying ETL is patched (Phase
-  A.1 #1218 / A.2 #1010 / a previous fix) + add a regression test
-  that the stage now succeeds against a fresh DB.
-- Operator-visible: GET /system/bootstrap-status (mirror of
-  /system/postgres-health shape) returning (stage, last_status,
-  last_error, retryable) per stage. Lets operator drive T9-POST
-  without log-grepping.
+1. Confirm `python -m app.main` + `python -m app.jobs` are running
+   the latest code (post-PR #1223 / `bd6a0fc`). The dispatch
+   hardening from A.3 only takes effect on a restarted jobs process.
+2. Hit `GET /system/bootstrap-status`. Identify retryable=True
+   stages (S17-S24 against current run_id=3 per spec § 4.2 worked
+   example).
+3. Operator clicks Retry in the admin UI — calls
+   `POST /system/bootstrap/retry-failed`. Dispatcher walks the
+   sec_rate + db lanes from their respective MIN(failed_order).
+4. Monitor `/system/bootstrap-status` until every stage = success.
+5. S16 (`sec_def14a_bootstrap`, stuck pending) will NOT be reached
+   by retry-failed (order 16 < sec_rate min-failed 17). #1224 is
+   the followup; for T9-POST acceptance an operator can manually
+   advance via `mark_stage_success` or accept partial via
+   `POST /system/bootstrap/mark-complete`.
+6. S23/S24 will re-block until #1225 (bulk ingesters writing
+   rows_processed) lands. They DO retry (retryable=True) but the
+   cap-eval re-marks blocked on the same NULL row counts. Operator
+   options: file follow-up + `mark-complete`, OR wait for #1225.
+7. `bootstrap_state.status = 'complete'` either via natural drain
+   (if #1224 + #1225 land first) or via `mark-complete` escape
+   hatch.
 
 FIRST ACTIONS:
 
-1. Read CLAUDE.md working order. Confirm #1136 still OPEN.
-2. Read app/services/processes/bootstrap_orchestrator and the
-   bootstrap_stages schema in sql/.
-3. Spike: SELECT stage_key, status, last_error FROM bootstrap_stages
-   WHERE run_id = (SELECT last_run_id FROM bootstrap_state WHERE id=1);
-4. Read app/api/system.py (postgres-health) for the endpoint shape.
+1. Read CLAUDE.md working order.
+2. Confirm latest code is running:
+   - `git rev-parse HEAD` should match origin/main.
+   - `curl /system/bootstrap-status` should respond 200 with the
+     new shape (`retry_available`, per-stage `retryable`).
+3. Spike: `curl /system/bootstrap-status | jq '.retry_available,
+   .retry_blocked_reason, [.stages[] | select(.retryable)] |
+   length'` — expect retry_available=true and retryable count > 0.
+4. Drive the operator through steps 2-7 above. Surface decisions
+   that need their judgement (e.g. "S16 stuck — manual advance or
+   mark-complete?").
 
-DESIGN STEPS:
-- Mirror #1208 / #1218 / #1010 cadence: spike → spec → Codex 1a/1b
-  → impl → Codex 2 → push → bot → merge.
-- Spec at docs/superpowers/specs/2026-05-NN-1136-bootstrap-state-audit.md.
-- Implementation: stage audit script + /system/bootstrap-status
-  endpoint + regression tests for previously-failing stages.
+NON-NEGOTIABLES (carried throughout the plan):
+- Per CLAUDE.md: never close positions / never invoke destructive
+  ops without operator confirmation. `mark-complete` is an escape
+  hatch and changes the bootstrap gate semantics — confirm with
+  operator before invoking.
+- Per feedback_no_fake_polling: NEVER narrate "monitoring" without
+  invoking a real curl/gh/Read this turn.
 
-CONTEXT FROM A.1 + A.2 (just merged):
-- PR #1220 f451e18 merged 2026-05-19. Phase A.1 closed #1218.
-- PR #1222 240112e merged 2026-05-19. Phase A.2 closed #1010.
-- Same Codex/bot/merge cadence worked in both; bot's NITPICK fixed
-  pre-merge in A.2.
-
-NON-NEGOTIABLES (carried from #1208 + #1218 + #1010):
-- Per CLAUDE.md: read settled-decisions + prevention-log + relevant
-  skills BEFORE writing code.
-- Per feedback_post_push_cycle: poll gh pr view + gh pr checks
-  IMMEDIATELY after push.
-- Per feedback_no_fake_polling: NEVER narrate "waiting/polling"
-  without invoking actual check tool that turn.
-- Per feedback_pr_auto_close_required: PR body MUST contain
-  `Closes #1136` on its own line (or scope-subset reference if the
-  full umbrella stays open).
-
-If A.3 lands clean, next session = Phase C operator T9-POST drive
-(no code; admin UI clicks + monitor /system/bootstrap-status until
-every stage = complete).
+If T9-POST lands clean, next sessions = Phase D + E + F in any
+order per operator preference. Phase D (#1217 auth lazy-conn,
+#1219 VACUUM FULL runbook, etc.) and Phase E (#917 N-PORT, #1011
+PRs, etc.) are now safe to land any time — bootstrap drain has
+completed; ETL polish no longer contaminates the drain.
 ```
 
 ---
