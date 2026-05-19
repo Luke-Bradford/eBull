@@ -103,12 +103,39 @@ The test suite MUST point at `ebull_test_*` databases, never the operator dev DB
 1. **Singleton-row drops** — a test that `TRUNCATE`s or `DELETE`s from a singleton table (e.g. `runtime_config`, `kill_switch`) takes the live system into a fail-closed 503 state until an operator re-seeds. 2026-05-18 is on record.
 2. **Test pollution** — fixtures that mutate state run against a moving target, hiding non-determinism behind cross-suite interference.
 
-Defense in depth:
+Defense in depth (four rails, in order of how often they fire):
 
 1. **Primary:** `tests/fixtures/ebull_test_db.py::_assert_test_db` rejects any destructive op against a DB whose name does not match `ebull_test_*`. Every cursor obtained through `ebull_test_conn` goes through this guard.
-2. **Tripwire:** `tests/test_dev_db_no_test_writes.py` records `pg_database_size('ebull')` at session start + asserts <1 MB growth at session end. Catches the residual case where a test opens a raw `psycopg.connect(settings.database_url)` outside the fixture. Tripwire only — misses deletes and HOT updates; can false-positive on idle autovacuum.
+2. **Tripwire:** `tests/conftest.py::_dev_db_size_tripwire` records `pg_database_size('ebull')` at session start + asserts <1 MB growth at session end. Catches the residual case where a test opens a raw `psycopg.connect(settings.database_url)` outside the fixture. Tripwire only — misses deletes and HOT updates; can false-positive on idle autovacuum.
+3. **Orphan sweep** (#1208 Phase 2): `_drop_orphan_workers_older_than` runs on every controller-start inside `build_template_if_stale()`. Catches the residue of `ebull_test_<epoch>_<hex>_<gw>` databases left behind when a worker SIGSEGV's, the operator force-quits pytest, or the OS reboots mid-run — failure modes that `pytest_sessionfinish` cannot reach because it only fires on graceful exit. Three-rail safety model (activity guard via `pg_stat_activity`, age backstop via parsed epoch, hard-coded `_NEVER_DROP` literal); plain `DROP DATABASE` without `WITH (FORCE)` to eliminate the TOCTOU race against a sibling pytest worker. CI is short-circuited (`os.getenv("CI") == "true"`).
+4. **Session-lifetime keepalive** (`_worker_db_keepalive`, autouse from `conftest.py`): each worker holds one autocommit connection to its private DB for the whole pytest session, so the worker DB appears in `pg_stat_activity` even between tests — the load-bearing input to the orphan-sweep activity rail.
 
 When the tripwire fires: grep the tests directory for `psycopg.connect(settings.database_url)` and route each use through `tests/fixtures/ebull_test_db.py::test_database_url`. Never silence the tripwire by raising the threshold — fix the offending test.
+
+When the orphan sweep stops cleaning (leaked `ebull_test_*` DBs accumulate again): check `pg_stat_activity` for stuck keepalive connections from prior pytest runs; the sweep correctly skips DBs with any active backend. If the sweep itself is broken, `_drop_orphan_workers_older_than` raises `AssertionError` on a regex regression — read the warning and re-tighten the regex.
+
+## Slim test-data posture
+
+Migrations are **schema-only**. Any `INSERT`/`UPDATE` in a `sql/NNN_*.sql` migration that puts more than ~5 rows of non-reference data into a public table is a defect — file a follow-up ticket, move the seed into a per-test fixture.
+
+The audit shape (run on a fresh `ebull_test_template`):
+
+```bash
+docker exec ebull-postgres psql -U postgres -d ebull_test_template -tAc \
+  "SELECT relname, reltuples::bigint FROM pg_class \
+   WHERE relkind='r' AND relnamespace='public'::regnamespace \
+     AND reltuples > 0 ORDER BY reltuples DESC LIMIT 20;"
+```
+
+A clean template returns ONLY `schema_migrations` (= count of applied migration files). Anything else with non-zero `reltuples` is either documented reference data (currency / country / fundamental-key catalogues) or a defect.
+
+Operationally:
+
+- Test fixtures seed 1–5 rows per-test through `ebull_test_conn`.
+- Bulk-data tests (e.g. ranking-engine integration over 10k rows) opt out of the default suite with `@pytest.mark.slow` + run in a separate CI job.
+- Reference data that genuinely belongs in a migration must be flat (`INSERT VALUES (...)` only, no DML loops); a future migration cannot start growing the seed without showing up in the audit above.
+
+Audited 2026-05-19 against #1208 Phase 2 — fresh template returned exactly `schema_migrations | 133`, no other non-zero tables. Codebase already honours this rule; the audit + this skill are the prevention against drift.
 
 ## Test naming
 
