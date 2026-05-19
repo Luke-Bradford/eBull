@@ -52,7 +52,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Final, Literal
 
 import psycopg
@@ -143,13 +143,18 @@ _FILINGS_HISTORY_KEEP_FORMS_TUPLE: tuple[str, ...] = tuple(sorted(SEC_INGEST_KEE
 # at dispatch time. The sentinel string is namespaced so it never
 # collides with a legitimate operator value.
 _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF = "<dynamic:bootstrap_13f_cutoff>"
+# #1010 — sibling sentinel for the HR-recency cohort cutoff on stage
+# 21. Filters ``institutional_filers.last_13f_hr_at >= cutoff`` so the
+# sweep iterates only currently-active HR filers.
+_PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF = "<dynamic:bootstrap_13f_hr_cutoff>"
 
 
 def _resolve_dynamic_params(params: Mapping[str, Any]) -> dict[str, Any]:
     """Materialise dispatch-time dynamic values in a stage params dict.
 
-    Today the only dynamic value is the bootstrap-13F recency cutoff;
-    the helper is structured for forward extensibility (additional
+    Today the dynamic values are the bootstrap-13F recency cutoffs
+    (one for ``min_period_of_report``, one for ``min_last_13f_hr_at``).
+    The helper is structured for forward extensibility (additional
     sentinels can be added without touching call sites).
 
     The dispatcher calls this immediately before invoking the
@@ -159,6 +164,20 @@ def _resolve_dynamic_params(params: Mapping[str, Any]) -> dict[str, Any]:
     resolved: dict[str, Any] = dict(params)
     if resolved.get("min_period_of_report") == _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF:
         resolved["min_period_of_report"] = date.today() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS)
+    if resolved.get("min_last_13f_hr_at") == _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF:
+        # UTC start-of-day so the boundary is inclusive against
+        # ``form.idx`` dates which are stored at midnight UTC. Two
+        # subtle pitfalls avoided here:
+        #   (1) using the full timestamp (no ``.date()`` truncation)
+        #       would drift the cutoff during the day and exclude
+        #       filings whose form.idx date is exactly ``today() -
+        #       380d`` (Codex 1a B-3); (2) ``date.today()`` returns
+        #       *local* time — on a non-UTC dev host around the
+        #       local/UTC date boundary it would shift the cutoff by
+        #       ±1 day and silently exclude an exact-boundary UTC
+        #       filer (Codex 2 MEDIUM). Take the UTC date explicitly.
+        cutoff_date = datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS)
+        resolved["min_last_13f_hr_at"] = datetime.combine(cutoff_date, time(0, 0), tzinfo=UTC)
     return resolved
 
 
@@ -888,8 +907,13 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         # ``date.today()`` here would freeze the cutoff at module-load,
         # so a long-lived jobs process would dispatch stage 21 with a
         # stale floor. The sentinel keeps the StageSpec data-only.
+        # ``min_last_13f_hr_at`` (#1010) bounds the cohort to filers
+        # whose most recent 13F-HR / HR/A is within the same 380-day
+        # window — collapses 11,205 → ≈ 3-5k active filers and drops
+        # bootstrap stage 21 wall-clock from ~8h to ≤3h.
         params={
             "min_period_of_report": _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF,
+            "min_last_13f_hr_at": _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF,
             "source_label": "sec_edgar_13f_directory_bootstrap",
         },
     ),

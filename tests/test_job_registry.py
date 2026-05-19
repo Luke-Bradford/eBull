@@ -464,6 +464,26 @@ class TestJobInternalKeysRegistry:
     def test_sec_13f_has_source_label_internal(self) -> None:
         assert "source_label" in JOB_INTERNAL_KEYS["sec_13f_quarterly_sweep"]
 
+    def test_sec_13f_min_last_13f_hr_at_is_internal(self) -> None:
+        """#1010 — the HR-recency cohort filter is bootstrap-only.
+        Exposing it on the manual API would let an operator drop the
+        full-cohort safety-net on the non-bootstrap path."""
+        assert "min_last_13f_hr_at" in JOB_INTERNAL_KEYS["sec_13f_quarterly_sweep"]
+
+    def test_sec_13f_min_last_13f_hr_at_rejected_on_manual_path(self) -> None:
+        """#1010 — operator API path MUST reject ``min_last_13f_hr_at``
+        even though it's listed in JOB_INTERNAL_KEYS for the bootstrap
+        path."""
+        from datetime import UTC, datetime
+
+        with pytest.raises(ParamValidationError, match="unknown param"):
+            validate_job_params(
+                "sec_13f_quarterly_sweep",
+                {"min_last_13f_hr_at": datetime(2025, 1, 1, 0, 0, tzinfo=UTC)},
+                allow_internal_keys=False,
+                metadata=(),
+            )
+
     def test_internal_keys_keys_are_known_jobs(self) -> None:
         """Every job in JOB_INTERNAL_KEYS must be in the source registry."""
         registry = get_job_name_to_source()

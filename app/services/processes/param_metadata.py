@@ -159,10 +159,13 @@ class ParamMetadata(BaseModel):
 JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
     # Bootstrap variant of sec_13f_quarterly_sweep tags rows with a
     # distinct source_label so audit history can distinguish bootstrap-
-    # bounded sweeps from the standalone weekly historical sweep. The
-    # operator never edits this — it lives in the bootstrap StageSpec's
-    # params dict.
-    "sec_13f_quarterly_sweep": frozenset({"source_label"}),
+    # bounded sweeps from the standalone manual / sweep-adapter path.
+    # ``min_last_13f_hr_at`` (#1010) is the HR-recency cohort filter
+    # exclusive to bootstrap stage 21 — exposing it on the manual API
+    # would let an operator accidentally drop the standalone path's
+    # full-cohort safety-net. Both keys live in the bootstrap
+    # StageSpec's params dict.
+    "sec_13f_quarterly_sweep": frozenset({"source_label", "min_last_13f_hr_at"}),
     # PR1c #1064 — bootstrap-only invokers promoted from bespoke
     # wrappers. These jobs are NOT in SCHEDULED_JOBS today (no cron
     # cadence), so they have no operator-facing ``ParamMetadata``;

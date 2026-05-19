@@ -4290,19 +4290,27 @@ def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
     tombstoned in ``institutional_holdings_ingest_log`` so a
     deadline-interrupted sweep resumes the tail on the next fire.
 
-    Honoured params (PR1c #1064):
+    Honoured params (PR1c #1064 + #1010):
 
     * ``min_period_of_report`` (date) — recency floor; accessions whose
       ``period_of_report`` is older are skipped. Default ``None`` = no
       floor (full historical sweep). Bootstrap stage 21 dispatches with
       ``today() - 380d`` so first-install completes in ~30-45 min
       instead of 11+h.
+    * ``min_last_13f_hr_at`` (datetime, #1010) — cohort filter; only
+      filers whose most recent 13F-HR / 13F-HR/A in
+      ``institutional_filers.last_13f_hr_at`` is at or after this
+      cutoff are iterated. Default ``None`` = full cohort (manual /
+      sweep-adapter / Admin "Run now" safety-net path). Bootstrap
+      stage 21 dispatches with ``today() - 380d`` at UTC midnight so
+      first-install completes in ≤ 3 h vs the unbounded ~8 h. Internal
+      key — operator-API path REJECTS this via ``JOB_INTERNAL_KEYS``.
     * ``source_label`` (str, audit-only) — provenance tag on each
       ingested holding row. Default ``"sec_edgar_13f_directory"``;
       bootstrap stage 21 overrides with
       ``"sec_edgar_13f_directory_bootstrap"`` so audit history
       distinguishes bootstrap-bounded sweeps from the standalone
-      weekly historical sweep. Operator-API path REJECTS this key
+      manual / sweep-adapter path. Operator-API path REJECTS this key
       via ``JOB_INTERNAL_KEYS`` allow-list (#1064 PR1a).
     """
     from app.providers.implementations.sec_edgar import SecFilingsProvider
@@ -4321,6 +4329,26 @@ def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
     else:
         # Validator should have coerced; defensive against direct invocation.
         min_period_of_report = date.fromisoformat(str(min_period_of_report_param))
+
+    # #1010 — HR-recency cohort filter. The bootstrap resolver always
+    # produces a tz-aware UTC datetime; the explicit naive-value tag
+    # below is defence-in-depth for direct invocation / future callers
+    # so psycopg never falls back to the server's local zone (Codex 1b
+    # minor).
+    min_last_13f_hr_at_param = params.get("min_last_13f_hr_at")
+    min_last_13f_hr_at: datetime | None
+    if min_last_13f_hr_at_param is None:
+        min_last_13f_hr_at = None
+    elif isinstance(min_last_13f_hr_at_param, datetime):
+        min_last_13f_hr_at = (
+            min_last_13f_hr_at_param
+            if min_last_13f_hr_at_param.tzinfo is not None
+            else min_last_13f_hr_at_param.replace(tzinfo=UTC)
+        )
+    else:
+        parsed = datetime.fromisoformat(str(min_last_13f_hr_at_param))
+        min_last_13f_hr_at = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
     source_label = str(params.get("source_label") or "sec_edgar_13f_directory")
 
     with _tracked_job(JOB_SEC_13F_QUARTERLY_SWEEP) as tracker:
@@ -4328,7 +4356,7 @@ def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
             psycopg.connect(settings.database_url) as conn,
         ):
-            ciks = list_directory_filer_ciks(conn)
+            ciks = list_directory_filer_ciks(conn, min_last_13f_hr_at=min_last_13f_hr_at)
             summaries = ingest_all_active_filers(
                 conn,
                 sec,
@@ -4348,7 +4376,8 @@ def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
             "sec_13f_quarterly_sweep: filers=%d processed=%d "
             "accessions_ingested=%d holdings_inserted=%d "
             "holdings_skipped_no_cusip=%d "
-            "source_label=%s min_period_of_report=%s",
+            "source_label=%s min_period_of_report=%s "
+            "min_last_13f_hr_at=%s",
             total_filers,
             processed,
             accessions_ingested,
@@ -4356,6 +4385,7 @@ def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
             rows_skipped,
             source_label,
             min_period_of_report,
+            min_last_13f_hr_at,
         )
 
 

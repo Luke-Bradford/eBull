@@ -129,6 +129,18 @@ Source: <https://www.sec.gov/files/form_13f.pdf> §5.7.
 
 13F filed within **45 days after each calendar quarter end**.
 
+**13F-HR vs 13F-NT (cohort signal, #1010)** — a filer "active in 13F" can mean either:
+form.idx exposes both `13F-HR` (holdings) and `13F-NT` (notice; another manager
+files our holdings). NT entries contribute **zero** infotable rows, so iterating
+an NT-only filer in `sec_13f_quarterly_sweep` costs the submissions.json roundtrip
+and writes nothing. `institutional_filers.last_13f_hr_at` (#1010,
+[sec_13f_filer_directory.py:42](../../../app/services/sec_13f_filer_directory.py#L42))
+is the HR-only recency signal — distinct from `last_filing_at` which mixes both.
+Bootstrap stage 21 filters cohort on this column (cohort drops 11k → ~3-5k);
+the manual / sweep-adapter / Admin "Run now" path keeps the full cohort as a
+safety-net so a previously-inactive filer can re-enter when they resume HR
+filing.
+
 ### 2.2 N-PORT-P XML schema
 
 Source: <https://www.sec.gov/info/edgar/specifications/form-n-port-xml-tech-specs.htm>.

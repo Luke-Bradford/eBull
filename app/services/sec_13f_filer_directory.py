@@ -44,6 +44,13 @@ logger = logging.getLogger(__name__)
 # bandwidth but don't add new filers — the tail is bounded.
 DEFAULT_QUARTERS: int = 4
 
+# HR-only subset of ``_THIRTEEN_F_FORM_TYPES``. Used to populate
+# ``institutional_filers.last_13f_hr_at`` distinct from the all-form
+# ``last_filing_at``. 13F-NT / 13F-NT/A are notice-only filings (no
+# holdings) and must not contribute to the HR-recency signal that
+# bounds the bootstrap cohort (#1010).
+_THIRTEEN_F_HR_FORM_TYPES: frozenset[str] = frozenset({"13F-HR", "13F-HR/A"})
+
 
 @dataclass(frozen=True)
 class FilerDirectorySyncResult:
@@ -85,11 +92,17 @@ def _aggregate_filer_directory(
     quarters: list[tuple[int, int]],
     *,
     fetch: Callable[[int, int], str],
-) -> tuple[dict[str, str], dict[str, date], int]:
+) -> tuple[dict[str, str], dict[str, date], dict[str, date], int]:
     """Walk each quarter's form.idx and aggregate the latest 13F-HR
     company_name + filing date per CIK.
 
-    Returns ``(latest_name_by_cik, latest_filed_by_cik, quarters_failed)``.
+    Returns ``(latest_name_by_cik, latest_filed_by_cik,
+    latest_hr_filed_by_cik, quarters_failed)``. ``latest_hr_filed`` is
+    HR-only (13F-HR + 13F-HR/A); ``latest_filed`` is all-forms (HR +
+    HR/A + NT + NT/A) and feeds ``last_filing_at``. The HR-only dict
+    feeds the new ``last_13f_hr_at`` column that bounds the
+    bootstrap-stage 21 cohort (#1010).
+
     Per-quarter fetch failures are isolated — a transient SEC outage
     on one quarter must not abort the whole sweep, partial coverage
     beats aborting. ``latest_name`` keys on the most recent
@@ -101,6 +114,7 @@ def _aggregate_filer_directory(
     """
     latest_name: dict[str, str] = {}
     latest_filed: dict[str, date] = {}
+    latest_hr_filed: dict[str, date] = {}
     failed = 0
     for year, q in quarters:
         try:
@@ -123,7 +137,14 @@ def _aggregate_filer_directory(
             elif entry.date_filed == prior_date and entry.company_name > latest_name[entry.cik]:
                 # Same-day tiebreak — deterministic by name.
                 latest_name[entry.cik] = entry.company_name
-    return latest_name, latest_filed, failed
+            # HR-only tracking is independent — 13F-NT/NT-A entries
+            # must NOT advance ``latest_hr_filed`` even when newer
+            # than the existing HR date. #1010.
+            if entry.form_type in _THIRTEEN_F_HR_FORM_TYPES:
+                prior_hr = latest_hr_filed.get(entry.cik)
+                if prior_hr is None or entry.date_filed > prior_hr:
+                    latest_hr_filed[entry.cik] = entry.date_filed
+    return latest_name, latest_filed, latest_hr_filed, failed
 
 
 def _bulk_classify_filer_type(
@@ -199,7 +220,7 @@ def sync_filer_directory(
     """
     today_d = today if today is not None else datetime.now(tz=UTC).date()
     qs = _last_n_quarters(today_d, quarters)
-    latest_name, latest_filed, failed = _aggregate_filer_directory(qs, fetch=fetch)
+    latest_name, latest_filed, latest_hr_filed, failed = _aggregate_filer_directory(qs, fetch=fetch)
 
     skipped_empty_name = 0
     valid_ciks: list[str] = []
@@ -238,14 +259,20 @@ def sync_filer_directory(
         # the TIMESTAMPTZ column so GREATEST() comparisons against
         # later-arriving timestamps stay monotone.
         last_filing_ts = datetime.combine(filed_d, time(0, 0), tzinfo=UTC)
+        # HR-only filing recency (NEW #1010). NULL when this CIK was
+        # seen only via 13F-NT / NT-A in the form.idx walk — the
+        # NULLIF guard in the UPSERT keeps an NT-only filer's column
+        # NULL so the cohort filter excludes them.
+        hr_filed_d = latest_hr_filed.get(cik)
+        last_13f_hr_at = datetime.combine(hr_filed_d, time(0, 0), tzinfo=UTC) if hr_filed_d is not None else None
         # ``filer_type`` is only consumed on INSERT (DO UPDATE
         # preserves the existing value); pre-existing rows pass
         # ``'INV'`` as a no-op placeholder.
         filer_type = filer_types.get(cik, "INV")
         row = conn.execute(
             """
-            INSERT INTO institutional_filers (cik, name, filer_type, last_filing_at)
-            VALUES (%(cik)s, %(name)s, %(filer_type)s, %(last_filing_at)s)
+            INSERT INTO institutional_filers (cik, name, filer_type, last_filing_at, last_13f_hr_at)
+            VALUES (%(cik)s, %(name)s, %(filer_type)s, %(last_filing_at)s, %(last_13f_hr_at)s)
             ON CONFLICT (cik) DO UPDATE SET
                 -- Only refresh name when the incoming filing is at
                 -- least as recent as the stored one. Without this
@@ -264,6 +291,17 @@ def sync_filer_directory(
                     COALESCE(institutional_filers.last_filing_at, '-infinity'),
                     COALESCE(EXCLUDED.last_filing_at, '-infinity')
                 ),
+                -- HR-only recency: NULLIF collapses the '-infinity'
+                -- sentinel back to NULL when both sides are NULL, so
+                -- an NT-only filer with no prior HR keeps NULL and is
+                -- excluded by the cohort filter (#1010 Codex 1a B-1).
+                last_13f_hr_at = NULLIF(
+                    GREATEST(
+                        COALESCE(institutional_filers.last_13f_hr_at, '-infinity'::timestamptz),
+                        COALESCE(EXCLUDED.last_13f_hr_at,            '-infinity'::timestamptz)
+                    ),
+                    '-infinity'::timestamptz
+                ),
                 fetched_at = NOW()
             RETURNING (xmax = 0) AS was_inserted
             """,
@@ -272,6 +310,7 @@ def sync_filer_directory(
                 "name": name,
                 "filer_type": filer_type,
                 "last_filing_at": last_filing_ts,
+                "last_13f_hr_at": last_13f_hr_at,
             },
         ).fetchone()
         # ``xmax = 0`` is true on a fresh INSERT, false when an UPDATE
