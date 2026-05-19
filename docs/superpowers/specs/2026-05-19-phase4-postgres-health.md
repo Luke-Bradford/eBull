@@ -317,6 +317,11 @@ Post-merge:
 | LOW | "Latency: one docker exec" mismatched 2-call warning path | §6 row updated to "two calls on warning path, one on non-warning." |
 | LOW | §5 heading named only one test file, but spec defines two | §5.1 heading updated to list both files. |
 
-### 8.2 Codex 2 — pre-push diff review
+### 8.3 Codex 2 — pre-push diff review (2026-05-19)
 
-Pending — invoked after T1-T5 implementations + tests pass.
+| Severity | Finding | Resolution |
+|---|---|---|
+| HIGH | `app/api/auth.py:125` resolves `Depends(get_conn)` before bearer/session branching → `/system/postgres-health` can fail in auth DB checkout before reaching the handler's 503 path | `DEFERRED` (tech-debt follow-up). Pre-existing pattern across every `/system/*` endpoint; refactoring the auth helper to lazy-resolve the DB conn is a cross-cutting change touching every other auth-gated route. Phase 4 inherits the limitation; documented in §7 + a follow-up issue. Practical impact: if PG is fully down, the endpoint returns 401 (from get_conn raising) rather than 503 (which is what the operator would prefer). Either way the operator concludes "PG is broken." |
+| MED | 503 test patches `collect_postgres_health` not the underlying `psycopg.connect` | `tests/test_api_postgres_health.py::test_endpoint_returns_503_on_real_psycopg_connect_failure` — patches `psycopg.connect` directly. |
+| MED | Per-metric isolation test mocks the snapshot; would still pass if `autocommit=True` is removed | `tests/test_postgres_health_service.py` — runs the real service against the test DB, monkey-patches one `_q_*` to raise `InsufficientPrivilege`, asserts subsequent probes succeed. The test fails if autocommit is removed. |
+| LOW | `-gt` on raw psql stdout fails on non-numeric blip under `set -euo pipefail` | Hook adds `[[ "${db_size}" =~ ^[0-9]+$ && ... ]]` integer-regex guard. |

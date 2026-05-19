@@ -135,7 +135,12 @@ DB_SIZE_WARN_BYTES=10737418240  # 10 GB
 if command -v docker >/dev/null 2>&1; then
   db_size=$(docker exec ebull-postgres psql -U postgres -d ebull -tAc \
     "SELECT pg_database_size('ebull')" 2>/dev/null | tr -d ' ' || true)
-  if [[ -n "${db_size}" && "${db_size}" -gt "${DB_SIZE_WARN_BYTES}" ]]; then
+  # Codex 2 LOW #4: `-gt` is bash arithmetic; a non-numeric blip (e.g.
+  # psql returning an error to stdout, container restart mid-probe)
+  # under `set -euo pipefail` would kill the hook. The integer regex
+  # below filters non-numeric values out so the warn block silently
+  # no-ops instead of failing the entire push.
+  if [[ "${db_size}" =~ ^[0-9]+$ && "${db_size}" -gt "${DB_SIZE_WARN_BYTES}" ]]; then
     pretty=$(docker exec ebull-postgres psql -U postgres -d ebull -tAc \
       "SELECT pg_size_pretty(pg_database_size('ebull'))" 2>/dev/null \
       | tr -d ' ' || true)

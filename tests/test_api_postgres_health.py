@@ -190,11 +190,13 @@ def test_metric_isolation_returns_partial_payload() -> None:
     assert body["db_size_bytes"] is not None
 
 
-def test_endpoint_returns_503_on_connection_failure() -> None:
-    """Connection-level error → 503, mirroring the fail-closed posture
-    documented at `app/api/system.py:24`."""
+def test_endpoint_returns_503_on_real_psycopg_connect_failure() -> None:
+    """Codex 2 MED #2 regression: patch the underlying
+    `psycopg.connect` not the service helper, so the test exercises
+    the real production fail-closed path (the service's
+    connection-open code raises → endpoint 503)."""
     with patch(
-        "app.services.postgres_health.collect_postgres_health",
+        "app.services.postgres_health.psycopg.connect",
         side_effect=psycopg.OperationalError("connection refused"),
     ):
         resp = client.get("/system/postgres-health")
