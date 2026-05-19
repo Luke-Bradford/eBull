@@ -413,12 +413,13 @@ class TestSyncFilerDirectory:
         (e.g. populated by the per-filing ingest from primary_doc.xml)
         is not regressed by an older form.idx HR. Mirrors the existing
         guard for ``last_filing_at``. #1010."""
+        from datetime import UTC
         from datetime import datetime as _dt
 
         ebull_test_conn.execute(
             "INSERT INTO institutional_filers (cik, name, filer_type, last_13f_hr_at) "
             "VALUES ('0000000900', 'NEWER HR FILER', 'INV', %s)",
-            (_dt(2027, 1, 15, 0, 0, tzinfo=__import__("datetime").timezone.utc),),
+            (_dt(2027, 1, 15, 0, 0, tzinfo=UTC),),
         )
         ebull_test_conn.commit()
 
