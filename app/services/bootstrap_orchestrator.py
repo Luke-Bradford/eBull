@@ -1746,6 +1746,16 @@ def run_bootstrap_orchestrator() -> None:
     # DB doesn't store params (immutable across runs; lives in code),
     # so the dispatch path consults the spec table at run time.
     stage_params_by_key: dict[str, Mapping[str, Any]] = {spec.stage_key: spec.params for spec in _BOOTSTRAP_STAGE_SPECS}
+    # #1136 Phase A.3 dispatch hardening — index the catalogue by
+    # ``stage_key`` so the dispatcher resolves ``job_name`` from the
+    # spec rather than the DB row's persisted ``job_name``. Removes
+    # the stale-name failure mode observed in run_id=3 stage 21
+    # (where the DB row carried ``bootstrap_sec_13f_recent_sweep``
+    # after PR1c #1064 renamed the canonical to
+    # ``JOB_SEC_13F_QUARTERLY_SWEEP``). The DB column stays as the
+    # audit snapshot of "what the run was created to dispatch" — the
+    # runtime decision is logged below for forensic replay.
+    spec_by_stage_key: dict[str, StageSpec] = {spec.stage_key: spec for spec in _BOOTSTRAP_STAGE_SPECS}
 
     # Pre-populate statuses with stages already in a terminal state
     # so the dependency graph sees them when a downstream pending
@@ -1768,12 +1778,60 @@ def run_bootstrap_orchestrator() -> None:
             preexisting_rows_processed[stage.stage_key] = stage.rows_processed
             logger.info("bootstrap dispatcher: skipping %s (already %s)", stage.stage_key, stage.status)
             continue
-        invoker = _INVOKERS.get(stage.job_name)
-        if invoker is None:
+        # #1136 Phase A.3 — resolve job_name from the catalogue by
+        # stage_key. Fail closed if the stage_key has been trimmed
+        # from the catalogue (silently dispatching the DB row's
+        # stored job_name would lose canonical params /
+        # CapRequirement / lane semantics — worst-of-both-worlds).
+        canonical_spec = spec_by_stage_key.get(stage.stage_key)
+        if canonical_spec is None:
             logger.error(
-                "bootstrap dispatcher: stage %s has unknown job_name %r; marking error",
+                "bootstrap dispatcher: stage_key %r not in current catalogue; "
+                "stored_job_name=%r is stale, refusing to dispatch",
                 stage.stage_key,
                 stage.job_name,
+            )
+            with psycopg.connect(database_url) as conn:
+                # pending → running → error: ``mark_stage_error`` has
+                # ``AND status = 'running'`` so a direct call against
+                # the pending row would silently no-op and let the
+                # stage survive finalize_run still pending (Codex 1b
+                # finding §1).
+                mark_stage_running(conn, run_id=run_id, stage_key=stage.stage_key)
+                mark_stage_error(
+                    conn,
+                    run_id=run_id,
+                    stage_key=stage.stage_key,
+                    error_message=(
+                        f"stage_key {stage.stage_key!r} not in current bootstrap catalogue; "
+                        f"row job_name={stage.job_name!r} is stale and dispatch is refused"
+                    ),
+                )
+                conn.commit()
+            continue
+        effective_job_name = canonical_spec.job_name
+        if effective_job_name != stage.job_name:
+            # Forensic trail — DB row stays as the audit snapshot;
+            # the log line records the runtime decision (Codex 1a §4).
+            logger.info(
+                "bootstrap dispatcher: stage %s remapped stored_job_name=%r -> "
+                "effective_job_name=%r (catalogue rename)",
+                stage.stage_key,
+                stage.job_name,
+                effective_job_name,
+            )
+        invoker = _INVOKERS.get(effective_job_name)
+        if invoker is None:
+            # Catalogue carries the stage_key but its job_name is not
+            # registered — points at a registry / SCHEDULED_JOBS gap,
+            # NOT a stale-DB-row case. The catalogue-invariant test
+            # (`tests/test_bootstrap_orchestrator_source_registry.py`)
+            # is meant to prevent this at push time; the runtime guard
+            # is defense-in-depth.
+            logger.error(
+                "bootstrap dispatcher: stage %s effective_job_name %r is unregistered in _INVOKERS; marking error",
+                stage.stage_key,
+                effective_job_name,
             )
             with psycopg.connect(database_url) as conn:
                 mark_stage_running(conn, run_id=run_id, stage_key=stage.stage_key)
@@ -1781,14 +1839,18 @@ def run_bootstrap_orchestrator() -> None:
                     conn,
                     run_id=run_id,
                     stage_key=stage.stage_key,
-                    error_message=f"unknown job_name {stage.job_name!r}",
+                    error_message=f"unknown job_name {effective_job_name!r}",
                 )
                 conn.commit()
             continue
         runnable.append(
             _RunnableStage(
                 stage_key=stage.stage_key,
-                job_name=stage.job_name,
+                # effective_job_name flows into _RunnableStage so all
+                # downstream consumers — validate_job_params,
+                # _run_one_stage, _snapshot_job_runs_max_id — see the
+                # canonical name (Codex 1a §3).
+                job_name=effective_job_name,
                 lane=_effective_lane(stage.stage_key, stage.lane),
                 invoker=invoker,
                 requires=_STAGE_REQUIRES_CAPS.get(stage.stage_key, CapRequirement()),

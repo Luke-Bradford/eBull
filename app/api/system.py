@@ -44,7 +44,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.api.auth import require_session_or_service_token
+from app.api.bootstrap import BootstrapApiStatus, LaneApi, StageApiStatus
 from app.db import get_conn
+from app.services.bootstrap_state import (
+    compute_retryable_view,
+    read_run_with_stages,
+    read_state,
+)
 from app.services.ops_monitor import (
     JobHealth,
     LayerHealth,
@@ -571,6 +577,149 @@ class PostgresHealthResponse(BaseModel):
     financial_facts_raw_default_breached_warn: bool | None
     metric_errors: list[str]
     collected_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap status overview (#1136 Phase A.3 audit endpoint)
+# ---------------------------------------------------------------------------
+#
+# Lean operator readout mirroring the ``/system/postgres-health`` shape:
+# per-stage ``(status, last_error, retryable, attempt_count,
+# completed_at)`` plus a top-level summary and ``retry_available`` /
+# ``retry_blocked_reason`` pair. Lets the operator drive T9-POST drain
+# without log-grepping or replaying ``reset_failed_stages_for_retry``
+# precedence by hand.
+#
+# Distinct from ``GET /system/bootstrap/status`` (rich admin-page
+# payload — archive_results, bulk_manifest, full stage params); this
+# is the audit-shape sibling. Both endpoints read the same tables.
+
+
+class BootstrapStatusSummary(BaseModel):
+    total: int
+    pending: int
+    running: int
+    success: int
+    error: int
+    blocked: int
+    skipped: int
+    cancelled: int
+
+
+class BootstrapStatusStageOverview(BaseModel):
+    stage_key: str
+    stage_order: int
+    lane: LaneApi
+    status: StageApiStatus
+    last_error: str | None
+    attempt_count: int
+    completed_at: datetime | None
+    retryable: bool
+
+
+class BootstrapStatusOverview(BaseModel):
+    state_status: BootstrapApiStatus
+    current_run_id: int | None
+    last_completed_at: datetime | None
+    summary: BootstrapStatusSummary
+    retry_available: bool
+    retry_blocked_reason: (
+        Literal[
+            "bootstrap_running",
+            "no_prior_run",
+            "state_not_resettable",
+            "no_failed_stages",
+        ]
+        | None
+    )
+    stages: list[BootstrapStatusStageOverview]
+    collected_at: datetime
+
+
+@router.get("/bootstrap-status", response_model=BootstrapStatusOverview)
+def get_bootstrap_status_overview(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> BootstrapStatusOverview:
+    """Lean operator readout of bootstrap state + per-stage retryability.
+
+    Spec: ``docs/superpowers/specs/2026-05-19-1136-bootstrap-state-audit.md``.
+
+    Failure posture mirrors ``/system/postgres-health``:
+      * DB unreachable → 503.
+      * No prior run → 200 with ``state_status='pending'``, empty
+        stages, ``retry_blocked_reason='no_prior_run'``.
+
+    Run identification pins on ``bootstrap_state.last_run_id`` (NOT
+    ``ORDER BY bootstrap_runs.id DESC``) so the readout reflects what
+    ``/retry-failed`` would target — the two can diverge transiently
+    during ``start_run`` or after a post-restart sweep that re-seeded
+    a row without touching the singleton.
+    """
+    now = _utcnow()
+    try:
+        with conn.transaction():
+            state = read_state(conn)
+            if state.last_run_id is None:
+                snapshot = None
+            else:
+                snapshot = read_run_with_stages(conn, run_id=state.last_run_id)
+    except psycopg.Error as exc:
+        logger.exception("bootstrap-status: DB-level failure")
+        raise HTTPException(status_code=503, detail="bootstrap status unavailable") from exc
+
+    view = compute_retryable_view(state, snapshot)
+
+    summary = BootstrapStatusSummary(
+        total=0, pending=0, running=0, success=0, error=0, blocked=0, skipped=0, cancelled=0
+    )
+    stage_overviews: list[BootstrapStatusStageOverview] = []
+    if snapshot is not None:
+        for stage in snapshot.stages:
+            stage_overviews.append(
+                BootstrapStatusStageOverview(
+                    stage_key=stage.stage_key,
+                    stage_order=stage.stage_order,
+                    lane=stage.lane,
+                    status=stage.status,
+                    last_error=stage.last_error,
+                    attempt_count=stage.attempt_count,
+                    completed_at=stage.completed_at,
+                    retryable=view.stage_retryable.get(stage.stage_key, False),
+                )
+            )
+        counter_map: dict[str, int] = {
+            "pending": 0,
+            "running": 0,
+            "success": 0,
+            "error": 0,
+            "blocked": 0,
+            "skipped": 0,
+            "cancelled": 0,
+        }
+        for stage in snapshot.stages:
+            if stage.status in counter_map:
+                counter_map[stage.status] += 1
+        summary = BootstrapStatusSummary(
+            total=len(snapshot.stages),
+            pending=counter_map["pending"],
+            running=counter_map["running"],
+            success=counter_map["success"],
+            error=counter_map["error"],
+            blocked=counter_map["blocked"],
+            skipped=counter_map["skipped"],
+            cancelled=counter_map["cancelled"],
+        )
+
+    return BootstrapStatusOverview(
+        state_status=state.status,
+        current_run_id=state.last_run_id,
+        last_completed_at=state.last_completed_at,
+        summary=summary,
+        retry_available=view.retry_available,
+        retry_blocked_reason=view.retry_blocked_reason,
+        stages=stage_overviews,
+        collected_at=now,
+    )
 
 
 @router.get("/postgres-health", response_model=PostgresHealthResponse)

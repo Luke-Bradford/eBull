@@ -457,8 +457,13 @@ def test_orchestrator_unknown_job_name_recorded_as_error(
     ebull_test_conn: psycopg.Connection[tuple],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If a stage's job_name is missing from _INVOKERS, the orchestrator
-    must mark that stage error rather than crash.
+    """Registry-side gap: catalogue stage_key resolves to a job_name
+    that is not in _INVOKERS. Orchestrator must mark error, not crash.
+
+    #1136 Phase A.3 — uses a catalogue stage_key (``universe_sync``)
+    so the dispatch hardening's "stage_key not in catalogue" branch
+    is skipped; the registry-side guard is what fires when _INVOKERS
+    is forced empty.
     """
     _reset_state(ebull_test_conn)
     _bind_settings_to_test_db(monkeypatch)
@@ -466,10 +471,12 @@ def test_orchestrator_unknown_job_name_recorded_as_error(
     from app.jobs import runtime as runtime_module
     from app.services.bootstrap_state import StageSpec
 
-    # Empty registry on purpose — nothing is invokable.
+    # Empty registry on purpose — every catalogue lookup misses.
     monkeypatch.setattr(runtime_module, "_INVOKERS", {})
 
-    specs = (StageSpec(stage_key="orphan", stage_order=1, lane="init", job_name="nonexistent_job"),)
+    # Catalogue stage_key + ``init`` lane so no upstream blocks
+    # cascade-block this; isolated single-row scenario.
+    specs = (StageSpec(stage_key="universe_sync", stage_order=1, lane="init", job_name="nightly_universe_sync"),)
     start_run(ebull_test_conn, operator_id=None, stage_specs=specs)
     ebull_test_conn.commit()
 
@@ -481,6 +488,116 @@ def test_orchestrator_unknown_job_name_recorded_as_error(
     assert snap.stages[0].status == "error"
     assert snap.stages[0].last_error is not None
     assert "unknown job_name" in snap.stages[0].last_error
+
+    state = read_state(ebull_test_conn)
+    assert state.status == "partial_error"
+
+
+def test_dispatch_resolves_job_name_from_spec_by_stage_key(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1136 Phase A.3 — dispatcher uses spec.job_name, not stage.job_name.
+
+    Reproduces the run_id=3 S21 regression class. PR1c #1064 renamed
+    the canonical 13F-sweep wrapper from ``bootstrap_sec_13f_recent_sweep``
+    to ``sec_13f_quarterly_sweep`` but bootstrap_stages.job_name for
+    an in-flight run was never updated. Pre-#1136 the dispatcher
+    looked up ``_INVOKERS.get(stage.job_name)`` and errored
+    "unknown job_name 'bootstrap_sec_13f_recent_sweep'". Post-#1136
+    it resolves by stage_key from ``_BOOTSTRAP_STAGE_SPECS`` and
+    dispatches the canonical name.
+
+    The test asserts the effective name reaches both the invoker
+    lookup AND param validation (Codex 1b §5) — the seeded stage
+    carries the bootstrap-only ``source_label`` internal-key param
+    which is allow-listed under the canonical job's metadata but
+    has no entry under the stale name.
+    """
+    _reset_state(ebull_test_conn)
+    _bind_settings_to_test_db(monkeypatch)
+    calls = _patch_invokers_with_fakes(monkeypatch)
+
+    # Seed a normal run.
+    run_id = start_run(
+        ebull_test_conn,
+        operator_id=None,
+        stage_specs=get_bootstrap_stage_specs(),
+    )
+    # Rewrite the S21 stage row to carry the stale wrapper name —
+    # this is what an in-flight retry of pre-PR1c run looks like.
+    ebull_test_conn.execute(
+        """
+        UPDATE bootstrap_stages
+           SET job_name = 'bootstrap_sec_13f_recent_sweep'
+         WHERE bootstrap_run_id = %s
+           AND stage_key = 'sec_13f_recent_sweep'
+        """,
+        (run_id,),
+    )
+    ebull_test_conn.commit()
+
+    run_bootstrap_orchestrator()
+
+    snap = read_latest_run_with_stages(ebull_test_conn)
+    assert snap is not None
+    s21 = next(s for s in snap.stages if s.stage_key == "sec_13f_recent_sweep")
+    # Post-fix: stage runs to success under the canonical name even
+    # though the DB row still carries the stale string.
+    assert s21.status == "success", s21.last_error
+    # The canonical invoker — not the stale wrapper — appears in the
+    # call log.
+    from app.workers.scheduler import JOB_SEC_13F_QUARTERLY_SWEEP
+
+    assert JOB_SEC_13F_QUARTERLY_SWEEP in calls["order"]
+    assert "bootstrap_sec_13f_recent_sweep" not in calls["order"]
+    # DB column stays as the audit snapshot — never silently rewritten.
+    assert s21.job_name == "bootstrap_sec_13f_recent_sweep"
+
+
+def test_dispatch_unknown_stage_key_fails_closed(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1136 Phase A.3 — catalogue-trimmed stage_key fails closed.
+
+    A pre-#719 install might still carry rows for a stage_key that
+    has been removed from ``_BOOTSTRAP_STAGE_SPECS`` (e.g. legacy
+    ``dividend_calendar``). Silently dispatching the DB row's
+    ``stage.job_name`` would lose canonical params / CapRequirement /
+    lane semantics. The dispatcher must mark error instead — and
+    the error must actually land (Codex 1b §1: ``mark_stage_error``
+    no-ops against pending rows; the path must run pending → running
+    → error).
+    """
+    _reset_state(ebull_test_conn)
+    _bind_settings_to_test_db(monkeypatch)
+    _patch_invokers_with_fakes(monkeypatch)
+
+    from app.services.bootstrap_state import StageSpec
+
+    # ``dividend_calendar`` is not in _BOOTSTRAP_STAGE_SPECS today (#260
+    # retired the standalone cron). The stage_key existing in a DB row
+    # is the exact pre-#719-install survivor case.
+    specs = (StageSpec(stage_key="dividend_calendar", stage_order=1, lane="init", job_name="dividend_calendar_job"),)
+    start_run(ebull_test_conn, operator_id=None, stage_specs=specs)
+    ebull_test_conn.commit()
+
+    run_bootstrap_orchestrator()
+
+    snap = read_latest_run_with_stages(ebull_test_conn)
+    assert snap is not None
+    assert len(snap.stages) == 1
+    row = snap.stages[0]
+    # Critical: row did NOT survive in pending. That's the silent-
+    # no-op pitfall Codex 1b §1 flagged.
+    assert row.status == "error", (
+        f"unknown stage_key must reach terminal error; "
+        f"got status={row.status!r} (silent no-op? mark_stage_running missing?)"
+    )
+    assert row.last_error is not None
+    assert "dividend_calendar" in row.last_error
+    assert "not in current bootstrap catalogue" in row.last_error
 
     state = read_state(ebull_test_conn)
     assert state.status == "partial_error"

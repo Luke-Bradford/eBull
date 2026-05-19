@@ -241,18 +241,76 @@ def read_latest_run_with_stages(
         if run_row is None:
             return None
         run_id, run_status, triggered_at, completed_at = run_row
+        return _read_run_with_stage_rows(
+            conn,
+            run_id=run_id,
+            run_status=run_status,
+            triggered_at=triggered_at,
+            completed_at=completed_at,
+        )
 
-        stage_rows = conn.execute(
+
+def read_run_with_stages(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+) -> RunSnapshot | None:
+    """Return a specific bootstrap_runs row + its stages, or None.
+
+    Used by ``GET /system/bootstrap-status`` (#1136 Phase A.3 audit
+    endpoint) which pins on ``bootstrap_state.last_run_id`` rather
+    than ``ORDER BY id DESC LIMIT 1``. The two diverge transiently
+    during ``start_run`` and any post-restart sweep that re-seeded a
+    row without touching the singleton — the retry semantics the
+    endpoint advertises target ``last_run_id`` because that is what
+    ``reset_failed_stages_for_retry`` reads.
+
+    Returns ``None`` when the run row has been deleted out-of-band
+    (manual cleanup); the caller should surface ``last_run_id`` with
+    empty stages as an operator-visible stale-pointer signal rather
+    than masking it as "no prior run."
+    """
+    with conn.transaction():
+        run_row = conn.execute(
             """
-            SELECT id, bootstrap_run_id, stage_key, stage_order, lane, job_name,
-                   status, started_at, completed_at, rows_processed,
-                   expected_units, units_done, last_error, attempt_count
-              FROM bootstrap_stages
-             WHERE bootstrap_run_id = %(run_id)s
-             ORDER BY stage_order ASC, id ASC
+            SELECT id, status, triggered_at, completed_at
+              FROM bootstrap_runs
+             WHERE id = %(run_id)s
             """,
             {"run_id": run_id},
-        ).fetchall()
+        ).fetchone()
+        if run_row is None:
+            return None
+        row_id, run_status, triggered_at, completed_at = run_row
+        return _read_run_with_stage_rows(
+            conn,
+            run_id=row_id,
+            run_status=run_status,
+            triggered_at=triggered_at,
+            completed_at=completed_at,
+        )
+
+
+def _read_run_with_stage_rows(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+    run_status: RunStatus,
+    triggered_at: datetime,
+    completed_at: datetime | None,
+) -> RunSnapshot:
+    """Helper: project the stage rows for an already-located run row."""
+    stage_rows = conn.execute(
+        """
+        SELECT id, bootstrap_run_id, stage_key, stage_order, lane, job_name,
+               status, started_at, completed_at, rows_processed,
+               expected_units, units_done, last_error, attempt_count
+          FROM bootstrap_stages
+         WHERE bootstrap_run_id = %(run_id)s
+         ORDER BY stage_order ASC, id ASC
+        """,
+        {"run_id": run_id},
+    ).fetchall()
 
     stages = tuple(
         StageRow(
@@ -1139,6 +1197,144 @@ def reap_orphaned_running(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Retry-view computation (#1136 Phase A.3 audit endpoint)
+# ---------------------------------------------------------------------------
+
+
+RetryBlockedReason = Literal[
+    "bootstrap_running",
+    "no_prior_run",
+    "state_not_resettable",
+    "no_failed_stages",
+]
+"""Why ``/system/bootstrap/retry-failed`` would refuse the next click.
+
+``None`` when the click would succeed (retry-available). Each
+non-None value mirrors the exception precedence inside
+``reset_failed_stages_for_retry``:
+
+* ``"no_prior_run"``         — ``state.last_run_id IS NULL``.
+* ``"bootstrap_running"``    — ``state.status == 'running'``.
+* ``"state_not_resettable"`` — ``state.status NOT IN
+                               ('partial_error', 'cancelled')``.
+* ``"no_failed_stages"``     — singleton is in a resettable status but
+                               latest run has no
+                               ``error``/``blocked``/``cancelled``
+                               stage; helper returns 0 reset rows and
+                               the API maps to 404.
+"""
+
+
+_FAILED_STATUSES: frozenset[str] = frozenset({"error", "blocked", "cancelled"})
+_RESETTABLE_STATE_STATUSES: frozenset[str] = frozenset({"partial_error", "cancelled"})
+
+
+@dataclass(frozen=True)
+class RetryView:
+    """Pure-data view of the bootstrap-retry surface.
+
+    Computed from ``(BootstrapState, RunSnapshot | None)`` without DB
+    access; the API endpoint serialises it directly. Per-stage
+    ``stage_retryable`` is keyed by ``stage_key``.
+
+    Semantics mirror ``reset_failed_stages_for_retry``:
+
+    * ``retry_available`` is True iff a ``/retry-failed`` call would
+      reset at least one stage (and not raise).
+    * ``stage_retryable[stage_key]`` is True iff that specific stage
+      row would be transitioned to ``pending`` by the reset SQL —
+      i.e. it sits in a lane with at least one failed row AND its
+      ``stage_order >= MIN(stage_order)`` over the failed rows of
+      that lane. The stage's *own* status is irrelevant to the
+      predicate; a ``success`` row downstream of a same-lane failure
+      gets reset alongside the failures (#1136 audit findings §3 +
+      §4.2).
+    """
+
+    retry_available: bool
+    retry_blocked_reason: RetryBlockedReason | None
+    stage_retryable: Mapping[str, bool]
+
+
+def compute_retryable_view(
+    state: BootstrapState,
+    snapshot: RunSnapshot | None,
+) -> RetryView:
+    """Project the retry surface from state + run snapshot.
+
+    Pure function. Mirrors the precedence inside
+    ``reset_failed_stages_for_retry`` so the operator readout
+    reflects what the next click will do — not what the row reads as
+    today. Detailed semantics in
+    ``docs/superpowers/specs/2026-05-19-1136-bootstrap-state-audit.md``
+    §4.2.
+    """
+    # Precedence 1: no prior run.
+    if state.last_run_id is None:
+        return RetryView(
+            retry_available=False,
+            retry_blocked_reason="no_prior_run",
+            stage_retryable={},
+        )
+
+    # Precedence 2: bootstrap currently running.
+    if state.status == "running":
+        return RetryView(
+            retry_available=False,
+            retry_blocked_reason="bootstrap_running",
+            stage_retryable={stage.stage_key: False for stage in (snapshot.stages if snapshot else ())},
+        )
+
+    # Precedence 3: singleton status not in (partial_error, cancelled).
+    if state.status not in _RESETTABLE_STATE_STATUSES:
+        return RetryView(
+            retry_available=False,
+            retry_blocked_reason="state_not_resettable",
+            stage_retryable={stage.stage_key: False for stage in (snapshot.stages if snapshot else ())},
+        )
+
+    # State is resettable; need a snapshot to compute per-lane mins.
+    if snapshot is None or not snapshot.stages:
+        return RetryView(
+            retry_available=False,
+            retry_blocked_reason="no_failed_stages",
+            stage_retryable={},
+        )
+
+    min_failed_order_by_lane: dict[str, int] = {}
+    for stage in snapshot.stages:
+        if stage.status not in _FAILED_STATUSES:
+            continue
+        current = min_failed_order_by_lane.get(stage.lane)
+        if current is None or stage.stage_order < current:
+            min_failed_order_by_lane[stage.lane] = stage.stage_order
+
+    if not min_failed_order_by_lane:
+        # Resettable singleton but no failed rows on the latest run —
+        # /retry-failed would 404 with "no failed stages to retry"
+        # because reset_count==0.
+        return RetryView(
+            retry_available=False,
+            retry_blocked_reason="no_failed_stages",
+            stage_retryable={stage.stage_key: False for stage in snapshot.stages},
+        )
+
+    stage_retryable: dict[str, bool] = {}
+    for stage in snapshot.stages:
+        min_order = min_failed_order_by_lane.get(stage.lane)
+        if min_order is None:
+            stage_retryable[stage.stage_key] = False
+            continue
+        stage_retryable[stage.stage_key] = stage.stage_order >= min_order
+
+    return RetryView(
+        retry_available=True,
+        retry_blocked_reason=None,
+        stage_retryable=stage_retryable,
+    )
+
+
 __all__ = [
     "BootstrapAlreadyRunning",
     "BootstrapNoPriorRun",
@@ -1148,6 +1344,8 @@ __all__ = [
     "BootstrapState",
     "BootstrapStatus",
     "Lane",
+    "RetryBlockedReason",
+    "RetryView",
     "RunSnapshot",
     "RunStatus",
     "StageRow",
@@ -1155,6 +1353,7 @@ __all__ = [
     "StageStatus",
     "StopAlreadyPendingError",
     "cancel_run",
+    "compute_retryable_view",
     "finalize_run",
     "force_mark_complete",
     "mark_run_cancelled",
@@ -1165,6 +1364,7 @@ __all__ = [
     "mark_stage_skipped",
     "mark_stage_success",
     "read_latest_run_with_stages",
+    "read_run_with_stages",
     "read_state",
     "reap_orphaned_running",
     "reset_failed_stages_for_retry",
