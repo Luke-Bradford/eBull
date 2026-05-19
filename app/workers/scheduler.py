@@ -274,6 +274,7 @@ JOB_MONTHLY_REPORT = "monthly_report"
 JOB_SEED_COST_MODELS = "seed_cost_models"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
+JOB_FINANCIAL_FACTS_RETENTION_SWEEP = "financial_facts_retention_sweep"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
@@ -831,6 +832,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # 225 GB rehash unnecessarily — a missed window waits for the
         # next natural fire.
         catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_FINANCIAL_FACTS_RETENTION_SWEEP,
+        display_name="Financial facts retention sweep",
+        source="db",
+        description=(
+            "Evicts financial_facts_raw rows outside the §13 retention "
+            "horizons (10-K family = last 3 annual filings, 10-Q family "
+            "= last 8 quarterly filings; amendments share the family "
+            "budget). Idempotent — no-op on an already-swept DB. "
+            "Required after the #1208 Phase 3 partition migration to "
+            "bound the post-migration table footprint."
+        ),
+        # 02:45 UTC: post raw_data_retention_sweep (02:00) + pre
+        # orchestrator_full_sync (03:00). The 15-min gap leaves
+        # headroom for raw_data_retention_sweep's filesystem rehash.
+        cadence=Cadence.daily(hour=2, minute=45),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # no-op on empty DB pre-bootstrap
     ),
     ScheduledJob(
         name=JOB_EXCHANGES_METADATA_REFRESH,
@@ -3837,6 +3857,33 @@ def raw_data_retention_sweep() -> None:
             total_deleted,
             total_bytes,
             dry_run,
+        )
+
+
+def financial_facts_retention_sweep() -> None:
+    """Daily eviction of `financial_facts_raw` rows outside §13 horizons
+    (#1208 Phase 3 Sub 3).
+
+    Thin scheduler-side wrapper around
+    :func:`app.services.financial_facts_retention.sweep_retention_all_instruments`.
+    The service owns transaction shape (autocommit conn + per-instrument
+    ``with conn.transaction()``); this wrapper only adds job-runs
+    telemetry.
+
+    Idempotent: a swept DB deletes 0 rows on the next fire. Bootstrap
+    gate prevents running against an empty universe.
+    """
+    from app.services.financial_facts_retention import (
+        sweep_retention_all_instruments,
+    )
+
+    with _tracked_job(JOB_FINANCIAL_FACTS_RETENTION_SWEEP) as tracker:
+        summary = sweep_retention_all_instruments()
+        tracker.row_count = summary.rows_deleted
+        logger.info(
+            "financial_facts_retention_sweep complete: instruments=%d rows_deleted=%d",
+            summary.instruments,
+            summary.rows_deleted,
         )
 
 

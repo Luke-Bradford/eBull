@@ -1018,3 +1018,16 @@ A parser-version bump triggers re-parse of in-horizon raw bodies (`filing_raw_do
 ### 13.C Adding a new source — derivable from this rule
 
 `(filing size per instrument) × (rows per instrument over the horizon)` must fit the storage budget for the universe (~12k tradable instruments). A source with 100k filings per instrument over 2 years would blow the budget — pick a shorter horizon or a coarser steady-state cadence. The horizon values in the table above are derived from this constraint; do not change them without re-computing the budget for that source.
+
+### 13.D Storage-side enforcement — `financial_facts_raw` retention sweep (#1208 Phase 3)
+
+Discovery-layer enforcement (§13.A) keeps OLD accessions out of the manifest, but it does NOT bound the size of the parser-layer landing tables that already hold years of historical residue. For `financial_facts_raw` specifically, the 10-K = 3-annual + 10-Q = 8-quarterly horizons are also enforced on the storage side by `app/services/financial_facts_retention.py::sweep_retention_for_instrument`, registered as the daily `ScheduledJob` `financial_facts_retention_sweep` (02:45 UTC, gated on `_bootstrap_complete`).
+
+Implementation details that any future storage-side retention sweep MUST mirror:
+
+- **Family-level retention.** 10-K and 10-K/A share the ANNUAL family budget (3); 10-Q and 10-Q/A share the QUARTERLY family budget (8). XBRL amendments supersede the original — they consume the same slot.
+- **DISTINCT-accession ranking, not per-row.** A 10-K filing emits hundreds of facts under one accession. Rank DISTINCT accessions then DELETE all facts of out-of-horizon accessions (NOT individual facts — ranking rows would evict facts 4..N of the latest filing and break the accession's atomicity). The Codex 1a BLOCKING #3 finding on the Phase 3 spec is the regression test for this rule.
+- **Service-no-commit + autocommit orchestrator.** The per-instrument sweep is a service function that takes a conn and does NOT enter `with conn.transaction()`; the orchestrator opens `psycopg.connect(url, autocommit=True)` then iterates instruments with `with conn.transaction()` per instrument so each becomes a real top-level tx (Codex 1b BLOCKING #2 on the Phase 3 spec). Defeats the SAVEPOINT trap that Phase 1 prevention-log §"psycopg3 service-no-commit invariant" warns about.
+- **Idempotent.** Second-pass deletes 0 rows. Verified in `tests/test_financial_facts_retention.py::test_idempotent_second_run_deletes_zero`.
+
+When ADDING a new storage-side retention sweep for another mega-table (`filing_raw_documents`, `filing_events`, etc.) follow the same pattern: a `<table>_retention_sweep` service + a daily `ScheduledJob` wired through `_INVOKERS` + the §13 horizon table in this file picks up the new row.
