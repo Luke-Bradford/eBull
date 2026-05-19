@@ -158,10 +158,25 @@ ALTER INDEX idx_facts_raw_instrument_concept_new RENAME TO idx_facts_raw_instrum
 ALTER INDEX idx_facts_raw_retention_ranking_new  RENAME TO idx_facts_raw_retention_ranking;
 ALTER INDEX idx_facts_raw_retention_evict_new    RENAME TO idx_facts_raw_retention_evict;
 
--- ── 9. Re-attach sequence ownership to the renamed table ─────────
+-- ── 9. Re-attach sequence ownership + setval to current max ──────
+--
+-- BIGSERIAL on the old table advanced the sequence on every insert,
+-- so post-migration `nextval()` already returns a unique value for
+-- normal serial inserts. BUT — the INSERT-SELECT copied explicit
+-- `fact_id` values, including any row that was inserted with an
+-- explicit `fact_id` greater than the sequence's last_value (manual
+-- backfill, restore-from-dump, etc.). Without `setval()`, the next
+-- regular insert could collide with an existing high `fact_id`.
+-- `setval(..., GREATEST(max(fact_id), 1))` is the canonical safe-and-
+-- idempotent guard.
 
 ALTER SEQUENCE financial_facts_raw_fact_id_seq
     OWNED BY financial_facts_raw.fact_id;
+
+SELECT setval(
+    'financial_facts_raw_fact_id_seq',
+    GREATEST((SELECT COALESCE(max(fact_id), 0) FROM financial_facts_raw), 1)
+);
 
 -- ── 10. Re-create dependent views VERBATIM from sql/052 ──────────
 --
@@ -316,3 +331,13 @@ COMMENT ON VIEW instrument_share_count_latest IS
     'Newest point-in-time share count per instrument. Drives live '
     'market-cap derivation (shares x close) — retires a yfinance '
     'call site under #432.';
+
+-- ── 11. ANALYZE post-swap so the planner has fresh stats ─────────
+--
+-- The 62M-row swap leaves every partition with empty pg_statistic.
+-- Autoanalyze will catch up eventually, but until it does the planner
+-- runs on zero-stat partitions and can pick poor plans (e.g. seq-scan
+-- a 380 MB leaf because it thinks it's empty). One explicit ANALYZE
+-- on the parent cascades to every leaf and bounds the cost.
+
+ANALYZE financial_facts_raw;

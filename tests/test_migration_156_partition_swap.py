@@ -72,8 +72,16 @@ def _temp_database_at_migration_155() -> Iterator[str]:
                 cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(db_name)))
 
 
+_FAR_FACT_ID = 999_999_999  # Codex 2 WARNING — exercise the setval drift case
+
+
 def _seed_pre_migration(conn: psycopg.Connection[tuple]) -> int:
     """Seed `financial_facts_raw` in its pre-156 un-partitioned shape.
+
+    Includes one row with an explicit `fact_id` far above the
+    sequence's `last_value` to exercise the `setval()` drift case
+    (Codex 2 WARNING #1: without setval the post-migration sequence
+    can hand out a `fact_id` that collides with this row).
 
     Returns the row count seeded.
     """
@@ -134,8 +142,24 @@ def _seed_pre_migration(conn: psycopg.Connection[tuple]) -> int:
             )
             """
         )
+        # 1 row with explicit fact_id far above the sequence's current
+        # last_value (simulates restore-from-dump / manual backfill).
+        # Post-migration setval() must bump the sequence past this
+        # value or the next regular insert would PK-collide.
+        cur.execute(
+            """
+            INSERT INTO financial_facts_raw (
+                fact_id, instrument_id, taxonomy, concept, unit,
+                period_end, val, accession_number, form_type, filed_date
+            ) VALUES (
+                %s, 40001, 'us-gaap', 'SetvalDrift', 'USD',
+                '2024-06-15', 0, 'acc-setval-drift', '10-K', '2024-06-15'
+            )
+            """,
+            (_FAR_FACT_ID,),
+        )
     conn.commit()
-    return 52
+    return 53
 
 
 def test_migration_156_swap_preserves_rows_and_indexes() -> None:
@@ -169,7 +193,8 @@ def test_migration_156_swap_preserves_rows_and_indexes() -> None:
             assert hist.get("financial_facts_raw_2021q2") == 10
             assert hist.get("financial_facts_raw_2022q3") == 10
             assert hist.get("financial_facts_raw_2023q4") == 10
-            assert hist.get("financial_facts_raw_2024q2") == 10
+            # 2024q2 holds 10 in-window seed facts + the explicit-fact_id drift seed
+            assert hist.get("financial_facts_raw_2024q2") == 11
             # Both junk rows in DEFAULT (NOT pre2010 — pre-1900 too)
             assert hist.get("financial_facts_raw_default") == 2
             assert "financial_facts_raw_pre2010" not in hist, "pre-1900 junk should land in DEFAULT, not pre2010"
@@ -241,3 +266,29 @@ def test_migration_156_swap_preserves_rows_and_indexes() -> None:
             assert next_val > max_fact_id_pre, (
                 f"nextval()={next_val} should exceed max(fact_id)={max_fact_id_pre} from the seeded pre-migration data"
             )
+            # Codex 2 WARNING #1 regression: max(fact_id) in the seed is
+            # the explicit _FAR_FACT_ID. Post-migration setval() must
+            # have bumped the sequence past it. Without setval(), the
+            # next regular insert would collide with the drift row's PK.
+            assert next_val > _FAR_FACT_ID, (
+                f"nextval()={next_val} should exceed explicit fact_id {_FAR_FACT_ID} — setval() drift guard not applied"
+            )
+
+            # A regular INSERT (no explicit fact_id) MUST succeed and
+            # NOT collide with the existing _FAR_FACT_ID row.
+            with verify.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO financial_facts_raw (
+                        instrument_id, taxonomy, concept, unit, period_end,
+                        val, accession_number, form_type, filed_date
+                    ) VALUES (
+                        40001, 'us-gaap', 'PostSwapInsert', 'USD',
+                        '2024-08-15', 1, 'acc-post-swap', '10-K', '2024-08-15'
+                    ) RETURNING fact_id
+                    """
+                )
+                row = cur.fetchone()
+            verify.commit()
+            assert row is not None
+            assert int(row[0]) > _FAR_FACT_ID, "post-swap regular insert produced fact_id ≤ drift seed"

@@ -304,9 +304,10 @@ def test_default_partition_growth_alarm(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     """DEFAULT partition is a parking lot for parser bugs, not normal
-    storage. Test template is empty, so this asserts the floor. The
-    same assertion run on dev should hold <5000 — operator alarm if it
-    exceeds."""
+    storage. Test template is empty, so this asserts the floor only —
+    a live-DB growth alarm needs Phase 4's `/system/postgres-health`
+    endpoint to be meaningful (Codex 2 WARNING #5: the empty-DB test
+    cannot guard dev/prod growth on its own)."""
     with ebull_test_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM financial_facts_raw_default")
         row = cur.fetchone()

@@ -18,8 +18,10 @@ import psycopg
 from app.services.financial_facts_retention import (
     KEEP_10K,
     KEEP_10Q,
+    sweep_retention_all_instruments,
     sweep_retention_for_instrument,
 )
+from tests.fixtures.ebull_test_db import test_database_url
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple], *, instrument_id: int) -> None:
@@ -296,3 +298,53 @@ def test_horizon_constants_match_skill_section_13(
     the skill, this test fails."""
     assert KEEP_10K == 3
     assert KEEP_10Q == 8
+
+
+def test_orchestrator_commits_per_instrument_autocommit_contract(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Codex 2 WARNING #4 regression: `sweep_retention_all_instruments`
+    must open an autocommit conn AND commit per instrument.
+
+    Strategy: seed two instruments with eviction-eligible accessions,
+    fire the orchestrator with the test DB URL, then verify from a
+    SEPARATE connection that the deletions are visible — proving the
+    per-instrument transaction committed (a SAVEPOINT-only path inside
+    one outer tx would leave the changes invisible to a fresh conn
+    until the outer commit, which never happens because the orchestrator
+    closes the conn on exit).
+    """
+    for iid in (50001, 50002):
+        _seed_instrument(ebull_test_conn, instrument_id=iid)
+        for i in range(5):
+            _seed_accession(
+                ebull_test_conn,
+                instrument_id=iid,
+                accession_number=f"10K-{iid}-{i:02d}",
+                form_type="10-K",
+                filed_date=date(2025, 1, 1) - timedelta(days=365 * i),
+                n_facts=4,
+            )
+    # The orchestrator opens its OWN conn; the seed-side conn just
+    # needs to commit so the rows are visible to the orchestrator.
+    # Do NOT close — the fixture's teardown needs the conn alive for
+    # the planner-table truncate.
+    ebull_test_conn.commit()
+
+    summary = sweep_retention_all_instruments(database_url=test_database_url())
+    assert summary.instruments >= 2
+    assert summary.rows_deleted == 16  # 2 instruments × 2 oldest × 4 facts
+
+    # Verify from a fresh conn — if deletions weren't committed
+    # per-instrument, the rows would still be present.
+    import psycopg as _psycopg
+
+    with _psycopg.connect(test_database_url()) as verify:
+        with verify.cursor() as cur:
+            cur.execute(
+                "SELECT instrument_id, count(*) FROM financial_facts_raw "
+                " WHERE instrument_id IN (50001, 50002) "
+                " GROUP BY 1 ORDER BY 1"
+            )
+            counts = dict(cur.fetchall())
+    assert counts == {50001: 12, 50002: 12}, f"expected each instrument at 3 accessions × 4 facts = 12, got {counts}"
