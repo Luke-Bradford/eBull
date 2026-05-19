@@ -980,3 +980,30 @@ class TestBootstrapDrain:
         )
         assert result.filings_scanned == 0
         assert rerun_fetcher.calls == []
+
+    def test_exit_reason_drained_when_queue_empties(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#1234 — natural drain signals ``exit_reason='drained'``."""
+        fetcher = _StubFetcher({})
+        result = bootstrap_business_summaries(
+            ebull_test_conn,
+            cast("object", fetcher),  # type: ignore[arg-type]
+            chunk_limit=10,
+            max_runtime_seconds=10,
+        )
+        assert result.filings_scanned == 0
+        assert result.exit_reason == "drained"
+
+    def test_exit_reason_deadline_when_max_runtime_zero(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#1234 — ``max_runtime_seconds=0`` exits the loop before any
+        chunk runs, so ``exit_reason='deadline'`` (the default). Pins
+        the deadline-bound exit signal so the orchestrator can later
+        surface a WARNING badge instead of silent SUCCESS."""
+        fetcher = _StubFetcher({})
+        result = bootstrap_business_summaries(
+            ebull_test_conn,
+            cast("object", fetcher),  # type: ignore[arg-type]
+            chunk_limit=10,
+            max_runtime_seconds=0,
+        )
+        assert result.filings_scanned == 0
+        assert result.exit_reason == "deadline"

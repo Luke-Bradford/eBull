@@ -35,7 +35,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 import psycopg
@@ -132,6 +132,12 @@ class IngestSummary:
     rows_inserted: int
     rows_updated: int
     first_error: str | None = None
+    # #1234 — exit reason for deadline-bound bootstrap loops
+    # (``bootstrap_def14a``). ``None`` for single-chunk callers that
+    # don't loop. ``drained`` = candidate query returned zero rows.
+    # ``deadline`` = wall-clock cap fired before drain (silent
+    # undercoverage signal; operator should re-trigger to finish).
+    exit_reason: Literal["drained", "deadline"] | None = None
 
     @property
     def accessions_ingested(self) -> int:
@@ -924,6 +930,8 @@ def bootstrap_def14a(
     total_inserted = 0
     total_updated = 0
     first_error: str | None = None
+    # #1234 — track WHY the loop exits.
+    exit_reason: Literal["drained", "deadline"] = "deadline"
 
     while time.monotonic() < deadline:
         chunk = ingest_def14a(
@@ -942,6 +950,7 @@ def bootstrap_def14a(
         if first_error is None and chunk.first_error is not None:
             first_error = chunk.first_error
         if chunk.accessions_seen == 0:
+            exit_reason = "drained"
             break
 
     # Bot review for #839 PR #850: enforce the accounting invariant
@@ -962,14 +971,30 @@ def bootstrap_def14a(
         )
 
     logger.info(
-        "bootstrap_def14a complete: seen=%d succeeded=%d partial=%d failed=%d inserted=%d updated=%d",
+        "bootstrap_def14a complete: seen=%d succeeded=%d partial=%d failed=%d inserted=%d updated=%d exit=%s",
         total_seen,
         total_succeeded,
         total_partial,
         total_failed,
         total_inserted,
         total_updated,
+        exit_reason,
     )
+    # #1234 — deadline exit = silent undercoverage. Loud WARNING so the
+    # operator log surface signals "stage marked SUCCESS but candidate
+    # set may not be fully drained — re-trigger if you want full
+    # coverage." Full warnings_count wiring through the _JobTracker is
+    # a follow-up (would touch every tracked-job site).
+    if exit_reason == "deadline":
+        logger.warning(
+            "bootstrap_def14a hit wall-clock deadline (max_runtime_seconds=%d) — "
+            "candidate set may not be fully drained. Re-trigger the stage to "
+            "process the remaining backlog. seen=%d inserted=%d updated=%d.",
+            max_runtime_seconds,
+            total_seen,
+            total_inserted,
+            total_updated,
+        )
 
     return IngestSummary(
         accessions_seen=total_seen,
@@ -979,6 +1004,7 @@ def bootstrap_def14a(
         rows_inserted=total_inserted,
         rows_updated=total_updated,
         first_error=first_error,
+        exit_reason=exit_reason,
     )
 
 

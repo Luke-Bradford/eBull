@@ -533,6 +533,17 @@ def _parse_percent(raw: str) -> Decimal | None:
     regex because that regex's trailing-asterisk branch would
     otherwise erase the cell content and return None — losing the
     less-than-1% signal the proxy explicitly conveys.
+
+    Out-of-range guard (#1228): clamps to ``[Decimal(0), Decimal(100)]``.
+    A real percent-of-class is bounded by definition (ownership is a
+    fraction of total shares). Values outside that band are almost
+    always a column-resolver misfire (positional fallback in
+    ``_resolve_columns`` mapped a shares-count column into
+    percent_idx). The schema is ``NUMERIC(8, 4)`` (max 9999.9999)
+    which raises ``NumericValueOutOfRange`` on 7-digit shares values
+    and previously aborted the whole batch in ``ingest_def14a``.
+    Returning ``None`` lets shares parse independently and the row
+    survives without a spurious percent.
     """
     if not raw:
         return None
@@ -548,9 +559,18 @@ def _parse_percent(raw: str) -> Decimal | None:
     if cleaned in ("", "-", "—", "–"):
         return None
     try:
-        return Decimal(cleaned)
+        value = Decimal(cleaned)
     except InvalidOperation:
         return None
+    # #1228 — clamp to the natural [0, 100] band. See docstring.
+    # NaN / Inf survive ``Decimal(cleaned)`` for inputs like ``"NaN"``
+    # or ``"Infinity"``; comparison against finite Decimals would
+    # raise ``InvalidOperation`` so reject them first.
+    if value.is_nan() or value.is_infinite():
+        return None
+    if value < Decimal(0) or value > Decimal(100):
+        return None
+    return value
 
 
 # Column-finder. DEF 14A tables vary in column order and labelling;
