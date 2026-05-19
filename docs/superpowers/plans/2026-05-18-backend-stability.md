@@ -404,6 +404,164 @@ substituted.
 
 ---
 
+### 6.2 Handover prompt for Phase 3 (`financial_facts_raw` partition + retention, #1208 Sub 3)
+
+Paste the block below verbatim into the next session — self-contained, no prior conversation context required.
+
+---
+
+```
+Pick up Phase 3 of docs/superpowers/plans/2026-05-18-backend-stability.md
+(Backend stability + dev DB hygiene, autonomous-execution contract per
+ETL plan §1 — no operator signoff between Codex iterations, drive PR to
+merge in one session).
+
+PHASE 3 SCOPE — financial_facts_raw partition + retention (#1208 Sub 3):
+
+SCHEMA PRIMITIVE. Biggest blast radius of the epic. Phase 2 (PR #1213
+merged YYYY-MM-DD SHA `XXXXXXX`) shipped 2026-05-19 — orphan sweep +
+keepalive fixture + slim-data audit are LIVE on dev. As of Phase 2 the
+dev cluster:
+
+- `pg_database_size('ebull')` ≈ 46 GB (spike value pre-tuning;
+  re-measure pre-Phase-3 with `docker exec ebull-postgres psql -tAc
+  "SELECT pg_size_pretty(pg_database_size('ebull'));"`).
+- `financial_facts_raw` is ~28 GB unpartitioned — the WAL-PANIC root
+  cause from Phase 1 §1. Autovacuum bursts on this single table caused
+  two PG container PANICs on 2026-05-18.
+- No partition strategy in place; rows accumulate forever; retention
+  horizons documented at `.claude/skills/data-engineer/SKILL.md` §13
+  (10-K = last 3 annual, 10-Q = last 8 quarterly) are NOT enforced.
+
+DELIVERABLES:
+
+Task A — Schema migration:
+- `sql/NNN_financial_facts_raw_partition.sql` — convert
+  `financial_facts_raw` to `PARTITION BY RANGE (period_end)` with
+  quarterly buckets (e.g. `financial_facts_raw_2020q1`, ...,
+  `financial_facts_raw_2026q2` + a default partition for the future).
+- Decision (deferred to spec): online detach/attach vs fresh-table
+  swap-rename. Both have trade-offs:
+    online detach/attach = live; lower risk; multi-step migration.
+    swap-rename = atomic; requires brief table-lock window; simpler.
+  Recommend swap-rename for v1 (28 GB is one-shot tractable) with the
+  spec capturing the brief-lock window operator runbook.
+- Same `-- runner: autocommit` directive shape as Phase 1's sql/155
+  if any non-tx statement is needed; otherwise plain tx migration.
+
+Task B — Retention sweep:
+- `app/services/financial_facts_retention.py::sweep_retention()` —
+  enforce per-table horizons from `.claude/skills/data-engineer/SKILL.md`
+  §13. For each (instrument, concept) family, keep last N rows where
+  N is statement-type-dependent (10-K → 3, 10-Q → 8). DELETE the
+  excess via per-partition tx-bounded batch.
+- Wire as a `ScheduledJob` at 03:00 ET nightly (idempotent if no
+  excess rows).
+
+Task C — Tests:
+- tests/test_financial_facts_raw_partition.py — fresh template +
+  insert rows spanning >5 quarters → assert correct partition routing
+  + retention sweep keeps the documented N per concept.
+- tests/test_financial_facts_raw_swap.py — exercise the swap-rename
+  migration shape on a fixture table.
+
+Task D — Operator runbook + prevention-log:
+- docs/review-prevention-log.md — new section "Unpartitioned mega-table
+  WAL-PANICs Postgres" linking back to Phase 1's tuning entry.
+- `.claude/skills/data-engineer/SKILL.md` §13 — retention horizons
+  cross-reference to the sweep service.
+
+FIRST ACTIONS:
+
+1. Read CLAUDE.md working order. Confirm #1208 OPEN; PR #1213 merged
+   (record SHA in spec).
+2. Read docs/review-prevention-log.md §"Postgres on Docker Desktop
+   macOS — defaults blow up partition-heavy workloads" — the
+   WAL-PANIC root cause that motivates this phase.
+3. Read sql/097_financial_facts_raw.sql (or whichever migration owns
+   the current shape) end-to-end. Capture the index inventory + the
+   FK fan-in so the partition migration preserves both.
+4. Read app/services/financial_facts/* — every reader path that
+   issues queries against the table; partition-routing must be
+   transparent to them.
+5. Spike: count + size per period_end quarter:
+     SELECT date_trunc('quarter', period_end), count(*),
+            pg_size_pretty(sum(pg_column_size(t.*)))
+     FROM financial_facts_raw t GROUP BY 1 ORDER BY 1;
+   Capture in spec §2 as the partition-budget evidence.
+
+DESIGN STEPS (follow CLAUDE.md working order verbatim):
+
+1. Branch: feature/1208-phase3-financial-facts-raw-partition.
+2. Spike: row counts per quarter; index inventory; FK fan-in;
+   smoke test reads under the proposed partition shape on a copy.
+3. Spec at docs/superpowers/specs/2026-05-NN-phase3-financial-facts-raw-partition.md
+   mirroring Phase 1 + Phase 2 spec shape (§3.4/§3.5/§3.6 for Codex
+   iterations). Explicit decision on swap-rename vs detach/attach
+   with operator-runbook implications.
+4. Codex 1a on spec → Codex 1b on revised spec → Codex 1c if needed.
+5. Implementation order:
+   - T1: schema migration (swap-rename OR detach/attach per spec).
+   - T2: retention service + ScheduledJob registration.
+   - T3: tests (partition routing + retention sweep + migration).
+   - T4: operator-runbook + prevention-log + skill cross-reference.
+6. Codex 2 pre-push on branch diff.
+7. Push + poll bot + CI.
+
+ETL DoD CLAUSES that apply (#8-#12):
+
+- #8 Smoke against 3-5 known instruments (AAPL, GME, MSFT, JPM, HD)
+  on dev DB: read `/instruments/<symbol>/fundamentals` post-migration
+  + confirm partition routing transparent.
+- #9 Cross-source: spot-check one concept against an independent
+  source (gurufocus / SEC EDGAR direct).
+- #10 Backfill: POST /jobs/sec_rebuild/run with the affected source
+  scope; observe partition rows populate.
+- #11 Operator-visible: `pg_database_size('ebull')` < 10 GB
+  post-retention-sweep + first nightly run (target <5 GB per epic
+  acceptance §8.3).
+- #12 PR records SHA + verification.
+
+NON-NEGOTIABLES (carried forward):
+
+- Autonomous-execution contract per ETL plan §1 — no operator signoff
+  between Codex iterations; merge to master in one session.
+- Service-no-commit invariant + psycopg3 savepoint discipline still
+  apply. The retention sweep service MUST NOT enter its own
+  `conn.transaction()` block (Phase 1 lesson — see prevention-log
+  §"psycopg3 service-no-commit invariant").
+- ALTER SYSTEM forbidden inside non-autocommit migrations — if the
+  partition migration needs anything non-transactional, use the
+  `-- runner: autocommit` directive from Phase 1.
+- Skill ownership posture — update skills inline on any observed gap.
+- Per feedback_post_push_cycle.md: poll gh pr view + gh pr checks
+  IMMEDIATELY after push.
+- Per feedback_pre_push_xdist_postgres_locks.md: --no-verify justified
+  when impacted-files clean + Codex green + targeted pytest + smoke
+  pass.
+- Per feedback_pr_auto_close_required.md: PR body MUST contain
+  `Refs #1208` on its own line.
+
+REFERENCES:
+
+- Parent maintenance plan: docs/superpowers/plans/2026-05-18-backend-stability.md.
+- Issue: #1208 (Postgres tuning + dev-DB hygiene umbrella).
+- Phase 1 spec (template shape): docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md.
+- Phase 2 spec (sibling): docs/superpowers/specs/2026-05-19-phase2-test-fixture-orphan-sweep.md.
+- Phase 1 merge SHA: `471a3b3` (PR #1210). Phase 2 merge SHA: TBD
+  (PR #1213).
+- WAL-PANIC root cause: prevention-log §"Postgres on Docker Desktop
+  macOS — defaults blow up partition-heavy workloads".
+- Retention horizons: `.claude/skills/data-engineer/SKILL.md` §13.
+
+If Phase 3 lands clean, next session = Phase 4 (`/system/postgres-health`
+endpoint + pre-push hook bloat warning, #1208 Sub 4). Phase 5
+(prevention-log + skill updates) folds into Phase 4's PR per §3 of
+this plan.
+```
+
+---
+
 ## 7. Out of scope for the whole #1208 epic (yet)
 
 - Production HA / replication tuning. eBull demo-first; production posture is a separate epic.
