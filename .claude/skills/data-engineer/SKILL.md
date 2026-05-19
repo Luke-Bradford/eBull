@@ -1031,3 +1031,18 @@ Implementation details that any future storage-side retention sweep MUST mirror:
 - **Idempotent.** Second-pass deletes 0 rows. Verified in `tests/test_financial_facts_retention.py::test_idempotent_second_run_deletes_zero`.
 
 When ADDING a new storage-side retention sweep for another mega-table (`filing_raw_documents`, `filing_events`, etc.) follow the same pattern: a `<table>_retention_sweep` service + a daily `ScheduledJob` wired through `_INVOKERS` + the §13 horizon table in this file picks up the new row.
+
+### 13.E Operator-visible health surface (#1208 Phase 4)
+
+`GET /system/postgres-health` is the live readout for the storage discipline this section enforces. Returns per-poll:
+
+- `db_size_*`: `pg_database_size('ebull')` against the 10 GB warn threshold (matches the pre-push hook bloat warn in `.githooks/pre-push`).
+- `leaked_test_db_*`: count + names of leaked `ebull_test_*_gw*` databases (Phase 2 sweep target — should be zero).
+- `wal_dir_*` + `wal_since_checkpoint_*`: WAL retention + burst pressure against `max_wal_size=4 GB` (Phase 1 tuning gate).
+- `last_checkpoint_at`: most recent PG checkpoint.
+- `autovacuum_top10`: tables sorted by `n_dead_tup` (Phase 3 partition motivation — should stay <5% dead_fraction for active partitions).
+- `financial_facts_raw_default_*`: row count against the 5000-row growth alarm (parser-junk early-warning).
+
+Every metric is nullable + every breach flag is nullable; a failed probe (e.g. `pg_ls_waldir()` requires `pg_monitor` role on a non-superuser DB) returns `null` rather than `0` so a silent collection failure can't masquerade as "all clear". The `metric_errors` field lists which probes failed for ops triage.
+
+When adding a new storage discipline rule (retention, sweep, partition retrofit), wire its operator-visible signal into this endpoint AND into `.githooks/pre-push` if it's a push-time concern. The two surfaces share a single threshold constant (`DB_SIZE_WARN_BYTES` is the working example) so an operator never sees one surface clean while the other is breached.

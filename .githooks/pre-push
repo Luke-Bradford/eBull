@@ -116,4 +116,38 @@ if [[ -d frontend && -f frontend/package.json ]] && command -v pnpm >/dev/null 2
   pnpm --dir frontend dark:check
 fi
 
+# #1208 Phase 4 — dev DB bloat warning (non-blocking).
+#
+# Surfaces creeping growth at push time so the operator notices BEFORE
+# more code piles on top of an unswept DB. Threshold is the same
+# constant exposed by GET /system/postgres-health
+# (DB_SIZE_WARN_BYTES in app/services/postgres_health.py); the test
+# tests/test_pre_push_hook_bloat_warn.py asserts the two stay aligned.
+#
+# Single-quoted echoes are deliberate: a double-quoted message with
+# backticks would trigger command substitution at hook-run time,
+# silently running a second psql probe per push (Codex 1a BLOCKING).
+#
+# || true on every docker exec so set -euo pipefail (top of file)
+# cannot kill the whole hook if psql is briefly unavailable — same
+# best-effort posture as the orphan-sweep cleanup.
+DB_SIZE_WARN_BYTES=10737418240  # 10 GB
+if command -v docker >/dev/null 2>&1; then
+  db_size=$(docker exec ebull-postgres psql -U postgres -d ebull -tAc \
+    "SELECT pg_database_size('ebull')" 2>/dev/null | tr -d ' ' || true)
+  # Codex 2 LOW #4: `-gt` is bash arithmetic; a non-numeric blip (e.g.
+  # psql returning an error to stdout, container restart mid-probe)
+  # under `set -euo pipefail` would kill the hook. The integer regex
+  # below filters non-numeric values out so the warn block silently
+  # no-ops instead of failing the entire push.
+  if [[ "${db_size}" =~ ^[0-9]+$ && "${db_size}" -gt "${DB_SIZE_WARN_BYTES}" ]]; then
+    pretty=$(docker exec ebull-postgres psql -U postgres -d ebull -tAc \
+      "SELECT pg_size_pretty(pg_database_size('ebull'))" 2>/dev/null \
+      | tr -d ' ' || true)
+    echo '==> WARN: dev DB ebull size = '"${pretty}"' (> 10 GB).'
+    echo '==> WARN: investigate via GET /system/postgres-health.'
+    echo '==> WARN: non-blocking; push continues.'
+  fi
+fi
+
 echo "==> Pre-push gate: green. Pushing."

@@ -527,3 +527,111 @@ def get_jobs(
         raise HTTPException(status_code=503, detail="job overview unavailable") from exc
 
     return JobsListResponse(checked_at=now, jobs=overviews, jobs_process=jobs_process)
+
+
+# ---------------------------------------------------------------------------
+# Postgres health (#1208 Phase 4 Sub 4)
+# ---------------------------------------------------------------------------
+#
+# Surfaces the five operator-visible signals that Phases 1-3 of #1208
+# added enforcement for but no live readout: dev DB size + leaked
+# test-DB count + WAL pressure + last checkpoint + autovacuum top-10
+# + financial_facts_raw_default growth alarm.
+#
+# Implementation lives in `app/services/postgres_health.py` — that
+# module opens its own autocommit conn so per-metric failures stay
+# isolated (Phase 4 spec §4.2 / Codex 1a BLOCKING #1).
+
+
+class AutovacuumTableLagSchema(BaseModel):
+    relname: str
+    last_autovacuum: datetime | None
+    last_analyze: datetime | None
+    n_dead_tup: int
+    n_live_tup: int
+    dead_fraction: float | None
+
+
+class PostgresHealthResponse(BaseModel):
+    db_size_bytes: int | None
+    db_size_pretty: str | None
+    db_size_warn_threshold_bytes: int
+    db_size_breached_warn: bool | None
+    leaked_test_db_count: int | None
+    leaked_test_db_names: list[str] | None
+    wal_dir_bytes: int | None
+    wal_dir_pretty: str | None
+    wal_since_checkpoint_bytes: int | None
+    wal_warn_threshold_bytes: int
+    wal_breached_warn: bool | None
+    last_checkpoint_at: datetime | None
+    autovacuum_top10: list[AutovacuumTableLagSchema] | None
+    financial_facts_raw_default_rows: int | None
+    financial_facts_raw_default_warn_threshold: int
+    financial_facts_raw_default_breached_warn: bool | None
+    metric_errors: list[str]
+    collected_at: datetime
+
+
+@router.get("/postgres-health", response_model=PostgresHealthResponse)
+def get_postgres_health() -> PostgresHealthResponse:
+    """Live Postgres health snapshot for the operator dashboard.
+
+    Returns 200 with a partial payload if some metric queries fail —
+    the `metric_errors` field lists which probes raised, and the
+    corresponding `*_breached_warn` flags are `null` rather than
+    `false` so a silent collection failure can't masquerade as "all
+    clear" (Phase 4 spec §4.3).
+
+    Raises 503 only when the underlying `psycopg.connect()` fails —
+    i.e. the dev DB is itself unreachable. Matches the fail-closed
+    posture documented in the module docstring.
+    """
+    # Local import so the system router file stays light on global
+    # state (the service module touches `settings.database_url` at
+    # call time, not at import time).
+    from app.services.postgres_health import (
+        PostgresHealthSnapshot,
+        collect_postgres_health,
+    )
+
+    try:
+        snapshot: PostgresHealthSnapshot = collect_postgres_health()
+    except psycopg.Error as exc:
+        logger.exception("postgres-health: connection-level failure")
+        raise HTTPException(status_code=503, detail="postgres health unavailable") from exc
+
+    return PostgresHealthResponse(
+        db_size_bytes=snapshot.db_size_bytes,
+        db_size_pretty=snapshot.db_size_pretty,
+        db_size_warn_threshold_bytes=snapshot.db_size_warn_threshold_bytes,
+        db_size_breached_warn=snapshot.db_size_breached_warn,
+        leaked_test_db_count=snapshot.leaked_test_db_count,
+        leaked_test_db_names=snapshot.leaked_test_db_names,
+        wal_dir_bytes=snapshot.wal_dir_bytes,
+        wal_dir_pretty=snapshot.wal_dir_pretty,
+        wal_since_checkpoint_bytes=snapshot.wal_since_checkpoint_bytes,
+        wal_warn_threshold_bytes=snapshot.wal_warn_threshold_bytes,
+        wal_breached_warn=snapshot.wal_breached_warn,
+        last_checkpoint_at=snapshot.last_checkpoint_at,
+        autovacuum_top10=(
+            None
+            if snapshot.autovacuum_top10 is None
+            else [
+                AutovacuumTableLagSchema(
+                    relname=lag.relname,
+                    last_autovacuum=lag.last_autovacuum,
+                    last_analyze=lag.last_analyze,
+                    n_dead_tup=lag.n_dead_tup,
+                    n_live_tup=lag.n_live_tup,
+                    dead_fraction=lag.dead_fraction,
+                )
+                for lag in snapshot.autovacuum_top10
+            ]
+        ),
+        financial_facts_raw_default_rows=snapshot.financial_facts_raw_default_rows,
+        financial_facts_raw_default_warn_threshold=(snapshot.financial_facts_raw_default_warn_threshold),
+        financial_facts_raw_default_breached_warn=(snapshot.financial_facts_raw_default_breached_warn),
+        metric_errors=snapshot.metric_errors,
+        collected_at=snapshot.collected_at,
+    )
