@@ -332,8 +332,18 @@ def test_orchestrator_commits_per_instrument_autocommit_contract(
     ebull_test_conn.commit()
 
     summary = sweep_retention_all_instruments(database_url=test_database_url())
+    # Bot review #1215 BLOCKING: do NOT assert exact `summary.rows_deleted`
+    # — the orchestrator sweeps every instrument with swept-family
+    # facts in the DB, so a stray fact from a future co-located test
+    # (or any cross-test leak) would push rows_deleted above 16 and
+    # flake this test. The load-bearing contract is the per-instrument
+    # visibility check below: rows were COMMITTED per-instrument so a
+    # fresh conn can see them — that proves the autocommit + per-tx
+    # shape. ``>= 16`` keeps the floor.
     assert summary.instruments >= 2
-    assert summary.rows_deleted == 16  # 2 instruments × 2 oldest × 4 facts
+    assert summary.rows_deleted >= 16, (
+        f"expected at least 2 instruments × 2 oldest × 4 facts = 16, got {summary.rows_deleted}"
+    )
 
     # Verify from a fresh conn — if deletions weren't committed
     # per-instrument, the rows would still be present.
