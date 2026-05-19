@@ -98,9 +98,9 @@ def test_safe_wrapper_catches_non_psycopg_exceptions(
 
     assert snapshot.financial_facts_raw_default_rows is None
     assert snapshot.financial_facts_raw_default_breached_warn is None
-    assert any(
-        e.startswith("default_partition_rows:") for e in snapshot.metric_errors
-    ), f"expected default_partition_rows entry in metric_errors, got {snapshot.metric_errors}"
+    assert any(e.startswith("default_partition_rows:") for e in snapshot.metric_errors), (
+        f"expected default_partition_rows entry in metric_errors, got {snapshot.metric_errors}"
+    )
     # Every other metric unaffected.
     assert snapshot.db_size_bytes is not None
     assert snapshot.last_checkpoint_at is not None
