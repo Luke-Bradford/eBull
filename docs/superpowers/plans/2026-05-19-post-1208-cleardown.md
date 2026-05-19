@@ -40,13 +40,15 @@ Three deliverables. Each follows the #1208-shape cadence: spike → spec → Cod
 - **Estimate:** ~150 LOC. One PR.
 - **Spec gate:** `docs/superpowers/specs/2026-05-NN-1218-parser-period-end.md` + Codex 1a/1b.
 
-### Phase A.2 — #1010 13F sweep cohort bound
+### Phase A.2 — #1010 13F sweep cohort bound — CLOSED 2026-05-19
+
+**Merged:** PR #1222 / `240112e`.
+**Spec:** `docs/superpowers/specs/2026-05-19-1010-13f-cohort-bound.md`.
 
 - **Symptom:** `bootstrap_sec_13f_recent_sweep` walks 11,205 filers @ 23/min = ~8 h on first install. Most are sub-$100M managers filing empty 13F-NTs. Bootstrap times out + retries forever.
-- **Scope:** add `last_13f_hr_at` column to `institutional_filers`; populate during `sec_13f_filer_directory_sync` by tracking last `13F-HR` (excluding -NT/-A) per CIK; sweep excludes filers older than 4 quarters. Optional secondary cap on top-N by AUM if cheap to derive.
-- **Why pre-bootstrap:** without this, the bootstrap drain literally cannot finish in a reasonable window. Operator retry burns 8 h per attempt.
-- **Estimate:** ~250 LOC. One PR. Migration adds the column + a back-population query.
-- **Spec gate:** `docs/superpowers/specs/2026-05-NN-1010-13f-cohort-bound.md` + Codex 1a/1b.
+- **Scope (delivered):** added `last_13f_hr_at` column to `institutional_filers`; populated during `sec_13f_filer_directory_sync` by tracking 13F-HR / HR-A only (NT/NT-A excluded); `list_directory_filer_ciks(min_last_13f_hr_at=...)` filters cohort; bootstrap stage 21 dispatches `_PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF` resolved to UTC start-of-day `today() - 380d`. AUM cap deferred (not needed; recency alone landed acceptance).
+- **Outcome:** cohort 11,205 → 8,718 (78% have backfill) → 8,681 (within 380d). Subsequent `sec_13f_filer_directory_sync` runs converge to form.idx ground truth (NT-only filers re-revealed as NULL).
+- **Iteration:** Codex 1a (6 findings: NULLIF guard, `_upsert_filer` advance, UTC-midnight cutoff, backfill caveat, shared-cutoff justification, default ordering preserved), Codex 1b (4 follow-ups: exact-equality test, naive ISO UTC tag, retired-cron wording, boundary-test UTC midnight explicit), Codex 1c clean, Codex 2 MEDIUM (`date.today()` is local TZ → `datetime.now(tz=UTC).date()`). Bot APPROVE round 1 + APPROVE round 2 after NITPICK fix (`__import__("datetime").timezone.utc` → `from datetime import UTC`).
 
 ### Phase A.3 — #1136 bootstrap state-machine audit (scope subset)
 
@@ -180,6 +182,66 @@ When §D + §E land (any time):
 8. N-PORT data populated (Phase E #917).
 
 ## 12. Handover for next session
+
+```
+Pick up Phase A.3 of docs/superpowers/plans/2026-05-19-post-1208-cleardown.md
+(post-#1208 clear-down + bootstrap completion, autonomous-execution
+contract per #1208 plan §1 — no operator signoff between Codex
+iterations, drive PR to merge in one session).
+
+PHASE A.3 SCOPE — #1136 bootstrap state-machine audit (subset):
+
+- Audit current bootstrap_stages to identify which stage(s) failed in
+  run_id=3.
+- For each failed stage: confirm the underlying ETL is patched (Phase
+  A.1 #1218 / A.2 #1010 / a previous fix) + add a regression test
+  that the stage now succeeds against a fresh DB.
+- Operator-visible: GET /system/bootstrap-status (mirror of
+  /system/postgres-health shape) returning (stage, last_status,
+  last_error, retryable) per stage. Lets operator drive T9-POST
+  without log-grepping.
+
+FIRST ACTIONS:
+
+1. Read CLAUDE.md working order. Confirm #1136 still OPEN.
+2. Read app/services/processes/bootstrap_orchestrator and the
+   bootstrap_stages schema in sql/.
+3. Spike: SELECT stage_key, status, last_error FROM bootstrap_stages
+   WHERE run_id = (SELECT last_run_id FROM bootstrap_state WHERE id=1);
+4. Read app/api/system.py (postgres-health) for the endpoint shape.
+
+DESIGN STEPS:
+- Mirror #1208 / #1218 / #1010 cadence: spike → spec → Codex 1a/1b
+  → impl → Codex 2 → push → bot → merge.
+- Spec at docs/superpowers/specs/2026-05-NN-1136-bootstrap-state-audit.md.
+- Implementation: stage audit script + /system/bootstrap-status
+  endpoint + regression tests for previously-failing stages.
+
+CONTEXT FROM A.1 + A.2 (just merged):
+- PR #1220 f451e18 merged 2026-05-19. Phase A.1 closed #1218.
+- PR #1222 240112e merged 2026-05-19. Phase A.2 closed #1010.
+- Same Codex/bot/merge cadence worked in both; bot's NITPICK fixed
+  pre-merge in A.2.
+
+NON-NEGOTIABLES (carried from #1208 + #1218 + #1010):
+- Per CLAUDE.md: read settled-decisions + prevention-log + relevant
+  skills BEFORE writing code.
+- Per feedback_post_push_cycle: poll gh pr view + gh pr checks
+  IMMEDIATELY after push.
+- Per feedback_no_fake_polling: NEVER narrate "waiting/polling"
+  without invoking actual check tool that turn.
+- Per feedback_pr_auto_close_required: PR body MUST contain
+  `Closes #1136` on its own line (or scope-subset reference if the
+  full umbrella stays open).
+
+If A.3 lands clean, next session = Phase C operator T9-POST drive
+(no code; admin UI clicks + monitor /system/bootstrap-status until
+every stage = complete).
+```
+
+---
+
+## 12.OLD. (archived) Phase A.1 handover
 
 ```
 Pick up Phase A.1 of docs/superpowers/plans/2026-05-19-post-1208-cleardown.md
