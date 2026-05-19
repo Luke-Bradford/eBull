@@ -419,7 +419,7 @@ merge in one session).
 PHASE 3 SCOPE — financial_facts_raw partition + retention (#1208 Sub 3):
 
 SCHEMA PRIMITIVE. Biggest blast radius of the epic. Phase 2 (PR #1213
-merged YYYY-MM-DD SHA `XXXXXXX`) shipped 2026-05-19 — orphan sweep +
+merged 2026-05-19 SHA `efff62f`) shipped — orphan sweep +
 keepalive fixture + slim-data audit are LIVE on dev. As of Phase 2 the
 dev cluster:
 
@@ -548,8 +548,8 @@ REFERENCES:
 - Issue: #1208 (Postgres tuning + dev-DB hygiene umbrella).
 - Phase 1 spec (template shape): docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md.
 - Phase 2 spec (sibling): docs/superpowers/specs/2026-05-19-phase2-test-fixture-orphan-sweep.md.
-- Phase 1 merge SHA: `471a3b3` (PR #1210). Phase 2 merge SHA: TBD
-  (PR #1213).
+- Phase 1 merge SHA: `471a3b3` (PR #1210). Phase 2 merge SHA:
+  `efff62f` (PR #1213).
 - WAL-PANIC root cause: prevention-log §"Postgres on Docker Desktop
   macOS — defaults blow up partition-heavy workloads".
 - Retention horizons: `.claude/skills/data-engineer/SKILL.md` §13.
