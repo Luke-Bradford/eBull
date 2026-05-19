@@ -95,14 +95,20 @@ def _safe[T](
     fn: Callable[[psycopg.Connection[tuple]], T],
     errors: list[str],
 ) -> T | None:
-    """Run one metric probe under autocommit isolation. On failure,
+    """Run one metric probe under autocommit isolation. On any failure,
     append a `<name>: <ExceptionClassName>` line to `errors` and
     return None. The autocommit conn keeps a failure local to this
     single query — the next probe still works.
+
+    Catches `Exception` (not just `psycopg.Error`) so a defensive
+    `assert row is not None` inside a probe, a `KeyError` on an
+    unexpected column shape, or any other non-DB exception still
+    flows through the isolation wrapper instead of escaping to the
+    API handler as an unhandled 500 (bot review #1216).
     """
     try:
         return fn(conn)
-    except psycopg.Error as exc:
+    except Exception as exc:  # noqa: BLE001 — isolation wrapper, see docstring
         msg = f"{name}: {type(exc).__name__}"
         logger.warning("postgres_health probe %s failed: %s", name, exc)
         errors.append(msg)

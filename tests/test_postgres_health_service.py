@@ -75,3 +75,32 @@ def test_autocommit_isolates_failed_probe_under_real_db(
     assert snapshot.last_checkpoint_at is not None
     assert snapshot.autovacuum_top10 is not None
     assert snapshot.financial_facts_raw_default_rows is not None
+
+
+@pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
+def test_safe_wrapper_catches_non_psycopg_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bot review #1216 regression: `_safe` MUST catch every exception
+    type, not just `psycopg.Error`. Probe internals contain bare
+    `assert row is not None` statements — an `AssertionError` from
+    one of those would otherwise escape `_safe` + bypass the API's
+    `psycopg.Error` handler + yield an unhandled 500 instead of a
+    partial 200 with `metric_errors` populated.
+    """
+
+    def _bad_probe(_conn: psycopg.Connection[tuple]) -> int:
+        raise AssertionError("synthetic: probe internal assertion failed")
+
+    monkeypatch.setattr(postgres_health, "_q_default_partition_rows", _bad_probe)
+
+    snapshot = collect_postgres_health(database_url=test_database_url())
+
+    assert snapshot.financial_facts_raw_default_rows is None
+    assert snapshot.financial_facts_raw_default_breached_warn is None
+    assert any(
+        e.startswith("default_partition_rows:") for e in snapshot.metric_errors
+    ), f"expected default_partition_rows entry in metric_errors, got {snapshot.metric_errors}"
+    # Every other metric unaffected.
+    assert snapshot.db_size_bytes is not None
+    assert snapshot.last_checkpoint_at is not None
