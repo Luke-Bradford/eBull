@@ -113,6 +113,48 @@ _PERIOD_RE: Final[re.Pattern[str]] = re.compile(r"CY[0-9]{4}(?:Q[1-4]I?)?")
 # collectively bursting past the SEC fair-use limit (#537).
 _MIN_REQUEST_INTERVAL_S = 0.11
 
+# XBRL period sanity window (#1218). The DEFAULT partition of
+# ``financial_facts_raw`` (sql/156) absorbed parser bugs that emitted
+# pre-1900 / year-6016 ``period_end`` values; the 5000-row alarm at
+# ``app/services/postgres_health.py::DEFAULT_PARTITION_WARN_ROWS``
+# fires once they accumulate. We reject at the parser instead of
+# routing junk to the partition.
+#
+# Bounds: ``[1900-01-01, 2100-01-01)`` — EDGAR began 1993 + XBRL
+# became mandatory 2009, so pre-1900 has no filer use-case; 2100
+# leaves ~75y headroom beyond the most-distant legitimate
+# forward-projected schedule item observed on dev (2041), tight
+# enough to catch the year-6016 digit-overflow bug class. Spec
+# ``docs/superpowers/specs/2026-05-19-1218-parser-period-end.md``.
+_PERIOD_MIN: Final[date] = date(1900, 1, 1)
+_PERIOD_MAX: Final[date] = date(2100, 1, 1)
+
+_REJ_END_OUT_OF_WINDOW: Final[str] = "period_end_out_of_window"
+_REJ_START_OUT_OF_WINDOW: Final[str] = "period_start_out_of_window"
+_REJ_START_AFTER_END: Final[str] = "period_start_after_period_end"
+
+
+def _classify_period_rejection(
+    period_start: date | None,
+    period_end: date,
+) -> str | None:
+    """Return one of the ``_REJ_*`` reason constants if the
+    ``(period_start, period_end)`` pair should be rejected, or
+    ``None`` if the pair is in-window and well-ordered.
+
+    Pure date predicate — no logging, no XBRL-shape coupling, so the
+    helper is trivially testable.
+    """
+    if not (_PERIOD_MIN <= period_end < _PERIOD_MAX):
+        return _REJ_END_OUT_OF_WINDOW
+    if period_start is not None:
+        if not (_PERIOD_MIN <= period_start < _PERIOD_MAX):
+            return _REJ_START_OUT_OF_WINDOW
+        if period_start > period_end:
+            return _REJ_START_AFTER_END
+    return None
+
+
 # XBRL tags, in priority order, for each concept.
 # Companies use different tags depending on accounting standard and vintage.
 _REVENUE_TAGS = (
@@ -331,6 +373,10 @@ def _extract_facts_from_section(
     subset.
     """
     facts: list[XbrlFact] = []
+    # Per-call WARN dedup on ``(accession, reason)`` — without this, a
+    # single malformed filing fans out across many concept × unit_key
+    # rows and drowns the log signal (#1218 spec §3.2).
+    warned_rejections: set[tuple[str, str]] = set()
     for tag_name, fact_data in section.items():
         if allowed_tags is not None and tag_name not in allowed_tags:
             continue
@@ -357,6 +403,36 @@ def _extract_facts_from_section(
                     filed_date = date.fromisoformat(filed_str)
                 except ValueError, TypeError:
                     logger.debug("Skipping XBRL entry for %s: bad date format", tag_name)
+                    continue
+
+                # #1218 — reject out-of-window period_end / period_start
+                # at the parser before the row reaches
+                # ``financial_facts_raw``. The DEFAULT partition (sql/156)
+                # has a 5000-row alarm; silently routing parser bugs into
+                # it is a non-actionable signal. Skip + WARN with reason
+                # + full provenance instead.
+                rejection_reason = _classify_period_rejection(period_start, period_end)
+                if rejection_reason is not None:
+                    key = (accn, rejection_reason)
+                    if key not in warned_rejections:
+                        warned_rejections.add(key)
+                        logger.warning(
+                            "XBRL parser: rejecting fact for %s/%s "
+                            "(taxonomy=%s, accn=%s, form=%s, filed=%s): "
+                            "%s — period_start=%s, period_end=%s; "
+                            "window [%s, %s)",
+                            tag_name,
+                            unit_key,
+                            taxonomy,
+                            accn,
+                            form,
+                            filed_str,
+                            rejection_reason,
+                            start_str or "<null>",
+                            end_str,
+                            _PERIOD_MIN.isoformat(),
+                            _PERIOD_MAX.isoformat(),
+                        )
                     continue
 
                 # Guard against NaN/Infinity values in SEC data
