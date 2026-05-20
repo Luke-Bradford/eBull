@@ -4,7 +4,7 @@
 >
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 >
-> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter cap (#1242), PR7 N-PORT 8-quarter cap (#1243), and **PR8 N-CSR 730d cap (this commit)** shipped. PR1 revision reframed the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
+> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter cap (#1242), PR7 N-PORT 8-quarter cap (#1243), PR8 N-CSR 730d cap (#1244), and **PR9 N-CEN latest-only invariant pin (this commit)** shipped. PR1 revision reframed the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
 
 ## 0. Status snapshot (2026-05-19 17:00 UTC, mid-drain)
 
@@ -232,8 +232,16 @@ Aggregated under DEF 14A discovery (treasury share counts, ESOP plan holdings, b
 - **Current volume**: small; one row per investment-company CIK per year.
 - **Half-life**: **slow** — classification updates annually; latest N-CEN per CIK is sufficient.
 - **Consumers**: `app/services/ncen_classifier.py` filer-type classification feeds 13F-HR vs N-PORT routing; influences institutional vs funds ownership lane decision.
-- **Ingest depth cap**: **latest N-CEN per CIK** at the parser. Post-wipe clean re-run lands one row per CIK.
-- **Why this matters**: small storage, but **load-bearing for filer classification** — Codex 1a caught the omission. Spec must acknowledge this source even though it's lightweight.
+- **Ingest depth cap**: **latest N-CEN per CIK — PR9 SHIPPED.** Unlike PR5-PR8 (which add ingest-time horizon caps to observations tables), N-CEN enforces latest-only **structurally**, not via a horizon helper:
+  1. **Schema** — `ncen_filer_classifications.cik` is `PRIMARY KEY` ([sql/100_ncen_filer_classifications.sql:45](sql/100_ncen_filer_classifications.sql#L45)). The DB physically refuses a second row per CIK.
+  2. **Writer** — `_upsert_classification` ([app/services/ncen_classifier.py:287](app/services/ncen_classifier.py#L287)) is the sole INSERT path; its UPSERT clause promotes in place when a newer N-CEN appears AND its `WHERE EXCLUDED.filed_at >= ncen_filer_classifications.filed_at` predicate refuses to demote to an older accession (Codex 1a HIGH on PR9 — makes the database the monotonicity oracle so a stale caller / one-off operator script cannot silently overwrite the newer classification).
+  3. **Discovery** — `_find_latest_ncen` ([app/services/ncen_classifier.py:233](app/services/ncen_classifier.py#L233)) walks the SEC submissions array newest-first and returns on the first `N-CEN` / `N-CEN/A` match. Only the latest accession's `primary_doc.xml` is fetched + parsed. No accumulator pattern, no multi-row write path.
+  4. **Reader** — `compose_filer_type` ([app/services/ncen_classifier.py:511](app/services/ncen_classifier.py#L511)) reads a single row via `LIMIT 1` on a PK-deduped table; latest-by-construction.
+- **Chokepoint coverage (PR9)**: smallest of any PR in this rubric. No manifest-worker parser (`app/services/manifest_parsers/sec_n_cen.py` does not exist), no bulk-dataset path, no rewash function, no SQL repair sweep, no scheduled cron job — `classify_filers_via_ncen` is invoked only from the operator-driven `scripts/seed_holder_coverage.py:449`. The four structural invariants above ARE the cap. Lint guard `scripts/check_ncen_latest_only.sh` (four placement invariants A / B / C / D — C now also pins the monotonicity predicate from the Codex 1a HIGH) pins the invariants against regression and is wired into `.githooks/pre-push`. Two existing tests already pin the runtime behaviour (`test_picks_latest_ncen` selects the newest of multiple N-CENs in one submissions array; `test_re_run_upserts_in_place` confirms re-runs against the same accession produce 1 row); PR9 adds `test_promotes_to_newer_accession_across_passes` (pass 1 writes row(A); pass 2 with submissions array now showing accessions A + newer B promotes to row(B), still 1 row total) and `test_does_not_demote_to_older_accession` (pass 1 writes row(newer B); pass 2 with submissions array now showing only older A is REFUSED by the predicate — row stays at B).
+- **No `_ingest_single_accession` / no bulk-dataset / no rewash / no SQL repair sweep / no manifest parser / no cron**: if a future PR adds ANY of those code paths to N-CEN, that PR is responsible for honouring the latest-only invariant (one row per CIK by construction, never an observations append) AND extending the lint guard with a new placement invariant. The structural model is non-negotiable: N-CEN is a classification table, not an observations table — PR1's two-layer model in §6.4 does NOT apply here.
+- **Cohort bound**: classifier walks `institutional_filer_seeds WHERE active = TRUE` (`_list_active_filer_seeds`, [app/services/ncen_classifier.py:278](app/services/ncen_classifier.py#L278)) — same active-only cohort as the 13F-HR ingester. No `last_ncen_at` recency bound (mirror of #1010) — the cohort is already curated + small, classification updates annually, so a recency filter would shed nothing.
+- **Existing rows**: untouched. The pre-wipe (§6.3) + clean re-run will land at most one row per CIK by construction.
+- **Why this matters**: small storage, but **load-bearing for filer classification** — Codex 1a caught the omission. Spec must acknowledge this source even though it's lightweight. The N-CEN cap is not the storage win; it's the **bug-class lockout** — the lint guard makes "someone refactors `_upsert_classification` into an append-mode writer" a push-time failure instead of a silent regression that only surfaces months later when 13F-HR routing breaks.
 
 ### 4.14 Metadata-only forms (Form D, Form 144, NT 10-Q, S-1/3/4/8/11, 424B)
 
@@ -354,7 +362,7 @@ Land per-source PRs in this order. Each PR is **ingest-side cap only** — no PR
 - **PR6 — SHIPPED.** 13F-HR 8-quarter ingest cap at every writer chokepoint (parse_submissions_index intrinsic floor, _ingest_single_accession defensive post-parse gate, manifest-worker post-parse gate, bulk-dataset per-row gate, rewash rescue gate, sync_institutions SQL predicate). Cap anchored to calendar quarter ends (`thirteen_f_retention_cutoff`) — admits exactly 8 quarter-ends. (#1010 cohort bound already in place.) Lint guard `scripts/check_13f_hr_retention.sh` with nine PR5-style placement invariants A-I.
 - **PR7 — SHIPPED.** N-PORT 8-quarter (24-month) ingest cap at every writer chokepoint (parse_submissions_index intrinsic floor, _ingest_single_accession defensive post-parse gate, manifest-worker post-parse gate, bulk-dataset per-row gate). Cap anchored to **calendar month-ends** via `n_port_retention_cutoff` (NOT calendar-quarter-ends — fiscal-Q-non-calendar funds would otherwise be silently rejected). Cohort bound shipped in the same PR (mirror of #1010 — bootstrap stage 22 dispatches with `min_last_seen_filed_at = today - 380d` via `_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF`; daily / Admin / manual paths use full cohort). Lint guard `scripts/check_nport_retention.sh` with seven PR5-style placement invariants A/B/C/D/F/H/I (no E for rewash, no G for sync_funds — both chokepoints don't exist for N-PORT). `sec_n_port_ingest` migrated from `_adapt_zero_arg` to native `JobInvoker(params)` so stage 22 params reach the body.
 - **PR8 — SHIPPED.** N-CSR / N-CSRS 730d filed-at ingest cap at every writer chokepoint (bootstrap drain via shared `n_csr_retention_cutoff` helper + manifest-worker `_parse_sec_n_csr` pre-fetch retention gate placed BEFORE iXBRL fetch). Drift audit found the original 730d cap existed ONLY in bootstrap drain — atom / daily-index / per-CIK poll / master-idx all enqueued uncapped, and the worker parsed every accession. `horizon_days` param removed from public signature + scheduler invoker + param_metadata (single source of truth in the helper). Lint guard `scripts/check_n_csr_retention.sh` with three placement invariants (A helpers in canonical module / B bootstrap drain uses helper / D manifest-worker gate placed before fetch). Smallest chokepoint surface of any PR — no `_ingest_single_accession`, no bulk-dataset, no rewash, no SQL repair sweep.
-- **PR9 — pending.** N-CEN latest-only cap at the parser. Verify `ncen_classifier` reads latest.
+- **PR9 — SHIPPED.** N-CEN latest-only invariant pin. No new gate code: latest-only is enforced structurally by (a) `cik PRIMARY KEY` on `ncen_filer_classifications`, (b) `_upsert_classification`'s `ON CONFLICT (cik) DO UPDATE`, (c) `_find_latest_ncen`'s newest-first walk + early return, (d) `compose_filer_type`'s `LIMIT 1` read on a PK-deduped table. Lint guard `scripts/check_ncen_latest_only.sh` pins all four invariants (A schema PK / B sole writer / C UPSERT clause / D newest-first early-return) against future regression. Cross-pass promotion test added (`test_promotes_to_newer_accession_across_passes`). Smallest PR in the rubric by line count — N-CEN's classification-table semantics make a horizon cap structurally redundant.
 - **PR10 — pending.** Form 3/5 latest-only at the parser + business summary (10-K Item 1) latest-only at the parser.
 - **PR11 — pending.** 13D/G activate dormant pipeline with 3y historical + current-state cap at the parser.
 - **PR12 — pending.** `ownership_*_current` size audit + remediation (no row-deletion — schema audit only; if wide-row write bug found, fix the writer; existing rows reshape happens via the pre-wipe).
@@ -423,29 +431,58 @@ State as of this commit:
 
 - PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix
   (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter
-  cap (#1242), PR7 N-PORT 8-quarter cap (#1243), and **PR8 N-CSR
-  730d cap (this commit)** all shipped.
-- PR9-PR12 remain — every one is ingest-side cap only, no row deletion.
+  cap (#1242), PR7 N-PORT 8-quarter cap (#1243), PR8 N-CSR 730d
+  cap (#1244), and **PR9 N-CEN latest-only invariant pin (this commit)**
+  all shipped.
+- PR10-PR12 remain — every one is ingest-side cap only, no row deletion.
   The pre-wipe is the single operator event at the end.
 
-```text
-After PR8 merges, the next session picks up PR9 (N-CEN latest-only
-cap at the parser; verify `ncen_classifier` reads latest).
+PR9 audit summary (for the record):
 
-PR9 scope:
-- Audit the N-CEN parser (`app/services/manifest_parsers/sec_n_cen.py`
-  or equivalent) — confirm it overwrites a single row per CIK rather
-  than appending an observation per year.
-- Confirm `ncen_classifier` (`app/services/ncen_classifier.py`)
-  consumes the latest-only row.
-- If drift found (observations accumulating year-on-year), apply the
-  PR8 pattern: parser writes ONE row per CIK + lint guard rejecting
-  multi-row-per-CIK INSERTs.
+- N-CEN architecturally diverges from PR5-PR8. Those PRs added
+  ingest-time horizon helpers (`*_retention_cutoff` / `*_within_retention`)
+  applied at multiple writer chokepoints because the underlying tables
+  are append-only observations. N-CEN's `ncen_filer_classifications` is
+  a classification table — `cik` is the primary key, so the DB itself
+  refuses multi-row drift.
+- No manifest-worker parser exists for N-CEN
+  (`app/services/manifest_parsers/sec_n_cen.py` is absent).
+- No bulk-dataset / rewash / SQL repair-sweep paths exist.
+- No scheduled cron job. The classifier is operator-driven via
+  `scripts/seed_holder_coverage.py:449`.
+- Two existing tests already pin the runtime invariant
+  (`test_picks_latest_ncen`, `test_re_run_upserts_in_place`); PR9 adds
+  `test_promotes_to_newer_accession_across_passes` to cover the missing
+  cross-pass promotion case.
+
+```text
+After PR9 merges, the next session picks up PR10 (Form 3 / Form 5
+latest-only at the parser + business summary (10-K Item 1)
+latest-only at the parser).
+
+PR10 scope:
+- Form 3 (initial insider filing) + Form 5 (annual catch-up). Per
+  §4.4 the cap is "latest per insider-company pair" — confirm the
+  current parser overwrites a single row per pair rather than
+  appending one observation per filing.
+- Business summary (10-K Item 1, `business_summaries` table). Per
+  §4.10 the cap is "latest 10-K per CIK" — confirm the writer
+  upserts on `cik` PK / unique constraint and only the latest 10-K's
+  Item 1 narrative is retained.
+- If either is already structurally latest-only (PR9 pattern): pin
+  via lint guard + tests.
+- If either is observations-shaped (PR8 pattern): apply
+  `*_retention_cutoff` / `*_within_retention` helper at every writer
+  chokepoint.
+- One PR can cover both if both are structurally latest-only; if
+  either requires a horizon helper, split into PR10a / PR10b.
 
 FIRST ACTIONS:
-1. Read CLAUDE.md working order + revised §4.13.
-2. Confirm PR8 merged. Confirm #1233 still OPEN.
-3. Branch `feature/1233-pr9-ncen-latest-only-cap`.
-4. Read N-CEN parser + `ncen_classifier` + confirm single-row-per-CIK
-   semantics.
+1. Read CLAUDE.md working order + spec §4.4 (Form 3 / Form 5) + §4.10
+   (business summary).
+2. Confirm PR9 merged. Confirm #1233 still OPEN.
+3. Branch `feature/1233-pr10-form35-business-summary-cap`.
+4. Audit Form 3/5 + business_summaries schema + writer paths the same
+   way PR9 audited N-CEN: schema PK / writer count / UPSERT clause /
+   discovery early-return.
 ```
