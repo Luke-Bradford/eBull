@@ -39,7 +39,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from app.services.insider_transactions import form4_retention_cutoff
+from app.services.insider_transactions import form4_retention_cutoff, form5_retention_cutoff
 from app.services.ownership_observations import record_insider_observation
 
 logger = logging.getLogger(__name__)
@@ -58,8 +58,9 @@ class InsiderIngestResult:
     # before the 3y retention cap. Counted separately from
     # ``rows_skipped_bad_data`` so operator-visible logging can
     # distinguish deliberate retention skips from malformed input.
-    # Form 3 and Form 5 rows are NOT counted here — they continue to
-    # ingest unbounded until PR10's latest-only cap lands.
+    # PR10b (#1233 §4.4) extends the same counter to Form 5 / 5-A
+    # rows outside the 18-month cap. Form 3 rows are still unbounded
+    # (per §4.4 — Form 3 is read-side latest-per-pair).
     rows_skipped_retention: int = 0
     parse_errors: int = 0
     touched_instrument_ids: set[int] = field(default_factory=set)
@@ -272,11 +273,13 @@ def ingest_insider_dataset_archive(
     result = InsiderIngestResult()
 
     # PR4 (#1233 §4.3) — Form 4 / 4-A 3y retention cap, archive scope.
-    # Anchor the cutoff to a single instant for the whole archive so a
-    # long walk crossing midnight UTC uses one boundary. Form 3 and
-    # Form 5 rows are NOT gated here — they ride to PR10's latest-only
-    # cap.
+    # PR10b (#1233 §4.4) — Form 5 / 5-A 18-month retention cap, same
+    # archive scope. Anchor each cutoff to a single instant for the
+    # whole archive so a long walk crossing midnight UTC uses one
+    # boundary. Form 3 rows are NOT gated here — Form 3 is read-side
+    # latest-per-pair via ``list_baseline_only_insider_holdings``.
     retention_cutoff = form4_retention_cutoff()
+    retention_cutoff_form5 = form5_retention_cutoff()
 
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
@@ -331,11 +334,15 @@ def ingest_insider_dataset_archive(
                 result.rows_skipped_bad_data += 1
                 continue
 
-            # PR4 retention cap — Form 4 / 4-A only. `_map_form_to_source`
-            # collapses Form 4 + Form 5 into "form4" but the cap applies
-            # to Form 4 only; route on the raw form string instead.
+            # PR4 + PR10b retention caps. `_map_form_to_source` collapses
+            # Form 4 + Form 5 into "form4" so route on the raw form
+            # string for the per-form predicate. Mutually exclusive
+            # branches because a single filing carries one form_upper.
             form_upper = (form or "").strip().upper()
             if form_upper.startswith("4") and filed_at.date() < retention_cutoff:
+                result.rows_skipped_retention += 1
+                continue
+            if form_upper.startswith("5") and filed_at.date() < retention_cutoff_form5:
                 result.rows_skipped_retention += 1
                 continue
 
@@ -398,11 +405,18 @@ def ingest_insider_dataset_archive(
                 result.rows_skipped_bad_data += 1
                 continue
 
-            # PR4 retention cap — Form 4 / 4-A only. Form 3 initial-
-            # holdings statements typically land in this loop (no
-            # NONDERIV_TRANS rows); the gate must NOT touch them.
+            # PR4 + PR10b retention caps. Form 3 initial-holdings
+            # statements typically land in THIS loop (no NONDERIV_TRANS
+            # rows); the Form 3 startswith("3") case is intentionally
+            # unguarded — Form 3 is read-side latest-per-pair, not
+            # ingest-capped. Form 5 holdings without transactions
+            # (rare but possible — historical NPV-style filings) are
+            # capped here for parity with the transactions loop above.
             form_upper = (form or "").strip().upper()
             if form_upper.startswith("4") and filed_at.date() < retention_cutoff:
+                result.rows_skipped_retention += 1
+                continue
+            if form_upper.startswith("5") and filed_at.date() < retention_cutoff_form5:
                 result.rows_skipped_retention += 1
                 continue
 

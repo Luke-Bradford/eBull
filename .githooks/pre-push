@@ -110,6 +110,21 @@ bash scripts/check_ncen_latest_only.sh
 echo "==> Pre-push gate: business_summary latest-only invariant lint"
 bash scripts/check_business_summary_latest_only.sh
 
+# #1233 §4.4 PR10b — Form 5 18-month filed_at retention cap at every
+# writer chokepoint (helpers in insider_transactions.py, manifest-
+# worker _parse_form5 pre-fetch gate, bulk-dataset per-loop gates,
+# sync_insiders LEFT JOIN gate). ~40ms.
+echo "==> Pre-push gate: Form 5 retention cap lint"
+bash scripts/check_form5_retention.sh
+
+# #1233 §4.4 PR10b — Form 3 read-side latest-per-pair contract
+# (DISTINCT ON + ORDER BY tie-break + NOT EXISTS anti-join) pinned
+# inside list_baseline_only_insider_holdings. Whitespace-normalised
+# awk walker; resilient against reformatting, brittle only against
+# semantic changes. ~30ms.
+echo "==> Pre-push gate: Form 3 latest-per-pair invariant lint"
+bash scripts/check_form3_latest_per_pair.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

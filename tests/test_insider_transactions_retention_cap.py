@@ -43,8 +43,11 @@ import pytest
 
 from app.services.insider_transactions import (
     INSIDER_FORM4_RETENTION_YEARS,
+    INSIDER_FORM5_RETENTION_MONTHS,
     form4_retention_cutoff,
     form4_within_retention,
+    form5_retention_cutoff,
+    form5_within_retention,
     ingest_insider_transactions,
     ingest_insider_transactions_backfill,
     ingest_insider_transactions_for_instrument,
@@ -104,6 +107,60 @@ class TestForm4WithinRetention:
     def test_ancient_filing_rejected(self) -> None:
         ref = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
         assert form4_within_retention(date(2010, 6, 1), now=ref) is False
+
+
+# ---------------------------------------------------------------------------
+# Form 5 helper contracts (#1233 PR10b spec §4.4)
+# ---------------------------------------------------------------------------
+
+
+class TestForm5RetentionConstantAndCutoff:
+    def test_constant_is_18_months(self) -> None:
+        assert INSIDER_FORM5_RETENTION_MONTHS == 18
+
+    def test_cutoff_is_now_minus_18_calendar_months(self) -> None:
+        # 2026-05-20 minus 18 months → 2024-11-20.
+        ref = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        assert form5_retention_cutoff(now=ref) == date(2024, 11, 20)
+
+    def test_cutoff_leap_day_anchors_to_feb_28_in_non_leap_target(self) -> None:
+        # 2024-02-29 minus 18 months → 2022-08-29 (Aug has 31 days). Use
+        # a different leap-impacted case: 2025-08-31 minus 18 months →
+        # 2024-02-29 (leap) which is valid. Pick a non-leap shift:
+        # 2023-08-31 minus 18 months → 2022-02-28 (Feb only has 28).
+        ref = datetime(2023, 8, 31, 12, 0, 0, tzinfo=UTC)
+        assert form5_retention_cutoff(now=ref) == date(2022, 2, 28)
+
+    def test_cutoff_returns_date_not_datetime(self) -> None:
+        ref = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        result = form5_retention_cutoff(now=ref)
+        assert isinstance(result, date)
+        assert not isinstance(result, datetime)
+
+
+class TestForm5WithinRetention:
+    def test_at_boundary_accepted(self) -> None:
+        ref = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        cutoff = form5_retention_cutoff(now=ref)
+        assert form5_within_retention(cutoff, now=ref) is True
+
+    def test_one_day_before_boundary_rejected(self) -> None:
+        ref = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        cutoff = form5_retention_cutoff(now=ref)
+        assert form5_within_retention(cutoff - timedelta(days=1), now=ref) is False
+
+    def test_one_day_after_boundary_accepted(self) -> None:
+        ref = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        cutoff = form5_retention_cutoff(now=ref)
+        assert form5_within_retention(cutoff + timedelta(days=1), now=ref) is True
+
+    def test_future_filing_accepted(self) -> None:
+        ref = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        assert form5_within_retention(ref.date() + timedelta(days=1), now=ref) is True
+
+    def test_ancient_filing_rejected(self) -> None:
+        ref = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        assert form5_within_retention(date(2010, 6, 1), now=ref) is False
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +542,129 @@ class TestManifestWorkerGate:
 
 
 # ---------------------------------------------------------------------------
-# Bulk dataset path — Form 4 only; Form 3 + Form 5 untouched
+# Form 5 manifest-worker pre-fetch gate (#1233 PR10b spec §4.4)
+# ---------------------------------------------------------------------------
+
+
+class TestForm5ManifestWorkerGate:
+    @pytest.fixture(autouse=True)
+    def _reset_registry(self):
+        from app.jobs.sec_manifest_worker import clear_registered_parsers
+        from app.services.manifest_parsers import register_all_parsers
+
+        clear_registered_parsers()
+        register_all_parsers()
+        yield
+        clear_registered_parsers()
+        register_all_parsers()
+
+    def test_pre_18mo_form5_tombstoned_before_fetch(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.jobs.sec_manifest_worker import run_manifest_worker
+        from app.providers.implementations import sec_edgar
+        from app.services.sec_manifest import get_manifest_row
+
+        iid = _seed_instrument(ebull_test_conn, iid=803, symbol="MAN5O")
+        # 600 days ago ≈ 20 months — outside 18-month window.
+        old = datetime.now(tz=UTC) - timedelta(days=600)
+        _seed_manifest_pending(
+            ebull_test_conn,
+            accession="0000320193-22-000099",
+            instrument_id=iid,
+            filed_at=old,
+            form="5",
+        )
+        # Re-tag the manifest row as sec_form5 source so the worker
+        # routes to ``_parse_form5``. The shared seeder defaults to
+        # ``sec_form4`` for Form 4 tests.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sec_filing_manifest SET source='sec_form5' WHERE accession_number = %s",
+                ("0000320193-22-000099",),
+            )
+        ebull_test_conn.commit()
+
+        call_log: list[str] = []
+        monkeypatch.setattr(
+            sec_edgar.SecFilingsProvider,
+            "fetch_document_text",
+            lambda self, url: (call_log.append(url), "should-not-be-called")[1],
+        )
+
+        stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+        ebull_test_conn.commit()
+
+        assert call_log == []  # pre-fetch gate fired; no network call.
+        assert stats.tombstoned == 1
+        row = get_manifest_row(ebull_test_conn, "0000320193-22-000099")
+        assert row is not None
+        assert row.ingest_status == "tombstoned"
+        assert row.error == "retention floor"
+
+    def test_within_18mo_form5_proceeds_to_fetch(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.jobs.sec_manifest_worker import run_manifest_worker
+        from app.providers.implementations import sec_edgar
+
+        iid = _seed_instrument(ebull_test_conn, iid=804, symbol="MAN5I")
+        _seed_manifest_pending(
+            ebull_test_conn,
+            accession="0000320193-26-000098",
+            instrument_id=iid,
+            filed_at=datetime.now(tz=UTC),
+            form="5",
+        )
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sec_filing_manifest SET source='sec_form5' WHERE accession_number = %s",
+                ("0000320193-26-000098",),
+            )
+        ebull_test_conn.commit()
+
+        call_log: list[str] = []
+
+        def _fake_fetch(self: Any, url: str) -> str:
+            call_log.append(url)
+            # Return an empty body so the parser tombstones cleanly
+            # — we only need to prove fetch was reached, not that the
+            # rest of the pipeline succeeded.
+            return ""
+
+        monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _fake_fetch)
+
+        run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+        ebull_test_conn.commit()
+
+        assert len(call_log) == 1  # gate did NOT fire; fetch reached.
+
+    def test_form5_filed_at_none_tombstones(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Defensive parity with Form 4: ``filed_at=None`` short-circuits
+        before the retention check, tombstoning with the missing-metadata
+        error message."""
+        from app.services.manifest_parsers.insider_345 import _parse_form5
+
+        class _FakeRow:
+            accession_number = "FAKE-NULL-FILED-5"
+            instrument_id = 12346
+            primary_document_url = "https://example.com/x.xml"
+            filed_at = None
+
+        outcome = _parse_form5(ebull_test_conn, _FakeRow())
+        assert outcome.status == "tombstoned"
+        assert outcome.error == "missing filed_at"
+
+
+# ---------------------------------------------------------------------------
+# Bulk dataset path — Form 4 + PR10b Form 5; Form 3 untouched
 # ---------------------------------------------------------------------------
 
 
@@ -654,30 +833,78 @@ class TestBulkDatasetForm4Only:
         assert result.rows_skipped_retention == 0
         assert result.rows_written > 0
 
-    def test_pre_3y_form5_retained(
+    def test_pre_18mo_form5_skipped(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
         tmp_path: Path,
     ) -> None:
-        """Form 5 (annual catch-up) is outside PR4 scope — PR10 owns its
-        latest-only cap. Confirm the Form 4 cap does NOT touch Form 5
-        rows even though both map to source='form4' via
-        ``_map_form_to_source``."""
+        """PR10b (#1233 §4.4) — Form 5 outside the 18-month cap is
+        skipped by the bulk dataset transactions loop. Reverses the
+        PR4-era contract that left Form 5 unbounded."""
         iid = _seed_universe_with_cik(ebull_test_conn, iid=903, symbol="BULK5OLD", cik_padded="0000320195")
         del iid
+        # 600 days ≈ 20 months — comfortably outside the 18m window.
+        old_date = (date.today() - timedelta(days=600)).isoformat()
         subs, owners, trans = _bulk_payload(
             accession="0000320195-10-000001",
             cik_unpadded="320195",
             document_type="5",
-            filing_date="2010-06-15",
+            filing_date=old_date,
         )
-        archive = tmp_path / "bulk-form5.zip"
+        archive = tmp_path / "bulk-form5-old.zip"
         archive.write_bytes(_build_dataset_zip(submissions=subs, owners=owners, transactions=trans))
 
         result = ingest_insider_dataset_archive(conn=ebull_test_conn, archive_path=archive, ingest_run_id=uuid4())
-        # Pre-3y Form 5 row IS retained (PR4 out of scope for Form 5).
+        assert result.rows_skipped_retention == 1
+        assert result.rows_written == 0
+
+    def test_within_18mo_form5_retained(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        """Form 5 within the 18-month window writes through."""
+        iid = _seed_universe_with_cik(ebull_test_conn, iid=904, symbol="BULK5NEW", cik_padded="0000320196")
+        del iid
+        # 90 days ago — well inside the 18-month window.
+        fresh_date = (date.today() - timedelta(days=90)).isoformat()
+        subs, owners, trans = _bulk_payload(
+            accession="0000320196-26-000001",
+            cik_unpadded="320196",
+            document_type="5",
+            filing_date=fresh_date,
+        )
+        archive = tmp_path / "bulk-form5-fresh.zip"
+        archive.write_bytes(_build_dataset_zip(submissions=subs, owners=owners, transactions=trans))
+
+        result = ingest_insider_dataset_archive(conn=ebull_test_conn, archive_path=archive, ingest_run_id=uuid4())
         assert result.rows_skipped_retention == 0
         assert result.rows_written > 0
+
+    def test_pre_18mo_form5_skipped_via_holdings_loop(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        """Bulk archive NONDERIV_HOLDING write loop also gates Form 5.
+        Mirror of ``test_pre_3y_form4_skipped_via_holdings_loop`` —
+        rare holdings-only Form 5 filings must not slip past the cap
+        on the second loop branch."""
+        iid = _seed_universe_with_cik(ebull_test_conn, iid=907, symbol="BULK5HOLDOLD", cik_padded="0000320199")
+        del iid
+        old_date = (date.today() - timedelta(days=600)).isoformat()
+        subs, owners, holdings = _bulk_holdings_payload(
+            accession="0000320199-10-000001",
+            cik_unpadded="320199",
+            document_type="5",
+            filing_date=old_date,
+        )
+        archive = tmp_path / "bulk-form5-holdings-old.zip"
+        archive.write_bytes(_build_dataset_zip(submissions=subs, owners=owners, holdings=holdings))
+
+        result = ingest_insider_dataset_archive(conn=ebull_test_conn, archive_path=archive, ingest_run_id=uuid4())
+        assert result.rows_skipped_retention == 1
+        assert result.rows_written == 0
 
     def test_pre_3y_form4_skipped_via_holdings_loop(
         self,

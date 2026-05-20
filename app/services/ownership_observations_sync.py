@@ -147,11 +147,36 @@ def sync_insiders(
     # Form 4 — read insider_transactions joined to insider_filings for
     # filed_at + url. Group by accession + filer to capture latest
     # post_transaction_shares per holding.
+    #
+    # PR10b (#1233 §4.4) — Form 5 18-month retention cap chokepoint.
+    # ``sync_insiders`` is a steady-state observations writer: it
+    # mirrors typed-table rows into the observations layer, so a
+    # post-cap re-run would re-write pre-cap Form 5 observations
+    # without the gate. The LEFT JOIN to ``filing_events`` (canonical
+    # source of ``filing_date`` outside the typed tables) lets the
+    # Form 5 branch reference ``fe.filing_date >= form5_cutoff`` while
+    # the Form 4 branch ignores ``fe`` entirely — Form 4 rows lacking
+    # a manifest entry still sync. Form 4 retention is NOT gated here
+    # (#PR4 follow-up — see ``GH issue`` linked in the PR
+    # description); §6.3 happy-path-uncapped is the rationale for not
+    # silently fixing it inside PR10b.
+    from app.services.insider_transactions import form5_retention_cutoff
+
     where = "WHERE it.post_transaction_shares IS NOT NULL AND it.is_derivative = FALSE"
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = {"form5_cutoff": form5_retention_cutoff()}
     if since is not None:
         where += " AND it.txn_date >= %(since)s"
         params["since"] = since
+    where += (
+        " AND ("
+        "  f.document_type IN ('3','3/A','4','4/A')"
+        "  OR ("
+        "    f.document_type IN ('5','5/A')"
+        "    AND fe.filing_date IS NOT NULL"
+        "    AND fe.filing_date >= %(form5_cutoff)s"
+        "  )"
+        ")"
+    )
     if limit is not None:
         params["lim"] = limit
     limit_sql = "LIMIT %(lim)s" if limit is not None else ""
@@ -172,6 +197,9 @@ def sync_insiders(
                 f.primary_document_url
             FROM insider_transactions it
             JOIN insider_filings f USING (accession_number)
+            LEFT JOIN filing_events fe
+              ON fe.provider_filing_id = it.accession_number
+             AND fe.provider = 'sec'
             {where}
             ORDER BY it.accession_number, it.filer_cik, it.filer_name, it.direct_indirect,
                      it.txn_date DESC NULLS LAST, it.txn_row_num DESC
