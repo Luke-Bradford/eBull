@@ -37,7 +37,9 @@ class TestRetentionCutoff:
     def test_exact_730d_offset(self) -> None:
         now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
         cutoff = n_csr_retention_cutoff(now)
-        # 730 days back: 2024-05-21 12:00:00 UTC.
+        # 730 days back from 2026-05-20: 2024-05-20 (2024 is leap, but
+        # Feb 29 lies before the window so subtracting 365*2 lands on
+        # the same MM-DD).
         assert cutoff == datetime(2024, 5, 20, 12, 0, 0, tzinfo=UTC)
 
     def test_normalises_non_utc_to_utc(self) -> None:
