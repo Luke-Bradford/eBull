@@ -214,5 +214,9 @@ def _ingest_one(
         symbol=symbol or cik_padded,
     )
     for filing in filings:
-        _upsert_filing(conn, str(instrument_id), "sec", filing)
-        result.filings_upserted += 1
+        # ``_upsert_filing`` returns False when the 10y retention cap
+        # (#1233 §4.2) drops a pre-cutoff filing. Count only accepted
+        # rows so ``SubmissionsIngestResult.filings_upserted`` stays
+        # accurate during the historical bulk archive walk.
+        if _upsert_filing(conn, str(instrument_id), "sec", filing):
+            result.filings_upserted += 1
