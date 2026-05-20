@@ -198,7 +198,19 @@ fi
 # ======================================================================
 echo "Checking invariant B (no-demotion predicate full shape)..."
 
-# B.1 — tuple opener (sole-anchor)
+# B.1 — tuple opener (sole-anchor across app/).
+#
+# The wc -l counter inside the if-block is INTENTIONALLY gated by the
+# ``[[ -n "$tuple_files" ]]`` test on the preceding line. Without that
+# guard, an empty grep result would feed ``echo ""`` into ``wc -l`` and
+# return 1 (echo on empty string emits one newline) — which would make
+# the file-count check silently PASS when no file in app/ contains the
+# predicate. With the guard, ``tuple_count`` stays at 0 on empty grep
+# and the ``tuple_count != 1`` check trips. See
+# ``docs/review-prevention-log.md`` § "Empty-grep wc -l false-positive
+# in bash idioms" for the general lesson. Adversarial test: sed the
+# tuple out of ``app/services/business_summary.py``; this check reports
+# ``found 0:`` and exits non-zero.
 tuple_files=$(grep -rl "(EXCLUDED.filed_at, EXCLUDED.source_accession)" app --include="*.py" 2>/dev/null || true)
 tuple_count=0
 if [[ -n "$tuple_files" ]]; then
