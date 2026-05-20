@@ -5,7 +5,7 @@
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 > Parent spec: `docs/superpowers/specs/2026-05-19-data-retention-rubric.md` §4.8.
 >
-> Status: **REVISED post-Codex-1a** — 3 BLOCKING + 4 HIGH + 3 MEDIUM findings folded in; pending Codex 1b spec review, then operator sign-off, then implementation plan.
+> Status: **REVISED v3 post-Codex-1b** — Codex 1a (3B + 4H + 3M) and Codex 1b (2B + 3H + 2M + 1L) findings folded in; pending Codex 1c spec review, then operator sign-off, then implementation plan.
 
 ## 0. Why this design exists
 
@@ -133,15 +133,16 @@ These constraints make `subject_type='blockholder_filer'` the only schema-legal 
    - `dateRange = custom`, `startdt = _resolve_discovery_startdt(...)`, `enddt = today.isoformat()` — see §3.5 for steady-state startdt derivation
    - `from = 0; size = 100`; advance `from` by 100 until `len(hits) < size`
 
-3. For each `hit._source`, defensively parse the filer set without positional assumptions (Codex 1a MEDIUM):
+3. For each `hit._source`, defensively parse the filer set without positional assumptions (Codex 1a MEDIUM #8):
    - Extract `accession = adsh`, `form = form`, `file_date = file_date`, `cik_list = ciks` (raw, zero-padded 10-digit), `name_list = display_names`
-   - **Defensive filer extraction**: `filer_ciks = [c for c in cik_list if c.lstrip('0') != issuer_cik_unpadded]` — no positional assumption about issuer index, tolerates issuer not-in-position-0 + duplicate CIK entries. **Cardinality assertions**: if `len(filer_ciks) == 0` → log + skip (issuer-only result, anomalous); if `len(filer_ciks) == 1` → standard case; if `len(filer_ciks) >= 2` → joint filing, all filer CIKs are seeded into `blockholder_filers` but ONLY the FIRST is the manifest's `cik` / `subject_id` (chosen by stable sort order — `min(filer_ciks)` lexicographically — so re-discovery picks the same one and the UPSERT is idempotent).
+   - **Defensive filer extraction**: `filer_ciks = [c for c in cik_list if c.lstrip('0') != issuer_cik_unpadded]` — no positional assumption about issuer index, tolerates issuer not-in-position-0 + duplicate CIK entries. **Cardinality assertions**: if `len(filer_ciks) == 0` → log + skip (issuer-only result, anomalous); if `len(filer_ciks) == 1` → standard case; if `len(filer_ciks) >= 2` → joint filing, all filer CIKs are seeded into `blockholder_filers`.
+   - **Archive-owner CIK derivation (corrected — Codex 1b BLOCKING #1)**: the manifest's `cik` field MUST be a value the parser can pass to `_archive_file_url(cik, accession, "primary_doc.xml")` and get back a valid SEC archive path. SEC's filer-archive convention guarantees that the accession-number prefix CIK (first 10 zero-padded digits of `adsh`, e.g. `0001193125` from `0001193125-24-036431`) IS the canonical archive-owner CIK. Use `archive_owner_cik = adsh.split('-')[0]` for the manifest `cik` field; this is independent of `ciks[]` ordering and works even when the filing was submitted via a third-party filing agent (common for activist 13D filings). Empirically verified: SEC archive directory ALSO serves the same content under any CIK in `ciks[]` (tested AAPL + GME, all return 200), so any choice from `ciks[]` would work — but accession-prefix is the canonical SEC contract and removes the min-lex / first-in-list ambiguity entirely.
    - **Defensive name extraction**: `display_names[]` is positionally aligned with `ciks[]` per empirical observation. For each filer CIK, map to its name via `name_list[cik_list.index(filer_cik)]` rather than `name_list[1]`. If the name doesn't parse cleanly (rare bracketed-LLC labels), fall back to `f"CIK {filer_cik}"` — the resolver only joins on CIK; name is operator-visible label only.
-   - For each filer CIK + its display name: UPSERT `blockholder_filers (cik, name)` via `_upsert_filer` from `app/services/blockholders.py` (idempotent ON CONFLICT (cik) DO UPDATE name).
+   - For each filer CIK + its display name: UPSERT `blockholder_filers (cik, name)` via `_upsert_filer` from `app/services/blockholders.py` (idempotent ON CONFLICT (cik) DO UPDATE name). The archive-owner CIK is ALSO seeded (it may not be in `filer_ciks` — filing agents typically aren't reporting persons).
    - INSERT into `sec_filing_manifest` via `record_manifest_entry` with:
      - `subject_type = 'blockholder_filer'`
-     - `subject_id = first_filer_cik` (the min-lex filer CIK from step above)
-     - `cik = first_filer_cik` (same — schema requires `cik NOT NULL`; for blockholder_filer this IS the filer)
+     - `subject_id = archive_owner_cik` (accession-prefix derived)
+     - `cik = archive_owner_cik` (same — schema requires `cik NOT NULL`; for blockholder_filer this is the resolver lookup AND the archive-owner identity)
      - `instrument_id = None` (per CHECK constraint)
      - `source = 'sec_13d'` if form starts with `SC 13D` else `'sec_13g'`
      - `accession_number = adsh`
@@ -150,10 +151,21 @@ These constraints make `subject_type='blockholder_filer'` the only schema-legal 
      - `status = 'pending'`
    - ON CONFLICT on PK `accession_number`: existing row stays (matches `record_manifest_entry`'s ON CONFLICT DO UPDATE pattern). Re-discovery is idempotent.
 
-4. Issuer linkage propagation (NEW for PR11, addresses Codex 1a BLOCKING #2):
-   - At discovery time we ALREADY know `(issuer_instrument_id, issuer_cik)` from the universe walk seed.
-   - PR11 writes this mapping into a NEW lightweight side-table `sec_13dg_discovery_issuer_hint (accession_number PK, instrument_id NOT NULL, issuer_cik NOT NULL, discovered_at)` so the parser can short-circuit CUSIP resolution when the hint is present, AVOIDING the silent CUSIP-unresolved gap for universe-discovered accessions.
-   - Parser change: `_parse_13dg` looks up the hint table first; if a hint exists, use `instrument_id` from hint instead of CUSIP resolution. If no hint (legacy daily-index path or operator rebuild), fall back to CUSIP lookup as today. This preserves backward compat AND closes the gap for the new path.
+4. Issuer linkage propagation (NEW for PR11, addresses Codex 1a BLOCKING #2; revised for share-class siblings per Codex 1b BLOCKING #2):
+   - At discovery time we know `(issuer_instrument_id, issuer_cik)` from the universe walk seed.
+   - **Share-class sibling handling**: this repo allows multiple instruments to share one SEC CIK ([sql/099_unresolved_13f_cusips.sql:60], [sql/103_instrument_symbol_history.sql:8]) — examples: Alphabet GOOG + GOOGL on CIK 1652044; Berkshire BRK.A + BRK.B on CIK 1067983. The discovery query `SELECT DISTINCT instrument_id, cik` returns ONE ROW PER SIBLING for these issuers. The same accession is therefore discovered N times (once per sibling) when N share the issuer CIK.
+   - PR11 writes the mapping into a NEW side-table `sec_13dg_discovery_issuer_hint` keyed on `(accession_number, instrument_id) PRIMARY KEY` (multi-row per accession), NOT on `accession_number` alone. Each (accession, sibling) pair gets its own hint row.
+   - Parser strategy (REVISED — Codex 1b BLOCKING #2): the parser must NOT use the hint to bypass CUSIP resolution outright (a bypass would route the SC 13D against GOOG-A onto the GOOGL-C sibling). Instead, the hint acts as a **universe-membership cross-validator**:
+     1. Parse the XML, extract `filing.issuer_cusip`.
+     2. Resolve `filing.issuer_cusip` to `instrument_id_from_cusip` via `_resolve_cusip_to_instrument_id` (today's path).
+     3. Load the hint set: `hint_ids = SELECT instrument_id FROM sec_13dg_discovery_issuer_hint WHERE accession_number = ?`.
+     4. **CASE A (happy)**: `instrument_id_from_cusip in hint_ids` → confirmed universe-relevant; write observation with `instrument_id_from_cusip`. This is the typical case and preserves share-class correctness via CUSIP.
+     5. **CASE B (CUSIP unresolved + 1 hint)**: `instrument_id_from_cusip is None and len(hint_ids) == 1` → use the single hint as fallback (closes the silent CUSIP-unresolved gap for single-class issuers).
+     6. **CASE C (CUSIP unresolved + N>1 hints)**: `instrument_id_from_cusip is None and len(hint_ids) > 1` → ambiguous share-class case; write `instrument_id=NULL` with `blockholder_filings_ingest_log.error="cusip_unresolved_with_ambiguous_hint"` for operator audit. Existing #740 backfill will retroactively resolve this once the CUSIP→instrument mapping lands in `external_identifiers`.
+     7. **CASE D (CUSIP resolved but NOT in hints)**: `instrument_id_from_cusip is not None and instrument_id_from_cusip not in hint_ids` → discrepancy log + still write with `instrument_id_from_cusip` (CUSIP is more specific than hint; hint may be a stale universe entry — e.g. instrument was delisted between discovery and parse).
+     8. **CASE E (no hint at all)**: legacy daily-index path or operator rebuild from no-hint source → CUSIP-only resolution as today, no PR11 regression.
+   - **Hint UPSERT semantics (Codex 1b HIGH)**: `INSERT INTO sec_13dg_discovery_issuer_hint (accession_number, instrument_id, issuer_cik) VALUES (...) ON CONFLICT (accession_number, instrument_id) DO UPDATE SET discovered_at = NOW(), issuer_cik = EXCLUDED.issuer_cik`. Idempotent on re-discovery; refreshes `discovered_at` so the freshness operator can observe recent scan activity.
+   - **Atomicity (Codex 1b HIGH)**: per-accession discovery writes both the manifest row AND every applicable hint row inside a single `conn.transaction()` block. The manifest row never becomes worker-visible (`status='pending'`) until the hint row(s) are committed. This pins the close of the silent-gap window — the worker cannot race ahead of the hint write and re-introduce the CUSIP-only fallback for a universe-discovered accession.
 
 5. Rate-limit: shared SEC 10 req/s budget via `_PROCESS_RATE_LIMIT_LOCK` + `_PROCESS_REQ_TS` in [app/providers/implementations/sec_edgar.py:54-78] (process-wide single-instance throttle shared by every `SecFilingsProvider`). Discovery uses `SecFilingsProvider.fetch_document_text` (or a new sibling `fetch_search_index_json`) so HTTP calls flow through the same throttle as parser fetches. Per-issuer query cost = 1 search-index request + 0-2 pagination requests for outlier issuers. Bootstrap = ~5,200 + ~200 outlier-page = ~5,400 requests = **~9 min wall-clock** under shared budget — fits inside default `max_runtime_seconds=3600` with 6× headroom.
 
@@ -202,7 +214,7 @@ Chokepoint matrix (REVISED post-Codex-1a — chokepoints C + F corrected):
 | **C** | Observations sync | `app/services/ownership_observations_sync.py::sync_blockholders` | Gate directly on the raw chain's own `filed_at` column: `WHERE bf.filed_at >= blockholders_retention_cutoff()`. **Do NOT use a `filing_events.filing_date >= cutoff` predicate** — a LEFT JOIN with that predicate null-rejects rows missing a `filing_events` entry (Codex 1a HIGH #4 + Codex 1b PR10b lesson). `blockholder_filings.filed_at` is the source of truth at the raw layer ([sql/095_blockholder_filers_filings.sql:124]). | `test_sync_blockholders_excludes_pre_cap_rows` + `test_sync_blockholders_includes_rows_without_filing_events_entry` |
 | **D** | Refresh-current | `app/services/ownership_observations.py::refresh_blockholders_current` | **UNCAPPED** — per parent spec §6.3 "refresh-current is exempt from the cap; capping it would actively delete pre-wipe pre-cap rows" (mirror of §4.5 `refresh_institutions_current` precedent) | `test_refresh_current_keeps_pre_cap_observations_intact` |
 | **E** | Bulk dataset | n/a — SEC publishes no 13D/G bulk archive | no gate needed | n/a |
-| **F** | Rewash | `app/services/rewash_filings.py::_apply_blockholders` (the `primary_doc_13dg` ParserSpec; **CORRECTED — Codex 1a BLOCKING #3 caught this; the function exists at [rewash_filings.py:571] and is currently uncapped**) | Add pre-DELETE gate: derive `accession_filed_at` from `raw_doc` or its `filing_events` join; if not `blockholders_within_retention(accession_filed_at)` → return `False` (skip rewash; leave existing rows in place; rewash is happy-path-uncapped per parent spec §6.3 amendment, but rescue-path IS gated because rewashing a pre-cap accession would re-introduce pre-cap observations through the back door). Distinguish happy-path vs rescue-path per parent spec §6.3 "Rewash happy-path-uncapped clarification" — happy path operates on rows already in `blockholder_filings`; rescue path is the zero-rows-yet branch. PR11 gates only the rescue-path branch. | `test_rewash_13dg_happy_path_uncapped_for_existing_rows` + `test_rewash_13dg_rescue_path_skips_pre_cap_accession` |
+| **F** | Rewash | `app/services/rewash_filings.py::_apply_blockholders` (the `primary_doc_13dg` ParserSpec; **CORRECTED — Codex 1a BLOCKING #3 caught this; the function exists at [rewash_filings.py:571] and is currently uncapped**) | **EXPLICIT BRANCH ORDER (Codex 1b MEDIUM)**: (i) FIRST query `SELECT COUNT(*) FROM blockholder_filings WHERE accession_number = ?` to determine branch — non-zero ⇒ HAPPY PATH (uncapped per parent spec §6.3); zero ⇒ RESCUE PATH. (ii) ONLY in the RESCUE PATH branch, derive `accession_filed_at` from `raw_doc` or its `filing_events` join and short-circuit return `False` if not `blockholders_within_retention(accession_filed_at)` (skip the rewash; would otherwise re-introduce pre-cap observations through the back door). (iii) HAPPY PATH branch proceeds with DELETE + re-INSERT exactly as today; the retention helper is NOT invoked. Lint invariant H pins the branch-order placement. | `test_rewash_13dg_happy_path_uncapped_for_existing_rows` (rows exist + accession pre-cap → still rewashes) + `test_rewash_13dg_rescue_path_skips_pre_cap_accession` (zero rows + accession pre-cap → returns False, no DELETE, no INSERT) + `test_rewash_13dg_rescue_path_writes_post_cap_accession` (zero rows + accession post-cap → normal rescue write) |
 | **G** | One-shot single accession | `_ingest_single_accession` is not 13D/G-aware; operator-rebuild via `POST /jobs/sec_rebuild/run` re-enqueues manifest rows which then pass through gate B | no separate gate | covered by B |
 
 The cap is **filed-at based** (matches PR8 N-CSR precedent), not `period_of_report` based, because:
@@ -216,11 +228,13 @@ The cap is **filed-at based** (matches PR8 N-CSR precedent), not `period_of_repo
 No new worker code. Existing `sec_manifest_worker` already drains pending `sec_13d` + `sec_13g` rows via `_parse_13dg` (registered at `app/services/manifest_parsers/__init__.py:59`). PR11 changes inside `_parse_13dg`:
 
 1. ADD: pre-fetch retention gate (chokepoint B above). Reuses `blockholders_within_retention(row.filed_at)` import from `app.services.blockholders`.
-2. ADD: issuer-hint short-circuit. Before falling back to CUSIP lookup, the parser checks the new `sec_13dg_discovery_issuer_hint` table (PK = accession_number) for a `(instrument_id, issuer_cik)` mapping written by discovery. If present, the parser uses the hint directly — closes the silent CUSIP-unresolved gap for universe-discovered accessions (Codex 1a BLOCKING #2). If absent (legacy daily-index path or operator rebuild from a no-hint source), fall back to CUSIP lookup exactly as today.
+2. ADD: hint-cross-validated CUSIP resolution (REVISED per Codex 1b BLOCKING #2 to honour share-class sibling semantics). The 5-case branch logic from §3.1 step 4 lives inside `_parse_13dg`. CUSIP resolution remains the primary instrument_id source for the share-class-aware path; the hint is consulted as (a) a universe-membership validator and (b) a single-row fallback when CUSIP unresolves on a single-class issuer. Ambiguous CUSIP-unresolved + multi-hint cases write `instrument_id=NULL` with explicit `blockholder_filings_ingest_log.error="cusip_unresolved_with_ambiguous_hint"` so operator audit surfaces the case without silent loss.
 3. UNCHANGED: store_raw (still BEFORE parse per #938 raw-payload invariant), parse, upsert into `blockholder_filers` + `blockholder_filings`, observation write-through, refresh-current.
 4. UNCHANGED: `subject_type='blockholder_filer'` + `instrument_id IS NULL` semantics — the schema CHECK at [sql/118_sec_filing_manifest.sql] enforces this and PR11 preserves it. The discovery layer guarantees `blockholder_filers` is auto-seeded BEFORE the manifest row is INSERTed (so the legacy resolver path continues to succeed for filers that re-appear via daily-index); `_upsert_filer` inside the parser body remains idempotent via ON CONFLICT (cik) DO UPDATE.
 
-The issuer-hint side-table is the precision mechanism that lets PR11 avoid both BLOCKING #1 (schema-incompatible manifest shape) AND BLOCKING #2 (silent CUSIP gap) without changing the manifest schema invariants.
+The hint side-table + the 5-case parser logic together close BLOCKING #1 (schema-incompatible manifest shape) AND BLOCKING #2 (silent CUSIP gap) AND Codex 1b BLOCKING #2 (share-class sibling routing) without changing the manifest schema invariants.
+
+**Out-of-scope parser coverage gap (pre-existing, NOT introduced by PR11)**: empirical testing during this spec revision (2026-05-21) confirmed that many real-world SC 13D/G accessions do NOT contain `primary_doc.xml` — examples: GME `0000921895-24-001394` (only `sc13da912128005_06112024.htm`); Apple `0001193125-24-036431` (only `d751537dsc13ga.htm`). The existing `_parse_13dg` at [manifest_parsers/sec_13dg.py:121-159] tombstones these as `error="empty or non-200 fetch"` — silently losing the observation. This is a parser format-coverage gap that exists TODAY regardless of PR11. PR11 inherits the gap; activation will surface it at scale (operator-visible tombstone counter spike post-merge). A follow-up ticket (file at PR merge) should add HTML-body parser fallback OR adopt `edgartools.thirteenf` family equivalents for SC 13D/G. PR11 does NOT block on this — the spec calls it out so the post-merge metrics are interpretable.
 
 ### 3.4 Cleanup — dormant code retirement (in same PR)
 
@@ -260,22 +274,29 @@ DROP INDEX IF EXISTS idx_blockholder_filer_seeds_active;
 DROP TABLE IF EXISTS blockholder_filer_seeds;
 ```
 
-**ADD** (same-PR new migration `sql/15Y_create_sec_13dg_discovery_issuer_hint.sql`):
+**ADD** (same-PR new migration `sql/15Y_create_sec_13dg_discovery_issuer_hint.sql`) — schema revised for share-class siblings per Codex 1b BLOCKING #2:
 
 ```sql
 -- Discovery-time issuer hint table. When the new universe-CIK-driven
 -- discovery layer enqueues a 13D/G accession into sec_filing_manifest,
--- it also writes the (instrument_id, issuer_cik) hint here so the
--- manifest worker parser can short-circuit CUSIP resolution and avoid
--- the silent CUSIP-unresolved gap (#1233 PR11 + Codex 1a BLOCKING #2).
--- Legacy daily-index path writes no hint; the parser falls back to
--- CUSIP lookup as today.
+-- it also writes one hint row per universe-member (accession, instrument_id)
+-- pair so the manifest worker parser can (a) confirm universe-membership
+-- and (b) fall back to a single hint when CUSIP resolution fails for a
+-- single-class issuer. Multi-row per accession PK shape handles
+-- share-class siblings on a shared CIK (GOOG/GOOGL, BRK.A/BRK.B,
+-- per sql/099/103 documented sibling semantics).
+--
+-- Legacy daily-index path writes no hint rows; the parser falls back
+-- to CUSIP-only resolution as today.
 CREATE TABLE IF NOT EXISTS sec_13dg_discovery_issuer_hint (
-    accession_number  TEXT PRIMARY KEY,
+    accession_number  TEXT NOT NULL,
     instrument_id     BIGINT NOT NULL REFERENCES instruments(instrument_id) ON DELETE CASCADE,
     issuer_cik        TEXT NOT NULL,
-    discovered_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    discovered_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (accession_number, instrument_id)
 );
+CREATE INDEX IF NOT EXISTS idx_sec_13dg_discovery_issuer_hint_accession
+    ON sec_13dg_discovery_issuer_hint (accession_number);
 CREATE INDEX IF NOT EXISTS idx_sec_13dg_discovery_issuer_hint_instrument_id
     ON sec_13dg_discovery_issuer_hint (instrument_id);
 ```
@@ -300,29 +321,33 @@ The atom fast-lane resolver and daily-index reconcile resolver are also edited: 
 - `tests/test_sec_13dg_parser.py`: unchanged.
 - `tests/test_api_blockholders.py`: unchanged.
 - NEW `tests/test_sec_13dg_discovery.py`: covers the new discovery module — fake `efts.sec.gov` response fixtures including:
-  - happy-path single filer
-  - joint filing with 2 filers (both seeded; first in lex order picked for manifest)
+  - happy-path single filer + single-class issuer
+  - joint filing with 2 filers (all seeded; manifest `cik`/`subject_id` = accession-prefix CIK)
   - joint filing with issuer CIK NOT in `ciks[0]` (defensive filer extraction, Codex 1a MEDIUM #8)
   - duplicate CIK in `ciks[]` (dedup)
   - no-CIK natural-person filer (name-only fallback, no manifest row for that filer — only CIK-bearing filers are seedable)
   - exactly 100 hits page 1 followed by empty page 2 (pagination boundary, Codex 1a MEDIUM #9)
-  - re-discovery idempotency on second run (no duplicate manifest rows, no duplicate filer seeds)
+  - re-discovery idempotency on second run (zero new manifest rows, zero new hint rows, `discovered_at` REFRESHED — Codex 1b HIGH idempotency)
   - 3y window enforcement at query level (no out-of-window hits reach the manifest writer)
-  - steady-state watermark degrades to 3y floor on freshness-index gap (Codex 1a MEDIUM #10)
+  - steady-state watermark = `MAX(bf.filed_at)` per-issuer derivation (NOT from DFI — Codex 1b HIGH coherence) + degrades to 3y floor for issuer with zero prior ingest (Codex 1a MEDIUM #10)
+  - share-class sibling: same accession discovered N times under N sibling instrument_ids → N hint rows written, ONE manifest row (Codex 1b BLOCKING #2)
+  - manifest + hint atomicity: a worker thread reading `status='pending'` mid-discovery is blocked by the `conn.transaction()` until both writes commit (Codex 1b HIGH atomicity)
+  - archive-owner CIK derivation: `cik` field on manifest = `adsh.split('-')[0]`, NOT min-lex of filer set, NOT first in `ciks[]` (Codex 1b BLOCKING #1)
+- NEW `tests/test_manifest_parser_sec_13dg.py` additions: 5-case hint-cross-validation branch — CASE A (CUSIP-in-hints happy path), CASE B (single-hint fallback), CASE C (multi-hint ambiguous writes NULL + log), CASE D (CUSIP-not-in-hints discrepancy log + trust CUSIP), CASE E (no hint → CUSIP-only legacy path). One test per case; assertion on resulting `instrument_id` value AND on `blockholder_filings_ingest_log.error` content for CASE C.
 - NEW `tests/test_ownership_observations_sync_blockholders_cap.py` (or fold into existing): covers chokepoint C gate — `bf.filed_at >= cutoff` predicate; row WITHOUT `filing_events` entry still syncs; row WITH pre-cap `bf.filed_at` excluded.
 - NEW `tests/test_rewash_blockholders_cap.py` (or fold into existing): covers chokepoint F — happy path uncapped for accessions with existing `blockholder_filings` rows; rescue path skipped for pre-cap accession with zero existing rows.
 
 ### 3.5 Bootstrap stage + scheduler wiring
 
-**Rate-limit surface (corrected — Codex 1a HIGH #7)**: there is no `app/services/sec_rate_limit.py` module. The actual throttle lives in `app/providers/implementations/sec_edgar.py:54-78` via:
+**Rate-limit surface (corrected — Codex 1a HIGH #7 + Codex 1b LOW symbol names)**: there is no `app/services/sec_rate_limit.py` module. The actual throttle lives in `app/providers/implementations/sec_edgar.py:55-80` via the following SYMBOLS (verified at the cited line numbers, 2026-05-21):
 
-- `_PROCESS_REQ_TS` — process-wide last-request timestamp
-- `_PROCESS_RATE_LIMIT_LOCK` — process-wide threading.Lock guarding `_PROCESS_REQ_TS` reads/writes
-- `_SEC_RATE_FLOOR_SECONDS` — conservative inter-request floor (≈0.1s to stay under 10 req/s)
+- `_MIN_REQUEST_INTERVAL_S = 0.11` — conservative inter-request floor (≈0.11 s ⇒ ≤9.1 req/s, safely under SEC's 10 req/s ceiling)
+- `_PROCESS_RATE_LIMIT_CLOCK: list[float] = [0.0]` — process-wide last-request timestamp (mutable single-element list so multiple `SecFilingsProvider` instances share the same wall-clock cursor)
+- `_PROCESS_RATE_LIMIT_LOCK: threading.Lock` — process-wide lock guarding read-modify-write of `_PROCESS_RATE_LIMIT_CLOCK`
 
-Every `SecFilingsProvider` instance reuses these process-wide singletons via the constructor's `shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK` injection at [sec_edgar.py:246, :252]. Discovery uses `SecFilingsProvider` for ALL HTTP — including a new method `fetch_search_index_json(ciks, forms, startdt, enddt, from_offset, size)` that hits `efts.sec.gov/LATEST/search-index` — so discovery's requests share the 10 req/s budget with parser fetches automatically. The `lane="sec_rate"` on the bootstrap stage serializes the JOB (one discovery job at a time); the provider-internal throttle serializes REQUESTS across all SEC-touching jobs.
+Every `SecFilingsProvider` instance reuses these process-wide singletons via the constructor's `min_request_interval_s=_MIN_REQUEST_INTERVAL_S, shared_last_request=_PROCESS_RATE_LIMIT_CLOCK, shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK` injection at [sec_edgar.py:244-252]. Discovery uses `SecFilingsProvider` for ALL HTTP — including a NEW method `fetch_search_index_json(ciks, forms, startdt, enddt, from_offset, size)` that hits `efts.sec.gov/LATEST/search-index` — so discovery's requests share the 10 req/s budget with parser fetches automatically. The `lane="sec_rate"` on the bootstrap stage serializes the JOB (one discovery job at a time); the provider-internal throttle serializes REQUESTS across all SEC-touching jobs.
 
-**Discovery startdt resolution** (corrected — Codex 1a MEDIUM #10):
+**Discovery startdt resolution** (revised twice — Codex 1a MEDIUM #10 + Codex 1b HIGH watermark coherence): the per-issuer watermark cannot be sourced from `data_freshness_index` because DFI for `sec_13d`/`sec_13g` is keyed by `subject_type='blockholder_filer' + subject_id=filer_cik` (the live daily-index path's identity grain) — not by issuer CIK. PR11's discovery is per-ISSUER not per-filer, so the DFI key shape doesn't match. The correct watermark source for per-issuer scans is the raw chain's own `blockholder_filings.issuer_cik + filed_at` data we've already ingested:
 
 ```python
 def _resolve_discovery_startdt(
@@ -333,18 +358,37 @@ def _resolve_discovery_startdt(
 ) -> date:
     """Pick discovery window start, with 3y floor as the hard ceiling.
 
-    Bootstrap: always full 3y window.
-    Steady-state: derive from data_freshness_index watermark for sec_13d+sec_13g
-    keyed on (subject_type='blockholder_filer', issuer_cik) OR the LATEST blockholder_filings.filed_at for that issuer, minus a 7d safety overlap. CLAMP to the 3y floor so a watermark gap >3y can't reduce coverage.
+    Bootstrap: always full 3y floor.
+    Steady-state: derive from MAX(blockholder_filings.filed_at) for this
+    issuer_cik (the chain we've already ingested), minus a 7d safety
+    overlap. CLAMP to the 3y floor so a watermark gap (issuer with no
+    prior 13D/G ingest) does not silently reduce coverage.
+
+    data_freshness_index is NOT consulted here — DFI's blockholder_filer
+    key shape is filer-side, not issuer-side, and would not match the
+    per-issuer scan grain (Codex 1b HIGH watermark coherence).
     """
     floor = blockholders_retention_cutoff().date()
     if mode == "bootstrap":
         return floor
-    watermark = _load_freshness_watermark(conn, issuer_cik) or floor
+    if issuer_cik is None:
+        return floor
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT MAX(filed_at)::date
+            FROM blockholder_filings
+            WHERE issuer_cik = %s
+              AND filed_at IS NOT NULL
+            """,
+            (issuer_cik,),
+        )
+        row = cur.fetchone()
+    watermark = row[0] if row and row[0] else floor
     return max(floor, watermark - timedelta(days=7))
 ```
 
-This protects against the silent-gap risk where a >14d job outage would let recent filings slip through a flat sliding window. The 3y floor is the absolute upper bound; the watermark only ever NARROWS the window for the common case where steady-state ran recently.
+This protects against (a) the silent-gap risk where a >14d job outage would let recent filings slip through a flat sliding window AND (b) an issuer with zero prior 13D/G ingest (no `blockholder_filings` rows) silently scanning a tight window. The 3y floor is the absolute upper bound; the watermark only ever NARROWS the window for the common case where steady-state ran recently AND has accumulated chain rows for the issuer.
 
 **NEW bootstrap stage** in `app/workers/scheduler.py` `_BOOTSTRAP_STAGE_SPECS`:
 
@@ -393,8 +437,10 @@ Invariants (REVISED post-Codex-1a — D corrected, H added for rewash):
 - **F — no append writers outside the helper-gated chokepoints**: forbid raw `INSERT INTO ownership_blockholders_observations` and raw `INSERT INTO blockholder_filings` outside (a) `app/services/blockholders.py` lower-level helpers and (b) the manifest parser. Catches future PRs that add a side-path writer skipping the cap.
 - **G — dormant entrypoints stay deleted**: forbid the literal symbols `ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`, and `seed_filer` (the 13D/G variants) from re-appearing anywhere under `app/` AND under `scripts/` (except as comment-only mentions in the retirement note inside `scripts/seed_holder_coverage.py`). Catches accidental resurrection.
 - **H — rewash rescue-path gated (NEW post-Codex-1a)**: `app/services/rewash_filings.py::_apply_blockholders` function body contains a reference to `blockholders_within_retention(` (the rescue-path gate) AND the call precedes any `DELETE FROM blockholder_filings` or `_upsert_filing_row(` invocation inside the same function. Distinguishes happy-path (existing rows already in `blockholder_filings`) from rescue-path (zero rows → would re-introduce pre-cap observations through the back door).
-- **I — discovery uses provider throttle (no raw httpx)**: `app/services/sec_13dg_discovery.py` does NOT import `httpx` directly. All HTTP must route through `app.providers.implementations.sec_edgar.SecFilingsProvider` so the `_PROCESS_RATE_LIMIT_LOCK` throttle is honoured. Catches future PRs that add a side-channel fetch bypassing the 10 req/s budget.
-- **J — discovery uses `record_manifest_entry` (no raw INSERT)**: `app/services/sec_13dg_discovery.py` does NOT contain `INSERT INTO sec_filing_manifest` (raw SQL); all manifest writes route through `record_manifest_entry` from `app.services.sec_manifest` so the schema CHECK + idempotency contracts are honoured.
+- **I — discovery uses provider throttle (no raw HTTP) — REVISED per Codex 1b MEDIUM**: `app/services/sec_13dg_discovery.py` MUST satisfy ALL of (i) POSITIVE: `from app.providers.implementations.sec_edgar import SecFilingsProvider` appears in the import block; (ii) POSITIVE: the discovery body calls `provider.fetch_search_index_json(` at least once; (iii) NEGATIVE: no `import httpx`, no `import requests`, no `import urllib`, no `from httpx`, no `from requests`, no `from urllib`, no aliased imports (e.g. `import httpx as` / `import requests as`); (iv) NEGATIVE: no direct reach into `app.providers.implementations.sec_edgar._client` or other underscore-prefixed provider internals. Catches future PRs that add a side-channel fetch bypassing the 10 req/s budget.
+- **J — discovery uses `record_manifest_entry` (no raw INSERT) — REVISED per Codex 1b MEDIUM**: `app/services/sec_13dg_discovery.py` MUST satisfy ALL of (i) POSITIVE: `from app.services.sec_manifest import record_manifest_entry` appears in the import block; (ii) POSITIVE: the discovery body calls `record_manifest_entry(` at least once; (iii) NEGATIVE: no `INSERT INTO sec_filing_manifest` (raw SQL), no `UPDATE sec_filing_manifest`, no `cur.execute(...sec_filing_manifest...` patterns, no dynamic SQL-string concatenation against the manifest table name. All manifest writes route through `record_manifest_entry` from `app.services.sec_manifest` so the schema CHECK + idempotency contracts are honoured.
+- **K — hint table writes are atomic with manifest writes (NEW per Codex 1b HIGH)**: `app/services/sec_13dg_discovery.py` body contains a `conn.transaction()` block (or equivalent context-manager wrapping a psycopg connection's transaction primitive) AND BOTH `record_manifest_entry(` AND `INSERT INTO sec_13dg_discovery_issuer_hint` (or its helper wrapper) appear within the SAME block scope. AWK-based block walker verifies the call-pair nesting per the PR4 Codex 1c lesson. Catches a future PR that splits the writes across separate commits, re-introducing the silent-gap window where the worker can race the hint write.
+- **L — hint UPSERT uses ON CONFLICT (NEW per Codex 1b HIGH idempotency)**: the SQL string in `app/services/sec_13dg_discovery.py` that writes to `sec_13dg_discovery_issuer_hint` MUST contain `ON CONFLICT (accession_number, instrument_id) DO UPDATE SET discovered_at` so re-discovery refreshes the hint cleanly. Catches a future PR that switches to `INSERT ... ON CONFLICT DO NOTHING` (stale `discovered_at` would mask freshness signal).
 
 Wired into `.githooks/pre-push` after the existing PR10b `check_form3_latest_per_pair.sh` and `check_form5_retention.sh` invocations.
 
@@ -454,7 +500,12 @@ Same PR amends `docs/superpowers/specs/2026-05-19-data-retention-rubric.md`:
 | Auto-populated `blockholder_filers.name` is sometimes a joint-filing label (e.g. "RC Ventures LLC and Ryan Cohen") | Accept name as-is from `display_names[i]` matched to its own CIK index (positional alignment per empirical observation); the resolver only joins on CIK; name is operator-visible label only — no functional impact. Fallback to `f"CIK {filer_cik}"` if display name is missing for a filer CIK index. |
 | Resurrection of dormant seed-driven path by future PR | Lint guard G forbids re-introduction of the deleted symbols (`ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`, `seed_filer`); migration drops the seed table so the resurrection would also need to re-add the schema (loud, not silent). Pre-push hook fails the push BEFORE the change lands. |
 | Existing `blockholder_filings` rows from prior smoke tests survive PR11 with stale parser_version | Per parent spec §6.3, existing rows untouched until pre-wipe; PR11 introduces no `parser_version` bump; if prior smoke-test rows exist they're either correct (live manifest path semantics preserved) or rebuilt by post-merge `POST /jobs/sec_rebuild/run` (which routes through the new chokepoint F rewash gate — rescue-path skip for pre-cap accessions, happy-path uncapped for existing rows). |
-| Silent CUSIP-unresolved gap for universe-discovered accessions (Codex 1a BLOCKING #2) | NEW `sec_13dg_discovery_issuer_hint` side-table per §3.4 carries `(accession_number → instrument_id, issuer_cik)` written by discovery; parser short-circuits CUSIP lookup when hint present. Legacy daily-index path continues to fall back to CUSIP (no regression for that path; the historical gap stays tracked under #740 for the legacy ingest surface). |
+| Silent CUSIP-unresolved gap for universe-discovered accessions (Codex 1a BLOCKING #2) | NEW `sec_13dg_discovery_issuer_hint` side-table per §3.4 carries `(accession_number, instrument_id)` PK rows (multi-row for share-class siblings per Codex 1b BLOCKING #2). Parser cross-validates CUSIP-resolved `instrument_id` against the hint set via §3.1 step 4's 5-case branch: CASE A (CUSIP-in-hints) is happy path; CASE B (single-hint fallback) closes the single-class CUSIP gap; CASE C (multi-hint ambiguous) writes NULL with explicit audit log; CASE D (CUSIP-not-in-hints) trusts CUSIP and logs discrepancy. Legacy daily-index path continues to fall back to CUSIP only (no hint rows written; no regression for that path; #740 backfill epic continues to own the legacy gap). |
+| Share-class siblings on shared CIK (GOOG/GOOGL, BRK.A/BRK.B) silently routed to wrong instrument (Codex 1b BLOCKING #2) | Hint table PK is `(accession_number, instrument_id)` — N rows per accession for N siblings. Parser uses CUSIP as the primary share-class disambiguator (today's path); hint only consulted as universe-membership validator + single-hint-fallback. CASE C explicit NULL + log surfaces the ambiguous-multi-sibling case for operator audit instead of silent mis-routing. Test fixture pins the GOOG/GOOGL shape. |
+| Hint-table write races manifest-row pending status (Codex 1b HIGH atomicity) | Discovery writes manifest row + ALL applicable hint rows in a single `conn.transaction()` block. Manifest row never becomes worker-visible (`status='pending'` committed) until hints are committed. Lint invariant K pins the call-pair nesting; test fixture asserts via psycopg `SERIALIZABLE` isolation that a concurrent worker thread blocks until the discovery transaction commits both writes. |
+| Hint-table re-discovery duplicates / stale `discovered_at` (Codex 1b HIGH idempotency) | UPSERT clause `ON CONFLICT (accession_number, instrument_id) DO UPDATE SET discovered_at = NOW(), issuer_cik = EXCLUDED.issuer_cik` per §3.4 migration. Lint invariant L pins the `ON CONFLICT ... DO UPDATE` shape (forbids `DO NOTHING` which would mask freshness). Test fixture pins idempotent re-discovery — second pass writes 0 new manifest rows + 0 new hint rows but DOES advance `discovered_at`. |
+| Watermark coherence for per-issuer steady-state (Codex 1b HIGH) | `_resolve_discovery_startdt` per §3.5 derives watermark from `MAX(blockholder_filings.filed_at) WHERE issuer_cik = ?` (chain-derived, per-issuer-grain), NOT from `data_freshness_index` (DFI is filer-keyed, wrong grain). Clamped to 3y floor for issuers with zero prior ingest. |
+| Pre-existing HTML-only 13D/G parser gap surfaces at scale post-activation | §3.3 out-of-scope note + new follow-up ticket filed at PR merge (HTML body parser fallback OR edgartools adoption). PR11 inherits the gap; tombstone counter will spike post-merge — explicitly called out in the PR description so the operator-visible delta is interpretable. |
 | Steady-state >14d job outage silently shrinks coverage | `_resolve_discovery_startdt` clamps watermark to 3y floor (`max(floor, watermark - 7d)`); on first run after outage, the watermark is stale → falls back to 3y floor → discovery re-covers the whole window. Codex 1a MEDIUM #10 lesson. |
 | Rewash rescue-path re-introduces pre-cap accessions via the back door | Chokepoint F gate in `_apply_blockholders` distinguishes happy-path (existing rows present → uncapped, preserves §6.3 contract) from rescue-path (zero rows → would re-introduce pre-cap observations → SKIPPED if accession is outside retention). Lint invariant H pins the placement. |
 | `scripts/seed_holder_coverage.py` retirement breaks the 13F-HR / CUSIP-resolver / N-CEN paths (Codex 1a HIGH #5) | PR11 surgically removes only the 13D/G blockholder block from the script (constant, import, prints, ingest call); every other path is preserved. Script's CLI help text updated to note 13D/G is now universe-driven via bootstrap stage. |
@@ -476,14 +527,14 @@ Same PR amends `docs/superpowers/specs/2026-05-19-data-retention-rubric.md`:
 2. Helper additions in `app/services/blockholders.py` (`blockholders_retention_cutoff`, `blockholders_within_retention`, `INSIDER_BLOCKHOLDERS_RETENTION_YEARS = 3`).
 3. NEW `app/services/sec_13dg_discovery.py` (discovery module + `discover_sec_13dg_for_universe` entry-point + `_resolve_discovery_startdt` watermark helper + `DiscoveryResult` dataclass).
 4. NEW `SecFilingsProvider.fetch_search_index_json` method in `app/providers/implementations/sec_edgar.py` (or sibling) — single HTTP entrypoint for efts.sec.gov so `_PROCESS_RATE_LIMIT_LOCK` is honoured.
-5. Cap gate B in `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (pre-fetch, pre-store_raw); ADD issuer-hint short-circuit (look up `sec_13dg_discovery_issuer_hint`; use hint if present; else CUSIP fallback).
+5. Cap gate B in `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (pre-fetch, pre-store_raw); REPLACE today's CUSIP-only resolution with the 5-case hint-cross-validated branch (CASE A CUSIP-in-hints / CASE B single-hint fallback / CASE C multi-hint ambiguous NULL+log / CASE D CUSIP-not-in-hints discrepancy log / CASE E legacy no-hint).
 6. Sync gate C in `app/services/ownership_observations_sync.py::sync_blockholders` (`bf.filed_at >= cutoff` predicate; NO `fe.filing_date` predicate).
-7. Rewash gate F in `app/services/rewash_filings.py::_apply_blockholders` (rescue-path skip for pre-cap; happy-path uncapped).
+7. Rewash gate F in `app/services/rewash_filings.py::_apply_blockholders` — EXPLICIT BRANCH ORDER: (i) `SELECT COUNT(*) FROM blockholder_filings WHERE accession_number = ?`; (ii) zero-count rescue path applies retention helper; (iii) non-zero happy path proceeds uncapped (Codex 1b MEDIUM rewash branch-order pin).
 8. Resolver edits in `app/jobs/sec_atom_fast_lane.py` + `app/jobs/sec_daily_index_reconcile.py` (remove seed-list lookup branch; keep `blockholder_filers` lookup).
 9. DELETE dormant code from `app/services/blockholders.py` (`ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`, `seed_filer`).
 10. EDIT `scripts/seed_holder_coverage.py` (surgical 13D/G block removal; preserve 13F-HR / CUSIP-resolver / N-CEN paths).
 11. NEW scheduler job `sec_blockholders_discovery_job` + bootstrap stage `sec_blockholders_discovery` in `app/workers/scheduler.py` + `data_freshness_index` entries for `sec_13d` + `sec_13g`.
-12. NEW lint guard `scripts/check_13dg_retention.sh` with placement invariants A-J + wire into `.githooks/pre-push`.
+12. NEW lint guard `scripts/check_13dg_retention.sh` with placement invariants A-L (incl. K hint-atomicity-in-same-conn-transaction-block and L hint-UPSERT-uses-ON-CONFLICT-DO-UPDATE) + wire into `.githooks/pre-push`.
 13. NEW + UPDATED tests:
     - parser cap + issuer-hint short-circuit + CUSIP fallback (`tests/test_manifest_parser_sec_13dg.py` additions)
     - discovery module — fixture-driven `efts.sec.gov` responses, joint filings, pagination boundary, dedup, watermark degradation (`tests/test_sec_13dg_discovery.py` NEW)
