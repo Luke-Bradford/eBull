@@ -156,14 +156,17 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 
 ### 4.6 N-PORT fund holdings (`ownership_funds_observations`)
 
-- **Raw shape**: same shape as 13F-HR but for mutual fund filers (vs institutional advisers). Quarterly per fund.
+- **Raw shape**: per-fund-trust quarterly snapshot of all portfolio holdings (mutual fund / ETF / closed-end fund filers; 13F is institutional advisers). Holdings: CUSIP, balance (shares), market value, payoff profile.
 - **Current volume**: 3.68M obs rows, 1.6 GB obs + 2.5 GB current = **4.1 GB combined**.
-- **Half-life**: same as 13F.
-- **Consumers**: funds slice of institutional ownership chart; potentially fold into 13F view if redundant.
-- **Ingest depth cap**: **8 quarters** at the parser, same as 13F + always-current snapshot.
-- **Cohort bound**: same recency-based filter pattern as #1010, applied to N-PORT filer registry (`last_nport_at`).
+- **Half-life**: **medium** — same shape as 13F. 4-quarter trend matters for momentum; 8 quarters (2y) for backtests.
+- **Consumers**: funds slice of institutional ownership chart (N-PORT augments N-CSR); concentration metric in ranking; AI thesis "Vanguard Index Fund increased position by 8%".
+- **Ingest depth cap**: **8 fiscal-quarter snapshots per fund** (= 24 consecutive completed calendar month-ends). **PR7 SHIPPED.**
+   Critical adaptation vs §4.5: NPORT-P `period_of_report` is the END of the third month of the fund's FISCAL quarter, which can be ANY calendar month-end (funds have their own fiscal calendars). The PR6 calendar-quarter anchor would silently reject fiscal-Q-non-calendar funds (e.g. a fund whose fiscal Q ends Jan-31 has no period_ends on Mar/Jun/Sep/Dec). So PR7 anchors to **calendar month-ends** via `n_port_retention_cutoff` in `app/services/n_port_ingest.py` — admits 24 consecutive completed month-ends, which by the mod-3 congruence-class argument contains exactly 8 fiscal-Q snapshots for any fiscal-year alignment. Boundary inclusive.
+- **Cohort bound**: **PR7 SHIPPED.** Mirror of #1010 for N-PORT — bootstrap stage 22 dispatches with `min_last_seen_filed_at = today - 380d` (UTC midnight, resolved at dispatch via `_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF` sentinel). Daily / Admin "Run now" / manual sweep paths dispatch with empty params → full cohort (safety-net for previously-inactive trusts re-emerging). No migration needed: `sec_nport_filer_directory.last_seen_filed_at` + DESC NULLS LAST index already exist (`sql/126`).
+- **Chokepoint coverage (PR7)**: every N-PORT writer honours the cap — `parse_submissions_index` intrinsic floor, `_ingest_single_accession` defensive post-parse gate, manifest-worker `_parse_n_port` post-parse gate, `ingest_nport_dataset_archive` per-row gate (placed BEFORE CUSIP / series / sub-reg-fund lookup so pre-cap rows don't pay for downstream filters and `rows_skipped_retention` is unconfounded — Codex 1a WARN 3) + `rows_skipped_retention` counter on `NPortIngestResult`. `sec_bulk_orchestrator_jobs.sec_nport_ingest_from_dataset_job` surfaces the per-archive counter and distinguishes all-retention-skipped (no error) from all-CUSIP-unresolved (RuntimeError). Lint guard `scripts/check_nport_retention.sh` (PR5-style placement invariants A/B/C/D/F/H/I — no E for rewash, no G for sync_funds; both chokepoints don't exist for N-PORT).
+- **No rewash / no sync_funds**: `rewash_filings.py` has no `_apply_n_port_*` function and `ownership_observations_sync.py` has no `sync_funds`. PR7 lint guard intentionally omits those invariants. If a future PR adds either chokepoint, that PR is responsible for adding the gate + extending the lint guard.
 - **Existing rows**: untouched until pre-wipe (§6.3).
-- **Why this matters**: similar to 13F — combined 4.1 GB; same proportional projection post-wipe + clean re-run.
+- **Why this matters**: combined 4.1 GB. Post-wipe + clean re-run under 8q + PR12 audit projects to ~0.5 GB (same proportional shape as §4.5).
 
 ### 4.7 DEF 14A blockholders (`def14a_beneficial_holdings`, `ownership_def14a_observations`)
 
@@ -345,7 +348,7 @@ Land per-source PRs in this order. Each PR is **ingest-side cap only** — no PR
 - **PR4 — IN PROGRESS.** Form 4 / 4-A 3y ingest cap at every writer chokepoint (legacy filing_events SELECTs, manifest-worker `_parse_form4` pre-fetch gate, bulk-dataset Form-4-only filter). Cumulative-rollup invariant pinned by steady-state test; synthetic opening-balance anchor NOT written (§4.3 amendment, this commit). Recency cohort bound inherited from PR1 `is_tradable=TRUE` filter (no insider-filer cohort table; Form 4 walked per-issuer-CIK via filing_events). Includes a parity lint guard catching new chokepoints that omit the predicate.
 - **PR5 — SHIPPED.** DEF 14A latest-2-PRIMARY-proxies cap at discovery + parser + rewash-rescue chokepoints. Supplemental form variants (DEFA14A / DEFR14A / DEFM14A) uncapped (§4.7). NUMERIC overflow #1228 already folded (#1236).
 - **PR6 — SHIPPED.** 13F-HR 8-quarter ingest cap at every writer chokepoint (parse_submissions_index intrinsic floor, _ingest_single_accession defensive post-parse gate, manifest-worker post-parse gate, bulk-dataset per-row gate, rewash rescue gate, sync_institutions SQL predicate). Cap anchored to calendar quarter ends (`thirteen_f_retention_cutoff`) — admits exactly 8 quarter-ends. (#1010 cohort bound already in place.) Lint guard `scripts/check_13f_hr_retention.sh` with nine PR5-style placement invariants A-I.
-- **PR7 — pending.** N-PORT 8-quarter cap (mirror of PR6). N-PORT recency cohort bound (`last_nport_at`) per #1010 pattern.
+- **PR7 — SHIPPED.** N-PORT 8-quarter (24-month) ingest cap at every writer chokepoint (parse_submissions_index intrinsic floor, _ingest_single_accession defensive post-parse gate, manifest-worker post-parse gate, bulk-dataset per-row gate). Cap anchored to **calendar month-ends** via `n_port_retention_cutoff` (NOT calendar-quarter-ends — fiscal-Q-non-calendar funds would otherwise be silently rejected). Cohort bound shipped in the same PR (mirror of #1010 — bootstrap stage 22 dispatches with `min_last_seen_filed_at = today - 380d` via `_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF`; daily / Admin / manual paths use full cohort). Lint guard `scripts/check_nport_retention.sh` with seven PR5-style placement invariants A/B/C/D/F/H/I (no E for rewash, no G for sync_funds — both chokepoints don't exist for N-PORT). `sec_n_port_ingest` migrated from `_adapt_zero_arg` to native `JobInvoker(params)` so stage 22 params reach the body.
 - **PR8 — pending.** N-CSR/N-CSRS validate existing 2y horizon. Doc-only unless drift found.
 - **PR9 — pending.** N-CEN latest-only cap at the parser. Verify `ncen_classifier` reads latest.
 - **PR10 — pending.** Form 3/5 latest-only at the parser + business summary (10-K Item 1) latest-only at the parser.
@@ -415,28 +418,33 @@ Per #1208 cadence:
 State as of this commit:
 
 - PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix
-  (#1236), PR5 latest-2-primary cap (#1241), and **PR6 13F-HR
-  8-quarter cap (this commit)** all shipped.
-- PR7-PR12 remain — every one is ingest-side cap only, no row deletion.
+  (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter
+  cap (#1242), and **PR7 N-PORT 8-quarter cap (this commit)** all
+  shipped.
+- PR8-PR12 remain — every one is ingest-side cap only, no row deletion.
   The pre-wipe is the single operator event at the end.
 
 ```text
-After PR6 merges, the next session picks up PR7
-(N-PORT 8-quarter ingest cap at the parser).
+After PR7 merges, the next session picks up PR8
+(N-CSR / N-CSRS validate existing 2y horizon; doc-only unless drift
+found).
 
-PR7 scope:
-- N-PORT observations: per-fund-trust 8-quarter rank cap. Mirror of
-  PR6 shape; N-PORT is the fund-trust equivalent of 13F-HR.
-- N-PORT recency cohort bound (`last_nport_at` 380d) — apply the
-  #1010 pattern to the N-PORT filer directory.
-- Identify every N-PORT writer (manifest-worker parser, bulk drain,
-  rewash path, sync_funds repair sweep) and apply the per-quarter
-  rank cap at each.
-- No DELETE of pre-8q rows. They survive until the §6.3 pre-wipe.
+PR8 scope:
+- Audit `app/jobs/sec_first_install_drain.py:770-815`
+  (`bootstrap_n_csr_drain`) — already passes `horizon_days=730`. Spec
+  §4.12 says "Retain as-is". Confirm no drift from spec wording vs
+  code; close out the spec PR otherwise without code changes.
+- Confirm `cik_refresh_mf_directory` still gates the N-CSR drain (no
+  full-universe walk).
+- If drift found, add minimal cap-confirmation comment + maybe a
+  trivial lint guard line; if no drift, PR is a §4.12 SHIPPED status
+  update.
 
 FIRST ACTIONS:
-1. Read CLAUDE.md working order + the revised §4.6.
-2. Confirm PR6 merged. Confirm #1233 still OPEN as the umbrella.
-3. Branch `feature/1233-pr7-nport-8q-cap`.
-4. Codex 1a on plan, then Codex 2 pre-push, then PR.
+1. Read CLAUDE.md working order + the revised §4.12 (currently
+   unchanged from initial spec; PR7 did not touch it).
+2. Confirm PR7 merged. Confirm #1233 still OPEN as the umbrella.
+3. Branch `feature/1233-pr8-ncsr-horizon-confirm`.
+4. Read `bootstrap_n_csr_drain` + confirm `horizon_days=730` is the
+   only depth knob; if so, doc-only spec PR + close.
 ```

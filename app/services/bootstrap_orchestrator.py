@@ -124,6 +124,14 @@ JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
 _BOOTSTRAP_13F_QUARTERS_BACK = 4
 _BOOTSTRAP_13F_RECENCY_DAYS = _BOOTSTRAP_13F_QUARTERS_BACK * 95
 
+# PR7 #1233 §4.6 — N-PORT cohort recency window. Aliases to the 13F
+# 380d window today (#1010 precedent) but lives in its own constant
+# so a future 13F-only tuning of ``_BOOTSTRAP_13F_RECENCY_DAYS``
+# doesn't silently drift the N-PORT cohort cutoff. Bot review on PR
+# #1243 WARNING — keep the two namespaced even when their numerical
+# value is identical.
+_BOOTSTRAP_NPORT_RECENCY_DAYS = _BOOTSTRAP_13F_RECENCY_DAYS
+
 # PR1c #1064 — filings_history_seed bootstrap default form-type
 # allow-list. Imported once at module load so the StageSpec.params
 # dict is plain data; the underlying constant lives in the canonical
@@ -147,6 +155,13 @@ _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF = "<dynamic:bootstrap_13f_cutoff>"
 # 21. Filters ``institutional_filers.last_13f_hr_at >= cutoff`` so the
 # sweep iterates only currently-active HR filers.
 _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF = "<dynamic:bootstrap_13f_hr_cutoff>"
+# #1233 PR7 (mirror of #1010 for N-PORT) — recency cohort cutoff for
+# stage 22 sec_n_port_ingest. Filters
+# ``sec_nport_filer_directory.last_seen_filed_at >= cutoff`` so the
+# bootstrap sweep iterates only currently-active fund-trust filers.
+# Daily / Admin / manual paths dispatch with empty params → full
+# cohort (#1010 precedent — safety-net for re-emerging filers).
+_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF = "<dynamic:bootstrap_nport_cutoff>"
 
 
 def _resolve_dynamic_params(params: Mapping[str, Any]) -> dict[str, Any]:
@@ -178,6 +193,17 @@ def _resolve_dynamic_params(params: Mapping[str, Any]) -> dict[str, Any]:
         #       filer (Codex 2 MEDIUM). Take the UTC date explicitly.
         cutoff_date = datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS)
         resolved["min_last_13f_hr_at"] = datetime.combine(cutoff_date, time(0, 0), tzinfo=UTC)
+    if resolved.get("min_last_seen_filed_at") == _PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF:
+        # PR7 #1233 §4.6 — mirror of the 13F HR-cutoff resolution.
+        # UTC start-of-day so the boundary is inclusive against
+        # ``sec_nport_filer_directory.last_seen_filed_at`` (stored at
+        # midnight UTC by ``sec_nport_filer_directory_sync``). The
+        # 380d window aliases the 13F figure today but lives behind
+        # the dedicated ``_BOOTSTRAP_NPORT_RECENCY_DAYS`` constant so
+        # a future 13F-only tuning doesn't silently drift the N-PORT
+        # cohort cutoff (PR #1243 bot review WARNING).
+        nport_cutoff_date = datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_NPORT_RECENCY_DAYS)
+        resolved["min_last_seen_filed_at"] = datetime.combine(nport_cutoff_date, time(0, 0), tzinfo=UTC)
     return resolved
 
 
@@ -917,7 +943,24 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
             "source_label": "sec_edgar_13f_directory_bootstrap",
         },
     ),
-    _spec("sec_n_port_ingest", 22, "sec_rate", "sec_n_port_ingest"),
+    _spec(
+        "sec_n_port_ingest",
+        22,
+        "sec_rate",
+        "sec_n_port_ingest",
+        # PR7 #1233 §4.6 — ``min_last_seen_filed_at`` (mirror of #1010
+        # ``min_last_13f_hr_at`` for stage 21) bounds the cohort to
+        # trust CIKs whose most recent NPORT-P / NPORT-P/A filed_at is
+        # within the 380-day window. Collapses ~5k registered trusts
+        # to ~3-4k actively-filing trusts and drops bootstrap stage 22
+        # wall-clock proportionally. Daily / Admin "Run now" paths
+        # dispatch ``sec_n_port_ingest`` with empty params → full
+        # cohort (safety-net for previously-inactive trusts re-
+        # emerging).
+        params={
+            "min_last_seen_filed_at": _PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF,
+        },
+    ),
     _spec("ownership_observations_backfill", 23, "db", "ownership_observations_backfill"),
     _spec("fundamentals_sync", 24, "db", "fundamentals_sync"),
     # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap

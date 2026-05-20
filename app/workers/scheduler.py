@@ -4991,7 +4991,7 @@ def sec_nport_filer_directory_sync() -> None:
         )
 
 
-def sec_n_port_ingest() -> None:
+def sec_n_port_ingest(params: Mapping[str, Any]) -> None:
     """Monthly NPORT-P fund-holdings sweep (#917 — Phase 3 PR1).
 
     Walks the fund-filer CIK universe and ingests each filer's pending
@@ -5006,9 +5006,27 @@ def sec_n_port_ingest() -> None:
     the WRONG entity for N-PORT — N-PORT is filed by trust CIKs, not
     manager CIKs, leaving the standing job producing zero rows on dev
     until #919 worked around with a hardcoded panel-targeted CIK list.
+
+    PR7 #1233 §4.6 — params-aware (mirror of #1064 PR1c lift for
+    ``sec_13f_quarterly_sweep``). Accepts:
+
+      * ``min_last_seen_filed_at`` — bootstrap stage 22 passes
+        ``today - 380d`` (UTC midnight) via the
+        ``_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF`` sentinel; daily /
+        Admin "Run now" / manual sweep paths pass an empty dict, which
+        resolves to ``None`` here → full cohort (safety-net for
+        previously-inactive trusts re-emerging — #1010 precedent).
     """
     from app.providers.implementations.sec_edgar import SecFilingsProvider
     from app.services.n_port_ingest import ingest_all_fund_filers
+    from app.services.sec_nport_filer_directory import list_nport_filer_ciks
+
+    min_last_seen_filed_at = params.get("min_last_seen_filed_at")
+    if min_last_seen_filed_at is not None and not isinstance(min_last_seen_filed_at, datetime):
+        raise TypeError(
+            "sec_n_port_ingest: ``min_last_seen_filed_at`` must be a datetime; "
+            f"got {type(min_last_seen_filed_at).__name__}"
+        )
 
     deadline_seconds = settings.sec_n_port_sweep_deadline_seconds
 
@@ -5017,15 +5035,10 @@ def sec_n_port_ingest() -> None:
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
             psycopg.connect(settings.database_url) as conn,
         ):
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT cik
-                    FROM sec_nport_filer_directory
-                    ORDER BY last_seen_filed_at DESC NULLS LAST, cik
-                    """
-                )
-                ciks = [str(row[0]).zfill(10) for row in cur.fetchall()]
+            ciks = list_nport_filer_ciks(
+                conn,
+                min_last_seen_filed_at=min_last_seen_filed_at,
+            )
 
             summaries = ingest_all_fund_filers(
                 conn,

@@ -274,3 +274,51 @@ def sync_nport_filer_directory(
         filers_refreshed=refreshed,
         skipped_empty_name=skipped_empty_name,
     )
+
+
+# ---------------------------------------------------------------------------
+# Directory accessor (#1233 PR7 cohort bound, mirrors #1010 for 13F-HR)
+# ---------------------------------------------------------------------------
+
+
+def list_nport_filer_ciks(
+    conn: psycopg.Connection[Any],
+    *,
+    min_last_seen_filed_at: datetime | None = None,
+) -> list[str]:
+    """Return zero-padded trust CIKs from ``sec_nport_filer_directory``.
+
+    ``min_last_seen_filed_at`` (PR7 #1233 §4.6, mirrors #1010 for
+    13F-HR): when provided, restricts the cohort to trust CIKs whose
+    last NPORT-P / NPORT-P/A was filed at or after that timestamp.
+    Bootstrap stage 22 passes ``today - 380d`` to collapse the cohort
+    to active-recent trusts; daily / standalone / Admin "Run now"
+    paths pass ``None`` (full cohort — safety-net for previously-
+    inactive trusts re-emerging).
+
+    Ordering ``last_seen_filed_at DESC NULLS LAST, cik`` matches the
+    pre-existing scheduler-inline SELECT (replaced in PR7) and the
+    DESC NULLS LAST index from ``sql/126`` so the filter + ORDER BY
+    share the index.
+    """
+    with conn.cursor() as cur:
+        if min_last_seen_filed_at is None:
+            cur.execute(
+                """
+                SELECT cik
+                FROM sec_nport_filer_directory
+                ORDER BY last_seen_filed_at DESC NULLS LAST, cik
+                """
+            )
+        else:
+            cur.execute(
+                """
+                SELECT cik
+                FROM sec_nport_filer_directory
+                WHERE last_seen_filed_at IS NOT NULL
+                  AND last_seen_filed_at >= %s
+                ORDER BY last_seen_filed_at DESC NULLS LAST, cik
+                """,
+                (min_last_seen_filed_at,),
+            )
+        return [str(row[0]).zfill(10) for row in cur.fetchall()]

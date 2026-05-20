@@ -284,22 +284,41 @@ class TestSyncNportFilerDirectory:
         produces non-zero rows in production without the
         ``.claude/nport-panel-backfill.py`` workaround #919 needed.
 
-        We exercise the selector SQL by inspecting the source — the
-        full job invocation hits SEC EDGAR which we don't want in a
-        unit test. The constants assert is enough to catch a future
-        regression that swaps the selector back."""
+        We exercise the selector by inspecting the source — the full
+        job invocation hits SEC EDGAR which we don't want in a unit
+        test. The constants assert is enough to catch a future
+        regression that swaps the selector back.
+
+        PR7 #1233 §4.6 moved the inline ``SELECT ... FROM
+        sec_nport_filer_directory`` SQL into the
+        ``list_nport_filer_ciks`` accessor in
+        ``app/services/sec_nport_filer_directory.py`` so bootstrap
+        stage 22 can pass a cohort-recency filter. The job's source
+        no longer literally contains ``FROM sec_nport_filer_directory``
+        — assert the accessor is invoked instead, and that the legacy
+        ``institutional_filers`` directory is not referenced."""
         # Get the source of sec_n_port_ingest so we can assert the
-        # selector references the new table, not the old one.
+        # selector path is wired correctly.
         import inspect
 
         from app.workers import scheduler as scheduler_mod
 
         source = inspect.getsource(scheduler_mod.sec_n_port_ingest)
-        assert "FROM sec_nport_filer_directory" in source, (
-            "sec_n_port_ingest must read from sec_nport_filer_directory (#963), "
-            "not the legacy institutional_filers universe."
+        assert "list_nport_filer_ciks(" in source, (
+            "sec_n_port_ingest must call list_nport_filer_ciks(...) — "
+            "the PR7 #1233 §4.6 accessor that wraps sec_nport_filer_directory."
         )
         assert "FROM institutional_filers" not in source, (
             "sec_n_port_ingest must NOT read from institutional_filers any more — "
             "that's the 13F-MANAGER directory, wrong entity for N-PORT."
+        )
+
+        # Pin that the accessor itself wraps the right table; this
+        # catches an accidental re-target of the accessor.
+        from app.services import sec_nport_filer_directory as nport_dir_mod
+
+        accessor_source = inspect.getsource(nport_dir_mod.list_nport_filer_ciks)
+        assert "FROM sec_nport_filer_directory" in accessor_source, (
+            "list_nport_filer_ciks must read from sec_nport_filer_directory (#963), "
+            "not the legacy institutional_filers universe."
         )

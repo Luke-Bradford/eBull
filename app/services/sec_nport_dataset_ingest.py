@@ -40,6 +40,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from app.services.n_port_ingest import n_port_retention_cutoff
 from app.services.ownership_observations import (
     record_fund_observation,
     upsert_sec_fund_series,
@@ -63,6 +64,7 @@ class NPortIngestResult:
     rows_skipped_non_positive_shares: int = 0
     rows_skipped_missing_series: int = 0
     rows_skipped_bad_data: int = 0
+    rows_skipped_retention: int = 0  # PR7 #1233 §4.6
     parse_errors: int = 0
     touched_instrument_ids: set[int] = field(default_factory=set)
 
@@ -264,6 +266,15 @@ def ingest_nport_dataset_archive(
         # we don't re-issue the upsert per holding.
         seen_series: set[str] = set()
 
+        # PR7 #1233 §4.6 — 8-quarter (24-month) retention cap. Cutoff
+        # resolved ONCE per archive to avoid date-rollover during a
+        # multi-million-row drain. Gate fires BEFORE any per-row work
+        # (CUSIP map lookup, series upsert, observation write) so
+        # pre-cap rows don't pay for downstream filters and the
+        # ``rows_skipped_retention`` counter is unconfounded with
+        # filter / unresolved-CUSIP buckets. Codex 1a WARN 3.
+        retention_cutoff = n_port_retention_cutoff()
+
         for holding in _iter_tsv(zf, "FUND_REPORTED_HOLDING.tsv"):
             result.holdings_seen += 1
             accn = holding.get("ACCESSION_NUMBER", "").strip()
@@ -271,9 +282,33 @@ def ingest_nport_dataset_archive(
                 result.rows_skipped_orphan_accession += 1
                 continue
             sub = sub_by_accn.get(accn)
+            if sub is None:
+                result.rows_skipped_orphan_accession += 1
+                continue
+
+            # PR7 #1233 §4.6 — retention gate (EARLY). Parse
+            # ``period_end`` from SUBMISSION.tsv up-front (the same
+            # column the canonical parse at "─── REPORT_DATE ───"
+            # below uses) and skip pre-cap rows BEFORE the reg/fund/
+            # series/CUSIP lookups. This keeps the
+            # ``rows_skipped_retention`` counter unconfounded with
+            # ``rows_skipped_orphan_accession`` etc. — a pre-cap row
+            # whose REGISTRANT/FUND rows are missing must land in the
+            # retention bucket, not the orphan bucket (Codex 2 WARN 1
+            # on PR7). Rows whose period parse fails leak past this
+            # gate and land in the existing ``rows_skipped_bad_data``
+            # bucket below — we don't pre-empt the malformed-row
+            # branch.
+            period_end_early = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(
+                sub.get("REPORT_ENDING_PERIOD")
+            )
+            if period_end_early is not None and period_end_early < retention_cutoff:
+                result.rows_skipped_retention += 1
+                continue
+
             reg = reg_by_accn.get(accn)
             fund = fund_by_accn.get(accn)
-            if sub is None or reg is None or fund is None:
+            if reg is None or fund is None:
                 result.rows_skipped_orphan_accession += 1
                 continue
 
