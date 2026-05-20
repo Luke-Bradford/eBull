@@ -334,16 +334,35 @@ def test_no_writer_bypasses_the_gate() -> None:
     This is a defensive guard: a future PR that adds a fourth writer
     without the gate will fail this test, prompting the developer to
     either route through the existing chokepoints or add the gate
-    explicitly."""
+    explicitly.
+
+    Path is anchored to the repo root via ``__file__`` so the test
+    cannot pass vacuously when pytest is invoked from a subdirectory.
+    Bot review BLOCKING for PR #1239."""
     import subprocess
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    app_dir = repo_root / "app"
 
     proc = subprocess.run(
-        ["grep", "-rln", "INSERT INTO filing_events", "app/"],
+        ["grep", "-rln", "INSERT INTO filing_events", str(app_dir)],
         capture_output=True,
         text=True,
         check=False,
     )
     writer_files = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+    # The 3 chokepoints (filings.py x2 + fundamentals.py) PLUS any
+    # consumer that quotes the pattern in a docstring / comment.
+    # If grep finds zero matches, the path was wrong — assert
+    # non-empty so the test fails loudly rather than silently
+    # passing. Bot PREVENTION for PR #1239.
+    assert writer_files, (
+        f"grep found no ``INSERT INTO filing_events`` matches under {app_dir}. "
+        "The lint-style guard cannot run; verify the search path resolves correctly."
+    )
+
     # Allow a deny-list of files known not to need the gate (e.g.
     # SQL migrations, documentation generators). Currently empty —
     # every writer must invoke ``filing_within_retention``.
@@ -352,10 +371,13 @@ def test_no_writer_bypasses_the_gate() -> None:
     for f in writer_files:
         if f in deny_list:
             continue
-        # ``errors="replace"`` so a binary blob (e.g. a stray
-        # non-UTF8 fixture surfaced via grep) doesn't crash the lint
-        # — we only care about the ASCII helper name.
-        text = open(f, encoding="utf-8", errors="replace").read()
+        # Context manager so a permission error on a stale grep
+        # result doesn't leak a file handle. ``errors="replace"`` so
+        # a binary blob (stray non-UTF8 fixture surfaced via grep)
+        # doesn't crash the lint — we only care about the ASCII
+        # helper name. Bot WARNING for PR #1239.
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
         if "filing_within_retention" not in text:
             bypassed.append(f)
     assert not bypassed, (
