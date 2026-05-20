@@ -33,12 +33,15 @@
 #         ``record_fund_observation(`` call.
 #       - ``rows_skipped_retention`` field on ``NPortIngestResult`` +
 #         ≥ 1 increment.
-#  H. Repo-wide writer discovery — exactly 3 production *.py files
-#     under app/ (excluding ownership_observations.py and tests)
-#     contain ≥ 1 ``record_fund_observation(`` call-site. (N-PORT's
-#     helper hardcodes ``source='nport'`` so there is no per-call
-#     ``source='nport'`` co-located marker as in PR6 invariant H —
-#     plain call-site discovery suffices.)
+#  H. Repo-wide writer discovery — exactly 3 ``record_fund_observation(``
+#     call-sites total across production *.py files under app/
+#     (excluding ownership_observations.py and tests). The guard
+#     sums per-file call-sites; a single file with 2 call-sites and a
+#     second file with 1 produces the same total as three files with
+#     1 each, by design — adding a NEW call-site (anywhere) trips the
+#     guard. (N-PORT's helper hardcodes ``source='nport'`` so there
+#     is no per-call ``source='nport'`` co-located marker as in PR6
+#     invariant H — plain call-site discovery suffices.)
 #  I. Repo-wide writer discovery — exactly 1 production *.py file
 #     under app/ contains ``INSERT INTO ownership_funds_observations
 #     (`` (note trailing column-list paren).
