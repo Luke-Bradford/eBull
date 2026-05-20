@@ -161,8 +161,12 @@ def walk_files_pages(
                 for filing in filings:
                     try:
                         with conn.transaction():
-                            _upsert_filing(conn, str(instrument_id), "sec", filing)
-                            result.filings_upserted += 1
+                            # ``_upsert_filing`` returns False when
+                            # the 10y retention cap (#1233 §4.2) drops
+                            # a pre-cutoff filing. Count only accepted
+                            # rows.
+                            if _upsert_filing(conn, str(instrument_id), "sec", filing):
+                                result.filings_upserted += 1
                     except Exception as exc:  # noqa: BLE001
                         logger.debug(
                             "files walk: upsert failed for %s/%s: %s",

@@ -38,13 +38,79 @@ rows on first install (operator audit 2026-05-07).
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 
 import psycopg
 
 from app.providers.filings import FilingEvent, FilingSearchResult, FilingsProvider
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# filing_events retention cap (#1233 §4.2)
+# ---------------------------------------------------------------------------
+
+
+# 10-year rolling cap on every filing_events ingest path. Discovery
+# writers (Atom fast-lane, daily-index reconcile, first-install drain,
+# per-CIK poll, targeted rebuild, master-index reconcile) all funnel
+# into one of three chokepoints — ``_upsert_filing`` /
+# ``_upsert_filing_event`` here, plus
+# ``fundamentals._upsert_filing_from_master_index`` — so capping at
+# the writer catches every code path uniformly.
+#
+# Existing rows are NOT deleted. The cap is ingest-side only; pre-cap
+# rows survive until the operator-driven pre-wipe + clean re-run
+# (spec §6.3). After the wipe the bounded set lands organically.
+#
+# Constant deliberately exported for testability + so future tuning
+# (e.g. tightening to 5y once a downstream chart only needs that
+# depth) is a single-symbol edit with grep visibility, not a hidden
+# magic number per writer.
+FILING_EVENTS_RETENTION_YEARS: int = 10
+
+
+def filing_events_retention_cutoff(now: datetime | None = None) -> date:
+    """Return the earliest ``filing_date`` accepted for ``filing_events``.
+
+    Rows with ``filing_date < cutoff`` are rejected at the writer
+    chokepoints (#1233 §4.2). Returns a ``date`` because
+    ``filing_events.filing_date`` is a DATE column — comparison must
+    not pull in time-of-day semantics.
+
+    Implements **calendar-year** subtraction (not ``365 *
+    FILING_EVENTS_RETENTION_YEARS`` days, which would drift past leap
+    days). Feb 29 boundary is handled explicitly: if today is Feb 29
+    and ``today.year - 10`` is not a leap year, the cutoff anchors to
+    Feb 28 of that earlier year. Codex 1a pre-push catch.
+
+    ``now`` is injectable so tests can pin a stable reference instant
+    without monkeypatching ``datetime.now``. Production callers pass
+    nothing and the helper defaults to ``datetime.now(tz=UTC)``.
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    today = now.date()
+    target_year = today.year - FILING_EVENTS_RETENTION_YEARS
+    try:
+        return today.replace(year=target_year)
+    except ValueError:
+        # today == Feb 29 and target_year is not a leap year. Anchor
+        # to Feb 28 — the conservative choice (one day earlier window
+        # rather than one day later, so a filing at Feb 28 in the
+        # target year stays inside).
+        return date(target_year, 2, 28)
+
+
+def filing_within_retention(filing_date: date, now: datetime | None = None) -> bool:
+    """Boundary check used by every writer chokepoint.
+
+    Returns True iff ``filing_date >= filing_events_retention_cutoff(now)``.
+    Boundary is inclusive — a filing exactly at the cutoff date is
+    retained (no off-by-one drop on the rolling boundary).
+    """
+    return filing_date >= filing_events_retention_cutoff(now)
 
 
 # ---------------------------------------------------------------------------
@@ -302,11 +368,18 @@ def refresh_filings(
                 end_date=end_date,
                 filing_types=filing_types,
             )
+            results_upserted = 0
             with conn.transaction():
                 for result in results:
-                    _upsert_filing(conn, instrument_id, provider_name, result)
+                    # Count only rows the writer actually accepted.
+                    # The 10y retention cap (#1233 §4.2) drops pre-
+                    # cutoff filings; a naive ``len(results)`` would
+                    # over-report telemetry whenever the cap fires
+                    # during historical replays (Codex 1a #2).
+                    if _upsert_filing(conn, instrument_id, provider_name, result):
+                        results_upserted += 1
             # Count only after the transaction commits successfully
-            upserted += len(results)
+            upserted += results_upserted
         except Exception:
             logger.warning(
                 "Filings: failed to refresh instrument_id=%s via %s, skipping",
@@ -442,7 +515,21 @@ def _upsert_filing_event(
     payload shape but accepts the richer ``FilingEvent`` variant
     returned by ``FilingsProvider.get_filing``. Chunk E's 8-K gap
     fill path uses this when re-fetching a single accession (#268).
+
+    Filings older than the 10y retention cutoff (#1233 §4.2) are
+    rejected here — silently dropped with a DEBUG log so a noisy
+    upstream replay doesn't flood the operator log.
     """
+    filing_date = event.filed_at.date()
+    if not filing_within_retention(filing_date):
+        logger.debug(
+            "filing_events: skipping %s/%s — filing_date %s pre-%dy cutoff (#1233 §4.2)",
+            provider_name,
+            event.provider_filing_id,
+            filing_date.isoformat(),
+            FILING_EVENTS_RETENTION_YEARS,
+        )
+        return
     conn.execute(
         """
         INSERT INTO filing_events (
@@ -488,11 +575,31 @@ def _upsert_filing(
     instrument_id: str,
     provider_name: str,
     result: FilingSearchResult,
-) -> None:
-    """
-    Upsert a single filing into filing_events.
+) -> bool:
+    """Upsert a single filing into filing_events.
+
     Idempotent — keyed on (provider, provider_filing_id).
+
+    Filings older than the 10y retention cutoff (#1233 §4.2) are
+    rejected here — silently dropped with a DEBUG log so a noisy
+    upstream replay doesn't flood the operator log.
+
+    Returns ``True`` if the INSERT/UPDATE fired, ``False`` if the row
+    was dropped by the retention cap. Callers tracking
+    ``filings_upserted`` for telemetry must check the return value;
+    naively counting ``len(results)`` would over-report whenever the
+    cap drops historical filings (Codex 1a #2).
     """
+    filing_date = result.filed_at.date()
+    if not filing_within_retention(filing_date):
+        logger.debug(
+            "filing_events: skipping %s/%s — filing_date %s pre-%dy cutoff (#1233 §4.2)",
+            provider_name,
+            result.provider_filing_id,
+            filing_date.isoformat(),
+            FILING_EVENTS_RETENTION_YEARS,
+        )
+        return False
     conn.execute(
         """
         INSERT INTO filing_events (
@@ -534,3 +641,4 @@ def _upsert_filing(
             ),
         },
     )
+    return True

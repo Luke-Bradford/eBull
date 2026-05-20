@@ -1648,12 +1648,18 @@ def backfill_filings(
         )
 
     conn.commit()  # M1 invariant before mutation block.
+    recent_results_upserted = 0
     with conn.transaction():
         for r in recent_results:
-            _upsert_filing(conn, str(instrument_id), "sec", r)
+            # ``_upsert_filing`` returns False when the 10y retention
+            # cap (#1233 §4.2) drops a pre-cutoff filing. Count only
+            # accepted rows so ``filings_upserted`` telemetry stays
+            # accurate during historical replays.
+            if _upsert_filing(conn, str(instrument_id), "sec", r):
+                recent_results_upserted += 1
     seen_filings.extend(recent_results)
     pages_fetched += 1
-    filings_upserted += len(recent_results)
+    filings_upserted += recent_results_upserted
 
     bar_met = probe_status(conn, instrument_id) in ("analysable", "fpi")
     if recent_results:
@@ -1764,12 +1770,16 @@ def backfill_filings(
             )
 
         conn.commit()  # M1 invariant.
+        page_results_upserted = 0
         with conn.transaction():
             for r in page_results:
-                _upsert_filing(conn, str(instrument_id), "sec", r)
+                # Count only writes that survived the retention cap
+                # (#1233 §4.2).
+                if _upsert_filing(conn, str(instrument_id), "sec", r):
+                    page_results_upserted += 1
         seen_filings.extend(page_results)
         pages_fetched += 1
-        filings_upserted += len(page_results)
+        filings_upserted += page_results_upserted
 
         if not bar_met:
             bar_met = probe_status(conn, instrument_id) in ("analysable", "fpi")

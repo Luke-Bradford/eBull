@@ -38,6 +38,10 @@ from app.providers.implementations.sec_edgar import (
     parse_master_index,
 )
 from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
+from app.services.filings import (
+    FILING_EVENTS_RETENTION_YEARS,
+    filing_within_retention,
+)
 from app.services.ownership_observations import (
     record_treasury_observation,
     refresh_treasury_current,
@@ -2240,6 +2244,21 @@ def _upsert_filing_from_master_index(
             entry.cik,
         )
         filed_at = datetime.now(UTC)
+    # #1233 §4.2 — 10y rolling cap on filing_events. Master-index
+    # reconcile walks every form in the quarterly index, including
+    # decades-old filings that no current consumer renders. The
+    # canonical helper in ``filings`` ensures all three writers
+    # (this one + the two in ``filings.py``) share the same cutoff
+    # semantics — a single grep for the constant catches any future
+    # writer that needs the gate.
+    if not filing_within_retention(filed_at.date()):
+        logger.debug(
+            "filing_events: skipping sec/%s — filing_date %s pre-%dy cutoff (#1233 §4.2)",
+            entry.accession_number,
+            filed_at.date().isoformat(),
+            FILING_EVENTS_RETENTION_YEARS,
+        )
+        return
     conn.execute(
         """
         INSERT INTO filing_events (
