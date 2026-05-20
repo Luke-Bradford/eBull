@@ -95,6 +95,23 @@ class SecDocFetcher(Protocol):
 _DEF14A_FORM_TYPES: frozenset[str] = frozenset(("DEF 14A", "DEFA14A", "DEFM14A", "DEFR14A"))
 
 
+# ---------------------------------------------------------------------------
+# Latest-N-primary-proxies-per-filer ingest cap (#1233 §4.7 PR5)
+# ---------------------------------------------------------------------------
+
+
+# Cap: keep latest 2 PRIMARY ``DEF 14A`` accessions per issuer CIK.
+# Supplemental variants (DEFA14A, DEFR14A, DEFM14A) are NOT capped —
+# they are amendments / merger proxies that would otherwise evict a
+# prior-year primary from the cap window. See spec §4.7.
+DEF14A_LATEST_PER_FILER_CAP: int = 2
+
+# Form type the cap partitions on. Imported by the manifest-worker
+# parser + lint guard so a future widening (e.g. include DEFA14A in
+# the cap) only edits one place.
+DEF14A_PRIMARY_FORM_TYPE: str = "DEF 14A"
+
+
 @dataclass(frozen=True)
 class AccessionRef:
     """One DEF 14A accession to ingest. Sourced from
@@ -192,42 +209,30 @@ def discover_pending_def14a(
     issuer (used by ad-hoc re-ingest scripts and the per-instrument
     backfill in PR 3); ``None`` returns the full pending set.
     """
-    # Per-#1117 PR-B: targeted selectors (`fe.instrument_id = %s`)
-    # only match one sibling's rows in filing_events — no fan-out
-    # multiplies, dedup unnecessary. Universe-wide selectors require
-    # the inner-CTE DISTINCT ON pattern so N siblings sharing a CIK
-    # do not consume N slots of the LIMIT budget for one accession.
-    where_iid = "AND fe.instrument_id = %(iid)s" if instrument_id is not None else ""
+    # #1233 PR5 — latest-N-primary cap applied via inline rank CTE.
+    # Per-instrument branch pre-scopes to target CIK in Python (one
+    # round-trip) so the rank universe is bounded to the filer's
+    # corpus. Universe-wide branch ranks every DEF 14A accession in
+    # one CTE and returns directly from the de-duped row set (NO
+    # outer JOIN back to filing_events — that would fan one accession
+    # to N sibling rows and burn the LIMIT slot).
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         if instrument_id is not None:
-            cur.execute(
-                f"""
-                SELECT fe.provider_filing_id, fe.instrument_id, fe.filing_date,
-                       fe.primary_document_url
-                FROM filing_events fe
-                LEFT JOIN def14a_ingest_log log
-                    ON log.accession_number = fe.provider_filing_id
-                WHERE fe.provider = 'sec'
-                  AND fe.filing_type = ANY(%(forms)s)
-                  AND fe.primary_document_url IS NOT NULL
-                  AND log.accession_number IS NULL
-                  {where_iid}
-                ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
-                LIMIT %(limit)s
-                """,
-                {
-                    "forms": list(_DEF14A_FORM_TYPES),
-                    "iid": instrument_id,
-                    "limit": limit,
-                },
-            )
-        else:
-            cur.execute(
-                """
-                WITH per_accession AS (
-                    SELECT DISTINCT ON (fe.provider_filing_id)
-                        fe.provider_filing_id, fe.instrument_id, fe.filing_date,
-                        fe.primary_document_url, fe.filing_event_id
+            target_cik = _resolve_target_cik_for_cap(conn, instrument_id=instrument_id)
+            if target_cik is None:
+                # CIK-truly-missing — legacy uncapped path for the
+                # calling instrument's own DEF 14A accessions. The
+                # parser-side helper (``def14a_within_cap``) returns
+                # ``True`` for these (CIK-missing carve-out at §3) so
+                # the existing CIK-MISSING tombstone path runs.
+                cur.execute(
+                    """
+                    -- DEF14A-CAP-EXEMPT: CIK-MISSING legacy uncapped
+                    -- (#1233 PR5 §2.6 — calling instrument has no profile
+                    -- and no sibling profile either; parser-side helper
+                    -- short-circuits CIK-missing).
+                    SELECT fe.provider_filing_id, fe.instrument_id,
+                           fe.filing_date, fe.primary_document_url
                     FROM filing_events fe
                     LEFT JOIN def14a_ingest_log log
                         ON log.accession_number = fe.provider_filing_id
@@ -235,15 +240,109 @@ def discover_pending_def14a(
                       AND fe.filing_type = ANY(%(forms)s)
                       AND fe.primary_document_url IS NOT NULL
                       AND log.accession_number IS NULL
-                    ORDER BY fe.provider_filing_id, fe.instrument_id
+                      AND fe.instrument_id = %(iid)s
+                    ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+                    LIMIT %(limit)s
+                    """,
+                    {
+                        "forms": list(_DEF14A_FORM_TYPES),
+                        "iid": instrument_id,
+                        "limit": limit,
+                    },
                 )
-                SELECT provider_filing_id, instrument_id, filing_date, primary_document_url
-                FROM per_accession
-                ORDER BY filing_date DESC, filing_event_id DESC
+            else:
+                cur.execute(
+                    """
+                    WITH per_accession AS (
+                        SELECT DISTINCT ON (fe.provider_filing_id)
+                            fe.provider_filing_id, fe.filing_date,
+                            fe.filing_type, fe.primary_document_url,
+                            fe.filing_event_id
+                        FROM filing_events fe
+                        JOIN instrument_sec_profile isp
+                            ON isp.instrument_id = fe.instrument_id
+                        WHERE fe.provider = 'sec'
+                          AND fe.filing_type = ANY(%(forms)s)
+                          AND isp.cik = %(target_cik)s
+                        ORDER BY fe.provider_filing_id, fe.instrument_id
+                    ),
+                    ranked AS (
+                        SELECT *,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY filing_type
+                                ORDER BY filing_date DESC, provider_filing_id DESC
+                            ) AS rank_within_form
+                        FROM per_accession
+                    )
+                    SELECT fe.provider_filing_id, fe.instrument_id,
+                           fe.filing_date, fe.primary_document_url
+                    FROM ranked r
+                    JOIN filing_events fe
+                        ON fe.provider_filing_id = r.provider_filing_id
+                       AND fe.provider = 'sec'
+                       AND fe.primary_document_url IS NOT NULL
+                    LEFT JOIN def14a_ingest_log log
+                        ON log.accession_number = r.provider_filing_id
+                    WHERE log.accession_number IS NULL
+                      AND fe.instrument_id = %(iid)s
+                      AND (r.filing_type <> 'DEF 14A'
+                           OR r.rank_within_form <= %(cap)s)
+                    ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+                    LIMIT %(limit)s
+                    """,
+                    {
+                        "forms": list(_DEF14A_FORM_TYPES),
+                        "iid": instrument_id,
+                        "target_cik": target_cik,
+                        "cap": DEF14A_LATEST_PER_FILER_CAP,
+                        "limit": limit,
+                    },
+                )
+        else:
+            cur.execute(
+                """
+                WITH per_accession AS (
+                    -- ORDER BY ``(isp.cik IS NULL)`` prefers
+                    -- profile-bearing siblings on DISTINCT ON
+                    -- (#1233 PR5 §2.2); ``fe.instrument_id`` is the
+                    -- deterministic tie-break across same-CIK
+                    -- siblings.
+                    SELECT DISTINCT ON (fe.provider_filing_id)
+                        fe.provider_filing_id, fe.instrument_id, fe.filing_date,
+                        fe.filing_type, fe.primary_document_url,
+                        fe.filing_event_id, isp.cik
+                    FROM filing_events fe
+                    LEFT JOIN instrument_sec_profile isp
+                        ON isp.instrument_id = fe.instrument_id
+                    WHERE fe.provider = 'sec'
+                      AND fe.filing_type = ANY(%(forms)s)
+                    ORDER BY fe.provider_filing_id, (isp.cik IS NULL),
+                             fe.instrument_id
+                ),
+                ranked AS (
+                    SELECT *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY cik, filing_type
+                            ORDER BY filing_date DESC, provider_filing_id DESC
+                        ) AS rank_within_form
+                    FROM per_accession
+                )
+                SELECT r.provider_filing_id, r.instrument_id,
+                       r.filing_date, r.primary_document_url
+                FROM ranked r
+                LEFT JOIN def14a_ingest_log log
+                    ON log.accession_number = r.provider_filing_id
+                WHERE log.accession_number IS NULL
+                  AND r.primary_document_url IS NOT NULL
+                  AND (r.filing_type <> 'DEF 14A'
+                       OR r.cik IS NULL
+                       OR r.rank_within_form <= %(cap)s)
+                ORDER BY r.filing_date DESC, r.filing_event_id DESC
                 LIMIT %(limit)s
                 """,
                 {
                     "forms": list(_DEF14A_FORM_TYPES),
+                    "cap": DEF14A_LATEST_PER_FILER_CAP,
                     "limit": limit,
                 },
             )
@@ -281,6 +380,175 @@ def _resolve_issuer_cik(
         )
         row = cur.fetchone()
     return str(row[0]) if row is not None else None
+
+
+def _resolve_target_cik_for_cap(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+) -> str | None:
+    """Resolve the issuer CIK against which the latest-N cap is
+    enforced for ``instrument_id``.
+
+    Two-step lookup (#1233 PR5 §2.6.0):
+
+    1. Direct profile row on ``instrument_id``.
+    2. Sibling-via-filing_events fallback — find any DEF 14A
+       accession that ``instrument_id`` has a filing_events row for,
+       then locate a sibling instrument that DOES have a profile
+       row, and return its CIK.
+
+    Step 2 catches the #1102 PR-B fan-out gap: per-instrument-side
+    discovery for a sibling without ``instrument_sec_profile`` would
+    otherwise route through the legacy uncapped path even though
+    its share-class siblings carry the CIK.
+
+    Returns ``None`` only when NO sibling sharing any DEF 14A
+    accession with the calling instrument has a profile (genuine
+    CIK-MISSING — parser's CIK-MISSING sentinel handles it
+    downstream).
+    """
+    with conn.cursor() as cur:
+        # Step 1 — direct profile lookup. ``instrument_sec_profile.cik``
+        # is currently ``TEXT NOT NULL`` (sql/051) so the ``cik IS NOT
+        # NULL`` guard is defensive against a future migration that
+        # relaxes the constraint; today it is a no-op.
+        cur.execute(
+            """
+            SELECT cik
+            FROM instrument_sec_profile
+            WHERE instrument_id = %s AND cik IS NOT NULL
+            LIMIT 1
+            """,
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return str(row[0])
+
+        # Step 2 — sibling-via-filing_events fallback. ``ORDER BY
+        # fe_sib.instrument_id LIMIT 1`` is the deterministic
+        # tie-break (mirrors the DISTINCT ON ordering used by the
+        # universe-wide discovery CTE).
+        cur.execute(
+            """
+            SELECT isp.cik
+            FROM filing_events fe_self
+            JOIN filing_events fe_sib
+                ON fe_sib.provider_filing_id = fe_self.provider_filing_id
+               AND fe_sib.provider = 'sec'
+               AND fe_sib.instrument_id <> fe_self.instrument_id
+            JOIN instrument_sec_profile isp ON isp.instrument_id = fe_sib.instrument_id
+            WHERE fe_self.instrument_id = %s
+              AND fe_self.provider = 'sec'
+              AND fe_self.filing_type = ANY(%s)
+              AND isp.cik IS NOT NULL
+            ORDER BY fe_sib.instrument_id
+            LIMIT 1
+            """,
+            (instrument_id, list(_DEF14A_FORM_TYPES)),
+        )
+        row = cur.fetchone()
+        return str(row[0]) if row is not None else None
+
+
+def def14a_within_cap(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession_number: str,
+    instrument_id: int,
+) -> bool:
+    """True iff ``accession_number`` is allowed to ingest under the
+    latest-2-primary-proxies-per-filer cap (#1233 §4.7 PR5).
+
+    Returns ``True`` for:
+    - non-DEF-14A primary form (DEFA14A, DEFR14A, DEFM14A) —
+      supplemental forms uncapped.
+    - DEF 14A primary AND within rank ``DEF14A_LATEST_PER_FILER_CAP``
+      for its issuer CIK.
+    - DEF 14A primary AND issuer CIK is missing (CIK-MISSING
+      tombstone path handled downstream).
+
+    Returns ``False`` for:
+    - DEF 14A primary AND rank > cap for its issuer CIK.
+    - Accession not present in ``filing_events`` (out-of-corpus —
+      safe default; manifest dispatched something we cannot rank).
+
+    SQL mirrors the discovery CTE so a single rank source-of-truth
+    is exercised at both discovery + per-row gate.
+    """
+    target_cik = _resolve_target_cik_for_cap(conn, instrument_id=instrument_id)
+
+    with conn.cursor() as cur:
+        # Locate this accession's filing_type from filing_events.
+        # Out-of-corpus refusal: no row → False.
+        cur.execute(
+            """
+            SELECT filing_type
+            FROM filing_events
+            WHERE provider = 'sec'
+              AND provider_filing_id = %s
+              AND filing_type = ANY(%s)
+            LIMIT 1
+            """,
+            (accession_number, list(_DEF14A_FORM_TYPES)),
+        )
+        ft_row = cur.fetchone()
+        if ft_row is None:
+            return False
+        filing_type = str(ft_row[0])
+
+        # Supplemental forms — uncapped (spec §4.7).
+        if filing_type != DEF14A_PRIMARY_FORM_TYPE:
+            return True
+
+        # CIK-truly-missing — legacy CIK-MISSING fast tombstone path
+        # downstream; bypass cap.
+        if target_cik is None:
+            return True
+
+        # Rank this accession against the CIK's primary DEF 14A
+        # corpus (across siblings, de-duped by accession). Mirrors
+        # the universe CTE in ``discover_pending_def14a``.
+        cur.execute(
+            """
+            WITH per_accession AS (
+                SELECT DISTINCT ON (fe.provider_filing_id)
+                    fe.provider_filing_id, fe.filing_date
+                FROM filing_events fe
+                JOIN instrument_sec_profile isp
+                    ON isp.instrument_id = fe.instrument_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type = %s
+                  AND isp.cik = %s
+                ORDER BY fe.provider_filing_id, fe.instrument_id
+            ),
+            ranked AS (
+                SELECT provider_filing_id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY filing_date DESC, provider_filing_id DESC
+                       ) AS rank_within_form
+                FROM per_accession
+            )
+            SELECT rank_within_form
+            FROM ranked
+            WHERE provider_filing_id = %s
+            """,
+            (DEF14A_PRIMARY_FORM_TYPE, target_cik, accession_number),
+        )
+        rank_row = cur.fetchone()
+
+    if rank_row is None:
+        # Accession exists in filing_events but its profile-bearing
+        # sibling's CIK doesn't include it (data-integrity edge
+        # case — the per_accession CTE filters by
+        # ``isp.cik = target_cik``; if the accession's only
+        # filing_events row points at an instrument without a
+        # profile, that row is excluded here). Treat as
+        # out-of-target-corpus → refuse (False).
+        return False
+
+    return int(rank_row[0]) <= DEF14A_LATEST_PER_FILER_CAP
 
 
 def _record_ingest_attempt(

@@ -458,6 +458,8 @@ def _def14a_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pipeline
 
         cur.execute(
             """
+            -- DEF14A-CAP-EXEMPT: read-side drilldown diagnostic
+            -- (tombstone-count). Not an ingest chokepoint.
             SELECT COUNT(*) AS tombstone_count
             FROM def14a_ingest_log log
             WHERE log.status IN ('partial', 'failed')
@@ -480,6 +482,8 @@ def _def14a_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pipeline
         # review caught the gap.
         cur.execute(
             """
+            -- DEF14A-CAP-EXEMPT: read-side drilldown diagnostic
+            -- (raw-body count). Not an ingest chokepoint.
             SELECT COUNT(DISTINCT r.accession_number) AS body_count
             FROM filing_raw_documents r
             JOIN filing_events fe ON fe.provider_filing_id = r.accession_number

@@ -433,7 +433,6 @@ def _apply_def14a(
     partial, but in re-wash context it means the new parser is
     weaker than the prior one against the same body."""
     from app.providers.implementations.sec_def14a import parse_beneficial_ownership_table
-    from app.services.def14a_ingest import _upsert_holding
 
     # Resolution priority:
     #   1. Existing typed rows in def14a_beneficial_holdings —
@@ -446,6 +445,8 @@ def _apply_def14a(
     #      in. Codex pre-push review caught this gap — without
     #      the fallback, the cohort rewash should rescue stays on
     #      the old parser_version forever.
+    from app.services.def14a_ingest import _upsert_holding, def14a_within_cap
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -473,6 +474,21 @@ def _apply_def14a(
                 (raw_doc.accession_number,),
             )
             row = cur.fetchone()
+        # #1233 PR5 §4.3 — rescue path is an ingest-side write; the
+        # cap MUST apply or this branch leaks out-of-cap accessions
+        # into ``def14a_beneficial_holdings``. Happy-path (above)
+        # skips the cap because it operates on already-existing
+        # typed rows (spec §6.3 — existing rows untouched).
+        if row is not None and not def14a_within_cap(
+            conn,
+            accession_number=raw_doc.accession_number,
+            instrument_id=int(row[1]),
+        ):
+            logger.debug(
+                "def14a rewash: accession=%s rescue path blocked by latest-N primary cap",
+                raw_doc.accession_number,
+            )
+            return False
     if row is None:
         return False
     issuer_cik, instrument_id = row

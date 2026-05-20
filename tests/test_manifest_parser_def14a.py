@@ -79,6 +79,22 @@ def _seed_pending_def14a(
         filed_at=datetime(2026, 5, 11, tzinfo=UTC),
         primary_document_url=primary_doc_url,
     )
+    # #1233 PR5 — the parser's pre-fetch cap-check (`def14a_within_cap`)
+    # reads `filing_type` from `filing_events` to decide whether the
+    # cap applies. A manifest row without a matching `filing_events`
+    # row is treated as out-of-corpus and tombstoned. Mirror the
+    # production wiring (manifest fan-out is paired with filing_events
+    # rows) so the cap can rank.
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type,
+            provider, provider_filing_id, primary_document_url
+        ) VALUES (%s, %s, %s, 'sec', %s, %s)
+        ON CONFLICT (provider, provider_filing_id, instrument_id) DO NOTHING
+        """,
+        (instrument_id, datetime(2026, 5, 11, tzinfo=UTC).date(), form, accession, primary_doc_url),
+    )
 
 
 # A minimal DEF 14A body the parser will accept — section heading
