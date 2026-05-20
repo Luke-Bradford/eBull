@@ -183,6 +183,12 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
     # days_back. Internal-only — the operator does not tune the
     # bootstrap-time retention window through the standard UX.
     "sec_n_csr_bootstrap_drain": frozenset({"horizon_days"}),
+    # PR7 #1233 §4.6 (mirror of #1010 for N-PORT). ``min_last_seen_filed_at``
+    # is the recency cohort filter exclusive to bootstrap stage 22 —
+    # exposing it on the manual API would let an operator accidentally
+    # drop the standalone path's full-cohort safety-net (mirror of the
+    # ``min_last_13f_hr_at`` posture on sec_13f_quarterly_sweep above).
+    "sec_n_port_ingest": frozenset({"min_last_seen_filed_at"}),
 }
 
 

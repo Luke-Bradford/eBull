@@ -247,7 +247,11 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # ``min_period_of_report`` + ``source_label`` via StageSpec.params.
     JOB_SEC_13F_QUARTERLY_SWEEP: sec_13f_quarterly_sweep,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC: _adapt_zero_arg(sec_nport_filer_directory_sync),
-    JOB_SEC_N_PORT_INGEST: _adapt_zero_arg(sec_n_port_ingest),
+    # PR7 #1233 §4.6 — sec_n_port_ingest migrated to native JobInvoker
+    # (params-aware). Bootstrap stage 22 passes ``min_last_seen_filed_at``
+    # via StageSpec.params; daily / Admin path dispatches with an empty
+    # params dict → full cohort (#1010 precedent for 13F-HR stage 21).
+    JOB_SEC_N_PORT_INGEST: sec_n_port_ingest,
     # Registered for #994 (first-install bootstrap orchestrator) — these
     # were callable as scheduled-only paths before but the orchestrator
     # needs them in _INVOKERS so it can dispatch them via JobLock.

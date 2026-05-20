@@ -102,6 +102,11 @@ class TestStageSpecParamsField:
             # PR #1175 (#1174) — N-CSR/S fund-scoped bootstrap drain
             # added with horizon_days=730 params.
             "sec_n_csr_bootstrap_drain",
+            # PR7 #1233 §4.6 — sec_n_port_ingest dispatches with
+            # ``min_last_seen_filed_at`` resolved at dispatch time to
+            # ``today - 380d`` (UTC midnight). Mirror of the #1010
+            # cohort bound on stage 21's sec_13f_recent_sweep.
+            "sec_n_port_ingest",
         }
         for stage in _BOOTSTRAP_STAGE_SPECS:
             if stage.stage_key in lifted_stage_keys:

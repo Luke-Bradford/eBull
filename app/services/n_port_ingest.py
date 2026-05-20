@@ -55,7 +55,7 @@ import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 from uuid import uuid4
@@ -94,6 +94,92 @@ _NPORT_FORM_TYPES: frozenset[str] = frozenset(
         "N-PORT/A",
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# N-PORT 8-quarter retention cap (#1233 PR7, spec §4.6)
+# ---------------------------------------------------------------------------
+
+# NPORT-P period_of_report is a calendar MONTH end (END of the third
+# month of the fund's fiscal quarter; funds have their own fiscal
+# calendars so the month can be any of Jan-Dec). Spec §4.6 caps depth
+# at 8 fiscal-quarter snapshots per fund. Anchoring to month
+# boundaries (not a floating ``today - 760d`` window, not the
+# calendar-quarter anchor used by 13F-HR §4.5) admits 24 consecutive
+# completed month-ends, which by the mod-3 congruence-class argument
+# contains exactly 8 month-ends for every fiscal-Q choice.
+#
+# Ingest-side cap only — existing rows are untouched until the
+# operator-driven pre-wipe + clean re-run (spec §6.3). Cutoff is
+# computed in Python and passed as a ``date`` everywhere, NOT as
+# ``NOW() - make_interval(...)`` which carries DB session-timezone
+# ambiguity. UTC anchor — #1010 Codex 2 lesson: ``date.today()``
+# returns local TZ, drifts the cutoff by ±1 day on non-UTC dev hosts.
+NPORT_RETENTION_QUARTERS: int = 8
+
+
+def _last_day_of_month(year: int, month: int) -> date:
+    """Return the canonical month-end ``date`` for (year, month).
+
+    Local helper — month-end arithmetic is a one-off here; importing
+    dateutil for ``relativedelta`` would be casual dependency creep
+    (CLAUDE.md non-negotiables).
+    """
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
+def n_port_retention_cutoff(now: datetime | None = None) -> date:
+    """Earliest ``period_of_report`` accepted for NPORT-P / NPORT-P/A.
+
+    Returns the calendar month-end exactly ``NPORT_RETENTION_QUARTERS
+    * 3`` = 24 months before today (i.e. the month-end of the month
+    24 months ago). Boundary inclusive → the admitted set is the 24
+    consecutive completed month-ends ending at ``today.month - 1``,
+    which by the mod-3 congruence-class argument contains exactly 8
+    month-ends for every fiscal-Q congruence class. So every fund
+    sees exactly 8 of its fiscal-Q snapshots regardless of its
+    fiscal-year alignment.
+
+    ``now`` must be a tz-aware datetime; the helper normalises to UTC
+    before taking ``.date()`` so the cutoff doesn't drift on non-UTC
+    callers (#1010 / PR6 Codex lesson).
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    if now.tzinfo is None:
+        raise ValueError(
+            "n_port_retention_cutoff: ``now`` must be a tz-aware datetime; "
+            "naive datetimes would honour the caller's local TZ and drift the cutoff."
+        )
+    today = now.astimezone(UTC).date()
+    # Target month = (today.year, today.month - 24) with year-wrap.
+    # ``today.month - 24`` is the calendar month exactly 24 months
+    # before today's month; its month-end is the inclusive lower bound
+    # of the admitted window.
+    months_back = NPORT_RETENTION_QUARTERS * 3  # 24
+    target_y = today.year
+    target_m = today.month - months_back
+    while target_m <= 0:
+        target_m += 12
+        target_y -= 1
+    return _last_day_of_month(target_y, target_m)
+
+
+def n_port_within_retention(
+    period_of_report: date | None,
+    now: datetime | None = None,
+) -> bool:
+    """Boundary check used by every N-PORT writer chokepoint.
+
+    Returns True iff ``period_of_report >= n_port_retention_cutoff(now)``.
+    A None ``period_of_report`` returns False — defensive: an
+    accession we couldn't tag with a month end is unsafe to admit.
+    """
+    if period_of_report is None:
+        return False
+    return period_of_report >= n_port_retention_cutoff(now)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +347,11 @@ def _archive_file_url(cik: str, accession_number: str, filename: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def parse_submissions_index(payload: str) -> list[AccessionRef]:
+def parse_submissions_index(
+    payload: str,
+    *,
+    min_period_of_report: date | None = None,
+) -> list[AccessionRef]:
     """Walk ``data.sec.gov/submissions/CIK{cik}.json`` and emit one
     :class:`AccessionRef` per NPORT-P / NPORT-P/A row.
 
@@ -269,6 +359,11 @@ def parse_submissions_index(payload: str) -> list[AccessionRef]:
     the ``recent`` array holds the most recent ~1,000 filings per CIK
     which covers ≥ 12 quarters of monthly N-PORT for any actively
     filing fund family.
+
+    PR7 #1233 §4.6 — applies the intrinsic 24-month cap as the
+    effective floor; any caller-provided ``min_period_of_report`` can
+    RAISE the floor but never lower it. Caller passing ``None`` still
+    gets the cap.
     """
     try:
         data: dict[str, Any] = json.loads(payload)
@@ -283,6 +378,12 @@ def parse_submissions_index(payload: str) -> list[AccessionRef]:
     filing_dates = recent.get("filingDate", [])
     report_dates = recent.get("reportDate", [])
 
+    intrinsic_floor = n_port_retention_cutoff()
+    if min_period_of_report is None:
+        effective_floor = intrinsic_floor
+    else:
+        effective_floor = max(min_period_of_report, intrinsic_floor)
+
     out: list[AccessionRef] = []
     for i, accession in enumerate(accessions):
         if i >= len(forms):
@@ -292,6 +393,8 @@ def parse_submissions_index(payload: str) -> list[AccessionRef]:
             continue
         filed_at = _safe_iso_datetime(filing_dates[i] if i < len(filing_dates) else "")
         period = _safe_iso_date(report_dates[i] if i < len(report_dates) else "")
+        if period is not None and period < effective_floor:
+            continue
         out.append(
             AccessionRef(
                 accession_number=str(accession),
@@ -608,10 +711,17 @@ def ingest_fund_n_port(
     sec: SecArchiveFetcher,
     *,
     filer_cik: str,
+    min_period_of_report: date | None = None,
 ) -> IngestSummary:
     """Fetch + parse + upsert every pending NPORT-P for one fund-filer
     CIK. Per-accession failures are isolated (logged + tombstoned) so
-    a single malformed accession does not abort the filer batch."""
+    a single malformed accession does not abort the filer batch.
+
+    PR7 #1233 §4.6 — ``min_period_of_report`` plumbs through to
+    ``parse_submissions_index``; ``None`` (default) yields the
+    intrinsic 24-month cap. A caller can tighten the floor but never
+    loosen it.
+    """
     cik = _zero_pad_cik(filer_cik)
     summary = _MutableSummary(cik=cik)
 
@@ -620,7 +730,10 @@ def ingest_fund_n_port(
         logger.info("n_port ingest: submissions JSON 404/error for cik=%s", cik)
         return summary.to_immutable()
 
-    pending = parse_submissions_index(submissions_payload)
+    pending = parse_submissions_index(
+        submissions_payload,
+        min_period_of_report=min_period_of_report,
+    )
     summary.accessions_seen = len(pending)
     if not pending:
         return summary.to_immutable()
@@ -669,6 +782,7 @@ def ingest_all_fund_filers(
     ciks: list[str],
     deadline_seconds: float | None = None,
     source_label: str = "sec_n_port_ingest",
+    min_period_of_report: date | None = None,
 ) -> list[IngestSummary]:
     """Walk a list of fund-filer CIKs and ingest each one's pending
     NPORT-Ps. Per-filer crashes isolated; a soft deadline allows the
@@ -713,7 +827,12 @@ def ingest_all_fund_filers(
                 break
             filers_attempted += 1
             try:
-                summary = ingest_fund_n_port(conn, sec, filer_cik=cik)
+                summary = ingest_fund_n_port(
+                    conn,
+                    sec,
+                    filer_cik=cik,
+                    min_period_of_report=min_period_of_report,
+                )
             except Exception as exc:  # noqa: BLE001 — per-filer crash isolation
                 logger.exception("n_port ingest: filer %s raised; continuing", cik)
                 crash_error = f"{cik}: {exc}"
@@ -886,6 +1005,27 @@ def _ingest_single_accession(
             error=f"parse failed: {exc}",
             series_id=None,
             period_of_report=ref.period_of_report,
+        )
+
+    # PR7 #1233 §4.6 — defensive post-parse gate. ``parse_submissions_index``
+    # already skips accessions with a known pre-cap ``period_of_report``,
+    # but submissions JSON may carry a NULL / malformed ``reportDate``
+    # → leaks past the index-level gate and reaches here. Re-check
+    # against ``parsed.period_end`` and short-circuit BEFORE the first
+    # observation write so pre-cap accessions never touch
+    # ``ownership_funds_observations`` / ``ownership_funds_current``.
+    if not n_port_within_retention(parsed.period_end):
+        return _AccessionOutcome(
+            status="failed",
+            holdings_inserted=0,
+            holdings_skipped_no_cusip=0,
+            holdings_skipped_non_equity=0,
+            holdings_skipped_short=0,
+            holdings_skipped_non_share_units=0,
+            holdings_skipped_zero_shares=0,
+            error="retention floor",
+            series_id=parsed.series_id,
+            period_of_report=parsed.period_end,
         )
 
     # Update series reference table — UPSERT on every ingest so a

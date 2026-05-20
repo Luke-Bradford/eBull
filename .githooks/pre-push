@@ -70,6 +70,15 @@ bash scripts/check_def14a_cap.sh
 echo "==> Pre-push gate: 13F-HR 8-quarter retention cap lint"
 bash scripts/check_13f_hr_retention.sh
 
+# #1233 §4.6 PR7 — every N-PORT ingest chokepoint must honour the
+# 8-quarter (24-month) retention cap (parse_submissions_index
+# intrinsic floor, _ingest_single_accession post-parse gate,
+# manifest-worker post-parse gate, bulk-dataset per-row gate). No
+# rewash analog and no sync_funds chokepoint for N-PORT; see plan
+# §6 for the letter→chokepoint map. ~40ms.
+echo "==> Pre-push gate: N-PORT 8-quarter retention cap lint"
+bash scripts/check_nport_retention.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

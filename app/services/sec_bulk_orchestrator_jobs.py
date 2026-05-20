@@ -648,6 +648,9 @@ def sec_nport_ingest_from_dataset_job() -> None:
 
     failed_archives: list[str] = []
     total_written = 0
+    total_holdings_seen = 0
+    total_skipped = 0
+    total_retention_skipped = 0
     succeeded: list[Path] = []
     touched_ids: set[int] = set()
     for archive in archives:
@@ -668,6 +671,9 @@ def sec_nport_ingest_from_dataset_job() -> None:
                 continue
         succeeded.append(archive)
         total_written += result.rows_written
+        total_holdings_seen += result.holdings_seen
+        total_skipped += result.rows_skipped_unresolved_cusip
+        total_retention_skipped += result.rows_skipped_retention
         touched_ids |= result.touched_instrument_ids
         if run_id is not None:
             _record_archive_result(
@@ -678,28 +684,53 @@ def sec_nport_ingest_from_dataset_job() -> None:
                 rows_skipped={
                     "unresolved_cusip": result.rows_skipped_unresolved_cusip,
                     "non_equity": result.rows_skipped_non_equity,
+                    "retention": result.rows_skipped_retention,
                 },
             )
         logger.info(
-            "sec_nport_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d non_equity=%d",
+            "sec_nport_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d "
+            "non_equity=%d retention_skipped=%d",
             archive.name,
             result.rows_written,
             result.rows_skipped_unresolved_cusip,
             result.rows_skipped_non_equity,
+            result.rows_skipped_retention,
         )
     logger.info(
-        "sec_nport_ingest_from_dataset: total_rows_written=%d",
+        "sec_nport_ingest_from_dataset: total_rows_written=%d total_unresolved=%d total_retention_skipped=%d",
         total_written,
+        total_skipped,
+        total_retention_skipped,
     )
     if failed_archives:
         raise RuntimeError(
             f"sec_nport_ingest_from_dataset: {len(failed_archives)} archives failed: " + "; ".join(failed_archives)
         )
     if run_id is not None and total_written == 0:
-        raise RuntimeError(
-            f"sec_nport_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives. "
-            "Check CUSIP coverage."
-        )
+        # PR7 #1233 §4.6 — distinguish all-retention-skipped (no error,
+        # by design) from CUSIP-coverage / shape failures. Tighter than
+        # PR6's 13F split because ``NPortIngestResult`` carries many
+        # more skip buckets (orphan / non_equity / non_long /
+        # non_share_units / non_positive_shares / missing_series /
+        # bad_data / parse_errors); a loose ``retention_skipped > 0 &&
+        # unresolved_cusip == 0`` check would silently suppress
+        # RuntimeError when those buckets also contributed to
+        # rows_written=0. Only treat as no-op when EVERY observed
+        # holding row landed in the retention bucket (Codex 2 WARN on
+        # PR7).
+        if total_holdings_seen > 0 and total_retention_skipped == total_holdings_seen:
+            logger.info(
+                "sec_nport_ingest_from_dataset: aggregate rows_written=0 across %d archives; "
+                "all %d holdings skipped by 8q retention cap (#1233 §4.6). Not an error.",
+                len(archives),
+                total_retention_skipped,
+            )
+        else:
+            raise RuntimeError(
+                f"sec_nport_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives; "
+                f"holdings_seen={total_holdings_seen} unresolved_cusip={total_skipped} "
+                f"retention_skipped={total_retention_skipped}. Check CUSIP coverage / archive shape."
+            )
     # Refresh ownership_funds_current for every instrument whose
     # fund-holdings observations moved. See C3 job rationale — refresh
     # failures propagate before disk cleanup so archives stay

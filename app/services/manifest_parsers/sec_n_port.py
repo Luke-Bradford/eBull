@@ -64,6 +64,7 @@ from app.services.n_port_ingest import (
     _archive_file_url,
     _record_ingest_attempt,
     _resolve_cusip_to_instrument_id,
+    n_port_within_retention,
     parse_n_port_payload,
 )
 from app.services.ownership_observations import (
@@ -233,6 +234,47 @@ def _parse_n_port(
                 accession,
             )
         return _failed_outcome(f"{kind}: {exc}", raw_status="stored")
+
+    # PR7 #1233 §4.6 — 8-quarter retention cap. ``parsed.period_end``
+    # is the month-end intrinsic to the filing; gate on it (not
+    # ``row.filed_at``) so NPORT-P/A late amendments restating
+    # pre-cap fiscal quarters are correctly rejected. Tombstone the
+    # manifest row so the operator's ``sec_rebuild`` is the recovery
+    # path if the cap widens later. Pre-fetch placement is N/A here
+    # — the manifest worker fetched + stored the primary_doc.xml
+    # before reaching the parser; the cap saves the per-holding
+    # write loop + the ``ownership_funds_current`` refresh fan-out.
+    if not n_port_within_retention(parsed.period_end):
+        logger.debug(
+            "n_port manifest parser: accession=%s period=%s pre-8q retention cap; tombstoning",
+            accession,
+            parsed.period_end,
+        )
+        try:
+            with conn.transaction():
+                _record_ingest_attempt(
+                    conn,
+                    filer_cik=filer_cik,
+                    accession_number=accession,
+                    fund_series_id=parsed.series_id,
+                    period_of_report=parsed.period_end,
+                    status="failed",
+                    holdings_inserted=0,
+                    holdings_skipped=0,
+                    error="retention floor",
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "n_port manifest parser: ingest-log INSERT failed after retention skip accession=%s",
+                accession,
+            )
+            return _failed_outcome("log error after retention skip", raw_status="stored")
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_NPORT,
+            raw_status="stored",
+            error="retention floor",
+        )
 
     # Upsert phase. Mirror the legacy filter ladder from
     # ``n_port_ingest._ingest_single_accession``. Wrap the entire
