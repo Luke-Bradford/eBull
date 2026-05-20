@@ -299,9 +299,11 @@ _INVOKERS[_scheduler.JOB_FILINGS_HISTORY_SEED] = _scheduler.filings_history_seed
 _INVOKERS[_scheduler.JOB_SEC_FIRST_INSTALL_DRAIN] = _scheduler.sec_first_install_drain
 
 # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap
-# drain. Both invokers are params-aware natively (no ``_adapt_zero_arg``);
-# ``mf_directory_sync`` discards params, ``sec_n_csr_bootstrap_drain``
-# consumes ``horizon_days``.
+# drain. Both invokers are params-aware natively (no ``_adapt_zero_arg``).
+# Both discard params: ``mf_directory_sync`` never honoured any, and
+# ``sec_n_csr_bootstrap_drain`` had its ``horizon_days`` param removed
+# in PR8 (#1233 §4.12) when N_CSR_RETENTION_DAYS became the single
+# source of truth for the 730d cap.
 _INVOKERS[_scheduler.JOB_MF_DIRECTORY_SYNC] = _scheduler.mf_directory_sync
 _INVOKERS[_scheduler.JOB_SEC_N_CSR_BOOTSTRAP_DRAIN] = _scheduler.sec_n_csr_bootstrap_drain
 

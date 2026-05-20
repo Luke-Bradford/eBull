@@ -968,12 +968,16 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # S26 (terminal) drains N-CSR + N-CSRS accessions per trust for the
     # #1171 fund-metadata parser to consume.
     _spec("mf_directory_sync", 25, "sec_rate", JOB_MF_DIRECTORY_SYNC),
+    # #1233 §4.12 / PR8 — S26 dispatches with no params. The 730d
+    # retention window is hard-pinned at
+    # ``app/services/manifest_parsers/sec_n_csr.py::N_CSR_RETENTION_DAYS``
+    # and the previous ``horizon_days`` param was removed (single
+    # source of truth for every N-CSR writer chokepoint).
     _spec(
         "sec_n_csr_bootstrap_drain",
         26,
         "sec_rate",
         JOB_SEC_N_CSR_BOOTSTRAP_DRAIN,
-        params={"horizon_days": 730},
     ),
 )
 

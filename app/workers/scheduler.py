@@ -4592,24 +4592,22 @@ def sec_n_csr_bootstrap_drain(params: Mapping[str, Any]) -> None:
     bootstrap drain for N-CSR / N-CSRS (#1174 / T8 deferred from #1171).
 
     Walks distinct trust CIKs from ``cik_refresh_mf_directory`` +
-    enqueues last-``horizon_days`` (default 730) N-CSR + N-CSRS
-    accessions per trust to ``sec_filing_manifest``. The manifest
-    worker drains via the #1171 fund-metadata parser.
+    enqueues N-CSR + N-CSRS accessions per trust to
+    ``sec_filing_manifest`` within the 730d retention window. The
+    manifest worker drains via the #1171 fund-metadata parser.
 
     Subject identity at every enqueue:
     ``subject_type='institutional_filer'`` + ``subject_id=trust_cik`` +
     ``instrument_id=None`` (matches the manifest CHECK constraint
     ``chk_manifest_issuer_has_instrument`` + N-PORT precedent).
 
-    Honoured params:
-
-    * ``horizon_days`` (int) — retention window in days. Default 730
-      (matches ``filings_history_seed.days_back``).
+    No params honoured. The 730d retention window is hard-pinned at
+    ``app/services/manifest_parsers/sec_n_csr.py::N_CSR_RETENTION_DAYS``
+    (#1233 §4.12 / PR8); the previous ``horizon_days`` param was
+    removed so every writer chokepoint shares one source of truth.
     """
+    del params  # no params honoured post-PR8 (#1233 §4.12)
     from app.jobs.sec_first_install_drain import bootstrap_n_csr_drain
-
-    horizon_days_param = params.get("horizon_days", 730)
-    horizon_days = int(horizon_days_param) if horizon_days_param is not None else 730
 
     with _tracked_job(JOB_SEC_N_CSR_BOOTSTRAP_DRAIN) as tracker:
         with (
@@ -4619,19 +4617,17 @@ def sec_n_csr_bootstrap_drain(params: Mapping[str, Any]) -> None:
             stats = bootstrap_n_csr_drain(
                 conn,
                 http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
-                horizon_days=horizon_days,
             )
         tracker.row_count = stats.manifest_rows_upserted
         logger.info(
             "sec_n_csr_bootstrap_drain: trusts=%d skipped=%d manifest_rows=%d "
-            "errors=%d secondary_pages=%d outside_horizon=%d horizon_days=%d",
+            "errors=%d secondary_pages=%d outside_horizon=%d",
             stats.trusts_processed,
             stats.trusts_skipped,
             stats.manifest_rows_upserted,
             stats.errors,
             stats.secondary_pages_fetched,
             stats.accessions_outside_horizon,
-            horizon_days,
         )
 
 

@@ -49,6 +49,11 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         "db_ownership_inst",
         "db_ownership_insider",
         "db_ownership_funds",
+        # #915 / #916 (Phase 6 PRs 11+12, 2026-05-18). FINRA bimonthly
+        # short interest + RegSHO daily share a dedicated ``finra``
+        # Lane disjoint from sec_rate (CDN serves both endpoints with
+        # one shared throttle).
+        "finra",
     }
 )
 
@@ -99,9 +104,11 @@ class TestStageSpecParamsField:
             "filings_history_seed",
             "sec_first_install_drain",
             "sec_13f_recent_sweep",
-            # PR #1175 (#1174) — N-CSR/S fund-scoped bootstrap drain
-            # added with horizon_days=730 params.
-            "sec_n_csr_bootstrap_drain",
+            # PR8 #1233 §4.12 — sec_n_csr_bootstrap_drain previously
+            # carried ``horizon_days=730`` params; the param was
+            # removed when N_CSR_RETENTION_DAYS became the single
+            # source of truth, so the stage now dispatches with
+            # ``params={}`` and is intentionally absent from this set.
             # PR7 #1233 §4.6 — sec_n_port_ingest dispatches with
             # ``min_last_seen_filed_at`` resolved at dispatch time to
             # ``today - 380d`` (UTC midnight). Mirror of the #1010

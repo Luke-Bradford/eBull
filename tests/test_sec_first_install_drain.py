@@ -982,3 +982,52 @@ class TestNCsrBootstrapDrain:
         assert stats.trusts_processed == 1
         assert visited_urls == [_submissions_url(universe_trust)]
         assert stats.manifest_rows_upserted == 1
+
+    # ------------------------------------------------------------------
+    # PR8 #1233 §4.12 — bootstrap drain hard-pins 730d cap; no
+    # ``horizon_days`` param + pre-cap accessions reject at the drain.
+    # ------------------------------------------------------------------
+    def test_signature_has_no_horizon_days_kwarg(self) -> None:
+        """The ``horizon_days`` kwarg was removed in PR8 so every N-CSR
+        writer chokepoint shares one source of truth (#1233 §4.12).
+        Guards against accidental re-introduction.
+        """
+        import inspect
+
+        sig = inspect.signature(bootstrap_n_csr_drain)
+        assert "horizon_days" not in sig.parameters, (
+            "bootstrap_n_csr_drain.horizon_days kwarg reintroduced — PR8 (#1233 §4.12) "
+            "hard-pins N_CSR_RETENTION_DAYS as the single source of truth."
+        )
+
+    def test_pre_cap_accessions_rejected_at_drain(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Accessions filed > 730d before today are skipped by the
+        drain's ``_within_horizon`` filter; in-cap rows still enqueue.
+        """
+        _seed_trust(ebull_test_conn, _VANGUARD_CIK)
+        today = date.today()
+        pre_cap = (today - timedelta(days=1000)).isoformat()
+        in_cap = today.isoformat()
+        rows = [
+            ("0001104659-22-000001", pre_cap, "N-CSR", "old1.htm"),
+            ("0001104659-22-000002", pre_cap, "N-CSRS", "old2.htm"),
+            ("0001104659-26-000001", in_cap, "N-CSR", "new1.htm"),
+        ]
+        payload = _make_submissions_payload(cik=_VANGUARD_CIK, rows=rows)
+        http_get = _by_url({_submissions_url(_VANGUARD_CIK): payload})
+
+        stats = bootstrap_n_csr_drain(ebull_test_conn, http_get=http_get)
+        ebull_test_conn.commit()
+
+        assert stats.manifest_rows_upserted == 1
+        assert stats.accessions_outside_horizon == 2
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT accession_number FROM sec_filing_manifest WHERE source = 'sec_n_csr' ORDER BY accession_number"
+            )
+            inserted = [r[0] for r in cur.fetchall()]
+        assert inserted == ["0001104659-26-000001"]
