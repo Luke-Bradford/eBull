@@ -24,6 +24,20 @@
 --   * Identity / dedupe = ``cik`` PK. Each filer has at most one
 --     active N-CEN classification at a time; re-running the
 --     classifier on a newer N-CEN UPSERTs in place.
+--
+--     #1233 §4.13 PR9 — this PRIMARY KEY is the LOAD-BEARING latest-
+--     only invariant for N-CEN. Unlike the observations tables
+--     governed by ingest-time horizon helpers (PR4 Form 4,
+--     PR5 DEF 14A, PR6 13F-HR, PR7 N-PORT, PR8 N-CSR), the cap here
+--     is the schema itself: the DB physically refuses a second row
+--     per CIK. Any future migration that relaxes this (composite key
+--     adding accession_number / filed_at; demoting PK to a regular
+--     UNIQUE that allows soft-delete tombstones; switching to an
+--     observations-shaped writer) MUST also extend the cap-shaping
+--     story — N-CEN is a classification table, not an observations
+--     table, and the §6.4 two-layer model does NOT apply. The lint
+--     guard ``scripts/check_ncen_latest_only.sh`` invariant A pins
+--     the literal ``cik TEXT PRIMARY KEY`` text below.
 --   * ``investment_company_type`` stores the raw SEC code
 --     (``N-1A``, ``N-2``, etc.) for audit; the derived
 --     ``filer_type`` is the operator-facing enum value applied to

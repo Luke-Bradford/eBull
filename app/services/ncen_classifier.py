@@ -238,6 +238,21 @@ def _find_latest_ncen(payload: str) -> _NCenAccessionRef | None:
     N-CEN appears in the recent-filings array. The caller treats
     both cases identically — the filer simply has no N-CEN-derived
     classification on this pass.
+
+    #1233 §4.13 PR9 — this function's newest-first-with-early-return
+    pattern is the load-bearing fetch-side latest-only invariant. The
+    SEC submissions array orders ``recent`` newest-first by
+    convention; this function exits on the first form match via an
+    early return (NOT via an accumulator that collects every N-CEN
+    and picks the last). The single early-return statement here is
+    what guarantees only ONE accession's ``primary_doc.xml`` is
+    fetched per filer per pass — without it the SEC HTTP budget would
+    pay for every historical N-CEN in the array.
+
+    The lint guard ``scripts/check_ncen_latest_only.sh`` invariant D
+    pins this function's body to a single dataclass-constructor
+    return statement so an accidental refactor to "collect all then
+    pick newest" pattern would surface at push time.
     """
     try:
         data: dict[str, Any] = json.loads(payload)
@@ -288,7 +303,54 @@ def _upsert_classification(
     conn: psycopg.Connection[tuple],
     classification: NCenClassification,
 ) -> None:
-    """Idempotent upsert into ``ncen_filer_classifications``."""
+    """Idempotent upsert into ``ncen_filer_classifications``.
+
+    #1233 §4.13 PR9 — this function is the SOLE writer for the
+    ``ncen_filer_classifications`` table. The upsert clause is the
+    load-bearing latest-only invariant: when a newer N-CEN accession
+    arrives for a CIK that already has a row, the row is promoted in
+    place (no second row inserted). Combined with the schema PK on
+    ``cik`` (``sql/100_ncen_filer_classifications.sql`` invariant A),
+    the at-most-one-row-per-CIK contract is enforced structurally —
+    there is no separate ingest-time horizon helper as in PR4-PR8.
+
+    Monotonicity: the ``WHERE`` predicate on the UPDATE branch
+    rejects DEMOTION to an older accession. Without it the structural
+    cap would enforce "at most one row" but not "latest one row" — a
+    stale call passing an older N-CEN would silently overwrite the
+    newer classification. Codex 1a (PR9) caught the initial gap;
+    Codex 2 (PR9) caught the same-day tie-break gap. The discovery
+    path ``_find_latest_ncen`` already returns the newest accession,
+    but a future caller using a different discovery path (or a
+    one-off operator script passing accessions directly) must not be
+    able to demote the row. The predicate makes the database the
+    monotonicity oracle.
+
+    The tie-break: ``filed_at`` is parsed from SEC's ``filingDate``
+    field (a calendar date) and stored as midnight UTC of that day —
+    two N-CEN filings on the same calendar day for the same CIK
+    therefore share an identical ``filed_at`` value (an N-CEN/A
+    amendment same day as the original is the canonical case). The
+    row-constructor comparison ``(EXCLUDED.filed_at,
+    EXCLUDED.accession_number) >= (existing.filed_at,
+    existing.accession_number)`` tie-breaks on accession_number
+    (lexicographically newer wins on identical filed_at — SEC's
+    intra-day accession sequence number is the chronological tiebreak
+    they themselves use). Without this, a same-day older accession
+    could clobber a same-day newer one.
+
+    The lint guard ``scripts/check_ncen_latest_only.sh`` pins:
+
+      * invariant B: this function is the only call site of the
+        INSERT statement under ``app/``;
+      * invariant C: this function's body contains the SQL UPSERT
+        clause (matched on the ``DO UPDATE SET`` anchor — narrowing
+        past this docstring's prose reference).
+
+    Any future change that introduces a second writer OR drops the
+    UPSERT clause OR switches to an append-mode writer would break
+    the cap and surface as a push-time lint failure.
+    """
     conn.execute(
         """
         INSERT INTO ncen_filer_classifications (
@@ -301,6 +363,8 @@ def _upsert_classification(
             accession_number = EXCLUDED.accession_number,
             filed_at = EXCLUDED.filed_at,
             fetched_at = NOW()
+        WHERE (EXCLUDED.filed_at, EXCLUDED.accession_number)
+              >= (ncen_filer_classifications.filed_at, ncen_filer_classifications.accession_number)
         """,
         {
             "cik": classification.cik,

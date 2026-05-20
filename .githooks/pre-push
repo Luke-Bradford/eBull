@@ -88,6 +88,16 @@ bash scripts/check_nport_retention.sh
 echo "==> Pre-push gate: N-CSR 730d retention cap lint"
 bash scripts/check_n_csr_retention.sh
 
+# #1233 §4.13 PR9 — N-CEN's latest-N-CEN-per-CIK cap is enforced
+# STRUCTURALLY rather than via an ingest-time horizon helper. The
+# invariants are (A) schema PK on cik, (B) sole INSERT writer under
+# app/, (C) UPSERT clause + WHERE EXCLUDED.filed_at >= ...
+# no-demotion predicate, (D) newest-first early-return in
+# _find_latest_ncen. Smaller surface than PR8 (no horizon helper, no
+# manifest-worker parser at all). ~20ms.
+echo "==> Pre-push gate: N-CEN latest-only invariant lint"
+bash scripts/check_ncen_latest_only.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

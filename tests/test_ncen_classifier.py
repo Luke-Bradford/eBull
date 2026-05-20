@@ -328,6 +328,226 @@ class TestClassifyBatch:
         assert row is not None
         assert row[0] == 1
 
+    def test_promotes_to_newer_accession_across_passes(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#1233 §4.13 PR9 — pin the cross-pass latest-only promotion
+        case. Pass 1 writes row(A); pass 2 with submissions array now
+        showing both A and a newer B must promote in place to row(B),
+        still 1 row total. This is the canonical "newer N-CEN arrives
+        next year" trajectory — the existing
+        ``test_re_run_upserts_in_place`` only covers re-running with
+        the SAME accession, which is too weak to prove latest-only is
+        enforced across passes."""
+        conn = _setup
+        cik = "0001234567"
+        accession_a = "0001234567-24-000001"
+        accession_b = "0001234567-25-000050"
+
+        # Pass 1: only the older accession A is on file.
+        pass1_fetcher = _InMemoryFetcher(
+            {
+                f"https://data.sec.gov/submissions/CIK{cik}.json": _submissions_json(
+                    accessions=[(accession_a, "N-CEN", "2024-11-14")]
+                ),
+                _archive_url(cik, accession_a, "primary_doc.xml"): _ncen_xml(cik=cik, investment_company_type="N-1A"),
+            }
+        )
+        first = classify_filers_via_ncen(conn, pass1_fetcher, ciks=[cik])
+        assert first.classifications_written == 1
+
+        # Pass 2: SEC submissions index now lists newer B first (SEC
+        # convention: ``recent`` is newest-first), then older A. The
+        # discovery walk picks B; the UPSERT promotes the row.
+        pass2_fetcher = _InMemoryFetcher(
+            {
+                f"https://data.sec.gov/submissions/CIK{cik}.json": _submissions_json(
+                    accessions=[
+                        (accession_b, "N-CEN", "2025-11-14"),
+                        (accession_a, "N-CEN", "2024-11-14"),
+                    ]
+                ),
+                _archive_url(cik, accession_b, "primary_doc.xml"): _ncen_xml(cik=cik, investment_company_type="N-2"),
+            }
+        )
+        second = classify_filers_via_ncen(conn, pass2_fetcher, ciks=[cik])
+        assert second.classifications_written == 1
+
+        # Exactly one row, promoted to accession B with the newer
+        # derived_filer_type. accession A's classification (N-1A →
+        # INV) must not survive.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT accession_number, investment_company_type, derived_filer_type
+                FROM ncen_filer_classifications
+                WHERE cik = %s
+                """,
+                (cik,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["accession_number"] == accession_b
+        assert rows[0]["investment_company_type"] == "N-2"
+        assert rows[0]["derived_filer_type"] == "INV"
+
+    def test_does_not_demote_to_older_accession(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#1233 §4.13 PR9 / Codex 1a HIGH — the writer's no-demotion
+        predicate must REFUSE to overwrite the row with an older
+        accession. Without the predicate, the structural PK + UPSERT
+        would silently demote the row if a stale caller passes an
+        older N-CEN. With it, the row stays at the newer
+        classification and the operation no-ops on the existing row
+        (Postgres reports a row LOCK but no UPDATE when the
+        ``DO UPDATE ... WHERE`` clause evaluates false).
+
+        Scenario: pass 1 writes the newer accession B. Pass 2 sees
+        only the older accession A in the submissions array (e.g. a
+        hypothetical stale cache or operator script with a pinned
+        older index). The discovery walk picks A; the UPSERT WHERE
+        clause refuses; the row stays at B AND ``fetched_at`` is
+        unchanged (the strongest proof the row was not mutated —
+        ``classifications_written`` only counts UPSERT attempts, not
+        actual row writes)."""
+        conn = _setup
+        cik = "0001234567"
+        accession_a = "0001234567-24-000001"
+        accession_b = "0001234567-25-000050"
+
+        # Pass 1: only newer B is on file.
+        pass1_fetcher = _InMemoryFetcher(
+            {
+                f"https://data.sec.gov/submissions/CIK{cik}.json": _submissions_json(
+                    accessions=[(accession_b, "N-CEN", "2025-11-14")]
+                ),
+                _archive_url(cik, accession_b, "primary_doc.xml"): _ncen_xml(cik=cik, investment_company_type="N-2"),
+            }
+        )
+        first = classify_filers_via_ncen(conn, pass1_fetcher, ciks=[cik])
+        assert first.classifications_written == 1
+
+        # Capture fetched_at after pass 1 — pass 2 must NOT bump this
+        # if the WHERE clause correctly refuses the demotion. (The
+        # SET clause sets fetched_at = NOW(), but only when the
+        # WHERE predicate evaluates true and the UPDATE actually
+        # fires.) Codex 2 Low strengthening for PR9.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fetched_at FROM ncen_filer_classifications WHERE cik = %s",
+                (cik,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        fetched_at_before = row[0]
+
+        # Pass 2: stale submissions index showing only the older A.
+        pass2_fetcher = _InMemoryFetcher(
+            {
+                f"https://data.sec.gov/submissions/CIK{cik}.json": _submissions_json(
+                    accessions=[(accession_a, "N-CEN", "2024-11-14")]
+                ),
+                _archive_url(cik, accession_a, "primary_doc.xml"): _ncen_xml(cik=cik, investment_company_type="N-1A"),
+            }
+        )
+        second = classify_filers_via_ncen(conn, pass2_fetcher, ciks=[cik])
+        # classifications_written counts UPSERT attempts (the writer
+        # ran and conn.commit'd); the row may or may not have been
+        # mutated by the WHERE clause — the post-state assertions
+        # below are what prove the no-demotion contract.
+        assert second.classifications_written == 1
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT accession_number, investment_company_type, derived_filer_type, fetched_at
+                FROM ncen_filer_classifications
+                WHERE cik = %s
+                """,
+                (cik,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        # The newer B classification SURVIVES — the predicate refused
+        # to overwrite with the older A.
+        assert rows[0]["accession_number"] == accession_b
+        assert rows[0]["investment_company_type"] == "N-2"
+        # fetched_at was NOT bumped — proves the UPDATE branch did
+        # not fire (the SET clause includes ``fetched_at = NOW()``
+        # which only runs when WHERE evaluates true).
+        assert rows[0]["fetched_at"] == fetched_at_before, (
+            "fetched_at should not change when the no-demotion predicate refuses the UPSERT — "
+            f"before={fetched_at_before!r} after={rows[0]['fetched_at']!r}"
+        )
+
+    def test_same_day_older_accession_does_not_clobber_newer(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#1233 §4.13 PR9 / Codex 2 Medium — same-day tie-break case.
+
+        Two N-CEN filings on the same calendar day share an identical
+        ``filed_at`` value (parsed from SEC's ``filingDate``, stored
+        as midnight UTC of that day). Without the accession_number
+        tie-break in the UPSERT WHERE predicate, a same-day older
+        accession would overwrite a same-day newer one — the
+        N-CEN/A-same-day-as-original case.
+
+        Scenario: both accessions filed on 2025-11-14 but accession
+        B has the lexicographically newer suffix (SEC's intra-day
+        sequence number). Pass 1 writes the newer B. Pass 2 sees
+        only the older A. The row-constructor comparison
+        ``(EXCLUDED.filed_at, EXCLUDED.accession_number) >= (...,
+        ...)`` evaluates ``(same_day, A) >= (same_day, B)`` as false
+        (A < B lexicographically) and refuses the overwrite."""
+        conn = _setup
+        cik = "0001234567"
+        same_day = "2025-11-14"
+        accession_a = "0001234567-25-000001"  # lex-older suffix
+        accession_b = "0001234567-25-000050"  # lex-newer suffix
+
+        # Pass 1: write newer B (same-day filing).
+        pass1_fetcher = _InMemoryFetcher(
+            {
+                f"https://data.sec.gov/submissions/CIK{cik}.json": _submissions_json(
+                    accessions=[(accession_b, "N-CEN", same_day)]
+                ),
+                _archive_url(cik, accession_b, "primary_doc.xml"): _ncen_xml(cik=cik, investment_company_type="N-2"),
+            }
+        )
+        first = classify_filers_via_ncen(conn, pass1_fetcher, ciks=[cik])
+        assert first.classifications_written == 1
+
+        # Pass 2: stale index showing same-day-but-older A.
+        pass2_fetcher = _InMemoryFetcher(
+            {
+                f"https://data.sec.gov/submissions/CIK{cik}.json": _submissions_json(
+                    accessions=[(accession_a, "N-CEN", same_day)]
+                ),
+                _archive_url(cik, accession_a, "primary_doc.xml"): _ncen_xml(cik=cik, investment_company_type="N-1A"),
+            }
+        )
+        second = classify_filers_via_ncen(conn, pass2_fetcher, ciks=[cik])
+        assert second.classifications_written == 1
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT accession_number, investment_company_type
+                FROM ncen_filer_classifications
+                WHERE cik = %s
+                """,
+                (cik,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        # Same-day older A must NOT clobber same-day newer B.
+        assert rows[0]["accession_number"] == accession_b
+        assert rows[0]["investment_company_type"] == "N-2"
+
     def test_malformed_submissions_json_counts_as_fetch_failure(
         self,
         _setup: psycopg.Connection[tuple],
