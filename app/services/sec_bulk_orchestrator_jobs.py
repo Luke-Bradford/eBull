@@ -312,6 +312,7 @@ def sec_13f_ingest_from_dataset_job() -> None:
     failed_archives: list[str] = []
     total_written = 0
     total_skipped = 0
+    total_retention_skipped = 0
     succeeded: list[Path] = []
     touched_ids: set[int] = set()
     for archive in archives:
@@ -333,6 +334,7 @@ def sec_13f_ingest_from_dataset_job() -> None:
         succeeded.append(archive)
         total_written += result.rows_written
         total_skipped += result.rows_skipped_unresolved_cusip
+        total_retention_skipped += result.rows_skipped_retention
         touched_ids |= result.touched_instrument_ids
         if run_id is not None:
             _record_archive_result(
@@ -340,28 +342,45 @@ def sec_13f_ingest_from_dataset_job() -> None:
                 stage_key="sec_13f_ingest_from_dataset",
                 archive_name=archive.name,
                 rows_written=result.rows_written,
-                rows_skipped={"unresolved_cusip": result.rows_skipped_unresolved_cusip},
+                rows_skipped={
+                    "unresolved_cusip": result.rows_skipped_unresolved_cusip,
+                    "retention": result.rows_skipped_retention,
+                },
             )
         logger.info(
-            "sec_13f_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d",
+            "sec_13f_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d retention_skipped=%d",
             archive.name,
             result.rows_written,
             result.rows_skipped_unresolved_cusip,
+            result.rows_skipped_retention,
         )
     logger.info(
-        "sec_13f_ingest_from_dataset: total_rows_written=%d total_unresolved=%d",
+        "sec_13f_ingest_from_dataset: total_rows_written=%d total_unresolved=%d total_retention_skipped=%d",
         total_written,
         total_skipped,
+        total_retention_skipped,
     )
     if failed_archives:
         raise RuntimeError(
             f"sec_13f_ingest_from_dataset: {len(failed_archives)} archives failed: " + "; ".join(failed_archives)
         )
     if run_id is not None and total_written == 0:
-        raise RuntimeError(
-            f"sec_13f_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives; "
-            f"unresolved_cusip={total_skipped}. Check CUSIP coverage."
-        )
+        # Codex 2 MED — distinguish all-retention-skipped from CUSIP-coverage failure.
+        # An all-pre-cap drain is a no-op by design (#1233 §4.5); a zero-CUSIP-resolve
+        # is still a coverage failure. Only the latter should raise.
+        if total_retention_skipped > 0 and total_skipped == 0:
+            logger.info(
+                "sec_13f_ingest_from_dataset: aggregate rows_written=0 across %d archives; "
+                "all %d rows skipped by 8q retention cap (#1233 §4.5). Not an error.",
+                len(archives),
+                total_retention_skipped,
+            )
+        else:
+            raise RuntimeError(
+                f"sec_13f_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives; "
+                f"unresolved_cusip={total_skipped} retention_skipped={total_retention_skipped}. "
+                f"Check CUSIP coverage."
+            )
     # Refresh ownership_institutions_current for every instrument
     # whose observations changed. Bulk ingest writes only to the
     # _observations table; the rollup endpoint reads _current. Without

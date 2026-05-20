@@ -72,6 +72,7 @@ from app.services.institutional_holdings import (
     _upsert_filer,
     _upsert_holding,
     parse_archive_index,
+    thirteen_f_within_retention,
 )
 from app.services.manifest_parsers._classify import (
     format_upsert_error,
@@ -293,6 +294,44 @@ def _parse_13f_hr(
                 accession,
             )
         return _failed_outcome(f"{kind}: {exc}", raw_status="stored")
+
+    # PR6 #1233 §4.5 — post-parse 8-quarter retention gate. We gate on
+    # ``info.period_of_report`` (the quarter end intrinsic to the
+    # filing) NOT ``row.filed_at`` so 13F-HR/A amendments restating
+    # pre-cap quarters are correctly rejected. Pre-fetch placement
+    # (before infotable.xml fetch) saves the often-several-MB
+    # attachment for pre-cap accessions. Tombstone the manifest so
+    # operator's ``sec_rebuild`` is the recovery path if the cap
+    # later widens; ingest-log row is written with the parsed period
+    # for audit visibility.
+    if not thirteen_f_within_retention(info.period_of_report):
+        logger.debug(
+            "13F-HR manifest parser: accession=%s period=%s pre-8q retention cap; tombstoning",
+            accession,
+            info.period_of_report,
+        )
+        try:
+            with conn.transaction():
+                _record_ingest_attempt(
+                    conn,
+                    filer_cik=filer_cik,
+                    accession_number=accession,
+                    period_of_report=info.period_of_report,
+                    status="failed",
+                    error="retention floor",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "13F-HR manifest parser: ingest-log INSERT failed accession=%s",
+                accession,
+            )
+            return _failed_outcome(f"log error: {exc}", raw_status="stored")
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13F_HR,
+            raw_status="stored",
+            error="retention floor",
+        )
 
     # Step 3: fetch infotable.xml + store_raw inside savepoint.
     try:

@@ -4,7 +4,7 @@
 >
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 >
-> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR2 (#1237) + PR5 NUMERIC fix (#1236) shipped. PR1 revision in flight (this commit) reframes the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
+> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix (#1236), PR5 latest-2-primary cap (#1241), and **PR6 13F-HR 8-quarter cap (this commit)** shipped. PR1 revision reframed the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
 
 ## 0. Status snapshot (2026-05-19 17:00 UTC, mid-drain)
 
@@ -146,9 +146,11 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 105k raw holdings; 3.86M observations rows; 2.5 GB obs + 2.8 GB current = **5.3 GB combined**.
 - **Half-life**: **medium** — 4-quarter trend matters for momentum; 8 quarters (2y) for backtests; beyond = decoration.
 - **Consumers**: stacked institutional ownership % chart; concentration metric in ranking; AI thesis "Vanguard increased position by 8%".
-- **Ingest depth cap**: **8 quarters (2y)** observations at the parser + always-current snapshot.
+- **Ingest depth cap**: **8 quarters (2y)** observations at the parser + always-current snapshot. **PR6 SHIPPED.** Cap anchored to calendar quarter ends (`thirteen_f_retention_cutoff` in `app/services/institutional_holdings.py`) — admits exactly 8 quarter-ends at every instant. A floating `today - 760d` cutoff would slip to nine quarter-ends right after a new quarter completes (Codex 1a on the PR6 plan caught this).
 - **Cohort bound**: **already done #1010** — `last_13f_hr_at` 380d recency cap on filer cohort (11,205 → 8,681 filers).
+- **Chokepoint coverage (PR6)**: every 13F-HR writer honours the cap — `parse_submissions_index` intrinsic floor, `_ingest_single_accession` defensive post-parse gate, manifest-worker `_parse_13f_hr` post-parse gate, `ingest_13f_dataset_archive` per-row gate + `rows_skipped_retention` counter, rewash `_apply_13f_infotable` rescue branch (happy path uncapped per PR5 precedent — see §6.3 amend), and `ownership_observations_sync.sync_institutions` SQL predicate. Lint guard `scripts/check_13f_hr_retention.sh` (nine PR5-style placement invariants A-I) wired into `.githooks/pre-push`.
 - **`ownership_institutions_current` size oddity**: 2.8 GB is huge for a "current snapshot" — investigation needed. Either stores wide rows with embedded payload, or write-through is dumping more than current state. Separate audit ticket (PR12).
+- **`refresh_institutions_current` is NOT a writer chokepoint**: it derives `_current` from `_observations` via `DELETE` + `INSERT … SELECT DISTINCT ON`. Spec §4.5 "always-current snapshot" + spec §6.3 "existing rows untouched" together mean the refresh path is exempt from the cap — capping it would actively delete pre-wipe pre-cap rows from `_current` on every repair sweep, contradicting §6.3.
 - **Existing rows**: untouched until pre-wipe (§6.3).
 - **Why this matters**: combined 5.3 GB. Post-wipe + clean re-run under 8q + PR12 audit projects to ~1-2 GB (depending on what `current` really stores).
 
@@ -311,6 +313,17 @@ This single event replaces the dozen per-PR `DELETE` instructions. Reasons:
 
 **Same-DB cold archive remains out of scope** — Codex 1a §3 was right that same-DB archive doesn't reduce DB size. If a future epic wants cold-archive, ship as **separate database** or **S3 parquet snapshots**, not same-DB tables.
 
+**Rewash happy-path-uncapped clarification (PR5 + PR6 precedent)**:
+`_apply_def14a` / `_apply_13f_infotable` etc. have two branches —
+*happy path* when typed rows already exist for the accession (DELETE +
+re-INSERT under a new `parser_version`, row set preserved), and
+*rescue path* when no typed rows yet exist (turning a zero-row
+accession into populated rows). Happy path is uncapped (it operates
+on rows the spec already owns under "existing rows untouched");
+rescue path is capped (pre-cap accessions must not enter via the
+rescue back-door). PR5 codified this split for DEF 14A; PR6 inherits
+it for 13F-HR.
+
 ### 6.4 Two-layer storage (current + observations)
 
 Per `#788` decomposition, keep the two-layer model:
@@ -331,7 +344,7 @@ Land per-source PRs in this order. Each PR is **ingest-side cap only** — no PR
 - **PR3 — pending.** Filing events 10y rolling cap at the parser. Applied uniformly across every filing_type via every discovery writer. Schema columns + existing rows untouched.
 - **PR4 — IN PROGRESS.** Form 4 / 4-A 3y ingest cap at every writer chokepoint (legacy filing_events SELECTs, manifest-worker `_parse_form4` pre-fetch gate, bulk-dataset Form-4-only filter). Cumulative-rollup invariant pinned by steady-state test; synthetic opening-balance anchor NOT written (§4.3 amendment, this commit). Recency cohort bound inherited from PR1 `is_tradable=TRUE` filter (no insider-filer cohort table; Form 4 walked per-issuer-CIK via filing_events). Includes a parity lint guard catching new chokepoints that omit the predicate.
 - **PR5 — SHIPPED.** DEF 14A latest-2-PRIMARY-proxies cap at discovery + parser + rewash-rescue chokepoints. Supplemental form variants (DEFA14A / DEFR14A / DEFM14A) uncapped (§4.7). NUMERIC overflow #1228 already folded (#1236).
-- **PR6 — pending.** 13F-HR 8-quarter ingest cap at the parser. (#1010 cohort bound already in place.)
+- **PR6 — SHIPPED.** 13F-HR 8-quarter ingest cap at every writer chokepoint (parse_submissions_index intrinsic floor, _ingest_single_accession defensive post-parse gate, manifest-worker post-parse gate, bulk-dataset per-row gate, rewash rescue gate, sync_institutions SQL predicate). Cap anchored to calendar quarter ends (`thirteen_f_retention_cutoff`) — admits exactly 8 quarter-ends. (#1010 cohort bound already in place.) Lint guard `scripts/check_13f_hr_retention.sh` with nine PR5-style placement invariants A-I.
 - **PR7 — pending.** N-PORT 8-quarter cap (mirror of PR6). N-PORT recency cohort bound (`last_nport_at`) per #1010 pattern.
 - **PR8 — pending.** N-CSR/N-CSRS validate existing 2y horizon. Doc-only unless drift found.
 - **PR9 — pending.** N-CEN latest-only cap at the parser. Verify `ncen_classifier` reads latest.
@@ -402,25 +415,28 @@ Per #1208 cadence:
 State as of this commit:
 
 - PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix
-  (#1236) and PR5 latest-2-primary cap (this commit) all shipped.
-- PR6-PR12 remain — every one is ingest-side cap only, no row deletion.
+  (#1236), PR5 latest-2-primary cap (#1241), and **PR6 13F-HR
+  8-quarter cap (this commit)** all shipped.
+- PR7-PR12 remain — every one is ingest-side cap only, no row deletion.
   The pre-wipe is the single operator event at the end.
 
 ```text
-After PR5 merges, the next session picks up PR6
-(13F-HR 8-quarter ingest cap at the parser).
+After PR6 merges, the next session picks up PR7
+(N-PORT 8-quarter ingest cap at the parser).
 
-PR6 scope:
-- 13F-HR observations: per-filer 8-quarter rank cap.
-- #1010 cohort bound (last_13f_hr_at 380d) already in place — the
-  cohort is bounded; PR6 adds per-filer depth.
-- Identify every 13F-HR writer (manifest-worker parser, bulk drain,
-  rewash path) and apply the per-quarter rank cap at each.
+PR7 scope:
+- N-PORT observations: per-fund-trust 8-quarter rank cap. Mirror of
+  PR6 shape; N-PORT is the fund-trust equivalent of 13F-HR.
+- N-PORT recency cohort bound (`last_nport_at` 380d) — apply the
+  #1010 pattern to the N-PORT filer directory.
+- Identify every N-PORT writer (manifest-worker parser, bulk drain,
+  rewash path, sync_funds repair sweep) and apply the per-quarter
+  rank cap at each.
 - No DELETE of pre-8q rows. They survive until the §6.3 pre-wipe.
 
 FIRST ACTIONS:
-1. Read CLAUDE.md working order + the revised §4.5.
-2. Confirm PR5 merged. Confirm #1233 still OPEN as the umbrella.
-3. Branch `feature/1233-pr6-13f-hr-8q-cap`.
+1. Read CLAUDE.md working order + the revised §4.6.
+2. Confirm PR6 merged. Confirm #1233 still OPEN as the umbrella.
+3. Branch `feature/1233-pr7-nport-8q-cap`.
 4. Codex 1a on plan, then Codex 2 pre-push, then PR.
 ```
