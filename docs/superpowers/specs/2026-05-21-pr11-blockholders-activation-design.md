@@ -262,26 +262,50 @@ from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 parsed: dict = Schedule13D.parse_xml(primary_xml)   # for sec_13d source
 parsed: dict = Schedule13G.parse_xml(primary_xml)   # for sec_13g source
 
-# The PR11 manifest-worker adapter reads dict fields directly. Dict shape
-# (verified during impl spike, pinned by a fixture-driven contract test):
-#   parsed["issuer_info"]["cik"]          → str (subject issuer CIK)
-#   parsed["issuer_info"]["name"]         → str (issuer display name)
-#   parsed["security_info"]["cusip"]      → str (CUSIP for share-class disambiguation)
-#   parsed["security_info"]["title"]      → str (securities class title)
-#   parsed["reporting_persons"]           → list[dict] (one per cover-page reporter)
-#       each: cik, name, role, sole_voting_power, shared_voting_power,
-#             sole_dispositive_power, shared_dispositive_power,
-#             aggregate_amount_owned, percent_of_class, type_of_reporting_person, etc.
-#   parsed["date_of_event"]               → str (ISO date)
-#   parsed["signatures"]                  → list[dict] (signer + filed_at)
+# The PR11 manifest-worker adapter reads from the parsed dict. The TOP-LEVEL
+# is a dict (dict-key access at the outer layer), but NESTED VALUES are
+# dataclass / Pydantic objects (attribute access). Verified empirically
+# (Codex 1f HIGH); pinned by tests/test_edgartools_schedule13_dict_shape.py:
 #
-# Adapter maps these into the eBull _upsert_filing_row contract; no Schedule13D
-# instance constructed (avoids the 7-positional-arg requirement at no functional cost).
+#   parsed["issuer_info"]                 → IssuerInfo dataclass
+#       .cik          : str               # subject issuer CIK
+#       .name         : str               # issuer display name
+#       .cusip        : str               # issuer-level CUSIP
+#       .address      : Address | None
+#
+#   parsed["security_info"]               → SecurityInfo dataclass
+#       .title        : str               # securities class title
+#       .cusip        : str               # share-class CUSIP for disambiguation
+#
+#   parsed["reporting_persons"]           → list[ReportingPerson dataclass]
+#       .cik                          : str
+#       .name                         : str
+#       .citizenship                  : str
+#       .sole_voting_power            : int
+#       .shared_voting_power          : int
+#       .sole_dispositive_power       : int
+#       .shared_dispositive_power     : int
+#       .aggregate_amount             : int    # NOT aggregate_amount_owned
+#       .percent_of_class             : float
+#       .type_of_reporting_person     : str
+#       .fund_type                    : str | None
+#       .comment                      : str | None
+#       .member_of_group              : str | None  # "a" group member, "b" excluded
+#       .is_aggregate_exclude_shares  : bool
+#       .no_cik                       : bool   # True for natural-person filers
+#
+#   parsed["date_of_event"]               → str (ISO date)
+#   parsed["signatures"]                  → list[Signature dataclass]
+#       .signer, .filed_at, .title
+#
+# Adapter maps these into the eBull _upsert_filing_row contract via attribute
+# access on the nested dataclasses; no Schedule13D Pydantic instance constructed
+# (avoids the 7-positional-arg requirement at no functional cost).
 ```
 
 Edgartools' `parse_xml` is canonical (tracks SEC schema updates upstream). The retention floor `max(today - 3y, 2024-12-19)` GUARANTEES every filing inside the window is post-XML-mandate and parseable — so the parser library coverage gap (skill_edgartools.md G11: pre-2024-12-19 HTML returns `None` from `Schedule13D.from_filing`) is closed by construction at the cap layer, not the parser layer.
 
-A new contract test `tests/test_edgartools_schedule13_dict_shape.py` pins the dict-key contract via a real EDGAR fixture so an edgartools upgrade that renames keys fails CI immediately (companion to the existing version-pin test).
+A new contract test `tests/test_edgartools_schedule13_shape.py` pins BOTH the top-level dict-key contract (`"issuer_info"`, `"security_info"`, `"reporting_persons"`, `"date_of_event"`, `"signatures"`) AND the nested dataclass field-access contract (`IssuerInfo.cik`, `SecurityInfo.cusip`, `ReportingPerson.aggregate_amount`, `ReportingPerson.percent_of_class`, etc., per Codex 1f LOW) via a real EDGAR fixture. An edgartools upgrade that renames either layer fails CI immediately (companion to the existing version-pin test).
 
 **Library version + risk acknowledgment**: edgartools is already pinned at `5.30.2 (<5.31.0 ceiling)` in this repo (currently used only for 13F static parsers per skill_edgartools.md). The Pydantic validation cliff (#932) means a future edgartools upgrade can break drop-in compatibility; PR11 documents the version pin in the parser module docstring + adds a pinned version test (`tests/test_edgartools_version_pin.py` extension or new file) so a CI break surfaces immediately.
 
