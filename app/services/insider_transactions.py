@@ -76,16 +76,51 @@ logger = logging.getLogger(__name__)
 # re-fetch the universe of Form 4 XML from SEC.
 _PARSER_VERSION = 2
 
-# Backfill horizon for Form 4 ingestion. eBull's posture is long-
-# horizon (months-to-years holding periods), and the signal carried
-# by insider Form 4 trades decays sharply with age — the 2026-05
-# backlog audit found 1.02M un-ingested filings older than 2y vs
-# 221k under 2y. Draining the historical tail at 500/hr would burn
-# ~6 weeks of SEC bandwidth on filings that never reach the live
-# trading model. A 5-year floor keeps recent insider activity, the
-# COVID era, and the rate-cycle pivot, while skipping pre-2021
-# noise. Bump this if the operator decides to widen the window.
-INSIDER_FORM4_BACKFILL_FLOOR_YEARS: int = 5
+# Form 4 retention cap (#1233 PR4, spec §4.3). Tightened from 5y to
+# 3y after the 2026-05-19 T9-POST drive surfaced that historical Form
+# 4 ingest costs days of SEC bandwidth for signal that decays sharply:
+# 90d is the alert window, 12mo the thesis window, 3y the
+# cluster-buy / persistence-of-trend window. Pre-3y trades cost
+# ingest budget at no operator value.
+#
+# Ingest-side cap only — existing rows are untouched until the
+# operator-driven pre-wipe + clean re-run (spec §6.3). The cutoff is
+# computed in Python (calendar-year arithmetic — Codex PR3 lesson:
+# `365 * N` days drifts past leap days) and passed as a `date` param
+# to every SQL chokepoint, NOT as `NOW() - make_interval(...)` which
+# carries DB session-timezone ambiguity.
+INSIDER_FORM4_RETENTION_YEARS: int = 3
+
+
+def form4_retention_cutoff(now: datetime | None = None) -> date:
+    """Earliest ``filing_date`` accepted for Form 4 / 4-A ingest.
+
+    Calendar-year subtraction so the boundary stays stable across leap
+    days. Feb 29 in a non-leap target year anchors to Feb 28 of that
+    year — the conservative choice (one day earlier, so a filing
+    exactly at Feb 28 in the target year remains inside the window).
+
+    ``now`` is injectable so tests can pin a stable reference instant
+    without monkeypatching ``datetime.now``.
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    today = now.date()
+    target_year = today.year - INSIDER_FORM4_RETENTION_YEARS
+    try:
+        return today.replace(year=target_year)
+    except ValueError:
+        return date(target_year, 2, 28)
+
+
+def form4_within_retention(filing_date: date, now: datetime | None = None) -> bool:
+    """Boundary check used by every Form 4 writer chokepoint.
+
+    Returns True iff ``filing_date >= form4_retention_cutoff(now)``.
+    Boundary is inclusive — a filing exactly at the cutoff date is
+    retained (no off-by-one drop on the rolling boundary).
+    """
+    return filing_date >= form4_retention_cutoff(now)
 
 
 # ---------------------------------------------------------------------
@@ -1524,12 +1559,15 @@ def ingest_insider_transactions_for_instrument(
 
     - Candidate = ``provider='sec'`` + ``filing_type IN ('4', '4/A')``
       + ``primary_document_url IS NOT NULL`` + no existing
-      ``insider_filings`` row.
+      ``insider_filings`` row + ``filing_date >= form4_retention_cutoff()``
+      (#1233 PR4 — 3y cap honoured at every chokepoint, including this
+      inner SELECT which pre-PR4 lacked the floor predicate).
     - Tombstone on fetch error / parse miss.
     - Caller's fetch URL runs through :func:`_canonical_form_4_url` to
       strip XSL-rendering segments.
     """
     conn.commit()
+    retention_cutoff = form4_retention_cutoff()
     candidates: list[tuple[int, str, str]] = []
     with conn.cursor() as cur:
         cur.execute(
@@ -1542,12 +1580,13 @@ def ingest_insider_transactions_for_instrument(
             WHERE fe.provider = 'sec'
               AND fe.filing_type IN ('4', '4/A')
               AND fe.primary_document_url IS NOT NULL
-              AND fe.instrument_id = %s
+              AND fe.instrument_id = %(iid)s
               AND fil.accession_number IS NULL
+              AND fe.filing_date >= %(retention_cutoff)s
             ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
-            LIMIT %s
+            LIMIT %(limit)s
             """,
-            (instrument_id, limit),
+            {"iid": instrument_id, "limit": limit, "retention_cutoff": retention_cutoff},
         )
         for row in cur.fetchall():
             candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
@@ -1574,10 +1613,12 @@ def ingest_insider_transactions(
        is ingested exactly once per accession — tombstones live in the
        same table so a failed fetch writes a tombstone row and the
        hourly ingester never re-fetches the same dead URL.
-    4. ``fe.filing_date >= NOW() - INTERVAL '<floor> years'`` — see
-       :data:`INSIDER_FORM4_BACKFILL_FLOOR_YEARS`. Historical Form 4s
-       outside the floor are skipped permanently; the operator can
-       widen the floor if archaeology becomes a need.
+    4. ``fe.filing_date >= form4_retention_cutoff()`` — see
+       :data:`INSIDER_FORM4_RETENTION_YEARS`. Historical Form 4s outside
+       the cap are skipped permanently; the operator can widen the cap
+       if archaeology becomes a need. Python-computed cutoff (not
+       ``NOW() - make_interval(...)``) so the Feb 29 logic + UTC anchor
+       are shared with the helper and not subject to DB session TZ.
     5. Ordered by filing_date DESC so fresh filings always get budget.
 
     Bounded per run (``limit=500``) to match expected daily Form 4
@@ -1588,6 +1629,7 @@ def ingest_insider_transactions(
     # Per-#1117 PR-B: universe-wide selector requires inner-CTE
     # DISTINCT ON dedup so N siblings sharing a CIK do not consume N
     # slots of the LIMIT budget for the same accession.
+    retention_cutoff = form4_retention_cutoff()
     candidates: list[tuple[int, str, str]] = []
     with conn.cursor() as cur:
         cur.execute(
@@ -1602,7 +1644,7 @@ def ingest_insider_transactions(
                   AND fe.filing_type IN ('4', '4/A')
                   AND fe.primary_document_url IS NOT NULL
                   AND fil.accession_number IS NULL
-                  AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
+                  AND fe.filing_date >= %(retention_cutoff)s
                 ORDER BY fe.provider_filing_id, fe.instrument_id
             )
             SELECT instrument_id, provider_filing_id, primary_document_url
@@ -1610,7 +1652,7 @@ def ingest_insider_transactions(
             ORDER BY filing_date DESC, filing_event_id DESC
             LIMIT %(limit)s
             """,
-            {"limit": limit, "floor_years": INSIDER_FORM4_BACKFILL_FLOOR_YEARS},
+            {"limit": limit, "retention_cutoff": retention_cutoff},
         )
         for row in cur.fetchall():
             candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
@@ -1784,6 +1826,8 @@ def ingest_insider_transactions_backfill(
     """
     conn.commit()
 
+    retention_cutoff = form4_retention_cutoff()
+
     # Per-#1117 PR-B: dedup by accession before GROUP BY so a single
     # share-class accession is not double-counted across siblings.
     # The canonical-sibling parser fan-out (see upsert_filing) covers
@@ -1803,7 +1847,7 @@ def ingest_insider_transactions_backfill(
                   AND fe.filing_type IN ('4', '4/A')
                   AND fe.primary_document_url IS NOT NULL
                   AND fil.accession_number IS NULL
-                  AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
+                  AND fe.filing_date >= %(retention_cutoff)s
                 ORDER BY fe.provider_filing_id, fe.instrument_id
             )
             SELECT instrument_id, COUNT(*) AS unfetched
@@ -1812,7 +1856,7 @@ def ingest_insider_transactions_backfill(
             ORDER BY unfetched DESC
             LIMIT %(limit)s
             """,
-            {"limit": instruments_per_tick, "floor_years": INSIDER_FORM4_BACKFILL_FLOOR_YEARS},
+            {"limit": instruments_per_tick, "retention_cutoff": retention_cutoff},
         )
         targets = [(int(r[0]), int(r[1])) for r in cur.fetchall()]
     conn.commit()
@@ -1828,6 +1872,13 @@ def ingest_insider_transactions_backfill(
     for instrument_id, _unfetched in targets:
         candidates: list[tuple[int, str, str]] = []
         with conn.cursor() as cur:
+            # PR4 gap fix: inner per-instrument SELECT must honour the
+            # retention cutoff too. Pre-PR4 the outer aggregate picked
+            # an instrument by count of inside-floor un-ingested
+            # candidates, but the inner SELECT was floor-free — so an
+            # instrument with one fresh filing + 99 pre-floor filings
+            # would consume per_instrument_limit slots on pre-floor
+            # work. The cap is honoured uniformly now.
             cur.execute(
                 """
                 SELECT fe.instrument_id,
@@ -1839,12 +1890,17 @@ def ingest_insider_transactions_backfill(
                 WHERE fe.provider = 'sec'
                   AND fe.filing_type IN ('4', '4/A')
                   AND fe.primary_document_url IS NOT NULL
-                  AND fe.instrument_id = %s
+                  AND fe.instrument_id = %(iid)s
                   AND fil.accession_number IS NULL
+                  AND fe.filing_date >= %(retention_cutoff)s
                 ORDER BY fe.filing_date ASC, fe.filing_event_id ASC
-                LIMIT %s
+                LIMIT %(limit)s
                 """,
-                (instrument_id, per_instrument_limit),
+                {
+                    "iid": instrument_id,
+                    "limit": per_instrument_limit,
+                    "retention_cutoff": retention_cutoff,
+                },
             )
             for row in cur.fetchall():
                 candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))

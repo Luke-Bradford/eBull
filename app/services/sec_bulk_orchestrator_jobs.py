@@ -504,13 +504,17 @@ def sec_insider_ingest_from_dataset_job() -> None:
                 stage_key="sec_insider_ingest_from_dataset",
                 archive_name=archive.name,
                 rows_written=result.rows_written,
-                rows_skipped={"unresolved_cik": result.rows_skipped_unresolved_cik},
+                rows_skipped={
+                    "unresolved_cik": result.rows_skipped_unresolved_cik,
+                    "retention": result.rows_skipped_retention,
+                },
             )
         logger.info(
-            "sec_insider_ingest_from_dataset: archive=%s rows_written=%d unresolved_cik=%d",
+            "sec_insider_ingest_from_dataset: archive=%s rows_written=%d unresolved_cik=%d retention_skipped=%d",
             archive.name,
             result.rows_written,
             result.rows_skipped_unresolved_cik,
+            result.rows_skipped_retention,
         )
     logger.info(
         "sec_insider_ingest_from_dataset: total_rows_written=%d",

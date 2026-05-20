@@ -1013,15 +1013,22 @@ class TestBackfill:
 
 
 class TestForm4DateFloor:
-    """Regression: ``INSIDER_FORM4_BACKFILL_FLOOR_YEARS`` keeps the
-    SEC ingest budget focused on operationally-useful filings. eBull
-    is long-horizon — pre-2021 insider trades aren't in the trading
-    model, so we skip them rather than burn 6 weeks of SEC bandwidth
-    draining the historical tail."""
+    """Regression: ``INSIDER_FORM4_RETENTION_YEARS`` (PR4 #1233 §4.3,
+    tightened from 5y to 3y) keeps SEC ingest focused on operationally-
+    useful filings. eBull is long-horizon — pre-3y insider trades
+    aren't in the trading model, so we skip them rather than burn SEC
+    bandwidth draining the historical tail.
+
+    Detailed coverage of every chokepoint (legacy universe + backfill
+    inner + manifest worker + bulk dataset) lives in
+    ``tests/test_insider_transactions_retention_cap.py``."""
 
     def test_universe_path_skips_filings_older_than_floor(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn, iid=601, symbol="OLD")
-        # One filing inside the 5-year floor, one well outside.
+        # One filing inside the 3-year retention cap (today), one well
+        # outside (2010). The seeded ancient filing also pre-dates the
+        # superseded 5y floor, so the test pins behaviour at both the
+        # old and new constants.
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
