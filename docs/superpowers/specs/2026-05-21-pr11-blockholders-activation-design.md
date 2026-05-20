@@ -5,7 +5,7 @@
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 > Parent spec: `docs/superpowers/specs/2026-05-19-data-retention-rubric.md` §4.8.
 >
-> Status: **DRAFT** — pending Codex 1a/1b spec review, then operator sign-off, then implementation plan.
+> Status: **REVISED post-Codex-1a** — 3 BLOCKING + 4 HIGH + 3 MEDIUM findings folded in; pending Codex 1b spec review, then operator sign-off, then implementation plan.
 
 ## 0. Why this design exists
 
@@ -101,9 +101,20 @@ This endpoint is the load-bearing discovery primitive for PR11.
 
 **New file**: `app/services/sec_13dg_discovery.py`
 
+**Manifest schema constraints (verified against [sql/118_sec_filing_manifest.sql] + [app/services/sec_manifest.py:194-231])** — load-bearing for every design call below:
+
+- `accession_number` is the **sole PK**. Joint 13D/G filings (one accession, multiple reporters) CANNOT be enqueued as multiple rows — one row per accession.
+- CHECK constraint enforces `(subject_type='issuer' AND instrument_id IS NOT NULL) OR (subject_type<>'issuer' AND instrument_id IS NULL)`. A `subject_type='blockholder_filer'` row **MUST have `instrument_id = NULL`** — the issuer linkage cannot ride along on the manifest row directly.
+- `cik` is `NOT NULL TEXT`. For `subject_type='blockholder_filer'` rows it is the **filer CIK**.
+- `subject_id` is the canonical identity for the subject_type (filer CIK for blockholder_filer).
+- `record_manifest_entry` raises `ValueError` on either CHECK violation at the Python layer ([sec_manifest.py:223-231]).
+
+These constraints make `subject_type='blockholder_filer'` the only schema-legal choice for 13D/G manifest rows (consistent with the existing live daily-index path at [sec_atom_fast_lane.py:57-101] + [manifest_parsers/sec_13dg.py:28-35]). Issuer linkage continues to be resolved at parse-time via CUSIP→instrument lookup in `external_identifiers`, exactly as today — PR11 does NOT change parser semantics for issuer resolution. The silent CUSIP-unresolved gap is by-design at the schema layer (audit trail preserved with `instrument_id=NULL` per [manifest_parsers/sec_13dg.py:31-35]) and tracked by #740 (CUSIP backfill epic); PR11 inherits that contract.
+
 **Responsibilities**:
 
 1. Read the universe-issuer-CIK cohort via the canonical SELECT (post-PR1):
+
    ```sql
    SELECT DISTINCT i.instrument_id, ei.identifier_value AS cik
    FROM instruments i
@@ -115,41 +126,53 @@ This endpoint is the load-bearing discovery primitive for PR11.
      AND i.is_tradable = TRUE
    ORDER BY i.instrument_id
    ```
-2. For each CIK, page through `efts.sec.gov/LATEST/search-index` with:
+
+2. For each issuer CIK, page through `efts.sec.gov/LATEST/search-index` with:
    - `forms = SC 13D,SC 13D/A,SC 13G,SC 13G/A` (URL-encoded as `SC%2013D,SC%2013D%2FA,SC%2013G,SC%2013G%2FA`)
-   - `ciks = {zero-padded 10-digit CIK}`
-   - `dateRange = custom`, `startdt = blockholders_retention_cutoff().date().isoformat()`, `enddt = today.isoformat()`
+   - `ciks = {zero-padded 10-digit issuer CIK}`
+   - `dateRange = custom`, `startdt = _resolve_discovery_startdt(...)`, `enddt = today.isoformat()` — see §3.5 for steady-state startdt derivation
    - `from = 0; size = 100`; advance `from` by 100 until `len(hits) < size`
-3. For each `hit._source`:
-   - Extract `accession = adsh`, `form = form`, `file_date = file_date`, `cik_list = ciks`, `name_list = display_names`
-   - Identify filer CIK(s): `[c for c in cik_list if c != issuer_cik_padded]` (typically 1; joint filings can be 2+)
-   - For each filer CIK + matching display name: UPSERT `blockholder_filers (cik, name)` so the subject resolver can find them (`_upsert_filer` already exists in `blockholders.py`)
-   - INSERT (or no-op on conflict) into `sec_filing_manifest`:
-     ```
-     subject_type   = 'blockholder_filer'
-     subject_id     = filer_cik (the standalone CIK, not the joint-filing concatenation)
-     instrument_id  = issuer_instrument_id (the universe-resolved issuer)
-     source         = 'sec_13d' if form starts with 'SC 13D' else 'sec_13g'
-     accession_number = adsh
-     filed_at       = file_date (parsed as date at UTC midnight; manifest schema uses TIMESTAMPTZ)
-     primary_document_url = built from accession via _archive_file_url (or left NULL — parser rebuilds canonically)
-     status         = 'pending'
-     ```
-   - Joint-filing handling: enqueue ONE manifest row per filer CIK per accession (matches `blockholder_filings` PK of `(accession, COALESCE(reporter_cik,''), reporter_name)`). The worker parser handles the per-reporter expansion downstream from one fetch of `primary_doc.xml`.
-4. Rate-limit: shared SEC 10 req/s budget via the existing `app/services/sec_rate_limit.py` shared semaphore. Per-issuer query cost = 1 search-index request + 0-2 pagination requests for outlier issuers. Bootstrap = ~5,200 + ~200 outlier-page = ~5,400 requests = **~9 min wall-clock** under shared budget.
-5. Return a `DiscoveryResult` dataclass:
+
+3. For each `hit._source`, defensively parse the filer set without positional assumptions (Codex 1a MEDIUM):
+   - Extract `accession = adsh`, `form = form`, `file_date = file_date`, `cik_list = ciks` (raw, zero-padded 10-digit), `name_list = display_names`
+   - **Defensive filer extraction**: `filer_ciks = [c for c in cik_list if c.lstrip('0') != issuer_cik_unpadded]` — no positional assumption about issuer index, tolerates issuer not-in-position-0 + duplicate CIK entries. **Cardinality assertions**: if `len(filer_ciks) == 0` → log + skip (issuer-only result, anomalous); if `len(filer_ciks) == 1` → standard case; if `len(filer_ciks) >= 2` → joint filing, all filer CIKs are seeded into `blockholder_filers` but ONLY the FIRST is the manifest's `cik` / `subject_id` (chosen by stable sort order — `min(filer_ciks)` lexicographically — so re-discovery picks the same one and the UPSERT is idempotent).
+   - **Defensive name extraction**: `display_names[]` is positionally aligned with `ciks[]` per empirical observation. For each filer CIK, map to its name via `name_list[cik_list.index(filer_cik)]` rather than `name_list[1]`. If the name doesn't parse cleanly (rare bracketed-LLC labels), fall back to `f"CIK {filer_cik}"` — the resolver only joins on CIK; name is operator-visible label only.
+   - For each filer CIK + its display name: UPSERT `blockholder_filers (cik, name)` via `_upsert_filer` from `app/services/blockholders.py` (idempotent ON CONFLICT (cik) DO UPDATE name).
+   - INSERT into `sec_filing_manifest` via `record_manifest_entry` with:
+     - `subject_type = 'blockholder_filer'`
+     - `subject_id = first_filer_cik` (the min-lex filer CIK from step above)
+     - `cik = first_filer_cik` (same — schema requires `cik NOT NULL`; for blockholder_filer this IS the filer)
+     - `instrument_id = None` (per CHECK constraint)
+     - `source = 'sec_13d'` if form starts with `SC 13D` else `'sec_13g'`
+     - `accession_number = adsh`
+     - `filed_at = file_date` parsed at UTC midnight
+     - `primary_document_url = None` (parser rebuilds canonically via `_archive_file_url`)
+     - `status = 'pending'`
+   - ON CONFLICT on PK `accession_number`: existing row stays (matches `record_manifest_entry`'s ON CONFLICT DO UPDATE pattern). Re-discovery is idempotent.
+
+4. Issuer linkage propagation (NEW for PR11, addresses Codex 1a BLOCKING #2):
+   - At discovery time we ALREADY know `(issuer_instrument_id, issuer_cik)` from the universe walk seed.
+   - PR11 writes this mapping into a NEW lightweight side-table `sec_13dg_discovery_issuer_hint (accession_number PK, instrument_id NOT NULL, issuer_cik NOT NULL, discovered_at)` so the parser can short-circuit CUSIP resolution when the hint is present, AVOIDING the silent CUSIP-unresolved gap for universe-discovered accessions.
+   - Parser change: `_parse_13dg` looks up the hint table first; if a hint exists, use `instrument_id` from hint instead of CUSIP resolution. If no hint (legacy daily-index path or operator rebuild), fall back to CUSIP lookup as today. This preserves backward compat AND closes the gap for the new path.
+
+5. Rate-limit: shared SEC 10 req/s budget via `_PROCESS_RATE_LIMIT_LOCK` + `_PROCESS_REQ_TS` in [app/providers/implementations/sec_edgar.py:54-78] (process-wide single-instance throttle shared by every `SecFilingsProvider`). Discovery uses `SecFilingsProvider.fetch_document_text` (or a new sibling `fetch_search_index_json`) so HTTP calls flow through the same throttle as parser fetches. Per-issuer query cost = 1 search-index request + 0-2 pagination requests for outlier issuers. Bootstrap = ~5,200 + ~200 outlier-page = ~5,400 requests = **~9 min wall-clock** under shared budget — fits inside default `max_runtime_seconds=3600` with 6× headroom.
+
+6. Return a `DiscoveryResult` dataclass:
+
    ```python
    @dataclass(frozen=True)
    class DiscoveryResult:
        issuers_scanned: int
        accessions_discovered: int
        manifest_rows_inserted: int
+       manifest_rows_skipped_existing: int  # PK conflict on re-discovery
        filers_upserted: int
-       rows_skipped_outside_cap: int  # always 0 since discovery query is already capped; surfaces explicit invariant
+       hints_written: int                    # sec_13dg_discovery_issuer_hint inserts
+       rows_skipped_outside_cap: int         # always 0 since discovery query is already capped; surfaces explicit invariant
        elapsed_seconds: float
    ```
 
-**Why one file** (not split discovery + ingest module): the discovery layer is pure HTTP+SELECT+INSERT and does NOT call the parser. It enqueues manifest rows; the existing `sec_manifest_worker` drains them. Putting discovery in `sec_13dg_discovery.py` keeps the load-bearing live module (`blockholders.py`) focused on parse + write helpers; `sec_13dg_discovery.py` mirrors the shape of `sec_n_csr_discovery` introduced under PR8.
+**Why one file** (not split discovery + ingest module): the discovery layer is pure HTTP + SELECT + INSERT and does NOT call the parser. It enqueues manifest rows; the existing `sec_manifest_worker` drains them. Putting discovery in `sec_13dg_discovery.py` keeps the load-bearing live module (`blockholders.py`) focused on parse + write helpers; `sec_13dg_discovery.py` mirrors the shape of N-CSR discovery introduced under PR8.
 
 ### 3.2 Cap chokepoints (3y `filed_at`)
 
@@ -170,16 +193,16 @@ def blockholders_within_retention(filed_at: datetime | None) -> bool:
     return filed_at >= blockholders_retention_cutoff()
 ```
 
-Chokepoint matrix:
+Chokepoint matrix (REVISED post-Codex-1a — chokepoints C + F corrected):
 
 | # | Chokepoint | File / function | Gate kind | Test pin |
-|---|---|---|---|---|
-| **A** | Discovery query | `app/services/sec_13dg_discovery.py::_build_query_params` | `&startdt = blockholders_retention_cutoff().date().isoformat()` | `test_discovery_query_uses_helper_cutoff` |
-| **B** | Manifest worker pre-fetch | `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (BEFORE `fetch_document_text`) | If not `blockholders_within_retention(row.filed_at)` → tombstone with `error="retention floor"` and skip fetch | `test_parse_13dg_tombstones_pre_cap_accession` |
-| **C** | Observations sync | `app/services/ownership_observations_sync.py::sync_blockholders` | LEFT JOIN `filing_events fe ON fe.provider_filing_id = bf.accession_number AND fe.provider = 'sec'`; add `WHERE fe.filing_date >= blockholders_retention_cutoff().date()` predicate (LEFT not INNER — Codex 1b PR10b lesson — so rows missing manifest entry still sync) | `test_sync_blockholders_excludes_pre_cap_rows` |
+| --- | --- | --- | --- | --- |
+| **A** | Discovery query | `app/services/sec_13dg_discovery.py::_build_query_params` | `&startdt = _resolve_discovery_startdt()` — derived from `MAX(blockholders_retention_cutoff(), watermark_from_freshness_index)` so steady-state windowing degrades to the 3y floor on outage (Codex 1a MEDIUM #10) | `test_discovery_query_uses_helper_cutoff` + `test_steady_state_watermark_degrades_to_3y_floor` |
+| **B** | Manifest worker pre-fetch | `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (BEFORE `fetch_document_text` AND BEFORE `store_raw` to save SEC HTTP budget) | If not `blockholders_within_retention(row.filed_at)` → tombstone with `error="retention floor"` and skip fetch | `test_parse_13dg_tombstones_pre_cap_accession` |
+| **C** | Observations sync | `app/services/ownership_observations_sync.py::sync_blockholders` | Gate directly on the raw chain's own `filed_at` column: `WHERE bf.filed_at >= blockholders_retention_cutoff()`. **Do NOT use a `filing_events.filing_date >= cutoff` predicate** — a LEFT JOIN with that predicate null-rejects rows missing a `filing_events` entry (Codex 1a HIGH #4 + Codex 1b PR10b lesson). `blockholder_filings.filed_at` is the source of truth at the raw layer ([sql/095_blockholder_filers_filings.sql:124]). | `test_sync_blockholders_excludes_pre_cap_rows` + `test_sync_blockholders_includes_rows_without_filing_events_entry` |
 | **D** | Refresh-current | `app/services/ownership_observations.py::refresh_blockholders_current` | **UNCAPPED** — per parent spec §6.3 "refresh-current is exempt from the cap; capping it would actively delete pre-wipe pre-cap rows" (mirror of §4.5 `refresh_institutions_current` precedent) | `test_refresh_current_keeps_pre_cap_observations_intact` |
 | **E** | Bulk dataset | n/a — SEC publishes no 13D/G bulk archive | no gate needed | n/a |
-| **F** | Rewash | n/a — no `_apply_13dg_*` rewash function exists | no gate needed | n/a |
+| **F** | Rewash | `app/services/rewash_filings.py::_apply_blockholders` (the `primary_doc_13dg` ParserSpec; **CORRECTED — Codex 1a BLOCKING #3 caught this; the function exists at [rewash_filings.py:571] and is currently uncapped**) | Add pre-DELETE gate: derive `accession_filed_at` from `raw_doc` or its `filing_events` join; if not `blockholders_within_retention(accession_filed_at)` → return `False` (skip rewash; leave existing rows in place; rewash is happy-path-uncapped per parent spec §6.3 amendment, but rescue-path IS gated because rewashing a pre-cap accession would re-introduce pre-cap observations through the back door). Distinguish happy-path vs rescue-path per parent spec §6.3 "Rewash happy-path-uncapped clarification" — happy path operates on rows already in `blockholder_filings`; rescue path is the zero-rows-yet branch. PR11 gates only the rescue-path branch. | `test_rewash_13dg_happy_path_uncapped_for_existing_rows` + `test_rewash_13dg_rescue_path_skips_pre_cap_accession` |
 | **G** | One-shot single accession | `_ingest_single_accession` is not 13D/G-aware; operator-rebuild via `POST /jobs/sec_rebuild/run` re-enqueues manifest rows which then pass through gate B | no separate gate | covered by B |
 
 The cap is **filed-at based** (matches PR8 N-CSR precedent), not `period_of_report` based, because:
@@ -193,46 +216,135 @@ The cap is **filed-at based** (matches PR8 N-CSR precedent), not `period_of_repo
 No new worker code. Existing `sec_manifest_worker` already drains pending `sec_13d` + `sec_13g` rows via `_parse_13dg` (registered at `app/services/manifest_parsers/__init__.py:59`). PR11 changes inside `_parse_13dg`:
 
 1. ADD: pre-fetch retention gate (chokepoint B above). Reuses `blockholders_within_retention(row.filed_at)` import from `app.services.blockholders`.
-2. UNCHANGED: store_raw, parse, CUSIP resolution, upsert, observation write-through, refresh-current.
-3. UNCHANGED: `subject_type='blockholder_filer'` semantics — the discovery layer guarantees `blockholder_filers` is auto-seeded BEFORE the manifest row is INSERTed, so `_upsert_filer` inside the parser body becomes a no-op for filers seeded by discovery (still functional for the legacy daily-index path where the resolver succeeds via `_upsert_filer`'s ON CONFLICT clause).
+2. ADD: issuer-hint short-circuit. Before falling back to CUSIP lookup, the parser checks the new `sec_13dg_discovery_issuer_hint` table (PK = accession_number) for a `(instrument_id, issuer_cik)` mapping written by discovery. If present, the parser uses the hint directly — closes the silent CUSIP-unresolved gap for universe-discovered accessions (Codex 1a BLOCKING #2). If absent (legacy daily-index path or operator rebuild from a no-hint source), fall back to CUSIP lookup exactly as today.
+3. UNCHANGED: store_raw (still BEFORE parse per #938 raw-payload invariant), parse, upsert into `blockholder_filers` + `blockholder_filings`, observation write-through, refresh-current.
+4. UNCHANGED: `subject_type='blockholder_filer'` + `instrument_id IS NULL` semantics — the schema CHECK at [sql/118_sec_filing_manifest.sql] enforces this and PR11 preserves it. The discovery layer guarantees `blockholder_filers` is auto-seeded BEFORE the manifest row is INSERTed (so the legacy resolver path continues to succeed for filers that re-appear via daily-index); `_upsert_filer` inside the parser body remains idempotent via ON CONFLICT (cik) DO UPDATE.
+
+The issuer-hint side-table is the precision mechanism that lets PR11 avoid both BLOCKING #1 (schema-incompatible manifest shape) AND BLOCKING #2 (silent CUSIP gap) without changing the manifest schema invariants.
 
 ### 3.4 Cleanup — dormant code retirement (in same PR)
 
 The operator mandate "no tech debt, no coming back later" requires retiring the dormant filer-seed-driven path in the same PR that activates the live one. Concretely:
 
-**DELETE**:
+**DELETE from `app/services/blockholders.py`**:
 
-- `app/services/blockholders.py::ingest_all_active_filers` (entry-point that walks `blockholder_filer_seeds`)
-- `app/services/blockholders.py::ingest_filer_blockholders` (per-filer walker; dependency-only of `ingest_all_active_filers` — no other caller surfaces in the repo)
-- `app/services/blockholders.py::_list_active_filer_seeds` (helper that reads the seed table)
-- The corresponding test cases in `tests/test_blockholders_ingester.py` that exercise the deleted entrypoints (estimated ~400-500 LOC of the 955; the lower-level helper tests — `_upsert_filer`, `_upsert_filing_row`, `_record_13dg_observation_for_filing` — stay because the live manifest path uses them)
+- `ingest_all_active_filers` (entry-point that walks `blockholder_filer_seeds`)
+- `ingest_filer_blockholders` (per-filer walker; dependency-only of `ingest_all_active_filers`)
+- `_list_active_filer_seeds` (helper that reads the seed table)
+- `seed_filer` (operator-facing helper that wrote to the seed table)
+- Any other helper whose sole caller surface is the deleted set (audit during impl)
+
+**EDIT `scripts/seed_holder_coverage.py` (Codex 1a HIGH #5 caught this — full retirement breaks the script's 13F-HR / CUSIP-resolver / N-CEN paths)**:
+
+- Remove the 13D/G blockholder seeding block: `_BLOCKHOLDER_SEEDS` constant, the `seed_blockholder_filer` import + call, the "Seeding blockholder_filer_seeds..." print block, and the "Ingesting 13D/G blockholders..." print block + `ingest_all_blockholders` call.
+- KEEP every other path in the script:
+  - 13F-HR `institutional_filer_seeds` seeding + `ingest_all_institutional` invocation (#730 path — out of PR11 scope)
+  - ETF `etf_filer_cik_seeds` over-tagging
+  - CUSIP resolver (#781)
+  - N-CEN classifier (#782)
+- Add a one-line script docstring update noting "13D/G blockholders are now universe-driven via the bootstrap `sec_blockholders_discovery` stage (#1233 PR11) — no operator seeding required."
+- Update the script's CLI help text accordingly.
 
 **DROP** (new migration `sql/15X_drop_blockholder_filer_seeds.sql`):
 
 ```sql
+-- Drop dormant filer-seed table; PR11 retires the operator-curated
+-- seed mechanism in favour of universe-issuer-CIK-driven discovery
+-- via efts.sec.gov. The seed table was empty universe-wide (never
+-- populated outside dev smoke tests). All downstream consumers
+-- (ingest_all_active_filers, ingest_filer_blockholders, the atom
+-- fast-lane / daily-index reconcile subject resolver's seed-list
+-- lookup branch, scripts/seed_holder_coverage.py blockholder block)
+-- are removed in the same PR.
 DROP INDEX IF EXISTS idx_blockholder_filer_seeds_active;
 DROP TABLE IF EXISTS blockholder_filer_seeds;
 ```
 
+**ADD** (same-PR new migration `sql/15Y_create_sec_13dg_discovery_issuer_hint.sql`):
+
+```sql
+-- Discovery-time issuer hint table. When the new universe-CIK-driven
+-- discovery layer enqueues a 13D/G accession into sec_filing_manifest,
+-- it also writes the (instrument_id, issuer_cik) hint here so the
+-- manifest worker parser can short-circuit CUSIP resolution and avoid
+-- the silent CUSIP-unresolved gap (#1233 PR11 + Codex 1a BLOCKING #2).
+-- Legacy daily-index path writes no hint; the parser falls back to
+-- CUSIP lookup as today.
+CREATE TABLE IF NOT EXISTS sec_13dg_discovery_issuer_hint (
+    accession_number  TEXT PRIMARY KEY,
+    instrument_id     BIGINT NOT NULL REFERENCES instruments(instrument_id) ON DELETE CASCADE,
+    issuer_cik        TEXT NOT NULL,
+    discovered_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sec_13dg_discovery_issuer_hint_instrument_id
+    ON sec_13dg_discovery_issuer_hint (instrument_id);
+```
+
+`tests/fixtures/ebull_test_db.py::_PLANNER_TABLES` updated to drop `blockholder_filer_seeds` and add `sec_13dg_discovery_issuer_hint` (per the "When a migration adds OR drops any table with a FK relationship, update `_PLANNER_TABLES`" prevention-log entry).
+
+The atom fast-lane resolver and daily-index reconcile resolver are also edited: the `blockholder_filer_seeds` lookup branch is removed; the `blockholder_filers` lookup branch stays (now the SOLE resolution path; populated by PR11's discovery layer upstream of the manifest insert).
+
 **KEEP**:
 
-- `app/services/blockholders.py` lower-level helpers (`_upsert_filer`, `_upsert_filing_row`, `_record_13dg_observation_for_filing`, `_resolve_cusip_to_instrument_id`, `_archive_file_url`, `_record_ingest_attempt`, etc.) — actively used by the live manifest parser at `manifest_parsers/sec_13dg.py:60-69`.
+- `app/services/blockholders.py` lower-level helpers (`_upsert_filer`, `_upsert_filing_row`, `_record_13dg_observation_for_filing`, `_resolve_cusip_to_instrument_id`, `_archive_file_url`, `_record_ingest_attempt`, etc.) — actively used by the live manifest parser at [manifest_parsers/sec_13dg.py:60-69].
 - `blockholder_filers` table — auto-populated by discovery + parser via `_upsert_filer`; required for resolver lookup; required for `blockholder_filings` FK.
 - `blockholder_filings` table — raw chain; populated by parser; read by `sync_blockholders` and ownership rollup.
 - `blockholder_filings_ingest_log` table — written by parser via `_record_ingest_attempt`; required for operator audit.
-- All ownership_blockholders_* tables and refresh paths.
+- All `ownership_blockholders_*` tables and refresh paths.
 - All parser, provider, API, and rollup code paths.
 
 **Test impact**:
 
 - `tests/test_blockholders_ingester.py`: ~50% of cases reference `ingest_all_active_filers` or `ingest_filer_blockholders`; those cases are deleted. The remaining cases (lower-level helper tests + sync tests) stay.
-- `tests/test_manifest_parser_sec_13dg.py`: unchanged shape; adds one new test case for the retention-gate tombstone branch (chokepoint B).
+- `tests/test_manifest_parser_sec_13dg.py`: unchanged shape; adds new test cases for (a) chokepoint B tombstone branch, (b) issuer-hint short-circuit, (c) issuer-hint absent → CUSIP fallback.
 - `tests/test_sec_13dg_parser.py`: unchanged.
 - `tests/test_api_blockholders.py`: unchanged.
-- NEW `tests/test_sec_13dg_discovery.py`: covers the new discovery module — fake efts.sec.gov response fixtures + assertions on filer/manifest seeding + invariant on no out-of-window rows + pagination behaviour.
-- NEW `tests/test_ownership_observations_sync_blockholders_cap.py` (or fold into existing): covers chokepoint C gate.
+- NEW `tests/test_sec_13dg_discovery.py`: covers the new discovery module — fake `efts.sec.gov` response fixtures including:
+  - happy-path single filer
+  - joint filing with 2 filers (both seeded; first in lex order picked for manifest)
+  - joint filing with issuer CIK NOT in `ciks[0]` (defensive filer extraction, Codex 1a MEDIUM #8)
+  - duplicate CIK in `ciks[]` (dedup)
+  - no-CIK natural-person filer (name-only fallback, no manifest row for that filer — only CIK-bearing filers are seedable)
+  - exactly 100 hits page 1 followed by empty page 2 (pagination boundary, Codex 1a MEDIUM #9)
+  - re-discovery idempotency on second run (no duplicate manifest rows, no duplicate filer seeds)
+  - 3y window enforcement at query level (no out-of-window hits reach the manifest writer)
+  - steady-state watermark degrades to 3y floor on freshness-index gap (Codex 1a MEDIUM #10)
+- NEW `tests/test_ownership_observations_sync_blockholders_cap.py` (or fold into existing): covers chokepoint C gate — `bf.filed_at >= cutoff` predicate; row WITHOUT `filing_events` entry still syncs; row WITH pre-cap `bf.filed_at` excluded.
+- NEW `tests/test_rewash_blockholders_cap.py` (or fold into existing): covers chokepoint F — happy path uncapped for accessions with existing `blockholder_filings` rows; rescue path skipped for pre-cap accession with zero existing rows.
 
 ### 3.5 Bootstrap stage + scheduler wiring
+
+**Rate-limit surface (corrected — Codex 1a HIGH #7)**: there is no `app/services/sec_rate_limit.py` module. The actual throttle lives in `app/providers/implementations/sec_edgar.py:54-78` via:
+
+- `_PROCESS_REQ_TS` — process-wide last-request timestamp
+- `_PROCESS_RATE_LIMIT_LOCK` — process-wide threading.Lock guarding `_PROCESS_REQ_TS` reads/writes
+- `_SEC_RATE_FLOOR_SECONDS` — conservative inter-request floor (≈0.1s to stay under 10 req/s)
+
+Every `SecFilingsProvider` instance reuses these process-wide singletons via the constructor's `shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK` injection at [sec_edgar.py:246, :252]. Discovery uses `SecFilingsProvider` for ALL HTTP — including a new method `fetch_search_index_json(ciks, forms, startdt, enddt, from_offset, size)` that hits `efts.sec.gov/LATEST/search-index` — so discovery's requests share the 10 req/s budget with parser fetches automatically. The `lane="sec_rate"` on the bootstrap stage serializes the JOB (one discovery job at a time); the provider-internal throttle serializes REQUESTS across all SEC-touching jobs.
+
+**Discovery startdt resolution** (corrected — Codex 1a MEDIUM #10):
+
+```python
+def _resolve_discovery_startdt(
+    conn: psycopg.Connection,
+    *,
+    mode: Literal["bootstrap", "steady_state"],
+    issuer_cik: str | None = None,
+) -> date:
+    """Pick discovery window start, with 3y floor as the hard ceiling.
+
+    Bootstrap: always full 3y window.
+    Steady-state: derive from data_freshness_index watermark for sec_13d+sec_13g
+    keyed on (subject_type='blockholder_filer', issuer_cik) OR the LATEST blockholder_filings.filed_at for that issuer, minus a 7d safety overlap. CLAMP to the 3y floor so a watermark gap >3y can't reduce coverage.
+    """
+    floor = blockholders_retention_cutoff().date()
+    if mode == "bootstrap":
+        return floor
+    watermark = _load_freshness_watermark(conn, issuer_cik) or floor
+    return max(floor, watermark - timedelta(days=7))
+```
+
+This protects against the silent-gap risk where a >14d job outage would let recent filings slip through a flat sliding window. The 3y floor is the absolute upper bound; the watermark only ever NARROWS the window for the common case where steady-state ran recently.
 
 **NEW bootstrap stage** in `app/workers/scheduler.py` `_BOOTSTRAP_STAGE_SPECS`:
 
@@ -241,10 +353,10 @@ DROP TABLE IF EXISTS blockholder_filer_seeds;
     stage_key="sec_blockholders_discovery",
     lane="sec_rate",                # shared 10 req/s SEC budget
     job_name="sec_blockholders_discovery_job",
-    order=...,                       # post-PR1, post-PR5 (DEF14A discovery); pre-N-PORT? — set during impl
+    order=...,                       # post-PR1, post-PR5 (DEF14A discovery); pre-N-PORT — set during impl
     description="Universe-issuer-CIK-driven SC 13D/G discovery via efts.sec.gov, 3y cap",
     prerequisite="sec_universe_sync",  # depends on country='US' + is_tradable being populated
-    params={},                       # full-cohort scan; no dynamic resolution
+    params={"mode": "bootstrap"},   # full-cohort 3y scan
     max_runtime_seconds=3600,        # 1h default — should drain in ~10min for 5,174 issuers under shared budget
 )
 ```
@@ -254,31 +366,35 @@ DROP TABLE IF EXISTS blockholder_filer_seeds;
 ```python
 @register_job("sec_blockholders_discovery_job", JobLane.SEC_RATE)
 def sec_blockholders_discovery_job(params: dict[str, Any]) -> JobResult:
-    """Walk universe US-tradable issuer CIKs; enqueue SC 13D/G within 3y to manifest."""
+    """Walk universe US-tradable issuer CIKs; enqueue SC 13D/G within 3y window to manifest."""
+    mode = params.get("mode", "steady_state")  # bootstrap stage overrides via StageSpec.params
     result = discover_sec_13dg_for_universe(  # NEW in app/services/sec_13dg_discovery.py
-        sliding_window_days=14 if params.get("steady_state") else 365 * 3,
+        mode=mode,
         ...
     )
     return JobResult(...)
 ```
 
-Steady-state cron uses a tight 14d sliding window (catches new filings + amendments); bootstrap uses full 3y. The discriminator is the explicit `steady_state` flag in params (operator-controllable via admin UI).
+The steady-state job dispatches with empty params → defaults to `mode="steady_state"` which uses the watermark-derived startdt clamped to the 3y floor. The bootstrap stage explicitly dispatches `mode="bootstrap"` for the full-3y scan.
 
-**`data_freshness_index` integration**: NEW entries for `sec_13d` and `sec_13g` lanes per #863 — three-tier polling (fresh / stale / dormant). The discovery job + worker drain update `data_freshness_index.last_observed_at` automatically.
+**`data_freshness_index` integration**: NEW entries for `sec_13d` and `sec_13g` lanes per #863 — three-tier polling (fresh / stale / dormant). The discovery job + worker drain update `data_freshness_index.last_observed_at` automatically. The steady-state `_resolve_discovery_startdt` reads this index to derive its window watermark.
 
 ### 3.6 Lint guard
 
 NEW `scripts/check_13dg_retention.sh` (pre-push hook; PR5-style awk block walker; mirror of `check_n_csr_retention.sh`):
 
-Invariants:
+Invariants (REVISED post-Codex-1a — D corrected, H added for rewash):
 
 - **A — helpers present**: `app/services/blockholders.py` defines exactly one `def blockholders_retention_cutoff(` and one `def blockholders_within_retention(`. (Greps for the literal `def ` prefix on both names; fails if count ≠ 1 or if defined outside `blockholders.py`.)
-- **B — discovery query uses helper**: `app/services/sec_13dg_discovery.py` contains `startdt = blockholders_retention_cutoff()` (or equivalent assignment whose RHS is the helper call). Empty-grep `wc -l` guard per PR10a Codex iter 1 lesson.
-- **C — manifest gate placed BEFORE fetch**: `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` calls `blockholders_within_retention(` on a line whose line number precedes the first `fetch_document_text(` call inside the same function block. Awk-based block walker (PR4 Codex 1c lesson).
-- **D — sync uses helper + LEFT JOIN**: `app/services/ownership_observations_sync.py::sync_blockholders` contains both `LEFT JOIN filing_events` and `blockholders_retention_cutoff()` within the same function body (Codex 1b PR10b lesson — LEFT not INNER, so rows missing manifest entry still sync).
+- **B — discovery query uses helper**: `app/services/sec_13dg_discovery.py` contains a call to `blockholders_retention_cutoff()` AND a call to `_resolve_discovery_startdt(` (the watermark-clamped variant) AND the `_resolve_discovery_startdt` body references `blockholders_retention_cutoff()` (so the 3y floor cannot be bypassed by accident). Empty-grep `wc -l` guard per PR10a Codex iter 1 lesson.
+- **C — manifest gate placed BEFORE fetch + BEFORE store_raw**: `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` calls `blockholders_within_retention(` on a line whose line number precedes the first `fetch_document_text(` AND the first `store_raw(` invocation inside the same function block. Awk-based block walker (PR4 Codex 1c lesson).
+- **D — sync gates on `bf.filed_at` directly, NOT on `filing_events.filing_date`**: `app/services/ownership_observations_sync.py::sync_blockholders` body contains both (a) a literal `bf.filed_at >= ` predicate (or equivalent column-qualified comparison against the cutoff helper) AND (b) `blockholders_retention_cutoff()`; AND simultaneously FORBIDS the substring `fe.filing_date >=` or `filing_events.filing_date >=` anywhere in the function body. This pins the Codex 1a HIGH #4 lesson: `LEFT JOIN ... WHERE fe.filing_date >= cutoff` null-rejects rows missing a `filing_events` entry, so the gate must be on the raw chain's own column.
 - **E — refresh-current is exempt**: forbid any reference to `blockholders_retention_cutoff` or `blockholders_within_retention` inside `refresh_blockholders_current(` function block (the §4.5 13F-HR precedent: capping refresh would actively delete pre-wipe rows from `_current`).
 - **F — no append writers outside the helper-gated chokepoints**: forbid raw `INSERT INTO ownership_blockholders_observations` and raw `INSERT INTO blockholder_filings` outside (a) `app/services/blockholders.py` lower-level helpers and (b) the manifest parser. Catches future PRs that add a side-path writer skipping the cap.
-- **G — dormant entrypoints stay deleted**: forbid the literal symbols `ingest_all_active_filers` and `ingest_filer_blockholders` from re-appearing anywhere in `app/`. Catches accidental resurrection.
+- **G — dormant entrypoints stay deleted**: forbid the literal symbols `ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`, and `seed_filer` (the 13D/G variants) from re-appearing anywhere under `app/` AND under `scripts/` (except as comment-only mentions in the retirement note inside `scripts/seed_holder_coverage.py`). Catches accidental resurrection.
+- **H — rewash rescue-path gated (NEW post-Codex-1a)**: `app/services/rewash_filings.py::_apply_blockholders` function body contains a reference to `blockholders_within_retention(` (the rescue-path gate) AND the call precedes any `DELETE FROM blockholder_filings` or `_upsert_filing_row(` invocation inside the same function. Distinguishes happy-path (existing rows already in `blockholder_filings`) from rescue-path (zero rows → would re-introduce pre-cap observations through the back door).
+- **I — discovery uses provider throttle (no raw httpx)**: `app/services/sec_13dg_discovery.py` does NOT import `httpx` directly. All HTTP must route through `app.providers.implementations.sec_edgar.SecFilingsProvider` so the `_PROCESS_RATE_LIMIT_LOCK` throttle is honoured. Catches future PRs that add a side-channel fetch bypassing the 10 req/s budget.
+- **J — discovery uses `record_manifest_entry` (no raw INSERT)**: `app/services/sec_13dg_discovery.py` does NOT contain `INSERT INTO sec_filing_manifest` (raw SQL); all manifest writes route through `record_manifest_entry` from `app.services.sec_manifest` so the schema CHECK + idempotency contracts are honoured.
 
 Wired into `.githooks/pre-push` after the existing PR10b `check_form3_latest_per_pair.sh` and `check_form5_retention.sh` invocations.
 
@@ -307,8 +423,14 @@ The atom fast-lane resolver and daily-index reconcile resolver are also edited: 
 
 1. **Smoke-tested against panel** (AAPL, GME, MSFT, JPM, HD) on dev DB after merge. Expected: GME has ≥3 SC 13D/A (RC Ventures activist trail) + multiple SC 13G (Vanguard/BlackRock); AAPL likely has 0-1 SC 13D + handful of SC 13G; MSFT/JPM/HD have institutional 13G filings.
 2. **Cross-source verified**: At least one observation row's `(filer_cik, filed_at, percent_of_class)` cross-checked against SEC EDGAR direct (`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=<issuer>&type=SC+13`).
-3. **Backfill executed**: `POST /jobs/sec_rebuild/run` with `{"source": "sec_13d"}` and `{"source": "sec_13g"}` after merge. Manifest worker drains. PR description records the job invocations + final manifest pending counts.
-4. **Operator-visible figure verified**: `GET /instruments/GME/blockholders` and `/ownership-rollup?category=blockholders` render the RC Ventures + Vanguard/BlackRock entries post-backfill. PR description records the rendered figures.
+3. **Discovery executed first, THEN rebuild as needed** (corrected — Codex 1a HIGH #6):
+   - PR11 adds NEW universe rows; `POST /jobs/sec_rebuild/run` only re-enqueues EXISTING manifest rows. The correct post-merge sequence is:
+     1. Trigger the new bootstrap stage: `POST /jobs/sec_blockholders_discovery_job/run` with `{"mode": "bootstrap"}` (or invoke via the bootstrap-state-machine S?? stage if the operator is doing a full re-run; otherwise the explicit `/run` triggers the same job body).
+     2. Wait for discovery to drain (~9 min wall-clock under 10 req/s shared budget; observable via `data_freshness_index` + `sec_filing_manifest` `pending` count for `source IN ('sec_13d','sec_13g')`).
+     3. Manifest worker drains discovered accessions through `_parse_13dg` (already-live; no operator intervention).
+     4. Only AFTER discovery + worker drain does `POST /jobs/sec_rebuild/run` make sense — for re-parsing accessions with stale `parser_version` (the rewash happy path) or for retrying transient failures.
+   - PR description records (a) the discovery job invocation + final result counts (`issuers_scanned`, `accessions_discovered`, `manifest_rows_inserted`, `hints_written`) and (b) any subsequent rebuild invocations + outcomes.
+4. **Operator-visible figure verified**: `GET /instruments/GME/blockholders` and `/ownership-rollup?category=blockholders` render the RC Ventures + Vanguard/BlackRock entries post-discovery + post-worker-drain. PR description records the rendered figures.
 5. **PR description records the verification step + commit SHA** for each of clauses 1-4.
 
 ### 3.9 Provenance + parent spec amendments
@@ -324,14 +446,18 @@ Same PR amends `docs/superpowers/specs/2026-05-19-data-retention-rubric.md`:
 ## 4. Risks + mitigations
 
 | Risk | Mitigation |
-|---|---|
-| efts.sec.gov endpoint changes shape / undocumented | Fallback to `data.sec.gov/submissions/CIK{filer}.json` per-filer walk via a `blockholder_filers` view of known filers; if endpoint flat-out unavailable, discovery is no-op and operator paged via #863 freshness index |
-| Pagination edge case — issuer with >100 results in 3y window | Loop until `len(hits) < size`; smoke-test confirms 99th-percentile fits in 2 pages |
-| Joint-filing identification — `ciks[]` may have >2 entries | Filer set = `set(cik_list) - {issuer_cik_padded}`; enqueue one manifest row per filer; parser's per-reporter expansion downstream handles the joint case via existing `BlockholderFiling.reporting_persons` walker |
-| SEC rate-limit budget contention with other lanes during bootstrap | Stage uses `lane="sec_rate"` (shared semaphore); 5,400-request bootstrap discovery scan = ~9min wall-clock; fits inside default `max_runtime_seconds=3600` with 5x headroom |
-| Auto-populated `blockholder_filers.name` is sometimes joint-filing label (e.g. "RC Ventures LLC and Ryan Cohen") | Accept name as-is from `display_names[i]`; the resolver only joins on CIK; name is operator-visible label only — no functional impact |
-| Resurrection of dormant seed-driven path by future PR | Lint guard G forbids re-introduction of the deleted symbols; migration drops the seed table so the resurrection would also need to re-add the schema (loud, not silent) |
-| Existing `blockholder_filings` rows from prior smoke tests (if any) survive PR11 with stale parser_version | Per parent spec §6.3, existing rows untouched until pre-wipe; PR11 introduces no `parser_version` bump; if prior smoke-test rows exist they're either correct (live manifest path semantics preserved) or rebuilt by post-merge `POST /jobs/sec_rebuild/run` |
+| --- | --- |
+| `efts.sec.gov` endpoint changes shape / undocumented | Fallback to `data.sec.gov/submissions/CIK{filer}.json` per-filer walk via a `blockholder_filers` view of known filers (post-bootstrap, when the table has been seeded); if endpoint flat-out unavailable, discovery is no-op and operator paged via #863 freshness index. Discovery has explicit contract test against fixture response shapes so a silent endpoint drift fails CI before production. |
+| Pagination edge case — issuer with exactly 100 or 200 results in 3y window | Loop until `len(hits) < size`; fixture test pins the exact-100-hits boundary (Codex 1a MEDIUM #9). Smoke-test confirms 99th-percentile fits in 2 pages. |
+| Joint-filing identification — `ciks[]` may have >2 entries, issuer not in position 0, duplicate CIKs, or no-CIK natural-person filers | Defensive extraction per §3.1 step 3: filter `[c for c in cik_list if c.lstrip('0') != issuer_cik_unpadded]`; dedupe via set; pick min-lex filer CIK as manifest's `subject_id` for idempotent re-discovery; auto-seed every CIK-bearing filer into `blockholder_filers`. No-CIK natural-person filers can't be seeded (no PK) — those are surfaced inside the parsed `BlockholderFiling.reporting_persons` rows at parse-time and written to `blockholder_filings` with `reporter_cik=NULL, reporter_no_cik=TRUE`. Fixture tests pin each shape. |
+| SEC rate-limit budget contention with other lanes during bootstrap | Stage uses `lane="sec_rate"` (job-level serialization); requests further serialized by `_PROCESS_RATE_LIMIT_LOCK` in `sec_edgar.py` (10 req/s ceiling). 5,400-request bootstrap discovery scan = ~9min wall-clock; fits inside default `max_runtime_seconds=3600` with 5-6× headroom. |
+| Auto-populated `blockholder_filers.name` is sometimes a joint-filing label (e.g. "RC Ventures LLC and Ryan Cohen") | Accept name as-is from `display_names[i]` matched to its own CIK index (positional alignment per empirical observation); the resolver only joins on CIK; name is operator-visible label only — no functional impact. Fallback to `f"CIK {filer_cik}"` if display name is missing for a filer CIK index. |
+| Resurrection of dormant seed-driven path by future PR | Lint guard G forbids re-introduction of the deleted symbols (`ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`, `seed_filer`); migration drops the seed table so the resurrection would also need to re-add the schema (loud, not silent). Pre-push hook fails the push BEFORE the change lands. |
+| Existing `blockholder_filings` rows from prior smoke tests survive PR11 with stale parser_version | Per parent spec §6.3, existing rows untouched until pre-wipe; PR11 introduces no `parser_version` bump; if prior smoke-test rows exist they're either correct (live manifest path semantics preserved) or rebuilt by post-merge `POST /jobs/sec_rebuild/run` (which routes through the new chokepoint F rewash gate — rescue-path skip for pre-cap accessions, happy-path uncapped for existing rows). |
+| Silent CUSIP-unresolved gap for universe-discovered accessions (Codex 1a BLOCKING #2) | NEW `sec_13dg_discovery_issuer_hint` side-table per §3.4 carries `(accession_number → instrument_id, issuer_cik)` written by discovery; parser short-circuits CUSIP lookup when hint present. Legacy daily-index path continues to fall back to CUSIP (no regression for that path; the historical gap stays tracked under #740 for the legacy ingest surface). |
+| Steady-state >14d job outage silently shrinks coverage | `_resolve_discovery_startdt` clamps watermark to 3y floor (`max(floor, watermark - 7d)`); on first run after outage, the watermark is stale → falls back to 3y floor → discovery re-covers the whole window. Codex 1a MEDIUM #10 lesson. |
+| Rewash rescue-path re-introduces pre-cap accessions via the back door | Chokepoint F gate in `_apply_blockholders` distinguishes happy-path (existing rows present → uncapped, preserves §6.3 contract) from rescue-path (zero rows → would re-introduce pre-cap observations → SKIPPED if accession is outside retention). Lint invariant H pins the placement. |
+| `scripts/seed_holder_coverage.py` retirement breaks the 13F-HR / CUSIP-resolver / N-CEN paths (Codex 1a HIGH #5) | PR11 surgically removes only the 13D/G blockholder block from the script (constant, import, prints, ingest call); every other path is preserved. Script's CLI help text updated to note 13D/G is now universe-driven via bootstrap stage. |
 
 ## 5. Out of scope
 
@@ -343,15 +469,28 @@ Same PR amends `docs/superpowers/specs/2026-05-19-data-retention-rubric.md`:
 
 ## 6. Implementation sequencing (preview — full plan in writing-plans output)
 
-1. Schema migration `sql/15X_drop_blockholder_filer_seeds.sql` + `_PLANNER_TABLES` update.
-2. Helper additions in `app/services/blockholders.py` (`blockholders_retention_cutoff` + `blockholders_within_retention`).
-3. NEW `app/services/sec_13dg_discovery.py` (discovery module + `discover_sec_13dg_for_universe` entry-point).
-4. Cap gate in `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (chokepoint B, pre-fetch).
-5. Sync gate in `app/services/ownership_observations_sync.py::sync_blockholders` (chokepoint C, LEFT JOIN + filed_at filter).
-6. Resolver edits in `app/jobs/sec_atom_fast_lane.py` + `app/jobs/sec_daily_index_reconcile.py` (remove seed-list lookup branch; keep `blockholder_filers` lookup).
-7. DELETE dormant code from `app/services/blockholders.py` (`ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`).
-8. NEW scheduler job + bootstrap stage in `app/workers/scheduler.py`.
-9. NEW lint guard `scripts/check_13dg_retention.sh` + wire into `.githooks/pre-push`.
-10. NEW + UPDATED tests (parser cap, discovery, sync cap, refresh-current uncapped, dormant-symbol absence).
-11. Amend parent spec (`docs/superpowers/specs/2026-05-19-data-retention-rubric.md` §4.8, §7, §11, §12).
-12. PR description with the ETL clause 8-12 evidence + Codex 2 pre-push review.
+1. Schema migrations:
+   - `sql/15X_drop_blockholder_filer_seeds.sql`
+   - `sql/15Y_create_sec_13dg_discovery_issuer_hint.sql`
+   - `_PLANNER_TABLES` update (both add + drop).
+2. Helper additions in `app/services/blockholders.py` (`blockholders_retention_cutoff`, `blockholders_within_retention`, `INSIDER_BLOCKHOLDERS_RETENTION_YEARS = 3`).
+3. NEW `app/services/sec_13dg_discovery.py` (discovery module + `discover_sec_13dg_for_universe` entry-point + `_resolve_discovery_startdt` watermark helper + `DiscoveryResult` dataclass).
+4. NEW `SecFilingsProvider.fetch_search_index_json` method in `app/providers/implementations/sec_edgar.py` (or sibling) — single HTTP entrypoint for efts.sec.gov so `_PROCESS_RATE_LIMIT_LOCK` is honoured.
+5. Cap gate B in `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (pre-fetch, pre-store_raw); ADD issuer-hint short-circuit (look up `sec_13dg_discovery_issuer_hint`; use hint if present; else CUSIP fallback).
+6. Sync gate C in `app/services/ownership_observations_sync.py::sync_blockholders` (`bf.filed_at >= cutoff` predicate; NO `fe.filing_date` predicate).
+7. Rewash gate F in `app/services/rewash_filings.py::_apply_blockholders` (rescue-path skip for pre-cap; happy-path uncapped).
+8. Resolver edits in `app/jobs/sec_atom_fast_lane.py` + `app/jobs/sec_daily_index_reconcile.py` (remove seed-list lookup branch; keep `blockholder_filers` lookup).
+9. DELETE dormant code from `app/services/blockholders.py` (`ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`, `seed_filer`).
+10. EDIT `scripts/seed_holder_coverage.py` (surgical 13D/G block removal; preserve 13F-HR / CUSIP-resolver / N-CEN paths).
+11. NEW scheduler job `sec_blockholders_discovery_job` + bootstrap stage `sec_blockholders_discovery` in `app/workers/scheduler.py` + `data_freshness_index` entries for `sec_13d` + `sec_13g`.
+12. NEW lint guard `scripts/check_13dg_retention.sh` with placement invariants A-J + wire into `.githooks/pre-push`.
+13. NEW + UPDATED tests:
+    - parser cap + issuer-hint short-circuit + CUSIP fallback (`tests/test_manifest_parser_sec_13dg.py` additions)
+    - discovery module — fixture-driven `efts.sec.gov` responses, joint filings, pagination boundary, dedup, watermark degradation (`tests/test_sec_13dg_discovery.py` NEW)
+    - sync cap on `bf.filed_at`, LEFT JOIN preserves rows without `filing_events` entry (`tests/test_ownership_observations_sync_blockholders_cap.py` NEW or fold)
+    - rewash happy-path uncapped + rescue-path gated (`tests/test_rewash_blockholders_cap.py` NEW or fold)
+    - refresh-current uncapped invariant
+    - dormant symbol absence (lint-as-test or integration-test grep)
+    - delete dormant entrypoint test cases in `tests/test_blockholders_ingester.py`
+14. Amend parent spec (`docs/superpowers/specs/2026-05-19-data-retention-rubric.md` §4.8, §7, §11, §12).
+15. PR description with the ETL clause 8-12 evidence + Codex 2 pre-push review.
