@@ -1176,6 +1176,119 @@ def test_blockholders_apply_raises_on_empty_reporting_persons(
     assert result_row[0] == 1  # original reporter still on file
 
 
+def test_13f_infotable_rescue_branch_pre_cap_period_returns_false(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """PR6 #1233 §4.5 — rescue branch gates on period_of_report.
+
+    Rescue cohort = no existing rows in ``institutional_holdings`` for
+    the accession (the IF branch took rows=None and we fell into the
+    ELSE rescue branch's SELECT against
+    ``institutional_holdings_ingest_log``). A pre-cap period must NOT
+    write new typed rows via the rescue path; happy path is uncapped
+    by spec §6.3 (refresh of existing rows is allowed) but rescue is
+    effectively a fresh ingest.
+    """
+    from datetime import date as date_cls
+
+    from app.providers.implementations.sec_13f import ThirteenFHolding
+
+    conn = ebull_test_conn
+    instrument_id = 950_090
+    accession = "0001234567-26-13f-rescue-precap"
+    pre_cap_period = date_cls(2020, 3, 31)  # pre-cap at fixed_now = 2026-05-20
+
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'PRECAP13F', 'PreCap 13F', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES (%s, 'sec', 'cusip', 'PRECAP13F0', TRUE)
+        ON CONFLICT DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    # Filer + tombstoned ingest_log row with pre-cap period; zero
+    # institutional_holdings rows.
+    conn.execute(
+        """
+        INSERT INTO institutional_filers (cik, name)
+        VALUES ('0000111002', 'Test PreCap Filer')
+        ON CONFLICT (cik) DO NOTHING
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings_ingest_log (
+            accession_number, filer_cik, period_of_report, status
+        ) VALUES (%s, '0000111002', %s, 'partial')
+        """,
+        (accession, pre_cap_period),
+    )
+    _seed_raw(conn, accession=accession, kind="infotable_13f", parser_version="13f-infotable-v0")
+    conn.commit()
+
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: [
+            ThirteenFHolding(
+                name_of_issuer="PreCap Issuer",
+                title_of_class="COM",
+                cusip="PRECAP13F0",
+                value_usd=Decimal("1000"),
+                shares_or_principal=Decimal("100"),
+                shares_or_principal_type="SH",
+                investment_discretion="SOLE",
+                voting_sole=Decimal("100"),
+                voting_shared=Decimal("0"),
+                voting_none=Decimal("0"),
+                put_call=None,
+            )
+        ],
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    from unittest.mock import patch
+
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+    with patch("app.services.institutional_holdings.datetime") as mock_dt:
+        mock_dt.now.return_value = fixed_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        result = rewash_filings.run_rewash(conn, document_kind="infotable_13f")
+
+    # Cap returns False → rewash counts the row as skipped (not bumped).
+    assert result.rows_reparsed == 0
+    assert result.rows_skipped == 1
+
+    # No typed rows written.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM institutional_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        count = cur.fetchone()
+    assert count is not None
+    assert count[0] == 0
+
+
 def test_13f_infotable_apply_raises_on_empty_parse(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

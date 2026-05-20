@@ -62,6 +62,14 @@ bash scripts/check_form4_retention.sh
 echo "==> Pre-push gate: DEF 14A latest-N cap lint"
 bash scripts/check_def14a_cap.sh
 
+# #1233 §4.5 PR6 — every 13F-HR ingest chokepoint must honour the
+# 8-quarter retention cap (parse_submissions_index intrinsic floor,
+# _ingest_single_accession post-parse gate, manifest-worker post-parse
+# gate, bulk-dataset per-row gate, rewash rescue gate, sync_institutions
+# SQL predicate). ~40ms.
+echo "==> Pre-push gate: 13F-HR 8-quarter retention cap lint"
+bash scripts/check_13f_hr_retention.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

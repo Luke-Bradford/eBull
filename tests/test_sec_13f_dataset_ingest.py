@@ -433,11 +433,23 @@ class TestRealArchiveEdgeCases:
         )
         archive_path = tmp_path / "form13f.zip"
         archive_path.write_bytes(archive_bytes)
-        result = ingest_13f_dataset_archive(
-            conn=ebull_test_conn,
-            archive_path=archive_path,
-            ingest_run_id=uuid4(),
-        )
+        # PR6 #1233 §4.5 — pin ``now`` to early 2023 so the
+        # ``thirteen_f_retention_cutoff`` admits the 2022-Q3 period
+        # under test. The 8q cap is exercised separately in
+        # ``tests/test_thirteen_f_retention_cap.py``; this test focuses
+        # on the VALUE-cutover scaling.
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        historical_now = datetime(2023, 1, 15, 12, 0, 0, tzinfo=UTC)
+        with patch("app.services.institutional_holdings.datetime") as mock_dt:
+            mock_dt.now.return_value = historical_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = ingest_13f_dataset_archive(
+                conn=ebull_test_conn,
+                archive_path=archive_path,
+                ingest_run_id=uuid4(),
+            )
         ebull_test_conn.commit()
         assert result.rows_written == 1
         with ebull_test_conn.cursor() as cur:

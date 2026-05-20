@@ -72,6 +72,85 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# 13F-HR 8-quarter retention cap (#1233 PR6, spec §4.5)
+# ---------------------------------------------------------------------------
+
+# 13F-HR period_of_report is always a calendar quarter end. Spec §4.5
+# caps depth at 8 quarter-ends per filer. Anchoring the cutoff to
+# quarter boundaries (not a floating ``today - 760d`` window) keeps the
+# admitted set strictly = 8 quarter-ends.
+#
+# Ingest-side cap only — existing rows are untouched until the
+# operator-driven pre-wipe + clean re-run (spec §6.3). Cutoff is
+# computed in Python and passed as a `date` everywhere, NOT as
+# `NOW() - make_interval(...)` which carries DB session-timezone
+# ambiguity. UTC anchor — local-TZ ``date.today()`` would drift the
+# cutoff by ±1 day on non-UTC dev hosts.
+THIRTEEN_F_HR_RETENTION_QUARTERS: int = 8
+
+
+def _calendar_quarter_end(year: int, quarter_idx: int) -> date:
+    return {
+        1: date(year, 3, 31),
+        2: date(year, 6, 30),
+        3: date(year, 9, 30),
+        4: date(year, 12, 31),
+    }[quarter_idx]
+
+
+def thirteen_f_retention_cutoff(now: datetime | None = None) -> date:
+    """Earliest ``period_of_report`` accepted for 13F-HR / 13F-HR/A.
+
+    Returns the quarter-end exactly
+    ``THIRTEEN_F_HR_RETENTION_QUARTERS - 1`` quarters before the most
+    recent COMPLETED calendar quarter end. Boundary inclusive — exactly
+    8 quarter-ends survive at every moment of every day. A floating
+    ``today - 760d`` cutoff would slip to nine admitted quarter-ends
+    right after a new quarter completes (Codex 1a §1 lesson).
+
+    ``now`` must be a tz-aware datetime; the helper normalises to UTC
+    before taking ``.date()`` so the cutoff doesn't drift on non-UTC
+    callers.
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    if now.tzinfo is None:
+        raise ValueError(
+            "thirteen_f_retention_cutoff: ``now`` must be a tz-aware datetime; "
+            "naive datetimes would honour the caller's local TZ and drift the cutoff."
+        )
+    today = now.astimezone(UTC).date()
+    if today.month <= 3:
+        latest_y, latest_q = today.year - 1, 4
+    elif today.month <= 6:
+        latest_y, latest_q = today.year, 1
+    elif today.month <= 9:
+        latest_y, latest_q = today.year, 2
+    else:
+        latest_y, latest_q = today.year, 3
+    latest_global = latest_y * 4 + (latest_q - 1)
+    target_global = latest_global - (THIRTEEN_F_HR_RETENTION_QUARTERS - 1)
+    target_y, target_q_zero = divmod(target_global, 4)
+    return _calendar_quarter_end(target_y, target_q_zero + 1)
+
+
+def thirteen_f_within_retention(
+    period_of_report: date | None,
+    now: datetime | None = None,
+) -> bool:
+    """Boundary check used by every 13F-HR writer chokepoint.
+
+    Returns True iff
+    ``period_of_report >= thirteen_f_retention_cutoff(now)``.
+    A None ``period_of_report`` returns False — defensive: an accession
+    we couldn't tag with a quarter end is unsafe to admit.
+    """
+    if period_of_report is None:
+        return False
+    return period_of_report >= thirteen_f_retention_cutoff(now)
+
+
+# ---------------------------------------------------------------------------
 # Provider contract
 # ---------------------------------------------------------------------------
 
@@ -141,6 +220,12 @@ class _AccessionOutcome:
     holdings_inserted: int
     holdings_skipped_no_cusip: int
     error: str | None
+    # PR6 #1233 §4.5 — defensive post-parse gate may discover a parsed
+    # ``period_of_report`` that the submissions JSON didn't carry (NULL
+    # / malformed ``reportDate`` leaked past the index filter). Thread
+    # it back through the outcome so the caller's ingest-log row
+    # records the audit-grade period rather than a sentinel ``None``.
+    period_of_report_override: date | None = None
 
     @property
     def ingested(self) -> bool:
@@ -214,13 +299,23 @@ def parse_submissions_index(
     For active filers (banks, asset managers) the recent array can
     cover 60+ years of filings since most issuers file far fewer
     than 1,000 reports per decade. ``min_period_of_report`` (#1008)
-    bounds historical depth: when set, accessions whose
+    is the caller's additional floor: when set, accessions whose
     ``period_of_report`` is older than the cut-off are skipped.
     Pre-2013 13F filings additionally have no machine-readable
     primary_doc / infotable structure, so iterating them costs an
     SEC fetch + parse and yields zero rows. First-install bootstrap
     passes a recent cut-off (last 4 quarters); the standalone
-    weekly cron leaves it ``None`` for full historical coverage.
+    weekly cron leaves it ``None`` to inherit only the intrinsic cap.
+
+    PR6 #1233 §4.5 — the intrinsic 8-quarter retention cap
+    (``thirteen_f_retention_cutoff``) is the EFFECTIVE FLOOR:
+    caller-provided ``min_period_of_report`` raises the floor (more
+    recent caller floors win), but ``None`` no longer means "full
+    history" — it means "intrinsic 8q cap." The legacy per-accession
+    ``period is None`` short-circuit is preserved at the line-level
+    (a NULL ``reportDate`` row leaks past the index filter and is
+    caught by the defensive post-parse gate in
+    ``_ingest_single_accession``).
     """
     try:
         data: dict[str, Any] = json.loads(payload)
@@ -235,6 +330,15 @@ def parse_submissions_index(
     filing_dates = recent.get("filingDate", [])
     report_dates = recent.get("reportDate", [])
 
+    # PR6 #1233 §4.5 — effective floor = max(caller_floor, intrinsic_cap).
+    # ``None`` caller falls back to the intrinsic cap; a caller passing
+    # a more-recent floor (e.g. bootstrap stage 21's 380d / 4q) wins.
+    intrinsic_floor = thirteen_f_retention_cutoff()
+    if min_period_of_report is None:
+        effective_floor = intrinsic_floor
+    else:
+        effective_floor = max(min_period_of_report, intrinsic_floor)
+
     out: list[AccessionRef] = []
     for i, accession in enumerate(accessions):
         if i >= len(forms):
@@ -244,10 +348,12 @@ def parse_submissions_index(
             continue
         filed_at = _safe_iso_datetime(filing_dates[i] if i < len(filing_dates) else "")
         period = _safe_iso_date(report_dates[i] if i < len(report_dates) else "")
-        if min_period_of_report is not None and period is not None and period < min_period_of_report:
-            # #1008 — first-install bootstrap caller passes a recent
-            # cut-off so we don't iterate pre-2013 filings whose
-            # primary_doc/infotable XML structure didn't exist yet.
+        if period is not None and period < effective_floor:
+            # PR6 #1233 §4.5 — applies both the intrinsic 8q cap and
+            # the caller-provided ``min_period_of_report``. A NULL
+            # ``reportDate`` (period is None) leaks past this filter
+            # and is caught by ``_ingest_single_accession``'s post-
+            # parse gate.
             continue
         out.append(
             AccessionRef(
@@ -928,7 +1034,12 @@ def ingest_filer_13f(
             conn,
             filer_cik=cik,
             accession_number=ref.accession_number,
-            period_of_report=ref.period_of_report,
+            # Prefer the parser-derived period when the per-accession
+            # driver surfaced one (defensive post-parse gate path); else
+            # fall back to ``ref.period_of_report`` from the submissions
+            # index. Codex 2 LOW — without this, the defensive-gate
+            # branch wrote NULL despite knowing the parsed period.
+            period_of_report=outcome.period_of_report_override or ref.period_of_report,
             status=outcome.status,
             holdings_inserted=outcome.holdings_inserted,
             holdings_skipped=outcome.holdings_skipped_no_cusip,
@@ -1278,6 +1389,30 @@ def _ingest_single_accession(
             holdings_inserted=0,
             holdings_skipped_no_cusip=0,
             error=f"primary_doc.xml parse failed: {exc}",
+        )
+
+    # PR6 #1233 §4.5 — defensive post-parse gate. submissions JSON may
+    # carry a NULL / malformed ``reportDate`` for some accessions;
+    # those leak past ``parse_submissions_index``'s ``period is None``
+    # short-circuit. Re-check against the parsed period and short-circuit
+    # before fetching the (often-large) infotable.
+    if not thirteen_f_within_retention(info.period_of_report):
+        logger.debug(
+            "13F ingest: cik=%s accession=%s period=%s pre-8q retention cap; skipping",
+            filer_cik,
+            ref.accession_number,
+            info.period_of_report,
+        )
+        return _AccessionOutcome(
+            status="failed",
+            holdings_inserted=0,
+            holdings_skipped_no_cusip=0,
+            error="retention floor",
+            # Surface the parsed period so the caller writes an audit-
+            # grade ingest-log row instead of carrying ``ref.period_of_report=None``
+            # forward (the defensive-gate path is exactly the case
+            # where ``ref.period_of_report`` is None). Codex 2 LOW.
+            period_of_report_override=info.period_of_report,
         )
 
     infotable_xml = sec.fetch_document_text(infotable_url)

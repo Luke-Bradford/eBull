@@ -294,13 +294,23 @@ def sync_institutions(
     Per Codex plan-review finding #2: filer_id → cik resolution is
     explicit; orphans (filer_id without parent row) are logged and
     skipped, never silently dropped. ``ownership_nature='economic'``
-    for the equity slice; ``exposure_kind`` mirrors ``is_put_call``."""
+    for the equity slice; ``exposure_kind`` mirrors ``is_put_call``.
+
+    PR6 #1233 §4.5 — the 8-quarter retention cap is enforced as a SQL
+    predicate so this scheduled repair sweep cannot repopulate pre-cap
+    observations from any pre-cap ``institutional_holdings`` rows that
+    still exist in the dev DB pre-pre-wipe. ``since`` is the caller's
+    optional ADDITIONAL floor (incremental repair); the cap is the
+    intrinsic floor."""
+    from app.services.institutional_holdings import thirteen_f_retention_cutoff
+
     summary = SyncSummary()
     instruments_touched: set[int] = set()
     run_id = uuid4()
 
-    where = "WHERE 1=1"
-    params: dict[str, Any] = {}
+    retention_cutoff = thirteen_f_retention_cutoff()
+    where = "WHERE ih.period_of_report >= %(retention_cutoff)s"
+    params: dict[str, Any] = {"retention_cutoff": retention_cutoff}
     if since is not None:
         where += " AND ih.period_of_report >= %(since)s"
         params["since"] = since

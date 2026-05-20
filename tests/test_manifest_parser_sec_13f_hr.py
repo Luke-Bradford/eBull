@@ -677,7 +677,18 @@ def test_pre_2023_filed_at_scales_value_by_thousand(
 
     monkeypatch.setattr(parser_module, "parse_primary_doc", _fake_primary_doc)
 
-    stats = run_manifest_worker(ebull_test_conn, source="sec_13f_hr", max_rows=10)
+    # PR6 #1233 §4.5 — period_of_report=2022-09-30 is pre-cap under the
+    # default ``thirteen_f_retention_cutoff``. Pin ``now`` so the cap is
+    # historically anchored to 2023-Q1 and the pre-cutover fixture
+    # survives the gate. This test exercises the VALUE-cutover scaling,
+    # not the retention cap.
+    from unittest.mock import patch
+
+    historical_now = datetime(2023, 1, 15, 12, 0, 0, tzinfo=UTC)
+    with patch("app.services.institutional_holdings.datetime") as mock_dt:
+        mock_dt.now.return_value = historical_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        stats = run_manifest_worker(ebull_test_conn, source="sec_13f_hr", max_rows=10)
     ebull_test_conn.commit()
 
     assert stats.parsed == 1
@@ -746,6 +757,110 @@ def test_ingest_log_preserves_period_on_failure_after_success(
     assert row[0] == "failed"
     # The critical assertion: period preserved despite a NULL write.
     assert row[1] == date_cls(2024, 9, 30)
+
+
+def _fake_primary_xml_with_period(period_mdY: str, signature_mdY: str = "04-15-2020") -> str:
+    """``_FAKE_PRIMARY_XML`` clone with a configurable periodOfReport.
+
+    Used by the PR6 retention-cap tests below to land a pre-cap quarter
+    end without disturbing the happy-path fixture (locked at 2024-Q3).
+    """
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler">
+  <headerData>
+    <filerInfo>
+      <filer>
+        <credentials>
+          <cik>0001067983</cik>
+        </credentials>
+      </filer>
+      <periodOfReport>{period_mdY}</periodOfReport>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPage>
+      <reportCalendarOrQuarter>{period_mdY}</reportCalendarOrQuarter>
+      <filingManager>
+        <name>BERKSHIRE HATHAWAY INC</name>
+        <address>
+          <street1>3555 Farnam Street</street1>
+          <city>Omaha</city>
+          <stateOrCountry>NE</stateOrCountry>
+          <zipCode>68131</zipCode>
+        </address>
+      </filingManager>
+    </coverPage>
+    <signatureBlock>
+      <signatureDate>{signature_mdY}</signatureDate>
+    </signatureBlock>
+  </formData>
+</edgarSubmission>
+"""
+
+
+def test_pre_cap_period_tombstones_before_infotable_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR6 #1233 §4.5 — pre-cap period_of_report skips infotable fetch.
+
+    Manifest worker fetches index + primary_doc, parses, then checks
+    the cap. If the parsed period is pre-cap (cutoff anchored to
+    2024-06-30 at the test's fixed_now of 2026-05-20), the manifest is
+    tombstoned with error='retention floor' BEFORE the infotable URL
+    is touched. The ingest-log row carries the parsed period for audit.
+    """
+    from datetime import date as date_cls
+    from unittest.mock import patch
+
+    accession = "0001067983-20-000099"
+    filer_cik = "0001067983"
+    _seed_pending_13f_hr(ebull_test_conn, accession=accession, filer_cik=filer_cik)
+    ebull_test_conn.commit()
+
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession.replace('-', '')}/"
+    pre_cap_primary = _fake_primary_xml_with_period("03-31-2020", signature_mdY="04-15-2020")
+    calls = _patch_fetch_map(
+        monkeypatch,
+        {
+            base + "index.json": _index_json(),
+            base + "primary_doc.xml": pre_cap_primary,
+            # If the cap fails closed, this URL would be hit and the
+            # assertion below would catch it.
+            base + "infotable.xml": _infotable_xml(holdings=[{"cusip": "037833100"}]),
+        },
+    )
+
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+    with patch("app.services.institutional_holdings.datetime") as mock_dt:
+        mock_dt.now.return_value = fixed_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        stats = run_manifest_worker(ebull_test_conn, source="sec_13f_hr", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    row = get_manifest_row(ebull_test_conn, accession)
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.error == "retention floor"
+    # raw_status='stored' — primary_doc.xml WAS fetched + persisted before
+    # the cap check (we still want the body for diagnostics).
+    assert row.raw_status == "stored"
+
+    # CRITICAL: infotable.xml URL must NEVER appear in the fetch calls.
+    assert base + "infotable.xml" not in calls
+
+    # Ingest-log row carries the parsed period for audit visibility.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, period_of_report, error FROM institutional_holdings_ingest_log WHERE accession_number = %s",
+            (accession,),
+        )
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "failed"
+    assert log[1] == date_cls(2020, 3, 31)
+    assert log[2] == "retention floor"
 
 
 def test_parser_registered_via_register_all() -> None:

@@ -747,6 +747,7 @@ def _apply_13f_infotable(
     from app.services.institutional_holdings import (
         _resolve_cusip_to_instrument_id,
         _upsert_holding,
+        thirteen_f_within_retention,
     )
 
     # Resolution priority:
@@ -802,6 +803,14 @@ def _apply_13f_infotable(
     if row is None:
         return False
     filer_id, period_of_report, filed_at = row
+    # PR6 #1233 §4.5 — rescue-branch cap. Happy path (the IF branch
+    # above) re-parses existing in-cap rows and refreshes parser_version
+    # under the spec §6.3 "existing rows untouched" contract. This
+    # rescue branch is effectively a fresh ingest (was zero typed rows,
+    # now populating them); pre-cap accessions must not enter via the
+    # rescue path — they'd write NEW rows outside the 8q window.
+    if not had_existing_holdings and not thirteen_f_within_retention(period_of_report):
+        return False
 
     try:
         holdings = parse_infotable(raw_doc.payload)

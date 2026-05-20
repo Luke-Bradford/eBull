@@ -34,6 +34,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from app.services.institutional_holdings import thirteen_f_retention_cutoff
 from app.services.ownership_observations import record_institution_observation
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class Form13FIngestResult:
     rows_skipped_unresolved_cusip: int = 0
     rows_skipped_orphan_accession: int = 0
     rows_skipped_bad_data: int = 0
+    rows_skipped_retention: int = 0  # PR6 #1233 §4.5
     parse_errors: int = 0
     touched_instrument_ids: set[int] = field(default_factory=set)
 
@@ -256,6 +258,13 @@ def ingest_13f_dataset_archive(
     # (Codex sweep BLOCKING).
     cusip_map = _load_cusip_map(conn)
 
+    # PR6 #1233 §4.5 — archive-level retention cutoff. Resolve once
+    # OUTSIDE the per-row INFOTABLE loop so a multi-million-row drain
+    # doesn't re-evaluate ``date.today()`` per row (and so a sentinel
+    # mid-drain ``today`` boundary roll doesn't admit some rows and
+    # reject others within the same archive).
+    retention_cutoff = thirteen_f_retention_cutoff()
+
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
         coverpages = _open_tsv(zf, "COVERPAGE.tsv")
@@ -302,6 +311,14 @@ def ingest_13f_dataset_archive(
             period_end = _parse_period_end(cover.get("REPORTCALENDARORQUARTER"))
             if filed_at is None or period_end is None:
                 result.rows_skipped_bad_data += 1
+                continue
+
+            # PR6 #1233 §4.5 — per-row retention gate. Bulk dataset
+            # archives can span 30+ years; the per-row check honours
+            # the calendar-quarter cap regardless of the archive's
+            # nominal coverage window.
+            if period_end < retention_cutoff:
+                result.rows_skipped_retention += 1
                 continue
 
             # SSHPRNAMT carries shares OR principal-amount depending on
