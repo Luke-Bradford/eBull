@@ -71,6 +71,7 @@ from app.services.insider_transactions import (
     _PARSER_VERSION_FORM5,
     _canonical_form_4_url,
     _write_tombstone,
+    form4_within_retention,
     parse_form_3_xml,
     parse_form_4_xml,
     parse_form_5_xml,
@@ -117,6 +118,7 @@ def _parse_form4(
     accession = row.accession_number
     instrument_id = row.instrument_id
     url = row.primary_document_url
+    filed_at = row.filed_at
 
     if instrument_id is None:
         logger.warning(
@@ -137,6 +139,36 @@ def _parse_form4(
             status="tombstoned",
             parser_version=_PARSER_VERSION_FORM4,
             error="missing primary_document_url",
+        )
+    # PR4 (#1233 §4.3) — Form 4 3y retention cap, pre-fetch gate.
+    # `filed_at` is DB-NOT-NULL, but the parser-side type is permissive
+    # (`Any`); defensive tombstone on None matches the existing
+    # missing-metadata pattern above. Past-cap rows are tombstoned
+    # rather than `failed` because the skip is deterministic — retry
+    # would never change the answer. Pre-fetch placement means no
+    # `filing_raw_documents` row is written, so the recovery path for
+    # a future cap widening is the manifest source-reset
+    # (`POST /jobs/sec_rebuild/run`), not parser-version rewash.
+    if filed_at is None:
+        logger.warning(
+            "form4 manifest parser: accession=%s has no filed_at; tombstoning",
+            accession,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM4,
+            error="missing filed_at",
+        )
+    if not form4_within_retention(filed_at.date()):
+        logger.debug(
+            "form4 manifest parser: accession=%s filed_at=%s pre-3y retention cap; tombstoning",
+            accession,
+            filed_at,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM4,
+            error="retention floor",
         )
 
     canonical_url = _canonical_form_4_url(url)

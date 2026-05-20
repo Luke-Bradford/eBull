@@ -39,6 +39,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from app.services.insider_transactions import form4_retention_cutoff
 from app.services.ownership_observations import record_insider_observation
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,13 @@ class InsiderIngestResult:
     rows_skipped_unresolved_cik: int = 0
     rows_skipped_orphan_owner: int = 0
     rows_skipped_bad_data: int = 0
+    # PR4 (#1233 §4.3) — Form 4 / 4-A rows whose ``FILING_DATE`` falls
+    # before the 3y retention cap. Counted separately from
+    # ``rows_skipped_bad_data`` so operator-visible logging can
+    # distinguish deliberate retention skips from malformed input.
+    # Form 3 and Form 5 rows are NOT counted here — they continue to
+    # ingest unbounded until PR10's latest-only cap lands.
+    rows_skipped_retention: int = 0
     parse_errors: int = 0
     touched_instrument_ids: set[int] = field(default_factory=set)
 
@@ -263,6 +271,13 @@ def ingest_insider_dataset_archive(
 
     result = InsiderIngestResult()
 
+    # PR4 (#1233 §4.3) — Form 4 / 4-A 3y retention cap, archive scope.
+    # Anchor the cutoff to a single instant for the whole archive so a
+    # long walk crossing midnight UTC uses one boundary. Form 3 and
+    # Form 5 rows are NOT gated here — they ride to PR10's latest-only
+    # cap.
+    retention_cutoff = form4_retention_cutoff()
+
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
         owners = _open_tsv(zf, "REPORTINGOWNER.tsv", "REPORTING_OWNER.tsv")
@@ -314,6 +329,14 @@ def ingest_insider_dataset_archive(
             filed_at = _parse_filing_date(sub.get("FILING_DATE") or sub.get("DATE_FILED"))
             if filed_at is None:
                 result.rows_skipped_bad_data += 1
+                continue
+
+            # PR4 retention cap — Form 4 / 4-A only. `_map_form_to_source`
+            # collapses Form 4 + Form 5 into "form4" but the cap applies
+            # to Form 4 only; route on the raw form string instead.
+            form_upper = (form or "").strip().upper()
+            if form_upper.startswith("4") and filed_at.date() < retention_cutoff:
+                result.rows_skipped_retention += 1
                 continue
 
             period_end = _parse_iso_date(trans.get("TRANS_DATE")) or _parse_iso_date(sub.get("PERIOD_OF_REPORT"))
@@ -373,6 +396,14 @@ def ingest_insider_dataset_archive(
             filed_at = _parse_filing_date(sub.get("FILING_DATE") or sub.get("DATE_FILED"))
             if filed_at is None:
                 result.rows_skipped_bad_data += 1
+                continue
+
+            # PR4 retention cap — Form 4 / 4-A only. Form 3 initial-
+            # holdings statements typically land in this loop (no
+            # NONDERIV_TRANS rows); the gate must NOT touch them.
+            form_upper = (form or "").strip().upper()
+            if form_upper.startswith("4") and filed_at.date() < retention_cutoff:
+                result.rows_skipped_retention += 1
                 continue
 
             period_end = _parse_iso_date(sub.get("PERIOD_OF_REPORT"))

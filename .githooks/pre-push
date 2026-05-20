@@ -50,6 +50,12 @@ uv run pyright
 echo "==> Pre-push gate: INSERT INTO instruments lint"
 bash scripts/check_instruments_inserts.sh
 
+# #1233 §4.3 PR4 — every Form 4 ingest chokepoint must honour the 3y
+# retention cap (legacy SQL `%(retention_cutoff)s` bindings, manifest-
+# worker pre-fetch gate, bulk-dataset per-loop gates). ~30ms.
+echo "==> Pre-push gate: Form 4 retention cap lint"
+bash scripts/check_form4_retention.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually
