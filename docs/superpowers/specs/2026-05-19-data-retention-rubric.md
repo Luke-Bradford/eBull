@@ -169,7 +169,7 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 47k raw rows, 17 MB; 40k obs rows, 24 MB; combined ~50 MB.
 - **Half-life**: **slow state, but only LATEST matters** — DEF 14A is the annual snapshot; the prior year's snapshot is decoration.
 - **Consumers**: top-5-holders pie chart; AI thesis "Top 5 institutional holders are…"; executive-comp slice (separate epic).
-- **Ingest depth cap**: **latest 2 proxies per filer** (current + one prior for change tracking) at the parser. Older filings not fetched.
+- **Ingest depth cap**: **latest 2 PRIMARY `DEF 14A` accessions per filer** (current + one prior for change tracking) at every chokepoint (discovery rank CTE, manifest-worker pre-fetch gate, rewash rescue gate). Supplemental form variants (`DEFA14A`, `DEFR14A`, `DEFM14A`) are **uncapped** — a same-cycle DEFA14A shouldn't evict the prior-year primary `DEF 14A` from the cap window; supplements are rare amendments / merger proxies that don't drive bandwidth pressure. Codex 1a (PR5) lesson.
 - **NUMERIC overflow bug**: #1228 — fix already landed via PR5 fold-in (#1236).
 - **Existing rows**: untouched until pre-wipe (§6.3).
 - **Why this matters**: not storage (small); ingest-budget. DEF 14A is HTML scrape — 1h per pass with deadline cap; 5y of proxies × 5,174 filers = un-drainable in one pass. 2-proxy cap = ~80% reduction in candidate set.
@@ -330,7 +330,7 @@ Land per-source PRs in this order. Each PR is **ingest-side cap only** — no PR
 - **PR2 — SHIPPED (#1237).** Companyfacts XBRL concept whitelist (~50 numeric us-gaap + ~3 DEI concepts) + 20y rolling cap at the parser. Every write path (bulk + steady-state).
 - **PR3 — pending.** Filing events 10y rolling cap at the parser. Applied uniformly across every filing_type via every discovery writer. Schema columns + existing rows untouched.
 - **PR4 — IN PROGRESS.** Form 4 / 4-A 3y ingest cap at every writer chokepoint (legacy filing_events SELECTs, manifest-worker `_parse_form4` pre-fetch gate, bulk-dataset Form-4-only filter). Cumulative-rollup invariant pinned by steady-state test; synthetic opening-balance anchor NOT written (§4.3 amendment, this commit). Recency cohort bound inherited from PR1 `is_tradable=TRUE` filter (no insider-filer cohort table; Form 4 walked per-issuer-CIK via filing_events). Includes a parity lint guard catching new chokepoints that omit the predicate.
-- **PR5 — partially shipped (#1236 NUMERIC fix).** DEF 14A latest-2-proxies cap at the parser. NUMERIC overflow #1228 already folded.
+- **PR5 — SHIPPED.** DEF 14A latest-2-PRIMARY-proxies cap at discovery + parser + rewash-rescue chokepoints. Supplemental form variants (DEFA14A / DEFR14A / DEFM14A) uncapped (§4.7). NUMERIC overflow #1228 already folded (#1236).
 - **PR6 — pending.** 13F-HR 8-quarter ingest cap at the parser. (#1010 cohort bound already in place.)
 - **PR7 — pending.** N-PORT 8-quarter cap (mirror of PR6). N-PORT recency cohort bound (`last_nport_at`) per #1010 pattern.
 - **PR8 — pending.** N-CSR/N-CSRS validate existing 2y horizon. Doc-only unless drift found.
@@ -401,24 +401,26 @@ Per #1208 cadence:
 
 State as of this commit:
 
-- PR1 bundles cross-cutting code (country populate + is_tradable filter audit + lint guard) AND this spec revision (drop-policy → ingest-side-caps-only).
-- PR2 (#1237) + PR5 NUMERIC fix (#1236) already shipped.
-- PR3-PR12 remain — every one is ingest-side cap only, no row deletion. The pre-wipe is the single operator event at the end.
+- PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix
+  (#1236) and PR5 latest-2-primary cap (this commit) all shipped.
+- PR6-PR12 remain — every one is ingest-side cap only, no row deletion.
+  The pre-wipe is the single operator event at the end.
 
 ```text
-After PR1 merges, the next session picks up PR3
-(filing_events 10y rolling cap at the parser).
+After PR5 merges, the next session picks up PR6
+(13F-HR 8-quarter ingest cap at the parser).
 
-PR3 scope:
-- Identify every filing_events discovery writer (Atom fast-lane, daily-index
-  reconcile, first-install drain, per-CIK poll, targeted rebuild).
-- Apply 10y depth cap at the parser layer so every writer respects it.
-- Preserve raw_payload_json (#1014 is the separate slice).
-- No DELETE of pre-10y rows. They survive until the §6.3 pre-wipe.
+PR6 scope:
+- 13F-HR observations: per-filer 8-quarter rank cap.
+- #1010 cohort bound (last_13f_hr_at 380d) already in place — the
+  cohort is bounded; PR6 adds per-filer depth.
+- Identify every 13F-HR writer (manifest-worker parser, bulk drain,
+  rewash path) and apply the per-quarter rank cap at each.
+- No DELETE of pre-8q rows. They survive until the §6.3 pre-wipe.
 
 FIRST ACTIONS:
-1. Read CLAUDE.md working order + the revised §3.3 / §4.2 / §6.3 / §7.
-2. Confirm PR1 merged. Confirm #1233 still OPEN as the umbrella.
-3. Branch `feature/1233-pr3-filing-events-10y-cap`.
+1. Read CLAUDE.md working order + the revised §4.5.
+2. Confirm PR5 merged. Confirm #1233 still OPEN as the umbrella.
+3. Branch `feature/1233-pr6-13f-hr-8q-cap`.
 4. Codex 1a on plan, then Codex 2 pre-push, then PR.
 ```

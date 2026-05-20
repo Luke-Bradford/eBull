@@ -572,28 +572,40 @@ class TestBootstrapDef14a:
         self,
         _setup: psycopg.Connection[tuple],
     ) -> None:
-        """Three pending accessions, chunk_limit=2 → two chunks
-        consumed by one bootstrap call (the deadline doesn't fire,
-        the empty-chunk break does)."""
+        """Four pending accessions across TWO filers (2 each),
+        chunk_limit=2 → two chunks consumed by one bootstrap call
+        (the deadline doesn't fire, the empty-chunk break does).
+
+        #1233 PR5 cap: 2 primary accessions per filer is the cap.
+        Two filers × 2 accessions exercises the chunking loop while
+        keeping every accession within the cap so the legacy
+        "drains across chunks" contract holds.
+        """
         conn = _setup
+        # Filer A is the default ``839_001`` seeded in ``_setup``;
+        # seed a second filer here.
+        _seed_instrument(conn, iid=839_002, symbol="BOOTB")
+        _seed_sec_profile(conn, instrument_id=839_002, cik="0000839002")
+
         urls: dict[str, str | None] = {}
-        for i in range(3):
-            url = f"https://www.sec.gov/Archives/edgar/data/839001/000083900125-00000{i}/d.htm"
-            urls[url] = _proxy_html_with_table()
-            _seed_filing_event(
-                conn,
-                instrument_id=839_001,
-                accession=f"0000839001-25-00000{i}",
-                filing_date=date(2026, 1, 15 + i),
-                primary_document_url=url,
-            )
+        for filer_iid, base in [(839_001, "0000839001"), (839_002, "0000839002")]:
+            for i in range(2):
+                url = f"https://www.sec.gov/Archives/edgar/data/{filer_iid}/{base}25-00000{i}/d.htm"
+                urls[url] = _proxy_html_with_table()
+                _seed_filing_event(
+                    conn,
+                    instrument_id=filer_iid,
+                    accession=f"{base}-25-00000{i}",
+                    filing_date=date(2026, 1, 15 + i),
+                    primary_document_url=url,
+                )
         conn.commit()
         fetcher = _InMemoryFetcher(urls)
 
         summary = bootstrap_def14a(conn, fetcher, chunk_limit=2, max_runtime_seconds=60)
-        assert summary.accessions_seen == 3
-        assert summary.accessions_succeeded == 3
-        assert summary.rows_inserted == 9  # 3 holders × 3 accessions
+        assert summary.accessions_seen == 4
+        assert summary.accessions_succeeded == 4
+        assert summary.rows_inserted == 12  # 3 holders × 4 accessions
 
     def test_idempotent_second_run_is_noop(
         self,

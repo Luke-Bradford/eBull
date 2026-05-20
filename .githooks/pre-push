@@ -56,6 +56,12 @@ bash scripts/check_instruments_inserts.sh
 echo "==> Pre-push gate: Form 4 retention cap lint"
 bash scripts/check_form4_retention.sh
 
+# #1233 §4.7 PR5 — every DEF 14A ingest chokepoint must honour the
+# latest-2-primary-proxies-per-filer cap (discovery rank CTE, manifest-
+# worker pre-fetch gate, rewash rescue gate). ~40ms.
+echo "==> Pre-push gate: DEF 14A latest-N cap lint"
+bash scripts/check_def14a_cap.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

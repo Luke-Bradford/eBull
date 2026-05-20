@@ -69,6 +69,7 @@ from app.services.def14a_ingest import (
     _record_ingest_attempt,
     _resolve_issuer_cik,
     _upsert_holding,
+    def14a_within_cap,
 )
 from app.services.manifest_parsers._classify import (
     format_upsert_error,
@@ -189,6 +190,29 @@ def _parse_def14a(
             status="tombstoned",
             parser_version=_PARSER_VERSION_DEF14A,
             error="missing instrument_id",
+        )
+
+    # #1233 PR5 §4.2 — latest-N-primary-proxies-per-filer pre-fetch
+    # gate. Refuses pre-rank-2 DEF 14A accessions BEFORE the SEC HTTP
+    # call so no rate-limit budget is burned. Supplemental form
+    # variants (DEFA14A / DEFR14A / DEFM14A) and CIK-missing
+    # accessions pass the helper and proceed via their existing
+    # tombstone paths. Out-of-corpus rows (no filing_events source)
+    # refuse — safe default for manifest rows whose source-of-truth
+    # is missing.
+    if not def14a_within_cap(
+        conn,
+        accession_number=accession,
+        instrument_id=instrument_id,
+    ):
+        logger.debug(
+            "def14a manifest parser: accession=%s exceeds latest-N primary cap; tombstoning",
+            accession,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_DEF14A,
+            error="latest-N primary cap",
         )
 
     try:

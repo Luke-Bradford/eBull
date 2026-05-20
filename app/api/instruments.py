@@ -2511,6 +2511,10 @@ def get_def14a_drill(
         # that compared them and false-positived.
         cur.execute(
             """
+            -- DEF14A-CAP-EXEMPT: read-side coverage/diagnostic
+            -- query — reports what's been ingested; not a writer
+            -- chokepoint. #1233 PR5 cap applies only to ingest
+            -- decisions.
             SELECT provider_filing_id AS accession, filing_date
             FROM filing_events
             WHERE provider = 'sec'
@@ -2547,6 +2551,8 @@ def get_def14a_drill(
         # signal, not row-level.
         cur.execute(
             """
+            -- DEF14A-CAP-EXEMPT: read-side coverage/diagnostic
+            -- (tombstone-count). Not an ingest chokepoint.
             SELECT COUNT(DISTINCT log.accession_number) AS tombstone_count
             FROM def14a_ingest_log log
             WHERE log.status IN ('partial', 'failed')
@@ -2564,6 +2570,8 @@ def get_def14a_drill(
         tomb = cur.fetchone() or {"tombstone_count": 0}
         cur.execute(
             """
+            -- DEF14A-CAP-EXEMPT: read-side coverage/diagnostic
+            -- (raw-body count). Not an ingest chokepoint.
             SELECT COUNT(DISTINCT r.accession_number) AS body_count
             FROM filing_raw_documents r
             JOIN filing_events fe ON fe.provider_filing_id = r.accession_number
@@ -2588,6 +2596,8 @@ def get_def14a_drill(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
+            -- DEF14A-CAP-EXEMPT: read-side coverage/diagnostic
+            -- (discovered-unparsed count). Not an ingest chokepoint.
             SELECT COUNT(*) AS c
             FROM filing_events fe
             WHERE fe.provider = 'sec'
