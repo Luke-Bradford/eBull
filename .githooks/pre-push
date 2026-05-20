@@ -98,6 +98,18 @@ bash scripts/check_n_csr_retention.sh
 echo "==> Pre-push gate: N-CEN latest-only invariant lint"
 bash scripts/check_ncen_latest_only.sh
 
+# #1233 §4.10 PR10a — business-summary 10-K Item 1 latest-only cap is
+# enforced STRUCTURALLY like N-CEN (PR9). Invariants:
+# (A) schema PK on instrument_id, (B) no-demotion (filed_at,
+# source_accession) tuple-comparison predicate + NULL-incumbent
+# re-baseline branch, (C) bounded UPSERT writer surface — exactly two
+# canonical INSERT chokepoints inside the service module and zero
+# elsewhere, (D) manifest worker excludes the source_accession-
+# mutating record_parse_attempt helper (filed_at-ASC drain safety).
+# ~20ms.
+echo "==> Pre-push gate: business_summary latest-only invariant lint"
+bash scripts/check_business_summary_latest_only.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

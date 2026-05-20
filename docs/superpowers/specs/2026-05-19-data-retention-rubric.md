@@ -4,7 +4,7 @@
 >
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 >
-> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter cap (#1242), PR7 N-PORT 8-quarter cap (#1243), PR8 N-CSR 730d cap (#1244), and **PR9 N-CEN latest-only invariant pin (this commit)** shipped. PR1 revision reframed the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
+> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter cap (#1242), PR7 N-PORT 8-quarter cap (#1243), PR8 N-CSR 730d cap (#1244), PR9 N-CEN latest-only invariant pin (#1245), and **PR10a business-summary latest-only invariant pin (this commit)** shipped. PR10 was split into PR10a (this commit — business summary §4.10 only) + PR10b (Form 3 / Form 5 §4.4 — follow-up) because Form 3/5 are observations-shaped at write while business summary is structurally latest-only via `instrument_business_summary.instrument_id PRIMARY KEY` + the existing no-demotion gate; spec §7 already permitted the split. PR1 revision reframed the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
 
 ## 0. Status snapshot (2026-05-19 17:00 UTC, mid-drain)
 
@@ -203,7 +203,16 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 10,744 rows.
 - **Half-life**: **slow state, latest only** — business model doesn't change rapidly; the latest 10-K subsumes prior.
 - **Consumers**: instrument page text panel; AI thesis "company is in business of…" context.
-- **Ingest depth cap**: **latest 10-K per CIK** at the parser. Post-wipe clean re-run naturally lands one row per CIK.
+- **Ingest depth cap**: **latest 10-K per instrument — PR10a SHIPPED.** Like PR9 (N-CEN), latest-only is enforced **structurally** rather than via a horizon helper:
+  1. **Schema** — `instrument_business_summary.instrument_id` is `PRIMARY KEY` ([sql/055_instrument_business_summary.sql:22](sql/055_instrument_business_summary.sql#L22)) with `ON DELETE CASCADE` against `instruments.instrument_id`. The DB physically refuses a second row per instrument. (Note: PR10a pins this at the **instrument** grain; share-class siblings on the same CIK each carry their own row via the manifest worker's sibling fan-out at [sec_10k.py:356](app/services/manifest_parsers/sec_10k.py#L356) — the "per CIK" wording in earlier draft was loose, the real invariant is one row per `instrument_id`.)
+  2. **Writer** — `upsert_business_summary` ([app/services/business_summary.py:892](app/services/business_summary.py#L892)) is the canonical gated INSERT path; its UPSERT carries the no-demotion row-constructor `WHERE instrument_business_summary.filed_at IS NULL OR (EXCLUDED.filed_at IS NOT NULL AND (EXCLUDED.filed_at, EXCLUDED.source_accession) >= (instrument_business_summary.filed_at, instrument_business_summary.source_accession))` predicate. NULL incumbents (legacy / pre-#1151 rows) re-baseline on first dated write; dated incumbents stay put when an older `(filed_at, source_accession)` tuple arrives. The (filed_at, source_accession) tuple subsumes the PR9 same-day tie-break: a same-day filing with a higher SEC accession number lexicographically advances the tuple comparison.
+  3. **Tombstone helper** — `record_parse_attempt` ([app/services/business_summary.py:1037](app/services/business_summary.py#L1037)) is the only other INSERT writer against the table; it mutates `source_accession` unconditionally on conflict because the legacy bulk path that owns it picks `DISTINCT ON (instrument_id) ORDER BY filing_date DESC` (newest-first) and never re-enters with a stale accession. Pinned at runtime by `tests/test_manifest_parser_sec_10k.py::test_tombstone_path_does_not_mutate_existing_body_summary_row` — the manifest worker (which drains `filed_at`-ASC) MUST NOT route through this helper.
+  4. **Manifest writer** — [app/services/manifest_parsers/sec_10k.py:358](app/services/manifest_parsers/sec_10k.py#L358) calls `upsert_business_summary` per share-class sibling under one batched savepoint; suppression returns are treated as a successful drain (no body write, no error).
+- **Chokepoint coverage (PR10a)**: smallest of any PR after PR9. No new gate code: latest-only is enforced structurally by (a) the schema PK, (b) the no-demotion predicate in `upsert_business_summary`, (c) bounded UPSERT writer surface (exactly two `INSERT INTO instrument_business_summary` chokepoints in the service module — `upsert_business_summary` + `record_parse_attempt` — and zero in any other production *.py file under `app/`), (d) the manifest worker's exclusion of `record_parse_attempt`. Lint guard `scripts/check_business_summary_latest_only.sh` pins all four invariants against future regression and is wired into `.githooks/pre-push` after PR9's `check_ncen_latest_only.sh`. Runtime behaviour is already pinned by the existing manifest-level tests `test_filed_at_gate_suppresses_older_arrival`, `test_filed_at_gate_allows_newer_arrival`, `test_same_day_accession_tiebreaker_picks_later`, `test_same_day_accession_tiebreaker_suppresses_lower`, and the tombstone-safety test cited above — PR10a does not add new behaviour tests because the gate semantics are already covered (PR9 added new tests because `_upsert_classification` had no prior cross-pass promotion / demotion coverage).
+- **No bulk-dataset / no rewash / no SQL repair sweep**: 10-K Item 1 has no SEC bulk archive (per-accession HTML fetch only), no rewash-rescue branch (the legacy bulk path's 10-K/A → prior-plain-10-K fallback at [business_summary.py:1737](app/services/business_summary.py#L1737) routes through the same `upsert_business_summary` gate), and no SQL repair sweep. If a future PR adds ANY of those code paths it MUST share the gated upsert (no append paths, no ungated UPDATEs against `instrument_business_summary`) AND extend `check_business_summary_latest_only.sh` with the new chokepoint's invariant.
+- **Cohort bound**: SEC universe filter (`instruments.country='US'` after PR1 + `is_tradable=TRUE`) constrains the candidate set. No `last_10k_at` recency bound — 10-K cadence is already annual, so a recency filter would shed nothing.
+- **Existing rows**: untouched. The pre-wipe (§6.3) + clean re-run will land at most one row per instrument by construction.
+- **Why this matters**: small storage (~10k rows; bodies TOAST-compressed), but **load-bearing for the operator-visible business summary panel + AI thesis context**. The structural cap is not the storage win; it's the bug-class lockout — the lint guard makes "someone adds a second 10-K writer path that bypasses the gate" or "the manifest worker is refactored to use `record_parse_attempt` on parse failure" push-time failures instead of silent regressions surfacing months later when an older 10-K's narrative briefly overwrites a newer one during a filed_at-ASC drain.
 
 ### 4.11 Treasury / ESOP / blockholder slices
 
@@ -363,11 +372,12 @@ Land per-source PRs in this order. Each PR is **ingest-side cap only** — no PR
 - **PR7 — SHIPPED.** N-PORT 8-quarter (24-month) ingest cap at every writer chokepoint (parse_submissions_index intrinsic floor, _ingest_single_accession defensive post-parse gate, manifest-worker post-parse gate, bulk-dataset per-row gate). Cap anchored to **calendar month-ends** via `n_port_retention_cutoff` (NOT calendar-quarter-ends — fiscal-Q-non-calendar funds would otherwise be silently rejected). Cohort bound shipped in the same PR (mirror of #1010 — bootstrap stage 22 dispatches with `min_last_seen_filed_at = today - 380d` via `_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF`; daily / Admin / manual paths use full cohort). Lint guard `scripts/check_nport_retention.sh` with seven PR5-style placement invariants A/B/C/D/F/H/I (no E for rewash, no G for sync_funds — both chokepoints don't exist for N-PORT). `sec_n_port_ingest` migrated from `_adapt_zero_arg` to native `JobInvoker(params)` so stage 22 params reach the body.
 - **PR8 — SHIPPED.** N-CSR / N-CSRS 730d filed-at ingest cap at every writer chokepoint (bootstrap drain via shared `n_csr_retention_cutoff` helper + manifest-worker `_parse_sec_n_csr` pre-fetch retention gate placed BEFORE iXBRL fetch). Drift audit found the original 730d cap existed ONLY in bootstrap drain — atom / daily-index / per-CIK poll / master-idx all enqueued uncapped, and the worker parsed every accession. `horizon_days` param removed from public signature + scheduler invoker + param_metadata (single source of truth in the helper). Lint guard `scripts/check_n_csr_retention.sh` with three placement invariants (A helpers in canonical module / B bootstrap drain uses helper / D manifest-worker gate placed before fetch). Smallest chokepoint surface of any PR — no `_ingest_single_accession`, no bulk-dataset, no rewash, no SQL repair sweep.
 - **PR9 — SHIPPED.** N-CEN latest-only invariant pin. No new gate code: latest-only is enforced structurally by (a) `cik PRIMARY KEY` on `ncen_filer_classifications`, (b) `_upsert_classification`'s UPSERT clause with no-demotion row-constructor predicate `WHERE (EXCLUDED.filed_at, EXCLUDED.accession_number) >= (existing.filed_at, existing.accession_number)` (Codex 1a HIGH + Codex 2 Medium tie-break for the N-CEN/A-same-day-as-original case), (c) `_find_latest_ncen`'s newest-first walk + early return (Codex 2 Medium D-2 forbid-list pins out `reversed(` / `sorted(` / `.sort(`), (d) `compose_filer_type`'s `LIMIT 1` read on a PK-deduped table. Lint guard `scripts/check_ncen_latest_only.sh` pins all four invariants against future regression. Three new tests added: `test_promotes_to_newer_accession_across_passes`, `test_does_not_demote_to_older_accession` (with `fetched_at` immutability assertion — strongest no-mutation proof), `test_same_day_older_accession_does_not_clobber_newer` (tie-break case). Smallest PR in the rubric by line count — N-CEN's classification-table semantics make a horizon cap structurally redundant.
-- **PR10 — pending.** Form 3/5 latest-only at the parser + business summary (10-K Item 1) latest-only at the parser.
+- **PR10a — SHIPPED.** Business-summary (10-K Item 1) latest-only invariant pin. Like PR9 (N-CEN), no new gate code: latest-only is enforced structurally by (a) `instrument_business_summary.instrument_id` PK, (b) `upsert_business_summary`'s UPSERT with no-demotion predicate `WHERE instrument_business_summary.filed_at IS NULL OR (EXCLUDED.filed_at, EXCLUDED.source_accession) >= (...)`, (c) bounded UPSERT writer surface (2 INSERT chokepoints in `app/services/business_summary.py`, 0 elsewhere under `app/`), (d) manifest worker excludes the source_accession-mutating `record_parse_attempt` helper. Lint guard `scripts/check_business_summary_latest_only.sh` with placement invariants A / B / C / D. Runtime behaviour already pinned by `test_filed_at_gate_*` + `test_same_day_accession_tiebreaker_*` + `test_tombstone_path_does_not_mutate_existing_body_summary_row` in `tests/test_manifest_parser_sec_10k.py`; PR10a adds no new behaviour tests because the gate semantics are already covered. Spec §4.10 amended in the same commit. Splits PR10 from the original "Form 3/5 + business summary in one PR" framing — PR10b owns Form 3/5 (observations-shaped at write; needs a different cap shape).
+- **PR10b — pending.** Form 3 / Form 5 latest-per-pair cap. Form 3: read-side latest-per-pair via `list_baseline_only_insider_holdings` `DISTINCT ON (filer_cik, security_title, is_derivative)` is the existing semantic; PR10b adds a lint pin against drift of the SELECT shape (no write-side schema change — `insider_filings.accession_number` PK + `insider_initial_holdings.row_num` natural key continue to support per-accession append). Form 5: ingest-time horizon helper (likely 1y `filed_at` cap, matching the annual filing cadence) wired into both manifest-worker `_parse_form5` ([app/services/manifest_parsers/insider_345.py:542](app/services/manifest_parsers/insider_345.py#L542)) and bulk-dataset `ingest_insider_dataset_archive` ([app/services/sec_insider_dataset_ingest.py:277](app/services/sec_insider_dataset_ingest.py#L277) — the PR4 carve-out explicitly defers Form 5 to PR10's latest-only). Form 5 horizon helper sits next to `form4_retention_cutoff` / `form4_within_retention` for consistency; lint guard mirrors the PR4 form4 chokepoint-parity shape.
 - **PR11 — pending.** 13D/G activate dormant pipeline with 3y historical + current-state cap at the parser.
 - **PR12 — pending.** `ownership_*_current` size audit + remediation (no row-deletion — schema audit only; if wide-row write bug found, fix the writer; existing rows reshape happens via the pre-wipe).
 
-After PR1-PR12 land, the operator triggers the **pre-wipe + clean re-run** (§6.3) — a whole-DB controlled wipe + clean bootstrap re-ingest under all caps. The clean re-run measures the new ceiling.
+After PR1-PR12 land (PR10 split into PR10a + PR10b), the operator triggers the **pre-wipe + clean re-run** (§6.3) — a whole-DB controlled wipe + clean bootstrap re-ingest under all caps. The clean re-run measures the new ceiling.
 
 ## 8. Acceptance
 
@@ -432,57 +442,97 @@ State as of this commit:
 - PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix
   (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter
   cap (#1242), PR7 N-PORT 8-quarter cap (#1243), PR8 N-CSR 730d
-  cap (#1244), and **PR9 N-CEN latest-only invariant pin (this commit)**
+  cap (#1244), PR9 N-CEN latest-only invariant pin (#1245), and
+  **PR10a business-summary latest-only invariant pin (this commit)**
   all shipped.
-- PR10-PR12 remain — every one is ingest-side cap only, no row deletion.
+- PR10b (Form 3 / Form 5), PR11 (13D/G), PR12 (`ownership_*_current`
+  audit) remain — every one is ingest-side cap only, no row deletion.
   The pre-wipe is the single operator event at the end.
 
-PR9 audit summary (for the record):
+PR10a audit summary (for the record):
 
-- N-CEN architecturally diverges from PR5-PR8. Those PRs added
-  ingest-time horizon helpers (`*_retention_cutoff` / `*_within_retention`)
-  applied at multiple writer chokepoints because the underlying tables
-  are append-only observations. N-CEN's `ncen_filer_classifications` is
-  a classification table — `cik` is the primary key, so the DB itself
-  refuses multi-row drift.
-- No manifest-worker parser exists for N-CEN
-  (`app/services/manifest_parsers/sec_n_cen.py` is absent).
-- No bulk-dataset / rewash / SQL repair-sweep paths exist.
-- No scheduled cron job. The classifier is operator-driven via
-  `scripts/seed_holder_coverage.py:449`.
-- Two existing tests already pin the runtime invariant
-  (`test_picks_latest_ncen`, `test_re_run_upserts_in_place`); PR9 adds
-  `test_promotes_to_newer_accession_across_passes` to cover the missing
-  cross-pass promotion case.
+- Business-summary architecturally matches the N-CEN pattern from
+  PR9: `instrument_business_summary.instrument_id` is `PRIMARY KEY`
+  (single-instrument grain enforced at the schema layer) and
+  `upsert_business_summary` already carried the no-demotion gate
+  `(EXCLUDED.filed_at, EXCLUDED.source_accession) >= (...)` from
+  #1151's Option C work. PR10a's contribution is the lint guard
+  pinning the four structural invariants against future regression
+  — there is no new gate code.
+- Two INSERT writer chokepoints exist by design:
+  `upsert_business_summary` (the gated path) and
+  `record_parse_attempt` (a tombstone helper that mutates
+  `source_accession` but only when invoked newest-first from the
+  legacy bulk path; the manifest worker's filed_at-ASC drain is
+  explicitly forbidden from routing through this helper by the
+  pre-existing `test_tombstone_path_does_not_mutate_existing_body_summary_row`).
+- No bulk-dataset path (SEC publishes no 10-K bulk archive — every
+  10-K Item 1 is a per-accession HTML fetch).
+- No rewash function and no SQL repair sweep. The legacy bulk path's
+  10-K/A → prior-plain-10-K fallback at
+  `business_summary.py:1737` routes through the same gated upsert.
+- Runtime behaviour already pinned by `test_filed_at_gate_*` +
+  `test_same_day_accession_tiebreaker_*` +
+  `test_tombstone_path_does_not_mutate_existing_body_summary_row`
+  in `tests/test_manifest_parser_sec_10k.py`. PR10a does NOT add
+  new behaviour tests because the existing coverage already pins
+  every direction of the gate (suppress older, allow newer, same-day
+  picks-later, same-day suppresses-lower, NULL-incumbent
+  re-baseline, tombstone path leaves incumbent intact).
+- Spec §4.10 amended in the same commit to record the structural
+  invariants explicitly.
 
 ```text
-After PR9 merges, the next session picks up PR10 (Form 3 / Form 5
-latest-only at the parser + business summary (10-K Item 1)
-latest-only at the parser).
+After PR10a merges, the next session picks up PR10b (Form 3 / Form 5
+latest-per-pair cap).
 
-PR10 scope:
-- Form 3 (initial insider filing) + Form 5 (annual catch-up). Per
-  §4.4 the cap is "latest per insider-company pair" — confirm the
-  current parser overwrites a single row per pair rather than
-  appending one observation per filing.
-- Business summary (10-K Item 1, `business_summaries` table). Per
-  §4.10 the cap is "latest 10-K per CIK" — confirm the writer
-  upserts on `cik` PK / unique constraint and only the latest 10-K's
-  Item 1 narrative is retained.
-- If either is already structurally latest-only (PR9 pattern): pin
-  via lint guard + tests.
-- If either is observations-shaped (PR8 pattern): apply
-  `*_retention_cutoff` / `*_within_retention` helper at every writer
-  chokepoint.
-- One PR can cover both if both are structurally latest-only; if
-  either requires a horizon helper, split into PR10a / PR10b.
+PR10b scope (split from original PR10 framing because Form 3/5 are
+observations-shaped at write, not structurally latest-only):
 
-FIRST ACTIONS:
-1. Read CLAUDE.md working order + spec §4.4 (Form 3 / Form 5) + §4.10
-   (business summary).
-2. Confirm PR9 merged. Confirm #1233 still OPEN.
-3. Branch `feature/1233-pr10-form35-business-summary-cap`.
-4. Audit Form 3/5 + business_summaries schema + writer paths the same
-   way PR9 audited N-CEN: schema PK / writer count / UPSERT clause /
-   discovery early-return.
+- Form 3 (initial insider filing). Per §4.4 the cap is "latest per
+  insider-company pair". `insider_filings.accession_number` is PK,
+  so the table appends one row per accession; latest-per-pair is
+  already enforced at READ time by
+  `list_baseline_only_insider_holdings`'s
+  `DISTINCT ON (filer_cik, security_title, is_derivative)` ordered
+  `as_of_date DESC, accession_number DESC, row_num ASC`. PR10b's job
+  for Form 3: pin the SELECT shape via lint guard + a new behaviour
+  test that exercises latest-per-pair on a synthesised
+  multi-Form-3-per-pair fixture. No write-side schema change. The
+  existing `INSIDER_FORM3_BACKFILL_FLOOR_YEARS = None` stays —
+  Form 3 lifetime volume per issuer is bounded (~5-30 lifetime),
+  and a 10y-old Form 3 for a still-serving officer IS the correct
+  baseline.
+
+- Form 5 (annual catch-up of any missed Form 4s). Per §4.4 the cap
+  is "latest only matters"; per the PR4 carve-out at
+  `sec_insider_dataset_ingest.py:277` Form 5 explicitly defers to
+  PR10's latest-only. Because Form 5 transactions persist into
+  `insider_transactions` (PK `accession_number` + per-row
+  transaction_id) just like Form 4, latest-per-pair at write time
+  is not enforceable without a schema overhaul. PR10b applies a
+  filed_at horizon helper instead: `form5_retention_cutoff()` /
+  `form5_within_retention()` next to `form4_*` (likely 1y, matching
+  the annual filing cadence — empirical Form 5 volume is one
+  filing per insider per year, so a 1y cap admits exactly one
+  per pair on the typical case). Wire into manifest-worker
+  `_parse_form5` (pre-fetch gate, mirrors PR4) AND
+  `ingest_insider_dataset_archive` (per-row Form 5 gate, replaces
+  the carve-out at line 277). Lint guard `scripts/check_form5_retention.sh`
+  with two placement invariants (manifest gate, bulk gate). The
+  helper depth value should be confirmed against empirical Form 5
+  volume during the PR10b audit — 1y is the proposed default.
+
+FIRST ACTIONS for PR10b:
+1. Read CLAUDE.md working order + spec §4.4 (Form 3/5) + the PR4
+   carve-out comment at `sec_insider_dataset_ingest.py:277`.
+2. Confirm PR10a merged. Confirm #1233 still OPEN.
+3. Branch `feature/1233-pr10b-form35-cap`.
+4. Audit Form 5 ingest volume against an empirical sample to confirm
+   the proposed 1y horizon (vs 18m for amendment-window safety) is
+   right.
+5. Audit Form 3 read-side DISTINCT ON shape + identify the lint
+   anchor (likely the literal `DISTINCT ON (` opener inside
+   `list_baseline_only_insider_holdings`'s SQL block, mirrored by
+   PR9-style awk function-scope counting).
 ```
