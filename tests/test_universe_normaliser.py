@@ -368,3 +368,154 @@ class TestUniverseInstrumentTypeUpsert:
         sync_universe(provider, ebull_test_conn)
         ebull_test_conn.commit()
         assert _read_instrument_type_id(ebull_test_conn, 950012) == 6
+
+
+# ---------------------------------------------------------------------------
+# sync_universe — country derives from exchanges.country (#1233 §6.1)
+# ---------------------------------------------------------------------------
+
+
+def _read_country(conn: psycopg.Connection[tuple], instrument_id: int) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT country FROM instruments WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _seed_exchange(conn: psycopg.Connection[tuple], *, exchange_id: str, country: str | None, asset_class: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO exchanges (exchange_id, country, asset_class)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (exchange_id) DO UPDATE SET country = EXCLUDED.country, asset_class = EXCLUDED.asset_class
+            """,
+            (exchange_id, country, asset_class),
+        )
+
+
+def _make_record_with_exchange(
+    *,
+    provider_id: str,
+    symbol: str,
+    exchange: str | None,
+) -> InstrumentRecord:
+    return InstrumentRecord(
+        provider_id=provider_id,
+        symbol=symbol,
+        company_name=f"{symbol} Co.",
+        exchange=exchange,
+        currency="USD",
+        sector=None,
+        industry=None,
+        country=None,  # provider does not supply country (#1233 §6.1)
+        is_tradable=True,
+        instrument_type=None,
+        instrument_type_id=None,
+    )
+
+
+@pytest.mark.integration
+class TestUniverseCountryDerivesFromExchanges:
+    """``instruments.country`` is derived from ``exchanges.country`` via
+    the ``instruments.exchange = exchanges.exchange_id`` join — eToro
+    does not expose country in the instruments endpoint (#1233 §6.1)."""
+
+    def test_us_exchange_populates_country_us(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # exchange_id='4' is curated as US equity per sql/067.
+        _seed_exchange(ebull_test_conn, exchange_id="4", country="US", asset_class="us_equity")
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="970001", symbol="USEQ1", exchange="4"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_country(ebull_test_conn, 970001) == "US"
+
+    def test_country_null_for_uncurated_exchange(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # Crypto exchange has NULL country in seed (sql/067 line 92).
+        _seed_exchange(ebull_test_conn, exchange_id="8", country=None, asset_class="crypto")
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="970002", symbol="CRYPTO1", exchange="8"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_country(ebull_test_conn, 970002) is None
+
+    def test_country_refreshes_when_operator_recurates_exchange(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Operator re-classifies an exchange from NULL→'US'; the next
+        sync_universe pass propagates the new country."""
+        _seed_exchange(ebull_test_conn, exchange_id="970", country=None, asset_class="unknown")
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="970003", symbol="RECLASS", exchange="970"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_country(ebull_test_conn, 970003) is None
+
+        # Operator curates the exchange.
+        _seed_exchange(ebull_test_conn, exchange_id="970", country="GB", asset_class="uk_equity")
+        ebull_test_conn.commit()
+
+        # Next provider pass — country derives fresh from the join.
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_country(ebull_test_conn, 970003) == "GB"
+
+    def test_missing_exchange_row_preserves_prior_country(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex 2 pre-push edge case: if the exchange row is missing
+        from ``exchanges`` (transient bootstrap order, brand-new
+        exchange not yet seeded by sql/067), the upsert must preserve
+        the existing ``instruments.country`` rather than wipe it to
+        NULL."""
+        # Seed a curated exchange + instrument with US country.
+        _seed_exchange(ebull_test_conn, exchange_id="971", country="US", asset_class="us_equity")
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="970005", symbol="STALEXCH", exchange="971"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_country(ebull_test_conn, 970005) == "US"
+
+        # Re-sync the same instrument, but with an exchange that does
+        # NOT exist in exchanges. (Simulates: eToro reports a new
+        # exchange the operator hasn't curated yet.)
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="970005", symbol="STALEXCH", exchange="99999"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+
+        # Country must NOT have been wiped — the CASE branch preserves
+        # the prior US value when the exchange row is missing.
+        assert _read_country(ebull_test_conn, 970005) == "US"
+
+    def test_record_country_field_ignored(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """The ``InstrumentRecord.country`` field is NOT wired through
+        the upsert — the upsert sources country from ``exchanges`` only,
+        so the dataclass field is irrelevant. This pins the behaviour:
+        a provider that mistakenly populates ``country`` from
+        instrument metadata cannot override the operator-curated
+        exchanges.country."""
+        _seed_exchange(ebull_test_conn, exchange_id="5", country="US", asset_class="us_equity")
+        provider = MagicMock()
+        rec = _make_record_with_exchange(provider_id="970004", symbol="OVERRIDE", exchange="5")
+        # Mutate the frozen dataclass — can't, but mock-construct an
+        # alternative by patching the dataclass replacement.
+        from dataclasses import replace
+
+        rec_with_bogus_country = replace(rec, country="XX")
+        provider.get_tradable_instruments.return_value = [rec_with_bogus_country]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        # exchanges.country wins.
+        assert _read_country(ebull_test_conn, 970004) == "US"

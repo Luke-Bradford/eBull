@@ -78,8 +78,8 @@ def _seed_issuer(
     """
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO instruments (instrument_id, symbol, company_name) "
-            "VALUES (%s, %s, %s) ON CONFLICT (instrument_id) DO NOTHING",
+            "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+            "VALUES (%s, %s, %s, TRUE) ON CONFLICT (instrument_id) DO NOTHING",
             (instrument_id, symbol, company_name or symbol),
         )
         cur.execute(

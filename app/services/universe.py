@@ -56,7 +56,31 @@ def sync_universe(
     deactivated = 0
 
     with conn.transaction():
-        # Upsert each record from the provider
+        # Upsert each record from the provider.
+        #
+        # ``country`` is NOT taken from the provider (eToro instruments
+        # endpoint does not expose it — see
+        # ``app/providers/implementations/etoro.py:350``). Derived
+        # instead from ``exchanges.country`` (operator-curated, ISO
+        # 3166-1 alpha-2) via the ``instruments.exchange =
+        # exchanges.exchange_id`` join.
+        #
+        # Semantic: the source of truth is the exchanges curator. A
+        # curated change ("exchange 5 is now uk_equity / GB") flows
+        # through to every instrument on that exchange on the next
+        # sync. There is NO instrument-level operator override (#1233
+        # §6.1).
+        #
+        # Edge case: if the exchange row is missing from ``exchanges``
+        # at upsert time (transient bootstrap order, brand-new
+        # exchange not yet seeded by sql/067), the CASE branch
+        # preserves the existing ``instruments.country`` rather than
+        # wiping it to NULL. The next sync, after sql/067 backfills
+        # the missing exchange, picks up the curated value. Codex 2
+        # pre-push catch (PR1 #1233).
+        #
+        # One-shot backfill for existing rows lives in
+        # ``sql/158_instruments_country_backfill.sql``.
         for rec in records:
             conn.execute(
                 """
@@ -68,7 +92,9 @@ def sync_universe(
                 )
                 VALUES (
                     %(provider_id)s, %(symbol)s, %(company_name)s, %(exchange)s,
-                    %(currency)s, %(sector)s, %(industry)s, %(country)s, %(is_tradable)s,
+                    %(currency)s, %(sector)s, %(industry)s,
+                    (SELECT country FROM exchanges WHERE exchange_id = %(exchange)s),
+                    %(is_tradable)s,
                     %(instrument_type)s, %(instrument_type_id)s, NOW(), NOW()
                 )
                 ON CONFLICT (instrument_id) DO UPDATE SET
@@ -78,7 +104,21 @@ def sync_universe(
                     currency           = COALESCE(EXCLUDED.currency, instruments.currency),
                     sector             = EXCLUDED.sector,
                     industry           = EXCLUDED.industry,
-                    country            = EXCLUDED.country,
+                    -- Preserve prior country if the exchange row is
+                    -- missing (transient bootstrap order); otherwise
+                    -- mirror the curator's value (which may legitimately
+                    -- be NULL for crypto / FX / index exchanges).
+                    country            = CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM exchanges
+                            WHERE exchange_id = EXCLUDED.exchange
+                        )
+                        THEN (
+                            SELECT country FROM exchanges
+                            WHERE exchange_id = EXCLUDED.exchange
+                        )
+                        ELSE instruments.country
+                    END,
                     is_tradable        = EXCLUDED.is_tradable,
                     -- COALESCE preserves a previously-known type when a
                     -- transient eToro response omits ``instrumentTypeName``
@@ -113,7 +153,6 @@ def sync_universe(
                     "currency": rec.currency,
                     "sector": rec.sector,
                     "industry": rec.industry,
-                    "country": rec.country,
                     "is_tradable": rec.is_tradable,
                     "instrument_type": rec.instrument_type,
                     "instrument_type_id": rec.instrument_type_id,

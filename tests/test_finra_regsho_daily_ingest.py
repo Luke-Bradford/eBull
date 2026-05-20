@@ -52,8 +52,8 @@ _TRADE_DATE = date(2026, 5, 15)
 def _seed_instrument(conn: psycopg.Connection[tuple], *, instrument_id: int, symbol: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO instruments (instrument_id, symbol, company_name) "
-            "VALUES (%s, %s, %s) ON CONFLICT (instrument_id) DO NOTHING",
+            "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+            "VALUES (%s, %s, %s, TRUE) ON CONFLICT (instrument_id) DO NOTHING",
             (instrument_id, symbol, symbol),
         )
 

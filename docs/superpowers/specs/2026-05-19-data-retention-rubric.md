@@ -4,7 +4,7 @@
 >
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 >
-> Status: **READY FOR PR** — Codex 1a + 1b + 1c + 1d complete (all blocking + warning findings resolved). Empirical numbers captured mid-drain so the volumes here are a lower bound (S21 13F sweep still running; ownership rollups not yet refreshed).
+> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR2 (#1237) + PR5 NUMERIC fix (#1236) shipped. PR1 revision in flight (this commit) reframes the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
 
 ## 0. Status snapshot (2026-05-19 17:00 UTC, mid-drain)
 
@@ -43,7 +43,7 @@ Bootstrap currently ingests **all SEC sources for all CIK-holding instruments at
 2. **Storage.** 43 GB of dev DB. `financial_facts_raw` at 23 GB alone is half. Steady-state growth is unbounded.
 3. **SEC rate-limit budget.** 10 req/s shared. Universe-wide × 33y depth × per-accession HTTP for the non-bulk sources = days of wall-clock.
 
-We pull data that **never feeds a current-as-of-today thesis or chart**. The premise of this spec: every row in hot storage must justify itself against a downstream consumer (chart panel, AI prompt section, alert trigger, valuation model). If no current consumer cites it, it doesn't ingest — or it gets dropped post-retention horizon. (Same-DB cold archive is out per §6.3.)
+We pull data that **never feeds a current-as-of-today thesis or chart, and we pull it for sources at unbounded depth**. The premise of this spec: every cap is justified against a plausible downstream consumer (chart, AI prompt, alert, valuation model, future report). Caps are applied **at ingest time** so the table doesn't grow with noise; existing rows are untouched until the single operator-driven pre-wipe + clean re-run at the end (§6.3). Schema columns are preserved throughout — the product is reporting-incomplete by design, and columns the parser could fill stay populated even if no current consumer reads them.
 
 ### Why pre-wipe
 
@@ -81,14 +81,17 @@ How fast does the data stop being predictive?
 
 ### 3.3 Downstream consumer surface
 
-Every row in hot storage must feed at least one of:
+Every cap must be justified against a plausible downstream consumer:
 
 - **Chart panel** — currently-rendering surface on the instrument detail page.
 - **AI prompt section** — thesis-writer, thesis-critic, ranking-engine, valuation-analyst, news-sentiment.
 - **Alert trigger** — future surface (cluster insider buy, new 5%+ blockholder, material 8-K).
 - **Valuation model input** — backtest history depth, ranking factor.
+- **Future report** — any panel / prompt / chart not yet built but plausibly within scope; v1 is reporting-incomplete by design.
 
-Rows that match no current consumer are candidates for drop (no same-DB cold archive — see §6.3).
+**Important: this is an ingest-side discipline, not a row-deletion rule.** Caps gate what new ingests *write*. Existing rows are NEVER deleted on a per-source basis to align with this list. The product is reporting-incomplete; columns the parser could fill but no current consumer cites stay populated because tomorrow's report may want them. Schema columns are never removed during cap-shaping work.
+
+The only purge in this spec is the single **pre-wipe** event in §6.3 — operator-driven, whole-DB, run once before a clean-bootstrap re-run. After the wipe, the clean ingest pulls bounded data under the new caps. There is no piecemeal post-merge `DELETE` per PR.
 
 ## 4. Per-source rubric
 
@@ -100,10 +103,10 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 16.4M rows, 23 GB. Largest single table by far.
 - **Half-life**: **slow** — multi-year. 10y trend matters for valuation; CAGR models need 5y+.
 - **Consumers**: PE/PS/margin time-series charts; ranking engine factor inputs; valuation analyst inputs; AI thesis valuation context.
-- **Ingest depth cap (proposed)**: **20y** rolling window (`period_end >= NOW() - 20y`). No separate completeness SLA — the 20y cap *is* the completeness rule.
-- **Retention horizon cap (proposed)**: **20y in hot table**; older → **drop** (Codex 1a §3 — same-DB cold archive doesn't reduce DB size; if backtests later need pre-20y, re-ingest via `POST /jobs/sec_rebuild/run` with explicit horizon override).
-- **Field-level cap**: many XBRL concepts are textual annotations or auditor disclosures, not numbers. Filter on a whitelist of numeric concepts at ingest time. Drop or quarantine the rest. Estimated 30-50% row reduction.
-- **Why this matters**: half the DB. Even a 20% cut here = 4+ GB.
+- **Ingest depth cap**: **20y rolling window** (`period_end >= NOW() - 20y`) applied at the parser. Already landed via PR2 (#1237). Survives the pre-wipe + clean re-run as the steady-state cap.
+- **Field-level cap**: many XBRL concepts are textual annotations or auditor disclosures, not numbers. Whitelist of ~50 numeric concepts + ~3 DEI concepts is enforced at ingest. Already landed via PR2 (#1237). Schema column for `concept` is preserved — operator can widen the whitelist later without a migration.
+- **Existing rows**: untouched. The pre-wipe (§6.3) and subsequent clean re-run will land the bounded set; the in-place 16.4M-row table stays put until then.
+- **Why this matters**: half the DB. Post-wipe + clean re-run, the 20y + whitelist combo projects to ~7 GB for this table.
 
 ### 4.2 Filing events (`filing_events`)
 
@@ -111,10 +114,10 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 5.79M rows, 4.3 GB, 1993–2026.
 - **Half-life**: **slow** for navigation (drilldown link source); fast for "recent activity" displays.
 - **Consumers**: drilldown links from chart pages; AI thesis recent-events context; audit trail; 8-K event timeline chart (filtered view, not a separate table).
-- **Ingest depth cap (proposed)**: **10y** rolling window applied uniformly across every filing_type. The "8-K 2y for chart" referenced in §5.1 is a **query filter**, not a separate retention cap (Codex 1a §1 — earlier draft contradicted itself by treating 8-K as a separate retention shape).
-- **Retention horizon cap (proposed)**: **10y hot**, pre-2016 → drop. Operator re-ingests older slices on demand via `POST /jobs/sec_rebuild/run` with `since=<date>`.
-- **Raw payload**: `raw_payload_json` should be dropped from hot table after first parse; payload retention belongs in #1014 raw-payload retention slice. Estimated 40-60% size reduction on its own.
-- **Why this matters**: 4.3 GB. Drop pre-2016 = ~60-70% row reduction; payload-strip = additional 40-60% per-row reduction; ~3 GB saved.
+- **Ingest depth cap**: **10y rolling window** at ingest (every discovery writer — Atom, daily-index reconcile, first-install drain, per-CIK poll, targeted rebuild). The "8-K 2y for chart" referenced in §5.1 is a **query filter** that the consumer applies, not a parser-side cap (Codex 1a §1).
+- **Raw payload posture**: `raw_payload_json` is preserved in the schema. The strip-after-parse work is a **separate** ticket (#1014 raw-payload retention) so the ingest cap here doesn't conflate with the payload question.
+- **Existing rows**: untouched. The pre-wipe (§6.3) + clean re-run will land the bounded set under the new cap.
+- **Why this matters**: 4.3 GB. Post-wipe + clean re-run under the 10y cap projects to ~1 GB (60-70% row reduction at clean ingest time, schema intact).
 
 ### 4.3 Form 4 (insider transactions, `insider_transactions`)
 
@@ -122,10 +125,11 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 7,777 rows, 3.7 MB. **Under-ingested** — should be hundreds of thousands at universe scale × full history.
 - **Half-life**: **fast** — last 90d is the alert signal; last 12mo is the thesis signal; 5y old = decoration.
 - **Consumers**: insider buy/sell timeline chart; AI thesis "insiders bought $X in last 90d"; future cluster-buy alerts. **`ownership_insiders_current`** (29 MB) is the cumulative post-transaction holdings rollup derived from observations.
-- **Ingest depth cap (proposed)**: **3y** from today, per CIK.
-- **Retention horizon cap (proposed)**: **3y hot** on `insider_transactions` + `ownership_insiders_observations`, pre-3y → drop.
-- **Codex 1a §6 — cumulative ownership concern**: dropping pre-3y observations is safe **only if** `ownership_insiders_current` is maintained as a write-through cumulative ledger (not recomputed from observations on each refresh). Verification step in PR4: confirm `ownership_insiders_current` survives an observations truncate; if it recomputes from observations, freeze cumulative balance at the 3y boundary as an opening position so dropping older rows is non-destructive.
-- **Cohort bound**: only ingest for `is_tradable=TRUE` instruments. Form 4 for delisted = noise.
+- **Ingest depth cap**: **3y** from today, per CIK, at the parser. Rows outside the window aren't fetched.
+- **Cumulative ownership invariant**: the steady-state ingest cap is safe **only if** `ownership_insiders_current` is maintained as a write-through cumulative ledger (not recomputed from observations on each refresh). Verification step in the Form 4 cap PR: confirm `ownership_insiders_current` survives an observations truncate-from-clean-re-ingest; if it would recompute from observations, the parser writes a synthetic opening-balance row at the 3y boundary as a write-through anchor so the post-wipe re-ingest preserves cumulative state.
+- **Post-wipe semantics for cumulative state**: a whole-DB wipe (§6.3) deliberately resets `ownership_insiders_current` along with `ownership_insiders_observations`. The clean re-ingest under the 3y cap rebuilds cumulative state going forward from "no opening balance" — i.e. the post-wipe `ownership_insiders_current` reflects only trades observed inside the 3y window. Pre-3y cumulative position is lost by design. Operator accepts this as the trade-off for a bounded clean re-run; if pre-3y opening balance is later wanted, it requires a separate one-shot "deep history" sweep outside the cap (operator-driven, like `POST /jobs/sec_rebuild/run` with explicit depth override).
+- **Cohort bound**: only ingest for `is_tradable=TRUE` instruments (PR1 §6.2). Form 4 for delisted = ingest-budget noise.
+- **Existing rows**: untouched until pre-wipe (§6.3).
 - **Why this matters**: not size, but ingest-budget — universe-wide × 33y Form 4 ingest is the multi-day cost. 3y cap = ~90% reduction in candidate set.
 
 ### 4.4 Form 3 / Form 5 (initial / annual insider summary)
@@ -134,8 +138,7 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: low (no dedicated table for Form 3 visible; data threaded into insider_transactions).
 - **Half-life**: **latest only matters** — Form 3 is the initial filing, supplanted by ongoing Form 4s; Form 5 is annual catch-up.
 - **Consumers**: insider registry table (who is registered as an insider for this issuer).
-- **Ingest depth cap (proposed)**: **latest per insider-company pair**.
-- **Retention horizon cap (proposed)**: keep latest; drop older — they add no signal beyond what's already in Form 4 history.
+- **Ingest depth cap**: **latest per insider-company pair** at the parser. The post-wipe clean re-run naturally lands one row per pair under this rule.
 
 ### 4.5 13F-HR institutional holdings (`institutional_holdings`, `ownership_institutions_observations`)
 
@@ -143,11 +146,11 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 105k raw holdings; 3.86M observations rows; 2.5 GB obs + 2.8 GB current = **5.3 GB combined**.
 - **Half-life**: **medium** — 4-quarter trend matters for momentum; 8 quarters (2y) for backtests; beyond = decoration.
 - **Consumers**: stacked institutional ownership % chart; concentration metric in ranking; AI thesis "Vanguard increased position by 8%".
-- **Ingest depth cap (proposed)**: **8 quarters (2y)** observations + always-current snapshot.
+- **Ingest depth cap**: **8 quarters (2y)** observations at the parser + always-current snapshot.
 - **Cohort bound**: **already done #1010** — `last_13f_hr_at` 380d recency cap on filer cohort (11,205 → 8,681 filers).
-- **Retention horizon cap (proposed)**: **8 quarters hot** in observations; current snapshot always. Pre-8q → drop (per §6.3 no same-DB cold archive).
-- **`ownership_institutions_current` size oddity**: 2.8 GB is huge for a "current snapshot" — investigation needed. Either stores wide rows with embedded payload, or write-through is dumping more than current state. Separate audit ticket.
-- **Why this matters**: combined 5.3 GB. Cut to 2y observations = ~2-3 GB saved (depending on what `current` really stores).
+- **`ownership_institutions_current` size oddity**: 2.8 GB is huge for a "current snapshot" — investigation needed. Either stores wide rows with embedded payload, or write-through is dumping more than current state. Separate audit ticket (PR12).
+- **Existing rows**: untouched until pre-wipe (§6.3).
+- **Why this matters**: combined 5.3 GB. Post-wipe + clean re-run under 8q + PR12 audit projects to ~1-2 GB (depending on what `current` really stores).
 
 ### 4.6 N-PORT fund holdings (`ownership_funds_observations`)
 
@@ -155,10 +158,10 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 3.68M obs rows, 1.6 GB obs + 2.5 GB current = **4.1 GB combined**.
 - **Half-life**: same as 13F.
 - **Consumers**: funds slice of institutional ownership chart; potentially fold into 13F view if redundant.
-- **Ingest depth cap (proposed)**: **8 quarters** same as 13F.
-- **Cohort bound**: same recency-based filter pattern as #1010, applied to N-PORT filer registry.
-- **Retention horizon cap (proposed)**: **8 quarters hot**, current snapshot always.
-- **Why this matters**: similar to 13F — combined 4.1 GB; same proportional cut.
+- **Ingest depth cap**: **8 quarters** at the parser, same as 13F + always-current snapshot.
+- **Cohort bound**: same recency-based filter pattern as #1010, applied to N-PORT filer registry (`last_nport_at`).
+- **Existing rows**: untouched until pre-wipe (§6.3).
+- **Why this matters**: similar to 13F — combined 4.1 GB; same proportional projection post-wipe + clean re-run.
 
 ### 4.7 DEF 14A blockholders (`def14a_beneficial_holdings`, `ownership_def14a_observations`)
 
@@ -166,10 +169,10 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 47k raw rows, 17 MB; 40k obs rows, 24 MB; combined ~50 MB.
 - **Half-life**: **slow state, but only LATEST matters** — DEF 14A is the annual snapshot; the prior year's snapshot is decoration.
 - **Consumers**: top-5-holders pie chart; AI thesis "Top 5 institutional holders are…"; executive-comp slice (separate epic).
-- **Ingest depth cap (proposed)**: **latest 2 proxies per filer** (current + one prior for change tracking).
-- **Retention horizon cap (proposed)**: **latest 2 proxies hot**; older → drop. Current snapshot always.
-- **NUMERIC overflow bug**: #1228 affects this source. Fix lands before clean re-run.
-- **Why this matters**: not storage (small); ingest-budget. DEF 14A is HTML scrape — 1h per pass with deadline cap; 5y of proxies × 5,174 filers = un-drainable in one pass. 2-proxy cap = ~80% reduction.
+- **Ingest depth cap**: **latest 2 proxies per filer** (current + one prior for change tracking) at the parser. Older filings not fetched.
+- **NUMERIC overflow bug**: #1228 — fix already landed via PR5 fold-in (#1236).
+- **Existing rows**: untouched until pre-wipe (§6.3).
+- **Why this matters**: not storage (small); ingest-budget. DEF 14A is HTML scrape — 1h per pass with deadline cap; 5y of proxies × 5,174 filers = un-drainable in one pass. 2-proxy cap = ~80% reduction in candidate set.
 
 ### 4.8 13D/G blockholders
 
@@ -177,8 +180,8 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 0 ingested (table exists; pipeline not yet active).
 - **Half-life**: **fast for new-filing alert**, **slow for current state** (current 13D/G filers = decoration table).
 - **Consumers**: top concentrated holders panel; AI thesis "new blockholder X filed Y ago"; future alert on new 13D crossing.
-- **Ingest depth cap (proposed)**: **3y historical**, current state always.
-- **Retention horizon cap (proposed)**: **3y hot**, older → drop.
+- **Ingest depth cap**: **3y historical** at the parser + current state always.
+- **Existing rows**: 13D/G table is empty today (pipeline dormant); the cap shapes the first ingest.
 
 ### 4.9 8-K events (filtered view of `filing_events`)
 
@@ -195,8 +198,7 @@ Each subsection follows the shape: **raw shape → current volume → signal hal
 - **Current volume**: 10,744 rows.
 - **Half-life**: **slow state, latest only** — business model doesn't change rapidly; the latest 10-K subsumes prior.
 - **Consumers**: instrument page text panel; AI thesis "company is in business of…" context.
-- **Ingest depth cap (proposed)**: **latest 10-K per CIK only**.
-- **Retention horizon cap (proposed)**: keep latest; drop prior.
+- **Ingest depth cap**: **latest 10-K per CIK** at the parser. Post-wipe clean re-run naturally lands one row per CIK.
 
 ### 4.11 Treasury / ESOP / blockholder slices
 
@@ -204,8 +206,7 @@ Aggregated under DEF 14A discovery (treasury share counts, ESOP plan holdings, b
 
 - **Half-life**: slow-state.
 - **Consumers**: capital structure panel; buyback / dilution context.
-- **Ingest depth cap**: latest 2 proxies per filer (same as DEF 14A).
-- **Retention horizon cap**: latest 2 hot.
+- **Ingest depth cap**: latest 2 proxies per filer (same as DEF 14A) at the parser.
 
 ### 4.12 N-CSR / N-CSRS (fund certified shareholder reports)
 
@@ -213,8 +214,7 @@ Aggregated under DEF 14A discovery (treasury share counts, ESOP plan holdings, b
 - **Current volume**: not yet exercised at universe scale in this drive. Ingest path lives in `app/jobs/sec_first_install_drain.py:512-815` (bootstrap_n_csr_drain). Existing `horizon_days=730` (2y) cap already in code.
 - **Half-life**: **medium** — funds report semi-annually; 4 semi-annual snapshots = 2y of position changes per trust.
 - **Consumers**: funds slice augmentation (N-PORT alone misses some trusts that file only N-CSR); AI thesis context for fund-held instruments.
-- **Ingest depth cap (proposed)**: **730 days (2y) — already in code**, retain as-is.
-- **Retention horizon cap (proposed)**: **2y hot** matching ingest; older → drop.
+- **Ingest depth cap**: **730 days (2y) — already in code** (`bootstrap_n_csr_drain` `horizon_days=730`). Retain as-is.
 - **Cohort bound**: fund trusts only (sourced from `cik_refresh_mf_directory`). Issuer-scoped seed excludes N-CSR per `sec_first_install_drain.py:167`.
 
 ### 4.13 N-CEN (annual fund census, classification only)
@@ -223,8 +223,7 @@ Aggregated under DEF 14A discovery (treasury share counts, ESOP plan holdings, b
 - **Current volume**: small; one row per investment-company CIK per year.
 - **Half-life**: **slow** — classification updates annually; latest N-CEN per CIK is sufficient.
 - **Consumers**: `app/services/ncen_classifier.py` filer-type classification feeds 13F-HR vs N-PORT routing; influences institutional vs funds ownership lane decision.
-- **Ingest depth cap (proposed)**: **latest N-CEN per CIK only**.
-- **Retention horizon cap (proposed)**: keep latest; drop prior. No value in N-CEN history beyond current classification.
+- **Ingest depth cap**: **latest N-CEN per CIK** at the parser. Post-wipe clean re-run lands one row per CIK.
 - **Why this matters**: small storage, but **load-bearing for filer classification** — Codex 1a caught the omission. Spec must acknowledge this source even though it's lightweight.
 
 ### 4.14 Metadata-only forms (Form D, Form 144, NT 10-Q, S-1/3/4/8/11, 424B)
@@ -234,9 +233,8 @@ These SEC filings are **discovered via the submissions manifest** and persisted 
 - **Raw shape**: index entry only (`filing_type`, `filing_date`, `source_url`).
 - **Half-life**: varies — Form 144 last 90d is the insider-sale-intent signal; S-1/424B are one-shot per offering; NT 10-Q is a late-filing notice (90d window).
 - **Consumers**: drilldown links; AI thesis "recently filed S-1" context; future Form 144 alert (intent-to-sell signal complementing Form 4 actuals).
-- **Ingest depth cap**: covered by `filing_events` 10y.
-- **Retention horizon cap**: covered by `filing_events` 10y.
-- **No separate parser retention required** unless a future ticket adds an observation table (e.g. Form 144 intent-to-sell extraction for the alerts epic — out of scope here).
+- **Ingest depth cap**: covered by `filing_events` 10y cap.
+- **No separate parser cap required** unless a future ticket adds an observation table (e.g. Form 144 intent-to-sell extraction for the alerts epic — out of scope here).
 
 ## 5. Downstream consumer map
 
@@ -293,13 +291,25 @@ Mapping each surface to the sources it needs. Used to validate the caps don't br
 
 **Decision**: audit + lint guard. Cron stages add the filter; bootstrap stages add the filter; the few legitimate "ingest delisted for back-history" paths require explicit override flag.
 
-### 6.3 Drop, don't archive (Codex 1a §3 revision)
+### 6.3 No piecemeal drops — one operator-driven pre-wipe + clean re-run
 
-Earlier draft proposed same-DB `*_archive_pre_NNNN` cold tables. Codex 1a flagged: same-DB archive doesn't reduce DB size, contradicting the storage-target acceptance.
+The original draft proposed per-PR `DELETE` of pre-cap rows. **Revoked.** Per-PR row-deletion conflates two concerns: (a) gate what new ingests write (ingest-side cap, safe + reversible), (b) reshape an existing table (destructive, hard to roll back, risks erasing data a future report may want).
 
-**Decision**: pre-cap rows **drop** in v1. No same-DB cold archive. If a backtest later demands pre-cap depth, operator re-ingests via `POST /jobs/sec_rebuild/run` with explicit `since=<date>` horizon override — SEC bulk endpoints are the source of truth; we don't need to be the archive.
+**Decision: caps are ingest-side only.** No PR in this spec issues `DELETE FROM <table>` against pre-cap rows. Existing rows stay until the single pre-wipe event below.
 
-Future epic: if cold-archive becomes desirable, ship as **separate database** or **S3 parquet snapshots**, not same-DB tables. Out of scope for this spec.
+**Pre-wipe event** (operator-driven, whole-DB, one-shot):
+
+1. Operator triggers a controlled wipe of the dev DB (`TRUNCATE` or DB re-creation) **after** PR1-PR12 land and all caps are merged.
+2. Bootstrap re-runs from a clean DB. Ingest is bounded by every cap in §4.
+3. Final DB size measures the post-wipe steady-state under the new caps.
+
+This single event replaces the dozen per-PR `DELETE` instructions. Reasons:
+
+- It's already on the operator's roadmap ("we will purge all reporting data once we're ready to test bootstrap timing"). The cap-shaping PRs are the precondition for that wipe, not a parallel concern.
+- Same outcome as in-place delete (clean ingest under new caps yields the same survivor set) without the risk of dropping rows a half-finished report still references.
+- Schema columns are preserved through the wipe — the wipe is `DELETE FROM` / `TRUNCATE`, not `DROP COLUMN` / `DROP TABLE`. Parsers fill what they always filled into the same columns.
+
+**Same-DB cold archive remains out of scope** — Codex 1a §3 was right that same-DB archive doesn't reduce DB size. If a future epic wants cold-archive, ship as **separate database** or **S3 parquet snapshots**, not same-DB tables.
 
 ### 6.4 Two-layer storage (current + observations)
 
@@ -314,75 +324,32 @@ Caps apply to **`*_observations`**; `*_current` is always latest.
 
 ## 7. Implementation sequence
 
-Land per-source PRs in this order, each gated by Codex 1a/1b + bot review:
+Land per-source PRs in this order. Each PR is **ingest-side cap only** — no PR issues `DELETE FROM <table>` against pre-cap rows (§6.3). Schema columns are preserved across every PR.
 
-1. **PR1 — Cross-cutting (#1233 §2 + §3).**
-   - Populate `instruments.country` from universe sync.
-   - Audit + add `is_tradable=TRUE` filter to every SEC stage entry point.
-   - Lint guard: CI grep `INSERT INTO instruments` must include `is_tradable`.
+- **PR1 — IN PROGRESS.** Cross-cutting (#1233 §2 + §3). Populate `instruments.country` from `exchanges.country` join + backfill migration; audit + add `is_tradable=TRUE` filter to every SEC stage entry point; lint guard greps `INSERT INTO instruments` for `is_tradable` in the column list (extends prevention-log §"`INSERT INTO instruments` fixtures must supply `is_tradable`" from tests/ to app/ + tests/). **Bundles spec revision** (this commit).
+- **PR2 — SHIPPED (#1237).** Companyfacts XBRL concept whitelist (~50 numeric us-gaap + ~3 DEI concepts) + 20y rolling cap at the parser. Every write path (bulk + steady-state).
+- **PR3 — pending.** Filing events 10y rolling cap at the parser. Applied uniformly across every filing_type via every discovery writer. Schema columns + existing rows untouched.
+- **PR4 — pending.** Form 4 3y cap at the parser + cumulative-rollup invariant check on `ownership_insiders_current` (synthetic opening-balance anchor at 3y boundary if recompute-from-observations). Recency cohort bound mirroring #1010.
+- **PR5 — partially shipped (#1236 NUMERIC fix).** DEF 14A latest-2-proxies cap at the parser. NUMERIC overflow #1228 already folded.
+- **PR6 — pending.** 13F-HR 8-quarter ingest cap at the parser. (#1010 cohort bound already in place.)
+- **PR7 — pending.** N-PORT 8-quarter cap (mirror of PR6). N-PORT recency cohort bound (`last_nport_at`) per #1010 pattern.
+- **PR8 — pending.** N-CSR/N-CSRS validate existing 2y horizon. Doc-only unless drift found.
+- **PR9 — pending.** N-CEN latest-only cap at the parser. Verify `ncen_classifier` reads latest.
+- **PR10 — pending.** Form 3/5 latest-only at the parser + business summary (10-K Item 1) latest-only at the parser.
+- **PR11 — pending.** 13D/G activate dormant pipeline with 3y historical + current-state cap at the parser.
+- **PR12 — pending.** `ownership_*_current` size audit + remediation (no row-deletion — schema audit only; if wide-row write bug found, fix the writer; existing rows reshape happens via the pre-wipe).
 
-2. **PR2 — Companyfacts XBRL concept whitelist + 20y depth cap.**
-   - Whitelist of ~50 numeric XBRL concepts (revenue, EPS, margins, …).
-   - Drop or quarantine non-whitelisted rows at ingest.
-   - 20y depth cap on bootstrap entry (`period_end >= NOW() - 20y`).
-   - Pre-20y rows → drop (no same-DB archive per §6.3).
-
-3. **PR3 — Filing events 10y hot + payload strip.**
-   - 10y depth cap on hot table.
-   - Pre-10y rows → drop (no same-DB archive per §6.3).
-   - Drop `raw_payload_json` from hot table (#1014 raw-payload retention).
-
-4. **PR4 — Form 4 3y depth cap + cumulative-rollup verification.**
-   - **Verification step FIRST** (Codex 1a §6 / 1b PARTIAL): confirm `ownership_insiders_current` is maintained as a write-through cumulative ledger, NOT recomputed from `ownership_insiders_observations` on each refresh. If recomputed, freeze opening cumulative balance at the 3y boundary as a write-through anchor row so dropping older observations is non-destructive. Acceptance fails until this verification is recorded in the PR description.
-   - 3y depth cap on `insider_transactions` ingest.
-   - Drop pre-3y rows from `insider_transactions` + `ownership_insiders_observations`.
-   - Recency cohort bound on Form 4 sweep (mirror of #1010 pattern).
-
-5. **PR5 — DEF 14A latest-2-proxies cap + #1228 NUMERIC fix.**
-   - Bundle the NUMERIC overflow fix from #1228.
-   - Latest-2-proxies-per-filer cap on ingest.
-   - Drop older from `def14a_beneficial_holdings` + `ownership_def14a_observations`.
-
-6. **PR6 — 13F-HR 8-quarter observations cap.**
-   - 8-quarter depth on `ownership_institutions_observations`.
-   - Drop pre-8q rows; `current` snapshot always.
-   - (`#1010` cohort bound already in place.)
-
-7. **PR7 — N-PORT 8-quarter cap (mirror of PR6).**
-   - Same shape applied to funds.
-   - Add N-PORT recency cohort bound (`last_nport_at`) per #1010 pattern.
-
-8. **PR8 — N-CSR/N-CSRS retain existing 2y horizon + observations cap.**
-   - Validate existing `horizon_days=730` in `bootstrap_n_csr_drain`.
-   - Document in spec; no code change unless audit finds drift.
-
-9. **PR9 — N-CEN latest-only.**
-   - Drop pre-latest N-CEN per CIK.
-   - Verify `ncen_classifier` reads from latest-only, not history.
-
-10. **PR10 — Form 3/5 latest-only + business summary latest-only.**
-    - Form 3/5: keep latest per insider-company pair.
-    - Business summary: drop prior; latest 10-K only.
-
-11. **PR11 — 13D/G 3y historical activation.**
-    - Activate the dormant 13D/G ingest pipeline.
-    - 3y depth cap; current state always.
-
-12. **PR12 — `ownership_*_current` size audit + remediation.**
-    - Investigate why `ownership_institutions_current` is 2.8 GB + `ownership_funds_current` is 2.5 GB. Either truncate-narrow the rows, or move bulky columns to observations.
-    - Cross-cutting; runs after PR6+PR7 land.
-
-After PR1-PR12 land + bootstrap drain re-runs cleanly under the new caps, **wipe + clean re-run** to validate. Measure end-to-end wall-clock + final DB size.
+After PR1-PR12 land, the operator triggers the **pre-wipe + clean re-run** (§6.3) — a whole-DB controlled wipe + clean bootstrap re-ingest under all caps. The clean re-run measures the new ceiling.
 
 ## 8. Acceptance
 
-Clean re-run after caps land (revised per Codex 1a §2 + §7):
+Measured after PR1-PR12 land + the operator-driven pre-wipe + clean bootstrap re-run (§6.3). The clean re-run lands the bounded set under all caps; the numbers below are the projection for that final state, not for any in-place delete pass.
 
 1. **Wall-clock**: full bootstrap drain (every bootstrap stage including N-CSR S25 fund-trust drain) completes in **a single business day (10-12h)** from fresh DB (was multi-day pre-caps).
    - **Why not < 8h**: SEC 10 req/s budget is shared across DEF14A HTML, Form 4, 13D/G, N-PORT, N-CSR, companyfacts per-CIK fetches. Even with caps, the per-accession candidate set remains large (5,174 US filers × multi-source + fund-trust universe for N-CSR). 10-12h is the realistic floor; sub-10h is a Phase 2 optimization (parallel SEC fetcher pools, CDN cache warm-up).
 2. **DB size**: post-clean-rerun `pg_database_size('ebull')` measured (excludes WAL — Postgres WAL lives outside per-database size accounting; tracked separately at the filesystem level via `pg_stat_wal` / `pg_ls_waldir()` if needed). Provisional breakdown:
    - `financial_facts_raw`: current 16.4M rows / 23 GB. Apply (a) 20y rolling cap → keep rows where `period_end >= NOW() - 20y` ≈ 60% of rows survive (proxy: 20y/33y); (b) whitelist of ~50 numeric concepts → assumed 50% row reduction inside the surviving 20y slice. Net: 16.4M × 0.60 × 0.50 ≈ 4.9M rows × ~1.5 KB/row (raw + tuple header + partitions) ≈ **~7 GB** including indexes + partition overhead.
-   - `filing_events`: current 5.79M rows / 4.3 GB. Apply 10y cap → ~30% rows survive (10y/33y); apply payload strip → row width drops ~50%. Net: 5.79M × 0.30 × 0.50 × ~600 B/row ≈ **~0.5 GB**; **~1 GB with indexes**.
+   - `filing_events`: current 5.79M rows / 4.3 GB. Apply 10y cap → ~30% rows survive (10y/33y). Net (no payload strip — deferred to #1014): 5.79M × 0.30 × ~750 B/row ≈ **~1.3 GB**; **~1.5 GB with indexes**. (With #1014's payload strip applied: row width drops ~50% → **~0.7 GB**; **~1 GB with indexes**.)
    - `ownership_institutions_current` + `ownership_funds_current`: **conditional on PR12 audit** — current 5.3 GB combined. Post-PR12 (audit + remediate wide-row writes) assumed ≤ 1 GB combined.
    - `ownership_institutions_observations` + `ownership_funds_observations` (8 quarters): current 4.1 GB combined across all-time partitions. 8-quarter cap retains 8 of ~64 partitions populated → ≈ 4.1 GB × 8/64 ≈ **~0.5 GB**.
    - `ownership_insiders_observations` (3y from current 316 MB across ~64 partitions): 316 MB × 12/64 ≈ **~60 MB**.
@@ -391,8 +358,8 @@ Clean re-run after caps land (revised per Codex 1a §2 + §7):
    - **Honest totals**:
      - **PR12 unsolved**: 7 + 1 + 5.3 + 0.5 + 0.06 + 0.15 ≈ **14 GB raw**, **~17 GB with 20% overhead**.
      - **PR12 solved**: 7 + 1 + 1 + 0.5 + 0.06 + 0.15 ≈ **9.7 GB raw**, **~12 GB with 20% overhead**.
-   - Operator acceptance tiers (all measured AFTER the post-PR1-PR12 wipe + clean re-run — the wipe gate per §7 is unconditional on PR1-PR12 having merged; the *tier* selected for acceptance depends on what state PR12 reached):
-     - **v1 bar — `<20 GB hot`**: PR12 merged with audit complete but remediation partial / deferred (current snapshots remain near 5.3 GB combined). ~57% reduction from current 43 GB. Acceptable for v1 ship.
+   - Operator acceptance tiers (all measured AFTER the §6.3 pre-wipe + clean re-run; the *tier* selected for acceptance depends on what state PR12 reached at wipe time):
+     - **v1 bar — `<20 GB hot`**: PR12 audit complete + caps merged but remediation partial / deferred (current snapshots remain near 5.3 GB combined under whatever the audit identifies as the cause). ~57% reduction from current 43 GB. Acceptable for v1 ship.
      - **Phase 2 stretch — `<15 GB hot`**: PR12 fully solved (current snapshots ≤ 1 GB combined). ~65% reduction.
      - **Ambitious stretch — `<10 GB hot`**: only achievable by also tightening companyfacts (e.g. 10y cap instead of 20y; concept whitelist trimmed to ~20 numeric concepts). Not in PR1-PR12 scope — proposed as a Phase 3 ticket if Phase 2 lands and storage remains a concern.
 3. **Chart pages**: every chart in §5.1 renders correctly for the standard panel (AAPL, GME, MSFT, JPM, HD) — Cypress / Playwright golden path.
@@ -406,7 +373,8 @@ Clean re-run after caps land (revised per Codex 1a §2 + §7):
 - **Insider horizon**: 3y or 5y for Form 4? Trade-off: cluster-buy signal richness vs ingest budget. Bias to 3y. Resolution depends on PR4 verification of `ownership_insiders_current` rollup semantics.
 - **8-K chart depth**: 2y or 3y? Trade-off: visual continuity vs storage. Bias to 2y. (Query-window only; doesn't affect retention.)
 - **`ownership_*_current` size oddity (PR12)**: biggest unknown affecting §8 DB-size target. Three-tier acceptance: v1 bar `<20 GB`, Phase 2 stretch `<15 GB` (PR12 solved), ambitious `<10 GB` (PR12 + companyfacts further tightening — Phase 3 if needed).
-- **Wipe gating**: clean re-run gate per §7 specifies PR1-PR12 must all land before wipe. Acceptance §8 is measured AFTER the clean re-run, so both tiers are evaluated against the same post-wipe state — no ambiguity in the gate.
+- **Wipe gating**: §6.3 + §7 specify that PR1-PR12 must all land before the operator-driven pre-wipe + clean re-run. Acceptance §8 is measured AFTER the clean re-run, so all tiers are evaluated against the same post-wipe state — no ambiguity in the gate.
+- **No piecemeal deletes**: §6.3 removed the per-PR `DELETE` instructions. Every cap in §4 is ingest-side only; existing rows are untouched until the single pre-wipe event. The trade-off is that the in-place 43 GB dev DB stays that size until the wipe — which is fine because the wipe is already on the operator's roadmap and is the only honest way to measure post-cap steady-state.
 - **Form 144 alert**: out of this spec, but the metadata is there in `filing_events` if a future ticket activates it.
 
 ## 10. Out of scope
@@ -429,25 +397,28 @@ Per #1208 cadence:
 - Implementation plan = separate doc (`docs/superpowers/plans/2026-05-19-data-retention-impl.md`), Codex 1a/1b on that.
 - PRs 1-12 each follow standard #1208 cadence.
 
-## 12. Handover for next session (impl plan kickoff)
+## 12. Handover for next session
+
+State as of this commit:
+
+- PR1 bundles cross-cutting code (country populate + is_tradable filter audit + lint guard) AND this spec revision (drop-policy → ingest-side-caps-only).
+- PR2 (#1237) + PR5 NUMERIC fix (#1236) already shipped.
+- PR3-PR12 remain — every one is ingest-side cap only, no row deletion. The pre-wipe is the single operator event at the end.
 
 ```text
-Pick up the impl-plan write-up for the data retention rubric spec at
-docs/superpowers/specs/2026-05-19-data-retention-rubric.md.
+After PR1 merges, the next session picks up PR3
+(filing_events 10y rolling cap at the parser).
 
-Spec is post-Codex (1a + 1b + 1c + 1d, all clean). After spec PR
-merges, write the impl plan covering
-PRs 1-12 with per-PR scope + LOC estimate + Codex gate + acceptance
-per PR.
-
-Wipe + clean re-run gated on PR1-PR12 landing.
+PR3 scope:
+- Identify every filing_events discovery writer (Atom fast-lane, daily-index
+  reconcile, first-install drain, per-CIK poll, targeted rebuild).
+- Apply 10y depth cap at the parser layer so every writer respects it.
+- Preserve raw_payload_json (#1014 is the separate slice).
+- No DELETE of pre-10y rows. They survive until the §6.3 pre-wipe.
 
 FIRST ACTIONS:
-1. Read CLAUDE.md working order + this spec end-to-end.
-2. Confirm #1233 + #1228 + #1234 still OPEN.
-3. Branch `feature/1233-data-retention-rubric-spec` is already created
-   (this session's branch).
-4. If Codex 1b not yet run: run it. Else: commit spec; push; create PR;
-   iterate to APPROVE; merge.
-5. Next session = impl plan.
+1. Read CLAUDE.md working order + the revised §3.3 / §4.2 / §6.3 / §7.
+2. Confirm PR1 merged. Confirm #1233 still OPEN as the umbrella.
+3. Branch `feature/1233-pr3-filing-events-10y-cap`.
+4. Codex 1a on plan, then Codex 2 pre-push, then PR.
 ```
