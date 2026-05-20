@@ -79,6 +79,15 @@ bash scripts/check_13f_hr_retention.sh
 echo "==> Pre-push gate: N-PORT 8-quarter retention cap lint"
 bash scripts/check_nport_retention.sh
 
+# #1233 §4.12 PR8 — every N-CSR / N-CSRS ingest chokepoint must honour
+# the 730d filed-at retention cap (bootstrap_n_csr_drain via shared
+# helper + manifest-worker _parse_sec_n_csr pre-fetch gate). Smallest
+# chokepoint surface of any PR: no _ingest_single_accession, no
+# bulk-dataset, no rewash, no SQL repair sweep — see plan §6 for the
+# letter→chokepoint map. ~30ms.
+echo "==> Pre-push gate: N-CSR 730d retention cap lint"
+bash scripts/check_n_csr_retention.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

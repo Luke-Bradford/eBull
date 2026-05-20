@@ -4,7 +4,7 @@
 >
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 >
-> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix (#1236), PR5 latest-2-primary cap (#1241), and **PR6 13F-HR 8-quarter cap (this commit)** shipped. PR1 revision reframed the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
+> Status: **EVOLVING** — original spec merged 2026-05-19 (#1235) after Codex 1a + 1b + 1c + 1d. PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter cap (#1242), PR7 N-PORT 8-quarter cap (#1243), and **PR8 N-CSR 730d cap (this commit)** shipped. PR1 revision reframed the spec's drop-policy from "DELETE pre-cap rows per PR" to "ingest-side caps only + one operator-driven pre-wipe + clean re-run at the end" — caps don't touch existing rows, and the wipe is whole-DB + operator-driven, not per-source.
 
 ## 0. Status snapshot (2026-05-19 17:00 UTC, mid-drain)
 
@@ -215,12 +215,16 @@ Aggregated under DEF 14A discovery (treasury share counts, ESOP plan holdings, b
 
 ### 4.12 N-CSR / N-CSRS (fund certified shareholder reports)
 
-- **Raw shape**: registered fund trust annual + semi-annual reports. Per-trust filings with portfolio holdings appendix.
-- **Current volume**: not yet exercised at universe scale in this drive. Ingest path lives in `app/jobs/sec_first_install_drain.py:512-815` (bootstrap_n_csr_drain). Existing `horizon_days=730` (2y) cap already in code.
-- **Half-life**: **medium** — funds report semi-annually; 4 semi-annual snapshots = 2y of position changes per trust.
-- **Consumers**: funds slice augmentation (N-PORT alone misses some trusts that file only N-CSR); AI thesis context for fund-held instruments.
-- **Ingest depth cap**: **730 days (2y) — already in code** (`bootstrap_n_csr_drain` `horizon_days=730`). Retain as-is.
-- **Cohort bound**: fund trusts only (sourced from `cik_refresh_mf_directory`). Issuer-scoped seed excludes N-CSR per `sec_first_install_drain.py:167`.
+- **Raw shape**: registered fund trust annual + semi-annual reports. Per-trust iXBRL filings parsed for fund-metadata (N-CSR holdings are NOT ingested — spike #918 §10.5 stands).
+- **Current volume**: not yet exercised at universe scale. Ingest path lives in `app/jobs/sec_first_install_drain.py:770` (bootstrap_n_csr_drain) + manifest-worker `app/services/manifest_parsers/sec_n_csr.py:_parse_sec_n_csr`. PR8 drift audit (2026-05-20) found the 730d cap was applied ONLY in bootstrap drain; atom fast-lane, daily-index reconcile, per-CIK poll, master-idx sweep all enqueue N-CSR uncapped, and the manifest-worker parser writes `fund_metadata_observations` for every accession regardless of `filed_at`.
+- **Half-life**: **medium** — funds report semi-annually (N-CSRS) + annually (N-CSR); 4 semi-annual + 2 annual snapshots = 2y of fund-metadata changes per trust.
+- **Consumers**: `fund_metadata_observations → fund_metadata_current` write-through (settled-decisions §"N-CSR / N-CSRS — winner selection in fund_metadata_current"); funds-slice augmentation (N-PORT alone misses trusts that file only N-CSR); AI thesis context for fund-held instruments.
+- **Ingest depth cap**: **730 days (2y) — PR8 SHIPPED.** Cap anchored to a sliding `filed_at >= NOW(UTC) - 730d` window via `n_csr_retention_cutoff` + `n_csr_within_retention` helpers in `app/services/manifest_parsers/sec_n_csr.py`. Distinct from PR6/PR7 which anchor on `period_of_report` calendar boundaries — N-CSR has no per-snapshot period concept at the manifest-row level (the iXBRL `period_of_report` is a narrative fiscal-period end, lags `filed_at` by ~60d), so the cap is filed-at based to stay consistent with bootstrap drain semantics.
+- **Chokepoint coverage (PR8)**: every N-CSR writer honours the cap — bootstrap drain `bootstrap_n_csr_drain` calls `n_csr_retention_cutoff()` (replaces the inlined `horizon_days=730` parameter; the param is removed from the public signature + scheduler invoker + param_metadata + bootstrap_orchestrator S26 StageSpec so there is no override knob) AND manifest-worker `_parse_sec_n_csr` **pre-fetch retention gate** (placed BEFORE iXBRL fetch — distinct from PR6/PR7's "post-parse" gates because N-CSR's iXBRL companion IS the payload, so the gate sits between manifest-row validation and HTTP fetch; saves SEC HTTP budget on pre-cap drift from atom/daily/per-CIK/master-idx). Atom / daily-index reconcile / per-CIK poll / master-idx sweep stay uncapped at MANIFEST DISCOVERY per PR7 precedent — the worker gate is the single chokepoint before `fund_metadata_observations` is touched.
+- **No `_ingest_single_accession` / no bulk-dataset / no rewash / no SQL repair sweep**: N-CSR has the smallest chokepoint surface of any source. There is no per-accession one-shot endpoint, no bulk archive (SEC publishes none for N-CSR), no `_apply_n_csr_*` rewash function, and no `sync_fund_metadata` SQL repair sweep. Lint guard `scripts/check_n_csr_retention.sh` intentionally omits invariants for those chokepoints — if any are added later, that PR is responsible for the gate + extending the lint guard.
+- **Cohort bound**: fund trusts only (sourced from `cik_refresh_mf_directory`, INNER JOIN on `external_identifiers (identifier_type='class_id', is_primary=TRUE)` — see `_iter_trust_ciks` at `sec_first_install_drain.py:555`). Issuer-scoped seed excludes N-CSR per `sec_first_install_drain.py:168`. No `last_n_csr_at` recency bound (mirror of #1010) — fund-trust universe is already orders of magnitude smaller than the 13F-HR / N-PORT filer cohorts, so the cohort bound carries no measurable wall-clock saving.
+- **Existing rows**: untouched until pre-wipe (§6.3).
+- **Why this matters**: not storage (small — `fund_metadata_observations` is ≲ 50 MB), but ingest-budget. Atom + daily reconcile + per-CIK poll currently enqueue every N-CSR they see; the worker would then iXBRL-fetch + parse every accession back to the trust's first filing. The PR8 worker gate tombstones pre-cap accessions BEFORE fetch — the load-bearing chokepoint.
 
 ### 4.13 N-CEN (annual fund census, classification only)
 
@@ -349,7 +353,7 @@ Land per-source PRs in this order. Each PR is **ingest-side cap only** — no PR
 - **PR5 — SHIPPED.** DEF 14A latest-2-PRIMARY-proxies cap at discovery + parser + rewash-rescue chokepoints. Supplemental form variants (DEFA14A / DEFR14A / DEFM14A) uncapped (§4.7). NUMERIC overflow #1228 already folded (#1236).
 - **PR6 — SHIPPED.** 13F-HR 8-quarter ingest cap at every writer chokepoint (parse_submissions_index intrinsic floor, _ingest_single_accession defensive post-parse gate, manifest-worker post-parse gate, bulk-dataset per-row gate, rewash rescue gate, sync_institutions SQL predicate). Cap anchored to calendar quarter ends (`thirteen_f_retention_cutoff`) — admits exactly 8 quarter-ends. (#1010 cohort bound already in place.) Lint guard `scripts/check_13f_hr_retention.sh` with nine PR5-style placement invariants A-I.
 - **PR7 — SHIPPED.** N-PORT 8-quarter (24-month) ingest cap at every writer chokepoint (parse_submissions_index intrinsic floor, _ingest_single_accession defensive post-parse gate, manifest-worker post-parse gate, bulk-dataset per-row gate). Cap anchored to **calendar month-ends** via `n_port_retention_cutoff` (NOT calendar-quarter-ends — fiscal-Q-non-calendar funds would otherwise be silently rejected). Cohort bound shipped in the same PR (mirror of #1010 — bootstrap stage 22 dispatches with `min_last_seen_filed_at = today - 380d` via `_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF`; daily / Admin / manual paths use full cohort). Lint guard `scripts/check_nport_retention.sh` with seven PR5-style placement invariants A/B/C/D/F/H/I (no E for rewash, no G for sync_funds — both chokepoints don't exist for N-PORT). `sec_n_port_ingest` migrated from `_adapt_zero_arg` to native `JobInvoker(params)` so stage 22 params reach the body.
-- **PR8 — pending.** N-CSR/N-CSRS validate existing 2y horizon. Doc-only unless drift found.
+- **PR8 — SHIPPED.** N-CSR / N-CSRS 730d filed-at ingest cap at every writer chokepoint (bootstrap drain via shared `n_csr_retention_cutoff` helper + manifest-worker `_parse_sec_n_csr` pre-fetch retention gate placed BEFORE iXBRL fetch). Drift audit found the original 730d cap existed ONLY in bootstrap drain — atom / daily-index / per-CIK poll / master-idx all enqueued uncapped, and the worker parsed every accession. `horizon_days` param removed from public signature + scheduler invoker + param_metadata (single source of truth in the helper). Lint guard `scripts/check_n_csr_retention.sh` with three placement invariants (A helpers in canonical module / B bootstrap drain uses helper / D manifest-worker gate placed before fetch). Smallest chokepoint surface of any PR — no `_ingest_single_accession`, no bulk-dataset, no rewash, no SQL repair sweep.
 - **PR9 — pending.** N-CEN latest-only cap at the parser. Verify `ncen_classifier` reads latest.
 - **PR10 — pending.** Form 3/5 latest-only at the parser + business summary (10-K Item 1) latest-only at the parser.
 - **PR11 — pending.** 13D/G activate dormant pipeline with 3y historical + current-state cap at the parser.
@@ -381,7 +385,7 @@ Measured after PR1-PR12 land + the operator-driven pre-wipe + clean bootstrap re
 3. **Chart pages**: every chart in §5.1 renders correctly for the standard panel (AAPL, GME, MSFT, JPM, HD) — Cypress / Playwright golden path.
 4. **AI thesis**: thesis-writer produces same-or-better quality output for the standard panel (manual eval; small comparison set).
 5. **No regression**: existing PRs + smoke tests pass without modification (no consumer-shape changes).
-6. **Operator override**: each cap has a documented "manual rebuild for ad-hoc deep dive" path (per-instrument or per-source override via `POST /jobs/sec_rebuild/run`).
+6. **Operator override**: each cap has a documented "manual rebuild for ad-hoc deep dive" path (per-instrument or per-source override via `POST /jobs/sec_rebuild/run`). **Exception: N-CSR (#4.12 / PR8).** N-CSR is hard-pinned at the parser gate with no bypass — `sec_rebuild` requeues will tombstone as `outside_retention` if `filed_at` predates the 730d window. Rationale: fund-metadata pre-cap rows are not part of any consumer surface (no chart depth requirement, no AI prompt depth requirement, no alert window). If a future ticket needs pre-cap N-CSR for an ad-hoc backfill, that ticket must add an explicit `bypass_retention` flag at the `ManifestRow` level + plumb it through the parser gate.
 
 ## 9. Open questions for review
 
@@ -419,32 +423,29 @@ State as of this commit:
 
 - PR1 (#1238), PR2 (#1237), PR3 (#1239), PR4 (#1240), PR5 NUMERIC fix
   (#1236), PR5 latest-2-primary cap (#1241), PR6 13F-HR 8-quarter
-  cap (#1242), and **PR7 N-PORT 8-quarter cap (this commit)** all
-  shipped.
-- PR8-PR12 remain — every one is ingest-side cap only, no row deletion.
+  cap (#1242), PR7 N-PORT 8-quarter cap (#1243), and **PR8 N-CSR
+  730d cap (this commit)** all shipped.
+- PR9-PR12 remain — every one is ingest-side cap only, no row deletion.
   The pre-wipe is the single operator event at the end.
 
 ```text
-After PR7 merges, the next session picks up PR8
-(N-CSR / N-CSRS validate existing 2y horizon; doc-only unless drift
-found).
+After PR8 merges, the next session picks up PR9 (N-CEN latest-only
+cap at the parser; verify `ncen_classifier` reads latest).
 
-PR8 scope:
-- Audit `app/jobs/sec_first_install_drain.py:770-815`
-  (`bootstrap_n_csr_drain`) — already passes `horizon_days=730`. Spec
-  §4.12 says "Retain as-is". Confirm no drift from spec wording vs
-  code; close out the spec PR otherwise without code changes.
-- Confirm `cik_refresh_mf_directory` still gates the N-CSR drain (no
-  full-universe walk).
-- If drift found, add minimal cap-confirmation comment + maybe a
-  trivial lint guard line; if no drift, PR is a §4.12 SHIPPED status
-  update.
+PR9 scope:
+- Audit the N-CEN parser (`app/services/manifest_parsers/sec_n_cen.py`
+  or equivalent) — confirm it overwrites a single row per CIK rather
+  than appending an observation per year.
+- Confirm `ncen_classifier` (`app/services/ncen_classifier.py`)
+  consumes the latest-only row.
+- If drift found (observations accumulating year-on-year), apply the
+  PR8 pattern: parser writes ONE row per CIK + lint guard rejecting
+  multi-row-per-CIK INSERTs.
 
 FIRST ACTIONS:
-1. Read CLAUDE.md working order + the revised §4.12 (currently
-   unchanged from initial spec; PR7 did not touch it).
-2. Confirm PR7 merged. Confirm #1233 still OPEN as the umbrella.
-3. Branch `feature/1233-pr8-ncsr-horizon-confirm`.
-4. Read `bootstrap_n_csr_drain` + confirm `horizon_days=730` is the
-   only depth knob; if so, doc-only spec PR + close.
+1. Read CLAUDE.md working order + revised §4.13.
+2. Confirm PR8 merged. Confirm #1233 still OPEN.
+3. Branch `feature/1233-pr9-ncen-latest-only-cap`.
+4. Read N-CEN parser + `ncen_classifier` + confirm single-row-per-CIK
+   semantics.
 ```

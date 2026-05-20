@@ -70,6 +70,60 @@ _FAILED_RETRY_DELAY = timedelta(hours=1)
 # 24h backoff for resolver-pending miss (gives daily cik_refresh time).
 _PENDING_CIK_REFRESH_DELAY = timedelta(hours=24)
 
+# Spec #1233 §4.12 / PR8 — N-CSR / N-CSRS 2y filed-at sliding window.
+# Hard-pinned at module level so every writer chokepoint sees the same
+# number. Unlike PR6 (13F-HR) / PR7 (N-PORT), N-CSR has NO deep-dive
+# override: `sec_rebuild` requeues a manifest accession and the parser
+# gate runs on every parse, so a rebuilt pre-cap accession tombstones
+# with `outside_retention`. Pre-cap fund-metadata is not part of any
+# consumer surface (no chart depth requirement, no AI prompt depth
+# requirement, no alert window) — accepting the loss is the explicit
+# trade-off in spec §8 acceptance #6.
+N_CSR_RETENTION_DAYS: int = 730
+
+
+def n_csr_retention_cutoff(now: datetime | None = None) -> datetime:
+    """Earliest ``filed_at`` accepted for N-CSR / N-CSRS (#1233 §4.12).
+
+    Returns ``now - N_CSR_RETENTION_DAYS`` as a UTC-aware datetime.
+    Boundary inclusive — caller compares ``filed_at >= cutoff``.
+
+    ``now`` must be tz-aware; raises ``ValueError`` on tz-naive input
+    so the cutoff doesn't drift by ±1 day on non-UTC dev hosts (PR7
+    Codex 2 lesson — ``date.today()`` / ``datetime.now()`` honour the
+    caller's local TZ).
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    if now.tzinfo is None:
+        raise ValueError(
+            "n_csr_retention_cutoff: ``now`` must be a tz-aware datetime; "
+            "naive datetimes would honour the caller's local TZ and drift the cutoff."
+        )
+    return now.astimezone(UTC) - timedelta(days=N_CSR_RETENTION_DAYS)
+
+
+def n_csr_within_retention(
+    filed_at: datetime | None,
+    now: datetime | None = None,
+) -> bool:
+    """Boundary check used by every N-CSR writer chokepoint (#1233 §4.12).
+
+    Returns True iff ``filed_at >= n_csr_retention_cutoff(now)``.
+    A ``None`` ``filed_at`` returns False — defensive: an accession we
+    couldn't tag with a filed-at timestamp is unsafe to admit. A tz-
+    naive ``filed_at`` raises ``ValueError`` for the same reason
+    ``n_csr_retention_cutoff`` rejects tz-naive ``now``.
+    """
+    if filed_at is None:
+        return False
+    if filed_at.tzinfo is None:
+        raise ValueError(
+            "n_csr_within_retention: ``filed_at`` must be a tz-aware datetime; "
+            "naive datetimes would honour the caller's local TZ."
+        )
+    return filed_at.astimezone(UTC) >= n_csr_retention_cutoff(now)
+
 
 def _failed_outcome(error: str, *, delay: timedelta = _FAILED_RETRY_DELAY) -> Any:
     """Build a ``failed`` ParseOutcome with retry backoff."""
@@ -262,6 +316,14 @@ def _parse_sec_n_csr(
 
     if not url:
         return _tombstoned("missing primary_document_url")
+
+    # Retention gate (#1233 §4.12 / PR8). ``filed_at`` predates the
+    # 730d window → tombstone BEFORE iXBRL fetch. Atom / daily-index /
+    # per-CIK poll / master-idx sweep enqueue N-CSR uncapped, so this
+    # is the single chokepoint that blocks pre-cap accessions from
+    # spending SEC HTTP budget + writing ``fund_metadata_observations``.
+    if not n_csr_within_retention(filed_at):
+        return _tombstoned("outside_retention")
 
     # 1. Fetch iXBRL companion.
     ixbrl_url = _ixbrl_companion_url(url)

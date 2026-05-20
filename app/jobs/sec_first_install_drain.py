@@ -33,7 +33,7 @@ import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -46,6 +46,7 @@ from app.providers.implementations.sec_submissions import (
 )
 from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
 from app.services.bootstrap_state import BootstrapStageCancelled
+from app.services.manifest_parsers.sec_n_csr import n_csr_retention_cutoff
 from app.services.processes.bootstrap_cancel_signal import (
     active_bootstrap_stage_key,
     bootstrap_cancel_requested,
@@ -771,11 +772,10 @@ def bootstrap_n_csr_drain(
     conn: psycopg.Connection[Any],
     *,
     http_get: HttpGet,
-    horizon_days: int = 730,
 ) -> NCsrDrainStats:
     """Walk fund-trust CIKs from ``cik_refresh_mf_directory`` + enqueue
-    last-``horizon_days`` N-CSR + N-CSRS accessions per trust to
-    ``sec_filing_manifest``.
+    N-CSR + N-CSRS accessions per trust to ``sec_filing_manifest``
+    within the 730d retention window (#1233 §4.12 / PR8).
 
     Pre-condition: ``class_id_mapping_ready`` capability (S25
     ``mf_directory_sync`` populates ``cik_refresh_mf_directory``). Raises
@@ -792,6 +792,13 @@ def bootstrap_n_csr_drain(
     ``subject_type='institutional_filer'`` + ``subject_id=trust_cik`` +
     ``instrument_id=None``. The parser fans out per-(series, class) at
     parse time.
+
+    Retention cap (PR8): cutoff resolved via ``n_csr_retention_cutoff``
+    in ``app/services/manifest_parsers/sec_n_csr.py`` so this drain
+    shares the single source of truth with the manifest-worker pre-
+    fetch gate. The previous ``horizon_days`` parameter is removed —
+    pre-cap deep dives use the parser gate's tombstone path (spec §8
+    acceptance #6 N-CSR exception).
     """
     # Entry guard — manual-trigger before S25 has ever fired.
     with conn.cursor() as cur:
@@ -801,7 +808,7 @@ def bootstrap_n_csr_drain(
     if directory_count == 0:
         raise BootstrapPhaseSkipped("class_id_mapping_ready unsatisfied — cik_refresh_mf_directory empty")
 
-    cutoff = datetime.now(UTC) - timedelta(days=horizon_days)
+    cutoff = n_csr_retention_cutoff()
     trusts_processed = 0
     trusts_skipped = 0
     secondary_pages_fetched = 0

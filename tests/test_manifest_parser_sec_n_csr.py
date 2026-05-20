@@ -368,3 +368,61 @@ def test_ixbrl_companion_url_derivation() -> None:
 def test_register_idempotent() -> None:
     parser_mod.register()
     parser_mod.register()
+
+
+def test_pre_cap_filed_at_tombstones_before_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1233 §4.12 / PR8 — pre-fetch retention gate.
+
+    An accession with ``filed_at`` older than 730d MUST tombstone with
+    reason ``outside_retention`` BEFORE the iXBRL fetch runs. The fetch
+    spy asserts the gate short-circuits cleanly + saves SEC budget on
+    pre-cap drift from atom/daily/per-CIK/master-idx.
+    """
+    fetch_calls: list[str] = []
+
+    def _spy_fetch(url: str) -> bytes | None:
+        fetch_calls.append(url)
+        return b"<xml/>"
+
+    monkeypatch.setattr(parser_mod, "_fetch_ixbrl", _spy_fetch)
+
+    row = _ManifestRowStub(
+        accession_number="0001-22-OLD",
+        primary_document_url="https://www.sec.gov/Archives/edgar/data/819118/000099/primary_doc.htm",
+        # 1000 days back from any plausible "now" exceeds the 730d cap.
+        filed_at=datetime(2022, 1, 1, tzinfo=UTC),
+    )
+    outcome = parser_mod._parse_sec_n_csr(ebull_test_conn, row)
+    assert outcome.status == "tombstoned"
+    assert outcome.error == "outside_retention"
+    assert fetch_calls == []  # short-circuited before HTTP fetch
+
+
+def test_in_cap_filed_at_proceeds_past_gate(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1233 §4.12 / PR8 — gate admits in-cap accessions.
+
+    Companion of ``test_pre_cap_filed_at_tombstones_before_fetch`` —
+    pins that the gate isn't over-broad. ``filed_at`` 10 days back is
+    well inside the 730d window; the parser must proceed through fetch
+    + extract.
+    """
+    _seed_instrument(ebull_test_conn, iid=3801, symbol="VTSAX", class_id="C000000901")
+    ebull_test_conn.commit()
+    _patch_fetch_and_extract(
+        monkeypatch,
+        extract_returns=[_make_facts(class_id="C000000901")],
+    )
+
+    row = _ManifestRowStub(
+        accession_number="0001-26-INC",
+        primary_document_url="https://www.sec.gov/Archives/edgar/data/819118/000100/primary_doc.htm",
+        filed_at=datetime.now(tz=UTC),
+    )
+    outcome = parser_mod._parse_sec_n_csr(ebull_test_conn, row)
+    assert outcome.status == "parsed"
