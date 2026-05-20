@@ -72,6 +72,7 @@ from app.services.insider_transactions import (
     _canonical_form_4_url,
     _write_tombstone,
     form4_within_retention,
+    form5_within_retention,
     parse_form_3_xml,
     parse_form_4_xml,
     parse_form_5_xml,
@@ -561,6 +562,7 @@ def _parse_form5(
     accession = row.accession_number
     instrument_id = row.instrument_id
     url = row.primary_document_url
+    filed_at = row.filed_at
 
     if instrument_id is None:
         logger.warning(
@@ -581,6 +583,33 @@ def _parse_form5(
             status="tombstoned",
             parser_version=_PARSER_VERSION_FORM5,
             error="missing primary_document_url",
+        )
+    # PR10b (#1233 §4.4) — Form 5 18-month retention cap, pre-fetch
+    # gate. Past-cap rows tombstone deterministically (retry would
+    # never change the answer). Pre-fetch placement means no
+    # ``filing_raw_documents`` row is written — future cap widening
+    # recovers via ``POST /jobs/sec_rebuild/run`` source-reset, NOT a
+    # parser-version rewash. Mirrors PR4's Form 4 gate.
+    if filed_at is None:
+        logger.warning(
+            "form5 manifest parser: accession=%s has no filed_at; tombstoning",
+            accession,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM5,
+            error="missing filed_at",
+        )
+    if not form5_within_retention(filed_at.date()):
+        logger.debug(
+            "form5 manifest parser: accession=%s filed_at=%s pre-18mo retention cap; tombstoning",
+            accession,
+            filed_at,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_FORM5,
+            error="retention floor",
         )
 
     # SEC XSL-rendering prefix strip — Atom discovery may carry the

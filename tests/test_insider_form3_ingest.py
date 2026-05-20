@@ -849,3 +849,129 @@ class TestBaselineOnlyReader:
         assert len(rows) == 1
         assert rows[0].shares == Decimal("7500")
         assert rows[0].as_of_date.isoformat() == "2026-03-15"
+
+    def test_multiple_filers_each_with_multiple_form3_returns_latest_per_pair(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """PR10b (#1233 §4.4) — pair-isolation under multiplicity. Three
+        filers × two Form 3s each (each pair carries an older + newer
+        snapshot for the same security). The reader returns exactly 3
+        rows (one per filer), each carrying the latest as_of_date for
+        its pair. Pins the DISTINCT ON dedup against a simultaneous
+        multi-pair fixture — none of the prior tests exercise this
+        dimension."""
+        iid = _seed_instrument(ebull_test_conn)
+
+        # 3 filers × 2 Form 3s. Each filer's later Form 3 carries a
+        # higher accession sequence + a newer as_of_date. The DISTINCT
+        # ON tie-break is as_of_date DESC, so the newer wins for each.
+        fixtures = [
+            ("0001100001", "Filer One", "0000000307-26-000001", "2024-04-15", 1000),
+            ("0001100001", "Filer One", "0000000307-26-000002", "2026-03-15", 1500),
+            ("0001100002", "Filer Two", "0000000308-26-000001", "2024-06-01", 2000),
+            ("0001100002", "Filer Two", "0000000308-26-000002", "2026-02-10", 2300),
+            ("0001100003", "Filer Three", "0000000309-26-000001", "2024-08-21", 3000),
+            ("0001100003", "Filer Three", "0000000309-26-000002", "2026-01-31", 3100),
+        ]
+        with ebull_test_conn.cursor() as cur:
+            for cik, name, accn, as_of, shares in fixtures:
+                cur.execute(
+                    """
+                    INSERT INTO insider_filings (
+                        accession_number, instrument_id, document_type,
+                        primary_document_url, parser_version, is_tombstone
+                    ) VALUES (%s, %s, '3', 'https://example.test/x.xml', 1, FALSE)
+                    """,
+                    (accn, iid),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO insider_initial_holdings (
+                        instrument_id, accession_number, row_num,
+                        filer_cik, filer_name, as_of_date,
+                        security_title, shares, is_derivative
+                    ) VALUES (%s, %s, 0, %s, %s, %s, 'Common Stock', %s, FALSE)
+                    """,
+                    (iid, accn, cik, name, as_of, shares),
+                )
+        ebull_test_conn.commit()
+
+        rows = list_baseline_only_insider_holdings(ebull_test_conn, instrument_id=iid)
+        assert len(rows) == 3
+        # Reader sorts by shares DESC NULLS LAST, filer_name ASC, so
+        # the order is Filer Three (3100) → Filer Two (2300) → Filer
+        # One (1500).
+        assert [r.filer_cik for r in rows] == ["0001100003", "0001100002", "0001100001"]
+        assert [r.shares for r in rows] == [Decimal("3100"), Decimal("2300"), Decimal("1500")]
+        # Each row must carry the LATEST as_of_date for its pair —
+        # never the older fixture.
+        assert [r.as_of_date.isoformat() for r in rows] == [
+            "2026-01-31",
+            "2026-02-10",
+            "2026-03-15",
+        ]
+
+    def test_multiple_filers_mixed_with_form4_activity_returns_only_baseline_only_filers(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """PR10b (#1233 §4.4) Codex 1a MED — pin the anti-join AS WELL
+        AS the DISTINCT ON. Three filers each with multiple Form 3s;
+        one of them ALSO has a non-tombstoned Form 4. Reader must
+        return exactly 2 rows — the Form-4-active filer is excluded
+        via the ``NOT EXISTS`` anti-join, even though their Form 3
+        baseline rows exist."""
+        iid = _seed_instrument(ebull_test_conn)
+
+        fixtures = [
+            ("0001200001", "Active Filer", "0000000311-26-000001", "2024-05-15", 4000),
+            ("0001200001", "Active Filer", "0000000311-26-000002", "2026-04-15", 4500),
+            ("0001200002", "Baseline Two", "0000000312-26-000001", "2024-06-15", 5000),
+            ("0001200002", "Baseline Two", "0000000312-26-000002", "2026-04-20", 5200),
+            ("0001200003", "Baseline Three", "0000000313-26-000001", "2024-07-30", 6000),
+            ("0001200003", "Baseline Three", "0000000313-26-000002", "2026-05-01", 6100),
+        ]
+        with ebull_test_conn.cursor() as cur:
+            for cik, name, accn, as_of, shares in fixtures:
+                cur.execute(
+                    """
+                    INSERT INTO insider_filings (
+                        accession_number, instrument_id, document_type,
+                        primary_document_url, parser_version, is_tombstone
+                    ) VALUES (%s, %s, '3', 'https://example.test/x.xml', 1, FALSE)
+                    """,
+                    (accn, iid),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO insider_initial_holdings (
+                        instrument_id, accession_number, row_num,
+                        filer_cik, filer_name, as_of_date,
+                        security_title, shares, is_derivative
+                    ) VALUES (%s, %s, 0, %s, %s, %s, 'Common Stock', %s, FALSE)
+                    """,
+                    (iid, accn, cik, name, as_of, shares),
+                )
+        ebull_test_conn.commit()
+
+        # Plant a Form 4 for the first filer only — the anti-join must
+        # remove them from the baseline-only output, but the other two
+        # filers (no Form 4 activity) survive.
+        _seed_form_4_for_filer(
+            ebull_test_conn,
+            instrument_id=iid,
+            filer_cik="0001200001",
+            filer_name="Active Filer",
+            accession="0000000311-26-000003",
+        )
+
+        rows = list_baseline_only_insider_holdings(ebull_test_conn, instrument_id=iid)
+        assert len(rows) == 2
+        ciks_returned = {r.filer_cik for r in rows}
+        assert ciks_returned == {"0001200002", "0001200003"}
+        # Latest-per-pair contract still holds for the surviving
+        # filers: their newer as_of_date wins.
+        as_of_by_cik = {r.filer_cik: r.as_of_date.isoformat() for r in rows}
+        assert as_of_by_cik == {
+            "0001200002": "2026-04-20",
+            "0001200003": "2026-05-01",
+        }

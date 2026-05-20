@@ -123,6 +123,65 @@ def form4_within_retention(filing_date: date, now: datetime | None = None) -> bo
     return filing_date >= form4_retention_cutoff(now)
 
 
+# Form 5 retention cap (#1233 PR10b, spec §4.4). Form 5 is the annual
+# catch-up of any missed Form 4s — cadence is one filing per insider
+# per fiscal year, due ~45 days after fiscal-year-end. Spec §4.4 says
+# "latest only matters"; the closest annual-cadence approximation
+# without a schema overhaul is an 18-month ``filed_at`` window.
+#
+# Why 18 months, not 12: a 1y rolling cap drops the only/latest Form 5
+# for a pair the moment it crosses the year boundary, leaving zero
+# Form 5 visibility for weeks until the next annual lands. 18 months
+# gives the annual-cadence buffer (Codex 1a MED on the PR10b plan).
+# Worst case it admits BOTH the prior-year Form 5 and the current-year
+# Form 5 briefly — operator-visible impact is zero because the read
+# side de-dupes via cumulative Form 4 rollup
+# (``refresh_insiders_current`` aggregates observations + Form 3
+# baseline; Form 5 transactions land in ``insider_transactions`` and
+# flow through the same cumulative path).
+#
+# Ingest-side cap only — existing rows are untouched until the
+# operator-driven pre-wipe + clean re-run (spec §6.3).
+INSIDER_FORM5_RETENTION_MONTHS: int = 18
+
+
+def form5_retention_cutoff(now: datetime | None = None) -> date:
+    """Earliest ``filed_at`` (as ``date``) accepted for Form 5 / 5-A ingest.
+
+    Calendar-month subtraction so the boundary stays stable across
+    leap days. ``now`` is injectable so tests can pin a stable
+    reference instant without monkeypatching ``datetime.now``.
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    today = now.date()
+    months_back = INSIDER_FORM5_RETENTION_MONTHS
+    # Subtract whole months. Year/month arithmetic without dateutil:
+    # convert today's (year, month) to a monotonic month index, step
+    # backward, convert back. Day-of-month is clamped to the target
+    # month's max (Feb 29 → Feb 28 in a non-leap year, Jan 31 → Feb 28
+    # in any year).
+    month_index = today.year * 12 + (today.month - 1) - months_back
+    target_year = month_index // 12
+    target_month = (month_index % 12) + 1
+    target_day = today.day
+    while target_day > 1:
+        try:
+            return date(target_year, target_month, target_day)
+        except ValueError:
+            target_day -= 1
+    return date(target_year, target_month, 1)
+
+
+def form5_within_retention(filing_date: date, now: datetime | None = None) -> bool:
+    """Boundary check used by every Form 5 writer chokepoint.
+
+    Returns True iff ``filing_date >= form5_retention_cutoff(now)``.
+    Boundary is inclusive.
+    """
+    return filing_date >= form5_retention_cutoff(now)
+
+
 # ---------------------------------------------------------------------
 # Public types
 # ---------------------------------------------------------------------
