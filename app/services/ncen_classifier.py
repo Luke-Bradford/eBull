@@ -318,12 +318,26 @@ def _upsert_classification(
     rejects DEMOTION to an older accession. Without it the structural
     cap would enforce "at most one row" but not "latest one row" — a
     stale call passing an older N-CEN would silently overwrite the
-    newer classification. Codex 1a (PR9) caught this gap. The
-    discovery path ``_find_latest_ncen`` already returns the newest
-    accession, but a future caller using a different discovery path
-    (or a one-off operator script passing accessions directly) must
-    not be able to demote the row. The predicate makes the database
-    the monotonicity oracle.
+    newer classification. Codex 1a (PR9) caught the initial gap;
+    Codex 2 (PR9) caught the same-day tie-break gap. The discovery
+    path ``_find_latest_ncen`` already returns the newest accession,
+    but a future caller using a different discovery path (or a
+    one-off operator script passing accessions directly) must not be
+    able to demote the row. The predicate makes the database the
+    monotonicity oracle.
+
+    The tie-break: ``filed_at`` is parsed from SEC's ``filingDate``
+    field (a calendar date) and stored as midnight UTC of that day —
+    two N-CEN filings on the same calendar day for the same CIK
+    therefore share an identical ``filed_at`` value (an N-CEN/A
+    amendment same day as the original is the canonical case). The
+    row-constructor comparison ``(EXCLUDED.filed_at,
+    EXCLUDED.accession_number) >= (existing.filed_at,
+    existing.accession_number)`` tie-breaks on accession_number
+    (lexicographically newer wins on identical filed_at — SEC's
+    intra-day accession sequence number is the chronological tiebreak
+    they themselves use). Without this, a same-day older accession
+    could clobber a same-day newer one.
 
     The lint guard ``scripts/check_ncen_latest_only.sh`` pins:
 
@@ -349,7 +363,8 @@ def _upsert_classification(
             accession_number = EXCLUDED.accession_number,
             filed_at = EXCLUDED.filed_at,
             fetched_at = NOW()
-        WHERE EXCLUDED.filed_at >= ncen_filer_classifications.filed_at
+        WHERE (EXCLUDED.filed_at, EXCLUDED.accession_number)
+              >= (ncen_filer_classifications.filed_at, ncen_filer_classifications.accession_number)
         """,
         {
             "cik": classification.cik,
