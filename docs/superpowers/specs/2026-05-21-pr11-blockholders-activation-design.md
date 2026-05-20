@@ -165,9 +165,8 @@ These constraints make `subject_type='blockholder_filer'` the only schema-legal 
      4. **CASE A (happy)**: `instrument_id_from_cusip in hint_ids` → confirmed universe-relevant; write observation with `instrument_id_from_cusip`. This is the typical case and preserves share-class correctness via CUSIP.
      5. **CASE B (CUSIP unresolved + 1 hint)**: `instrument_id_from_cusip is None and len(hint_ids) == 1` → use the single hint as fallback (closes the silent CUSIP-unresolved gap for single-class issuers).
      6. **CASE C (CUSIP unresolved + N>1 hints)**: `instrument_id_from_cusip is None and len(hint_ids) > 1` → ambiguous share-class case; write `instrument_id=NULL` with `blockholder_filings_ingest_log.error="cusip_unresolved_with_ambiguous_hint"` for operator audit. Existing #740 backfill will retroactively resolve this once the CUSIP→instrument mapping lands in `external_identifiers`.
-     7. **CASE D (CUSIP resolved but NOT in hints)**: `instrument_id_from_cusip is not None and instrument_id_from_cusip not in hint_ids` → discrepancy log + still write with `instrument_id_from_cusip` (CUSIP is more specific than hint; hint may be a stale universe entry — e.g. instrument was delisted between discovery and parse).
-     8. **CASE D (CUSIP resolved but NOT in hints) — REVISED v4 per Codex 1c HIGH universe-scope leak**: `instrument_id_from_cusip is not None and instrument_id_from_cusip not in hint_ids`. The v3 spec wrote with `instrument_id_from_cusip` and logged a discrepancy. Codex 1c correctly caught that this leaks outside the current tradable universe — if CUSIP resolves to a delisted or non-US sibling on a shared CIK, PR11 writes an observation against an instrument that violates the §6.1/§6.2 universe filter. **Corrected v4 behaviour**: cross-check `instrument_id_from_cusip` against the current universe (`SELECT 1 FROM instruments WHERE instrument_id = ? AND country = 'US' AND is_tradable = TRUE`). If the CUSIP-resolved instrument IS in the current universe → write with that `instrument_id` + log discrepancy with hint_ids (the hint may simply be stale — e.g. universe re-sync removed an instrument between discovery and parse). If the CUSIP-resolved instrument IS NOT in the current universe → write `instrument_id=NULL` with `blockholder_filings_ingest_log.error="cusip_resolved_outside_universe (instrument=%d hints=%s)"`. The raw chain row still persists (audit trail preserved per existing schema); the observation layer stays universe-clean.
-     9. **CASE E (no hint at all)**: legacy daily-index path or operator rebuild from no-hint source → CUSIP-only resolution as today, no PR11 regression.
+     7. **CASE D (CUSIP resolved but NOT in hints) — universe-revalidated, Codex 1c HIGH + Codex 1e LOW stale-dedup**: `instrument_id_from_cusip is not None and instrument_id_from_cusip not in hint_ids`. Codex 1c caught that blindly trusting CUSIP would leak outside the current tradable universe (if CUSIP resolves to a delisted or non-US sibling on a shared CIK, PR11 would write an observation against an instrument that violates the §6.1/§6.2 universe filter). Correct behaviour: cross-check `instrument_id_from_cusip` against the current universe (`SELECT 1 FROM instruments WHERE instrument_id = ? AND country = 'US' AND is_tradable = TRUE`). If the CUSIP-resolved instrument IS in the current universe → write with that `instrument_id` + log discrepancy with hint_ids (the hint may simply be stale — e.g. universe re-sync removed an instrument between discovery and parse). If the CUSIP-resolved instrument IS NOT in the current universe → write `instrument_id=NULL` with `blockholder_filings_ingest_log.error="cusip_resolved_outside_universe (instrument=%d hints=%s)"`. The raw chain row still persists (audit trail preserved per existing schema); the observation layer stays universe-clean.
+     8. **CASE E (no hint at all)**: legacy daily-index path or operator rebuild from no-hint source → CUSIP-only resolution as today, no PR11 regression.
    - **Hint UPSERT semantics (Codex 1b HIGH)**: `INSERT INTO sec_13dg_discovery_issuer_hint (accession_number, instrument_id, issuer_cik) VALUES (...) ON CONFLICT (accession_number, instrument_id) DO UPDATE SET discovered_at = NOW(), issuer_cik = EXCLUDED.issuer_cik`. Idempotent on re-discovery; refreshes `discovered_at` so the freshness operator can observe recent scan activity.
    - **Atomicity (Codex 1b HIGH)**: per-accession discovery writes both the manifest row AND every applicable hint row inside a single `conn.transaction()` block. The manifest row never becomes worker-visible (`status='pending'`) until the hint row(s) are committed. This pins the close of the silent-gap window — the worker cannot race ahead of the hint write and re-introduce the CUSIP-only fallback for a universe-discovered accession.
 
@@ -252,19 +251,37 @@ No new worker code. Existing `sec_manifest_worker` already drains pending `sec_1
 
 The hint side-table + the 5-case parser logic together close BLOCKING #1 (schema-incompatible manifest shape) AND BLOCKING #2 (silent CUSIP gap) AND Codex 1b BLOCKING #2 (share-class sibling routing) without changing the manifest schema invariants.
 
-**Parser library adoption (NEW v4 per operator scope call; v5 API correction per Codex 1d HIGH)**: PR11 replaces the in-house XML parser at `app/providers/implementations/sec_13dg.py::parse_primary_doc` with edgartools' canonical Schedule13 parsers. The actual API (verified at `.venv/lib/python3.14/site-packages/edgar/beneficial_ownership/schedule13.py`):
+**Parser library adoption (NEW v4; v5 API correction per Codex 1d HIGH; v6 simpler dict-only pattern per Codex 1e HIGH)**: PR11 replaces the in-house XML parser at `app/providers/implementations/sec_13dg.py::parse_primary_doc` with edgartools' canonical Schedule13 `parse_xml` static methods. The actual API (verified at `.venv/lib/python3.14/site-packages/edgar/beneficial_ownership/schedule13.py`):
 
 ```python
 from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 
-# parse_xml is a @staticmethod returning dict (NOT a Schedule13D instance)
-parsed_dict: dict = Schedule13D.parse_xml(xml)   # for sec_13d source
-parsed_dict: dict = Schedule13G.parse_xml(xml)   # for sec_13g source
-# Construct the typed object from the parsed dict (Pydantic model construction)
-filing = Schedule13D(**parsed_dict)              # or Schedule13G(**parsed_dict)
+# parse_xml is a @staticmethod returning dict. The Pydantic class constructor
+# (Schedule13D.__init__) requires 7 positional args incl. a `filing` reference
+# the worker doesn't have; constructing the object is unnecessary for our use.
+parsed: dict = Schedule13D.parse_xml(primary_xml)   # for sec_13d source
+parsed: dict = Schedule13G.parse_xml(primary_xml)   # for sec_13g source
+
+# The PR11 manifest-worker adapter reads dict fields directly. Dict shape
+# (verified during impl spike, pinned by a fixture-driven contract test):
+#   parsed["issuer_info"]["cik"]          → str (subject issuer CIK)
+#   parsed["issuer_info"]["name"]         → str (issuer display name)
+#   parsed["security_info"]["cusip"]      → str (CUSIP for share-class disambiguation)
+#   parsed["security_info"]["title"]      → str (securities class title)
+#   parsed["reporting_persons"]           → list[dict] (one per cover-page reporter)
+#       each: cik, name, role, sole_voting_power, shared_voting_power,
+#             sole_dispositive_power, shared_dispositive_power,
+#             aggregate_amount_owned, percent_of_class, type_of_reporting_person, etc.
+#   parsed["date_of_event"]               → str (ISO date)
+#   parsed["signatures"]                  → list[dict] (signer + filed_at)
+#
+# Adapter maps these into the eBull _upsert_filing_row contract; no Schedule13D
+# instance constructed (avoids the 7-positional-arg requirement at no functional cost).
 ```
 
-The PR11 manifest-worker adapter wraps both calls and maps `filing.cover_page` / `filing.reporting_persons` etc. into the eBull `_upsert_filing_row` write shape. Edgartools' parser is canonical, Pydantic-validated, and tracks SEC schema updates. The retention floor `max(today - 3y, 2024-12-19)` GUARANTEES every filing inside the window is post-XML-mandate and parseable — so the parser library coverage gap (skill_edgartools.md G11: pre-2024-12-19 HTML returns `None`) is closed by construction at the cap layer, not the parser layer.
+Edgartools' `parse_xml` is canonical (tracks SEC schema updates upstream). The retention floor `max(today - 3y, 2024-12-19)` GUARANTEES every filing inside the window is post-XML-mandate and parseable — so the parser library coverage gap (skill_edgartools.md G11: pre-2024-12-19 HTML returns `None` from `Schedule13D.from_filing`) is closed by construction at the cap layer, not the parser layer.
+
+A new contract test `tests/test_edgartools_schedule13_dict_shape.py` pins the dict-key contract via a real EDGAR fixture so an edgartools upgrade that renames keys fails CI immediately (companion to the existing version-pin test).
 
 **Library version + risk acknowledgment**: edgartools is already pinned at `5.30.2 (<5.31.0 ceiling)` in this repo (currently used only for 13F static parsers per skill_edgartools.md). The Pydantic validation cliff (#932) means a future edgartools upgrade can break drop-in compatibility; PR11 documents the version pin in the parser module docstring + adds a pinned version test (`tests/test_edgartools_version_pin.py` extension or new file) so a CI break surfaces immediately.
 
@@ -371,7 +388,7 @@ The atom fast-lane resolver and daily-index reconcile resolver are also edited: 
   - archive-owner CIK derivation: `cik` field on manifest = first non-issuer, non-agent CIK from `ciks[]` (Codex 1c BLOCKING #1 — accession-prefix returns 404 for filing-agent submissions like Donnelley/Edgar Agents/DFIN/Workiva)
   - filing-agent CIK in `ciks[]`: agent is NOT seeded into `blockholder_filers`; manifest `cik` falls through to the first non-issuer-non-agent CIK
   - issuer-only result (no non-issuer CIK in `ciks[]`): defensive skip + warn log (anomalous; should not occur in practice but pinned for safety)
-- NEW `tests/test_manifest_parser_sec_13dg.py` additions: 5-case hint-cross-validation branch — CASE A (CUSIP-in-hints happy path), CASE B (single-hint fallback), CASE C (multi-hint ambiguous writes NULL + log), CASE D (CUSIP-not-in-hints discrepancy log + trust CUSIP), CASE E (no hint → CUSIP-only legacy path). One test per case; assertion on resulting `instrument_id` value AND on `blockholder_filings_ingest_log.error` content for CASE C.
+- NEW `tests/test_manifest_parser_sec_13dg.py` additions: 5-case hint-cross-validation branch — CASE A (CUSIP-in-hints happy path), CASE B (single-hint fallback), CASE C (multi-hint ambiguous writes NULL + log), CASE D-in-universe (CUSIP-not-in-hints but instrument is in current tradable universe → write CUSIP + discrepancy log), CASE D-out-of-universe (CUSIP resolves to delisted/non-US sibling → write NULL + `cusip_resolved_outside_universe` log), CASE E (no hint → CUSIP-only legacy path). One test per case; assertion on resulting `instrument_id` value AND on `blockholder_filings_ingest_log.error` content for CASE C / CASE D-out-of-universe.
 - NEW `tests/test_ownership_observations_sync_blockholders_cap.py` (or fold into existing): covers chokepoint C gate — `bf.filed_at >= cutoff` predicate; row WITHOUT `filing_events` entry still syncs; row WITH pre-cap `bf.filed_at` excluded.
 - NEW `tests/test_rewash_blockholders_cap.py` (or fold into existing): covers chokepoint F — happy path uncapped for accessions with existing `blockholder_filings` rows; rescue path skipped for pre-cap accession with zero existing rows.
 
@@ -565,9 +582,9 @@ Same PR amends `docs/superpowers/specs/2026-05-19-data-retention-rubric.md`:
 2. Helper additions in `app/services/blockholders.py` (`blockholders_retention_cutoff`, `blockholders_within_retention`, `INSIDER_BLOCKHOLDERS_RETENTION_YEARS = 3`).
 3. NEW `app/services/sec_13dg_discovery.py` (discovery module + `discover_sec_13dg_for_universe` entry-point + `_resolve_discovery_startdt` watermark helper + `DiscoveryResult` dataclass).
 4. NEW `SecFilingsProvider.fetch_search_index_json` method in `app/providers/implementations/sec_edgar.py` (or sibling) — single HTTP entrypoint for efts.sec.gov so `_PROCESS_RATE_LIMIT_LOCK` is honoured.
-5. Cap gate B in `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (pre-fetch, pre-store_raw); REPLACE in-house `parse_primary_doc` call with `Schedule13D(**Schedule13D.parse_xml(primary_xml))` / `Schedule13G(**Schedule13G.parse_xml(primary_xml))` (edgartools `parse_xml` is `@staticmethod -> dict`, NOT an instance constructor — dispatch on manifest source `sec_13d` vs `sec_13g`); REPLACE today's CUSIP-only resolution with the 5-case hint-cross-validated branch (CASE A CUSIP-in-hints / CASE B single-hint fallback / CASE C multi-hint ambiguous NULL+log / CASE D CUSIP-universe-revalidated / CASE E legacy no-hint).
+5. Cap gate B in `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (pre-fetch, pre-store_raw); REPLACE in-house `parse_primary_doc` call with `parsed = Schedule13D.parse_xml(primary_xml)` / `Schedule13G.parse_xml(primary_xml)` returning a `dict`; map dict fields (`parsed["issuer_info"]`, `parsed["security_info"]`, `parsed["reporting_persons"]`, `parsed["date_of_event"]`, etc.) directly into the eBull `_upsert_filing_row` shape — do NOT construct a `Schedule13D` / `Schedule13G` Pydantic instance (the constructor requires 7 positional args including a `filing` reference the worker doesn't have, per Codex 1e HIGH). Dispatch on manifest source `sec_13d` vs `sec_13g`. REPLACE today's CUSIP-only resolution with the 5-case hint-cross-validated branch.
 6. Sync gate C in `app/services/ownership_observations_sync.py::sync_blockholders` (`bf.filed_at >= cutoff` predicate; NO `fe.filing_date` predicate).
-7. Rewash gate F in `app/services/rewash_filings.py::_apply_blockholders` — EXPLICIT BRANCH ORDER: (i) `SELECT COUNT(*) FROM blockholder_filings WHERE accession_number = ?`; (ii) zero-count rescue path applies retention helper; (iii) non-zero happy path proceeds uncapped (Codex 1b MEDIUM rewash branch-order pin). REPLACE in-house `parse_primary_doc` call with `edgartools.Schedule13D.parse_xml` / `Schedule13G.parse_xml` to match the live manifest-worker path.
+7. Rewash gate F in `app/services/rewash_filings.py::_apply_blockholders` — EXPLICIT BRANCH ORDER: (i) `SELECT COUNT(*) FROM blockholder_filings WHERE accession_number = ?`; (ii) zero-count rescue path applies retention helper; (iii) non-zero happy path proceeds uncapped (Codex 1b MEDIUM rewash branch-order pin). REPLACE in-house `parse_primary_doc` call with `parsed = Schedule13D.parse_xml(xml)` / `Schedule13G.parse_xml(xml)` returning `dict`; map dict fields directly into the eBull write shape (NO Schedule13D/G Pydantic-instance construction — same dict-only adapter pattern as the live manifest-worker path, Codex 1e HIGH).
 8. Resolver edits in `app/jobs/sec_atom_fast_lane.py` + `app/jobs/sec_daily_index_reconcile.py` (remove seed-list lookup branch; keep `blockholder_filers` lookup).
 9. DELETE dormant code from `app/services/blockholders.py` (`ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`, `seed_filer`).
 10. EDIT `scripts/seed_holder_coverage.py` (surgical 13D/G block removal; preserve 13F-HR / CUSIP-resolver / N-CEN paths).
