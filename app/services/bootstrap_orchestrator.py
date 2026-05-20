@@ -124,6 +124,14 @@ JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
 _BOOTSTRAP_13F_QUARTERS_BACK = 4
 _BOOTSTRAP_13F_RECENCY_DAYS = _BOOTSTRAP_13F_QUARTERS_BACK * 95
 
+# PR7 #1233 §4.6 — N-PORT cohort recency window. Aliases to the 13F
+# 380d window today (#1010 precedent) but lives in its own constant
+# so a future 13F-only tuning of ``_BOOTSTRAP_13F_RECENCY_DAYS``
+# doesn't silently drift the N-PORT cohort cutoff. Bot review on PR
+# #1243 WARNING — keep the two namespaced even when their numerical
+# value is identical.
+_BOOTSTRAP_NPORT_RECENCY_DAYS = _BOOTSTRAP_13F_RECENCY_DAYS
+
 # PR1c #1064 — filings_history_seed bootstrap default form-type
 # allow-list. Imported once at module load so the StageSpec.params
 # dict is plain data; the underlying constant lives in the canonical
@@ -189,10 +197,12 @@ def _resolve_dynamic_params(params: Mapping[str, Any]) -> dict[str, Any]:
         # PR7 #1233 §4.6 — mirror of the 13F HR-cutoff resolution.
         # UTC start-of-day so the boundary is inclusive against
         # ``sec_nport_filer_directory.last_seen_filed_at`` (stored at
-        # midnight UTC by ``sec_nport_filer_directory_sync``). 380d
-        # window borrows the #1010 precedent — same wall-clock benefit
-        # for stage 22 as #1010 delivered for stage 21.
-        nport_cutoff_date = datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS)
+        # midnight UTC by ``sec_nport_filer_directory_sync``). The
+        # 380d window aliases the 13F figure today but lives behind
+        # the dedicated ``_BOOTSTRAP_NPORT_RECENCY_DAYS`` constant so
+        # a future 13F-only tuning doesn't silently drift the N-PORT
+        # cohort cutoff (PR #1243 bot review WARNING).
+        nport_cutoff_date = datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_NPORT_RECENCY_DAYS)
         resolved["min_last_seen_filed_at"] = datetime.combine(nport_cutoff_date, time(0, 0), tzinfo=UTC)
     return resolved
 
