@@ -265,7 +265,7 @@ parsed: dict = Schedule13G.parse_xml(primary_xml)   # for sec_13g source
 # The PR11 manifest-worker adapter reads from the parsed dict. The TOP-LEVEL
 # is a dict (dict-key access at the outer layer), but NESTED VALUES are
 # dataclass / Pydantic objects (attribute access). Verified empirically
-# (Codex 1f HIGH); pinned by tests/test_edgartools_schedule13_dict_shape.py:
+# (Codex 1f HIGH); pinned by tests/test_edgartools_schedule13_shape.py:
 #
 #   parsed["issuer_info"]                 → IssuerInfo dataclass
 #       .cik          : str               # subject issuer CIK
