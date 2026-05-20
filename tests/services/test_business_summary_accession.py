@@ -15,7 +15,8 @@ from app.services.business_summary import (
 def _seed_instrument(conn: psycopg.Connection[tuple], symbol: str = "GSE2", iid: int = 199) -> int:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO instruments (instrument_id, symbol, company_name) VALUES (%s, %s, %s) RETURNING instrument_id",
+            "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+            "VALUES (%s, %s, %s, TRUE) RETURNING instrument_id",
             (iid, symbol, "Test Co Accession"),
         )
         row = cur.fetchone()

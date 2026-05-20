@@ -182,8 +182,8 @@ def test_073_purges_fundamentals_snapshot_for_non_sec_cik_instruments(
             (exchange_id,),
         )
         cur.execute(
-            "INSERT INTO instruments (instrument_id, symbol, company_name, exchange) "
-            "VALUES (%s, 'TST073A', 'Test 073 A', %s), (%s, 'TST073B', 'Test 073 B', %s)",
+            "INSERT INTO instruments (instrument_id, symbol, company_name, exchange, is_tradable) "
+            "VALUES (%s, 'TST073A', 'Test 073 A', %s, TRUE), (%s, 'TST073B', 'Test 073 B', %s, TRUE)",
             (sec_id, exchange_id, fmp_id, exchange_id),
         )
         # SEC-CIK on sec_id; fmp_id has no SEC CIK (FMP-only).

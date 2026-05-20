@@ -482,7 +482,7 @@ class TestUpsertQuote:
     def _seed_instrument(self, conn: psycopg.Connection[tuple], iid: int = 1001) -> None:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO instruments (instrument_id, symbol, company_name) VALUES (%s, %s, %s)",
+                "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (%s, %s, %s, TRUE)",
                 (iid, "AAPL", "Apple Inc."),
             )
         conn.commit()
@@ -576,11 +576,11 @@ class TestFetchWatchedInstrumentIds:
     def test_returns_held_and_watchlist_union(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO instruments (instrument_id, symbol, company_name) "
-                "VALUES (1001, 'AAPL', 'Apple'), "
-                "(1002, 'MSFT', 'Microsoft'), "
-                "(1003, 'NVDA', 'Nvidia'), "
-                "(1004, 'GOOG', 'Google')"
+                "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+                "VALUES (1001, 'AAPL', 'Apple', TRUE), "
+                "(1002, 'MSFT', 'Microsoft', TRUE), "
+                "(1003, 'NVDA', 'Nvidia', TRUE), "
+                "(1004, 'GOOG', 'Google', TRUE)"
             )
             # Held = 1001, 1002. Watchlist = 1002, 1003. Result should
             # be the union {1001, 1002, 1003}; 1004 (neither) stays out.

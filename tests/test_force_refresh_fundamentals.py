@@ -40,8 +40,8 @@ def _seed(
     )
     ebull_test_conn.execute(
         """
-        INSERT INTO instruments (instrument_id, symbol, company_name, exchange)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, is_tradable)
+        VALUES (%s, %s, %s, %s, TRUE)
         ON CONFLICT (instrument_id) DO NOTHING
         """,
         (instrument_id, symbol, f"Test {symbol}", f"frt_{instrument_id}"),

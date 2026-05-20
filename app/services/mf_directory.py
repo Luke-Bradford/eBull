@@ -118,9 +118,12 @@ def refresh_mf_directory(
             if symbol_stripped is None:
                 continue
 
-            # Look up the matching instrument by symbol. Skip if not in universe.
+            # Look up the matching instrument by symbol. Skip if not in
+            # universe OR if delisted (#1233 §6.2 — seeding class_id for
+            # an inactive instrument burns scheduler budget for no
+            # operator value).
             cur.execute(
-                "SELECT instrument_id FROM instruments WHERE symbol = %s",
+                "SELECT instrument_id FROM instruments WHERE symbol = %s AND is_tradable = TRUE",
                 (symbol_stripped,),
             )
             inst_row = cur.fetchone()

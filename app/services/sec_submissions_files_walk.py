@@ -70,7 +70,9 @@ def _list_cik_secondary_pages(
             SELECT ei.instrument_id, ei.identifier_value, i.symbol
             FROM external_identifiers ei
             JOIN instruments i ON i.instrument_id = ei.instrument_id
-            WHERE ei.provider = 'sec' AND ei.identifier_type = 'cik'
+            WHERE ei.provider = 'sec'
+              AND ei.identifier_type = 'cik'
+              AND i.is_tradable = TRUE
             """,
         )
         for row in cur.fetchall():

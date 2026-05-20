@@ -57,7 +57,8 @@ class _StubFetcher:
 def _seed_instrument(conn: psycopg.Connection[tuple], iid: int = 99, symbol: str = "AAPL") -> int:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO instruments (instrument_id, symbol, company_name) VALUES (%s, %s, %s) RETURNING instrument_id",
+            "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+            "VALUES (%s, %s, %s, TRUE) RETURNING instrument_id",
             (iid, symbol, "Test Co"),
         )
         row = cur.fetchone()

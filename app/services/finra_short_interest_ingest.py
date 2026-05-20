@@ -129,9 +129,16 @@ def build_preloaded_symbol_resolver(
     materialisation + O(1) per-row lookup vs the per-row 3-table
     default-resolver path.
     """
+    # Filter ``is_tradable = TRUE`` so delisted instruments don't bloat
+    # the resolver's collision space. FINRA bimonthly short-interest
+    # reports cover currently-listed securities only; a symbol that no
+    # longer trades cannot appear in today's FINRA payload, and keeping
+    # its row in the resolver only increases the chance of a normalised-
+    # symbol collision that forces the legitimate active row into the
+    # ambiguous bucket. #1233 §6.2.
     multimap: dict[str, set[int]] = {}
     with conn.cursor() as cur:
-        cur.execute("SELECT instrument_id, symbol FROM instruments")
+        cur.execute("SELECT instrument_id, symbol FROM instruments WHERE is_tradable = TRUE")
         for instrument_id, symbol in cur.fetchall():
             normalised = normalise_symbol(symbol)
             if not normalised:

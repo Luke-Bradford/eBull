@@ -43,6 +43,13 @@ uv run ruff format --check .
 echo "==> Pre-push gate: pyright"
 uv run pyright
 
+# #1233 §6.2 — every INSERT INTO instruments must list is_tradable in
+# its column list. Extends the prevention-log §"INSERT INTO instruments
+# fixtures must supply is_tradable" gate from tests/fixtures/ to the
+# whole tree. ~50ms; no docker / DB / Python dependency.
+echo "==> Pre-push gate: INSERT INTO instruments lint"
+bash scripts/check_instruments_inserts.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually
