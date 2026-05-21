@@ -4,6 +4,15 @@
 
 **Goal:** Activate the dormant SEC Schedule 13D/13G pipeline with universe-issuer-CIK-driven discovery via `efts.sec.gov/LATEST/search-index`, capped at `max(today - 3y, 2024-12-18)` (XML mandate floor). Retire dormant filer-seed code path in the same PR.
 
+**Plan v2 deltas (post-Codex-1a 2026-05-21):**
+
+- BLOCKING: spec v7.2 alignment pushed 2024-12-19 → 2024-12-18 throughout (already landed via the same commit that ships this plan v2).
+- HIGH: Phase 1 reordered — sql/159 drop migration MOVES from Task 1.1 (pre-cleanup) to Task 8.5 (post-cleanup) so intermediate commits never reference the dropped table from live code/resolvers.
+- HIGH: Phase 4 — `_ingest_one_accession` MUST NOT rely on `record_manifest_entry` for insert-vs-update distinction (helper returns `None` + unconditional `ON CONFLICT DO UPDATE`). Use a pre-check `SELECT 1 FROM sec_filing_manifest WHERE accession_number = %s` and increment counters accordingly.
+- HIGH: Phase 5 — parser swap introduces an explicit `_build_filing_from_edgartools_dict(parsed: dict, *, source: str) -> BlockholderFiling` adapter that maps edgartools' top-level dict + nested-dataclass attrs into the existing repo `BlockholderFiling` / `BlockholderReportingPerson` shape so `_upsert_filing_row` + `_record_13dg_observation_for_filing` consume unchanged.
+- MEDIUM: Phase 6/7/11 tests fleshed out — no placeholders.
+- MEDIUM: Phase 9 task explicitly bumps `_BOOTSTRAP_STAGE_SPECS` length assertion at `app/services/bootstrap_orchestrator.py:1961` from 26 → 27 + updates the runbook / frontend / `tests/test_bootstrap_stage_count.py` (if it exists) in lockstep.
+
 **Architecture:** New `app/services/sec_13dg_discovery.py` walks `instruments WHERE country='US' AND is_tradable=TRUE`, queries efts.sec.gov per issuer CIK, writes `sec_filing_manifest` rows + multi-row `sec_13dg_discovery_issuer_hint` side-table in one transaction. Existing `manifest_parsers/sec_13dg.py::_parse_13dg` swapped to `edgartools.beneficial_ownership.schedule13.Schedule13D.parse_xml` (dict + nested dataclass attribute access), with a 5-case CUSIP-vs-hint cross-validation branch for share-class sibling correctness. Cap chokepoints at: discovery query (A) / manifest pre-fetch (B) / sync (C) / rewash rescue-path (F). Refresh-current EXEMPT per parent spec §6.3.
 
 **Tech Stack:** Python 3.14 / psycopg3 / FastAPI / PostgreSQL 17 / edgartools 5.30.2 / pytest + pytest-testmon / awk-based pre-push lint.
@@ -29,66 +38,15 @@
 
 ---
 
-## Phase 1 — Schema migrations
+## Phase 1 — Schema migrations (ADD only; drop migration deferred to Phase 8)
 
-### Task 1.1: New migration `sql/159_drop_blockholder_filer_seeds.sql`
+> **Codex 1a HIGH ordering fix**: the `sql/159_drop_blockholder_filer_seeds.sql` migration originally proposed here is **deferred to Phase 8 (Task 8.5)** so it lands AFTER all resolver / ingester / script references to the table are removed. Applying the drop earlier would leave intermediate commits in a state where live code paths query a missing table.
 
-**Files:**
-
-- Create: `sql/159_drop_blockholder_filer_seeds.sql`
-
-- [ ] **Step 1: Write the migration**
-
-```sql
--- 159_drop_blockholder_filer_seeds.sql
---
--- Drop dormant filer-seed table introduced by sql/096 (#766).
--- PR11 (#1233) retires the operator-curated seed mechanism in favour
--- of universe-issuer-CIK-driven discovery via efts.sec.gov.
---
--- The seed table was empty universe-wide (never populated outside
--- dev smoke tests). All downstream consumers are removed in the
--- same PR:
---
---   * app/services/blockholders.py::ingest_all_active_filers
---   * app/services/blockholders.py::ingest_filer_blockholders
---   * app/services/blockholders.py::_list_active_filer_seeds
---   * app/services/blockholders.py::seed_filer
---   * blockholder block inside scripts/seed_holder_coverage.py
---   * blockholder_filer_seeds lookup branch inside the daily-index /
---     atom subject_resolver (blockholder_filers remains the sole
---     resolution path; auto-populated by PR11's discovery layer
---     upstream of the manifest insert).
---
--- _PLANNER_TABLES in tests/fixtures/ebull_test_db.py is updated to
--- DROP the entry in the same PR per the prevention-log entry
--- "When a migration adds OR drops any table with a FK relationship,
--- update _PLANNER_TABLES …".
-
-DROP INDEX IF EXISTS idx_blockholder_filer_seeds_active;
-DROP TABLE IF EXISTS blockholder_filer_seeds;
-```
-
-- [ ] **Step 2: Apply migration locally + verify**
-
-Run: `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/159_drop_blockholder_filer_seeds.sql`
-Expected: `DROP INDEX` / `DROP TABLE` succeed silently. If the table doesn't exist locally (clean dev DB), `IF EXISTS` makes it a no-op.
-
-Run: `docker exec ebull-postgres psql -U postgres -d ebull -c "\dt blockholder_filer_seeds"`
-Expected: `Did not find any relation named "blockholder_filer_seeds".`
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add sql/159_drop_blockholder_filer_seeds.sql
-git commit -m "feat(#1233): drop dormant blockholder_filer_seeds table (PR11)"
-```
-
-### Task 1.2: New migration `sql/160_create_sec_13dg_discovery_issuer_hint.sql`
+### Task 1.1: New migration `sql/159_create_sec_13dg_discovery_issuer_hint.sql`
 
 **Files:**
 
-- Create: `sql/160_create_sec_13dg_discovery_issuer_hint.sql`
+- Create: `sql/159_create_sec_13dg_discovery_issuer_hint.sql`
 
 - [ ] **Step 1: Write the migration**
 
@@ -145,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_sec_13dg_discovery_issuer_hint_instrument_id
 
 - [ ] **Step 2: Apply migration locally + verify**
 
-Run: `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/160_create_sec_13dg_discovery_issuer_hint.sql`
+Run: `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/159_create_sec_13dg_discovery_issuer_hint.sql`
 Expected: `CREATE TABLE` / `CREATE INDEX` succeed.
 
 Run: `docker exec ebull-postgres psql -U postgres -d ebull -c "\d sec_13dg_discovery_issuer_hint"`
@@ -154,40 +112,37 @@ Expected: 4-column table with composite PK and 2 indexes listed.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add sql/160_create_sec_13dg_discovery_issuer_hint.sql
+git add sql/159_create_sec_13dg_discovery_issuer_hint.sql
 git commit -m "feat(#1233): add sec_13dg_discovery_issuer_hint table (PR11)"
 ```
 
-### Task 1.3: Update `_PLANNER_TABLES` in test fixtures
+### Task 1.2: Add `sec_13dg_discovery_issuer_hint` to `_PLANNER_TABLES`
 
 **Files:**
 
 - Modify: `tests/fixtures/ebull_test_db.py`
 
+> **Note**: this task only ADDS the new hint table. The `blockholder_filer_seeds` drop happens in Task 8.5 alongside the drop migration, so intermediate test runs still see the dormant-but-existing seed table.
+
 - [ ] **Step 1: Grep for `_PLANNER_TABLES` to find the relevant block**
 
 Run: `grep -n "_PLANNER_TABLES\|blockholder_filer_seeds" tests/fixtures/ebull_test_db.py`
-Expected: line-number for the `_PLANNER_TABLES` tuple/list definition + any line referencing `blockholder_filer_seeds`.
+Expected: line-number for the `_PLANNER_TABLES` tuple/list definition + existing `blockholder_filer_seeds` line.
 
-- [ ] **Step 2: Remove `blockholder_filer_seeds` + add `sec_13dg_discovery_issuer_hint`**
+- [ ] **Step 2: Add `sec_13dg_discovery_issuer_hint`**
 
-Edit the `_PLANNER_TABLES` collection inside `tests/fixtures/ebull_test_db.py`:
-
-- Delete the line containing `"blockholder_filer_seeds"`.
-- Add `"sec_13dg_discovery_issuer_hint"` in alphabetical / grouped position consistent with the surrounding entries.
-
-(Exact line-edit deferred to the executor reading the file; the rule is: drop the dormant table reference + add the new hint table reference. Keep the existing comment block style.)
+Edit the `_PLANNER_TABLES` collection inside `tests/fixtures/ebull_test_db.py`: add `"sec_13dg_discovery_issuer_hint"` in alphabetical / grouped position consistent with the surrounding entries. Leave `"blockholder_filer_seeds"` in place — Task 8.5 removes it after the drop migration lands.
 
 - [ ] **Step 3: Verify the fixture still loads**
 
-Run: `uv run python -c "from tests.fixtures.ebull_test_db import _PLANNER_TABLES; print('count:', len(_PLANNER_TABLES)); assert 'blockholder_filer_seeds' not in _PLANNER_TABLES; assert 'sec_13dg_discovery_issuer_hint' in _PLANNER_TABLES; print('PLANNER TABLES updated correctly')"`
-Expected: `PLANNER TABLES updated correctly`
+Run: `uv run python -c "from tests.fixtures.ebull_test_db import _PLANNER_TABLES; assert 'sec_13dg_discovery_issuer_hint' in _PLANNER_TABLES; assert 'blockholder_filer_seeds' in _PLANNER_TABLES; print('OK')"`
+Expected: `OK`
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add tests/fixtures/ebull_test_db.py
-git commit -m "feat(#1233): update _PLANNER_TABLES for sql/159 drop + sql/160 add (PR11)"
+git commit -m "feat(#1233): add sec_13dg_discovery_issuer_hint to _PLANNER_TABLES (PR11)"
 ```
 
 ---
@@ -1009,27 +964,38 @@ def _ingest_one_accession(
 
         # Manifest row — schema CHECK requires instrument_id IS NULL
         # for non-issuer subject_type.
-        try:
-            record_manifest_entry(
-                conn,
-                accession,
-                cik=archive_owner_cik,
-                form=form,
-                source=source,
-                subject_type="blockholder_filer",
-                subject_id=archive_owner_cik,
-                instrument_id=None,
-                filed_at=filed_at,
-                primary_document_url=None,
+        #
+        # Codex 1a HIGH 2026-05-21: record_manifest_entry returns None
+        # and always uses ON CONFLICT DO UPDATE
+        # (sec_manifest.py:194-209 + :253). Pre-check existence so the
+        # counter distinguishes a true insert from a no-op upsert.
+        # Pre-check is inside the transaction so the SELECT + INSERT
+        # see the same snapshot.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM sec_filing_manifest WHERE accession_number = %s",
+                (accession,),
             )
-            manifest_inserted = True
-        except Exception:  # noqa: BLE001
-            # PK conflict on re-discovery is expected. record_manifest_entry's
-            # ON CONFLICT DO UPDATE returns silently in that case; if a raise
-            # occurs it's a genuine error and we surface it.
-            raise
+            already_present = cur.fetchone() is not None
+        record_manifest_entry(
+            conn,
+            accession,
+            cik=archive_owner_cik,
+            form=form,
+            source=source,
+            subject_type="blockholder_filer",
+            subject_id=archive_owner_cik,
+            instrument_id=None,
+            filed_at=filed_at,
+            primary_document_url=None,
+        )
+        manifest_inserted = not already_present
 
         # Hint row(s) — multi-row for share-class siblings on shared CIK.
+        # rowcount on ON CONFLICT DO UPDATE is 1 for both INSERT and UPDATE
+        # under psycopg3 + PG17, so use xmax = 0 trick: when a fresh INSERT
+        # occurs, xmax of the new row is 0; on UPDATE it's the txid that
+        # supersedes it. Capture via RETURNING for precise metrics.
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1039,10 +1005,12 @@ def _ingest_one_accession(
                 ON CONFLICT (accession_number, instrument_id) DO UPDATE
                 SET discovered_at = NOW(),
                     issuer_cik = EXCLUDED.issuer_cik
+                RETURNING (xmax = 0) AS inserted
                 """,
                 (accession, instrument_id, issuer_cik),
             )
-            hint_inserted = cur.rowcount > 0
+            hint_row = cur.fetchone()
+            hint_inserted = bool(hint_row and hint_row[0])
     return (manifest_inserted, hint_inserted, filers_upserted)
 
 
@@ -1607,28 +1575,280 @@ git add app/services/manifest_parsers/sec_13dg.py tests/test_manifest_parser_sec
 git commit -m "feat(#1233): _parse_13dg retention gate B (pre-fetch tombstone) (PR11)"
 ```
 
-### Task 5.3: Swap `parse_primary_doc` → edgartools dict-only adapter
+### Task 5.3: Adapter — edgartools dict → repo `BlockholderFiling` dataclass
+
+**Files:**
+
+- Create: `app/services/manifest_parsers/_schedule13_adapter.py`
+- Test: `tests/test_schedule13_adapter.py` (NEW)
+
+> **Codex 1a HIGH adapter contract**: `_upsert_filing_row` consumes `BlockholderReportingPerson` with `aggregate_amount_owned: Decimal | None`, `sole_voting_power: Decimal | None`, etc. (blockholders.py:463). `_record_13dg_observation_for_filing` consumes `BlockholderFiling` with `primary_filer_cik: str`, `issuer_cik`, `issuer_cusip`, etc. (blockholders.py:735). Edgartools returns `dict` + nested dataclasses with different field names + types (`int` not `Decimal`, `aggregate_amount` not `aggregate_amount_owned`). The adapter builds the repo dataclasses so downstream helpers are unchanged.
+
+- [ ] **Step 1: Write the failing adapter test**
+
+Create `tests/test_schedule13_adapter.py`:
+
+```python
+"""Tests for the edgartools dict → repo BlockholderFiling adapter (#1233 PR11)."""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+import pytest
+from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
+
+from app.providers.implementations.sec_13dg import (
+    BlockholderFiling,
+    BlockholderReportingPerson,
+)
+from app.services.manifest_parsers._schedule13_adapter import (
+    build_filing_from_edgartools_dict,
+)
+
+
+_SAMPLE_SC_13D_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D">
+  <headerData>
+    <submissionType>SCHEDULE 13D/A</submissionType>
+    <filerInfo><filer><filerCredentials><cik>0001822844</cik></filerCredentials></filer></filerInfo>
+  </headerData>
+  <formData>
+    <coverPage>
+      <issuerInfo>
+        <issuerName>GameStop Corp.</issuerName>
+        <cik>0001326380</cik>
+        <cusip>36467W109</cusip>
+      </issuerInfo>
+      <securityInfo>
+        <securityClassTitle>Class A Common Stock</securityClassTitle>
+        <cusip>36467W109</cusip>
+      </securityInfo>
+    </coverPage>
+  </formData>
+</edgarSubmission>
+"""
+
+
+def test_adapter_returns_blockholder_filing() -> None:
+    parsed = Schedule13D.parse_xml(_SAMPLE_SC_13D_XML)
+    filing = build_filing_from_edgartools_dict(parsed, source="sec_13d")
+    assert isinstance(filing, BlockholderFiling)
+    assert filing.submission_type == "SCHEDULE 13D/A"
+    assert filing.status == "active"
+    assert filing.primary_filer_cik == "0001822844"
+    assert filing.issuer_cik == "0001326380"
+    assert filing.issuer_cusip == "36467W109"
+    assert filing.securities_class_title == "Class A Common Stock"
+
+
+def test_adapter_maps_aggregate_amount_to_aggregate_amount_owned_decimal() -> None:
+    """edgartools .aggregate_amount (int) → repo .aggregate_amount_owned (Decimal | None)."""
+    parsed = Schedule13D.parse_xml(_SAMPLE_SC_13D_XML)
+    filing = build_filing_from_edgartools_dict(parsed, source="sec_13d")
+    # Every reporting person must be a repo dataclass with the legacy field name.
+    for person in filing.reporting_persons:
+        assert isinstance(person, BlockholderReportingPerson)
+        if person.aggregate_amount_owned is not None:
+            assert isinstance(person.aggregate_amount_owned, Decimal)
+
+
+def test_adapter_dispatches_on_source_sc_13d_vs_sc_13g_status() -> None:
+    parsed_13d = Schedule13D.parse_xml(_SAMPLE_SC_13D_XML)
+    f13d = build_filing_from_edgartools_dict(parsed_13d, source="sec_13d")
+    assert f13d.status == "active"
+    # 13G fixture with passive status is harder to inline; assert via the
+    # mapping table that source='sec_13g' selects status='passive'.
+    from app.services.manifest_parsers._schedule13_adapter import _STATUS_FOR_SOURCE
+    assert _STATUS_FOR_SOURCE["sec_13g"] == "passive"
+    assert _STATUS_FOR_SOURCE["sec_13d"] == "active"
+
+
+def test_adapter_preserves_no_cik_natural_persons() -> None:
+    """edgartools ReportingPerson.no_cik=True → repo .no_cik=True + .cik=None."""
+    # (For natural-person fixtures: assert person.no_cik AND person.cik is None.
+    # If the inline fixture lacks one, mark as @pytest.mark.skip + file follow-up.)
+    pytest.skip("requires natural-person edgartools fixture; see tests/fixtures/sec_13dg/")
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/test_schedule13_adapter.py -v`
+Expected: ImportError (`No module named 'app.services.manifest_parsers._schedule13_adapter'`).
+
+- [ ] **Step 3: Write the adapter module**
+
+Create `app/services/manifest_parsers/_schedule13_adapter.py`:
+
+```python
+"""Adapter: edgartools Schedule13D/G parse_xml dict → repo BlockholderFiling.
+
+PR11 (#1233) swaps the in-house parse_primary_doc XML parser for
+edgartools.beneficial_ownership.schedule13.Schedule13D.parse_xml /
+Schedule13G.parse_xml on the manifest-worker path AND the rewash path.
+Edgartools returns a top-level dict with nested dataclasses
+(IssuerInfo / SecurityInfo / ReportingPerson / Signature); the
+downstream helpers (_upsert_filing_row, _record_13dg_observation_for_filing)
+consume the repo's BlockholderFiling / BlockholderReportingPerson
+dataclasses with Decimal numeric types and legacy field names
+(aggregate_amount_owned, primary_filer_cik, etc.).
+
+This adapter is the single field-mapping chokepoint between the two
+shapes. Keep all dict/attribute access here so downstream helpers stay
+ignorant of the parser library choice.
+
+See .claude/skills/data-sources/edgartools.md G15 for the edgartools
+contract (top-level dict + nested dataclass attr access; .aggregate_amount
+NOT .aggregate_amount_owned; Schedule13D.__init__ requires 7 positional
+args incl. filing — so we don't construct the Pydantic instance here).
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any, Final, Literal
+
+from app.providers.implementations.sec_13dg import (
+    BlockholderFiling,
+    BlockholderReportingPerson,
+)
+
+
+_STATUS_FOR_SOURCE: Final[dict[str, Literal["active", "passive"]]] = {
+    "sec_13d": "active",
+    "sec_13g": "passive",
+}
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    """Convert edgartools int/float/None to Decimal | None.
+
+    edgartools stores ReportingPerson share counts as int and
+    percent_of_class as float; the repo dataclass requires Decimal so
+    NUMERIC(24,4) writes round-trip without floating-point drift.
+    """
+    if value is None:
+        return None
+    return Decimal(str(value))
+
+
+def _map_reporting_person(person: Any) -> BlockholderReportingPerson:
+    """One edgartools.ReportingPerson dataclass → repo BlockholderReportingPerson."""
+    return BlockholderReportingPerson(
+        cik=None if getattr(person, "no_cik", False) else getattr(person, "cik", None),
+        no_cik=bool(getattr(person, "no_cik", False)),
+        name=getattr(person, "name", "") or "",
+        member_of_group=getattr(person, "member_of_group", None),
+        type_of_reporting_person=getattr(person, "type_of_reporting_person", None),
+        citizenship=getattr(person, "citizenship", None),
+        sole_voting_power=_to_decimal(getattr(person, "sole_voting_power", None)),
+        shared_voting_power=_to_decimal(getattr(person, "shared_voting_power", None)),
+        sole_dispositive_power=_to_decimal(getattr(person, "sole_dispositive_power", None)),
+        shared_dispositive_power=_to_decimal(getattr(person, "shared_dispositive_power", None)),
+        aggregate_amount_owned=_to_decimal(getattr(person, "aggregate_amount", None)),
+        percent_of_class=_to_decimal(getattr(person, "percent_of_class", None)),
+    )
+
+
+def build_filing_from_edgartools_dict(
+    parsed: dict[str, Any],
+    *,
+    source: Literal["sec_13d", "sec_13g"],
+) -> BlockholderFiling:
+    """Map edgartools Schedule13D/G.parse_xml dict to repo BlockholderFiling.
+
+    Raises ValueError if required fields are missing (matches the
+    pre-existing in-house parse_primary_doc contract — the manifest
+    worker's tombstone branch already handles ValueError).
+    """
+    issuer_info = parsed.get("issuer_info")
+    security_info = parsed.get("security_info")
+    reporting_persons = parsed.get("reporting_persons") or []
+
+    if issuer_info is None or security_info is None:
+        raise ValueError(
+            "Schedule13 parsed payload missing issuer_info or security_info"
+        )
+    if not reporting_persons:
+        raise ValueError("Schedule13 parsed payload has zero reporting persons")
+
+    # primary_filer_cik = the cover-page filer (the entity that submitted
+    # on EDGAR). For 13D/G this is typically the first reporting person's
+    # CIK OR a service company filing on their behalf; edgartools doesn't
+    # expose the filer-credentials block directly. Fall back to the first
+    # reporting person with a CIK.
+    primary_filer_cik = next(
+        (p.cik for p in reporting_persons if getattr(p, "cik", None)),
+        "",
+    )
+
+    # submission_type retrieval: edgartools' Schedule13D.parse_xml returns
+    # 'SCHEDULE 13D' / 'SCHEDULE 13D/A'; for Schedule13G.parse_xml the
+    # variants are 'SCHEDULE 13G' / 'SCHEDULE 13G/A'. The top-level dict
+    # may not always include `submission_type`; if absent we derive from
+    # the source + items.amendment_number.
+    submission_type = parsed.get("submission_type")
+    if submission_type is None:
+        # Derive from source + amendment_number.
+        is_amendment = parsed.get("amendment_number") is not None
+        base = "SCHEDULE 13D" if source == "sec_13d" else "SCHEDULE 13G"
+        submission_type = f"{base}/A" if is_amendment else base
+
+    return BlockholderFiling(
+        submission_type=submission_type,
+        status=_STATUS_FOR_SOURCE[source],
+        primary_filer_cik=primary_filer_cik,
+        issuer_cik=getattr(issuer_info, "cik", "") or "",
+        issuer_cusip=getattr(security_info, "cusip", "") or "",
+        issuer_name=getattr(issuer_info, "name", "") or "",
+        securities_class_title=getattr(security_info, "title", None),
+        date_of_event=parsed.get("date_of_event"),
+        filed_at=None,  # signature-block parsing happens at the manifest layer
+        reporting_persons=[_map_reporting_person(p) for p in reporting_persons],
+    )
+```
+
+- [ ] **Step 4: Run the adapter tests**
+
+Run: `uv run pytest tests/test_schedule13_adapter.py -v`
+Expected: 3 PASS + 1 SKIP (natural-person fixture deferred).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/services/manifest_parsers/_schedule13_adapter.py tests/test_schedule13_adapter.py
+git commit -m "feat(#1233): edgartools dict → BlockholderFiling adapter (PR11)"
+```
+
+### Task 5.3.5: Wire the adapter into `_parse_13dg`
 
 **Files:**
 
 - Modify: `app/services/manifest_parsers/sec_13dg.py`
 
-- [ ] **Step 1: Write the failing test for happy-path edgartools parse**
+- [ ] **Step 1: Write the failing end-to-end test**
 
-Add to `tests/test_manifest_parser_sec_13dg.py` a test that drives `_parse_13dg` end-to-end against a real edgartools-parseable XML fixture (use the same fixture from `tests/test_edgartools_schedule13_shape.py` if convenient). Assert that the resulting `blockholder_filings` row has the expected `issuer_cik`, `issuer_cusip`, `securities_class_title`, and per-reporter shares.
+Add a test to `tests/test_manifest_parser_sec_13dg.py` that drives `_parse_13dg` against a real post-mandate fixture and asserts the `blockholder_filings` row has correct `issuer_cik` / `issuer_cusip` / per-reporter `aggregate_amount_owned` (Decimal).
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `uv run pytest tests/test_manifest_parser_sec_13dg.py -v -k "edgartools_happy"`
-Expected: fails because the parser still calls in-house `parse_primary_doc`.
+Expected: fails because `_parse_13dg` still calls the in-house `parse_primary_doc`.
 
 - [ ] **Step 3: Replace the parse call in `_parse_13dg`**
 
 In `app/services/manifest_parsers/sec_13dg.py`:
 
-- Replace the `from app.providers.implementations.sec_13dg import (BlockholderFiling, parse_primary_doc)` import.
-- Add `from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G`.
-- Replace the `filing: BlockholderFiling = parse_primary_doc(primary_xml)` call with source-dispatched edgartools `parse_xml`:
+- Remove `from app.providers.implementations.sec_13dg import (BlockholderFiling, parse_primary_doc)`. Keep `BlockholderFiling` import IF other code in the module uses the type annotation; otherwise drop it too.
+- Add:
+
+```python
+from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
+from app.services.manifest_parsers._schedule13_adapter import (
+    build_filing_from_edgartools_dict,
+)
+```
+
+- Replace the body that did `filing: BlockholderFiling = parse_primary_doc(primary_xml)` with:
 
 ```python
         try:
@@ -1636,27 +1856,25 @@ In `app/services/manifest_parsers/sec_13dg.py`:
                 parsed = Schedule13D.parse_xml(primary_xml)
             else:  # sec_13g
                 parsed = Schedule13G.parse_xml(primary_xml)
+            filing = build_filing_from_edgartools_dict(parsed, source=row.source)
         except Exception as exc:  # noqa: BLE001
-            ...  # existing error-handling path stays
+            # Existing error-handling path; preserves raw_status='stored'
+            # because store_raw ran in the savepoint above.
+            ...
 ```
 
-- Replace every downstream attribute read (`filing.issuer_cusip`, `filing.reporting_persons`, etc.) with the dict-key + nested-dataclass-attr pattern documented at .claude/skills/data-sources/edgartools.md G15:
-  - `parsed["issuer_info"].cik` / `.name` / `.cusip`
-  - `parsed["security_info"].cusip` / `.title`
-  - `for person in parsed["reporting_persons"]: person.cik / .name / .aggregate_amount / .percent_of_class / .no_cik / ...`
-  - `parsed["date_of_event"]`
-- Map these into the existing `_upsert_filing_row` / `_record_13dg_observation_for_filing` calls. The downstream Python types (`int` for `aggregate_amount`, `float` for `percent_of_class`) need no conversion at the call site if the helpers already accept those types; if they expect `Decimal` or string, convert at the boundary.
+Downstream `_upsert_filing_row(...)` + `_record_13dg_observation_for_filing(...)` calls stay untouched because the adapter delivers the repo's `BlockholderFiling` shape they already consume.
 
 - [ ] **Step 4: Run all `test_manifest_parser_sec_13dg.py` tests**
 
 Run: `uv run pytest tests/test_manifest_parser_sec_13dg.py -v`
-Expected: all tests PASS. If pre-existing tests using the in-house `parse_primary_doc` fixtures fail, port the fixtures to edgartools-parseable XML or assert that the legacy path is no longer the production code path.
+Expected: all PASS. Any pre-existing test using XML fixtures that the in-house `parse_primary_doc` accepted but edgartools rejects → port the fixture to an edgartools-parseable form (or assert the legacy parser is no longer the production path and remove the legacy-only test).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add app/services/manifest_parsers/sec_13dg.py tests/test_manifest_parser_sec_13dg.py
-git commit -m "feat(#1233): _parse_13dg adopts edgartools Schedule13D/G.parse_xml dict adapter (PR11)"
+git commit -m "feat(#1233): _parse_13dg uses edgartools + Schedule13 adapter (PR11)"
 ```
 
 ### Task 5.4: 5-case CUSIP-vs-hint cross-validation branch
@@ -1792,25 +2010,136 @@ from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 pytestmark = pytest.mark.integration
 
 
+def _seed_blockholder_filing(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    issuer_cik: str,
+    filer_cik: str,
+    accession: str,
+    filed_at: datetime,
+) -> None:
+    """Insert one universe-resolved blockholder_filings row + its filer."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO blockholder_filers (cik, name)
+            VALUES (%s, %s)
+            ON CONFLICT (cik) DO UPDATE SET name = EXCLUDED.name
+            RETURNING filer_id
+            """,
+            (filer_cik, f"Filer-{filer_cik}"),
+        )
+        filer_id = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO blockholder_filings (
+                filer_id, accession_number, submission_type, status,
+                instrument_id, issuer_cik, issuer_cusip,
+                securities_class_title, reporter_name,
+                aggregate_amount_owned, percent_of_class, filed_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                filer_id, accession, "SCHEDULE 13D", "active",
+                instrument_id, issuer_cik, "999999999",
+                "Class A Common", "Test Reporter",
+                100_000, 5.25, filed_at,
+            ),
+        )
+
+
+def _seed_universe_instrument(
+    conn: psycopg.Connection[tuple], *, instrument_id: int, symbol: str
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO instruments (instrument_id, symbol, is_tradable, country)
+            VALUES (%s, %s, TRUE, 'US')
+            ON CONFLICT (instrument_id) DO NOTHING
+            """,
+            (instrument_id, symbol),
+        )
+
+
 def test_sync_excludes_pre_cap_filings(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
     """A blockholder_filings row with filed_at strictly before the cutoff
     is not synced to ownership_blockholders_observations."""
     cutoff = blockholders_retention_cutoff()
-    pre_cap = datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC) - timedelta(seconds=1)
-    # ... seed instrument + cik + filer + pre-cap filing + post-cap filing
-    # ... assert post-cap observation exists, pre-cap does not
+    pre_cap_filed_at = datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC) - timedelta(seconds=1)
+    post_cap_filed_at = datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC) + timedelta(days=30)
+
+    iid = 99700001
+    _seed_universe_instrument(ebull_test_conn, instrument_id=iid, symbol="SYNC1")
+    _seed_blockholder_filing(
+        ebull_test_conn,
+        instrument_id=iid,
+        issuer_cik="0009999991",
+        filer_cik="0007777771",
+        accession="0000111111-23-000001",  # pre-cap accession
+        filed_at=pre_cap_filed_at,
+    )
+    _seed_blockholder_filing(
+        ebull_test_conn,
+        instrument_id=iid,
+        issuer_cik="0009999991",
+        filer_cik="0007777772",
+        accession="0000111111-26-000001",  # post-cap accession
+        filed_at=post_cap_filed_at,
+    )
+    ebull_test_conn.commit()
+
+    sync_blockholders(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_accession FROM ownership_blockholders_observations WHERE instrument_id = %s",
+            (iid,),
+        )
+        synced_accessions = {r[0] for r in cur.fetchall()}
+
+    assert "0000111111-26-000001" in synced_accessions, "post-cap row must sync"
+    assert "0000111111-23-000001" not in synced_accessions, "pre-cap row must NOT sync"
 
 
 def test_sync_includes_rows_without_filing_events_entry(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
     """Codex 1a HIGH #4: gating on filing_events.filing_date with LEFT JOIN
-    would null-reject rows missing a filing_events entry. We gate on bf.filed_at
-    directly, so post-cap rows WITHOUT a filing_events entry still sync."""
-    # ... seed post-cap blockholder_filings row WITHOUT a filing_events entry
-    # ... call sync; assert observation exists
+    would null-reject rows missing a filing_events entry. The gate is on
+    bf.filed_at directly, so post-cap rows WITHOUT a filing_events entry
+    still sync."""
+    cutoff = blockholders_retention_cutoff()
+    post_cap = datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC) + timedelta(days=10)
+
+    iid = 99700002
+    _seed_universe_instrument(ebull_test_conn, instrument_id=iid, symbol="SYNC2")
+    accession = "0000111111-26-000002"
+    _seed_blockholder_filing(
+        ebull_test_conn,
+        instrument_id=iid,
+        issuer_cik="0009999992",
+        filer_cik="0007777773",
+        accession=accession,
+        filed_at=post_cap,
+    )
+    # Deliberately do NOT seed a filing_events row for this accession.
+    ebull_test_conn.commit()
+
+    sync_blockholders(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ownership_blockholders_observations WHERE source_accession = %s",
+            (accession,),
+        )
+        assert cur.fetchone() is not None, \
+            "post-cap row missing filing_events entry must still sync"
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -1871,11 +2200,163 @@ git commit -m "feat(#1233): sync_blockholders bf.filed_at retention gate C (PR11
 
 - [ ] **Step 1: Write the failing tests for happy-path / rescue-path branches**
 
-Create `tests/test_rewash_blockholders_cap.py` with three tests:
+Create `tests/test_rewash_blockholders_cap.py`:
 
-- `test_happy_path_uncapped_for_existing_rows` — pre-cap accession WITH existing `blockholder_filings` rows → DELETE + re-INSERT still happens (happy path uncapped per §6.3).
-- `test_rescue_path_skips_pre_cap_accession` — pre-cap accession WITHOUT existing rows → returns False, no INSERT.
-- `test_rescue_path_writes_post_cap_accession` — post-cap accession WITHOUT existing rows → normal rescue write.
+```python
+"""Tests for the _apply_blockholders rewash retention gate (#1233 PR11 chokepoint F).
+
+The gate distinguishes:
+  - happy-path: existing blockholder_filings rows for the accession exist
+    → uncapped DELETE + re-INSERT proceeds (parent spec §6.3 — happy-path
+    uncapped because the rows are already on file).
+  - rescue-path + pre-cap: zero rows + accession pre-cap → return False
+    (skip; would re-introduce pre-cap observations through the back door).
+  - rescue-path + post-cap: zero rows + accession post-cap → normal write.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
+
+import psycopg
+import pytest
+
+from app.services.blockholders import blockholders_retention_cutoff
+from app.services.rewash_filings import _apply_blockholders
+from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
+
+pytestmark = pytest.mark.integration
+
+
+def _make_raw_doc(accession: str) -> object:
+    """Minimal raw_doc shape consumed by _apply_blockholders.
+    Adjust attribute names to match the actual raw_doc dataclass
+    contract (likely `accession_number`, `payload`, `parser_version`)."""
+    raw = MagicMock()
+    raw.accession_number = accession
+    # The function fetches primary XML from the raw_doc's payload OR
+    # rebuilds the URL; pass a small valid post-mandate SC 13D XML
+    # body sufficient for edgartools parse_xml to succeed.
+    raw.payload = """<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D">
+  <headerData>
+    <submissionType>SCHEDULE 13D</submissionType>
+    <filerInfo><filer><filerCredentials><cik>0007654321</cik></filerCredentials></filer></filerInfo>
+  </headerData>
+  <formData>
+    <coverPage>
+      <issuerInfo><issuerName>X</issuerName><cik>0001234567</cik><cusip>999999999</cusip></issuerInfo>
+      <securityInfo><securityClassTitle>Common</securityClassTitle><cusip>999999999</cusip></securityInfo>
+    </coverPage>
+  </formData>
+</edgarSubmission>
+"""
+    return raw
+
+
+def _seed_blockholder_filings_row(
+    conn: psycopg.Connection[tuple], accession: str, filed_at: datetime
+) -> None:
+    """Insert a minimal existing blockholder_filings row for the happy-path branch."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO blockholder_filers (cik, name)
+            VALUES ('0007654321', 'Existing Filer')
+            ON CONFLICT (cik) DO UPDATE SET name = EXCLUDED.name
+            RETURNING filer_id
+            """,
+        )
+        filer_id = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO blockholder_filings (
+                filer_id, accession_number, submission_type, status,
+                issuer_cik, issuer_cusip, reporter_name, filed_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                filer_id, accession, "SCHEDULE 13D", "active",
+                "0001234567", "999999999", "Existing Reporter", filed_at,
+            ),
+        )
+
+
+def test_happy_path_uncapped_for_existing_rows(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Pre-cap accession WITH an existing blockholder_filings row → rewash
+    still DELETEs + re-INSERTs (happy path uncapped per parent spec §6.3)."""
+    pre_cap = datetime.combine(
+        blockholders_retention_cutoff(), datetime.min.time(), tzinfo=UTC
+    ) - timedelta(days=400)
+    accession = "0000111111-22-000001"
+    _seed_blockholder_filings_row(ebull_test_conn, accession, pre_cap)
+    ebull_test_conn.commit()
+
+    raw_doc = _make_raw_doc(accession)
+    result = _apply_blockholders(ebull_test_conn, raw_doc, pre_cap)
+    ebull_test_conn.commit()
+
+    assert result is True, "happy path must rewash even for pre-cap accession"
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM blockholder_filings WHERE accession_number = %s",
+            (accession,),
+        )
+        # Existing row was DELETEd then re-INSERTed by the rewash — count >= 1.
+        assert cur.fetchone()[0] >= 1
+
+
+def test_rescue_path_skips_pre_cap_accession(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Pre-cap accession with ZERO existing rows → rescue-path returns False
+    and writes no rows (would otherwise re-introduce pre-cap obs through
+    the back door)."""
+    pre_cap = datetime.combine(
+        blockholders_retention_cutoff(), datetime.min.time(), tzinfo=UTC
+    ) - timedelta(days=400)
+    accession = "0000222222-22-000001"
+    # NO _seed_blockholder_filings_row call → zero existing rows.
+    ebull_test_conn.commit()
+
+    raw_doc = _make_raw_doc(accession)
+    result = _apply_blockholders(ebull_test_conn, raw_doc, pre_cap)
+    ebull_test_conn.commit()
+
+    assert result is False, "rescue-path must skip pre-cap accession"
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM blockholder_filings WHERE accession_number = %s",
+            (accession,),
+        )
+        assert cur.fetchone()[0] == 0, "no row must be written"
+
+
+def test_rescue_path_writes_post_cap_accession(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Post-cap accession with ZERO existing rows → rescue-path normal write."""
+    post_cap = datetime.combine(
+        blockholders_retention_cutoff(), datetime.min.time(), tzinfo=UTC
+    ) + timedelta(days=30)
+    accession = "0000333333-26-000001"
+    ebull_test_conn.commit()
+
+    raw_doc = _make_raw_doc(accession)
+    result = _apply_blockholders(ebull_test_conn, raw_doc, post_cap)
+    ebull_test_conn.commit()
+
+    assert result is True, "rescue-path must write post-cap accession"
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM blockholder_filings WHERE accession_number = %s",
+            (accession,),
+        )
+        assert cur.fetchone()[0] >= 1
+```
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -2055,6 +2536,64 @@ git add tests/test_blockholders_ingester.py
 git commit -m "feat(#1233): drop dormant ingester test cases (PR11)"
 ```
 
+### Task 8.5: Drop `blockholder_filer_seeds` table (post-cleanup migration)
+
+**Files:**
+
+- Create: `sql/161_drop_blockholder_filer_seeds.sql`
+- Modify: `tests/fixtures/ebull_test_db.py`
+
+> **Codex 1a HIGH ordering**: this drop migration MUST land AFTER Tasks 8.1-8.4 (resolver edits + dormant entrypoint deletion + script edit + test deletion). At this point no live code path references `blockholder_filer_seeds`; the drop is safe.
+
+- [ ] **Step 1: Write the drop migration**
+
+Create `sql/161_drop_blockholder_filer_seeds.sql`:
+
+```sql
+-- 161_drop_blockholder_filer_seeds.sql
+--
+-- Drop dormant filer-seed table introduced by sql/096 (#766).
+-- PR11 (#1233) Task 8.5 — runs AFTER Tasks 8.1-8.4 removed every
+-- live reference (resolver branches, ingester entrypoints, script
+-- callers, test cases). The seed table was empty universe-wide;
+-- the resolver path now goes through blockholder_filers
+-- (auto-populated by sec_13dg_discovery.py upstream of the manifest
+-- insert).
+--
+-- Migration ordering rationale (Codex 1a HIGH 2026-05-21):
+-- applying this drop earlier in the PR (Phase 1) would leave
+-- intermediate commits in a state where live resolver / ingester
+-- paths query a missing table. Phase 8 finishes the cleanup; this
+-- migration then locks the absence at the schema layer.
+
+DROP INDEX IF EXISTS idx_blockholder_filer_seeds_active;
+DROP TABLE IF EXISTS blockholder_filer_seeds;
+```
+
+- [ ] **Step 2: Apply migration locally + verify**
+
+Run: `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/161_drop_blockholder_filer_seeds.sql`
+Expected: `DROP INDEX` / `DROP TABLE` succeed.
+
+Run: `docker exec ebull-postgres psql -U postgres -d ebull -c "\dt blockholder_filer_seeds"`
+Expected: `Did not find any relation named "blockholder_filer_seeds".`
+
+- [ ] **Step 3: Remove `blockholder_filer_seeds` from `_PLANNER_TABLES`**
+
+Edit `tests/fixtures/ebull_test_db.py`: delete the `"blockholder_filer_seeds"` line from the `_PLANNER_TABLES` collection.
+
+- [ ] **Step 4: Verify the fixture still loads**
+
+Run: `uv run python -c "from tests.fixtures.ebull_test_db import _PLANNER_TABLES; assert 'blockholder_filer_seeds' not in _PLANNER_TABLES; print('OK')"`
+Expected: `OK`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add sql/161_drop_blockholder_filer_seeds.sql tests/fixtures/ebull_test_db.py
+git commit -m "feat(#1233): drop dormant blockholder_filer_seeds table (post-cleanup) (PR11)"
+```
+
 ---
 
 ## Phase 9 — Scheduler wiring
@@ -2071,24 +2610,46 @@ git commit -m "feat(#1233): drop dormant ingester test cases (PR11)"
 
 Find where existing `sec_def14a_bootstrap` / `sec_business_summary_bootstrap` jobs are registered. Mirror their pattern for a new `sec_blockholders_discovery_job` that calls `discover_sec_13dg_for_universe(conn, mode=params.get("mode", "steady_state"))`. The job body returns a `JobResult` populated from the `DiscoveryResult` dataclass.
 
-- [ ] **Step 2: Add the bootstrap stage**
+- [ ] **Step 2: Add the bootstrap stage + bump the stage-count assertion**
 
-In `_BOOTSTRAP_STAGE_SPECS` (bootstrap_orchestrator.py:859), insert a new `_spec(...)` line in the appropriate position (after the existing SEC discovery stages, before sec_first_install_drain — order 22 is the last assigned per recent PRs; pick the next free order number, likely 26 or 27):
+In `app/services/bootstrap_orchestrator.py`:
+
+(a) Add a new `_spec(...)` line inside `_BOOTSTRAP_STAGE_SPECS` (definition starts at line 859). Pick the next free order number — verify with `grep -nE "_spec\(.*,\s*[0-9]+," app/services/bootstrap_orchestrator.py | tail -5` and pick the next integer after the current max (likely 27 per Codex 1a 2026-05-21 — repo has stages past 22):
 
 ```python
     _spec(
         "sec_blockholders_discovery",
-        27,  # adjust to next free order
+        27,
         "sec_rate",
         "sec_blockholders_discovery_job",
         params={"mode": "bootstrap"},
     ),
 ```
 
-- [ ] **Step 3: Test the job is wired**
+(b) Bump the hard-coded stage-count assertion at line 1961 (`assert len(_BOOTSTRAP_STAGE_SPECS) == 26`). Codex 1a MEDIUM caught this — the assertion explicitly says "update the spec, frontend, runbook, and stage_count tests in lockstep":
 
-Run: `uv run pytest tests/test_job_registry.py -v -k "blockholders"` (or similar smoke test that verifies the job source list)
+```python
+assert len(_BOOTSTRAP_STAGE_SPECS) == 27, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 27 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+    "update the spec, frontend, runbook, and stage_count tests in lockstep. "
+    "#1027 added 7 bulk-archive stages (sec_bulk_download + C1.a/C2/C3/C4/C5 ingesters + C1.b walker); "
+    "#1174 added 2 fund-stages (S25 mf_directory_sync + S26 sec_n_csr_bootstrap_drain); "
+    "#1233 PR11 added S27 sec_blockholders_discovery."
+)
+```
+
+(c) Grep for any other 26-hardcoded references that need to bump:
+
+Run: `grep -rn "26\b.*stage\|stage.*26\|stage_count.*26\|stages.*26" app/ tests/ frontend/ docs/`
+Expected: surface the runbook + frontend stage-list + `tests/test_bootstrap_stage_count.py` (if it exists). Update each in lockstep.
+
+- [ ] **Step 3: Test the job is wired + stage count is correct**
+
+Run: `uv run pytest tests/ -v -k "stage_count or bootstrap_stage or blockholders_discovery_job"`
 Expected: PASS.
+
+Run: `uv run python -c "from app.services.bootstrap_orchestrator import _BOOTSTRAP_STAGE_SPECS; assert any(s.stage_key == 'sec_blockholders_discovery' for s in _BOOTSTRAP_STAGE_SPECS); assert len(_BOOTSTRAP_STAGE_SPECS) == 27; print('OK')"`
+Expected: `OK`
 
 - [ ] **Step 4: Commit**
 
@@ -2160,25 +2721,177 @@ git commit -m "feat(#1233): scripts/check_13dg_retention.sh placement invariants
 
 **Files:**
 
-- Add a test case to `tests/test_ownership_observations.py` (or NEW `tests/test_refresh_blockholders_current_uncapped.py`).
+- Create: `tests/test_refresh_blockholders_current_uncapped.py`
 
-- [ ] **Step 1: Write the test**
+- [ ] **Step 1: Write the failing test**
 
-Seed a pre-cap observation row directly into `ownership_blockholders_observations`, then call `refresh_blockholders_current(conn, instrument_id=...)`. Assert the pre-cap observation row is still readable and `ownership_blockholders_current` reflects it (i.e. refresh did NOT delete the pre-cap row).
+```python
+"""Pins parent spec §6.3 + §4.5 13F-HR precedent: refresh-current paths
+are EXEMPT from the retention cap. Capping them would actively delete
+pre-wipe pre-cap rows from `_current`, contradicting the
+"existing rows untouched until pre-wipe" contract (#1233 PR11)."""
 
-- [ ] **Step 2: Run + commit**
+from __future__ import annotations
 
-Same TDD shape as previous tasks.
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from uuid import uuid4
+
+import psycopg
+import pytest
+
+from app.services.blockholders import blockholders_retention_cutoff
+from app.services.ownership_observations import refresh_blockholders_current
+from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
+
+pytestmark = pytest.mark.integration
+
+
+def test_refresh_current_keeps_pre_cap_observations_intact(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """A pre-cap row in ownership_blockholders_observations survives
+    refresh_blockholders_current AND is reflected in _current."""
+    cutoff = blockholders_retention_cutoff()
+    pre_cap = datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC) - timedelta(days=400)
+
+    iid = 99800001
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO instruments (instrument_id, symbol, is_tradable, country)
+            VALUES (%s, 'PREXCAP', TRUE, 'US')
+            ON CONFLICT (instrument_id) DO NOTHING
+            """,
+            (iid,),
+        )
+        cur.execute(
+            """
+            INSERT INTO ownership_blockholders_observations (
+                instrument_id, source_accession, holder_identity_key,
+                holder_name, ownership_nature, shares,
+                source, observed_at, period_end, filed_at, source_document_id,
+                ingested_at, run_id
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s,
+                '13d', %s, %s, %s, %s, NOW(), %s
+            )
+            """,
+            (
+                iid,
+                "0000111111-23-000099",
+                "test-holder-key",
+                "Test Holder",
+                "beneficial",
+                Decimal("12345"),
+                pre_cap, pre_cap, pre_cap,
+                1, uuid4(),
+            ),
+        )
+    ebull_test_conn.commit()
+
+    refresh_blockholders_current(ebull_test_conn, instrument_id=iid)
+    ebull_test_conn.commit()
+
+    # The pre-cap observation row must survive the refresh.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT shares FROM ownership_blockholders_observations WHERE source_accession = %s",
+            ("0000111111-23-000099",),
+        )
+        assert cur.fetchone() is not None, "pre-cap observation row must NOT be deleted by refresh"
+
+        cur.execute(
+            "SELECT shares FROM ownership_blockholders_current WHERE instrument_id = %s",
+            (iid,),
+        )
+        current_row = cur.fetchone()
+        assert current_row is not None, "current snapshot must include the pre-cap row"
+        assert current_row[0] == Decimal("12345")
+```
+
+- [ ] **Step 2: Run to verify behaviour**
+
+Run: `uv run pytest tests/test_refresh_blockholders_current_uncapped.py -v`
+Expected: PASS (this test asserts CURRENT behaviour stays intact post-PR11; if it fails the refresh path accidentally got the cap and the gate placement in Task 6 needs review).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/test_refresh_blockholders_current_uncapped.py
+git commit -m "test(#1233): pin refresh_blockholders_current uncapped contract (PR11)"
+```
 
 ### Task 11.2: Pin dormant symbol absence
 
 **Files:**
 
-- Add a test to `tests/test_no_dormant_symbols.py` (or extend the lint-guard test file if one exists).
+- Create: `tests/test_no_dormant_blockholder_symbols.py`
 
-- [ ] **Step 1: Write a grep-test that fails if any of `ingest_all_active_filers`, `ingest_filer_blockholders`, `_list_active_filer_seeds`, `seed_filer` reappear under `app/` outside the deleted-symbol allow-list**
+- [ ] **Step 1: Write the failing test**
 
-- [ ] **Step 2: Run + commit**
+```python
+"""Lint-as-test: PR11 deleted ingest_all_active_filers /
+ingest_filer_blockholders / _list_active_filer_seeds / seed_filer (the
+13D/G variants). If a future PR resurrects any of these symbols, this
+test trips at CI time before the resurrection lands."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FORBIDDEN_SYMBOLS = (
+    "ingest_all_active_filers",
+    "ingest_filer_blockholders",
+    "_list_active_filer_seeds",
+    "seed_filer",
+)
+ALLOWED_PATHS = {
+    # The retirement note in seed_holder_coverage.py is a comment-only
+    # historical reference and should not surface here either; the
+    # lint script enforces same.
+    "scripts/seed_holder_coverage.py",
+}
+
+
+def _git_grep(symbol: str) -> list[str]:
+    """Run git grep across app/ + scripts/ + tests/ for the symbol."""
+    proc = subprocess.run(
+        ["git", "grep", "-n", "-w", symbol, "--", "app/", "scripts/", "tests/"],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def test_dormant_blockholder_symbols_stay_deleted() -> None:
+    """Every reference must be either zero or in the ALLOWED_PATHS set."""
+    offenders: list[str] = []
+    for symbol in FORBIDDEN_SYMBOLS:
+        hits = _git_grep(symbol)
+        for hit in hits:
+            # hit format: path:line:content
+            path = hit.split(":", 1)[0]
+            if path not in ALLOWED_PATHS:
+                offenders.append(hit)
+    assert not offenders, (
+        "PR11 (#1233) deleted these dormant entrypoints; resurrection "
+        f"detected at:\n  " + "\n  ".join(offenders)
+    )
+```
+
+- [ ] **Step 2: Run + verify it passes**
+
+Run: `uv run pytest tests/test_no_dormant_blockholder_symbols.py -v`
+Expected: PASS (Tasks 8.1-8.4 already removed every reference; this test pins the absence going forward).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/test_no_dormant_blockholder_symbols.py
+git commit -m "test(#1233): pin dormant blockholder symbol absence (PR11)"
+```
 
 ---
 
@@ -2226,7 +2939,7 @@ git commit -m "docs(#1233): amend parent rubric §4.8 + §7 + §11 + §12 for PR
 - [ ] **Step 1: Apply migrations + run discovery against dev DB**
 
 Run: `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/159_drop_blockholder_filer_seeds.sql`
-Run: `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/160_create_sec_13dg_discovery_issuer_hint.sql`
+Run: `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/159_create_sec_13dg_discovery_issuer_hint.sql`
 
 Run the new discovery job (curl the operator API or invoke directly):
 

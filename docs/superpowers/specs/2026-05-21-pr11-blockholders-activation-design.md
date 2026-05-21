@@ -5,7 +5,7 @@
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 > Parent spec: `docs/superpowers/specs/2026-05-19-data-retention-rubric.md` §4.8.
 >
-> Status: **REVISED v4 post-Codex-1c** — Codex 1a (3B + 4H + 3M) + Codex 1b (2B + 3H + 2M + 1L) + Codex 1c (2B + 1H + 3L) findings folded in. Two operator scope decisions also folded (2026-05-21): (i) adopt `edgartools.Schedule13D.parse_xml` / `Schedule13G.parse_xml` for the XML parse path; (ii) align retention floor with SEC's XBRL mandate effective date `2024-12-19` (no library covers pre-mandate HTML; cap = `max(today - 3y, 2024-12-19)` is honest 100%). Pending Codex 1d spec review, then operator sign-off, then implementation plan.
+> Status: **APPROVED v7.2 post-impl-plan-alignment** — Codex 1a (3B + 4H + 3M) + Codex 1b (2B + 3H + 2M + 1L) + Codex 1c (2B + 1H + 3L) + Codex 1d (2H + 1M + 3L) + Codex 1e (1H + 1M + 1L) + Codex 1f (1H + 1L) + Codex 1g APPROVED (1L test filename) all folded. v7.2 alignment pass (post-PR1251): SEC Schedule 13 XBRL mandate effective date corrected from 2024-12-19 → 2024-12-18 per SEC EDGAR Release 23.4 (cited by Codex 1251 LOW; canonical source `https://www.sec.gov/submit-filings/edgar-news-announcements/edgar-release-23-4`). All date references in this spec now read 2024-12-18 in sync with `.claude/skills/data-sources/edgartools.md` G15 + `.claude/skills/data-sources/sec-edgar.md` §2.4.1 + the implementation plan at `docs/superpowers/plans/2026-05-21-1233-pr11-blockholders-activation.md`.
 
 ## 0. Why this design exists
 
@@ -198,7 +198,7 @@ INSIDER_BLOCKHOLDERS_RETENTION_YEARS = 3
 
 # SEC adopted final amendments to Rule 13d-1/13d-2 + Schedule 13D/13G
 # mandating structured-XML (inline XBRL) submissions for all Schedule 13
-# filings, effective 2024-12-19. Filings made BEFORE this date are
+# filings, effective 2024-12-18. Filings made BEFORE this date are
 # HTML-only and not parseable by edgartools.Schedule13D/Schedule13G
 # (skill_edgartools.md G11) or by any extant library in this repo.
 # PR11 honours "100% complete" by capping retention at the more-recent of
@@ -220,7 +220,7 @@ def blockholders_within_retention(filed_at: datetime | None) -> bool:
     return filed_at.date() >= blockholders_retention_cutoff()
 ```
 
-**Why date not datetime**: the mandate floor is calendar-day granular (SEC's 2024-12-19 effective date is a date, not an instant); helper returns `date` so the comparison is unambiguous across timezones. Discovery's `&startdt=` query param expects ISO date.
+**Why date not datetime**: the mandate floor is calendar-day granular (SEC's 2024-12-18 effective date is a date, not an instant); helper returns `date` so the comparison is unambiguous across timezones. Discovery's `&startdt=` query param expects ISO date.
 
 Chokepoint matrix (REVISED post-Codex-1a — chokepoints C + F corrected):
 
@@ -303,7 +303,7 @@ parsed: dict = Schedule13G.parse_xml(primary_xml)   # for sec_13g source
 # (avoids the 7-positional-arg requirement at no functional cost).
 ```
 
-Edgartools' `parse_xml` is canonical (tracks SEC schema updates upstream). The retention floor `max(today - 3y, 2024-12-19)` GUARANTEES every filing inside the window is post-XML-mandate and parseable — so the parser library coverage gap (skill_edgartools.md G11: pre-2024-12-19 HTML returns `None` from `Schedule13D.from_filing`) is closed by construction at the cap layer, not the parser layer.
+Edgartools' `parse_xml` is canonical (tracks SEC schema updates upstream). The retention floor `max(today - 3y, 2024-12-18)` GUARANTEES every filing inside the window is post-XML-mandate and parseable — so the parser library coverage gap (skill_edgartools.md G11: pre-2024-12-18 HTML returns `None` from `Schedule13D.from_filing`) is closed by construction at the cap layer, not the parser layer.
 
 A new contract test `tests/test_edgartools_schedule13_shape.py` pins BOTH the top-level dict-key contract (`"issuer_info"`, `"security_info"`, `"reporting_persons"`, `"date_of_event"`, `"signatures"`) AND the nested dataclass field-access contract (`IssuerInfo.cik`, `SecurityInfo.cusip`, `ReportingPerson.aggregate_amount`, `ReportingPerson.percent_of_class`, etc., per Codex 1f LOW) via a real EDGAR fixture. An edgartools upgrade that renames either layer fails CI immediately (companion to the existing version-pin test).
 
@@ -311,7 +311,7 @@ A new contract test `tests/test_edgartools_schedule13_shape.py` pins BOTH the to
 
 **Provider function disposition**: `parse_primary_doc` in `app/providers/implementations/sec_13dg.py` is RETAINED but deprecated — kept for backward compat with `rewash_filings.py::_apply_blockholders` (which is itself updated to call edgartools' parser in the same PR). After PR11 merges, a follow-up housekeeping ticket can fully delete `parse_primary_doc` and its `BlockholderFiling` dataclass once all callers route through edgartools. PR11 does NOT delete it — keeping the diff focused on activation + cap.
 
-**Pre-mandate HTML filings are explicitly out of scope**: the cap floor `2024-12-19` makes pre-mandate filings unreachable by construction. No tombstoning needed because no manifest row is enqueued for pre-mandate accessions (discovery's `&startdt=` query honours the floor; gate B's `blockholders_within_retention` is the defensive backstop). If a legacy daily-index discovery path (no PR11 hint) enqueues a pre-mandate accession, gate B tombstones it with `error="retention floor"` — explicit, not silent.
+**Pre-mandate HTML filings are explicitly out of scope**: the cap floor `2024-12-18` makes pre-mandate filings unreachable by construction. No tombstoning needed because no manifest row is enqueued for pre-mandate accessions (discovery's `&startdt=` query honours the floor; gate B's `blockholders_within_retention` is the defensive backstop). If a legacy daily-index discovery path (no PR11 hint) enqueues a pre-mandate accession, gate B tombstones it with `error="retention floor"` — explicit, not silent.
 
 ### 3.4 Cleanup — dormant code retirement (in same PR)
 
@@ -584,7 +584,7 @@ Same PR amends `docs/superpowers/specs/2026-05-19-data-retention-rubric.md`:
 | Hint-table write races manifest-row pending status (Codex 1b HIGH atomicity) | Discovery writes manifest row + ALL applicable hint rows in a single `conn.transaction()` block. Manifest row never becomes worker-visible (`status='pending'` committed) until hints are committed. Lint invariant K pins the call-pair nesting; test fixture asserts via psycopg `SERIALIZABLE` isolation that a concurrent worker thread blocks until the discovery transaction commits both writes. |
 | Hint-table re-discovery duplicates / stale `discovered_at` (Codex 1b HIGH idempotency) | UPSERT clause `ON CONFLICT (accession_number, instrument_id) DO UPDATE SET discovered_at = NOW(), issuer_cik = EXCLUDED.issuer_cik` per §3.4 migration. Lint invariant L pins the `ON CONFLICT ... DO UPDATE` shape (forbids `DO NOTHING` which would mask freshness). Test fixture pins idempotent re-discovery — second pass writes 0 new manifest rows + 0 new hint rows but DOES advance `discovered_at`. |
 | Watermark coherence for per-issuer steady-state (Codex 1b HIGH) | `_resolve_discovery_startdt` per §3.5 derives watermark from `MAX(blockholder_filings.filed_at) WHERE issuer_cik = ?` (chain-derived, per-issuer-grain), NOT from `data_freshness_index` (DFI is filer-keyed, wrong grain). Clamped to 3y floor for issuers with zero prior ingest. |
-| Pre-2024-12-19 HTML-only 13D/G filings unreachable by any extant parser | Closed by construction in v4: `blockholders_retention_cutoff()` returns `max(today - 3y, 2024-12-19)` so discovery's `&startdt=` query NEVER admits pre-mandate accessions; gate B's `blockholders_within_retention` is the defensive backstop for any legacy-path enqueue (tombstone with explicit `error="retention floor"`). edgartools' Schedule13D/G covers every in-window accession. By 2027-12-19 the 3y floor catches up and the function reverts to plain `today - 3y`. No follow-up ticket needed; PR11 is universe-complete for what is parseable. |
+| Pre-2024-12-18 HTML-only 13D/G filings unreachable by any extant parser | Closed by construction in v4: `blockholders_retention_cutoff()` returns `max(today - 3y, 2024-12-18)` so discovery's `&startdt=` query NEVER admits pre-mandate accessions; gate B's `blockholders_within_retention` is the defensive backstop for any legacy-path enqueue (tombstone with explicit `error="retention floor"`). edgartools' Schedule13D/G covers every in-window accession. By 2027-12-19 the 3y floor catches up and the function reverts to plain `today - 3y`. No follow-up ticket needed; PR11 is universe-complete for what is parseable. |
 | Steady-state >14d job outage silently shrinks coverage | `_resolve_discovery_startdt` clamps watermark to 3y floor (`max(floor, watermark - 7d)`); on first run after outage, the watermark is stale → falls back to 3y floor → discovery re-covers the whole window. Codex 1a MEDIUM #10 lesson. |
 | Rewash rescue-path re-introduces pre-cap accessions via the back door | Chokepoint F gate in `_apply_blockholders` distinguishes happy-path (existing rows present → uncapped, preserves §6.3 contract) from rescue-path (zero rows → would re-introduce pre-cap observations → SKIPPED if accession is outside retention). Lint invariant H pins the placement. |
 | `scripts/seed_holder_coverage.py` retirement breaks the 13F-HR / CUSIP-resolver / N-CEN paths (Codex 1a HIGH #5) | PR11 surgically removes only the 13D/G blockholder block from the script (constant, import, prints, ingest call); every other path is preserved. Script's CLI help text updated to note 13D/G is now universe-driven via bootstrap stage. |
