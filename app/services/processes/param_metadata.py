@@ -184,18 +184,6 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
     # drop the standalone path's full-cohort safety-net (mirror of the
     # ``min_last_13f_hr_at`` posture on sec_13f_quarterly_sweep above).
     "sec_n_port_ingest": frozenset({"min_last_seen_filed_at"}),
-    # PR11 #1233 §3.5 — ``mode`` is bootstrap-only ("bootstrap" forces
-    # the full 3y scan instead of the per-issuer watermark default).
-    # Exposing it via the manual API would let an operator silently
-    # bypass the steady-state watermark logic and rescan the universe
-    # at SEC's 10 req/s clock, which on a populated dev DB would
-    # consume the SEC budget for ~10 minutes for no marginal coverage
-    # (the same accessions resolve to ON CONFLICT DO UPDATE no-ops in
-    # ``sec_filing_manifest``). Bootstrap stage 27 dispatches with
-    # ``params={"mode": "bootstrap"}``; the steady-state path
-    # dispatches with empty params → ``mode="steady_state"`` default
-    # in the job body.
-    "sec_blockholders_discovery_job": frozenset({"mode"}),
 }
 
 

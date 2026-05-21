@@ -114,16 +114,6 @@ class TestStageSpecParamsField:
             # ``today - 380d`` (UTC midnight). Mirror of the #1010
             # cohort bound on stage 21's sec_13f_recent_sweep.
             "sec_n_port_ingest",
-            # PR11 #1233 §3.5 — sec_blockholders_discovery dispatches
-            # with ``mode="bootstrap"`` to force the full 3y scan
-            # instead of the per-issuer watermark default. ``mode`` is
-            # allow-listed in
-            # ``JOB_INTERNAL_KEYS["sec_blockholders_discovery_job"]``
-            # so the manual API path cannot set it (a recursive scan
-            # of 5k+ issuer CIKs at SEC's 10 req/s clock is bootstrap-
-            # only territory; steady-state defaults to per-issuer
-            # watermark via empty params).
-            "sec_blockholders_discovery",
         }
         for stage in _BOOTSTRAP_STAGE_SPECS:
             if stage.stage_key in lifted_stage_keys:

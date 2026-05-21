@@ -5,8 +5,9 @@ Without seed data the institutional / ETF filer-seed tables stay
 empty and the ownership card silently omits Institutions / ETFs,
 leaving the operator with only Insiders + Treasury rendered.
 
-13D/G blockholders are now universe-driven via the bootstrap
-``sec_blockholders_discovery`` stage (#1233 PR11) — no operator
+13D/G blockholders are now manifest-driven via the legacy daily-index
+path (which feeds ``sec_filing_manifest`` rows that the manifest
+worker drains through ``manifest_parsers/sec_13dg.py``) — no operator
 seeding required. This script no longer touches the legacy
 ``blockholder_filer_seeds`` table (dropped in PR11 Task 8.5) or the
 retired ``app.services.blockholders.ingest_all_active_filers`` entry

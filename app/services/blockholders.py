@@ -4,13 +4,18 @@ Historical seed-walking entrypoints (``ingest_all_active_filers``,
 ``ingest_filer_blockholders``, ``_list_active_filer_seeds``,
 ``seed_filer``) were retired in #1233 PR11 once the manifest-worker
 path (:mod:`app.services.manifest_parsers.sec_13dg`) became the sole
-production write path and the universe-driven discovery stage
-(:mod:`app.services.sec_13dg_discovery`) replaced the operator-curated
-``blockholder_filer_seeds`` table.
+production write path. The operator-curated ``blockholder_filer_seeds``
+table was dropped in the same epic (sql/161). Discovery of new SC
+13D/G accessions rides the legacy daily-index path
+(``app/services/filings_history.py`` → ``sec_filing_manifest``) — the
+v8 empirical pivot 2026-05-21 abandoned the universe-issuer-CIK
+discovery layer after smoke against AAPL/GME/MSFT/JPM/HD showed that
+``efts.sec.gov/LATEST/search-index`` post-2024-12-18 indexes SC 13D/G
+by FILER CIK only, not SUBJECT CIK.
 
 This module now exposes the surviving shared substrate consumed by
-the manifest parser, the discovery stage, the rewash pipeline, and
-the PR 3 reader endpoint:
+the manifest parser, the rewash pipeline, and the PR 3 reader
+endpoint:
 
   * Retention helpers (:func:`blockholders_retention_cutoff`,
     :func:`blockholders_within_retention`) — the canonical

@@ -93,7 +93,6 @@ from app.workers.scheduler import (
     JOB_SEC_8K_EVENTS_INGEST,
     JOB_SEC_13F_FILER_DIRECTORY_SYNC,
     JOB_SEC_13F_QUARTERLY_SWEEP,
-    JOB_SEC_BLOCKHOLDERS_DISCOVERY,
     JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
     JOB_SEC_DEF14A_BOOTSTRAP,
     JOB_SEC_DEF14A_INGEST,
@@ -139,7 +138,6 @@ from app.workers.scheduler import (
     sec_8k_events_ingest,
     sec_13f_filer_directory_sync,
     sec_13f_quarterly_sweep,
-    sec_blockholders_discovery_job,
     sec_business_summary_bootstrap,
     sec_def14a_bootstrap,
     sec_def14a_ingest,
@@ -254,13 +252,6 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # via StageSpec.params; daily / Admin path dispatches with an empty
     # params dict → full cohort (#1010 precedent for 13F-HR stage 21).
     JOB_SEC_N_PORT_INGEST: sec_n_port_ingest,
-    # PR11 #1233 §3.5 — sec_blockholders_discovery_job native JobInvoker
-    # (params-aware). Bootstrap stage 27 passes ``mode="bootstrap"`` for
-    # the full 3y backfill; manual API / steady-state path dispatches
-    # with empty params → defaults to ``mode="steady_state"`` (per-issuer
-    # watermark clamped to the 3y floor). ``mode`` allow-listed in
-    # ``JOB_INTERNAL_KEYS["sec_blockholders_discovery_job"]``.
-    JOB_SEC_BLOCKHOLDERS_DISCOVERY: sec_blockholders_discovery_job,
     # Registered for #994 (first-install bootstrap orchestrator) — these
     # were callable as scheduled-only paths before but the orchestrator
     # needs them in _INVOKERS so it can dispatch them via JobLock.

@@ -475,15 +475,6 @@ class TestProductionInvokerRegistry:
             # drain is bootstrap-only (no scheduled cadence).
             "mf_directory_sync",
             "sec_n_csr_bootstrap_drain",
-            # #1233 PR11 — universe-issuer-CIK-driven SC 13D/G
-            # discovery. Registered in _INVOKERS so the bootstrap
-            # orchestrator can dispatch stage S27 + operator Run-now
-            # works; NOT in SCHEDULED_JOBS (no cron cadence; the
-            # steady-state per-issuer watermark path runs only via
-            # bootstrap dispatch / Admin manual trigger today — the
-            # Layer 1/2/3 freshness redesign carries incremental 13D/G
-            # discovery in the live daily-index path).
-            "sec_blockholders_discovery_job",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "
