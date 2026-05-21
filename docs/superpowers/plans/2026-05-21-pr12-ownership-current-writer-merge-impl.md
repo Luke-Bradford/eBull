@@ -881,7 +881,7 @@ def test_known_to_expiry_watermark_alignment(conn, seeded_instrument_id, helper)
 
 - [ ] **Step 3.3: Add the missing fixtures**
 
-Inspect `tests/conftest.py` + `tests/fixtures/ebull_test_db.py` for existing `test_db_conn` (or equivalent) connection fixture + the `seeded_instrument_id` / `two_seeded_instrument_ids` pattern. If those fixtures do not yet exist, add them to `tests/conftest.py` (single-line factory each — produce a fresh `instruments` row with a unique `etoro_id` per test). Run `grep -n "seeded_instrument_id\|test_db_conn\|two_seeded_instrument_ids" tests/conftest.py tests/fixtures/*.py 2>&1 | head -20` to confirm location.
+Inspect `tests/conftest.py` + `tests/fixtures/ebull_test_db.py` for the `ebull_test_conn` connection fixture (verified to exist) + the `seeded_instrument_id` / `two_seeded_instrument_ids` patterns. If the seeded-instrument fixtures do not yet exist, add them to `tests/conftest.py` (single-line factory each — produce a fresh `instruments` row with a unique `etoro_id` per test). Run `grep -n "seeded_instrument_id\|ebull_test_conn\|two_seeded_instrument_ids" tests/conftest.py tests/fixtures/*.py 2>&1 | head -20` to confirm location.
 
 If fixtures need to be added, follow the pattern of the existing per-test instrument-seeding helpers in the test suite. Each fixture should insert a single fresh instrument row + return its `instrument_id`.
 
@@ -1073,11 +1073,11 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 | Helper | Differences from funds template |
 | --- | --- |
-| `refresh_insiders_current` | DISTINCT ON `(holder_identity_key, ownership_nature)`; ORDER BY keeps the source-priority `CASE source WHEN 'form4' THEN 1 ... END ASC` chain verbatim from existing code lines 256-274. Diff tuple uses business cols `(holder_cik, holder_name, holder_identity_key, source, source_document_id, source_accession, source_url, filed_at, period_start, period_end, shares)`. Category literal `'insiders'`. |
+| `refresh_insiders_current` | PK is `(instrument_id, holder_identity_key, ownership_nature)`. ON clause: `tgt.instrument_id = %(iid)s AND tgt.holder_identity_key = src.holder_identity_key AND tgt.ownership_nature = src.ownership_nature`. DISTINCT ON `(holder_identity_key, ownership_nature)`; ORDER BY keeps the source-priority `CASE source WHEN 'form4' THEN 1 ... END ASC` chain verbatim from existing code lines 256-274. Diff tuple = NON-PK + NON-refreshed_at cols: `(holder_cik, holder_name, source, source_document_id, source_accession, source_url, filed_at, period_start, period_end, shares)`. `holder_identity_key` is the schema-generated PK column — appears in ON + INSERT cols + DISTINCT ON, NEVER in diff tuple or UPDATE SET (Codex 1b plan-rev2 HIGH-1: PK cols ∩ diff cols = ∅ per spec §4.2). Category literal `'insiders'`. |
 | `refresh_institutions_current` | DISTINCT ON `(filer_cik, ownership_nature, exposure_kind)`. Business cols `(filer_name, filer_type, source, source_document_id, source_accession, source_url, filed_at, period_start, period_end, shares, market_value_usd, voting_authority)` (exposure_kind is PK). Category `'institutions'`. |
 | `refresh_blockholders_current` | DISTINCT ON `(reporter_cik, ownership_nature)`. Business cols `(reporter_name, submission_type, status_flag, source, source_document_id, source_accession, source_url, filed_at, period_start, period_end, aggregate_amount_owned, percent_of_class)`. Category `'blockholders'`. |
 | `refresh_treasury_current` | DISTINCT ON `(instrument_id)`. **Extra WHERE filter** `AND treasury_shares IS NOT NULL`. Business cols `(ownership_nature, source, source_document_id, source_accession, source_url, filed_at, period_start, period_end, treasury_shares)`. Category `'treasury'`. PK is `(instrument_id)` only → ON clause is just `tgt.instrument_id = %(iid)s`. |
-| `refresh_def14a_current` | DISTINCT ON `(holder_name_key, ownership_nature)`. **Extra WHERE filter (3 clauses)** `AND shares IS NOT NULL AND holder_role IS DISTINCT FROM 'esop' AND holder_name !~* %(esop_regex)s` — bind the existing module-level `_ESOP_HOLDER_NAME_SQL_REGEX` constant. Business cols `(holder_name, holder_name_key, holder_role, source, source_document_id, source_accession, source_url, filed_at, period_start, period_end, shares, percent_of_class)`. Category `'def14a'`. Watermark capture also needs `%(esop_regex)s` parameter NO — the watermark is over the full observations population (`MAX(ingested_at) WHERE instrument_id = %s`); the ESOP filter applies only to the MERGE source subquery. |
+| `refresh_def14a_current` | PK is `(instrument_id, holder_name_key, ownership_nature)`. ON clause: `tgt.instrument_id = %(iid)s AND tgt.holder_name_key = src.holder_name_key AND tgt.ownership_nature = src.ownership_nature`. DISTINCT ON `(holder_name_key, ownership_nature)`. **Extra WHERE filter (3 clauses, all bound as named placeholders so the MERGE statement remains all-named-parameter — Codex 1b plan-rev2 MED-2)**: `AND shares IS NOT NULL AND holder_role IS DISTINCT FROM 'esop' AND holder_name !~* %(esop_regex)s` — bind the existing module-level `_ESOP_HOLDER_NAME_SQL_REGEX` constant. Pass via `{"iid": instrument_id, "esop_regex": _ESOP_HOLDER_NAME_SQL_REGEX}`. Diff tuple = NON-PK + NON-refreshed_at + NON-generated cols: `(holder_name, holder_role, source, source_document_id, source_accession, source_url, filed_at, period_start, period_end, shares, percent_of_class)`. `holder_name_key` is the schema-generated PK column (NOT in diff tuple, NOT in UPDATE SET — Codex 1b plan-rev2 HIGH-1). Lint K3 must accept the named placeholder `%(esop_regex)s` (not bare `%s`) — see Step 8.2 config update below. Category `'def14a'`. Watermark capture uses the full observations population (`SELECT MAX(ingested_at) FROM ownership_def14a_observations WHERE instrument_id = %s`); the ESOP filter applies only to the MERGE source subquery, NOT to the watermark statement. |
 | `refresh_esop_current` | DISTINCT ON `(plan_name)`. Business cols `(plan_trustee_name, plan_trustee_cik, ownership_nature, source, source_document_id, source_accession, source_url, filed_at, period_start, period_end, shares, percent_of_class)`. Category `'esop'`. |
 
 - [ ] **Step 5.1: Rewrite `refresh_insiders_current`**
@@ -1291,18 +1291,18 @@ Create `tests/test_postgres_version_guard.py`:
 from __future__ import annotations
 
 import pytest
-import psycopg
 
 from app.system.postgres_version_guard import assert_postgres_min_version
 
 
-def test_guard_passes_on_pg17(test_db_conn):
+def test_guard_passes_on_pg17(ebull_test_conn):
     # Dev DB is PG17.9; guard must not raise.
-    assert_postgres_min_version(test_db_conn, min_version_num=170000)
+    assert_postgres_min_version(ebull_test_conn, min_version_num=170000)
 
 
-def test_guard_fails_on_simulated_pg16(monkeypatch, test_db_conn):
+def test_guard_fails_on_simulated_pg16():
     # Patch the version probe to return PG16's server_version_num.
+    # No DB needed — FakeConn duck-types the .cursor() contract.
     class FakeCursor:
         def __enter__(self): return self
         def __exit__(self, *a): return False
@@ -1313,6 +1313,8 @@ def test_guard_fails_on_simulated_pg16(monkeypatch, test_db_conn):
     with pytest.raises(RuntimeError, match="PG >= 17"):
         assert_postgres_min_version(FakeConn(), min_version_num=170000)
 ```
+
+Codex 1b plan-rev2 MED-1: `ebull_test_conn` (not `test_db_conn`) — matches the actual fixture in `tests/fixtures/ebull_test_db.py`. Codex 1b plan-rev2 LOW-2: unused `import psycopg` removed; the FakeConn duck-types only `.cursor()` which is all the guard touches.
 
 - [ ] **Step 7.3: Run test — verify fail**
 
@@ -1456,7 +1458,7 @@ CFG
 distinct_on=holder_name_key, ownership_nature
 order_by=holder_name_key, ownership_nature, period_end DESC, filed_at DESC, source_document_id ASC
 # Three independent clauses; lint K1/K2/K3 each grep one clause.
-extra_where=AND shares IS NOT NULL AND holder_role IS DISTINCT FROM 'esop' AND holder_name !~* %s
+extra_where=AND shares IS NOT NULL AND holder_role IS DISTINCT FROM 'esop' AND holder_name !~* %(esop_regex)s
 category=def14a
 CFG
 )"
@@ -1512,9 +1514,11 @@ Expected: all checks pass.
 git add scripts/check_ownership_refresh_writer_pattern.sh .githooks/pre-push
 git commit -m "lint(#1233): scripts/check_ownership_refresh_writer_pattern.sh (93 clause-counts)
 
-7 helpers × 12 per-helper invariants A-L (with K split per def14a 3-clause
-filter + treasury null guard) + 12 cross-cutting M/N/O1-O3/P1-P7 per
-spec §5. Awk-based function-body block walker + exact-count grep
+Breakdown per spec §5: 81 per-helper (7 × 10 A-J + 7 × 1 L + 1 treasury K
++ 3 def14a K1/K2/K3) + 12 cross-cutting (M/N/O1-O3/P1-P7) = 93. K-class
+is conditional, not a flat ×7 multiplier (Codex 1b plan-rev2 MED-3 —
+prior commit-message shorthand '7 × 12 + 12 = 96' was wrong; spec is
+authoritative). Awk-based function-body block walker + exact-count grep
 assertions mirror the PR11 check_13dg_retention.sh pattern.
 
 Wired into .githooks/pre-push after check_13dg_retention.sh.
