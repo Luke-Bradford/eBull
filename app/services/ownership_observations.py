@@ -1037,23 +1037,24 @@ def record_fund_observation(
         )
 
 
-def refresh_funds_current(
-    conn: psycopg.Connection[Any],
-    *,
-    instrument_id: int,
-) -> int:
-    """Deterministically rebuild ``ownership_funds_current`` rows for
-    one instrument from its observations.
+def refresh_funds_current(conn: psycopg.Connection[Any], *, instrument_id: int) -> int:
+    """Diff-aware MERGE reconciler for ``ownership_funds_current``.
 
-    Atomicity contract identical to ``refresh_institutions_current``:
-    explicit ``conn.transaction()`` + per-instrument
-    ``pg_advisory_xact_lock`` so concurrent refreshes serialise.
+    Spec: docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md §4.
 
-    Dedup picks one row per ``fund_series_id`` ordered by
-    ``filed_at DESC, period_end DESC, source_document_id ASC`` —
-    Codex pre-impl review #5: amendments (NPORT-P/A) carry the same
-    ``period_end`` as the original NPORT-P but are filed later, so
-    ordering by ``filed_at DESC`` first ensures the amendment wins."""
+    UPDATE only when business cols IS DISTINCT FROM the new set; INSERT
+    new rows; DELETE rows that fall out of the latest set (NOT MATCHED
+    BY SOURCE scope-clamped to this instrument via the ON clause AND
+    the DELETE clause for defence-in-depth). ``refreshed_at`` is
+    advanced on the UPDATE path only; the operator-visible drift
+    watermark for repair-sweep lives in ``ownership_refresh_state``
+    (§3.3 — separates write-side dead-tuple budget from watermark
+    semantics so no-op refreshes do not trigger forever-loops in
+    the repair sweep).
+
+    Watermark captured pre-MERGE in a Python var so the state UPSERT
+    cannot advance past observations the MERGE did not see (Codex 1b
+    HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
@@ -1064,34 +1065,83 @@ def refresh_funds_current(
             (instrument_id,),
         )
         cur.execute(
-            "DELETE FROM ownership_funds_current WHERE instrument_id = %s",
+            "SELECT MAX(ingested_at) FROM ownership_funds_observations WHERE instrument_id = %s",
             (instrument_id,),
+        )
+        wm_row = cur.fetchone()
+        watermark = wm_row[0] if wm_row else None
+        cur.execute(
+            """
+            MERGE INTO ownership_funds_current AS tgt
+            USING (
+                SELECT DISTINCT ON (fund_series_id)
+                    instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+                    ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    shares, market_value_usd, payoff_profile, asset_category
+                FROM ownership_funds_observations
+                WHERE instrument_id = %(iid)s AND known_to IS NULL
+                ORDER BY
+                    fund_series_id,
+                    filed_at DESC,
+                    period_end DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = %(iid)s
+               AND tgt.fund_series_id = src.fund_series_id
+            WHEN MATCHED AND (
+                tgt.fund_series_name, tgt.fund_filer_cik, tgt.ownership_nature,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares, tgt.market_value_usd, tgt.payoff_profile, tgt.asset_category
+            ) IS DISTINCT FROM (
+                src.fund_series_name, src.fund_filer_cik, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.market_value_usd, src.payoff_profile, src.asset_category
+            ) THEN UPDATE SET
+                fund_series_name   = src.fund_series_name,
+                fund_filer_cik     = src.fund_filer_cik,
+                ownership_nature   = src.ownership_nature,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                market_value_usd   = src.market_value_usd,
+                payoff_profile     = src.payoff_profile,
+                asset_category     = src.asset_category,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+                ownership_nature, source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, market_value_usd, payoff_profile, asset_category
+            ) VALUES (
+                src.instrument_id, src.fund_series_id, src.fund_series_name, src.fund_filer_cik,
+                src.ownership_nature, src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.market_value_usd, src.payoff_profile, src.asset_category
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE
+            """,
+            {"iid": instrument_id},
         )
         cur.execute(
             """
-            INSERT INTO ownership_funds_current (
-                instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
-                ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                shares, market_value_usd, payoff_profile, asset_category
-            )
-            SELECT DISTINCT ON (fund_series_id)
-                instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
-                ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                shares, market_value_usd, payoff_profile, asset_category
-            FROM ownership_funds_observations
-            WHERE instrument_id = %s
-              AND known_to IS NULL
-            ORDER BY
-                fund_series_id,
-                filed_at DESC,
-                period_end DESC,
-                source_document_id ASC
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%(iid)s, 'funds', %(watermark)s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
             """,
-            (instrument_id,),
+            {"iid": instrument_id, "watermark": watermark},
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_funds_current WHERE instrument_id = %s",
