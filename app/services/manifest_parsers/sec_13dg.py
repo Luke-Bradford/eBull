@@ -316,7 +316,98 @@ def _parse_13dg(
     inserted = 0
     try:
         with conn.transaction():
-            instrument_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
+            # PR11 (#1233) 5-case CUSIP-vs-hint cross-validation per
+            # spec §3.1 step 4. The hint set comes from the
+            # discovery-time ``sec_13dg_discovery_issuer_hint`` side
+            # table (one row per ``(accession, instrument_id)``,
+            # multi-row for share-class siblings on a shared CIK).
+            # CUSIP remains the primary share-class disambiguator
+            # (today's path); the hint is consulted as
+            #   (a) a universe-membership validator and
+            #   (b) a single-row fallback when CUSIP unresolves on a
+            #       single-class issuer.
+            #
+            # CASE A  cusip-in-hints (happy)          → use cusip id
+            # CASE B  cusip None + 1 hint             → use single hint
+            # CASE C  cusip None + N>1 hints          → NULL + ambiguous
+            #                                           audit log; no
+            #                                           observation row
+            # CASE D  cusip resolved + NOT in hints   → universe re-check
+            #   D-in   instrument IS in universe      → use cusip id +
+            #                                           discrepancy log
+            #   D-out  instrument is NOT in universe  → NULL +
+            #                                           outside-universe
+            #                                           audit log; no
+            #                                           observation row
+            # CASE E  no hints at all (legacy)        → CUSIP-only as today
+            cusip_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT instrument_id FROM sec_13dg_discovery_issuer_hint "
+                    "WHERE accession_number = %s",
+                    (accession,),
+                )
+                hint_ids = {r[0] for r in cur.fetchall()}
+
+            log_error: str | None = None
+            instrument_id: int | None = None
+            if cusip_id is not None and cusip_id in hint_ids:
+                # CASE A
+                instrument_id = cusip_id
+            elif cusip_id is None and len(hint_ids) == 1:
+                # CASE B
+                instrument_id = next(iter(hint_ids))
+            elif cusip_id is None and len(hint_ids) > 1:
+                # CASE C — ambiguous; surface for operator audit and
+                # let #740 CUSIP backfill retroactively resolve.
+                instrument_id = None
+                log_error = (
+                    f"cusip_unresolved_with_ambiguous_hint "
+                    f"(cusip={filing.issuer_cusip!r} hints={sorted(hint_ids)})"
+                )
+            elif cusip_id is not None and not hint_ids:
+                # CASE E — legacy daily-index path; no hint rows.
+                instrument_id = cusip_id
+            elif cusip_id is not None and cusip_id not in hint_ids:
+                # CASE D — universe-revalidate per Codex 1c HIGH.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM instruments WHERE instrument_id = %s "
+                        "AND country = 'US' AND is_tradable = TRUE",
+                        (cusip_id,),
+                    )
+                    in_universe = cur.fetchone() is not None
+                if in_universe:
+                    # CASE D-in: hint is likely stale; trust CUSIP
+                    # share-class signal + log discrepancy.
+                    instrument_id = cusip_id
+                    log_error = (
+                        f"cusip_resolved_with_hint_discrepancy "
+                        f"(cusip_id={cusip_id} hints={sorted(hint_ids)})"
+                    )
+                else:
+                    # CASE D-out: CUSIP resolves outside the current
+                    # tradable universe (delisted / non-US sibling on
+                    # a shared CIK); write NULL + explicit audit log
+                    # so the §6.1/§6.2 universe filter is honoured at
+                    # the observation layer.
+                    instrument_id = None
+                    log_error = (
+                        f"cusip_resolved_outside_universe "
+                        f"(instrument={cusip_id} hints={sorted(hint_ids)})"
+                    )
+            else:
+                # Fallthrough (no CUSIP + no hints). Should not occur
+                # in production — legacy path always carries CUSIP
+                # and discovery path always carries >=1 hint — but
+                # defensively NULL the instrument so observation
+                # write-through skips and operator sees the log.
+                instrument_id = None
+                log_error = (
+                    f"cusip_unresolved_with_no_hint "
+                    f"(cusip={filing.issuer_cusip!r})"
+                )
+
             skipped_no_cusip = 0 if instrument_id is not None else len(filing.reporting_persons)
             filer_id = _upsert_filer(conn, cik=filing.primary_filer_cik, name=filer_name)
             for person in filing.reporting_persons:
@@ -349,12 +440,10 @@ def _parse_13dg(
                 )
                 refresh_blockholders_current(conn, instrument_id=instrument_id)
 
+            # CASE A / B / D-in / E → success (observation written).
+            # CASE C / D-out (and the defensive fallthrough) → partial
+            # (no observation row, audit-log carries the reason).
             log_status = "success" if instrument_id is not None else "partial"
-            log_error = (
-                None
-                if instrument_id is not None
-                else f"issuer CUSIP {filing.issuer_cusip!r} unresolved (gated by #740 backfill)"
-            )
             _record_ingest_attempt(
                 conn,
                 filer_cik=filer_cik,

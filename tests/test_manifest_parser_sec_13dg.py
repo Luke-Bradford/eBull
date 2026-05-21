@@ -146,11 +146,13 @@ def _seed_instrument_with_cusip(
     cusip: str,
 ) -> None:
     """Seed an instrument + CUSIP mapping in external_identifiers so
-    _resolve_cusip_to_instrument_id can join."""
+    _resolve_cusip_to_instrument_id can join. ``country='US'`` so the
+    PR11 CASE D universe re-validation (``SELECT 1 FROM instruments
+    WHERE country='US' AND is_tradable=TRUE``) matches by default."""
     conn.execute(
         """
-        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
-        VALUES (%s, %s, %s, '4', 'USD', TRUE)
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, country, is_tradable)
+        VALUES (%s, %s, %s, '4', 'USD', 'US', TRUE)
         ON CONFLICT (instrument_id) DO NOTHING
         """,
         (iid, symbol, f"{symbol} co"),
@@ -733,6 +735,487 @@ def test_parse_13dg_tombstones_pre_cap_accession_without_fetch(
     assert row.error == "retention floor"
     # Critical: gate B runs BEFORE fetch — zero SEC HTTP calls.
     assert fetch_calls == []
+
+
+def _seed_hint(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession: str,
+    instrument_id: int,
+    issuer_cik: str,
+) -> None:
+    """Seed a ``sec_13dg_discovery_issuer_hint`` row mimicking the
+    discovery-layer UPSERT (#1233 PR11)."""
+    conn.execute(
+        """
+        INSERT INTO sec_13dg_discovery_issuer_hint
+            (accession_number, instrument_id, issuer_cik)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (accession_number, instrument_id) DO NOTHING
+        """,
+        (accession, instrument_id, issuer_cik),
+    )
+
+
+def _set_instrument_universe(
+    conn: psycopg.Connection[tuple], *, iid: int, in_universe: bool
+) -> None:
+    """Set ``is_tradable`` on an instrument so CASE D-in vs D-out
+    universe re-validation flips deterministically."""
+    conn.execute(
+        "UPDATE instruments SET is_tradable = %s WHERE instrument_id = %s",
+        (in_universe, iid),
+    )
+
+
+def test_case_a_cusip_in_hints_writes_observation_with_cusip_id(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CASE A (happy): CUSIP resolves AND in hint set →
+    ``instrument_id = cusip-resolved``; observation row written; no
+    discrepancy log."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    accession = "0001140361-26-000110"
+    iid = 8750110
+    _seed_instrument_with_cusip(
+        ebull_test_conn, iid=iid, symbol="EL_A", cusip="518439104"
+    )
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession=accession,
+        filer_cik="0002093607",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    _seed_hint(
+        ebull_test_conn, accession=accession, instrument_id=iid, issuer_cik="0001001250"
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id FROM blockholder_filings "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        bf = cur.fetchone()
+    assert bf is not None and bf[0] == iid
+
+    # Observation row must be written for the CUSIP-resolved id.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ownership_blockholders_observations "
+            "WHERE source_accession = %s AND instrument_id = %s",
+            (accession, iid),
+        )
+        assert cur.fetchone() is not None
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error FROM blockholder_filings_ingest_log "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "success"
+    assert log[1] is None  # no discrepancy log on CASE A
+
+
+def test_case_b_cusip_none_single_hint_uses_hint_fallback(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CASE B: CUSIP unresolved + exactly 1 hint → use single hint."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    accession = "0001140361-26-000120"
+    iid = 8750120
+    # Seed instrument WITHOUT the CUSIP→instrument mapping so the
+    # parser's CUSIP lookup unresolves.
+    ebull_test_conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (%s, 'ELB', 'EL_B co', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (iid,),
+    )
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession=accession,
+        filer_cik="0002093607",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    _seed_hint(
+        ebull_test_conn, accession=accession, instrument_id=iid, issuer_cik="0001001250"
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id FROM blockholder_filings "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        bf = cur.fetchone()
+    assert bf is not None and bf[0] == iid
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ownership_blockholders_observations "
+            "WHERE source_accession = %s AND instrument_id = %s",
+            (accession, iid),
+        )
+        assert cur.fetchone() is not None
+
+
+def test_case_c_cusip_none_multi_hint_writes_null_and_ambiguous_log(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CASE C: CUSIP unresolved + N>1 hints → instrument_id NULL +
+    ``cusip_unresolved_with_ambiguous_hint`` log."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    accession = "0001140361-26-000130"
+    iid_a, iid_b = 8750131, 8750132
+    for iid, sym in ((iid_a, "ELC_A"), (iid_b, "ELC_B")):
+        ebull_test_conn.execute(
+            """
+            INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+            VALUES (%s, %s, %s, '4', 'USD', TRUE)
+            ON CONFLICT (instrument_id) DO NOTHING
+            """,
+            (iid, sym, f"{sym} co"),
+        )
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession=accession,
+        filer_cik="0002093607",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    _seed_hint(
+        ebull_test_conn,
+        accession=accession,
+        instrument_id=iid_a,
+        issuer_cik="0001001250",
+    )
+    _seed_hint(
+        ebull_test_conn,
+        accession=accession,
+        instrument_id=iid_b,
+        issuer_cik="0001001250",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id FROM blockholder_filings "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        bf = cur.fetchone()
+    assert bf is not None and bf[0] is None
+
+    # No observation row should exist for CASE C.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ownership_blockholders_observations "
+            "WHERE source_accession = %s",
+            (accession,),
+        )
+        assert cur.fetchone() is None
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error FROM blockholder_filings_ingest_log "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "partial"
+    assert log[1] is not None
+    assert "cusip_unresolved_with_ambiguous_hint" in log[1]
+
+
+def test_case_d_in_universe_writes_cusip_id_with_discrepancy_log(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CASE D-in-universe: CUSIP resolves to instrument NOT in hints
+    BUT the instrument is in the current tradable universe → use the
+    CUSIP id + log discrepancy."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    accession = "0001140361-26-000140"
+    cusip_iid = 8750141
+    hint_iid = 8750142
+
+    _seed_instrument_with_cusip(
+        ebull_test_conn, iid=cusip_iid, symbol="ELDi_C", cusip="518439104"
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (%s, 'ELDi_H', 'EL_D_hint co', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (hint_iid,),
+    )
+    # CUSIP-resolved id IS in current universe (default is_tradable=TRUE).
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession=accession,
+        filer_cik="0002093607",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    _seed_hint(
+        ebull_test_conn,
+        accession=accession,
+        instrument_id=hint_iid,
+        issuer_cik="0001001250",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id FROM blockholder_filings "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        bf = cur.fetchone()
+    assert bf is not None and bf[0] == cusip_iid
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ownership_blockholders_observations "
+            "WHERE source_accession = %s AND instrument_id = %s",
+            (accession, cusip_iid),
+        )
+        assert cur.fetchone() is not None
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error FROM blockholder_filings_ingest_log "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        log = cur.fetchone()
+    assert log is not None
+    # CASE D-in still writes a successful observation; the discrepancy
+    # is informational (logged in the error column).
+    assert log[1] is not None
+    assert "cusip_resolved_with_hint_discrepancy" in log[1]
+
+
+def test_case_d_out_of_universe_writes_null_and_outside_universe_log(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CASE D-out-of-universe: CUSIP resolves to an instrument that
+    is NOT in the current tradable universe (delisted, non-US sibling
+    on a shared CIK) → write NULL + ``cusip_resolved_outside_universe``
+    log."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    accession = "0001140361-26-000150"
+    cusip_iid = 8750151
+    hint_iid = 8750152
+
+    _seed_instrument_with_cusip(
+        ebull_test_conn, iid=cusip_iid, symbol="ELDo_C", cusip="518439104"
+    )
+    # Flip the CUSIP-resolved instrument OUT of the tradable universe.
+    _set_instrument_universe(ebull_test_conn, iid=cusip_iid, in_universe=False)
+
+    ebull_test_conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (%s, 'ELDo_H', 'EL_D_hint co', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (hint_iid,),
+    )
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession=accession,
+        filer_cik="0002093607",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    _seed_hint(
+        ebull_test_conn,
+        accession=accession,
+        instrument_id=hint_iid,
+        issuer_cik="0001001250",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id FROM blockholder_filings "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        bf = cur.fetchone()
+    assert bf is not None and bf[0] is None
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ownership_blockholders_observations "
+            "WHERE source_accession = %s",
+            (accession,),
+        )
+        assert cur.fetchone() is None
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error FROM blockholder_filings_ingest_log "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "partial"
+    assert log[1] is not None
+    assert "cusip_resolved_outside_universe" in log[1]
+
+
+def test_case_e_no_hints_uses_cusip_legacy_path(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CASE E (legacy daily-index path): no hints + CUSIP resolves →
+    use CUSIP-resolved id; no discrepancy log."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    accession = "0001140361-26-000160"
+    iid = 8750160
+    _seed_instrument_with_cusip(
+        ebull_test_conn, iid=iid, symbol="ELE", cusip="518439104"
+    )
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession=accession,
+        filer_cik="0002093607",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    # No _seed_hint — legacy path.
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id FROM blockholder_filings "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        bf = cur.fetchone()
+    assert bf is not None and bf[0] == iid
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ownership_blockholders_observations "
+            "WHERE source_accession = %s AND instrument_id = %s",
+            (accession, iid),
+        )
+        assert cur.fetchone() is not None
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error FROM blockholder_filings_ingest_log "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "success"
+    assert log[1] is None  # legacy CASE E: no discrepancy log
 
 
 def test_parser_registered_for_both_sources() -> None:
