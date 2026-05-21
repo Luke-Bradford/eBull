@@ -113,6 +113,16 @@ JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap drain.
 JOB_MF_DIRECTORY_SYNC = "mf_directory_sync"
 JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
+# #1233 PR11 — universe-issuer-CIK-driven SC 13D/G discovery. The
+# canonical string also lives in ``app/workers/scheduler.py`` as
+# ``JOB_SEC_BLOCKHOLDERS_DISCOVERY``; redeclared here so the bootstrap-
+# stage entry below and ``__all__`` stay single-site (mirror of the
+# ``JOB_MF_DIRECTORY_SYNC`` / ``JOB_SEC_N_CSR_BOOTSTRAP_DRAIN``
+# pattern). Drift between the two declarations is caught at runtime
+# by ``tests/test_job_registry.py::TestSourceRegistry`` when the
+# bootstrap stage's ``job_name`` fails to resolve in the source
+# registry.
+JOB_SEC_BLOCKHOLDERS_DISCOVERY = "sec_blockholders_discovery_job"
 
 
 # PR1c #1064 — bootstrap-bounded 13F sweep recency cut-off. Used to
@@ -448,6 +458,17 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     # #1174 — dedicated MF directory refresh + N-CSR drain (S25 + S26).
     "mf_directory_sync": CapRequirement(all_of=("universe_seeded",)),
     "sec_n_csr_bootstrap_drain": CapRequirement(all_of=("class_id_mapping_ready",)),
+    # #1233 PR11 — universe-issuer-CIK-driven SC 13D/G discovery.
+    # Requires only ``universe_seeded`` because the discovery walker
+    # queries ``instruments WHERE country='US' AND is_tradable=TRUE``
+    # joined to the SEC primary CIK row in ``external_identifiers``
+    # (spec §3.5 ``_list_universe_issuers``); the CIK side comes from
+    # the universe-seeded chain, not from a separate bootstrap stage.
+    # Terminal w.r.t. capability flow (no ``_STAGE_PROVIDES`` entry —
+    # mirror of S26 ``sec_n_csr_bootstrap_drain``); the manifest
+    # worker downstream consumes the seeded manifest rows
+    # asynchronously.
+    "sec_blockholders_discovery": CapRequirement(all_of=("universe_seeded",)),
     # Phase E — final derivations. Per-family caps in §4 of the spec
     # encode the bulk-OR-legacy alternative at the *provider* side
     # (each cap has both a bulk and a legacy producer), so the
@@ -978,6 +999,30 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         26,
         "sec_rate",
         JOB_SEC_N_CSR_BOOTSTRAP_DRAIN,
+    ),
+    # #1233 §3.5 / PR11 — S27 universe-issuer-CIK-driven SC 13D/G
+    # discovery via ``efts.sec.gov/LATEST/search-index``. Bootstrap
+    # dispatches ``mode="bootstrap"`` for the full 3y backfill (floor =
+    # ``max(today-3y, 2024-12-18)`` per the SEC Schedule 13 XBRL
+    # mandate); the steady-state path (post-bootstrap) dispatches with
+    # empty params → ``mode="steady_state"`` and uses the per-issuer
+    # watermark derived from ``MAX(blockholder_filings.filed_at) WHERE
+    # issuer_cik = ?`` clamped to the 3y floor (spec §3.5 helper
+    # ``_resolve_discovery_startdt``). Stage terminal w.r.t. capability
+    # flow (no ``_STAGE_PROVIDES`` entry — same shape as S26
+    # ``sec_n_csr_bootstrap_drain``); the manifest worker +
+    # ``manifest_parsers/sec_13dg.py`` carry the typed-row writes
+    # downstream. ``params={"mode": "bootstrap"}`` is bootstrap-only;
+    # ``mode`` is allow-listed in
+    # ``JOB_INTERNAL_KEYS["sec_blockholders_discovery_job"]`` so the
+    # manual API path rejects it (operator-only triage uses the empty-
+    # params steady-state default).
+    _spec(
+        "sec_blockholders_discovery",
+        27,
+        "sec_rate",
+        JOB_SEC_BLOCKHOLDERS_DISCOVERY,
+        params={"mode": "bootstrap"},
     ),
 )
 
@@ -1948,6 +1993,7 @@ __all__ = [
     "JOB_DAILY_CIK_REFRESH",
     "JOB_DAILY_FINANCIAL_FACTS",
     "JOB_MF_DIRECTORY_SYNC",
+    "JOB_SEC_BLOCKHOLDERS_DISCOVERY",
     "JOB_SEC_N_CSR_BOOTSTRAP_DRAIN",
     "get_bootstrap_stage_specs",
     "run_bootstrap_orchestrator",
@@ -1957,10 +2003,11 @@ __all__ = [
 # Stage count assertion — pin so a future refactor that adds /
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
-# current 26-stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 26, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 26 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+# current 27-stage shape.
+assert len(_BOOTSTRAP_STAGE_SPECS) == 27, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 27 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
     "update the spec, frontend, runbook, and stage_count tests in lockstep. "
     "#1027 added 7 bulk-archive stages (sec_bulk_download + C1.a/C2/C3/C4/C5 ingesters + C1.b walker); "
-    "#1174 added 2 fund-stages (S25 mf_directory_sync + S26 sec_n_csr_bootstrap_drain)."
+    "#1174 added 2 fund-stages (S25 mf_directory_sync + S26 sec_n_csr_bootstrap_drain); "
+    "#1233 PR11 added S27 sec_blockholders_discovery."
 )

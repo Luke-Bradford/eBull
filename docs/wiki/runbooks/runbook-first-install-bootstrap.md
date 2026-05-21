@@ -27,17 +27,20 @@ Click "Run bootstrap" on the admin page when:
 Do **not** run it as part of routine ops: scheduled jobs handle
 incremental refresh once bootstrap is complete.
 
-## 2. What runs (26 stages)
+## 2. What runs (27 stages)
 
 Phases in order; the catalogue lives in
 ``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS`` and
-is the source of truth (asserted == 26 at module load). Spec:
+is the source of truth (asserted == 27 at module load). Spec:
 ``docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md``.
 
-#1174 added S25 ``mf_directory_sync`` (dedicated MF-directory refresh
+Issue #1174 added S25 ``mf_directory_sync`` (dedicated MF-directory refresh
 for N-CSR classId resolution) + S26 ``sec_n_csr_bootstrap_drain``
 (fund-scoped manifest enqueue for the #1171 fund-metadata parser).
-Both ride the ``sec_rate`` lane.
+Issue #1233 PR11 added S27 ``sec_blockholders_discovery`` (universe-issuer-
+CIK-driven SC 13D/G discovery via ``efts.sec.gov/LATEST/search-index``;
+3y cap floor = ``max(today-3y, 2024-12-18)`` per SEC Schedule 13 XBRL
+mandate). All three ride the ``sec_rate`` lane.
 
 1. **Phase A — init** (sequential, ``init`` lane, single thread):
    - S1 ``universe_sync`` (``nightly_universe_sync``; ~30s, ~1.5k rows).
@@ -77,6 +80,16 @@ Both ride the ``sec_rate`` lane.
 1. **Phase E — final derivations** (``db`` lane):
    - S23 ``ownership_observations_backfill``
    - S24 ``fundamentals_sync``
+1. **Phase F — fund + 13D/G discovery** (``sec_rate``):
+   - S25 ``mf_directory_sync`` (advertises ``class_id_mapping_ready``
+     for S26)
+   - S26 ``sec_n_csr_bootstrap_drain`` (fund-scoped N-CSR / N-CSRS
+     manifest enqueue; 730d retention pinned at
+     ``app/services/manifest_parsers/sec_n_csr.py::N_CSR_RETENTION_DAYS``)
+   - S27 ``sec_blockholders_discovery`` (``sec_blockholders_discovery_job``
+     with ``params={"mode": "bootstrap"}``; 3y cap floor =
+     ``max(today-3y, 2024-12-18)`` per the SEC Schedule 13 XBRL mandate;
+     spec ``docs/superpowers/specs/2026-05-21-pr11-blockholders-activation-design.md``)
 
 Total wall-clock: typically **60–90 minutes** on the bulk path,
 dominated by ``sec_bulk_download`` + ``sec_submissions_files_walk``.

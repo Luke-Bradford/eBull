@@ -332,6 +332,13 @@ JOB_SEC_REBUILD = "sec_rebuild"
 JOB_FINRA_SHORT_INTEREST_REFRESH = "finra_short_interest_refresh"
 JOB_FINRA_REGSHO_DAILY_REFRESH = "finra_regsho_daily_refresh"
 
+# #1233 PR11 — universe-issuer-CIK-driven SC 13D/G discovery job.
+# Dispatched by bootstrap stage S27 with ``params={"mode": "bootstrap"}``
+# for the full 3y backfill; steady-state path dispatches with empty
+# params → ``mode="steady_state"`` and uses the per-issuer watermark
+# (spec §3.5 helper ``_resolve_discovery_startdt``).
+JOB_SEC_BLOCKHOLDERS_DISCOVERY = "sec_blockholders_discovery_job"
+
 
 # ---------------------------------------------------------------------------
 # Prerequisite checks
@@ -5064,6 +5071,78 @@ def sec_n_port_ingest(params: Mapping[str, Any]) -> None:
             accessions_ingested,
             rows_upserted,
             rows_skipped,
+        )
+
+
+def sec_blockholders_discovery_job(params: Mapping[str, Any]) -> None:
+    """Universe-issuer-CIK-driven SC 13D/G discovery (#1233 PR11 §3.5).
+
+    Walks the US tradable universe (one ``efts.sec.gov`` call per
+    DISTINCT issuer CIK regardless of share-class sibling count) and
+    writes ``sec_filing_manifest`` rows + multi-row
+    ``sec_13dg_discovery_issuer_hint`` side-table for every discovered
+    accession. The manifest worker + ``manifest_parsers/sec_13dg.py``
+    later carry the typed-row writes.
+
+    Bootstrap stage S27 dispatches ``mode="bootstrap"`` for the full
+    3y backfill (floor = ``max(today-3y, 2024-12-18)`` per the SEC
+    Schedule 13 XBRL mandate). The steady-state path (post-bootstrap)
+    dispatches with empty params → defaults to ``mode="steady_state"``
+    which derives the per-issuer window start from
+    ``MAX(blockholder_filings.filed_at) WHERE issuer_cik = ?`` clamped
+    to the 3y floor (spec §3.5 helper ``_resolve_discovery_startdt``).
+
+    Rate-limit posture: HTTP fetches go through ``SecFilingsProvider``,
+    which shares the process-wide 10 req/s SEC clock with every other
+    SEC-touching job (``_PROCESS_RATE_LIMIT_CLOCK`` in
+    ``app/providers/implementations/sec_edgar.py:55-80``). The
+    bootstrap stage's ``lane="sec_rate"`` serialises THIS job; the
+    provider-internal throttle serialises REQUESTS across all SEC
+    jobs.
+
+    Params (validated via ``JOB_INTERNAL_KEYS["sec_blockholders_discovery_job"]``):
+      * ``mode`` — ``"bootstrap"`` | ``"steady_state"`` (default
+        ``"steady_state"`` for safety on the manual API path).
+    """
+    from app.services.sec_13dg_discovery import discover_sec_13dg_for_universe
+
+    mode_raw = params.get("mode", "steady_state")
+    if mode_raw not in ("bootstrap", "steady_state"):
+        raise ValueError(
+            f"sec_blockholders_discovery_job: ``mode`` must be 'bootstrap' or 'steady_state'; got {mode_raw!r}"
+        )
+    # Narrow to the Literal type without ``cast`` so static type-checkers
+    # see the membership guard above (mirror of sec_n_port_ingest's
+    # isinstance guard pattern).
+    mode: Literal["bootstrap", "steady_state"] = "bootstrap" if mode_raw == "bootstrap" else "steady_state"
+
+    with _tracked_job(JOB_SEC_BLOCKHOLDERS_DISCOVERY) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            result = discover_sec_13dg_for_universe(conn, mode=mode)
+
+        # ``tracker.row_count`` is the operator-visible "work done" knob
+        # surfaced on the Bootstrap Timeline + admin Background-tasks
+        # panel + retention-spike check. The most operator-meaningful
+        # counter here is NEW manifest rows written (excludes
+        # re-discoveries of already-present accessions); the manifest
+        # worker carries the per-accession parser work downstream, so
+        # this number tracks the net new ingest queue depth this run
+        # produced.
+        tracker.row_count = result.manifest_rows_inserted
+        logger.info(
+            "sec_blockholders_discovery_job: mode=%s issuers_scanned=%d "
+            "accessions_discovered=%d manifest_rows_inserted=%d "
+            "manifest_rows_skipped_existing=%d filers_upserted=%d "
+            "hints_written=%d rows_skipped_outside_cap=%d elapsed_s=%.1f",
+            mode,
+            result.issuers_scanned,
+            result.accessions_discovered,
+            result.manifest_rows_inserted,
+            result.manifest_rows_skipped_existing,
+            result.filers_upserted,
+            result.hints_written,
+            result.rows_skipped_outside_cap,
+            result.elapsed_seconds,
         )
 
 
