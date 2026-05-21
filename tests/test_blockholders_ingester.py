@@ -115,4 +115,3 @@ class TestParseSubmissionsIndex:
         """Valid JSON with no 'recent' array is a legitimate empty
         result — distinct from malformed JSON above."""
         assert parse_submissions_index('{"filings": {}}') == []
-

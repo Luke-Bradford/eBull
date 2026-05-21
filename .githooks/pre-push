@@ -125,18 +125,17 @@ bash scripts/check_form5_retention.sh
 echo "==> Pre-push gate: Form 3 latest-per-pair invariant lint"
 bash scripts/check_form3_latest_per_pair.sh
 
-# #1233 §4.8 PR11 — every SC 13D/G writer chokepoint must honour the
-# 3y filed_at retention cap AND the discovery layer must route every
-# HTTP fetch + manifest write through the rate-limited provider +
-# canonical helper. Twelve placement invariants (A-L): helper defs,
-# discovery-uses-cutoff, manifest pre-fetch gate, sync bf.filed_at
-# gate (NOT fe.filing_date — Codex 1a HIGH #4), refresh-current
-# exemption, no-append-writers, dormant-entrypoint retirement, rewash
-# rescue-path branch order, provider-throttle discipline,
-# helper-only manifest writes, hint+manifest atomicity in same
-# conn.transaction(), ON CONFLICT DO UPDATE on hint UPSERT (forbid
-# DO NOTHING). ~40ms.
-echo "==> Pre-push gate: 13D/G retention cap + discovery invariant lint"
+# #1233 §4.8 PR11 (v8 empirical pivot) — every SC 13D/G writer
+# chokepoint must honour the max(today-3y, 2024-12-18) retention floor.
+# Seven placement invariants A/C/D/E/F/G/H: A helper defs, C manifest
+# pre-fetch gate, D sync bf.filed_at gate (NOT fe.filing_date — Codex
+# 1a HIGH #4), E refresh-current exemption, F no-append-writers
+# outside chokepoints, G dormant-entrypoint retirement, H rewash
+# rescue-path branch order. Invariants B/I/J/K/L were retired with
+# the universe-issuer-CIK discovery layer (efts.sec.gov post-mandate
+# does NOT index by subject CIK — see spec v8 §0.1 empirical pivot).
+# ~30ms.
+echo "==> Pre-push gate: 13D/G retention cap invariant lint"
 bash scripts/check_13dg_retention.sh
 
 # #1249 / #1250 cleanup — every manifest_parsers/sec_*.py that calls

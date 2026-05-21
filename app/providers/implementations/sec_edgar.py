@@ -446,12 +446,18 @@ class SecFilingsProvider(FilingsProvider):
 
         Hits ``https://efts.sec.gov/LATEST/search-index`` — the JSON
         backing the EDGAR full-text search UI — and returns the parsed
-        ``hits`` envelope. Used by the PR11 13D/G discovery job
-        (#1233) to enumerate which blockholder filings exist for each
-        universe issuer over a bounded date window. Returns the
-        parsed dict on 2xx, ``None`` on 404 or non-dict body. Raises
-        on other HTTP errors so the caller decides retry vs skip
-        (same shape as :func:`fetch_filing_index`).
+        ``hits`` envelope. Returns the parsed dict on 2xx, ``None`` on
+        404 or non-dict body. Raises on other HTTP errors so the caller
+        decides retry vs skip (same shape as :func:`fetch_filing_index`).
+
+        **History (#1233 PR11 v8 empirical pivot)**: this method was
+        added to support the PR11 universe-issuer-CIK discovery job,
+        which empirically failed (efts.sec.gov post-2024-12-18 does
+        NOT index by SUBJECT CIK — only by FILER CIK; see spec v8 §0.1).
+        The discovery job was retired but this method is retained as a
+        general-purpose provider primitive — future filer-CIK-driven
+        ingest (e.g. per-13F-manager 13D/G coverage) can reuse it
+        without re-introducing the dual-host throttle plumbing.
 
         **Rate-limit chain (#1233 PR11):** routes through
         ``self._http_tickers`` so the request shares the process-wide
