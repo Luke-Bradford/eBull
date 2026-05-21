@@ -434,10 +434,14 @@ def test_parse_phase_exception_preserves_stored_raw_status(
         lambda self, url: _FAKE_13D_XML,
     )
 
+    # PR11 (#1233): the parse call is now edgartools-backed via
+    # ``Schedule13D.parse_xml`` (imported into parser_module at the
+    # top); patch THAT to simulate a parse-phase crash after
+    # ``store_raw`` has already persisted the body.
     def _raising_parse(xml):  # noqa: ARG001
         raise RuntimeError("synthetic parser crash")
 
-    monkeypatch.setattr(parser_module, "parse_primary_doc", _raising_parse)
+    monkeypatch.setattr(parser_module.Schedule13D, "parse_xml", _raising_parse)
 
     stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
     ebull_test_conn.commit()
@@ -483,7 +487,10 @@ def test_unexpected_parse_exception_writes_ingest_log(
     def _raising_parse(xml):  # noqa: ARG001
         raise RuntimeError("synthetic unexpected parser crash")
 
-    monkeypatch.setattr(parser_module, "parse_primary_doc", _raising_parse)
+    # PR11 (#1233): patch the edgartools entry-point (Schedule13D
+    # for source=sec_13d). The broad-except branch still runs
+    # because the manifest dispatch isn't ValueError/ET.ParseError.
+    monkeypatch.setattr(parser_module.Schedule13D, "parse_xml", _raising_parse)
 
     stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
     ebull_test_conn.commit()
@@ -607,6 +614,64 @@ def test_transient_upsert_exception_retries(
     with ebull_test_conn.cursor() as cur:
         cur.execute("SELECT 1 FROM blockholder_filings_ingest_log WHERE accession_number = '0009999999-26-000091'")
         assert cur.fetchone() is None
+
+
+def test_parse_13dg_uses_edgartools_and_writes_issuer_class_decimal_fields(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end happy-path through the edgartools-backed parser
+    (#1233 PR11 Task 5.4): seeds CUSIP→instrument, drives the worker
+    against ``_FAKE_13D_XML``, and asserts ``blockholder_filings``
+    row carries the edgartools-derived issuer_cik / issuer_cusip /
+    securities_class_title plus Decimal-typed share fields.
+    """
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from decimal import Decimal as _Dec
+
+    _seed_instrument_with_cusip(
+        ebull_test_conn, iid=8750040, symbol="EL3", cusip="518439104"
+    )
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession="0001140361-26-000040",
+        filer_cik="0002093607",
+        source="sec_13d",
+        form="SC 13D",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13D_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, "0001140361-26-000040")
+    assert row is not None and row.ingest_status == "parsed"
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT submission_type, issuer_cik, issuer_cusip, "
+            "securities_class_title, aggregate_amount_owned, "
+            "percent_of_class FROM blockholder_filings "
+            "WHERE accession_number = '0001140361-26-000040'"
+        )
+        bf = cur.fetchone()
+    assert bf is not None
+    assert bf[0] == "SCHEDULE 13D"
+    assert bf[1] == "0001001250"  # issuer_cik from edgartools IssuerInfo
+    assert bf[2] == "518439104"  # issuer_cusip from SecurityInfo.cusip
+    assert bf[3] == "Class A Common Stock, par value $.01 per share"
+    assert bf[4] == _Dec("1500000")
+    assert isinstance(bf[4], _Dec)
+    assert bf[5] == _Dec("5.5")
 
 
 def test_parse_13dg_tombstones_pre_cap_accession_without_fetch(

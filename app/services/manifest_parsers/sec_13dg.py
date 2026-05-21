@@ -50,12 +50,10 @@ from typing import Any
 from uuid import uuid4
 
 import psycopg
+from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 
 from app.config import settings
-from app.providers.implementations.sec_13dg import (
-    BlockholderFiling,
-    parse_primary_doc,
-)
+from app.providers.implementations.sec_13dg import BlockholderFiling
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.blockholders import (
     _PARSER_VERSION_13DG,
@@ -71,6 +69,9 @@ from app.services.blockholders import (
 from app.services.manifest_parsers._classify import (
     format_upsert_error,
     is_transient_upsert_error,
+)
+from app.services.manifest_parsers._schedule13_adapter import (
+    build_filing_from_edgartools_dict,
 )
 from app.services.ownership_observations import refresh_blockholders_current
 from app.services.raw_filings import store_raw
@@ -245,7 +246,26 @@ def _parse_13dg(
     # trail is consistent regardless of which exception type fires
     # (#1129 review WARNING + PREVENTION).
     try:
-        filing: BlockholderFiling = parse_primary_doc(primary_xml)
+        # PR11 (#1233): edgartools-backed parse via Schedule13D/G
+        # static methods. ``parse_xml`` returns a dict whose nested
+        # values are frozen dataclasses; the local adapter converts
+        # that into the repo-internal ``BlockholderFiling`` shape so
+        # downstream consumers (``_upsert_filing_row`` +
+        # ``_record_13dg_observation_for_filing``) are unchanged.
+        # The in-house ``parse_primary_doc`` is retained at
+        # ``app/providers/implementations/sec_13dg.py`` for backward
+        # compat with ``rewash_filings._apply_blockholders`` until
+        # that consumer is migrated in a follow-up.
+        if row.source == "sec_13d":
+            parsed_dict = Schedule13D.parse_xml(primary_xml)
+        else:  # sec_13g
+            parsed_dict = Schedule13G.parse_xml(primary_xml)
+        filing: BlockholderFiling = build_filing_from_edgartools_dict(
+            parsed_dict,
+            source=row.source,
+            manifest_form=row.form,
+            manifest_filer_cik=filer_cik,
+        )
     except Exception as exc:  # noqa: BLE001 — broad catch + audit-log write
         # Tag the error string by exception class so operators reading
         # blockholder_filings_ingest_log can distinguish expected
