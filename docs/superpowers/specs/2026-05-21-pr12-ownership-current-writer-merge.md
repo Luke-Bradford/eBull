@@ -6,7 +6,7 @@
 >
 > Parent spec: [`docs/superpowers/specs/2026-05-19-data-retention-rubric.md`](2026-05-19-data-retention-rubric.md) §4.5 / §4.6 / §6.4 / §7 / §8.
 >
-> Status: **DESIGN (rev 3)** — initial draft addressed bloat via diff-aware MERGE; Codex 1a found 5 HIGH + 7 MED + 4 LOW → folded into rev 2 (side-table watermark + tightened lint + extended tests + concurrency contract + CI extension provisioning). Codex 1b on rev 2 found 3 HIGH (watermark-population mismatch + MERGE-vs-state UPSERT race + nondeterministic per-row backfill) + 7 MED + 4 LOW. Rev 3 folds the 1b findings: watermark captured pre-MERGE in Python var; observations-anchored single-query predicate via `IS DISTINCT FROM`; backfill via `MAX … GROUP BY (instrument_id, category)`; repair sweep expanded to all 7 categories; block-local lint for ON/DELETE clamps; per-clause lint for def14a 3-clause filter; state-table churn acceptance floor added.
+> Status: **DESIGN (rev 4)** — Codex 1a → rev 2 (5H + 7M + 4L). Codex 1b → rev 3 (3H + 7M + 4L). Codex 1c on rev 3 found 1 HIGH (rev 3's obs-anchored `GROUP BY instrument_id` predicate scans the full observations table per sweep — breaks the "<100ms healthy install" claim on funds-scale tables without a dedicated `(instrument_id, ingested_at)` index) + 3 MED (backfill from `_current.refreshed_at` lags obs MAX by tx-time-vs-clock_timestamp skew → first-sweep false-drift; missing `known_to` expiry watermark test; tuple_percent ≥ 70% floor too tight for state table churn-vs-autovacuum cadence) + 3 LOW (stale "5 categories" text; "always advances" wording inaccurate; handover stale). Rev 4 folds all 1c findings: state-anchored predicate primary path with LATERAL obs-MAX + UNION orphan tail; per-observations-table `(instrument_id, ingested_at DESC)` indexes provisioned in sql/163; backfill switched to `MAX(obs.ingested_at) GROUP BY obs.instrument_id` (uses obs MAX directly, eliminates skew); new case 4b watermark-alignment test on `known_to` expiry; state-table acceptance switched to dead-tuple bound; stale text purged.
 
 ## 0. Status snapshot (2026-05-21 dev DB)
 
@@ -82,7 +82,7 @@ Caller inventory (refresh callers across the codebase):
 | `app/services/sec_bulk_orchestrator_jobs.py:425` | `refresh_institutions_current` | bulk archive drain |
 | `app/services/ownership_observations_sync.py:404` | `refresh_institutions_current` | observations sync |
 | `app/services/rewash_filings.py:1075` | `refresh_institutions_current` | rewash rescue |
-| `app/jobs/ownership_observations_repair.py:70` | (all 5 categories via lambda) | weekly repair sweep |
+| `app/jobs/ownership_observations_repair.py:70` | (5 categories pre-PR12 via lambda; expanded to 7 in §3.3) | weekly repair sweep |
 
 ## 2. Non-goals
 
@@ -131,7 +131,23 @@ CREATE INDEX IF NOT EXISTS idx_ownership_refresh_state_category
 - PK `(instrument_id, category)` caps the table at 7 × |distinct-instrument-ids| rows (currently ~87k in dev; grows linearly with universe). UPSERT-only writer with no row growth past the cap → bloat surface tiny + autovacuum-manageable.
 - CHECK lists all **7 categories** (Codex 1b MED-4 — current repair sweep iterates only 5; PR12 expands the sweep's `_CATEGORIES` list to include `funds` + `esop` for uniformity).
 
-**Migration backfill** is in the same SQL file; one INSERT per category, aggregated via `MAX(_current.refreshed_at) GROUP BY (instrument_id, category)` (Codex 1b HIGH-3 — multi-row categories like funds/institutions/insiders/blockholders/def14a/esop carry many rows per instrument with different `refreshed_at` values; per-row `ON CONFLICT DO NOTHING` is nondeterministic; aggregate first):
+**Per-observations-table `(instrument_id, ingested_at DESC)` indexes** (new, in same sql/163 migration) — load-bearing for the repair-sweep predicate cost target (Codex 1c HIGH-1):
+
+```sql
+-- Per observations table, repeated 7 times in the migration:
+CREATE INDEX IF NOT EXISTS idx_ownership_funds_obs_instrument_ingested_at
+    ON ownership_funds_observations (instrument_id, ingested_at DESC);
+-- (sibling CREATE INDEX statements for insiders / institutions / blockholders /
+--  treasury / def14a / esop observations tables, including partition propagation
+--  via PARTITION INDEX where the parent table is partitioned by period_end —
+--  funds + institutions + insiders + blockholders + treasury + def14a + esop
+--  observations are all RANGE-partitioned per migration 114-style schema; PG17
+--  cascades CREATE INDEX from parent to all partitions automatically.)
+```
+
+Without these indexes the LATERAL `MAX(ingested_at)` lookups per state row would fall back to per-partition seq-scan + aggregate → tens of seconds on funds (3.68M obs rows). With the index, each lookup is an index-only scan returning 1 row → <1ms × ~87k state rows = <100ms total sweep cost on healthy install (matches the repair docstring's target).
+
+**Migration backfill** is in the same SQL file; one INSERT per category, sourced from **observations MAX(ingested_at)** rather than `_current.refreshed_at` (Codex 1c MED-1 — `_current.refreshed_at` uses transaction `now()` while `observations.ingested_at` uses `clock_timestamp()`; the latter can be later within the same refresh tx, so backfilling from `_current.refreshed_at` would seed an under-estimate and cause first-sweep false drift). Backfilling from obs MAX asserts the write-through invariant "_current reflects observations as of obs MAX ingested_at" — which is the steady-state contract:
 
 ```sql
 -- Per category, repeated 7 times in the migration:
@@ -140,37 +156,53 @@ INSERT INTO ownership_refresh_state (
     last_drained_observations_max_ingested_at, last_refresh_attempted_at
 )
 SELECT
-    c.instrument_id,
+    obs.instrument_id,
     'funds',
-    MAX(c.refreshed_at),
-    MAX(c.refreshed_at)
-FROM ownership_funds_current c
-GROUP BY c.instrument_id
+    MAX(obs.ingested_at),
+    now()
+FROM ownership_funds_observations obs
+GROUP BY obs.instrument_id
 ON CONFLICT (instrument_id, category) DO NOTHING;
 ```
 
-This carries the existing watermark forward verbatim, avoiding a "first sweep post-deploy storm" where every instrument looks un-drained.
+If write-through has been broken (observations exist but `_current` never reconciled), the first post-deploy sweep will still find drift legitimately — repair fires, MERGE reconciles, state advances. Honest behaviour, not silent skip.
 
-**Repair-sweep predicate switch** in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) — single observations-anchored LEFT JOIN query using `IS DISTINCT FROM` for NULL-safe comparison (Codex 1b MED-3 — collapses the rev-2 two-part predicate + UNION tail into one statement):
+**Repair-sweep predicate switch** in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) — **state-anchored primary path** (cheap correlated LATERAL `MAX` per state row, indexed by §3.3 indexes) + **orphan tail** for the rare "obs exists but state row missing" case (write-through gap caught at next sweep):
 
 ```sql
-SELECT obs.instrument_id
-FROM (
-    SELECT instrument_id, MAX(ingested_at) AS obs_max
-    FROM ownership_X_observations
-    GROUP BY instrument_id
-) obs
-LEFT JOIN ownership_refresh_state s
-    ON s.instrument_id = obs.instrument_id AND s.category = %s
-WHERE s.last_drained_observations_max_ingested_at IS DISTINCT FROM obs.obs_max;
+-- Primary path: state-anchored, cheap with the new (instrument_id, ingested_at DESC) index.
+SELECT s.instrument_id
+FROM ownership_refresh_state s
+LEFT JOIN LATERAL (
+    SELECT MAX(o.ingested_at) AS obs_max
+    FROM ownership_X_observations o
+    WHERE o.instrument_id = s.instrument_id
+) sub ON TRUE
+WHERE s.category = %s
+  AND s.last_drained_observations_max_ingested_at IS DISTINCT FROM sub.obs_max
+
+UNION
+
+-- Orphan tail: obs exists for an instrument with no state row for this category.
+-- Defence-in-depth against a broken write-through that wrote obs without firing
+-- refresh + ownership_refresh_state UPSERT. Backfill covers all _current rows
+-- at deploy time so this branch fires only on post-deploy write-through gaps.
+SELECT DISTINCT o.instrument_id
+FROM ownership_X_observations o
+WHERE NOT EXISTS (
+    SELECT 1 FROM ownership_refresh_state s
+    WHERE s.instrument_id = o.instrument_id AND s.category = %s
+);
 ```
 
-NULL semantics:
+NULL semantics on the primary branch:
 
-- `obs` row present, no `s` row → `s.<col>` is NULL, `obs.obs_max` is not NULL → `NULL IS DISTINCT FROM <value>` = TRUE → drift detected, refresh fires.
-- Both present, same value → not distinct → no drift.
-- Both present, different value (obs newer) → distinct → drift.
-- `obs` row absent (no observations) → instrument not in subquery → not in result. Orphan state-table rows (instrument with state but no obs) are not detected — acceptable; cleanup is an O(1) follow-up if it ever happens. Observations-anchored anchor keeps the common path tight.
+- Both `s.last_drained` and `sub.obs_max` present, equal → not distinct → no drift.
+- Both present, different → distinct → drift → refresh fires.
+- `s.last_drained` present, `sub.obs_max` NULL (all obs deleted for instrument) → distinct → drift → refresh fires → MERGE NOT MATCHED BY SOURCE deletes any orphan `_current` rows → state UPSERT writes watermark = NULL → next sweep both NULL → not distinct → no drift.
+- Both NULL → not distinct → no drift (steady state for empty instrument).
+
+Orphan-tail cost: full obs table scan with `NOT EXISTS` filter. Healthy install: zero rows match (every obs-bearing instrument has a state row after backfill) → planner uses index-only-distinct on observations PK + anti-join against state PK → cheap. If the tail starts returning many rows, that signals a write-through regression and the sweep cost is the right signal to surface (loud failure mode).
 
 ## 4. Writer rewrite
 
@@ -321,7 +353,7 @@ Mechanical contract that lint invariants E + I + J pin (simplified per Codex 1b 
 - **Diff cols** ∩ PK cols = ∅ (PK cols are matched by ON clause; not in the diff predicate).
 - `refreshed_at` ∉ diff cols, `refreshed_at` ∉ INSERT column list (so DEFAULT now() fires on insert).
 
-Operator-visible semantic: `refreshed_at` advances IFF business cols changed. The drift watermark for repair sweep is in `ownership_refresh_state.last_drained_observations_max_ingested_at` (§3.3), which always advances on every refresh attempt — no longer overloaded with the "did we attempt this" signal.
+Operator-visible semantic: `_current.refreshed_at` advances IFF business cols changed. The drift watermark for repair sweep is `ownership_refresh_state.last_drained_observations_max_ingested_at` (§3.3) — updated on **every** refresh attempt (Codex 1c LOW-2 — "updated on every attempt" is the accurate phrasing; the *value* only changes when `MAX(observations.ingested_at)` changed). The companion `last_refresh_attempted_at` column records the wall-clock of the call regardless.
 
 ### 4.3 Scope clamp on ON clause + DELETE branch (Codex 1a HIGH-2 + HIGH-4)
 
@@ -358,7 +390,7 @@ Per helper (×7):
 | **K** | Per-helper extra WHERE filter clauses present inside USING subquery — see §4.1 column "Extra WHERE filter" | Per-clause grep with per-helper expected counts (Codex 1b MED-6 — def14a's 3 clauses must be counted independently; one clause passing while the other two are dropped must fail the lint): treasury `AND treasury_shares IS NOT NULL` → count == 1; def14a (K1) `AND shares IS NOT NULL` → count == 1, (K2) `AND holder_role IS DISTINCT FROM 'esop'` → count == 1, (K3) `AND holder_name !~* %s` (the `_ESOP_HOLDER_NAME_SQL_REGEX` parameter) → count == 1. Insiders / institutions / blockholders / funds / esop have no extra filter; the K-class is skipped for those helpers (per-helper expected count = 0). |
 | **L** | Helper UPSERTs into `ownership_refresh_state` with the matching category literal | grep `INSERT INTO ownership_refresh_state` inside body span → count == 1 AND grep `'<expected category>'` inside same block → count == 1 |
 
-**84 base per-helper checks** (7 helpers × 12 invariants A-L), with K-class per-helper expected content varying per §4.1: def14a's K expands to 3 sub-clauses (K1/K2/K3), treasury's K is 1 clause, the other 5 helpers have no K-class clause. Exact total counting sub-clauses: 7 × 10 (A-J) + 7 × 1 (L) + 1 (treasury K) + 3 (def14a K1/K2/K3) = **81 per-helper clause-counts**.
+Per-helper clause-count breakdown (counting K-class sub-clauses individually per §4.1 — def14a K = K1+K2+K3, treasury K = 1, others have no K): 7 × 10 (A-J) + 7 × 1 (L) + 1 (treasury K) + 3 (def14a K1/K2/K3) = **81 per-helper clause-counts**.
 
 Plus 4 cross-cutting checks:
 
@@ -371,7 +403,7 @@ Plus 4 cross-cutting checks:
 
 Total: **85 lint clause-counts** (81 per-helper + 4 cross-cutting). Pure text walk, no DB dependency, sub-second runtime.
 
-## 6. Tests (45 parametrised cases + helper-specific overlays)
+## 6. Tests (52 parametrised cases)
 
 New file: [`tests/test_ownership_refresh_writer_merge.py`](../../../tests/test_ownership_refresh_writer_merge.py). Parametrised over the 7 helpers.
 
@@ -387,8 +419,9 @@ New file: [`tests/test_ownership_refresh_writer_merge.py`](../../../tests/test_o
 | 6 | **priority-chain regression (insiders only)** | write 2 observations same `(holder_identity_key, ownership_nature)`: source='form4' (priority 1) + source='13d' (priority 3); equal period_end + filed_at | refresh | `_current.source == 'form4'` (priority chain unchanged). Pins the cross-source `CASE source WHEN ... ASC` ORDER BY chain (lint invariant H + runtime). |
 | 7 | **per-helper filter regression** | (a) **treasury**: write 1 obs with `treasury_shares=NULL` AND 1 obs with `treasury_shares=12345` same period; (b) **def14a**: write 1 obs `holder_role='esop'`, 1 obs `holder_role='principal' AND holder_name ILIKE '%ESOP%'`, 1 obs `holder_role='principal' AND holder_name='Vanguard'` | refresh | (a) `_current.treasury_shares == 12345` (NULL-displacement guard works); (b) `_current` row count == 1; only the Vanguard row survives (ESOP regex + holder_role='esop' both excluded). |
 | 8 | **repair-sweep no-loop** | row present in `_current` + `ownership_refresh_state`; UPSERT same obs row (DO UPDATE clause bumps `obs.ingested_at`); refresh fires (no diff → MERGE no-op) | run `_drifted_instruments` again with the new predicate | empty list (state-table watermark advanced; sweep no longer re-selects). **Pins the §3.3 watermark fix end-to-end.** |
+| 9 | **`known_to` expiry watermark alignment** (Codex 1c MED-2) | row present in `_current` + state; `UPDATE _observations SET known_to = now()` on the active observation (no row deletion, just expiry); refresh fires (MERGE NOT MATCHED BY SOURCE → DELETE on `_current`; state UPSERT advances watermark to new obs MAX, which now reflects the expired row's bumped `ingested_at`) | run `_drifted_instruments` again | empty list. **Pins the all-observations population alignment between watermark capture and repair predicate** — if the watermark used `known_to IS NULL` while the predicate used all obs (or vice versa), expiry would create a false drift trigger. |
 
-Total: 5 base cases × 7 helpers = 35 + 1 priority-chain (insiders) + 2 filter-regression (treasury + def14a) + 7 repair-sweep no-loop (all helpers) = **45 parametrised cases**, with helper-specific cases on top.
+Total: 5 base cases × 7 helpers = 35 + 1 priority-chain (insiders) + 2 filter-regression (treasury + def14a) + 7 repair-sweep no-loop + 7 known_to expiry watermark = **52 parametrised cases**.
 
 **Extension provisioning + CI fail-loud** (Codex 1a MED-6): [`tests/fixtures/ebull_test_db.py`](../../../tests/fixtures/ebull_test_db.py) template provisioning gains `CREATE EXTENSION IF NOT EXISTS pgstattuple`. If the extension is missing at test time, the no-op-churn case fails loudly with a dedicated error message (`pytest.fail(f"pgstattuple extension missing in {db_name} — provisioning bug, do NOT skip")`) instead of skipping. CI provisioning step explicitly asserts the extension is present after template clone.
 
@@ -416,17 +449,17 @@ Reclaim path is the **operator pre-wipe + clean re-run** (parent spec §6.3 + §
 
 **Read-side unchanged**: no `_current` consumer sees behavioural change. Same row shapes, same dedup ordering, same priorities, same indexes. The MERGE's `WHEN NOT MATCHED BY SOURCE THEN DELETE` is steady-state writer behaviour identical to today's DELETE+INSERT (a row drops out of `_current` only when its only observation expires via `known_to` or when caps shed it post-wipe).
 
-**Sweep cost**: repair sweep stays at "<100ms on healthy install" — the watermark predicate now reflects "have we drained these observations" rather than "did we touch this row", so no-op refreshes do not re-trigger.
+**Sweep cost**: repair sweep stays at "<100ms on healthy install" — the state-anchored predicate does ~87k cheap LATERAL `MAX(ingested_at)` lookups (index-only scans on the new per-observations-table `(instrument_id, ingested_at DESC)` indexes from §3.3). The orphan UNION tail is zero rows on healthy install (write-through invariant holds → every obs-bearing instrument has a state row after backfill). If the orphan tail starts returning many rows, that's a write-through regression signal — sweep cost growth is the correct alarm channel.
 
 ## 9. Definition of done
 
 CLAUDE.md §"Definition of done" + §"ETL / parser / schema-migration additional clauses" both apply.
 
 1. 7 `refresh_*_current` helpers in [`app/services/ownership_observations.py`](../../../app/services/ownership_observations.py) rewritten to single-statement MERGE + `ownership_refresh_state` UPSERT per §4 template + §4.1 per-helper differences. Signature `(conn, *, instrument_id) -> int` preserved on every helper.
-2. New migration `sql/163_ownership_refresh_state.sql` creates the table with the schema in §3.3, plus an idempotent backfill from existing `_current.refreshed_at`. Runs inside the standard migration runner; no `-- runner: autocommit` directive required (no ALTER SYSTEM / CREATE DATABASE / VACUUM / REINDEX SYSTEM).
-3. Repair-sweep predicate switched in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) to the §3.3 form (observations-anchored single-query LEFT JOIN with `IS DISTINCT FROM`). `_CATEGORIES` list expanded to all 7 categories — adds `funds` + `esop` lambdas wiring `refresh_funds_current` + `refresh_esop_current` so the sweep stays uniform with the state-table CHECK constraint (Codex 1b MED-4).
+2. New migration `sql/163_ownership_refresh_state.sql` creates the table with the schema in §3.3 + 7 `(instrument_id, ingested_at DESC)` indexes on each observations table (load-bearing for sweep cost — Codex 1c HIGH-1) + idempotent backfill via `MAX(observations.ingested_at) GROUP BY instrument_id` per category (Codex 1c MED-1 — eliminates `_current.refreshed_at` vs `clock_timestamp()` skew). Runs inside the standard migration runner; no `-- runner: autocommit` directive required.
+3. Repair-sweep predicate switched in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) to the §3.3 form (state-anchored LATERAL `MAX(ingested_at)` primary path + UNION orphan tail; `IS DISTINCT FROM` NULL-safe). `_CATEGORIES` list expanded to all 7 categories — adds `funds` + `esop` lambdas wiring `refresh_funds_current` + `refresh_esop_current` so the sweep stays uniform with the state-table CHECK constraint (Codex 1b MED-4).
 4. [`scripts/check_ownership_refresh_writer_pattern.sh`](../../../scripts/check_ownership_refresh_writer_pattern.sh) (85 clause-counts: 81 per-helper + 4 cross-cutting, per §5) wired into [`.githooks/pre-push`](../../../.githooks/pre-push) after `check_13dg_retention.sh`.
-5. [`tests/test_ownership_refresh_writer_merge.py`](../../../tests/test_ownership_refresh_writer_merge.py) — parametrised over 7 helpers × 5 base cases + insiders priority-chain + treasury null guard + def14a ESOP exclusion + 7 repair-sweep no-loop cases. Load-bearing no-op-churn case uses per-row `xmin::text` equality + `pgstattuple`.
+5. [`tests/test_ownership_refresh_writer_merge.py`](../../../tests/test_ownership_refresh_writer_merge.py) — 52 parametrised cases (7 × 5 base + insiders priority-chain + treasury null guard + def14a ESOP exclusion + 7 repair-sweep no-loop + 7 known_to expiry watermark alignment per §6). Load-bearing no-op-churn case uses per-row `xmin::text` equality + `pgstattuple` on both `_current` and `ownership_refresh_state`.
 6. [`tests/fixtures/ebull_test_db.py`](../../../tests/fixtures/ebull_test_db.py) template provisions `pgstattuple` extension; failure to provision triggers `pytest.fail` in no-op-churn case (no silent skips).
 7. Boot-time PG ≥ 17 guard at lifespan (mirror #1187 pattern). Pinned by `tests/smoke/test_app_boots.py`.
 8. Smoke verification against AAPL / GME / MSFT / JPM / HD (CLAUDE.md panel) post-merge: for each instrument, call `refresh_funds_current` and `refresh_institutions_current` twice in succession; assert `pgstattuple.table_len` delta == 0 + per-row `xmin::text` stability across the second call. Additionally call `refresh_treasury_current` and `refresh_def14a_current` for at least one instrument each to exercise the small-table helpers + their per-helper filters (Codex 1a LOW-4). PR description records each instrument's outcome and the commit SHA per CLAUDE.md ETL clause 12.
@@ -456,16 +489,19 @@ WHERE relname IN ('ownership_funds_current', 'ownership_institutions_current', '
 ORDER BY pg_total_relation_size(oid) DESC;
 ```
 
-Per-helper `pgstattuple` confirms `tuple_percent` ≥ 70% on `_current` tables (healthy density floor). Same floor applies to `ownership_refresh_state` (Codex 1b MED-1 — state table churns 1 row UPSERT per refresh call; ≤87k row PK cap means autovacuum easily keeps up at default thresholds; floor pinned by acceptance script).
+Per-helper `pgstattuple` confirms `tuple_percent` ≥ 70% on `_current` tables (healthy density floor).
+
+State-table acceptance uses a **dead-tuple bound** rather than a fixed tuple_percent floor (Codex 1c MED-3 — default autovacuum at `scale_factor=0.2 + threshold=50` fires at `dead_tup > 0.2 × 87,000 + 50 ≈ 17,450`, so the state table's tuple_percent can dip below 70% between vacuum cycles under bootstrap-rate churn even though steady-state remains healthy). Acceptance: `pgstattuple(ownership_refresh_state).dead_tuple_count ≤ live_tuple_count` post-autovacuum (≤50% dead-tuple ratio). If a future tuning pass shows this dips too low under production load, add per-table `ALTER TABLE ownership_refresh_state SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 100)` as a tightening knob — out of PR12 scope unless the dev-DB profile shows it during the §6.3 clean re-run.
 
 ## 11. Codex review gate
 
 Per #1208 cadence + CLAUDE.md "Codex second-opinion — mandatory checkpoints":
 
 - **Codex 1a** on this spec — completed; 5 HIGH + 7 MED + 4 LOW folded into rev 2.
-- **Codex 1b** on rev 2 — completed; 3 HIGH + 7 MED + 4 LOW folded into rev 3 (this commit).
-- **Codex 1c** on rev 3 (next).
-- Codex 1d if needed.
+- **Codex 1b** on rev 2 — completed; 3 HIGH + 7 MED + 4 LOW folded into rev 3.
+- **Codex 1c** on rev 3 — completed; 1 HIGH + 3 MED + 3 LOW folded into rev 4 (this commit).
+- **Codex 1d** on rev 4 (next).
+- Codex 1e if needed.
 - Spec lands as DOC PR (no code yet).
 - Implementation plan = separate doc (`docs/superpowers/plans/2026-05-21-pr12-ownership-current-writer-merge-impl.md`). Codex 1a / 1b on the plan.
 - PR12 implementation PR follows standard #1208 cadence: self-review → Codex 2 pre-push → push → bot review → resolve → APPROVE on latest commit → merge.
@@ -475,9 +511,8 @@ Per #1208 cadence + CLAUDE.md "Codex second-opinion — mandatory checkpoints":
 State at this commit:
 
 - Parent umbrella #1233 still OPEN. PR1-PR11 all SHIPPED (PR11 #1253 020e701 merged 2026-05-21).
-- This is the DESIGN doc for PR12 (rev 3 post-Codex 1b).
-- This is the DESIGN doc for PR12 (rev 2 post-Codex 1a).
+- This is the DESIGN doc for PR12 (rev 4 post-Codex 1c).
 - Branch: `feature/1233-pr12-design-spec`.
-- Next: Codex 1b on rev 2; revise if needed; doc PR; then writing-plans skill → implementation plan → execution.
+- Next: Codex 1d on rev 4; revise if needed; doc PR; then writing-plans skill → implementation plan → execution.
 
 After PR12 merges, the operator triggers the §6.3 pre-wipe + clean re-run and #1233 closes per parent spec §8.
