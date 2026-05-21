@@ -5,7 +5,21 @@
 > Tracking issue: **#1233** — Bootstrap scope discipline umbrella.
 > Parent spec: `docs/superpowers/specs/2026-05-19-data-retention-rubric.md` §4.8.
 >
-> Status: **APPROVED v7.2 post-impl-plan-alignment** — Codex 1a (3B + 4H + 3M) + Codex 1b (2B + 3H + 2M + 1L) + Codex 1c (2B + 1H + 3L) + Codex 1d (2H + 1M + 3L) + Codex 1e (1H + 1M + 1L) + Codex 1f (1H + 1L) + Codex 1g APPROVED (1L test filename) all folded. v7.2 alignment pass (post-PR1251): SEC Schedule 13 XBRL mandate effective date corrected from 2024-12-19 → 2024-12-18 per SEC EDGAR Release 23.4 (cited by Codex 1251 LOW; canonical source `https://www.sec.gov/submit-filings/edgar-news-announcements/edgar-release-23-4`). All date references in this spec now read 2024-12-18 in sync with `.claude/skills/data-sources/edgartools.md` G15 + `.claude/skills/data-sources/sec-edgar.md` §2.4.1 + the implementation plan at `docs/superpowers/plans/2026-05-21-1233-pr11-blockholders-activation.md`.
+> Status: **AMENDED v8 empirical pivot 2026-05-21** — see §0.1 below. v7.2 ancestor approved by Codex 1a (3B + 4H + 3M) + Codex 1b (2B + 3H + 2M + 1L) + Codex 1c (2B + 1H + 3L) + Codex 1d (2H + 1M + 3L) + Codex 1e (1H + 1M + 1L) + Codex 1f (1H + 1L) + Codex 1g APPROVED (1L test filename); v8 carries forward every cap/edgartools/dormant-retirement win and amends only the discovery layer + hint cross-validation surface that operator smoke proved empirically unsatisfiable.
+
+## 0.1 v8 empirical pivot — 2026-05-21
+
+**TL;DR**: The universe-issuer-CIK-driven discovery layer (efts.sec.gov/LATEST/search-index walker) is RETIRED. The legacy daily-index path (`app/services/filings_history.py`) remains the discovery mechanism. PR11's net contribution becomes: retention helper + edgartools `Schedule13D/G.parse_xml` adoption + 3 chokepoint gates (manifest pre-fetch B, sync `bf.filed_at` C, rewash rescue-path F) + refresh-current EXEMPT (§6.3) + dormant filer-seed retirement (4 entrypoints + `blockholder_filer_seeds` table). Bootstrap stage S27 was rolled back; the catalogue is back to 26 stages.
+
+**Empirical finding**: operator smoke against AAPL/GME/MSFT/JPM/HD on 2026-05-21 returned 0 efts.sec.gov hits for SC 13D/G filings against the panel issuers — even though Vanguard (filer CIK 102909) files SCHEDULE 13G/A against all of them and Vanguard's filer-CIK query returns 3,589 hits in 2026. Conclusion: efts.sec.gov post-2024-12-18 does NOT index SC 13D/G by SUBJECT CIK, only by FILER CIK. The PR11 discovery layer was structurally incapable of returning the rows it was designed to surface.
+
+**Sections RETIRED** below (kept in-place for historical context, but marked as such): §3.1 (discovery layer), §3.5 (bootstrap stage S27 + scheduler wiring), the §3.2 chokepoint matrix's CASE A discovery query, the §3.3 5-case CUSIP-vs-hint cross-validation branch (now CUSIP-only), §3.7 sql/159 hint-table migration (dropped via sql/162).
+
+**Sections SHIPPED AS-DESIGNED** (no amendment needed): §3.2 chokepoints B/C/F (manifest pre-fetch / sync gate / rewash rescue-path), §3.2 chokepoint D-exempt (refresh-current), §3.4 cleanup (dormant filer-seed retirement: 4 entrypoints deleted + `blockholder_filer_seeds` dropped via sql/161 + `scripts/seed_holder_coverage.py` surgical edit + `tests/test_blockholders_ingester.py` dormant tests removed).
+
+**Lint guard** (`scripts/check_13dg_retention.sh`): pruned A-L → A/C/D/E/F/G/H (5 invariants removed: B/I/J/K/L all referenced the deleted discovery module or dropped hint table). Surviving invariants cover the entire post-pivot writer surface.
+
+**Acceptance**: drop "trigger discovery job first" sequencing. Operator verification = legacy daily-index path drains pending `sec_13d` / `sec_13g` manifest rows through the new edgartools adapter + cap gate. Dev DB already carries ~575k SC 13D/G manifest rows from the legacy path; the cap gate + adapter operate against those rows without a discovery-job invocation.
 
 ## 0. Why this design exists
 
@@ -97,7 +111,19 @@ This endpoint is the load-bearing discovery primitive for PR11.
 
 ## 3. Design
 
-### 3.1 Discovery layer (NEW)
+### 3.1 Discovery layer (RETIRED v8 — empirical pivot)
+
+> **RETIRED 2026-05-21**: this entire section is historical. The
+> universe-issuer-CIK discovery layer it specified was deleted in the
+> v8 empirical pivot — `app/services/sec_13dg_discovery.py` + the
+> hint table + the bootstrap stage S27 + every test fixture that
+> depended on them are gone. See §0.1 for the empirical reason
+> (efts.sec.gov post-2024-12-18 indexes SC 13D/G by FILER CIK only,
+> not SUBJECT CIK; the panel-issuer queries returned zero hits even
+> though filers were actively filing against the panel issuers). The
+> legacy daily-index path remains the discovery mechanism. The
+> sections below are preserved verbatim for archaeology only — do
+> not act on them.
 
 **New file**: `app/services/sec_13dg_discovery.py`
 
@@ -222,11 +248,11 @@ def blockholders_within_retention(filed_at: datetime | None) -> bool:
 
 **Why date not datetime**: the mandate floor is calendar-day granular (SEC's 2024-12-18 effective date is a date, not an instant); helper returns `date` so the comparison is unambiguous across timezones. Discovery's `&startdt=` query param expects ISO date.
 
-Chokepoint matrix (REVISED post-Codex-1a — chokepoints C + F corrected):
+Chokepoint matrix (REVISED post-Codex-1a — chokepoints C + F corrected; v8 empirical pivot 2026-05-21 retires chokepoint A):
 
 | # | Chokepoint | File / function | Gate kind | Test pin |
 | --- | --- | --- | --- | --- |
-| **A** | Discovery query | `app/services/sec_13dg_discovery.py::_build_query_params` | `&startdt = _resolve_discovery_startdt()` — derived from `MAX(blockholders_retention_cutoff(), watermark_from_freshness_index)` so steady-state windowing degrades to the 3y floor on outage (Codex 1a MEDIUM #10) | `test_discovery_query_uses_helper_cutoff` + `test_steady_state_watermark_degrades_to_3y_floor` |
+| **A** | Discovery query | **RETIRED v8** — discovery layer deleted; legacy daily-index path remains the discovery mechanism. | n/a — discovery is no longer a PR11-owned writer chokepoint | n/a |
 | **B** | Manifest worker pre-fetch | `app/services/manifest_parsers/sec_13dg.py::_parse_13dg` (BEFORE `fetch_document_text` AND BEFORE `store_raw` to save SEC HTTP budget) | If not `blockholders_within_retention(row.filed_at)` → tombstone with `error="retention floor"` and skip fetch | `test_parse_13dg_tombstones_pre_cap_accession` |
 | **C** | Observations sync | `app/services/ownership_observations_sync.py::sync_blockholders` | Gate directly on the raw chain's own `filed_at` column: `WHERE bf.filed_at >= blockholders_retention_cutoff()`. **Do NOT use a `filing_events.filing_date >= cutoff` predicate** — a LEFT JOIN with that predicate null-rejects rows missing a `filing_events` entry (Codex 1a HIGH #4 + Codex 1b PR10b lesson). `blockholder_filings.filed_at` is the source of truth at the raw layer ([sql/095_blockholder_filers_filings.sql:124]). | `test_sync_blockholders_excludes_pre_cap_rows` + `test_sync_blockholders_includes_rows_without_filing_events_entry` |
 | **D** | Refresh-current | `app/services/ownership_observations.py::refresh_blockholders_current` | **UNCAPPED** — per parent spec §6.3 "refresh-current is exempt from the cap; capping it would actively delete pre-wipe pre-cap rows" (mirror of §4.5 `refresh_institutions_current` precedent) | `test_refresh_current_keeps_pre_cap_observations_intact` |
@@ -242,14 +268,25 @@ The cap is **filed-at based** (matches PR8 N-CSR precedent), not `period_of_repo
 
 ### 3.3 Manifest worker integration
 
+> **v8 empirical pivot 2026-05-21 — amended**: the 5-case CUSIP-vs-hint
+> cross-validation branch (originally Step 2 below) collapses to a
+> single CUSIP-only resolution because the hint table + discovery
+> layer that produced the hint rows are RETIRED. Step 2 now reads:
+> "CUSIP-only resolution via `_resolve_cusip_to_instrument_id`;
+> CUSIP-unresolved writes `blockholder_filings` rows with
+> `instrument_id=NULL` (audit trail preserved per the parser module
+> docstring; CUSIP-resolution gap tracked by #740)." The retention
+> gate B + edgartools `Schedule13D/G.parse_xml` adoption + all other
+> Phase 5 wins are unchanged.
+
 No new worker code. Existing `sec_manifest_worker` already drains pending `sec_13d` + `sec_13g` rows via `_parse_13dg` (registered at `app/services/manifest_parsers/__init__.py:59`). PR11 changes inside `_parse_13dg`:
 
 1. ADD: pre-fetch retention gate (chokepoint B above). Reuses `blockholders_within_retention(row.filed_at)` import from `app.services.blockholders`.
-2. ADD: hint-cross-validated CUSIP resolution (REVISED per Codex 1b BLOCKING #2 to honour share-class sibling semantics). The 5-case branch logic from §3.1 step 4 lives inside `_parse_13dg`. CUSIP resolution remains the primary instrument_id source for the share-class-aware path; the hint is consulted as (a) a universe-membership validator and (b) a single-row fallback when CUSIP unresolves on a single-class issuer. Ambiguous CUSIP-unresolved + multi-hint cases write `instrument_id=NULL` with explicit `blockholder_filings_ingest_log.error="cusip_unresolved_with_ambiguous_hint"` so operator audit surfaces the case without silent loss.
+2. **AMENDED v8**: CUSIP-only resolution via `_resolve_cusip_to_instrument_id` (the 5-case hint cross-validation branch was retired with the discovery layer + hint table). CUSIP-unresolved writes `blockholder_filings` rows with `instrument_id=NULL` + `blockholder_filings_ingest_log.status='partial'` + `error="cusip_unresolved (cusip=...)"`; CUSIP-resolved writes `status='success'`. Audit trail preserved end-to-end (see parser docstring); CUSIP-resolution gap tracked by #740.
 3. UNCHANGED: store_raw (still BEFORE parse per #938 raw-payload invariant), parse, upsert into `blockholder_filers` + `blockholder_filings`, observation write-through, refresh-current.
-4. UNCHANGED: `subject_type='blockholder_filer'` + `instrument_id IS NULL` semantics — the schema CHECK at [sql/118_sec_filing_manifest.sql] enforces this and PR11 preserves it. The discovery layer guarantees `blockholder_filers` is auto-seeded BEFORE the manifest row is INSERTed (so the legacy resolver path continues to succeed for filers that re-appear via daily-index); `_upsert_filer` inside the parser body remains idempotent via ON CONFLICT (cik) DO UPDATE.
+4. UNCHANGED: `subject_type='blockholder_filer'` + `instrument_id IS NULL` semantics — the schema CHECK at [sql/118_sec_filing_manifest.sql] enforces this and PR11 preserves it. `_upsert_filer` inside the parser body remains idempotent via ON CONFLICT (cik) DO UPDATE.
 
-The hint side-table + the 5-case parser logic together close BLOCKING #1 (schema-incompatible manifest shape) AND BLOCKING #2 (silent CUSIP gap) AND Codex 1b BLOCKING #2 (share-class sibling routing) without changing the manifest schema invariants.
+The CUSIP-only branch closes BLOCKING #1 (schema-incompatible manifest shape) without changing the manifest schema invariants. BLOCKING #2 (silent CUSIP gap) is mitigated by the explicit `cusip_unresolved` audit log row — full closure remains gated on #740 CUSIP backfill coverage.
 
 **Parser library adoption (NEW v4; v5 API correction per Codex 1d HIGH; v6 simpler dict-only pattern per Codex 1e HIGH)**: PR11 replaces the in-house XML parser at `app/providers/implementations/sec_13dg.py::parse_primary_doc` with edgartools' canonical Schedule13 `parse_xml` static methods. The actual API (verified at `.venv/lib/python3.14/site-packages/edgar/beneficial_ownership/schedule13.py`):
 
@@ -314,6 +351,18 @@ A new contract test `tests/test_edgartools_schedule13_shape.py` pins BOTH the to
 **Pre-mandate HTML filings are explicitly out of scope**: the cap floor `2024-12-18` makes pre-mandate filings unreachable by construction. No tombstoning needed because no manifest row is enqueued for pre-mandate accessions (discovery's `&startdt=` query honours the floor; gate B's `blockholders_within_retention` is the defensive backstop). If a legacy daily-index discovery path (no PR11 hint) enqueues a pre-mandate accession, gate B tombstones it with `error="retention floor"` — explicit, not silent.
 
 ### 3.4 Cleanup — dormant code retirement (in same PR)
+
+> **v8 empirical pivot 2026-05-21 — partially amended**: the dormant
+> filer-seed retirement (4 entrypoints + `blockholder_filer_seeds`
+> table + `seed_holder_coverage.py` surgical edit + `_PLANNER_TABLES`
+> update) SHIPPED AS-DESIGNED. The "ADD `sql/15Y_create_sec_13dg_
+> discovery_issuer_hint.sql`" subsection (the hint table creation)
+> was applied as `sql/159` then immediately retired by `sql/162`
+> when the discovery layer was deleted; `_PLANNER_TABLES` no longer
+> contains the hint table; the atom-fast-lane / daily-index
+> resolver edits ALSO shipped (the seed-list lookup branch deleted)
+> and remain in place since the legacy daily-index path now uses
+> `blockholder_filers` as the SOLE resolution surface.
 
 The operator mandate "no tech debt, no coming back later" requires retiring the dormant filer-seed-driven path in the same PR that activates the live one. Concretely:
 
@@ -416,7 +465,22 @@ The atom fast-lane resolver and daily-index reconcile resolver are also edited: 
 - NEW `tests/test_ownership_observations_sync_blockholders_cap.py` (or fold into existing): covers chokepoint C gate — `bf.filed_at >= cutoff` predicate; row WITHOUT `filing_events` entry still syncs; row WITH pre-cap `bf.filed_at` excluded.
 - NEW `tests/test_rewash_blockholders_cap.py` (or fold into existing): covers chokepoint F — happy path uncapped for accessions with existing `blockholder_filings` rows; rescue path skipped for pre-cap accession with zero existing rows.
 
-### 3.5 Bootstrap stage + scheduler wiring
+### 3.5 Bootstrap stage + scheduler wiring (RETIRED v8 — empirical pivot)
+
+> **RETIRED 2026-05-21**: the bootstrap stage S27
+> `sec_blockholders_discovery` + the `sec_blockholders_discovery_job`
+> scheduler entrypoint + the `_resolve_discovery_startdt` watermark
+> helper + the `data_freshness_index` integration of `sec_13d` /
+> `sec_13g` lanes were all rolled back when the discovery layer was
+> deleted in the v8 empirical pivot. The 27→26 stage-count assertion
+> is back in place; `JOB_SEC_BLOCKHOLDERS_DISCOVERY` /
+> `sec_blockholders_discovery_job` / `JOB_INTERNAL_KEYS["..."]` /
+> `_STAGE_REQUIRES_CAPS["sec_blockholders_discovery"]` are all gone.
+> The legacy daily-index path (`sec_daily_index_reconcile`) carries
+> incremental SC 13D/G discovery; manifest rows it enqueues drain
+> through the live `_parse_13dg` parser as today (575k rows already
+> in dev DB). The §3.5 body below is archaeology only — do not act
+> on it.
 
 **Rate-limit surface (corrected — Codex 1a HIGH #7 + Codex 1b LOW symbol names)**: there is no `app/services/sec_rate_limit.py` module. The actual throttle lives in `app/providers/implementations/sec_edgar.py:55-80` via the following SYMBOLS (verified at the cited line numbers, 2026-05-21):
 
@@ -504,9 +568,20 @@ The steady-state job dispatches with empty params → defaults to `mode="steady_
 
 ### 3.6 Lint guard
 
+> **v8 empirical pivot 2026-05-21 — amended**: pruned A-L → A/C/D/E/F/G/H.
+> Invariants B (discovery wires the cutoff helper) / I (discovery
+> uses provider throttle) / J (discovery uses `record_manifest_entry`)
+> / K (hint + manifest atomic) / L (hint UPSERT uses DO UPDATE) all
+> referenced the deleted `app/services/sec_13dg_discovery.py` module
+> or the dropped `sec_13dg_discovery_issuer_hint` table; pruning was
+> mechanical with explicit history retained in the script header.
+> Module-scope list in invariant G shrank from {helpers, manifest,
+> discovery} → {helpers, manifest}. The seven surviving invariants
+> below cover the entire post-pivot writer surface.
+
 NEW `scripts/check_13dg_retention.sh` (pre-push hook; PR5-style awk block walker; mirror of `check_n_csr_retention.sh`):
 
-Invariants (REVISED post-Codex-1a — D corrected, H added for rewash):
+Invariants (REVISED post-Codex-1a — D corrected, H added for rewash; v8 pivot 2026-05-21 — B/I/J/K/L pruned):
 
 - **A — helpers present**: `app/services/blockholders.py` defines exactly one `def blockholders_retention_cutoff(` and one `def blockholders_within_retention(`. (Greps for the literal `def ` prefix on both names; fails if count ≠ 1 or if defined outside `blockholders.py`.)
 - **B — discovery query uses helper**: `app/services/sec_13dg_discovery.py` contains a call to `blockholders_retention_cutoff()` AND a call to `_resolve_discovery_startdt(` (the watermark-clamped variant) AND the `_resolve_discovery_startdt` body references `blockholders_retention_cutoff()` (so the 3y floor cannot be bypassed by accident). Empty-grep `wc -l` guard per PR10a Codex iter 1 lesson.
@@ -524,6 +599,17 @@ Invariants (REVISED post-Codex-1a — D corrected, H added for rewash):
 Wired into `.githooks/pre-push` after the existing PR10b `check_form3_latest_per_pair.sh` and `check_form5_retention.sh` invocations.
 
 ### 3.7 Migration
+
+> **v8 empirical pivot 2026-05-21 — amended**: the `sql/161` drop of
+> `blockholder_filer_seeds` SHIPPED AS-DESIGNED (text below
+> describes it accurately). `sql/159_create_sec_13dg_discovery_issuer_hint.sql`
+> was applied as part of the original PR11 design + then immediately
+> retired by `sql/162_drop_sec_13dg_discovery_issuer_hint.sql` when
+> the discovery layer was deleted in this pivot. `_PLANNER_TABLES`
+> no longer carries the hint table; the atom-fast-lane + daily-index
+> resolver edits remain in place (the seed-list branch is still
+> deleted; the `blockholder_filers` lookup is still the sole
+> resolution path).
 
 NEW `sql/15X_drop_blockholder_filer_seeds.sql`:
 
@@ -546,16 +632,17 @@ The atom fast-lane resolver and daily-index reconcile resolver are also edited: 
 
 ### 3.8 Acceptance criteria (per CLAUDE.md ETL clauses 8-12)
 
-1. **Smoke-tested against panel** (AAPL, GME, MSFT, JPM, HD) on dev DB after merge. Expected: GME has ≥3 SC 13D/A (RC Ventures activist trail) + multiple SC 13G (Vanguard/BlackRock); AAPL likely has 0-1 SC 13D + handful of SC 13G; MSFT/JPM/HD have institutional 13G filings.
+> **v8 empirical pivot 2026-05-21 — rewritten**: drop the "trigger
+> discovery job first" sequencing — there is no discovery job
+> anymore. Operator verification proceeds against the legacy
+> daily-index path, which already shipped ~575k SC 13D/G manifest
+> rows into dev DB pre-pivot; the cap gate + edgartools adapter
+> operate against those rows without a discovery-job invocation.
+
+1. **Smoke-tested against panel** (AAPL, GME, MSFT, JPM, HD) on dev DB after merge. Expected: GME has ≥3 SC 13D/A (RC Ventures activist trail) + multiple SC 13G (Vanguard/BlackRock); AAPL likely has 0-1 SC 13D + handful of SC 13G; MSFT/JPM/HD have institutional 13G filings. **All discovered via the legacy daily-index path** (no PR11-owned discovery layer).
 2. **Cross-source verified**: At least one observation row's `(filer_cik, filed_at, percent_of_class)` cross-checked against SEC EDGAR direct (`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=<issuer>&type=SC+13`).
-3. **Discovery executed first, THEN rebuild as needed** (corrected — Codex 1a HIGH #6):
-   - PR11 adds NEW universe rows; `POST /jobs/sec_rebuild/run` only re-enqueues EXISTING manifest rows. The correct post-merge sequence is:
-     1. Trigger the new bootstrap stage: `POST /jobs/sec_blockholders_discovery_job/run` with `{"mode": "bootstrap"}` (or invoke via the bootstrap-state-machine S?? stage if the operator is doing a full re-run; otherwise the explicit `/run` triggers the same job body).
-     2. Wait for discovery to drain (~9 min wall-clock under 10 req/s shared budget; observable via `data_freshness_index` + `sec_filing_manifest` `pending` count for `source IN ('sec_13d','sec_13g')`).
-     3. Manifest worker drains discovered accessions through `_parse_13dg` (already-live; no operator intervention).
-     4. Only AFTER discovery + worker drain does `POST /jobs/sec_rebuild/run` make sense — for re-parsing accessions with stale `parser_version` (the rewash happy path) or for retrying transient failures.
-   - PR description records (a) the discovery job invocation + final result counts (`issuers_scanned`, `accessions_discovered`, `manifest_rows_inserted`, `hints_written`) and (b) any subsequent rebuild invocations + outcomes.
-4. **Operator-visible figure verified**: `GET /instruments/GME/blockholders` and `/ownership-rollup?category=blockholders` render the RC Ventures + Vanguard/BlackRock entries post-discovery + post-worker-drain. PR description records the rendered figures.
+3. **Drain sequence**: the legacy daily-index path is already discovering SC 13D/G accessions (575k rows in dev DB). Post-merge, the operator (a) confirms the manifest worker is draining pending `sec_13d` / `sec_13g` rows through the new `_parse_13dg` adapter + gate B; (b) triggers `POST /jobs/sec_rebuild/run` with `{"source": "sec_13d"}` (and again with `"sec_13g"`) to re-parse any already-parsed rows under the new `_PARSER_VERSION_13DG` so the edgartools adapter runs against the back-catalogue; (c) records the resulting `issuers_with_observations`, `accessions_re_parsed`, and `cap_skipped` counts in the PR description.
+4. **Operator-visible figure verified**: `GET /instruments/GME/blockholders` and `/ownership-rollup?category=blockholders` render the RC Ventures + Vanguard/BlackRock entries after the manifest drain + rebuild complete. PR description records the rendered figures.
 5. **PR description records the verification step + commit SHA** for each of clauses 1-4.
 
 ### 3.9 Provenance + parent spec amendments

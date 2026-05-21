@@ -1,10 +1,18 @@
-# PR11 — SEC SC 13D/G activation + 3y cap implementation plan (v3)
+# PR11 — SEC SC 13D/G activation + 3y cap implementation plan (v4)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Activate the dormant SEC Schedule 13D/13G pipeline. Universe-issuer-CIK-driven discovery via `efts.sec.gov/LATEST/search-index`. Retention floor = `max(today − 3y, 2024-12-18)` (SEC XBRL mandate). Retire dormant filer-seed code path in the same PR.
+## v4 empirical pivot — 2026-05-21
 
-**Architecture:** New `app/services/sec_13dg_discovery.py` walks `instruments WHERE country='US' AND is_tradable=TRUE`, queries efts per issuer CIK, writes `sec_filing_manifest` rows + multi-row `sec_13dg_discovery_issuer_hint` side-table in one transaction. Existing `manifest_parsers/sec_13dg.py::_parse_13dg` swapped to `edgartools.beneficial_ownership.schedule13.Schedule13D.parse_xml` via a new `_schedule13_adapter.py` (dict → repo `BlockholderFiling`). Cap chokepoints A/B/C/F at discovery query / manifest pre-fetch / sync / rewash rescue-path. Refresh-current EXEMPT.
+The universe-issuer-CIK discovery layer this plan dispatched (Phase 3 provider + Phase 4 discovery service + Phase 5 Task 5.5 5-case cross-validation + Phase 9 scheduler/bootstrap wiring + Phase 11 hint-related dormant-code edits) is **RETIRED**. Operator smoke against AAPL/GME/MSFT/JPM/HD on 2026-05-21 returned 0 efts.sec.gov hits for SC 13D/G against the panel issuers even though Vanguard (filer CIK 102909) actively files SCHEDULE 13G/A against them and filer-CIK queries return 3,589 hits in 2026. Conclusion: efts.sec.gov post-2024-12-18 does NOT index SC 13D/G by SUBJECT CIK, only by FILER CIK. The discovery layer was structurally incapable of returning the rows it was designed to surface.
+
+**Phases RETIRED**: Phase 3 (NEW efts.sec.gov provider method), Phase 4 (NEW discovery service), Phase 5 Task 5.5 (5-case CUSIP-vs-hint cross-validation branch — collapses to CUSIP-only), Phase 9 (scheduler/bootstrap wiring of S27), Phase 11 Tasks specific to the hint-resolver-side-of-dormant-cleanup. Phases 13.1 + 13.2 are updated below to drive verification via the LEGACY DAILY-INDEX PATH (the existing `sec_daily_index_reconcile` discovery mechanism — already shipping 575k SC 13D/G manifest rows in dev DB).
+
+**Phases SHIPPED AS-DESIGNED** (no amendment needed): Phase 1 (retention helpers in `blockholders.py`), Phase 2 (manifest-parser pre-fetch gate B), Phase 5 Tasks 5.1-5.4 + 5.6 (edgartools adapter + parser body retention gate + log-success path — minus the 5-case branch), Phase 6 (sync gate C), Phase 7 (rewash rescue-path gate F), Phase 8 (full dormant-code retirement — 4 entrypoints + `blockholder_filer_seeds` table + `seed_holder_coverage.py` surgical edit), Phase 10 (lint guard A/C/D/E/F/G/H — invariants B/I/J/K/L pruned), Phase 12 (refresh-current EXEMPT pin).
+
+**Goal:** Activate the dormant SEC Schedule 13D/13G pipeline. Retention floor = `max(today − 3y, 2024-12-18)` (SEC XBRL mandate). Retire dormant filer-seed code path in the same PR. **v4: discovery is the legacy daily-index path, not a PR11-owned universe-issuer-CIK walker.**
+
+**Architecture:** Existing `sec_daily_index_reconcile` is the discovery mechanism (already-live, no PR11 changes). `manifest_parsers/sec_13dg.py::_parse_13dg` swapped to `edgartools.beneficial_ownership.schedule13.Schedule13D.parse_xml` via a new `_schedule13_adapter.py` (dict → repo `BlockholderFiling`). Cap chokepoints B/C/F at manifest pre-fetch / sync / rewash rescue-path; chokepoint A (discovery) is no longer PR11-owned. Refresh-current EXEMPT.
 
 **Tech stack:** Python 3.14 / psycopg3 / FastAPI / PostgreSQL 17 / edgartools 5.30.2 / pytest + pytest-testmon / awk-based pre-push lint.
 
@@ -57,7 +65,13 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 
 > **Codex 1a HIGH ordering**: drop migration `sql/161_drop_blockholder_filer_seeds.sql` lands in Phase 8 Task 8.5 AFTER all live references are removed.
 
-### Task 1.1: New migration `sql/159_create_sec_13dg_discovery_issuer_hint.sql`
+### Task 1.1: New migration `sql/159_create_sec_13dg_discovery_issuer_hint.sql` (RETIRED v4)
+
+> **RETIRED 2026-05-21**: `sql/159` was applied + then dropped via
+> `sql/162_drop_sec_13dg_discovery_issuer_hint.sql` in the v4
+> empirical pivot. The hint table had zero rows in dev DB (no
+> successful discovery runs landed before the empirical finding).
+> Original task body below is archaeology only.
 
 **Files:** Create `sql/159_create_sec_13dg_discovery_issuer_hint.sql`.
 
@@ -67,7 +81,11 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 - [ ] **Step 2**: Apply locally via `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/159_*.sql`. Verify with `\d sec_13dg_discovery_issuer_hint`.
 - [ ] **Step 3**: Commit `feat(#1233): add sec_13dg_discovery_issuer_hint table (PR11)`.
 
-### Task 1.2: Add `sec_13dg_discovery_issuer_hint` to `_PLANNER_TABLES`
+### Task 1.2: Add `sec_13dg_discovery_issuer_hint` to `_PLANNER_TABLES` (RETIRED v4)
+
+> **RETIRED 2026-05-21**: hint table dropped via `sql/162`;
+> `_PLANNER_TABLES` no longer carries the entry. Original task body
+> below is archaeology only.
 
 **Files:** Modify `tests/fixtures/ebull_test_db.py`.
 
@@ -96,7 +114,12 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 
 ---
 
-## Phase 3 — Provider efts.sec.gov method
+## Phase 3 — Provider efts.sec.gov method (RETIRED v4)
+
+> **RETIRED 2026-05-21**: the `SecFilingsProvider.fetch_search_index_json`
+> method this phase introduced was used only by the now-deleted
+> discovery layer. v4 empirical pivot deletes the method along with
+> its callers; legacy daily-index path uses unrelated providers.
 
 ### Task 3.1: Add `SecFilingsProvider.fetch_search_index_json`
 
@@ -112,7 +135,14 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 
 ---
 
-## Phase 4 — Discovery module
+## Phase 4 — Discovery module (RETIRED v4)
+
+> **RETIRED 2026-05-21**: the entire discovery service +
+> `_resolve_discovery_startdt` watermark helper +
+> `_list_universe_issuers` walker + edge-case fixtures are deleted.
+> `app/services/sec_13dg_discovery.py` + `tests/test_sec_13dg_discovery.py`
+> no longer exist in the repo. The legacy daily-index path is the
+> discovery mechanism.
 
 ### Task 4.1: Stub `app/services/sec_13dg_discovery.py` + `DiscoveryResult` dataclass
 
@@ -164,7 +194,16 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 
 ---
 
-## Phase 5 — Manifest parser swap + 5-case hint cross-validation
+## Phase 5 — Manifest parser swap (5-case hint cross-validation RETIRED v4)
+
+> **v4 amendment 2026-05-21**: Tasks 5.1-5.4 + 5.6 shipped as-designed.
+> Task 5.5 (5-case CUSIP-vs-hint cross-validation) is RETIRED — the
+> branch collapses to CUSIP-only resolution because the hint table +
+> discovery layer that produced the hint rows are gone. The
+> CUSIP-unresolved branch still writes `blockholder_filings` rows
+> with `instrument_id=NULL` and logs `status='partial'` with a single
+> `cusip_unresolved` reason (audit trail preserved per the parser
+> docstring; CUSIP-resolution gap tracked by #740).
 
 ### Task 5.1: Contract test pinning edgartools `Schedule13D/G.parse_xml` shape
 
@@ -223,7 +262,12 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 - [ ] **Step 4**: Run all `test_manifest_parser_sec_13dg.py` tests. Port any pre-existing test fixture that was valid for in-house `parse_primary_doc` but invalid for edgartools (likely `<coverPage>` → `<coverPageHeader>` rename). If a legacy-only test asserts behavior the new path no longer matches, document why + remove.
 - [ ] **Step 5**: Commit.
 
-### Task 5.5: 5-case CUSIP-vs-hint cross-validation branch
+### Task 5.5: 5-case CUSIP-vs-hint cross-validation branch (RETIRED v4)
+
+> **RETIRED 2026-05-21**: branch deleted; `_parse_13dg` now calls
+> `_resolve_cusip_to_instrument_id` and writes a single audit-log
+> row. See `app/services/manifest_parsers/sec_13dg.py` post-pivot
+> for the simplified body.
 
 **Files:** Modify `app/services/manifest_parsers/sec_13dg.py`; extend `tests/test_manifest_parser_sec_13dg.py`.
 
@@ -357,7 +401,13 @@ Real schema for `instruments` at `sql/001:1-10` — **`company_name` is NOT NULL
 
 ---
 
-## Phase 9 — Scheduler wiring
+## Phase 9 — Scheduler wiring (RETIRED v4)
+
+> **RETIRED 2026-05-21**: bootstrap stage S27 + scheduler job +
+> `JOB_INTERNAL_KEYS["sec_blockholders_discovery_job"]` + the
+> stage-count assertion bump (27 → bumped back to 26) +
+> `_STAGE_REQUIRES_CAPS["sec_blockholders_discovery"]` are all
+> rolled back. The catalogue is back to 26 stages.
 
 ### Task 9.1: Bootstrap stage + scheduler job + stage-count assertion bump
 
@@ -436,15 +486,25 @@ Real schema for `instruments` at `sql/001:1-10` — **`company_name` is NOT NULL
 
 ## Phase 13 — Smoke + Codex 2 + PR
 
-### Task 13.1: Apply migrations + run discovery against dev DB
+### Task 13.1: Apply migrations + drive legacy daily-index drain against dev DB (AMENDED v4)
 
-- [ ] **Step 1**: Apply both migrations:
-  - `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/159_create_sec_13dg_discovery_issuer_hint.sql`
+> **v4 amendment 2026-05-21**: discovery job is gone — drain proceeds
+> against the legacy daily-index path's pre-existing 575k SC 13D/G
+> manifest rows.
+
+- [ ] **Step 1**: Apply migrations (drop chain):
   - `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/161_drop_blockholder_filer_seeds.sql`
-- [ ] **Step 2**: Trigger discovery: `curl -X POST http://localhost:8000/jobs/sec_blockholders_discovery_job/run -H 'Content-Type: application/json' -d '{"mode":"bootstrap"}'`. Capture the `DiscoveryResult` fields.
+  - `docker exec -i ebull-postgres psql -U postgres -d ebull < sql/162_drop_sec_13dg_discovery_issuer_hint.sql`
+- [ ] **Step 2**: Trigger re-parse of the legacy back-catalogue under the new `_PARSER_VERSION_13DG`:
+  - `curl -X POST http://localhost:8000/jobs/sec_rebuild/run -H 'Content-Type: application/json' -d '{"source": "sec_13d"}'`
+  - `curl -X POST http://localhost:8000/jobs/sec_rebuild/run -H 'Content-Type: application/json' -d '{"source": "sec_13g"}'`
 - [ ] **Step 3**: Poll `GET /jobs/sec_manifest_worker/status` until `pending` for `source IN ('sec_13d','sec_13g')` reaches zero.
 
-### Task 13.2: Operator-panel verification
+### Task 13.2: Operator-panel verification (AMENDED v4)
+
+> **v4 amendment 2026-05-21**: no change to operator-visible endpoints
+> — the rollup is fed by the same observation table regardless of
+> which discovery path enqueued the manifest row.
 
 - [ ] **Step 1**: For AAPL, GME, MSFT, JPM, HD:
   - `curl http://localhost:8000/instruments/<symbol>/blockholders`
