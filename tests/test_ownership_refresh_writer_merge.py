@@ -633,8 +633,7 @@ def test_repair_sweep_no_loop(conn, seeded_instrument_id, helper):
     _seed_one_observation(conn, helper, seeded_instrument_id)
     helper.refresh_fn(conn, seeded_instrument_id)
     conn.commit()
-    # Task 6 adds the 4th category_literal param — ignore until then.
-    drifted = _drifted_instruments(conn, helper.current_table, helper.observations_table, helper.category_literal)  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+    drifted = _drifted_instruments(conn, helper.current_table, helper.observations_table, helper.category_literal)
     assert seeded_instrument_id not in drifted, (
         f"repair sweep would re-select {helper.name} instrument forever despite no-op MERGE"
     )
@@ -662,6 +661,5 @@ def test_known_to_expiry_watermark_alignment(conn, seeded_instrument_id, helper)
     conn.commit()
     helper.refresh_fn(conn, seeded_instrument_id)
     conn.commit()
-    # Task 6 adds the 4th category_literal param — ignore until then.
-    drifted = _drifted_instruments(conn, helper.current_table, helper.observations_table, helper.category_literal)  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+    drifted = _drifted_instruments(conn, helper.current_table, helper.observations_table, helper.category_literal)
     assert seeded_instrument_id not in drifted
