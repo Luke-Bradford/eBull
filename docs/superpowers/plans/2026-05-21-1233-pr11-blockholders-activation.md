@@ -195,16 +195,16 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 
 **Reference:** internal dataclass shape at `app/providers/implementations/sec_13dg.py:77-180`; edgartools models at `.venv/.../models.py`. **Codex 1b HIGH**: `parse_xml` does NOT return `submission_type` or `amendment_number` — the adapter MUST accept `manifest_form: str` (e.g. `"SC 13D/A"`) from the caller and derive `submission_type` (`"SCHEDULE 13D/A"`).
 
-- [ ] **Step 1**: Write failing tests in `tests/test_schedule13_adapter.py`. Use the SAME XML fixture as Task 5.1 (valid `<coverPageHeader>`). Assert: adapter signature `build_filing_from_edgartools_dict(parsed: dict, *, source: Literal["sec_13d","sec_13g"], manifest_form: str) -> BlockholderFiling`; returned filing is a `BlockholderFiling` instance; `status` follows `_STATUS_FOR_SOURCE` table (`sec_13d → 'active'`, `sec_13g → 'passive'`); `submission_type` derived from `manifest_form` via mapping table (`"SC 13D"→"SCHEDULE 13D"`, `"SC 13D/A"→"SCHEDULE 13D/A"`, etc.); each `BlockholderReportingPerson` carries Decimal-typed `aggregate_amount_owned` mapped from edgartools `.aggregate_amount` (int).
+- [ ] **Step 1**: Write failing tests in `tests/test_schedule13_adapter.py`. Use the SAME XML fixture as Task 5.1 (valid `<coverPageHeader>`). Assert: adapter signature `build_filing_from_edgartools_dict(parsed: dict, *, source: Literal["sec_13d","sec_13g"], manifest_form: str, manifest_filer_cik: str) -> BlockholderFiling`; returned filing is a `BlockholderFiling` instance; `primary_filer_cik == manifest_filer_cik` (zero-padded — edgartools does NOT expose `headerData/filerInfo/filer/filerCredentials/cik` so the manifest's `row.cik` IS the canonical filer-of-record CIK per `app/providers/implementations/sec_13dg.py:141-147` doc); `status` follows `_STATUS_FOR_SOURCE` table; `submission_type` derived from `manifest_form` via mapping table; `BlockholderFiling.date_of_event` is `date | None` (parsed via `date.fromisoformat(parsed["date_of_event"])` when the edgartools string is non-empty, else `None`); each `BlockholderReportingPerson` carries Decimal-typed `aggregate_amount_owned` mapped from edgartools `.aggregate_amount` (int).
 - [ ] **Step 2**: Run, verify ImportError.
 - [ ] **Step 3**: Implement adapter. Field mapping table:
   - edgartools `IssuerInfo.cik` → repo `BlockholderFiling.issuer_cik`
   - edgartools `IssuerInfo.name` → repo `BlockholderFiling.issuer_name`
   - edgartools `SecurityInfo.cusip` → repo `BlockholderFiling.issuer_cusip` (share-class CUSIP — IssuerInfo.cusip would be issuer-level; SecurityInfo is the right choice for instrument disambiguation)
   - edgartools `SecurityInfo.title` → repo `BlockholderFiling.securities_class_title`
-  - edgartools `parsed["date_of_event"]` → repo `BlockholderFiling.date_of_event`
+  - edgartools `parsed["date_of_event"]` (str, possibly empty) → repo `BlockholderFiling.date_of_event` (`date | None`): use `date.fromisoformat(s)` when `s` is non-empty + well-formed, else `None`. Catch `ValueError` defensively (defer to the existing parse-error tombstone path on malformed dates).
   - `BlockholderFiling.filed_at` → `None` here; manifest layer computes from `row.filed_at`
-  - `BlockholderFiling.primary_filer_cik` → first `reporting_persons[].cik` with non-None CIK (edgartools doesn't expose `filerCredentials/cik` distinctly; fall back to first reporter)
+  - `BlockholderFiling.primary_filer_cik` → `_zero_pad_cik(manifest_filer_cik)` from the adapter's caller arg (NOT `reporting_persons[0].cik`). edgartools does not expose `headerData/filerInfo/filer/filerCredentials/cik`; the manifest row's `row.cik` IS that canonical filer-of-record CIK per the existing parser contract at `app/services/manifest_parsers/sec_13dg.py:103` (`filer_cik = (row.cik or "").strip()`). Mismapping to a reporting-person CIK would silently shift the `blockholder_filer_seeds` key + ingest-log identity downstream.
   - Per reporter: map `cik`/`name`/`citizenship`/`member_of_group`/`type_of_reporting_person` directly; `no_cik` via `bool(getattr(p, 'no_cik', False))`; `cik` is `None` when `no_cik` else passthrough; `sole_voting_power` / `shared_voting_power` / `sole_dispositive_power` / `shared_dispositive_power` → `Decimal(str(value))` mapping; `aggregate_amount` → `aggregate_amount_owned` (Decimal); `percent_of_class` → Decimal.
   - `_STATUS_FOR_SOURCE: Final[dict[str, Literal["active","passive"]]]`
   - Submission-type derivation: `_SUBMISSION_TYPE_FOR_FORM: Final[dict[str, str]] = {"SC 13D": "SCHEDULE 13D", "SC 13D/A": "SCHEDULE 13D/A", "SC 13G": "SCHEDULE 13G", "SC 13G/A": "SCHEDULE 13G/A"}`; KeyError on unknown form (loud, not silent).
@@ -215,9 +215,11 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 
 **Files:** Modify `app/services/manifest_parsers/sec_13dg.py`; extend `tests/test_manifest_parser_sec_13dg.py`.
 
+**Reference:** Task 5.3 adapter signature (`manifest_form` + `manifest_filer_cik` args); `app/services/manifest_parsers/sec_13dg.py:103-122` for the existing `row.cik` / `row.source` / archive-URL pattern; downstream `_upsert_filing_row` + `_record_13dg_observation_for_filing` at `app/services/blockholders.py:463 / :735` (unchanged consumers).
+
 - [ ] **Step 1**: Write end-to-end happy-path test against a post-mandate edgartools-parseable fixture. Seed a pending manifest row + monkeypatch `fetch_document_text` to return the fixture XML; assert `blockholder_filings` row has correct `issuer_cik` / `issuer_cusip` / `securities_class_title`; per-reporter `aggregate_amount_owned` is Decimal.
 - [ ] **Step 2**: Run, verify failure (still uses in-house `parse_primary_doc`).
-- [ ] **Step 3**: Replace in-house parse with edgartools + adapter. Source-dispatch on `row.source` (`'sec_13d'` → `Schedule13D.parse_xml`, `'sec_13g'` → `Schedule13G.parse_xml`); pass `row.form` to the adapter's `manifest_form` arg. Downstream `_upsert_filing_row` + `_record_13dg_observation_for_filing` calls stay unchanged (adapter outputs the existing dataclass shape).
+- [ ] **Step 3**: Replace in-house parse with edgartools + adapter. Source-dispatch on `row.source` (`'sec_13d'` → `Schedule13D.parse_xml`, `'sec_13g'` → `Schedule13G.parse_xml`); pass `manifest_form=row.form` AND `manifest_filer_cik=filer_cik` (the existing local var from `:103`) to the adapter. Downstream `_upsert_filing_row` + `_record_13dg_observation_for_filing` calls stay unchanged.
 - [ ] **Step 4**: Run all `test_manifest_parser_sec_13dg.py` tests. Port any pre-existing test fixture that was valid for in-house `parse_primary_doc` but invalid for edgartools (likely `<coverPage>` → `<coverPageHeader>` rename). If a legacy-only test asserts behavior the new path no longer matches, document why + remove.
 - [ ] **Step 5**: Commit.
 
@@ -227,7 +229,13 @@ v3 pivots to imperative shape: each task lists files + cites canonical source pa
 
 **Reference:** spec §3.1 step 4 5-case branch logic (CASE A/B/C/D-in-universe/D-out-of-universe/E).
 
-- [ ] **Step 1**: Write 6 failing tests, one per case. Each test seeds: a manifest row + 0/1/N hint rows + instruments + external_identifiers + CUSIP→instrument mapping appropriate for the case. Run manifest worker; assert resulting `instrument_id` value on the observation row AND `blockholder_filings_ingest_log.error` content for CASE C + CASE D-out-of-universe.
+- [ ] **Step 1**: Write 6 failing tests, one per case. Each test seeds: a manifest row + 0/1/N hint rows + instruments + external_identifiers + CUSIP→instrument mapping appropriate for the case. Run manifest worker. Per-case assertions:
+  - **CASE A** (CUSIP-in-hints): observation row exists with `instrument_id = instrument_id_from_cusip`; `blockholder_filings.instrument_id` non-null.
+  - **CASE B** (CUSIP None + 1 hint): observation row exists with `instrument_id = sole hint`; `blockholder_filings.instrument_id` set to the hint.
+  - **CASE C** (CUSIP None + N>1 hints): **NO observation row written**; `blockholder_filings.instrument_id IS NULL`; `blockholder_filings_ingest_log.error` matches `"cusip_unresolved_with_ambiguous_hint"`.
+  - **CASE D-in-universe**: observation row exists with `instrument_id = instrument_id_from_cusip`; ingest-log error has `"cusip_resolved_with_hint_discrepancy"` (info-level, not failure).
+  - **CASE D-out-of-universe**: **NO observation row written**; `blockholder_filings.instrument_id IS NULL`; ingest-log error matches `"cusip_resolved_outside_universe"`.
+  - **CASE E** (no hints, CUSIP resolves): observation row exists with `instrument_id = instrument_id_from_cusip`; no discrepancy log (legacy daily-index path, no regression).
 - [ ] **Step 2**: Run, verify failures.
 - [ ] **Step 3**: Implement the 5-case branch in `_parse_13dg` between the parse step and the `_record_13dg_observation_for_filing` call:
   - Resolve `instrument_id_from_cusip = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)`.
@@ -294,6 +302,8 @@ Real schema for `instruments` at `sql/001:1-10` — **`company_name` is NOT NULL
 
 **Files:** Modify `app/jobs/sec_atom_fast_lane.py` + `app/jobs/sec_daily_index_reconcile.py`.
 
+**Reference:** spec §3.4 cleanup checklist; `app/jobs/sec_atom_fast_lane.py:57-101` for the existing `default_subject_resolver` shape (1: issuer_cik, 2: institutional_filers, 3: blockholder_filers — Task 8.1 removes the 4th `blockholder_filer_seeds` branch that's also present, see grep).
+
 - [ ] **Step 1**: Grep `blockholder_filer_seeds` in both files.
 - [ ] **Step 2**: Delete each branch that SELECTs from `blockholder_filer_seeds`; preserve the `blockholder_filers` branch (now the sole resolver for `subject_type='blockholder_filer'`).
 - [ ] **Step 3**: Smoke import both modules.
@@ -302,6 +312,8 @@ Real schema for `instruments` at `sql/001:1-10` — **`company_name` is NOT NULL
 ### Task 8.2: Delete dormant entrypoints from `app/services/blockholders.py`
 
 **Files:** Modify `app/services/blockholders.py`.
+
+**Reference:** spec §3.4 DELETE list; current entrypoint definitions in `app/services/blockholders.py` (grep finds them); the lower-level helpers (`_upsert_filer`, `_upsert_filing_row`, `_record_13dg_observation_for_filing`, `_resolve_cusip_to_instrument_id`, `_archive_file_url`, `_record_ingest_attempt`, `_zero_pad_cik`) STAY — used by `manifest_parsers/sec_13dg.py:60-69`.
 
 - [ ] **Step 1**: Grep `^def (ingest_all_active_filers|ingest_filer_blockholders|_list_active_filer_seeds|seed_filer)\b` in the file.
 - [ ] **Step 2**: Grep external callers across `app/ tests/ scripts/` — every hit must be in `scripts/seed_holder_coverage.py` (Task 8.3) or `tests/test_blockholders_ingester.py` (Task 8.4); any other caller resolves first.
@@ -312,6 +324,8 @@ Real schema for `instruments` at `sql/001:1-10` — **`company_name` is NOT NULL
 
 **Files:** Modify `scripts/seed_holder_coverage.py`.
 
+**Reference:** spec §3.4 EDIT clause; current script bullets at `scripts/seed_holder_coverage.py:1-56` (4 steps: institutional + ETF + blockholder + CUSIP-resolver + N-CEN). Codex 1a HIGH #5 from PR1251 noted: PR11 must NOT delete the 13F-HR / CUSIP-resolver / N-CEN paths (those are out-of-scope unrelated work).
+
 - [ ] **Step 1**: Read the script structure (`grep -nE "def |BLOCKHOLDER|13D|ingest_all_blockholders" scripts/seed_holder_coverage.py`).
 - [ ] **Step 2**: Remove only the 13D/G block: `_BLOCKHOLDER_SEEDS` const, `seed_blockholder_filer` import + calls, `ingest_all_blockholders` import + call, the matching print blocks. Preserve 13F-HR / ETF / CUSIP-resolver / N-CEN sections.
 - [ ] **Step 3**: Update docstring + `--help` text — note PR11 universe-driven discovery.
@@ -321,6 +335,8 @@ Real schema for `instruments` at `sql/001:1-10` — **`company_name` is NOT NULL
 ### Task 8.4: Delete dormant ingester test cases
 
 **Files:** Modify `tests/test_blockholders_ingester.py`.
+
+**Reference:** spec §3.4 test impact bullet (~50% of 955 LOC reference deleted entrypoints; preserve helper-level tests for `_upsert_filer`, `_upsert_filing_row`, `_record_13dg_observation_for_filing`, `_resolve_cusip_to_instrument_id`).
 
 - [ ] **Step 1**: Grep test cases referencing the deleted entrypoints.
 - [ ] **Step 2**: Delete those tests; preserve helper-level tests.
