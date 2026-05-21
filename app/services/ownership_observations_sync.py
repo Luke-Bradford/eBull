@@ -425,7 +425,21 @@ def sync_blockholders(
     (filer_id → cik), never the per-row reporter_cik. Joint reporters
     on the same accession collapse via ``DISTINCT ON (accession_number,
     filer_id)`` so each accession contributes one observation per
-    primary filer."""
+    primary filer.
+
+    PR11 #1233 §3.2 chokepoint C — the 3y retention cap is enforced as
+    a SQL predicate on the raw chain's own ``bf.filed_at`` column so
+    this steady-state observations writer cannot repopulate pre-cap
+    observations from any pre-cap ``blockholder_filings`` rows that
+    still exist in the dev DB pre-pre-wipe. The gate uses
+    ``bf.filed_at`` directly (NOT a ``LEFT JOIN filing_events ...
+    WHERE fe.filing_date >= cutoff`` predicate) because such a predicate
+    null-rejects rows missing a ``filing_events`` entry — the Codex 1a
+    HIGH #4 / Codex 1b PR10b lesson for this category of cap. ``since``
+    is the caller's optional ADDITIONAL floor (incremental repair); the
+    cap is the intrinsic floor."""
+    from app.services.blockholders import blockholders_retention_cutoff
+
     summary = SyncSummary()
     instruments_touched: set[int] = set()
     run_id = uuid4()
@@ -435,8 +449,12 @@ def sync_blockholders(
     # rather than discovering the orphan per-row in the catch-all
     # exception handler — keeps the orphans list focused on real
     # identity gaps.
-    where = "WHERE bf.aggregate_amount_owned IS NOT NULL AND bf.filed_at IS NOT NULL"
-    params: dict[str, Any] = {}
+    where = (
+        "WHERE bf.aggregate_amount_owned IS NOT NULL "
+        "AND bf.filed_at IS NOT NULL "
+        "AND bf.filed_at >= %(retention_cutoff)s"
+    )
+    params: dict[str, Any] = {"retention_cutoff": blockholders_retention_cutoff()}
     if since is not None:
         where += " AND bf.filed_at >= %(since)s"
         params["since"] = since
