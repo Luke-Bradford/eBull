@@ -876,6 +876,18 @@ def refresh_treasury_current(
                     filed_at DESC,
                     source_document_id ASC
             ) AS src
+            -- PG MERGE FULL JOIN needs at least one equi-joinable tgt↔src
+            -- condition; a const predicate alone errors with
+            -- `FULL JOIN is only supported with merge-joinable or
+            -- hash-joinable join conditions`. Treasury PK is single-col
+            -- (instrument_id), so the ON clause IS the equi-join — the
+            -- USING subquery already filters `WHERE instrument_id =
+            -- %(iid)s` so 1×1 cardinality is preserved. The
+            -- NOT MATCHED BY SOURCE clause below still carries the literal
+            -- `tgt.instrument_id = %(iid)s` scope clamp for
+            -- defence-in-depth. Lint D1 expected count for treasury is 0
+            -- (no const literal in ON); D2 expected count is 1
+            -- (const literal in NOT MATCHED BY SOURCE).
             ON tgt.instrument_id = src.instrument_id
             WHEN MATCHED AND (
                 tgt.ownership_nature,
