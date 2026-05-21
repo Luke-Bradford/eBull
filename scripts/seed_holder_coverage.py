@@ -1,29 +1,33 @@
 """Bootstrap script: seed + ingest holder coverage so the ownership
 card renders all 5 categories (#766 + #730 + #740 / #781 + #782).
 
-Without seed data the new holder-coverage tables (institutional /
-blockholder filer seeds) stay empty and the ownership card silently
-omits Institutions / ETFs / Blockholders, leaving the operator
-with only Insiders + Treasury rendered.
+Without seed data the institutional / ETF filer-seed tables stay
+empty and the ownership card silently omits Institutions / ETFs,
+leaving the operator with only Insiders + Treasury rendered.
+
+13D/G blockholders are now universe-driven via the bootstrap
+``sec_blockholders_discovery`` stage (#1233 PR11) — no operator
+seeding required. This script no longer touches the legacy
+``blockholder_filer_seeds`` table (dropped in PR11 Task 8.5) or the
+retired ``app.services.blockholders.ingest_all_active_filers`` entry
+point.
 
 This script is idempotent -- running twice doesn't insert duplicate
 seed rows or re-fetch already-ingested accessions. Each step:
 
-  1. Adds curated CIK rows to ``institutional_filer_seeds`` and
-     ``blockholder_filer_seeds``. Existing CIKs UPSERT in place.
+  1. Adds curated CIK rows to ``institutional_filer_seeds``.
+     Existing CIKs UPSERT in place.
   2. Optionally walks ``etf_filer_cik_seeds`` for the curated
      ETF list when the operator wants to over-tag CIKs from the
      institutional seeds as ETFs.
   3. Runs the 13F-HR batch ingester (``ingest_all_active_filers``
      in :mod:`app.services.institutional_holdings`).
-  4. Runs the 13D/G blockholder batch ingester (``ingest_all_active_filers``
-     in :mod:`app.services.blockholders`).
-  5. Runs the CUSIP resolver (#781) so 13F holdings whose CUSIP
+  4. Runs the CUSIP resolver (#781) so 13F holdings whose CUSIP
      wasn't in ``external_identifiers`` get fuzzy-matched and
      promoted. Subsequent re-runs of step 3 will then resolve those
      holdings (operator clears the unresolved-cusips log if
      desired; this script does not).
-  6. Runs the N-CEN classifier (#782) so filer_type splits ETF /
+  5. Runs the N-CEN classifier (#782) so filer_type splits ETF /
      INV / INS correctly on the operator UI chip.
 
 Usage:
@@ -39,8 +43,7 @@ the seed plan without writing.
 Bandwidth: SEC fair-use is 10 req/sec for public traffic. The
 provider's internal throttle handles spacing. ~10 institutional
 seeds x ~10 quarterly 13F-HR accessions = 100 fetches ~ 10 sec
-wall clock. Blockholder seeds vary by activist activity but
-typically <5 accessions per filer per year.
+wall clock.
 """
 
 from __future__ import annotations
@@ -53,12 +56,6 @@ import psycopg
 
 from app.config import settings
 from app.providers.implementations.sec_edgar import SecFilingsProvider
-from app.services.blockholders import (
-    ingest_all_active_filers as ingest_all_blockholders,
-)
-from app.services.blockholders import (
-    seed_filer as seed_blockholder_filer,
-)
 from app.services.cusip_resolver import resolve_unresolved_cusips
 from app.services.institutional_holdings import (
     ingest_all_active_filers as ingest_all_institutional,
@@ -160,23 +157,6 @@ _ETF_OVERRIDES: list[tuple[str, str]] = [
     # 0001029160) is intentionally NOT in the ETF override list.
     ("0001214717", "Geode Capital (Fidelity index-fund engine)"),
 ]
-
-# Activist hedge funds + founder-family holdcos that file 13D/G
-# regularly. Operator can extend via the same seed_filer helper
-# at runtime.
-_BLOCKHOLDER_SEEDS: list[tuple[str, str]] = [
-    ("0000921669", "Icahn Capital LP (Carl Icahn)"),
-    ("0001336528", "Pershing Square Capital Management LP (Bill Ackman)"),
-    ("0001364099", "Elliott Investment Management"),
-    ("0001418814", "ValueAct Holdings LP"),
-    ("0001603466", "Engaged Capital LLC"),
-    ("0001345471", "Trian Fund Management LP"),
-    ("0001540531", "Starboard Value LP"),
-    # GameStop / Bed Bath activist — verified via SEC EDGAR
-    # full-text search 13D filings on GME / BBBY.
-    ("0001822844", "RC Ventures LLC (Ryan Cohen)"),
-]
-
 
 # Curated (instrument_symbol, CUSIP) seed list. Without these in
 # ``external_identifiers``, every 13F-HR holding for the named
@@ -309,16 +289,6 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
         seed_etf_filer(conn, cik=cik, label=label)
     print(f"  {len(_ETF_OVERRIDES)} ETF overrides upserted.")
 
-    print("Seeding blockholder_filer_seeds...")
-    seen: set[str] = set()
-    for cik, label in _BLOCKHOLDER_SEEDS:
-        if cik in seen:
-            print(f"  skipping duplicate CIK {cik} in seed list")
-            continue
-        seed_blockholder_filer(conn, cik=cik, label=label)
-        seen.add(cik)
-    print(f"  {len(seen)} blockholder seeds upserted.")
-
     print("Seeding curated CUSIPs into external_identifiers...")
     cusip_inserts = 0
     cusip_already_correct = 0
@@ -409,8 +379,7 @@ def main() -> int:
         print("DRY RUN -- pass --apply to write rows + run ingesters.\n")
         print(
             f"Would seed {len(_INSTITUTIONAL_SEEDS)} institutional filers, "
-            f"{len(_ETF_OVERRIDES)} ETF overrides, "
-            f"{len(set(c for c, _ in _BLOCKHOLDER_SEEDS))} blockholder filers."
+            f"{len(_ETF_OVERRIDES)} ETF overrides."
         )
         return 0
 
@@ -431,17 +400,6 @@ def main() -> int:
                     f"failed={s.accessions_failed} "
                     f"holdings={s.holdings_inserted} "
                     f"skipped_no_cusip={s.holdings_skipped_no_cusip}"
-                )
-
-            print("\nIngesting 13D/G blockholders...")
-            block_summaries = ingest_all_blockholders(conn, sec)
-            for s in block_summaries:
-                print(
-                    f"  cik={s.filer_cik} "
-                    f"seen={s.accessions_seen} ingested={s.accessions_ingested} "
-                    f"failed={s.accessions_failed} "
-                    f"rows={s.rows_inserted} "
-                    f"skipped_no_cusip={s.rows_skipped_no_cusip}"
                 )
 
             if not args.skip_ncen:
