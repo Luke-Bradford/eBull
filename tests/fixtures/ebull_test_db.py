@@ -155,7 +155,6 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "blockholder_filings_ingest_log",
     "blockholder_filings",
     "blockholder_filers",
-    "blockholder_filer_seeds",
     # #1233 PR11 — discovery-time hint table for SC 13D/G universe-CIK
     # discovery layer. Child of ``instruments`` (ON DELETE CASCADE); the
     # parent CASCADE would clean rows up on instrument removal but the
