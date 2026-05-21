@@ -113,6 +113,37 @@ def _parse_n_port(
             error="missing filer cik",
         )
 
+    # Defense-in-depth (#1250): row.cik MUST NOT be a known filing-agent
+    # CIK. Discovery for N-PORT writes cik=<fund_trust_cik> (curated
+    # cohort from sec_nport_filer_directory); filing agents are never in
+    # that cohort. A row whose cik resolves to an agent CIK means a future
+    # discovery PR has a bug — _archive_file_url below would 404 because
+    # SEC archives are not mounted under agent CIKs (see sec_edgar.py:83-104
+    # + fetch_filing_index agent-fallback at sec_edgar.py:397-417). Fail
+    # loudly here rather than tombstone every accession with a generic
+    # "archive 404" that masks the real bug.
+    from app.providers.implementations.sec_edgar import (
+        KNOWN_FILING_AGENT_CIKS,
+        _zero_pad_cik,
+    )
+
+    padded_filer_cik = _zero_pad_cik(filer_cik)
+    if padded_filer_cik in KNOWN_FILING_AGENT_CIKS:
+        logger.warning(
+            "n_port manifest parser: accession=%s row.cik=%s resolves to "
+            "known filing-agent CIK %s — discovery should never enqueue "
+            "agent CIKs as filer_cik (sec_nport_filer_directory cohort "
+            "excludes them). Tombstoning to surface the upstream discovery bug.",
+            accession,
+            filer_cik,
+            padded_filer_cik,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_NPORT,
+            error=f"row.cik is a known filing-agent CIK ({padded_filer_cik})",
+        )
+
     # NPORT-P primary doc lives at the accession's primary_doc.xml.
     primary_url = _archive_file_url(filer_cik, accession, "primary_doc.xml")
 

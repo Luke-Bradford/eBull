@@ -485,6 +485,31 @@ Notable triggers: `POST /jobs/sec_rebuild/run`, `POST /jobs/ownership_observatio
 - `runtime_config` row keyed by name. Read by `get_kill_switch_status` (`app/services/ops_monitor.py`).
 - Toggle: `POST /system/config/kill-switch` (`app/api/config.py:233`).
 
+### Q15. How do share-class siblings on a shared CIK (GOOG/GOOGL, BRK.A/BRK.B) flow through ETL?
+
+The rule: **multiple `instruments` rows can share one SEC CIK**. Alphabet Class A (GOOG) and Class C (GOOGL) both carry CIK `0001652044`; Berkshire Class A (BRK.A) and Class B (BRK.B) both carry CIK `0001067983`. Schema acknowledges this at [sql/099_unresolved_13f_cusips.sql:60](../../../sql/099_unresolved_13f_cusips.sql#L60) + [sql/103_instrument_symbol_history.sql:8](../../../sql/103_instrument_symbol_history.sql#L8).
+
+**Two rules apply** (sourced from `data-sources/sec-edgar.md` §3.6 fan-out table — re-derive any new code path from there):
+
+1. **Issuer-scoped filings (10-K, 10-Q, 8-K, S-1, DEF 14A, Form 3/4/5, Companyfacts XBRL, submissions JSON, business-summary text)** = filer IS the issuer, no per-security data in the body. Writers MUST fan out per-instrument across every instrument sharing the issuer CIK via `siblings_for_issuer_cik(conn, cik)` ([app/services/sec_identity.py](../../../app/services/sec_identity.py)). Entity-level tables (`sec_filing_manifest`, `filing_events`, `filing_raw_documents`, `eight_k_filings`, `insider_filings`, `def14a_ingest_log`) stay PK on accession — one row per filing regardless of how many siblings the issuer has. The PER-INSTRUMENT tables (insider observations, def14a holdings, instrument_business_summary, instrument_sec_profile, financial_facts_raw → via `financial_periods.instrument_id`) get the fan-out.
+
+2. **CUSIP-resolved filings (13F-HR, N-PORT, N-CSR holdings, SC 13D/G)** = body contains CUSIP-bearing structured data that disambiguates share class. SHAPE differs per form: 13F-HR / N-PORT carry per-holding rows (one CUSIP per row of `<infoTable>` or `<invstOrSec>`); SC 13D/G carries ONE issuer per accession (one `<securityInfo>/<cusip>` per primary_doc — the filing IS about one issuer's class). Either way, NO fan-out needed at write time — CUSIP maps 1:1 to a SECURITY-level instrument (GOOG.CUSIP `02079K107` ≠ GOOGL.CUSIP `02079K305`, even though both share Alphabet's CIK 1652044). The parser's CUSIP-resolution at parse-time picks the correct share-class sibling automatically. Aggregation across share classes happens at READ time in the rollup layer when desired.
+
+**Audit checklist for new SEC parsers**:
+
+- Does the body of the filing have per-security CUSIPs (or any per-security identifier)?
+  - **Yes** → CUSIP-resolved write path; no fan-out; no per-CIK sibling concern.
+  - **No** → issuer-scoped fan-out required; MUST call `siblings_for_issuer_cik` when writing to per-instrument tables.
+- Does the parser write to entity-level tables (PK on accession) or per-instrument tables (PK includes instrument_id)?
+  - Entity-level → single row per accession is correct; no fan-out.
+  - Per-instrument → fan-out is mandatory if filing is issuer-scoped.
+
+**Discovery-side concern**: when a per-issuer-CIK discovery walker (e.g. PR11's universe-CIK walker for SC 13D/G) joins `instruments` to `external_identifiers` on CIK, it MUST be prepared for N siblings per CIK. The discovery layer either (a) writes one manifest row per accession and lets CUSIP at parse-time disambiguate (preferred for CUSIP-bearing filings), or (b) writes one hint-table row per (accession, sibling) and cross-validates CUSIP-resolution against the hint set at parse-time (PR11 pattern for SC 13D/G).
+
+**Common bug shape**: a `SELECT DISTINCT cik FROM instruments` that loses sibling instrument_ids; or a writer that calls `_resolve_cik_to_instrument_id` and gets back an arbitrary sibling instead of the share-class-correct one. The cure is: never write per-instrument observations from a CIK — always go through CUSIP at parse time, or fan out across `siblings_for_issuer_cik`.
+
+PR11 (#1233) spec authoring surfaced this concern; Codex 1b BLOCKING #2 caught a draft that would have routed SC 13D against GOOG-A onto the GOOGL-C sibling. The fix landed as a `(accession_number, instrument_id)` PK multi-row hint table + CUSIP-cross-validated parser branch.
+
 ## 5. Quick reference — file/line index
 
 **Schema**:

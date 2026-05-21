@@ -113,6 +113,39 @@ def _parse_13dg(
             error="missing filer cik",
         )
 
+    # Defense-in-depth (post-#1249/#1250 cleanup, anticipating PR11 #1233):
+    # row.cik MUST NOT be a known filing-agent CIK. Discovery for 13D/G
+    # writes cik=<first non-issuer-non-agent CIK from ciks[]> per the
+    # #1233 PR11 spec; legacy daily-index path resolves via the
+    # blockholder_filers table (which also excludes agents). A row whose
+    # cik resolves to an agent CIK means a future discovery PR has a bug
+    # — _archive_file_url below would 404 because SEC archives are not
+    # mounted under agent CIKs (see sec_edgar.py:83-104 +
+    # fetch_filing_index agent-fallback at sec_edgar.py:397-417). Fail
+    # loudly here rather than tombstone with a generic empty-body error
+    # that masks the real upstream bug.
+    from app.providers.implementations.sec_edgar import (
+        KNOWN_FILING_AGENT_CIKS,
+        _zero_pad_cik,
+    )
+
+    padded_filer_cik = _zero_pad_cik(filer_cik)
+    if padded_filer_cik in KNOWN_FILING_AGENT_CIKS:
+        logger.warning(
+            "13D/G manifest parser: accession=%s row.cik=%s resolves to "
+            "known filing-agent CIK %s — discovery should never enqueue "
+            "agent CIKs as filer_cik. Tombstoning to surface the upstream "
+            "discovery bug.",
+            accession,
+            filer_cik,
+            padded_filer_cik,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13DG,
+            error=f"row.cik is a known filing-agent CIK ({padded_filer_cik})",
+        )
+
     # Build canonical primary_doc.xml URL — manifest's
     # primary_document_url may be the filing-index page or a sibling
     # attachment. The legacy ingester builds this URL directly from

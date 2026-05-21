@@ -125,6 +125,15 @@ bash scripts/check_form5_retention.sh
 echo "==> Pre-push gate: Form 3 latest-per-pair invariant lint"
 bash scripts/check_form3_latest_per_pair.sh
 
+# #1249 / #1250 cleanup — every manifest_parsers/sec_*.py that calls
+# _archive_file_url(<cik>, ...) where <cik> is row.cik (filer_cik /
+# similar) MUST also reference KNOWN_FILING_AGENT_CIKS for the agent-
+# CIK defensive guard, OR be on the script's ALLOW_LIST (issuer-CIK
+# subject_type contract). SEC archives are not mounted under agent
+# CIKs — unguarded calls 404 every agent-enqueued accession. ~20ms.
+echo "==> Pre-push gate: manifest-parser archive-URL agent-CIK guard"
+bash scripts/check_archive_url_agent_guard.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

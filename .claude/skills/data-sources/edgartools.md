@@ -11,7 +11,7 @@ Static parsers (no network, no Pydantic strict) — the **safe drop-in path**:
 | 13F-HR primary doc | `edgar.thirteenf.parsers.primary_xml.parse_primary_document_xml(xml)` | `PrimaryDocument13F` dataclass |
 | 13F-HR INFOTABLE | `edgar.thirteenf.parsers.infotable_xml.parse_infotable_xml(xml)` | `pd.DataFrame` (cols: `Issuer, Class, Cusip, Value, PutCall, InvestmentDiscretion, OtherManager, SharesPrnAmount, Type, SoleVoting, SharedVoting, NonVoting, Ticker`) |
 | Form 3 / 4 / 5 | `Ownership.parse_xml(xml)` (BeautifulSoup) | dict → `Form3/Form4/Form5(**dict)` |
-| Schedule 13D / 13G (post-2024-12-19) | `Schedule13D.parse_xml(xml)` / `Schedule13G.parse_xml(xml)` | dict → `Schedule13D(**dict)` |
+| Schedule 13D / 13G (post-2024-12-18) | `edgar.beneficial_ownership.schedule13.Schedule13D.parse_xml(xml)` / `Schedule13G.parse_xml(xml)` | dict at the top level; nested values are dataclasses (`IssuerInfo`, `SecurityInfo`, `ReportingPerson`, `Signature`) — **attribute access**, not nested dict-key. See Gotcha **G15**. |
 | Form 144 | `Form144.from_filing(filing)` | `Form144` |
 | Form D, EFFECT, MA-I, ATS-N | `FormD.from_xml(xml)` / `XmlFiling.from_filing(...)` | structured object |
 
@@ -33,7 +33,7 @@ Network-required (live filing fetch + identity required):
 | XBRL statements | `XBRL.from_filing(filing)` / `XBRL.from_directory(path)` | full statement engine |
 | Multi-filing stitching | `XBRLS.from_filings(c.latest("10-K", 5))` | 5y income statement stitched |
 
-**Not covered**: pre-2024-12-19 HTML 13D/G; non-CMBS Form 10-D; MSRB / FINRA filings; real-time push feeds.
+**Not covered**: pre-2024-12-18 HTML 13D/G; non-CMBS Form 10-D; MSRB / FINRA filings; real-time push feeds.
 
 ## API cheat-sheet
 
@@ -158,8 +158,8 @@ Returns 10-Ks **filed** in that calendar year, NOT covering that fiscal year. Us
 ### G10 — `get_filings()` triggers full submissions load
 Default pages every historical filing. For Berkshire / BlackRock that's dozens of round-trips. Use `trigger_full_load=False` to limit to first ~1000.
 
-### G11 — Pre-2024-12-19 13D/G is HTML, not XML
-`Schedule13D.from_filing(old_filing)` returns `None` because `parse_xml` requires `<edgarSubmission>` root which only exists in post-rule structured XML. Filter ingest by filing date `>= 2024-12-19`.
+### G11 — Pre-2024-12-18 13D/G is HTML, not XML
+`Schedule13D.from_filing(old_filing)` returns `None` because `parse_xml` requires `<edgarSubmission>` root which only exists in post-rule structured XML. Filter ingest by filing date `>= 2024-12-18`.
 
 ### G12 — N-CSR has no per-holding identifier of any kind
 OEF iXBRL N-CSR taxonomy publishes fund-level + class-level + sector-axis facts ONLY. There is no holding-level CUSIP / ISIN / SEDOL / ticker / portfolio-issuer CIK in the iXBRL. The N-CSR primary HTML's Schedule of Investments lists positions as `Name`-`Shares`-`Value` columns with no machine-readable identifier. The N-CSR itself directs readers to N-PORT for structured per-issuer holdings. Don't use N-CSR for security-level rollups under any path (iXBRL, HTML, exhibit). Verified by raw-payload spike `docs/superpowers/spikes/2026-05-14-n-csr-feasibility.md` (4 iXBRL companions + 52 MB primary HTML across 3 sampled OEF families). #918 closed (synth no-op landed); the gap is a real taxonomy limitation, not an EdgarTools surface limitation.
@@ -170,6 +170,55 @@ OEF iXBRL N-CSR taxonomy publishes fund-level + class-level + sector-axis facts 
 ### G14 — Process-local rate limiter
 Default `requests_per_second=9` (`edgar/httpclient.py:142`). Spawning N processes each calling `get_filings(...)` collectively hits SEC at N×9 r/s. SEC threshold is ~10 r/s per IP. Lower `EDGAR_RATE_LIMIT_PER_SEC=9/N` per process or centralise SEC fetches.
 
+### G15 — `Schedule13D / Schedule13G` `.parse_xml()` returns a dict; the Pydantic constructor needs 7 positional args
+Verified at `.venv/lib/python3.14/site-packages/edgar/beneficial_ownership/schedule13.py` + `models.py` (pinned `edgartools==5.30.2`, 2026-05-21).
+
+```python
+from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
+
+parsed = Schedule13D.parse_xml(xml)   # @staticmethod -> dict (NOT a Schedule13D instance)
+parsed = Schedule13G.parse_xml(xml)   # @staticmethod -> dict
+
+# DO NOT do this — Schedule13D.__init__ requires 7 positional args incl. a `filing` ref
+# filing = Schedule13D(**parsed)        # TypeError: missing 7 required positional args
+# filing = Schedule13D(filing=None, **parsed)  # technically works but a `filing` ref the worker rarely has
+```
+
+**Top-level keys** (dict access): `"issuer_info"`, `"security_info"`, `"reporting_persons"`, `"items"`, `"signatures"`, `"date_of_event"`, `"previously_filed"`, `"amendment_number"`.
+
+**Nested values are dataclasses** (attribute access, NOT dict-key):
+
+```python
+parsed["issuer_info"]                  # IssuerInfo dataclass
+parsed["issuer_info"].cik              # str
+parsed["issuer_info"].name             # str
+parsed["issuer_info"].cusip            # str (issuer-level CUSIP)
+
+parsed["security_info"]                # SecurityInfo dataclass
+parsed["security_info"].title          # str (securities class title)
+parsed["security_info"].cusip          # str (share-class-specific CUSIP)
+
+parsed["reporting_persons"]            # list[ReportingPerson dataclass]
+for person in parsed["reporting_persons"]:
+    person.cik, person.name, person.citizenship                         # str, str, str
+    person.sole_voting_power, person.shared_voting_power                # int, int
+    person.sole_dispositive_power, person.shared_dispositive_power      # int, int
+    person.aggregate_amount                                              # int  (NOT aggregate_amount_owned)
+    person.percent_of_class                                              # float
+    person.type_of_reporting_person                                      # str
+    person.fund_type, person.comment, person.member_of_group             # str | None
+    person.is_aggregate_exclude_shares                                   # bool
+    person.no_cik                                                        # bool — True for natural-person filers
+
+parsed["signatures"]                   # list[Signature dataclass]
+```
+
+**Recommended adapter pattern**: skip Pydantic-instance construction entirely; read from the dict + nested dataclass attrs directly. PR11 (#1233 SC 13D/G activation) uses this pattern in both the manifest-worker `_parse_13dg` and rewash `_apply_blockholders`.
+
+**Pin against drift**: a contract test (e.g. `tests/test_edgartools_schedule13_shape.py`) that exercises BOTH top-level dict keys AND nested dataclass attribute access on a real EDGAR fixture catches any `edgartools` upgrade that renames either layer at CI time.
+
+**Codex 1d/1e/1f on the PR11 spec all caught this in sequence** — the documentation gap cost three review rounds. This entry exists so the next PR adopting `parse_xml` gets it right on the first pass.
+
 ## Decision tree — when to use edgartools vs roll-our-own
 
 ```
@@ -179,7 +228,7 @@ Need to parse SEC data?
 ├─ Static parser exists in edgartools (no Pydantic strict)?
 │   ├─ 13F-HR primary/infotable          → edgartools
 │   ├─ Form 3/4/5                        → edgartools (BeautifulSoup, fixture-safe)
-│   ├─ Schedule 13D/G post-2024-12-19    → edgartools
+│   ├─ Schedule 13D/G post-2024-12-18    → edgartools
 │   ├─ Form 144                          → edgartools
 │   ├─ N-PORT                            → edgartools wrapper (#932 — see G3 + spike doc)
 │   └─ Anything else                     → investigate first
@@ -215,7 +264,7 @@ Need to parse SEC data?
 |---|---|---|---|---|
 | 13F INFOTABLE → typed | **best** | partial (download only) | no | ~50 LoC |
 | Form 3/4/5 transactions | **best** (full insider model) | partial | no | hard |
-| 13D/13G structured XML | **best** (post-2024-12-19) | partial | no | possible |
+| 13D/13G structured XML | **best** (post-2024-12-18) | partial | no | possible |
 | N-PORT XML | **best** (wrapper + tombstone catch, #932) | no | no | ~150 LoC viable |
 | 10-K/10-Q XBRL | **best** (full statements engine) | no | no | painful |
 | companyfacts JSON | wraps cleanly | no | no | ~20 LoC |
