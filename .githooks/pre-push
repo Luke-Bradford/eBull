@@ -125,6 +125,20 @@ bash scripts/check_form5_retention.sh
 echo "==> Pre-push gate: Form 3 latest-per-pair invariant lint"
 bash scripts/check_form3_latest_per_pair.sh
 
+# #1233 §4.8 PR11 — every SC 13D/G writer chokepoint must honour the
+# 3y filed_at retention cap AND the discovery layer must route every
+# HTTP fetch + manifest write through the rate-limited provider +
+# canonical helper. Twelve placement invariants (A-L): helper defs,
+# discovery-uses-cutoff, manifest pre-fetch gate, sync bf.filed_at
+# gate (NOT fe.filing_date — Codex 1a HIGH #4), refresh-current
+# exemption, no-append-writers, dormant-entrypoint retirement, rewash
+# rescue-path branch order, provider-throttle discipline,
+# helper-only manifest writes, hint+manifest atomicity in same
+# conn.transaction(), ON CONFLICT DO UPDATE on hint UPSERT (forbid
+# DO NOTHING). ~40ms.
+echo "==> Pre-push gate: 13D/G retention cap + discovery invariant lint"
+bash scripts/check_13dg_retention.sh
+
 # #1249 / #1250 cleanup — every manifest_parsers/sec_*.py that calls
 # _archive_file_url(<cik>, ...) where <cik> is row.cik (filer_cik /
 # similar) MUST also reference KNOWN_FILING_AGENT_CIKS for the agent-
