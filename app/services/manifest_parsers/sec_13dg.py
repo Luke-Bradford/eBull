@@ -161,8 +161,7 @@ def _parse_13dg(
     # timestamp cannot be placed inside the window).
     if not blockholders_within_retention(row.filed_at):
         logger.info(
-            "13D/G manifest parser: accession=%s filed_at=%s outside "
-            "retention cutoff; tombstoning without fetch",
+            "13D/G manifest parser: accession=%s filed_at=%s outside retention cutoff; tombstoning without fetch",
             accession,
             row.filed_at,
         )
@@ -343,8 +342,7 @@ def _parse_13dg(
             cusip_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT instrument_id FROM sec_13dg_discovery_issuer_hint "
-                    "WHERE accession_number = %s",
+                    "SELECT instrument_id FROM sec_13dg_discovery_issuer_hint WHERE accession_number = %s",
                     (accession,),
                 )
                 hint_ids = {r[0] for r in cur.fetchall()}
@@ -362,8 +360,7 @@ def _parse_13dg(
                 # let #740 CUSIP backfill retroactively resolve.
                 instrument_id = None
                 log_error = (
-                    f"cusip_unresolved_with_ambiguous_hint "
-                    f"(cusip={filing.issuer_cusip!r} hints={sorted(hint_ids)})"
+                    f"cusip_unresolved_with_ambiguous_hint (cusip={filing.issuer_cusip!r} hints={sorted(hint_ids)})"
                 )
             elif cusip_id is not None and not hint_ids:
                 # CASE E — legacy daily-index path; no hint rows.
@@ -372,8 +369,7 @@ def _parse_13dg(
                 # CASE D — universe-revalidate per Codex 1c HIGH.
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT 1 FROM instruments WHERE instrument_id = %s "
-                        "AND country = 'US' AND is_tradable = TRUE",
+                        "SELECT 1 FROM instruments WHERE instrument_id = %s AND country = 'US' AND is_tradable = TRUE",
                         (cusip_id,),
                     )
                     in_universe = cur.fetchone() is not None
@@ -381,10 +377,7 @@ def _parse_13dg(
                     # CASE D-in: hint is likely stale; trust CUSIP
                     # share-class signal + log discrepancy.
                     instrument_id = cusip_id
-                    log_error = (
-                        f"cusip_resolved_with_hint_discrepancy "
-                        f"(cusip_id={cusip_id} hints={sorted(hint_ids)})"
-                    )
+                    log_error = f"cusip_resolved_with_hint_discrepancy (cusip_id={cusip_id} hints={sorted(hint_ids)})"
                 else:
                     # CASE D-out: CUSIP resolves outside the current
                     # tradable universe (delisted / non-US sibling on
@@ -392,10 +385,7 @@ def _parse_13dg(
                     # so the §6.1/§6.2 universe filter is honoured at
                     # the observation layer.
                     instrument_id = None
-                    log_error = (
-                        f"cusip_resolved_outside_universe "
-                        f"(instrument={cusip_id} hints={sorted(hint_ids)})"
-                    )
+                    log_error = f"cusip_resolved_outside_universe (instrument={cusip_id} hints={sorted(hint_ids)})"
             else:
                 # Fallthrough (no CUSIP + no hints). Should not occur
                 # in production — legacy path always carries CUSIP
@@ -403,10 +393,7 @@ def _parse_13dg(
                 # defensively NULL the instrument so observation
                 # write-through skips and operator sees the log.
                 instrument_id = None
-                log_error = (
-                    f"cusip_unresolved_with_no_hint "
-                    f"(cusip={filing.issuer_cusip!r})"
-                )
+                log_error = f"cusip_unresolved_with_no_hint (cusip={filing.issuer_cusip!r})"
 
             skipped_no_cusip = 0 if instrument_id is not None else len(filing.reporting_persons)
             filer_id = _upsert_filer(conn, cik=filing.primary_filer_cik, name=filer_name)
