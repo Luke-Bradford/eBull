@@ -52,7 +52,7 @@ import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError; no untrusted input parsed here.
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
@@ -75,6 +75,59 @@ from app.services.ownership_observations import (
 _PARSER_VERSION_13DG = "13dg-primary-v1"
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Retention helpers (#1233 PR11, spec §3.2)
+# ---------------------------------------------------------------------------
+#
+# Schedule 13D / 13G ingest is capped at the more-recent of (today − 3y) and
+# the SEC Schedule 13 structured-XML mandate effective date (2024-12-18, SEC
+# EDGAR Release 23.4). Filings made BEFORE the mandate are HTML-only and not
+# parseable by ``edgartools.beneficial_ownership.schedule13`` (skill_edgartools
+# G11) or by any extant library in this repo. PR11 honours "100% complete"
+# by capping retention at the floor so every filing inside the window is
+# guaranteed parseable. Once ``today − 3y >= 2024-12-18`` (i.e. on / after
+# 2027-12-18) the function reverts to plain ``today − 3y``.
+#
+# Calendar-day granularity: the helper returns ``date`` (NOT ``datetime``).
+# The SEC mandate is a calendar-day effective date — comparing as ``date``
+# avoids timezone ambiguity at the day boundary, and the discovery query
+# param ``efts.sec.gov/.../search-index?&startdt=YYYY-MM-DD`` expects an
+# ISO calendar date too. Returning ``datetime`` would force every consumer
+# to ``.date()`` at the call site and risk timezone-driven off-by-one drift.
+INSIDER_BLOCKHOLDERS_RETENTION_YEARS = 3
+
+# SEC EDGAR Release 23.4 effective date — Schedule 13 XBRL mandate.
+SEC_SCHEDULE_13_XML_MANDATE_DATE = date(2024, 12, 18)
+
+
+def blockholders_retention_cutoff() -> date:
+    """Inclusive lower bound on ``filed_at`` for Schedule 13D/13G ingest.
+
+    Returns ``max(today − 3y, SEC_SCHEDULE_13_XML_MANDATE_DATE)`` as a
+    ``date`` (calendar-day granularity; see module-level rationale). The
+    XML-mandate floor dominates while ``today − 3y`` is still earlier
+    than 2024-12-18, and degrades to the plain 3-year rolling floor once
+    the rolling boundary catches up.
+    """
+    today = datetime.now(tz=UTC).date()
+    three_year_floor = today - timedelta(days=365 * INSIDER_BLOCKHOLDERS_RETENTION_YEARS)
+    return max(three_year_floor, SEC_SCHEDULE_13_XML_MANDATE_DATE)
+
+
+def blockholders_within_retention(filed_at: datetime | None) -> bool:
+    """Inclusive retention predicate used by every 13D/G writer chokepoint.
+
+    ``filed_at is None`` resolves to ``False`` (defensive — a row missing
+    the canonical filing timestamp cannot be safely placed inside the
+    retention window). Otherwise returns
+    ``filed_at.date() >= blockholders_retention_cutoff()`` so a filing
+    timestamped exactly at the cutoff midnight UTC is retained.
+    """
+    if filed_at is None:
+        return False
+    return filed_at.date() >= blockholders_retention_cutoff()
 
 
 # ---------------------------------------------------------------------------
