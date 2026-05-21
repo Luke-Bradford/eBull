@@ -1290,6 +1290,8 @@ Create `tests/test_postgres_version_guard.py`:
 """PR12 PG >= 17 boot-time guard (#1233 spec §7)."""
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from app.system.postgres_version_guard import assert_postgres_min_version
@@ -1303,15 +1305,25 @@ def test_guard_passes_on_pg17(ebull_test_conn):
 def test_guard_fails_on_simulated_pg16():
     # Patch the version probe to return PG16's server_version_num.
     # No DB needed — FakeConn duck-types the .cursor() contract.
+    # Methods expanded to multi-line bodies to satisfy ruff E704
+    # (statement-on-same-line-as-def) — Codex 1c plan-rev3 MED-1.
     class FakeCursor:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def execute(self, *a, **k): pass
-        def fetchone(self): return (160005,)
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def execute(self, *a, **k):
+            pass
+        def fetchone(self):
+            return (160005,)
     class FakeConn:
-        def cursor(self): return FakeCursor()
+        def cursor(self):
+            return FakeCursor()
+    # `cast(Any, …)` because FakeConn doesn't extend psycopg.Connection
+    # but duck-types the only method the guard touches — Codex 1c
+    # plan-rev3 MED-2 (avoids pyright structural-typing complaint).
     with pytest.raises(RuntimeError, match="PG >= 17"):
-        assert_postgres_min_version(FakeConn(), min_version_num=170000)
+        assert_postgres_min_version(cast(Any, FakeConn()), min_version_num=170000)
 ```
 
 Codex 1b plan-rev2 MED-1: `ebull_test_conn` (not `test_db_conn`) — matches the actual fixture in `tests/fixtures/ebull_test_db.py`. Codex 1b plan-rev2 LOW-2: unused `import psycopg` removed; the FakeConn duck-types only `.cursor()` which is all the guard touches.
@@ -1667,33 +1679,67 @@ WITH iids AS (
 SELECT * FROM iids ORDER BY symbol"
 ```
 
-Then for each instrument run (substituting `<IID>`):
+Then for each instrument run the following full verification sequence (substituting `<IID>` — captures pre/post pgstattuple AND per-row xmin per spec §6 case 2 no-op-churn contract; Codex 1c plan-rev3 LOW-1):
 
 ```bash
+IID=<IID>
+# Snapshot pre-first-call: pgstattuple + per-row xmin for both _current tables.
 docker exec ebull-postgres psql -U postgres -d ebull -c "
-SELECT pgstattuple('ownership_funds_current'), pgstattuple('ownership_institutions_current')"
-# call refresh helpers via a Python one-liner that opens a psycopg connection
+\set iid ${IID}
+SELECT 'pre-first' AS phase, 'funds' AS tbl, (pgstattuple('ownership_funds_current')).table_len AS table_len;
+SELECT 'pre-first' AS phase, 'institutions' AS tbl, (pgstattuple('ownership_institutions_current')).table_len AS table_len;
+SELECT 'pre-first' AS phase, 'funds' AS tbl, xmin::text AS xmin
+  FROM ownership_funds_current WHERE instrument_id = :iid ORDER BY 1;
+SELECT 'pre-first' AS phase, 'institutions' AS tbl, xmin::text AS xmin
+  FROM ownership_institutions_current WHERE instrument_id = :iid ORDER BY 1;
+"
+# First refresh pair.
 uv run python -c "
 import psycopg
 from app.services.ownership_observations import refresh_funds_current, refresh_institutions_current
 with psycopg.connect('host=localhost dbname=ebull user=postgres') as c:
-    refresh_funds_current(c, instrument_id=<IID>)
-    refresh_institutions_current(c, instrument_id=<IID>)
+    refresh_funds_current(c, instrument_id=${IID})
+    refresh_institutions_current(c, instrument_id=${IID})
     c.commit()
 "
-# second call
+# Snapshot mid (between calls).
+docker exec ebull-postgres psql -U postgres -d ebull -c "
+\set iid ${IID}
+SELECT 'mid' AS phase, 'funds' AS tbl, (pgstattuple('ownership_funds_current')).table_len AS table_len;
+SELECT 'mid' AS phase, 'institutions' AS tbl, (pgstattuple('ownership_institutions_current')).table_len AS table_len;
+SELECT 'mid' AS phase, 'funds' AS tbl, xmin::text AS xmin
+  FROM ownership_funds_current WHERE instrument_id = :iid ORDER BY 1;
+SELECT 'mid' AS phase, 'institutions' AS tbl, xmin::text AS xmin
+  FROM ownership_institutions_current WHERE instrument_id = :iid ORDER BY 1;
+"
+# Second refresh pair (no observation change between calls — must be no-op).
 uv run python -c "
 import psycopg
 from app.services.ownership_observations import refresh_funds_current, refresh_institutions_current
 with psycopg.connect('host=localhost dbname=ebull user=postgres') as c:
-    refresh_funds_current(c, instrument_id=<IID>)
-    refresh_institutions_current(c, instrument_id=<IID>)
+    refresh_funds_current(c, instrument_id=${IID})
+    refresh_institutions_current(c, instrument_id=${IID})
     c.commit()
 "
-# final pgstattuple — table_len must equal pre-first-call value
+# Snapshot post-second.
+docker exec ebull-postgres psql -U postgres -d ebull -c "
+\set iid ${IID}
+SELECT 'post-second' AS phase, 'funds' AS tbl, (pgstattuple('ownership_funds_current')).table_len AS table_len;
+SELECT 'post-second' AS phase, 'institutions' AS tbl, (pgstattuple('ownership_institutions_current')).table_len AS table_len;
+SELECT 'post-second' AS phase, 'funds' AS tbl, xmin::text AS xmin
+  FROM ownership_funds_current WHERE instrument_id = :iid ORDER BY 1;
+SELECT 'post-second' AS phase, 'institutions' AS tbl, xmin::text AS xmin
+  FROM ownership_institutions_current WHERE instrument_id = :iid ORDER BY 1;
+"
 ```
 
-Capture results in a markdown table for the PR description.
+**Assertion contract** (verify by inspection of the output, no scripted assertion needed):
+
+1. `mid.table_len` may exceed `pre-first.table_len` (the first refresh may have made changes).
+2. `post-second.table_len == mid.table_len` (second refresh is a no-op — pgstattuple's table_len must NOT grow).
+3. `post-second.xmin == mid.xmin` per-row for the instrument (rows were not rewritten — load-bearing for the bloat fix).
+
+Capture all three phases for each instrument in a markdown table for the PR description.
 
 - [ ] **Step 10.2: EXPLAIN ANALYZE the repair-sweep predicate**
 
