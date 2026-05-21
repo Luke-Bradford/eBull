@@ -1,28 +1,35 @@
 #!/usr/bin/env bash
 #
 # Lint guard: every SC 13D/G writer chokepoint MUST honour the 3y
-# filed_at retention cap (#1233 §4.8 PR11) AND the discovery layer
-# MUST route every HTTP fetch + manifest write through the rate-
-# limited provider + the canonical helper. Twelve placement
-# invariants (A-L) covering helpers, discovery, manifest gate, sync
-# gate, refresh-current exemption, writer surface, dormant-code
-# retirement, rewash rescue gate, provider-throttle discipline,
-# helper-only manifest writes, hint-atomicity-in-same-conn-
-# transaction-block, and hint-UPSERT-uses-ON-CONFLICT-DO-UPDATE.
+# filed_at retention cap (#1233 §4.8 PR11). Seven placement invariants
+# (A/C/D/E/F/G/H) covering helpers, manifest pre-fetch gate, sync gate,
+# refresh-current exemption, writer surface, dormant-code retirement,
+# and rewash rescue gate.
 #
-# Invariants (spec §3.6):
+# Empirical-pivot history (2026-05-21): PR11 originally landed 12
+# invariants (A-L) covering an additional universe-issuer-CIK
+# discovery layer (``app/services/sec_13dg_discovery.py``) + a
+# discovery-time issuer-hint side table
+# (``sec_13dg_discovery_issuer_hint``) + a 5-case CUSIP-vs-hint
+# cross-validation branch in the manifest parser. Operator smoke
+# against AAPL/GME/MSFT/JPM/HD revealed that ``efts.sec.gov/LATEST/
+# search-index`` post-2024-12-18 does NOT index SC 13D/G by SUBJECT
+# CIK, only by FILER CIK — the discovery layer + hint table were
+# therefore retired and invariants B (discovery wires the cutoff
+# helper) / I (discovery uses provider throttle) / J (discovery uses
+# record_manifest_entry) / K (hint + manifest atomic) / L (hint UPSERT
+# uses DO UPDATE) were pruned with them. The legacy daily-index path
+# (``app/services/filings_history.py``) remains the discovery
+# mechanism and already ships ~575k SC 13D/G manifest rows in dev DB;
+# the seven surviving invariants cover the entire post-pivot writer
+# surface.
+#
+# Invariants (spec §3.6 v8 post-pivot):
 #
 #  A. ``app/services/blockholders.py`` defines exactly one
 #     ``def blockholders_retention_cutoff(`` AND exactly one
 #     ``def blockholders_within_retention(``. Greps for the literal
 #     ``def `` prefix on both names.
-#  B. ``app/services/sec_13dg_discovery.py`` (i) calls
-#     ``blockholders_retention_cutoff()`` AT LEAST ONCE; (ii) calls
-#     ``_resolve_discovery_startdt(`` AT LEAST ONCE; (iii) the
-#     ``_resolve_discovery_startdt`` body itself references
-#     ``blockholders_retention_cutoff()`` so the 3y floor cannot be
-#     bypassed. Empty-grep ``wc -l`` guard per PR10a Codex iter 1
-#     lesson.
 #  C. ``app/services/manifest_parsers/sec_13dg.py::_parse_13dg`` calls
 #     ``blockholders_within_retention(`` on a line whose line number
 #     precedes BOTH the first ``fetch_document_text(`` call AND the
@@ -52,10 +59,9 @@
 #  G. Dormant entrypoints stay deleted. The four 13D/G symbols
 #     ``ingest_all_active_filers``, ``ingest_filer_blockholders``,
 #     ``_list_active_filer_seeds``, ``seed_filer`` MUST NOT re-appear
-#     inside any of the blockholder-specific modules:
+#     inside any of the surviving blockholder-specific modules:
 #       * ``app/services/blockholders.py``
 #       * ``app/services/manifest_parsers/sec_13dg.py``
-#       * ``app/services/sec_13dg_discovery.py``
 #     Module-scoped check because the SAME identifier names also live
 #     in ``app/services/institutional_holdings.py`` (13F-HR variant) +
 #     ``app/services/ncen_classifier.py`` (N-CEN variant); a blunt
@@ -72,40 +78,6 @@
 #     ``_upsert_filing_row(`` invocation inside the same function
 #     block. Codex 1b MEDIUM branch-order pin: rescue-path gate must
 #     fire BEFORE the destructive replace-then-insert sequence.
-#  I. ``app/services/sec_13dg_discovery.py`` discovery uses the rate-
-#     limited provider — NO raw HTTP. Codex 1b MEDIUM:
-#       * POSITIVE: imports ``SecFilingsProvider`` from
-#         ``app.providers.implementations.sec_edgar``.
-#       * POSITIVE: calls ``provider.fetch_search_index_json(`` AT
-#         LEAST ONCE.
-#       * NEGATIVE: no ``import httpx`` / ``import requests`` /
-#         ``import urllib`` (bare) / aliased forms thereof.
-#         ``import urllib.parse`` IS allowed — only the bare module
-#         import is forbidden (the bare import would invite ad-hoc
-#         ``urllib.request`` use; ``urllib.parse`` is stateless string
-#         munging). Same for ``from httpx`` / ``from requests`` /
-#         ``from urllib`` (bare module form).
-#       * NEGATIVE: no reach into underscore-prefixed provider
-#         internals (``_client`` etc.) bypassing the throttle.
-#  J. ``app/services/sec_13dg_discovery.py`` manifest writes go through
-#     ``record_manifest_entry`` — NO raw SQL. Codex 1b MEDIUM:
-#       * POSITIVE: imports ``record_manifest_entry`` from
-#         ``app.services.sec_manifest``.
-#       * POSITIVE: calls ``record_manifest_entry(`` AT LEAST ONCE.
-#       * NEGATIVE: no ``INSERT INTO sec_filing_manifest`` AND no
-#         ``UPDATE sec_filing_manifest`` AND no dynamic SQL-string
-#         concatenation against the table name.
-#  K. ``app/services/sec_13dg_discovery.py`` body contains a
-#     ``conn.transaction()`` block AND BOTH ``record_manifest_entry(``
-#     AND ``INSERT INTO sec_13dg_discovery_issuer_hint`` appear within
-#     the SAME block scope. Codex 1b HIGH atomicity: hint write +
-#     manifest write must commit atomically so the worker can never
-#     observe a manifest row whose hints aren't yet present.
-#  L. The SQL string in ``app/services/sec_13dg_discovery.py`` that
-#     writes to ``sec_13dg_discovery_issuer_hint`` MUST contain the
-#     literal ``ON CONFLICT (accession_number, instrument_id) DO UPDATE SET discovered_at``.
-#     Codex 1b HIGH idempotency: ``DO NOTHING`` would mask the
-#     freshness signal on re-discovery.
 #
 # Exits non-zero on the first invariant violation. Wired into
 # ``.githooks/pre-push`` after ``check_form3_latest_per_pair.sh`` and
@@ -121,7 +93,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 FILE_HELPERS="app/services/blockholders.py"
-FILE_DISCOVERY="app/services/sec_13dg_discovery.py"
 FILE_MANIFEST="app/services/manifest_parsers/sec_13dg.py"
 FILE_SYNC="app/services/ownership_observations_sync.py"
 FILE_REFRESH="app/services/ownership_observations.py"
@@ -219,37 +190,6 @@ else
   fi
   if (( within_defs != 1 )); then
     fail "$FILE_HELPERS: expected exactly 1 'def blockholders_within_retention(', found ${within_defs}."
-  fi
-fi
-
-# ======================================================================
-# B — discovery wires the cutoff helper through _resolve_discovery_startdt
-# ======================================================================
-echo "Checking invariant B (discovery uses cutoff via _resolve_discovery_startdt)..."
-
-if [[ ! -f "$FILE_DISCOVERY" ]]; then
-  fail "missing file: $FILE_DISCOVERY"
-else
-  # (i) Discovery file references the cutoff helper somewhere.
-  cutoff_refs=$(count_literal "$FILE_DISCOVERY" "blockholders_retention_cutoff(")
-  if (( cutoff_refs < 1 )); then
-    fail "$FILE_DISCOVERY: missing reference to 'blockholders_retention_cutoff()' — discovery cannot enforce the 3y floor without the helper."
-  fi
-
-  # (ii) Discovery file references _resolve_discovery_startdt (call-site
-  # — at least one). The helper definition itself also matches; we
-  # want >= 1 call-site in addition to the def. So require >= 2 total
-  # references (1 def + >= 1 call).
-  startdt_refs=$(count_literal "$FILE_DISCOVERY" "_resolve_discovery_startdt(")
-  if (( startdt_refs < 2 )); then
-    fail "$FILE_DISCOVERY: expected >= 2 references to '_resolve_discovery_startdt(' (1 def + >= 1 call-site), found ${startdt_refs}."
-  fi
-
-  # (iii) The _resolve_discovery_startdt BODY references the cutoff
-  # helper. Block-scoped check via awk function-body walker.
-  cutoff_in_resolve=$(count_in_function "$FILE_DISCOVERY" "_resolve_discovery_startdt" "blockholders_retention_cutoff(")
-  if (( cutoff_in_resolve < 1 )); then
-    fail "$FILE_DISCOVERY: _resolve_discovery_startdt body missing 'blockholders_retention_cutoff()' reference — the 3y floor can be bypassed if the watermark drifts."
   fi
 fi
 
@@ -447,6 +387,11 @@ echo "Checking invariant G (dormant 13D/G entrypoints stay deleted)..."
 # WITHOUT backticks) at a definition / call / import site. We count
 # total occurrences then subtract the docstring backtick-wrapped
 # count; the remainder MUST be zero.
+#
+# v8 empirical pivot 2026-05-21: ``sec_13dg_discovery.py`` was deleted,
+# so the surviving blockholder module set is just helpers + manifest
+# parser. Re-introduction of any dormant entrypoint in either file is
+# still forbidden.
 DORMANT_SYMBOLS=(
   "ingest_all_active_filers"
   "ingest_filer_blockholders"
@@ -456,7 +401,6 @@ DORMANT_SYMBOLS=(
 BLOCKHOLDER_MODULES=(
   "$FILE_HELPERS"
   "$FILE_MANIFEST"
-  "$FILE_DISCOVERY"
 )
 
 for mod in "${BLOCKHOLDER_MODULES[@]}"; do
@@ -548,209 +492,6 @@ else
         fail "$FILE_REWASH:$cap_line: rescue gate appears AT/AFTER '_upsert_filing_row(' at line $upsert_line — gate MUST precede the re-insert."
       fi
     fi
-  fi
-fi
-
-# ======================================================================
-# I — discovery uses provider throttle (no raw HTTP)
-# ======================================================================
-echo "Checking invariant I (discovery uses SecFilingsProvider, no raw HTTP)..."
-
-if [[ -f "$FILE_DISCOVERY" ]]; then
-  # (i) POSITIVE: import.
-  provider_import=$(count_literal "$FILE_DISCOVERY" "SecFilingsProvider,")
-  provider_import_plain=$(count_literal "$FILE_DISCOVERY" "SecFilingsProvider")
-  if (( provider_import_plain < 1 )); then
-    fail "$FILE_DISCOVERY: missing SecFilingsProvider reference — discovery must route HTTP through the rate-limited provider."
-  fi
-  if ! grep -qE "from app\.providers\.implementations\.sec_edgar import" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: missing 'from app.providers.implementations.sec_edgar import' import block — SecFilingsProvider must come from the canonical module."
-  fi
-
-  # (ii) POSITIVE: call-site.
-  fsi_calls=$(count_literal "$FILE_DISCOVERY" "fetch_search_index_json(")
-  if (( fsi_calls < 1 )); then
-    fail "$FILE_DISCOVERY: missing 'fetch_search_index_json(' call — discovery must use the throttled efts.sec.gov entrypoint."
-  fi
-
-  # (iii) NEGATIVE: raw HTTP imports forbidden. ``import urllib.parse``
-  # is allowed (stateless string munging — urlencode etc.); only the
-  # bare ``import urllib`` form is forbidden (would invite ad-hoc
-  # ``urllib.request`` use). Same for ``from httpx`` / ``from
-  # requests`` / ``from urllib`` (bare module form, no dot).
-  if grep -qE "^[[:space:]]*import[[:space:]]+httpx([[:space:]]|$)" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: forbidden 'import httpx' — use SecFilingsProvider."
-  fi
-  if grep -qE "^[[:space:]]*import[[:space:]]+httpx[[:space:]]+as[[:space:]]" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: forbidden aliased 'import httpx as ...' — use SecFilingsProvider."
-  fi
-  if grep -qE "^[[:space:]]*import[[:space:]]+requests([[:space:]]|$)" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: forbidden 'import requests' — use SecFilingsProvider."
-  fi
-  if grep -qE "^[[:space:]]*import[[:space:]]+requests[[:space:]]+as[[:space:]]" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: forbidden aliased 'import requests as ...' — use SecFilingsProvider."
-  fi
-  if grep -qE "^[[:space:]]*import[[:space:]]+urllib([[:space:]]|$)" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: forbidden bare 'import urllib' — use 'import urllib.parse' for stateless urlencode only."
-  fi
-  if grep -qE "^[[:space:]]*from[[:space:]]+httpx[[:space:]]+import" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: forbidden 'from httpx import ...' — use SecFilingsProvider."
-  fi
-  if grep -qE "^[[:space:]]*from[[:space:]]+requests[[:space:]]+import" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: forbidden 'from requests import ...' — use SecFilingsProvider."
-  fi
-  if grep -qE "^[[:space:]]*from[[:space:]]+urllib[[:space:]]+import" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: forbidden bare 'from urllib import ...' — use 'from urllib.parse import ...' (subpackage) for stateless urlencode only."
-  fi
-
-  # (iv) NEGATIVE: no reach into provider internals.
-  internals=$(count_literal "$FILE_DISCOVERY" "sec_edgar._")
-  if (( internals > 0 )); then
-    fail "$FILE_DISCOVERY: forbidden reach into 'sec_edgar._*' underscore-prefixed internals (${internals} occurrence(s)) — would bypass the rate-limited provider."
-  fi
-fi
-
-# ======================================================================
-# J — discovery uses record_manifest_entry (no raw manifest SQL)
-# ======================================================================
-echo "Checking invariant J (discovery uses record_manifest_entry, no raw SQL)..."
-
-if [[ -f "$FILE_DISCOVERY" ]]; then
-  # (i) POSITIVE: import.
-  if ! grep -qE "^[[:space:]]*from[[:space:]]+app\.services\.sec_manifest[[:space:]]+import[[:space:]]+record_manifest_entry" "$FILE_DISCOVERY"; then
-    fail "$FILE_DISCOVERY: missing 'from app.services.sec_manifest import record_manifest_entry' — manifest writes must route through the canonical helper."
-  fi
-
-  # (ii) POSITIVE: call-site.
-  rme_calls=$(count_literal "$FILE_DISCOVERY" "record_manifest_entry(")
-  if (( rme_calls < 1 )); then
-    fail "$FILE_DISCOVERY: missing 'record_manifest_entry(' call — manifest writes must route through the canonical helper."
-  fi
-
-  # (iii) NEGATIVE: no raw SQL against sec_filing_manifest.
-  raw_insert=$(count_literal "$FILE_DISCOVERY" "INSERT INTO sec_filing_manifest")
-  raw_update=$(count_literal "$FILE_DISCOVERY" "UPDATE sec_filing_manifest")
-  if (( raw_insert > 0 )); then
-    fail "$FILE_DISCOVERY: forbidden raw 'INSERT INTO sec_filing_manifest' (${raw_insert} occurrence(s)) — route through record_manifest_entry."
-  fi
-  if (( raw_update > 0 )); then
-    fail "$FILE_DISCOVERY: forbidden raw 'UPDATE sec_filing_manifest' (${raw_update} occurrence(s)) — route through record_manifest_entry."
-  fi
-fi
-
-# ======================================================================
-# K — hint write + manifest write atomic in same conn.transaction() block
-# ======================================================================
-echo "Checking invariant K (hint + manifest atomic in same conn.transaction() block)..."
-
-if [[ -f "$FILE_DISCOVERY" ]]; then
-  # Walk the file with awk. Track ``with conn.transaction()`` opener
-  # blocks by indentation: the block body is every subsequent line whose
-  # leading-whitespace count is STRICTLY GREATER than the opener's
-  # indent, until a line returns to <= the opener's indent. Within each
-  # block, count occurrences of both anchor strings; if any single block
-  # contains BOTH ``record_manifest_entry(`` AND
-  # ``INSERT INTO sec_13dg_discovery_issuer_hint`` we PASS.
-  found=$(awk '
-    function leading_indent(s,    n) {
-      n = 0
-      while (substr(s, n+1, 1) == " ") n++
-      return n
-    }
-    BEGIN { in_block = 0; opener_indent = -1; rme = 0; hint = 0; passed = 0 }
-    {
-      line = $0
-      stripped = line
-      sub(/^[[:space:]]+/, "", stripped)
-      if (in_block == 0) {
-        if (index(stripped, "with conn.transaction()") == 1 || \
-            index(stripped, "with conn.transaction() :") == 1 || \
-            stripped ~ /^with[[:space:]]+conn\.transaction\(\)/) {
-          in_block = 1
-          opener_indent = leading_indent(line)
-          rme = 0
-          hint = 0
-          next
-        }
-      } else {
-        cur_indent = leading_indent(line)
-        # A non-empty line at or below the opener indent closes the block.
-        if (length(stripped) > 0 && cur_indent <= opener_indent) {
-          if (rme > 0 && hint > 0) { passed = 1 }
-          in_block = 0
-          opener_indent = -1
-          rme = 0
-          hint = 0
-          # Re-evaluate this line as a potential new opener.
-          if (index(stripped, "with conn.transaction()") == 1 || \
-              stripped ~ /^with[[:space:]]+conn\.transaction\(\)/) {
-            in_block = 1
-            opener_indent = cur_indent
-            next
-          }
-          next
-        }
-        if (index(line, "record_manifest_entry(") > 0) rme++
-        if (index(line, "INSERT INTO sec_13dg_discovery_issuer_hint") > 0) hint++
-      }
-    }
-    END {
-      if (in_block == 1 && rme > 0 && hint > 0) passed = 1
-      print passed + 0
-    }
-  ' "$FILE_DISCOVERY")
-
-  if [[ "$found" != "1" ]]; then
-    fail "$FILE_DISCOVERY: no 'with conn.transaction()' block contains BOTH 'record_manifest_entry(' AND 'INSERT INTO sec_13dg_discovery_issuer_hint' (Codex 1b HIGH atomicity). Splitting these writes across separate transactions re-introduces the silent-gap window where the worker can race the hint write."
-  fi
-fi
-
-# ======================================================================
-# L — hint UPSERT uses ON CONFLICT DO UPDATE (forbid DO NOTHING)
-# ======================================================================
-echo "Checking invariant L (hint UPSERT uses ON CONFLICT (..., ...) DO UPDATE SET discovered_at)..."
-
-if [[ -f "$FILE_DISCOVERY" ]]; then
-  # Pin the FULL UPSERT shape — column tuple + DO UPDATE SET +
-  # discovered_at. Catches a future flip to ``DO NOTHING`` (which
-  # would leave ``discovered_at`` stale on re-discovery) and a future
-  # flip to a different conflict target.
-  upsert_full=$(count_literal "$FILE_DISCOVERY" "ON CONFLICT (accession_number, instrument_id)")
-  do_update_discovered=$(count_literal "$FILE_DISCOVERY" "DO UPDATE SET")
-  discovered_set=$(count_literal "$FILE_DISCOVERY" "discovered_at = NOW()")
-
-  if (( upsert_full < 1 )); then
-    fail "$FILE_DISCOVERY: missing 'ON CONFLICT (accession_number, instrument_id)' UPSERT target on the hint table — Codex 1b HIGH idempotency requires this exact conflict tuple."
-  fi
-  if (( do_update_discovered < 1 )); then
-    fail "$FILE_DISCOVERY: missing 'DO UPDATE SET' clause on the hint UPSERT — 'DO NOTHING' would mask the freshness signal on re-discovery."
-  fi
-  if (( discovered_set < 1 )); then
-    fail "$FILE_DISCOVERY: hint UPSERT must SET 'discovered_at = NOW()' on conflict — without it re-discovery cannot refresh the freshness timestamp."
-  fi
-
-  # Forbid 'DO NOTHING' adjacent to the hint table (defensive: catches
-  # a future regression even when the DO UPDATE clause still exists
-  # elsewhere in the file). Look for ``DO NOTHING`` within +/- 10 lines
-  # of any ``sec_13dg_discovery_issuer_hint`` mention.
-  bad_do_nothing=$(awk '
-    BEGIN { hit = 0 }
-    { lines[NR] = $0 }
-    END {
-      for (i = 1; i <= NR; i++) {
-        if (index(lines[i], "sec_13dg_discovery_issuer_hint") > 0) {
-          lo = i - 10; if (lo < 1) lo = 1
-          hi = i + 10; if (hi > NR) hi = NR
-          for (j = lo; j <= hi; j++) {
-            if (lines[j] ~ /[Dd][Oo][[:space:]]+[Nn][Oo][Tt][Hh][Ii][Nn][Gg]/) { hit = 1 }
-          }
-        }
-      }
-      print hit + 0
-    }
-  ' "$FILE_DISCOVERY")
-  if [[ "$bad_do_nothing" == "1" ]]; then
-    fail "$FILE_DISCOVERY: forbidden 'DO NOTHING' clause within +/- 10 lines of 'sec_13dg_discovery_issuer_hint' — Codex 1b HIGH idempotency: re-discovery must refresh discovered_at, not silently skip."
   fi
 fi
 
