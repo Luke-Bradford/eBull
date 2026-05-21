@@ -682,8 +682,7 @@ def _apply_blockholders(
     # §6.3 + lint invariant H.
     if existing_rows == 0 and not blockholders_within_retention(manifest_filed_at):
         logger.info(
-            "rewash 13D/G: accession=%s rescue-path skip — filed_at=%s "
-            "outside retention cutoff",
+            "rewash 13D/G: accession=%s rescue-path skip — filed_at=%s outside retention cutoff",
             accession,
             manifest_filed_at,
         )

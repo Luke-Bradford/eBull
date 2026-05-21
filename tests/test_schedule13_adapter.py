@@ -87,10 +87,7 @@ def test_adapter_returns_blockholder_filing_for_13d_dict() -> None:
     assert filing.issuer_cik == "0001001250"
     assert filing.issuer_name == "The Estee Lauder Companies Inc."
     assert filing.issuer_cusip == "518439104"
-    assert (
-        filing.securities_class_title
-        == "Class A Common Stock, par value $.01 per share"
-    )
+    assert filing.securities_class_title == "Class A Common Stock, par value $.01 per share"
 
     # date_of_event: ISO-parsed when well-formed
     from datetime import date
@@ -179,9 +176,7 @@ def test_adapter_returns_passive_status_for_sec_13g_source() -> None:
         ("SC 13G/A", "SCHEDULE 13G/A"),
     ],
 )
-def test_adapter_derives_submission_type_from_manifest_form_table(
-    manifest_form: str, expected: str
-) -> None:
+def test_adapter_derives_submission_type_from_manifest_form_table(manifest_form: str, expected: str) -> None:
     """Submission type comes from a closed mapping table (KeyError
     raises loudly on an unknown form; Codex 1b HIGH said adapter must
     NOT silently fall back)."""
@@ -265,6 +260,11 @@ def test_adapter_accepts_full_schedule_form_name() -> None:
     from app.services.manifest_parsers._schedule13_adapter import (
         _SUBMISSION_TYPE_FOR_FORM,
     )
-    for short, full in [("SC 13D", "SCHEDULE 13D"), ("SC 13D/A", "SCHEDULE 13D/A"),
-                        ("SC 13G", "SCHEDULE 13G"), ("SC 13G/A", "SCHEDULE 13G/A")]:
+
+    for short, full in [
+        ("SC 13D", "SCHEDULE 13D"),
+        ("SC 13D/A", "SCHEDULE 13D/A"),
+        ("SC 13G", "SCHEDULE 13G"),
+        ("SC 13G/A", "SCHEDULE 13G/A"),
+    ]:
         assert _SUBMISSION_TYPE_FOR_FORM[short] == _SUBMISSION_TYPE_FOR_FORM[full] == full

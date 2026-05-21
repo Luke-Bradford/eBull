@@ -378,10 +378,7 @@ def main() -> int:
 
     if not args.apply:
         print("DRY RUN -- pass --apply to write rows + run ingesters.\n")
-        print(
-            f"Would seed {len(_INSTITUTIONAL_SEEDS)} institutional filers, "
-            f"{len(_ETF_OVERRIDES)} ETF overrides."
-        )
+        print(f"Would seed {len(_INSTITUTIONAL_SEEDS)} institutional filers, {len(_ETF_OVERRIDES)} ETF overrides.")
         return 0
 
     with psycopg.connect(settings.database_url) as conn:

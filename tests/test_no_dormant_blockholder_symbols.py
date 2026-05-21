@@ -99,10 +99,7 @@ def _git_grep_symbol(symbol: str) -> list[str]:
     # success (empty hit list). Other non-zero exits indicate a real
     # error (e.g. malformed pathspec) — surface them.
     if proc.returncode not in (0, 1):
-        raise RuntimeError(
-            f"git grep failed for symbol={symbol!r}: "
-            f"rc={proc.returncode} stderr={proc.stderr!r}"
-        )
+        raise RuntimeError(f"git grep failed for symbol={symbol!r}: rc={proc.returncode} stderr={proc.stderr!r}")
     return [line for line in proc.stdout.splitlines() if line]
 
 

@@ -333,9 +333,7 @@ def _parse_13dg(
             # ships 575k SC 13D/G manifest rows in dev DB.
             instrument_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
             log_error: str | None = (
-                None
-                if instrument_id is not None
-                else f"cusip_unresolved (cusip={filing.issuer_cusip!r})"
+                None if instrument_id is not None else f"cusip_unresolved (cusip={filing.issuer_cusip!r})"
             )
 
             skipped_no_cusip = 0 if instrument_id is not None else len(filing.reporting_persons)

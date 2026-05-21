@@ -141,9 +141,7 @@ def test_schedule13d_parse_xml_returns_dict_with_expected_top_level_keys() -> No
     """Adapter relies on dict-key access for the outer layer; pin it."""
     parsed = Schedule13D.parse_xml(_FIXTURE_13D_XML)
 
-    assert isinstance(parsed, dict), (
-        "edgartools Schedule13D.parse_xml must return dict (G15)"
-    )
+    assert isinstance(parsed, dict), "edgartools Schedule13D.parse_xml must return dict (G15)"
     # Adapter reads these specific keys; absence breaks _parse_13dg.
     assert "issuer_info" in parsed
     assert "security_info" in parsed

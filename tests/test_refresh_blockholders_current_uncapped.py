@@ -143,9 +143,7 @@ class TestRefreshBlockholdersCurrentUncapped:
         assert obs_before[0]["source_accession"] == pre_accn
 
         # ACT — run the refresh.
-        rows_in_current = refresh_blockholders_current(
-            conn, instrument_id=instrument_id
-        )
+        rows_in_current = refresh_blockholders_current(conn, instrument_id=instrument_id)
         conn.commit()
 
         # ASSERT 1 — refresh did NOT delete the pre-cap observation.
@@ -163,8 +161,7 @@ class TestRefreshBlockholdersCurrentUncapped:
             )
             obs_after = cur.fetchall()
         assert len(obs_after) == 1, (
-            f"refresh deleted the pre-cap observation row "
-            f"(parent spec §6.3 forbids this): {obs_after}"
+            f"refresh deleted the pre-cap observation row (parent spec §6.3 forbids this): {obs_after}"
         )
         assert obs_after[0]["source_accession"] == pre_accn
 
@@ -189,10 +186,7 @@ class TestRefreshBlockholdersCurrentUncapped:
                 (instrument_id,),
             )
             current_rows = cur.fetchall()
-        assert len(current_rows) == 1, (
-            f"refresh did not materialise the pre-cap row into "
-            f"_current: {current_rows}"
-        )
+        assert len(current_rows) == 1, f"refresh did not materialise the pre-cap row into _current: {current_rows}"
         row = current_rows[0]
         assert row["source_accession"] == pre_accn
         assert row["reporter_cik"] == primary_filer_cik

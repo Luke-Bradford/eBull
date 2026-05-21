@@ -113,9 +113,7 @@ def blockholders_retention_cutoff() -> date:
     try:
         three_year_floor = today.replace(year=today.year - INSIDER_BLOCKHOLDERS_RETENTION_YEARS)
     except ValueError:
-        three_year_floor = today.replace(
-            year=today.year - INSIDER_BLOCKHOLDERS_RETENTION_YEARS, day=28
-        )
+        three_year_floor = today.replace(year=today.year - INSIDER_BLOCKHOLDERS_RETENTION_YEARS, day=28)
     return max(three_year_floor, SEC_SCHEDULE_13_XML_MANDATE_DATE)
 
 

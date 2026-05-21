@@ -512,6 +512,7 @@ def test_happy_path_sec_13g_writes_passive_status(
 
     # Seed the raw 13G XML body so the rewash sweep can parse it.
     from app.services import raw_filings as _raw
+
     _raw.store_raw(
         conn,
         accession_number=accession,
@@ -537,8 +538,7 @@ def test_happy_path_sec_13g_writes_passive_status(
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT submission_type, status, reporter_name FROM blockholder_filings "
-            "WHERE accession_number = %s",
+            "SELECT submission_type, status, reporter_name FROM blockholder_filings WHERE accession_number = %s",
             (accession,),
         )
         rows = cur.fetchall()

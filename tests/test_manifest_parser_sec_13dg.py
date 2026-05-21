@@ -632,9 +632,7 @@ def test_parse_13dg_uses_edgartools_and_writes_issuer_class_decimal_fields(
 
     import app.services.manifest_parsers  # noqa: F401 — register
 
-    _seed_instrument_with_cusip(
-        ebull_test_conn, iid=8750040, symbol="EL3", cusip="518439104"
-    )
+    _seed_instrument_with_cusip(ebull_test_conn, iid=8750040, symbol="EL3", cusip="518439104")
     _seed_pending_13dg(
         ebull_test_conn,
         accession="0001140361-26-000040",
@@ -694,9 +692,7 @@ def test_parse_13dg_tombstones_pre_cap_accession_without_fetch(
     cutoff = blockholders_retention_cutoff()
     # 1 day strictly before cutoff — gate predicate is inclusive of
     # the cutoff midnight so 1 day under is unambiguously outside.
-    pre_cap_filed_at = datetime(
-        cutoff.year, cutoff.month, cutoff.day, tzinfo=UTC
-    ) - timedelta(days=1)
+    pre_cap_filed_at = datetime(cutoff.year, cutoff.month, cutoff.day, tzinfo=UTC) - timedelta(days=1)
 
     # Use the canonical seed helper but override filed_at to the
     # pre-cap timestamp via the lower-level record_manifest_entry.
@@ -722,9 +718,7 @@ def test_parse_13dg_tombstones_pre_cap_accession_without_fetch(
         fetch_calls.append(url)
         return _FAKE_13D_XML
 
-    monkeypatch.setattr(
-        sec_edgar.SecFilingsProvider, "fetch_document_text", _track_fetch
-    )
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _track_fetch)
 
     stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
     ebull_test_conn.commit()
@@ -736,7 +730,6 @@ def test_parse_13dg_tombstones_pre_cap_accession_without_fetch(
     assert row.error == "retention floor"
     # Critical: gate B runs BEFORE fetch — zero SEC HTTP calls.
     assert fetch_calls == []
-
 
 
 def test_parser_registered_for_both_sources() -> None:
