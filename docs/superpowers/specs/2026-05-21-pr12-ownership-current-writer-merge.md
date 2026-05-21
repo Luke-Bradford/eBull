@@ -6,7 +6,7 @@
 >
 > Parent spec: [`docs/superpowers/specs/2026-05-19-data-retention-rubric.md`](2026-05-19-data-retention-rubric.md) §4.5 / §4.6 / §6.4 / §7 / §8.
 >
-> Status: **DESIGN (rev 2)** — initial draft addressed bloat via diff-aware MERGE; Codex 1a found 5 HIGH (repair-sweep watermark breakage, ON-clause scope-clamp shape, per-helper WHERE filter omissions, lint string-match too weak, test-matrix priority/filter coverage gap) + 7 MED + 4 LOW. Rev 2 folds all findings in: separate `ownership_refresh_state` side-table watermark + tightened lint (84 checks) + extended test matrix (≥56 cases) + concurrency contract + CI extension provisioning.
+> Status: **DESIGN (rev 3)** — initial draft addressed bloat via diff-aware MERGE; Codex 1a found 5 HIGH + 7 MED + 4 LOW → folded into rev 2 (side-table watermark + tightened lint + extended tests + concurrency contract + CI extension provisioning). Codex 1b on rev 2 found 3 HIGH (watermark-population mismatch + MERGE-vs-state UPSERT race + nondeterministic per-row backfill) + 7 MED + 4 LOW. Rev 3 folds the 1b findings: watermark captured pre-MERGE in Python var; observations-anchored single-query predicate via `IS DISTINCT FROM`; backfill via `MAX … GROUP BY (instrument_id, category)`; repair sweep expanded to all 7 categories; block-local lint for ON/DELETE clamps; per-clause lint for def14a 3-clause filter; state-table churn acceptance floor added.
 
 ## 0. Status snapshot (2026-05-21 dev DB)
 
@@ -113,12 +113,12 @@ Per parent spec §7 "ownership_*_current size audit + remediation" and `feedback
 ```sql
 -- sql/163_ownership_refresh_state.sql
 CREATE TABLE IF NOT EXISTS ownership_refresh_state (
-    instrument_id                            BIGINT      NOT NULL,
-    category                                 TEXT        NOT NULL CHECK (category IN (
+    instrument_id                             BIGINT      NOT NULL,
+    category                                  TEXT        NOT NULL CHECK (category IN (
         'insiders', 'institutions', 'blockholders', 'treasury', 'def14a', 'funds', 'esop'
     )),
     last_drained_observations_max_ingested_at TIMESTAMPTZ,
-    last_refresh_attempted_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_refresh_attempted_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (instrument_id, category)
 );
 
@@ -126,40 +126,51 @@ CREATE INDEX IF NOT EXISTS idx_ownership_refresh_state_category
     ON ownership_refresh_state (category, last_drained_observations_max_ingested_at);
 ```
 
-- `last_drained_observations_max_ingested_at` is the **drift watermark** — set by each `refresh_X_current` call to the `MAX(ingested_at)` over `ownership_X_observations` for the instrument as of refresh time. NULL means "never drained" → repair sweep picks it up.
+- `last_drained_observations_max_ingested_at` is the **drift watermark** — set by each `refresh_X_current` call to `MAX(ingested_at)` over **all** rows in `ownership_X_observations` for the instrument (no `known_to IS NULL` filter — the repair sweep predicate operates over the same population, so the two sides must align; otherwise a `known_to` expiry would advance only one side and produce false drift, Codex 1b HIGH-1). NULL means "no observations at all" → predicate treats matching NULLs as no-drift (via `IS DISTINCT FROM`).
 - `last_refresh_attempted_at` records the most recent refresh call (whether MERGE wrote rows or not). Operator-visible "did we run". Not used by sweep predicate; useful for ops dashboards.
-- PK `(instrument_id, category)` keeps the table at ≤ 7 × 12,417 = ~87k rows. UPSERT-only writer with no row growth past the cap → bloat surface tiny + autovacuum-manageable.
+- PK `(instrument_id, category)` caps the table at 7 × |distinct-instrument-ids| rows (currently ~87k in dev; grows linearly with universe). UPSERT-only writer with no row growth past the cap → bloat surface tiny + autovacuum-manageable.
+- CHECK lists all **7 categories** (Codex 1b MED-4 — current repair sweep iterates only 5; PR12 expands the sweep's `_CATEGORIES` list to include `funds` + `esop` for uniformity).
 
-**Migration backfill** is in the same SQL file: for each existing `_current` row populate `ownership_refresh_state` with `last_drained_observations_max_ingested_at = _current.refreshed_at`, `last_refresh_attempted_at = _current.refreshed_at`. This avoids a "first sweep post-deploy storm" where every instrument looks un-drained — backfill carries the existing watermark forward verbatim. Migration runs inside one tx; idempotent via `ON CONFLICT (instrument_id, category) DO NOTHING`.
-
-**Repair-sweep predicate switch** in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py):
-
-```sql
--- Before (current):
-SELECT c.instrument_id FROM ownership_X_current c
-WHERE c.refreshed_at < (SELECT MAX(o.ingested_at) FROM ownership_X_observations o WHERE o.instrument_id = c.instrument_id)
-GROUP BY c.instrument_id;
-
--- After (PR12):
-SELECT s.instrument_id FROM ownership_refresh_state s
-LEFT JOIN LATERAL (
-    SELECT MAX(o.ingested_at) AS obs_max
-    FROM ownership_X_observations o
-    WHERE o.instrument_id = s.instrument_id
-) sub ON TRUE
-WHERE s.category = %s
-  AND (s.last_drained_observations_max_ingested_at IS NULL
-       OR sub.obs_max IS NOT NULL AND sub.obs_max > s.last_drained_observations_max_ingested_at);
-```
-
-Plus a tail clause that catches the new case "instrument has observations but no state row" (only fires until backfill stabilises; safe to keep as defence-in-depth):
+**Migration backfill** is in the same SQL file; one INSERT per category, aggregated via `MAX(_current.refreshed_at) GROUP BY (instrument_id, category)` (Codex 1b HIGH-3 — multi-row categories like funds/institutions/insiders/blockholders/def14a/esop carry many rows per instrument with different `refreshed_at` values; per-row `ON CONFLICT DO NOTHING` is nondeterministic; aggregate first):
 
 ```sql
-UNION
-SELECT DISTINCT o.instrument_id FROM ownership_X_observations o
-LEFT JOIN ownership_refresh_state s ON s.instrument_id = o.instrument_id AND s.category = %s
-WHERE o.known_to IS NULL AND s.instrument_id IS NULL;
+-- Per category, repeated 7 times in the migration:
+INSERT INTO ownership_refresh_state (
+    instrument_id, category,
+    last_drained_observations_max_ingested_at, last_refresh_attempted_at
+)
+SELECT
+    c.instrument_id,
+    'funds',
+    MAX(c.refreshed_at),
+    MAX(c.refreshed_at)
+FROM ownership_funds_current c
+GROUP BY c.instrument_id
+ON CONFLICT (instrument_id, category) DO NOTHING;
 ```
+
+This carries the existing watermark forward verbatim, avoiding a "first sweep post-deploy storm" where every instrument looks un-drained.
+
+**Repair-sweep predicate switch** in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) — single observations-anchored LEFT JOIN query using `IS DISTINCT FROM` for NULL-safe comparison (Codex 1b MED-3 — collapses the rev-2 two-part predicate + UNION tail into one statement):
+
+```sql
+SELECT obs.instrument_id
+FROM (
+    SELECT instrument_id, MAX(ingested_at) AS obs_max
+    FROM ownership_X_observations
+    GROUP BY instrument_id
+) obs
+LEFT JOIN ownership_refresh_state s
+    ON s.instrument_id = obs.instrument_id AND s.category = %s
+WHERE s.last_drained_observations_max_ingested_at IS DISTINCT FROM obs.obs_max;
+```
+
+NULL semantics:
+
+- `obs` row present, no `s` row → `s.<col>` is NULL, `obs.obs_max` is not NULL → `NULL IS DISTINCT FROM <value>` = TRUE → drift detected, refresh fires.
+- Both present, same value → not distinct → no drift.
+- Both present, different value (obs newer) → distinct → drift.
+- `obs` row absent (no observations) → instrument not in subquery → not in result. Orphan state-table rows (instrument with state but no obs) are not detected — acceptable; cleanup is an O(1) follow-up if it ever happens. Observations-anchored anchor keeps the common path tight.
 
 ## 4. Writer rewrite
 
@@ -186,6 +197,22 @@ def refresh_funds_current(conn: psycopg.Connection[Any], *, instrument_id: int) 
             """,
             (instrument_id,),
         )
+        # Codex 1b HIGH-2: capture watermark BEFORE MERGE in a separate
+        # statement so the value stored in ownership_refresh_state cannot
+        # advance past observations the MERGE did not see. Race direction
+        # under READ COMMITTED: an obs that commits between this SELECT
+        # and the MERGE's source-subquery snapshot will be merged + the
+        # state watermark will lag → next sweep finds drift → extra
+        # refresh (no-op for the freshly-merged row). Benign over-detect,
+        # never silent under-detect. Population aligned with §3.3 repair
+        # predicate (no `known_to IS NULL` filter — both sides operate
+        # over all observations for the instrument).
+        cur.execute(
+            "SELECT MAX(ingested_at) FROM ownership_funds_observations WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        watermark_row = cur.fetchone()
+        watermark = watermark_row[0] if watermark_row else None
         cur.execute(
             """
             MERGE INTO ownership_funds_current AS tgt
@@ -252,18 +279,14 @@ def refresh_funds_current(conn: psycopg.Connection[Any], *, instrument_id: int) 
             INSERT INTO ownership_refresh_state (
                 instrument_id, category,
                 last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (
+                %(iid)s, 'funds', %(watermark)s, now()
             )
-            SELECT
-                %(iid)s,
-                'funds',
-                (SELECT MAX(ingested_at) FROM ownership_funds_observations
-                 WHERE instrument_id = %(iid)s AND known_to IS NULL),
-                now()
             ON CONFLICT (instrument_id, category) DO UPDATE SET
                 last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
                 last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
             """,
-            {"iid": instrument_id},
+            {"iid": instrument_id, "watermark": watermark},
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_funds_current WHERE instrument_id = %s",
@@ -291,13 +314,12 @@ The insiders source-priority `CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 
 
 The `IS DISTINCT FROM` tuple lists on LHS and RHS must contain **exactly the same column names** in the same order; they must contain **every non-PK column** that appears in the UPDATE SET clause; they must **not** contain `refreshed_at`; they must **not** contain PK columns (PK columns are matched by the ON clause; the diff predicate covers business cols only).
 
-Mechanical contract that lint invariant E + L pin:
+Mechanical contract that lint invariants E + I + J pin (simplified per Codex 1b MED-7 — exact ordered equality, no subset relations):
 
-- LHS tuple cols ≡ RHS tuple cols (set equality + ordering)
-- LHS tuple cols ⊆ UPDATE SET targets ∪ {PK cols} (every diff col gets written if UPDATE fires)
-- UPDATE SET targets ≡ LHS tuple cols ∪ {`refreshed_at`} (UPDATE writes diff cols + refreshed_at, nothing else)
-- `refreshed_at` ∉ LHS, `refreshed_at` ∉ RHS
-- PK cols ∉ LHS, PK cols ∉ RHS
+- **Diff cols** ≡ LHS tuple cols ≡ RHS tuple cols (exact ordered equality, same names same positions on both sides of `IS DISTINCT FROM`).
+- **Diff cols** ≡ UPDATE SET targets **minus** `{refreshed_at}` (UPDATE writes every diff col + `refreshed_at`, and nothing else).
+- **Diff cols** ∩ PK cols = ∅ (PK cols are matched by ON clause; not in the diff predicate).
+- `refreshed_at` ∉ diff cols, `refreshed_at` ∉ INSERT column list (so DEFAULT now() fires on insert).
 
 Operator-visible semantic: `refreshed_at` advances IFF business cols changed. The drift watermark for repair sweep is in `ownership_refresh_state.last_drained_observations_max_ingested_at` (§3.3), which always advances on every refresh attempt — no longer overloaded with the "did we attempt this" signal.
 
@@ -315,7 +337,7 @@ The `WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE` cla
 - Concurrent **observation writers** (record_*_observation called from a sibling code path) do not block on the advisory lock. They may commit between the lock acquisition and the MERGE's source-subquery scan; the MERGE will see whatever was committed at scan time. The repair-sweep predicate (§3.3) catches any obs writes that committed after the most recent refresh — that is the whole point of the watermark.
 - PG MERGE takes row-level locks on matched/updated target rows + the locks released at COMMIT. Concurrent same-instrument refreshes (advisory lock contention) → serialised. Concurrent different-instrument refreshes → row-level locks are disjoint by PK; no contention.
 
-## 5. Lint guard (expanded — 7 helpers × 12 invariants = 84 checks)
+## 5. Lint guard (85 clause-counts total — 81 per-helper + 4 cross-cutting)
 
 New script: [`scripts/check_ownership_refresh_writer_pattern.sh`](../../../scripts/check_ownership_refresh_writer_pattern.sh). Wired into [`.githooks/pre-push`](../../../.githooks/pre-push) after PR11's `check_13dg_retention.sh`. Awk-based function-body block walker (PR4 Codex 1c lesson); every grep guarded against empty-input by exact-count assertion (PR10a Codex iter 1 lesson).
 
@@ -326,17 +348,17 @@ Per helper (×7):
 | **A** | Helper defined exactly once in `app/services/ownership_observations.py` | grep `^def refresh_<X>_current\(` → count == 1 |
 | **B** | No legacy `DELETE FROM ownership_<X>_current` inside helper body | awk-extract body span; grep → count == 0 |
 | **C** | `MERGE INTO ownership_<X>_current AS tgt` opener present | grep inside body span → count == 1 |
-| **D** | Scope-clamp pinned by exact literal `tgt.instrument_id = %(iid)s` in **both** the ON clause and the NOT-MATCHED-BY-SOURCE DELETE clause | grep literal `tgt.instrument_id = %(iid)s` inside body span → count == 2 (one in ON, one in DELETE) |
+| **D** | Scope-clamp pinned by exact literal `tgt.instrument_id = %(iid)s` in **both** the ON clause and the NOT-MATCHED-BY-SOURCE DELETE clause | Block-local awk (Codex 1b MED-5 — count == 2 is satisfiable by two literals in wrong places): (D1) awk-extract the ON-clause span from `MERGE INTO ownership_<X>_current AS tgt` opener through the first `WHEN` keyword; grep literal `tgt.instrument_id = %(iid)s` inside → count == 1. (D2) awk-extract the `WHEN NOT MATCHED BY SOURCE` clause through the `THEN DELETE` terminator; grep literal `tgt.instrument_id = %(iid)s` inside → count == 1. |
 | **E** | `refreshed_at` NOT inside diff predicate's `IS DISTINCT FROM` tuples (either side) | awk-extract span from `WHEN MATCHED AND (` to `) THEN UPDATE`; grep → count == 0 |
 | **F** | `pg_advisory_xact_lock` preserved on function-namespace hash | grep `hashtextextended\('refresh_<X>_current'` inside body → count == 1 |
 | **G** | DISTINCT ON columns match per-helper expected tuple | grep literal `DISTINCT ON (<expected cols>)` inside body → count == 1 |
 | **H** | ORDER BY tuple matches per-helper expected list (whitespace-normalised) | awk-extract `ORDER BY` block; collapse whitespace; compare against per-helper expected string → equal |
 | **I** | UPDATE SET clause writes every non-PK business column AND `refreshed_at` (parity with diff tuples) | awk-extract UPDATE SET block; collect column names; assert set == diff-tuple-cols ∪ {refreshed_at} |
 | **J** | INSERT clause omits exactly `refreshed_at` from column list (DEFAULT now() fires) | awk-extract INSERT column list; assert `refreshed_at` ∉ list; assert set ≡ all-non-PK-cols ∪ {PK cols} |
-| **K** | Per-helper extra WHERE filter literal present inside USING subquery (e.g. treasury `AND treasury_shares IS NOT NULL`; def14a 3-clause ESOP filter) — see §4.1 column "Extra WHERE filter" | grep per-helper literal inside body span → count == 1 (or 0 for helpers with no extra filter; per-helper expected count) |
+| **K** | Per-helper extra WHERE filter clauses present inside USING subquery — see §4.1 column "Extra WHERE filter" | Per-clause grep with per-helper expected counts (Codex 1b MED-6 — def14a's 3 clauses must be counted independently; one clause passing while the other two are dropped must fail the lint): treasury `AND treasury_shares IS NOT NULL` → count == 1; def14a (K1) `AND shares IS NOT NULL` → count == 1, (K2) `AND holder_role IS DISTINCT FROM 'esop'` → count == 1, (K3) `AND holder_name !~* %s` (the `_ESOP_HOLDER_NAME_SQL_REGEX` parameter) → count == 1. Insiders / institutions / blockholders / funds / esop have no extra filter; the K-class is skipped for those helpers (per-helper expected count = 0). |
 | **L** | Helper UPSERTs into `ownership_refresh_state` with the matching category literal | grep `INSERT INTO ownership_refresh_state` inside body span → count == 1 AND grep `'<expected category>'` inside same block → count == 1 |
 
-7 helpers × 12 invariants = **84 per-helper checks**.
+**84 base per-helper checks** (7 helpers × 12 invariants A-L), with K-class per-helper expected content varying per §4.1: def14a's K expands to 3 sub-clauses (K1/K2/K3), treasury's K is 1 clause, the other 5 helpers have no K-class clause. Exact total counting sub-clauses: 7 × 10 (A-J) + 7 × 1 (L) + 1 (treasury K) + 3 (def14a K1/K2/K3) = **81 per-helper clause-counts**.
 
 Plus 4 cross-cutting checks:
 
@@ -347,9 +369,9 @@ Plus 4 cross-cutting checks:
 | **O** | `ownership_observations_repair.py` predicate references `ownership_refresh_state.last_drained_observations_max_ingested_at` (not legacy `c.refreshed_at < ...` form) | grep `c.refreshed_at <` → count == 0 inside the repair file |
 | **P** | Migration `sql/163_ownership_refresh_state.sql` exists and creates the table with the documented PK and CHECK constraint | targeted grep |
 
-Total: **88 lint checks** (84 per-helper + 4 cross-cutting). Pure text walk, no DB dependency, sub-second runtime.
+Total: **85 lint clause-counts** (81 per-helper + 4 cross-cutting). Pure text walk, no DB dependency, sub-second runtime.
 
-## 6. Tests (expanded — 7 helpers × 8 cases = 56 cases + cross-helper + cross-sweep)
+## 6. Tests (45 parametrised cases + helper-specific overlays)
 
 New file: [`tests/test_ownership_refresh_writer_merge.py`](../../../tests/test_ownership_refresh_writer_merge.py). Parametrised over the 7 helpers.
 
@@ -358,7 +380,7 @@ New file: [`tests/test_ownership_refresh_writer_merge.py`](../../../tests/test_o
 | # | Case | Setup | Action | Assertion |
 | --- | --- | --- | --- | --- |
 | 1 | **insert** | empty `_current` for instrument I; write 1 observation | `refresh_X_current(I)` | row present; row's `xmin` is a fresh xid (not the pre-call xid) |
-| 2 | **no-op churn** | row present from prior refresh; no observation change; capture per-row `xmin0` + `pgstattuple(table).{table_len, tuple_count, dead_tuple_count}` | `refresh_X_current(I)` again | per-row `xmin::text == xmin0::text` (no rewrite); `pgstattuple.table_len` unchanged; `pgstattuple.dead_tuple_count` delta == 0; `_current.refreshed_at` unchanged (proves diff-predicate excludes it). **Load-bearing for primary bloat fix.** |
+| 2 | **no-op churn** | row present from prior refresh; no observation change; capture per-row `xmin0` + `pgstattuple(_current).{table_len, tuple_count, dead_tuple_count}` + `pgstattuple(ownership_refresh_state).{tuple_count, dead_tuple_count}` | `refresh_X_current(I)` again | per-row `xmin::text == xmin0::text` on `_current` (no rewrite); `pgstattuple(_current).table_len` unchanged; `pgstattuple(_current).dead_tuple_count` delta == 0; `_current.refreshed_at` unchanged (proves diff-predicate excludes it). State-table churn bounded (Codex 1b MED-2): `pgstattuple(ownership_refresh_state).tuple_count` delta == 0 (UPSERT into same PK row) AND `dead_tuple_count` delta ≤ 1 (the in-place state UPDATE produces at most 1 dead tuple per refresh call, autovacuum-bounded). **Load-bearing for primary bloat fix on `_current`; pins state-table bloat surface.** |
 | 3 | **update (amendment)** | row present `xmin0`, refreshed_at0; insert later-`filed_at` observation, same PK, different `shares` | refresh | row present; per-row `xmin::text != xmin0::text`; `shares` reflects amendment; `refreshed_at > refreshed_at0` (advances on actual diff). |
 | 4 | **delete (`known_to` expiry)** | row present; `UPDATE _observations SET known_to = now() WHERE …` | refresh | row absent (NOT MATCHED BY SOURCE → DELETE fired). |
 | 5 | **scope clamp** | rows present for instruments A and B; capture B's per-row `xmin0` | `refresh_X_current(A)` with no observation change | B's row present; B's per-row `xmin::text == xmin0::text` (other-instrument rows untouched). **Pins the literal `tgt.instrument_id = %(iid)s` clamp in ON clause + DELETE clause.** |
@@ -388,7 +410,9 @@ Single-fact assertion; cross-cutting; minimal blast radius. PR description expli
 
 Reclaim path is the **operator pre-wipe + clean re-run** (parent spec §6.3 + §8 acceptance). PR12's contribution is ensuring the clean re-run does not re-bloat the new write-through pattern AND that the repair sweep stays cheap on healthy installs.
 
-**Lock / downtime cost of the operator pre-wipe** (Codex 1a LOW-2 — restated honestly): the parent spec's §6.3 pre-wipe is `TRUNCATE` of every observations + `_current` + `ownership_refresh_state` table. `TRUNCATE` takes an `ACCESS EXCLUSIVE` lock per table → all SELECT/INSERT/UPDATE traffic blocks for the truncate window. Dev DB at 43 GB the operation is typically <30s. Production-grade deployments would need a maintenance window — out of scope here (dev-DB-only operation by design).
+**Honest bloat attribution** (Codex 1b LOW-4): the dominant bloat source under the old pattern is bootstrap / write-through refresh after every observation batch (per-call N-row DELETE+INSERT × ~9k N-PORT accessions × 86 rows-per-instrument). Repair-sweep retriggers under the legacy `c.refreshed_at < (...)` predicate are a **secondary** amplifier, not the primary mass. The diff-aware MERGE eliminates the secondary feeder; the new `ownership_refresh_state` watermark prevents the forever-loop regression that pure MERGE would have introduced. The primary write-side reduction comes from MERGE skipping no-op rewrites of business-identical rows, not from sweep behaviour.
+
+**Lock / downtime cost of the operator pre-wipe** (Codex 1a LOW-2): the parent spec's §6.3 pre-wipe is `TRUNCATE` of every observations + `_current` + `ownership_refresh_state` table. `TRUNCATE` takes an `ACCESS EXCLUSIVE` lock per table → all SELECT/INSERT/UPDATE traffic blocks for the truncate window. Dev DB at ~41 GB the operation is typically <30s. Production-grade deployments would need a maintenance window — out of scope here (dev-DB-only operation by design).
 
 **Read-side unchanged**: no `_current` consumer sees behavioural change. Same row shapes, same dedup ordering, same priorities, same indexes. The MERGE's `WHEN NOT MATCHED BY SOURCE THEN DELETE` is steady-state writer behaviour identical to today's DELETE+INSERT (a row drops out of `_current` only when its only observation expires via `known_to` or when caps shed it post-wipe).
 
@@ -400,8 +424,8 @@ CLAUDE.md §"Definition of done" + §"ETL / parser / schema-migration additional
 
 1. 7 `refresh_*_current` helpers in [`app/services/ownership_observations.py`](../../../app/services/ownership_observations.py) rewritten to single-statement MERGE + `ownership_refresh_state` UPSERT per §4 template + §4.1 per-helper differences. Signature `(conn, *, instrument_id) -> int` preserved on every helper.
 2. New migration `sql/163_ownership_refresh_state.sql` creates the table with the schema in §3.3, plus an idempotent backfill from existing `_current.refreshed_at`. Runs inside the standard migration runner; no `-- runner: autocommit` directive required (no ALTER SYSTEM / CREATE DATABASE / VACUUM / REINDEX SYSTEM).
-3. Repair-sweep predicate switched in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) to the §3.3 form (state-table watermark with LATERAL obs-MAX subquery + UNION defence-in-depth tail clause).
-4. [`scripts/check_ownership_refresh_writer_pattern.sh`](../../../scripts/check_ownership_refresh_writer_pattern.sh) (88 checks: 7 × 12 per-helper + 4 cross-cutting) wired into [`.githooks/pre-push`](../../../.githooks/pre-push) after `check_13dg_retention.sh`.
+3. Repair-sweep predicate switched in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) to the §3.3 form (observations-anchored single-query LEFT JOIN with `IS DISTINCT FROM`). `_CATEGORIES` list expanded to all 7 categories — adds `funds` + `esop` lambdas wiring `refresh_funds_current` + `refresh_esop_current` so the sweep stays uniform with the state-table CHECK constraint (Codex 1b MED-4).
+4. [`scripts/check_ownership_refresh_writer_pattern.sh`](../../../scripts/check_ownership_refresh_writer_pattern.sh) (85 clause-counts: 81 per-helper + 4 cross-cutting, per §5) wired into [`.githooks/pre-push`](../../../.githooks/pre-push) after `check_13dg_retention.sh`.
 5. [`tests/test_ownership_refresh_writer_merge.py`](../../../tests/test_ownership_refresh_writer_merge.py) — parametrised over 7 helpers × 5 base cases + insiders priority-chain + treasury null guard + def14a ESOP exclusion + 7 repair-sweep no-loop cases. Load-bearing no-op-churn case uses per-row `xmin::text` equality + `pgstattuple`.
 6. [`tests/fixtures/ebull_test_db.py`](../../../tests/fixtures/ebull_test_db.py) template provisions `pgstattuple` extension; failure to provision triggers `pytest.fail` in no-op-churn case (no silent skips).
 7. Boot-time PG ≥ 17 guard at lifespan (mirror #1187 pattern). Pinned by `tests/smoke/test_app_boots.py`.
@@ -420,7 +444,7 @@ PR12 alone does not move the post-merge dev DB size (per §8 above). Acceptance 
 Per parent spec §8 acceptance tiers:
 
 - **v1 bar (`<20 GB hot`)** — PR12 audit complete (this spec) + writer remediation merged + pre-wipe + clean re-run lands `ownership_funds_current + ownership_institutions_current` somewhere in the original 5.3 GB ballpark (Codex 1a LOW-3 — DB-size projections in this spec apply only to the two `_current` tables; other hot tables are governed by their respective PR caps).
-- **Phase 2 stretch (`<15 GB hot`)** — PR12 writer fix + observations caps from PR6/PR7 + clean re-run lands combined `_current` ≤ 1 GB. The 2080 MB → ~250 MB compression on funds_current comes from: (a) 786k live rows × 280 B real-data row width = ~220 MB heap + ~80 MB indexes; (b) zero bloat under diff-aware MERGE; (c) repair sweep no longer triggers redundant refreshes that previously fed the bloat. ✅ Phase 2 unblocked by PR12.
+- **Phase 2 stretch (`<15 GB hot`)** — PR12 writer fix + observations caps from PR6/PR7 + clean re-run lands combined `_current` ≤ 1 GB. The 2080 MB → ~250 MB compression on funds_current comes from: (a) 786k live rows × 280 B real-data row width = ~220 MB heap + ~80 MB indexes; (b) MERGE skipping no-op rewrites on business-identical refresh calls (primary saving). The repair-sweep watermark fix is a correctness fix that keeps the sweep cheap on healthy installs; it is not the headline bloat-reduction lever (Codex 1b LOW-4). ✅ Phase 2 unblocked by PR12.
 - **Ambitious (`<10 GB hot`)** — requires further `companyfacts` tightening (Phase 3 ticket; out of #1233 scope).
 
 PR12 measurement protocol post pre-wipe + clean re-run:
@@ -432,15 +456,16 @@ WHERE relname IN ('ownership_funds_current', 'ownership_institutions_current', '
 ORDER BY pg_total_relation_size(oid) DESC;
 ```
 
-Plus per-helper `pgstattuple` to confirm `tuple_percent` ≥ 70% (healthy density floor).
+Per-helper `pgstattuple` confirms `tuple_percent` ≥ 70% on `_current` tables (healthy density floor). Same floor applies to `ownership_refresh_state` (Codex 1b MED-1 — state table churns 1 row UPSERT per refresh call; ≤87k row PK cap means autovacuum easily keeps up at default thresholds; floor pinned by acceptance script).
 
 ## 11. Codex review gate
 
 Per #1208 cadence + CLAUDE.md "Codex second-opinion — mandatory checkpoints":
 
 - **Codex 1a** on this spec — completed; 5 HIGH + 7 MED + 4 LOW folded into rev 2.
-- **Codex 1b** on rev 2 (after this commit).
-- Codex 1c if needed.
+- **Codex 1b** on rev 2 — completed; 3 HIGH + 7 MED + 4 LOW folded into rev 3 (this commit).
+- **Codex 1c** on rev 3 (next).
+- Codex 1d if needed.
 - Spec lands as DOC PR (no code yet).
 - Implementation plan = separate doc (`docs/superpowers/plans/2026-05-21-pr12-ownership-current-writer-merge-impl.md`). Codex 1a / 1b on the plan.
 - PR12 implementation PR follows standard #1208 cadence: self-review → Codex 2 pre-push → push → bot review → resolve → APPROVE on latest commit → merge.
@@ -450,6 +475,7 @@ Per #1208 cadence + CLAUDE.md "Codex second-opinion — mandatory checkpoints":
 State at this commit:
 
 - Parent umbrella #1233 still OPEN. PR1-PR11 all SHIPPED (PR11 #1253 020e701 merged 2026-05-21).
+- This is the DESIGN doc for PR12 (rev 3 post-Codex 1b).
 - This is the DESIGN doc for PR12 (rev 2 post-Codex 1a).
 - Branch: `feature/1233-pr12-design-spec`.
 - Next: Codex 1b on rev 2; revise if needed; doc PR; then writing-plans skill → implementation plan → execution.
