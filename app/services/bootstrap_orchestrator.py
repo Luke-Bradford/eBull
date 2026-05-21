@@ -113,8 +113,6 @@ JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap drain.
 JOB_MF_DIRECTORY_SYNC = "mf_directory_sync"
 JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
-
-
 # PR1c #1064 — bootstrap-bounded 13F sweep recency cut-off. Used to
 # live as a constant inside the deleted ``bootstrap_sec_13f_recent_sweep_job``
 # wrapper. 4 quarters (~380 days) = current + 3 prior periods, matches

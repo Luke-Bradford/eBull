@@ -155,7 +155,6 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "blockholder_filings_ingest_log",
     "blockholder_filings",
     "blockholder_filers",
-    "blockholder_filer_seeds",
     "def14a_drift_alerts",
     "def14a_ingest_log",
     "def14a_beneficial_holdings",

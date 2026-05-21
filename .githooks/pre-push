@@ -125,6 +125,19 @@ bash scripts/check_form5_retention.sh
 echo "==> Pre-push gate: Form 3 latest-per-pair invariant lint"
 bash scripts/check_form3_latest_per_pair.sh
 
+# #1233 §4.8 PR11 (v8 empirical pivot) — every SC 13D/G writer
+# chokepoint must honour the max(today-3y, 2024-12-18) retention floor.
+# Seven placement invariants A/C/D/E/F/G/H: A helper defs, C manifest
+# pre-fetch gate, D sync bf.filed_at gate (NOT fe.filing_date — Codex
+# 1a HIGH #4), E refresh-current exemption, F no-append-writers
+# outside chokepoints, G dormant-entrypoint retirement, H rewash
+# rescue-path branch order. Invariants B/I/J/K/L were retired with
+# the universe-issuer-CIK discovery layer (efts.sec.gov post-mandate
+# does NOT index by subject CIK — see spec v8 §0.1 empirical pivot).
+# ~30ms.
+echo "==> Pre-push gate: 13D/G retention cap invariant lint"
+bash scripts/check_13dg_retention.sh
+
 # #1249 / #1250 cleanup — every manifest_parsers/sec_*.py that calls
 # _archive_file_url(<cik>, ...) where <cik> is row.cik (filer_cik /
 # similar) MUST also reference KNOWN_FILING_AGENT_CIKS for the agent-

@@ -34,10 +34,10 @@ Phases in order; the catalogue lives in
 is the source of truth (asserted == 26 at module load). Spec:
 ``docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md``.
 
-#1174 added S25 ``mf_directory_sync`` (dedicated MF-directory refresh
+Issue #1174 added S25 ``mf_directory_sync`` (dedicated MF-directory refresh
 for N-CSR classId resolution) + S26 ``sec_n_csr_bootstrap_drain``
-(fund-scoped manifest enqueue for the #1171 fund-metadata parser).
-Both ride the ``sec_rate`` lane.
+(fund-scoped manifest enqueue for the #1171 fund-metadata parser). Both
+ride the ``sec_rate`` lane.
 
 1. **Phase A — init** (sequential, ``init`` lane, single thread):
    - S1 ``universe_sync`` (``nightly_universe_sync``; ~30s, ~1.5k rows).
@@ -77,6 +77,12 @@ Both ride the ``sec_rate`` lane.
 1. **Phase E — final derivations** (``db`` lane):
    - S23 ``ownership_observations_backfill``
    - S24 ``fundamentals_sync``
+1. **Phase F — fund metadata** (``sec_rate``):
+   - S25 ``mf_directory_sync`` (advertises ``class_id_mapping_ready``
+     for S26)
+   - S26 ``sec_n_csr_bootstrap_drain`` (fund-scoped N-CSR / N-CSRS
+     manifest enqueue; 730d retention pinned at
+     ``app/services/manifest_parsers/sec_n_csr.py::N_CSR_RETENTION_DAYS``)
 
 Total wall-clock: typically **60–90 minutes** on the bulk path,
 dominated by ``sec_bulk_download`` + ``sec_submissions_files_walk``.

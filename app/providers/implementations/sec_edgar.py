@@ -28,6 +28,7 @@ Provider contract:
 import hashlib
 import logging
 import threading
+import urllib.parse
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from types import TracebackType
@@ -422,6 +423,89 @@ class SecFilingsProvider(FilingsProvider):
             )
             cik_for_url = int(raw_id[:10])
         absolute_url = f"https://www.sec.gov/Archives/edgar/data/{cik_for_url}/{raw_id}/index.json"
+        resp = self._http_tickers.get(absolute_url)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        parsed = resp.json()
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    def fetch_search_index_json(
+        self,
+        *,
+        ciks: str,
+        forms: tuple[str, ...],
+        startdt: date,
+        enddt: date,
+        from_offset: int = 0,
+        size: int = 100,
+    ) -> dict[str, object] | None:
+        """Query SEC EDGAR full-text search-index for filings by issuer + form.
+
+        Hits ``https://efts.sec.gov/LATEST/search-index`` — the JSON
+        backing the EDGAR full-text search UI — and returns the parsed
+        ``hits`` envelope. Returns the parsed dict on 2xx, ``None`` on
+        404 or non-dict body. Raises on other HTTP errors so the caller
+        decides retry vs skip (same shape as :func:`fetch_filing_index`).
+
+        **History (#1233 PR11 v8 empirical pivot)**: this method was
+        added to support the PR11 universe-issuer-CIK discovery job,
+        which empirically failed (efts.sec.gov post-2024-12-18 does
+        NOT index by SUBJECT CIK — only by FILER CIK; see spec v8 §0.1).
+        The discovery job was retired but this method is retained as a
+        general-purpose provider primitive — future filer-CIK-driven
+        ingest (e.g. per-13F-manager 13D/G coverage) can reuse it
+        without re-introducing the dual-host throttle plumbing.
+
+        **Rate-limit chain (#1233 PR11):** routes through
+        ``self._http_tickers`` so the request shares the process-wide
+        SEC 10 req/s budget via
+        :data:`_MIN_REQUEST_INTERVAL_S` /
+        :data:`_PROCESS_RATE_LIMIT_CLOCK` /
+        :data:`_PROCESS_RATE_LIMIT_LOCK` (see lines 55-80). Per-issuer
+        discovery cost is 1 request + 0-2 pagination requests for
+        outlier issuers, so a full-universe bootstrap (~5,400
+        requests) fits comfortably inside the 10 req/s ceiling
+        alongside parser fetches without per-call coordination.
+
+        **Host (`efts.sec.gov`):** a distinct host from both
+        ``data.sec.gov`` and ``www.sec.gov``, but with the same SEC
+        fair-use policy. The ``_http_tickers`` client carries the
+        declared User-Agent and the shared throttle — both are
+        required for ``efts.sec.gov`` too.
+
+        **Parameters** (URL-encoded via :func:`urllib.parse.urlencode`):
+          * ``q`` — empty (issuer + form is the filter; no keyword search)
+          * ``forms`` — CSV of form names from ``forms`` tuple
+          * ``ciks`` — zero-padded 10-digit CIK string (caller's
+            responsibility to pad)
+          * ``dateRange=custom`` — required to honour ``startdt`` /
+            ``enddt``
+          * ``startdt`` / ``enddt`` — ISO date strings
+          * ``from`` — pagination offset
+          * ``size`` — page size (SEC max is 100)
+
+        Cross-link: :ref:`.claude/skills/data-sources/sec-edgar.md` §1
+        (endpoint catalogue) + §3.7 (filing-agent vs issuer CIK
+        archive-URL semantics — discovery returns ALL of ``ciks[]``
+        per hit so the caller can pick the right archive-owner CIK
+        per §3.7's rules).
+        """
+        params = urllib.parse.urlencode(
+            {
+                "q": "",
+                "forms": ",".join(forms),
+                "ciks": ciks,
+                "dateRange": "custom",
+                "startdt": startdt.isoformat(),
+                "enddt": enddt.isoformat(),
+                "from": from_offset,
+                "size": size,
+            }
+        )
+        absolute_url = f"https://efts.sec.gov/LATEST/search-index?{params}"
         resp = self._http_tickers.get(absolute_url)
         if resp.status_code == 404:
             return None

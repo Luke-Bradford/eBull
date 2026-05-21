@@ -50,12 +50,10 @@ from typing import Any
 from uuid import uuid4
 
 import psycopg
+from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 
 from app.config import settings
-from app.providers.implementations.sec_13dg import (
-    BlockholderFiling,
-    parse_primary_doc,
-)
+from app.providers.implementations.sec_13dg import BlockholderFiling
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.blockholders import (
     _PARSER_VERSION_13DG,
@@ -66,10 +64,14 @@ from app.services.blockholders import (
     _resolve_cusip_to_instrument_id,
     _upsert_filer,
     _upsert_filing_row,
+    blockholders_within_retention,
 )
 from app.services.manifest_parsers._classify import (
     format_upsert_error,
     is_transient_upsert_error,
+)
+from app.services.manifest_parsers._schedule13_adapter import (
+    build_filing_from_edgartools_dict,
 )
 from app.services.ownership_observations import refresh_blockholders_current
 from app.services.raw_filings import store_raw
@@ -146,6 +148,29 @@ def _parse_13dg(
             error=f"row.cik is a known filing-agent CIK ({padded_filer_cik})",
         )
 
+    # Chokepoint B (#1233 PR11): pre-fetch retention gate. Tombstone
+    # any manifest row whose ``filed_at`` falls strictly before
+    # ``blockholders_retention_cutoff()`` BEFORE we touch SEC HTTP or
+    # ``store_raw`` — saves the rate-limited budget AND prevents any
+    # operator-triggered rebuild (POST /jobs/sec_rebuild/run) from
+    # re-introducing pre-cap rows through the manifest worker. The cap
+    # honours the SEC Schedule 13 XML mandate (2024-12-18) as a
+    # mandate-floor — pre-mandate filings are HTML-only and not
+    # parseable by edgartools. ``filed_at IS NULL`` resolves to
+    # ``False`` (defensive — a row without a canonical filing
+    # timestamp cannot be placed inside the window).
+    if not blockholders_within_retention(row.filed_at):
+        logger.info(
+            "13D/G manifest parser: accession=%s filed_at=%s outside retention cutoff; tombstoning without fetch",
+            accession,
+            row.filed_at,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13DG,
+            error="retention floor",
+        )
+
     # Build canonical primary_doc.xml URL — manifest's
     # primary_document_url may be the filing-index page or a sibling
     # attachment. The legacy ingester builds this URL directly from
@@ -220,7 +245,26 @@ def _parse_13dg(
     # trail is consistent regardless of which exception type fires
     # (#1129 review WARNING + PREVENTION).
     try:
-        filing: BlockholderFiling = parse_primary_doc(primary_xml)
+        # PR11 (#1233): edgartools-backed parse via Schedule13D/G
+        # static methods. ``parse_xml`` returns a dict whose nested
+        # values are frozen dataclasses; the local adapter converts
+        # that into the repo-internal ``BlockholderFiling`` shape so
+        # downstream consumers (``_upsert_filing_row`` +
+        # ``_record_13dg_observation_for_filing``) are unchanged.
+        # The in-house ``parse_primary_doc`` is retained at
+        # ``app/providers/implementations/sec_13dg.py`` for backward
+        # compat with ``rewash_filings._apply_blockholders`` until
+        # that consumer is migrated in a follow-up.
+        if row.source == "sec_13d":
+            parsed_dict = Schedule13D.parse_xml(primary_xml)
+        else:  # sec_13g
+            parsed_dict = Schedule13G.parse_xml(primary_xml)
+        filing: BlockholderFiling = build_filing_from_edgartools_dict(
+            parsed_dict,
+            source=row.source,
+            manifest_form=row.form,
+            manifest_filer_cik=filer_cik,
+        )
     except Exception as exc:  # noqa: BLE001 — broad catch + audit-log write
         # Tag the error string by exception class so operators reading
         # blockholder_filings_ingest_log can distinguish expected
@@ -267,11 +311,31 @@ def _parse_13dg(
     # lose the manifest's view of the stored raw row (Codex pre-push
     # finding). Skipping the observation write-through is conditional
     # on instrument_id resolving non-NULL — the upsert path still
-    # writes ``blockholder_filings`` rows for auditability.
+    # writes ``blockholder_filings`` rows for auditability (audit
+    # trail preserved per the module docstring; CUSIP-unresolved
+    # accessions are tracked by #740).
     inserted = 0
     try:
         with conn.transaction():
+            # PR11 v8 empirical pivot 2026-05-21: CUSIP-only resolution.
+            # The earlier 5-case CUSIP-vs-hint cross-validation branch
+            # depended on the ``sec_13dg_discovery_issuer_hint`` side
+            # table seeded by the universe-issuer-CIK discovery layer.
+            # Operator smoke against AAPL/GME/MSFT/JPM/HD revealed that
+            # ``efts.sec.gov/LATEST/search-index`` post-2024-12-18 does
+            # NOT index SC 13D/G by SUBJECT CIK, only by FILER CIK —
+            # the hint table would never get populated by the discovery
+            # path, so the cross-validation branches collapse to CASE E
+            # (legacy daily-index path; no hints, CUSIP-only). The hint
+            # table + discovery module + 5-case branch are therefore
+            # all retired (sql/162 drops the table). The legacy daily-
+            # index path remains the discovery mechanism and already
+            # ships 575k SC 13D/G manifest rows in dev DB.
             instrument_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
+            log_error: str | None = (
+                None if instrument_id is not None else f"cusip_unresolved (cusip={filing.issuer_cusip!r})"
+            )
+
             skipped_no_cusip = 0 if instrument_id is not None else len(filing.reporting_persons)
             filer_id = _upsert_filer(conn, cik=filing.primary_filer_cik, name=filer_name)
             for person in filing.reporting_persons:
@@ -304,12 +368,10 @@ def _parse_13dg(
                 )
                 refresh_blockholders_current(conn, instrument_id=instrument_id)
 
+            # CUSIP-resolved → success (observation written).
+            # CUSIP-unresolved → partial (no observation row, audit-log
+            # carries the reason; rollup join gated by #740 backfill).
             log_status = "success" if instrument_id is not None else "partial"
-            log_error = (
-                None
-                if instrument_id is not None
-                else f"issuer CUSIP {filing.issuer_cusip!r} unresolved (gated by #740 backfill)"
-            )
             _record_ingest_attempt(
                 conn,
                 filer_cik=filer_cik,
