@@ -37,6 +37,30 @@ from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixtu
 pytestmark = pytest.mark.integration
 
 
+# Minimal post-mandate SC 13D primary_doc.xml that ``Schedule13D.parse_xml``
+# (edgartools 5.30.2) accepts without raising. Used by the legacy
+# blockholder rewash tests that monkeypatch
+# ``_schedule13_adapter.build_filing_from_edgartools_dict`` — the XML
+# only has to traverse the upstream parser cleanly; the adapter
+# monkeypatch substitutes the canned ``BlockholderFiling`` regardless
+# of the parsed dict contents. PR11 #1233 lesson (Phase 5): SC 13D
+# parse_xml REQUIRES ``<coverPageHeader>`` (NOT ``<coverPage>``).
+_MIN_PARSEABLE_13D_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D">
+  <headerData><submissionType>SCHEDULE 13D</submissionType></headerData>
+  <formData>
+    <coverPageHeader>
+      <issuerInfo>
+        <issuerCIK>0000999000</issuerCIK>
+        <issuerCUSIP>CSP12345</issuerCUSIP>
+        <issuerName>Filler Issuer</issuerName>
+      </issuerInfo>
+    </coverPageHeader>
+  </formData>
+</edgarSubmission>
+"""
+
+
 @pytest.fixture
 def isolated_registry() -> Iterator[None]:
     """Snapshot + restore the parser registry around each test."""
@@ -874,9 +898,18 @@ def test_blockholders_apply_raises_on_parse_failure(
 ) -> None:
     """13D/G rewash spec follows the same parse-regression contract:
     parser failure on a body with an existing typed row must raise
-    so the failure surfaces in rows_failed."""
+    so the failure surfaces in rows_failed.
+
+    PR11 #1233: ``_apply_blockholders`` was switched from the in-house
+    ``parse_primary_doc`` to edgartools' ``Schedule13D.parse_xml`` +
+    the ``_schedule13_adapter`` wrapper. We monkeypatch
+    ``Schedule13D.parse_xml`` to simulate the regression so the test
+    targets the live parser entry point.
+    """
+    from edgar.beneficial_ownership.schedule13 import Schedule13D
+
     conn = ebull_test_conn
-    accession = "0001234567-26-13dg-regress"
+    accession = "0001234567-26-130031"
     instrument_id = 950_030
     conn.execute(
         """
@@ -910,10 +943,10 @@ def test_blockholders_apply_raises_on_parse_failure(
     _seed_raw(conn, accession=accession, kind="primary_doc_13dg", parser_version="13dg-primary-v0")
     conn.commit()
 
-    monkeypatch.setattr(
-        "app.providers.implementations.sec_13dg.parse_primary_doc",
-        lambda _xml: (_ for _ in ()).throw(ValueError("synthetic parse error")),
-    )
+    def _boom(_xml: str) -> dict:
+        raise ValueError("synthetic parse error")
+
+    monkeypatch.setattr(Schedule13D, "parse_xml", staticmethod(_boom))
 
     rewash_filings._REGISTRY.clear()
     register_parser(
@@ -972,7 +1005,16 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
     the stale typed-row value. Otherwise the row ends up internally
     inconsistent (issuer_cusip from the new parse, instrument_id
     pointing at the old issuer). Regression for the high-severity
-    Codex finding."""
+    Codex finding.
+
+    PR11 #1233: ``_apply_blockholders`` now routes through the
+    edgartools ``Schedule13D/G.parse_xml`` + ``_schedule13_adapter``
+    pair. We monkeypatch the adapter to inject the "bug-fixed" parse
+    output deterministically (the adapter is imported at call time
+    inside ``_apply_blockholders`` so module-attribute monkeypatching
+    takes effect). The CUSIP regex (8 alnum) constrains the test
+    fixtures to ``OLDCUSP1`` / ``NEWCUSP1``.
+    """
     from app.providers.implementations.sec_13dg import (
         BlockholderFiling,
         BlockholderReportingPerson,
@@ -997,8 +1039,8 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
         INSERT INTO external_identifiers (
             instrument_id, provider, identifier_type, identifier_value, is_primary
         ) VALUES
-            (%s, 'sec', 'cusip', 'OLDCUSIP', FALSE),
-            (%s, 'sec', 'cusip', 'NEWCUSIP', FALSE)
+            (%s, 'sec', 'cusip', 'OLDCUSP1', FALSE),
+            (%s, 'sec', 'cusip', 'NEWCUSP1', FALSE)
         ON CONFLICT (provider, identifier_type, identifier_value)
             WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
         DO NOTHING
@@ -1014,7 +1056,7 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
     assert result is not None
     filer_id = result[0]
 
-    accession = "0001234567-26-13dg-cusip-fix"
+    accession = "0001234567-26-130041"
     # Seed a typed row with the OLD cusip + OLD instrument_id.
     conn.execute(
         """
@@ -1023,21 +1065,32 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
             instrument_id, issuer_cik, issuer_cusip, securities_class_title,
             reporter_no_cik, reporter_name, aggregate_amount_owned, percent_of_class
         ) VALUES (%s, %s, 'SCHEDULE 13G', 'passive', %s,
-                  '0000999000', 'OLDCUSIP', 'Common',
+                  '0000999000', 'OLDCUSP1', 'Common',
                   FALSE, 'Test Reporter', 1000, 5.5)
         """,
         (filer_id, accession, old_iid),
     )
-    _seed_raw(conn, accession=accession, kind="primary_doc_13dg", parser_version="13dg-primary-v0")
+    # The raw body has to make Schedule13D.parse_xml succeed since it
+    # runs before the adapter; supply a real post-mandate fixture with
+    # ``<coverPageHeader>`` per Phase 5 lesson.
+    raw_filings.store_raw(
+        conn,
+        accession_number=accession,
+        document_kind="primary_doc_13dg",
+        payload=_MIN_PARSEABLE_13D_XML,
+        parser_version="13dg-primary-v0",
+    )
     conn.commit()
 
-    # Stub the parser to return the NEW cusip (simulating the bug fix).
+    # Stub the adapter to return the NEW cusip (simulating the bug
+    # fix). Adapter is imported at call time inside
+    # _apply_blockholders, so the module-level patch is observed.
     fake_filing = BlockholderFiling(
         submission_type="SCHEDULE 13G",
         status="passive",
         primary_filer_cik="0000111000",
         issuer_cik="0000999000",
-        issuer_cusip="NEWCUSIP",  # parser fix
+        issuer_cusip="NEWCUSP1",  # parser fix
         issuer_name="New Issuer",
         securities_class_title="Common",
         date_of_event=None,
@@ -1060,8 +1113,8 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
         ],
     )
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13dg.parse_primary_doc",
-        lambda _xml: fake_filing,
+        "app.services.manifest_parsers._schedule13_adapter.build_filing_from_edgartools_dict",
+        lambda _parsed, **_kw: fake_filing,
     )
 
     rewash_filings._REGISTRY.clear()
@@ -1084,7 +1137,7 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
         row = cur.fetchone()
     assert row is not None
     instrument_id, issuer_cusip = row
-    assert issuer_cusip == "NEWCUSIP"
+    assert issuer_cusip == "NEWCUSP1"
     assert instrument_id == new_iid  # re-resolved, not reused stale value
 
 
@@ -1097,11 +1150,16 @@ def test_blockholders_apply_raises_on_empty_reporting_persons(
     previously-populated 13D/G accession, the apply must RAISE —
     without the guard, DELETE would silently destroy every existing
     reporter row with no failure signal. Regression for the BLOCKING
-    finding from PR #825 review."""
+    finding from PR #825 review.
+
+    PR11 #1233: monkeypatch the post-edgartools adapter (not the
+    in-house ``parse_primary_doc``) since ``_apply_blockholders`` now
+    routes through ``Schedule13D/G.parse_xml`` + ``_schedule13_adapter``.
+    """
     from app.providers.implementations.sec_13dg import BlockholderFiling
 
     conn = ebull_test_conn
-    accession = "0001234567-26-13dg-empty-persons"
+    accession = "0001234567-26-130110"
     instrument_id = 950_110
     conn.execute(
         """
@@ -1127,12 +1185,20 @@ def test_blockholders_apply_raises_on_empty_reporting_persons(
             instrument_id, issuer_cik, issuer_cusip, securities_class_title,
             reporter_no_cik, reporter_name, aggregate_amount_owned, percent_of_class
         ) VALUES (%s, %s, 'SCHEDULE 13G', 'passive', %s,
-                  '0000999000', 'CSP1', 'Common',
+                  '0000999000', 'CSP12345', 'Common',
                   FALSE, 'Existing', 1000, 5.0)
         """,
         (filer_id, accession, instrument_id),
     )
-    _seed_raw(conn, accession=accession, kind="primary_doc_13dg", parser_version="13dg-primary-v0")
+    # Real post-mandate 13D XML so Schedule13D.parse_xml succeeds
+    # before the adapter monkeypatch intercepts the dict.
+    raw_filings.store_raw(
+        conn,
+        accession_number=accession,
+        document_kind="primary_doc_13dg",
+        payload=_MIN_PARSEABLE_13D_XML,
+        parser_version="13dg-primary-v0",
+    )
     conn.commit()
 
     fake_filing = BlockholderFiling(
@@ -1140,7 +1206,7 @@ def test_blockholders_apply_raises_on_empty_reporting_persons(
         status="passive",
         primary_filer_cik="0000111000",
         issuer_cik="0000999000",
-        issuer_cusip="CSP1",
+        issuer_cusip="CSP12345",
         issuer_name="Issuer",
         securities_class_title="Common",
         date_of_event=None,
@@ -1148,8 +1214,8 @@ def test_blockholders_apply_raises_on_empty_reporting_persons(
         reporting_persons=[],  # parser regression: lost all reporters
     )
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13dg.parse_primary_doc",
-        lambda _xml: fake_filing,
+        "app.services.manifest_parsers._schedule13_adapter.build_filing_from_edgartools_dict",
+        lambda _parsed, **_kw: fake_filing,
     )
 
     rewash_filings._REGISTRY.clear()

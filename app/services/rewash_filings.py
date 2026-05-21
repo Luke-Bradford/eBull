@@ -585,34 +585,136 @@ def _apply_blockholders(
 
     Returns ``False`` when no existing row is found (re-wash isn't
     a first-time ingester). Raises ``RewashParseError`` on parser
-    regression so failures surface in ``rows_failed``."""
-    from app.providers.implementations.sec_13dg import parse_primary_doc
+    regression so failures surface in ``rows_failed``.
+
+    PR11 (#1233) §3.2 chokepoint F — EXPLICIT BRANCH ORDER (Codex 1b
+    MEDIUM rewash branch-order pin):
+
+      (i) FIRST query ``SELECT COUNT(*) FROM blockholder_filings WHERE
+          accession_number = ?`` to determine which branch this raw
+          row falls into.
+      (ii) Non-zero count → HAPPY PATH: the accession already has
+           typed rows on file (a prior parser version produced them).
+           Per parent spec §6.3 the rewash is uncapped here — pre-wipe
+           rows stay on the canvas until the operator explicitly wipes
+           them. Proceed with DELETE + re-INSERT as before.
+      (iii) Zero count → RESCUE PATH: no typed rows exist yet (the
+            row was tombstoned or never made it through the first-time
+            ingester). Resolve ``filed_at`` from the manifest layer
+            (the same ``sec_filing_manifest.filed_at`` value chokepoint
+            B / C gate on) and short-circuit return ``False`` if the
+            accession is outside the retention window — otherwise the
+            rescue path would re-introduce pre-cap observations
+            through the back door (parent spec §3.2 chokepoint F).
+
+    Lint invariant H in ``scripts/check_13dg_retention.sh`` pins this
+    branch order (the ``blockholders_within_retention(`` call must
+    precede any ``DELETE FROM blockholder_filings`` /
+    ``_upsert_filing_row(`` invocation in this function body).
+    """
+    from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
+
     from app.services.blockholders import (
         _resolve_cusip_to_instrument_id,
         _upsert_filer,
         _upsert_filing_row,
+        blockholders_within_retention,
+    )
+    from app.services.manifest_parsers._schedule13_adapter import (
+        build_filing_from_edgartools_dict,
     )
 
+    accession = raw_doc.accession_number
+
+    # Branch-order step 1: count existing typed rows for the accession.
     with conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT filed_at
-            FROM blockholder_filings
-            WHERE accession_number = %s
-            LIMIT 1
-            """,
-            (raw_doc.accession_number,),
+            "SELECT COUNT(*) FROM blockholder_filings WHERE accession_number = %s",
+            (accession,),
         )
-        row = cur.fetchone()
-    if row is None:
-        return False
-    (filed_at,) = row
+        count_row = cur.fetchone()
+    existing_rows = int(count_row[0]) if count_row is not None else 0
 
+    # Resolve manifest filed_at + canonical source (sec_13d vs sec_13g)
+    # + filer_cik (canonical filer-of-record per #1233 PR11 §3.1) +
+    # form (SC 13D / SC 13D/A / SC 13G / SC 13G/A) from the manifest
+    # row. ``raw_doc`` is the body store and does NOT carry these
+    # fields — the manifest layer is the canonical source. The
+    # ``sec_filing_manifest`` row exists for every accession that
+    # entered the worker pipeline (PK accession_number; written by
+    # both legacy daily-index discovery + PR11 universe-issuer
+    # discovery), so a LEFT-JOIN-style miss here is a deeply abnormal
+    # state — defensively treat it as "filed_at unknown" → rescue
+    # path returns False (cannot place inside the retention window
+    # per the helper's own ``None`` policy).
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT filed_at, source, cik, form FROM sec_filing_manifest WHERE accession_number = %s",
+            (accession,),
+        )
+        manifest_row = cur.fetchone()
+
+    manifest_filed_at = manifest_row[0] if manifest_row is not None else None
+    manifest_source = manifest_row[1] if manifest_row is not None else None
+    manifest_filer_cik = (manifest_row[2] or "").strip() if manifest_row is not None else ""
+    manifest_form = manifest_row[3] if manifest_row is not None else None
+
+    # Branch-order step 2: RESCUE PATH gate (only fires when existing
+    # rows == 0). Happy path is intentionally uncapped per parent spec
+    # §6.3 + lint invariant H.
+    if existing_rows == 0:
+        if not blockholders_within_retention(manifest_filed_at):
+            logger.info(
+                "rewash 13D/G: accession=%s rescue-path skip — filed_at=%s "
+                "outside retention cutoff (or manifest row missing)",
+                accession,
+                manifest_filed_at,
+            )
+            return False
+
+    # Happy path: existing rows present → preserve original
+    # blockholder_filings.filed_at fallback semantics (same as legacy
+    # behaviour before PR11). Rescue path past the gate: use the
+    # manifest filed_at as the fallback (filing's own filed_at takes
+    # priority below when present).
+    if existing_rows > 0:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT filed_at FROM blockholder_filings WHERE accession_number = %s LIMIT 1",
+                (accession,),
+            )
+            fa_row = cur.fetchone()
+        filed_at = fa_row[0] if fa_row is not None else manifest_filed_at
+    else:
+        filed_at = manifest_filed_at
+
+    # Source dispatch for edgartools parser. Fall back to Schedule13D
+    # when the manifest source is unknown (defensive — should not
+    # occur for live manifest-driven flows since both 'sec_13d' and
+    # 'sec_13g' are CHECK-constrained in sec_filing_manifest.source).
     try:
-        filing = parse_primary_doc(raw_doc.payload)
+        if manifest_source == "sec_13g":
+            parsed_dict = Schedule13G.parse_xml(raw_doc.payload)
+        else:
+            parsed_dict = Schedule13D.parse_xml(raw_doc.payload)
+        # Adapter requires the manifest form label (SC 13D / SC 13G /
+        # /A variants) for the closed submission_type mapping. When the
+        # manifest row is somehow missing, derive a default from source
+        # — defensive default so a malformed dev-DB row doesn't crash
+        # the entire rewash sweep. Codex 1c HIGH manifest_filer_cik:
+        # the canonical filer-of-record CIK comes from the manifest
+        # row (NEVER from a reporting-person CIK).
+        form_for_adapter = manifest_form or ("SC 13G" if manifest_source == "sec_13g" else "SC 13D")
+        source_for_adapter = "sec_13g" if manifest_source == "sec_13g" else "sec_13d"
+        filing = build_filing_from_edgartools_dict(
+            parsed_dict,
+            source=source_for_adapter,
+            manifest_form=form_for_adapter,
+            manifest_filer_cik=manifest_filer_cik,
+        )
     except Exception as exc:
         raise RewashParseError(
-            f"parse_primary_doc(13dg) failed for accession={raw_doc.accession_number}: {exc}"
+            f"edgartools Schedule13D/G.parse_xml + adapter failed for accession={raw_doc.accession_number}: {exc}"
         ) from exc
 
     # Empty reporting_persons after re-parse means the new parser
