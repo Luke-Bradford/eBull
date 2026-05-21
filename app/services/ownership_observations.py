@@ -183,40 +183,28 @@ def refresh_insiders_current(
     *,
     instrument_id: int,
 ) -> int:
-    """Deterministically rebuild ``ownership_insiders_current`` rows
-    for one instrument from its observations.
+    """Diff-aware MERGE reconciler for ``ownership_insiders_current``.
 
-    Atomicity (Codex plan-review finding #3): wrapped in a single
-    transaction with a per-instrument ``pg_advisory_xact_lock`` so
-    concurrent refreshes against the same instrument serialise. The
-    UNIQUE PK on ``(instrument_id, holder_cik, ownership_nature)``
-    is the second-line guard — if the lock is ever bypassed, a
-    duplicate INSERT trips the constraint loudly.
+    Spec: docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md §4.
 
-    Dedup logic (per the two-axis spec): for each
-    ``(holder_cik, ownership_nature)`` group, pick the highest-priority
-    observation by ``source_priority ASC, period_end DESC, filed_at DESC``.
-    Cross-nature observations NEVER dedup against each other —
-    Cohen's direct Form 4 and beneficial 13D/A both produce ``_current``
-    rows.
+    UPDATE only when business cols IS DISTINCT FROM the new set; INSERT
+    new rows; DELETE rows that fall out of the latest set (NOT MATCHED
+    BY SOURCE scope-clamped to this instrument). ``refreshed_at`` is
+    advanced on the UPDATE path only; the operator-visible drift
+    watermark for repair-sweep lives in ``ownership_refresh_state``
+    (§3.3 — separates write-side dead-tuple budget from watermark
+    semantics so no-op refreshes do not trigger forever-loops in
+    the repair sweep).
 
-    Returns the number of ``_current`` rows after the refresh."""
-    # Codex review for #840.A: explicit ``with conn.transaction()``
-    # so the advisory lock and the DELETE/INSERT pair share one
-    # transaction even if the caller has set ``conn.autocommit=True``
-    # — without this, ``pg_advisory_xact_lock`` would release after
-    # the SELECT and the DELETE/INSERT would land in separate
-    # auto-committed transactions, reopening the race the lock is
-    # meant to close.
+    Source-priority CASE chain preserved verbatim from the prior
+    DELETE+INSERT implementation (Codex 1b HIGH-1: ``holder_identity_key``
+    is a schema-generated PK column — appears in ON clause + INSERT col
+    list + DISTINCT ON, but NEVER in diff tuple or UPDATE SET).
+
+    Watermark captured pre-MERGE in a Python var so the state UPSERT
+    cannot advance past observations the MERGE did not see (Codex 1b
+    HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
-        # Per-instrument advisory lock keyed on a stable hash of the
-        # function name # instrument_id. ``pg_advisory_xact_lock`` is
-        # transaction-scoped — released automatically at COMMIT/ROLLBACK.
-        # The 2-arg form takes (int4, int4) and the 1-arg form takes
-        # int8. Use the 1-arg form fed by a 64-bit composite (function
-        # namespace hash XOR instrument_id) so both halves contribute
-        # uniqueness and collisions across functions / instruments are
-        # negligible. ``hashtextextended`` returns int8 directly.
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(
@@ -225,57 +213,94 @@ def refresh_insiders_current(
             """,
             (instrument_id,),
         )
-
-        # Replace-then-insert: clear stale rows for the instrument and
-        # rebuild from observations under the same transaction.
         cur.execute(
-            "DELETE FROM ownership_insiders_current WHERE instrument_id = %s",
+            "SELECT MAX(ingested_at) FROM ownership_insiders_observations WHERE instrument_id = %s",
             (instrument_id,),
         )
-        # DISTINCT ON ordering implements the source-priority chain.
-        # Codex review for #840.A: deterministic final tie-breakers
-        # (source, source_document_id) so equal-priority pairs (13d
-        # vs 13g; same accession refiled) don't pick
-        # nondeterministically across refresh runs.
+        wm_row = cur.fetchone()
+        watermark = wm_row[0] if wm_row else None
         cur.execute(
             """
-            INSERT INTO ownership_insiders_current (
+            MERGE INTO ownership_insiders_current AS tgt
+            USING (
+                SELECT DISTINCT ON (holder_identity_key, ownership_nature)
+                    instrument_id, holder_cik, holder_name, holder_identity_key,
+                    ownership_nature, source, source_document_id, source_accession,
+                    source_url, filed_at, period_start, period_end, shares
+                FROM ownership_insiders_observations
+                WHERE instrument_id = %(iid)s AND known_to IS NULL
+                ORDER BY
+                    holder_identity_key,
+                    ownership_nature,
+                    CASE source
+                        WHEN 'form4'    THEN 1
+                        WHEN 'form3'    THEN 2
+                        WHEN '13d'      THEN 3
+                        WHEN '13g'      THEN 3
+                        WHEN 'def14a'   THEN 4
+                        WHEN '13f'      THEN 5
+                        WHEN 'nport'    THEN 6
+                        WHEN 'ncsr'     THEN 6
+                        WHEN 'xbrl_dei' THEN 7
+                        WHEN '10k_note' THEN 8
+                        WHEN 'finra_si' THEN 9
+                        ELSE 10
+                    END ASC,
+                    period_end DESC,
+                    filed_at DESC,
+                    source ASC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = %(iid)s
+               AND tgt.holder_identity_key = src.holder_identity_key
+               AND tgt.ownership_nature = src.ownership_nature
+            WHEN MATCHED AND (
+                tgt.holder_cik, tgt.holder_name,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares
+            ) IS DISTINCT FROM (
+                src.holder_cik, src.holder_name,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares
+            ) THEN UPDATE SET
+                holder_cik         = src.holder_cik,
+                holder_name        = src.holder_name,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
                 instrument_id, holder_cik, holder_name, holder_identity_key,
                 ownership_nature, source, source_document_id, source_accession,
                 source_url, filed_at, period_start, period_end, shares
+            ) VALUES (
+                src.instrument_id, src.holder_cik, src.holder_name, src.holder_identity_key,
+                src.ownership_nature, src.source, src.source_document_id, src.source_accession,
+                src.source_url, src.filed_at, src.period_start, src.period_end, src.shares
             )
-            SELECT DISTINCT ON (holder_identity_key, ownership_nature)
-                instrument_id, holder_cik, holder_name, holder_identity_key,
-                ownership_nature, source, source_document_id, source_accession,
-                source_url, filed_at, period_start, period_end, shares
-            FROM ownership_insiders_observations
-            WHERE instrument_id = %s
-              AND known_to IS NULL
-            ORDER BY
-                holder_identity_key,
-                ownership_nature,
-                CASE source
-                    WHEN 'form4'    THEN 1
-                    WHEN 'form3'    THEN 2
-                    WHEN '13d'      THEN 3
-                    WHEN '13g'      THEN 3
-                    WHEN 'def14a'   THEN 4
-                    WHEN '13f'      THEN 5
-                    WHEN 'nport'    THEN 6
-                    WHEN 'ncsr'     THEN 6
-                    WHEN 'xbrl_dei' THEN 7
-                    WHEN '10k_note' THEN 8
-                    WHEN 'finra_si' THEN 9
-                    ELSE 10
-                END ASC,
-                period_end DESC,
-                filed_at DESC,
-                source ASC,
-                source_document_id ASC
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE
             """,
-            (instrument_id,),
+            {"iid": instrument_id},
         )
-
+        cur.execute(
+            """
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%(iid)s, 'insiders', %(watermark)s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
+            """,
+            {"iid": instrument_id, "watermark": watermark},
+        )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_insiders_current WHERE instrument_id = %s",
             (instrument_id,),
@@ -392,15 +417,18 @@ def refresh_institutions_current(
     *,
     instrument_id: int,
 ) -> int:
-    """Deterministically rebuild ``ownership_institutions_current``
-    rows for one instrument.
+    """Diff-aware MERGE reconciler for ``ownership_institutions_current``.
 
-    Same atomicity contract as ``refresh_insiders_current``: explicit
-    transaction + per-instrument advisory lock. Dedup picks the latest
-    ``period_end`` per ``(filer_cik, ownership_nature)`` — within 13F
-    there's no cross-source priority chain to apply (13F is the only
-    source today; nport/ncsr in Phase 3 will need the chain). Final
-    deterministic tie-breakers: ``filed_at DESC, source_document_id ASC``."""
+    Spec: docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md §4.
+
+    UPDATE only when business cols IS DISTINCT FROM the new set; INSERT
+    new rows; DELETE rows that fall out of the latest set. ``refreshed_at``
+    advanced on UPDATE path only. Drift watermark lives in
+    ``ownership_refresh_state`` (§3.3).
+
+    Watermark captured pre-MERGE in a Python var so the state UPSERT
+    cannot advance past observations the MERGE did not see (Codex 1b
+    HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
@@ -411,34 +439,84 @@ def refresh_institutions_current(
             (instrument_id,),
         )
         cur.execute(
-            "DELETE FROM ownership_institutions_current WHERE instrument_id = %s",
+            "SELECT MAX(ingested_at) FROM ownership_institutions_observations WHERE instrument_id = %s",
             (instrument_id,),
+        )
+        wm_row = cur.fetchone()
+        watermark = wm_row[0] if wm_row else None
+        cur.execute(
+            """
+            MERGE INTO ownership_institutions_current AS tgt
+            USING (
+                SELECT DISTINCT ON (filer_cik, ownership_nature, exposure_kind)
+                    instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    shares, market_value_usd, voting_authority, exposure_kind
+                FROM ownership_institutions_observations
+                WHERE instrument_id = %(iid)s AND known_to IS NULL
+                ORDER BY
+                    filer_cik,
+                    ownership_nature,
+                    exposure_kind,
+                    period_end DESC,
+                    filed_at DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = %(iid)s
+               AND tgt.filer_cik = src.filer_cik
+               AND tgt.ownership_nature = src.ownership_nature
+               AND tgt.exposure_kind = src.exposure_kind
+            WHEN MATCHED AND (
+                tgt.filer_name, tgt.filer_type,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares, tgt.market_value_usd, tgt.voting_authority
+            ) IS DISTINCT FROM (
+                src.filer_name, src.filer_type,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.market_value_usd, src.voting_authority
+            ) THEN UPDATE SET
+                filer_name         = src.filer_name,
+                filer_type         = src.filer_type,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                market_value_usd   = src.market_value_usd,
+                voting_authority   = src.voting_authority,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, market_value_usd, voting_authority, exposure_kind
+            ) VALUES (
+                src.instrument_id, src.filer_cik, src.filer_name, src.filer_type, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.market_value_usd, src.voting_authority, src.exposure_kind
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE
+            """,
+            {"iid": instrument_id},
         )
         cur.execute(
             """
-            INSERT INTO ownership_institutions_current (
-                instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                shares, market_value_usd, voting_authority, exposure_kind
-            )
-            SELECT DISTINCT ON (filer_cik, ownership_nature, exposure_kind)
-                instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                shares, market_value_usd, voting_authority, exposure_kind
-            FROM ownership_institutions_observations
-            WHERE instrument_id = %s
-              AND known_to IS NULL
-            ORDER BY
-                filer_cik,
-                ownership_nature,
-                exposure_kind,
-                period_end DESC,
-                filed_at DESC,
-                source_document_id ASC
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%(iid)s, 'institutions', %(watermark)s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
             """,
-            (instrument_id,),
+            {"iid": instrument_id, "watermark": watermark},
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_institutions_current WHERE instrument_id = %s",
@@ -570,11 +648,18 @@ def refresh_blockholders_current(
     *,
     instrument_id: int,
 ) -> int:
-    """Deterministically rebuild ``ownership_blockholders_current``.
+    """Diff-aware MERGE reconciler for ``ownership_blockholders_current``.
 
-    Picks latest amendment per ``(reporter_cik, ownership_nature)``
-    by ``filed_at DESC, period_end DESC``. Same atomicity contract as
-    the other refresh helpers."""
+    Spec: docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md §4.
+
+    UPDATE only when business cols IS DISTINCT FROM the new set; INSERT
+    new rows; DELETE rows that fall out of the latest set. ``refreshed_at``
+    advanced on UPDATE path only. Drift watermark lives in
+    ``ownership_refresh_state`` (§3.3).
+
+    Watermark captured pre-MERGE in a Python var so the state UPSERT
+    cannot advance past observations the MERGE did not see (Codex 1b
+    HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
@@ -585,35 +670,85 @@ def refresh_blockholders_current(
             (instrument_id,),
         )
         cur.execute(
-            "DELETE FROM ownership_blockholders_current WHERE instrument_id = %s",
+            "SELECT MAX(ingested_at) FROM ownership_blockholders_observations WHERE instrument_id = %s",
             (instrument_id,),
+        )
+        wm_row = cur.fetchone()
+        watermark = wm_row[0] if wm_row else None
+        cur.execute(
+            """
+            MERGE INTO ownership_blockholders_current AS tgt
+            USING (
+                SELECT DISTINCT ON (reporter_cik, ownership_nature)
+                    instrument_id, reporter_cik, reporter_name, ownership_nature,
+                    submission_type, status_flag,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    aggregate_amount_owned, percent_of_class
+                FROM ownership_blockholders_observations
+                WHERE instrument_id = %(iid)s AND known_to IS NULL
+                ORDER BY
+                    reporter_cik,
+                    ownership_nature,
+                    filed_at DESC,
+                    period_end DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = %(iid)s
+               AND tgt.reporter_cik = src.reporter_cik
+               AND tgt.ownership_nature = src.ownership_nature
+            WHEN MATCHED AND (
+                tgt.reporter_name, tgt.submission_type, tgt.status_flag,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.aggregate_amount_owned, tgt.percent_of_class
+            ) IS DISTINCT FROM (
+                src.reporter_name, src.submission_type, src.status_flag,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.aggregate_amount_owned, src.percent_of_class
+            ) THEN UPDATE SET
+                reporter_name        = src.reporter_name,
+                submission_type      = src.submission_type,
+                status_flag          = src.status_flag,
+                source               = src.source,
+                source_document_id   = src.source_document_id,
+                source_accession     = src.source_accession,
+                source_url           = src.source_url,
+                filed_at             = src.filed_at,
+                period_start         = src.period_start,
+                period_end           = src.period_end,
+                aggregate_amount_owned = src.aggregate_amount_owned,
+                percent_of_class     = src.percent_of_class,
+                refreshed_at         = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, reporter_cik, reporter_name, ownership_nature,
+                submission_type, status_flag,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                aggregate_amount_owned, percent_of_class
+            ) VALUES (
+                src.instrument_id, src.reporter_cik, src.reporter_name, src.ownership_nature,
+                src.submission_type, src.status_flag,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.aggregate_amount_owned, src.percent_of_class
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE
+            """,
+            {"iid": instrument_id},
         )
         cur.execute(
             """
-            INSERT INTO ownership_blockholders_current (
-                instrument_id, reporter_cik, reporter_name, ownership_nature,
-                submission_type, status_flag,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                aggregate_amount_owned, percent_of_class
-            )
-            SELECT DISTINCT ON (reporter_cik, ownership_nature)
-                instrument_id, reporter_cik, reporter_name, ownership_nature,
-                submission_type, status_flag,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                aggregate_amount_owned, percent_of_class
-            FROM ownership_blockholders_observations
-            WHERE instrument_id = %s
-              AND known_to IS NULL
-            ORDER BY
-                reporter_cik,
-                ownership_nature,
-                filed_at DESC,
-                period_end DESC,
-                source_document_id ASC
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%(iid)s, 'blockholders', %(watermark)s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
             """,
-            (instrument_id,),
+            {"iid": instrument_id, "watermark": watermark},
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_blockholders_current WHERE instrument_id = %s",
@@ -691,10 +826,23 @@ def refresh_treasury_current(
     *,
     instrument_id: int,
 ) -> int:
-    """Latest non-null ``treasury_shares`` per instrument wins.
-    ``WHERE treasury_shares IS NOT NULL`` so a NULL observation
-    doesn't displace an earlier non-null value (e.g. a re-parse
-    that lost the concept shouldn't blank out the column)."""
+    """Diff-aware MERGE reconciler for ``ownership_treasury_current``.
+
+    Spec: docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md §4.
+
+    ``WHERE treasury_shares IS NOT NULL`` preserved — a NULL re-parse
+    must not displace a prior non-null value. Single-column PK
+    ``(instrument_id)`` — ON clause uses ``tgt.instrument_id =
+    src.instrument_id`` (PG MERGE requires a column-to-column join
+    condition; a bare constant predicate triggers FULL JOIN
+    unsupported error). ``src.instrument_id`` is always ``%(iid)s``
+    due to the USING WHERE clause so this is semantically equivalent.
+    ``refreshed_at`` advanced on UPDATE path only. Drift watermark
+    lives in ``ownership_refresh_state`` (§3.3).
+
+    Watermark captured pre-MERGE in a Python var so the state UPSERT
+    cannot advance past observations the MERGE did not see (Codex 1b
+    HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
@@ -705,31 +853,75 @@ def refresh_treasury_current(
             (instrument_id,),
         )
         cur.execute(
-            "DELETE FROM ownership_treasury_current WHERE instrument_id = %s",
+            "SELECT MAX(ingested_at) FROM ownership_treasury_observations WHERE instrument_id = %s",
             (instrument_id,),
+        )
+        wm_row = cur.fetchone()
+        watermark = wm_row[0] if wm_row else None
+        cur.execute(
+            """
+            MERGE INTO ownership_treasury_current AS tgt
+            USING (
+                SELECT DISTINCT ON (instrument_id)
+                    instrument_id, ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end, treasury_shares
+                FROM ownership_treasury_observations
+                WHERE instrument_id = %(iid)s
+                  AND known_to IS NULL
+                  AND treasury_shares IS NOT NULL
+                ORDER BY
+                    instrument_id,
+                    period_end DESC,
+                    filed_at DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = src.instrument_id
+            WHEN MATCHED AND (
+                tgt.ownership_nature,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.treasury_shares
+            ) IS DISTINCT FROM (
+                src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.treasury_shares
+            ) THEN UPDATE SET
+                ownership_nature   = src.ownership_nature,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                treasury_shares    = src.treasury_shares,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end, treasury_shares
+            ) VALUES (
+                src.instrument_id, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end, src.treasury_shares
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE
+            """,
+            {"iid": instrument_id},
         )
         cur.execute(
             """
-            INSERT INTO ownership_treasury_current (
-                instrument_id, ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end, treasury_shares
-            )
-            SELECT DISTINCT ON (instrument_id)
-                instrument_id, ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end, treasury_shares
-            FROM ownership_treasury_observations
-            WHERE instrument_id = %s
-              AND known_to IS NULL
-              AND treasury_shares IS NOT NULL
-            ORDER BY
-                instrument_id,
-                period_end DESC,
-                filed_at DESC,
-                source_document_id ASC
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%(iid)s, 'treasury', %(watermark)s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
             """,
-            (instrument_id,),
+            {"iid": instrument_id, "watermark": watermark},
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_treasury_current WHERE instrument_id = %s",
@@ -845,17 +1037,27 @@ def refresh_def14a_current(
     *,
     instrument_id: int,
 ) -> int:
-    """Latest proxy per (instrument, normalised holder name) wins.
+    """Diff-aware MERGE reconciler for ``ownership_def14a_current``.
 
-    ESOP-shape rows are excluded from this slice — they live in
-    ``ownership_esop_current`` instead (#843). The exclusion uses
-    BOTH ``holder_role`` (catches new-format rows from the post-#843
-    parser) AND a name-pattern regex (catches legacy rows ingested
-    before the parser ESOP override landed). Without the regex
-    fallback, a re-wash / repair / backfill that re-reads
-    ``def14a_beneficial_holdings`` would re-introduce the same
-    double-count guarded against in
-    ``def14a_ingest._record_def14a_observations_for_filing``."""
+    Spec: docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md §4.
+
+    ESOP-shape rows excluded by 3-clause filter (shares IS NOT NULL +
+    holder_role IS DISTINCT FROM 'esop' + holder_name !~* regex) —
+    same semantics as the prior DELETE+INSERT implementation; regex
+    bound via named placeholder ``%(esop_regex)s`` (psycopg3 cannot
+    mix named + positional placeholders in one execute call — Codex 1b
+    plan-rev2 MED-2).
+
+    ``holder_name_key`` is a schema-generated PK column — appears in
+    ON clause + INSERT col list + DISTINCT ON, but NEVER in diff tuple
+    or UPDATE SET (Codex 1b plan-rev2 HIGH-1).
+
+    ``refreshed_at`` advanced on UPDATE path only. Drift watermark
+    lives in ``ownership_refresh_state`` (§3.3).
+
+    Watermark captured pre-MERGE in a Python var so the state UPSERT
+    cannot advance past observations the MERGE did not see (Codex 1b
+    HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
@@ -866,36 +1068,85 @@ def refresh_def14a_current(
             (instrument_id,),
         )
         cur.execute(
-            "DELETE FROM ownership_def14a_current WHERE instrument_id = %s",
+            "SELECT MAX(ingested_at) FROM ownership_def14a_observations WHERE instrument_id = %s",
             (instrument_id,),
+        )
+        wm_row = cur.fetchone()
+        watermark = wm_row[0] if wm_row else None
+        cur.execute(
+            """
+            MERGE INTO ownership_def14a_current AS tgt
+            USING (
+                SELECT DISTINCT ON (holder_name_key, ownership_nature)
+                    instrument_id, holder_name, holder_name_key, holder_role, ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    shares, percent_of_class
+                FROM ownership_def14a_observations
+                WHERE instrument_id = %(iid)s
+                  AND known_to IS NULL
+                  AND shares IS NOT NULL
+                  AND holder_role IS DISTINCT FROM 'esop'
+                  AND holder_name !~* %(esop_regex)s
+                ORDER BY
+                    holder_name_key,
+                    ownership_nature,
+                    period_end DESC,
+                    filed_at DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = %(iid)s
+               AND tgt.holder_name_key = src.holder_name_key
+               AND tgt.ownership_nature = src.ownership_nature
+            WHEN MATCHED AND (
+                tgt.holder_name, tgt.holder_role,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares, tgt.percent_of_class
+            ) IS DISTINCT FROM (
+                src.holder_name, src.holder_role,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.percent_of_class
+            ) THEN UPDATE SET
+                holder_name        = src.holder_name,
+                holder_role        = src.holder_role,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                percent_of_class   = src.percent_of_class,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, holder_name, holder_name_key, holder_role, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, percent_of_class
+            ) VALUES (
+                src.instrument_id, src.holder_name, src.holder_name_key, src.holder_role, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.percent_of_class
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE
+            """,
+            {"iid": instrument_id, "esop_regex": _ESOP_HOLDER_NAME_SQL_REGEX},
         )
         cur.execute(
             """
-            INSERT INTO ownership_def14a_current (
-                instrument_id, holder_name, holder_name_key, holder_role, ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                shares, percent_of_class
-            )
-            SELECT DISTINCT ON (holder_name_key, ownership_nature)
-                instrument_id, holder_name, holder_name_key, holder_role, ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                shares, percent_of_class
-            FROM ownership_def14a_observations
-            WHERE instrument_id = %s
-              AND known_to IS NULL
-              AND shares IS NOT NULL  -- prevent NULL re-parse displacing prior good value
-              AND holder_role IS DISTINCT FROM 'esop'
-              AND holder_name !~* %s
-            ORDER BY
-                holder_name_key,
-                ownership_nature,
-                period_end DESC,
-                filed_at DESC,
-                source_document_id ASC
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%(iid)s, 'def14a', %(watermark)s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
             """,
-            (instrument_id, _ESOP_HOLDER_NAME_SQL_REGEX),
+            {"iid": instrument_id, "watermark": watermark},
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_def14a_current WHERE instrument_id = %s",
@@ -1246,18 +1497,24 @@ def refresh_esop_current(
     *,
     instrument_id: int,
 ) -> int:
-    """Deterministically rebuild ``ownership_esop_current`` rows for
-    one instrument from its observations (#843).
+    """Diff-aware MERGE reconciler for ``ownership_esop_current``.
 
-    Atomicity contract identical to ``refresh_funds_current``:
-    explicit ``conn.transaction()`` + per-instrument
-    ``pg_advisory_xact_lock`` so concurrent refreshes serialise.
+    Spec: docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md §4.
+
+    UPDATE only when business cols IS DISTINCT FROM the new set; INSERT
+    new rows; DELETE rows that fall out of the latest set. ``refreshed_at``
+    advanced on UPDATE path only. Drift watermark lives in
+    ``ownership_refresh_state`` (§3.3).
 
     Dedup picks one row per ``plan_name`` ordered by
     ``filed_at DESC, period_end DESC, source_document_id ASC`` —
     DEF 14A amendments (DEFA14A) carry the same period_end as the
     original DEF 14A but are filed later, so ordering by
-    ``filed_at DESC`` first ensures the amendment wins."""
+    ``filed_at DESC`` first ensures the amendment wins.
+
+    Watermark captured pre-MERGE in a Python var so the state UPSERT
+    cannot advance past observations the MERGE did not see (Codex 1b
+    HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
@@ -1268,34 +1525,83 @@ def refresh_esop_current(
             (instrument_id,),
         )
         cur.execute(
-            "DELETE FROM ownership_esop_current WHERE instrument_id = %s",
+            "SELECT MAX(ingested_at) FROM ownership_esop_observations WHERE instrument_id = %s",
             (instrument_id,),
+        )
+        wm_row = cur.fetchone()
+        watermark = wm_row[0] if wm_row else None
+        cur.execute(
+            """
+            MERGE INTO ownership_esop_current AS tgt
+            USING (
+                SELECT DISTINCT ON (plan_name)
+                    instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
+                    ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    shares, percent_of_class
+                FROM ownership_esop_observations
+                WHERE instrument_id = %(iid)s AND known_to IS NULL
+                ORDER BY
+                    plan_name,
+                    filed_at DESC,
+                    period_end DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = %(iid)s
+               AND tgt.plan_name = src.plan_name
+            WHEN MATCHED AND (
+                tgt.plan_trustee_name, tgt.plan_trustee_cik, tgt.ownership_nature,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares, tgt.percent_of_class
+            ) IS DISTINCT FROM (
+                src.plan_trustee_name, src.plan_trustee_cik, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.percent_of_class
+            ) THEN UPDATE SET
+                plan_trustee_name  = src.plan_trustee_name,
+                plan_trustee_cik   = src.plan_trustee_cik,
+                ownership_nature   = src.ownership_nature,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                percent_of_class   = src.percent_of_class,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
+                ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, percent_of_class
+            ) VALUES (
+                src.instrument_id, src.plan_name, src.plan_trustee_name, src.plan_trustee_cik,
+                src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.percent_of_class
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE
+            """,
+            {"iid": instrument_id},
         )
         cur.execute(
             """
-            INSERT INTO ownership_esop_current (
-                instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
-                ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                shares, percent_of_class
-            )
-            SELECT DISTINCT ON (plan_name)
-                instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
-                ownership_nature,
-                source, source_document_id, source_accession, source_url,
-                filed_at, period_start, period_end,
-                shares, percent_of_class
-            FROM ownership_esop_observations
-            WHERE instrument_id = %s
-              AND known_to IS NULL
-            ORDER BY
-                plan_name,
-                filed_at DESC,
-                period_end DESC,
-                source_document_id ASC
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%(iid)s, 'esop', %(watermark)s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
             """,
-            (instrument_id,),
+            {"iid": instrument_id, "watermark": watermark},
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_esop_current WHERE instrument_id = %s",
