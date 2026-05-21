@@ -214,13 +214,21 @@ ON CONFLICT (instrument_id, category) DO NOTHING;
 COMMIT;
 ```
 
-- [ ] **Step 1.2: Apply migration to dev DB**
+- [ ] **Step 1.2: Apply migration via the runner (preferred) or manually**
 
-Run:
+Codex 1a MED-4: prefer the standard migration runner over manual psql so the migration goes through the same path production will use + `schema_migrations` is updated automatically. If the runner is invoked at lifespan start, the cleanest path is to restart the stack (or the API service):
+
 ```bash
+# Preferred: trigger via lifespan restart of the API service.
+# If your dev stack uses VS Code tasks, restart the relevant task.
+# Otherwise run the runner CLI directly if one exists:
+grep -rn "def run_migrations\|class MigrationRunner\|def apply_migrations" /Users/lukebradford/Dev/eBull/app/db 2>&1 | head -5
+# If the runner has a Python entrypoint, invoke it; otherwise fall back to:
 docker exec -i ebull-postgres psql -U postgres -d ebull < sql/163_ownership_refresh_state.sql
 ```
-Expected: `BEGIN`, table + 3 index creations (or `NOTICE: relation … already exists, skipping` on re-run), 7 `INSERT 0 N` lines, `COMMIT`. No errors.
+Expected: `BEGIN`, table + 3 index creations (or `NOTICE: relation … already exists, skipping` on re-run), 7 `INSERT 0 N` lines, `COMMIT`. No errors. If the runner applied it, `schema_migrations` already records `163_ownership_refresh_state.sql` (Step 1.5 below becomes a no-op verification).
+
+If applying manually, the runner will detect the table is already present on next boot and (depending on runner shape) either skip or fail — see Step 1.5 for the explicit `schema_migrations` insert that prevents double-apply.
 
 - [ ] **Step 1.3: Verify schema**
 
@@ -233,16 +241,26 @@ Expected: PK `(instrument_id, category)`, CHECK with 7 category literals, 3 inde
 
 - [ ] **Step 1.4: Verify backfill from `_current.refreshed_at`**
 
-Run:
+Codex 1a MED-3: backfill verification must aggregate `_current` per instrument (multi-row categories like funds have many `_current` rows per instrument with potentially different `refreshed_at` values; a plain JOIN can compare against any single row's value, not the MAX). Use grouped CTE:
+
 ```bash
 docker exec ebull-postgres psql -U postgres -d ebull -c "
-SELECT s.category, s.instrument_id, s.last_drained_observations_max_ingested_at, c.refreshed_at AS _current_refreshed_at
+WITH expected AS (
+    SELECT instrument_id, MAX(refreshed_at) AS expected_watermark
+    FROM ownership_funds_current
+    GROUP BY instrument_id
+)
+SELECT
+    s.instrument_id,
+    s.last_drained_observations_max_ingested_at AS stored,
+    expected.expected_watermark AS expected,
+    s.last_drained_observations_max_ingested_at IS NOT DISTINCT FROM expected.expected_watermark AS ok
 FROM ownership_refresh_state s
-JOIN ownership_funds_current c ON c.instrument_id = s.instrument_id
+JOIN expected ON expected.instrument_id = s.instrument_id
 WHERE s.category = 'funds'
 LIMIT 5"
 ```
-Expected: `s.last_drained_observations_max_ingested_at` equals `MAX(c.refreshed_at)` for each instrument (with PK PK ON funds c, the join returns one row per (s, c)).
+Expected: `ok = t` for every returned row; if any `ok = f`, the backfill failed for that instrument — investigate before proceeding.
 
 - [ ] **Step 1.5: Register migration in `schema_migrations`**
 
@@ -274,21 +292,25 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 2: ebull_test template — pgstattuple extension
+## Task 2: ebull_test template — pgstattuple extension + state-table truncate
 
 **Files:**
 - Modify: `tests/fixtures/ebull_test_db.py`
 
-- [ ] **Step 2.1: Locate the template-provisioning function**
+- [ ] **Step 2.1: Locate the template-provisioning function + `_PLANNER_TABLES`**
 
-Run: `grep -n "CREATE EXTENSION\|template" /Users/lukebradford/Dev/eBull/tests/fixtures/ebull_test_db.py | head -10`
-Expected: existing `CREATE EXTENSION IF NOT EXISTS …` calls (e.g. for pg_trgm) — gives the pattern + the exact insertion site.
+Run: `grep -n "CREATE EXTENSION\|_PLANNER_TABLES\|template" /Users/lukebradford/Dev/eBull/tests/fixtures/ebull_test_db.py | head -20`
+Expected: existing `CREATE EXTENSION IF NOT EXISTS …` calls (e.g. for pg_trgm) — gives the pattern + the exact insertion site. Also locates `_PLANNER_TABLES` tuple (Codex 1a HIGH-3 — `ownership_refresh_state` has no FK cascade from `instruments`, so per-test TRUNCATE must include it explicitly or state rows leak between tests).
 
 - [ ] **Step 2.2: Add pgstattuple provisioning**
 
 In `tests/fixtures/ebull_test_db.py`, add `CREATE EXTENSION IF NOT EXISTS pgstattuple` immediately after the existing `CREATE EXTENSION` block in the template-provisioning function. Use the same cursor + same connection.
 
-- [ ] **Step 2.3: Re-create the test template + smoke**
+- [ ] **Step 2.3: Add `ownership_refresh_state` to `_PLANNER_TABLES`**
+
+In `tests/fixtures/ebull_test_db.py`, find the `_PLANNER_TABLES: tuple[str, ...] = (...)` declaration and add `"ownership_refresh_state",` in alphabetical order (or wherever the existing pattern places child-to-parent ordering — Codex 1a HIGH-3: state-table rows leak between tests without this because there is no FK cascade from `instruments`). The TRUNCATE block uses `RESTART IDENTITY CASCADE` so order is not load-bearing, but follow the existing convention.
+
+- [ ] **Step 2.4: Re-create the test template + smoke**
 
 Run (drops the template DB if present + re-provisions on next test):
 ```bash
@@ -297,23 +319,28 @@ uv run pytest tests/fixtures -x -q 2>&1 | tail -10
 ```
 Expected: pytest provisions a fresh template with `pgstattuple` extension; no errors.
 
-- [ ] **Step 2.4: Verify extension is in template**
+- [ ] **Step 2.5: Verify extension + truncate-list entry**
 
 Run:
 ```bash
 docker exec ebull-postgres psql -U postgres -d ebull_test_template -c "SELECT extname FROM pg_extension WHERE extname = 'pgstattuple'"
+grep -n "ownership_refresh_state" /Users/lukebradford/Dev/eBull/tests/fixtures/ebull_test_db.py
 ```
-Expected: 1 row with `pgstattuple`.
+Expected: 1 row with `pgstattuple`; grep returns the new entry in `_PLANNER_TABLES`.
 
-- [ ] **Step 2.5: Commit**
+- [ ] **Step 2.6: Commit**
 
 ```bash
 git add tests/fixtures/ebull_test_db.py
-git commit -m "test(#1233): provision pgstattuple in ebull_test template
+git commit -m "test(#1233): provision pgstattuple + truncate ownership_refresh_state per test
 
 Required by PR12 test case 2 (no-op churn) for authoritative table_len
 + dead_tuple_count measurements. Spec §6 + §9 DoD #6 — failure to
 provision must trigger pytest.fail in the test (no silent skip).
+
+ownership_refresh_state added to _PLANNER_TABLES (Codex 1a HIGH-3 — no
+FK cascade from instruments, so state rows leak between tests
+without explicit TRUNCATE).
 
 Refs #1233.
 
@@ -431,16 +458,21 @@ ALL_HELPERS: list[HelperCase] = [
 
 
 @pytest.fixture
-def conn(test_db_conn):
-    """Reuse the existing per-worker test DB connection fixture."""
-    return test_db_conn
+def conn(ebull_test_conn):
+    """Reuse the existing per-worker test DB connection fixture
+    (`ebull_test_conn` from `tests/fixtures/ebull_test_db.py`)."""
+    return ebull_test_conn
 
 
 def _pgstattuple(conn, table: str) -> dict[str, int]:
-    """Return pgstattuple measurements; fail loud on missing extension."""
+    """Return pgstattuple measurements; fail loud on missing extension.
+
+    Uses `%s::regclass` cast so the table-name parameter resolves to a
+    regclass OID exactly as pgstattuple expects (text-parameter form
+    can fail function resolution under some psycopg modes)."""
     with conn.cursor() as cur:
         try:
-            cur.execute(f"SELECT * FROM pgstattuple(%s)", (table,))
+            cur.execute("SELECT * FROM pgstattuple(%s::regclass)", (table,))
         except psycopg.errors.UndefinedFunction:
             pytest.fail(
                 f"pgstattuple extension missing in test DB — provisioning "
@@ -472,9 +504,11 @@ def _seed_one_observation(conn, helper: HelperCase, instrument_id: int, *, fixtu
     filed = datetime(2025, 1, 1 + fixture_idx, tzinfo=timezone.utc)
     period_end = date(2024, 12, 31)
     if helper.name == 'insiders':
+        # holder_identity_key is a schema-generated column (not a param).
+        # Verified against app/services/ownership_observations.py:110-127.
         oo.record_insider_observation(conn,
             instrument_id=instrument_id, holder_cik='0000000001',
-            holder_name='Test Holder', holder_identity_key='HK1',
+            holder_name='Test Holder',
             ownership_nature='direct', source='form4',
             source_document_id=doc_id, source_accession=None,
             source_field=None, source_url=None,
@@ -518,10 +552,11 @@ def _seed_one_observation(conn, helper: HelperCase, instrument_id: int, *, fixtu
             ingest_run_id=run_id, shares=Decimal('400'),
             percent_of_class=Decimal('3.5'))
     elif helper.name == 'funds':
+        # ownership_nature + source are fixed by schema CHECK constraints
+        # and NOT accepted as params (app/services/ownership_observations.py:913-933).
         oo.record_fund_observation(conn,
             instrument_id=instrument_id, fund_series_id='S000000001',
             fund_series_name='Test Fund', fund_filer_cik='0000000004',
-            ownership_nature='economic', source='nport',
             source_document_id=doc_id, source_accession=None,
             source_field=None, source_url=None,
             filed_at=filed, period_start=None, period_end=period_end,
@@ -529,6 +564,7 @@ def _seed_one_observation(conn, helper: HelperCase, instrument_id: int, *, fixtu
             market_value_usd=Decimal('25000'), payoff_profile='Long',
             asset_category='EC')
     elif helper.name == 'esop':
+        # No ownership_nature / source params — same pattern as funds.
         oo.record_esop_observation(conn,
             instrument_id=instrument_id, plan_name='Test ESOP',
             plan_trustee_name='Fidelity', plan_trustee_cik='0000000005',
@@ -676,11 +712,12 @@ def test_insiders_priority_chain(conn, seeded_instrument_id):
     helper = next(h for h in ALL_HELPERS if h.name == 'insiders')
     run_id = uuid4()
     period = date(2024, 12, 31)
-    # Two observations same (holder_identity_key, ownership_nature) but
+    # Two observations same (holder_cik, ownership_nature) — the schema
+    # generates holder_identity_key from holder_cik (NULL-safe) — but
     # different source priority. Form 4 (priority 1) must win.
     oo.record_insider_observation(conn,
         instrument_id=seeded_instrument_id, holder_cik='0000000007',
-        holder_name='Insider X', holder_identity_key='HKX',
+        holder_name='Insider X',
         ownership_nature='direct', source='13d',  # priority 3
         source_document_id='13d-doc', source_accession=None,
         source_field=None, source_url=None,
@@ -689,7 +726,7 @@ def test_insiders_priority_chain(conn, seeded_instrument_id):
         shares=Decimal('100'))
     oo.record_insider_observation(conn,
         instrument_id=seeded_instrument_id, holder_cik='0000000007',
-        holder_name='Insider X', holder_identity_key='HKX',
+        holder_name='Insider X',
         ownership_nature='direct', source='form4',  # priority 1
         source_document_id='form4-doc', source_accession=None,
         source_field=None, source_url=None,
@@ -1377,17 +1414,78 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 Run: `cat /Users/lukebradford/Dev/eBull/scripts/check_13dg_retention.sh | head -80`
 Expected: confirms the awk-based function-body block walker + empty-grep `wc -l` guard pattern to mirror.
 
-- [ ] **Step 8.2: Write lint guard**
+- [ ] **Step 8.2: Write lint guard with per-helper expected-literal table**
 
-Create `scripts/check_ownership_refresh_writer_pattern.sh` covering all 12 per-helper invariants A-L (with K split per spec §4.1) + 12 cross-cutting checks (M, N, O1-O3, P1-P7) per spec §5. Use awk for block extraction; use grep with `-c` for exact-count assertions; use the pattern `if [ "$count" -ne <expected> ]; then echo FAIL; fi`. Reference exact per-helper expected literals from spec §4.1 (PK columns, DISTINCT ON columns, ORDER BY whitespace-normalised, extra WHERE filter clauses).
+Create `scripts/check_ownership_refresh_writer_pattern.sh`. Codex 1a MED-5 — inline the per-helper expected literal table so the implementer is not free to drift. Mirror `scripts/check_13dg_retention.sh` exactly for the awk + grep + exact-count-assertion harness; the per-helper data drives a loop.
 
-(Full script body omitted from plan for brevity — implementation agent generates the script body from the spec §5 invariant table + the helper-by-helper differences in §4.1. Mirror the awk + grep + exact-count-assertion pattern from `scripts/check_13dg_retention.sh` exactly. The 7-helper × 12-invariant matrix + 12 cross-cutting checks produces ~250-400 lines of shell.)
+Per-helper expected-literal table (verbatim from spec §4.1 — paste this into the script as a bash associative-array config block):
 
-Each invariant must:
-1. Use awk to extract the function-body span (`def refresh_<X>_current` → next `^def `).
-2. grep within that span for the expected literal.
-3. Assert exact count via `[ "$count" -ne <expected> ]`.
-4. Emit FAIL with the specific invariant ID + helper name + expected/actual on mismatch.
+```bash
+# Per-helper config: name → (distinct_on_cols, order_by_normalised, extra_where_filter, category_literal)
+declare -A HELPERS=(
+    [insiders]="$(cat <<'CFG'
+distinct_on=holder_identity_key, ownership_nature
+# ORDER BY is the canonical newest-priority-source-first chain; whitespace-normalised.
+order_by=holder_identity_key, ownership_nature, CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN '13d' THEN 3 WHEN '13g' THEN 3 WHEN 'def14a' THEN 4 WHEN '13f' THEN 5 WHEN 'nport' THEN 6 WHEN 'ncsr' THEN 6 WHEN 'xbrl_dei' THEN 7 WHEN '10k_note' THEN 8 WHEN 'finra_si' THEN 9 ELSE 10 END ASC, period_end DESC, filed_at DESC, source ASC, source_document_id ASC
+extra_where=
+category=insiders
+CFG
+)"
+    [institutions]="$(cat <<'CFG'
+distinct_on=filer_cik, ownership_nature, exposure_kind
+order_by=filer_cik, ownership_nature, exposure_kind, period_end DESC, filed_at DESC, source_document_id ASC
+extra_where=
+category=institutions
+CFG
+)"
+    [blockholders]="$(cat <<'CFG'
+distinct_on=reporter_cik, ownership_nature
+order_by=reporter_cik, ownership_nature, filed_at DESC, period_end DESC, source_document_id ASC
+extra_where=
+category=blockholders
+CFG
+)"
+    [treasury]="$(cat <<'CFG'
+distinct_on=instrument_id
+order_by=instrument_id, period_end DESC, filed_at DESC, source_document_id ASC
+extra_where=AND treasury_shares IS NOT NULL
+category=treasury
+CFG
+)"
+    [def14a]="$(cat <<'CFG'
+distinct_on=holder_name_key, ownership_nature
+order_by=holder_name_key, ownership_nature, period_end DESC, filed_at DESC, source_document_id ASC
+# Three independent clauses; lint K1/K2/K3 each grep one clause.
+extra_where=AND shares IS NOT NULL AND holder_role IS DISTINCT FROM 'esop' AND holder_name !~* %s
+category=def14a
+CFG
+)"
+    [funds]="$(cat <<'CFG'
+distinct_on=fund_series_id
+order_by=fund_series_id, filed_at DESC, period_end DESC, source_document_id ASC
+extra_where=
+category=funds
+CFG
+)"
+    [esop]="$(cat <<'CFG'
+distinct_on=plan_name
+order_by=plan_name, filed_at DESC, period_end DESC, source_document_id ASC
+extra_where=
+category=esop
+CFG
+)"
+)
+```
+
+The script must:
+1. For each helper key in `HELPERS`, extract the body span (`awk` between `^def refresh_${helper}_current\(` and the next `^def `) into a temp file.
+2. Apply invariants A-L per spec §5 against the body-span temp file, using the per-helper config values for G (DISTINCT ON literal), H (ORDER BY normalised), K (extra WHERE filter literal — split into K1/K2/K3 for def14a), L (category literal).
+3. For invariant D, awk-extract the ON-clause span (between `MERGE INTO ownership_${helper}_current AS tgt` and the first `WHEN`) and the WHEN NOT MATCHED BY SOURCE clause separately; assert literal `tgt.instrument_id = %(iid)s` count == 1 in each.
+4. Apply cross-cutting invariants M, N, O1-O3, P1-P7 against the repo tree (not per-helper).
+5. Emit `FAIL: invariant <ID> helper=<name> expected=<N> actual=<M>` on mismatch; exit non-zero.
+6. Mirror `scripts/check_13dg_retention.sh`'s awk-helper-function shape (extracting the body span via line range from the named function-def to the next line starting `^def `).
+
+Estimated script length: 250-400 lines of bash. Use shellcheck before committing.
 
 - [ ] **Step 8.3: Run lint guard against the implemented code**
 
@@ -1687,9 +1785,13 @@ In `docs/review-prevention-log.md`, append two new entries at the bottom (or in 
 - Enforced in: `scripts/check_ownership_refresh_writer_pattern.sh` invariant E (refreshed_at not in IS DISTINCT FROM tuples); `tests/test_ownership_refresh_writer_merge.py` case 2 (no-op churn) + case 8 (repair-sweep no-loop).
 ```
 
-- [ ] **Step 11.3: Update data-engineer skill**
+- [ ] **Step 11.3: Update data-engineer skill + memory pointer**
 
-In `.claude/skills/data-engineer/SKILL.md` (and the matching memory file), find the write-through pattern section and add:
+Update BOTH files (Codex 1a LOW-1 — file map only listed the skill, not the memory pointer):
+- `.claude/skills/data-engineer/SKILL.md` (in-repo skill body)
+- `/Users/lukebradford/.claude/projects/-Users-lukebradford-Dev-eBull/memory/skill_ebull_data_engineer.md` (operator memory pointer — already exists; add a single-line `- Diff-aware MERGE replaces DELETE+INSERT in refresh_*_current (#1233 PR12 — see spec docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md)` under the existing write-through pattern bullet)
+
+In `.claude/skills/data-engineer/SKILL.md`, find the write-through pattern section and add:
 
 ```markdown
 ### Diff-aware MERGE replaces DELETE+INSERT in refresh_*_current helpers (#1233 PR12)
@@ -1709,7 +1811,9 @@ Lint guard: `scripts/check_ownership_refresh_writer_pattern.sh` (93 clause-count
 - [ ] **Step 11.4: Commit**
 
 ```bash
-git add docs/superpowers/specs/2026-05-19-data-retention-rubric.md docs/review-prevention-log.md .claude/skills/data-engineer/SKILL.md
+git add docs/superpowers/specs/2026-05-19-data-retention-rubric.md docs/review-prevention-log.md .claude/skills/data-engineer/SKILL.md /Users/lukebradford/.claude/projects/-Users-lukebradford-Dev-eBull/memory/skill_ebull_data_engineer.md 2>/dev/null || git add docs/superpowers/specs/2026-05-19-data-retention-rubric.md docs/review-prevention-log.md .claude/skills/data-engineer/SKILL.md
+# (Memory file lives outside the repo; track its update manually if so —
+# the conditional git add ignores it if the path is outside the work tree.)
 git commit -m "docs(#1233): PR12 — parent spec amendment + prevention log + skill update
 
 - Parent rubric spec §7: PR12 flipped to SHIPPED.
