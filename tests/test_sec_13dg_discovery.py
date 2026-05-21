@@ -24,8 +24,14 @@ from typing import Any
 import psycopg
 import pytest
 
+from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.blockholders import blockholders_retention_cutoff
-from app.services.sec_13dg_discovery import _resolve_discovery_startdt
+from app.services.sec_13dg_discovery import (
+    DiscoveryResult,
+    _extract_filer_set,
+    _resolve_discovery_startdt,
+    discover_sec_13dg_for_universe,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -78,7 +84,6 @@ def _seed_primary_cik(
             instrument_id, provider, identifier_type, identifier_value, is_primary
         )
         VALUES (%s, 'sec', 'cik', %s, TRUE)
-        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
         """,
         (instrument_id, cik),
     )
@@ -217,3 +222,167 @@ class TestResolveDiscoveryStartdt:
 
         expected = max(floor, watermark.date() - timedelta(days=7))
         assert startdt == expected
+
+
+# ---------------------------------------------------------------------------
+# Task 4.3 — extraction + atomic per-accession ingest helpers + entry point
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFilerSet:
+    """Pure-function tests for ``_extract_filer_set`` (no DB)."""
+
+    def test_drops_issuer_and_known_agent_padded_and_unpadded(self) -> None:
+        """Issuer CIK matched on the unpadded form; agent CIK matched
+        on the padded form; both should be dropped regardless of how
+        they appear in the raw efts ``ciks[]`` list."""
+        # Issuer "320193" (unpadded), agent "1193125" (unpadded for Donnelley),
+        # genuine filer "1067983" (Berkshire-style), duplicate of the same
+        # filer to test dedupe.
+        result = _extract_filer_set(
+            cik_list=["320193", "1193125", "1067983", "0001067983"],
+            name_list=["AAPL Inc.", "Donnelley", "Berkshire Hathaway", "Berkshire dup"],
+            issuer_cik="0000320193",
+        )
+        assert result == [("0001067983", "Berkshire Hathaway")]
+
+    def test_aligns_name_by_position_falls_back_to_synthetic(self) -> None:
+        """Each filer CIK maps to ``name_list`` at its own positional
+        index; missing / empty names fall back to ``"CIK <padded>"``."""
+        result = _extract_filer_set(
+            cik_list=["0001234567", "0007654321"],
+            name_list=["Real Filer", ""],
+            issuer_cik="0000999999",
+        )
+        assert result == [
+            ("0001234567", "Real Filer"),
+            ("0007654321", "CIK 0007654321"),
+        ]
+
+
+class TestDiscoverSec13dgForUniverse:
+    """End-to-end discovery: universe SELECT → efts → manifest + hint
+    writes. SEC HTTP is monkeypatched at the class method level so
+    tests run offline + deterministically."""
+
+    def test_happy_path_single_issuer_single_filer(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One US tradable issuer with one primary CIK; one efts hit
+        with one non-issuer non-agent filer. Expect: 1 manifest row,
+        1 hint row, 1 ``DiscoveryResult.manifest_rows_inserted``,
+        1 ``hints_written``, 1 ``filers_upserted``."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=8101, symbol="GMEX")
+        _seed_primary_cik(conn, instrument_id=8101, cik="0000999100")
+        conn.commit()
+
+        accession = "0001234567-25-000010"
+        filer_cik = "0001234567"
+        fake_payload: dict[str, object] = {
+            "hits": {
+                "hits": [
+                    {
+                        "_source": {
+                            "adsh": accession,
+                            "form": "SC 13G",
+                            "file_date": "2026-04-15",
+                            "ciks": ["0000999100", filer_cik],
+                            "display_names": ["GMEX Test Co.", "Test Filer"],
+                        }
+                    }
+                ]
+            }
+        }
+        calls: list[dict[str, Any]] = []
+
+        def _fake_fetch(
+            self: SecFilingsProvider,
+            *,
+            ciks: str,
+            forms: tuple[str, ...],
+            startdt: date,
+            enddt: date,
+            from_offset: int = 0,
+            size: int = 100,
+        ) -> dict[str, object] | None:
+            calls.append(
+                {
+                    "ciks": ciks,
+                    "forms": forms,
+                    "startdt": startdt,
+                    "enddt": enddt,
+                    "from_offset": from_offset,
+                    "size": size,
+                }
+            )
+            # Return the payload on the first call, then empty on the
+            # next page to terminate the loop cleanly.
+            if from_offset == 0:
+                return fake_payload
+            return {"hits": {"hits": []}}
+
+        monkeypatch.setattr(SecFilingsProvider, "fetch_search_index_json", _fake_fetch)
+
+        result = discover_sec_13dg_for_universe(conn, mode="bootstrap")
+        conn.commit()
+
+        # DiscoveryResult counters
+        assert isinstance(result, DiscoveryResult)
+        assert result.issuers_scanned == 1
+        assert result.accessions_discovered == 1
+        assert result.manifest_rows_inserted == 1
+        assert result.manifest_rows_skipped_existing == 0
+        assert result.hints_written == 1
+        assert result.filers_upserted == 1
+        assert result.rows_skipped_outside_cap == 0
+        assert result.elapsed_seconds >= 0.0
+
+        # Manifest row present with the right shape
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT subject_type, cik, instrument_id, source, form
+                FROM sec_filing_manifest
+                WHERE accession_number = %s
+                """,
+                (accession,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "blockholder_filer"
+        assert row[1] == filer_cik
+        assert row[2] is None  # CHECK constraint: blockholder_filer → NULL
+        assert row[3] == "sec_13g"
+        assert row[4] == "SC 13G"
+
+        # Hint row present
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, issuer_cik
+                FROM sec_13dg_discovery_issuer_hint
+                WHERE accession_number = %s
+                """,
+                (accession,),
+            )
+            hint_rows = cur.fetchall()
+        assert hint_rows == [(8101, "0000999100")]
+
+        # blockholder_filers seeded for the genuine filer ONLY
+        # (issuer + any agent must NOT be auto-seeded).
+        with conn.cursor() as cur:
+            cur.execute("SELECT cik FROM blockholder_filers ORDER BY cik")
+            filers = [r[0] for r in cur.fetchall()]
+        assert filers == [filer_cik]
+
+        # Provider called once. The loop terminates after the first page
+        # because ``len(hits) == 1 < _PAGE_SIZE`` (efts contract: a
+        # short page implies no more results).
+        assert len(calls) == 1
+        assert calls[0]["ciks"] == "0000999100"
+        assert calls[0]["forms"] == ("SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A")
+        assert calls[0]["startdt"] == blockholders_retention_cutoff()
+        assert calls[0]["from_offset"] == 0
