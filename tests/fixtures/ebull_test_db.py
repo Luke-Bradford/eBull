@@ -155,12 +155,6 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "blockholder_filings_ingest_log",
     "blockholder_filings",
     "blockholder_filers",
-    # #1233 PR11 — discovery-time hint table for SC 13D/G universe-CIK
-    # discovery layer. Child of ``instruments`` (ON DELETE CASCADE); the
-    # parent CASCADE would clean rows up on instrument removal but the
-    # per-test truncate list keeps the hint table here so fixtures that
-    # only touch hint rows (no FK ripple) still get a clean slate.
-    "sec_13dg_discovery_issuer_hint",
     "def14a_drift_alerts",
     "def14a_ingest_log",
     "def14a_beneficial_holdings",
