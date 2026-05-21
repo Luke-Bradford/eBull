@@ -18,6 +18,7 @@ External boundaries:
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -386,3 +387,406 @@ class TestDiscoverSec13dgForUniverse:
         assert calls[0]["forms"] == ("SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A")
         assert calls[0]["startdt"] == blockholders_retention_cutoff()
         assert calls[0]["from_offset"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 4.4 — edge-case fixtures
+#
+# Each test below pins one of the discovery layer's risk-mitigation
+# clauses from spec §3.1 (joint filings + filing-agent defence;
+# share-class siblings; pagination boundary; re-discovery idempotency;
+# issuer-only defensive skip).
+# ---------------------------------------------------------------------------
+
+
+def _install_single_page_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+    calls: list[dict[str, Any]],
+) -> None:
+    """Monkeypatch ``SecFilingsProvider.fetch_search_index_json`` to
+    return ``payload`` on the first call and an empty page on every
+    subsequent call. Records call args into ``calls`` for assertions."""
+
+    def _fake_fetch(
+        self: SecFilingsProvider,
+        *,
+        ciks: str,
+        forms: tuple[str, ...],
+        startdt: date,
+        enddt: date,
+        from_offset: int = 0,
+        size: int = 100,
+    ) -> dict[str, object] | None:
+        calls.append(
+            {
+                "ciks": ciks,
+                "forms": forms,
+                "startdt": startdt,
+                "enddt": enddt,
+                "from_offset": from_offset,
+                "size": size,
+            }
+        )
+        if from_offset == 0:
+            return payload
+        return {"hits": {"hits": []}}
+
+    monkeypatch.setattr(SecFilingsProvider, "fetch_search_index_json", _fake_fetch)
+
+
+class TestDiscoveryEdgeCases:
+    """Spec §3.1 risks-table coverage + §3.4 test-impact bullets."""
+
+    def test_joint_filing_excludes_agent_cik(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One efts hit with ciks=[issuer, Donnelley agent, filer1, filer2]:
+
+        * manifest ``cik`` MUST be ``filer1`` (first non-issuer
+          non-agent CIK — the archive-owner-CIK derivation).
+        * ``blockholder_filers`` seeded for ``filer1`` + ``filer2``
+          ONLY; the agent CIK 0001193125 (Donnelley) must NOT be
+          seeded (filing agents are infrastructure, not reporters).
+        """
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=8201, symbol="EDG")
+        _seed_primary_cik(conn, instrument_id=8201, cik="0000888200")
+        conn.commit()
+
+        accession = "0001193125-25-036431"
+        filer1 = "0001067983"
+        filer2 = "0001767470"
+        agent = "0001193125"  # Donnelley R.R. & Sons — in KNOWN_FILING_AGENT_CIKS
+        payload: dict[str, object] = {
+            "hits": {
+                "hits": [
+                    {
+                        "_source": {
+                            "adsh": accession,
+                            "form": "SC 13D",
+                            "file_date": "2026-04-20",
+                            "ciks": ["0000888200", agent, filer1, filer2],
+                            "display_names": ["EDG Test Co.", "Donnelley", "Berkshire", "Cohen"],
+                        }
+                    }
+                ]
+            }
+        }
+        _install_single_page_provider(monkeypatch, payload, calls=[])
+
+        result = discover_sec_13dg_for_universe(conn, mode="bootstrap")
+        conn.commit()
+
+        # Manifest cik is the first non-issuer non-agent CIK (filer1).
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT cik, subject_id FROM sec_filing_manifest WHERE accession_number = %s",
+                (accession,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == filer1
+        assert row[1] == filer1
+
+        # Auto-seeded filers = filer1 + filer2 ONLY (no agent, no issuer).
+        with conn.cursor() as cur:
+            cur.execute("SELECT cik FROM blockholder_filers ORDER BY cik")
+            filers = [r[0] for r in cur.fetchall()]
+        assert filers == sorted([filer1, filer2])
+        assert agent not in filers
+        assert "0000888200" not in filers
+
+        # Result counters: 2 filers seeded for this single hit.
+        assert result.filers_upserted == 2
+        assert result.manifest_rows_inserted == 1
+        assert result.hints_written == 1
+
+    def test_share_class_siblings_one_manifest_two_hints(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two instruments on a shared issuer CIK (GOOG + GOOGL on
+        1652044). One efts call returns one accession; the discovery
+        layer writes ONE manifest row + TWO hint rows (one per
+        sibling)."""
+        conn = ebull_test_conn
+        issuer_cik = "0001652044"
+        _seed_instrument(conn, iid=8301, symbol="GOOG")
+        _seed_primary_cik(conn, instrument_id=8301, cik=issuer_cik)
+        _seed_instrument(conn, iid=8302, symbol="GOOGL")
+        _seed_primary_cik(conn, instrument_id=8302, cik=issuer_cik)
+        conn.commit()
+
+        accession = "0001234567-25-000888"
+        filer_cik = "0001234567"
+        payload: dict[str, object] = {
+            "hits": {
+                "hits": [
+                    {
+                        "_source": {
+                            "adsh": accession,
+                            "form": "SC 13G/A",
+                            "file_date": "2026-03-10",
+                            "ciks": [issuer_cik, filer_cik],
+                            "display_names": ["Alphabet Inc.", "Test Filer"],
+                        }
+                    }
+                ]
+            }
+        }
+        calls: list[dict[str, Any]] = []
+        _install_single_page_provider(monkeypatch, payload, calls)
+
+        result = discover_sec_13dg_for_universe(conn, mode="bootstrap")
+        conn.commit()
+
+        # Exactly ONE efts call for the issuer CIK (siblings collapse).
+        assert len(calls) == 1
+        assert calls[0]["ciks"] == issuer_cik
+
+        # ONE manifest row keyed on the accession.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM sec_filing_manifest WHERE accession_number = %s",
+                (accession,),
+            )
+            row = cur.fetchone()
+        assert row is not None and row[0] == 1
+
+        # TWO hint rows — one per sibling instrument.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT instrument_id
+                FROM sec_13dg_discovery_issuer_hint
+                WHERE accession_number = %s
+                ORDER BY instrument_id
+                """,
+                (accession,),
+            )
+            hint_instruments = [r[0] for r in cur.fetchall()]
+        assert hint_instruments == [8301, 8302]
+
+        # Counters reflect the 1-manifest, 2-hint fan-out.
+        assert result.issuers_scanned == 1
+        assert result.accessions_discovered == 1
+        assert result.manifest_rows_inserted == 1
+        # The second sibling sees the manifest row already present (the
+        # first sibling's pre-check + UPSERT) → bumps the "skipped
+        # existing" counter exactly once.
+        assert result.manifest_rows_skipped_existing == 1
+        assert result.hints_written == 2
+
+    def test_pagination_boundary_at_exactly_100(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Page 1 returns exactly 100 hits (the SEC page-size ceiling);
+        the loop MUST request page 2 (offset=100). Page 2 returns 0
+        hits → loop terminates. Total: 2 efts calls,
+        ``accessions_discovered == 100``."""
+        conn = ebull_test_conn
+        issuer_cik = "0000777777"
+        _seed_instrument(conn, iid=8401, symbol="PAG")
+        _seed_primary_cik(conn, instrument_id=8401, cik=issuer_cik)
+        conn.commit()
+
+        filer_cik = "0001234567"
+        # 100 distinct accessions so the PK doesn't collide.
+        hits = [
+            {
+                "_source": {
+                    "adsh": f"0001234567-25-{i:06d}",
+                    "form": "SC 13G",
+                    "file_date": "2026-04-15",
+                    "ciks": [issuer_cik, filer_cik],
+                    "display_names": ["Pag Test Co.", "Test Filer"],
+                }
+            }
+            for i in range(100)
+        ]
+        calls: list[dict[str, Any]] = []
+
+        def _fake_fetch(
+            self: SecFilingsProvider,
+            *,
+            ciks: str,
+            forms: tuple[str, ...],
+            startdt: date,
+            enddt: date,
+            from_offset: int = 0,
+            size: int = 100,
+        ) -> dict[str, object] | None:
+            calls.append({"from_offset": from_offset})
+            if from_offset == 0:
+                return {"hits": {"hits": hits}}
+            # Page 2: empty list → terminates the loop.
+            return {"hits": {"hits": []}}
+
+        monkeypatch.setattr(SecFilingsProvider, "fetch_search_index_json", _fake_fetch)
+
+        result = discover_sec_13dg_for_universe(conn, mode="bootstrap")
+        conn.commit()
+
+        # Two pages: offset=0 (full page), offset=100 (empty → terminate).
+        assert [c["from_offset"] for c in calls] == [0, 100]
+        assert result.accessions_discovered == 100
+        assert result.manifest_rows_inserted == 100
+        assert result.hints_written == 100
+
+    def test_re_discovery_idempotent_with_discovered_at_advancement(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run the same discovery sweep twice. The second run MUST:
+
+        * write 0 new manifest rows (``manifest_rows_inserted == 0``;
+          ``manifest_rows_skipped_existing == 1``).
+        * write 0 new hint rows (``hints_written == 0``).
+        * advance ``sec_13dg_discovery_issuer_hint.discovered_at``
+          on the existing hint row — pinning the hint-UPSERT-with-
+          ``DO UPDATE SET discovered_at = NOW()`` contract from
+          ``sql/159``.
+        """
+        conn = ebull_test_conn
+        issuer_cik = "0000666666"
+        _seed_instrument(conn, iid=8501, symbol="IDP")
+        _seed_primary_cik(conn, instrument_id=8501, cik=issuer_cik)
+        conn.commit()
+
+        accession = "0001234567-25-000500"
+        payload: dict[str, object] = {
+            "hits": {
+                "hits": [
+                    {
+                        "_source": {
+                            "adsh": accession,
+                            "form": "SC 13G",
+                            "file_date": "2026-04-15",
+                            "ciks": [issuer_cik, "0001234567"],
+                            "display_names": ["IDP Test Co.", "Test Filer"],
+                        }
+                    }
+                ]
+            }
+        }
+        _install_single_page_provider(monkeypatch, payload, calls=[])
+
+        first = discover_sec_13dg_for_universe(conn, mode="bootstrap")
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT discovered_at
+                FROM sec_13dg_discovery_issuer_hint
+                WHERE accession_number = %s AND instrument_id = %s
+                """,
+                (accession, 8501),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        first_discovered_at = row[0]
+        assert first.manifest_rows_inserted == 1
+        assert first.hints_written == 1
+
+        # Sleep a tiny moment so NOW() advances measurably between runs
+        # (Postgres TIMESTAMPTZ is microsecond-resolution; on fast hardware
+        # the second run can complete inside the same microsecond).
+        time.sleep(0.01)
+
+        second = discover_sec_13dg_for_universe(conn, mode="bootstrap")
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT discovered_at
+                FROM sec_13dg_discovery_issuer_hint
+                WHERE accession_number = %s AND instrument_id = %s
+                """,
+                (accession, 8501),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        second_discovered_at = row[0]
+
+        # Counters: second pass writes nothing net-new.
+        assert second.manifest_rows_inserted == 0
+        assert second.manifest_rows_skipped_existing == 1
+        assert second.hints_written == 0
+
+        # discovered_at strictly advanced under the UPSERT-refresh contract.
+        assert second_discovered_at > first_discovered_at
+
+    def test_issuer_only_result_skips_with_warn(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An efts hit whose ``ciks[]`` contains ONLY the issuer CIK
+        (no non-issuer non-agent CIK extractable) MUST short-circuit
+        without writing a manifest row, a hint row, or a blockholder
+        filer row. A warning log line records the anomaly."""
+        conn = ebull_test_conn
+        issuer_cik = "0000555555"
+        _seed_instrument(conn, iid=8601, symbol="ISO")
+        _seed_primary_cik(conn, instrument_id=8601, cik=issuer_cik)
+        conn.commit()
+
+        accession = "0000555555-25-000099"
+        payload: dict[str, object] = {
+            "hits": {
+                "hits": [
+                    {
+                        "_source": {
+                            "adsh": accession,
+                            "form": "SC 13G",
+                            "file_date": "2026-04-15",
+                            "ciks": [issuer_cik],  # issuer ONLY
+                            "display_names": ["ISO Test Co."],
+                        }
+                    }
+                ]
+            }
+        }
+        _install_single_page_provider(monkeypatch, payload, calls=[])
+
+        with caplog.at_level("WARNING", logger="app.services.sec_13dg_discovery"):
+            result = discover_sec_13dg_for_universe(conn, mode="bootstrap")
+            conn.commit()
+
+        # Nothing written.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM sec_filing_manifest WHERE accession_number = %s",
+                (accession,),
+            )
+            manifest_count = (cur.fetchone() or (0,))[0]
+            cur.execute(
+                "SELECT COUNT(*) FROM sec_13dg_discovery_issuer_hint WHERE accession_number = %s",
+                (accession,),
+            )
+            hint_count = (cur.fetchone() or (0,))[0]
+            cur.execute("SELECT COUNT(*) FROM blockholder_filers")
+            filer_count = (cur.fetchone() or (0,))[0]
+        assert manifest_count == 0
+        assert hint_count == 0
+        assert filer_count == 0
+
+        # Counters: hit was returned by efts (accessions_discovered=1)
+        # but every write counter stays at 0.
+        assert result.accessions_discovered == 1
+        assert result.manifest_rows_inserted == 0
+        assert result.manifest_rows_skipped_existing == 0
+        assert result.hints_written == 0
+        assert result.filers_upserted == 0
+
+        # Warning emitted with the accession + issuer CIK for operator audit.
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any(accession in r.getMessage() and issuer_cik in r.getMessage() for r in warnings)
