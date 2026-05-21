@@ -21,7 +21,7 @@ without touching SEC.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -607,6 +607,67 @@ def test_transient_upsert_exception_retries(
     with ebull_test_conn.cursor() as cur:
         cur.execute("SELECT 1 FROM blockholder_filings_ingest_log WHERE accession_number = '0009999999-26-000091'")
         assert cur.fetchone() is None
+
+
+def test_parse_13dg_tombstones_pre_cap_accession_without_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chokepoint B (#1233 PR11): a manifest row with ``filed_at``
+    strictly before ``blockholders_retention_cutoff()`` MUST be
+    tombstoned with ``error='retention floor'`` BEFORE any SEC
+    fetch (saves the HTTP budget + closes the gate against any
+    operator-triggered rebuild that re-enqueues pre-cap rows).
+    """
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.providers.implementations import sec_edgar
+    from app.services.blockholders import blockholders_retention_cutoff
+
+    cutoff = blockholders_retention_cutoff()
+    # 1 day strictly before cutoff — gate predicate is inclusive of
+    # the cutoff midnight so 1 day under is unambiguously outside.
+    pre_cap_filed_at = datetime(
+        cutoff.year, cutoff.month, cutoff.day, tzinfo=UTC
+    ) - timedelta(days=1)
+
+    # Use the canonical seed helper but override filed_at to the
+    # pre-cap timestamp via the lower-level record_manifest_entry.
+    accession = "0009000000-20-000001"
+    filer_cik = "0002093607"
+    record_manifest_entry(
+        ebull_test_conn,
+        accession,
+        cik=filer_cik,
+        form="SC 13D",
+        source="sec_13d",
+        subject_type="blockholder_filer",
+        subject_id=filer_cik,
+        instrument_id=None,
+        filed_at=pre_cap_filed_at,
+        primary_document_url="https://www.sec.gov/Archives/edgar/data/2093607/000900000020000001/primary_doc.xml",
+    )
+    ebull_test_conn.commit()
+
+    fetch_calls: list[str] = []
+
+    def _track_fetch(self, url):  # noqa: ARG001
+        fetch_calls.append(url)
+        return _FAKE_13D_XML
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider, "fetch_document_text", _track_fetch
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    row = get_manifest_row(ebull_test_conn, accession)
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.error == "retention floor"
+    # Critical: gate B runs BEFORE fetch — zero SEC HTTP calls.
+    assert fetch_calls == []
 
 
 def test_parser_registered_for_both_sources() -> None:

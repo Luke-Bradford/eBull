@@ -66,6 +66,7 @@ from app.services.blockholders import (
     _resolve_cusip_to_instrument_id,
     _upsert_filer,
     _upsert_filing_row,
+    blockholders_within_retention,
 )
 from app.services.manifest_parsers._classify import (
     format_upsert_error,
@@ -144,6 +145,30 @@ def _parse_13dg(
             status="tombstoned",
             parser_version=_PARSER_VERSION_13DG,
             error=f"row.cik is a known filing-agent CIK ({padded_filer_cik})",
+        )
+
+    # Chokepoint B (#1233 PR11): pre-fetch retention gate. Tombstone
+    # any manifest row whose ``filed_at`` falls strictly before
+    # ``blockholders_retention_cutoff()`` BEFORE we touch SEC HTTP or
+    # ``store_raw`` — saves the rate-limited budget AND prevents any
+    # operator-triggered rebuild (POST /jobs/sec_rebuild/run) from
+    # re-introducing pre-cap rows through the manifest worker. The cap
+    # honours the SEC Schedule 13 XML mandate (2024-12-18) as a
+    # mandate-floor — pre-mandate filings are HTML-only and not
+    # parseable by edgartools. ``filed_at IS NULL`` resolves to
+    # ``False`` (defensive — a row without a canonical filing
+    # timestamp cannot be placed inside the window).
+    if not blockholders_within_retention(row.filed_at):
+        logger.info(
+            "13D/G manifest parser: accession=%s filed_at=%s outside "
+            "retention cutoff; tombstoning without fetch",
+            accession,
+            row.filed_at,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13DG,
+            error="retention floor",
         )
 
     # Build canonical primary_doc.xml URL — manifest's
