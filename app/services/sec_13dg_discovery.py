@@ -41,6 +41,10 @@ shape of the N-CSR discovery introduced under PR8.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import Any, Literal
+
+import psycopg
 
 from app.providers.implementations.sec_edgar import (
     KNOWN_FILING_AGENT_CIKS,
@@ -59,19 +63,73 @@ __all__ = [
 
 
 # Silence "imported but unused" — these symbols are intentionally re-exported
-# so future Task 4.2 / 4.3 additions in this module can reach them without a
+# so future Task 4.3 additions in this module can reach them without a
 # fresh edit to the import block. The lint guard in Phase 10 invariant B
 # requires the module body to reference ``blockholders_retention_cutoff()``
-# explicitly; the watermark helper lands in Task 4.2 and the discovery walker
-# in Task 4.3, both of which will consume these names.
+# explicitly (already true via ``_resolve_discovery_startdt`` below); the
+# discovery walker in Task 4.3 will consume the remaining names.
 _REEXPORTS_FOR_NEXT_TASK = (
     KNOWN_FILING_AGENT_CIKS,
     SecFilingsProvider,
     _zero_pad_cik,
     _upsert_filer,
-    blockholders_retention_cutoff,
     record_manifest_entry,
 )
+
+
+# 7-day safety overlap so a steady-state pass after a short outage still
+# re-covers any filings whose ``filed_at`` predates the previous run's
+# completion (SEC accepts filings 24/7; ``filed_at`` lags wall-clock by
+# up to a business day on amendment chains).
+_WATERMARK_SAFETY_OVERLAP_DAYS = 7
+
+
+def _resolve_discovery_startdt(
+    conn: psycopg.Connection[Any],
+    *,
+    mode: Literal["bootstrap", "steady_state"],
+    issuer_cik: str | None = None,
+) -> date:
+    """Pick the discovery window start, with the 3y floor as the hard ceiling.
+
+    Per spec §3.5:
+
+    * ``mode='bootstrap'`` always returns the floor — the bootstrap
+      stage performs the full-cohort 3y scan regardless of any prior
+      ingest state.
+    * ``mode='steady_state'`` narrows to
+      ``MAX(blockholder_filings.filed_at) WHERE issuer_cik = ?`` minus
+      a 7-day safety overlap, CLAMPED to the floor so a missing
+      watermark (issuer with zero prior 13D/G ingest) does not
+      silently shrink coverage. An ``issuer_cik`` of ``None`` is
+      defensive — also falls back to the floor.
+
+    Watermark source: the raw chain's own
+    ``blockholder_filings.filed_at`` keyed by ``issuer_cik``. We do
+    NOT consult ``data_freshness_index`` because DFI for
+    ``sec_13d``/``sec_13g`` is keyed by
+    ``(subject_type='blockholder_filer', subject_id=filer_cik)`` —
+    that grain is filer-side and would not match the per-issuer scan
+    PR11's discovery performs (Codex 1b HIGH watermark coherence).
+    """
+    floor = blockholders_retention_cutoff()
+    if mode == "bootstrap":
+        return floor
+    if issuer_cik is None:
+        return floor
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT MAX(filed_at)::date
+            FROM blockholder_filings
+            WHERE issuer_cik = %s
+              AND filed_at IS NOT NULL
+            """,
+            (issuer_cik,),
+        )
+        row = cur.fetchone()
+    watermark = row[0] if row and row[0] else floor
+    return max(floor, watermark - timedelta(days=_WATERMARK_SAFETY_OVERLAP_DAYS))
 
 
 @dataclass(frozen=True)
