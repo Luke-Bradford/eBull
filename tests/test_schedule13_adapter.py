@@ -252,3 +252,20 @@ def test_adapter_yields_none_date_of_event_for_empty_string() -> None:
     )
 
     assert filing.date_of_event is None
+
+
+def test_adapter_accepts_full_schedule_form_name() -> None:
+    """Codex 1f gap + PR11 v8 empirical pivot: post-2024-12-18 manifest
+    rows carry form='SCHEDULE 13D/A' style (not 'SC 13D/A'). Adapter MUST
+    map both spellings to the same SubmissionType.
+
+    Live smoke 2026-05-21 on accession 0001104659-26-064061 surfaced this
+    as a KeyError before the alias was added — 0 post-mandate accessions
+    would parse without it.
+    """
+    from app.services.manifest_parsers._schedule13_adapter import (
+        _SUBMISSION_TYPE_FOR_FORM,
+    )
+    for short, full in [("SC 13D", "SCHEDULE 13D"), ("SC 13D/A", "SCHEDULE 13D/A"),
+                        ("SC 13G", "SCHEDULE 13G"), ("SC 13G/A", "SCHEDULE 13G/A")]:
+        assert _SUBMISSION_TYPE_FOR_FORM[short] == _SUBMISSION_TYPE_FOR_FORM[full] == full

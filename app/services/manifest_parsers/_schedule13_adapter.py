@@ -63,11 +63,24 @@ _STATUS_FOR_SOURCE: Final[dict[Literal["sec_13d", "sec_13g"], Status]] = {
 }
 
 
+# Form-name aliasing (#1233 PR11 v8 empirical pivot): legacy
+# pre-mandate filings index under ``SC 13D/A`` style; post-2024-12-18
+# XML mandate filings index under ``SCHEDULE 13D/A`` style
+# (see ``sec_manifest.py:855-866`` form-type mapping which carries
+# both spellings). Live smoke 2026-05-21 against SCHEDULE 13D/A
+# manifest rows surfaced the prior single-spelling KeyError. Both
+# spellings normalise to the same SubmissionType.
 _SUBMISSION_TYPE_FOR_FORM: Final[dict[str, SubmissionType]] = {
+    # Short ``SC`` spelling (pre-mandate index)
     "SC 13D": "SCHEDULE 13D",
     "SC 13D/A": "SCHEDULE 13D/A",
     "SC 13G": "SCHEDULE 13G",
     "SC 13G/A": "SCHEDULE 13G/A",
+    # Full ``SCHEDULE`` spelling (post-mandate index)
+    "SCHEDULE 13D": "SCHEDULE 13D",
+    "SCHEDULE 13D/A": "SCHEDULE 13D/A",
+    "SCHEDULE 13G": "SCHEDULE 13G",
+    "SCHEDULE 13G/A": "SCHEDULE 13G/A",
 }
 
 
