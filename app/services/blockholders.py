@@ -48,7 +48,7 @@ import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError; no untrusted input parsed here.
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -106,7 +106,16 @@ def blockholders_retention_cutoff() -> date:
     the rolling boundary catches up.
     """
     today = datetime.now(tz=UTC).date()
-    three_year_floor = today - timedelta(days=365 * INSIDER_BLOCKHOLDERS_RETENTION_YEARS)
+    # Calendar-exact 3-year subtraction (not 365×3=1095 days) so the
+    # floor doesn't drift by ±1 day across leap-year boundaries — bot
+    # NITPICK 2026-05-21. Feb 29 today → Feb 28 floor three years prior
+    # (no Feb 29 in non-leap-year fallback).
+    try:
+        three_year_floor = today.replace(year=today.year - INSIDER_BLOCKHOLDERS_RETENTION_YEARS)
+    except ValueError:
+        three_year_floor = today.replace(
+            year=today.year - INSIDER_BLOCKHOLDERS_RETENTION_YEARS, day=28
+        )
     return max(three_year_floor, SEC_SCHEDULE_13_XML_MANDATE_DATE)
 
 

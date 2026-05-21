@@ -395,3 +395,161 @@ def test_rescue_path_writes_post_cap_accession(
     assert reporter_name == "Rewash Cap Filer LLC"
     assert issuer_cusip == cusip
     assert aggregate == 1500000
+
+
+# ---------------------------------------------------------------------------
+# Bot PREVENTION (post-PR1253-iter-1): sec_13g happy-path mis-source guard
+# ---------------------------------------------------------------------------
+
+_NS_13G = "http://www.sec.gov/edgar/schedule13G"
+
+
+_FAKE_13G_XML = f"""<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="{_NS_13G}">
+  <headerData>
+    <submissionType>SCHEDULE 13G</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0000222000</cik>
+        </filerCredentials>
+      </filer>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Common Stock</securitiesClassTitle>
+      <eventDateRequiresFilingThisStatement>11/03/2025</eventDateRequiresFilingThisStatement>
+      <issuerInfo>
+        <issuerCik>0000999000</issuerCik>
+        <issuerCusip>BLKCSP01</issuerCusip>
+        <issuerName>Rewash Cap Issuer Inc.</issuerName>
+      </issuerInfo>
+    </coverPageHeader>
+    <coverPageHeaderReportingPersonDetails>
+      <reportingPersonName>Passive Holder LLC</reportingPersonName>
+      <reportingPersonNoCIK>N</reportingPersonNoCIK>
+      <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+      <memberGroup>b</memberGroup>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>1500000</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>1500000</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>1500000</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <classPercent>5.5</classPercent>
+      <typeOfReportingPerson>CO</typeOfReportingPerson>
+    </coverPageHeaderReportingPersonDetails>
+    <signatureInfo>
+      <signaturePerson>
+        <signatureDetails>
+          <date>11/06/2025</date>
+        </signatureDetails>
+      </signaturePerson>
+    </signatureInfo>
+  </formData>
+</edgarSubmission>
+"""
+
+
+def test_happy_path_sec_13g_writes_passive_status(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    isolated_registry: None,
+) -> None:
+    """Bot PREVENTION 2026-05-21: rewash happy-path must source-dispatch
+    via the manifest row's source column. When manifest_source='sec_13g'
+    AND existing typed rows exist, the re-written blockholder_filings row
+    MUST have status='passive' (NOT silently defaulted to 'active' from
+    a sec_13d fallback).
+
+    Original bug: rewash code defaulted ``source_for_adapter`` to
+    ``'sec_13d'`` when manifest_source was None on the happy path. Fix:
+    require manifest_row in BOTH branches; return False if missing.
+    """
+    conn = ebull_test_conn
+    instrument_id = 99500003
+    accession = "0000222000-26-000003"
+    filer_cik = "0000222000"
+    cusip = "BLKCSP01"
+
+    _seed_instrument_and_cusip(conn, iid=instrument_id, symbol="BLKPSV", cusip=cusip)
+
+    post_cap = _post_cap_filed_at()
+    _seed_manifest_row(
+        conn,
+        accession=accession,
+        filer_cik=filer_cik,
+        filed_at=post_cap,
+        form="SCHEDULE 13G",
+        source="sec_13g",
+    )
+
+    # Seed an existing row so we enter the HAPPY PATH (existing_rows > 0).
+    # Pre-seed with the WRONG status ('active') so a silent default-to-13D
+    # would leave it active; correct sec_13g dispatch overwrites with 'passive'.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO blockholder_filers (cik, name)
+            VALUES (%s, 'Passive Holder LLC')
+            ON CONFLICT (cik) DO UPDATE SET name = EXCLUDED.name
+            RETURNING filer_id
+            """,
+            (filer_cik,),
+        )
+        filer_id = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO blockholder_filings (
+                filer_id, accession_number, submission_type, status,
+                instrument_id, issuer_cik, issuer_cusip, reporter_name,
+                aggregate_amount_owned, percent_of_class, filed_at
+            ) VALUES (%s, %s, 'SCHEDULE 13G', 'passive', %s, '0000999000', %s, 'Stale Row', 1, 0.0, %s)
+            """,
+            (filer_id, accession, instrument_id, cusip, post_cap),
+        )
+
+    # Seed the raw 13G XML body so the rewash sweep can parse it.
+    from app.services import raw_filings as _raw
+    _raw.store_raw(
+        conn,
+        accession_number=accession,
+        document_kind="primary_doc_13dg",
+        payload=_FAKE_13G_XML,
+        parser_version="13dg-primary-v0",  # older version → reparse trigger
+    )
+    conn.commit()
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="primary_doc_13dg",
+            current_version="13dg-primary-v1",
+            apply_fn=rewash_filings._apply_blockholders,
+        )
+    )
+
+    result = run_rewash(conn, document_kind="primary_doc_13dg")
+
+    assert result.rows_reparsed == 1, f"happy-path sec_13g must rewash; got {result}"
+    assert result.rows_failed == 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT submission_type, status, reporter_name FROM blockholder_filings "
+            "WHERE accession_number = %s",
+            (accession,),
+        )
+        rows = cur.fetchall()
+    # Rewash performs DELETE + re-INSERT — should produce exactly one row.
+    assert len(rows) == 1, f"expected exactly 1 row post-rewash, got {len(rows)}: {rows}"
+    submission_type, status, reporter_name = rows[0]
+    assert submission_type == "SCHEDULE 13G", f"expected SCHEDULE 13G, got {submission_type!r}"
+    assert status == "passive", (
+        f"sec_13g rewash must write status='passive', got {status!r} — "
+        f"silent sec_13d default would write 'active' on a passive filing"
+    )
+    assert reporter_name == "Passive Holder LLC", (
+        f"row was not re-written from the XML; pre-seeded 'Stale Row' remains. {reporter_name=!r}"
+    )

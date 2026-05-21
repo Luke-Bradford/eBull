@@ -44,9 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BLOCKHOLDER_PATHS: tuple[str, ...] = (
     "app/services/blockholders.py",
     "app/services/manifest_parsers/sec_13dg.py",
-    "app/services/sec_13dg_discovery.py",
     "tests/test_manifest_parser_sec_13dg.py",
-    "tests/test_sec_13dg_discovery.py",
     "tests/test_blockholders_ingester.py",
     "tests/test_schedule13_adapter.py",
     "tests/test_rewash_blockholders_cap.py",
@@ -55,10 +53,16 @@ BLOCKHOLDER_PATHS: tuple[str, ...] = (
     "tests/test_blockholders_retention_helpers.py",
 )
 
+# Note: sec_13dg_discovery.py + test_sec_13dg_discovery.py were in
+# this list pre-pivot but deleted by the v8 empirical pivot. `git grep`
+# against non-existent paths silently exits 1 (no match), so leaving
+# them here would be dead weight that never catches a regression —
+# bot WARNING 2026-05-21. Dropped.
+
 # Dormant entrypoints retired in PR11 Phase 8. Resurrection in any of
 # the BLOCKHOLDER_PATHS above is forbidden — the manifest-worker path
-# (sec_13dg_discovery → manifest worker → sec_13dg parser) replaces
-# them end-to-end.
+# (legacy daily-index discovery → manifest worker → sec_13dg parser)
+# replaces them end-to-end.
 FORBIDDEN: tuple[str, ...] = (
     "ingest_all_active_filers",
     "ingest_filer_blockholders",
