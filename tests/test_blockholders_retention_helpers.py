@@ -100,7 +100,8 @@ def test_cutoff_uses_3y_floor_once_rolling_boundary_catches_up(
     the mandate. (The mandate floor stops binding on / after 2027-12-18.)
     """
     _install_fake_now(monkeypatch, datetime(2028, 1, 15, 12, 0, 0, tzinfo=UTC))
-    # 365 * 3 = 1095 days. 2028-01-15 − 1095d = 2025-01-15.
+    # Calendar-exact 3-year subtraction (today.replace(year=today.year-3)):
+    # 2028-01-15 minus 3 calendar years = 2025-01-15. Leap-year-stable.
     assert blockholders_retention_cutoff() == date(2025, 1, 15)
 
 

@@ -180,12 +180,21 @@ def build_filing_from_edgartools_dict(
 
     reporting_persons: list[BlockholderReportingPerson] = []
     for person in reporting_persons_raw:
-        no_cik = bool(getattr(person, "no_cik", False))
+        edgartools_no_cik = bool(getattr(person, "no_cik", False))
         # edgartools returns empty string when CIK is absent (e.g. on
-        # the 13G cover); coerce to None for the schema-nullable
+        # the 13G cover where the schema doesn't carry a per-reporter
+        # CIK at all). Coerce to None for the schema-nullable
         # reporter_cik column. ``no_cik=True`` also yields None.
         raw_cik = getattr(person, "cik", "") or ""
-        cik: str | None = None if no_cik else (raw_cik or None)
+        cik: str | None = None if edgartools_no_cik else (raw_cik or None)
+        # Bot WARNING 2026-05-21 iter 2: sql/095 documents the semantic
+        # convention "reporter_cik NULL → reporter_no_cik TRUE" (lines
+        # 103-105). Promote no_cik=True whenever we're writing NULL
+        # cik regardless of edgartools' own flag — otherwise a 13G
+        # filing whose ReportingPerson dataclass has cik="" + no_cik=False
+        # writes (NULL, FALSE) which violates the semantic convention
+        # downstream readers rely on.
+        no_cik = edgartools_no_cik or cik is None
         reporting_persons.append(
             BlockholderReportingPerson(
                 cik=cik,

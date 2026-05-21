@@ -268,3 +268,44 @@ def test_adapter_accepts_full_schedule_form_name() -> None:
         ("SC 13G/A", "SCHEDULE 13G/A"),
     ]:
         assert _SUBMISSION_TYPE_FOR_FORM[short] == _SUBMISSION_TYPE_FOR_FORM[full] == full
+
+
+def test_adapter_promotes_no_cik_when_raw_cik_empty() -> None:
+    """Bot WARNING iter 2 — sql/095:103-105 semantic convention:
+    reporter_cik NULL → reporter_no_cik TRUE. 13G ReportingPerson
+    dataclasses carry cik='' + no_cik=False (the per-reporter CIK
+    field is not on the 13G cover schema at all). Adapter must promote
+    no_cik=True whenever it's writing NULL cik."""
+    from types import SimpleNamespace
+
+    fake_person = SimpleNamespace(
+        cik="",
+        no_cik=False,  # edgartools didn't flag it; we still NULL the CIK
+        name="Empty CIK Holder LLC",
+        citizenship="DE",
+        member_of_group=None,
+        type_of_reporting_person="CO",
+        sole_voting_power=0,
+        shared_voting_power=0,
+        sole_dispositive_power=0,
+        shared_dispositive_power=0,
+        aggregate_amount=0,
+        percent_of_class=0.0,
+    )
+    fake_parsed = {
+        "issuer_info": SimpleNamespace(cik="0000999000", name="Issuer Inc.", cusip="X"),
+        "security_info": SimpleNamespace(cusip="X", title="Common"),
+        "reporting_persons": [fake_person],
+        "event_date": "2025-01-01",
+    }
+    filing = build_filing_from_edgartools_dict(
+        fake_parsed, source="sec_13g", manifest_form="SCHEDULE 13G", manifest_filer_cik="0000222000"
+    )
+    assert len(filing.reporting_persons) == 1
+    p = filing.reporting_persons[0]
+    assert p.cik is None, "empty raw_cik must coerce to None"
+    assert p.no_cik is True, (
+        "sql/095:103-105 convention requires reporter_no_cik=TRUE when "
+        "reporter_cik IS NULL — adapter must promote even when edgartools "
+        f"didn't flag it. Got no_cik={p.no_cik!r} cik={p.cik!r}"
+    )

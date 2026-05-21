@@ -498,7 +498,9 @@ def test_happy_path_sec_13g_writes_passive_status(
             """,
             (filer_cik,),
         )
-        filer_id = cur.fetchone()[0]
+        row = cur.fetchone()
+        assert row is not None, "filer upsert returned no row"
+        filer_id = row[0]
         cur.execute(
             """
             INSERT INTO blockholder_filings (
