@@ -6,7 +6,7 @@
 >
 > Parent spec: [`docs/superpowers/specs/2026-05-19-data-retention-rubric.md`](2026-05-19-data-retention-rubric.md) §4.5 / §4.6 / §6.4 / §7 / §8.
 >
-> Status: **DESIGN (rev 6)** — Codex 1a → rev 2 (5H+7M+4L). Codex 1b → rev 3 (3H+7M+4L). Codex 1c → rev 4 (1H+3M+3L). Codex 1d → rev 5 (3H+3M+1L). Codex 1e on rev 5 returned 0 HIGH + 2 MED + 2 LOW (convergence). MED-1 was the load-bearing one: state-anchored per-row LATERAL `MAX(ingested_at)` against the RANGE-partitioned observations tables fans out to ~84 partitions per probe × ~87k state rows = minutes per sweep — NOT sub-second despite proper indexing (partition pruning by `period_end` doesn't help an `instrument_id` predicate). Rev 6 switches the sweep predicate to an obs-anchored CTE aggregate `MAX(ingested_at) GROUP BY instrument_id` (single full-index scan via Append + IndexScan; ~500ms-2s for funds; deterministically faster than per-row LATERAL fanout). Rev 6 also adds an out-of-band orphan-reconciliation script to DoD (pin the write-through invariant Codex 1e MED-2 flagged); refines first-sweep cost wording to "bounded + measured" (LOW-1); tightens P6 to pin the `MAX(c.refreshed_at)` literal (LOW-2).
+> Status: **DESIGN (rev 7 — FINAL for doc-PR)** — Codex 1a → rev 2 (5H+7M+4L). Codex 1b → rev 3 (3H+7M+4L). Codex 1c → rev 4 (1H+3M+3L). Codex 1d → rev 5 (3H+3M+1L). Codex 1e → rev 6 (0H+2M+2L). Codex 1f on rev 6 returned 0 HIGH + 1 MED + 3 LOW — MED tightens the orphan-audit DoD from "script exists" to "script runs + records zero rows at verification SHA"; LOWs (DoD #3 wording stale, EXPLAIN target wording alignment, lint O regression-guard for CTE shape) all folded in rev 7. Convergence is stable: HIGH=0 across two rounds, MED count diminishing. Spec sign-off: rev 7 ready for doc-PR; implementation plan via writing-plans skill follows.
 
 ## 0. Status snapshot (2026-05-21 dev DB)
 
@@ -354,7 +354,7 @@ The `WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE` cla
 - Concurrent **observation writers** (record_*_observation called from a sibling code path) do not block on the advisory lock. They may commit between the lock acquisition and the MERGE's source-subquery scan; the MERGE will see whatever was committed at scan time. The repair-sweep predicate (§3.3) catches any obs writes that committed after the most recent refresh — that is the whole point of the watermark.
 - PG MERGE takes row-level locks on matched/updated target rows + the locks released at COMMIT. Concurrent same-instrument refreshes (advisory lock contention) → serialised. Concurrent different-instrument refreshes → row-level locks are disjoint by PK; no contention.
 
-## 5. Lint guard (91 clause-counts total — 81 per-helper + 10 cross-cutting)
+## 5. Lint guard (93 clause-counts total — 81 per-helper + 12 cross-cutting)
 
 New script: [`scripts/check_ownership_refresh_writer_pattern.sh`](../../../scripts/check_ownership_refresh_writer_pattern.sh). Wired into [`.githooks/pre-push`](../../../.githooks/pre-push) after PR11's `check_13dg_retention.sh`. Awk-based function-body block walker (PR4 Codex 1c lesson); every grep guarded against empty-input by exact-count assertion (PR10a Codex iter 1 lesson).
 
@@ -383,10 +383,10 @@ Plus 4 cross-cutting checks:
 | --- | --- | --- |
 | **M** | No `DELETE FROM ownership_*_current` anywhere under `app/` outside the 7 helper bodies | grep across `app/**/*.py` minus the 7 helper bodies → count == 0 |
 | **N** | No `DELETE FROM ownership_*_current` anywhere under `scripts/` and `app/jobs/` (catches future writers landing outside `app/services/`) | grep across both trees → count == 0 |
-| **O** | `ownership_observations_repair.py` predicate references `ownership_refresh_state.last_drained_observations_max_ingested_at` (not legacy `c.refreshed_at < ...` form) | grep `c.refreshed_at <` → count == 0 inside the repair file |
+| **O** | `ownership_observations_repair.py` predicate uses the rev-6 obs-anchored CTE aggregate shape (Codex 1f LOW-3 — forbids both regressions: legacy `c.refreshed_at <` form AND the rev-5 per-row LATERAL form that partition-fanouts) | Inside the repair file: (O1) grep `c.refreshed_at <` → count == 0 (no legacy form); (O2) grep `WITH obs_max AS` → count ≥ 1 (positive shape pin for the CTE aggregate); (O3) grep `LATERAL` inside the predicate-defining function body → count == 0 (no per-row LATERAL regression). |
 | **P** | Migration `sql/163_ownership_refresh_state.sql` pins all rev-6 contracts (Codex 1d MED-3 + Codex 1e LOW-2): table + indexes + backfill + literal aggregate expression | 7 targeted grep checks against the migration file with exact-count assertions — (P1) `CREATE TABLE IF NOT EXISTS ownership_refresh_state` opener present; (P2) PK is `(instrument_id, category)`; (P3) CHECK lists exactly the 7 category literals; (P4) `CREATE INDEX IF NOT EXISTS idx_funds_obs_instrument_ingested` present; (P5) `CREATE INDEX IF NOT EXISTS idx_esop_obs_instrument_ingested` present; (P6) backfill source uses literal `MAX(c.refreshed_at)` from `ownership_X_current c GROUP BY c.instrument_id` (not from observations MAX, not from `now()`, not from `MIN(c.refreshed_at)` — pin both the aggregate function and the source column to lock in the false-positive-over-false-negative trade-off); (P7) backfill block repeated 7 times (one per category). |
 
-Total: **91 lint clause-counts** (81 per-helper + 10 cross-cutting — M, N, O, P1-P7). Pure text walk, no DB dependency, sub-second runtime.
+Total: **93 lint clause-counts** (81 per-helper + 12 cross-cutting — M, N, O1-O3, P1-P7). Pure text walk, no DB dependency, sub-second runtime.
 
 ## 6. Tests (52 parametrised cases)
 
@@ -442,18 +442,18 @@ CLAUDE.md §"Definition of done" + §"ETL / parser / schema-migration additional
 
 1. 7 `refresh_*_current` helpers in [`app/services/ownership_observations.py`](../../../app/services/ownership_observations.py) rewritten to single-statement MERGE + `ownership_refresh_state` UPSERT per §4 template + §4.1 per-helper differences. Signature `(conn, *, instrument_id) -> int` preserved on every helper.
 2. New migration `sql/163_ownership_refresh_state.sql` creates the table with the schema in §3.3 + 2 `(instrument_id, ingested_at DESC)` indexes on funds + esop observations tables (sql/119 already covers the other 5 — Codex 1d MED-1) + idempotent backfill via `MAX(_current.refreshed_at) GROUP BY instrument_id` per category (Codex 1d HIGH-1 — false-positive over false-negative; backfilling from obs MAX would mask drift). Runs inside the standard migration runner; no `-- runner: autocommit` directive required.
-3. Repair-sweep predicate switched in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) to the §3.3 form (state-anchored single-query LATERAL `MAX(ingested_at)` with `IS DISTINCT FROM`; orphan UNION tail dropped per Codex 1d HIGH-3). `_CATEGORIES` list expanded to all 7 categories — adds `funds` + `esop` lambdas wiring `refresh_funds_current` + `refresh_esop_current` so the sweep stays uniform with the state-table CHECK constraint (Codex 1b MED-4).
-4. [`scripts/check_ownership_refresh_writer_pattern.sh`](../../../scripts/check_ownership_refresh_writer_pattern.sh) (91 clause-counts: 81 per-helper + 10 cross-cutting M/N/O/P1-P7, per §5) wired into [`.githooks/pre-push`](../../../.githooks/pre-push) after `check_13dg_retention.sh`.
+3. Repair-sweep predicate switched in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) to the §3.3 form — **obs-anchored CTE aggregate** (`WITH obs_max AS (SELECT instrument_id, MAX(ingested_at) FROM ownership_X_observations GROUP BY instrument_id)` LEFT JOIN state, `IS DISTINCT FROM`; orphan UNION tail dropped per Codex 1d HIGH-3; per-row LATERAL replaced per Codex 1e MED-1 partition-fanout). `_CATEGORIES` list expanded to all 7 categories — adds `funds` + `esop` lambdas wiring `refresh_funds_current` + `refresh_esop_current` so the sweep stays uniform with the state-table CHECK constraint (Codex 1b MED-4).
+4. [`scripts/check_ownership_refresh_writer_pattern.sh`](../../../scripts/check_ownership_refresh_writer_pattern.sh) (93 clause-counts: 81 per-helper + 12 cross-cutting M/N/O1-O3/P1-P7, per §5) wired into [`.githooks/pre-push`](../../../.githooks/pre-push) after `check_13dg_retention.sh`.
 5. [`tests/test_ownership_refresh_writer_merge.py`](../../../tests/test_ownership_refresh_writer_merge.py) — 52 parametrised cases (7 × 5 base + insiders priority-chain + treasury null guard + def14a ESOP exclusion + 7 repair-sweep no-loop + 7 known_to expiry watermark alignment per §6). Load-bearing no-op-churn case uses per-row `xmin::text` equality + `pgstattuple` on both `_current` and `ownership_refresh_state`.
 6. [`tests/fixtures/ebull_test_db.py`](../../../tests/fixtures/ebull_test_db.py) template provisions `pgstattuple` extension; failure to provision triggers `pytest.fail` in no-op-churn case (no silent skips).
 7. Boot-time PG ≥ 17 guard at lifespan (mirror #1187 pattern). Pinned by `tests/smoke/test_app_boots.py`.
-8. Smoke verification against AAPL / GME / MSFT / JPM / HD (CLAUDE.md panel) post-merge: for each instrument, call `refresh_funds_current` and `refresh_institutions_current` twice in succession; assert `pgstattuple.table_len` delta == 0 + per-row `xmin::text` stability across the second call. Additionally call `refresh_treasury_current` and `refresh_def14a_current` for at least one instrument each to exercise the small-table helpers + their per-helper filters (Codex 1a LOW-4). EXPLAIN ANALYZE the repair-sweep predicate against a populated dev DB and record steady-state wall clock — confirms sub-second target (Codex 1d HIGH-2). PR description records each instrument's outcome, the EXPLAIN ANALYZE timing, and the commit SHA per CLAUDE.md ETL clause 12.
+8. Smoke verification against AAPL / GME / MSFT / JPM / HD (CLAUDE.md panel) post-merge: for each instrument, call `refresh_funds_current` and `refresh_institutions_current` twice in succession; assert `pgstattuple.table_len` delta == 0 + per-row `xmin::text` stability across the second call. Additionally call `refresh_treasury_current` and `refresh_def14a_current` for at least one instrument each to exercise the small-table helpers + their per-helper filters (Codex 1a LOW-4). EXPLAIN ANALYZE the repair-sweep predicate against a populated dev DB and record steady-state wall clock — must complete under the §8 hard ceiling (≤5s for the largest category funds — Codex 1d HIGH-2 / Codex 1f LOW-2 alignment). PR description records each instrument's outcome, the EXPLAIN ANALYZE timing, and the commit SHA per CLAUDE.md ETL clause 12.
 9. Parent spec amendment — [`docs/superpowers/specs/2026-05-19-data-retention-rubric.md`](2026-05-19-data-retention-rubric.md) §4.5 + §4.6 + §7 + §8 updated: PR12 status flipped to SHIPPED, writer-pattern + watermark side-table documented, Phase 2 (`<15 GB hot`) acceptance unblocked.
 10. New prevention-log entries:
     - "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope `AND tgt.<scope_col> = %(scope)s` clamp on BOTH the ON clause AND the DELETE clause (lint pins both literals)" — catastrophic data-loss class.
     - "Diff-aware writers (MERGE … IS DISTINCT FROM) MUST NOT include the `refreshed_at`-style update-timestamp column in the diff predicate — drift watermarks belong in a separate side-table". Includes the forever-loop failure mode discovered in PR12 Codex 1a.
 11. Data-engineer skill update ([`.claude/skills/data-engineer/SKILL.md`](../../../.claude/skills/data-engineer/SKILL.md) + memory) — write-through section gains "diff-aware MERGE replaces DELETE+INSERT" rule + watermark side-table pointer + lint-guard pointer.
-12. Out-of-band orphan-reconciliation script `scripts/ownership_refresh_state_orphan_audit.sh` (Codex 1e MED-2) — operator-triggered, scans per category for `instrument_id` values that appear in `ownership_X_observations` but have no row in `ownership_refresh_state`. Healthy install: zero rows. Non-zero output indicates a write-through regression (some code path wrote an observation without firing the matching `refresh_X_current`); script exits non-zero so it's safe to wire into a separate cron later if observed in the wild. Pins the write-through invariant the dropped UNION orphan tail (§3.3) is delegating to.
+12. Out-of-band orphan-reconciliation script `scripts/ownership_refresh_state_orphan_audit.sh` (Codex 1e MED-2 + Codex 1f MED-1) — operator-triggered, scans per category for `instrument_id` values that appear in `ownership_X_observations` but have no row in `ownership_refresh_state`. **Script MUST be run post-migration + backfill as part of this PR's verification** (per Codex 1f MED-1 — adding the script without running it leaves the invariant unproven) and the PR description MUST record zero orphans for all 7 categories at the verification commit SHA. Healthy install: zero rows. Non-zero output indicates a write-through regression (some code path wrote an observation without firing the matching `refresh_X_current`); script exits non-zero so it's safe to wire into a separate cron later if observed in the wild. Pins the write-through invariant the dropped UNION orphan tail (§3.3) is delegating to.
 13. Codex 2 pre-push green; bot review APPROVE on latest commit; CI green; merge.
 
 ## 10. Acceptance — cross-reference to parent spec §8
@@ -487,9 +487,9 @@ Per #1208 cadence + CLAUDE.md "Codex second-opinion — mandatory checkpoints":
 - **Codex 1b** on rev 2 — completed; 3 HIGH + 7 MED + 4 LOW folded into rev 3.
 - **Codex 1c** on rev 3 — completed; 1 HIGH + 3 MED + 3 LOW folded into rev 4.
 - **Codex 1d** on rev 4 — completed; 3 HIGH + 3 MED + 1 LOW folded into rev 5.
-- **Codex 1e** on rev 5 — completed; 0 HIGH + 2 MED + 2 LOW folded into rev 6 (this commit). Convergence reached at HIGH=0.
-- **Codex 1f** on rev 6 (next).
-- Codex 1g if needed.
+- **Codex 1e** on rev 5 — completed; 0 HIGH + 2 MED + 2 LOW folded into rev 6.
+- **Codex 1f** on rev 6 — completed; 0 HIGH + 1 MED + 3 LOW folded into rev 7 (this commit). Convergence stable at HIGH=0 + diminishing MED.
+- Spec sign-off: rev 7 is the final spec for doc-PR.
 - Spec lands as DOC PR (no code yet).
 - Implementation plan = separate doc (`docs/superpowers/plans/2026-05-21-pr12-ownership-current-writer-merge-impl.md`). Codex 1a / 1b on the plan.
 - PR12 implementation PR follows standard #1208 cadence: self-review → Codex 2 pre-push → push → bot review → resolve → APPROVE on latest commit → merge.
@@ -499,8 +499,8 @@ Per #1208 cadence + CLAUDE.md "Codex second-opinion — mandatory checkpoints":
 State at this commit:
 
 - Parent umbrella #1233 still OPEN. PR1-PR11 all SHIPPED (PR11 #1253 020e701 merged 2026-05-21).
-- This is the DESIGN doc for PR12 (rev 6 post-Codex 1e).
+- This is the DESIGN doc for PR12 (rev 7 — FINAL — post-Codex 1f).
 - Branch: `feature/1233-pr12-design-spec`.
-- Next: Codex 1f on rev 6 (sanity-pass after the predicate-shape switch); doc PR if 1f is LOW-or-CLEAN; then writing-plans skill → implementation plan → execution.
+- Next: doc-PR push + bot review + merge; then writing-plans skill → implementation plan → execution.
 
 After PR12 merges, the operator triggers the §6.3 pre-wipe + clean re-run and #1233 closes per parent spec §8.
