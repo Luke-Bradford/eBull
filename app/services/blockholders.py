@@ -1,37 +1,32 @@
-"""SEC Schedule 13D / 13G blockholder ingester (#766 PR 2 of 3).
+"""SEC Schedule 13D / 13G blockholder shared helpers (#766 PR 2 of 3).
 
-Walks the operator-curated ``blockholder_filer_seeds`` list and, for
-each active filer:
+Historical seed-walking entrypoints (``ingest_all_active_filers``,
+``ingest_filer_blockholders``, ``_list_active_filer_seeds``,
+``seed_filer``) were retired in #1233 PR11 once the manifest-worker
+path (:mod:`app.services.manifest_parsers.sec_13dg`) became the sole
+production write path and the universe-driven discovery stage
+(:mod:`app.services.sec_13dg_discovery`) replaced the operator-curated
+``blockholder_filer_seeds`` table.
 
-  1. Fetches ``data.sec.gov/submissions/CIK{cik}.json`` to discover
-     SC 13D / SC 13D/A / SC 13G / SC 13G/A accessions filed by that
-     CIK. The submissions index uses ``SC 13D`` / ``SC 13D/A`` /
-     ``SC 13G`` / ``SC 13G/A`` form labels; the canonical
-     ``SCHEDULE 13D`` / ``SCHEDULE 13G`` strings come from the parsed
-     primary_doc.xml itself, not the index.
-  2. For each accession not yet present in
-     ``blockholder_filings_ingest_log``, fetches the per-filing
-     ``primary_doc.xml`` directly. Unlike 13F-HR the 13D/G archive
-     has no separate infotable — every canonical field (issuer
-     CUSIP, ownership block, reporter list) lives in primary_doc.
-     The ``index.json`` walk is therefore unnecessary.
-  3. Parses primary_doc.xml via :mod:`app.providers.implementations.
-     sec_13dg`. A single accession yields 1..N reporting persons
-     (joint filings), and the ingester writes one
-     ``blockholder_filings`` row per reporter.
-  4. Resolves the issuer CUSIP to an ``instrument_id`` via
-     ``external_identifiers``. Filings whose CUSIP is unknown still
-     write rows (with ``instrument_id IS NULL``) so the audit trail
-     stays intact and the PR 3 reader can re-attempt resolution
-     once the #740 backfill closes the gap.
-  5. Upserts the primary filer + every reporter row inside one
-     transaction. Idempotent re-ingest of the same accession is
-     guaranteed by the partial UNIQUE INDEX from migration 095.
+This module now exposes the surviving shared substrate consumed by
+the manifest parser, the discovery stage, the rewash pipeline, and
+the PR 3 reader endpoint:
 
-The ingester is the only DB-touching half of the pipeline; the
-parser stays pure. The HTTP fetch routes through the bounded-
-concurrency client added in #728 so concurrent filer ingests share
-the SEC fair-use rate budget.
+  * Retention helpers (:func:`blockholders_retention_cutoff`,
+    :func:`blockholders_within_retention`) — the canonical
+    cutoff used at every 13D/G writer chokepoint per spec §3.2.
+  * Public dataclasses (:class:`AccessionRef`,
+    :class:`BlockholderPosition`).
+  * Lower-level DB helpers (:func:`_upsert_filer`,
+    :func:`_upsert_filing_row`,
+    :func:`_record_13dg_observation_for_filing`,
+    :func:`_resolve_cusip_to_instrument_id`,
+    :func:`_record_ingest_attempt`).
+  * URL builders (:func:`_archive_file_url`,
+    :func:`_submissions_url`).
+  * Submissions-index parser (:func:`parse_submissions_index`).
+  * Amendment-chain aggregator (:func:`latest_blockholder_positions`)
+    consumed by the PR 3 reader endpoint.
 
 Tombstones: a filing whose primary_doc.xml fetch 404s is recorded in
 ``blockholder_filings_ingest_log`` with ``status='failed'`` plus the
@@ -39,10 +34,6 @@ accession number in ``error``. The next run sees the accession is
 still missing and skips it — short-lived 404s heal naturally;
 persistent failures show up in the ops monitor (#13). To force a
 retry the operator deletes the log row.
-
-The amendment-chain aggregator (:func:`latest_blockholder_positions`)
-is exposed here so PR 3's reader endpoint can call it without
-re-implementing the SEC supersession semantics.
 """
 
 from __future__ import annotations
@@ -55,7 +46,6 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
-from uuid import uuid4
 
 import psycopg
 import psycopg.rows
@@ -66,7 +56,6 @@ from app.providers.implementations.sec_13dg import (
     parse_primary_doc,
 )
 from app.services import raw_filings
-from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
     record_blockholder_observation,
     refresh_blockholders_current,
@@ -351,11 +340,6 @@ def _safe_iso_datetime(text: str | None) -> datetime | None:
 # ---------------------------------------------------------------------------
 
 
-def _list_active_filer_seeds(conn: psycopg.Connection[tuple]) -> list[str]:
-    cur = conn.execute("SELECT cik FROM blockholder_filer_seeds WHERE active = TRUE ORDER BY cik")
-    return [_zero_pad_cik(row[0]) for row in cur.fetchall()]
-
-
 def _existing_accessions_for_filer(
     conn: psycopg.Connection[tuple],
     *,
@@ -450,37 +434,6 @@ def _resolve_cusip_to_instrument_id(
     )
     row = cur.fetchone()
     return int(row[0]) if row is not None else None
-
-
-def seed_filer(
-    conn: psycopg.Connection[tuple],
-    *,
-    cik: str | int,
-    label: str,
-    notes: str | None = None,
-    active: bool = True,
-) -> None:
-    """Idempotent helper for adding a filer to the curated seed list.
-
-    Used by tests + an operator-side script. The admin UI in PR 3
-    will call the same helper via an API endpoint.
-    """
-    conn.execute(
-        """
-        INSERT INTO blockholder_filer_seeds (cik, label, active, notes)
-        VALUES (%(cik)s, %(label)s, %(active)s, %(notes)s)
-        ON CONFLICT (cik) DO UPDATE SET
-            label = EXCLUDED.label,
-            active = EXCLUDED.active,
-            notes = COALESCE(EXCLUDED.notes, blockholder_filer_seeds.notes)
-        """,
-        {
-            "cik": _zero_pad_cik(cik),
-            "label": label,
-            "active": active,
-            "notes": notes,
-        },
-    )
 
 
 def _upsert_filer(
@@ -852,151 +805,6 @@ def _record_13dg_observation_for_filing(
         aggregate_amount_owned=chosen.aggregate_amount_owned,
         percent_of_class=chosen.percent_of_class,
     )
-
-
-def ingest_filer_blockholders(
-    conn: psycopg.Connection[tuple],
-    sec: SecArchiveFetcher,
-    *,
-    filer_cik: str,
-) -> IngestSummary:
-    """Fetch + parse + upsert every pending 13D/G filing for one filer.
-
-    ``filer_cik`` is normalised to 10-digit padded form on entry.
-    The function commits no transactions itself — the caller (test
-    code or :func:`ingest_all_active_filers`) decides commit cadence.
-    """
-    cik = _zero_pad_cik(filer_cik)
-    summary = _MutableSummary(cik=cik)
-    # Per-filer-batch run_id for observation audit trail (#890 bot
-    # review BLOCKING). Mirrors legacy sync_blockholders semantics —
-    # one ingest_run_id per logical batch run rather than per-row.
-    batch_run_id = uuid4()
-
-    submissions_payload = sec.fetch_document_text(_submissions_url(cik))
-    if submissions_payload is None:
-        logger.warning("13D/G ingest: submissions JSON 404/error for cik=%s", cik)
-        summary.submissions_fetch_failed = True
-        summary.first_error = "submissions JSON 404/error"
-        return summary.to_immutable()
-
-    pending_accessions = parse_submissions_index(submissions_payload)
-    if pending_accessions is None:
-        # Malformed 200-body — treated the same as a 404 so a stale
-        # CIK whose archive returns garbage (or HTML) does not
-        # silently masquerade as "no filings = success".
-        logger.warning("13D/G ingest: submissions JSON malformed for cik=%s", cik)
-        summary.submissions_fetch_failed = True
-        summary.first_error = "submissions JSON malformed"
-        return summary.to_immutable()
-    summary.accessions_seen = len(pending_accessions)
-
-    already_ingested = _existing_accessions_for_filer(conn, filer_cik=cik)
-
-    for ref in pending_accessions:
-        if ref.accession_number in already_ingested:
-            continue
-        outcome = _ingest_single_accession(conn, sec, filer_cik=cik, ref=ref, batch_run_id=batch_run_id)
-        _record_ingest_attempt(
-            conn,
-            filer_cik=cik,
-            accession_number=ref.accession_number,
-            submission_type=outcome.submission_type or ref.filing_type,
-            status=outcome.status,
-            rows_inserted=outcome.rows_inserted,
-            rows_skipped=outcome.rows_skipped_no_cusip,
-            error=outcome.error,
-        )
-        if outcome.ingested:
-            summary.accessions_ingested += 1
-        else:
-            summary.accessions_failed += 1
-            if outcome.error and summary.first_error is None:
-                summary.first_error = f"{ref.accession_number}: {outcome.error}"
-        summary.rows_inserted += outcome.rows_inserted
-        summary.rows_skipped_no_cusip += outcome.rows_skipped_no_cusip
-
-    return summary.to_immutable()
-
-
-def ingest_all_active_filers(
-    conn: psycopg.Connection[tuple],
-    sec: SecArchiveFetcher,
-) -> list[IngestSummary]:
-    """Walk every active row in ``blockholder_filer_seeds`` and ingest."""
-    seeds = _list_active_filer_seeds(conn)
-    if not seeds:
-        logger.info("13D/G ingest: no active filer seeds; nothing to do")
-        return []
-
-    run_id = start_ingestion_run(
-        conn,
-        source="sec_edgar_13dg",
-        endpoint="/Archives/edgar/data/{cik}/{accession}/primary_doc.xml",
-        instrument_count=len(seeds),
-    )
-    conn.commit()
-
-    rows_upserted = 0
-    rows_skipped = 0
-    summaries: list[IngestSummary] = []
-    crash_error: str | None = None
-    accession_failures = 0
-    submissions_failures = 0
-    first_filer_error: str | None = None
-    try:
-        for cik in seeds:
-            try:
-                summary = ingest_filer_blockholders(conn, sec, filer_cik=cik)
-            except Exception as exc:  # noqa: BLE001 — per-filer crash must not abort the batch
-                logger.exception("13D/G ingest: filer %s raised; continuing batch", cik)
-                crash_error = f"{cik}: {exc}"
-                conn.rollback()
-                continue
-            conn.commit()
-            summaries.append(summary)
-            rows_upserted += summary.rows_inserted
-            rows_skipped += summary.rows_skipped_no_cusip
-            accession_failures += summary.accessions_failed
-            if summary.submissions_fetch_failed:
-                submissions_failures += 1
-            if summary.first_error and first_filer_error is None:
-                first_filer_error = f"{cik} {summary.first_error}"
-    finally:
-        # Status precedence:
-        #   * any per-filer crash + zero summaries -> failed
-        #   * any per-filer crash with summaries  -> partial
-        #   * any submissions-fetch failure        -> partial
-        #     (a curated seed is silently invisible without this)
-        #   * any per-accession failure            -> partial
-        #   * any unresolved-CUSIP skip            -> partial
-        #   * else                                 -> success
-        if crash_error and not summaries:
-            status = "failed"
-        elif crash_error or accession_failures > 0 or rows_skipped > 0 or submissions_failures > 0:
-            status = "partial"
-        else:
-            status = "success"
-        error_parts: list[str] = []
-        if crash_error:
-            error_parts.append(f"crash: {crash_error}")
-        if submissions_failures > 0:
-            error_parts.append(f"{submissions_failures} filer submissions fetch failed")
-        if first_filer_error:
-            error_parts.append(f"first: {first_filer_error}")
-        if rows_skipped > 0 and not error_parts:
-            error_parts.append(f"{rows_skipped} reporter rows skipped — issuer CUSIPs unresolved (#740)")
-        finish_ingestion_run(
-            conn,
-            run_id=run_id,
-            status=status,
-            rows_upserted=rows_upserted,
-            rows_skipped=rows_skipped,
-            error="; ".join(error_parts) or None,
-        )
-        conn.commit()
-
-    return summaries
 
 
 # ---------------------------------------------------------------------------

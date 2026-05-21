@@ -28,7 +28,6 @@ from fastapi.testclient import TestClient
 
 from app.db import get_conn
 from app.main import app
-from app.services.blockholders import seed_filer
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 
 pytestmark = pytest.mark.integration
@@ -153,7 +152,6 @@ class TestBlockholdersEndpoint:
     ) -> None:
         conn = ebull_test_conn
         _seed_instrument(conn, iid=766_310, symbol="AAPL")
-        seed_filer(conn, cik="0001234567", label="Test Activist")
         _seed_filer_row(conn, filer_id=1001, cik="0001234567", name="Test Activist Fund LP")
         _seed_filing(
             conn,
@@ -201,7 +199,6 @@ class TestBlockholdersEndpoint:
         reporter rows."""
         conn = ebull_test_conn
         _seed_instrument(conn, iid=766_320, symbol="AAPL")
-        seed_filer(conn, cik="0001234567", label="Joint Filing Test")
         _seed_filer_row(conn, filer_id=1010, cik="0001234567", name="Test Activist Fund LP")
         accession = "0001234567-25-000010"
         _seed_filing(
@@ -261,7 +258,6 @@ class TestBlockholdersEndpoint:
         primary filer on the same issuer. Only the 13D appears."""
         conn = ebull_test_conn
         _seed_instrument(conn, iid=766_330, symbol="AAPL")
-        seed_filer(conn, cik="0001234567", label="Convert")
         _seed_filer_row(conn, filer_id=1020, cik="0001234567", name="Converting Fund")
 
         _seed_filing(
@@ -319,8 +315,6 @@ class TestBlockholdersEndpoint:
         _seed_instrument(conn, iid=766_360, symbol="AAPL")
         # Two distinct submitters, but they file on behalf of the
         # same beneficial owner (same reporter_cik).
-        seed_filer(conn, cik="0001111111", label="Old Submitter")
-        seed_filer(conn, cik="0002222222", label="New Submitter")
         _seed_filer_row(conn, filer_id=2001, cik="0001111111", name="Old Submitter LLC")
         _seed_filer_row(conn, filer_id=2002, cik="0002222222", name="New Submitter LLC")
 
@@ -381,7 +375,6 @@ class TestBlockholdersEndpoint:
         prior filer_id-keyed query for collapsing this case."""
         conn = ebull_test_conn
         _seed_instrument(conn, iid=766_370, symbol="AAPL")
-        seed_filer(conn, cik="0003333333", label="Shared Adviser")
         _seed_filer_row(conn, filer_id=2010, cik="0003333333", name="Shared Adviser LLC")
 
         # Two filings under the same submitter (filer_id=2010), but
@@ -434,8 +427,6 @@ class TestBlockholdersEndpoint:
         share counts that sum to the total."""
         conn = ebull_test_conn
         _seed_instrument(conn, iid=766_340, symbol="AAPL")
-        seed_filer(conn, cik="0001234567", label="Active")
-        seed_filer(conn, cik="0007654321", label="Passive")
         _seed_filer_row(conn, filer_id=1030, cik="0001234567", name="Activist Fund")
         _seed_filer_row(conn, filer_id=1031, cik="0007654321", name="Index Fund")
 
@@ -488,7 +479,6 @@ class TestBlockholdersEndpoint:
         _seed_instrument(conn, iid=766_350, symbol="AAPL")
         for i in range(3):
             cik = f"00099999{i:02d}"
-            seed_filer(conn, cik=cik, label=f"Filer {i}")
             _seed_filer_row(conn, filer_id=1100 + i, cik=cik, name=f"Filer {i}")
             _seed_filing(
                 conn,
