@@ -205,7 +205,7 @@ INSIDER_BLOCKHOLDERS_RETENTION_YEARS = 3
 # (today - 3y) and the mandate effective date — every filing inside the
 # window is guaranteed parseable. By 2027-12-19 the 3y floor catches up
 # and the function reverts to plain (today - 3y).
-SEC_SCHEDULE_13_XML_MANDATE_DATE = date(2024, 12, 19)
+SEC_SCHEDULE_13_XML_MANDATE_DATE = date(2024, 12, 18)
 
 def blockholders_retention_cutoff() -> date:
     """Inclusive lower bound on filed_at: max of 3y-floor and XML mandate."""
