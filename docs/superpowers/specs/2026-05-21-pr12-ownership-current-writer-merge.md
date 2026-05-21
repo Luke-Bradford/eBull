@@ -6,7 +6,7 @@
 >
 > Parent spec: [`docs/superpowers/specs/2026-05-19-data-retention-rubric.md`](2026-05-19-data-retention-rubric.md) §4.5 / §4.6 / §6.4 / §7 / §8.
 >
-> Status: **DESIGN (rev 5)** — Codex 1a → rev 2 (5H+7M+4L). Codex 1b → rev 3 (3H+7M+4L). Codex 1c → rev 4 (1H+3M+3L). Codex 1d on rev 4 returned 3 HIGH (backfill from obs MAX MASKS real drift — false-negative regression vs rev 3's false-positive; "<100ms × 87k LATERAL probes" cost math optimistic; orphan UNION tail still scans 3.68M-row funds obs each sweep) + 3 MED (5 of 7 ingested_at indexes already exist in sql/119 — only funds + esop missing; case 9 raw UPDATE on `known_to` doesn't bump `ingested_at`; lint P doesn't pin index/backfill load-bearing semantics) + 1 LOW (non-goal wording stale re: sweep redesign). Rev 5 folds 1d: backfill reverted to `MAX(_current.refreshed_at) GROUP BY instrument_id` (false-positive over false-negative — one extra refresh-storm-during-first-sweep is benign; missed drift is silent staleness, unacceptable); orphan UNION tail DROPPED (state-anchored primary path only; write-through invariant trusted; gap documented as known limitation); "<100ms" hard claim replaced with "sub-second steady state, requires post-impl EXPLAIN ANALYZE"; sql/163 indexes scoped to funds + esop only (avoid sql/119 duplicates); case 9 setup uses explicit `SET ingested_at = clock_timestamp()` in fixture; lint P extended to pin index + backfill shape; non-goal §2 acknowledges sweep changes.
+> Status: **DESIGN (rev 6)** — Codex 1a → rev 2 (5H+7M+4L). Codex 1b → rev 3 (3H+7M+4L). Codex 1c → rev 4 (1H+3M+3L). Codex 1d → rev 5 (3H+3M+1L). Codex 1e on rev 5 returned 0 HIGH + 2 MED + 2 LOW (convergence). MED-1 was the load-bearing one: state-anchored per-row LATERAL `MAX(ingested_at)` against the RANGE-partitioned observations tables fans out to ~84 partitions per probe × ~87k state rows = minutes per sweep — NOT sub-second despite proper indexing (partition pruning by `period_end` doesn't help an `instrument_id` predicate). Rev 6 switches the sweep predicate to an obs-anchored CTE aggregate `MAX(ingested_at) GROUP BY instrument_id` (single full-index scan via Append + IndexScan; ~500ms-2s for funds; deterministically faster than per-row LATERAL fanout). Rev 6 also adds an out-of-band orphan-reconciliation script to DoD (pin the write-through invariant Codex 1e MED-2 flagged); refines first-sweep cost wording to "bounded + measured" (LOW-1); tightens P6 to pin the `MAX(c.refreshed_at)` literal (LOW-2).
 
 ## 0. Status snapshot (2026-05-21 dev DB)
 
@@ -141,7 +141,9 @@ CREATE INDEX IF NOT EXISTS idx_esop_obs_instrument_ingested
     ON ownership_esop_observations (instrument_id, ingested_at DESC);
 ```
 
-These indexes back the LATERAL `MAX(ingested_at)` correlated subquery in the repair-sweep predicate (below). Each lookup becomes an index-only scan returning 1 row — without them, the lookup falls back to per-partition seq-scan + aggregate (tens of seconds on funds at 3.68M obs rows).
+These indexes back the obs-anchored CTE aggregate (below) — a single `GROUP BY instrument_id` over each partitioned observations table. With the index in `(instrument_id, ingested_at DESC)` order PG can perform an index-only `Append + IndexScan` across all partitions and aggregate `MAX(ingested_at)` per instrument efficiently. Without them, the aggregate falls back to per-partition seq-scan + sort (tens of seconds on funds at 3.68M obs rows).
+
+Partition-fanout note (Codex 1e MED-1): the per-row LATERAL form `LEFT JOIN LATERAL (SELECT MAX(ingested_at) FROM obs WHERE instrument_id = s.instrument_id) sub` is *quadratic* in the partition count × state-row count (PG cannot prune partitions by `instrument_id` because partitioning is on `period_end`) — ~84 partitions × ~87k state-row probes is ~minutes per sweep on funds. The CTE-aggregate form (one full-index scan over each partition, materialised once, joined to state) is `O(total_obs_rows / index_block_size)` — sub-second to low-second range on funds. The aggregate form is the load-bearing choice.
 
 **Migration backfill** is in the same SQL file; one INSERT per category, sourced from **`MAX(_current.refreshed_at) GROUP BY instrument_id`** (Codex 1d HIGH-1 — backfilling from `MAX(obs.ingested_at)` would *mask* real drift if `_current` was never reconciled, a silent-staleness regression unacceptable for a safety-net job; backfilling from `_current.refreshed_at` may cause a one-off first-sweep refresh storm against instruments where obs `clock_timestamp()` ran slightly later than refresh-tx `now()`, but every such refresh is a MERGE no-op (the diff predicate skips writes) → benign extra cost, never missed drift):
 
@@ -161,20 +163,21 @@ GROUP BY c.instrument_id
 ON CONFLICT (instrument_id, category) DO NOTHING;
 ```
 
-Operator-visible: the first repair-sweep tick after deploy may select more instruments than steady state due to the tx-time vs clock_timestamp skew, with each selection costing one MERGE no-op (~1ms per instrument under the diff predicate). One-time event; subsequent sweeps return to steady state.
+Operator-visible: the first repair-sweep tick after deploy may select more instruments than steady state due to the tx-time vs clock_timestamp skew. Each false-positive selection costs one MERGE no-op (cost bounded by the diff-predicate skip path; per-call wall clock measured during the §9 DoD #8 smoke pass against the dev DB rather than assumed — Codex 1e LOW-1). One-time event; subsequent sweeps return to steady state.
 
-**Repair-sweep predicate switch** in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) — **state-anchored single-query** (Codex 1d HIGH-3 — the UNION orphan tail from rev 4 anti-joined observations every sweep, full-table-ish cost on funds even when zero rows matched; dropped in favour of the write-through invariant + a separate operator-driven backfill if drift between obs-existence and state-row-existence is ever discovered):
+**Repair-sweep predicate switch** in [`app/jobs/ownership_observations_repair.py`](../../../app/jobs/ownership_observations_repair.py) — **obs-anchored CTE aggregate** joined to state (Codex 1e MED-1 — the rev 5 state-anchored LATERAL form fanned out over RANGE-partitioned observations and could not be pruned by `instrument_id`; the CTE-aggregate form does ONE full-index scan per sweep tick instead of 87k probe-per-state-row scans):
 
 ```sql
+WITH obs_max AS (
+    SELECT instrument_id, MAX(ingested_at) AS m
+    FROM ownership_X_observations
+    GROUP BY instrument_id
+)
 SELECT s.instrument_id
 FROM ownership_refresh_state s
-LEFT JOIN LATERAL (
-    SELECT MAX(o.ingested_at) AS obs_max
-    FROM ownership_X_observations o
-    WHERE o.instrument_id = s.instrument_id
-) sub ON TRUE
+LEFT JOIN obs_max ON obs_max.instrument_id = s.instrument_id
 WHERE s.category = %s
-  AND s.last_drained_observations_max_ingested_at IS DISTINCT FROM sub.obs_max;
+  AND s.last_drained_observations_max_ingested_at IS DISTINCT FROM obs_max.m;
 ```
 
 NULL semantics on this branch:
@@ -381,7 +384,7 @@ Plus 4 cross-cutting checks:
 | **M** | No `DELETE FROM ownership_*_current` anywhere under `app/` outside the 7 helper bodies | grep across `app/**/*.py` minus the 7 helper bodies → count == 0 |
 | **N** | No `DELETE FROM ownership_*_current` anywhere under `scripts/` and `app/jobs/` (catches future writers landing outside `app/services/`) | grep across both trees → count == 0 |
 | **O** | `ownership_observations_repair.py` predicate references `ownership_refresh_state.last_drained_observations_max_ingested_at` (not legacy `c.refreshed_at < ...` form) | grep `c.refreshed_at <` → count == 0 inside the repair file |
-| **P** | Migration `sql/163_ownership_refresh_state.sql` pins all rev-5 contracts (Codex 1d MED-3): table + indexes + backfill | 7 targeted grep checks against the migration file with exact-count assertions — (P1) `CREATE TABLE IF NOT EXISTS ownership_refresh_state` opener present; (P2) PK is `(instrument_id, category)`; (P3) CHECK lists exactly the 7 category literals; (P4) `CREATE INDEX IF NOT EXISTS idx_funds_obs_instrument_ingested` present; (P5) `CREATE INDEX IF NOT EXISTS idx_esop_obs_instrument_ingested` present; (P6) backfill source shape `FROM ownership_X_current c GROUP BY c.instrument_id` (not from observations MAX); (P7) backfill repeated 7 times (one per category). |
+| **P** | Migration `sql/163_ownership_refresh_state.sql` pins all rev-6 contracts (Codex 1d MED-3 + Codex 1e LOW-2): table + indexes + backfill + literal aggregate expression | 7 targeted grep checks against the migration file with exact-count assertions — (P1) `CREATE TABLE IF NOT EXISTS ownership_refresh_state` opener present; (P2) PK is `(instrument_id, category)`; (P3) CHECK lists exactly the 7 category literals; (P4) `CREATE INDEX IF NOT EXISTS idx_funds_obs_instrument_ingested` present; (P5) `CREATE INDEX IF NOT EXISTS idx_esop_obs_instrument_ingested` present; (P6) backfill source uses literal `MAX(c.refreshed_at)` from `ownership_X_current c GROUP BY c.instrument_id` (not from observations MAX, not from `now()`, not from `MIN(c.refreshed_at)` — pin both the aggregate function and the source column to lock in the false-positive-over-false-negative trade-off); (P7) backfill block repeated 7 times (one per category). |
 
 Total: **91 lint clause-counts** (81 per-helper + 10 cross-cutting — M, N, O, P1-P7). Pure text walk, no DB dependency, sub-second runtime.
 
@@ -431,7 +434,7 @@ Reclaim path is the **operator pre-wipe + clean re-run** (parent spec §6.3 + §
 
 **Read-side unchanged**: no `_current` consumer sees behavioural change. Same row shapes, same dedup ordering, same priorities, same indexes. The MERGE's `WHEN NOT MATCHED BY SOURCE THEN DELETE` is steady-state writer behaviour identical to today's DELETE+INSERT (a row drops out of `_current` only when its only observation expires via `known_to` or when caps shed it post-wipe).
 
-**Sweep cost**: the state-anchored predicate does ~87k LATERAL `MAX(ingested_at)` lookups (index-only scans). Steady-state target is **sub-second** (≤ 1-2s) on healthy install (Codex 1d HIGH-2 — "<100ms × 87k = <100ms" math was wrong; even at index-only scan + ~10μs per row, 87k probes is ~1s wall clock under realistic PG planner overhead). Exact ceiling requires post-implementation `EXPLAIN ANALYZE` against a populated dev DB; spec asks for that as part of §9 DoD #8 verification. First sweep post-deploy may take longer due to backfill-skew false-positive refresh storm (each false-positive is a MERGE no-op; bounded by universe size × ~1ms per call); operator-acceptable one-off event.
+**Sweep cost**: the obs-anchored CTE-aggregate predicate (§3.3) does ONE full-index scan per category per sweep tick (Append + IndexScan via the `(instrument_id, ingested_at DESC)` indexes from sql/119 + sql/163), aggregated into the per-instrument `obs_max` then joined to the ~87k-row state table. Steady-state target: **sub-second to low-second range** (≤ 5s as a hard ceiling on funds, the largest table at 3.68M rows). Exact ceiling requires post-implementation `EXPLAIN ANALYZE` against a populated dev DB (§9 DoD #8). First sweep post-deploy may take longer due to backfill-skew false-positive refresh storm — each false-positive is a MERGE no-op; cost bounded by universe size × per-call MERGE wall clock; measured during smoke rather than assumed (Codex 1e LOW-1).
 
 ## 9. Definition of done
 
@@ -450,7 +453,8 @@ CLAUDE.md §"Definition of done" + §"ETL / parser / schema-migration additional
     - "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope `AND tgt.<scope_col> = %(scope)s` clamp on BOTH the ON clause AND the DELETE clause (lint pins both literals)" — catastrophic data-loss class.
     - "Diff-aware writers (MERGE … IS DISTINCT FROM) MUST NOT include the `refreshed_at`-style update-timestamp column in the diff predicate — drift watermarks belong in a separate side-table". Includes the forever-loop failure mode discovered in PR12 Codex 1a.
 11. Data-engineer skill update ([`.claude/skills/data-engineer/SKILL.md`](../../../.claude/skills/data-engineer/SKILL.md) + memory) — write-through section gains "diff-aware MERGE replaces DELETE+INSERT" rule + watermark side-table pointer + lint-guard pointer.
-12. Codex 2 pre-push green; bot review APPROVE on latest commit; CI green; merge.
+12. Out-of-band orphan-reconciliation script `scripts/ownership_refresh_state_orphan_audit.sh` (Codex 1e MED-2) — operator-triggered, scans per category for `instrument_id` values that appear in `ownership_X_observations` but have no row in `ownership_refresh_state`. Healthy install: zero rows. Non-zero output indicates a write-through regression (some code path wrote an observation without firing the matching `refresh_X_current`); script exits non-zero so it's safe to wire into a separate cron later if observed in the wild. Pins the write-through invariant the dropped UNION orphan tail (§3.3) is delegating to.
+13. Codex 2 pre-push green; bot review APPROVE on latest commit; CI green; merge.
 
 ## 10. Acceptance — cross-reference to parent spec §8
 
@@ -482,9 +486,10 @@ Per #1208 cadence + CLAUDE.md "Codex second-opinion — mandatory checkpoints":
 - **Codex 1a** on this spec — completed; 5 HIGH + 7 MED + 4 LOW folded into rev 2.
 - **Codex 1b** on rev 2 — completed; 3 HIGH + 7 MED + 4 LOW folded into rev 3.
 - **Codex 1c** on rev 3 — completed; 1 HIGH + 3 MED + 3 LOW folded into rev 4.
-- **Codex 1d** on rev 4 — completed; 3 HIGH + 3 MED + 1 LOW folded into rev 5 (this commit).
-- **Codex 1e** on rev 5 (next).
-- Codex 1f if needed.
+- **Codex 1d** on rev 4 — completed; 3 HIGH + 3 MED + 1 LOW folded into rev 5.
+- **Codex 1e** on rev 5 — completed; 0 HIGH + 2 MED + 2 LOW folded into rev 6 (this commit). Convergence reached at HIGH=0.
+- **Codex 1f** on rev 6 (next).
+- Codex 1g if needed.
 - Spec lands as DOC PR (no code yet).
 - Implementation plan = separate doc (`docs/superpowers/plans/2026-05-21-pr12-ownership-current-writer-merge-impl.md`). Codex 1a / 1b on the plan.
 - PR12 implementation PR follows standard #1208 cadence: self-review → Codex 2 pre-push → push → bot review → resolve → APPROVE on latest commit → merge.
@@ -494,8 +499,8 @@ Per #1208 cadence + CLAUDE.md "Codex second-opinion — mandatory checkpoints":
 State at this commit:
 
 - Parent umbrella #1233 still OPEN. PR1-PR11 all SHIPPED (PR11 #1253 020e701 merged 2026-05-21).
-- This is the DESIGN doc for PR12 (rev 5 post-Codex 1d).
+- This is the DESIGN doc for PR12 (rev 6 post-Codex 1e).
 - Branch: `feature/1233-pr12-design-spec`.
-- Next: Codex 1e on rev 5; revise if needed; doc PR; then writing-plans skill → implementation plan → execution.
+- Next: Codex 1f on rev 6 (sanity-pass after the predicate-shape switch); doc PR if 1f is LOW-or-CLEAN; then writing-plans skill → implementation plan → execution.
 
 After PR12 merges, the operator triggers the §6.3 pre-wipe + clean re-run and #1233 closes per parent spec §8.
