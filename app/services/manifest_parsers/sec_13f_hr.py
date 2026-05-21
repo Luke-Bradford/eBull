@@ -138,6 +138,37 @@ def _parse_13f_hr(
             error="missing filer cik",
         )
 
+    # Defense-in-depth (#1249): row.cik MUST NOT be a known filing-agent
+    # CIK. Discovery for 13F-HR writes cik=<institutional_adviser_cik>
+    # (curated cohort from institutional_filers); filing agents are never
+    # in that cohort. A row whose cik resolves to an agent CIK means a
+    # future discovery PR has a bug — every _archive_file_url call below
+    # would 404 because SEC archives are not mounted under agent CIKs
+    # (see sec_edgar.py:83-104 + fetch_filing_index agent-fallback at
+    # sec_edgar.py:397-417). Fail loudly here rather than tombstone every
+    # accession with a generic "archive 404" that masks the real bug.
+    from app.providers.implementations.sec_edgar import (
+        KNOWN_FILING_AGENT_CIKS,
+        _zero_pad_cik,
+    )
+
+    padded_filer_cik = _zero_pad_cik(filer_cik)
+    if padded_filer_cik in KNOWN_FILING_AGENT_CIKS:
+        logger.warning(
+            "13F-HR manifest parser: accession=%s row.cik=%s resolves to "
+            "known filing-agent CIK %s — discovery should never enqueue "
+            "agent CIKs as filer_cik (institutional_filers cohort excludes "
+            "them). Tombstoning to surface the upstream discovery bug.",
+            accession,
+            filer_cik,
+            padded_filer_cik,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13F_HR,
+            error=f"row.cik is a known filing-agent CIK ({padded_filer_cik})",
+        )
+
     # Step 1: archive index walk. Manifest's ``primary_document_url`` is
     # typically the filing-index page (or one of the attachments); we
     # need both ``primary_doc.xml`` and ``infotable.xml`` names which

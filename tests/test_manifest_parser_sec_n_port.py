@@ -425,6 +425,36 @@ def test_transient_upsert_exception_retries(
         assert cur.fetchone() is None
 
 
+def test_agent_cik_row_tombstones_before_archive_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense-in-depth (#1250): mirror of the 13F-HR guard. If discovery
+    enqueues a row with cik=<known filing-agent CIK>, parser tombstones
+    immediately instead of hitting the SEC archive with a 404-guaranteed
+    URL."""
+    accession = "0001193125-25-099998"
+    agent_cik = "0001193125"  # Donnelley R.R. & Sons
+    _seed_pending_n_port(ebull_test_conn, accession=accession, filer_cik=agent_cik)
+    ebull_test_conn.commit()
+
+    calls = _patch_fetch_map(monkeypatch, {})
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_n_port", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    row = get_manifest_row(ebull_test_conn, accession)
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.error is not None
+    assert "known filing-agent CIK" in row.error
+    assert agent_cik in row.error
+
+    # CRITICAL: parser must NOT have hit the SEC archive at all.
+    assert calls == [], f"agent-CIK guard should short-circuit before fetch; got calls={calls}"
+
+
 def test_parser_registered_via_register_all() -> None:
     from app.jobs.sec_manifest_worker import registered_parser_sources
     from app.services.manifest_parsers import register_all_parsers

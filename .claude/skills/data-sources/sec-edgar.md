@@ -257,6 +257,24 @@ Sample reporting-person block:
 
 A single accession can carry up to 100 reporting persons (joint filings). 13G uses `classPercent` instead of `percentOfClass` and includes `classOwnership5PercentOrLess` flag (signals when filer dropped under 5%).
 
+### 2.4.1 Structured-data mandate effective dates per form
+
+SEC has phased in XBRL / structured-XML mandates form-by-form over the past decade. Pre-mandate filings are HTML / text only; post-mandate filings include `primary_doc.xml` (or iXBRL) that machine parsers can read. **Retention floors for any ingest job that depends on machine-parseable bodies MUST honour these dates — pulling pre-mandate accessions will silently tombstone or require a separate HTML extractor.**
+
+| Form | Structured-data mandate effective | Pre-mandate parser availability | Notes |
+|---|---|---|---|
+| 10-K, 10-Q (financial statements) | 2009-06-15 (large filers), staged through 2011 | iXBRL since 2019 (`10-K v2`) | Pre-iXBRL stays raw XBRL; the companyfacts API normalises both |
+| N-CSR / N-CSRS | iXBRL effective **2022-07-25** (Rule 30e-1) | None — bodies are HTML | Fund-metadata extraction post-2022; pre-mandate filings parser-tombstone today |
+| Form 3, 4, 5 (Section 16) | XML mandate since **2003-06-30** | Pre-2003 = HTML (decade-old, rare in scope) | Decades of XML coverage; the `<ownershipDocument>` schema has been stable |
+| 13F-HR | XML mandate since inception of electronic filing (**1999**) | XML universal in scope | INFOTABLE.xml + primary_doc.xml |
+| N-PORT-P / N-PORT-EX | XML mandate since **2018-06-01** | None | Per-fund-trust quarterly snapshots; primary_doc.xml universal in scope |
+| **Schedule 13D / 13G** | **Structured XML mandate effective 2024-12-18** (Rule 13d-1/2 amendments) | None — pre-mandate filings are HTML-only; `Schedule13D.from_filing(old_filing)` returns `None` (skill_edgartools.md G11) | **High-impact retention-floor**: any 13D/G ingest job pulling pre-2024-12-18 data needs either a custom HTML body parser or a hard date floor at the mandate effective date. PR11 (#1233) chose the date-floor approach. |
+| DEF 14A | Section 14(a) proxy filings — narrative HTML; no structured-XBRL mandate as of 2026-05 | HTML-only | eBull's `def14a_ingest` ships an HTML scraper for the beneficial-ownership table |
+| 8-K | Item codes structured in submissions JSON; body is HTML / iXBRL where attached | HTML-only for narrative body | eBull treats 8-K as a `filing_events` row + item-code metadata; no body-text observation table |
+| Companyfacts (XBRL) | Bulk endpoint built from 10-K / 10-Q XBRL; same dates apply | n/a | Per-CIK aggregation; SEC handles the mandate-date filtering server-side |
+
+Lesson: when adopting a new ingest path or library for a form, **check the structured-data mandate effective date first**. If the library only handles post-mandate filings (typical for edgartools — see skill_edgartools.md coverage matrix), align the retention floor with the mandate date by construction — `max(today - {Ny}, MANDATE_DATE)`. This pattern is the cleanest way to deliver "100% universe-complete coverage of what's parseable" without writing an HTML fallback parser for every form.
+
 ### 2.5 Date formats
 
 | Format | Example | Where used |
@@ -345,6 +363,40 @@ The single rule that drives every write-path + read-path decision for share-clas
 CUSIP-resolved writes (13F-HR, N-PORT, N-CSR) need no fan-out because CUSIP → instrument is 1:1 at the SECURITY level (GOOG.CUSIP ≠ GOOGL.CUSIP even though both share the issuer CIK). Aggregation across share classes happens at the read layer when desired, never at the write layer.
 
 These two rules + the table above + §3.1/3.2 fully define every share-class scenario eBull handles. If a future code path doesn't fit, the form's subject classification (column 1-3 above) was misread — go back to §3.1/3.2 and re-derive.
+
+### 3.7 Filing-agent CIKs vs filer/issuer CIKs (archive-URL semantics)
+
+A subset of SEC CIKs belong to **registered filing agents** — third-party submitters who file ON BEHALF of operating issuers / institutional advisers / fund trusts. The agent's CIK appears as the **accession-number prefix** for any filing they submit, but **the archive directory always lives under the issuer / filer CIK** — never under the agent's. Consequences:
+
+- `https://www.sec.gov/Archives/edgar/data/{agent_cik_int}/{accession_no_dashes}/...` 404s every time for agent-submitted accessions.
+- `https://www.sec.gov/Archives/edgar/data/{issuer_or_filer_cik_int}/{accession_no_dashes}/...` is the correct URL.
+- SEC's web archive ALSO serves the directory index under any CIK in the filing's `ciks[]` list (empirically verified — GET on `/index.json` returns 200 under issuer + filer CIKs, 404 under agent), but the file-level GET (`primary_doc.xml`, `infotable.xml`) only succeeds under non-agent CIKs.
+
+The canonical eBull defense lives at [app/providers/implementations/sec_edgar.py:97-104](../../../app/providers/implementations/sec_edgar.py#L97-L104) as `KNOWN_FILING_AGENT_CIKS`:
+
+```python
+KNOWN_FILING_AGENT_CIKS: frozenset[str] = frozenset({
+    "0001213900",  # EdgarOnline (Issuer Direct)
+    "0001493152",  # GlobeNewswire / Issuer Direct
+    "0001193125",  # Donnelley R.R. & Sons
+    "0001437749",  # Edgar Agents LLC
+    "0001571049",  # Donnelley Financial Solutions (DFIN)
+    "0001185185",  # Workiva
+    "0001387131",  # RR Donnelley
+    "0001469734",  # Toppan Merrill
+    "0001628280",  # Sec Compliance Services
+})
+```
+
+This list is intentionally **maintained as a code constant rather than a DB-config row** so additions are auditable in version control (per #752 defense-in-depth ticket).
+
+**Two enforcement points** every SEC ingest path must satisfy:
+
+1. **`fetch_filing_index` legacy-fallback short-circuit** (sec_edgar.py:397-417). When a caller invokes `fetch_filing_index(accession)` without passing `issuer_cik`, the provider derives `cik_for_url` from the accession-number prefix; if that prefix is in `KNOWN_FILING_AGENT_CIKS`, it returns `None` immediately rather than generating a guaranteed-404 GET. Operator action on the warning: pass `issuer_cik` from `external_identifiers`.
+
+2. **Manifest-worker parser guard** (post-#1249/#1250 cleanup). Every parser under `app/services/manifest_parsers/sec_*.py` that calls `_archive_file_url(row.cik, ...)` MUST check `row.cik` against `KNOWN_FILING_AGENT_CIKS` BEFORE the URL construction. The guard tombstones loudly so an upstream discovery bug (which mistakenly enqueued an agent CIK as the manifest's `cik` field) surfaces instead of generating thousands of silent 404s. Pinned by `scripts/check_archive_url_agent_guard.sh` lint with an issuer-CIK ALLOW_LIST for parsers whose `subject_type='issuer'` contract excludes agent collisions by construction.
+
+**Empirical prevalence (2026-05-21 sample)**: 0/100 recent 13F-HR + 0/100 recent NPORT-P filings have agent-prefix accession numbers (large institutional advisers and fund trusts file directly via their own submitter CIK). Filing agents handle the corporate-filing high-cadence work (10-K, 10-Q, 8-K, S-1, DEF 14A, registration statements) — and even there, the manifest's `cik` field carries the issuer CIK (not the agent) because discovery resolves through `subject_type='issuer'` → `external_identifiers`. The guards are belt-and-braces against future discovery regressions, not active bug-fixes.
 
 ## 4. Rate limits + access discipline
 
