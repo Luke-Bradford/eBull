@@ -628,8 +628,9 @@ def test_parse_13dg_uses_edgartools_and_writes_issuer_class_decimal_fields(
     row carries the edgartools-derived issuer_cik / issuer_cusip /
     securities_class_title plus Decimal-typed share fields.
     """
-    import app.services.manifest_parsers  # noqa: F401 — register
     from decimal import Decimal as _Dec
+
+    import app.services.manifest_parsers  # noqa: F401 — register
 
     _seed_instrument_with_cusip(
         ebull_test_conn, iid=8750040, symbol="EL3", cusip="518439104"

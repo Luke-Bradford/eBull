@@ -39,7 +39,6 @@ from edgar.beneficial_ownership.models import (
 )
 from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 
-
 # Minimal valid SC 13D XML using the post-mandate ``<coverPageHeader>``
 # element (NOT the in-house parser's ``<coverPage>``; edgartools requires
 # the mandated element name per the parse_xml source at
