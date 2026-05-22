@@ -53,8 +53,9 @@ import logging
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import date
 from difflib import SequenceMatcher
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import psycopg
 import psycopg.rows
@@ -194,6 +195,73 @@ class _Match:
 
 
 # ---------------------------------------------------------------------------
+# Bulk-path unresolved-CUSIP writer (#1233 PR-1a)
+# ---------------------------------------------------------------------------
+
+
+# Valid ``source`` values for the bulk-path writer. Mirrors the
+# CHECK constraint on ``unresolved_13f_cusips.source`` added by
+# sql/164. Keep in sync with PR-1b if new bulk sources are added.
+BulkCusipSource = Literal["bulk_13f_dataset", "bulk_nport_dataset"]
+
+
+def record_unresolved_cusip_from_bulk(
+    conn: psycopg.Connection[Any],
+    *,
+    cusip: str,
+    filer_cik: str,
+    period_end: date,
+    source: BulkCusipSource,
+) -> None:
+    """Bulk-path unresolved-CUSIP write. Idempotent.
+
+    Distinct from the legacy :func:`_record_unresolved_cusip`
+    (``app/services/institutional_holdings.py``) which requires
+    ``name_of_issuer`` + ``accession_number`` — both available on
+    the per-filing path. The bulk Form 13F / N-PORT datasets carry
+    ``period_end`` + filer CIK but **not** issuer name (the dataset
+    INFOTABLE row publishes CUSIP only; issuer name is filled later
+    by the PR-1b OpenFIGI sweep which writes back the ``name`` field
+    OpenFIGI returns).
+
+    Idempotent on the partial UNIQUE INDEX
+    ``unresolved_13f_cusips_bulk_idx`` (sql/164). A second call with
+    the same ``(cusip, filer_cik, period_end, source)`` tuple is a
+    no-op. A call with a different ``(filer_cik, period_end, source)``
+    for the same CUSIP inserts a new row — the bulk path records
+    *every* (cusip × filer × period) observation so the sweep can
+    rewash the right accessions once the CUSIP resolves.
+
+    The caller is responsible for committing the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO unresolved_13f_cusips (
+                cusip, name_of_issuer, last_accession_number,
+                filer_cik, period_end, source
+            )
+            VALUES (
+                %(cusip)s, NULL, NULL,
+                %(filer_cik)s, %(period_end)s, %(source)s
+            )
+            ON CONFLICT (
+                cusip,
+                COALESCE(filer_cik, ''),
+                COALESCE(period_end, '0001-01-01'::date),
+                COALESCE(source, '')
+            ) WHERE source IS NOT NULL DO NOTHING
+            """,
+            {
+                "cusip": cusip.strip().upper(),
+                "filer_cik": filer_cik.strip(),
+                "period_end": period_end,
+                "source": source,
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # Normalisation
 # ---------------------------------------------------------------------------
 
@@ -271,13 +339,22 @@ def _select_pending_unresolved(
 ) -> list[dict[str, Any]]:
     """Return up to ``limit`` unresolved CUSIPs that haven't been
     tombstoned, ordered by observation count DESC so the
-    highest-leverage entries resolve first."""
+    highest-leverage entries resolve first.
+
+    Scoped to legacy rows (``source IS NULL``) so the post-sql/164
+    bulk rows (which carry NULL ``name_of_issuer`` / NULL
+    ``last_accession_number`` by design) are NOT picked up by the
+    legacy fuzzy-name resolver — it would call ``_normalise_name(None)``
+    and tombstone every bulk row as ``unresolvable``. PR-1b's
+    OpenFIGI sweep owns the bulk partition independently.
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT cusip, name_of_issuer, observation_count
             FROM unresolved_13f_cusips
             WHERE resolution_status IS NULL
+              AND source IS NULL
             ORDER BY observation_count DESC, last_observed_at DESC
             LIMIT %(limit)s
             """,
@@ -409,9 +486,12 @@ def _promote_to_external_identifier(
         existing_iid = int(existing[0])
         if existing_iid == instrument_id:
             # Already mapped to the same instrument — source row is
-            # safely redundant.
+            # safely redundant. Scope the DELETE to the legacy
+            # partition (sql/164 #1233 PR-1a): a CUSIP may have
+            # multiple bulk rows whose lifecycle is owned by the
+            # PR-1b OpenFIGI sweep, not by this legacy resolver.
             conn.execute(
-                "DELETE FROM unresolved_13f_cusips WHERE cusip = %s",
+                "DELETE FROM unresolved_13f_cusips WHERE cusip = %s AND source IS NULL",
                 (cusip_norm,),
             )
             return "already_resolved"
@@ -428,8 +508,9 @@ def _promote_to_external_identifier(
         """,
         {"iid": instrument_id, "cusip": cusip_norm},
     )
+    # Legacy partition only — see comment above.
     conn.execute(
-        "DELETE FROM unresolved_13f_cusips WHERE cusip = %s",
+        "DELETE FROM unresolved_13f_cusips WHERE cusip = %s AND source IS NULL",
         (cusip_norm,),
     )
     return "inserted"
@@ -459,6 +540,11 @@ def _tombstone(
 
     The row stays in the table for operator audit; clearing
     ``resolution_status`` forces a retry on the next run.
+
+    Scoped to the legacy partition (``source IS NULL``) — the bulk
+    rows (sql/164 #1233 PR-1a) have their own status lifecycle owned
+    by PR-1b's OpenFIGI sweep. A legacy tombstone must NOT mutate
+    bulk rows for the same CUSIP.
     """
     conn.execute(
         """
@@ -466,6 +552,7 @@ def _tombstone(
         SET resolution_status = %s,
             last_observed_at = NOW()
         WHERE cusip = %s
+          AND source IS NULL
         """,
         (status, cusip.strip().upper()),
     )
@@ -636,7 +723,14 @@ def _select_resolvable_via_extid(
     """Return up to ``limit`` pending unresolved CUSIPs whose CUSIP
     already has a row in ``external_identifiers``. Ordered by
     observation_count DESC so the highest-leverage entries (Fortune-100
-    names with hundreds of stranded observations) resolve first."""
+    names with hundreds of stranded observations) resolve first.
+
+    Scoped to legacy rows (``source IS NULL``) — the extid sweep
+    relies on ``last_accession_number`` to drive the per-filing
+    rewash, and bulk rows (sql/164 #1233 PR-1a) leave that NULL
+    by design. PR-1b's OpenFIGI sweep handles the bulk partition
+    via its own re-ingest path (``rewash_bulk_source_filings``).
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -649,6 +743,7 @@ def _select_resolvable_via_extid(
              AND ei.provider = 'sec'
              AND ei.identifier_type = 'cusip'
             WHERE u.resolution_status IS NULL
+              AND u.source IS NULL
             ORDER BY u.observation_count DESC, u.last_observed_at DESC
             LIMIT %(limit)s
             """,
@@ -737,6 +832,10 @@ def sweep_resolvable_unresolved_cusips(
         # so the loser cleanly skips.
         with conn.transaction():
             with conn.cursor() as cur:
+                # Legacy partition only (sql/164 #1233 PR-1a) — the
+                # ``last_accession_number`` rewash semantics don't
+                # apply to bulk rows; PR-1b's OpenFIGI sweep owns
+                # that lifecycle separately.
                 cur.execute(
                     """
                     UPDATE unresolved_13f_cusips
@@ -744,6 +843,7 @@ def sweep_resolvable_unresolved_cusips(
                         last_observed_at = NOW()
                     WHERE cusip = %s
                       AND resolution_status IS NULL
+                      AND source IS NULL
                     """,
                     (cusip,),
                 )

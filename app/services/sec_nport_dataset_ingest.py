@@ -35,11 +35,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import psycopg
 
+from app.services.cusip_resolver import record_unresolved_cusip_from_bulk
 from app.services.n_port_ingest import n_port_retention_cutoff
 from app.services.ownership_observations import (
     record_fund_observation,
@@ -47,6 +48,12 @@ from app.services.ownership_observations import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# #1233 PR-1a — see ``sec_13f_dataset_ingest._UNRESOLVED_FLUSH_BATCH``
+# for rationale (per-batch incremental commit so a multi-million-row
+# archive doesn't hold the open transaction across the whole drain).
+_UNRESOLVED_FLUSH_BATCH = 1000
 
 
 @dataclass
@@ -209,6 +216,40 @@ def _iter_tsv(zf: zipfile.ZipFile, *candidate_names: str):
         yield from csv.DictReader(text, delimiter="\t")
 
 
+def _flush_unresolved_buffer(
+    conn: psycopg.Connection[Any],
+    buffer: list[tuple[str, str, date]],
+    *,
+    source: Literal["bulk_13f_dataset", "bulk_nport_dataset"],
+) -> None:
+    """Drain ``buffer`` into ``unresolved_13f_cusips`` via the bulk
+    helper. Each row is written under its own savepoint so a single
+    malformed triple can't poison the enclosing per-archive
+    transaction. Buffer is cleared in place. #1233 PR-1a.
+    """
+    if not buffer:
+        return
+    for cusip, filer_cik, period_end in buffer:
+        try:
+            with conn.transaction():
+                record_unresolved_cusip_from_bulk(
+                    conn,
+                    cusip=cusip,
+                    filer_cik=filer_cik,
+                    period_end=period_end,
+                    source=source,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "nport ingest: record_unresolved_cusip_from_bulk failed for cusip=%s filer=%s period=%s: %s",
+                cusip,
+                filer_cik,
+                period_end,
+                exc,
+            )
+    buffer.clear()
+
+
 # ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
@@ -244,6 +285,10 @@ def ingest_nport_dataset_archive(
         ingest_run_id = uuid4()
     result = NPortIngestResult()
     cusip_map = _load_cusip_map(conn)
+
+    # #1233 PR-1a — buffer of (cusip, filer_cik, period_end) triples
+    # for every unresolved-CUSIP holding. Mirrors the 13F path.
+    unresolved_buffer: list[tuple[str, str, date]] = []
 
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
@@ -342,6 +387,28 @@ def ingest_nport_dataset_archive(
                 continue
             instrument_id = cusip_map.get(cusip)
             if instrument_id is None:
+                # #1233 PR-1a — buffer the (cusip, filer_cik, period_end)
+                # triple for PR-1b's OpenFIGI sweep. Parse filer_cik
+                # from REGISTRANT here (the next gate would parse it
+                # anyway for the write path); fall through to the
+                # counter increment in either branch so the
+                # ``rows_skipped_unresolved_cusip`` semantics match
+                # pre-PR-1a baseline exactly. If period_end didn't
+                # parse early (``period_end_early`` is None) we drop
+                # the buffer write — the bulk index requires a
+                # period_end for the partial UNIQUE clause to
+                # disambiguate; an un-parseable period would fail the
+                # bad-data write path anyway.
+                filer_cik_raw_buf = (reg.get("CIK") or "").strip()
+                if filer_cik_raw_buf and period_end_early is not None:
+                    filer_cik_buf = filer_cik_raw_buf.zfill(10)
+                    unresolved_buffer.append((cusip, filer_cik_buf, period_end_early))
+                    if len(unresolved_buffer) >= _UNRESOLVED_FLUSH_BATCH:
+                        _flush_unresolved_buffer(
+                            conn,
+                            unresolved_buffer,
+                            source="bulk_nport_dataset",
+                        )
                 result.rows_skipped_unresolved_cusip += 1
                 continue
 
@@ -455,6 +522,8 @@ def ingest_nport_dataset_archive(
                 )
                 result.parse_errors += 1
 
+    # #1233 PR-1a — flush partial last batch at archive boundary.
+    _flush_unresolved_buffer(conn, unresolved_buffer, source="bulk_nport_dataset")
     return result
 
 

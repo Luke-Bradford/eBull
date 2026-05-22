@@ -34,6 +34,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from app.services.cusip_resolver import record_unresolved_cusip_from_bulk
 from app.services.institutional_holdings import thirteen_f_retention_cutoff
 from app.services.ownership_observations import record_institution_observation
 
@@ -46,6 +47,17 @@ logger = logging.getLogger(__name__)
 # Hoisted to module level so the cutover constant isn't re-built
 # on every INFOTABLE row. Codex pre-push NITPICK for #1054.
 _VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
+
+
+# #1233 PR-1a — flush the unresolved-CUSIP buffer every N rows. 1000
+# is the spec-mandated batch size; tuned so an archive of millions
+# of INFOTABLE rows commits incrementally without holding the open
+# transaction across the whole archive (would block other workers
+# and balloon WAL). The flush is idempotent on the partial UNIQUE
+# index ``unresolved_13f_cusips_bulk_idx`` (sql/164), so even a
+# crash mid-flush leaves a consistent partial set that the next run
+# will append to safely.
+_UNRESOLVED_FLUSH_BATCH = 1000
 
 
 @dataclass
@@ -233,6 +245,46 @@ def _iter_tsv(zf: zipfile.ZipFile, name: str):
         yield from csv.DictReader(text, delimiter="\t")
 
 
+def _flush_unresolved_buffer(
+    conn: psycopg.Connection[Any],
+    buffer: list[tuple[str, str, date]],
+    *,
+    source: Literal["bulk_13f_dataset", "bulk_nport_dataset"],
+) -> None:
+    """Drain ``buffer`` into ``unresolved_13f_cusips`` via the bulk
+    helper. Each row is written under its own savepoint so a single
+    malformed (cusip, filer, period) triple (e.g. CHECK violation
+    on a future tightening of ``filer_cik`` shape) can't poison the
+    enclosing per-archive transaction. Buffer is cleared in place
+    on the caller's reference — callers reuse the same list across
+    the loop.
+
+    #1233 PR-1a flush hook. Mirrored verbatim in
+    ``sec_nport_dataset_ingest._flush_unresolved_buffer``.
+    """
+    if not buffer:
+        return
+    for cusip, filer_cik, period_end in buffer:
+        try:
+            with conn.transaction():
+                record_unresolved_cusip_from_bulk(
+                    conn,
+                    cusip=cusip,
+                    filer_cik=filer_cik,
+                    period_end=period_end,
+                    source=source,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "13F ingest: record_unresolved_cusip_from_bulk failed for cusip=%s filer=%s period=%s: %s",
+                cusip,
+                filer_cik,
+                period_end,
+                exc,
+            )
+    buffer.clear()
+
+
 def ingest_13f_dataset_archive(
     *,
     conn: psycopg.Connection[Any],
@@ -257,6 +309,12 @@ def ingest_13f_dataset_archive(
     # otherwise dominate cost on multi-million-row INFOTABLE.tsv
     # (Codex sweep BLOCKING).
     cusip_map = _load_cusip_map(conn)
+
+    # #1233 PR-1a — buffer of (cusip, filer_cik, period_end) triples
+    # for every unresolved CUSIP this archive yields. Flushed every
+    # _UNRESOLVED_FLUSH_BATCH rows and again at archive boundary so
+    # the partial last-batch is never lost on completion.
+    unresolved_buffer: list[tuple[str, str, date]] = []
 
     # PR6 #1233 §4.5 — archive-level retention cutoff. Resolve once
     # OUTSIDE the per-row INFOTABLE loop so a multi-million-row drain
@@ -291,11 +349,15 @@ def ingest_13f_dataset_archive(
                 result.rows_skipped_bad_data += 1
                 continue
 
-            instrument_id = cusip_map.get(cusip)
-            if instrument_id is None:
-                result.rows_skipped_unresolved_cusip += 1
-                continue
-
+            # Parse filer_cik + period_end EARLY so the unresolved-CUSIP
+            # branch (#1233 PR-1a) can capture (cusip, filer_cik,
+            # period_end, source='bulk_13f_dataset') into the buffer
+            # for PR-1b's OpenFIGI sweep. Bad-data rows whose
+            # filer/period can't be parsed fall through to the normal
+            # ``rows_skipped_bad_data`` counter; unresolved-CUSIP rows
+            # whose filer/period DID parse are counted +1 in
+            # ``rows_skipped_unresolved_cusip`` and appended to the
+            # buffer in the same step.
             filer_cik = str(sub.get("CIK") or "").strip()
             if not filer_cik:
                 result.rows_skipped_bad_data += 1
@@ -311,6 +373,21 @@ def ingest_13f_dataset_archive(
             period_end = _parse_period_end(cover.get("REPORTCALENDARORQUARTER"))
             if filed_at is None or period_end is None:
                 result.rows_skipped_bad_data += 1
+                continue
+
+            instrument_id = cusip_map.get(cusip)
+            if instrument_id is None:
+                # PR-1a #1233 §4 — buffer the (cusip, filer_cik,
+                # period_end) triple so PR-1b's OpenFIGI sweep can
+                # resolve + rewash. Buffer flushed every
+                # ``_UNRESOLVED_FLUSH_BATCH`` rows and again at
+                # archive boundary (post-loop). Counter still
+                # increments here to keep dropped-row telemetry
+                # consistent with the pre-PR-1a baseline.
+                result.rows_skipped_unresolved_cusip += 1
+                unresolved_buffer.append((cusip, filer_cik, period_end))
+                if len(unresolved_buffer) >= _UNRESOLVED_FLUSH_BATCH:
+                    _flush_unresolved_buffer(conn, unresolved_buffer, source="bulk_13f_dataset")
                 continue
 
             # PR6 #1233 §4.5 — per-row retention gate. Bulk dataset
@@ -395,4 +472,9 @@ def ingest_13f_dataset_archive(
                     exc,
                 )
                 result.parse_errors += 1
+
+    # #1233 PR-1a — final flush at archive boundary. Picks up the
+    # partial last batch (< _UNRESOLVED_FLUSH_BATCH rows) so nothing
+    # is dropped on completion.
+    _flush_unresolved_buffer(conn, unresolved_buffer, source="bulk_13f_dataset")
     return result
