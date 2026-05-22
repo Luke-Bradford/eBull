@@ -155,6 +155,12 @@ def sync_insiders(
     # without the gate. The LEFT JOIN to ``filing_events`` (canonical
     # source of ``filing_date`` outside the typed tables) lets each
     # retention-capped branch reference ``fe.filing_date >= cutoff``.
+    # The JOIN is clamped to ``fe.instrument_id = it.instrument_id``
+    # so a sibling share-class's ``filing_events`` row cannot satisfy
+    # the gate for the row's own instrument (#1247 Codex 2 — per
+    # data-engineer skill §Q15, ``filing_events`` is fanned out across
+    # share-class siblings sharing a CIK; without the instrument
+    # clamp, sibling-A's row would gate sibling-B's transaction).
     #
     # #1247 (PR4 follow-up) — Form 4 3y retention cap also gated here.
     # Same strict shape as Form 5: ``fe.filing_date IS NOT NULL AND
@@ -222,6 +228,7 @@ def sync_insiders(
             LEFT JOIN filing_events fe
               ON fe.provider_filing_id = it.accession_number
              AND fe.provider = 'sec'
+             AND fe.instrument_id = it.instrument_id
             {where}
             ORDER BY it.accession_number, it.filer_cik, it.filer_name, it.direct_indirect,
                      it.txn_date DESC NULLS LAST, it.txn_row_num DESC
