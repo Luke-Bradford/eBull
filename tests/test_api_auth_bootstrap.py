@@ -2,8 +2,9 @@
 
 Post-amendment coverage: the recovery_phrase ceremony, ``POST
 /auth/recover`` endpoint, and ``recovery_required`` boot state are
-removed. ``BootstrapStateResponse`` is now ``{boot_state, needs_setup}``
-where needs_setup is operator-state only.
+removed. ``BootstrapStateResponse`` is now ``{boot_state, needs_setup,
+needs_broker_credentials}`` where the latter two are independent of
+each other (operator-state and broker-credential-state, respectively).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     app.include_router(router)
     app.dependency_overrides[get_conn] = lambda: None  # type: ignore[misc]
     monkeypatch.setattr(auth_bootstrap, "operators_empty", lambda _conn: False)
+    monkeypatch.setattr(auth_bootstrap, "_no_active_broker_credentials", lambda _conn: False)
     app.state.boot_state = "clean_install"
     return TestClient(app)
 
@@ -35,6 +37,7 @@ class TestBootstrapState:
         assert body == {
             "boot_state": "clean_install",
             "needs_setup": False,
+            "needs_broker_credentials": False,
         }
 
     def test_no_store_header(self, client: TestClient) -> None:
@@ -49,6 +52,7 @@ class TestBootstrapState:
         app.include_router(router)
         app.dependency_overrides[get_conn] = lambda: None  # type: ignore[misc]
         monkeypatch.setattr(auth_bootstrap, "operators_empty", lambda _conn: True)
+        monkeypatch.setattr(auth_bootstrap, "_no_active_broker_credentials", lambda _conn: False)
         app.state.boot_state = "normal"
         c = TestClient(app)
 
@@ -59,6 +63,40 @@ class TestBootstrapState:
         assert body["boot_state"] == "normal"
         # Field removed post-amendment 2026-05-07.
         assert "recovery_required" not in body
+
+    def test_needs_broker_credentials_true_when_no_active_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No active broker_credentials row → needs_broker_credentials True
+        regardless of operators_empty. Drives the frontend's
+        RequireAuth force-redirect to /settings (CLAUDE.md I12 — eToro
+        is sole execution boundary; main app inert without creds)."""
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[get_conn] = lambda: None  # type: ignore[misc]
+        monkeypatch.setattr(auth_bootstrap, "operators_empty", lambda _conn: False)
+        monkeypatch.setattr(auth_bootstrap, "_no_active_broker_credentials", lambda _conn: True)
+        app.state.boot_state = "normal"
+        c = TestClient(app)
+
+        resp = c.get("/auth/bootstrap-state")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["needs_broker_credentials"] is True
+        assert body["needs_setup"] is False  # independent dimensions
+
+    def test_needs_broker_credentials_false_when_active_row_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Active broker_credentials row present → needs_broker_credentials False."""
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[get_conn] = lambda: None  # type: ignore[misc]
+        monkeypatch.setattr(auth_bootstrap, "operators_empty", lambda _conn: False)
+        monkeypatch.setattr(auth_bootstrap, "_no_active_broker_credentials", lambda _conn: False)
+        app.state.boot_state = "normal"
+        c = TestClient(app)
+
+        resp = c.get("/auth/bootstrap-state")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["needs_broker_credentials"] is False
 
     def test_recover_endpoint_is_404(self, client: TestClient) -> None:
         """POST /auth/recover was removed in the 2026-05-07 amendment.

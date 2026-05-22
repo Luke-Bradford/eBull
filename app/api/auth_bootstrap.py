@@ -44,6 +44,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class BootstrapStateResponse(BaseModel):
     boot_state: str
     needs_setup: bool
+    needs_broker_credentials: bool
 
 
 # ---------------------------------------------------------------------------
@@ -62,18 +63,50 @@ def bootstrap_state(
     ``boot_state`` reports the master-key state machine
     (``clean_install`` or ``normal``). ``needs_setup`` is operator-state
     only — derived from ``operators_empty(conn)`` per request, decoupled
-    from credential/key state. The two dimensions are independent: an
-    existing operator with no broker credentials sees
-    ``needs_setup=False`` and is served the normal app shell with an
-    "add eToro creds" banner; a fresh DB with no operators sees
-    ``needs_setup=True`` and routes to the single-step setup wizard.
+    from credential/key state. ``needs_broker_credentials`` reports
+    whether the eToro credential set is INCOMPLETE — True iff EITHER
+    ``label='api_key'`` OR ``label='user_key'`` is missing an active
+    (non-revoked) row. Both must be present for the eToro client to
+    authenticate; a single-key state is treated as "missing".
+    The three dimensions are independent: a fresh DB with no operators
+    sees ``needs_setup=True`` and routes to the single-step setup
+    wizard; an existing operator with no active broker credentials
+    sees ``needs_setup=False`` + ``needs_broker_credentials=True`` and
+    is force-redirected by the frontend to the ``/settings`` broker-
+    add flow (since eBull is fundamentally an eToro-binding execution
+    engine — CLAUDE.md non-negotiable I12; the main app shell is
+    inert without active credentials).
     """
     response.headers["Cache-Control"] = "no-store"
     state = getattr(request.app.state, "boot_state", "clean_install")
     return BootstrapStateResponse(
         boot_state=state,
         needs_setup=operators_empty(conn),
+        needs_broker_credentials=_no_active_broker_credentials(conn),
     )
+
+
+def _no_active_broker_credentials(conn: psycopg.Connection[object]) -> bool:
+    """Return True when the eToro credential set is incomplete.
+
+    A complete set requires BOTH ``label='api_key'`` and
+    ``label='user_key'`` rows active (``revoked_at IS NULL``) — matches
+    the ``deriveCredentialSetMode`` "complete" contract in
+    ``frontend/src/lib/credentialSetMode.ts`` and the dual ``create``
+    calls in ``SettingsPage::handleCreate``. If only one is active the
+    eToro client cannot authenticate, so the main app shell stays inert
+    (Codex 2 P2 on this PR — a single-key-active state was passing the
+    prior ``EXISTS`` shape).
+
+    Used by the bootstrap-state endpoint to drive the frontend's
+    force-redirect to ``/settings``.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM broker_credentials WHERE revoked_at IS NULL AND label = 'api_key' LIMIT 1")
+        has_api_key = cur.fetchone() is not None
+        cur.execute("SELECT 1 FROM broker_credentials WHERE revoked_at IS NULL AND label = 'user_key' LIMIT 1")
+        has_user_key = cur.fetchone() is not None
+    return not (has_api_key and has_user_key)
 
 
 # ---------------------------------------------------------------------------

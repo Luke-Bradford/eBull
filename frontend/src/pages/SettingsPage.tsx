@@ -34,6 +34,7 @@ import { BudgetConfigSection } from "@/components/settings/BudgetConfigSection";
 import { DisplayCurrencySection } from "@/components/settings/DisplayCurrencySection";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
+import { useSession } from "@/lib/session";
 
 const MIN_SECRET_LEN = 4;
 
@@ -56,6 +57,7 @@ export function SettingsPage(): JSX.Element {
 }
 
 function BrokerCredentialsSection(): JSX.Element {
+  const { refreshBootstrapState } = useSession();
   const [rows, setRows] = useState<BrokerCredentialView[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -206,6 +208,11 @@ function BrokerCredentialsSection(): JSX.Element {
       // Always re-derive mode from server state, whether success or
       // partial failure (e.g. first key saved, second failed → Repair).
       await refresh();
+      // Refresh bootstrap-state so RequireAuth's broker-credentials
+      // gate releases (needs_broker_credentials flips False once the
+      // first active row lands). Without this, the redirect would
+      // pin the user on /settings even after successful save.
+      await refreshBootstrapState();
     }
   }
 
@@ -232,6 +239,11 @@ function BrokerCredentialsSection(): JSX.Element {
     } finally {
       setBusyId(null);
       await refresh();
+      // Revoke can flip the broker-creds set from complete back to
+      // incomplete — refresh bootstrap state so RequireAuth's
+      // needs_broker_credentials gate re-pins the user to /settings
+      // if the last usable key was just revoked (Codex 2 P2).
+      await refreshBootstrapState();
     }
   }
 
