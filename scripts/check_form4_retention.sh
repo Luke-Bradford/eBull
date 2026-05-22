@@ -3,7 +3,7 @@
 # Lint guard: every Form 4 / 4-A writer chokepoint MUST honour the 3y
 # retention cap (#1233 §4.3 PR4).
 #
-# Three target files, two invariants:
+# Four target files, three invariants:
 #
 # A. ``app/services/insider_transactions.py`` — every SQL block that
 #    selects from ``filing_events`` joined to ``insider_filings`` for
@@ -25,6 +25,13 @@
 #    (parenthesis-suffixed), with ``def`` lines excluded so the helper
 #    definitions themselves don't inflate the count.
 #
+# D. ``app/services/ownership_observations_sync.py`` — ``sync_insiders``
+#    MUST gate the Form 4 branch on ``filing_events.filing_date`` via
+#    the ``%(form4_cutoff)s`` parameter (PR4 follow-up #1247). The
+#    branch MUST include both ``fe.filing_date IS NOT NULL`` and
+#    ``fe.filing_date >= %(form4_cutoff)s``. ``form4_retention_cutoff``
+#    MUST be imported alongside ``form5_retention_cutoff``.
+#
 # Exits non-zero on the first invariant violation. Wired into
 # ``.githooks/pre-push`` so a violation blocks the push.
 #
@@ -36,6 +43,7 @@ set -euo pipefail
 FILE_INSIDER_TXNS="app/services/insider_transactions.py"
 FILE_MANIFEST_FORM4="app/services/manifest_parsers/insider_345.py"
 FILE_BULK_DATASET="app/services/sec_insider_dataset_ingest.py"
+FILE_SYNC_INSIDERS="app/services/ownership_observations_sync.py"
 
 violations=0
 fail() {
@@ -128,6 +136,41 @@ else
 fi
 
 # ----------------------------------------------------------------------
+# D. ownership_observations_sync.py — sync_insiders Form 4 gate (#1247)
+# ----------------------------------------------------------------------
+
+if [[ ! -f "$FILE_SYNC_INSIDERS" ]]; then
+  fail "missing file: $FILE_SYNC_INSIDERS"
+else
+  # D1. ``form4_retention_cutoff`` imported (one import line; the helper
+  # uses the result as a SQL param so a single call-site is enough).
+  d1_import=$(count_literal "$FILE_SYNC_INSIDERS" "form4_retention_cutoff")
+  if (( d1_import < 1 )); then
+    fail "$FILE_SYNC_INSIDERS: missing 'form4_retention_cutoff' import/call. #1247 requires sync_insiders to bind %(form4_cutoff)s via the helper."
+  fi
+
+  # D2. Form 4 branch — three required pins inside the WHERE clause:
+  #     - the Form 4 document-type predicate (Form 3 split out)
+  #     - the LEFT-JOIN NULL-guard on fe.filing_date
+  #     - the cutoff predicate on fe.filing_date
+  d2_doctype=$(count_literal "$FILE_SYNC_INSIDERS" "f.document_type IN ('4','4/A')")
+  d2_param=$(count_literal "$FILE_SYNC_INSIDERS" "fe.filing_date >= %(form4_cutoff)s")
+  if (( d2_doctype < 1 )); then
+    fail "$FILE_SYNC_INSIDERS: missing \"f.document_type IN ('4','4/A')\" branch — #1247 splits Form 4 into its own retention-gated branch."
+  fi
+  if (( d2_param < 1 )); then
+    fail "$FILE_SYNC_INSIDERS: missing \"fe.filing_date >= %(form4_cutoff)s\" predicate — #1247 requires the Form 4 branch to gate on the cutoff param."
+  fi
+
+  # D3. Form 3 stays in the unconditional branch — must NOT be wrapped
+  # in a filing_date predicate. Pin the unconditional Form 3 branch.
+  d3_form3=$(count_literal "$FILE_SYNC_INSIDERS" "f.document_type IN ('3','3/A')")
+  if (( d3_form3 < 1 )); then
+    fail "$FILE_SYNC_INSIDERS: missing unconditional \"f.document_type IN ('3','3/A')\" branch — Form 3 is read-side latest-per-pair (PR10b §4.4), not ingest-side capped. #1247 acceptance requires Form 3 stays in the unconditional branch."
+  fi
+fi
+
+# ----------------------------------------------------------------------
 # Verdict
 # ----------------------------------------------------------------------
 
@@ -136,6 +179,7 @@ if (( violations > 0 )); then
   echo "FAIL: ${violations} Form 4 retention-cap invariant violation(s)." >&2
   echo "See docs/superpowers/specs/2026-05-19-data-retention-rubric.md §4.3 +" >&2
   echo "docs/superpowers/plans/2026-05-20-pr4-form4-3y-cap.md §6 for the rules." >&2
+  echo "Invariant D added by #1247 (PR4 follow-up — sync_insiders chokepoint)." >&2
   exit 1
 fi
 
