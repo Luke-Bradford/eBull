@@ -113,32 +113,23 @@ describe("ProcessesTable", () => {
     expect(note.getAttribute("title")).toContain("already in flight");
   });
 
-  it("full-wash requires typed-name match before confirm enables", async () => {
+  it("full-wash confirm button is enabled immediately (no type-to-confirm)", async () => {
+    // Operator decision 2026-05-22 (#1264): type-to-confirm dropped —
+    // process names are internal identifiers, double-confirm with a
+    // single click on the red verb button is the chosen UX. The modal
+    // no longer renders the 'Process name confirmation' input.
     renderTable([
       makeProcessRow({ display_name: "Insider Form 4 ingest", can_full_wash: true }),
     ]);
     fireEvent.click(screen.getByRole("button", { name: "Full-wash" }));
     const dialog = await screen.findByRole("dialog");
-    const input = dialog.querySelector(
-      "input[aria-label='Process name confirmation']",
-    ) as HTMLInputElement;
-    const confirmBtn = dialog.querySelector(
-      "button[disabled]",
-    ) as HTMLButtonElement;
-    expect(confirmBtn.disabled).toBe(true);
-    fireEvent.change(input, { target: { value: "wrong" } });
     expect(
-      (
-        Array.from(dialog.querySelectorAll("button")).find(
-          (b) => b.textContent === "Full-wash",
-        ) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
-    fireEvent.change(input, { target: { value: "Insider Form 4 ingest" } });
-    const confirmEnabled = Array.from(dialog.querySelectorAll("button")).find(
+      dialog.querySelector("input[aria-label='Process name confirmation']"),
+    ).toBeNull();
+    const confirmBtn = Array.from(dialog.querySelectorAll("button")).find(
       (b) => b.textContent === "Full-wash",
     ) as HTMLButtonElement;
-    expect(confirmEnabled.disabled).toBe(false);
+    expect(confirmBtn.disabled).toBe(false);
   });
 
   it("cancel modal exposes terminate behind 'More' disclosure with honest copy", async () => {

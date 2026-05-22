@@ -331,11 +331,16 @@ function FullWashConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const [typed, setTyped] = useState("");
-  const matches = typed === row.display_name;
   // PR3a #1064 — bootstrap mechanism uses different verbs per
   // data-engineer skill §7.3. Modal heading + body + confirm-button
   // copy follow the same swap; the underlying POST stays mode='full_wash'.
+  //
+  // Operator 2026-05-22 (#1264): the prior type-to-confirm gate
+  // ('type the process name exactly') was friction without safety —
+  // process names are internal identifiers the operator does not need
+  // to know. Replaced with a single click-through confirm. The verb
+  // button itself stays red so the destructive intent is still clear;
+  // the Cancel button remains as the obvious bail-out.
   const isBootstrap = row.mechanism === "bootstrap";
   const heading = isBootstrap ? "Confirm Re-run all" : "Confirm full-wash";
   const verb = isBootstrap ? "Re-run all" : "Full-wash";
@@ -357,21 +362,6 @@ function FullWashConfirmDialog({
       <p className="mt-2 text-sm text-slate-700 dark:text-slate-300">
         {description}
       </p>
-      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-        Type the process name exactly to enable the confirm button.
-      </p>
-      <label className="mt-3 block text-xs font-medium text-slate-700 dark:text-slate-200">
-        Process name
-        <input
-          type="text"
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          autoFocus
-          aria-label="Process name confirmation"
-          placeholder={row.display_name}
-          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm font-mono text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-        />
-      </label>
       <div className="mt-4 flex justify-end gap-2">
         <button
           type="button"
@@ -383,7 +373,8 @@ function FullWashConfirmDialog({
         <button
           type="button"
           onClick={onConfirm}
-          disabled={!matches || busy}
+          disabled={busy}
+          autoFocus
           className="rounded border border-red-400 bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-700 dark:bg-red-700 dark:hover:bg-red-800"
         >
           {busy ? "Triggering…" : verb}
