@@ -176,7 +176,7 @@ def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
             ("enable_live_trading", "false"),
             ("display_currency", "GBP"),
         ):
-            _insert_audit_row(
+            insert_runtime_config_audit_row(
                 conn,
                 changed_at=now,
                 changed_by=BOOT_RECOVERY_CHANGED_BY,
@@ -321,7 +321,7 @@ def update_runtime_config(
         # so the audit table is queryable as "history of changes" not "history
         # of patches".
         if auto_changed:
-            _insert_audit_row(
+            insert_runtime_config_audit_row(
                 conn,
                 changed_at=now,
                 changed_by=updated_by,
@@ -331,7 +331,7 @@ def update_runtime_config(
                 new_value=str(new_auto).lower(),
             )
         if live_changed:
-            _insert_audit_row(
+            insert_runtime_config_audit_row(
                 conn,
                 changed_at=now,
                 changed_by=updated_by,
@@ -341,7 +341,7 @@ def update_runtime_config(
                 new_value=str(new_live).lower(),
             )
         if currency_changed:
-            _insert_audit_row(
+            insert_runtime_config_audit_row(
                 conn,
                 changed_at=now,
                 changed_by=updated_by,
@@ -370,7 +370,7 @@ def update_runtime_config(
     )
 
 
-def _insert_audit_row(
+def insert_runtime_config_audit_row(
     conn: psycopg.Connection[Any],
     *,
     changed_at: datetime,
@@ -381,6 +381,11 @@ def _insert_audit_row(
     new_value: str,
 ) -> None:
     """Insert one runtime_config_audit row.
+
+    Public helper — `field='kill_switch'` audit rows are written from
+    `app.services.ops_monitor.ensure_kill_switch_singleton` (#1232 bot
+    review iter 1 WARNING — cross-module callers should depend on the
+    public API, not a private underscore-prefixed symbol).
 
     Must be called inside an open transaction by the caller.
     """
@@ -420,7 +425,7 @@ def write_kill_switch_audit(
     `old_active` may be None on the first activation if the prior state is
     unknown — the column is nullable for this case.
     """
-    _insert_audit_row(
+    insert_runtime_config_audit_row(
         conn,
         changed_at=now or _utcnow(),
         changed_by=changed_by,

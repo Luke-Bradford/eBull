@@ -168,6 +168,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await asyncio.to_thread(_ensure_runtime_config_singleton_probe)
 
+    # #1232 — same singleton-vanished posture for ``kill_switch`` +
+    # ``bootstrap_state``. Both seed rows ship via one-time
+    # ``INSERT ... ON CONFLICT DO NOTHING`` migrations (sql/010 and
+    # sql/129); if the row is later lost (manual DELETE, snapshot
+    # restore from pre-seed era, dev DB wipe script), service callers
+    # fail-closed with no programmatic recovery path. Auto-reseed at
+    # lifespan mirrors the ``runtime_config`` precedent above — WARNING
+    # log surfaces the recovery + (for kill_switch) a single
+    # runtime_config_audit row records the boot-recovery write.
+    # Provenance: 2026-05-19 T9-POST drive (Phase C of #1208) lost the
+    # kill_switch seed row → every operator trigger rejected for hours
+    # of wall-clock before the row was manually re-inserted.
+    from app.services.bootstrap_state import ensure_bootstrap_state_singleton
+    from app.services.ops_monitor import ensure_kill_switch_singleton
+
+    def _ensure_kill_switch_singleton_probe() -> None:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_kill_switch_singleton(guard_conn)
+
+    await asyncio.to_thread(_ensure_kill_switch_singleton_probe)
+
+    def _ensure_bootstrap_state_singleton_probe() -> None:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_bootstrap_state_singleton(guard_conn)
+
+    await asyncio.to_thread(_ensure_bootstrap_state_singleton_probe)
+
     # Open the connection pool after migrations so the schema is up to date.
     pool = open_pool("db_pool", min_size=1, max_size=10)
     logger.info("Connection pool opened (min=1, max=10).")

@@ -127,7 +127,7 @@ class TestEnsureRuntimeConfigSingleton:
         ) -> None:
             raise RuntimeError("simulated audit insert failure")
 
-        monkeypatch.setattr(rc_mod, "_insert_audit_row", _boom)
+        monkeypatch.setattr(rc_mod, "insert_runtime_config_audit_row", _boom)
 
         url = test_database_url()
         with pytest.raises(RuntimeError, match="simulated audit insert failure"):
