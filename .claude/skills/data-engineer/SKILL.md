@@ -411,6 +411,60 @@ for chunk_start in range(0, len(sorted_ids), _REFRESH_BATCH_CHUNK_SIZE):
 Cancel observation latency degrades from ~50 instruments (old serial loop) to ~`_REFRESH_BATCH_CHUNK_SIZE` (=200) instruments. Documented trade-off, accepted in spec §8.
 
 The four other helpers (blockholders / treasury / def14a / esop) keep the single-instrument path only — nothing in the bulk orchestrator loops over them at scale, so the batched form would be code without a caller.
+### 2.10b Bulk-archive ingest pattern — per-archive TEMP + COPY + ON CONFLICT INSERT (#1233 PR-3, SHIPPED 2026-05-22)
+
+For multi-million-row SEC bulk dataset archives (13F INFOTABLE.tsv, N-PORT FUND_REPORTED_HOLDING.tsv, Insider NONDERIV_TRANS.tsv) the per-row `INSERT ... ON CONFLICT DO UPDATE` + `with conn.transaction()` SAVEPOINT pattern caps throughput at ~1500 rows/s. Bulk dataset ingesters (`app/services/sec_{13f,nport,insider}_dataset_ingest.py`) MUST use the per-archive lifecycle below. Lint guard: `scripts/check_bulk_ingest_copy_pattern.sh`.
+
+```
+# Per archive — orchestrator opens fresh conn, ingester runs, orchestrator commits.
+with conn.cursor() as cur:
+    cur.execute("""
+        CREATE TEMP TABLE _stg_<category> (
+            ...same columns as target observation table, sans GENERATED STORED cols...
+        ) ON COMMIT DROP
+    """)
+
+# Stream archive → pre-validate → COPY into staging.
+copy_sql = (
+    "COPY _stg_<category> (col, col, ...) FROM STDIN "
+    "WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)"
+)
+with conn.cursor() as cur, cur.copy(copy_sql) as copy:
+    for row in _iter_tsv(zf, ...):
+        # ...existing per-row Python gates: CUSIP map, retention, PRN-vs-SH, etc.
+        copy.write_row((..., ...))
+
+# Drain staging → target with DISTINCT ON dedupe + ON CONFLICT UPSERT.
+cur.execute("""
+    INSERT INTO ownership_<category>_observations (...)
+    SELECT DISTINCT ON (<conflict_key_cols>)
+        ...
+    FROM _stg_<category>
+    ORDER BY <conflict_key_cols>, ctid DESC
+    ON CONFLICT (<conflict_key_cols>) DO UPDATE SET ...
+""")
+
+# Orchestrator commits → _stg_<category> drops via ON COMMIT DROP.
+```
+
+**Hard invariants** (pinned by `scripts/check_bulk_ingest_copy_pattern.sh`):
+
+- **A. `cur.copy(` present** in every whitelisted ingester. Streams rows into staging via psycopg's COPY context.
+- **B. `CREATE TEMP TABLE _stg_<category>` ON COMMIT DROP** — the TEMP table lifecycle MUST be bounded by the per-archive transaction commit. Hoisting `CREATE TEMP TABLE` outside the archive loop would make the first commit drop it and subsequent iterations fail with "relation does not exist".
+- **C. NO `with conn.transaction()` AFTER the first `cur.copy(` call site** — the per-row SAVEPOINT pattern eliminated by PR-3. Per-archive series upserts (NPORT) belong in a pre-pass BEFORE the COPY context opens.
+- **D. Drain via `INSERT INTO ownership_<category>_observations` + `ON CONFLICT` + `FROM _stg_<category>`** with DISTINCT ON to dedupe staged rows that share a conflict key (otherwise PG raises `cardinality_violation`).
+
+**PG17 ON_ERROR ignore**: `COPY ... WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)` skips wire-level type-cast failures (NUMERIC overflow, bad timestamps) and emits NOTICEs — defence-in-depth against schema drift, NOT a substitute for Python pre-validation. Each skip increments `result.rows_skipped_bad_data` (derived from `copy_attempted - SELECT COUNT(*) FROM _stg`).
+
+**DISTINCT ON dedupe**: two staging rows sharing a conflict key trigger `cardinality_violation: ON CONFLICT DO UPDATE command cannot affect row a second time`. The per-row INSERT path would have sequentially UPDATEd; the bulk path keeps that "last write wins" semantic via `ORDER BY <conflict_key>, ctid DESC` (the implicit physical row order — COPY appends so ctid grows monotonically).
+
+**GENERATED STORED column handling**: `ownership_insiders_observations.holder_identity_key` is GENERATED ALWAYS — the COPY column list omits it, and the INSERT...SELECT into the target re-derives it on insert (PG materialises the generated value before consulting the unique index). The DISTINCT ON expression in the bulk drain materialises the same `CASE WHEN holder_cik IS NOT NULL ... END` formula the target uses.
+
+**Cancel observation cost**: per-row INSERT used to checkpoint operator-cancel at sub-second latency. COPY drains atomically per archive (10-60s on multi-million-row archives). Operator cancel is observed at the archive boundary; the trade-off is documented in spec §7 and accepted (the throughput gain is ~30× for first-install bootstrap, which is the dominant cost driver).
+
+**Companyfacts is NOT on this pattern** — `sec_companyfacts_ingest.py` reads XBRL JSON not TSV and already uses multi-row INSERT chunked at `_UPSERT_PAGE_SIZE=1000` via `upsert_facts_for_instrument`. The per-CIK savepoint there is intentional (one savepoint per CIK-payload, NOT per-row); it stays.
+
+Spec: `docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v2.md` §7. Tests: `tests/test_pr3_copy_refactor.py` (throughput floor, ON_ERROR skip, commit-boundary preservation, idempotency, touched-instrument set).
 
 ### 2.11 Worker / job entry points
 

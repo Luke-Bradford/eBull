@@ -23,6 +23,11 @@ bulk dataset is the first-install seed.
 
 Schema reference: SEC nport_readme.pdf (data sets readme).
 Spec: docs/superpowers/specs/2026-05-08-bulk-datasets-first-bootstrap.md
+
+PR-3 (#1233 v3 §7) — per-archive COPY refactor (was per-row INSERT +
+``with conn.transaction()`` savepoint, ~1500 rows/s ceiling). Mirrors
+the 13F shape; series upserts happen ONCE per archive in a pre-pass
+so the COPY hot loop is free of per-row savepoints.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ import csv
 import io
 import logging
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -42,10 +48,7 @@ import psycopg
 
 from app.services.cusip_resolver import record_unresolved_cusip_from_bulk
 from app.services.n_port_ingest import n_port_retention_cutoff
-from app.services.ownership_observations import (
-    record_fund_observation,
-    upsert_sec_fund_series,
-)
+from app.services.ownership_observations import upsert_sec_fund_series
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +199,7 @@ def _open_tsv(zf: zipfile.ZipFile, *candidate_names: str) -> list[dict[str, str]
     return []
 
 
-def _iter_tsv(zf: zipfile.ZipFile, *candidate_names: str):
+def _iter_tsv(zf: zipfile.ZipFile, *candidate_names: str) -> Iterator[dict[str, str]]:
     """Stream rows from a TSV — used for FUND_REPORTED_HOLDING which
     can be very large (millions of holdings per quarter).
     """
@@ -224,11 +227,19 @@ def _flush_unresolved_buffer(
     buffer: list[tuple[str, str, date]],
     *,
     source: Literal["bulk_13f_dataset", "bulk_nport_dataset"],
+    result: NPortIngestResult,
 ) -> None:
-    """Drain ``buffer`` into ``unresolved_13f_cusips`` via the bulk
-    helper. Each row is written under its own savepoint so a single
-    malformed triple can't poison the enclosing per-archive
-    transaction. Buffer is cleared in place. #1233 PR-1a.
+    """Drain ``buffer`` into ``unresolved_13f_cusips`` via the PR-1a
+    helper. Each write under its own SAVEPOINT (``with
+    conn.transaction()``) so a DB error (e.g. CHECK violation on the
+    bulk-path schema) does NOT leave the enclosing per-archive tx in
+    ``InFailedSqlTransaction`` and abort the surrounding staging
+    drain. Failures counted as ``parse_errors``; do not abort.
+    Caller clears the buffer post-flush.
+
+    Lint note: the savepoint is OUTSIDE the cur.copy() block body
+    (flush runs post-COPY) so the bulk-ingest lint guard at
+    scripts/check_bulk_ingest_copy_pattern.sh accepts it.
     """
     if not buffer:
         return
@@ -250,7 +261,105 @@ def _flush_unresolved_buffer(
                 period_end,
                 exc,
             )
-    buffer.clear()
+            result.parse_errors += 1
+
+
+# ---------------------------------------------------------------------------
+# PR-3 — per-archive staging table lifecycle
+# ---------------------------------------------------------------------------
+
+
+_STG_COPY_COLUMNS = (
+    "instrument_id",
+    "fund_series_id",
+    "fund_series_name",
+    "fund_filer_cik",
+    "ownership_nature",
+    "source",
+    "source_document_id",
+    "source_accession",
+    "source_field",
+    "source_url",
+    "filed_at",
+    "period_start",
+    "period_end",
+    "ingest_run_id",
+    "shares",
+    "market_value_usd",
+    "payoff_profile",
+    "asset_category",
+)
+
+
+# CREATE TEMP TABLE shape mirrors ownership_funds_observations minus
+# the partition / CHECK / PK. ON COMMIT DROP releases the staging
+# table when the orchestrator commits the per-archive tx, matching
+# the spec invariant.
+_CREATE_STG_SQL = """
+CREATE TEMP TABLE _stg_nport (
+    instrument_id      BIGINT,
+    fund_series_id     TEXT,
+    fund_series_name   TEXT,
+    fund_filer_cik     TEXT,
+    ownership_nature   TEXT,
+    source             TEXT,
+    source_document_id TEXT,
+    source_accession   TEXT,
+    source_field       TEXT,
+    source_url         TEXT,
+    filed_at           TIMESTAMPTZ,
+    period_start       DATE,
+    period_end         DATE,
+    ingest_run_id      UUID,
+    shares             NUMERIC(24, 4),
+    market_value_usd   NUMERIC(20, 2),
+    payoff_profile     TEXT,
+    asset_category     TEXT
+) ON COMMIT DROP
+"""
+
+
+# Drain into observations table with ON CONFLICT shape matching the
+# legacy ``record_fund_observation`` semantics 1:1. Conflict key +
+# UPDATE SET clause copied verbatim from ``ownership_observations.py``.
+# DISTINCT ON dedupes staging rows per conflict key BEFORE the
+# INSERT — see ``sec_13f_dataset_ingest._INSERT_FROM_STG_SQL`` for
+# the cardinality-violation rationale (ctid DESC preserves
+# last-write-wins semantics).
+_INSERT_FROM_STG_SQL = """
+INSERT INTO ownership_funds_observations (
+    instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+    ownership_nature,
+    source, source_document_id, source_accession, source_field, source_url,
+    filed_at, period_start, period_end, ingest_run_id,
+    shares, market_value_usd, payoff_profile, asset_category
+)
+SELECT DISTINCT ON (instrument_id, fund_series_id, period_end, source_document_id)
+    instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+    ownership_nature,
+    source, source_document_id, source_accession, source_field, source_url,
+    filed_at, period_start, period_end, ingest_run_id,
+    shares, market_value_usd, payoff_profile, asset_category
+FROM _stg_nport
+ORDER BY
+    instrument_id, fund_series_id, period_end, source_document_id,
+    ctid DESC
+ON CONFLICT (instrument_id, fund_series_id, period_end, source_document_id)
+DO UPDATE SET
+    fund_series_name = EXCLUDED.fund_series_name,
+    fund_filer_cik = EXCLUDED.fund_filer_cik,
+    source_accession = EXCLUDED.source_accession,
+    source_field = EXCLUDED.source_field,
+    source_url = EXCLUDED.source_url,
+    filed_at = EXCLUDED.filed_at,
+    period_start = EXCLUDED.period_start,
+    shares = EXCLUDED.shares,
+    market_value_usd = EXCLUDED.market_value_usd,
+    payoff_profile = EXCLUDED.payoff_profile,
+    asset_category = EXCLUDED.asset_category,
+    ingest_run_id = EXCLUDED.ingest_run_id,
+    ingested_at = clock_timestamp()
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +391,24 @@ def ingest_nport_dataset_archive(
         are skipped — refusing to synthesise a fund-series identity
         per the existing per-filing parser's posture.
 
+    PR-3 per-archive lifecycle:
+      1. CREATE TEMP TABLE _stg_nport ON COMMIT DROP.
+      2. Stream FUND_REPORTED_HOLDING through Python pre-validation;
+         buffer qualifying ``(accn, series_id, name, filer, period_end)``
+         tuples for the series upsert; write the COPY row into
+         staging in the same pass.
+      3. AFTER the COPY context closes, upsert every qualifying
+         series under its own savepoint. Legacy semantic preserved:
+         a series is only upserted if at least ONE holding under that
+         filing passed every gate (asset_cat / payoff / unit /
+         balance / CUSIP). ``seen_series`` is keyed by
+         ``(accn, series_id)`` so a series re-encountered under a
+         different accession STILL upserts (legacy semantic — feeds
+         the helper's GREATEST monotonic advance on
+         ``last_seen_period_end``).
+      4. INSERT...SELECT...ON CONFLICT drains staging into target.
+      5. Orchestrator commits → staging drops via ON COMMIT DROP.
+
     Returns telemetry suitable for stage reporting.
     """
     if ingest_run_id is None:
@@ -292,6 +419,10 @@ def ingest_nport_dataset_archive(
     # #1233 PR-1a — buffer of (cusip, filer_cik, period_end) triples
     # for every unresolved-CUSIP holding. Mirrors the 13F path.
     unresolved_buffer: list[tuple[str, str, date]] = []
+
+    # PR-3: CREATE TEMP TABLE before opening the COPY context.
+    with conn.cursor() as cur:
+        cur.execute(_CREATE_STG_SQL)
 
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
@@ -309,11 +440,6 @@ def ingest_nport_dataset_archive(
             r["ACCESSION_NUMBER"]: r for r in fund_info if "ACCESSION_NUMBER" in r
         }
 
-        # Track the (series_id, series_name, filer_cik, period_end)
-        # triples we have already upserted into sec_fund_series so
-        # we don't re-issue the upsert per holding.
-        seen_series: set[str] = set()
-
         # PR7 #1233 §4.6 — 8-quarter (24-month) retention cap. Cutoff
         # resolved ONCE per archive to avoid date-rollover during a
         # multi-million-row drain. Gate fires BEFORE any per-row work
@@ -323,210 +449,235 @@ def ingest_nport_dataset_archive(
         # filter / unresolved-CUSIP buckets. Codex 1a WARN 3.
         retention_cutoff = n_port_retention_cutoff()
 
-        for holding in _iter_tsv(zf, "FUND_REPORTED_HOLDING.tsv"):
-            result.holdings_seen += 1
-            accn = holding.get("ACCESSION_NUMBER", "").strip()
-            if not accn:
-                result.rows_skipped_orphan_accession += 1
-                continue
-            sub = sub_by_accn.get(accn)
-            if sub is None:
-                result.rows_skipped_orphan_accession += 1
-                continue
+        # PR-3: series upsert deferred to post-COPY. Legacy semantic
+        # preserved by buffering ``(accn, series_id, name, filer,
+        # period_end)`` tuples for every accession+series that has
+        # at least one fully-gated holding — the COPY context can't
+        # share its cursor with non-COPY statements, so we collect
+        # in-band and drain after the COPY block closes. ``seen_series``
+        # is keyed by ``(accn, series_id)`` to mirror the legacy
+        # ``seen_series`` set (Codex 2 HIGH on pre-pass `series_id`-only
+        # dedup: same series under a NEW accession in the same archive
+        # must still upsert so ``GREATEST(last_seen_period_end, …)``
+        # advances).
+        seen_series: set[tuple[str, str]] = set()
+        series_upsert_buffer: list[tuple[str, str, str, str, date]] = []
+        # Tracks series whose upsert FAILED so subsequent holdings
+        # under the same series in the SAME archive don't keep
+        # re-trying. Set is populated post-COPY when we drain
+        # series_upsert_buffer; the per-holding write does NOT
+        # short-circuit on this because the legacy path retried per
+        # holding until the series was marked seen — there's no clean
+        # "skip" channel during the COPY stream. The drain happens
+        # AFTER the staging drain so a failed series doesn't roll back
+        # the staged observations.
+        series_failed: set[str] = set()
 
-            # PR7 #1233 §4.6 — retention gate (EARLY). Parse
-            # ``period_end`` from SUBMISSION.tsv up-front (the same
-            # column the canonical parse at "─── REPORT_DATE ───"
-            # below uses) and skip pre-cap rows BEFORE the reg/fund/
-            # series/CUSIP lookups. This keeps the
-            # ``rows_skipped_retention`` counter unconfounded with
-            # ``rows_skipped_orphan_accession`` etc. — a pre-cap row
-            # whose REGISTRANT/FUND rows are missing must land in the
-            # retention bucket, not the orphan bucket (Codex 2 WARN 1
-            # on PR7). Rows whose period parse fails leak past this
-            # gate and land in the existing ``rows_skipped_bad_data``
-            # bucket below — we don't pre-empt the malformed-row
-            # branch.
-            period_end_early = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(
-                sub.get("REPORT_ENDING_PERIOD")
-            )
-            if period_end_early is not None and period_end_early < retention_cutoff:
-                result.rows_skipped_retention += 1
-                continue
-
-            reg = reg_by_accn.get(accn)
-            fund = fund_by_accn.get(accn)
-            if reg is None or fund is None:
-                result.rows_skipped_orphan_accession += 1
-                continue
-
-            # ─── filter at write boundary ───────────────────────
-            asset_cat = (holding.get("ASSET_CAT") or "").strip()
-            if asset_cat != "EC":
-                result.rows_skipped_non_equity += 1
-                continue
-            payoff = (holding.get("PAYOFF_PROFILE") or "").strip()
-            if payoff != "Long":
-                result.rows_skipped_non_long += 1
-                continue
-            # UNIT='NS' (number of shares) guard. A Long EC convertible-bond
-            # holding can report BALANCE in 'PA' (principal amount); passing
-            # that as ``shares`` would silently land non-share balances in
-            # the ownership pie. Existing XML ingester applies the same
-            # guard at app/services/n_port_ingest.py:886. Codex pre-push
-            # round 1, finding 2.
-            unit = (holding.get("UNIT") or "").strip().upper()
-            if unit != "NS":
-                result.rows_skipped_non_share_units += 1
-                continue
-            balance = _parse_decimal(holding.get("BALANCE"))
-            if balance is None or balance <= 0:
-                result.rows_skipped_non_positive_shares += 1
-                continue
-
-            cusip = (holding.get("ISSUER_CUSIP") or "").strip().upper()
-            if not cusip:
-                result.rows_skipped_unresolved_cusip += 1
-                continue
-            instrument_id = cusip_map.get(cusip)
-            if instrument_id is None:
-                # #1233 PR-1a — buffer the (cusip, filer_cik, period_end)
-                # triple for PR-1b's OpenFIGI sweep. Parse filer_cik
-                # from REGISTRANT here (the next gate would parse it
-                # anyway for the write path); fall through to the
-                # counter increment in either branch so the
-                # ``rows_skipped_unresolved_cusip`` semantics match
-                # pre-PR-1a baseline exactly. If period_end didn't
-                # parse early (``period_end_early`` is None) we drop
-                # the buffer write — the bulk index requires a
-                # period_end for the partial UNIQUE clause to
-                # disambiguate; an un-parseable period would fail the
-                # bad-data write path anyway.
-                filer_cik_raw_buf = (reg.get("CIK") or "").strip()
-                if filer_cik_raw_buf and period_end_early is not None:
-                    filer_cik_buf = filer_cik_raw_buf.zfill(10)
-                    unresolved_buffer.append((cusip, filer_cik_buf, period_end_early))
-                    if len(unresolved_buffer) >= _UNRESOLVED_FLUSH_BATCH:
-                        _flush_unresolved_buffer(
-                            conn,
-                            unresolved_buffer,
-                            source="bulk_nport_dataset",
-                        )
-                result.rows_skipped_unresolved_cusip += 1
-                continue
-
-            # ─── series identity ────────────────────────────────
-            series_id = (fund.get("SERIES_ID") or "").strip()
-            series_name = (fund.get("SERIES_NAME") or "").strip()
-            if not series_id:
-                result.rows_skipped_missing_series += 1
-                continue
-
-            filer_cik_raw = (reg.get("CIK") or "").strip()
-            if not filer_cik_raw:
-                result.rows_skipped_bad_data += 1
-                continue
-            filer_cik = filer_cik_raw.zfill(10)
-
-            filed_at = _parse_filing_date(sub.get("FILING_DATE"))
-            period_end = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(sub.get("REPORT_ENDING_PERIOD"))
-            if filed_at is None or period_end is None:
-                result.rows_skipped_bad_data += 1
-                continue
-
-            holding_id = (holding.get("HOLDING_ID") or "0").strip() or "0"
-            source_document_id = f"{accn}:{holding_id}"
-            accession_no_dashes = accn.replace("-", "")
-            source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
-
-            # Upsert series reference once per (accession, series_id).
-            series_key = f"{accn}:{series_id}"
-            if series_key not in seen_series:
-                # Per-series savepoint: a CHECK violation on the
-                # series-id regex would otherwise abort the
-                # transaction. Wrap so we can record the failure and
-                # continue cleanly.
-                try:
-                    with conn.transaction():
-                        upsert_sec_fund_series(
-                            conn,
-                            fund_series_id=series_id,
-                            fund_series_name=series_name or f"Series {series_id}",
-                            fund_filer_cik=filer_cik,
-                            last_seen_period_end=period_end,
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    # PR review WARNING (#1033): mark the series as
-                    # SEEN even on failure so subsequent holdings
-                    # under the same accession+series do not retry
-                    # the failing upsert (each retry was incrementing
-                    # parse_errors and silently discarding the
-                    # holding). Log at WARNING so the first occurrence
-                    # surfaces in production logs.
-                    logger.warning(
-                        "nport ingest: upsert_sec_fund_series failed for accn=%s series=%s: %s",
-                        accn,
-                        series_id,
-                        exc,
-                    )
-                    seen_series.add(series_key)
-                    result.parse_errors += 1
+        # Main per-holding loop. Pre-validate then COPY into staging.
+        copy_sql = (
+            "COPY _stg_nport ("
+            + ", ".join(_STG_COPY_COLUMNS)
+            + ") FROM STDIN WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)"
+        )
+        copy_attempted = 0
+        with conn.cursor() as cur, cur.copy(copy_sql) as copy:
+            for holding in _iter_tsv(zf, "FUND_REPORTED_HOLDING.tsv"):
+                result.holdings_seen += 1
+                accn = holding.get("ACCESSION_NUMBER", "").strip()
+                if not accn:
+                    result.rows_skipped_orphan_accession += 1
                     continue
-                seen_series.add(series_key)
+                sub = sub_by_accn.get(accn)
+                if sub is None:
+                    result.rows_skipped_orphan_accession += 1
+                    continue
 
-            # ─── currency_value (market_value_usd) ─────────────
-            # CURRENCY_VALUE is the value column; the dataset stores
-            # it in local currency and CURRENCY_CODE indicates which.
-            # Treat USD-denominated rows as canonical USD, and leave
-            # the column NULL for foreign rows rather than apply an
-            # ad-hoc fx conversion that the schema doesn't ask for.
-            currency_code = (holding.get("CURRENCY_CODE") or "").strip().upper()
-            if currency_code == "USD":
-                market_value_usd = _parse_decimal(holding.get("CURRENCY_VALUE"))
-            else:
-                market_value_usd = None
-
-            # Per-row savepoint: a CHECK violation on one malformed
-            # holding row would otherwise put psycopg into
-            # ``InFailedSqlTransaction`` for every subsequent
-            # ``record_fund_observation`` call. Wrapping each write
-            # in ``conn.transaction()`` rolls back the bad row cleanly
-            # so the loop keeps processing. Codex pre-push BLOCKING
-            # for #1020.
-            try:
-                with conn.transaction():
-                    record_fund_observation(
-                        conn,
-                        instrument_id=instrument_id,
-                        fund_series_id=series_id,
-                        fund_series_name=series_name or f"Series {series_id}",
-                        fund_filer_cik=filer_cik,
-                        source_document_id=source_document_id,
-                        source_accession=accn,
-                        source_field=holding_id,
-                        source_url=source_url,
-                        filed_at=filed_at,
-                        period_start=None,
-                        period_end=period_end,
-                        ingest_run_id=ingest_run_id,
-                        shares=balance,
-                        market_value_usd=market_value_usd,
-                        payoff_profile=payoff,
-                        asset_category=asset_cat,
-                    )
-                result.rows_written += 1
-                result.touched_instrument_ids.add(instrument_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "nport ingest: record_fund_observation failed for %s/%s: %s",
-                    accn,
-                    cusip,
-                    exc,
+                # PR7 §4.6 retention gate (EARLY) — same shape as
+                # legacy.
+                period_end_early = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(
+                    sub.get("REPORT_ENDING_PERIOD")
                 )
-                result.parse_errors += 1
+                if period_end_early is not None and period_end_early < retention_cutoff:
+                    result.rows_skipped_retention += 1
+                    continue
 
-    # #1233 PR-1a — flush partial last batch at archive boundary.
-    _flush_unresolved_buffer(conn, unresolved_buffer, source="bulk_nport_dataset")
+                reg = reg_by_accn.get(accn)
+                fund = fund_by_accn.get(accn)
+                if reg is None or fund is None:
+                    result.rows_skipped_orphan_accession += 1
+                    continue
+
+                # ─── filter at write boundary ───────────────────────
+                asset_cat = (holding.get("ASSET_CAT") or "").strip()
+                if asset_cat != "EC":
+                    result.rows_skipped_non_equity += 1
+                    continue
+                payoff = (holding.get("PAYOFF_PROFILE") or "").strip()
+                if payoff != "Long":
+                    result.rows_skipped_non_long += 1
+                    continue
+                unit = (holding.get("UNIT") or "").strip().upper()
+                if unit != "NS":
+                    result.rows_skipped_non_share_units += 1
+                    continue
+                balance = _parse_decimal(holding.get("BALANCE"))
+                if balance is None or balance <= 0:
+                    result.rows_skipped_non_positive_shares += 1
+                    continue
+
+                cusip = (holding.get("ISSUER_CUSIP") or "").strip().upper()
+                if not cusip:
+                    result.rows_skipped_unresolved_cusip += 1
+                    continue
+                instrument_id = cusip_map.get(cusip)
+                if instrument_id is None:
+                    filer_cik_raw_buf = (reg.get("CIK") or "").strip()
+                    if filer_cik_raw_buf and period_end_early is not None:
+                        filer_cik_buf = filer_cik_raw_buf.zfill(10)
+                        unresolved_buffer.append((cusip, filer_cik_buf, period_end_early))
+                    result.rows_skipped_unresolved_cusip += 1
+                    continue
+
+                # ─── series identity ────────────────────────────────
+                series_id = (fund.get("SERIES_ID") or "").strip()
+                series_name = (fund.get("SERIES_NAME") or "").strip()
+                if not series_id:
+                    result.rows_skipped_missing_series += 1
+                    continue
+
+                filer_cik_raw = (reg.get("CIK") or "").strip()
+                if not filer_cik_raw:
+                    result.rows_skipped_bad_data += 1
+                    continue
+                filer_cik = filer_cik_raw.zfill(10)
+
+                filed_at = _parse_filing_date(sub.get("FILING_DATE"))
+                period_end = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(sub.get("REPORT_ENDING_PERIOD"))
+                if filed_at is None or period_end is None:
+                    result.rows_skipped_bad_data += 1
+                    continue
+
+                # Series upsert is deferred to post-COPY. Buffer this
+                # (accn, series_id) tuple iff this is the first
+                # qualifying holding for the pair. Legacy semantic:
+                # one upsert per (accn, series_id) — re-encountering
+                # the same series under a different accession in the
+                # same archive STILL upserts so ``GREATEST(...)``
+                # advances ``last_seen_period_end``.
+                series_key = (accn, series_id)
+                if series_key not in seen_series:
+                    seen_series.add(series_key)
+                    series_upsert_buffer.append(
+                        (
+                            accn,
+                            series_id,
+                            series_name or f"Series {series_id}",
+                            filer_cik,
+                            period_end,
+                        )
+                    )
+
+                holding_id = (holding.get("HOLDING_ID") or "0").strip() or "0"
+                source_document_id = f"{accn}:{holding_id}"
+                accession_no_dashes = accn.replace("-", "")
+                source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
+
+                # CURRENCY_VALUE in local currency; only treat USD
+                # as canonical USD per legacy posture.
+                currency_code = (holding.get("CURRENCY_CODE") or "").strip().upper()
+                if currency_code == "USD":
+                    market_value_usd = _parse_decimal(holding.get("CURRENCY_VALUE"))
+                else:
+                    market_value_usd = None
+
+                copy.write_row(
+                    (
+                        instrument_id,
+                        series_id,
+                        series_name or f"Series {series_id}",
+                        filer_cik,
+                        "economic",
+                        "nport",
+                        source_document_id,
+                        accn,
+                        holding_id,
+                        source_url,
+                        filed_at,
+                        None,
+                        period_end,
+                        str(ingest_run_id),
+                        balance,
+                        market_value_usd,
+                        payoff,
+                        asset_cat,
+                    )
+                )
+                copy_attempted += 1
+                result.touched_instrument_ids.add(instrument_id)
+
+    # Drain staging into the partitioned observations table FIRST,
+    # before the series upsert + unresolved-CUSIP flushes. Rationale:
+    # the staging drain is the observation write-through; a series
+    # upsert failure (rare; would require a malformed series_id) must
+    # NOT roll back the legitimate observation rows. Counter-legacy:
+    # the per-row savepoint pattern lost holdings under failed
+    # series upserts. Documented refinement; the observation row
+    # carries ``fund_series_name`` inline so a missing reference-table
+    # row does not break downstream rollups.
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM _stg_nport")
+        row = cur.fetchone()
+        accepted_via_copy = int(row[0]) if row else 0
+        skipped_by_copy = copy_attempted - accepted_via_copy
+        if skipped_by_copy > 0:
+            result.rows_skipped_bad_data += skipped_by_copy
+        cur.execute(_INSERT_FROM_STG_SQL)
+        if cur.rowcount >= 0:
+            result.rows_written = cur.rowcount
+        else:
+            result.rows_written = accepted_via_copy
+
+    # Post-COPY series upserts. Each upsert under its own savepoint
+    # (legitimate use — this is OUTSIDE the cur.copy() block body,
+    # so the bulk-ingest lint guard at
+    # scripts/check_bulk_ingest_copy_pattern.sh accepts it). A
+    # malformed series_id raises ValueError inside the helper; the
+    # savepoint rolls it back cleanly and the loop continues.
+    for accn, series_id, series_name, filer_cik, period_end in series_upsert_buffer:
+        try:
+            with conn.transaction():
+                upsert_sec_fund_series(
+                    conn,
+                    fund_series_id=series_id,
+                    fund_series_name=series_name,
+                    fund_filer_cik=filer_cik,
+                    last_seen_period_end=period_end,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "nport ingest: upsert_sec_fund_series failed for accn=%s series=%s: %s",
+                accn,
+                series_id,
+                exc,
+            )
+            series_failed.add(series_id)
+            result.parse_errors += 1
+    series_upsert_buffer.clear()
+
+    # Flush accumulated unresolved CUSIPs AFTER the staging drain so
+    # a flush failure cannot roll it back. Per-row savepoint accepted
+    # by the lint (outside the COPY block body) so a single bad
+    # triple does not abort the enclosing transaction.
+    if unresolved_buffer:
+        for start in range(0, len(unresolved_buffer), _UNRESOLVED_FLUSH_BATCH):
+            chunk = unresolved_buffer[start : start + _UNRESOLVED_FLUSH_BATCH]
+            _flush_unresolved_buffer(
+                conn,
+                chunk,
+                source="bulk_nport_dataset",
+                result=result,
+            )
+        unresolved_buffer.clear()
     return result
 
 

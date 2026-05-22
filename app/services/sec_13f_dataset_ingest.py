@@ -17,6 +17,23 @@ Replaces S13 (`sec_13f_quarterly_sweep`) entirely on a fresh install.
 The bulk archive covers 100% of 13F filers — no top-N cohort cuts.
 
 Spec: docs/superpowers/specs/2026-05-08-bulk-datasets-first-bootstrap.md
+
+PR-3 (#1233 v3 §7) — per-archive COPY refactor (was per-row INSERT +
+``with conn.transaction()`` savepoint, ~1500 rows/s ceiling). New shape
+per archive:
+
+    CREATE TEMP TABLE _stg_13f (...) ON COMMIT DROP;
+    -- Python pre-validates every row + accumulates buffer
+    cursor-level COPY _stg_13f ... FROM STDIN
+                       WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)
+    INSERT INTO ownership_institutions_observations
+        SELECT ... FROM _stg_13f
+        ON CONFLICT (...) DO UPDATE SET ...
+    -- orchestrator commits → TEMP drops via ON COMMIT DROP
+
+Cancel observation cost: per-row checkpoint (ms) → per-archive
+checkpoint (10-60s on multi-million-row archives). Documented in
+``.claude/skills/data-engineer/SKILL.md`` §3.5 and the spec §7.
 """
 
 from __future__ import annotations
@@ -25,6 +42,7 @@ import csv
 import io
 import logging
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -36,7 +54,6 @@ import psycopg
 
 from app.services.cusip_resolver import record_unresolved_cusip_from_bulk
 from app.services.institutional_holdings import thirteen_f_retention_cutoff
-from app.services.ownership_observations import record_institution_observation
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +66,10 @@ logger = logging.getLogger(__name__)
 _VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
 
 
-# #1233 PR-1a — flush the unresolved-CUSIP buffer every N rows. 1000
-# is the spec-mandated batch size; tuned so an archive of millions
-# of INFOTABLE rows commits incrementally without holding the open
-# transaction across the whole archive (would block other workers
-# and balloon WAL). The flush is idempotent on the partial UNIQUE
-# index ``unresolved_13f_cusips_bulk_idx`` (sql/164), so even a
-# crash mid-flush leaves a consistent partial set that the next run
-# will append to safely.
+# Flush unresolved-CUSIP buffer every N rows to the PR-1a helper. The
+# helper inserts with ON CONFLICT DO NOTHING into the bulk-path partial
+# UNIQUE index on (cusip, filer_cik, period_end, source) so flushing
+# in chunks bounds in-memory buffer growth without changing semantics.
 _UNRESOLVED_FLUSH_BATCH = 1000
 
 
@@ -251,7 +264,7 @@ def _open_tsv(zf: zipfile.ZipFile, name: str) -> list[dict[str, str]]:
         return list(csv.DictReader(text, delimiter="\t"))
 
 
-def _iter_tsv(zf: zipfile.ZipFile, name: str):
+def _iter_tsv(zf: zipfile.ZipFile, name: str) -> Iterator[dict[str, str]]:
     """Yield rows of a TSV one at a time (used for INFOTABLE)."""
     if name not in zf.namelist():
         candidates = [n for n in zf.namelist() if n.endswith("/" + name) or n == name]
@@ -263,25 +276,194 @@ def _iter_tsv(zf: zipfile.ZipFile, name: str):
         yield from csv.DictReader(text, delimiter="\t")
 
 
+# ---------------------------------------------------------------------------
+# PR-3 — per-archive staging table lifecycle
+# ---------------------------------------------------------------------------
+
+
+# Column order MUST match the CREATE TEMP TABLE shape exactly. The
+# INSERT...SELECT below uses positional projection so any drift here
+# silently misaligns columns. scripts/check_bulk_ingest_copy_pattern.sh
+# pins the COPY column list shape in the codebase.
+_STG_COPY_COLUMNS = (
+    "instrument_id",
+    "filer_cik",
+    "filer_name",
+    "filer_type",
+    "ownership_nature",
+    "source",
+    "source_document_id",
+    "source_accession",
+    "source_field",
+    "source_url",
+    "filed_at",
+    "period_start",
+    "period_end",
+    "ingest_run_id",
+    "shares",
+    "market_value_usd",
+    "voting_authority",
+    "exposure_kind",
+)
+
+
+# CREATE TEMP TABLE shape mirrors ownership_institutions_observations
+# minus the partition/CHECK/PK (staging is unconstrained — DB-side
+# CHECKs fire on the INSERT...SELECT into the target). Same column
+# types so COPY parses identically. ON COMMIT DROP releases the
+# staging table when the orchestrator commits the per-archive tx,
+# matching the spec invariant "TEMP table dies with the per-archive
+# transaction so the next iteration starts clean."
+_CREATE_STG_SQL = """
+CREATE TEMP TABLE _stg_13f (
+    instrument_id      BIGINT,
+    filer_cik          TEXT,
+    filer_name         TEXT,
+    filer_type         TEXT,
+    ownership_nature   TEXT,
+    source             TEXT,
+    source_document_id TEXT,
+    source_accession   TEXT,
+    source_field       TEXT,
+    source_url         TEXT,
+    filed_at           TIMESTAMPTZ,
+    period_start       DATE,
+    period_end         DATE,
+    ingest_run_id      UUID,
+    shares             NUMERIC(24, 4),
+    market_value_usd   NUMERIC(20, 2),
+    voting_authority   TEXT,
+    exposure_kind      TEXT
+) ON COMMIT DROP
+"""
+
+
+# Drain into observations table with ON CONFLICT shape matching the
+# legacy ``record_institution_observation`` semantics 1:1. Conflict
+# key + UPDATE SET clause copied verbatim from
+# ``ownership_observations.py:record_institution_observation``.
+#
+# DISTINCT ON dedupes the staging rows per conflict key BEFORE the
+# INSERT — without this, two staging rows that share a conflict tuple
+# (e.g. an archive containing an INFOTABLE row + its amendment under
+# the same accession) trigger PG's ``cardinality_violation: ON
+# CONFLICT DO UPDATE command cannot affect row a second time``. The
+# legacy per-row INSERT path serialised the writes so the second one
+# would have UPDATEd the first; the bulk path keeps that "last write
+# wins" semantic by ordering DISTINCT ON by ``ctid DESC`` (the
+# implicit physical row order — COPY appends so ctid grows
+# monotonically, picking the LAST staged row per group).
+_INSERT_FROM_STG_SQL = """
+INSERT INTO ownership_institutions_observations (
+    instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+    source, source_document_id, source_accession, source_field, source_url,
+    filed_at, period_start, period_end, ingest_run_id,
+    shares, market_value_usd, voting_authority, exposure_kind
+)
+SELECT DISTINCT ON (
+    instrument_id, filer_cik, ownership_nature, period_end,
+    source_document_id, exposure_kind
+)
+    instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+    source, source_document_id, source_accession, source_field, source_url,
+    filed_at, period_start, period_end, ingest_run_id,
+    shares, market_value_usd, voting_authority, exposure_kind
+FROM _stg_13f
+ORDER BY
+    instrument_id, filer_cik, ownership_nature, period_end,
+    source_document_id, exposure_kind,
+    ctid DESC
+ON CONFLICT (
+    instrument_id, filer_cik, ownership_nature, period_end,
+    source_document_id, exposure_kind
+)
+DO UPDATE SET
+    filer_name = EXCLUDED.filer_name,
+    filer_type = EXCLUDED.filer_type,
+    source_accession = EXCLUDED.source_accession,
+    source_field = EXCLUDED.source_field,
+    source_url = EXCLUDED.source_url,
+    filed_at = EXCLUDED.filed_at,
+    period_start = EXCLUDED.period_start,
+    shares = EXCLUDED.shares,
+    market_value_usd = EXCLUDED.market_value_usd,
+    voting_authority = EXCLUDED.voting_authority,
+    ingest_run_id = EXCLUDED.ingest_run_id,
+    ingested_at = clock_timestamp()
+"""
+
+
+def _build_copy_row(
+    *,
+    instrument_id: int,
+    filer_cik: str,
+    filer_name: str,
+    filer_type: str,
+    ownership_nature: str,
+    source: str,
+    source_document_id: str,
+    source_accession: str | None,
+    source_field: str | None,
+    source_url: str | None,
+    filed_at: datetime,
+    period_start: date | None,
+    period_end: date,
+    ingest_run_id: UUID,
+    shares: Decimal | None,
+    market_value_usd: Decimal | None,
+    voting_authority: str | None,
+    exposure_kind: str,
+) -> tuple[Any, ...]:
+    """Return one staged row in the column order _STG_COPY_COLUMNS expects.
+
+    The wrapper exists to keep the per-row tuple build at the
+    ingester's INFOTABLE loop terse and the column order single-sourced
+    against _STG_COPY_COLUMNS.
+    """
+    return (
+        instrument_id,
+        filer_cik,
+        filer_name,
+        filer_type,
+        ownership_nature,
+        source,
+        source_document_id,
+        source_accession,
+        source_field,
+        source_url,
+        filed_at,
+        period_start,
+        period_end,
+        str(ingest_run_id),
+        shares,
+        market_value_usd,
+        voting_authority,
+        exposure_kind,
+    )
+
+
 def _flush_unresolved_buffer(
     conn: psycopg.Connection[Any],
-    buffer: list[tuple[str, str, date]],
     *,
+    buffer: list[tuple[str, str, date]],
     source: Literal["bulk_13f_dataset", "bulk_nport_dataset"],
+    result: Form13FIngestResult,
 ) -> None:
-    """Drain ``buffer`` into ``unresolved_13f_cusips`` via the bulk
-    helper. Each row is written under its own savepoint so a single
-    malformed (cusip, filer, period) triple (e.g. CHECK violation
-    on a future tightening of ``filer_cik`` shape) can't poison the
-    enclosing per-archive transaction. Buffer is cleared in place
-    on the caller's reference — callers reuse the same list across
-    the loop.
+    """Drain accumulated unresolved CUSIPs via the PR-1a helper.
 
-    #1233 PR-1a flush hook. Mirrored verbatim in
-    ``sec_nport_dataset_ingest._flush_unresolved_buffer``.
+    Each write under its own SAVEPOINT (``with conn.transaction()``)
+    so a DB error (e.g. CHECK violation on the bulk-path schema)
+    does NOT leave the enclosing per-archive tx in
+    ``InFailedSqlTransaction`` and abort the staging drain. Failure
+    to record an unresolved CUSIP is logged + counted as a
+    ``parse_error`` but does NOT abort the archive — the unresolved
+    table is a hint for the PR-1b OpenFIGI sweep, not a source of
+    truth. Caller is responsible for clearing the buffer post-flush.
+
+    Lint note: the savepoint is OUTSIDE the cur.copy() block body
+    (flush runs post-COPY) so the bulk-ingest lint guard at
+    scripts/check_bulk_ingest_copy_pattern.sh accepts it.
     """
-    if not buffer:
-        return
     for cusip, filer_cik, period_end in buffer:
         try:
             with conn.transaction():
@@ -300,7 +482,7 @@ def _flush_unresolved_buffer(
                 period_end,
                 exc,
             )
-    buffer.clear()
+            result.parse_errors += 1
 
 
 def ingest_13f_dataset_archive(
@@ -318,6 +500,30 @@ def ingest_13f_dataset_archive(
     Returns telemetry suitable for stage reporting. Per-row failures
     (unresolved CUSIP, bad period_end, etc) are counted on the result
     rather than raised.
+
+    PR-3: per-archive lifecycle —
+
+      1. CREATE TEMP TABLE _stg_13f (...) ON COMMIT DROP.
+      2. Python pre-validates every INFOTABLE row, mirroring the
+         legacy per-row gates (CUSIP map, retention, PRN-vs-SH,
+         value-cutover).
+      3. Validated rows are COPY'd into ``_stg_13f`` via
+         cursor-level COPY (`... ON_ERROR ignore, LOG_VERBOSITY verbose`) so
+         residual schema-drift on a single row skips that row + logs a
+         NOTICE rather than aborting the bulk write.
+      4. Single INSERT...SELECT...ON CONFLICT drains staging into
+         ``ownership_institutions_observations`` preserving the legacy
+         UPSERT semantics (conflict key + UPDATE SET copied from
+         ``record_institution_observation``).
+      5. Caller (orchestrator) commits → ``_stg_13f`` drops via
+         ON COMMIT DROP, leaving a clean transaction boundary for the
+         next archive.
+
+    Cancel observation cost: per-row INSERT used to checkpoint cancel
+    at sub-second latency. COPY drains atomically per archive, so
+    cancel observed only at archive boundary (10-60s on
+    multi-million-row archives). Acceptable trade-off documented in
+    spec §7 + skill §3.5.
     """
     if ingest_run_id is None:
         ingest_run_id = uuid4()
@@ -328,18 +534,21 @@ def ingest_13f_dataset_archive(
     # (Codex sweep BLOCKING).
     cusip_map = _load_cusip_map(conn)
 
-    # #1233 PR-1a — buffer of (cusip, filer_cik, period_end) triples
-    # for every unresolved CUSIP this archive yields. Flushed every
-    # _UNRESOLVED_FLUSH_BATCH rows and again at archive boundary so
-    # the partial last-batch is never lost on completion.
-    unresolved_buffer: list[tuple[str, str, date]] = []
-
     # PR6 #1233 §4.5 — archive-level retention cutoff. Resolve once
     # OUTSIDE the per-row INFOTABLE loop so a multi-million-row drain
     # doesn't re-evaluate ``date.today()`` per row (and so a sentinel
     # mid-drain ``today`` boundary roll doesn't admit some rows and
     # reject others within the same archive).
     retention_cutoff = thirteen_f_retention_cutoff()
+
+    # PR-3: CREATE TEMP TABLE _stg_13f ON COMMIT DROP — MUST live
+    # inside the per-archive tx (the orchestrator opens a fresh conn
+    # per archive and commits after this function returns). Drops
+    # automatically when the orchestrator commits.
+    with conn.cursor() as cur:
+        cur.execute(_CREATE_STG_SQL)
+
+    unresolved_buffer: list[tuple[str, str, date]] = []
 
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
@@ -350,111 +559,103 @@ def ingest_13f_dataset_archive(
         sub_by_accession = {row["ACCESSION_NUMBER"]: row for row in submissions if "ACCESSION_NUMBER" in row}
         cover_by_accession = {row["ACCESSION_NUMBER"]: row for row in coverpages if "ACCESSION_NUMBER" in row}
 
-        for row in _iter_tsv(zf, "INFOTABLE.tsv"):
-            result.infotable_seen += 1
-            accession = row.get("ACCESSION_NUMBER", "").strip()
-            if not accession:
-                result.rows_skipped_orphan_accession += 1
-                continue
-            sub = sub_by_accession.get(accession)
-            cover = cover_by_accession.get(accession)
-            if sub is None or cover is None:
-                result.rows_skipped_orphan_accession += 1
-                continue
+        # Stream INFOTABLE → pre-validate → COPY into _stg_13f. Single
+        # cursor.copy() context spans every validated row in the
+        # archive so the wire-level COPY drains in one pass. PG17
+        # ON_ERROR ignore + LOG_VERBOSITY verbose skip residual
+        # schema-drift rows + emit NOTICEs.
+        copy_sql = (
+            "COPY _stg_13f ("
+            + ", ".join(_STG_COPY_COLUMNS)
+            + ") FROM STDIN WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)"
+        )
+        copy_attempted = 0
+        with conn.cursor() as cur, cur.copy(copy_sql) as copy:
+            for row in _iter_tsv(zf, "INFOTABLE.tsv"):
+                result.infotable_seen += 1
+                accession = row.get("ACCESSION_NUMBER", "").strip()
+                if not accession:
+                    result.rows_skipped_orphan_accession += 1
+                    continue
+                sub = sub_by_accession.get(accession)
+                cover = cover_by_accession.get(accession)
+                if sub is None or cover is None:
+                    result.rows_skipped_orphan_accession += 1
+                    continue
 
-            cusip = (row.get("CUSIP") or "").strip().upper()
-            if not cusip:
-                result.rows_skipped_bad_data += 1
-                continue
+                cusip = (row.get("CUSIP") or "").strip().upper()
+                if not cusip:
+                    result.rows_skipped_bad_data += 1
+                    continue
 
-            # Parse filer_cik + period_end EARLY so the unresolved-CUSIP
-            # branch (#1233 PR-1a) can capture (cusip, filer_cik,
-            # period_end, source='bulk_13f_dataset') into the buffer
-            # for PR-1b's OpenFIGI sweep. Bad-data rows whose
-            # filer/period can't be parsed fall through to the normal
-            # ``rows_skipped_bad_data`` counter; unresolved-CUSIP rows
-            # whose filer/period DID parse are counted +1 in
-            # ``rows_skipped_unresolved_cusip`` and appended to the
-            # buffer in the same step.
-            filer_cik = str(sub.get("CIK") or "").strip()
-            if not filer_cik:
-                result.rows_skipped_bad_data += 1
-                continue
-            filer_cik = filer_cik.zfill(10)
-            filer_name = (cover.get("FILINGMANAGER_NAME") or "").strip()
-            if not filer_name:
-                # Schema requires NOT NULL filer_name; fall back to
-                # the CIK to keep the row instead of dropping it.
-                filer_name = f"CIK{filer_cik}"
+                filer_cik_raw = str(sub.get("CIK") or "").strip()
+                if not filer_cik_raw:
+                    result.rows_skipped_bad_data += 1
+                    continue
+                filer_cik = filer_cik_raw.zfill(10)
 
-            filed_at = _parse_filing_date(sub.get("FILING_DATE") or sub.get("DATE_FILED"))
-            period_end = _parse_period_end(cover.get("REPORTCALENDARORQUARTER"))
-            if filed_at is None or period_end is None:
-                result.rows_skipped_bad_data += 1
-                continue
+                period_end = _parse_period_end(cover.get("REPORTCALENDARORQUARTER"))
+                filed_at = _parse_filing_date(sub.get("FILING_DATE") or sub.get("DATE_FILED"))
 
-            instrument_id = cusip_map.get(cusip)
-            if instrument_id is None:
-                # PR-1a #1233 §4 — buffer the (cusip, filer_cik,
-                # period_end) triple so PR-1b's OpenFIGI sweep can
-                # resolve + rewash. Buffer flushed every
-                # ``_UNRESOLVED_FLUSH_BATCH`` rows and again at
-                # archive boundary (post-loop). Counter still
-                # increments here to keep dropped-row telemetry
-                # consistent with the pre-PR-1a baseline.
-                result.rows_skipped_unresolved_cusip += 1
-                unresolved_buffer.append((cusip, filer_cik, period_end))
-                if len(unresolved_buffer) >= _UNRESOLVED_FLUSH_BATCH:
-                    _flush_unresolved_buffer(conn, unresolved_buffer, source="bulk_13f_dataset")
-                continue
+                instrument_id = cusip_map.get(cusip)
+                if instrument_id is None:
+                    result.rows_skipped_unresolved_cusip += 1
+                    # PR-1a — record (cusip, filer, period) so the
+                    # PR-1b OpenFIGI sweep can rewash. Skip if period
+                    # parse failed (bulk-path index requires period).
+                    if period_end is not None:
+                        unresolved_buffer.append((cusip, filer_cik, period_end))
+                    continue
 
-            # PR6 #1233 §4.5 — per-row retention gate. Bulk dataset
-            # archives can span 30+ years; the per-row check honours
-            # the calendar-quarter cap regardless of the archive's
-            # nominal coverage window.
-            if period_end < retention_cutoff:
-                result.rows_skipped_retention += 1
-                continue
+                filer_name = (cover.get("FILINGMANAGER_NAME") or "").strip()
+                if not filer_name:
+                    # Schema requires NOT NULL filer_name; fall back to
+                    # the CIK to keep the row instead of dropping it.
+                    filer_name = f"CIK{filer_cik}"
 
-            # SSHPRNAMT carries shares OR principal-amount depending on
-            # SSHPRNAMTTYPE (SH | PRN). PRN rows hold bond principal in
-            # dollars, NOT shares — must skip to avoid silent
-            # corruption (PR #1054 finding: 20k PRN rows in 2026Q1).
-            shprn_type = (row.get("SSHPRNAMTTYPE") or "").strip().upper()
-            if shprn_type and shprn_type != "SH":
-                result.rows_skipped_bad_data += 1
-                continue
-            shares = _parse_decimal(row.get("SSHPRNAMT"))
-            # VALUE column unit changed 2023-01-03 — pre-cutover it
-            # was reported in $thousands, post-cutover in $dollars.
-            # See _VALUE_DOLLARS_CUTOVER constant at module top.
-            # Discriminate on FILED_AT (when the filer reported), NOT
-            # period_end — a 2022Q4 restatement filed in March 2023
-            # reports in dollars even though period_end is pre-cutover.
-            value_raw = _parse_decimal(row.get("VALUE"))
-            if value_raw is None:
-                market_value_usd = None
-            elif filed_at.date() >= _VALUE_DOLLARS_CUTOVER:
-                market_value_usd = value_raw
-            else:
-                market_value_usd = value_raw * Decimal("1000")
+                if filed_at is None or period_end is None:
+                    result.rows_skipped_bad_data += 1
+                    continue
 
-            voting_authority = _map_voting_authority(row)
-            exposure_kind = _map_putcall(row.get("PUTCALL"))
+                # PR6 #1233 §4.5 — per-row retention gate. Bulk dataset
+                # archives can span 30+ years; the per-row check honours
+                # the calendar-quarter cap regardless of the archive's
+                # nominal coverage window.
+                if period_end < retention_cutoff:
+                    result.rows_skipped_retention += 1
+                    continue
 
-            accession_no_dashes = accession.replace("-", "")
-            source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
-            # Per-row savepoint: a CHECK-constraint violation on one
-            # malformed dataset row would otherwise put psycopg into
-            # ``InFailedSqlTransaction`` for every subsequent
-            # ``_resolve_cusip`` / ``record_institution_observation``
-            # call. Wrapping each write in ``conn.transaction()``
-            # rolls back the bad row cleanly so the loop can keep
-            # processing. Codex review BLOCKING for PR #1031.
-            try:
-                with conn.transaction():
-                    record_institution_observation(
-                        conn,
+                # SSHPRNAMT carries shares OR principal-amount depending on
+                # SSHPRNAMTTYPE (SH | PRN). PRN rows hold bond principal in
+                # dollars, NOT shares — must skip to avoid silent
+                # corruption (PR #1054 finding: 20k PRN rows in 2026Q1).
+                shprn_type = (row.get("SSHPRNAMTTYPE") or "").strip().upper()
+                if shprn_type and shprn_type != "SH":
+                    result.rows_skipped_bad_data += 1
+                    continue
+                shares = _parse_decimal(row.get("SSHPRNAMT"))
+                # VALUE column unit changed 2023-01-03 — pre-cutover it
+                # was reported in $thousands, post-cutover in $dollars.
+                # See _VALUE_DOLLARS_CUTOVER constant at module top.
+                # Discriminate on FILED_AT (when the filer reported), NOT
+                # period_end — a 2022Q4 restatement filed in March 2023
+                # reports in dollars even though period_end is pre-cutover.
+                value_raw = _parse_decimal(row.get("VALUE"))
+                if value_raw is None:
+                    market_value_usd = None
+                elif filed_at.date() >= _VALUE_DOLLARS_CUTOVER:
+                    market_value_usd = value_raw
+                else:
+                    market_value_usd = value_raw * Decimal("1000")
+
+                voting_authority = _map_voting_authority(row)
+                exposure_kind = _map_putcall(row.get("PUTCALL"))
+
+                accession_no_dashes = accession.replace("-", "")
+                source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
+
+                copy.write_row(
+                    _build_copy_row(
                         instrument_id=instrument_id,
                         filer_cik=filer_cik,
                         filer_name=filer_name,
@@ -463,6 +664,10 @@ def ingest_13f_dataset_archive(
                         # CHECK accepts ETF/INV/INS/BD/OTHER. INV is
                         # the right default for typical 13F-HR filers.
                         filer_type="INV",
+                        # ``ownership_nature`` for 13F-HR: pass
+                        # ``'economic'`` for the full reported
+                        # position. Mapping pinned in
+                        # ``record_institution_observation`` docstring.
                         ownership_nature="economic",
                         source="13f",
                         source_document_id=accession,
@@ -478,21 +683,59 @@ def ingest_13f_dataset_archive(
                         voting_authority=voting_authority,
                         exposure_kind=exposure_kind,
                     )
-                result.rows_written += 1
-                result.touched_instrument_ids.add(instrument_id)
-            except Exception as exc:  # noqa: BLE001
-                # Record-level write failure rolled back via the
-                # savepoint; loop continues with a clean transaction.
-                logger.debug(
-                    "13F ingest: record_institution_observation failed for %s/%s: %s",
-                    accession,
-                    cusip,
-                    exc,
                 )
-                result.parse_errors += 1
+                copy_attempted += 1
+                result.touched_instrument_ids.add(instrument_id)
 
-    # #1233 PR-1a — final flush at archive boundary. Picks up the
-    # partial last batch (< _UNRESOLVED_FLUSH_BATCH rows) so nothing
-    # is dropped on completion.
-    _flush_unresolved_buffer(conn, unresolved_buffer, source="bulk_13f_dataset")
+    # Flush accumulated unresolved CUSIPs after the COPY context
+    # closes (a COPY context exclusively owns the cursor so we cannot
+    # interleave normal statements; flushing post-stream is the
+    # simplest correct shape).
+    if unresolved_buffer:
+        # Chunk the flush so a 5M-row archive with a 100k-unresolved
+        # tail doesn't block on one giant statement series. The PR-1a
+        # helper issues one INSERT per call so this is just a control-
+        # flow guard against unbounded buffer growth — semantically the
+        # same as flushing the whole list at once.
+        for start in range(0, len(unresolved_buffer), _UNRESOLVED_FLUSH_BATCH):
+            chunk = unresolved_buffer[start : start + _UNRESOLVED_FLUSH_BATCH]
+            _flush_unresolved_buffer(
+                conn,
+                buffer=chunk,
+                source="bulk_13f_dataset",
+                result=result,
+            )
+        unresolved_buffer.clear()
+
+    # Drain staging into the partitioned observations table.
+    #
+    # ON_ERROR ignore at COPY time silently drops rows that fail
+    # wire-level parse — those rows never reach _stg_13f. A row that
+    # later violates a target-table CHECK constraint at INSERT raises;
+    # the orchestrator records the archive as failed and rolls back
+    # cleanly via the per-archive boundary.
+    accepted_via_copy = 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM _stg_13f")
+        row = cur.fetchone()
+        accepted_via_copy = int(row[0]) if row else 0
+        # Surface PG17 ON_ERROR-skipped count as rows_skipped_bad_data
+        # so operator-visible telemetry stays consistent with the
+        # legacy per-row path (where a bad row landed in
+        # parse_errors). Bad-data accounting is the more honest bucket
+        # because ON_ERROR ignore = pre-validated row hit a type-cast
+        # issue at COPY time, not a schema CHECK violation.
+        skipped_by_copy = copy_attempted - accepted_via_copy
+        if skipped_by_copy > 0:
+            result.rows_skipped_bad_data += skipped_by_copy
+        cur.execute(_INSERT_FROM_STG_SQL)
+        # cur.rowcount counts inserts + updates (ON CONFLICT DO UPDATE).
+        # Both paths represent successful writes from the operator's
+        # perspective, so attribute both to rows_written.
+        if cur.rowcount >= 0:
+            result.rows_written = cur.rowcount
+        else:
+            # Driver couldn't tag the result. Fall back to staged
+            # count so the count is a lower bound rather than 0.
+            result.rows_written = accepted_via_copy
     return result
