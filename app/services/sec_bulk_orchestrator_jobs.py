@@ -45,6 +45,21 @@ JOB_SEC_INSIDER_INGEST_FROM_DATASET: Final[str] = "sec_insider_ingest_from_datas
 JOB_SEC_NPORT_INGEST_FROM_DATASET: Final[str] = "sec_nport_ingest_from_dataset"
 
 
+# Post-ingest batched _current refresh chunk size (PR-4 spec §8).
+#
+# Each post-ingest job (13F / insider / NPORT) calls the matching
+# ``refresh_<category>_current_batch`` helper in chunks so the
+# cancel-poll cadence remains interactive. The single-instrument loop
+# polled every 50 ids; the batch path round-trips ONE MERGE per chunk,
+# so cancel observation latency degrades from ~50 instruments to
+# ~_REFRESH_BATCH_CHUNK_SIZE instruments. 200 is the documented
+# trade-off — large enough to dominate the per-batch fixed cost
+# (server-side hash-sort + lock acquire), small enough that an
+# operator cancel still lands within ~5 s of the next chunk boundary
+# even on a slow disk.
+_REFRESH_BATCH_CHUNK_SIZE: Final[int] = 200
+
+
 def _bulk_dir() -> Path:
     return resolve_data_dir() / "sec" / "bulk"
 
@@ -403,35 +418,47 @@ def sec_13f_ingest_from_dataset_job() -> None:
                 stage_key=active_bootstrap_stage_key() or "",
             )
 
-        from app.services.ownership_observations import refresh_institutions_current
+        from app.services.ownership_observations import refresh_institutions_current_batch
 
         refresh_failures: list[str] = []
+        sorted_ids = sorted(touched_ids)
         with psycopg.connect(settings.database_url) as conn:
-            for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
-                if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
-                    # #1114: stage_key sourced from contextvar.
+            # Chunk batched refresh so cancel observation stays interactive.
+            # Single-instrument loop polled every 50 ids; batched call
+            # round-trips one MERGE per CHUNK_SIZE ids, so we poll between
+            # chunks instead. Documented trade-off: cancel latency degrades
+            # from ~50 instruments to ~200 instruments. PR-4 spec §8.
+            for chunk_start in range(0, len(sorted_ids), _REFRESH_BATCH_CHUNK_SIZE):
+                if bootstrap_cancel_requested():
                     raise BootstrapStageCancelled(
                         f"sec_13f_ingest_from_dataset cancelled by operator after "
-                        f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
+                        f"refreshing {chunk_start}/{len(sorted_ids)} instruments",
                         stage_key=active_bootstrap_stage_key() or "",
                     )
-                # Per-iteration savepoint — refresh_institutions_current
-                # owns its own ``with conn.transaction()`` (sql/.py:404),
-                # so this is defence-in-depth against a future refactor
-                # of the helper that drops its internal txn wrap. PR
-                # review BLOCKING for #1047.
+                chunk = sorted_ids[chunk_start : chunk_start + _REFRESH_BATCH_CHUNK_SIZE]
+                # Per-chunk savepoint — refresh_institutions_current_batch
+                # owns its own ``with conn.transaction()``; this is
+                # defence-in-depth so one bad chunk does not abort the
+                # ambient connection's prior chunk commits. Mirrors the
+                # single-instrument loop's defence per PR #1047.
                 try:
                     with conn.transaction():
-                        refresh_institutions_current(conn, instrument_id=instrument_id)
+                        refresh_institutions_current_batch(conn, instrument_ids=chunk)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
-                        "sec_13f_ingest_from_dataset: refresh_institutions_current failed for instrument=%d",
-                        instrument_id,
+                        "sec_13f_ingest_from_dataset: refresh_institutions_current_batch failed for "
+                        "chunk start=%d size=%d",
+                        chunk_start,
+                        len(chunk),
                     )
-                    refresh_failures.append(f"instrument={instrument_id}: {exc}")
+                    # Surface the first 5 instrument_ids in the chunk so
+                    # operator-visible error still names concrete ids.
+                    refresh_failures.append(
+                        f"chunk start={chunk_start} ids={chunk[:5]}{'...' if len(chunk) > 5 else ''}: {exc}"
+                    )
         if refresh_failures:
             raise RuntimeError(
-                f"sec_13f_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "
+                f"sec_13f_ingest_from_dataset: {len(refresh_failures)} chunk(s) of {len(sorted_ids)} "
                 f"_current refreshes failed; archives retained for retry: " + "; ".join(refresh_failures[:5])
             )
         logger.info(
@@ -562,30 +589,37 @@ def sec_insider_ingest_from_dataset_job() -> None:
                 stage_key=active_bootstrap_stage_key() or "",
             )
 
-        from app.services.ownership_observations import refresh_insiders_current
+        from app.services.ownership_observations import refresh_insiders_current_batch
 
         refresh_failures: list[str] = []
+        sorted_ids = sorted(touched_ids)
         with psycopg.connect(settings.database_url) as conn:
-            for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
-                if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
-                    # #1114: stage_key sourced from contextvar.
+            # See sec_13f_ingest_from_dataset_job for the chunked-batch
+            # cancel-poll rationale (PR-4 spec §8).
+            for chunk_start in range(0, len(sorted_ids), _REFRESH_BATCH_CHUNK_SIZE):
+                if bootstrap_cancel_requested():
                     raise BootstrapStageCancelled(
                         f"sec_insider_ingest_from_dataset cancelled by operator after "
-                        f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
+                        f"refreshing {chunk_start}/{len(sorted_ids)} instruments",
                         stage_key=active_bootstrap_stage_key() or "",
                     )
+                chunk = sorted_ids[chunk_start : chunk_start + _REFRESH_BATCH_CHUNK_SIZE]
                 try:
                     with conn.transaction():
-                        refresh_insiders_current(conn, instrument_id=instrument_id)
+                        refresh_insiders_current_batch(conn, instrument_ids=chunk)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
-                        "sec_insider_ingest_from_dataset: refresh_insiders_current failed for instrument=%d",
-                        instrument_id,
+                        "sec_insider_ingest_from_dataset: refresh_insiders_current_batch failed for "
+                        "chunk start=%d size=%d",
+                        chunk_start,
+                        len(chunk),
                     )
-                    refresh_failures.append(f"instrument={instrument_id}: {exc}")
+                    refresh_failures.append(
+                        f"chunk start={chunk_start} ids={chunk[:5]}{'...' if len(chunk) > 5 else ''}: {exc}"
+                    )
         if refresh_failures:
             raise RuntimeError(
-                f"sec_insider_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "
+                f"sec_insider_ingest_from_dataset: {len(refresh_failures)} chunk(s) of {len(sorted_ids)} "
                 f"_current refreshes failed; archives retained for retry: " + "; ".join(refresh_failures[:5])
             )
         logger.info(
@@ -744,30 +778,36 @@ def sec_nport_ingest_from_dataset_job() -> None:
                 stage_key=active_bootstrap_stage_key() or "",
             )
 
-        from app.services.ownership_observations import refresh_funds_current
+        from app.services.ownership_observations import refresh_funds_current_batch
 
         refresh_failures: list[str] = []
+        sorted_ids = sorted(touched_ids)
         with psycopg.connect(settings.database_url) as conn:
-            for refresh_idx, instrument_id in enumerate(sorted(touched_ids)):
-                if refresh_idx % 50 == 0 and bootstrap_cancel_requested():
-                    # #1114: stage_key sourced from contextvar.
+            # See sec_13f_ingest_from_dataset_job for the chunked-batch
+            # cancel-poll rationale (PR-4 spec §8).
+            for chunk_start in range(0, len(sorted_ids), _REFRESH_BATCH_CHUNK_SIZE):
+                if bootstrap_cancel_requested():
                     raise BootstrapStageCancelled(
                         f"sec_nport_ingest_from_dataset cancelled by operator after "
-                        f"refreshing {refresh_idx}/{len(touched_ids)} instruments",
+                        f"refreshing {chunk_start}/{len(sorted_ids)} instruments",
                         stage_key=active_bootstrap_stage_key() or "",
                     )
+                chunk = sorted_ids[chunk_start : chunk_start + _REFRESH_BATCH_CHUNK_SIZE]
                 try:
                     with conn.transaction():
-                        refresh_funds_current(conn, instrument_id=instrument_id)
+                        refresh_funds_current_batch(conn, instrument_ids=chunk)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
-                        "sec_nport_ingest_from_dataset: refresh_funds_current failed for instrument=%d",
-                        instrument_id,
+                        "sec_nport_ingest_from_dataset: refresh_funds_current_batch failed for chunk start=%d size=%d",
+                        chunk_start,
+                        len(chunk),
                     )
-                    refresh_failures.append(f"instrument={instrument_id}: {exc}")
+                    refresh_failures.append(
+                        f"chunk start={chunk_start} ids={chunk[:5]}{'...' if len(chunk) > 5 else ''}: {exc}"
+                    )
         if refresh_failures:
             raise RuntimeError(
-                f"sec_nport_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "
+                f"sec_nport_ingest_from_dataset: {len(refresh_failures)} chunk(s) of {len(sorted_ids)} "
                 f"_current refreshes failed; archives retained for retry: " + "; ".join(refresh_failures[:5])
             )
         logger.info(

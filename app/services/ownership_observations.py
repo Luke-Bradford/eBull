@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -1707,3 +1707,412 @@ def iter_insider_observations(
             )
         for row in cur.fetchall():
             yield dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Batched _current refreshers (#1233 PR-4)
+# ---------------------------------------------------------------------------
+#
+# Spec: docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v2.md §8.
+#
+# The serial refresh loop `for iid in touched_ids: refresh_X_current(conn, iid)`
+# inside `sec_bulk_orchestrator_jobs.py` costs one PG round-trip + one
+# advisory-lock acquire + one MERGE per touched instrument. At ~10k touched
+# instruments per 13F bulk run × 50 ms each = 5–10 min serial loop AFTER
+# ingest, and the same shape for insider + N-PORT. The batched helpers below
+# collapse the round-trips into a single statement per category while
+# preserving the diff-aware MERGE semantics established by PR12.
+#
+# Deadlock safety
+# ---------------
+# The single-instrument helpers each acquire one advisory lock keyed by
+# `hashtextextended('refresh_<category>_current', 0) # iid::bigint`. The
+# hash is NOT monotonic in `iid` — two parallel batch calls with overlapping
+# but un-sorted instrument sets would otherwise acquire locks in different
+# orders and could deadlock. The batched helpers acquire ALL locks for their
+# batch in a single server-side query sorted by the hashed lock key, so any
+# two batch callers see the same lock-acquire order for the same instrument
+# set. Sorting in SQL (not Python) avoids hashing the PG-side
+# `hashtextextended` algorithm in client code.
+#
+# Idempotency
+# -----------
+# The MERGE writer is no-op-on-same-input (IS DISTINCT FROM diff predicate
+# + WHEN NOT MATCHED BY SOURCE delete clamped to the batch). Re-running a
+# batched refresh on the same instrument set produces zero dead tuples and
+# leaves `refreshed_at` unchanged on every row that already matched (PR12
+# §3.3 invariant — preserved verbatim).
+#
+# Empty input
+# -----------
+# An empty `instrument_ids` is a no-op (returns 0 rows updated). The bulk
+# orchestrator already guards `if touched_ids:` upstream; the no-op here
+# is defence-in-depth.
+
+
+def _normalise_instrument_ids(instrument_ids: Iterable[int]) -> list[int]:
+    """Return a de-duplicated, sorted-by-int list of instrument_ids.
+
+    The MERGE writers downstream order locks by the hashed lock key
+    (not raw int), but we de-duplicate here so a caller that passes a
+    list rather than a set cannot inflate the lock-acquire count or
+    feed duplicate src rows to MERGE."""
+    return sorted({int(i) for i in instrument_ids})
+
+
+def refresh_insiders_current_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_ids: Iterable[int],
+) -> int:
+    """Batched form of :func:`refresh_insiders_current`.
+
+    Semantically equivalent to looping over ``instrument_ids`` and calling
+    the single-instrument helper once per id, but collapses the per-id
+    round-trip + lock + MERGE into one of each, scoped to the batch.
+
+    Returns the number of distinct instrument_ids processed (0 if the
+    input was empty)."""
+    ids = _normalise_instrument_ids(instrument_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        # Acquire ALL advisory locks for the batch in hash-key order
+        # (deadlock safety — see module-level note). One server-side
+        # query sorts the locks deterministically across callers.
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(lk)
+              FROM (
+                SELECT (hashtextextended('refresh_insiders_current', 0) # iid::bigint) AS lk
+                  FROM unnest(%(ids)s::bigint[]) AS iid
+                 ORDER BY lk
+              ) AS ordered_locks
+            """,
+            {"ids": ids},
+        )
+        # Capture per-instrument watermark BEFORE the MERGE so the state
+        # UPSERT cannot advance past observations the MERGE did not see
+        # (PR12 Codex 1b HIGH-2 race fix, preserved at batch scope).
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(ingested_at)
+              FROM ownership_insiders_observations
+             WHERE instrument_id = ANY(%(ids)s::bigint[])
+             GROUP BY instrument_id
+            """,
+            {"ids": ids},
+        )
+        watermarks: dict[int, datetime | None] = {int(r[0]): r[1] for r in cur.fetchall()}
+        cur.execute(
+            """
+            MERGE INTO ownership_insiders_current AS tgt
+            USING (
+                SELECT DISTINCT ON (instrument_id, holder_identity_key, ownership_nature)
+                    instrument_id, holder_cik, holder_name, holder_identity_key,
+                    ownership_nature, source, source_document_id, source_accession,
+                    source_url, filed_at, period_start, period_end, shares
+                FROM ownership_insiders_observations
+                WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
+                ORDER BY
+                    instrument_id,
+                    holder_identity_key,
+                    ownership_nature,
+                    CASE source
+                        WHEN 'form4'    THEN 1
+                        WHEN 'form3'    THEN 2
+                        WHEN '13d'      THEN 3
+                        WHEN '13g'      THEN 3
+                        WHEN 'def14a'   THEN 4
+                        WHEN '13f'      THEN 5
+                        WHEN 'nport'    THEN 6
+                        WHEN 'ncsr'     THEN 6
+                        WHEN 'xbrl_dei' THEN 7
+                        WHEN '10k_note' THEN 8
+                        WHEN 'finra_si' THEN 9
+                        ELSE 10
+                    END ASC,
+                    period_end DESC,
+                    filed_at DESC,
+                    source ASC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = src.instrument_id
+               AND tgt.holder_identity_key = src.holder_identity_key
+               AND tgt.ownership_nature = src.ownership_nature
+            WHEN MATCHED AND (
+                tgt.holder_cik, tgt.holder_name,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares
+            ) IS DISTINCT FROM (
+                src.holder_cik, src.holder_name,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares
+            ) THEN UPDATE SET
+                holder_cik         = src.holder_cik,
+                holder_name        = src.holder_name,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, holder_cik, holder_name, holder_identity_key,
+                ownership_nature, source, source_document_id, source_accession,
+                source_url, filed_at, period_start, period_end, shares
+            ) VALUES (
+                src.instrument_id, src.holder_cik, src.holder_name, src.holder_identity_key,
+                src.ownership_nature, src.source, src.source_document_id, src.source_accession,
+                src.source_url, src.filed_at, src.period_start, src.period_end, src.shares
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE
+            """,
+            {"ids": ids},
+        )
+        # Batched UPSERT of ownership_refresh_state — one round-trip for
+        # the whole batch. Watermarks come from the pre-MERGE snapshot:
+        # any instrument with zero observations gets NULL watermark,
+        # mirroring the single-instrument helper.
+        rows = [(iid, watermarks.get(iid)) for iid in ids]
+        cur.executemany(
+            """
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%s, 'insiders', %s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
+            """,
+            rows,
+        )
+    return len(ids)
+
+
+def refresh_institutions_current_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_ids: Iterable[int],
+) -> int:
+    """Batched form of :func:`refresh_institutions_current`.
+
+    See :func:`refresh_insiders_current_batch` for the design contract."""
+    ids = _normalise_instrument_ids(instrument_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(lk)
+              FROM (
+                SELECT (hashtextextended('refresh_institutions_current', 0) # iid::bigint) AS lk
+                  FROM unnest(%(ids)s::bigint[]) AS iid
+                 ORDER BY lk
+              ) AS ordered_locks
+            """,
+            {"ids": ids},
+        )
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(ingested_at)
+              FROM ownership_institutions_observations
+             WHERE instrument_id = ANY(%(ids)s::bigint[])
+             GROUP BY instrument_id
+            """,
+            {"ids": ids},
+        )
+        watermarks: dict[int, datetime | None] = {int(r[0]): r[1] for r in cur.fetchall()}
+        cur.execute(
+            """
+            MERGE INTO ownership_institutions_current AS tgt
+            USING (
+                SELECT DISTINCT ON (instrument_id, filer_cik, ownership_nature, exposure_kind)
+                    instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    shares, market_value_usd, voting_authority, exposure_kind
+                FROM ownership_institutions_observations
+                WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
+                ORDER BY
+                    instrument_id,
+                    filer_cik,
+                    ownership_nature,
+                    exposure_kind,
+                    period_end DESC,
+                    filed_at DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = src.instrument_id
+               AND tgt.filer_cik = src.filer_cik
+               AND tgt.ownership_nature = src.ownership_nature
+               AND tgt.exposure_kind = src.exposure_kind
+            WHEN MATCHED AND (
+                tgt.filer_name, tgt.filer_type,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares, tgt.market_value_usd, tgt.voting_authority
+            ) IS DISTINCT FROM (
+                src.filer_name, src.filer_type,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.market_value_usd, src.voting_authority
+            ) THEN UPDATE SET
+                filer_name         = src.filer_name,
+                filer_type         = src.filer_type,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                market_value_usd   = src.market_value_usd,
+                voting_authority   = src.voting_authority,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, market_value_usd, voting_authority, exposure_kind
+            ) VALUES (
+                src.instrument_id, src.filer_cik, src.filer_name, src.filer_type, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.market_value_usd, src.voting_authority, src.exposure_kind
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE
+            """,
+            {"ids": ids},
+        )
+        rows = [(iid, watermarks.get(iid)) for iid in ids]
+        cur.executemany(
+            """
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%s, 'institutions', %s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
+            """,
+            rows,
+        )
+    return len(ids)
+
+
+def refresh_funds_current_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_ids: Iterable[int],
+) -> int:
+    """Batched form of :func:`refresh_funds_current`.
+
+    See :func:`refresh_insiders_current_batch` for the design contract."""
+    ids = _normalise_instrument_ids(instrument_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(lk)
+              FROM (
+                SELECT (hashtextextended('refresh_funds_current', 0) # iid::bigint) AS lk
+                  FROM unnest(%(ids)s::bigint[]) AS iid
+                 ORDER BY lk
+              ) AS ordered_locks
+            """,
+            {"ids": ids},
+        )
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(ingested_at)
+              FROM ownership_funds_observations
+             WHERE instrument_id = ANY(%(ids)s::bigint[])
+             GROUP BY instrument_id
+            """,
+            {"ids": ids},
+        )
+        watermarks: dict[int, datetime | None] = {int(r[0]): r[1] for r in cur.fetchall()}
+        cur.execute(
+            """
+            MERGE INTO ownership_funds_current AS tgt
+            USING (
+                SELECT DISTINCT ON (instrument_id, fund_series_id)
+                    instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+                    ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    shares, market_value_usd, payoff_profile, asset_category
+                FROM ownership_funds_observations
+                WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
+                ORDER BY
+                    instrument_id,
+                    fund_series_id,
+                    filed_at DESC,
+                    period_end DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = src.instrument_id
+               AND tgt.fund_series_id = src.fund_series_id
+            WHEN MATCHED AND (
+                tgt.fund_series_name, tgt.fund_filer_cik, tgt.ownership_nature,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares, tgt.market_value_usd, tgt.payoff_profile, tgt.asset_category
+            ) IS DISTINCT FROM (
+                src.fund_series_name, src.fund_filer_cik, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.market_value_usd, src.payoff_profile, src.asset_category
+            ) THEN UPDATE SET
+                fund_series_name   = src.fund_series_name,
+                fund_filer_cik     = src.fund_filer_cik,
+                ownership_nature   = src.ownership_nature,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                market_value_usd   = src.market_value_usd,
+                payoff_profile     = src.payoff_profile,
+                asset_category     = src.asset_category,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+                ownership_nature, source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, market_value_usd, payoff_profile, asset_category
+            ) VALUES (
+                src.instrument_id, src.fund_series_id, src.fund_series_name, src.fund_filer_cik,
+                src.ownership_nature, src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.market_value_usd, src.payoff_profile, src.asset_category
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE
+            """,
+            {"ids": ids},
+        )
+        rows = [(iid, watermarks.get(iid)) for iid in ids]
+        cur.executemany(
+            """
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%s, 'funds', %s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
+            """,
+            rows,
+        )
+    return len(ids)
