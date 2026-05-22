@@ -52,9 +52,19 @@ bash scripts/check_instruments_inserts.sh
 
 # #1233 §4.3 PR4 — every Form 4 ingest chokepoint must honour the 3y
 # retention cap (legacy SQL `%(retention_cutoff)s` bindings, manifest-
-# worker pre-fetch gate, bulk-dataset per-loop gates). ~30ms.
+# worker pre-fetch gate, bulk-dataset per-loop gates, sync_insiders
+# filing_date predicate — #1247). ~30ms.
 echo "==> Pre-push gate: Form 4 retention cap lint"
 bash scripts/check_form4_retention.sh
+
+# #1233 §4.2 PR3 — every filing_events writer chokepoint must honour
+# the 10y rolling retention cap. 3 INSERTs across 2 files
+# (filings.py × 2 + fundamentals.py × 1); parity check assures every
+# INSERT is preceded by a `filing_within_retention(...)` gate; cross-
+# cutting check forbids new INSERT sites outside the 2 canonical
+# files. ~30ms.
+echo "==> Pre-push gate: filing_events retention cap lint"
+bash scripts/check_filing_events_retention.sh
 
 # #1233 §4.7 PR5 — every DEF 14A ingest chokepoint must honour the
 # latest-2-primary-proxies-per-filer cap (discovery rank CTE, manifest-
