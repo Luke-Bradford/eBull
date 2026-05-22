@@ -44,6 +44,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class BootstrapStateResponse(BaseModel):
     boot_state: str
     needs_setup: bool
+    needs_broker_credentials: bool
 
 
 # ---------------------------------------------------------------------------
@@ -62,18 +63,37 @@ def bootstrap_state(
     ``boot_state`` reports the master-key state machine
     (``clean_install`` or ``normal``). ``needs_setup`` is operator-state
     only — derived from ``operators_empty(conn)`` per request, decoupled
-    from credential/key state. The two dimensions are independent: an
-    existing operator with no broker credentials sees
-    ``needs_setup=False`` and is served the normal app shell with an
-    "add eToro creds" banner; a fresh DB with no operators sees
-    ``needs_setup=True`` and routes to the single-step setup wizard.
+    from credential/key state. ``needs_broker_credentials`` reports
+    whether the operator has at least one non-revoked broker credential.
+    The three dimensions are independent: a fresh DB with no operators
+    sees ``needs_setup=True`` and routes to the single-step setup
+    wizard; an existing operator with no active broker credentials
+    sees ``needs_setup=False`` + ``needs_broker_credentials=True`` and
+    is force-redirected by the frontend to the ``/settings`` broker-
+    add flow (since eBull is fundamentally an eToro-binding execution
+    engine — CLAUDE.md non-negotiable I12; the main app shell is
+    inert without active credentials).
     """
     response.headers["Cache-Control"] = "no-store"
     state = getattr(request.app.state, "boot_state", "clean_install")
     return BootstrapStateResponse(
         boot_state=state,
         needs_setup=operators_empty(conn),
+        needs_broker_credentials=_no_active_broker_credentials(conn),
     )
+
+
+def _no_active_broker_credentials(conn: psycopg.Connection[object]) -> bool:
+    """Return True when no non-revoked broker_credentials row exists.
+
+    Used by the bootstrap-state endpoint to drive the frontend's
+    force-redirect to ``/settings`` so a logged-in operator cannot
+    reach the main app shell with the credentials slate empty.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT EXISTS(SELECT 1 FROM broker_credentials WHERE revoked_at IS NULL)")
+        row = cur.fetchone()
+    return not bool(row and row[0])
 
 
 # ---------------------------------------------------------------------------

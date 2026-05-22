@@ -46,10 +46,17 @@ export interface SetupResponse {
 
 /**
  * Result of GET /auth/bootstrap-state. Drives the frontend boot
- * routing precedence post-amendment 2026-05-07:
+ * routing precedence:
  *
- *     needs_setup → /setup
- *     otherwise   → normal
+ *     needs_setup                     → /setup
+ *     needs_broker_credentials        → /settings (force, until creds added)
+ *     otherwise                       → normal
+ *
+ * `needs_broker_credentials` reflects whether at least one non-revoked
+ * `broker_credentials` row exists. eBull is fundamentally eToro-binding
+ * (CLAUDE.md non-negotiable I12 — eToro is the sole execution boundary);
+ * a logged-in operator with no active credentials cannot reach the
+ * main app shell.
  *
  * Always fetched fresh: the backend sets `Cache-Control: no-store`
  * and the helper below passes `cache: "no-store"` so the browser
@@ -58,6 +65,7 @@ export interface SetupResponse {
 export interface BootstrapStateResponse {
   boot_state: string;
   needs_setup: boolean;
+  needs_broker_credentials: boolean;
 }
 
 export function getBootstrapState(): Promise<BootstrapStateResponse> {

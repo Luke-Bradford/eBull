@@ -41,6 +41,22 @@ vi.mock("@/api/brokerCredentials", () => ({
   validateStoredCredentials: vi.fn(),
 }));
 
+// Session mock — SettingsPage's BrokerCredentialsSection now calls
+// useSession().refreshBootstrapState() after a successful save to flip
+// RequireAuth's needs_broker_credentials gate. The tests render
+// <SettingsPage /> directly without SessionProvider, so mock the hook.
+vi.mock("@/lib/session", () => ({
+  useSession: () => ({
+    status: "authenticated",
+    operator: null,
+    bootstrapState: null,
+    login: vi.fn(),
+    logout: vi.fn(),
+    markAuthenticated: vi.fn(),
+    refreshBootstrapState: vi.fn().mockResolvedValue(undefined),
+  }),
+}));
+
 // Budget API mock — prevents BudgetConfigSection from making real fetch
 // calls, which would produce extra role="alert" elements and break the
 // broker-credential test assertions that use getByRole("alert").
