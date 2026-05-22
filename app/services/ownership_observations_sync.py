@@ -153,23 +153,45 @@ def sync_insiders(
     # mirrors typed-table rows into the observations layer, so a
     # post-cap re-run would re-write pre-cap Form 5 observations
     # without the gate. The LEFT JOIN to ``filing_events`` (canonical
-    # source of ``filing_date`` outside the typed tables) lets the
-    # Form 5 branch reference ``fe.filing_date >= form5_cutoff`` while
-    # the Form 4 branch ignores ``fe`` entirely — Form 4 rows lacking
-    # a manifest entry still sync. Form 4 retention is NOT gated here
-    # (#PR4 follow-up — see ``GH issue`` linked in the PR
-    # description); §6.3 happy-path-uncapped is the rationale for not
-    # silently fixing it inside PR10b.
-    from app.services.insider_transactions import form5_retention_cutoff
+    # source of ``filing_date`` outside the typed tables) lets each
+    # retention-capped branch reference ``fe.filing_date >= cutoff``.
+    #
+    # #1247 (PR4 follow-up) — Form 4 3y retention cap also gated here.
+    # Same strict shape as Form 5: ``fe.filing_date IS NOT NULL AND
+    # fe.filing_date >= form4_cutoff``. Closes the gap PR4 left for
+    # sync_insiders. Pre-cap Form 4 rows lacking a ``filing_events``
+    # row are excluded because we cannot prove their retention status
+    # — fail-closed for unattributed legacy rows is the conservative
+    # interpretation of §6.3 ingest-side capping. The prior PR10b
+    # carve-out ("Form 4 rows without ``filing_events`` still sync")
+    # is retired; the matching legacy-test
+    # ``test_form4_without_filing_events_row_still_syncs`` is updated
+    # to assert the new contract.
+    #
+    # Form 3 ('3'/'3/A') is read-side latest-per-pair (per PR10b
+    # §4.4); no ingest-side retention cap, so it stays in the
+    # unconditional branch.
+    from app.services.insider_transactions import (
+        form4_retention_cutoff,
+        form5_retention_cutoff,
+    )
 
     where = "WHERE it.post_transaction_shares IS NOT NULL AND it.is_derivative = FALSE"
-    params: dict[str, Any] = {"form5_cutoff": form5_retention_cutoff()}
+    params: dict[str, Any] = {
+        "form4_cutoff": form4_retention_cutoff(),
+        "form5_cutoff": form5_retention_cutoff(),
+    }
     if since is not None:
         where += " AND it.txn_date >= %(since)s"
         params["since"] = since
     where += (
         " AND ("
-        "  f.document_type IN ('3','3/A','4','4/A')"
+        "  f.document_type IN ('3','3/A')"
+        "  OR ("
+        "    f.document_type IN ('4','4/A')"
+        "    AND fe.filing_date IS NOT NULL"
+        "    AND fe.filing_date >= %(form4_cutoff)s"
+        "  )"
         "  OR ("
         "    f.document_type IN ('5','5/A')"
         "    AND fe.filing_date IS NOT NULL"

@@ -66,6 +66,18 @@ class TestSyncInsiders:
             """,
             (accession, 841_001),
         )
+        # #1247 — sync_insiders now gates Form 4 on
+        # ``fe.filing_date IS NOT NULL AND fe.filing_date >= form4_cutoff``.
+        # Real production ingest writes both ``insider_transactions`` and
+        # ``filing_events`` for every Form 4 accession; mirror that.
+        conn.execute(
+            """
+            INSERT INTO filing_events (
+                instrument_id, provider, provider_filing_id, filing_type, filing_date
+            ) VALUES (%s, 'sec', %s, '4', %s)
+            """,
+            (841_001, accession, date.today() - timedelta(days=30)),
+        )
         conn.commit()
 
         summary = sync_insiders(conn)
@@ -151,16 +163,17 @@ class TestSyncInsiders:
         assert accns == ["0000320193-26-000050"]
         assert summary.orphans == []
 
-    def test_form4_without_filing_events_row_still_syncs(
+    def test_form4_without_filing_events_row_excluded_from_sync(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        """Codex 1b MED regression. The PR10b sync gate adds a LEFT JOIN
-        to ``filing_events``; the Form 4 branch must not reference
-        ``fe.filing_date``, so a Form 4 row lacking a manifest entry
-        still mirrors. Legacy ingest paths wrote
-        ``insider_transactions`` without always populating
-        ``filing_events``."""
+        """#1247 (PR4 follow-up) — sync chokepoint gates Form 4 the same
+        way it gates Form 5: ``fe.filing_date IS NOT NULL AND
+        fe.filing_date >= form4_cutoff``. Form 4 rows lacking a
+        ``filing_events`` row CANNOT prove their retention status, so
+        the conservative interpretation of §6.3 is to exclude them.
+        This retires the prior PR10b carve-out that admitted legacy
+        Form 4 rows lacking a manifest entry."""
         conn = ebull_test_conn
         _seed_instrument(conn, iid=841_600, symbol="F4LEG")
 
@@ -183,13 +196,12 @@ class TestSyncInsiders:
             """,
             (accn, 841_600, date.today() - timedelta(days=10)),
         )
-        # NO filing_events row inserted — legacy gap.
+        # NO filing_events row inserted — gated as cannot prove retention.
         conn.commit()
 
-        summary = sync_insiders(conn)
+        sync_insiders(conn)
         conn.commit()
 
-        assert summary.observations_recorded >= 1
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT COUNT(*) FROM ownership_insiders_observations "
@@ -198,7 +210,68 @@ class TestSyncInsiders:
             )
             row = cur.fetchone()
         assert row is not None
-        assert row[0] == 1
+        assert row[0] == 0
+
+    def test_pre_3y_form4_excluded_from_sync(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#1247 (PR4 follow-up) — sync chokepoint gates Form 4
+        transactions outside the 3-year window via the
+        ``filing_events.filing_date`` LEFT-JOIN predicate. Seed two
+        Form 4 accessions with the same shape but different
+        ``filing_date`` — only the recent one mirrors."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=841_700, symbol="F4OLD")
+
+        # 3y cutoff = today - 3y. Use 3y+30d for old, 30d for new.
+        old_date = date.today() - timedelta(days=365 * 3 + 30)
+        new_date = date.today() - timedelta(days=30)
+
+        for accn, fdate, filer_cik in (
+            ("0000320193-21-000040", old_date, "0001000801"),
+            ("0000320193-26-000040", new_date, "0001000802"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO insider_filings (
+                    accession_number, instrument_id, document_type, issuer_cik
+                ) VALUES (%s, %s, '4', '0000000789')
+                """,
+                (accn, 841_700),
+            )
+            conn.execute(
+                """
+                INSERT INTO insider_transactions (
+                    accession_number, txn_row_num, instrument_id, filer_cik, filer_name,
+                    txn_date, txn_code, shares, post_transaction_shares, is_derivative
+                ) VALUES (%s, 1, %s, %s, 'Form 4 Filer', %s, 'P', 100, 5000, FALSE)
+                """,
+                (accn, 841_700, filer_cik, fdate),
+            )
+            conn.execute(
+                """
+                INSERT INTO filing_events (
+                    instrument_id, provider, provider_filing_id, filing_type,
+                    filing_date
+                ) VALUES (%s, 'sec', %s, '4', %s)
+                """,
+                (841_700, accn, fdate),
+            )
+        conn.commit()
+
+        summary = sync_insiders(conn)
+        conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT source_accession FROM ownership_insiders_observations "
+                "WHERE instrument_id = %s ORDER BY source_accession",
+                (841_700,),
+            )
+            accns = [str(r[0]) for r in cur.fetchall()]
+        assert accns == ["0000320193-26-000040"]
+        assert summary.orphans == []
 
 
 # ---------------------------------------------------------------------------
