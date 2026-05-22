@@ -120,6 +120,63 @@ class CapitalEvent:
 # ---------------------------------------------------------------------------
 
 
+def ensure_budget_config_singleton(conn: psycopg.Connection[Any]) -> None:
+    """Re-seed the budget_config singleton row if it vanished (#1232 follow-up).
+
+    Migration ``sql/027_budget_capital.sql`` seeds the row via
+    ``INSERT INTO budget_config (id) VALUES (TRUE) ON CONFLICT DO NOTHING``
+    — a one-time write. If the row is later lost (manual ``DELETE``,
+    snapshot restore from pre-seed era, dev DB wipe script), every
+    caller of ``get_budget_config`` raises ``BudgetConfigCorrupt`` and
+    the API ``GET /budget/config`` 503s — the SettingsPage budget
+    section then shows "Failed to load" with no programmatic recovery
+    path.
+
+    This boot-time guard inspects the singleton and re-seeds with the
+    column-default values (``cash_buffer_pct=0.05``,
+    ``cgt_scenario='higher'``, ``updated_by='migration'``,
+    ``reason='initial seed'``) on absence. No audit table dependency.
+    WARNING log surfaces the recovery.
+
+    Idempotent: no-op when exactly one row with ``id=TRUE`` exists.
+    Fail-loud when a non-canonical row exists (``id != TRUE``; possible
+    only under constraint corruption).
+
+    Connection contract: caller MUST supply a conn in autocommit mode
+    (mirrors ``ensure_runtime_config_singleton``, ``ensure_kill_switch_singleton``,
+    ``ensure_bootstrap_state_singleton`` — the helper opens its own
+    real ``BEGIN`` via ``conn.transaction()``; a non-autocommit caller
+    would degrade that into a SAVEPOINT under an outer tx).
+    """
+    if not conn.autocommit:
+        raise RuntimeError(
+            "ensure_budget_config_singleton requires an autocommit "
+            "connection — pass psycopg.connect(url, autocommit=True). "
+            "The helper opens its own real BEGIN via conn.transaction(); "
+            "a non-autocommit caller would degrade that into a SAVEPOINT."
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM budget_config")
+        rows = cur.fetchall()
+
+    if len(rows) == 1 and rows[0][0] is True:
+        return
+
+    if len(rows) > 1 or (rows and rows[0][0] is not True):
+        raise RuntimeError(f"budget_config singleton constraint violated — rows={rows!r}")
+
+    logger.warning(
+        "budget_config singleton vanished — re-seeding with column-default "
+        "(cash_buffer_pct=0.05, cgt_scenario='higher'). See "
+        "docs/review-prevention-log.md section 'Singleton-row migrations "
+        "need a boot-time presence guard' + #1232 follow-up."
+    )
+
+    with conn.transaction():
+        conn.execute("INSERT INTO budget_config (id) VALUES (TRUE) ON CONFLICT DO NOTHING")
+
+
 def get_budget_config(conn: psycopg.Connection[Any]) -> BudgetConfig:
     """Load the singleton budget_config row.
 
