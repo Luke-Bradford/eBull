@@ -643,12 +643,21 @@ def _record_unresolved_cusip(
     disambiguation, mapping correction) is fixed. Bot review of
     #781 caught the absence of this note.
     """
+    # sql/164 (#1233 PR-1a) dropped the legacy PRIMARY KEY on
+    # ``cusip`` and replaced it with TWO partial UNIQUE indexes
+    # (``..._legacy_idx`` for ``source IS NULL`` and ``..._bulk_idx``
+    # for ``source IS NOT NULL``). PG can no longer infer the
+    # legacy index from ``ON CONFLICT (cusip)`` alone — both
+    # indexes have ``cusip`` as the leading column. The
+    # ``WHERE source IS NULL`` clause disambiguates: it matches the
+    # legacy partial index's predicate exactly, so PG picks the
+    # right index for the upsert. Semantics unchanged from sql/099.
     conn.execute(
         """
         INSERT INTO unresolved_13f_cusips (
             cusip, name_of_issuer, last_accession_number
         ) VALUES (%(cusip)s, %(name)s, %(accession)s)
-        ON CONFLICT (cusip) DO UPDATE SET
+        ON CONFLICT (cusip) WHERE source IS NULL DO UPDATE SET
             name_of_issuer = EXCLUDED.name_of_issuer,
             last_accession_number = EXCLUDED.last_accession_number,
             observation_count = unresolved_13f_cusips.observation_count + 1,

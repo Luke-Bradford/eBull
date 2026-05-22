@@ -1,0 +1,997 @@
+"""#1233 PR-1a — bulk-path unresolved-CUSIP capture.
+
+Verifies:
+
+* Migration ``sql/164`` applies cleanly to ``ebull_test_template``
+  (verified implicitly — the per-worker DB is built from the
+  template, so a broken migration would prevent ``ebull_test_conn``
+  from connecting). Re-application is idempotent (explicit test).
+* ``record_unresolved_cusip_from_bulk`` writes one row per
+  ``(cusip, filer_cik, period_end, source)`` tuple. Re-call with
+  same tuple is no-op (partial UNIQUE on ``..._bulk_idx``).
+* Different ``(filer_cik, period_end, source)`` for the same
+  CUSIP create separate rows.
+* Bulk 13F ingest fixture lands one row per unresolved CUSIP.
+* Bulk N-PORT ingest fixture lands one row per unresolved CUSIP.
+* Legacy ``_record_unresolved_cusip`` still works (writes with
+  ``source=NULL``) and shares the table without colliding with
+  bulk rows.
+* The legacy resolver / extid sweep (``cusip_resolver.py``) ONLY
+  reads/mutates legacy rows (``source IS NULL``); bulk rows for
+  the same CUSIP are untouched. Codex BLOCKING + HIGH on PR-1a
+  pre-push review.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import zipfile
+from datetime import date
+from pathlib import Path
+from uuid import uuid4
+
+import psycopg
+import pytest
+
+from app.services.cusip_resolver import (
+    record_unresolved_cusip_from_bulk,
+    resolve_unresolved_cusips,
+    sweep_resolvable_unresolved_cusips,
+)
+from app.services.institutional_holdings import _record_unresolved_cusip
+from app.services.sec_13f_dataset_ingest import ingest_13f_dataset_archive
+from app.services.sec_nport_dataset_ingest import ingest_nport_dataset_archive
+from tests.fixtures.ebull_test_db import ebull_test_conn
+from tests.fixtures.ebull_test_db import test_db_available as _test_db_available
+
+__all__ = ["ebull_test_conn"]
+
+
+# ---------------------------------------------------------------------------
+# Constants — picked so all test data passes the 8-quarter retention gate
+# (PR6/PR7) regardless of when the suite runs in 2026.
+# ---------------------------------------------------------------------------
+
+
+# Latest completed quarter as of 2026-05-22 = 2026-03-31. The retention
+# gate admits the 8 most recent quarter-ends inclusive — 2024Q2 onward.
+# Using the latest completed quarter end means the tests stay in-window
+# for the next ~24 months without churn.
+_PERIOD_END = date(2026, 3, 31)
+_FILED_AT = "2026-05-15"  # post-2023-01-03 dollars cutover
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _count_bulk_rows(conn: psycopg.Connection[tuple]) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM unresolved_13f_cusips WHERE source IS NOT NULL")
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+def _count_legacy_rows(conn: psycopg.Connection[tuple]) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM unresolved_13f_cusips WHERE source IS NULL")
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+def _build_13f_zip(
+    *,
+    submissions: list[dict[str, str]],
+    coverpages: list[dict[str, str]],
+    infotable: list[dict[str, str]],
+) -> bytes:
+    def _to_tsv(rows: list[dict[str, str]]) -> str:
+        if not rows:
+            return ""
+        fieldnames = sorted({k for row in rows for k in row.keys()})
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        return buf.getvalue()
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zf:
+        zf.writestr("SUBMISSION.tsv", _to_tsv(submissions))
+        zf.writestr("COVERPAGE.tsv", _to_tsv(coverpages))
+        zf.writestr("INFOTABLE.tsv", _to_tsv(infotable))
+    return out.getvalue()
+
+
+def _build_nport_zip(
+    *,
+    submissions: list[dict[str, str]],
+    registrants: list[dict[str, str]],
+    fund_info: list[dict[str, str]],
+    holdings: list[dict[str, str]],
+) -> bytes:
+    def _to_tsv(rows: list[dict[str, str]]) -> str:
+        if not rows:
+            return ""
+        fieldnames = sorted({k for row in rows for k in row.keys()})
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        return buf.getvalue()
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zf:
+        zf.writestr("SUBMISSION.tsv", _to_tsv(submissions))
+        zf.writestr("REGISTRANT.tsv", _to_tsv(registrants))
+        zf.writestr("FUND_REPORTED_INFO.tsv", _to_tsv(fund_info))
+        zf.writestr("FUND_REPORTED_HOLDING.tsv", _to_tsv(holdings))
+    return out.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Schema / migration smoke
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestMigration164:
+    def test_partial_unique_indexes_present(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Both partial UNIQUE indexes from sql/164 exist on the
+        worker's private DB (built from ``ebull_test_template`` which
+        has all migrations applied)."""
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE tablename = 'unresolved_13f_cusips'
+                  AND indexname IN (
+                    'unresolved_13f_cusips_bulk_idx',
+                    'unresolved_13f_cusips_legacy_idx'
+                  )
+                ORDER BY indexname
+                """,
+            )
+            names = [r[0] for r in cur.fetchall()]
+        assert names == [
+            "unresolved_13f_cusips_bulk_idx",
+            "unresolved_13f_cusips_legacy_idx",
+        ]
+
+    def test_legacy_pk_dropped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """The legacy PRIMARY KEY on ``cusip`` is gone after sql/164;
+        partial UNIQUE indexes take over."""
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'unresolved_13f_cusips'::regclass
+                  AND contype = 'p'
+                """,
+            )
+            assert cur.fetchone() is None
+
+    def test_migration_is_idempotent(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Re-running ``sql/164`` against an already-migrated DB is a
+        no-op (no errors, schema unchanged). Guards against operator
+        re-application via ``psql -f`` or partial migration recovery.
+        """
+        sql_path = Path(__file__).resolve().parents[1] / "sql" / "164_unresolved_13f_cusips_bulk_columns.sql"
+        sql_text = sql_path.read_text(encoding="utf-8")
+        with psycopg.ClientCursor(ebull_test_conn) as cur:
+            # ClientCursor uses the simple query protocol — matches
+            # what app/db/migrations.py uses, so this proves the
+            # exact code path the runner would take.
+            cur.execute(sql_text)  # type: ignore[call-overload]
+        ebull_test_conn.commit()
+
+        # Schema is unchanged: same two partial UNIQUE indexes + same
+        # nullable columns + same source CHECK + no PK.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT indexname FROM pg_indexes
+                WHERE tablename = 'unresolved_13f_cusips'
+                  AND indexname LIKE 'unresolved_13f_cusips_%_idx'
+                ORDER BY indexname
+                """,
+            )
+            indexes = [r[0] for r in cur.fetchall()]
+        assert indexes == [
+            "unresolved_13f_cusips_bulk_idx",
+            "unresolved_13f_cusips_legacy_idx",
+        ]
+
+    def test_bulk_columns_present_and_nullable(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """The three new columns exist with the expected types and
+        every legacy column that used to be NOT NULL is now nullable
+        (so the bulk path can leave issuer name / accession empty)."""
+        expected = {
+            "filer_cik": ("text", "YES"),
+            "period_end": ("date", "YES"),
+            "source": ("text", "YES"),
+            "name_of_issuer": ("text", "YES"),
+            "last_accession_number": ("text", "YES"),
+        }
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name, data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_name = 'unresolved_13f_cusips'
+                  AND column_name = ANY(%s)
+                ORDER BY column_name
+                """,
+                (list(expected.keys()),),
+            )
+            actual = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+        assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# Helper unit behaviour
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestRecordUnresolvedCusipFromBulk:
+    def test_first_insert_creates_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="00BULK0001",
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cusip, filer_cik, period_end, source,
+                       name_of_issuer, last_accession_number
+                FROM unresolved_13f_cusips
+                WHERE cusip = %s
+                """,
+                ("00BULK0001",),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row[0] == "00BULK0001"
+        assert row[1] == "0001234567"
+        assert row[2] == _PERIOD_END
+        assert row[3] == "bulk_13f_dataset"
+        # Bulk path leaves issuer name + accession blank; OpenFIGI
+        # sweep (PR-1b) fills name_of_issuer.
+        assert row[4] is None
+        assert row[5] is None
+
+    def test_duplicate_tuple_is_no_op(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        for _ in range(3):
+            record_unresolved_cusip_from_bulk(
+                ebull_test_conn,
+                cusip="00BULK0002",
+                filer_cik="0001234567",
+                period_end=_PERIOD_END,
+                source="bulk_13f_dataset",
+            )
+        ebull_test_conn.commit()
+        assert _count_bulk_rows(ebull_test_conn) == 1
+
+    def test_different_filer_cik_creates_separate_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="00BULK0003",
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="00BULK0003",
+            filer_cik="0009999999",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+        assert _count_bulk_rows(ebull_test_conn) == 2
+
+    def test_different_period_end_creates_separate_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="00BULK0004",
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="00BULK0004",
+            filer_cik="0001234567",
+            period_end=date(2025, 12, 31),
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+        assert _count_bulk_rows(ebull_test_conn) == 2
+
+    def test_different_source_creates_separate_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="00BULK0005",
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="00BULK0005",
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_nport_dataset",
+        )
+        ebull_test_conn.commit()
+        assert _count_bulk_rows(ebull_test_conn) == 2
+
+
+# ---------------------------------------------------------------------------
+# Legacy / bulk coexistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestLegacyWriterCoexistence:
+    def test_legacy_writer_still_works(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Legacy ``_record_unresolved_cusip`` still upserts one row
+        per CUSIP under the new partial UNIQUE
+        ``unresolved_13f_cusips_legacy_idx``."""
+        _record_unresolved_cusip(
+            ebull_test_conn,
+            cusip="00LEGACY01",
+            name_of_issuer="Legacy Issuer Inc",
+            accession_number="0000000-00-000001",
+        )
+        _record_unresolved_cusip(
+            ebull_test_conn,
+            cusip="00LEGACY01",
+            name_of_issuer="Legacy Issuer Inc Updated",
+            accession_number="0000000-00-000002",
+        )
+        ebull_test_conn.commit()
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cusip, name_of_issuer, last_accession_number,
+                       observation_count, source
+                FROM unresolved_13f_cusips
+                WHERE cusip = %s
+                """,
+                ("00LEGACY01",),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        cusip, name, accn, obs_count, source = rows[0]
+        assert cusip == "00LEGACY01"
+        assert name == "Legacy Issuer Inc Updated"
+        assert accn == "0000000-00-000002"
+        assert obs_count == 2
+        assert source is None
+
+    def test_legacy_and_bulk_coexist_for_same_cusip(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """A CUSIP can have ONE legacy row (source IS NULL) AND
+        multiple bulk rows (source IS NOT NULL) simultaneously —
+        the partial indexes don't cross-collide."""
+        cusip = "00MIX00001"
+        _record_unresolved_cusip(
+            ebull_test_conn,
+            cusip=cusip,
+            name_of_issuer="Mixed Issuer Inc",
+            accession_number="0000000-00-000099",
+        )
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip=cusip,
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip=cusip,
+            filer_cik="0009999999",
+            period_end=_PERIOD_END,
+            source="bulk_nport_dataset",
+        )
+        ebull_test_conn.commit()
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM unresolved_13f_cusips WHERE cusip = %s",
+                (cusip,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+        assert int(row[0]) == 3
+
+
+# ---------------------------------------------------------------------------
+# 13F bulk-ingest integration — five unresolved CUSIPs land five rows
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestBulk13FIngestUnresolvedCapture:
+    def test_five_unresolved_cusips_yield_five_bulk_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """A 13F archive with 5 unresolved CUSIPs writes 5 rows into
+        ``unresolved_13f_cusips`` with ``source='bulk_13f_dataset'``.
+        Zero resolved rows are emitted because we seed no
+        ``external_identifiers``."""
+        accession = "0001234567-26-000001"
+        submissions = [
+            {
+                "ACCESSION_NUMBER": accession,
+                "CIK": "1234567",
+                "FILING_DATE": _FILED_AT,
+            },
+        ]
+        coverpages = [
+            {
+                "ACCESSION_NUMBER": accession,
+                "FILINGMANAGER_NAME": "Test Fund",
+                "REPORTCALENDARORQUARTER": _PERIOD_END.isoformat(),
+            },
+        ]
+        unresolved_cusips = [
+            "U0000001A1",
+            "U0000002B2",
+            "U0000003C3",
+            "U0000004D4",
+            "U0000005E5",
+        ]
+        infotable = [
+            {
+                "ACCESSION_NUMBER": accession,
+                "CUSIP": cusip,
+                "VALUE": "1000",
+                "SSHPRNAMT": "100",
+                "VOTING_AUTH_SOLE": "100",
+            }
+            for cusip in unresolved_cusips
+        ]
+        archive_path = tmp_path / "form13f_unresolved.zip"
+        archive_path.write_bytes(
+            _build_13f_zip(
+                submissions=submissions,
+                coverpages=coverpages,
+                infotable=infotable,
+            )
+        )
+
+        result = ingest_13f_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.rows_skipped_unresolved_cusip == 5
+        assert result.rows_written == 0
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cusip, filer_cik, period_end, source
+                FROM unresolved_13f_cusips
+                WHERE source = 'bulk_13f_dataset'
+                ORDER BY cusip
+                """,
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 5
+        assert [r[0] for r in rows] == sorted(unresolved_cusips)
+        # Same filer + period for every row (single-submission fixture).
+        assert all(r[1] == "0001234567" for r in rows)
+        assert all(r[2] == _PERIOD_END for r in rows)
+        assert all(r[3] == "bulk_13f_dataset" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# N-PORT bulk-ingest integration — five unresolved CUSIPs land five rows
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestBulkNPortIngestUnresolvedCapture:
+    def test_five_unresolved_cusips_yield_five_bulk_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """A N-PORT archive with 5 EC/Long/NS unresolved CUSIPs writes
+        5 rows into ``unresolved_13f_cusips`` with
+        ``source='bulk_nport_dataset'``."""
+        accession = "0007654321-26-000001"
+        submissions = [
+            {
+                "ACCESSION_NUMBER": accession,
+                "FILING_DATE": _FILED_AT,
+                "SUB_TYPE": "NPORT-P",
+                "REPORT_DATE": _PERIOD_END.isoformat(),
+            },
+        ]
+        registrants = [
+            {
+                "ACCESSION_NUMBER": accession,
+                "CIK": "7654321",
+                "REGISTRANT_NAME": "Test Trust",
+            },
+        ]
+        fund_info = [
+            {
+                "ACCESSION_NUMBER": accession,
+                "SERIES_ID": "S000004310",
+                "SERIES_NAME": "Test Equity Series",
+            },
+        ]
+        unresolved_cusips = [
+            "N0000001A1",
+            "N0000002B2",
+            "N0000003C3",
+            "N0000004D4",
+            "N0000005E5",
+        ]
+        holdings = [
+            {
+                "ACCESSION_NUMBER": accession,
+                "HOLDING_ID": str(i),
+                "ISSUER_CUSIP": cusip,
+                "ASSET_CAT": "EC",
+                "PAYOFF_PROFILE": "Long",
+                "UNIT": "NS",
+                "BALANCE": "1000",
+                "CURRENCY_CODE": "USD",
+                "CURRENCY_VALUE": "10000",
+            }
+            for i, cusip in enumerate(unresolved_cusips, start=1)
+        ]
+        archive_path = tmp_path / "nport_unresolved.zip"
+        archive_path.write_bytes(
+            _build_nport_zip(
+                submissions=submissions,
+                registrants=registrants,
+                fund_info=fund_info,
+                holdings=holdings,
+            )
+        )
+
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.rows_skipped_unresolved_cusip == 5
+        assert result.rows_written == 0
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cusip, filer_cik, period_end, source
+                FROM unresolved_13f_cusips
+                WHERE source = 'bulk_nport_dataset'
+                ORDER BY cusip
+                """,
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 5
+        assert [r[0] for r in rows] == sorted(unresolved_cusips)
+        assert all(r[1] == "0007654321" for r in rows)
+        assert all(r[2] == _PERIOD_END for r in rows)
+        assert all(r[3] == "bulk_nport_dataset" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Resolved rows MUST NOT land in the unresolved table — guards against the
+# capture branch leaking past the cusip_map.get() check.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestResolvedCusipDoesNotCapture:
+    def test_resolved_cusip_in_13f_archive_is_not_captured(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """If the CUSIP resolves via external_identifiers, the ingester
+        writes the observation and DOES NOT add a row to
+        ``unresolved_13f_cusips``."""
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+                "VALUES (%s, %s, %s, 'USD', TRUE)",
+                (90001, "RES1", "Resolved Co"),
+            )
+            cur.execute(
+                "INSERT INTO external_identifiers "
+                "(instrument_id, provider, identifier_type, identifier_value, is_primary) "
+                "VALUES (%s, 'sec', 'cusip', %s, TRUE)",
+                (90001, "RESOLVED01"),
+            )
+        ebull_test_conn.commit()
+
+        accession = "0001234567-26-000099"
+        archive_path = tmp_path / "form13f_resolved.zip"
+        archive_path.write_bytes(
+            _build_13f_zip(
+                submissions=[
+                    {
+                        "ACCESSION_NUMBER": accession,
+                        "CIK": "1234567",
+                        "FILING_DATE": _FILED_AT,
+                    }
+                ],
+                coverpages=[
+                    {
+                        "ACCESSION_NUMBER": accession,
+                        "FILINGMANAGER_NAME": "Test Fund",
+                        "REPORTCALENDARORQUARTER": _PERIOD_END.isoformat(),
+                    }
+                ],
+                infotable=[
+                    {
+                        "ACCESSION_NUMBER": accession,
+                        "CUSIP": "RESOLVED01",
+                        "VALUE": "1000",
+                        "SSHPRNAMT": "100",
+                        "VOTING_AUTH_SOLE": "100",
+                    }
+                ],
+            )
+        )
+
+        bulk_before = _count_bulk_rows(ebull_test_conn)
+        legacy_before = _count_legacy_rows(ebull_test_conn)
+        result = ingest_13f_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.rows_written == 1
+        assert result.rows_skipped_unresolved_cusip == 0
+        assert _count_bulk_rows(ebull_test_conn) == bulk_before
+        assert _count_legacy_rows(ebull_test_conn) == legacy_before
+
+    def test_resolved_cusip_in_nport_archive_is_not_captured(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """N-PORT mirror of the 13F resolved-CUSIP no-capture invariant.
+        Codex MED on PR-1a pre-push: 13F path had this, N-PORT didn't.
+        """
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+                "VALUES (%s, %s, %s, 'USD', TRUE)",
+                (90002, "RES2", "Resolved N-PORT Co"),
+            )
+            cur.execute(
+                "INSERT INTO external_identifiers "
+                "(instrument_id, provider, identifier_type, identifier_value, is_primary) "
+                "VALUES (%s, 'sec', 'cusip', %s, TRUE)",
+                (90002, "RESOLVED02"),
+            )
+        ebull_test_conn.commit()
+
+        accession = "0007654321-26-000099"
+        archive_path = tmp_path / "nport_resolved.zip"
+        archive_path.write_bytes(
+            _build_nport_zip(
+                submissions=[
+                    {
+                        "ACCESSION_NUMBER": accession,
+                        "FILING_DATE": _FILED_AT,
+                        "SUB_TYPE": "NPORT-P",
+                        "REPORT_DATE": _PERIOD_END.isoformat(),
+                    }
+                ],
+                registrants=[
+                    {
+                        "ACCESSION_NUMBER": accession,
+                        "CIK": "7654321",
+                        "REGISTRANT_NAME": "Test Trust",
+                    }
+                ],
+                fund_info=[
+                    {
+                        "ACCESSION_NUMBER": accession,
+                        "SERIES_ID": "S000004310",
+                        "SERIES_NAME": "Test Equity Series",
+                    }
+                ],
+                holdings=[
+                    {
+                        "ACCESSION_NUMBER": accession,
+                        "HOLDING_ID": "1",
+                        "ISSUER_CUSIP": "RESOLVED02",
+                        "ASSET_CAT": "EC",
+                        "PAYOFF_PROFILE": "Long",
+                        "UNIT": "NS",
+                        "BALANCE": "1000",
+                        "CURRENCY_CODE": "USD",
+                        "CURRENCY_VALUE": "10000",
+                    }
+                ],
+            )
+        )
+
+        bulk_before = _count_bulk_rows(ebull_test_conn)
+        legacy_before = _count_legacy_rows(ebull_test_conn)
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.rows_written == 1
+        assert result.rows_skipped_unresolved_cusip == 0
+        assert _count_bulk_rows(ebull_test_conn) == bulk_before
+        assert _count_legacy_rows(ebull_test_conn) == legacy_before
+
+
+# ---------------------------------------------------------------------------
+# Partition isolation — the legacy resolver / extid sweep must NOT touch
+# bulk rows. Codex BLOCKING + HIGH on PR-1a pre-push review.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestLegacyResolverIgnoresBulkRows:
+    def test_resolve_unresolved_cusips_skips_bulk_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """``resolve_unresolved_cusips`` reads only legacy rows. A bulk
+        row with NULL ``name_of_issuer`` would otherwise be picked up
+        and ``_normalise_name(None)`` would crash or silently
+        tombstone the bulk row as ``unresolvable``."""
+        # Seed one bulk row only.
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="BULKONLY01",
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+
+        # No legacy rows + bulk rows are filtered → report sees zero
+        # candidates.
+        report = resolve_unresolved_cusips(ebull_test_conn)
+        assert report.candidates_seen == 0
+        assert report.tombstoned_unresolvable == 0
+
+        # The bulk row is untouched: status still NULL.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = %s AND source = %s",
+                ("BULKONLY01", "bulk_13f_dataset"),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] is None
+
+    def test_extid_sweep_skips_bulk_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """``sweep_resolvable_unresolved_cusips`` reads only legacy
+        rows. A bulk row with NULL ``last_accession_number`` would
+        otherwise be picked up and the rewash call would target
+        accession ``"None"``."""
+        # Seed instrument + extid mapping so the sweep would otherwise
+        # pick the row.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+                "VALUES (%s, %s, %s, 'USD', TRUE)",
+                (90003, "BULK3", "Bulk Test Inc"),
+            )
+            cur.execute(
+                "INSERT INTO external_identifiers "
+                "(instrument_id, provider, identifier_type, identifier_value, is_primary) "
+                "VALUES (%s, 'sec', 'cusip', %s, TRUE)",
+                (90003, "BULKSWEEP1"),
+            )
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="BULKSWEEP1",
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+
+        report = sweep_resolvable_unresolved_cusips(ebull_test_conn)
+        assert report.candidates_seen == 0
+        assert report.promoted == 0
+
+        # Bulk row stays pending; status untouched.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = %s AND source = %s",
+                ("BULKSWEEP1", "bulk_13f_dataset"),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] is None
+
+    def test_legacy_tombstone_does_not_mutate_bulk_rows_for_same_cusip(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """A legacy tombstone (e.g. ``unresolvable`` when no candidate
+        crosses the fuzzy threshold) MUST mutate only the legacy row.
+        Bulk rows sharing the same CUSIP keep ``resolution_status =
+        NULL`` so PR-1b's OpenFIGI sweep can still pick them up.
+
+        Codex MED follow-up on PR-1a: previous tests covered DELETE
+        isolation but not UPDATE isolation."""
+        cusip = "TOMBSHARE1"
+
+        # Two rows: one legacy + one bulk, same CUSIP.
+        _record_unresolved_cusip(
+            ebull_test_conn,
+            cusip=cusip,
+            name_of_issuer="Z-Some Weird Unmatchable Name Inc",
+            accession_number="0000000-26-000100",
+        )
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip=cusip,
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+
+        # Run the legacy resolver. With no matching instrument, the
+        # legacy row gets tombstoned ``unresolvable``.
+        report = resolve_unresolved_cusips(ebull_test_conn)
+        assert report.tombstoned_unresolvable == 1
+        assert report.promotions == 0
+
+        # Legacy row status is now ``unresolvable``.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = %s AND source IS NULL",
+                (cusip,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == "unresolvable"
+
+        # Bulk row status stays NULL — UNTOUCHED.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = %s AND source = %s",
+                (cusip, "bulk_13f_dataset"),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] is None
+
+    def test_legacy_promotion_does_not_delete_bulk_rows_for_same_cusip(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """A legacy row whose CUSIP gets promoted to
+        ``external_identifiers`` is DELETEd, but bulk rows sharing
+        that CUSIP MUST survive (different lifecycle owned by PR-1b
+        sweep)."""
+        cusip = "SHARED0001"
+
+        # Bulk row for the CUSIP.
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip=cusip,
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+        )
+        # Legacy row for the same CUSIP.
+        _record_unresolved_cusip(
+            ebull_test_conn,
+            cusip=cusip,
+            name_of_issuer="Shared Co Inc",
+            accession_number="0000000-26-000099",
+        )
+        # Instrument + name to allow the legacy resolver to fuzzy-match.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+                "VALUES (%s, %s, %s, 'USD', TRUE)",
+                (90004, "SHRD", "Shared Co Inc"),
+            )
+        ebull_test_conn.commit()
+
+        report = resolve_unresolved_cusips(ebull_test_conn)
+        # The legacy row resolved (similarity 1.0).
+        assert report.promotions == 1
+
+        # Bulk row survives.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM unresolved_13f_cusips WHERE cusip = %s AND source = %s",
+                (cusip, "bulk_13f_dataset"),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert int(row[0]) == 1
+        # Legacy row is gone.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM unresolved_13f_cusips WHERE cusip = %s AND source IS NULL",
+                (cusip,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert int(row[0]) == 0

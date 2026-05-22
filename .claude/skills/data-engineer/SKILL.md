@@ -65,9 +65,14 @@ Hard-rule corollaries:
 | `instrument_sec_profile` | sql/051 | 1:1 SEC submissions metadata (cik, sic, former_names, has_insider_issuer). ON DELETE CASCADE from instruments |
 | `instrument_cik_history` | sql/102 | CIK chain per instrument with date ranges. `btree_gist` exclusion forbids overlapping ranges; partial UNIQUE WHERE `effective_to IS NULL` |
 | `instrument_symbol_history` | sql/103 | Symbol chain (FB→META, BBBY→BBBYQ). Same temporal-overlap GiST exclude |
-| `unresolved_13f_cusips` | sql/099 | Buffer for 13F-supplied CUSIPs not yet resolved to instruments |
+| `unresolved_13f_cusips` | sql/099 + sql/164 | Buffer for SEC-supplied CUSIPs not yet resolved to instruments. **Two-writer split** (#1233 PR-1a): legacy per-filing path (`source IS NULL`, partial UNIQUE `..._legacy_idx`) carries `name_of_issuer` + `last_accession_number`; bulk-dataset path (`source IN ('bulk_13f_dataset','bulk_nport_dataset')`, partial UNIQUE `..._bulk_idx`) carries `filer_cik` + `period_end` instead and leaves issuer name NULL until the OpenFIGI sweep (PR-1b) fills it |
 
-**No dedicated `cusip_map` table.** CUSIP→instrument lives in `external_identifiers WHERE provider='sec' AND identifier_type='cusip'`. Promotion path: 13F-HR ingest → unresolved → CUSIP backfill (#914 weekly) writes `external_identifiers` → `cusip_resolver.sweep_resolvable_unresolved_cusips` rewashes the source 13F (`app/services/cusip_resolver.py:425+`).
+**No dedicated `cusip_map` table.** CUSIP→instrument lives in `external_identifiers WHERE provider='sec' AND identifier_type='cusip'`. Promotion paths:
+
+* **Legacy per-filing** (#781 / #836): 13F-HR ingest writes `(cusip, name_of_issuer, accession)` via `institutional_holdings._record_unresolved_cusip` (`source=NULL`) → CUSIP backfill (#914 weekly) writes `external_identifiers` → `cusip_resolver.sweep_resolvable_unresolved_cusips` rewashes the source 13F (`app/services/cusip_resolver.py:425+`).
+* **Bulk dataset** (#1233 PR-1a): `sec_13f_dataset_ingest` / `sec_nport_dataset_ingest` capture `(cusip, filer_cik, period_end, source)` via `cusip_resolver.record_unresolved_cusip_from_bulk` for every unresolved CUSIP they encounter. Written under per-row savepoints, flushed every 1000 rows + at archive boundary. PR-1b's OpenFIGI sweep reads these rows, calls OpenFIGI for the ticker + issuer name, and either resolves the CUSIP into `external_identifiers` (provider='openfigi') OR tombstones the row.
+
+**Why two writers, not one?** The bulk-dataset path doesn't have issuer name on the per-holding row (the SEC FORM 13F INFOTABLE / FUND_REPORTED_HOLDING tables carry CUSIP + filer + period only). The legacy path's `_record_unresolved_cusip` REQUIRES `name_of_issuer + accession_number` (both NOT NULL in pre-#1233 schema). Splitting the writers — instead of relaxing the legacy signature — keeps the per-filing path's invariants intact and lets the bulk path use a separate partial UNIQUE that includes `(filer_cik, period_end, source)` so the same CUSIP can have multiple bulk rows (one per filer × period) without colliding.
 
 **Identity-graph cheat sheet**:
 - Instrument = `BIGINT instrument_id` (eToro-derived).
