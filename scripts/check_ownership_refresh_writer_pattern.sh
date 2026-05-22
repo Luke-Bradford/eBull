@@ -428,15 +428,23 @@ for helper in $HELPERS; do
   fi
 
   # ------------------------------------------------------------------
-  # I — UPDATE SET clause writes refreshed_at = now() exactly once
+  # I — UPDATE SET clause writes refreshed_at = now() exactly once.
+  #
+  # Aligned padding ("refreshed_at       = now()" or "refreshed_at =
+  # now()") both pass the && line filter. SQL comments are stripped
+  # before counting so a future `-- refreshed_at = now()` inline note
+  # cannot inflate the count (bot review iter 1 WARNING 2).
   # ------------------------------------------------------------------
-  # The file uses aligned padding: "refreshed_at       = now()" or
-  # "refreshed_at = now()". Grep for both forms.
-  i_count=$(printf '%s\n' "$body" | grep -Fc "refreshed_at" | grep -F "= now()" || true)
-  # Simpler: count lines containing both "refreshed_at" and "= now()".
-  i_count=$(printf '%s\n' "$body" | awk '/refreshed_at/ && /= now\(\)/' | wc -l | tr -d ' ')
+  i_count=$(printf '%s\n' "$body" \
+    | awk '{
+        stripped = $0
+        sub(/^[[:space:]]+/, "", stripped)
+        if (substr(stripped, 1, 2) == "--") next   # strip SQL comment lines
+        if (/refreshed_at/ && /= now\(\)/) print
+      }' \
+    | wc -l | tr -d ' ')
   if (( i_count != 1 )); then
-    fail "I helper=${helper}: expected exactly 1 'refreshed_at ... = now()' line in UPDATE SET, found ${i_count}."
+    fail "I helper=${helper}: expected exactly 1 'refreshed_at ... = now()' line in UPDATE SET (SQL comments stripped), found ${i_count}."
   fi
 
   # ------------------------------------------------------------------

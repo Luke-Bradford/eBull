@@ -42,7 +42,7 @@ orphan_count_total=0
 for pair in "${CATEGORIES[@]}"; do
     category="${pair%%:*}"
     obs_table="${pair##*:}"
-    count=$(docker exec "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DATABASE}" -tAc "
+    count=$(docker exec "${PG_CONTAINER}" psql -w -U "${PG_USER}" -d "${PG_DATABASE}" -tAc "
         SELECT count(DISTINCT o.instrument_id)
         FROM ${obs_table} o
         WHERE o.instrument_id IS NOT NULL
