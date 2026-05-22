@@ -52,11 +52,13 @@ export interface SetupResponse {
  *     needs_broker_credentials        → /settings (force, until creds added)
  *     otherwise                       → normal
  *
- * `needs_broker_credentials` reflects whether at least one non-revoked
- * `broker_credentials` row exists. eBull is fundamentally eToro-binding
- * (CLAUDE.md non-negotiable I12 — eToro is the sole execution boundary);
- * a logged-in operator with no active credentials cannot reach the
- * main app shell.
+ * `needs_broker_credentials` reflects whether the eToro credential set
+ * is INCOMPLETE — true iff EITHER `label='api_key'` OR `label='user_key'`
+ * lacks an active (non-revoked) row. Both must be present for the eToro
+ * client to authenticate; a single-key state is treated as "missing".
+ * eBull is fundamentally eToro-binding (CLAUDE.md non-negotiable I12 —
+ * eToro is the sole execution boundary); a logged-in operator with an
+ * incomplete credential set cannot reach the main app shell.
  *
  * Always fetched fresh: the backend sets `Cache-Control: no-store`
  * and the helper below passes `cache: "no-store"` so the browser
