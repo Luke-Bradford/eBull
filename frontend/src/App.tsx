@@ -24,6 +24,7 @@ import { IngestHealthPage } from "@/pages/IngestHealthPage";
 import { CoverageInsufficientPage } from "@/pages/CoverageInsufficientPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
+import { BrokerSetupPage } from "@/pages/BrokerSetupPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { OperatorsPage } from "@/pages/OperatorsPage";
@@ -37,6 +38,17 @@ export function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/setup" element={<SetupPage />} />
+        {/* Chrome-free broker-credentials setup. Requires auth but
+            renders outside AppShell so the operator sees only the
+            key-entry form until eToro creds are validated + saved. */}
+        <Route
+          path="/setup/broker"
+          element={
+            <RequireAuth>
+              <BrokerSetupPage />
+            </RequireAuth>
+          }
+        />
         <Route
           element={
             <RequireAuth>
