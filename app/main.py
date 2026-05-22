@@ -133,6 +133,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await asyncio.to_thread(_probe_pg_locks_floor)
 
+    # #1233 PR12 — fail-fast if PG < 17. PR12 rewrote every
+    # ``refresh_*_current`` helper to PG17 ``MERGE … WHEN NOT MATCHED
+    # BY SOURCE``; PG15/16 only have ``WHEN NOT MATCHED [BY TARGET]``
+    # and would crash at first refresh with ``syntax error at or near
+    # "BY"``. Spec
+    # ``docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md`` §7.
+    # ``asyncio.to_thread`` keeps the synchronous psycopg connect off
+    # the event loop (mirror of the locks-floor probe above).
+    from app.system.postgres_version_guard import assert_postgres_min_version
+
+    def _probe_pg_min_version() -> None:
+        with psycopg.connect(settings.database_url) as guard_conn:
+            assert_postgres_min_version(guard_conn)
+
+    await asyncio.to_thread(_probe_pg_min_version)
+
     # #1208 Sub 6 — runtime_config singleton vanish guard. Migration
     # sql/015_runtime_config.sql seeds the singleton via
     # ``INSERT ... ON CONFLICT DO NOTHING``; if the row is later lost
