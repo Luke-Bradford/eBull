@@ -35,6 +35,7 @@ import { ApiError } from "@/api/client";
 import {
   type ValidateCredentialResponse,
   createBrokerCredential,
+  revokeBrokerCredential,
   validateBrokerCredential,
 } from "@/api/brokerCredentials";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
@@ -115,22 +116,52 @@ export function BrokerSetupPage(): JSX.Element {
         return;
       }
 
-      // Save both rows. createBrokerCredential is idempotent on the
-      // partial-UNIQUE (operator_id, provider, label) WHERE NOT revoked
-      // index; if the prior save succeeded but the second one failed we
-      // do not duplicate.
-      await createBrokerCredential({
-        provider: "etoro",
-        label: "api_key",
-        environment: ENVIRONMENT,
-        secret: apiKey,
-      });
-      await createBrokerCredential({
-        provider: "etoro",
-        label: "user_key",
-        environment: ENVIRONMENT,
-        secret: userKey,
-      });
+      // Save both rows. The partial-UNIQUE (operator_id, provider,
+      // label, environment) WHERE NOT revoked index means a duplicate
+      // active row throws 409 — so the second create cannot land if
+      // the first one is left behind. Bot iter 1 caught the deadlock:
+      // if api_key save succeeds but user_key save fails (network
+      // blip, race, etc.), the operator is stuck on /setup/broker
+      // because every retry 409s on api_key + /settings is gated out.
+      //
+      // Recovery: capture the first save's id and revoke it on the
+      // second failure so a retry can land cleanly. Best-effort —
+      // a revoke that itself fails still leaves the operator with an
+      // actionable error message naming the stuck label.
+      let firstSaveId: string | null = null;
+      try {
+        const firstSave = await createBrokerCredential({
+          provider: "etoro",
+          label: "api_key",
+          environment: ENVIRONMENT,
+          secret: apiKey,
+        });
+        firstSaveId = firstSave.credential.id;
+
+        await createBrokerCredential({
+          provider: "etoro",
+          label: "user_key",
+          environment: ENVIRONMENT,
+          secret: userKey,
+        });
+      } catch (saveErr: unknown) {
+        if (firstSaveId !== null) {
+          // The api_key save succeeded; user_key save threw. Revoke
+          // the orphan so the next retry doesn't 409.
+          try {
+            await revokeBrokerCredential(firstSaveId);
+          } catch {
+            setError(
+              "Partial save: api_key was stored but user_key failed, and " +
+                "the recovery revoke ALSO failed. Sign out and contact " +
+                "operator support — the api_key row needs manual revoke " +
+                "before the next attempt can land.",
+            );
+            return;
+          }
+        }
+        throw saveErr;
+      }
 
       // Flip the RequireAuth gate.
       await refreshBootstrapState();
@@ -138,8 +169,8 @@ export function BrokerSetupPage(): JSX.Element {
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
         setError(
-          "Credentials already saved against this operator. " +
-            "Sign out and back in, or revoke the existing set in Settings.",
+          "Credentials already saved against this operator under a " +
+            "different label. Sign out and back in to retry.",
         );
       } else {
         setError("Could not save credentials. Try again.");
