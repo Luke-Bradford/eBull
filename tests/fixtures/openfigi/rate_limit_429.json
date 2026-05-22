@@ -1,0 +1,61 @@
+{
+  "captured_at": "2026-05-22T19:52:53.775586+00:00",
+  "elapsed_ms": 96,
+  "request": {
+    "body": [
+      {
+        "idType": "ID_CUSIP",
+        "idValue": "037833100"
+      },
+      {
+        "idType": "ID_CUSIP",
+        "idValue": "594918104"
+      },
+      {
+        "idType": "ID_CUSIP",
+        "idValue": "46625H100"
+      },
+      {
+        "idType": "ID_CUSIP",
+        "idValue": "36467W109"
+      },
+      {
+        "idType": "ID_CUSIP",
+        "idValue": "437076102"
+      }
+    ],
+    "method": "POST",
+    "url": "https://api.openfigi.com/v3/mapping"
+  },
+  "response": {
+    "body": "Too many requests, please try again later.",
+    "headers": {
+      "content-length": "42",
+      "content-security-policy": "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests",
+      "content-type": "text/html; charset=utf-8",
+      "cross-origin-opener-policy": "same-origin",
+      "cross-origin-resource-policy": "same-origin",
+      "date": "Fri, 22 May 2026 19:52:53 GMT",
+      "origin-agent-cluster": "?1",
+      "ratelimit-limit": "25",
+      "ratelimit-policy": "25;w=60",
+      "ratelimit-remaining": "0",
+      "ratelimit-reset": "58",
+      "referrer-policy": "no-referrer",
+      "retry-after": "58",
+      "server": "istio-envoy",
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "vary": "Origin, Accept-Encoding",
+      "x-content-type-options": "nosniff",
+      "x-dns-prefetch-control": "off",
+      "x-download-options": "noopen",
+      "x-envoy-upstream-service-time": "9",
+      "x-frame-options": "SAMEORIGIN",
+      "x-permitted-cross-domain-policies": "none",
+      "x-request-id": "323a948b-6dd0-49f9-b717-1f93ddd3d359",
+      "x-xss-protection": "0"
+    },
+    "status_code": 429
+  },
+  "scenario": "rate_limit_429"
+}
