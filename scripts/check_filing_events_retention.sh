@@ -46,8 +46,12 @@ count_literal() {
 }
 
 # Count parenthesis-suffixed helper call-sites, EXCLUDING `def` lines
-# (helper definitions) AND pure-comment lines AND docstring lines.
-# Mirrors check_form4_retention.sh::count_call_sites.
+# (helper definitions) AND pure-comment lines. Mirrors
+# check_form4_retention.sh::count_call_sites. Note: triple-quoted
+# docstring lines are NOT stripped; in practice the helper names are
+# never mentioned in docstrings of the 2 target files, but a future
+# docstring drop-in could inflate the count. A stronger triple-quote
+# scanner can be added if that ever surfaces (out of scope today).
 count_call_sites() {
   local file="$1" symbol="$2"
   awk -v sym="$symbol" '
@@ -105,10 +109,18 @@ fi
 # C. Cross-cutting — no INSERT INTO filing_events elsewhere under app/
 # ----------------------------------------------------------------------
 
-total_inserts=$(grep -rl "INSERT INTO filing_events" app --include="*.py" 2>/dev/null \
-    | grep -vc -E "^(app/services/filings\.py|app/services/fundamentals\.py)$" || true)
-if (( total_inserts != 0 )); then
-  fail "C: found ${total_inserts} 'INSERT INTO filing_events' occurrence(s) outside the 2 canonical files. Every writer must route through filings.py or fundamentals.py to inherit the retention gate."
+# `grep -rc` returns one `<file>:<count>` line per file. Sum the counts
+# from non-canonical files so the error message reports OCCURRENCE
+# count (not FILE count — bot review iter 1 NITPICK).
+stray_occurrences=$(grep -rc "INSERT INTO filing_events" app --include="*.py" 2>/dev/null \
+    | awk -F: '
+        $1 != "app/services/filings.py" && $1 != "app/services/fundamentals.py" && $2 > 0 {
+          sum += $2
+        }
+        END { print (sum ? sum : 0) }
+      ')
+if (( stray_occurrences != 0 )); then
+  fail "C: found ${stray_occurrences} 'INSERT INTO filing_events' occurrence(s) outside the 2 canonical files. Every writer must route through filings.py or fundamentals.py to inherit the retention gate."
   grep -rln "INSERT INTO filing_events" app --include="*.py" 2>/dev/null \
     | grep -v -E "^(app/services/filings\.py|app/services/fundamentals\.py)$" >&2 || true
 fi
