@@ -255,6 +255,58 @@ def _ensure_runtime_config_singleton_with_cleanup(
         raise
 
 
+def _ensure_kill_switch_singleton_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """Run the #1232 kill_switch singleton-vanish guard with fence + pool
+    cleanup on raise. Mirror of the runtime_config wrapper above; same
+    API-first migration pre-condition (jobs reads what API migrated).
+
+    Without this jobs-side mirror, the kill_switch boot-recovery only
+    happens on API restart — a jobs-process restart after the seed row
+    vanished would leave every scheduled fire rejected with
+    ``kill_switch_active`` until the API process happens to restart.
+    Codex 2 pre-push review caught this gap.
+    """
+    from app.services.ops_monitor import ensure_kill_switch_singleton
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_kill_switch_singleton(guard_conn)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+        raise
+
+
+def _ensure_bootstrap_state_singleton_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """Run the #1232 bootstrap_state singleton-vanish guard with fence +
+    pool cleanup on raise. Mirror of the runtime_config wrapper above.
+
+    Without this jobs-side mirror, every scheduled-job path that calls
+    ``check_bootstrap_state_gate`` would raise ``RuntimeError`` until
+    the API restarts and re-seeds the row. Codex 2 pre-push review
+    caught this gap.
+    """
+    from app.services.bootstrap_state import ensure_bootstrap_state_singleton
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_bootstrap_state_singleton(guard_conn)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+        raise
+
+
 def _boot_id() -> str:
     """Per-process identifier used as ``claimed_by`` on queue rows.
 
@@ -315,6 +367,18 @@ def serve(stop_event: threading.Event | None = None) -> int:
     # correct fail-loud signal.
     _ensure_runtime_config_singleton_with_cleanup(fence_conn, pool)
     logger.info("jobs entrypoint: runtime_config singleton guard passed")
+
+    # #1232 — same singleton-vanish posture for kill_switch +
+    # bootstrap_state. Without these mirrors, the jobs process is stuck
+    # in the pre-#1232 failure mode (every fire rejected with
+    # kill_switch_active OR every bootstrap-state-gated path raising
+    # RuntimeError) until the API restarts. Codex 2 pre-push review on
+    # PR #1232 caught the gap.
+    _ensure_kill_switch_singleton_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: kill_switch singleton guard passed")
+
+    _ensure_bootstrap_state_singleton_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: bootstrap_state singleton guard passed")
 
     _bootstrap_master_key(pool)
 
