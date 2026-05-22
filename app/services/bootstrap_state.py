@@ -219,6 +219,67 @@ def read_state(conn: psycopg.Connection[Any]) -> BootstrapState:
     )
 
 
+def ensure_bootstrap_state_singleton(conn: psycopg.Connection[Any]) -> None:
+    """Re-seed the bootstrap_state singleton row if it vanished (#1232).
+
+    Migration ``sql/129_bootstrap_state.sql`` seeds the row via
+    ``INSERT INTO bootstrap_state (id) VALUES (1) ON CONFLICT DO NOTHING``
+    — a one-time write. If the row is later lost (manual ``DELETE``,
+    snapshot restore from pre-seed era, future bootstrap reset script),
+    every caller of ``read_state`` raises ``RuntimeError`` and every
+    gate that checks ``status='complete'`` fail-closes. The orchestrator
+    cannot recover without a manual ``INSERT`` against the DB — see
+    #1232 provenance.
+
+    This boot-time guard inspects the singleton and re-seeds with the
+    column-default ``status='pending'`` on absence. No audit table exists
+    for ``bootstrap_state`` (sql/129 has none); a WARNING log surfaces
+    the recovery to the operator.
+
+    Idempotent: no-op when exactly one row with ``id=1`` exists.
+    Fail-loud when a non-canonical row exists (``id != 1``; possible
+    only under constraint corruption).
+
+    Connection contract: caller MUST supply a conn in autocommit mode
+    (mirrors ``ensure_runtime_config_singleton`` + ``ensure_kill_switch_singleton``
+    — the helper opens its own real new transaction via ``conn.transaction()``
+    so the seed INSERT lands atomically. A non-autocommit caller would
+    degrade that into a SAVEPOINT).
+    """
+    if not conn.autocommit:
+        raise RuntimeError(
+            "ensure_bootstrap_state_singleton requires an autocommit "
+            "connection — pass psycopg.connect(url, autocommit=True). "
+            "The helper opens its own real BEGIN via conn.transaction(); "
+            "a non-autocommit caller would degrade that into a SAVEPOINT."
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM bootstrap_state")
+        rows = cur.fetchall()
+
+    if len(rows) == 1 and rows[0][0] == 1:
+        return
+
+    if len(rows) > 1 or (rows and rows[0][0] != 1):
+        raise RuntimeError(f"bootstrap_state singleton constraint violated — rows={rows!r}")
+
+    logger.warning(
+        "bootstrap_state singleton vanished — re-seeding with column-default "
+        "status='pending'. See docs/review-prevention-log.md section "
+        "'Singleton-row migrations need a boot-time presence guard' + #1232."
+    )
+
+    with conn.transaction():
+        conn.execute(
+            """
+            INSERT INTO bootstrap_state (id)
+            VALUES (1)
+            ON CONFLICT (id) DO NOTHING
+            """
+        )
+
+
 def read_latest_run_with_stages(
     conn: psycopg.Connection[Any],
 ) -> RunSnapshot | None:

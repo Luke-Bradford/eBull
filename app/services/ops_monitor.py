@@ -41,7 +41,12 @@ from psycopg.types.json import Jsonb
 # rewires can land in PR2 without touching every caller. New code MUST
 # import ``to_jsonsafe_params`` directly.
 from app.services.processes.json_safe import to_jsonsafe_params as _jsonable_params
-from app.services.runtime_config import write_kill_switch_audit
+from app.services.runtime_config import (
+    BOOT_RECOVERY_CHANGED_BY,
+    BOOT_RECOVERY_REASON,
+    _insert_audit_row,
+    write_kill_switch_audit,
+)
 
 if TYPE_CHECKING:
     # layer_types sits at the bottom of the orchestrator import graph, but
@@ -686,3 +691,81 @@ def get_kill_switch_status(
             "reason": "kill_switch row missing — configuration corrupt",
         }
     return dict(row)
+
+
+def ensure_kill_switch_singleton(conn: psycopg.Connection[Any]) -> None:
+    """Re-seed the kill_switch singleton row if it vanished (#1232).
+
+    Migration ``sql/010_execution_guard.sql`` seeds the row via
+    ``INSERT ... ON CONFLICT DO NOTHING`` — a one-time write. If the row
+    is later lost (manual ``DELETE``, snapshot restore from pre-seed era,
+    future bootstrap reset script), ``get_kill_switch_status`` fail-closes
+    (returns ``is_active=True``), and the API ``deactivate`` path is
+    structurally unable to recover because the UPDATE has no row to act
+    on — see #1232 provenance from the 2026-05-19 T9-POST drive where
+    one missing seed broke the operator-action retry path for hours.
+
+    This boot-time guard inspects the singleton and re-seeds with the
+    safe default (``is_active=FALSE``) on absence, writing one
+    ``runtime_config_audit`` row with ``field='kill_switch'`` so the
+    audit invariant ("every mutation writes one row") holds for boot
+    recovery. WARNING log surfaces the recovery to the operator.
+
+    Idempotent: no-op when exactly one row with ``id=TRUE`` exists.
+    Fail-loud when a non-canonical row exists (``id != TRUE``; possible
+    only under constraint corruption).
+
+    Connection contract: caller MUST supply a conn in autocommit mode
+    (mirrors ``ensure_runtime_config_singleton`` — see that helper's
+    docstring for the SAVEPOINT-vs-COMMIT rationale). The helper opens
+    its own real new transaction via ``conn.transaction()`` to keep the
+    seed INSERT + the audit INSERT atomic.
+
+    Race: ``ON CONFLICT DO NOTHING`` + ``RETURNING id`` suppresses our
+    insert AND skips the audit row if another process re-seeded between
+    our SELECT and our INSERT — no phantom audit rows.
+    """
+    if not conn.autocommit:
+        raise RuntimeError(
+            "ensure_kill_switch_singleton requires an autocommit "
+            "connection — pass psycopg.connect(url, autocommit=True). "
+            "The helper opens its own real BEGIN via conn.transaction(); "
+            "a non-autocommit caller would degrade that into a SAVEPOINT."
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM kill_switch")
+        rows = cur.fetchall()
+
+    if len(rows) == 1 and rows[0][0] is True:
+        return
+
+    if len(rows) > 1 or (rows and rows[0][0] is not True):
+        raise RuntimeError(f"kill_switch singleton constraint violated — rows={rows!r}")
+
+    logger.warning(
+        "kill_switch singleton vanished — re-seeding with safe default "
+        "(is_active=FALSE). See docs/review-prevention-log.md section "
+        "'Singleton-row migrations need a boot-time presence guard' + #1232."
+    )
+
+    with conn.transaction():
+        inserted = conn.execute(
+            """
+            INSERT INTO kill_switch (id, is_active)
+            VALUES (TRUE, FALSE)
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id
+            """
+        ).fetchone()
+        if inserted is None:
+            return
+        _insert_audit_row(
+            conn,
+            changed_at=_utcnow(),
+            changed_by=BOOT_RECOVERY_CHANGED_BY,
+            reason=BOOT_RECOVERY_REASON,
+            field="kill_switch",
+            old_value=None,
+            new_value="false",
+        )
