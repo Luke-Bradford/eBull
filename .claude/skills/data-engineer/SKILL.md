@@ -325,6 +325,45 @@ sec_n_port_ingest (monthly day 22 03:00 UTC)
 - `data_freshness_index` — separate write-side via `record_poll_outcome`.
 - `sec_filing_manifest.parser_version` and `raw_status` — bumped by manifest worker / parser, not by `record_*_observation`.
 
+**Diff-aware MERGE replaces DELETE+INSERT in `refresh_*_current` helpers (#1233 PR12, SHIPPED 2026-05-22)**:
+
+Every `refresh_X_current(conn, *, instrument_id)` helper (7 of them: insiders / institutions / blockholders / treasury / def14a / funds / esop) uses a single-statement PG17 `MERGE … WHEN NOT MATCHED BY SOURCE`. Template:
+
+```
+WITH watermark captured pre-MERGE in Python:
+  cur.execute("SELECT MAX(ingested_at) FROM ownership_X_observations WHERE instrument_id = %s", (iid,))
+  watermark = cur.fetchone()[0]
+
+MERGE INTO ownership_X_current AS tgt
+USING (SELECT DISTINCT ON (<pk_cols>) ... FROM ownership_X_observations WHERE instrument_id = %(iid)s AND known_to IS NULL ORDER BY ...) AS src
+ON tgt.instrument_id = %(iid)s AND tgt.<pk> = src.<pk>   -- scope clamp on ON
+WHEN MATCHED AND (business_cols) IS DISTINCT FROM (excluded.cols) THEN UPDATE SET ..., refreshed_at = now()
+WHEN NOT MATCHED BY TARGET THEN INSERT (...) VALUES (...)   -- refreshed_at omitted; DEFAULT now() fires
+WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE   -- scope clamp on DELETE
+
+then UPSERT ownership_refresh_state(instrument_id, category, last_drained_observations_max_ingested_at, last_refresh_attempted_at) VALUES (iid, '<cat>', watermark, now())
+```
+
+Hard invariants pinned by `scripts/check_ownership_refresh_writer_pattern.sh` (93 clause-counts) + `tests/test_ownership_refresh_writer_merge.py` (52 parametrised cases):
+
+- `refreshed_at` is NEVER in the `IS DISTINCT FROM` diff predicate (would always re-fire UPDATE → bloat returns). It lives only in the UPDATE SET path; INSERT lets DEFAULT now() fire.
+- Scope clamp `tgt.instrument_id = %(iid)s` appears in BOTH the ON clause AND the NOT MATCHED BY SOURCE clause. **Exception: `ownership_treasury_current`** (single-col PK on instrument_id) — PG MERGE compiles NOT MATCHED BY SOURCE to FULL OUTER JOIN which requires an equi-join condition, so treasury's ON uses `tgt.instrument_id = src.instrument_id` and the const-clamp lives in the USING subquery's WHERE. The DELETE-clause clamp is preserved as defence-in-depth on all 7 helpers.
+- Drift watermark for the repair-sweep lives in `ownership_refresh_state(instrument_id, category, last_drained_observations_max_ingested_at, last_refresh_attempted_at)` — separated from `_current.refreshed_at` so no-op MERGE calls do not freeze the watermark (would otherwise re-select the same instrument every sweep tick).
+- Watermark captured PRE-MERGE in a Python variable (race-safe: prevents the post-MERGE UPSERT advancing past observations the MERGE did not see if new obs land between SELECT and MERGE).
+- Repair sweep (`app/jobs/ownership_observations_repair.py`) uses an obs-anchored CTE aggregate:
+
+```sql
+WITH obs_max AS (SELECT instrument_id, MAX(ingested_at) AS m FROM ownership_X_observations GROUP BY instrument_id)
+SELECT s.instrument_id FROM ownership_refresh_state s
+LEFT JOIN obs_max ON obs_max.instrument_id = s.instrument_id
+WHERE s.category = '<cat>'
+  AND s.last_drained_observations_max_ingested_at IS DISTINCT FROM obs_max.m
+```
+
+`_CATEGORIES` is 7 entries (was 5 pre-PR12 — funds + esop added). PG ≥ 17 is asserted at lifespan startup (`app/system/postgres_version_guard.py`).
+
+Spec: `docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md`. Prevention-log entries: "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope clamp on BOTH the ON clause AND the DELETE clause" + "Diff-aware writers must NOT include update-timestamp columns in the diff predicate".
+
 ### 2.11 Worker / job entry points
 
 [app/workers/scheduler.py:453](../../../app/workers/scheduler.py#L453) — `SCHEDULED_JOBS` declaration. [app/jobs/](../../../app/jobs/) package owns runtime side:

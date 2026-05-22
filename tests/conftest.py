@@ -42,6 +42,7 @@ os.environ.setdefault("EBULL_SKIP_CATCH_UP", "1")
 # unrelated test modules would 409 against it.
 os.environ.setdefault("EBULL_SKIP_BOOT_SWEEP", "1")
 
+import psycopg  # noqa: E402
 import pytest  # noqa: E402
 
 from app.api.auth import require_session_or_service_token  # noqa: E402
@@ -57,6 +58,37 @@ from tests.fixtures.ebull_test_db import (
 from tests.fixtures.ebull_test_db import (
     ebull_test_conn as ebull_test_conn,
 )
+
+
+@pytest.fixture
+def seeded_instrument_id(ebull_test_conn: psycopg.Connection[tuple]) -> int:
+    """Insert a single fresh instruments row and return its instrument_id.
+
+    Uses a fixed ID (1) — safe because ebull_test_conn TRUNCATEs
+    instruments between every test (instruments is in _PLANNER_TABLES).
+    """
+    ebull_test_conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+        "VALUES (1, 'PR12A', 'PR12 Test Co A', TRUE)"
+    )
+    ebull_test_conn.commit()
+    return 1
+
+
+@pytest.fixture
+def two_seeded_instrument_ids(ebull_test_conn: psycopg.Connection[tuple]) -> tuple[int, int]:
+    """Insert two fresh instruments rows and return their instrument_ids.
+
+    Uses fixed IDs (1, 2) — safe because ebull_test_conn TRUNCATEs
+    instruments between every test (instruments is in _PLANNER_TABLES).
+    """
+    ebull_test_conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+        "VALUES (1, 'PR12A', 'PR12 Test Co A', TRUE), "
+        "       (2, 'PR12B', 'PR12 Test Co B', TRUE)"
+    )
+    ebull_test_conn.commit()
+    return (1, 2)
 
 
 def _noop_auth() -> None:  # pragma: no cover - trivial override

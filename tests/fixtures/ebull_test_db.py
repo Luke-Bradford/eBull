@@ -192,6 +192,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #843 — DEF 14A bene-table ESOP plan extraction.
     "ownership_esop_current",
     "ownership_esop_observations",
+    # #1233 PR12 — ownership-current writer MERGE rewrite state table.
+    # No FK cascade from instruments; must be TRUNCATED explicitly to
+    # prevent state rows leaking between tests (Codex 1a HIGH-3).
+    "ownership_refresh_state",
     # #893 — dev-DB writers migrated onto worker test DB; tables they
     # touched now need per-test cleanup.
     "job_runtime_heartbeat",
@@ -577,6 +581,12 @@ def build_template_if_stale() -> None:
             # Apply migrations on a separate connection (we still hold
             # the advisory lock on the postgres DB).
             _apply_migrations(template_database_url())
+            # Provision pgstattuple extension (not in migrations — needed
+            # by the no-op-churn test case in PR12; #1233 Codex 1a MED-6).
+            with psycopg.connect(template_database_url()) as tpl_conn:
+                with tpl_conn.cursor() as cur:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
+                tpl_conn.commit()
             _write_stored_hash(current)
         finally:
             with admin.cursor() as cur:

@@ -5,17 +5,23 @@ Spec §"Eliminate periodic re-scan jobs"
 
 Replaces the legacy ``ownership_observations_sync`` job. Runs weekly
 (or on-demand) and ONLY against rows where the per-instrument
-``ownership_*_current`` snapshot is staler than the per-instrument
-max(ingested_at) of the corresponding observations partition. On a
-healthy install this finds zero rows and exits in <100ms.
+``ownership_refresh_state.last_drained_observations_max_ingested_at``
+diverges from the max(ingested_at) of the corresponding observations
+partition. On a healthy install this finds zero rows and exits in
+<100ms.
 
-Predicate per category:
+Predicate per category (obs-anchored CTE; Codex 1e MED-1):
 
-    WHERE c.refreshed_at < (
-        SELECT MAX(o.ingested_at)
-        FROM ownership_<category>_observations o
-        WHERE o.instrument_id = c.instrument_id
+    WITH obs_max AS (
+        SELECT instrument_id, MAX(ingested_at) AS m
+        FROM ownership_<category>_observations
+        GROUP BY instrument_id
     )
+    SELECT s.instrument_id
+    FROM ownership_refresh_state s
+    LEFT JOIN obs_max ON obs_max.instrument_id = s.instrument_id
+    WHERE s.category = '<category>'
+      AND s.last_drained_observations_max_ingested_at IS DISTINCT FROM obs_max.m
 
 Note ``ingested_at`` is system-time (advances on every UPSERT
 including DO UPDATE; #864 migration 119), distinct from valid-time
@@ -48,6 +54,8 @@ from psycopg import sql
 from app.services.ownership_observations import (
     refresh_blockholders_current,
     refresh_def14a_current,
+    refresh_esop_current,
+    refresh_funds_current,
     refresh_insiders_current,
     refresh_institutions_current,
     refresh_treasury_current,
@@ -56,33 +64,50 @@ from app.services.ownership_observations import (
 logger = logging.getLogger(__name__)
 
 
-# Per-category (current_table, observations_table, refresh_callable).
+# Per-category (current_table, observations_table, category_literal, refresh_callable).
 # Pinned here so adding a new category means one edit, not a sweep.
-_CATEGORIES: list[tuple[str, str, Callable[[psycopg.Connection[Any], int], int]]] = [
+_CATEGORIES: list[tuple[str, str, str, Callable[[psycopg.Connection[Any], int], int]]] = [
     (
         "ownership_insiders_current",
         "ownership_insiders_observations",
+        "insiders",
         lambda c, i: refresh_insiders_current(c, instrument_id=i),
     ),
     (
         "ownership_institutions_current",
         "ownership_institutions_observations",
+        "institutions",
         lambda c, i: refresh_institutions_current(c, instrument_id=i),
     ),
     (
         "ownership_blockholders_current",
         "ownership_blockholders_observations",
+        "blockholders",
         lambda c, i: refresh_blockholders_current(c, instrument_id=i),
     ),
     (
         "ownership_treasury_current",
         "ownership_treasury_observations",
+        "treasury",
         lambda c, i: refresh_treasury_current(c, instrument_id=i),
     ),
     (
         "ownership_def14a_current",
         "ownership_def14a_observations",
+        "def14a",
         lambda c, i: refresh_def14a_current(c, instrument_id=i),
+    ),
+    (
+        "ownership_funds_current",
+        "ownership_funds_observations",
+        "funds",
+        lambda c, i: refresh_funds_current(c, instrument_id=i),
+    ),
+    (
+        "ownership_esop_current",
+        "ownership_esop_observations",
+        "esop",
+        lambda c, i: refresh_esop_current(c, instrument_id=i),
     ),
 ]
 
@@ -103,25 +128,29 @@ class RepairSweepStats:
         return sum(c.drifted_instruments for c in self.per_category)
 
 
-def _drifted_instruments(conn: psycopg.Connection[Any], current_table: str, observations_table: str) -> list[int]:
-    """Return instrument_ids whose _current is staler than the observations
-    max(ingested_at) for that instrument. Empty on a healthy install."""
-    # Both table names are module-local literals — never user input.
-    # Compose via psycopg.sql.Identifier so static analysis sees a
-    # safe parameterised query.
+def _drifted_instruments(
+    conn: psycopg.Connection[Any],
+    current_table: str,  # retained for log lines; not used in predicate
+    observations_table: str,
+    category_literal: str,
+) -> list[int]:
+    """Obs-anchored CTE aggregate against the state table; sub-second
+    on healthy install via the (instrument_id, ingested_at DESC) indexes
+    in sql/119 + sql/163."""
     query = sql.SQL(
-        "SELECT c.instrument_id FROM {current_t} c"
-        " WHERE c.refreshed_at < ("
-        "    SELECT MAX(o.ingested_at) FROM {obs_t} o"
-        "    WHERE o.instrument_id = c.instrument_id"
-        " )"
-        " GROUP BY c.instrument_id"
-    ).format(
-        current_t=sql.Identifier(current_table),
-        obs_t=sql.Identifier(observations_table),
-    )
+        "WITH obs_max AS ("
+        "    SELECT instrument_id, MAX(ingested_at) AS m"
+        "    FROM {obs_t}"
+        "    GROUP BY instrument_id"
+        ") "
+        "SELECT s.instrument_id "
+        "FROM ownership_refresh_state s "
+        "LEFT JOIN obs_max ON obs_max.instrument_id = s.instrument_id "
+        "WHERE s.category = %s "
+        "  AND s.last_drained_observations_max_ingested_at IS DISTINCT FROM obs_max.m"
+    ).format(obs_t=sql.Identifier(observations_table))
     with conn.cursor() as cur:
-        cur.execute(query)
+        cur.execute(query, (category_literal,))
         return [int(row[0]) for row in cur.fetchall()]
 
 
@@ -135,8 +164,8 @@ def run_observations_repair_sweep(
     exists.
     """
     per_category: list[CategoryRepairStats] = []
-    for current_table, observations_table, refresh_fn in _CATEGORIES:
-        drifted = _drifted_instruments(conn, current_table, observations_table)
+    for current_table, observations_table, category_literal, refresh_fn in _CATEGORIES:
+        drifted = _drifted_instruments(conn, current_table, observations_table, category_literal)
         refreshed_rows = 0
         for instrument_id in drifted:
             try:
