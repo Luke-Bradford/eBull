@@ -64,7 +64,10 @@ def bootstrap_state(
     (``clean_install`` or ``normal``). ``needs_setup`` is operator-state
     only — derived from ``operators_empty(conn)`` per request, decoupled
     from credential/key state. ``needs_broker_credentials`` reports
-    whether the operator has at least one non-revoked broker credential.
+    whether the eToro credential set is INCOMPLETE — True iff EITHER
+    ``label='api_key'`` OR ``label='user_key'`` is missing an active
+    (non-revoked) row. Both must be present for the eToro client to
+    authenticate; a single-key state is treated as "missing".
     The three dimensions are independent: a fresh DB with no operators
     sees ``needs_setup=True`` and routes to the single-step setup
     wizard; an existing operator with no active broker credentials
