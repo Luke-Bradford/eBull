@@ -44,7 +44,7 @@ from app.services.processes.json_safe import to_jsonsafe_params as _jsonable_par
 from app.services.runtime_config import (
     BOOT_RECOVERY_CHANGED_BY,
     BOOT_RECOVERY_REASON,
-    _insert_audit_row,
+    insert_runtime_config_audit_row,
     write_kill_switch_audit,
 )
 
@@ -760,7 +760,7 @@ def ensure_kill_switch_singleton(conn: psycopg.Connection[Any]) -> None:
         ).fetchone()
         if inserted is None:
             return
-        _insert_audit_row(
+        insert_runtime_config_audit_row(
             conn,
             changed_at=_utcnow(),
             changed_by=BOOT_RECOVERY_CHANGED_BY,

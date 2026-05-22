@@ -109,7 +109,7 @@ class TestEnsureKillSwitchSingleton:
 
         # Patched at the import site in ops_monitor (where the helper looks
         # the symbol up).
-        monkeypatch.setattr("app.services.ops_monitor._insert_audit_row", _boom)
+        monkeypatch.setattr("app.services.ops_monitor.insert_runtime_config_audit_row", _boom)
 
         url = test_database_url()
         with pytest.raises(RuntimeError, match="simulated audit insert failure"):
