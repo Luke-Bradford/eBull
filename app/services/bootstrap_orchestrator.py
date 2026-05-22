@@ -113,6 +113,10 @@ JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap drain.
 JOB_MF_DIRECTORY_SYNC = "mf_directory_sync"
 JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
+# #1233 PR-1b — OpenFIGI CUSIP resolver post-bulk sweep (Phase D, S13).
+# Owns the ``openfigi`` Lane (cap=1). Invoker registered in
+# ``app/jobs/runtime.py`` alongside the other bootstrap-only jobs.
+JOB_CUSIP_RESOLVER_POST_BULK_SWEEP = "cusip_resolver_post_bulk_sweep"
 # PR1c #1064 — bootstrap-bounded 13F sweep recency cut-off. Used to
 # live as a constant inside the deleted ``bootstrap_sec_13f_recent_sweep_job``
 # wrapper. 4 quarters (~380 days) = current + 3 prior periods, matches
@@ -256,6 +260,13 @@ _LANE_MAX_CONCURRENCY: Final[dict[str, int]] = {
     "db_ownership_inst": 1,
     "db_ownership_insider": 1,
     "db_ownership_funds": 1,
+    # #1233 PR-1b — OpenFIGI CUSIP resolver post-bulk sweep stage S13.
+    # Single-stage lane (the only consumer is ``cusip_resolver_post_bulk_sweep``),
+    # cap=1 so the per-instance ``OpenFigiResolver`` rate limiter
+    # (``app/services/openfigi_resolver.py::_RateLimiter``) is the
+    # canonical budget gate. Disjoint from every SEC lane by host —
+    # see ``app/jobs/sources.py::Lane`` docstring for SD-1 cross-ref.
+    "openfigi": 1,
 }
 
 
@@ -429,6 +440,18 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     "sec_13f_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cusip_mapping_ready")),
     "sec_insider_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cik_mapping_ready")),
     "sec_nport_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cusip_mapping_ready")),
+    # Phase D — #1233 PR-1b. OpenFIGI sweep over the bulk-source rows
+    # written by S10 + S12. Requires both bulk ingesters to have
+    # advertised their caps so we know the unresolved_13f_cusips
+    # bulk partition is in a settled state (no in-flight ingest
+    # mutating it while the sweep iterates). Does NOT require
+    # ``cusip_mapping_ready`` because the sweep's ENTIRE PURPOSE is
+    # to extend the CUSIP mapping; a missing cusip_mapping cap means
+    # S3 cusip_universe_backfill never ran, which is a different
+    # failure mode — the sweep can still run safely.
+    "cusip_resolver_post_bulk_sweep": CapRequirement(
+        all_of=("institutional_inputs_seeded", "nport_inputs_seeded"),
+    ),
     # Phase C' — walker
     "sec_submissions_files_walk": CapRequirement(all_of=("filing_events_seeded",)),
     # Legacy chain
@@ -875,8 +898,32 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     _spec("sec_13f_ingest_from_dataset", 10, "db", JOB_SEC_13F_INGEST_FROM_DATASET),
     _spec("sec_insider_ingest_from_dataset", 11, "db", JOB_SEC_INSIDER_INGEST_FROM_DATASET),
     _spec("sec_nport_ingest_from_dataset", 12, "db", JOB_SEC_NPORT_INGEST_FROM_DATASET),
+    # Phase D — #1233 PR-1b. OpenFIGI CUSIP resolver sweep. Runs AFTER
+    # the bulk-13F + bulk-NPORT ingesters drop unresolved CUSIPs into
+    # ``unresolved_13f_cusips`` (source IN ('bulk_13f_dataset',
+    # 'bulk_nport_dataset')) and BEFORE every downstream stage that
+    # joins on the resolved CUSIP map. The sweep promotes each
+    # OpenFIGI-resolved CUSIP into ``external_identifiers`` with
+    # provider='openfigi', then leaves the unresolved row in place
+    # (a subsequent ``_load_cusip_map`` read picks the new mapping up
+    # via the WHERE provider IN ('sec', 'openfigi') filter).
+    #
+    # Lane=``openfigi`` so it is disjoint from every SEC budget — the
+    # OpenFIGI rate limiter (per-instance, in
+    # ``app/services/openfigi_resolver.py``) is the sole budget gate.
+    #
+    # No new capability provided — the sweep writes external_identifiers
+    # rows that already satisfy ``cusip_mapping_ready`` (advertised by
+    # S3 ``cusip_universe_backfill``). The post-sweep coverage check
+    # writes ``bootstrap_runs.coverage_floor_met`` informationally.
+    _spec(
+        "cusip_resolver_post_bulk_sweep",
+        13,
+        "openfigi",
+        JOB_CUSIP_RESOLVER_POST_BULK_SWEEP,
+    ),
     # Phase C' — per-CIK secondary-pages walk for deep-history parity.
-    _spec("sec_submissions_files_walk", 13, "sec_rate", JOB_SEC_SUBMISSIONS_FILES_WALK),
+    _spec("sec_submissions_files_walk", 14, "sec_rate", JOB_SEC_SUBMISSIONS_FILES_WALK),
     # Legacy per-filing stages — kept as a fallback path. After the
     # bulk pass these are largely idempotent DB no-ops on populated
     # observation tables; on the slow-connection bypass path they are
@@ -888,7 +935,7 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # consume the same dict shape that the manual API publishes.
     _spec(
         "filings_history_seed",
-        14,
+        15,
         "sec_rate",
         JOB_FILINGS_HISTORY_SEED,
         params={
@@ -898,16 +945,16 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     ),
     _spec(
         "sec_first_install_drain",
-        15,
+        16,
         "sec_rate",
         JOB_SEC_FIRST_INSTALL_DRAIN,
         params={"max_subjects": None},
     ),
-    _spec("sec_def14a_bootstrap", 16, "sec_rate", "sec_def14a_bootstrap"),
-    _spec("sec_business_summary_bootstrap", 17, "sec_rate", "sec_business_summary_bootstrap"),
-    _spec("sec_insider_transactions_backfill", 18, "sec_rate", "sec_insider_transactions_backfill"),
-    _spec("sec_form3_ingest", 19, "sec_rate", "sec_form3_ingest"),
-    _spec("sec_8k_events_ingest", 20, "sec_rate", "sec_8k_events_ingest"),
+    _spec("sec_def14a_bootstrap", 17, "sec_rate", "sec_def14a_bootstrap"),
+    _spec("sec_business_summary_bootstrap", 18, "sec_rate", "sec_business_summary_bootstrap"),
+    _spec("sec_insider_transactions_backfill", 19, "sec_rate", "sec_insider_transactions_backfill"),
+    _spec("sec_form3_ingest", 20, "sec_rate", "sec_form3_ingest"),
+    _spec("sec_8k_events_ingest", 21, "sec_rate", "sec_8k_events_ingest"),
     # #1008 — first-install bootstrap uses a recency-bounded sweep
     # (last 4 quarters, ~12 months) instead of the full historical
     # sweep. Walking decades of pre-2013 filings yields zero rows
@@ -923,7 +970,7 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # via ``JOB_INTERNAL_KEYS`` (PR1a) — manual API rejects it.
     _spec(
         "sec_13f_recent_sweep",
-        21,
+        22,
         "sec_rate",
         JOB_SEC_13F_QUARTERLY_SWEEP,
         # ``min_period_of_report`` resolves to ``today() - 380d`` at
@@ -943,7 +990,7 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     ),
     _spec(
         "sec_n_port_ingest",
-        22,
+        23,
         "sec_rate",
         "sec_n_port_ingest",
         # PR7 #1233 §4.6 — ``min_last_seen_filed_at`` (mirror of #1010
@@ -959,21 +1006,22 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
             "min_last_seen_filed_at": _PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF,
         },
     ),
-    _spec("ownership_observations_backfill", 23, "db", "ownership_observations_backfill"),
-    _spec("fundamentals_sync", 24, "db", "fundamentals_sync"),
+    _spec("ownership_observations_backfill", 24, "db", "ownership_observations_backfill"),
+    _spec("fundamentals_sync", 25, "db", "fundamentals_sync"),
     # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap
-    # drain (T8 deferred from #1171). S25 advertises class_id_mapping_ready;
-    # S26 (terminal) drains N-CSR + N-CSRS accessions per trust for the
-    # #1171 fund-metadata parser to consume.
-    _spec("mf_directory_sync", 25, "sec_rate", JOB_MF_DIRECTORY_SYNC),
-    # #1233 §4.12 / PR8 — S26 dispatches with no params. The 730d
-    # retention window is hard-pinned at
+    # drain (T8 deferred from #1171). S25 (post #1233 PR-1b: S26) advertises
+    # class_id_mapping_ready; S26 (post #1233 PR-1b: S27, terminal)
+    # drains N-CSR + N-CSRS accessions per trust for the #1171
+    # fund-metadata parser to consume.
+    _spec("mf_directory_sync", 26, "sec_rate", JOB_MF_DIRECTORY_SYNC),
+    # #1233 §4.12 / PR8 — terminal stage. Dispatches with no params.
+    # The 730d retention window is hard-pinned at
     # ``app/services/manifest_parsers/sec_n_csr.py::N_CSR_RETENTION_DAYS``
     # and the previous ``horizon_days`` param was removed (single
     # source of truth for every N-CSR writer chokepoint).
     _spec(
         "sec_n_csr_bootstrap_drain",
-        26,
+        27,
         "sec_rate",
         JOB_SEC_N_CSR_BOOTSTRAP_DRAIN,
     ),
@@ -2046,10 +2094,11 @@ __all__ = [
 # Stage count assertion — pin so a future refactor that adds /
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
-# current 26-stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 26, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 26 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+# current 27-stage shape.
+assert len(_BOOTSTRAP_STAGE_SPECS) == 27, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 27 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
     "update the spec, frontend, runbook, and stage_count tests in lockstep. "
     "#1027 added 7 bulk-archive stages (sec_bulk_download + C1.a/C2/C3/C4/C5 ingesters + C1.b walker); "
-    "#1174 added 2 fund-stages (S25 mf_directory_sync + S26 sec_n_csr_bootstrap_drain)."
+    "#1174 added 2 fund-stages (S25 mf_directory_sync + S26 sec_n_csr_bootstrap_drain); "
+    "#1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep (renumbering S13-S26 to S14-S27)."
 )

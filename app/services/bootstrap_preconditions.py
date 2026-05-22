@@ -213,11 +213,11 @@ def compute_cusip_coverage(conn: psycopg.Connection[Any]) -> CoverageRatio:
 
         cur.execute(
             """
-            SELECT COUNT(*) FROM instruments i
+            SELECT COUNT(DISTINCT i.instrument_id) FROM instruments i
               JOIN exchanges e ON e.exchange_id = i.exchange
               JOIN external_identifiers ei
                 ON ei.instrument_id = i.instrument_id
-               AND ei.provider = 'sec'
+               AND ei.provider IN ('sec', 'openfigi')
                AND ei.identifier_type = 'cusip'
              WHERE i.is_tradable = TRUE
                AND i.company_name IS NOT NULL
@@ -225,6 +225,13 @@ def compute_cusip_coverage(conn: psycopg.Connection[Any]) -> CoverageRatio:
                AND e.asset_class = 'us_equity'
             """,
         )
+        # ``COUNT(DISTINCT i.instrument_id)`` — needed because the
+        # widened provider filter (#1233 PR-1b) admits both
+        # ``provider='sec'`` and ``provider='openfigi'`` rows for the
+        # same CUSIP / instrument_id. Without the DISTINCT, a SEC
+        # primary + OpenFIGI fallback row for the same instrument
+        # would double-count and inflate the coverage numerator above
+        # the cohort denominator.
         row = cur.fetchone()
         mapped = int(row[0]) if row else 0
     return CoverageRatio(mapped=mapped, cohort=cohort)

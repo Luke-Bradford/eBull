@@ -165,14 +165,18 @@ def _institutional_state(conn: psycopg.Connection[Any], instrument_id: int) -> P
         body_row = cur.fetchone() or {"body_count": 0}
 
         # Unresolved CUSIPs surface separately so the operator
-        # knows there's a #740-backfill-shaped gap.
+        # knows there's a #740-backfill-shaped gap. Provider filter
+        # widened to ``('sec', 'openfigi')`` (#1233 PR-1b) so OpenFIGI-
+        # promoted bulk rows surface in the same audit even if they
+        # arrived via the post-bulk sweep rather than the curated
+        # SEC backfill.
         cur.execute(
             """
             SELECT COUNT(*) AS unresolved_count
             FROM unresolved_13f_cusips u
             WHERE u.cusip IN (
                 SELECT identifier_value FROM external_identifiers
-                WHERE provider = 'sec' AND identifier_type = 'cusip'
+                WHERE provider IN ('sec', 'openfigi') AND identifier_type = 'cusip'
                   AND instrument_id = %s
             )
             """,
