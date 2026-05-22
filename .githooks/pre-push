@@ -138,6 +138,25 @@ bash scripts/check_form3_latest_per_pair.sh
 echo "==> Pre-push gate: 13D/G retention cap invariant lint"
 bash scripts/check_13dg_retention.sh
 
+# #1233 §4.5 / §4.6 PR12 — every ownership_*_current writer chokepoint
+# (insiders / institutions / blockholders / treasury / def14a / funds /
+# esop) must honour the diff-aware MERGE template + watermark side-table
+# contract: MERGE INTO opener, IS DISTINCT FROM diff predicate excluding
+# refreshed_at, scope-clamp const-literal in ON + NOT MATCHED BY SOURCE
+# clauses, advisory-lock preserved, DISTINCT ON + ORDER BY matching the
+# per-helper natural-key tuple, refreshed_at written only on UPDATE path
+# (DEFAULT now() fires on INSERT), per-helper extra filters (treasury
+# null-guard / def14a 3-clause ESOP exclusion), and an UPSERT into
+# ownership_refresh_state with the correct category literal. Plus
+# cross-cutting checks: no raw DELETE FROM ownership_*_current in app/
+# or scripts/ outside the MERGE clause; repair file uses obs-anchored
+# CTE aggregate (no legacy c.refreshed_at < predicate, no LATERAL);
+# sql/163 structural pins (table opener, PK, CHECK domain, indexes,
+# backfill SELECT shape). 93 invariants across 7 helpers × 12 + 21
+# cross-cutting. ~80ms.
+echo "==> Pre-push gate: ownership_*_current MERGE writer invariant lint"
+bash scripts/check_ownership_refresh_writer_pattern.sh
+
 # #1249 / #1250 cleanup — every manifest_parsers/sec_*.py that calls
 # _archive_file_url(<cik>, ...) where <cik> is row.cik (filer_cik /
 # similar) MUST also reference KNOWN_FILING_AGENT_CIKS for the agent-
