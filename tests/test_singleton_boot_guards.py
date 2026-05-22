@@ -13,11 +13,13 @@ import psycopg.rows
 import pytest
 
 from app.services.bootstrap_state import ensure_bootstrap_state_singleton
+from app.services.budget import ensure_budget_config_singleton
 from app.services.ops_monitor import ensure_kill_switch_singleton
 from app.services.runtime_config import (
     BOOT_RECOVERY_CHANGED_BY,
     BOOT_RECOVERY_REASON,
 )
+from app.services.transaction_cost import ensure_transaction_cost_config_singleton
 from tests.fixtures.ebull_test_db import test_database_url
 
 
@@ -230,3 +232,126 @@ class TestEnsureBootstrapStateSingleton:
                 cur.execute('ALTER TABLE bootstrap_state ADD CONSTRAINT "bootstrap_state_id_check" CHECK (id = 1)')
                 cur.execute("INSERT INTO bootstrap_state (id) VALUES (1)")
             ebull_test_conn.commit()
+
+
+class TestEnsureBudgetConfigSingleton:
+    def test_noop_when_row_exists(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Template DB carries the seeded row; helper must be a quiet no-op."""
+        caplog.set_level("WARNING", logger="app.services.budget")
+        url = test_database_url()
+        with psycopg.connect(url, autocommit=True) as guard_conn:
+            ensure_budget_config_singleton(guard_conn)
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM budget_config")
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 1
+        assert not any("singleton vanished" in record.message for record in caplog.records)
+
+    def test_reseeds_when_row_missing(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Row dropped → helper re-seeds with column defaults
+        (cash_buffer_pct=0.05, cgt_scenario='higher')."""
+        caplog.set_level("WARNING", logger="app.services.budget")
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("DELETE FROM budget_config WHERE id = TRUE")
+        ebull_test_conn.commit()
+
+        url = test_database_url()
+        with psycopg.connect(url, autocommit=True) as guard_conn:
+            ensure_budget_config_singleton(guard_conn)
+
+        with ebull_test_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT id, cash_buffer_pct, cgt_scenario FROM budget_config")
+            row = cur.fetchone()
+        assert row is not None
+        assert row["id"] is True
+        assert str(row["cash_buffer_pct"]) == "0.0500"
+        assert row["cgt_scenario"] == "higher"
+        assert any("singleton vanished" in record.message for record in caplog.records)
+
+    def test_raises_when_caller_is_not_autocommit(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        assert ebull_test_conn.autocommit is False
+        with pytest.raises(RuntimeError, match="requires an autocommit connection"):
+            ensure_budget_config_singleton(ebull_test_conn)
+
+    def test_raises_on_non_canonical_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("DELETE FROM budget_config")
+            cur.execute("ALTER TABLE budget_config DROP CONSTRAINT budget_config_single_row")
+            cur.execute("INSERT INTO budget_config (id) VALUES (FALSE)")
+        ebull_test_conn.commit()
+
+        url = test_database_url()
+        try:
+            with pytest.raises(RuntimeError, match="singleton constraint violated"):
+                with psycopg.connect(url, autocommit=True) as guard_conn:
+                    ensure_budget_config_singleton(guard_conn)
+        finally:
+            with ebull_test_conn.cursor() as cur:
+                cur.execute("DELETE FROM budget_config")
+                cur.execute("ALTER TABLE budget_config ADD CONSTRAINT budget_config_single_row CHECK (id = true)")
+                cur.execute("INSERT INTO budget_config (id) VALUES (TRUE)")
+            ebull_test_conn.commit()
+
+
+class TestEnsureTransactionCostConfigSingleton:
+    def test_noop_when_row_exists(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level("WARNING", logger="app.services.transaction_cost")
+        url = test_database_url()
+        with psycopg.connect(url, autocommit=True) as guard_conn:
+            ensure_transaction_cost_config_singleton(guard_conn)
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM transaction_cost_config")
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 1
+        assert not any("singleton vanished" in record.message for record in caplog.records)
+
+    def test_reseeds_when_row_missing(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level("WARNING", logger="app.services.transaction_cost")
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("DELETE FROM transaction_cost_config WHERE id = TRUE")
+        ebull_test_conn.commit()
+
+        url = test_database_url()
+        with psycopg.connect(url, autocommit=True) as guard_conn:
+            ensure_transaction_cost_config_singleton(guard_conn)
+
+        with ebull_test_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT id FROM transaction_cost_config")
+            row = cur.fetchone()
+        assert row is not None
+        assert row["id"] is True
+        assert any("singleton vanished" in record.message for record in caplog.records)
+
+    def test_raises_when_caller_is_not_autocommit(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        assert ebull_test_conn.autocommit is False
+        with pytest.raises(RuntimeError, match="requires an autocommit connection"):
+            ensure_transaction_cost_config_singleton(ebull_test_conn)

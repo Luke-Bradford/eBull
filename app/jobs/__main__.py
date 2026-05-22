@@ -307,6 +307,52 @@ def _ensure_bootstrap_state_singleton_with_cleanup(
         raise
 
 
+def _ensure_budget_config_singleton_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """Run the #1232 follow-up budget_config singleton-vanish guard.
+
+    Without this jobs-side mirror, scheduled-job paths that consume
+    ``get_budget_config`` (e.g. execution_guard, portfolio_sync)
+    would raise ``BudgetConfigCorrupt`` until API restarts and
+    re-seeds. Discovered post-dev-DB-wipe.
+    """
+    from app.services.budget import ensure_budget_config_singleton
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_budget_config_singleton(guard_conn)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+        raise
+
+
+def _ensure_transaction_cost_config_singleton_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """Run the #1232 follow-up transaction_cost_config singleton-vanish guard.
+
+    Without this jobs-side mirror, every execution_guard cost-check
+    raises ``TransactionCostConfigCorrupt`` until API restarts.
+    """
+    from app.services.transaction_cost import ensure_transaction_cost_config_singleton
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_transaction_cost_config_singleton(guard_conn)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+        raise
+
+
 def _boot_id() -> str:
     """Per-process identifier used as ``claimed_by`` on queue rows.
 
@@ -379,6 +425,16 @@ def serve(stop_event: threading.Event | None = None) -> int:
 
     _ensure_bootstrap_state_singleton_with_cleanup(fence_conn, pool)
     logger.info("jobs entrypoint: bootstrap_state singleton guard passed")
+
+    # #1232 follow-up — same singleton-vanish posture for budget_config
+    # and transaction_cost_config. Without these mirrors, execution-
+    # guard / portfolio-sync paths would raise (Budget|TransactionCost)
+    # ConfigCorrupt until API restarts. Discovered post-dev-DB-wipe.
+    _ensure_budget_config_singleton_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: budget_config singleton guard passed")
+
+    _ensure_transaction_cost_config_singleton_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: transaction_cost_config singleton guard passed")
 
     _bootstrap_master_key(pool)
 

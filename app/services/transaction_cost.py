@@ -56,6 +56,51 @@ class CostEstimate:
 # ---------------------------------------------------------------------------
 
 
+def ensure_transaction_cost_config_singleton(conn: psycopg.Connection[Any]) -> None:
+    """Re-seed the transaction_cost_config singleton row if it vanished (#1232 follow-up).
+
+    Migration ``sql/031_transaction_cost_model.sql`` seeds the row via
+    ``INSERT INTO transaction_cost_config (id) VALUES (TRUE) ON CONFLICT
+    DO NOTHING`` — a one-time write. If the row is later lost (manual
+    ``DELETE``, snapshot restore from pre-seed era, dev DB wipe script),
+    every caller of ``get_transaction_cost_config`` raises
+    ``TransactionCostConfigCorrupt`` → execution_guard rejects every
+    cost decision → no programmatic recovery.
+
+    Auto-reseed with the column-default values + WARNING log. Mirror of
+    the runtime_config / kill_switch / bootstrap_state / budget_config
+    helpers (same autocommit-conn contract, same constraint-corruption
+    fail-loud branch).
+    """
+    if not conn.autocommit:
+        raise RuntimeError(
+            "ensure_transaction_cost_config_singleton requires an autocommit "
+            "connection — pass psycopg.connect(url, autocommit=True). "
+            "The helper opens its own real BEGIN via conn.transaction(); "
+            "a non-autocommit caller would degrade that into a SAVEPOINT."
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM transaction_cost_config")
+        rows = cur.fetchall()
+
+    if len(rows) == 1 and rows[0][0] is True:
+        return
+
+    if len(rows) > 1 or (rows and rows[0][0] is not True):
+        raise RuntimeError(f"transaction_cost_config singleton constraint violated — rows={rows!r}")
+
+    logger.warning(
+        "transaction_cost_config singleton vanished — re-seeding with "
+        "column defaults. See docs/review-prevention-log.md section "
+        "'Singleton-row migrations need a boot-time presence guard' + "
+        "#1232 follow-up."
+    )
+
+    with conn.transaction():
+        conn.execute("INSERT INTO transaction_cost_config (id) VALUES (TRUE) ON CONFLICT DO NOTHING")
+
+
 def get_transaction_cost_config(
     conn: psycopg.Connection[Any],
 ) -> dict[str, Any]:

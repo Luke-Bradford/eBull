@@ -195,6 +195,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await asyncio.to_thread(_ensure_bootstrap_state_singleton_probe)
 
+    # #1232 follow-up — same singleton-vanish posture for budget_config
+    # and transaction_cost_config. Discovered post-dev-DB-wipe: a
+    # TRUNCATE that purged these tables left /budget/config 503-ing
+    # ("Failed to load") in the SettingsPage with no programmatic
+    # recovery. Auto-reseed at lifespan with column defaults.
+    from app.services.budget import ensure_budget_config_singleton
+    from app.services.transaction_cost import ensure_transaction_cost_config_singleton
+
+    def _ensure_budget_config_singleton_probe() -> None:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_budget_config_singleton(guard_conn)
+
+    await asyncio.to_thread(_ensure_budget_config_singleton_probe)
+
+    def _ensure_transaction_cost_config_singleton_probe() -> None:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_transaction_cost_config_singleton(guard_conn)
+
+    await asyncio.to_thread(_ensure_transaction_cost_config_singleton_probe)
+
     # Open the connection pool after migrations so the schema is up to date.
     pool = open_pool("db_pool", min_size=1, max_size=10)
     logger.info("Connection pool opened (min=1, max=10).")
