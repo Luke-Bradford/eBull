@@ -355,3 +355,29 @@ class TestEnsureTransactionCostConfigSingleton:
         assert ebull_test_conn.autocommit is False
         with pytest.raises(RuntimeError, match="requires an autocommit connection"):
             ensure_transaction_cost_config_singleton(ebull_test_conn)
+
+    def test_raises_on_non_canonical_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Non-canonical row (id != TRUE) → fail loud (parity with sibling helpers)."""
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("DELETE FROM transaction_cost_config")
+            cur.execute("ALTER TABLE transaction_cost_config DROP CONSTRAINT transaction_cost_config_single_row")
+            cur.execute("INSERT INTO transaction_cost_config (id) VALUES (FALSE)")
+        ebull_test_conn.commit()
+
+        url = test_database_url()
+        try:
+            with pytest.raises(RuntimeError, match="singleton constraint violated"):
+                with psycopg.connect(url, autocommit=True) as guard_conn:
+                    ensure_transaction_cost_config_singleton(guard_conn)
+        finally:
+            with ebull_test_conn.cursor() as cur:
+                cur.execute("DELETE FROM transaction_cost_config")
+                cur.execute(
+                    "ALTER TABLE transaction_cost_config "
+                    "ADD CONSTRAINT transaction_cost_config_single_row CHECK (id = true)"
+                )
+                cur.execute("INSERT INTO transaction_cost_config (id) VALUES (TRUE)")
+            ebull_test_conn.commit()
