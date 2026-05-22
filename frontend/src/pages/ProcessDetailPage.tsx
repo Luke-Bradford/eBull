@@ -147,6 +147,21 @@ export function ProcessDetailPage() {
     }
   }, [tab, isOrchestrator, isBootstrap, showAdvanced]);
 
+  // #1271 — Auto-refresh the timeline while the bootstrap run is
+  // actively in flight so the operator sees stage transitions +
+  // processed_count growth without manually navigating away and back.
+  // Polls every 5s while on Timeline tab AND run.status === 'running'.
+  // Stops once run reaches a terminal state (complete / partial_error /
+  // cancelled) so we are not hammering the API after the work is done.
+  const timelineRefetch = timeline.refetch;
+  const timelineRunStatus = timeline.data?.run?.status ?? null;
+  useEffect(() => {
+    if (tab !== "timeline" || !isBootstrap) return;
+    if (timelineRunStatus !== "running") return;
+    const id = window.setInterval(() => timelineRefetch(), 5000);
+    return () => window.clearInterval(id);
+  }, [tab, isBootstrap, timelineRunStatus, timelineRefetch]);
+
   // Extract the refetch refs as local const bindings so ESLint can
   // see their identity and verify the dep array — `useAsync` wraps
   // refetch in `useCallback([], [])` (see useAsync.test.ts which
@@ -1158,6 +1173,52 @@ function TimelineStageRow({
           <div className="text-xs text-slate-500 dark:text-slate-400">
             {stage.job_name || stage.stage_key}
           </div>
+          {/* #1225 / #1271 — Live progress bar. Renders when we have
+              either an explicit target (target_count > 0) OR a
+              processed_count > 0 (stage instrumented but no upfront
+              target). Stages that never write progress (current bulk
+              ingesters per #1225) render no bar — operator sees the
+              stage status badge only, which is the prior baseline.
+              processed_count defensively coerced via ?? 0 — the DB
+              schema is `INTEGER NOT NULL DEFAULT 0`, but null guard
+              defends against future serializer drift (bot iter 1
+              BLOCKING). */}
+          {(() => {
+            if (stage.status !== "running") return null;
+            const processed = stage.processed_count ?? 0;
+            const target = stage.target_count;
+            const hasTarget = target !== null && target > 0;
+            if (!hasTarget && processed === 0) return null;
+            return (
+              <div className="mt-1.5">
+                {hasTarget ? (
+                  <>
+                    <div className="h-1 w-full overflow-hidden rounded bg-slate-200 dark:bg-slate-800">
+                      <div
+                        className="h-full bg-sky-500 dark:bg-sky-400 transition-[width] duration-500"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            (processed / (target as number)) * 100,
+                          ).toFixed(1)}%`,
+                        }}
+                        aria-label={`${processed} of ${target}`}
+                      />
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
+                      {processed.toLocaleString()} /{" "}
+                      {(target as number).toLocaleString()}{" "}
+                      ({((processed / (target as number)) * 100).toFixed(1)}%)
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                    {processed.toLocaleString()} processed (no target set)
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {stage.warning ? (
             <div
               className="mt-1 truncate text-xs text-amber-700 dark:text-amber-300"
