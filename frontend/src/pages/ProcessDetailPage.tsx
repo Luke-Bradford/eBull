@@ -1178,39 +1178,47 @@ function TimelineStageRow({
               processed_count > 0 (stage instrumented but no upfront
               target). Stages that never write progress (current bulk
               ingesters per #1225) render no bar — operator sees the
-              stage status badge only, which is the prior baseline. */}
-          {stage.status === "running" &&
-          (stage.target_count !== null && stage.target_count > 0
-            ? true
-            : stage.processed_count > 0) ? (
-            <div className="mt-1.5">
-              {stage.target_count !== null && stage.target_count > 0 ? (
-                <>
-                  <div className="h-1 w-full overflow-hidden rounded bg-slate-200 dark:bg-slate-800">
-                    <div
-                      className="h-full bg-sky-500 dark:bg-sky-400 transition-[width] duration-500"
-                      style={{
-                        width: `${Math.min(
-                          100,
-                          (stage.processed_count / stage.target_count) * 100,
-                        ).toFixed(1)}%`,
-                      }}
-                      aria-label={`${stage.processed_count} of ${stage.target_count}`}
-                    />
+              stage status badge only, which is the prior baseline.
+              processed_count defensively coerced via ?? 0 — the DB
+              schema is `INTEGER NOT NULL DEFAULT 0`, but null guard
+              defends against future serializer drift (bot iter 1
+              BLOCKING). */}
+          {(() => {
+            if (stage.status !== "running") return null;
+            const processed = stage.processed_count ?? 0;
+            const target = stage.target_count;
+            const hasTarget = target !== null && target > 0;
+            if (!hasTarget && processed === 0) return null;
+            return (
+              <div className="mt-1.5">
+                {hasTarget ? (
+                  <>
+                    <div className="h-1 w-full overflow-hidden rounded bg-slate-200 dark:bg-slate-800">
+                      <div
+                        className="h-full bg-sky-500 dark:bg-sky-400 transition-[width] duration-500"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            (processed / (target as number)) * 100,
+                          ).toFixed(1)}%`,
+                        }}
+                        aria-label={`${processed} of ${target}`}
+                      />
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
+                      {processed.toLocaleString()} /{" "}
+                      {(target as number).toLocaleString()}{" "}
+                      ({((processed / (target as number)) * 100).toFixed(1)}%)
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                    {processed.toLocaleString()} processed (no target set)
                   </div>
-                  <div className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
-                    {stage.processed_count.toLocaleString()} /{" "}
-                    {stage.target_count.toLocaleString()}{" "}
-                    ({((stage.processed_count / stage.target_count) * 100).toFixed(1)}%)
-                  </div>
-                </>
-              ) : (
-                <div className="text-[10px] text-slate-500 dark:text-slate-400">
-                  {stage.processed_count.toLocaleString()} processed (no target set)
-                </div>
-              )}
-            </div>
-          ) : null}
+                )}
+              </div>
+            );
+          })()}
           {stage.warning ? (
             <div
               className="mt-1 truncate text-xs text-amber-700 dark:text-amber-300"
