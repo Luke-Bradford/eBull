@@ -84,16 +84,26 @@ def bootstrap_state(
 
 
 def _no_active_broker_credentials(conn: psycopg.Connection[object]) -> bool:
-    """Return True when no non-revoked broker_credentials row exists.
+    """Return True when the eToro credential set is incomplete.
+
+    A complete set requires BOTH ``label='api_key'`` and
+    ``label='user_key'`` rows active (``revoked_at IS NULL``) — matches
+    the ``deriveCredentialSetMode`` "complete" contract in
+    ``frontend/src/lib/credentialSetMode.ts`` and the dual ``create``
+    calls in ``SettingsPage::handleCreate``. If only one is active the
+    eToro client cannot authenticate, so the main app shell stays inert
+    (Codex 2 P2 on this PR — a single-key-active state was passing the
+    prior ``EXISTS`` shape).
 
     Used by the bootstrap-state endpoint to drive the frontend's
-    force-redirect to ``/settings`` so a logged-in operator cannot
-    reach the main app shell with the credentials slate empty.
+    force-redirect to ``/settings``.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT EXISTS(SELECT 1 FROM broker_credentials WHERE revoked_at IS NULL)")
-        row = cur.fetchone()
-    return not bool(row and row[0])
+        cur.execute("SELECT 1 FROM broker_credentials WHERE revoked_at IS NULL AND label = 'api_key' LIMIT 1")
+        has_api_key = cur.fetchone() is not None
+        cur.execute("SELECT 1 FROM broker_credentials WHERE revoked_at IS NULL AND label = 'user_key' LIMIT 1")
+        has_user_key = cur.fetchone() is not None
+    return not (has_api_key and has_user_key)
 
 
 # ---------------------------------------------------------------------------

@@ -239,6 +239,11 @@ function BrokerCredentialsSection(): JSX.Element {
     } finally {
       setBusyId(null);
       await refresh();
+      // Revoke can flip the broker-creds set from complete back to
+      // incomplete — refresh bootstrap state so RequireAuth's
+      // needs_broker_credentials gate re-pins the user to /settings
+      // if the last usable key was just revoked (Codex 2 P2).
+      await refreshBootstrapState();
     }
   }
 
