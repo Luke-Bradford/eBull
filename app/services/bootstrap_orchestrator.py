@@ -1410,21 +1410,23 @@ def _phase_batched_dispatch(
       uses this to skip ``finalize_run`` (the run is already in the
       terminal ``cancelled`` state).
 
-    Algorithm:
+    Algorithm (PR-2 #1233 — ``as_completed`` poll loop):
 
       1. Build per-stage status map (initially ``pending``).
-      2. **Cancel checkpoint** — at the top of each iteration check
+      2. **Cancel checkpoint** — at the top of each poll iteration
+         (after every completion, not every batch) check
          ``is_stop_requested`` against ``(target_run_kind='bootstrap_run',
          target_run_id=run_id)``. On observed cancel: mark stop
          request observed, call ``mark_run_cancelled`` (terminalises
          run + state + sweeps remaining stages), mark stop request
          completed, and return early. This is the operator-cancel
          observation point per spec §Cancel semantics — cooperative.
-      3. While any stage is pending: compute the satisfied-capability
-         set from current stage statuses (via ``_STAGE_PROVIDES`` +
-         ``_STAGE_PROVIDES_ON_SKIP``; #1138 Task A). For each pending
-         stage:
-         * If its ``CapRequirement`` is satisfied → "ready batch".
+      3. While any stage is pending OR any future is in flight:
+         compute the satisfied-capability set from current stage
+         statuses (via ``_STAGE_PROVIDES`` + ``_STAGE_PROVIDES_ON_SKIP``;
+         #1138 Task A). For each pending stage:
+         * If its ``CapRequirement`` is satisfied → submit to its
+           lane executor (subject to in-flight cap).
          * If unsatisfiable AND any contributing cap is error-dead
            (some provider in ``error``/``blocked``/``cancelled``) →
            propagate to ``blocked`` with structured "missing capability"
@@ -1435,22 +1437,37 @@ def _phase_batched_dispatch(
            invocation). This is the slow-connection-fallback path.
          * Else → leave as ``pending`` and wait for upstream
            ``pending``/``running`` providers to terminalise.
-      4. Group the ready batch by lane. For each lane, run up to
-         ``_LANE_MAX_CONCURRENCY[lane]`` stages concurrently via a
-         per-lane ``ThreadPoolExecutor``.
-      5. Join all lane workers; refresh status from the DB; loop.
-      6. Stop when no stage is pending.
+      4. Per-lane concurrency cap is enforced via
+         ``lane_in_flight_count`` decremented on completion; once at
+         cap, the stage stays ``pending`` and is reconsidered on the
+         next poll iteration.
+      5. ``wait(in_flight, return_when=FIRST_COMPLETED, timeout=1.0s)``
+         picks up the first completed future. Statuses + rows_processed
+         update IMMEDIATELY (not at end of batch); caps recompute on
+         the next iteration so a freshly-completed cap-provider
+         unblocks its consumers on the very next pass.
+      6. Stop when no stage is pending AND no future is in flight.
+      7. Deadlock detection: if no future is in flight AND no
+         ready/cascade transition happened on the iteration, the
+         dispatcher cannot make progress — flip remaining pending
+         stages to ``blocked`` with the canonical "abandoned" reason.
 
-    Stages with no `requires` start in the first batch. The dispatcher
-    is fully data-driven by ``_STAGE_REQUIRES_CAPS`` (capability-based
-    DNF dependency graph; #1138 Task A) + ``_STAGE_LANE_OVERRIDES``.
+    One persistent ``ThreadPoolExecutor`` per lane lives for the
+    duration of this function (try/finally ``shutdown(wait=True)``).
+    Stages with no ``requires`` start in the first iteration. The
+    dispatcher is fully data-driven by ``_STAGE_REQUIRES_CAPS``
+    (capability-based DNF dependency graph; #1138 Task A) +
+    ``_STAGE_LANE_OVERRIDES``.
 
-    Cancel observation latency: at most the duration of the longest
-    in-flight batch (a 13F sweep is ~30 min; CIK refresh ~30s).
+    Cancel observation latency: at most one completion interval +
+    the cancel-poll timeout (~1.0s when nothing is completing).
     Mid-stage work runs to completion — the watermark advances on
-    commit and the next Iterate resumes from there.
+    commit and the next Iterate resumes from there. Pre-PR-2 the
+    latency was the duration of the longest in-flight BATCH (5+ min
+    on 13F sweeps); the per-completion checkpoint reduces this to
+    the longest single stage.
     """
-    from concurrent.futures import ThreadPoolExecutor, wait
+    from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
     # #1138 Task A — cap-evaluation map overrides. Production callers
     # omit these (the module-level _STAGE_PROVIDES / _STAGE_PROVIDES_ON_SKIP
@@ -1494,262 +1511,336 @@ def _phase_batched_dispatch(
         for key, value in preexisting_rows_processed.items():
             rows_processed[key] = value
 
-    while True:
-        # Cancel checkpoint — covers (W1) "before submitting Phase A's
-        # first batch", "between any two ready batches", "before
-        # kicking off Phase B lanes", and "between stages within a
-        # lane" (the loop body re-enters here after every wait()).
-        #
-        # Single-tx atomicity (Codex pre-push round 1 WARNING W4):
-        # observation, cancellation, and stop-completion all commit
-        # together. A worker crash between two of three separate
-        # commits would otherwise leave the stop row observed-but-
-        # unfinished with the run still ``running``. Boot-recovery
-        # would still clean up after the next jobs restart, but
-        # collapsing into one tx makes the happy path clean.
+    # PR-2 #1233 — persistent per-lane executors. One executor per
+    # lane is created on first submission and lives for the duration
+    # of the dispatcher. The poll loop submits + tracks per-lane
+    # in-flight counts so the structural cap is preserved AND
+    # cross-lane parallelism is no longer gated on the slowest sibling.
+    lane_executors: dict[str, ThreadPoolExecutor] = {}
+    # Map future → (stage_key, lane) so completion handling has both.
+    in_flight: dict[Future[_StageOutcome], tuple[str, str]] = {}
+    lane_in_flight_count: dict[str, int] = {}
+    # Cancel-exit fast path: when set, the ``finally`` clause skips
+    # ``shutdown(wait=True)`` and uses ``wait=False`` so dispatcher
+    # exit doesn't block on still-running stages. Pre-PR-2 had the
+    # same issue (also ``shutdown(wait=True)``); PR-2 narrows it to
+    # the cancel return path so an operator-cancel returns from the
+    # dispatcher promptly. Already-running invokers continue to
+    # completion in their worker threads — they observe the
+    # ``bootstrap_cancel_requested()`` contextvar via
+    # ``_run_one_stage`` and bail cooperatively. Codex 2 BLOCKING.
+    cancel_exit = False
+
+    def _ensure_executor(lane: str) -> ThreadPoolExecutor:
+        if lane not in lane_executors:
+            max_workers = _LANE_MAX_CONCURRENCY.get(lane, 1)
+            lane_executors[lane] = ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix=f"bootstrap-{lane}",
+            )
+        return lane_executors[lane]
+
+    # Cancel-poll cadence (sec). On every poll iteration we also
+    # checkpoint via DB; when futures are in flight but none has
+    # completed yet, the wait() timeout bounds cancel latency.
+    _CANCEL_POLL_INTERVAL = 1.0
+
+    def _check_cancel() -> bool:
+        """Return True iff an operator-cancel has been observed.
+        Side-effect: terminalises the run + state under a single tx
+        per the W4 atomicity rule from the pre-PR-2 implementation.
+        """
         with psycopg.connect(database_url) as cancel_conn:
             stop = is_stop_requested(
                 cancel_conn,
                 target_run_kind="bootstrap_run",
                 target_run_id=run_id,
             )
-            if stop is not None:
-                logger.info(
-                    "bootstrap dispatcher: cancel observed at checkpoint (run_id=%d, stop_id=%d, mode=%s)",
-                    run_id,
-                    stop.id,
-                    stop.mode,
+            if stop is None:
+                return False
+            logger.info(
+                "bootstrap dispatcher: cancel observed at checkpoint (run_id=%d, stop_id=%d, mode=%s)",
+                run_id,
+                stop.id,
+                stop.mode,
+            )
+            with cancel_conn.transaction():
+                mark_stop_observed(cancel_conn, stop.id)
+                mark_run_cancelled(
+                    cancel_conn,
+                    run_id=run_id,
+                    notes_line="cancelled by operator at dispatcher checkpoint",
                 )
-                with cancel_conn.transaction():
-                    mark_stop_observed(cancel_conn, stop.id)
-                    mark_run_cancelled(
-                        cancel_conn,
-                        run_id=run_id,
-                        notes_line="cancelled by operator at dispatcher checkpoint",
-                    )
-                    mark_stop_completed(cancel_conn, stop.id)
+                mark_stop_completed(cancel_conn, stop.id)
+            return True
+
+    def _apply_outcome(stage_key: str, outcome: _StageOutcome) -> None:
+        """Map a completed stage outcome onto the statuses +
+        rows_processed maps. Identical semantics to the pre-PR-2 batch
+        post-process — just runs once per completion now."""
+        rows_processed[stage_key] = outcome.rows_processed
+        if outcome.skipped:
+            statuses[stage_key] = "skipped"
+            logger.info("bootstrap dispatcher: %s SKIPPED", stage_key)
+        elif outcome.cancelled:
+            # PR3d #1064 — stage observed operator cancel mid-loop and
+            # exited cooperatively. Status maps to 'cancelled' so the
+            # Timeline tones gray; the outer cancel checkpoint picks
+            # up the run-level cancel signal and sweeps the rest.
+            statuses[stage_key] = "cancelled"
+            logger.info("bootstrap dispatcher: %s CANCELLED (%s)", stage_key, outcome.error)
+        elif outcome.success:
+            statuses[stage_key] = "success"
+            logger.info(
+                "bootstrap dispatcher: %s OK (rows_processed=%s)",
+                stage_key,
+                outcome.rows_processed,
+            )
+        else:
+            statuses[stage_key] = "error"
+            logger.warning("bootstrap dispatcher: %s ERROR (%s)", stage_key, outcome.error)
+
+    try:
+        while True:
+            # Cancel checkpoint — fires before EVERY submission round
+            # and is re-checked after every completion. Pre-PR-2 only
+            # checked between batches; PR-2 reduces observation
+            # latency to ~ longest single stage + _CANCEL_POLL_INTERVAL.
+            if _check_cancel():
+                # Stop accepting new work. Set the cancel-exit flag so
+                # the ``finally`` clause uses ``shutdown(wait=False)``
+                # — dispatcher exit must not block on the slowest
+                # in-flight stage. In-flight workers continue to
+                # completion; they observe the
+                # ``bootstrap_cancel_requested()`` contextvar via
+                # ``_run_one_stage`` and bail cooperatively.
+                # ``mark_run_cancelled`` has already swept the
+                # remaining bootstrap_stages rows into ``cancelled``.
+                cancel_exit = True
                 return statuses, True
 
-        pending_keys = [k for k, s in statuses.items() if s == "pending"]
-        if not pending_keys:
-            break
-
-        # #1138 Task A — capability-based runnability + cascade-skip /
-        # error-block classification. Compute the satisfied cap set
-        # once per dispatcher iteration, then decide per pending
-        # stage whether to (a) dispatch, (b) block with structured
-        # reason, (c) cascade-skip with structured reason, or (d)
-        # wait for upstream pending/running providers.
-        caps = _satisfied_capabilities(
-            statuses,
-            rows_processed,
-            provides=effective_provides,
-            provides_on_skip=effective_provides_on_skip,
-            min_rows=effective_min_rows,
-            exclusions=effective_exclusions,
-        )
-        ready: list[_RunnableStage] = []
-        cascade_transitioned = False
-        for key in pending_keys:
-            stage = by_key[key]
-            req = stage.requires
-            if _requirement_satisfied(req, caps):
-                ready.append(stage)
-                continue
-            classification = _classify_requirement_unsatisfiable(
-                req,
+            # #1138 Task A — capability-based runnability + cascade
+            # classification. Recompute caps EVERY iteration (per
+            # completion under the new poll loop), so a freshly
+            # completed cap-provider unblocks its consumers on the
+            # very next pass — not at the end of the heterogeneous
+            # ready batch.
+            caps = _satisfied_capabilities(
                 statuses,
                 rows_processed,
-                providers_map=effective_providers_inverse,
+                provides=effective_provides,
                 provides_on_skip=effective_provides_on_skip,
                 min_rows=effective_min_rows,
                 exclusions=effective_exclusions,
             )
-            if classification is None:
-                continue  # still potentially satisfiable; wait
-            kind, dead_caps = classification
-            if kind == "error":
-                reason = _format_block_reason(
-                    dead_caps,
+
+            # ``in_flight_keys`` excludes already-submitted stages
+            # from re-evaluation. A submitted stage keeps
+            # ``statuses[key] == "pending"`` until its worker completes
+            # and _apply_outcome flips it; without this filter, the
+            # next poll iteration with a lane cap >1 (or a wait timeout
+            # firing before any completion) could re-add the same
+            # stage to ``ready`` and resubmit it. With production cap=1
+            # the lane gate masks this, but it would silently break
+            # the moment any lane cap was widened. Codex 2 HIGH.
+            in_flight_keys = {sk for sk, _ in in_flight.values()}
+            pending_keys = [k for k, s in statuses.items() if s == "pending" and k not in in_flight_keys]
+            ready: list[_RunnableStage] = []
+            cascade_transitioned = False
+            for key in pending_keys:
+                stage = by_key[key]
+                req = stage.requires
+                if _requirement_satisfied(req, caps):
+                    ready.append(stage)
+                    continue
+                classification = _classify_requirement_unsatisfiable(
+                    req,
                     statuses,
                     rows_processed,
                     providers_map=effective_providers_inverse,
+                    provides_on_skip=effective_provides_on_skip,
                     min_rows=effective_min_rows,
                     exclusions=effective_exclusions,
                 )
-                with psycopg.connect(database_url) as conn:
-                    mark_stage_blocked(
-                        conn,
-                        run_id=run_id,
-                        stage_key=key,
-                        reason=reason,
+                if classification is None:
+                    continue  # still potentially satisfiable; wait
+                kind, dead_caps = classification
+                if kind == "error":
+                    reason = _format_block_reason(
+                        dead_caps,
+                        statuses,
+                        rows_processed,
+                        providers_map=effective_providers_inverse,
+                        min_rows=effective_min_rows,
+                        exclusions=effective_exclusions,
                     )
-                    conn.commit()
-                statuses[key] = "blocked"
-                cascade_transitioned = True
-                logger.warning("bootstrap dispatcher: %s BLOCKED (%s)", key, reason)
-            else:  # skip_only
-                reason = _format_cascade_skip_reason(dead_caps)
-                with psycopg.connect(database_url) as conn:
-                    mark_stage_skipped(
-                        conn,
-                        run_id=run_id,
-                        stage_key=key,
-                        reason=reason,
-                    )
-                    conn.commit()
-                statuses[key] = "skipped"
-                cascade_transitioned = True
-                logger.info("bootstrap dispatcher: %s SKIPPED (cascade: %s)", key, reason)
-
-        # Codex pre-push WARNING: if a stage was cascade-blocked or
-        # cascade-skipped within this inner loop, an EARLIER pending
-        # key may have been evaluated against a still-pending upstream
-        # and left as pending. Restart the outer loop so caps are
-        # recomputed and the now-terminalised upstream propagates to
-        # those downstream pendings instead of dropping them into the
-        # "deadlock" branch below.
-        if cascade_transitioned and not ready:
-            continue
-
-        if not ready:
-            # No stage advanced this iteration. Any stage still in
-            # `pending` means its requirements are stuck (e.g. all
-            # in unmet_reqs) — the dispatcher cannot make progress.
-            # Mark them blocked so finalize_run sees a terminal state
-            # and the operator panel doesn't show "pending forever".
-            # Codex review BLOCKING (PR #1039).
-            stuck_keys = [k for k, s in statuses.items() if s == "pending"]
-            for key in stuck_keys:
-                with psycopg.connect(database_url) as conn:
-                    mark_stage_blocked(
-                        conn,
-                        run_id=run_id,
-                        stage_key=key,
-                        reason="dispatcher could not resolve dependencies; stage abandoned",
-                    )
-                    conn.commit()
-                statuses[key] = "blocked"
-                logger.warning(
-                    "bootstrap dispatcher: %s ABANDONED (deadlock in dependency graph)",
-                    key,
-                )
-            break
-
-        # Group ready by lane. Per-lane, dispatch only up to
-        # ``max_concurrency`` stages in this iteration — the rest stay
-        # pending and roll into the next iteration. This prevents a
-        # long-running stage in one lane (e.g. sec_first_install_drain
-        # in sec_rate) from blocking blocked-status propagation in
-        # other lanes (e.g. db lane's C-stages waiting on a failed
-        # sec_bulk_download). Without this cap, ``wait()`` blocks on
-        # the entire heterogeneous batch, leaving the operator panel
-        # showing C-stages as ``pending`` long after their upstream
-        # has failed.
-        by_lane_batch: dict[str, list[_RunnableStage]] = {}
-        for stage in ready:
-            by_lane_batch.setdefault(stage.lane, []).append(stage)
-
-        # Cap each lane to its max_concurrency. Stages over the cap
-        # stay in `pending` and re-enter the next outer iteration.
-        for lane, stages in list(by_lane_batch.items()):
-            cap = _LANE_MAX_CONCURRENCY.get(lane, 1)
-            by_lane_batch[lane] = stages[:cap]
-
-        logger.info(
-            "bootstrap dispatcher: ready batch — %s",
-            {lane: [s.stage_key for s in stages] for lane, stages in by_lane_batch.items()},
-        )
-
-        # One ThreadPoolExecutor per lane, sized to lane's concurrency.
-        # Lanes run concurrently with each other; within a lane,
-        # the cap above ensures we submit no more than max_concurrency.
-        lane_executors: list[ThreadPoolExecutor] = []
-        all_futures = []
-        try:
-            for lane, stages in by_lane_batch.items():
-                max_concurrency = _LANE_MAX_CONCURRENCY.get(lane, 1)
-                ex = ThreadPoolExecutor(
-                    max_workers=max_concurrency,
-                    thread_name_prefix=f"bootstrap-{lane}",
-                )
-                lane_executors.append(ex)
-                for stage in stages:
-                    # PR1c #1064: resolve dispatch-time dynamic values
-                    # (e.g. _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF →
-                    # ``today() - 380d``) and validate via the canonical
-                    # registry validator with allow_internal_keys=True
-                    # so audit-only keys (``source_label``) pass through.
-                    # Validation failure is a programmer error in the
-                    # stage spec — fail-fast, dispatch surfaces it as a
-                    # stage error.
-                    resolved = _resolve_dynamic_params(stage.params)
-                    try:
-                        validated_params = validate_job_params(
-                            stage.job_name,
-                            resolved,
-                            allow_internal_keys=True,
+                    with psycopg.connect(database_url) as conn:
+                        mark_stage_blocked(
+                            conn,
+                            run_id=run_id,
+                            stage_key=key,
+                            reason=reason,
                         )
-                    except ParamValidationError as exc:
-                        logger.error(
-                            "bootstrap dispatcher: stage %s params invalid: %s",
-                            stage.stage_key,
-                            exc,
+                        conn.commit()
+                    statuses[key] = "blocked"
+                    cascade_transitioned = True
+                    logger.warning("bootstrap dispatcher: %s BLOCKED (%s)", key, reason)
+                else:  # skip_only
+                    reason = _format_cascade_skip_reason(dead_caps)
+                    with psycopg.connect(database_url) as conn:
+                        mark_stage_skipped(
+                            conn,
+                            run_id=run_id,
+                            stage_key=key,
+                            reason=reason,
                         )
-                        with psycopg.connect(database_url) as conn:
-                            mark_stage_error(
-                                conn,
-                                run_id=run_id,
-                                stage_key=stage.stage_key,
-                                error_message=f"stage params invalid: {exc}",
-                            )
-                            conn.commit()
-                        statuses[stage.stage_key] = "error"
-                        continue
+                        conn.commit()
+                    statuses[key] = "skipped"
+                    cascade_transitioned = True
+                    logger.info("bootstrap dispatcher: %s SKIPPED (cascade: %s)", key, reason)
 
-                    fut = ex.submit(
-                        _run_one_stage,
-                        run_id=run_id,
-                        stage_key=stage.stage_key,
-                        job_name=stage.job_name,
-                        invoker=stage.invoker,
-                        database_url=database_url,
-                        params=validated_params,
+            # Submission gate — respect per-lane in-flight cap. Stages
+            # that don't fit stay in ``pending`` and will be
+            # reconsidered on the next iteration after a sibling
+            # completes. With production cap=1 across all lanes, the
+            # gate also prevents JobLock collisions between same-lane
+            # siblings dispatched in the same outer iteration.
+            submitted_this_iteration: list[str] = []
+            for stage in ready:
+                lane = stage.lane
+                cap = _LANE_MAX_CONCURRENCY.get(lane, 1)
+                if lane_in_flight_count.get(lane, 0) >= cap:
+                    continue  # at-cap; leave pending for next iteration
+
+                # PR1c #1064: resolve dispatch-time dynamic values
+                # (e.g. _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF →
+                # ``today() - 380d``) and validate via the canonical
+                # registry validator with allow_internal_keys=True
+                # so audit-only keys (``source_label``) pass through.
+                # Validation failure is a programmer error in the
+                # stage spec — fail-fast, dispatch surfaces it as a
+                # stage error.
+                resolved = _resolve_dynamic_params(stage.params)
+                try:
+                    validated_params = validate_job_params(
+                        stage.job_name,
+                        resolved,
+                        allow_internal_keys=True,
                     )
-                    all_futures.append((stage.stage_key, fut))
-            wait([f for _, f in all_futures])
-        finally:
-            for ex in lane_executors:
-                ex.shutdown(wait=True)
+                except ParamValidationError as exc:
+                    logger.error(
+                        "bootstrap dispatcher: stage %s params invalid: %s",
+                        stage.stage_key,
+                        exc,
+                    )
+                    with psycopg.connect(database_url) as conn:
+                        mark_stage_error(
+                            conn,
+                            run_id=run_id,
+                            stage_key=stage.stage_key,
+                            error_message=f"stage params invalid: {exc}",
+                        )
+                        conn.commit()
+                    statuses[stage.stage_key] = "error"
+                    continue
 
-        for stage_key, fut in all_futures:
-            outcome = fut.result()
-            # #1140 Task C — refresh the per-stage row count from the
-            # outcome so the next dispatcher iteration's cap-eval
-            # reads it.
-            rows_processed[stage_key] = outcome.rows_processed
-            if outcome.skipped:
-                statuses[stage_key] = "skipped"
-                logger.info("bootstrap dispatcher: %s SKIPPED", stage_key)
-            elif outcome.cancelled:
-                # PR3d #1064 — stage observed operator cancel
-                # mid-loop and exited cooperatively. Status maps to
-                # 'cancelled' so the Timeline tones gray; the
-                # outer cancel checkpoint at the next loop iteration
-                # picks up the run-level cancel signal and sweeps
-                # remaining stages.
-                statuses[stage_key] = "cancelled"
-                logger.info("bootstrap dispatcher: %s CANCELLED (%s)", stage_key, outcome.error)
-            elif outcome.success:
-                statuses[stage_key] = "success"
+                executor = _ensure_executor(lane)
+                fut = executor.submit(
+                    _run_one_stage,
+                    run_id=run_id,
+                    stage_key=stage.stage_key,
+                    job_name=stage.job_name,
+                    invoker=stage.invoker,
+                    database_url=database_url,
+                    params=validated_params,
+                )
+                in_flight[fut] = (stage.stage_key, lane)
+                lane_in_flight_count[lane] = lane_in_flight_count.get(lane, 0) + 1
+                submitted_this_iteration.append(stage.stage_key)
+
+            if submitted_this_iteration:
                 logger.info(
-                    "bootstrap dispatcher: %s OK (rows_processed=%s)",
-                    stage_key,
-                    outcome.rows_processed,
+                    "bootstrap dispatcher: submitted — %s (in-flight=%d)",
+                    submitted_this_iteration,
+                    len(in_flight),
                 )
-            else:
-                statuses[stage_key] = "error"
-                logger.warning("bootstrap dispatcher: %s ERROR (%s)", stage_key, outcome.error)
+
+            # Termination + deadlock detection.
+            if not in_flight:
+                if not pending_keys:
+                    # Everything terminalised.
+                    break
+                if cascade_transitioned:
+                    # Cascade flipped at least one stage this
+                    # iteration but didn't free any ready stage. Loop
+                    # to recompute caps — a now-terminalised upstream
+                    # may unblock another pending downstream.
+                    continue
+                # Nothing in flight, nothing ready, no cascade
+                # transition: the dependency graph cannot resolve.
+                # Mark remaining pending as blocked with the
+                # canonical "abandoned" reason (matches pre-PR-2 line
+                # 1622 of the legacy dispatcher; Codex review BLOCKING
+                # for PR #1039).
+                stuck_keys = [k for k, s in statuses.items() if s == "pending"]
+                for key in stuck_keys:
+                    with psycopg.connect(database_url) as conn:
+                        mark_stage_blocked(
+                            conn,
+                            run_id=run_id,
+                            stage_key=key,
+                            reason="dispatcher could not resolve dependencies; stage abandoned",
+                        )
+                        conn.commit()
+                    statuses[key] = "blocked"
+                    logger.warning(
+                        "bootstrap dispatcher: %s ABANDONED (deadlock in dependency graph)",
+                        key,
+                    )
+                break
+
+            # Wait for first completion (or timeout to re-check
+            # cancel). ``return_when=FIRST_COMPLETED`` means: pick up
+            # ONE completion and immediately re-evaluate caps, cascade
+            # classification, and the cancel checkpoint. Cross-lane
+            # parallelism: an idle lane gets its next stage submitted
+            # the moment the fast-lane sibling finishes — no waiting
+            # for the slow-lane batch-mate.
+            done, _pending_futs = wait(
+                set(in_flight.keys()),
+                return_when=FIRST_COMPLETED,
+                timeout=_CANCEL_POLL_INTERVAL,
+            )
+            if not done:
+                # Timeout fired — fall through to the cancel
+                # checkpoint at the top of the next iteration.
+                continue
+
+            # Process EVERY future that's already done. ``wait`` with
+            # FIRST_COMPLETED may return more than one if they raced
+            # to completion; consume them all in one pass so caps are
+            # only recomputed once before we loop.
+            for fut in done:
+                stage_key, lane = in_flight.pop(fut)
+                lane_in_flight_count[lane] = lane_in_flight_count.get(lane, 0) - 1
+                outcome = fut.result()
+                _apply_outcome(stage_key, outcome)
+    finally:
+        # Shutdown all lane executors. ``cancel_futures=True`` cancels
+        # any QUEUED futures (none expected — submission is gated on
+        # in-flight cap); running futures still complete naturally on
+        # their worker threads.
+        #
+        # ``wait`` is True on the happy path so a test fixture's
+        # monkeypatched _INVOKERS map can't get unbound while a worker
+        # is still calling it. On cancel exit, ``wait=False`` keeps
+        # dispatcher return latency bounded by ~ the cancel checkpoint
+        # interval (1.0s) — operator-cancel must not block on the
+        # slowest in-flight stage. Cooperative cancel inside
+        # ``_run_one_stage`` brings the workers home shortly after.
+        wait_on_shutdown = not cancel_exit
+        for executor in lane_executors.values():
+            executor.shutdown(wait=wait_on_shutdown, cancel_futures=True)
 
     return statuses, False
 
