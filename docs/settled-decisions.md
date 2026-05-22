@@ -566,6 +566,47 @@ allow-list + invariant assertions):**
 Unilateral flag-flip is mechanically forbidden by the CI invariant
 test.
 
+## OpenFIGI as approved external CUSIP-resolver fallback (2026-05-22)
+
+**Decision:** OpenFIGI v3 API at `https://api.openfigi.com/v3/mapping`
+is approved as a CUSIP-resolution fallback for the eBull universe.
+Lands as PR-0 (empirical probe + fixtures + skill) of issue #1233
+ahead of the PR-1b resolver wiring.
+
+**Constraints:**
+
+- Free tier: 25 req/min unkeyed × max 10 jobs/POST = 250 mappings/min.
+- Keyed tier: 25 req/6s × max 100 jobs/POST = 25,000 mappings/min.
+- Operator-keyed mode requires `OPENFIGI_API_KEY` env var; default is unkeyed.
+- The response **does not contain CUSIP**. Approved usage is
+  CUSIP→ticker (`idType=ID_CUSIP, idValue=<cusip>`); the response
+  includes ticker which resolves against `instruments.symbol` via
+  the parallel-array contract (`zip(request, response, strict=True)`).
+- Forbidden: ticker→CUSIP flow (response shape does not return CUSIP).
+- Forbidden: scheduling OpenFIGI calls on the `sec_rate` Lane — PR-1b
+  introduces a dedicated `openfigi` Lane (see spec v3 §5) so OpenFIGI
+  throughput does not cannibalise SEC's 10 req/s shared budget.
+
+**Empirical findings (probed 2026-05-22, see PR-0):**
+
+- 429 body is plain text (`"Too many requests, please try again later."`),
+  NOT JSON. Resolvers MUST branch on `status_code == 429` before
+  attempting `.json()`.
+- IETF draft RateLimit headers (`ratelimit-limit`, `ratelimit-remaining`,
+  `ratelimit-reset`, `ratelimit-policy`) are emitted on EVERY response;
+  `retry-after` is emitted on 429.
+- Per-row "not found" entry shape is `{"warning": "..."}` — single
+  key, no `error` key for unknown CUSIPs.
+- Successful `data` arrays can be large (AAPL: 255 entries across
+  cross-listings); always filter to `exchCode='US' AND securityType='Common Stock'`
+  before binding to `instruments.symbol`.
+
+**ToS posture:** OpenFIGI free tier permits programmatic use within
+rate limits. Operator approved 2026-05-22 prior to PR-1b merge.
+
+**Fixtures + skill:** `tests/fixtures/openfigi/`,
+`.claude/skills/data-sources/openfigi.md`.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
