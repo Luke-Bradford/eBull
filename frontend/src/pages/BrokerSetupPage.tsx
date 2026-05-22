@@ -169,8 +169,9 @@ export function BrokerSetupPage(): JSX.Element {
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
         setError(
-          "Credentials already saved against this operator under a " +
-            "different label. Sign out and back in to retry.",
+          "A credential row already exists for this label. " +
+            "Sign out and back in to retry, or revoke the existing row " +
+            "via operator support.",
         );
       } else {
         setError("Could not save credentials. Try again.");
