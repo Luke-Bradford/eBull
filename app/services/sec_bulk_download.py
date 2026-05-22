@@ -58,7 +58,16 @@ SEC_BASE_URL: Final[str] = "https://www.sec.gov"
 
 # Disk + bandwidth budgets. Configurable by env in callers.
 DEFAULT_MIN_FREE_BYTES: Final[int] = 25 * 1024**3  # 25 GB
-DEFAULT_BANDWIDTH_THRESHOLD_MBPS: Final[float] = 13.0
+# Bandwidth threshold tuned for the SEC archive single-stream limit
+# (typically 10-30 Mbps per TCP connection from sec.gov). Operator
+# 2026-05-22: prior 13 Mbps default forced fallback on a healthy
+# 100+ Mbps line because the 4 MB range-GET probe measured 9.5 Mbps —
+# normal for a single SEC stream. 5 Mbps admits modest broadband while
+# still excluding genuinely slow networks (sub-broadband, congested
+# tether). The fallback path's cascade-skip of bulk-dependent stages
+# (companyfacts, insider/13F/NPORT from dataset) loses half the data
+# pipeline silently — overshooting the threshold has high cost.
+DEFAULT_BANDWIDTH_THRESHOLD_MBPS: Final[float] = 5.0
 PROBE_BYTES: Final[int] = 4 * 1024 * 1024  # 4 MB range-GET probe
 DEFAULT_CONCURRENCY: Final[int] = 4  # one TCP connection per archive family
 DEFAULT_TIMEOUT_S: Final[float] = 600.0  # multi-GB transfers can take many minutes
