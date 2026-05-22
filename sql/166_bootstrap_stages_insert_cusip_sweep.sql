@@ -1,51 +1,54 @@
 -- 166_bootstrap_stages_insert_cusip_sweep.sql
 --
--- #1233 PR-1b (spec §5) — stage renumber for ``cusip_resolver_post_bulk_sweep``.
+-- #1233 PR-1b (spec §5) — stage renumber + new-S13 row insert for
+-- ``cusip_resolver_post_bulk_sweep``.
 --
 -- ## What this migration does
 --
--- Shifts every existing ``bootstrap_stages.stage_order`` row at or
--- above 13 up by one (13 -> 14, 14 -> 15, …, 26 -> 27) so the orchestrator
--- can slot the new S13 ``cusip_resolver_post_bulk_sweep`` (lane=``openfigi``)
--- between Phase C bulk ingest (S8-S12) and the per-CIK secondary-pages
--- walk (formerly S13, now S14).
+-- 1. Shifts every existing ``bootstrap_stages.stage_order`` row at or
+--    above 13 up by one (13 -> 14, 14 -> 15, …, 26 -> 27) so the
+--    orchestrator can slot the new S13 ``cusip_resolver_post_bulk_sweep``
+--    (lane=``openfigi``) between Phase C bulk ingest (S8-S12) and the
+--    per-CIK secondary-pages walk (formerly S13, now S14).
 --
--- ## Why renumber at the DB level
+-- 2. INSERTs the new S13 row into every existing run that was shifted,
+--    so an in-flight run picks the new stage up via the orchestrator's
+--    normal dispatch loop (which iterates persisted ``bootstrap_stages``
+--    rows, NOT the in-code catalogue). Without this step, in-flight
+--    runs at deploy time would skip the OpenFIGI sweep entirely AND
+--    never write ``bootstrap_runs.coverage_floor_met``. Codex 2
+--    pre-push review #1233 PR-1b BLOCKING.
+--
+-- ## Why renumber + insert in one migration
 --
 -- An in-flight bootstrap run at deploy time has rows in
 -- ``bootstrap_stages`` whose ``(run_id, stage_order)`` UNIQUE matches
 -- the orchestrator's ``_BOOTSTRAP_STAGE_SPECS`` catalogue. If we
--- silently changed the catalogue without renumbering existing rows
--- the orchestrator would either:
---   (a) re-scaffold the missing S13 slot mid-run and corrupt the
---       ordering, or
---   (b) treat the existing S13 (sec_submissions_files_walk) row as
+-- silently changed the catalogue without renumbering + slotting the
+-- new row, the orchestrator would either:
+--   (a) treat the existing S13 (sec_submissions_files_walk) row as
 --       the new ``cusip_resolver_post_bulk_sweep`` and dispatch the
---       wrong invoker against the wrong stage_key.
--- Neither is acceptable. Renumbering at the DB level keeps every
--- existing run consistent with the new catalogue shape — the
--- now-S14 ``sec_submissions_files_walk`` row is still recognisable
--- by its ``stage_key`` and the orchestrator picks up where it left off.
+--       wrong invoker against the wrong stage_key, or
+--   (b) finish the run with the new stage absent — never advertising
+--       ``coverage_floor_met``.
+-- Renumbering at the DB level keeps every existing run consistent
+-- with the new catalogue shape; inserting the new S13 row keeps the
+-- per-run stage count parity (post-shift = 27 stages per run).
 --
 -- ## Why this is safe to run repeatedly
 --
--- Idempotent re-application would otherwise double-shift (13 -> 14
--- on first run, 14 -> 15 on second run). To prevent that we GATE the
--- shift on whether the post-renumber state is already in place:
+-- Idempotent re-application would otherwise double-shift. We GATE
+-- the shift on whether the post-renumber state is already in place:
 --
 --   * Pre-state: catalogue has ``sec_submissions_files_walk`` at S13;
 --     no row exists for stage_key ``cusip_resolver_post_bulk_sweep``.
---   * Post-state: ``sec_submissions_files_walk`` at S14; the orchestrator
---     will create the S13 row for ``cusip_resolver_post_bulk_sweep``
---     on the next ``run_bootstrap_orchestrator`` invocation that
---     scaffolds a fresh run (existing in-flight runs see the empty
---     S13 slot and the orchestrator handles the missing-row case by
---     re-scaffolding only stages NOT already present for the run_id).
+--   * Post-state: ``sec_submissions_files_walk`` at S14;
+--     ``cusip_resolver_post_bulk_sweep`` exists at S13 for every run.
 --
 -- The gate: only shift if there exists ANY row with stage_key =
--- 'sec_submissions_files_walk' AND stage_order = 13. If none exist
--- (either never-ran-this-migration's-target or post-shift), this
--- migration is a no-op.
+-- 'sec_submissions_files_walk' AND stage_order = 13. The INSERT is
+-- gated by ``NOT EXISTS`` per-run so a run that already has the new
+-- row is untouched.
 --
 -- Concurrent-run safety: the orchestrator holds JobLock('bootstrap')
 -- when scaffolding new runs, so a deploy that lands this migration
@@ -56,21 +59,60 @@
 
 BEGIN;
 
--- Take a single update path: shift all rows with stage_order >= 13
--- UPward by 1, but ONLY when the catalogue's old S13 stage_key is
--- still in slot 13 somewhere in the table. This makes the migration
--- idempotent without resorting to a non-SQL guard.
---
--- Idempotency guard: the WHERE clause checks for the pre-shift sentinel.
--- After a successful first run the sentinel row sits at stage_order=14,
--- so the subselect returns false and the UPDATE is a no-op.
+-- Step 1: detect pre-shift state via a single boolean. The CTE
+-- captures the state ONCE; both subsequent statements key off it
+-- so a partially-applied state (shift happened, insert didn't) can
+-- still be detected and the insert completed.
+
+WITH pre_shift_state AS (
+    SELECT EXISTS (
+        SELECT 1 FROM bootstrap_stages
+         WHERE stage_key = 'sec_submissions_files_walk'
+           AND stage_order = 13
+    ) AS needs_shift
+)
 UPDATE bootstrap_stages
    SET stage_order = stage_order + 1
  WHERE stage_order >= 13
-   AND EXISTS (
-       SELECT 1 FROM bootstrap_stages
-        WHERE stage_key = 'sec_submissions_files_walk'
-          AND stage_order = 13
+   AND (SELECT needs_shift FROM pre_shift_state);
+
+-- Step 2: insert the new S13 row for every run whose stages have
+-- been shifted (post-shift sentinel: stage_key='sec_submissions_files_walk'
+-- AT stage_order=14). The ``NOT EXISTS`` guard per-run makes the
+-- INSERT idempotent — a run that already has the new row is untouched.
+--
+-- Status='pending' for runs that haven't reached S13's position yet
+-- (most common case — Phase C blocks Phase D); for finished runs
+-- (status='complete' / 'partial_error' / 'cancelled') the new row
+-- stays 'pending' too, which is the correct audit-history outcome
+-- (the orchestrator's run-complete check uses bootstrap_state, not
+-- per-run stage counts, so a lingering 'pending' row on a finished
+-- run is harmless).
+
+INSERT INTO bootstrap_stages (
+    bootstrap_run_id,
+    stage_key,
+    stage_order,
+    lane,
+    job_name,
+    status,
+    attempt_count
+)
+SELECT DISTINCT
+    bs.bootstrap_run_id,
+    'cusip_resolver_post_bulk_sweep',
+    13,
+    'openfigi',
+    'cusip_resolver_post_bulk_sweep',
+    'pending',
+    0
+  FROM bootstrap_stages bs
+ WHERE bs.stage_key = 'sec_submissions_files_walk'
+   AND bs.stage_order = 14
+   AND NOT EXISTS (
+       SELECT 1 FROM bootstrap_stages e
+        WHERE e.bootstrap_run_id = bs.bootstrap_run_id
+          AND e.stage_key = 'cusip_resolver_post_bulk_sweep'
    );
 
 COMMIT;

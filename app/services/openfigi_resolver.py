@@ -95,16 +95,20 @@ _KEYED_JOBS_PER_POST: Final[int] = 100
 
 # Defensive filter for the data[] array. AAPL CUSIP returns 255
 # worldwide listings; we want the US-primary common-stock row.
-_US_EXCH_CODES: Final[frozenset[str]] = frozenset({"US", "UN", "UQ"})
-"""Composite-US exchange codes accepted by the defensive filter.
+_US_PRIMARY_EXCH_CODE: Final[str] = "US"
+"""Composite-US exchange code — the only value PR-0's invariant admits.
 
-``US`` is OpenFIGI's composite-US ticker (the canonical CUSIP-side
-match). ``UN`` and ``UQ`` are NYSE / NASDAQ listed-exchange variants —
-PR-0 spec §4.1 / .claude/skills/data-sources/openfigi.md §7.4 calls
-out the empirical AAPL composite=``US`` shape. Cross-listings like
-``UA`` (NYSE Arca), ``UC`` (NYSE Chicago), ``UP`` (Pink) are excluded
-so we do not bind ownership rows to OTC mirrors that may not have a
-row in ``instruments``."""
+PR-0 fixtures pin the US-primary row to ``exchCode == 'US'`` (composite)
++ ``securityType == 'Common Stock'``. NYSE / NASDAQ listed-exchange
+variants (``UN``, ``UQ``) and cross-listings (``UA``, ``UC``, ``UP``)
+are excluded so we never bind ownership rows to a listed-exchange
+mirror when the composite row is absent or reordered — the resolver
+returns None and the bulk row stays pending for operator triage.
+
+Strict single-code match per Codex 2 pre-push review (#1233 PR-1b):
+widening to a set of US-ish codes admits row promotion in the
+``data[]`` reorder case where the composite row is missing, which is
+exactly the scenario the defensive filter exists to refuse."""
 
 
 @dataclass(frozen=True)
@@ -237,7 +241,7 @@ def _pick_us_primary(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     §7.5).
     """
     for entry in entries:
-        if entry.get("exchCode") in _US_EXCH_CODES and entry.get("securityType") == "Common Stock":
+        if entry.get("exchCode") == _US_PRIMARY_EXCH_CODE and entry.get("securityType") == "Common Stock":
             return entry
     return None
 
@@ -361,10 +365,11 @@ class OpenFigiResolver:
     def _post_and_parse(self, cusips: list[str]) -> dict[str, OpenFigiMapping]:
         """Issue one POST + parse the parallel-array response.
 
-        Rate-limit token acquired BEFORE the POST.
+        Each HTTP attempt (including the post-429 retry) acquires its
+        own rate-limit token via :meth:`_post`. The token-bucket clock
+        sees every POST, not just the first one.
         """
-        with self._rate_limiter:
-            resp = self._post(cusips, attempt=1)
+        resp = self._post(cusips, attempt=1)
         return self._parse_response(cusips, resp)
 
     def _post(self, cusips: list[str], *, attempt: int) -> httpx.Response:
@@ -375,6 +380,17 @@ class OpenFigiResolver:
         the sweep (the spec acceptance is "5xx extended outage → run
         completes with ``coverage_floor_met=FALSE``"; same applies to
         sustained 429s).
+
+        Rate-limit token acquired HERE so the retry POST is accounted
+        too — Codex 2 pre-push: ``with self._rate_limiter`` at the
+        ``_post_and_parse`` level was outside the recursive retry path,
+        and a 429+200 sequence consumed two HTTP slots but only one
+        token. Moving the acquire into the per-POST path means the
+        retry sleep (``time.sleep(retry_after)``) happens BEFORE the
+        retry's token acquire — the post-sleep ``acquire()`` re-checks
+        the window and either grants immediately (window rolled over)
+        or blocks (window still saturated, which is benign — we
+        already slept ``Retry-After``).
         """
         body = [{"idType": "ID_CUSIP", "idValue": c} for c in cusips]
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -382,7 +398,8 @@ class OpenFigiResolver:
             headers["X-OPENFIGI-APIKEY"] = self._api_key
 
         try:
-            resp = self._client.post(OPENFIGI_BASE_URL, json=body, headers=headers)
+            with self._rate_limiter:
+                resp = self._client.post(OPENFIGI_BASE_URL, json=body, headers=headers)
         except httpx.HTTPError as exc:
             # Transport-level failures (timeout, connection refused,
             # DNS). The sweep is daily-cadence — failing fast lets the
