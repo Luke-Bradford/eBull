@@ -307,6 +307,11 @@ _INVOKERS[_scheduler.JOB_SEC_FIRST_INSTALL_DRAIN] = _scheduler.sec_first_install
 _INVOKERS[_scheduler.JOB_MF_DIRECTORY_SYNC] = _scheduler.mf_directory_sync
 _INVOKERS[_scheduler.JOB_SEC_N_CSR_BOOTSTRAP_DRAIN] = _scheduler.sec_n_csr_bootstrap_drain
 
+# #1233 PR-1b — OpenFIGI CUSIP resolver post-bulk sweep (Phase D, S13).
+# Params-aware natively (discards the params dict; no params honoured).
+# Owns the dedicated ``openfigi`` Lane — see ``app/jobs/sources.py``.
+_INVOKERS[_scheduler.JOB_CUSIP_RESOLVER_POST_BULK_SWEEP] = _scheduler.cusip_resolver_post_bulk_sweep
+
 # #1155 — Layer 1 / 2 / 3 freshness redesign wiring + sec_rebuild
 # manual triage. Layers 1/2/3 are scheduled (SCHEDULED_JOBS rows in
 # scheduler.py); sec_rebuild is manual-trigger-only (params declared

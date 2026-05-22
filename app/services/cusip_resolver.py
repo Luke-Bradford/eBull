@@ -51,16 +51,36 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 import psycopg
 import psycopg.rows
 
 from app.services import rewash_filings
+
+if TYPE_CHECKING:
+    from app.services.openfigi_resolver import OpenFigiMapping
+
+
+class OpenFigiResolverProtocol(Protocol):
+    """Structural type for the OpenFIGI sweep collaborator.
+
+    The concrete implementation lives in
+    ``app/services/openfigi_resolver.py``; this Protocol decouples
+    cusip_resolver from that module so:
+
+      * tests can inject a fake resolver without spinning up httpx;
+      * the import cycle (cusip_resolver ↔ openfigi_resolver) is
+        avoided — only the sweep CALLER depends on the concrete
+        class, and the sweep itself depends only on this Protocol.
+    """
+
+    def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiMapping]: ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -899,6 +919,342 @@ def sweep_resolvable_unresolved_cusips(
         rewashed=rewashed,
         rewash_deferred=rewash_deferred,
         rewash_failed=rewash_failed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenFIGI sweep — bulk-source resolution path (#1233 PR-1b)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OpenFigiSweepReport:
+    """Per-run rollup for :func:`sweep_unresolved_cusips_via_openfigi`.
+
+    Counter semantics:
+
+      * ``candidates_seen`` — distinct bulk-source CUSIPs selected for
+        OpenFIGI lookup this pass (post-deduplication, post-LIMIT).
+      * ``resolved`` — entries OpenFIGI returned with a US-primary
+        common-stock ticker.
+      * ``promoted`` — resolutions that matched an existing
+        ``instruments.symbol`` and wrote a new
+        ``external_identifiers (provider='openfigi', identifier_type='cusip')``
+        row. ON CONFLICT DO NOTHING means an already-existing row is
+        counted as a non-promotion (audit trail says the mapping was
+        already there — likely from a prior sweep).
+      * ``no_instrument_match`` — OpenFIGI returned a US ticker but
+        no row in ``instruments`` matches (case-insensitive). Common
+        for newly-listed names not yet seeded in the universe — the
+        row stays pending until either OpenFIGI returns a different
+        ticker (unlikely) or the operator manually seeds.
+      * ``unresolved_by_openfigi`` — OpenFIGI returned warning / error /
+        no-US-row for these CUSIPs. Row stays pending.
+      * ``api_errors`` — number of CUSIPs we failed to lookup due to
+        transport / 429-saturation errors. Row stays pending.
+    """
+
+    candidates_seen: int
+    resolved: int
+    promoted: int
+    no_instrument_match: int
+    unresolved_by_openfigi: int
+    api_errors: int
+
+
+def _select_unresolved_bulk_cusips(
+    conn: psycopg.Connection[tuple],
+    *,
+    limit: int,
+) -> list[str]:
+    """Return up to ``limit`` distinct bulk-source CUSIPs pending OpenFIGI
+    resolution.
+
+    Bulk rows are the post-PR-1a partition (``source IN
+    ('bulk_13f_dataset', 'bulk_nport_dataset')``). The legacy partition
+    (``source IS NULL``) is owned by ``sweep_resolvable_unresolved_cusips``
+    above and the fuzzy resolver — this sweep ignores it.
+
+    De-duplicated: a CUSIP may appear in N bulk rows (different
+    filer × period) but only one OpenFIGI lookup is needed.
+
+    Filters out CUSIPs that ALREADY have an ``external_identifiers``
+    row (provider='sec' OR 'openfigi'). A CUSIP that was bulk-recorded
+    pre-mapping but later mapped by some other path (e.g. fuzzy
+    resolver running in parallel, or a prior OpenFIGI sweep) has no
+    business burning rate-limit budget.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT u.cusip
+              FROM unresolved_13f_cusips u
+             WHERE u.resolution_status IS NULL
+               AND u.source IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM external_identifiers ei
+                    WHERE ei.identifier_value = u.cusip
+                      AND ei.identifier_type = 'cusip'
+                      AND ei.provider IN ('sec', 'openfigi')
+               )
+             ORDER BY u.cusip
+             LIMIT %(limit)s
+            """,
+            {"limit": limit},
+        )
+        return [str(row[0]).strip().upper() for row in cur.fetchall()]
+
+
+def _find_instrument_by_ticker(
+    conn: psycopg.Connection[tuple],
+    *,
+    ticker: str,
+) -> int | None:
+    """Resolve an OpenFIGI-returned ticker to an ``instruments.instrument_id``.
+
+    Case-insensitive exact match against ``instruments.symbol``. Returns
+    None when:
+      * No row matches (newly-listed, not in universe).
+      * Multiple rows match (ambiguous — surfaced by the caller as
+        ``no_instrument_match`` rather than blindly picking).
+
+    Scoped to ``is_tradable=TRUE`` so a deprecated symbol that survived
+    in instruments doesn't ghost-match. Cross-source verification at
+    the universe layer keeps the symbol mappings tight (#1060 etc.).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id
+              FROM instruments
+             WHERE is_tradable = TRUE
+               AND UPPER(symbol) = UPPER(%(ticker)s)
+             LIMIT 2
+            """,
+            {"ticker": ticker},
+        )
+        rows = cur.fetchall()
+    if len(rows) != 1:
+        return None
+    return int(rows[0][0])
+
+
+def _promote_openfigi_mapping(
+    conn: psycopg.Connection[tuple],
+    *,
+    cusip: str,
+    instrument_id: int,
+) -> bool:
+    """Insert the OpenFIGI mapping into ``external_identifiers``.
+
+    Returns True iff a new row was inserted. ON CONFLICT DO NOTHING
+    against the ``(provider, identifier_type, identifier_value)``
+    UNIQUE — a re-run that sees a prior OpenFIGI row already in place
+    returns False so the caller can record the difference between
+    "promoted now" and "was already promoted".
+
+    ``is_primary=FALSE`` because OpenFIGI is the FALLBACK provider —
+    the SEC curated mapping (``provider='sec'``) is authoritative when
+    both exist. The partial UNIQUE index
+    ``uq_external_identifiers_primary`` would block a second
+    ``is_primary=TRUE`` row for the same (instrument_id, provider,
+    identifier_type) triple anyway, so primary-FALSE is the safe
+    default.
+    """
+    with conn.cursor() as cur:
+        # ON CONFLICT inference against the partial unique index
+        # ``uq_external_identifiers_provider_value_non_cik`` (sql/143).
+        # The partial index has a WHERE predicate
+        # ``NOT (provider = 'sec' AND identifier_type = 'cik')``, so the
+        # ON CONFLICT clause must include a matching WHERE predicate for
+        # PG to infer the partial index — without it PG raises
+        # ``there is no unique or exclusion constraint matching the
+        # ON CONFLICT specification``.
+        # The inserted row has ``provider='openfigi' AND
+        # identifier_type='cusip'``, in the partial index's filtered set.
+        cur.execute(
+            """
+            INSERT INTO external_identifiers (
+                instrument_id, provider, identifier_type,
+                identifier_value, is_primary
+            ) VALUES (
+                %(instrument_id)s, 'openfigi', 'cusip',
+                %(cusip)s, FALSE
+            )
+            ON CONFLICT (provider, identifier_type, identifier_value)
+                WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+            DO NOTHING
+            """,
+            {"instrument_id": instrument_id, "cusip": cusip},
+        )
+        return cur.rowcount == 1
+
+
+def _tombstone_bulk_rows_for_cusip(
+    conn: psycopg.Connection[tuple],
+    *,
+    cusip: str,
+    status: Literal["resolved_via_openfigi"],
+) -> int:
+    """Mark every bulk-source row for ``cusip`` with the given status.
+
+    Bulk rows that share a CUSIP are independent observations
+    (different filer × period). A successful OpenFIGI resolution
+    means the CUSIP→instrument_id mapping is now in
+    ``external_identifiers``; the next bulk ingest pass will load
+    the mapping via ``_load_cusip_map`` and write into typed tables
+    directly, so the unresolved rows have served their purpose.
+
+    Scoped to ``source IS NOT NULL`` so the legacy partition is
+    untouched. Returns rowcount.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unresolved_13f_cusips
+               SET resolution_status = %(status)s,
+                   last_observed_at = NOW()
+             WHERE cusip = %(cusip)s
+               AND source IS NOT NULL
+               AND resolution_status IS NULL
+            """,
+            {"cusip": cusip, "status": status},
+        )
+        return int(cur.rowcount)
+
+
+def sweep_unresolved_cusips_via_openfigi(
+    conn: psycopg.Connection[tuple],
+    *,
+    resolver: OpenFigiResolverProtocol,
+    limit: int = 1000,
+) -> OpenFigiSweepReport:
+    """Resolve bulk-source unresolved CUSIPs via the OpenFIGI v3 API.
+
+    Pipeline:
+
+      1. Select up to ``limit`` distinct bulk-source CUSIPs whose
+         ``resolution_status IS NULL`` and that do NOT already have
+         an ``external_identifiers`` row (sec or openfigi).
+      2. Batch-call ``resolver.resolve_cusips`` (the per-instance
+         rate limiter handles OpenFIGI's tier budget).
+      3. For each resolution, match the returned US-primary ticker
+         against ``instruments.symbol`` (case-insensitive exact).
+      4. On match: write ``external_identifiers (provider='openfigi',
+         identifier_type='cusip', is_primary=FALSE)``, then tombstone
+         every bulk row for that CUSIP with
+         ``resolution_status='resolved_via_openfigi'``.
+      5. On no-ticker / no-instrument-match: leave the row pending —
+         next sweep retries (idempotent — the row stays in
+         ``resolution_status IS NULL``).
+
+    Idempotent. A second run on the same backlog re-issues the same
+    OpenFIGI lookups for any rows still pending, which is wasteful
+    but not incorrect; the ``LIMIT`` cap bounds the per-pass cost.
+
+    The caller is responsible for the transaction boundary. The sweep
+    issues per-row UPDATEs in the outer conn — no per-cusip savepoint
+    is needed because a single failed match cannot poison the others
+    (each row's promote + tombstone is its own SQL statement, and
+    psycopg in non-autocommit mode auto-aborts on error which the
+    caller's transaction wrapper handles).
+
+    Surfacing ``OpenFigiTransportError`` / ``OpenFigiRateLimited``:
+    if the resolver raises mid-batch, the partially-completed batch's
+    successful resolutions ARE already committed-or-pending; the
+    remaining CUSIPs in the failed batch + every subsequent batch
+    increment ``api_errors``. The outer caller (S13 invoker) records
+    ``coverage_floor_met=FALSE`` if coverage drops below 0.80, which
+    correctly reflects the partial-outage state.
+    """
+    cusips = _select_unresolved_bulk_cusips(conn, limit=limit)
+    if not cusips:
+        return OpenFigiSweepReport(
+            candidates_seen=0,
+            resolved=0,
+            promoted=0,
+            no_instrument_match=0,
+            unresolved_by_openfigi=0,
+            api_errors=0,
+        )
+
+    resolved_count = 0
+    promoted_count = 0
+    no_instrument = 0
+    api_errors = 0
+
+    # Drive the OpenFIGI call inside a try/except so a transport-level
+    # failure surfaces as an error count rather than aborting the
+    # outer transaction. The caller's S13 invoker turns this into a
+    # ``coverage_floor_met=FALSE`` outcome; no exception propagates.
+    try:
+        mappings = resolver.resolve_cusips(cusips)
+    except Exception as exc:  # noqa: BLE001 — bound failure to error counter
+        # Subclass of OpenFigiError OR an unexpected exception — both
+        # collapse to api_errors. Logging captures the breakdown.
+        logger.warning(
+            "openfigi sweep: resolver raised %s; all %d CUSIPs marked api_error",
+            type(exc).__name__,
+            len(cusips),
+        )
+        mappings = {}
+        api_errors = len(cusips)
+
+    for cusip in cusips:
+        mapping = mappings.get(cusip)
+        if mapping is None:
+            # api_errors already counted above (whole-batch failure)
+            # OR resolver returned warning/error/no-US-row for this
+            # CUSIP.
+            if api_errors == 0:
+                # Normal "no resolution" path — the resolver succeeded
+                # but OpenFIGI doesn't know the CUSIP.
+                pass
+            continue
+        resolved_count += 1
+        instrument_id = _find_instrument_by_ticker(conn, ticker=mapping.ticker)
+        if instrument_id is None:
+            no_instrument += 1
+            logger.info(
+                "openfigi sweep: ticker %s for cusip %s has no unique instrument match",
+                mapping.ticker,
+                cusip,
+            )
+            continue
+        inserted = _promote_openfigi_mapping(
+            conn,
+            cusip=cusip,
+            instrument_id=instrument_id,
+        )
+        if inserted:
+            promoted_count += 1
+        # Tombstone all bulk rows for this CUSIP either way — even when
+        # the external_identifiers row already existed (a prior sweep's
+        # rowcount-0 insert), the bulk rows can be retired because the
+        # mapping is now live.
+        tombstoned = _tombstone_bulk_rows_for_cusip(
+            conn,
+            cusip=cusip,
+            status="resolved_via_openfigi",
+        )
+        if inserted:
+            logger.info(
+                "openfigi sweep: promoted cusip=%s ticker=%s instrument_id=%d (%d bulk rows tombstoned)",
+                cusip,
+                mapping.ticker,
+                instrument_id,
+                tombstoned,
+            )
+
+    unresolved_by_openfigi = len(cusips) - resolved_count - api_errors if api_errors < len(cusips) else 0
+
+    return OpenFigiSweepReport(
+        candidates_seen=len(cusips),
+        resolved=resolved_count,
+        promoted=promoted_count,
+        no_instrument_match=no_instrument,
+        unresolved_by_openfigi=unresolved_by_openfigi,
+        api_errors=api_errors,
     )
 
 

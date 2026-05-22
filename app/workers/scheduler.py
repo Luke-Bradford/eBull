@@ -24,7 +24,7 @@ import logging
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import anthropic
 import psycopg
@@ -319,6 +319,12 @@ JOB_SEC_FIRST_INSTALL_DRAIN = "sec_first_install_drain"
 # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap drain.
 JOB_MF_DIRECTORY_SYNC = "mf_directory_sync"
 JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
+# #1233 PR-1b — OpenFIGI CUSIP resolver post-bulk sweep stage (S13).
+# Owns the dedicated ``openfigi`` Lane (cap=1). Walks bulk-source
+# rows in ``unresolved_13f_cusips`` and promotes resolvable ones into
+# ``external_identifiers`` (provider='openfigi'). Writes
+# ``bootstrap_runs.coverage_floor_met`` informationally post-sweep.
+JOB_CUSIP_RESOLVER_POST_BULK_SWEEP = "cusip_resolver_post_bulk_sweep"
 
 # #1155 — Layer 1 / 2 / 3 freshness redesign wiring + sec_rebuild
 # manual triage. Implementation entrypoints existed since #867/#868/#870
@@ -4627,6 +4633,89 @@ def sec_n_csr_bootstrap_drain(params: Mapping[str, Any]) -> None:
             stats.errors,
             stats.secondary_pages_fetched,
             stats.accessions_outside_horizon,
+        )
+
+
+def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
+    """``_INVOKERS['cusip_resolver_post_bulk_sweep']`` — Phase D / S13
+    (#1233 PR-1b).
+
+    Drives the OpenFIGI sweep over bulk-source rows in
+    ``unresolved_13f_cusips`` (``source IN ('bulk_13f_dataset',
+    'bulk_nport_dataset')``), promotes successful CUSIP → ticker
+    resolutions into ``external_identifiers (provider='openfigi',
+    identifier_type='cusip')``, tombstones the corresponding bulk
+    rows with ``resolution_status='resolved_via_openfigi'``, then
+    computes the post-sweep CUSIP coverage and stamps the active
+    ``bootstrap_runs.coverage_floor_met`` boolean against the 0.80
+    floor.
+
+    ``coverage_floor_met`` is **informational only** — the run still
+    transitions to ``status='complete'`` regardless. The admin panel
+    renders an amber chip when the column is FALSE. See spec §15
+    (acceptance criteria) and SD-1 (settled-decisions) for rationale.
+
+    No operator-tweakable params. The 1000-row LIMIT in
+    ``sweep_unresolved_cusips_via_openfigi`` is the per-pass cap;
+    the daily / on-bootstrap cadence drains larger backlogs across
+    multiple invocations.
+    """
+    del params  # No params honoured.
+
+    from app.services.bootstrap_preconditions import compute_cusip_coverage
+    from app.services.cusip_resolver import sweep_unresolved_cusips_via_openfigi
+    from app.services.openfigi_resolver import OpenFigiResolver
+
+    # Coverage floor — the spec acceptance threshold below which the
+    # admin panel surfaces an amber "informational" chip on the
+    # bootstrap_runs row. NOT a hard block — the run still completes.
+    coverage_floor: Final[float] = 0.80
+
+    with _tracked_job(JOB_CUSIP_RESOLVER_POST_BULK_SWEEP) as tracker:
+        with (
+            OpenFigiResolver.from_env() as resolver,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            report = sweep_unresolved_cusips_via_openfigi(conn, resolver=resolver)
+            conn.commit()
+
+            # Post-sweep coverage compute + run-scoped writeback. Reads
+            # the latest running bootstrap_runs row — the orchestrator's
+            # at-most-one-running invariant
+            # (``bootstrap_runs_one_running_idx``) guarantees a single
+            # row matches when the invoker is dispatched from the
+            # orchestrator stage. Outside-of-bootstrap manual triggers
+            # (admin "Run now") find no running row and skip the
+            # column update — coverage_floor_met stays NULL.
+            coverage = compute_cusip_coverage(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM bootstrap_runs WHERE status='running' ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+                run_id = int(row[0]) if row else None
+                if run_id is not None:
+                    floor_met = coverage.ratio >= coverage_floor
+                    cur.execute(
+                        "UPDATE bootstrap_runs SET coverage_floor_met = %s WHERE id = %s",
+                        (floor_met, run_id),
+                    )
+            conn.commit()
+
+        tracker.row_count = report.promoted
+        logger.info(
+            "cusip_resolver_post_bulk_sweep: candidates=%d resolved=%d promoted=%d "
+            "no_instrument_match=%d unresolved_by_openfigi=%d api_errors=%d "
+            "coverage=%d/%d=%.2f%% floor=%.0f%% met=%s",
+            report.candidates_seen,
+            report.resolved,
+            report.promoted,
+            report.no_instrument_match,
+            report.unresolved_by_openfigi,
+            report.api_errors,
+            coverage.mapped,
+            coverage.cohort,
+            coverage.ratio * 100,
+            coverage_floor * 100,
+            coverage.ratio >= coverage_floor,
         )
 
 

@@ -77,17 +77,33 @@ class Form13FIngestResult:
 
 
 def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
-    """Preload all SEC CUSIP → instrument_id mappings into a dict.
+    """Preload all CUSIP → instrument_id mappings (SEC + OpenFIGI) into a dict.
 
     13F + N-PORT INFOTABLE rows can number in the millions per
     archive; doing one indexed DB query per row is the dominant
     cost of the bulk ingest. Loading the entire map once at the
     top of ingest_*_dataset_archive collapses millions of round
     trips into one SELECT. CUSIP universe is bounded (~13k SEC
-    Form 13F securities list rows + ~1500 universe instruments),
-    so the dict fits comfortably in memory.
+    Form 13F securities list rows + ~1500 universe instruments +
+    OpenFIGI promotions), so the dict fits comfortably in memory.
 
     Codex sweep BLOCKING for #1020.
+
+    Provider widening (#1233 PR-1b): the WHERE filter now reads
+    ``provider IN ('sec', 'openfigi')`` so post-bulk-sweep OpenFIGI
+    promotions become visible to the next bulk ingest pass without
+    a schema-level UNION view. The SEC-curated mappings remain
+    authoritative — ``ORDER BY is_primary DESC, external_identifier_id ASC``
+    means a SEC ``is_primary=TRUE`` row wins over an OpenFIGI
+    ``is_primary=FALSE`` row when both exist for the same CUSIP
+    (the OpenFIGI sweep deliberately writes ``is_primary=FALSE``;
+    see ``app/services/cusip_resolver.py::_promote_openfigi_mapping``).
+    The CUSIP-uniqueness constraint
+    (``uq_external_identifiers_provider_value`` on
+    ``(provider, identifier_type, identifier_value)``) means at most
+    one row per (provider, cusip), so the dedup happens at the row
+    level — ``setdefault`` keeps the first-seen mapping per CUSIP
+    after the ORDER BY.
     """
     out: dict[str, int] = {}
     with conn.cursor() as cur:
@@ -95,7 +111,7 @@ def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
             """
             SELECT identifier_value, instrument_id
             FROM external_identifiers
-            WHERE provider = 'sec' AND identifier_type = 'cusip'
+            WHERE provider IN ('sec', 'openfigi') AND identifier_type = 'cusip'
             ORDER BY is_primary DESC, external_identifier_id ASC
             """,
         )
@@ -104,7 +120,9 @@ def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
             key = str(cusip).strip().upper()
             # First (highest priority) wins per (CUSIP) — match the
             # `ORDER BY is_primary DESC` shape of the per-row query
-            # this replaces.
+            # this replaces. SEC primary > SEC non-primary > OpenFIGI
+            # non-primary by construction (OpenFIGI sweep never writes
+            # is_primary=TRUE).
             out.setdefault(key, int(instrument_id))
     return out
 

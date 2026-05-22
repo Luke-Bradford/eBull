@@ -78,6 +78,10 @@ LaneApi = Literal[
     "db_ownership_inst",
     "db_ownership_insider",
     "db_ownership_funds",
+    # #1233 PR-1b — bootstrap-only OpenFIGI sweep lane (S13).
+    # Mirrored from ``app/jobs/sources.py::Lane`` + sql/165's
+    # ``bootstrap_stages.lane`` CHECK constraint extension.
+    "openfigi",
 ]
 StageApiStatus = Literal["pending", "running", "success", "error", "skipped", "blocked", "cancelled"]
 

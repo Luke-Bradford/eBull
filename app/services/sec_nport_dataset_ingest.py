@@ -155,10 +155,13 @@ def _parse_decimal(value: str | None) -> Decimal | None:
 
 
 def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
-    """Preload the SEC CUSIP → instrument_id map (perf, Codex sweep BLOCKING).
+    """Preload all CUSIP → instrument_id mappings (SEC + OpenFIGI).
 
-    See ``sec_13f_dataset_ingest._load_cusip_map`` for rationale —
-    same pattern duplicated here to keep ingester modules independent.
+    See ``sec_13f_dataset_ingest._load_cusip_map`` for rationale and
+    the provider-widening note (#1233 PR-1b) — same pattern duplicated
+    here to keep ingester modules independent. The two readers MUST
+    stay in lock-step: a future curated mapping that only one sees
+    silently mis-aligns row counts between 13F and N-PORT.
     """
     out: dict[str, int] = {}
     with conn.cursor() as cur:
@@ -166,7 +169,7 @@ def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
             """
             SELECT identifier_value, instrument_id
             FROM external_identifiers
-            WHERE provider = 'sec' AND identifier_type = 'cusip'
+            WHERE provider IN ('sec', 'openfigi') AND identifier_type = 'cusip'
             ORDER BY is_primary DESC, external_identifier_id ASC
             """,
         )

@@ -72,6 +72,7 @@ Lane = Literal[
     "db_ownership_funds",
     "bootstrap",
     "finra",
+    "openfigi",
 ]
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
 jobs serialise under one ``JobLock``; cross-source jobs run in parallel.
@@ -136,6 +137,15 @@ The final lane is bootstrap-only:
   bimonthly + daily ingest share one in-process budget.
   v1 jobs: ``finra_short_interest_refresh`` (G6/#915, bimonthly) +
   ``finra_regsho_daily_refresh`` (G6/#916, daily).
+
+* ``openfigi`` — OpenFIGI v3 mapping host (api.openfigi.com).
+  Tier-dependent budget (unkeyed 25 req/60s × 10 jobs = 250
+  mappings/min; keyed 25 req/6s × 100 jobs = 25,000 mappings/min).
+  Disjoint from every SEC lane by construction (different host —
+  no shared per-IP budget with sec_rate). Sole consumer is the
+  bootstrap S13 ``cusip_resolver_post_bulk_sweep`` stage
+  (#1233 PR-1b). SD-1 cross-reference: ``docs/settled-decisions.md``.
+  Resolver: ``app/services/openfigi_resolver.py``.
 """
 
 

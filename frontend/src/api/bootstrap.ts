@@ -42,7 +42,12 @@ export type BootstrapLane =
   | "db_fundamentals_raw"
   | "db_ownership_inst"
   | "db_ownership_insider"
-  | "db_ownership_funds";
+  | "db_ownership_funds"
+  // #1233 PR-1b — OpenFIGI CUSIP resolver post-bulk sweep (S13).
+  // Bootstrap-only single-stage lane (cap=1). Mirrored from
+  // ``app/api/bootstrap.py::LaneApi`` + ``app/jobs/sources.py::Lane``
+  // + sql/165 ``bootstrap_stages.lane`` CHECK constraint extension.
+  | "openfigi";
 
 export interface BootstrapArchiveResultResponse {
   archive_name: string;
