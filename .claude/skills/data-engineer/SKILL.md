@@ -374,6 +374,44 @@ WHERE s.category = '<cat>'
 
 Spec: `docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md`. Prevention-log entries: "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope clamp on BOTH the ON clause AND the DELETE clause" + "Diff-aware writers must NOT include update-timestamp columns in the diff predicate".
 
+**Batched form for post-ingest hot-paths (#1233 PR-4, SHIPPED 2026-05-23)**:
+
+Three of the seven helpers also expose a batched form:
+
+- `refresh_insiders_current_batch(conn, *, instrument_ids)`
+- `refresh_institutions_current_batch(conn, *, instrument_ids)`
+- `refresh_funds_current_batch(conn, *, instrument_ids)`
+
+Used by `sec_bulk_orchestrator_jobs.py` after each bulk ingest. Collapses the per-instrument round-trip + lock + MERGE into one of each, scoped to the batch. Saves 5–10 min wall-clock per category at peak (~10k touched instruments × 50 ms each).
+
+Hard invariants pinned by `tests/test_ownership_observations_refresh_batch.py` (21 cases = 7 × 3 helpers):
+
+- **Deadlock-safe lock ordering**: the batched helper acquires ALL advisory locks for its batch in a single server-side query sorted by hashed lock key (`hashtextextended('refresh_X_current', 0) # iid::bigint`). NOT by raw `instrument_id` — the hash is not monotonic in `iid`, so two parallel callers seeing the same set in raw-int order could deadlock. Hash-key order makes both callers queue identically.
+- **DISTINCT ON / ORDER BY lead column**: batched USING subquery prepends `instrument_id` to both the DISTINCT ON tuple and the ORDER BY list so per-instrument partitioning matches the single-instrument helper exactly.
+- **ON clause**: drops the const clamp `tgt.instrument_id = %(iid)s` (no single iid in scope); uses `tgt.instrument_id = src.instrument_id` from MERGE's natural per-row matching.
+- **NOT MATCHED BY SOURCE clamp**: `tgt.instrument_id = ANY(%(ids)s::bigint[])` replaces the const clamp — the load-bearing scope guard against cross-instrument cartesian DELETE.
+- **Empty input**: no-op (returns 0, dispatches no SQL).
+- **Idempotency**: identical to single-instrument helper — IS DISTINCT FROM diff predicate skips UPDATE on no-op; xmin stays stable; row count unchanged.
+- **Caller normalisation**: `_normalise_instrument_ids` dedupes + sorts the input. A caller passing `[3, 1, 2, 1, 3]` behaves the same as `[1, 2, 3]`.
+- **Watermark UPSERT**: one `ownership_refresh_state` row per instrument in the batch, written via `executemany` — same shape as the single-instrument helper's single INSERT.
+
+Call-site pattern (in `sec_bulk_orchestrator_jobs.py`, mirrored across 13F / insider / N-PORT):
+
+```python
+_REFRESH_BATCH_CHUNK_SIZE: Final[int] = 200
+
+for chunk_start in range(0, len(sorted_ids), _REFRESH_BATCH_CHUNK_SIZE):
+    if bootstrap_cancel_requested():
+        raise BootstrapStageCancelled(...)
+    chunk = sorted_ids[chunk_start : chunk_start + _REFRESH_BATCH_CHUNK_SIZE]
+    with conn.transaction():
+        refresh_X_current_batch(conn, instrument_ids=chunk)
+```
+
+Cancel observation latency degrades from ~50 instruments (old serial loop) to ~`_REFRESH_BATCH_CHUNK_SIZE` (=200) instruments. Documented trade-off, accepted in spec §8.
+
+The four other helpers (blockholders / treasury / def14a / esop) keep the single-instrument path only — nothing in the bulk orchestrator loops over them at scale, so the batched form would be code without a caller.
+
 ### 2.11 Worker / job entry points
 
 [app/workers/scheduler.py:453](../../../app/workers/scheduler.py#L453) — `SCHEDULED_JOBS` declaration. [app/jobs/](../../../app/jobs/) package owns runtime side:
