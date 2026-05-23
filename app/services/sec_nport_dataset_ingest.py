@@ -39,9 +39,9 @@ import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID, uuid4
 
 import psycopg
@@ -57,6 +57,15 @@ logger = logging.getLogger(__name__)
 # for rationale (per-batch incremental commit so a multi-million-row
 # archive doesn't hold the open transaction across the whole drain).
 _UNRESOLVED_FLUSH_BATCH = 1000
+
+# Precision of ``ownership_funds_observations.shares`` (sql/123:84 —
+# NUMERIC(24, 4) NOT NULL CHECK (shares > 0)). The pre-validation gate
+# must quantise BALANCE to this scale BEFORE the > 0 predicate, because
+# a fractional-share holding like 0.00005 passes ``> 0`` but truncates
+# to 0.0000 on COPY into the staging table → trips the strict CHECK on
+# the drain INSERT. Pre-PR-3 per-row INSERT masked this via per-row
+# SAVEPOINT; the COPY-batched path cannot.
+_BALANCE_QUANTUM: Final = Decimal("0.0001")
 
 
 @dataclass
@@ -524,6 +533,30 @@ def ingest_nport_dataset_archive(
                 if balance is None or balance <= 0:
                     result.rows_skipped_non_positive_shares += 1
                     continue
+                # PR-3 regression guard: ``ownership_funds_observations.shares``
+                # is NUMERIC(24, 4) with a strict ``CHECK (shares > 0)``
+                # (sql/123:84). A fractional-share holding like 0.00005
+                # passes the ``> 0`` predicate above but quantises to
+                # 0.0000 on COPY into staging, then trips the CHECK on
+                # the INSERT...SELECT drain — aborting the entire archive.
+                # Pre-PR-3 per-row INSERT path masked this via per-row
+                # SAVEPOINT (counted as bad_data, loop continued); the
+                # COPY-batched path cannot. Quantise here at the same
+                # precision the column will store, and reject the row
+                # if it underflows to zero.
+                # ROUND_HALF_EVEN matches Postgres NUMERIC coercion
+                # semantics exactly — what PG would do on INSERT, we do
+                # here so the pre-validation outcome lines up with the
+                # CHECK constraint outcome. ``0.00005 → 0.0000`` (tie
+                # to even, reject); ``0.00006 → 0.0001`` (accept);
+                # ``0.00004 → 0.0000`` (reject). Codex 2 finding on
+                # the fix branch — implicit rounding mode was a
+                # forensic gap.
+                balance_q = balance.quantize(_BALANCE_QUANTUM, rounding=ROUND_HALF_EVEN)
+                if balance_q <= 0:
+                    result.rows_skipped_non_positive_shares += 1
+                    continue
+                balance = balance_q
 
                 cusip = (holding.get("ISSUER_CUSIP") or "").strip().upper()
                 if not cusip:
