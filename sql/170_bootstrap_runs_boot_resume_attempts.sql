@@ -35,7 +35,8 @@ ALTER TABLE bootstrap_runs
 
 COMMENT ON COLUMN bootstrap_runs.boot_resume_attempts IS
     '#1296 — count of jobs-process restarts that auto-enqueued an orchestrator '
-    'resume for this run. Bounded by _MAX_BOOT_RESUMES in app/jobs/__main__.py '
-    '(default 1) so a crash-during-resume cannot loop forever.';
+    'resume for this run. Bounded by _MAX_BOOT_RESUMES in '
+    'app/services/bootstrap_state.py (default 1) so a crash-during-resume '
+    'cannot loop forever.';
 
 COMMIT;

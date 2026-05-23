@@ -747,11 +747,16 @@ def serve(stop_event: threading.Event | None = None) -> int:
             with psycopg.connect(settings.database_url, autocommit=True) as conn:
                 decision = attempt_boot_resume(conn, requested_by=boot_id)
             if decision.decision == "resumed":
+                # Source the cap from bootstrap_state so the log line
+                # tracks widening of the cap automatically. Bot
+                # NITPICK on PR #1301.
+                from app.services.bootstrap_state import _MAX_BOOT_RESUMES
+
                 logger.info(
                     "jobs entrypoint: bootstrap auto-resume enqueued (run_id=%d, attempt=%d/%d)",
                     decision.run_id or -1,
                     decision.attempts,
-                    1,  # _MAX_BOOT_RESUMES default; keep in sync if widened
+                    _MAX_BOOT_RESUMES,
                 )
             else:
                 if decision.decision == "terminated_max_attempts":
