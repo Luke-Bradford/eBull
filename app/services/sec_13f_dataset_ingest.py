@@ -52,7 +52,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from app.services.cusip_resolver import record_unresolved_cusip_from_bulk
+from app.services.cusip_resolver import flush_unresolved_cusips_bulk
 from app.services.institutional_holdings import thirteen_f_retention_cutoff
 
 logger = logging.getLogger(__name__)
@@ -64,13 +64,6 @@ logger = logging.getLogger(__name__)
 # Hoisted to module level so the cutover constant isn't re-built
 # on every INFOTABLE row. Codex pre-push NITPICK for #1054.
 _VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
-
-
-# Flush unresolved-CUSIP buffer every N rows to the PR-1a helper. The
-# helper inserts with ON CONFLICT DO NOTHING into the bulk-path partial
-# UNIQUE index on (cusip, filer_cik, period_end, source) so flushing
-# in chunks bounds in-memory buffer growth without changing semantics.
-_UNRESOLVED_FLUSH_BATCH = 1000
 
 
 @dataclass
@@ -449,40 +442,44 @@ def _flush_unresolved_buffer(
     source: Literal["bulk_13f_dataset", "bulk_nport_dataset"],
     result: Form13FIngestResult,
 ) -> None:
-    """Drain accumulated unresolved CUSIPs via the PR-1a helper.
+    """Drain accumulated unresolved CUSIPs via the PR-1295 COPY helper.
 
-    Each write under its own SAVEPOINT (``with conn.transaction()``)
-    so a DB error (e.g. CHECK violation on the bulk-path schema)
-    does NOT leave the enclosing per-archive tx in
-    ``InFailedSqlTransaction`` and abort the staging drain. Failure
-    to record an unresolved CUSIP is logged + counted as a
-    ``parse_error`` but does NOT abort the archive — the unresolved
-    table is a hint for the PR-1b OpenFIGI sweep, not a source of
-    truth. Caller is responsible for clearing the buffer post-flush.
+    Pre-#1295: per-row INSERT + SAVEPOINT loop (~1k rows/s, dominated
+    Phase C wall-clock when the unresolved set hit 2M+).
+    Post-#1295: one COPY + INSERT...SELECT...ON CONFLICT pass via
+    :func:`cusip_resolver.flush_unresolved_cusips_bulk`. Same
+    idempotency on the bulk partial UNIQUE INDEX.
 
-    Lint note: the savepoint is OUTSIDE the cur.copy() block body
-    (flush runs post-COPY) so the bulk-ingest lint guard at
-    scripts/check_bulk_ingest_copy_pattern.sh accepts it.
+    Failure isolation: the helper is wrapped in ONE savepoint
+    (``with conn.transaction():``) so a CHECK / FK / OOM raise
+    inside it rolls back to the savepoint without poisoning the
+    outer archive tx. This preserves the pre-#1295 contract that
+    "the unresolved table is a hint for the PR-1b OpenFIGI sweep,
+    not a source of truth — a flush failure must not abort the
+    archive's observation writes". One savepoint per flush is the
+    cheapest way to keep that invariant under the new single-call
+    shape.
+
+    Lint note: the savepoint lives OUTSIDE the main observations
+    ``cur.copy()`` block (the flush runs post-stream), so the
+    bulk-ingest lint guard at
+    scripts/check_bulk_ingest_copy_pattern.sh invariant C.1 is
+    satisfied (the awk walker only scans inside the COPY-cursor
+    body).
     """
-    for cusip, filer_cik, period_end in buffer:
-        try:
-            with conn.transaction():
-                record_unresolved_cusip_from_bulk(
-                    conn,
-                    cusip=cusip,
-                    filer_cik=filer_cik,
-                    period_end=period_end,
-                    source=source,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "13F ingest: record_unresolved_cusip_from_bulk failed for cusip=%s filer=%s period=%s: %s",
-                cusip,
-                filer_cik,
-                period_end,
-                exc,
-            )
-            result.parse_errors += 1
+    if not buffer:
+        return
+    try:
+        with conn.transaction():
+            flush_unresolved_cusips_bulk(conn, buffer, source=source)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "13F ingest: flush_unresolved_cusips_bulk failed (chunk=%d, source=%s): %s",
+            len(buffer),
+            source,
+            exc,
+        )
+        result.parse_errors += 1
 
 
 def ingest_13f_dataset_archive(
@@ -690,21 +687,15 @@ def ingest_13f_dataset_archive(
     # Flush accumulated unresolved CUSIPs after the COPY context
     # closes (a COPY context exclusively owns the cursor so we cannot
     # interleave normal statements; flushing post-stream is the
-    # simplest correct shape).
+    # simplest correct shape). #1295: a single COPY pass handles
+    # millions of triples — no per-chunk loop needed.
     if unresolved_buffer:
-        # Chunk the flush so a 5M-row archive with a 100k-unresolved
-        # tail doesn't block on one giant statement series. The PR-1a
-        # helper issues one INSERT per call so this is just a control-
-        # flow guard against unbounded buffer growth — semantically the
-        # same as flushing the whole list at once.
-        for start in range(0, len(unresolved_buffer), _UNRESOLVED_FLUSH_BATCH):
-            chunk = unresolved_buffer[start : start + _UNRESOLVED_FLUSH_BATCH]
-            _flush_unresolved_buffer(
-                conn,
-                buffer=chunk,
-                source="bulk_13f_dataset",
-                result=result,
-            )
+        _flush_unresolved_buffer(
+            conn,
+            buffer=unresolved_buffer,
+            source="bulk_13f_dataset",
+            result=result,
+        )
         unresolved_buffer.clear()
 
     # Drain staging into the partitioned observations table.

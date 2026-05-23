@@ -253,6 +253,13 @@ def record_unresolved_cusip_from_bulk(
     rewash the right accessions once the CUSIP resolves.
 
     The caller is responsible for committing the transaction.
+
+    Note: this single-row writer is retained for back-compat (tests
+    + ad-hoc callers). The bulk ingest paths (13F dataset, NPORT
+    dataset) batch-flush via :func:`flush_unresolved_cusips_bulk`
+    instead — #1233 PR for #1295 — which is ~200× faster on large
+    unresolved sets by replacing per-row INSERT + SAVEPOINT with a
+    single COPY + INSERT...SELECT...ON CONFLICT.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -279,6 +286,123 @@ def record_unresolved_cusip_from_bulk(
                 "source": source,
             },
         )
+
+
+# Internal — staging-table column list for the bulk flush. Order
+# pinned because both ``cur.copy(...)`` writes and the
+# ``INSERT...SELECT`` projection bind by position.
+_BULK_STG_COLS: Final = ("cusip", "filer_cik", "period_end", "source")
+
+
+def flush_unresolved_cusips_bulk(
+    conn: psycopg.Connection[Any],
+    buffer: Iterable[tuple[str, str, date]],
+    *,
+    source: BulkCusipSource,
+) -> int:
+    """Drain accumulated ``(cusip, filer_cik, period_end)`` triples
+    into ``unresolved_13f_cusips`` in one COPY + INSERT...SELECT
+    pass. Idempotent on the same partial UNIQUE INDEX as
+    :func:`record_unresolved_cusip_from_bulk`.
+
+    Returns the number of rows successfully written (post ON CONFLICT
+    de-dup). A second flush of the same triples returns 0.
+
+    Performance: pre-PR-1295 used per-row INSERT + SAVEPOINT (~1000
+    rows/s ceiling on a 2M-row archive). The COPY + INSERT...SELECT
+    shape mirrors PR-3 (#1283) and lifts the ceiling to ~30k-50k
+    rows/s — empirically saves 15-30 min Phase C wall-clock on a
+    full bootstrap with a large unresolved backlog. The flush is
+    called ONCE per archive, after the main ``cur.copy()`` for the
+    observations table has closed, so the cursor is free for
+    sequential statements again. Single-pass iteration — buffer is
+    streamed directly into COPY without materialising a normalised
+    copy (memory parity with the caller's existing list).
+
+    Safety: ``source`` is a ``Literal`` constrained by the CHECK
+    constraint on ``unresolved_13f_cusips.source``. ``cusip`` is
+    upper-cased + stripped here so caller-side preprocessing is
+    optional. Malformed rows are filtered (empty cusip/filer or
+    NULL period_end) so the helper degrades to a no-op rather than
+    aborting on bad input.
+
+    Transaction safety: the helper does NOT own a savepoint — if
+    the INSERT (or any earlier statement) raises, the caller's
+    open transaction enters ``InFailedSqlTransaction``. Callers
+    that need flush-failure isolation MUST wrap the call in
+    ``with conn.transaction():`` so a failure rolls back to a
+    savepoint without poisoning the outer archive tx. Both bulk
+    ingesters (13F + NPORT) do this in their ``_flush_unresolved_buffer``
+    wrappers (#1295).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TEMP TABLE IF NOT EXISTS _stg_unresolved_cusips_bulk (
+                cusip       TEXT NOT NULL,
+                filer_cik   TEXT,
+                period_end  DATE,
+                source      TEXT
+            ) ON COMMIT DROP
+            """
+        )
+        # If the staging table was created earlier in the same tx
+        # (e.g. by a prior helper invocation in tests) clear it so
+        # this flush sees only its own rows.
+        cur.execute("TRUNCATE _stg_unresolved_cusips_bulk")
+
+        copy_sql = (
+            "COPY _stg_unresolved_cusips_bulk ("
+            + ", ".join(_BULK_STG_COLS)
+            + ") FROM STDIN WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)"
+        )
+        # Stream the caller's buffer directly into COPY. No
+        # materialised second list — peak memory is one buffer
+        # entry per row regardless of buffer length. Filter empty /
+        # incomplete triples in the same pass.
+        staged = 0
+        with cur.copy(copy_sql) as copy:
+            for cusip, filer_cik, period_end in buffer:
+                if not cusip or not filer_cik or period_end is None:
+                    continue
+                copy.write_row(
+                    (
+                        cusip.strip().upper(),
+                        filer_cik.strip(),
+                        period_end,
+                        source,
+                    )
+                )
+                staged += 1
+        if staged == 0:
+            return 0
+
+        # Drain staging into the target via INSERT...SELECT...ON
+        # CONFLICT. The partial UNIQUE INDEX
+        # ``unresolved_13f_cusips_bulk_idx`` enforces the dedup; the
+        # explicit ``WHERE source IS NOT NULL`` disambiguates from
+        # the legacy partial UNIQUE INDEX
+        # ``unresolved_13f_cusips_legacy_idx`` on ``(cusip) WHERE
+        # source IS NULL`` (sql/164).
+        cur.execute(
+            """
+            INSERT INTO unresolved_13f_cusips (
+                cusip, name_of_issuer, last_accession_number,
+                filer_cik, period_end, source
+            )
+            SELECT
+                cusip, NULL, NULL,
+                filer_cik, period_end, source
+            FROM _stg_unresolved_cusips_bulk
+            ON CONFLICT (
+                cusip,
+                COALESCE(filer_cik, ''),
+                COALESCE(period_end, '0001-01-01'::date),
+                COALESCE(source, '')
+            ) WHERE source IS NOT NULL DO NOTHING
+            """
+        )
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
 
 # ---------------------------------------------------------------------------

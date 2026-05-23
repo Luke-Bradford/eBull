@@ -35,6 +35,7 @@ import psycopg
 import pytest
 
 from app.services.cusip_resolver import (
+    flush_unresolved_cusips_bulk,
     record_unresolved_cusip_from_bulk,
     resolve_unresolved_cusips,
     sweep_resolvable_unresolved_cusips,
@@ -369,6 +370,225 @@ class TestRecordUnresolvedCusipFromBulk:
         )
         ebull_test_conn.commit()
         assert _count_bulk_rows(ebull_test_conn) == 2
+
+
+# ---------------------------------------------------------------------------
+# #1295 — COPY-based bulk flush helper unit behaviour
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestFlushUnresolvedCusipsBulk:
+    """Regression coverage for :func:`flush_unresolved_cusips_bulk`.
+
+    Pre-#1295 the bulk ingesters drained their unresolved-CUSIP
+    buffer via a per-row INSERT + SAVEPOINT loop. Post-#1295 they
+    call :func:`flush_unresolved_cusips_bulk`, which streams the
+    whole buffer into a TEMP staging table via ``COPY`` then drains
+    via ``INSERT...SELECT...ON CONFLICT DO NOTHING``. Idempotency
+    and dedup semantics must match the per-row writer exactly.
+    """
+
+    def test_empty_buffer_returns_zero(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        before = _count_bulk_rows(ebull_test_conn)
+        written = flush_unresolved_cusips_bulk(
+            ebull_test_conn,
+            [],
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+        assert written == 0
+        assert _count_bulk_rows(ebull_test_conn) == before
+
+    def test_multi_row_buffer_inserts_all_distinct_tuples(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        before = _count_bulk_rows(ebull_test_conn)
+        buffer = [
+            ("00FLUSH001", "0001111111", _PERIOD_END),
+            ("00FLUSH002", "0001111111", _PERIOD_END),
+            ("00FLUSH003", "0002222222", _PERIOD_END),
+        ]
+        written = flush_unresolved_cusips_bulk(
+            ebull_test_conn,
+            buffer,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+        assert written == 3
+        assert _count_bulk_rows(ebull_test_conn) == before + 3
+
+    def test_reflush_same_buffer_is_idempotent(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        buffer = [
+            ("00FLUSH010", "0001111111", _PERIOD_END),
+            ("00FLUSH011", "0001111111", _PERIOD_END),
+        ]
+        first = flush_unresolved_cusips_bulk(
+            ebull_test_conn,
+            buffer,
+            source="bulk_13f_dataset",
+        )
+        second = flush_unresolved_cusips_bulk(
+            ebull_test_conn,
+            buffer,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+        assert first == 2
+        assert second == 0
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM unresolved_13f_cusips
+                WHERE cusip IN ('00FLUSH010', '00FLUSH011')
+                """
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert int(row[0]) == 2
+
+    def test_same_cusip_different_filer_or_period_creates_separate_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        cusip = "00FLUSH020"
+        buffer = [
+            (cusip, "0001111111", _PERIOD_END),
+            (cusip, "0002222222", _PERIOD_END),
+            (cusip, "0001111111", date(2025, 12, 31)),
+        ]
+        written = flush_unresolved_cusips_bulk(
+            ebull_test_conn,
+            buffer,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+        assert written == 3
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM unresolved_13f_cusips WHERE cusip = %s",
+                (cusip,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert int(row[0]) == 3
+
+    def test_whitespace_and_case_normalisation(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Helper strips + upper-cases CUSIP and strips filer_cik so
+        downstream lookups (e.g. by the OpenFIGI sweep) match the
+        canonical form regardless of caller hygiene."""
+        buffer = [
+            ("  00flush030  ", "  0003333333  ", _PERIOD_END),
+        ]
+        written = flush_unresolved_cusips_bulk(
+            ebull_test_conn,
+            buffer,
+            source="bulk_nport_dataset",
+        )
+        ebull_test_conn.commit()
+        assert written == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cusip, filer_cik, source
+                FROM unresolved_13f_cusips
+                WHERE cusip = '00FLUSH030'
+                """
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0] == ("00FLUSH030", "0003333333", "bulk_nport_dataset")
+
+    def test_helper_failure_isolated_by_wrapper_savepoint(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The wrapper :func:`_flush_unresolved_buffer` in each
+        ingester catches helper raises and increments
+        ``parse_errors`` so a flush failure must NOT poison the
+        outer archive transaction.
+
+        Codex 2 pre-push BLOCKING finding on #1295: without the
+        wrapper's savepoint, a CHECK / FK / OOM raise inside the
+        helper leaves the connection in ``InFailedSqlTransaction``;
+        the next observation-table query in the archive flow fails
+        and the entire archive rolls back. The fix wraps the
+        helper call in ``with conn.transaction():`` so a raise
+        unwinds to the savepoint and the archive tx survives.
+        """
+        from app.services import sec_13f_dataset_ingest as ingest_mod
+        from app.services.sec_13f_dataset_ingest import Form13FIngestResult
+
+        def _boom(*_args: object, **_kwargs: object) -> int:
+            raise RuntimeError("forced helper failure for test")
+
+        monkeypatch.setattr(ingest_mod, "flush_unresolved_cusips_bulk", _boom)
+
+        result = Form13FIngestResult()
+        ingest_mod._flush_unresolved_buffer(
+            ebull_test_conn,
+            buffer=[("00FLUSH900", "0009000000", _PERIOD_END)],
+            source="bulk_13f_dataset",
+            result=result,
+        )
+
+        # Wrapper recorded the failure but did NOT raise.
+        assert result.parse_errors == 1
+
+        # Outer tx is alive: a plain SELECT runs without
+        # InFailedSqlTransaction. Pre-fix this would raise.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            assert cur.fetchone() == (1,)
+
+        # Commit succeeds — the failed flush did not poison the tx.
+        ebull_test_conn.commit()
+
+        # And the helper failed cleanly: no row reached the table.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM unresolved_13f_cusips WHERE cusip = '00FLUSH900'")
+            row = cur.fetchone()
+        assert row is not None
+        assert int(row[0]) == 0
+
+    def test_drops_rows_with_missing_required_field(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Buffer rows with empty cusip, empty filer_cik, or null
+        period_end are silently skipped by the helper — the caller
+        is expected to have filtered already, but the helper is
+        defensive so a malformed triple never aborts the flush.
+        Matches the pre-#1295 per-row SAVEPOINT semantic without
+        spending a SAVEPOINT to do it.
+        """
+        before = _count_bulk_rows(ebull_test_conn)
+        buffer = [
+            ("", "0001111111", _PERIOD_END),
+            ("00FLUSH040", "", _PERIOD_END),
+            ("00FLUSH041", "0001111111", None),  # type: ignore[arg-type]
+            ("00FLUSH042", "0001111111", _PERIOD_END),
+        ]
+        written = flush_unresolved_cusips_bulk(
+            ebull_test_conn,
+            buffer,
+            source="bulk_13f_dataset",
+        )
+        ebull_test_conn.commit()
+        assert written == 1
+        assert _count_bulk_rows(ebull_test_conn) == before + 1
 
 
 # ---------------------------------------------------------------------------
