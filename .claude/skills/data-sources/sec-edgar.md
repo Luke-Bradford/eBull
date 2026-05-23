@@ -84,6 +84,26 @@ Pattern at [app/services/institutional_holdings.py:189-220](../../../app/service
 | Insider dataset | `https://www.sec.gov/data-research/sec-markets-data/insider-transactions-data-sets` | Quarterly | All Form 3/4/5 |
 | Financial-statement dataset | `https://www.sec.gov/dera/data/financial-statement-data-sets.html` | Quarterly | XBRL extract (10-K / 10-Q) |
 
+### Daily-refresh pathways (#1233 PR-8)
+
+Bulk archives are downloaded ONCE at first-install bootstrap. After that they stale forever unless explicitly re-pulled. Three SCHEDULED_JOBS in `app/workers/scheduler.py` close the loop by HEAD-ing the SEC URL each cycle, comparing against a local `.zip.etag` sidecar, and re-downloading only on change.
+
+| Job | Archive | Cadence (UTC) | Lane | Rationale for cadence |
+|---|---|---|---|---|
+| `sec_submissions_bulk_refresh` | `submissions.zip` | Daily 08:00 | `sec_bulk_download` | After SEC's ~03:00 ET nightly rebuild has propagated |
+| `sec_companyfacts_bulk_refresh` | `companyfacts.zip` | Daily 08:30 | `sec_bulk_download` | Staggered 30 min after submissions to avoid GB-scale stream collision |
+| `sec_quarterly_datasets_bulk_refresh` | All 13F + N-PORT + insider quarterly files | Monthly day-5 06:00 | `sec_bulk_download` | After quarterly publication cycle settles (publishes typically land within first business days) |
+
+**ETag-compare contract:** Each archive has two sidecars — `<archive>.etag` (verbatim SEC ETag with quotes) and `<archive>.sha256` (hex digest of bytes on disk). Both written atomically (tmp + rename) AFTER the `.zip` itself is replaced. Missing sidecar ⇒ treat as stale ⇒ refresh.
+
+**Bootstrap fence:** Refresh job skips while `bootstrap_state.status='running'` so PR-5b's bulk-download reuse path is never raced. Skip is recorded as `job_runs.status='success' + error_msg='bootstrap_running'` (the refresh ran fine, it just had nothing to do).
+
+**Fail-closed on SEC 5xx:** HEAD or GET non-200 ⇒ skip with structured reason, local file untouched. The next fire retries. Never corrupts on-disk archives.
+
+**Implementation:** `app/services/sec_bulk_refresh.py`. Shares the `_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK` rate budget with every other SEC consumer (7 req/s ceiling).
+
+**Operator-visible:** `job_runs.row_count = bytes_downloaded`. A no-op fire ⇒ `row_count=0` + no error_msg. A real change ⇒ `row_count` ≈ archive size.
+
 ### Indexes + Atom feeds
 
 | Endpoint | URL | Refresh | Use For |
