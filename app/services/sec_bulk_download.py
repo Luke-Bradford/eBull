@@ -35,7 +35,9 @@ Behaviours:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import shutil
 import time
 import zipfile
@@ -97,13 +99,26 @@ class BulkArchive:
 
 @dataclass
 class ArchiveDownloadResult:
-    """Per-archive outcome reported back to the orchestrator."""
+    """Per-archive outcome reported back to the orchestrator.
+
+    ``reuse_reason`` is the value stamped into the per-run manifest:
+    - ``"downloaded_in_run"``: the bytes were fetched in THIS run.
+    - ``"etag_match_sha256_verified"``: a prior-run .zip was reused
+      because SEC's HEAD ETag matched the local ``.zip.etag`` sidecar
+      AND the local file's SHA-256 matched ``.zip.sha256``.
+    Both reasons satisfy ``assert_archive_belongs_to_run`` provenance
+    because the manifest is stamped fresh with the current
+    ``bootstrap_run_id`` regardless of reuse path
+    (settled-decisions.md "Bulk archive reuse keyed on SEC ETag +
+    SHA-256").
+    """
 
     name: str
     path: Path | None
     bytes_downloaded: int
     skipped: bool = False
     error: str | None = None
+    reuse_reason: Literal["downloaded_in_run", "etag_match_sha256_verified"] | None = None
 
 
 @dataclass
@@ -268,34 +283,375 @@ def build_bulk_archive_inventory(
 # ---------------------------------------------------------------------------
 
 
-def _preflight_cleanup_stale_partials(target_dir: Path) -> None:
-    """Delete leftover ``*.partial`` AND complete ``*.zip`` files
-    from previous runs.
+def _validate_archive_name(name: str) -> str:
+    """Return ``name`` unchanged after defending against path-traversal.
 
-    Originally only cleaned partials — but the run-manifest provenance
-    contract (#1020) requires every archive in the current run's
-    manifest to have been physically downloaded in THIS run. Promoting
-    a prior-run complete ``.zip`` into the current manifest would let
-    stale data pass provenance. Solution: nuke everything, every run
-    re-downloads. Resume-from-partial (within the same run) still
-    works because the per-run download itself can interrupt and
-    leave a ``.partial`` that the next-attempt pre-flight wipes
-    before retrying.
+    ``archive.name`` is joined into ``target_dir`` in three layers
+    (purge / preflight / download) to derive concrete paths for the
+    archive, its sidecars, and the resume-partial. A crafted name
+    containing path separators or ``..`` would escape ``target_dir``
+    and could delete or overwrite arbitrary filesystem state. Today
+    every name comes from ``build_bulk_archive_inventory`` which we
+    control, but defense-in-depth: validate at the boundary so a
+    future caller-supplied inventory cannot bypass the check.
 
-    The run-manifest itself is also wiped so a stale manifest cannot
-    leak into the next run.
+    Rules:
+      - Must equal its basename (no separators).
+      - Must not be empty, ``.``, ``..``, or absolute.
+      - Must not contain backslashes or NUL.
+      - Codex 2 BLOCKING for PR-5b.
     """
+    if not name:
+        raise ValueError("archive name must be non-empty")
+    if name in (".", ".."):
+        raise ValueError(f"archive name must not be {name!r}")
+    if "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError(f"archive name must not contain path separators or NUL: {name!r}")
+    if Path(name).is_absolute():
+        raise ValueError(f"archive name must be relative: {name!r}")
+    # Posix-form basename equality also catches drive letters on Win
+    # (``C:foo``) which would otherwise sneak past the separator check.
+    if Path(name).name != name:
+        raise ValueError(f"archive name must equal its basename: {name!r}")
+    return name
+
+
+def _resolve_archive_path(target_dir: Path, archive_name: str) -> Path:
+    """Return ``target_dir / archive_name`` after validation."""
+    return target_dir / _validate_archive_name(archive_name)
+
+
+def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """Return hex SHA-256 of ``path``. Streams in 1 MB chunks (multi-GB safe)."""
+    hasher = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+_SIDECAR_TMP_TAG: Final[str] = f".tmp.{os.getpid()}"
+
+
+def _atomic_write_sidecar(target_path: Path, value: str) -> None:
+    """Write ``value`` to ``target_path`` atomically (tmp + rename).
+
+    Crash-mid-write must not leave a half-formed sidecar that the next
+    run accepts as authoritative. Sidecar contents are pure text (hex
+    digest or ETag string) so encoding is fixed UTF-8.
+
+    The tmp suffix incorporates the writer's PID so two concurrent
+    processes targeting the same archive (defensive — bootstrap is
+    singleton-gated, but a future operator override could fire two
+    sec_bulk_download runs side-by-side) don't clobber each other's
+    half-written sidecar before the final ``rename``. Codex 2 MEDIUM
+    for PR-5b.
+    """
+    tmp_path = target_path.with_suffix(target_path.suffix + _SIDECAR_TMP_TAG)
+    tmp_path.write_text(value, encoding="utf-8")
+    tmp_path.replace(target_path)
+
+
+def _read_sidecar(path: Path) -> str | None:
+    """Return stripped sidecar contents, or None if missing/unreadable."""
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning("sidecar read failed for %s: %s", path, exc)
+        return None
+
+
+def _purge_archive_artifacts(target_dir: Path, archive_name: str) -> None:
+    """Delete the .zip, .partial, .sha256 + .etag sidecars for ``archive_name``.
+
+    Used by the ETag-keyed pre-flight when a re-download is required so
+    no stale local state can leak into the next attempt. Also used as
+    the broad reset path when ``BOOTSTRAP_FORCE_REDOWNLOAD=1``.
+    """
+    base = _resolve_archive_path(target_dir, archive_name)
+    candidates = (
+        base,
+        base.with_suffix(base.suffix + ".partial"),
+        Path(str(base) + ".sha256"),
+        Path(str(base) + ".etag"),
+    )
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            logger.info("preflight purge: removed %s", path)
+        except OSError as exc:
+            logger.warning("preflight purge: failed to remove %s: %s", path, exc)
+
+
+_FORCE_REDOWNLOAD_ENV: Final[str] = "BOOTSTRAP_FORCE_REDOWNLOAD"
+
+
+def _force_redownload_active() -> bool:
+    """Return True when the operator override env var is truthy."""
+    raw = os.environ.get(_FORCE_REDOWNLOAD_ENV, "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+async def _head_etag(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    rate_limiter: Any | None = None,
+) -> str | None:
+    """Return the ``ETag`` header from a HEAD against ``url``, or None.
+
+    Used by the pre-flight reuse path. Failure modes are tolerated by
+    the caller (no-reuse → re-download) — this helper never raises for
+    a missing or non-200 ETag, only for outright transport faults that
+    the caller must escalate.
+    """
+    if rate_limiter is not None:
+        await rate_limiter.acquire()
+    response = await client.head(url)
+    if response.status_code != 200:
+        logger.info(
+            "preflight HEAD non-200 for %s: status=%d — will re-download",
+            url,
+            response.status_code,
+        )
+        return None
+    etag = response.headers.get("etag") or response.headers.get("ETag")
+    if etag is None:
+        # Per spec: SEC sometimes serves static files without an ETag.
+        # No sidecar comparison possible → caller must re-download.
+        return None
+    return etag
+
+
+@dataclass(frozen=True)
+class _ArchiveReuseDecision:
+    """Outcome of the pre-flight reuse check for one archive."""
+
+    name: str
+    reused: bool
+    sec_etag: str | None  # remote ETag at preflight time, if HEAD succeeded
+    reason: str  # human-readable reason logged to operator
+
+
+async def _preflight_archive_reuse_decision(
+    client: httpx.AsyncClient,
+    archive: BulkArchive,
+    target_dir: Path,
+    *,
+    rate_limiter: Any | None = None,
+) -> _ArchiveReuseDecision:
+    """Decide whether ``archive`` can be reused from local disk.
+
+    Reuse criteria (ALL must hold):
+      1. Local ``.zip`` exists.
+      2. ``.zip.sha256`` sidecar exists AND matches a fresh SHA-256
+         of the local ``.zip``.
+      3. ``.zip.etag`` sidecar exists AND matches SEC's HEAD ``ETag``.
+
+    Operator override ``BOOTSTRAP_FORCE_REDOWNLOAD=1`` is handled at a
+    higher layer (the caller short-circuits before invoking this
+    helper) so the per-archive decision flow stays focused on
+    sidecar/HEAD comparison.
+
+    On any negative decision the caller is expected to purge the
+    archive's artefacts (.zip + .partial + sidecars) before retry.
+    """
+    zip_path = _resolve_archive_path(target_dir, archive.name)
+    sha_path = Path(str(zip_path) + ".sha256")
+    etag_path = Path(str(zip_path) + ".etag")
+    partial_path = zip_path.with_suffix(zip_path.suffix + ".partial")
+
+    # A leftover .partial alongside a complete .zip indicates a prior
+    # interrupted resume; safe path is full re-download.
+    if partial_path.exists():
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=None,
+            reason="partial_present",
+        )
+
+    if not zip_path.exists():
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=None,
+            reason="local_missing",
+        )
+
+    stored_sha = _read_sidecar(sha_path)
+    if stored_sha is None:
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=None,
+            reason="sha256_sidecar_missing",
+        )
+
+    stored_etag = _read_sidecar(etag_path)
+    if stored_etag is None:
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=None,
+            reason="etag_sidecar_missing",
+        )
+
+    # HEAD SEC for the live ETag. A non-200 / missing ETag means we
+    # cannot prove freshness; safe default is re-download.
+    try:
+        sec_etag = await _head_etag(client, archive.url, rate_limiter=rate_limiter)
+    except (httpx.HTTPError, OSError) as exc:
+        logger.warning("preflight HEAD failed for %s: %s — will re-download", archive.url, exc)
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=None,
+            reason=f"head_failed: {type(exc).__name__}",
+        )
+
+    if sec_etag is None:
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=None,
+            reason="sec_etag_missing",
+        )
+
+    if sec_etag != stored_etag:
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=sec_etag,
+            reason="etag_mismatch",
+        )
+
+    # ETag matches → verify the local bytes actually still match the
+    # SHA-256 we stamped at download time (defends against on-disk
+    # corruption or a tampered sidecar).
+    try:
+        actual_sha = _sha256_file(zip_path)
+    except OSError as exc:
+        logger.warning("preflight SHA-256 failed for %s: %s — will re-download", zip_path, exc)
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=sec_etag,
+            reason=f"sha256_read_failed: {type(exc).__name__}",
+        )
+
+    if actual_sha != stored_sha:
+        return _ArchiveReuseDecision(
+            name=archive.name,
+            reused=False,
+            sec_etag=sec_etag,
+            reason="sha256_mismatch",
+        )
+
+    return _ArchiveReuseDecision(
+        name=archive.name,
+        reused=True,
+        sec_etag=sec_etag,
+        reason="etag_match_sha256_verified",
+    )
+
+
+async def _preflight_etag_keyed_reuse(
+    client: httpx.AsyncClient,
+    archives: Sequence[BulkArchive],
+    target_dir: Path,
+    *,
+    rate_limiter: Any | None = None,
+) -> dict[str, _ArchiveReuseDecision]:
+    """For each archive, decide reuse-or-redownload and clean up
+    non-reusable local state.
+
+    Replaces the older blanket ``_preflight_cleanup_stale_partials``
+    that nuked every prior-run ``.zip`` regardless of freshness. With
+    sidecar evidence + SEC's stable S3-backed ETag, an unchanged
+    archive can be reused safely (settled-decisions.md, "Bulk archive
+    reuse keyed on SEC ETag + SHA-256").
+
+    The stale ``.run_manifest.json`` is always deleted up front — the
+    next run will stamp a fresh manifest with the current
+    ``bootstrap_run_id`` regardless of which archives were reused vs
+    downloaded. This preserves the provenance contract that
+    ``assert_archive_belongs_to_run`` enforces (#1020).
+
+    Operator override: ``BOOTSTRAP_FORCE_REDOWNLOAD=1`` bypasses reuse
+    for every archive.
+    """
+    decisions: dict[str, _ArchiveReuseDecision] = {}
     if not target_dir.exists():
-        return
+        return decisions
+
+    # Always wipe the prior manifest so we never leak a stale run_id
+    # forward; the new manifest is written by write_run_manifest().
+    manifest_path = target_dir / RUN_MANIFEST_NAME
+    if manifest_path.exists():
+        try:
+            manifest_path.unlink()
+            logger.info("preflight: removed stale run manifest %s", manifest_path)
+        except OSError as exc:
+            logger.warning("preflight: failed to remove stale manifest %s: %s", manifest_path, exc)
+
+    force = _force_redownload_active()
+    if force:
+        logger.warning(
+            "preflight: %s=1 — purging all archives + sidecars (forced redownload)",
+            _FORCE_REDOWNLOAD_ENV,
+        )
+
+    expected_names: set[str] = set()
+    for archive in archives:
+        expected_names.add(archive.name)
+        if force:
+            decision = _ArchiveReuseDecision(
+                name=archive.name,
+                reused=False,
+                sec_etag=None,
+                reason="force_redownload_env",
+            )
+        else:
+            decision = await _preflight_archive_reuse_decision(client, archive, target_dir, rate_limiter=rate_limiter)
+        decisions[archive.name] = decision
+        if not decision.reused:
+            _purge_archive_artifacts(target_dir, archive.name)
+            logger.info(
+                "preflight: %s will re-download (reason=%s)",
+                archive.name,
+                decision.reason,
+            )
+        else:
+            logger.info(
+                "preflight: %s reused from disk (etag=%s)",
+                archive.name,
+                decision.sec_etag,
+            )
+
+    # Stray archives not in the current inventory should still be
+    # cleaned (e.g. an old 13F window dropped off the rolling list).
     for path in target_dir.iterdir():
         if not path.is_file():
             continue
-        if path.name.endswith(".partial") or path.name.endswith(".zip") or path.name == RUN_MANIFEST_NAME:
-            try:
-                path.unlink()
-                logger.info("preflight cleanup: removed %s", path)
-            except OSError as exc:
-                logger.warning("preflight cleanup: failed to remove %s: %s", path, exc)
+        name = path.name
+        if not (name.endswith(".zip") or name.endswith(".partial")):
+            continue
+        # Strip ``.partial`` to get the canonical archive name.
+        base_name = name[: -len(".partial")] if name.endswith(".partial") else name
+        if base_name in expected_names:
+            continue
+        # Also clean the matching sidecars if any.
+        _purge_archive_artifacts(target_dir, base_name)
+
+    return decisions
 
 
 def check_disk_space(target_dir: Path, *, min_free_bytes: int = DEFAULT_MIN_FREE_BYTES) -> tuple[bool, int]:
@@ -377,8 +733,8 @@ async def _head_size_and_type(
     url: str,
     *,
     rate_limiter: Any | None = None,
-) -> tuple[int, str]:
-    """Return (Content-Length, Content-Type) for ``url`` via HEAD.
+) -> tuple[int, str, str | None]:
+    """Return ``(Content-Length, Content-Type, ETag-or-None)`` for ``url``.
 
     ``rate_limiter`` acquires the shared SEC rate clock before the
     HEAD so it counts against the per-IP budget (#1042).
@@ -389,6 +745,12 @@ async def _head_size_and_type(
     lets the caller reject non-archive responses BEFORE downloading
     bytes, replacing the brittle ``expected_min_bytes`` floor that
     conflated "small file" with "corrupted file" (#1059).
+
+    ETag is returned so the caller can bind a resume Range request to
+    the specific resource version it HEAD'd — if SEC rebuilds the
+    archive between HEAD and the resume GET, ``If-Range`` makes the
+    server return a 200 (full body) instead of appending fresh bytes
+    onto a stale ``.partial``. Codex 2 LOW/MEDIUM for PR-5b.
     """
     if rate_limiter is not None:
         await rate_limiter.acquire()
@@ -399,7 +761,8 @@ async def _head_size_and_type(
     if length is None:
         raise RuntimeError(f"HEAD missing Content-Length: url={url}")
     content_type = (response.headers.get("content-type") or "").lower()
-    return int(length), content_type
+    etag = response.headers.get("etag") or response.headers.get("ETag")
+    return int(length), content_type, etag
 
 
 # Acceptable Content-Type values for SEC bulk archives. Real-world
@@ -560,20 +923,28 @@ async def _download_one(
     HEAD/GET so the bulk downloader counts against the per-IP budget
     shared with sec_edgar / pipelined fetcher (#1042).
     """
-    final_path = target_dir / archive.name
+    final_path = _resolve_archive_path(target_dir, archive.name)
     partial_path = final_path.with_suffix(final_path.suffix + ".partial")
 
     if final_path.exists() and _zip_round_trip(final_path):
-        # Already-good archive on disk; treat as skip.
+        # Already-good archive on disk; treat as skip. Under the
+        # ETag-keyed reuse model the pre-flight is expected to either
+        # remove a stale .zip or short-circuit reuse before reaching
+        # this branch, so this is a defensive fallback. Stamp the
+        # in-run reuse_reason so manifest provenance still ties this
+        # path to the current bootstrap_run_id.
         return ArchiveDownloadResult(
             name=archive.name,
             path=final_path,
             bytes_downloaded=0,
             skipped=True,
+            reuse_reason="downloaded_in_run",
         )
 
     try:
-        expected_total, content_type = await _head_size_and_type(client, archive.url, rate_limiter=rate_limiter)
+        expected_total, content_type, head_etag = await _head_size_and_type(
+            client, archive.url, rate_limiter=rate_limiter
+        )
     except Exception as exc:  # noqa: BLE001 — operator-visible message
         return ArchiveDownloadResult(
             name=archive.name,
@@ -597,6 +968,11 @@ async def _download_one(
         )
 
     # Resume from partial if present and shorter than expected.
+    # ``If-Range`` binds the resume to the exact resource version we
+    # HEAD'd a few ms earlier; if SEC rebuilds the archive between HEAD
+    # and the resume GET, the server returns 200 (full body) instead of
+    # 206 — the existing 200-fallback path below already discards the
+    # partial and restarts from zero. Codex 2 LOW/MEDIUM for PR-5b.
     headers: dict[str, str] = {}
     resume_from = 0
     if partial_path.exists():
@@ -606,7 +982,10 @@ async def _download_one(
         else:
             resume_from = existing
             headers["Range"] = f"bytes={existing}-"
+            if head_etag is not None:
+                headers["If-Range"] = head_etag
 
+    response_etag: str | None = None
     try:
         if rate_limiter is not None:
             await rate_limiter.acquire()
@@ -627,8 +1006,17 @@ async def _download_one(
                             bytes_downloaded=0,
                             error=f"GET failed: status={fresh.status_code}",
                         )
+                    response_etag = fresh.headers.get("etag") or fresh.headers.get("ETag")
                     await _stream_to_partial(fresh, partial_path, mode="wb", chunk_size=chunk_size)
             elif response.status_code in (200, 206):
+                # Only capture ETag on a full GET (200). A 206 partial
+                # response's ETag refers to the resumed slice's parent
+                # which is fine to record on completion, but if the
+                # server already produced an ETag on the initial GET
+                # earlier we'd be stamping the same value. Either way,
+                # ETag from the response covers the full resource for
+                # SEC's S3-backed bulk archives.
+                response_etag = response.headers.get("etag") or response.headers.get("ETag")
                 mode = "ab" if resume_from else "wb"
                 await _stream_to_partial(response, partial_path, mode=mode, chunk_size=chunk_size)
             else:
@@ -676,10 +1064,36 @@ async def _download_one(
         )
 
     partial_path.replace(final_path)
+
+    # ETag-keyed reuse depends on these sidecars being present after
+    # every successful download. SHA-256 is computed from the
+    # on-disk file (not streamed during download) so corruption that
+    # somehow survives the size + magic + zip-round-trip checks is
+    # still caught on the next pre-flight. Both writes are atomic
+    # (tmp + rename); failures here are logged but do not fail the
+    # download itself — the manifest still records success and the
+    # next run will simply re-download for "sidecar_missing".
+    try:
+        sha256_hex = _sha256_file(final_path)
+        _atomic_write_sidecar(Path(str(final_path) + ".sha256"), sha256_hex)
+    except OSError as exc:
+        logger.warning("sidecar write (sha256) failed for %s: %s", final_path, exc)
+    if response_etag is not None:
+        try:
+            _atomic_write_sidecar(Path(str(final_path) + ".etag"), response_etag)
+        except OSError as exc:
+            logger.warning("sidecar write (etag) failed for %s: %s", final_path, exc)
+    else:
+        logger.info(
+            "no ETag header on GET for %s — reuse pre-flight will force re-download next run",
+            archive.name,
+        )
+
     return ArchiveDownloadResult(
         name=archive.name,
         path=final_path,
         bytes_downloaded=final_size - resume_from,
+        reuse_reason="downloaded_in_run",
     )
 
 
@@ -751,6 +1165,11 @@ def write_run_manifest(
                 "name": r.name,
                 "bytes_downloaded": r.bytes_downloaded,
                 "error": r.error,
+                # Provenance: which path produced this archive in THIS
+                # run. Default to "downloaded_in_run" if the result
+                # predates the field (defensive — should not occur
+                # after PR-5b but keeps the manifest schema honest).
+                "reuse_reason": r.reuse_reason or "downloaded_in_run",
             }
             for r in archives
             if r.error is None and r.path is not None
@@ -781,6 +1200,9 @@ def read_run_manifest(target_dir: Path) -> dict | None:
         return None
 
 
+_ACCEPTED_REUSE_REASONS: Final[frozenset[str]] = frozenset({"downloaded_in_run", "etag_match_sha256_verified"})
+
+
 def assert_archive_belongs_to_run(
     target_dir: Path,
     archive_name: str,
@@ -788,7 +1210,18 @@ def assert_archive_belongs_to_run(
     bootstrap_run_id: int,
 ) -> None:
     """Raise if the archive at ``<bulk>/<archive_name>`` is not in the
-    current run's manifest."""
+    current run's manifest.
+
+    Provenance contract (#1020): every archive read by a Phase C
+    stage must trace to a manifest stamped with the current
+    ``bootstrap_run_id``. PR-5b widens the contract to accept BOTH
+    ``reuse_reason='downloaded_in_run'`` and
+    ``reuse_reason='etag_match_sha256_verified'`` — see
+    settled-decisions.md "Bulk archive reuse keyed on SEC ETag +
+    SHA-256". The manifest is rewritten every run regardless of
+    reuse path, so a stale prior-run manifest still fails the
+    ``bootstrap_run_id`` check below.
+    """
     manifest = read_run_manifest(target_dir)
     if manifest is None:
         raise RuntimeError(
@@ -800,10 +1233,22 @@ def assert_archive_belongs_to_run(
             f"PRECONDITION: bulk manifest run_id={manifest.get('bootstrap_run_id')!r} "
             f"!= current bootstrap_run_id={bootstrap_run_id}; archive is stale."
         )
-    archive_names = {a["name"] for a in manifest.get("archives", [])}
-    if archive_name not in archive_names:
+    archive_entry: dict[str, Any] | None = None
+    for entry in manifest.get("archives", []):
+        if entry.get("name") == archive_name:
+            archive_entry = entry
+            break
+    if archive_entry is None:
         raise RuntimeError(
             f"PRECONDITION: archive {archive_name!r} not in current-run manifest; sec_bulk_download did not land it."
+        )
+    # ``reuse_reason`` may be absent on manifests written by pre-PR-5b
+    # code paths; treat absent as the legacy default.
+    reuse_reason = archive_entry.get("reuse_reason") or "downloaded_in_run"
+    if reuse_reason not in _ACCEPTED_REUSE_REASONS:
+        raise RuntimeError(
+            f"PRECONDITION: archive {archive_name!r} has unexpected reuse_reason={reuse_reason!r}; "
+            f"accepted values are {sorted(_ACCEPTED_REUSE_REASONS)}."
         )
 
 
@@ -829,7 +1274,6 @@ async def download_bulk_archives(
     recorded on the result and surfaced in the admin UI.
     """
     target_dir.mkdir(parents=True, exist_ok=True)
-    _preflight_cleanup_stale_partials(target_dir)
     has_space, free_bytes = check_disk_space(target_dir, min_free_bytes=min_free_bytes)
     if not has_space:
         return BulkDownloadResult(
@@ -869,7 +1313,18 @@ async def download_bulk_archives(
     )
 
     async with _make_client(user_agent) as client:
+        # ETag-keyed reuse pre-flight (PR-5b): for each archive,
+        # decide whether the existing local .zip + sidecars prove
+        # freshness against SEC's HEAD ETag. Non-reusable artefacts
+        # are purged before bandwidth probe + download. The stale
+        # run-manifest is always wiped (a fresh one is written
+        # post-download).
+        reuse_decisions = await _preflight_etag_keyed_reuse(client, archives, target_dir, rate_limiter=rate_limiter)
+
         # Bandwidth probe against the first archive (submissions.zip).
+        # If every archive is reused, the probe is unnecessary (0 bytes
+        # to fetch) but still cheap (4 MB range-GET) and confirms SEC
+        # is reachable before we declare the run a no-op.
         probe_url = archives[0].url
         try:
             measured = await measure_bandwidth_mbps(client, probe_url=probe_url, rate_limiter=rate_limiter)
@@ -897,7 +1352,22 @@ async def download_bulk_archives(
                 # (Codex sweep BLOCKING) don't condemn an archive.
                 return await _download_one_with_retry(client, archive, target_dir, rate_limiter=rate_limiter)
 
-        results = await asyncio.gather(*(_bounded(a) for a in archives))
+        async def _resolve(archive: BulkArchive) -> ArchiveDownloadResult:
+            decision = reuse_decisions.get(archive.name)
+            if decision is not None and decision.reused:
+                # 0-byte reuse: surface as a successful skip so the
+                # manifest writer records it with provenance
+                # ``etag_match_sha256_verified``. No network IO.
+                return ArchiveDownloadResult(
+                    name=archive.name,
+                    path=_resolve_archive_path(target_dir, archive.name),
+                    bytes_downloaded=0,
+                    skipped=True,
+                    reuse_reason="etag_match_sha256_verified",
+                )
+            return await _bounded(archive)
+
+        results = await asyncio.gather(*(_resolve(a) for a in archives))
 
     return BulkDownloadResult(
         mode="bulk",

@@ -607,6 +607,26 @@ rate limits. Operator approved 2026-05-22 prior to PR-1b merge.
 **Fixtures + skill:** `tests/fixtures/openfigi/`,
 `.claude/skills/data-sources/openfigi.md`.
 
+---
+
+## Bulk archive reuse keyed on SEC ETag + SHA-256 (2026-05-22)
+
+**Decision:** The Codex review BLOCKING for #1020 prohibited reusing a
+prior-run `.zip`. With SEC's stable S3-backed ETag, reuse is permitted
+when ALL of:
+(1) local `.zip.etag` sidecar matches SEC's HEAD response,
+(2) SHA-256 of local file matches `.zip.sha256` sidecar.
+The run-manifest records `reuse_reason: 'etag_match_sha256_verified'`.
+Forced override: `BOOTSTRAP_FORCE_REDOWNLOAD=1` env var.
+**Empirical:** SEC ignores `If-None-Match` / `If-Modified-Since` (both
+return 200 + full body regardless, probed 2026-05-22). Reuse therefore
+uses client-side header comparison: HEAD → compare ETag → conditional
+GET. The run-manifest is stamped fresh every run (download OR reuse),
+so `assert_archive_belongs_to_run` still gates Phase C on current
+`bootstrap_run_id` provenance regardless of reuse path.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
