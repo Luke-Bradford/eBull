@@ -311,6 +311,31 @@ Capability = Literal[
     # skipped → S8 cascade-skipped) still flows into S15 as the
     # legacy chain owner of ``filing_events_seeded``.
     "submissions_processed",
+    # #1233 — extension of the PR-1292 cap-ordering pattern to the
+    # other bulk/legacy pairs flagged by the 2026-05-23 lock-contention
+    # audit. Same shape:
+    #
+    #   * ``insider_dataset_processed`` — S11 sec_insider_ingest_from_dataset
+    #     and S19 sec_insider_transactions_backfill + S20 sec_form3_ingest
+    #     all write ``ownership_insiders_observations``. Without an
+    #     ordering cap, PR-2 ``as_completed`` parallelism would let the
+    #     bulk path and the legacy backfills run concurrently against
+    #     overlapping (instrument_id, holder, observed_at) rows —
+    #     identical row-lock storm shape as the S8↔S15 case PR-1292
+    #     fixed.
+    #
+    #   * ``institutional_dataset_processed`` — S10 sec_13f_ingest_from_dataset
+    #     and S22 sec_13f_recent_sweep both write
+    #     ``ownership_institutions_observations``. Same pattern;
+    #     largest write fanout of any audited pair (institutional 13F
+    #     rows during a full bootstrap can total tens of millions).
+    #
+    # Both caps are PROVIDED on SUCCESS by their respective bulk
+    # ingester and ON SKIP for cascade-skip parity. Required by the
+    # legacy stages downstream so they serialise after the bulk
+    # ingester terminalises.
+    "insider_dataset_processed",
+    "institutional_dataset_processed",
 ]
 
 
@@ -342,8 +367,20 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
     "sec_submissions_ingest": ("filing_events_seeded", "submissions_processed"),
     "sec_companyfacts_ingest": ("fundamentals_raw_seeded",),
     # Bulk ownership ingester covers both insider transactions + Form 3.
-    "sec_insider_ingest_from_dataset": ("insider_inputs_seeded", "form3_inputs_seeded"),
-    "sec_13f_ingest_from_dataset": ("institutional_inputs_seeded",),
+    # #1233 lock-contention cap-gates: bulk ingesters advertise an
+    # ordering cap on top of their content caps. Required by S19/S20
+    # (insider) and S22 (institutional) so the legacy backfills wait
+    # for the bulk path to terminalise. See ``insider_dataset_processed``
+    # / ``institutional_dataset_processed`` docstrings.
+    "sec_insider_ingest_from_dataset": (
+        "insider_inputs_seeded",
+        "form3_inputs_seeded",
+        "insider_dataset_processed",
+    ),
+    "sec_13f_ingest_from_dataset": (
+        "institutional_inputs_seeded",
+        "institutional_dataset_processed",
+    ),
     "sec_nport_ingest_from_dataset": ("nport_inputs_seeded",),
     "sec_submissions_files_walk": ("submissions_secondary_pages_walked",),
     "filings_history_seed": ("filing_events_seeded",),
@@ -380,6 +417,16 @@ _STAGE_PROVIDES_ON_SKIP: Final[dict[str, tuple[Capability, ...]]] = {
     # as success" — the cap is purely an ordering constraint on S15,
     # not a content-validity signal.
     "sec_submissions_ingest": ("submissions_processed",),
+    # #1233 lock-contention cap-gates: same cascade-skip parity as
+    # ``sec_submissions_ingest``. If S7 sec_bulk_download is skipped
+    # on slow-connection fallback (#1041), S10/S11 cascade-skip too —
+    # but the ordering cap still flows so the legacy ingesters
+    # proceed without waiting on a bulk run that will never happen.
+    # The cap is purely an ordering constraint; the cap-on-skip does
+    # NOT masquerade as "content was ingested", same as the existing
+    # ``submissions_processed`` cascade-skip entry.
+    "sec_insider_ingest_from_dataset": ("insider_dataset_processed",),
+    "sec_13f_ingest_from_dataset": ("institutional_dataset_processed",),
 }
 
 
@@ -444,6 +491,34 @@ _STRICT_CAP_PROVIDER_EXCLUSIONS: Final[dict[Capability, frozenset[str]]] = {
 }
 
 
+# #1233 lock-contention cap-gates — "ordering-only" caps that
+# advertise "the upstream stage has terminalised, no concurrent
+# writer remains" rather than "the upstream produced usable content".
+# These caps are SATISFIED on ANY terminal status of their provider
+# stage (success / skipped / blocked / error / cancelled), not just
+# success or skip.
+#
+# Rationale: the row-lock storm shape PR-1292 fixed exists ONLY while
+# the bulk stage is actively writing. Once the bulk stage has
+# terminalised — for any reason, including a cascade-block from an
+# earlier failure — the legacy downstream can write safely. Without
+# this concession the cap-gate would FALSELY block the legacy
+# recovery path during a partial-bulk-failure run
+# (``test_partial_bulk_failure_legacy_recovers``).
+#
+# Content caps (``filing_events_seeded``, ``insider_inputs_seeded``,
+# etc.) deliberately stay non-ordering: they must observe actual
+# content writes to be satisfied. Ordering caps only need the
+# upstream stage to be done.
+_ORDERING_ONLY_CAPS: Final[frozenset[Capability]] = frozenset(
+    {
+        "submissions_processed",
+        "insider_dataset_processed",
+        "institutional_dataset_processed",
+    }
+)
+
+
 # Stage-key → CapRequirement. Replaces the old AND-only
 # ``_STAGE_REQUIRES`` (#1138 Task A). Every entry in
 # ``_BOOTSTRAP_STAGE_SPECS`` must appear here (enforced by the
@@ -487,10 +562,18 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     "sec_business_summary_bootstrap": CapRequirement(
         all_of=("filing_events_seeded", "submissions_secondary_pages_walked")
     ),
-    "sec_insider_transactions_backfill": CapRequirement(all_of=("cik_mapping_ready",)),
-    "sec_form3_ingest": CapRequirement(all_of=("cik_mapping_ready",)),
+    # #1233 lock-contention cap-gates — same shape as PR-1292 for
+    # S15↔S8. The legacy backfills (S19/S20) and the legacy 13F sweep
+    # (S22) all write the same observation table their bulk
+    # counterparts (S11 / S10) write. Without the ordering cap, PR-2
+    # cross-lane parallelism lets them run concurrently and produces
+    # the row-lock storm shape that killed bootstrap run #5. Caps are
+    # ``*_dataset_processed`` (provided by S11 / S10 on success or
+    # skip), so the legacy stages run AFTER the bulk path terminalises.
+    "sec_insider_transactions_backfill": CapRequirement(all_of=("cik_mapping_ready", "insider_dataset_processed")),
+    "sec_form3_ingest": CapRequirement(all_of=("cik_mapping_ready", "insider_dataset_processed")),
     "sec_8k_events_ingest": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
-    "sec_13f_recent_sweep": CapRequirement(all_of=("cik_mapping_ready",)),
+    "sec_13f_recent_sweep": CapRequirement(all_of=("cik_mapping_ready", "institutional_dataset_processed")),
     "sec_n_port_ingest": CapRequirement(all_of=("cik_mapping_ready",)),
     # #1174 — dedicated MF directory refresh + N-CSR drain (S25 + S26).
     "mf_directory_sync": CapRequirement(all_of=("universe_seeded",)),
@@ -609,6 +692,16 @@ def _satisfied_capabilities(
                     caps.add(cap)
         elif status == "skipped":
             caps.update(provides_on_skip.get(stage_key, ()))
+        elif status in ("blocked", "error", "cancelled"):
+            # #1233 — ordering-only caps advertise "upstream is done"
+            # regardless of how it ended. Content caps stay unsatisfied
+            # on terminal failure (no usable rows landed). Without this
+            # branch a cascade-blocked bulk ingester would falsely gate
+            # its legacy counterpart from recovering — see
+            # ``_ORDERING_ONLY_CAPS`` docstring.
+            for cap in provides.get(stage_key, ()):
+                if cap in _ORDERING_ONLY_CAPS:
+                    caps.add(cap)
     return caps
 
 
@@ -619,6 +712,7 @@ def _capability_is_dead(
     *,
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
     provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
+    provides: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES,
     min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
     exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> bool:
@@ -661,6 +755,15 @@ def _capability_is_dead(
         if status == "skipped":
             on_skip = provides_on_skip.get(provider_key, ())
             if cap in on_skip:
+                return False
+        # #1233 ordering-only caps: a cascade-blocked / errored /
+        # cancelled provider STILL satisfies the cap because the
+        # cap's only semantic is "this stage is no longer writing".
+        # Content caps stay dead on terminal failure (handled by the
+        # ``return True`` fallthrough below).
+        if status in ("blocked", "error", "cancelled") and cap in _ORDERING_ONLY_CAPS:
+            on_provides = provides.get(provider_key, ())
+            if cap in on_provides:
                 return False
     return True
 
@@ -739,6 +842,7 @@ def _classify_requirement_unsatisfiable(
     *,
     providers_map: Mapping[Capability, tuple[str, ...]] = _CAPABILITY_PROVIDERS,
     provides_on_skip: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES_ON_SKIP,
+    provides: Mapping[str, tuple[Capability, ...]] = _STAGE_PROVIDES,
     min_rows: Mapping[Capability, int] = _CAPABILITY_MIN_ROWS,
     exclusions: Mapping[Capability, frozenset[str]] = _STRICT_CAP_PROVIDER_EXCLUSIONS,
 ) -> tuple[Literal["skip_only", "error"], list[Capability]] | None:
@@ -765,6 +869,7 @@ def _classify_requirement_unsatisfiable(
         rows_processed,
         providers_map=providers_map,
         provides_on_skip=provides_on_skip,
+        provides=provides,
         min_rows=min_rows,
         exclusions=exclusions,
     )
@@ -1733,6 +1838,7 @@ def _phase_batched_dispatch(
                     rows_processed,
                     providers_map=effective_providers_inverse,
                     provides_on_skip=effective_provides_on_skip,
+                    provides=effective_provides,
                     min_rows=effective_min_rows,
                     exclusions=effective_exclusions,
                 )
