@@ -673,6 +673,47 @@ def test_every_stage_appears_in_requires_caps() -> None:
     assert not missing, f"stages without _STAGE_REQUIRES_CAPS entry: {missing}"
 
 
+def test_filings_history_seed_requires_submissions_processed() -> None:
+    """Pin the PR-2 lock-contention fix: ``filings_history_seed`` (S15)
+    MUST require ``submissions_processed`` so it waits for S8
+    (``sec_submissions_ingest``) to terminalise before starting.
+
+    Background: S8 and S15 both write to ``filing_events`` for the same
+    ``(instrument_id, …)`` keys. Pre-PR-2 the dispatcher serialised
+    them via ``wait(ALL_COMPLETED)``; PR-2's cross-lane parallelism
+    let them run concurrently → row-lock contention left S8 stuck for
+    17+ min in bootstrap run #5. The fix expresses the ordering via
+    a ``submissions_processed`` capability that S8 provides on
+    success OR skip; S15 requires it.
+
+    Regression sentinel — a future spec edit that drops the requires
+    line would re-introduce the row-lock contention silently.
+    """
+    req = _STAGE_REQUIRES_CAPS["filings_history_seed"]
+    assert "submissions_processed" in req.all_of, (
+        "filings_history_seed must require submissions_processed (PR-2 lock-contention serialisation invariant)"
+    )
+
+
+def test_submissions_processed_provided_by_s8_on_success_and_skip() -> None:
+    """Companion invariant to the above. ``submissions_processed`` is
+    provided by ``sec_submissions_ingest`` (S8) on BOTH success AND
+    skip — the SKIP entry preserves the slow-connection fallback
+    where S7 → S8 cascade-skip and S15 still proceeds as the legacy
+    chain's filing_events seeder. Drop either provides entry and the
+    slow-connection path either deadlocks (no SKIP entry: S15 cascade-
+    skips, no provider) or reverts to the lock contention bug (no
+    SUCCESS entry: nothing waits on S8).
+    """
+    from app.services.bootstrap_orchestrator import (
+        _STAGE_PROVIDES,
+        _STAGE_PROVIDES_ON_SKIP,
+    )
+
+    assert "submissions_processed" in _STAGE_PROVIDES["sec_submissions_ingest"]
+    assert "submissions_processed" in _STAGE_PROVIDES_ON_SKIP["sec_submissions_ingest"]
+
+
 def test_partial_bulk_failure_legacy_recovers(
     ebull_test_conn: psycopg.Connection[tuple],
     monkeypatch: pytest.MonkeyPatch,
