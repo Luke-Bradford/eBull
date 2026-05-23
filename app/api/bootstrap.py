@@ -367,6 +367,24 @@ def get_bootstrap_status(
 # ---------------------------------------------------------------------------
 
 
+class BootstrapRunRequest(BaseModel):
+    """Optional body for ``POST /system/bootstrap/run``.
+
+    Today carries one operator-facing knob:
+
+    * ``reset_failed_manifest`` — default TRUE. Controls the #1233 PR-5a
+      manifest-reset prelude. Set FALSE to preserve stale ``failed``
+      manifest rows from a prior cancelled run (debugging the rows
+      themselves, or letting their existing backoff watermark drive
+      drainage).
+
+    The body is optional: callers that POST with no body get the
+    default-everything behaviour (matches the pre-PR-5a contract).
+    """
+
+    reset_failed_manifest: bool = True
+
+
 @router.post(
     "/run",
     status_code=status.HTTP_202_ACCEPTED,
@@ -374,6 +392,7 @@ def get_bootstrap_status(
 )
 def run_bootstrap(
     request: Request,
+    body: BootstrapRunRequest | None = None,
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> BootstrapRunQueuedResponse:
     """Trigger a fresh bootstrap run.
@@ -400,12 +419,19 @@ def run_bootstrap(
     """
     requested_by = _identify_requestor(request)
     operator_uuid = _operator_uuid(request)
+    # #1233 PR-5a — persist the operator-facing param dict on
+    # ``bootstrap_runs.params``. Empty-body POST falls back to the
+    # default-everything ``BootstrapRunRequest()`` instance. The dict
+    # is structurally validated at the JSONB CHECK constraint level
+    # (sql/169 ``bootstrap_runs_params_object_chk``).
+    run_params = (body or BootstrapRunRequest()).model_dump()
     try:
         with conn.transaction():
             run_id = start_run(
                 conn,
                 operator_id=operator_uuid,
                 stage_specs=get_bootstrap_stage_specs(),
+                params=run_params,
             )
             try:
                 request_id = publish_manual_job_request_with_conn(
