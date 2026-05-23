@@ -31,7 +31,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
 import psycopg
@@ -555,6 +555,15 @@ def mark_stage_success(
     ``error``. The dispatcher's wait()/checkpoint ordering already
     avoids the race in the normal flow, but pinning the helper to
     "only advance from running" keeps the invariant local.
+
+    #1296 — reset ``bootstrap_runs.boot_resume_attempts`` to 0 on
+    any stage success. The counter caps how many auto-resumes a
+    run can absorb before being terminated; resetting on stage
+    progress means a long-running bootstrap that survives a crash,
+    resumes, and then runs healthily regains its full resume
+    budget for any subsequent crash. Without this reset, a multi-
+    crash run would falsely hit the cap even though intermediate
+    progress proved each resume worked.
     """
     conn.execute(
         """
@@ -572,6 +581,19 @@ def mark_stage_success(
             "stage_key": stage_key,
             "rows_processed": rows_processed,
         },
+    )
+    # #1296 — reset the counter on stage progress so the resume
+    # budget is "consecutive resumes WITHOUT a successful stage",
+    # not "total resumes across the run's lifetime". Guarded by
+    # ``> 0`` so the no-op case skips an UPDATE round-trip.
+    conn.execute(
+        """
+        UPDATE bootstrap_runs
+           SET boot_resume_attempts = 0
+         WHERE id = %(run_id)s
+           AND boot_resume_attempts > 0
+        """,
+        {"run_id": run_id},
     )
 
 
@@ -1155,6 +1177,163 @@ def mark_run_cancelled(
         )
 
 
+# #1296 — auto-resume cap. Bumping past this means the resume attempt
+# itself crashed the process — fall through to the terminate reaper so
+# the operator can retry-failed from the admin panel rather than the
+# process getting stuck in an infinite resume → crash loop.
+_MAX_BOOT_RESUMES: Final[int] = 1
+
+
+@dataclass(frozen=True)
+class BootResumeDecision:
+    """Outcome of :func:`attempt_boot_resume` — drives the jobs
+    entrypoint's choice between auto-resume and terminate reaper.
+    """
+
+    decision: Literal["resumed", "terminated_max_attempts", "no_in_flight_run"]
+    run_id: int | None
+    attempts: int
+
+
+def attempt_boot_resume(
+    conn: psycopg.Connection[Any],
+    *,
+    requested_by: str,
+    max_attempts: int = _MAX_BOOT_RESUMES,
+) -> BootResumeDecision:
+    """Auto-resume an in-flight bootstrap on jobs-process start (#1296).
+
+    Pre-#1296 the boot-time reaper (:func:`reap_orphaned_running`)
+    treats every observed ``bootstrap_state.status='running'`` as a
+    dead run and terminates it to ``partial_error``. That leaves the
+    operator to click "retry-failed" — fine for genuine bugs, painful
+    for transient crashes (OOM, kill -9, segfault) where the desired
+    behaviour is to pick up where the dead process left off.
+
+    Decision tree:
+
+      * ``bootstrap_state.status != 'running'`` (or
+        ``last_run_id IS NULL``) → ``no_in_flight_run``. No-op.
+      * ``bootstrap_runs.status != 'running'`` →
+        ``terminated_max_attempts`` (Codex 2 MEDIUM on #1296: a
+        stale singleton can point at a terminal run row; resume
+        must not enqueue work for a finalised run).
+      * ``cancel_requested_at IS NOT NULL`` → ``terminated_max_attempts``.
+        Operator clicked cancel before the crash; honour the cancel
+        intent rather than auto-resuming.
+      * ``boot_resume_attempts >= max_attempts`` →
+        ``terminated_max_attempts``. The cap prevents a crash-during-
+        resume infinite loop. **The counter is reset to 0 inside**
+        :func:`mark_stage_success` (Codex 2 BLOCKING on #1296), so a
+        run that actually makes progress after a resume regains the
+        full resume budget on a subsequent crash.
+      * Otherwise → ``resumed``. Increment
+        ``bootstrap_runs.boot_resume_attempts``; publish a
+        ``manual_job`` queue row for ``bootstrap_orchestrator`` so
+        the next listener tick picks it up. The orchestrator's PR-6
+        ``reap_orphaned_running_stages`` will reset stuck ``running``
+        stages back to ``pending`` (lock-not-held probe + grace) and
+        the dispatcher resumes from the recoverable state.
+
+    Atomic in one transaction: counter bump + queue INSERT share the
+    same outer tx so either both land or neither (no orphaned resume
+    request, no orphaned counter increment).
+
+    Lock-order discipline (Codex 2 HIGH on #1296): lock
+    ``bootstrap_runs`` BEFORE ``bootstrap_state``, matching
+    :func:`finalize_run` / :func:`cancel_run` / :func:`mark_run_cancelled`.
+    Locking state first would deadlock against a concurrent finalizer
+    that already holds the run row.
+
+    The caller (jobs entrypoint) interprets the decision:
+      * ``resumed`` → skip the existing :func:`reap_orphaned_running`
+        terminate sweep; let the orchestrator handle it.
+      * ``terminated_max_attempts`` → fall through to
+        :func:`reap_orphaned_running` so the run transitions to
+        ``partial_error`` / ``cancelled`` and the admin panel shows
+        the operator their retry-failed button.
+      * ``no_in_flight_run`` → no action either way.
+    """
+    # Lazy imports to avoid a module cycle: bootstrap_orchestrator
+    # imports bootstrap_state, so importing it here at top would close
+    # the cycle.
+    from app.services.bootstrap_orchestrator import JOB_BOOTSTRAP_ORCHESTRATOR
+    from app.services.sync_orchestrator.dispatcher import (
+        publish_manual_job_request_with_conn,
+    )
+
+    with conn.transaction():
+        # Step 1 — unlocked probe of the singleton. Cheap; resolves
+        # the run_id we need to lock. The actual decision happens
+        # under FOR UPDATE locks on the run + state rows below.
+        probe = conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1").fetchone()
+        if probe is None or probe[0] != "running" or probe[1] is None:
+            return BootResumeDecision(decision="no_in_flight_run", run_id=None, attempts=0)
+        run_id = int(probe[1])
+
+        # Step 2 — lock the RUN row FIRST (run-then-state ordering
+        # matches finalize_run / cancel_run; reversing the order
+        # would deadlock against a concurrent finalizer).
+        run = conn.execute(
+            """
+            SELECT status,
+                   boot_resume_attempts,
+                   cancel_requested_at IS NOT NULL
+              FROM bootstrap_runs
+             WHERE id = %s
+             FOR UPDATE
+            """,
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            # state.last_run_id pointed at a row that no longer
+            # exists — pathological state. Terminate so the operator
+            # sees a clear error rather than a silently-skipped resume.
+            return BootResumeDecision(decision="terminated_max_attempts", run_id=run_id, attempts=0)
+        run_status, attempts, cancel_requested = str(run[0]), int(run[1]), bool(run[2])
+
+        # Step 3 — Codex 2 MEDIUM on #1296: re-check the run itself
+        # is actually running. A stale state singleton can point at
+        # a finalised row (e.g. mid-finalize crash) — auto-resuming
+        # a terminal run would silently flip it back to running.
+        if run_status != "running":
+            return BootResumeDecision(
+                decision="terminated_max_attempts",
+                run_id=run_id,
+                attempts=attempts,
+            )
+        if cancel_requested:
+            return BootResumeDecision(
+                decision="terminated_max_attempts",
+                run_id=run_id,
+                attempts=attempts,
+            )
+        if attempts >= max_attempts:
+            return BootResumeDecision(
+                decision="terminated_max_attempts",
+                run_id=run_id,
+                attempts=attempts,
+            )
+
+        # Step 4 — lock state SECOND (run-then-state). Re-confirm
+        # under both locks; a concurrent transition that landed
+        # between Step 1's probe and now is rare but possible.
+        state = conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1 FOR UPDATE").fetchone()
+        if state is None or state[0] != "running" or state[1] != run_id:
+            return BootResumeDecision(decision="no_in_flight_run", run_id=run_id, attempts=attempts)
+
+        conn.execute(
+            "UPDATE bootstrap_runs SET boot_resume_attempts = boot_resume_attempts + 1 WHERE id = %s",
+            (run_id,),
+        )
+        publish_manual_job_request_with_conn(
+            conn,
+            JOB_BOOTSTRAP_ORCHESTRATOR,
+            requested_by=requested_by,
+        )
+        return BootResumeDecision(decision="resumed", run_id=run_id, attempts=attempts + 1)
+
+
 def reap_orphaned_running(
     conn: psycopg.Connection[Any],
 ) -> bool:
@@ -1428,6 +1607,7 @@ def compute_retryable_view(
 
 
 __all__ = [
+    "BootResumeDecision",
     "BootstrapAlreadyRunning",
     "BootstrapNoPriorRun",
     "BootstrapNotResettable",
@@ -1444,6 +1624,7 @@ __all__ = [
     "StageSpec",
     "StageStatus",
     "StopAlreadyPendingError",
+    "attempt_boot_resume",
     "cancel_run",
     "compute_retryable_view",
     "finalize_run",
