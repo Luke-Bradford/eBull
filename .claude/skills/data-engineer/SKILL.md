@@ -822,6 +822,36 @@ The `last_attempted_at` stamp itself uses `clock_timestamp()` (statement-time wa
 **Idempotency:** the reset is a single SQL UPDATE; a second invocation finds zero matching rows. Re-queuing the orchestrator after a worker crash is safe.
 
 **Out of scope:** the prelude does NOT touch rows in any other state — `pending` rows stay pending, `parsed` stays parsed, `tombstoned` stays tombstoned. A stuck-`pending` row is the manifest-worker's problem (#1224); a `tombstoned` row needs an explicit `POST /jobs/sec_rebuild/run`.
+### 6.5.9 Bootstrap orphan-stage reaper (#1233 PR-6)
+
+When the jobs process crashes mid-stage, `bootstrap_stages.status` stays `'running'` forever. On restart, the dispatcher's `mark_stage_running(... AND status='pending')` silently no-ops against the stale row and the run sits stuck — operator must manually clear via Re-run failed.
+
+The `reap_orphaned_running_stages` prelude (in [`bootstrap_orchestrator.py`](../../../app/services/bootstrap_orchestrator.py)) runs at the top of `run_bootstrap_orchestrator`, immediately after the `read_latest_run_with_stages` snapshot and before the dispatcher loop. Reset criteria — ALL THREE must hold:
+
+1. `status = 'running'`.
+2. `started_at < NOW() - INTERVAL '5 minutes'` (`_REAPER_GRACE_SECONDS = 300`). The grace window is longer than the slowest known stage's start-up so a worker that's alive-but-slow doesn't get its row pulled out from under it.
+3. The corresponding `JobLock` advisory lock is NOT held in any Postgres session **in this database**. Probed via `SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objsubid=1 AND database=(current DB OID) AND classid=... AND objid=...` — **read-only, NEVER acquires**. The `database` predicate matters when multiple eBull instances share a Postgres cluster (dev + ebull_test on localhost:5432): the same advisory key in a sibling DB would otherwise spuriously suppress reset in this DB.
+
+Lock key derivation MUST byte-for-byte match [`JobLock` at `app/jobs/locks.py:224`](../../../app/jobs/locks.py#L224): `hashtext('job_source:' || <source>)::int` (NOT `hashtextextended` — the JobLock key space is int4 by construction).
+
+**`pg_locks` shape gotcha (empirically verified 2026-05-23).** `hashtext` returns a signed `int4`. When that's widened to the bigint key for `pg_try_advisory_lock(bigint)`, the high 32 bits depend on the sign:
+
+- Positive hashtext (e.g. `hashtext('job_source:openfigi') = 1_447_707_902`): `pg_locks.classid = 0, objid = <hashtext>`.
+- Negative hashtext (e.g. `hashtext('job_source:finra') = -685_386_401`): `pg_locks.classid = 4_294_967_295 (= 0xFFFFFFFF), objid = <hashtext & 0xFFFFFFFF> = 3_609_580_895`.
+
+A naive probe of `classid = 0 AND objid = <hashtext>` would silently MISS every negative-hashtext key and reset stages whose workers are alive. The correct probe lets Postgres do the bigint split itself: `classid = ((K::bigint >> 32) & 4294967295)::oid AND objid = (K::bigint & 4294967295)::oid`. `objsubid = 1` is session-scope (the `JobLock` form); transaction-scoped advisory locks use `objsubid = 2` — we deliberately do NOT probe those.
+
+**Reset shape.** On match, the row transitions `running` → `pending`: `started_at` / `completed_at` cleared, `last_error` APPENDED (not replaced) with `'reaper: reset from orphaned running (<NOW()>)'`. The append preserves forensic context from the previous crash so the operator can still investigate via `last_error`.
+
+The UPDATE is guarded by `AND status = 'running'` so a stage that transitioned to `'success'` / `'error'` between the SELECT and the UPDATE is left alone (Codex pre-push W3 pattern).
+
+**Caveats — accepted residual risk.**
+
+* Cannot detect a hung-but-alive worker that holds the lock but makes no progress. The grace window catches the obvious case (worker crashed before its first commit); a deeper deadlock requires operator Re-run failed.
+* Cannot detect the #1184 re-entrancy edge case where the outer-thread holds the lock but the stage-thread itself crashed — the outer holder will release on its own crash, and the next reaper pass after grace will reset.
+* A stage whose `job_name` is not in the `app.jobs.sources.JOB_NAME_TO_SOURCE` registry is LEFT ALONE (logged as a warning). The reaper must never reset a stage whose lock-key shape it cannot derive — doing so would silently reset a stage whose worker IS alive (registry gap is an operator mistake, not a crash signal).
+
+Acceptance criterion (`docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v3.md` §15): "process crash mid-stage: reaper resets to pending within 6 min (5 min grace + 1 min poll)".
 
 ## 6. Known live caveats / tech debt
 

@@ -2076,6 +2076,223 @@ def reset_manifest_for_run(
     return count
 
 
+# ---------------------------------------------------------------------------
+# Orphan-stage reaper (#1233 PR-6)
+# ---------------------------------------------------------------------------
+#
+# Symptom this fixes: if the jobs process crashes mid-stage,
+# ``bootstrap_stages.status`` stays ``'running'`` forever. On jobs-process
+# restart, the dispatcher's ``_should_run`` accepts ``'running'`` as runnable
+# BUT the per-stage dispatcher path then calls
+# ``mark_stage_running(... AND status='pending')`` which silently no-ops
+# against the stale running row, and the run sits stuck. Operator has to
+# manually clear via Re-run failed.
+#
+# Solution: just before the dispatcher loop, sweep rows whose worker is
+# provably dead (advisory lock NOT held in any session) and whose
+# ``started_at`` is older than ``_REAPER_GRACE_SECONDS`` (5 min — longer
+# than the slowest known stage start-up). Stale rows transition back to
+# ``'pending'`` so the dispatcher can pick them up cleanly.
+#
+# Liveness probe: read-only ``SELECT FROM pg_locks`` — NEVER acquires.
+# Lock key derivation MUST match ``JobLock`` exactly: ``hashtext('job_source:'
+# || <source>)::int`` (NOT ``hashtextextended`` — the locks key space is
+# int4 by construction; see ``app/jobs/locks.py:224``).
+#
+# Caveats (documented residual risk):
+# * Cannot detect a hung-but-alive worker that holds the lock without
+#   making progress. The grace window catches the obvious case (worker
+#   crashed before its first commit); a deeper deadlock requires an
+#   operator Re-run failed.
+# * Cannot detect re-entrancy (#1184) edge where the outer-thread holds
+#   the lock but the stage-thread itself crashed — accepted residual risk
+#   because the outer holder will release on its own crash, and the next
+#   reaper pass after grace will reset.
+# * The reset path is guarded by ``AND status='running'`` so a stage that
+#   transitioned to ``'success'``/``'error'`` between the SELECT and the
+#   UPDATE is left alone (Codex pre-push W3 pattern).
+
+_REAPER_GRACE_SECONDS: Final[int] = 300
+"""Minimum age before a ``running`` stage with no held lock is reset.
+
+Longer than the slowest known stage's start-up window (Phase B SEC
+filer-directory fetches take up to ~3 min on cold caches). A reset that
+fires before the worker has reached its first transaction is the
+worst-case false positive — the dispatcher would then race the worker
+on the same stage row. 5 minutes is a safe over-estimate of "the worker
+would have committed SOMETHING by now if it were alive."
+"""
+
+
+def _hashtext_int(conn: psycopg.Connection[Any], text: str) -> int:
+    """Return Postgres ``hashtext(text)::int`` — JobLock's lock-key shape.
+
+    MUST match ``app/jobs/locks.py:224``:
+        SELECT pg_try_advisory_lock(hashtext(%s)::int)
+
+    ``hashtext`` (NOT ``hashtextextended``) returns int4; the cast to
+    ``::int`` is a no-op in current PG but kept explicit so the call
+    site here mirrors the JobLock SQL byte-for-byte. Computing this
+    Python-side via a re-implementation of PG's hashtext is hostile to
+    review — a single PG version drift between Python clone and PG
+    server would silently miscompute the key. Round-tripping through
+    the active connection is honest and cheap (one query per stage).
+
+    Returned int is the signed int4 value (can be negative). Empirical:
+    ``hashtext('job_source:finra') = -685386401``. Callers probing
+    ``pg_locks`` must split this signed-int-widened-to-bigint into
+    ``(classid, objid)`` halves — see the probe SQL in
+    ``reap_orphaned_running_stages``.
+    """
+    row = conn.execute("SELECT hashtext(%(text)s)::int", {"text": text}).fetchone()
+    if row is None:
+        # Defensive: hashtext is a deterministic builtin; an empty row
+        # means the connection or DB itself is in an unexpected state.
+        raise RuntimeError(f"hashtext({text!r}) returned no row")
+    return int(row[0])
+
+
+def reap_orphaned_running_stages(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+) -> int:
+    """Reset ``running`` stages whose worker is provably dead.
+
+    Criteria for reset:
+
+    1. ``bootstrap_stages.status = 'running'``.
+    2. ``started_at < NOW() - INTERVAL '5 minutes'`` (grace window).
+    3. The corresponding ``JobLock`` advisory lock is NOT held in any
+       Postgres session — probed read-only via ``pg_locks``.
+
+    Lock key = ``hashtext('job_source:' || source)::int`` where
+    ``source = app.jobs.sources.source_for(job_name)``. Bytes-for-bytes
+    match with ``JobLock``'s acquisition SQL (``app/jobs/locks.py:224``).
+
+    On reset the stage transitions ``running`` → ``pending``:
+      * ``started_at`` / ``completed_at`` cleared.
+      * ``last_error`` is APPENDED (not replaced) with a reaper marker
+        so forensic context for the next crash is preserved.
+
+    Returns the count of stages reset. Idempotent — repeat calls with
+    no orphans return 0.
+
+    Defensive fallbacks:
+      * ``source_for(job_name)`` raising ``KeyError`` (registry gap)
+        logs a warning and leaves the row alone. The reaper must never
+        reset a stage whose lock semantics it cannot prove.
+    """
+    # Lazy import: app.jobs.sources -> app.services.bootstrap_orchestrator
+    # at module load via the JOB_NAME_TO_SOURCE construction. Importing
+    # back here at top-of-module would close the cycle.
+    from app.jobs.sources import source_for
+
+    candidate_rows = conn.execute(
+        """
+        SELECT stage_key, job_name
+          FROM bootstrap_stages
+         WHERE bootstrap_run_id = %(run_id)s
+           AND status = 'running'
+           AND started_at IS NOT NULL
+           AND started_at < NOW() - make_interval(secs => %(grace)s)
+        """,
+        {"run_id": run_id, "grace": _REAPER_GRACE_SECONDS},
+    ).fetchall()
+
+    count = 0
+    for stage_key, job_name in candidate_rows:
+        try:
+            source = source_for(job_name)
+        except KeyError:
+            logger.warning(
+                "reap_orphaned_running_stages: stage %r job_name %r has no source mapping; "
+                "leaving stale running row alone (defensive — cannot prove lock-not-held without "
+                "the source key)",
+                stage_key,
+                job_name,
+            )
+            continue
+
+        lock_key = _hashtext_int(conn, f"job_source:{source}")
+        # ``pg_locks`` splits the bigint advisory-lock key into two
+        # uint32 halves: ``classid`` (high 32 bits) and ``objid`` (low
+        # 32 bits). For a *positive* int4 key like 1_447_707_902 the
+        # widening to int8 leaves the high half all-zero so
+        # ``classid=0``; for a *negative* int4 key like -685_386_401
+        # the sign-extension fills the high half with 1s so
+        # ``classid=4_294_967_295`` (= ``0xFFFFFFFF``). Probing only
+        # ``classid=0`` would miss every negative-hashtext key (e.g.
+        # ``job_source:finra``) and silently fail to detect the held
+        # lock — the reaper would then reset a stage whose worker IS
+        # alive. The arithmetic split is done PG-side via ``::bigint``
+        # so the byte shape is identical to the kernel split.
+        # ``objsubid=1`` is session-scope (PG sets ``=2`` for
+        # transaction-scoped advisory locks; the JobLock path uses
+        # the session form).
+        #
+        # ``database = (current_database OID)`` scopes the probe to
+        # locks held in THIS database only (Codex 2 medium). The same
+        # advisory key in a sibling DB on the same Postgres cluster
+        # (e.g. dev + ebull_test running on localhost:5432 with their
+        # own bootstrap processes) would otherwise spuriously satisfy
+        # the probe and suppress a legitimate reset in this DB.
+        # ``pg_locks.database`` is OID; ``current_database()`` returns
+        # name → join via ``pg_database`` rather than rely on a
+        # hardcoded OID literal.
+        held_row = conn.execute(
+            """
+            SELECT 1
+              FROM pg_locks
+             WHERE locktype = 'advisory'
+               AND objsubid = 1
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND classid  = ((%(lock_key)s::bigint >> 32) & 4294967295)::oid
+               AND objid    = (%(lock_key)s::bigint & 4294967295)::oid
+            """,
+            {"lock_key": lock_key},
+        ).fetchone()
+        if held_row is not None:
+            # Worker (or some other session) still holds the lock; the
+            # stage may actually be running. Skip reset; operator can
+            # force-cancel via the existing Re-run failed UX if the
+            # worker is hung-but-alive.
+            continue
+
+        result = conn.execute(
+            """
+            UPDATE bootstrap_stages
+               SET status       = 'pending',
+                   started_at   = NULL,
+                   completed_at = NULL,
+                   last_error   = COALESCE(last_error, '')
+                                  || CASE WHEN COALESCE(last_error, '') = '' THEN '' ELSE E'\n' END
+                                  || 'reaper: reset from orphaned running ('
+                                  || NOW()::text || ')'
+             WHERE bootstrap_run_id = %(run_id)s
+               AND stage_key        = %(stage_key)s
+               AND status           = 'running'
+            """,
+            {"run_id": run_id, "stage_key": stage_key},
+        )
+        if result.rowcount > 0:
+            count += 1
+
+    if count > 0:
+        logger.info(
+            "reap_orphaned_running_stages: run_id=%d reset %d orphan stage(s) back to pending",
+            run_id,
+            count,
+        )
+    else:
+        logger.debug(
+            "reap_orphaned_running_stages: run_id=%d no orphans (grace=%ds)",
+            run_id,
+            _REAPER_GRACE_SECONDS,
+        )
+    return count
+
+
 def run_bootstrap_orchestrator() -> None:
     """``_INVOKERS['bootstrap_orchestrator']`` — drive a queued run
     via lane-aware phase-batched dispatch (#1020).
@@ -2154,6 +2371,16 @@ def run_bootstrap_orchestrator() -> None:
             "bootstrap_orchestrator: run_id=%d manifest reset skipped (params.reset_failed_manifest=False)",
             run_id,
         )
+
+    # #1233 PR-6 — sweep stages stuck in ``running`` from a previous
+    # jobs-process crash. Reset is guarded by ``pg_locks`` evidence that
+    # the worker's advisory lock is no longer held + a 5-min grace
+    # window. Runs AFTER the manifest reset prelude and BEFORE the
+    # dispatcher loop so the freshly reset rows enter dispatch as
+    # ``pending``. Idempotent — zero orphans is the steady state.
+    with psycopg.connect(database_url) as conn:
+        reap_orphaned_running_stages(conn, run_id=run_id)
+        conn.commit()
 
     # PR1c #1064 — build a stage_key → params lookup from the static
     # ``_BOOTSTRAP_STAGE_SPECS`` so the per-stage params dict can be
@@ -2318,6 +2545,7 @@ __all__ = [
     "JOB_MF_DIRECTORY_SYNC",
     "JOB_SEC_N_CSR_BOOTSTRAP_DRAIN",
     "get_bootstrap_stage_specs",
+    "reap_orphaned_running_stages",
     "reset_manifest_for_run",
     "run_bootstrap_orchestrator",
 ]
