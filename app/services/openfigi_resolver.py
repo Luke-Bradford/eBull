@@ -61,7 +61,6 @@ per-instance, not module-global).
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from collections.abc import Iterable, Iterator
@@ -264,7 +263,7 @@ class OpenFigiResolver:
 
     Usage::
 
-        resolver = OpenFigiResolver(api_key=os.environ.get("OPENFIGI_API_KEY"))
+        resolver = OpenFigiResolver.from_env()  # reads settings.openfigi_api_key
         mappings = resolver.resolve_cusips(["037833100", "594918104"])
         # → {"037833100": OpenFigiMapping(ticker="AAPL", ...),
         #    "594918104": OpenFigiMapping(ticker="MSFT", ...)}
@@ -299,9 +298,22 @@ class OpenFigiResolver:
 
     @classmethod
     def from_env(cls, *, client: httpx.Client | None = None) -> OpenFigiResolver:
-        """Read ``OPENFIGI_API_KEY`` and instantiate. Missing env var
-        falls back to unkeyed-tier rate limits (250 mappings/min)."""
-        return cls(api_key=os.environ.get("OPENFIGI_API_KEY") or None, client=client)
+        """Read OpenFIGI key from ``Settings`` and instantiate.
+
+        Resolution precedence (delegated to ``pydantic_settings``):
+          1. ``OPENFIGI_API_KEY`` environment variable (live env wins)
+          2. ``OPENFIGI_API_KEY=`` line in ``.env``
+          3. ``None`` → unkeyed tier (250 mappings/min)
+
+        Reading via ``settings.openfigi_api_key`` keeps the env-file vs
+        live-env precedence consistent with every other secret in the
+        repo. The prior ``os.environ.get`` shortcut silently bypassed
+        the .env loader — a key written into .env didn't actually reach
+        the resolver. Fixed in #1233 post-merge follow-up.
+        """
+        from app.config import settings
+
+        return cls(api_key=settings.openfigi_api_key or None, client=client)
 
     # -------- Context manager -------------------------------------------
 
