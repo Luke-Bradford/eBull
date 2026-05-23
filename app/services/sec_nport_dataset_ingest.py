@@ -46,17 +46,12 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from app.services.cusip_resolver import record_unresolved_cusip_from_bulk
+from app.services.cusip_resolver import flush_unresolved_cusips_bulk
 from app.services.n_port_ingest import n_port_retention_cutoff
 from app.services.ownership_observations import upsert_sec_fund_series
 
 logger = logging.getLogger(__name__)
 
-
-# #1233 PR-1a — see ``sec_13f_dataset_ingest._UNRESOLVED_FLUSH_BATCH``
-# for rationale (per-batch incremental commit so a multi-million-row
-# archive doesn't hold the open transaction across the whole drain).
-_UNRESOLVED_FLUSH_BATCH = 1000
 
 # Precision of ``ownership_funds_observations.shares`` (sql/123:84 —
 # NUMERIC(24, 4) NOT NULL CHECK (shares > 0)). The pre-validation gate
@@ -238,39 +233,39 @@ def _flush_unresolved_buffer(
     source: Literal["bulk_13f_dataset", "bulk_nport_dataset"],
     result: NPortIngestResult,
 ) -> None:
-    """Drain ``buffer`` into ``unresolved_13f_cusips`` via the PR-1a
-    helper. Each write under its own SAVEPOINT (``with
-    conn.transaction()``) so a DB error (e.g. CHECK violation on the
-    bulk-path schema) does NOT leave the enclosing per-archive tx in
-    ``InFailedSqlTransaction`` and abort the surrounding staging
-    drain. Failures counted as ``parse_errors``; do not abort.
-    Caller clears the buffer post-flush.
+    """Drain ``buffer`` into ``unresolved_13f_cusips`` via the PR-1295
+    COPY helper :func:`cusip_resolver.flush_unresolved_cusips_bulk`.
 
-    Lint note: the savepoint is OUTSIDE the cur.copy() block body
-    (flush runs post-COPY) so the bulk-ingest lint guard at
-    scripts/check_bulk_ingest_copy_pattern.sh accepts it.
+    Pre-#1295: per-row INSERT + SAVEPOINT loop. Post-#1295: one COPY
+    + INSERT...SELECT...ON CONFLICT pass. Same idempotency on the
+    bulk partial UNIQUE INDEX (sql/164).
+
+    Failure isolation: ONE savepoint (``with conn.transaction():``)
+    wraps the helper call so a raise inside the helper rolls back
+    to the savepoint and the outer archive tx survives. Preserves
+    the pre-#1295 contract that the unresolved-CUSIP buffer is a
+    sweep hint, not a source of truth — a flush failure must not
+    abort the observation writes that already landed in
+    ``_stg_nport``.
+
+    Lint note: the savepoint sits AFTER the observations
+    ``cur.copy()`` block has closed, so the bulk-ingest lint guard
+    at scripts/check_bulk_ingest_copy_pattern.sh invariant C.1
+    (awk walker scoped to the cur.copy(...) body) is satisfied.
     """
     if not buffer:
         return
-    for cusip, filer_cik, period_end in buffer:
-        try:
-            with conn.transaction():
-                record_unresolved_cusip_from_bulk(
-                    conn,
-                    cusip=cusip,
-                    filer_cik=filer_cik,
-                    period_end=period_end,
-                    source=source,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "nport ingest: record_unresolved_cusip_from_bulk failed for cusip=%s filer=%s period=%s: %s",
-                cusip,
-                filer_cik,
-                period_end,
-                exc,
-            )
-            result.parse_errors += 1
+    try:
+        with conn.transaction():
+            flush_unresolved_cusips_bulk(conn, buffer, source=source)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "nport ingest: flush_unresolved_cusips_bulk failed (chunk=%d, source=%s): %s",
+            len(buffer),
+            source,
+            exc,
+        )
+        result.parse_errors += 1
 
 
 # ---------------------------------------------------------------------------
@@ -698,18 +693,15 @@ def ingest_nport_dataset_archive(
     series_upsert_buffer.clear()
 
     # Flush accumulated unresolved CUSIPs AFTER the staging drain so
-    # a flush failure cannot roll it back. Per-row savepoint accepted
-    # by the lint (outside the COPY block body) so a single bad
-    # triple does not abort the enclosing transaction.
+    # a flush failure cannot roll it back. #1295: single COPY pass
+    # handles the whole buffer; no per-chunk loop needed.
     if unresolved_buffer:
-        for start in range(0, len(unresolved_buffer), _UNRESOLVED_FLUSH_BATCH):
-            chunk = unresolved_buffer[start : start + _UNRESOLVED_FLUSH_BATCH]
-            _flush_unresolved_buffer(
-                conn,
-                chunk,
-                source="bulk_nport_dataset",
-                result=result,
-            )
+        _flush_unresolved_buffer(
+            conn,
+            unresolved_buffer,
+            source="bulk_nport_dataset",
+            result=result,
+        )
         unresolved_buffer.clear()
     return result
 

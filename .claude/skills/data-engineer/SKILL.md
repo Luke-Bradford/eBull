@@ -853,6 +853,67 @@ The UPDATE is guarded by `AND status = 'running'` so a stage that transitioned t
 
 Acceptance criterion (`docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v3.md` §15): "process crash mid-stage: reaper resets to pending within 6 min (5 min grace + 1 min poll)".
 
+### 6.5.10 Cap-ordering for concurrent writers (#1233 PR-1292)
+
+PR-2's `as_completed` cross-lane parallelism exposed a row-lock contention bug: S8 `sec_submissions_ingest` (db_filings lane) and S15 `filings_history_seed` (sec_rate lane) both write to `filing_events` for the same `(instrument_id, …)` keys. Before PR-2 they were accidentally serialised by `wait(ALL_COMPLETED)`. After PR-2 they ran concurrently → PG transaction-lock contention left S8 stuck on the wait-graph for 17+ min.
+
+Fix shape (`submissions_processed` capability):
+- New capability provided by S8 on **success AND skip** (`_STAGE_PROVIDES_ON_SKIP`).
+- S15 requires it via `CapRequirement(all_of=("cik_mapping_ready", "submissions_processed"))`.
+- Effect: S15 waits for S8 to terminalise. Slow-connection fallback preserved because S8-on-skip still satisfies the cap.
+
+**Audit pattern for adding any new stage that writes to a shared table:**
+1. Grep `_STAGE_PROVIDES` + `_STAGE_REQUIRES_CAPS` for stages writing to the same target.
+2. If cross-lane (the dispatcher would run them concurrent), introduce an ordering cap.
+3. The cap should be provided ON SKIP if the downstream's slow-connection-fallback path requires the run to continue.
+
+**Open lock-contention audit (incomplete):** PR-1292 fixed S15↔S8 only. Same shape may exist for S17/S18/S19/S20/S21/S22 vs S8/S9/S11. Tracked in `project_1233_bootstrap_optimisation.md`.
+
+### 6.5.11 NUMERIC precision gate for bulk ingest (#1233 PR-1291)
+
+`ownership_funds_observations.shares` is NUMERIC(24, 4) NOT NULL with strict CHECK (shares > 0). PR-3's COPY-batched path replaced per-row INSERT + SAVEPOINT, which had silently absorbed CHECK violations as `rows_skipped_bad_data`. After PR-3 a single CHECK violation aborts the whole archive.
+
+Trap: a fractional-share holding like `Decimal("0.00005")` passes Python's `balance > 0` predicate but quantises to `0.0000` on COPY into the NUMERIC(24, 4) staging — then trips the strict CHECK on the drain INSERT.
+
+Fix shape (NPORT only — other ownership tables have no strict CHECK):
+```python
+_BALANCE_QUANTUM: Final = Decimal("0.0001")  # matches NUMERIC(24, 4) scale
+
+balance_q = balance.quantize(_BALANCE_QUANTUM, rounding=ROUND_HALF_EVEN)
+if balance_q <= 0:
+    result.rows_skipped_non_positive_shares += 1
+    continue
+balance = balance_q  # reassign so write_row writes the value the gate validated
+```
+
+`ROUND_HALF_EVEN` matches Postgres NUMERIC coercion exactly. The same gate is required for any new bulk ingester that writes to a NUMERIC column with a strict positive CHECK.
+
+### 6.5.12 Bulk-path unresolved-CUSIP capture (#1233 PR-1a)
+
+Pre-PR-1a the bulk dataset ingesters (`sec_13f_dataset_ingest`, `sec_nport_dataset_ingest`) silently dropped rows whose CUSIP wasn't in the cusip_map — incremented `rows_skipped_unresolved_cusip` counter only. Run #6 demonstrated 2M+ such drops on a full bootstrap.
+
+PR-1a captures them into `unresolved_13f_cusips` via the new helper `cusip_resolver.record_unresolved_cusip_from_bulk(conn, *, cusip, filer_cik, period_end, source)`. PR-1b's OpenFIGI sweep (S13 `cusip_resolver_post_bulk_sweep`) reads this buffer and promotes matches to `external_identifiers (provider='openfigi')`.
+
+Schema split (sql/164 — see `unresolved_13f_cusips_bulk_columns.sql`):
+- Original `(cusip)` PRIMARY KEY relaxed; new partial UNIQUE INDEX on `(cusip, filer_cik, period_end, source) WHERE source IS NOT NULL` for bulk writers.
+- Legacy per-filing path still writes with `source=NULL`; partition-isolated via the resolver's `AND source IS NULL` clamp.
+
+**Performance fix (#1295 — shipped)**: the per-row INSERT + SAVEPOINT loop is replaced by :func:`cusip_resolver.flush_unresolved_cusips_bulk`. The helper streams the buffer into a TEMP staging table ``_stg_unresolved_cusips_bulk`` (``ON COMMIT DROP``) via ``cur.copy()``, then drains via ``INSERT INTO unresolved_13f_cusips SELECT … FROM _stg ON CONFLICT … WHERE source IS NOT NULL DO NOTHING``. Same dedup semantics on the partial UNIQUE INDEX ``unresolved_13f_cusips_bulk_idx``. Single shared helper for both 13F + NPORT ingesters. Pre-fix ~1k rows/s; post-fix ~30-50k rows/s — saves 15-30 min Phase C wall-clock on a full bootstrap with a large unresolved backlog.
+
+### 6.5.13 OpenFIGI reverse-resolver caveats (#1233 PR-0/PR-1b)
+
+OpenFIGI v3 `/v3/mapping` accepts `idType=ID_CUSIP, idValue=<cusip>` and returns `{ticker, name, exchCode, securityType, …}`. **It does NOT return CUSIP in any response — CUSIP is input-only.** Approved use is CUSIP → ticker reverse resolution; the resolver matches the returned ticker against `instruments.symbol` and writes `external_identifiers (provider='openfigi', identifier_type='cusip', identifier_value=<cusip>, instrument_id=<matched>, is_primary=FALSE)`.
+
+Critical defensive filter: AAPL's CUSIP returns 255 worldwide listings. Pick the entry matching `exchCode = 'US' AND securityType = 'Common Stock'`. Do NOT trust `data[0]`.
+
+Rate limits (verified empirically, fixtures at `tests/fixtures/openfigi/`):
+- Unkeyed: 25 req/min × 10 jobs/POST = 250 mappings/min
+- Keyed: 25 req/6s × 100 jobs/POST = 25,000 mappings/min
+
+429 response body is **plain text**, not JSON — branch on status BEFORE calling `.json()`.
+
+Key loaded via `Settings.openfigi_api_key` (env or `.env` file). `OpenFigiResolver.from_env()` is the canonical entrypoint. See `app/services/openfigi_resolver.py` + `.claude/skills/data-sources/openfigi.md`.
+
 ## 6. Known live caveats / tech debt
 
 - **Coverage = telemetry not gate**: per-category universe estimates still NULL for Tier 0 (`_read_universe_estimates` returns all-None). Banner reports `unknown_universe` on most instruments. Real estimates seeded in #790 / Batch 2.
@@ -861,6 +922,7 @@ Acceptance criterion (`docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisat
 - **CI pytest job dropped (#928)**: pre-push hook is sole test gate.
 - **AS-OF semantics**: `as_of_date` everywhere = period end, never fetch time. `ingested_at` is system-time watermark for repair sweep. `known_from`/`known_to` are valid-time. Don't mix.
 - **N-PORT validation cliff (#932)**: EdgarTools' Pydantic `FundReport.parse_fund_xml` rejects synthetic test fixtures the bespoke parser tolerates. Bespoke stdlib-ElementTree parser remains shipped; rewrite parked.
+- **#1233 Tier 1 bootstrap optimisation incomplete (2026-05-23)**: 16 PRs shipped (PR-0..PR-6 + PR-8 + #1289/1291/1292/1295) but NOT proven end-to-end on a clean install. Runs #4/#5/#6 all ended without clean completion (#6 zombied at 80 min Phase C — jobs process crash, PR-6 reaper didn't fire because no orchestrator re-trigger). Open: #1280 (setup wizard), #1290 (singleton boot reaper for stale advisory locks), #1293 (candle_refresh row-count disambiguation), #1294 (S9 companyfacts INSERT-vs-UPSERT count), #1296 (jobs auto-resume in-flight bootstrap on restart). Lock-contention audit refined 2026-05-23 — S22↔S10, S19↔S11, S20↔S11 NEEDS_CAP_GATE (same shape as PR-1292 S15↔S8); S17/S18/S21 already SAFE. Source coverage audit refreshed 2026-05-23: 4 headline findings (Layer 1/2/3 unwired, 13F LEI column dropped, N-CEN unscheduled, Form 144/SC13E listed in skill but not built). Status in [`project_1233_bootstrap_optimisation.md`](../../../../../.claude/projects/-Users-lukebradford-Dev-eBull/memory/project_1233_bootstrap_optimisation.md); next-session prompt at [`project_1233_next_session_prompt.md`](../../../../../.claude/projects/-Users-lukebradford-Dev-eBull/memory/project_1233_next_session_prompt.md).
 
 ## 7. Admin / ETL page — operator UX FAQ
 
