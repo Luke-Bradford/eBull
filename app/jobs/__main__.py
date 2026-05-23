@@ -714,21 +714,65 @@ def serve(stop_event: threading.Event | None = None) -> int:
         except Exception:
             logger.exception("jobs entrypoint: reaper failed; continuing")
 
-        # Step 4b — bootstrap reaper (#994). If a previous jobs process
-        # crashed mid-bootstrap, ``bootstrap_state.status='running'``
-        # is now stale — no live thread is executing it. Sweep
-        # in-flight + still-pending stages on the latest run to
-        # ``error`` and transition state to ``partial_error`` so the
-        # operator can retry-failed from the admin panel rather than
-        # being stuck looking at a stale Running spinner.
+        # Step 4b — bootstrap recovery (#994 + #1296).
+        #
+        # If a previous jobs process crashed mid-bootstrap,
+        # ``bootstrap_state.status='running'`` is now stale — no live
+        # thread is executing the run.
+        #
+        # Pre-#1296: this step terminated the run to ``partial_error``
+        # so the operator could retry-failed from the admin panel.
+        # Operator-friendly for genuine bugs, painful for transient
+        # crashes (OOM, kill -9, segfault) where the desired behaviour
+        # is to resume where the dead process left off.
+        #
+        # Post-#1296: first try :func:`attempt_boot_resume` —
+        #   * ``resumed`` → counter bumped + ``bootstrap_orchestrator``
+        #     queue row enqueued. The orchestrator's PR-6
+        #     ``reap_orphaned_running_stages`` resets stuck ``running``
+        #     stages to ``pending`` so the dispatcher picks them up.
+        # SKIP the terminate reaper — the run is recoverable.
+        #   * ``terminated_max_attempts`` → resume cap exhausted (i.e.
+        #     the prior boot already auto-resumed and the process
+        #     crashed AGAIN). Fall through to the terminate reaper so
+        #     the operator can intervene rather than entering an
+        #     infinite resume loop.
+        #   * ``no_in_flight_run`` → no-op.
         try:
-            from app.services.bootstrap_state import reap_orphaned_running
+            from app.services.bootstrap_state import (
+                attempt_boot_resume,
+                reap_orphaned_running,
+            )
 
             with psycopg.connect(settings.database_url, autocommit=True) as conn:
-                if reap_orphaned_running(conn):
-                    logger.info("jobs entrypoint: bootstrap reaper transitioned a stuck running run to partial_error")
+                decision = attempt_boot_resume(conn, requested_by=boot_id)
+            if decision.decision == "resumed":
+                # Source the cap from bootstrap_state so the log line
+                # tracks widening of the cap automatically. Bot
+                # NITPICK on PR #1301.
+                from app.services.bootstrap_state import _MAX_BOOT_RESUMES
+
+                logger.info(
+                    "jobs entrypoint: bootstrap auto-resume enqueued (run_id=%d, attempt=%d/%d)",
+                    decision.run_id or -1,
+                    decision.attempts,
+                    _MAX_BOOT_RESUMES,
+                )
+            else:
+                if decision.decision == "terminated_max_attempts":
+                    logger.warning(
+                        "jobs entrypoint: bootstrap auto-resume cap reached "
+                        "(run_id=%d, attempts=%d) — falling through to terminate reaper",
+                        decision.run_id or -1,
+                        decision.attempts,
+                    )
+                with psycopg.connect(settings.database_url, autocommit=True) as conn:
+                    if reap_orphaned_running(conn):
+                        logger.info(
+                            "jobs entrypoint: bootstrap reaper transitioned a stuck running run to partial_error"
+                        )
         except Exception:
-            logger.exception("jobs entrypoint: bootstrap reaper failed; continuing")
+            logger.exception("jobs entrypoint: bootstrap recovery failed; continuing")
 
         # Step 5 — process_stop boot-recovery (#1065). Sweep abandoned
         # cooperative-cancel signals (>6h, never observed) and stuck
