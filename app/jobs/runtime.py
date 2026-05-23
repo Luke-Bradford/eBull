@@ -330,6 +330,16 @@ _INVOKERS[_scheduler.JOB_FINRA_SHORT_INTEREST_REFRESH] = _adapt_zero_arg(_schedu
 # shape — zero-param manual surface; extended-window backfill via REPL.
 _INVOKERS[_scheduler.JOB_FINRA_REGSHO_DAILY_REFRESH] = _adapt_zero_arg(_scheduler.finra_regsho_daily_refresh)
 
+# #1233 PR-8 — Daily bulk-archive refresh (ETag-conditional).
+# Each invoker HEADs the SEC URL once per fire and re-downloads
+# only when the ETag has changed since the local sidecar. Lane is
+# ``sec_bulk_download`` (registered automatically via SCHEDULED_JOBS).
+_INVOKERS[_scheduler.JOB_SEC_SUBMISSIONS_BULK_REFRESH] = _adapt_zero_arg(_scheduler.sec_submissions_bulk_refresh)
+_INVOKERS[_scheduler.JOB_SEC_COMPANYFACTS_BULK_REFRESH] = _adapt_zero_arg(_scheduler.sec_companyfacts_bulk_refresh)
+_INVOKERS[_scheduler.JOB_SEC_QUARTERLY_DATASETS_BULK_REFRESH] = _adapt_zero_arg(
+    _scheduler.sec_quarterly_datasets_bulk_refresh
+)
+
 # ---------------------------------------------------------------------------
 # Bulk-archive Phase C ingester invokers (#1027 — #1020)
 # ---------------------------------------------------------------------------

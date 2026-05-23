@@ -338,6 +338,18 @@ JOB_SEC_REBUILD = "sec_rebuild"
 JOB_FINRA_SHORT_INTEREST_REFRESH = "finra_short_interest_refresh"
 JOB_FINRA_REGSHO_DAILY_REFRESH = "finra_regsho_daily_refresh"
 
+# #1233 PR-8 — Daily bulk-archive refresh (ETag-conditional).
+# Closes the post-bootstrap freshness drift: bulk archives are
+# downloaded ONLY at bootstrap time today, then stale forever.
+# Each invoker HEADs the SEC URL, compares against the local
+# ``.zip.etag`` sidecar, and re-downloads only when changed.
+# Bootstrap-fenced — skips while ``bootstrap_state.status='running'``.
+# Lane = ``sec_bulk_download`` (disjoint from sec_rate by host
+# resource profile — these are large fixed-URL downloads).
+JOB_SEC_SUBMISSIONS_BULK_REFRESH = "sec_submissions_bulk_refresh"
+JOB_SEC_COMPANYFACTS_BULK_REFRESH = "sec_companyfacts_bulk_refresh"
+JOB_SEC_QUARTERLY_DATASETS_BULK_REFRESH = "sec_quarterly_datasets_bulk_refresh"
+
 # ---------------------------------------------------------------------------
 # Prerequisite checks
 # ---------------------------------------------------------------------------
@@ -1180,6 +1192,84 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
+    # -- #1233 PR-8 — Daily bulk-archive refresh (ETag-conditional) -------
+    # All three target the same ``sec_bulk_download`` Lane so they
+    # serialise behind the bootstrap downloader and behind each other
+    # — the shared SEC per-IP budget is honoured by the rate limiter
+    # inside ``refresh_bulk_archive_if_stale`` regardless.
+    #
+    # Cron schedules cluster post-SEC's nightly publish window (~03:00
+    # ET / 07:00-08:00 UTC) so HEAD races are minimal and a fresh ETag
+    # is available when the job fires.
+    ScheduledJob(
+        name=JOB_SEC_SUBMISSIONS_BULK_REFRESH,
+        display_name="SEC submissions.zip daily refresh",
+        source="sec_bulk_download",
+        description=(
+            "#1233 PR-8 — HEAD the SEC ``submissions.zip`` archive "
+            "daily and re-download only when the server ETag has "
+            "changed since the local sidecar. Closes the post-"
+            "bootstrap freshness drift on the bulk plane. Daily 08:00 "
+            "UTC lands ~1 h after SEC's 03:00 ET nightly rebuild. "
+            "Skips silently while a bootstrap is running so PR-5b's "
+            "reuse path is not raced. Skips on SEC 5xx + on missing "
+            "ETag header — local file is never corrupted. Most fires "
+            "transfer zero bytes; only when SEC re-publishes does the "
+            "full ~1.5 GB stream."
+        ),
+        cadence=Cadence.daily(hour=8, minute=0),
+        # No catch-up on boot — a missed 08:00 window naturally rolls
+        # forward to the next day. Catching up on every dev-stack
+        # restart could trigger a ~1.5 GB transfer on the boot path,
+        # which violates the "bounded cost per fire" criterion of the
+        # universal-gate carve-out and would burn SEC bandwidth on
+        # operator workflow steps that don't need it.
+        catch_up_on_boot=False,
+        # Gated by the standard bootstrap-complete prerequisite so the
+        # job stays quiet during first-install — the body's own
+        # ``bootstrap_running`` fence is belt-and-braces for the case
+        # where an operator re-runs bootstrap after first-install
+        # already finished (status flips from ``complete`` →
+        # ``running``).
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_COMPANYFACTS_BULK_REFRESH,
+        display_name="SEC companyfacts.zip daily refresh",
+        source="sec_bulk_download",
+        description=(
+            "#1233 PR-8 — HEAD the SEC ``companyfacts.zip`` archive "
+            "daily and re-download on ETag change. Daily 08:30 UTC "
+            "staggers 30 min after the submissions refresh so the two "
+            "potential ~1.4-1.5 GB transfers don't share the SEC "
+            "stream budget. Same bootstrap fence + skip semantics as "
+            "the submissions job."
+        ),
+        cadence=Cadence.daily(hour=8, minute=30),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_QUARTERLY_DATASETS_BULK_REFRESH,
+        display_name="SEC quarterly datasets bulk refresh",
+        source="sec_bulk_download",
+        description=(
+            "#1233 PR-8 — HEAD every quarterly SEC dataset archive "
+            "(Form 13F rolling windows + Insider Transactions + "
+            "Form N-PORT) and re-download those whose ETag changed. "
+            "Monthly on the 5th at 06:00 UTC — after SEC's quarterly "
+            "publication cycle has settled (publishes typically land "
+            "within the first few business days of each new quarter; "
+            "the 5th gives the catalogue time to stabilise before we "
+            "probe). Same bootstrap fence + per-archive skip "
+            "semantics. Most months no quarterly archive will have "
+            "changed and the job transfers zero bytes — the HEADs are "
+            "the only SEC traffic."
+        ),
+        cadence=Cadence.monthly(day=5, hour=6, minute=0),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
     ScheduledJob(
         name=JOB_SEC_MANIFEST_TOMBSTONE_STALE,
         display_name="Manifest stale-failed sweep",
@@ -1339,6 +1429,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                         tracker.run_id,
                         status="success",
                         row_count=tracker.row_count,
+                        error_msg=tracker.note,
                     )
                     if tracker.row_count is not None:
                         spike = check_row_count_spike(
@@ -1392,6 +1483,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                     tracker.run_id,
                     status="success",
                     row_count=tracker.row_count,
+                    error_msg=tracker.note,
                 )
                 # Check for row-count spikes after recording the successful run.
                 # Exclude the current run_id so we compare against the *previous*
@@ -1405,12 +1497,21 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
 
 
 class _JobTracker:
-    """Mutable bag passed into the tracked_job context so the caller can set row_count."""
+    """Mutable bag passed into the tracked_job context so the caller can set row_count.
+
+    ``note`` — optional operator-visible string forwarded to
+    ``job_runs.error_msg`` on the SUCCESS path. Use it for soft-skip
+    digests (e.g. "bootstrap_running" or "all archives fresh") where
+    the body ran cleanly but the operator should know nothing happened.
+    Leaving it ``None`` records the success row with NULL error_msg
+    (the historical contract).
+    """
 
     def __init__(self, job_name: str) -> None:
         self.job_name = job_name
         self.run_id: int = 0
         self.row_count: int | None = None
+        self.note: str | None = None
 
 
 def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
@@ -3959,6 +4060,96 @@ def sec_manifest_tombstone_stale() -> None:
             result.rows_skipped_transient,
             result.rows_skipped_race,
         )
+
+
+def _record_bulk_refresh_outcome(
+    tracker: _JobTracker,
+    results: list,  # list[RefreshResult] — annotation lazy to avoid import
+    *,
+    job_name: str,
+) -> None:
+    """Translate a list of ``RefreshResult`` into tracker state + a
+    single operator-visible log line.
+
+    Convention (per spec):
+      * ``row_count``  = total bytes downloaded across the archive set.
+      * ``tracker.note`` = a comma-joined ``name:reason`` digest when
+        ANY archive was skipped; ``None`` when every archive's outcome
+        was either a no-op or a fresh download. ``_tracked_job``
+        forwards ``tracker.note`` to ``job_runs.error_msg`` on the
+        SUCCESS path so a bootstrap-fence / SEC-5xx / missing-ETag
+        skip is operator-visible in the admin UI without raising
+        (the refresh itself ran fine, it just had nothing to do).
+
+    The function intentionally does NOT raise on a per-archive
+    skip — partial-success is the contractual mode for the quarterly
+    job (one 13F window can be stale while the others are fresh).
+    """
+    total_bytes = sum(r.bytes_downloaded for r in results)
+    tracker.row_count = total_bytes
+
+    skip_digest = ", ".join(f"{r.archive_name}:{r.skipped_reason}" for r in results if r.skipped_reason is not None)
+    if skip_digest:
+        tracker.note = skip_digest
+
+    changed = [r.archive_name for r in results if r.etag_changed]
+    fresh = [r.archive_name for r in results if not r.etag_changed and r.skipped_reason is None]
+    skipped = [r.archive_name for r in results if r.skipped_reason is not None]
+
+    logger.info(
+        "%s: changed=%s fresh_noop=%s skipped=%s bytes_downloaded=%d skip_digest=%s",
+        job_name,
+        changed,
+        fresh,
+        skipped,
+        total_bytes,
+        skip_digest or "-",
+    )
+
+
+def sec_submissions_bulk_refresh() -> None:
+    """#1233 PR-8 — Daily refresh of ``submissions.zip``.
+
+    HEADs the SEC URL once, compares ETag against the local sidecar,
+    re-downloads only when changed. Bootstrap-fenced inside
+    ``refresh_bulk_archive_if_stale`` so PR-5b's reuse path is not
+    raced.
+
+    Records ``tracker.row_count = bytes_downloaded`` so the operator
+    can see at a glance whether any transfer occurred. A no-op fire
+    (ETag match) records ``row_count=0`` with no error_msg — the
+    operator UI surfaces this as a clean SUCCESS.
+    """
+    from app.services.sec_bulk_refresh import _submissions_archive_names, refresh_archive_set
+
+    with _tracked_job(JOB_SEC_SUBMISSIONS_BULK_REFRESH) as tracker:
+        results = refresh_archive_set(_submissions_archive_names())
+        _record_bulk_refresh_outcome(tracker, results, job_name=JOB_SEC_SUBMISSIONS_BULK_REFRESH)
+
+
+def sec_companyfacts_bulk_refresh() -> None:
+    """#1233 PR-8 — Daily refresh of ``companyfacts.zip``."""
+    from app.services.sec_bulk_refresh import _companyfacts_archive_names, refresh_archive_set
+
+    with _tracked_job(JOB_SEC_COMPANYFACTS_BULK_REFRESH) as tracker:
+        results = refresh_archive_set(_companyfacts_archive_names())
+        _record_bulk_refresh_outcome(tracker, results, job_name=JOB_SEC_COMPANYFACTS_BULK_REFRESH)
+
+
+def sec_quarterly_datasets_bulk_refresh() -> None:
+    """#1233 PR-8 — Monthly refresh of quarterly bulk datasets.
+
+    Covers Form 13F rolling-window archives + Insider Transactions
+    quarterly archives + Form N-PORT quarterly archives. The exact
+    file set is computed from ``build_bulk_archive_inventory`` so
+    the refresh job targets the same files the bootstrap downloader
+    would write.
+    """
+    from app.services.sec_bulk_refresh import _quarterly_dataset_archive_names, refresh_archive_set
+
+    with _tracked_job(JOB_SEC_QUARTERLY_DATASETS_BULK_REFRESH) as tracker:
+        results = refresh_archive_set(_quarterly_dataset_archive_names())
+        _record_bulk_refresh_outcome(tracker, results, job_name=JOB_SEC_QUARTERLY_DATASETS_BULK_REFRESH)
 
 
 def sec_business_summary_bootstrap() -> None:
