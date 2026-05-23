@@ -239,22 +239,40 @@ def sec_companyfacts_ingest_job() -> None:
     def _do(conn: psycopg.Connection[tuple]) -> None:
         result = ingest_companyfacts_archive(conn=conn, archive_path=archive)
         captured["facts_upserted"] = result.facts_upserted
+        captured["facts_skipped"] = result.facts_skipped
         captured["parse_errors"] = result.parse_errors
         logger.info(
-            "sec_companyfacts_ingest: matched=%d facts_upserted=%d parse_errors=%d",
+            "sec_companyfacts_ingest: matched=%d facts_upserted=%d facts_skipped=%d parse_errors=%d",
             result.instruments_matched,
             result.facts_upserted,
+            result.facts_skipped,
             result.parse_errors,
         )
 
     _run_with_conn(_do)
     if run_id is not None:
+        # #1294: ``rows_written`` semantics drive the strict-gate
+        # ``fundamentals_raw_seeded`` cap (rows_processed >= 1). Using
+        # ``facts_upserted`` alone undercounts on re-runs where every
+        # value is unchanged: psycopg's ``ON CONFLICT DO UPDATE WHERE
+        # IS DISTINCT FROM`` filter returns rowcount=0 for idempotent
+        # re-upserts. The cap then false-blocks S25 fundamentals_sync
+        # even though the financial_facts_raw partition is fully
+        # populated.
+        # Fix: account ``facts_upserted + facts_skipped`` as
+        # "rows the upsert path saw". This matches the cap's intended
+        # semantic ("data passed through the upsert layer") rather
+        # than the narrower "rows that mutated" semantic.
+        facts_seen = captured.get("facts_upserted", 0) + captured.get("facts_skipped", 0)
         _record_archive_result(
             bootstrap_run_id=run_id,
             stage_key="sec_companyfacts_ingest",
             archive_name="companyfacts.zip",
-            rows_written=captured.get("facts_upserted", 0),
-            rows_skipped={"parse_errors": captured.get("parse_errors", 0)},
+            rows_written=facts_seen,
+            rows_skipped={
+                "parse_errors": captured.get("parse_errors", 0),
+                "facts_unchanged": captured.get("facts_skipped", 0),
+            },
         )
     _delete_archive_after_success(archive)
 
