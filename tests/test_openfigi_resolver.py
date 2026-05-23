@@ -501,3 +501,41 @@ def test_mapping_dataclass_is_frozen() -> None:
     mapping = OpenFigiMapping(ticker="AAPL", name="APPLE INC", exch_code="US", share_class_figi=None)
     with pytest.raises(Exception):  # noqa: B017 — FrozenInstanceError varies
         mapping.ticker = "MSFT"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# from_env() — Settings integration (fix/1233-openfigi-key-via-settings)
+# ---------------------------------------------------------------------------
+
+
+class TestFromEnv:
+    """``OpenFigiResolver.from_env`` reads ``settings.openfigi_api_key``.
+
+    The prior shape (``os.environ.get('OPENFIGI_API_KEY')``) silently
+    bypassed the ``.env`` loader — keys written to ``.env`` never
+    reached the resolver. Reading via Settings keeps env-file precedence
+    consistent with every other secret in the repo.
+    """
+
+    def test_settings_key_promoted_to_keyed_tier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "openfigi_api_key", "test-key-keyed")
+        with OpenFigiResolver.from_env() as resolver:
+            assert resolver.keyed is True
+
+    def test_missing_settings_key_falls_back_to_unkeyed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "openfigi_api_key", None)
+        with OpenFigiResolver.from_env() as resolver:
+            assert resolver.keyed is False
+
+    def test_empty_string_settings_key_falls_back_to_unkeyed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty ``OPENFIGI_API_KEY=`` line in .env yields empty string,
+        not None; resolver must treat as unkeyed."""
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "openfigi_api_key", "")
+        with OpenFigiResolver.from_env() as resolver:
+            assert resolver.keyed is False

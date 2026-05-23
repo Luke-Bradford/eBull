@@ -48,6 +48,14 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str | None = None
 
+    # OpenFIGI free fallback CUSIP→ticker resolver (#1233 PR-1b + SD-1).
+    # Optional. Without a key the resolver runs unkeyed (25 req/min,
+    # max 10 jobs/POST = 250 mappings/min — ~48 min on a 12k unresolved
+    # CUSIP backlog). With a key (free tier, register at
+    # https://www.openfigi.com/api): 25 req/6s, max 100 jobs/POST =
+    # 25,000 mappings/min — sweep completes in ~5 min.
+    openfigi_api_key: str | None = None
+
     default_portfolio_mode: str = "balanced"
     max_active_positions: int = 20
     max_initial_position_pct: int = 5
