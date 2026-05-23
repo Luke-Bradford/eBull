@@ -8,7 +8,7 @@
 - **Rate limit: 10 req/s per IP, regardless of machine count.** Source: <https://www.sec.gov/about/developer-resources>.
 - **User-Agent required.** Format `<Name> <email>`. Missing or generic UA = immediate 403.
 - **Bulk over per-filing whenever possible.** `submissions.zip` (~1.54 GB) and `companyfacts.zip` (~1.38 GB) rebuild nightly ~03:00 ET.
-- **Conditional fetch supported.** Many endpoints emit `Last-Modified` / `ETag`. Always send `If-Modified-Since`.
+- **Conditional fetch is asymmetric.** Many per-CIK / per-filing endpoints honour `If-Modified-Since` against `Last-Modified` (304 on no-change). **Bulk archives (`submissions.zip`, `companyfacts.zip`, etc.) DO NOT** — empirical probe 2026-05-22: SEC returns `200 + full body` regardless of `If-None-Match` / `If-Modified-Since`. Bulk reuse uses client-side HEAD ETag comparison instead (see "Bulk-archive reuse contract" in §4).
 - **Three-tier polling.** Hot (Atom getcurrent) / Warm (daily-index) / Cold (per-CIK submissions JSON).
 - **Identifiers, never names.** TSLA = `TESLA INC` in SEC, `Tesla, Inc.` in broker. Fuzzy-name match is forbidden — use CIK / CUSIP bridges.
 
@@ -424,13 +424,34 @@ Required format: `<Name> <email>`. Email must be syntactically valid and routabl
 
 1. **Bulk archives over per-filing scrapes.** `submissions.zip` + `companyfacts.zip` replace ~10k requests with 1.
 2. **`If-Modified-Since` against `Last-Modified`** for any per-CIK or per-filing endpoint. Server returns 304 (no body) for unchanged. Pattern at [app/providers/implementations/sec_edgar.py:497-529](../../../app/providers/implementations/sec_edgar.py#L497-L529).
-3. **`If-None-Match` against `ETag`** for archive files. Frankfurter pattern at [app/providers/implementations/frankfurter.py:98-144](../../../app/providers/implementations/frankfurter.py#L98-L144) is the cleanest in-repo template.
+3. **`If-None-Match` against `ETag`** — works for some non-SEC archives (Frankfurter pattern at [app/providers/implementations/frankfurter.py:98-144](../../../app/providers/implementations/frankfurter.py#L98-L144) is the cleanest in-repo template). **Does NOT work for SEC bulk archives** — empirical probe 2026-05-22 returned `200 + full body` even with the exact ETag echoed back. For SEC bulk files use the client-side HEAD-compare reuse contract in the "Bulk-archive reuse contract" subsection below.
 4. **Three-tier polling**:
    - **Hot**: Atom `getcurrent` for 8-K. Poll every 5–10 min during business hours.
    - **Warm**: `daily-index/master.{YYYYMMDD}.idx` early-morning batch.
    - **Cold**: per-CIK submissions JSON re-pull weekly or per-event.
 5. **Cache fetched bytes** in `raw_filings` table so re-wash is local. [app/services/raw_filings.py:11](../../../app/services/raw_filings.py#L11).
 6. **Backoff on 429 / 503**. Exponential, max 8 attempts. Many transient blocks clear within 60s.
+
+### Bulk-archive reuse contract (PR-5b, #1233)
+
+Settled decision: [docs/settled-decisions.md "Bulk archive reuse keyed on SEC ETag + SHA-256"](../../../docs/settled-decisions.md). Implementation: [app/services/sec_bulk_download.py `_preflight_etag_keyed_reuse`](../../../app/services/sec_bulk_download.py).
+
+Per archive, before deciding to download:
+
+1. **HEAD against SEC** with `User-Agent: settings.sec_user_agent` — capture the `ETag` header (empirical example for `submissions.zip`: `"504b124e9474334e889e9e525db95c14-184"`, stable S3-backed).
+2. **Read sidecars** at `<archive>.zip.sha256` + `<archive>.zip.etag`.
+3. **Reuse iff ALL of**:
+   - local `.zip` exists,
+   - `.sha256` sidecar exists AND matches a fresh SHA-256 of the local file (catches on-disk corruption / sidecar tampering),
+   - `.etag` sidecar exists AND matches SEC's HEAD `ETag` (catches SEC-side rebuild).
+4. **On reuse**: stamp manifest with `reuse_reason: "etag_match_sha256_verified"`. Zero bytes downloaded.
+5. **On no reuse**: purge `.zip` + `.partial` + `.sha256` + `.etag` and proceed to download. On successful download, write fresh sidecars (atomic `tmp + rename`) and stamp manifest with `reuse_reason: "downloaded_in_run"`.
+
+**Operator override**: `BOOTSTRAP_FORCE_REDOWNLOAD=1` env bypasses reuse entirely (forces re-download of every archive).
+
+**Provenance preserved**: `assert_archive_belongs_to_run` still gates downstream Phase C stages on the manifest's `bootstrap_run_id` matching the current run — the manifest is stamped fresh every run regardless of reuse path, so prior-run leftovers cannot leak.
+
+**Why client-side and not `If-None-Match`**: empirically SEC's S3-backed bulk endpoints ignore both `If-None-Match` and `If-Modified-Since`. The HEAD → compare → conditional-GET dance gives us the same outcome (0 bytes when unchanged) without depending on a header SEC won't honour.
 
 ## 5. Identity resolution + canonical mapping
 

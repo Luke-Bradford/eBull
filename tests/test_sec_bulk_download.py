@@ -16,7 +16,7 @@ from app.services.sec_bulk_download import (
     BulkArchive,
     BulkDownloadResult,
     _download_one,
-    _preflight_cleanup_stale_partials,
+    _purge_archive_artifacts,
     _zip_round_trip,
     build_bulk_archive_inventory,
     check_disk_space,
@@ -143,25 +143,21 @@ class TestInventory:
 # ---------------------------------------------------------------------------
 
 
-class TestPreflightCleanup:
-    def test_removes_partial_and_complete_zips_for_run_manifest_contract(self, tmp_path: Path) -> None:
-        # Run-manifest provenance (#1020) demands every archive in the
-        # current run's manifest was physically downloaded in THIS run.
-        # Promoting a prior-run complete .zip into the manifest would let
-        # stale data pass provenance, so the pre-flight nukes BOTH
-        # complete .zip and stale .partial files. See
-        # _preflight_cleanup_stale_partials docstring.
-        complete = tmp_path / "submissions.zip"
-        complete.write_bytes(b"complete payload")
-        partial = tmp_path / "companyfacts.zip.partial"
-        partial.write_bytes(b"truncated payload")
-        _preflight_cleanup_stale_partials(tmp_path)
-        assert not complete.exists()
-        assert not partial.exists()
+class TestPreflightPurge:
+    def test_purge_archive_artifacts_removes_zip_partial_and_sidecars(self, tmp_path: Path) -> None:
+        # _purge_archive_artifacts is the per-archive cleanup the
+        # ETag-keyed pre-flight calls when reuse is rejected. It must
+        # delete the .zip, .partial, .sha256, and .etag in one call.
+        (tmp_path / "submissions.zip").write_bytes(b"complete payload")
+        (tmp_path / "submissions.zip.partial").write_bytes(b"resume tail")
+        (tmp_path / "submissions.zip.sha256").write_text("deadbeef")
+        (tmp_path / "submissions.zip.etag").write_text('"abc-123"')
+        _purge_archive_artifacts(tmp_path, "submissions.zip")
+        for name in ("submissions.zip", "submissions.zip.partial", "submissions.zip.sha256", "submissions.zip.etag"):
+            assert not (tmp_path / name).exists(), name
 
-    def test_no_op_when_dir_missing(self, tmp_path: Path) -> None:
-        # Should not raise on absent directory.
-        _preflight_cleanup_stale_partials(tmp_path / "does-not-exist")
+    def test_purge_archive_artifacts_no_op_when_missing(self, tmp_path: Path) -> None:
+        _purge_archive_artifacts(tmp_path, "absent.zip")
 
 
 class TestDiskPreflight:
