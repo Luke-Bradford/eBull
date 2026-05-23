@@ -120,6 +120,13 @@ bash scripts/check_ncen_latest_only.sh
 echo "==> Pre-push gate: business_summary latest-only invariant lint"
 bash scripts/check_business_summary_latest_only.sh
 
+# #1233 v3 §7 PR-3 — bulk dataset ingesters MUST use the per-archive
+# COPY + INSERT...ON CONFLICT pattern. Guards against regression to
+# the legacy per-row INSERT + with-conn.transaction SAVEPOINT shape
+# (which caps throughput at ~1500 rows/s). ~30ms.
+echo "==> Pre-push gate: bulk-ingest COPY pattern lint"
+bash scripts/check_bulk_ingest_copy_pattern.sh
+
 # #1233 §4.4 PR10b — Form 5 18-month filed_at retention cap at every
 # writer chokepoint (helpers in insider_transactions.py, manifest-
 # worker _parse_form5 pre-fetch gate, bulk-dataset per-loop gates,
