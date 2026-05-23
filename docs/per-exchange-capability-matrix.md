@@ -7,7 +7,7 @@ This matrix is workstream 2's deliverable. One column per `exchange_id` row in t
 
 ## Granularity contract
 
-Per [`docs/superpowers/specs/2026-04-26-complete-coverage-spec.md`](superpowers/specs/2026-04-26-complete-coverage-spec.md):
+Per [`docs/proposals/etl/complete-coverage.md`](superpowers/specs/2026-04-26-complete-coverage-spec.md):
 
 | Artefact | Granularity |
 |----------|-------------|

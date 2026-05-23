@@ -208,6 +208,6 @@ Sign up at <https://www.openfigi.com/api> and provision an API key. Set `OPENFIG
 ## 9. Cross-references
 
 - `docs/settled-decisions.md` → "OpenFIGI as approved external CUSIP-resolver fallback (2026-05-22)" — the SD-1 entry that gates this integration.
-- `docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v3.md` §2 — the PR-0 introduction context; §5 — the PR-1b resolver shape.
+- `docs/proposals/etl/bootstrap-optimisation.md` §2 — the PR-0 introduction context; §5 — the PR-1b resolver shape.
 - `.claude/skills/data-sources/sec-edgar.md` §5 (CUSIP → CIK bridge) — the upstream bridge OpenFIGI complements when 13F Official List name-fuzzy fails.
 - `tests/fixtures/openfigi/README.md` — the recorded fixtures with full request/response payloads.

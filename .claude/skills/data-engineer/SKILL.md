@@ -372,7 +372,7 @@ WHERE s.category = '<cat>'
 
 `_CATEGORIES` is 7 entries (was 5 pre-PR12 — funds + esop added). PG ≥ 17 is asserted at lifespan startup (`app/system/postgres_version_guard.py`).
 
-Spec: `docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md`. Prevention-log entries: "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope clamp on BOTH the ON clause AND the DELETE clause" + "Diff-aware writers must NOT include update-timestamp columns in the diff predicate".
+Spec: `docs/_archive/2026-05/2026-05-21-pr12-ownership-current-writer-merge.md`. Prevention-log entries: "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope clamp on BOTH the ON clause AND the DELETE clause" + "Diff-aware writers must NOT include update-timestamp columns in the diff predicate".
 
 **Batched form for post-ingest hot-paths (#1233 PR-4, SHIPPED 2026-05-23)**:
 
@@ -464,7 +464,7 @@ cur.execute("""
 
 **Companyfacts is NOT on this pattern** — `sec_companyfacts_ingest.py` reads XBRL JSON not TSV and already uses multi-row INSERT chunked at `_UPSERT_PAGE_SIZE=1000` via `upsert_facts_for_instrument`. The per-CIK savepoint there is intentional (one savepoint per CIK-payload, NOT per-row); it stays.
 
-Spec: `docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v2.md` §7. Tests: `tests/test_pr3_copy_refactor.py` (throughput floor, ON_ERROR skip, commit-boundary preservation, idempotency, touched-instrument set).
+Spec: `docs/_archive/2026-05/superseded-bootstrap-etl-optimisation-v2.md` §7. Tests: `tests/test_pr3_copy_refactor.py` (throughput floor, ON_ERROR skip, commit-boundary preservation, idempotency, touched-instrument set).
 
 ### 2.11 Worker / job entry points
 
@@ -685,12 +685,12 @@ PR11 (#1233) spec authoring surfaced this concern; Codex 1b BLOCKING #2 caught a
 - `app/api/bootstrap.py` — `/system/bootstrap/status`, `/system/bootstrap/run`, `/system/bootstrap/mark-complete` (router prefix `/system/bootstrap`).
 
 **Specs**:
-- `docs/superpowers/specs/2026-05-03-ownership-tier0-and-cik-history-design.md`
-- `docs/superpowers/specs/2026-05-04-ownership-full-decomposition-design.md` (Phase 1 + 3)
-- `docs/superpowers/specs/2026-05-04-etl-coverage-model.md` (manifest + freshness + 3-tier polling)
-- `docs/superpowers/specs/2026-05-06-def14a-bene-table-extension-design.md` (#843 ESOP)
-- `docs/superpowers/specs/2026-05-07-first-install-bootstrap.md` (#993)
-- `docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md`
+- `docs/proposals/etl/ownership-tier0-cik-history.md`
+- `docs/proposals/etl/ownership-full-decomposition.md` (Phase 1 + 3)
+- `docs/specs/etl/coverage-model.md` (manifest + freshness + 3-tier polling)
+- `docs/proposals/etl/def14a-bene-table-extension.md` (#843 ESOP)
+- `docs/specs/bootstrap/first-install.md` (#993)
+- `docs/specs/bootstrap/orchestration.md`
 
 **Endpoint coverage matrix**: `.claude/skills/data-engineer/etl-endpoint-coverage.md` — per-endpoint wiring across bootstrap + standard refresh + freshness + watermark + rate-limit + parser. Read this when answering "are we covered for source X?" or "why isn't endpoint Y firing on cadence?". Last audit 2026-05-13.
 
@@ -701,7 +701,7 @@ PR11 (#1233) spec authoring surfaced this concern; Codex 1b BLOCKING #2 caught a
 
 > **State:** This section describes the **post-#1064 target state.** PR1 introduces source-level `JobLock` + `ParamMetadata` + `params_snapshot`; PR3 unifies the `bootstrap_state` gate across scheduled-fire and manual-trigger paths. Pre-PR1 reality: `JobLock` keys on `job_name`, scheduled jobs are zero-arg, and manual `/processes/{id}/trigger` bypasses prerequisites. The "Pre-PRn history" notes below mark each transition.
 >
-> Read before adding a new scheduled job, bootstrap stage, or operator-exposed parameter on an existing job. Cross-reference: [`docs/wiki/job-registry-audit.md`](../../../docs/wiki/job-registry-audit.md) for the per-job parameter surface; [`docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md`](../../../docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md) for the umbrella decisions.
+> Read before adding a new scheduled job, bootstrap stage, or operator-exposed parameter on an existing job. Cross-reference: [`docs/wiki/job-registry-audit.md`](../../../docs/wiki/job-registry-audit.md) for the per-job parameter surface; [`docs/proposals/ui/admin-control-hub-rewrite.md`](../../../docs/proposals/ui/admin-control-hub-rewrite.md) for the umbrella decisions.
 
 ### 6.5.1 Source-level concurrency (PR1 target state)
 
@@ -851,7 +851,7 @@ The UPDATE is guarded by `AND status = 'running'` so a stage that transitioned t
 * Cannot detect the #1184 re-entrancy edge case where the outer-thread holds the lock but the stage-thread itself crashed — the outer holder will release on its own crash, and the next reaper pass after grace will reset.
 * A stage whose `job_name` is not in the `app.jobs.sources.JOB_NAME_TO_SOURCE` registry is LEFT ALONE (logged as a warning). The reaper must never reset a stage whose lock-key shape it cannot derive — doing so would silently reset a stage whose worker IS alive (registry gap is an operator mistake, not a crash signal).
 
-Acceptance criterion (`docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v3.md` §15): "process crash mid-stage: reaper resets to pending within 6 min (5 min grace + 1 min poll)".
+Acceptance criterion (`docs/proposals/etl/bootstrap-optimisation.md` §15): "process crash mid-stage: reaper resets to pending within 6 min (5 min grace + 1 min poll)".
 
 ### 6.5.10 Cap-ordering for concurrent writers (#1233 PR-1292)
 

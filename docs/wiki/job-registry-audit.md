@@ -406,9 +406,9 @@ Notes:
 ## 9. Cross-references
 
 - Operator intent (locked decisions): [`.claude/projects/-Users-lukebradford-Dev-eBull/memory/project_admin_control_hub_rewrite.md`](../../.claude/projects/-Users-lukebradford-Dev-eBull/memory/project_admin_control_hub_rewrite.md)
-- Umbrella spec (#1064): [`docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md`](../superpowers/specs/2026-05-08-admin-control-hub-rewrite.md)
-- Bootstrap orchestration spec: [`docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md`](../superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md)
-- First-install bootstrap spec: [`docs/superpowers/specs/2026-05-07-first-install-bootstrap.md`](../superpowers/specs/2026-05-07-first-install-bootstrap.md)
+- Umbrella spec (#1064): [`docs/proposals/ui/admin-control-hub-rewrite.md`](../superpowers/specs/2026-05-08-admin-control-hub-rewrite.md)
+- Bootstrap orchestration spec: [`docs/specs/bootstrap/orchestration.md`](../superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md)
+- First-install bootstrap spec: [`docs/specs/bootstrap/first-install.md`](../superpowers/specs/2026-05-07-first-install-bootstrap.md)
 - Settled-decisions (process topology #719, cancel UX): [`docs/settled-decisions.md`](../settled-decisions.md)
 - Data-engineer skill (PR0 §10 update target): [`.claude/skills/data-engineer/SKILL.md`](../../.claude/skills/data-engineer/SKILL.md)
 - ScheduledJob declarations: [`app/workers/scheduler.py:453`](../../app/workers/scheduler.py#L453)

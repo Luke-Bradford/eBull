@@ -128,14 +128,14 @@ def _edgar_parsers() -> tuple[Any, Any]:
 
 ### G3 — N-PORT structural + Pydantic cliffs
 
-`FundReport.parse_fund_xml(xml)` returns a `Dict[str, Any]` with keys `header / general_info / fund_info / investments`. Two failure modes (#932 spike `docs/superpowers/spikes/2026-05-18-n-port-edgartools-feasibility.md` §4):
+`FundReport.parse_fund_xml(xml)` returns a `Dict[str, Any]` with keys `header / general_info / fund_info / investments`. Two failure modes (#932 spike `docs/_archive/2026-05/spike-n-port-edgartools.md` §4):
 
 1. **Structural cliff (observed on synthetic fixtures)**: the parser unconditionally dereferences `<filerInfo>` + `<fundInfo>` + `<returnInfo>` + `<monthlyTotReturns>` blocks. Missing any block → `AttributeError: 'NoneType' object has no attribute 'find'`. Hand-trimmed fixtures must include all four blocks plus `GeneralInfo` non-Optional text fields (`<regName>`, `<regCik>`, `<regFileNumber>`, `<regStreet1>` with non-empty content), `<fundInfo>` 9 required Decimal fields, and empty `<othMon1/2/3/>` tags under `<returnInfo>`.
 2. **Internal Pydantic cliff (latent on real-world payloads)**: `InvestmentOrSecurity.value_usd: Decimal` is non-Optional at `edgar/funds/reports.py:346`. An NPORT-P row that omits `<valUSD>` raises `pydantic.ValidationError` mid-iteration, aborting the whole-accession parse. Unobserved on the Vanguard probe sample but theoretically possible.
 
 **Rule of thumb**: if a form's module imports `from pydantic import BaseModel`, expect a validation cliff for synthetic fixtures AND for real-world payloads with missing required Decimal cells. Wrap the parser call AND the post-parse dict-key dereferences in `try/except (AttributeError, KeyError, decimal.InvalidOperation, ValueError, TypeError, pydantic.ValidationError)` and convert to a parser-specific error type so accession-level tombstones fire. `KeyError` defends against dict-shape drift on pin bump.
 
-Pinned at edgartools 5.30.2 by `pyproject.toml:21` (#925). Live wrapper at `app/services/n_port_ingest.py::parse_n_port_payload` (#932). See `docs/superpowers/spikes/2026-05-18-n-port-edgartools-feasibility.md` for the full empirical analysis.
+Pinned at edgartools 5.30.2 by `pyproject.toml:21` (#925). Live wrapper at `app/services/n_port_ingest.py::parse_n_port_payload` (#932). See `docs/_archive/2026-05/spike-n-port-edgartools.md` for the full empirical analysis.
 
 ### G4 — Type-label rewrite (`SH` → `Shares`, `PRN` → `Principal`)
 `parse_infotable_xml` output's `Type` column has values `"Shares"` / `"Principal"`, NOT the SEC two-letter codes. eBull maps back at [app/providers/implementations/sec_13f.py:210-213](../../../app/providers/implementations/sec_13f.py#L210-L213) (`_TYPE_CODE_FROM_LABEL`).
@@ -162,7 +162,7 @@ Default pages every historical filing. For Berkshire / BlackRock that's dozens o
 `Schedule13D.from_filing(old_filing)` returns `None` because `parse_xml` requires `<edgarSubmission>` root which only exists in post-rule structured XML. Filter ingest by filing date `>= 2024-12-18`.
 
 ### G12 — N-CSR has no per-holding identifier of any kind
-OEF iXBRL N-CSR taxonomy publishes fund-level + class-level + sector-axis facts ONLY. There is no holding-level CUSIP / ISIN / SEDOL / ticker / portfolio-issuer CIK in the iXBRL. The N-CSR primary HTML's Schedule of Investments lists positions as `Name`-`Shares`-`Value` columns with no machine-readable identifier. The N-CSR itself directs readers to N-PORT for structured per-issuer holdings. Don't use N-CSR for security-level rollups under any path (iXBRL, HTML, exhibit). Verified by raw-payload spike `docs/superpowers/spikes/2026-05-14-n-csr-feasibility.md` (4 iXBRL companions + 52 MB primary HTML across 3 sampled OEF families). #918 closed (synth no-op landed); the gap is a real taxonomy limitation, not an EdgarTools surface limitation.
+OEF iXBRL N-CSR taxonomy publishes fund-level + class-level + sector-axis facts ONLY. There is no holding-level CUSIP / ISIN / SEDOL / ticker / portfolio-issuer CIK in the iXBRL. The N-CSR primary HTML's Schedule of Investments lists positions as `Name`-`Shares`-`Value` columns with no machine-readable identifier. The N-CSR itself directs readers to N-PORT for structured per-issuer holdings. Don't use N-CSR for security-level rollups under any path (iXBRL, HTML, exhibit). Verified by raw-payload spike `docs/_archive/2026-05/spike-n-csr-feasibility.md` (4 iXBRL companions + 52 MB primary HTML across 3 sampled OEF families). #918 closed (synth no-op landed); the gap is a real taxonomy limitation, not an EdgarTools surface limitation.
 
 ### G13 — Internal module path is the only stability contract
 13F static parsers live under `edgar.thirteenf.parsers` — internal-looking. Library may reorganise. Mitigation: pin tight, keep golden-replay tests, audit on every minor bump.
@@ -303,5 +303,5 @@ All other SEC paths (`sec_edgar.py`, `sec_submissions.py`, `sec_daily_index.py`,
 - GitHub: <https://github.com/dgunning/edgartools>
 - Source files (installed venv): `.venv/lib/python*/site-packages/edgar/` (relative to repo root)
 - `pyproject.toml:21` — pin
-- Specs: `docs/superpowers/specs/2026-05-08-bulk-datasets-first-bootstrap.md` (edgartools dependency boundary)
+- Specs: `docs/specs/bootstrap/bulk-datasets.md` (edgartools dependency boundary)
 - Memory: `feedback_pydantic_validation_cliff.md`

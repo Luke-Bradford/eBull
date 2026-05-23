@@ -44,6 +44,8 @@ link to the authoritative source.
 - [`glossary.md`](glossary.md) — CIK, CUSIP, 13F-HR, NPORT-P,
   settlement_date, days_to_cover, and other domain terms in plain
   English.
+- [`spec-conventions.md`](spec-conventions.md) — where docs live
+  (specs / proposals / adr / archive). Naming + lifecycle rules.
 
 ## Source-of-truth pointers
 
@@ -52,6 +54,9 @@ link to the authoritative source.
 | "What workflow rules apply when contributing?" | `.claude/CLAUDE.md` |
 | "What design decisions are settled?" | `docs/settled-decisions.md` |
 | "What recurring mistakes have we caught?" | `docs/review-prevention-log.md` |
-| "What does this epic's design look like?" | `docs/superpowers/specs/README.md` |
+| "What currently-implemented systems exist?" | [`docs/specs/`](../specs/) |
+| "What's planned but not yet shipped?" | [`docs/proposals/`](../proposals/) |
+| "What architecture decisions have we recorded?" | [`docs/adr/`](../adr/) |
+| "Where do docs live + what are the naming rules?" | [`spec-conventions.md`](spec-conventions.md) |
 | "What third-party libraries do we use?" | `THIRD_PARTY_NOTICES.md` |
 | "What happened in this PR?" | `git log --oneline` + the PR body |

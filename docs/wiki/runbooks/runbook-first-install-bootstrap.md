@@ -9,7 +9,7 @@ operator explicitly runs the first-install bootstrap.
 This runbook covers when to run it, what to expect, and how to
 recover from per-stage failures.
 
-Spec: ``docs/superpowers/specs/2026-05-07-first-install-bootstrap.md``.
+Spec: ``docs/specs/bootstrap/first-install.md``.
 
 ## 1. When to run
 
@@ -32,7 +32,7 @@ incremental refresh once bootstrap is complete.
 Phases in order; the catalogue lives in
 ``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS`` and
 is the source of truth (asserted == 26 at module load). Spec:
-``docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md``.
+``docs/specs/bootstrap/orchestration.md``.
 
 Issue #1174 added S25 ``mf_directory_sync`` (dedicated MF-directory refresh
 for N-CSR classId resolution) + S26 ``sec_n_csr_bootstrap_drain``
