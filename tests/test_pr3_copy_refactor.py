@@ -33,6 +33,7 @@ import io
 import os
 import time
 import zipfile
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -723,6 +724,273 @@ class TestThroughputNPort:
             f"({rows_per_sec:.0f} rows/s) — well above the budget; "
             f"likely reverted to per-row INSERT."
         )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestNPortSharesPrecisionTruncation:
+    """``ownership_funds_observations.shares`` is NUMERIC(24, 4) with
+    a strict ``CHECK (shares > 0)``. A fractional-share holding like
+    0.00005 passes ``balance > 0`` in Python but quantises to 0.0000 on
+    COPY into the staging table → trips the CHECK on the INSERT...SELECT
+    drain, aborting the entire archive.
+
+    Pre-PR-3 the per-row INSERT path masked this via per-row SAVEPOINT
+    (counted as bad_data, loop continued). The COPY-batched path lost
+    that tolerance. Fix: quantise BALANCE to NUMERIC(24, 4) precision
+    before the > 0 gate.
+
+    Regression discovered live during bootstrap run #5 (2026-05-23):
+    ``ownership_funds_observations_shares_check`` violation on
+    Washington Mutual Investors Fund holding 147552177 (BALANCE source
+    rounded to 0.0000 in NPORT 2025q2-q4 archives).
+    """
+
+    def test_fractional_share_below_scale_skipped_not_archive_aborted(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        iid = _seed_universe_with_cusip(ebull_test_conn, symbol="PREC", cusip="037833100")
+        submissions = [
+            {
+                "ACCESSION_NUMBER": "0009999999-25-000001",
+                "FILING_DATE": "2025-11-14",
+                "REPORT_DATE": "2025-09-30",
+            }
+        ]
+        registrants = [{"ACCESSION_NUMBER": "0009999999-25-000001", "CIK": "9999999"}]
+        fund_info = [
+            {
+                "ACCESSION_NUMBER": "0009999999-25-000001",
+                "SERIES_ID": "S000099001",
+                "SERIES_NAME": "Precision Series",
+            }
+        ]
+        # Two holdings:
+        #   - HOLDING_ID=1: legitimate 100 shares — must land.
+        #   - HOLDING_ID=2: 0.00005 shares — passes ``> 0`` but quantises
+        #     to 0.0000 → would trip CHECK if not pre-quantised.
+        holdings = [
+            {
+                "ACCESSION_NUMBER": "0009999999-25-000001",
+                "ISSUER_CUSIP": "037833100",
+                "BALANCE": "100",
+                "ASSET_CAT": "EC",
+                "PAYOFF_PROFILE": "Long",
+                "UNIT": "NS",
+                "HOLDING_ID": "1",
+                "CURRENCY_CODE": "USD",
+                "CURRENCY_VALUE": "10000",
+            },
+            {
+                "ACCESSION_NUMBER": "0009999999-25-000001",
+                "ISSUER_CUSIP": "037833100",
+                "BALANCE": "0.00005",  # underflows NUMERIC(24, 4) → 0.0000
+                "ASSET_CAT": "EC",
+                "PAYOFF_PROFILE": "Long",
+                "UNIT": "NS",
+                "HOLDING_ID": "2",
+                "CURRENCY_CODE": "USD",
+                "CURRENCY_VALUE": "1",
+            },
+        ]
+        archive_bytes = _build_nport_zip(
+            submissions=submissions,
+            registrants=registrants,
+            fund_info=fund_info,
+            holdings=holdings,
+        )
+        archive_path = tmp_path / "nport_prec.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        # The fractional row counts as non-positive (the gate rejects
+        # the post-quantise zero), not as a CHECK violation that
+        # crashes the whole archive.
+        assert result.rows_skipped_non_positive_shares == 1
+        assert result.rows_written == 1
+        assert iid in result.touched_instrument_ids
+        # And the legitimate row landed.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT shares FROM ownership_funds_observations WHERE instrument_id = %s AND source_document_id = %s",
+                (iid, "0009999999-25-000001:1"),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == Decimal("100.0000")
+
+    def test_half_even_accept_0_00006_lands_as_0_0001(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """ROUND_HALF_EVEN: 0.00006 → 0.0001 (rounds away from zero,
+        not toward), so the row MUST land (not be skipped). Pins the
+        rounding mode against accidental switch to ROUND_DOWN which
+        would erroneously skip this row."""
+        iid = _seed_universe_with_cusip(ebull_test_conn, symbol="HEUP", cusip="037833100")
+        archive_bytes = _build_nport_zip(
+            submissions=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000003",
+                    "FILING_DATE": "2025-11-14",
+                    "REPORT_DATE": "2025-09-30",
+                }
+            ],
+            registrants=[{"ACCESSION_NUMBER": "0009999999-25-000003", "CIK": "9999997"}],
+            fund_info=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000003",
+                    "SERIES_ID": "S000099003",
+                    "SERIES_NAME": "HalfEvenUp Series",
+                }
+            ],
+            holdings=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000003",
+                    "ISSUER_CUSIP": "037833100",
+                    "BALANCE": "0.00006",
+                    "ASSET_CAT": "EC",
+                    "PAYOFF_PROFILE": "Long",
+                    "UNIT": "NS",
+                    "HOLDING_ID": "1",
+                    "CURRENCY_CODE": "USD",
+                    "CURRENCY_VALUE": "1",
+                }
+            ],
+        )
+        archive_path = tmp_path / "nport_he_up.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.rows_skipped_non_positive_shares == 0
+        assert result.rows_written == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT shares FROM ownership_funds_observations WHERE instrument_id = %s AND source_document_id = %s",
+                (iid, "0009999999-25-000003:1"),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == Decimal("0.0001")
+
+    def test_half_even_reject_0_00004_skipped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """ROUND_HALF_EVEN: 0.00004 → 0.0000 (rounds toward zero), so
+        skipped. Pins symmetry with the 0.00005 case."""
+        iid = _seed_universe_with_cusip(ebull_test_conn, symbol="HEDN", cusip="037833100")
+        archive_bytes = _build_nport_zip(
+            submissions=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000004",
+                    "FILING_DATE": "2025-11-14",
+                    "REPORT_DATE": "2025-09-30",
+                }
+            ],
+            registrants=[{"ACCESSION_NUMBER": "0009999999-25-000004", "CIK": "9999996"}],
+            fund_info=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000004",
+                    "SERIES_ID": "S000099004",
+                    "SERIES_NAME": "HalfEvenDown Series",
+                }
+            ],
+            holdings=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000004",
+                    "ISSUER_CUSIP": "037833100",
+                    "BALANCE": "0.00004",
+                    "ASSET_CAT": "EC",
+                    "PAYOFF_PROFILE": "Long",
+                    "UNIT": "NS",
+                    "HOLDING_ID": "1",
+                    "CURRENCY_CODE": "USD",
+                    "CURRENCY_VALUE": "1",
+                }
+            ],
+        )
+        archive_path = tmp_path / "nport_he_dn.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.rows_skipped_non_positive_shares == 1
+        assert result.rows_written == 0
+        del iid
+
+    def test_exactly_0_0001_shares_lands_not_skipped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """Boundary: 0.0001 is the smallest representable positive share
+        at NUMERIC(24, 4). Must land, not be rejected by the gate."""
+        iid = _seed_universe_with_cusip(ebull_test_conn, symbol="PRECB", cusip="037833100")
+        archive_bytes = _build_nport_zip(
+            submissions=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000002",
+                    "FILING_DATE": "2025-11-14",
+                    "REPORT_DATE": "2025-09-30",
+                }
+            ],
+            registrants=[{"ACCESSION_NUMBER": "0009999999-25-000002", "CIK": "9999998"}],
+            fund_info=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000002",
+                    "SERIES_ID": "S000099002",
+                    "SERIES_NAME": "Boundary Series",
+                }
+            ],
+            holdings=[
+                {
+                    "ACCESSION_NUMBER": "0009999999-25-000002",
+                    "ISSUER_CUSIP": "037833100",
+                    "BALANCE": "0.0001",
+                    "ASSET_CAT": "EC",
+                    "PAYOFF_PROFILE": "Long",
+                    "UNIT": "NS",
+                    "HOLDING_ID": "1",
+                    "CURRENCY_CODE": "USD",
+                    "CURRENCY_VALUE": "1",
+                }
+            ],
+        )
+        archive_path = tmp_path / "nport_prec_boundary.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.rows_skipped_non_positive_shares == 0
+        assert result.rows_written == 1
+        del iid
 
 
 @pytest.mark.integration
