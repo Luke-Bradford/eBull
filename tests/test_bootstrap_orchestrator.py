@@ -714,6 +714,139 @@ def test_submissions_processed_provided_by_s8_on_success_and_skip() -> None:
     assert "submissions_processed" in _STAGE_PROVIDES_ON_SKIP["sec_submissions_ingest"]
 
 
+# ---------------------------------------------------------------------------
+# #1233 extended lock-contention cap-gates — same pattern as PR-1292
+# for the other bulk/legacy pairs flagged by the 2026-05-23 audit.
+# ---------------------------------------------------------------------------
+
+
+def test_insider_legacy_backfills_require_insider_dataset_processed() -> None:
+    """S19 (sec_insider_transactions_backfill) and S20 (sec_form3_ingest)
+    BOTH write ``ownership_insiders_observations`` via the legacy
+    per-filing path. S11 (sec_insider_ingest_from_dataset) writes the
+    same table from the bulk dataset. PR-2 cross-lane parallelism would
+    let them run concurrently against overlapping
+    (instrument_id, holder, observed_at) rows — same row-lock storm
+    shape that PR-1292 fixed for S15↔S8.
+
+    Regression sentinel: any future edit that drops the
+    ``insider_dataset_processed`` requirement from S19 or S20 would
+    re-introduce the contention silently.
+    """
+    s19 = _STAGE_REQUIRES_CAPS["sec_insider_transactions_backfill"]
+    s20 = _STAGE_REQUIRES_CAPS["sec_form3_ingest"]
+    assert "insider_dataset_processed" in s19.all_of, (
+        "sec_insider_transactions_backfill must require insider_dataset_processed (#1233 lock-contention serialisation)"
+    )
+    assert "insider_dataset_processed" in s20.all_of, (
+        "sec_form3_ingest must require insider_dataset_processed (#1233 lock-contention serialisation)"
+    )
+
+
+def test_thirteen_f_recent_sweep_requires_institutional_dataset_processed() -> None:
+    """S22 (sec_13f_recent_sweep) and S10 (sec_13f_ingest_from_dataset)
+    both write ``ownership_institutions_observations``. Same shape as
+    the S19/S20 case above but on the institutional family — and the
+    largest write fanout of any audited pair (institutional 13F rows
+    during a full bootstrap can total tens of millions).
+    """
+    s22 = _STAGE_REQUIRES_CAPS["sec_13f_recent_sweep"]
+    assert "institutional_dataset_processed" in s22.all_of, (
+        "sec_13f_recent_sweep must require institutional_dataset_processed (#1233 lock-contention serialisation)"
+    )
+
+
+def test_dataset_processed_caps_provided_by_bulk_ingesters_on_success_and_skip() -> None:
+    """Companion invariant to the requires-side tests. Each new
+    ordering cap is advertised by its bulk ingester on BOTH success
+    AND skip — the skip entry preserves cascade-skip parity (S7
+    skipped → S10/S11 cascade-skipped → legacy chain still gets the
+    ordering cap satisfied so it does not deadlock).
+    """
+    from app.services.bootstrap_orchestrator import (
+        _STAGE_PROVIDES,
+        _STAGE_PROVIDES_ON_SKIP,
+    )
+
+    assert "insider_dataset_processed" in _STAGE_PROVIDES["sec_insider_ingest_from_dataset"]
+    assert "insider_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_insider_ingest_from_dataset"]
+    assert "institutional_dataset_processed" in _STAGE_PROVIDES["sec_13f_ingest_from_dataset"]
+    assert "institutional_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_13f_ingest_from_dataset"]
+
+
+def test_ordering_only_caps_disjoint_from_strict_gate_caps() -> None:
+    """Codex 2 LOW on #1233 cap-gates: pin the ``_ORDERING_ONLY_CAPS``
+    allowlist as an explicit invariant. Members must NOT also be
+    strict-gate caps (``_CAPABILITY_MIN_ROWS``) — ordering caps fire
+    on any terminal status, strict-gate caps require a row floor on
+    ``success``; conflating the two would let a strict cap leak into
+    the terminal-failure escape hatch and falsely satisfy a content
+    requirement.
+    """
+    from app.services.bootstrap_orchestrator import (
+        _CAPABILITY_MIN_ROWS,
+        _ORDERING_ONLY_CAPS,
+    )
+
+    assert _ORDERING_ONLY_CAPS == frozenset(
+        {
+            "submissions_processed",
+            "insider_dataset_processed",
+            "institutional_dataset_processed",
+        }
+    ), (
+        "_ORDERING_ONLY_CAPS membership changed without updating the test. "
+        "New ordering caps must be added consciously: they advertise on "
+        "ANY terminal status, including error/blocked/cancelled — a content "
+        "cap added here would silently bypass the strict-gate row floor."
+    )
+    leaks = _ORDERING_ONLY_CAPS & _CAPABILITY_MIN_ROWS.keys()
+    assert not leaks, (
+        f"ordering-only caps overlap strict-gate caps: {leaks}. "
+        "An ordering cap fires on terminal failure regardless of row "
+        "count; a strict-gate cap requires rows on success. Combining "
+        "both would let a zero-row failure satisfy a content cap."
+    )
+
+
+def test_ordering_caps_satisfied_on_terminal_failure_but_content_caps_are_not() -> None:
+    """Codex 2 LOW on #1233 cap-gates: prove the terminal-failure
+    escape hatch in ``_satisfied_capabilities`` works as documented.
+    An ordering cap (``insider_dataset_processed``) advertised by
+    ``sec_insider_ingest_from_dataset`` (S11) MUST be satisfied
+    whenever S11 reaches blocked / error / cancelled. The adjacent
+    content cap (``insider_inputs_seeded``) advertised by the same
+    stage MUST NOT — content caps stay dead on terminal failure so
+    downstream content consumers correctly block.
+
+    Tests the exact bug pattern Codex caught on
+    ``test_partial_bulk_failure_legacy_recovers`` regression: ordering
+    cap must flow through to legacy chain, content cap must not.
+    """
+    from app.services.bootstrap_orchestrator import _satisfied_capabilities
+
+    for terminal_status in ("blocked", "error", "cancelled"):
+        caps = _satisfied_capabilities(
+            statuses={"sec_insider_ingest_from_dataset": terminal_status},
+            rows_processed={"sec_insider_ingest_from_dataset": None},
+        )
+        assert "insider_dataset_processed" in caps, (
+            f"ordering cap missing on status={terminal_status!r} — legacy recovery chain would falsely block"
+        )
+        assert "insider_inputs_seeded" not in caps, (
+            f"content cap leaked on status={terminal_status!r} — downstream consumer would falsely proceed"
+        )
+
+    # Same shape for institutional pair.
+    for terminal_status in ("blocked", "error", "cancelled"):
+        caps = _satisfied_capabilities(
+            statuses={"sec_13f_ingest_from_dataset": terminal_status},
+            rows_processed={"sec_13f_ingest_from_dataset": None},
+        )
+        assert "institutional_dataset_processed" in caps
+        assert "institutional_inputs_seeded" not in caps
+
+
 def test_partial_bulk_failure_legacy_recovers(
     ebull_test_conn: psycopg.Connection[tuple],
     monkeypatch: pytest.MonkeyPatch,

@@ -867,7 +867,16 @@ Fix shape (`submissions_processed` capability):
 2. If cross-lane (the dispatcher would run them concurrent), introduce an ordering cap.
 3. The cap should be provided ON SKIP if the downstream's slow-connection-fallback path requires the run to continue.
 
-**Open lock-contention audit (incomplete):** PR-1292 fixed S15↔S8 only. Same shape may exist for S17/S18/S19/S20/S21/S22 vs S8/S9/S11. Tracked in `project_1233_bootstrap_optimisation.md`.
+**Lock-contention audit COMPLETE (2026-05-23):** PR-1292 fixed S15↔S8. The 2026-05-23 audit identified 3 more pairs needing cap-gates:
+- **S22 sec_13f_recent_sweep ↔ S10 sec_13f_ingest_from_dataset** — both write `ownership_institutions_observations`. Cap: `institutional_dataset_processed`.
+- **S19 sec_insider_transactions_backfill ↔ S11 sec_insider_ingest_from_dataset** — both write `ownership_insiders_observations`. Cap: `insider_dataset_processed`.
+- **S20 sec_form3_ingest ↔ S11** — same shared table as S19. Same cap.
+
+All three cap-gates land in the same PR mirroring PR-1292's pattern: bulk ingester provides cap on success (`_STAGE_PROVIDES`) AND on skip (`_STAGE_PROVIDES_ON_SKIP`) for slow-connection-fallback parity; legacy stage requires it in `_STAGE_REQUIRES_CAPS`.
+
+S17 sec_def14a_bootstrap / S18 sec_business_summary_bootstrap / S21 sec_8k_events_ingest — verified SAFE (disjoint writes, already chained behind `submissions_secondary_pages_walked` which transitively depends on S8).
+
+**Ordering-only cap semantic:** these three caps (plus `submissions_processed`) are advertised whenever the upstream stage reaches ANY terminal status — not just success/skip but also blocked/error/cancelled. The cap's only meaning is "no concurrent writer remains"; once the upstream stage has terminalised, the legacy chain can write safely regardless of how the upstream ended. The `_ORDERING_ONLY_CAPS` frozenset is the dispatch hook in `_satisfied_capabilities` + `_capability_is_dead`. Without this concession, a cascade-blocked bulk stage would falsely gate its legacy counterpart from recovering (`test_partial_bulk_failure_legacy_recovers` regression sentinel).
 
 ### 6.5.11 NUMERIC precision gate for bulk ingest (#1233 PR-1291)
 
