@@ -743,6 +743,32 @@ Every job in `SCHEDULED_JOBS` declares a `prerequisite: PrerequisiteFn | None`. 
 7. **Test invariants.** Every job needs a registry-shape test (`tests/test_job_registry.py`) covering source non-NULL + params_metadata validates + prerequisite is callable.
 8. **Queue/audit terminal-state correctness.** When the prelude (source lock acquisition, prereq check, `bootstrap_state` gate, fence-held opt-out) skips the body without invoking the underlying job, the corresponding `pending_job_requests` row MUST transition to `rejected` (not `completed`) with a structured `error_msg`. `mark_request_completed` after a skipped body produces an audit row that says "ran successfully" when the job never ran. PREVENTION-log-grade hazard — see PR #1072 BLOCKING and PR #1078 (orchestrator opt-out fence). The skipped/rejected vs completed distinction is the operator's only signal that a manual trigger didn't actually do what they asked. Grep `mark_request_completed` and verify each call site has the matching `mark_request_rejected` for the prelude-skip path.
 
+### 6.5.8 Bootstrap manifest-reset prelude (#1233 PR-5a)
+
+`run_bootstrap_orchestrator` runs a one-shot `reset_manifest_for_run` prelude AFTER the `running` snapshot validation and BEFORE the dispatcher loop. It UPDATEs `sec_filing_manifest`:
+
+```
+SET ingest_status='pending', next_retry_at=NULL, error=NULL, last_attempted_at=NULL
+WHERE source = ANY(_BOOTSTRAP_MANIFEST_SOURCES::text[])
+  AND ingest_status='failed'
+  AND last_attempted_at IS NOT NULL
+  AND last_attempted_at < bootstrap_runs.triggered_at
+```
+
+**Why:** a cancelled prior run can leave `failed` rows with `next_retry_at` in the future; without the reset, those rows refuse to drain in the new run even when parser_version bumped or the failure was transient. Run #4 inherited 1.18M `failed` rows from cancelled run #3 — the prelude prevents that recurrence.
+
+**Source whitelist** = SEC subset of `ManifestSource` (every value except `finra_short_interest` / `finra_regsho_daily`). FINRA sources are owned by non-bootstrap drivers; the bootstrap orchestrator must not flip their failure state. The whitelist is computed at module load from `_MANIFEST_SOURCES_BY_STAGE` ([app/services/bootstrap_orchestrator.py](../../../app/services/bootstrap_orchestrator.py)).
+
+**Time filter** = strict `<` against `bootstrap_runs.triggered_at`. A concurrent live cron writer landing a fresh `failed` row mid-reset has `last_attempted_at >= NOW() >= reset_started_at` and survives the predicate. Boundary case: equal timestamps are NOT reset (this is the operator's signal that the failure came from the running orchestrator itself, not the prior cancelled run).
+
+The `last_attempted_at` stamp itself uses `clock_timestamp()` (statement-time wall-clock) rather than `NOW()` (= `transaction_timestamp()`, fixed at tx start). A worker tx that began BEFORE `bootstrap_runs.triggered_at` but commits AFTER would otherwise stamp the row with a tx-start time that survives the reset predicate and gets erroneously flipped — `clock_timestamp()` removes that race.
+
+**Opt-out** = `bootstrap_runs.params['reset_failed_manifest']` (default TRUE; column added in sql/169 as `JSONB NOT NULL DEFAULT '{}'::jsonb` with `jsonb_typeof = 'object'` CHECK). Set FALSE via `POST /system/bootstrap/run` body `{"reset_failed_manifest": false}` when an operator deliberately wants to preserve stale `failed` rows from a prior run (e.g. debugging which accessions tripped a parser bug; letting routine backoff drive drainage). The orchestrator tests for exact `is False` so type-drift (string `"false"`, integer `0`) fail-closed against silent opt-out.
+
+**Idempotency:** the reset is a single SQL UPDATE; a second invocation finds zero matching rows. Re-queuing the orchestrator after a worker crash is safe.
+
+**Out of scope:** the prelude does NOT touch rows in any other state — `pending` rows stay pending, `parsed` stays parsed, `tombstoned` stays tombstoned. A stuck-`pending` row is the manifest-worker's problem (#1224); a `tombstoned` row needs an explicit `POST /jobs/sec_rebuild/run`.
+
 ## 6. Known live caveats / tech debt
 
 - **Coverage = telemetry not gate**: per-category universe estimates still NULL for Tier 0 (`_read_universe_estimates` returns all-None). Banner reports `unknown_universe` on most instruments. Real estimates seeded in #790 / Batch 2.

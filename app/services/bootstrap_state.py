@@ -184,12 +184,21 @@ class StageRow:
 
 @dataclass(frozen=True)
 class RunSnapshot:
-    """Latest run + its stages, read in a single transaction."""
+    """Latest run + its stages, read in a single transaction.
+
+    ``params`` is the JSONB dict persisted on ``bootstrap_runs`` (sql/169,
+    #1233 PR-5a). Empty-object default on the column keeps the read
+    path branch-free — consumers call ``snapshot.params.get('<knob>',
+    <default>)`` without distinguishing NULL from missing. Today the
+    only consumer is the manifest-reset prelude
+    (``app/services/bootstrap_orchestrator.py::reset_manifest_for_run``).
+    """
 
     run_id: int
     run_status: RunStatus
     triggered_at: datetime
     completed_at: datetime | None
+    params: Mapping[str, Any] = field(default_factory=dict)
     stages: Sequence[StageRow] = field(default_factory=tuple)
 
 
@@ -293,7 +302,7 @@ def read_latest_run_with_stages(
     with conn.transaction():
         run_row = conn.execute(
             """
-            SELECT id, status, triggered_at, completed_at
+            SELECT id, status, triggered_at, completed_at, params
               FROM bootstrap_runs
              ORDER BY id DESC
              LIMIT 1
@@ -301,13 +310,14 @@ def read_latest_run_with_stages(
         ).fetchone()
         if run_row is None:
             return None
-        run_id, run_status, triggered_at, completed_at = run_row
+        run_id, run_status, triggered_at, completed_at, params = run_row
         return _read_run_with_stage_rows(
             conn,
             run_id=run_id,
             run_status=run_status,
             triggered_at=triggered_at,
             completed_at=completed_at,
+            params=params,
         )
 
 
@@ -334,7 +344,7 @@ def read_run_with_stages(
     with conn.transaction():
         run_row = conn.execute(
             """
-            SELECT id, status, triggered_at, completed_at
+            SELECT id, status, triggered_at, completed_at, params
               FROM bootstrap_runs
              WHERE id = %(run_id)s
             """,
@@ -342,13 +352,14 @@ def read_run_with_stages(
         ).fetchone()
         if run_row is None:
             return None
-        row_id, run_status, triggered_at, completed_at = run_row
+        row_id, run_status, triggered_at, completed_at, params = run_row
         return _read_run_with_stage_rows(
             conn,
             run_id=row_id,
             run_status=run_status,
             triggered_at=triggered_at,
             completed_at=completed_at,
+            params=params,
         )
 
 
@@ -359,6 +370,7 @@ def _read_run_with_stage_rows(
     run_status: RunStatus,
     triggered_at: datetime,
     completed_at: datetime | None,
+    params: Mapping[str, Any] | None,
 ) -> RunSnapshot:
     """Helper: project the stage rows for an already-located run row."""
     stage_rows = conn.execute(
@@ -398,6 +410,10 @@ def _read_run_with_stage_rows(
         run_status=run_status,
         triggered_at=triggered_at,
         completed_at=completed_at,
+        # JSONB column ``bootstrap_runs.params`` is NOT NULL DEFAULT
+        # '{}'::jsonb (sql/169); the ``or {}`` guards a legacy snapshot
+        # path that pre-dated the column, defense in depth.
+        params=params or {},
         stages=stages,
     )
 
@@ -407,6 +423,7 @@ def start_run(
     *,
     operator_id: UUID | None,
     stage_specs: Sequence[StageSpec],
+    params: Mapping[str, Any] | None = None,
 ) -> int:
     """Create a new bootstrap run + seed pending stage rows.
 
@@ -439,13 +456,27 @@ def start_run(
         if current_status == "running":
             raise BootstrapAlreadyRunning(run_id=last_run_id or 0)
 
+        # #1233 PR-5a — operator-supplied params dict persists on
+        # bootstrap_runs.params (sql/169 JSONB column, NOT NULL DEFAULT
+        # '{}'::jsonb). Passing ``None`` falls back to the column
+        # default. ``Jsonb`` adapter pins the type for psycopg3 — a
+        # raw dict would be ambiguous against the JSONB column.
+        from psycopg.types.json import Jsonb
+
         run_row = conn.execute(
             """
-            INSERT INTO bootstrap_runs (triggered_by_operator_id, status)
-            VALUES (%(operator_id)s, 'running')
+            INSERT INTO bootstrap_runs (triggered_by_operator_id, status, params)
+            VALUES (
+                %(operator_id)s,
+                'running',
+                COALESCE(%(params)s::jsonb, '{}'::jsonb)
+            )
             RETURNING id
             """,
-            {"operator_id": operator_id},
+            {
+                "operator_id": operator_id,
+                "params": Jsonb(dict(params)) if params else None,
+            },
         ).fetchone()
         if run_row is None:
             raise RuntimeError("INSERT INTO bootstrap_runs returned no row")

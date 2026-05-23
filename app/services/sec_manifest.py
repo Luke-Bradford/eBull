@@ -380,9 +380,22 @@ def transition_status(
         # static analysis (pyright LiteralString) passes; the clause
         # tokens are module-local constants — never user input — but
         # composing through ``sql.SQL`` keeps the type safety habit.
+        # #1233 PR-5a — use ``clock_timestamp()`` rather than ``NOW()``
+        # (= ``transaction_timestamp()``, fixed at tx start). The
+        # bootstrap manifest reset prelude
+        # (``app/services/bootstrap_orchestrator.py::reset_manifest_for_run``)
+        # filters ``last_attempted_at < bootstrap_runs.triggered_at`` to
+        # protect concurrent live cron writes. ``NOW()`` would mis-stamp
+        # a long-running worker transaction's commit with its tx-start
+        # time — a worker tx begun before ``triggered_at`` but
+        # committing AFTER it would write a stale ``last_attempted_at``
+        # that survives the reset predicate and gets erroneously
+        # flipped to ``pending``. ``clock_timestamp()`` evaluates at
+        # statement time, so the stamp reflects when the failure was
+        # actually recorded.
         set_clauses: list[sql.Composable] = [
             sql.SQL("ingest_status = %(status)s"),
-            sql.SQL("last_attempted_at = COALESCE(%(attempt)s, NOW())"),
+            sql.SQL("last_attempted_at = COALESCE(%(attempt)s, clock_timestamp())"),
         ]
         params: dict[str, Any] = {
             "accession": accession_number,

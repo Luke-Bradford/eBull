@@ -50,7 +50,7 @@ parallel manual / scheduled trigger cannot run twice simultaneously.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Final, Literal
@@ -1893,6 +1893,189 @@ def _phase_batched_dispatch(
     return statuses, False
 
 
+# ---------------------------------------------------------------------------
+# Manifest reset prelude (#1233 PR-5a / spec §9)
+# ---------------------------------------------------------------------------
+#
+# Background: run #4 inherited 1.18M ``sec_filing_manifest`` rows from
+# the cancelled run #3, including ``ingest_status='failed'`` rows whose
+# ``next_retry_at`` watermarks lived in the future. Those rows refused
+# to drain in the new run even when (a) the parser_version had bumped
+# since the prior attempt, or (b) the failure was transient. Operator-
+# visible symptom: bootstrap completes with stale failure state.
+#
+# The prelude flips ``failed`` rows back to ``pending`` at run start
+# subject to two gates:
+#
+# 1. Source whitelist — only the subset of ``ManifestSource`` values
+#    the orchestrator's stage catalogue actually drives. FINRA sources
+#    have their own non-bootstrap drivers; their failure state must not
+#    be papered over here. The set is derived statically from
+#    ``_MANIFEST_SOURCES_BY_STAGE``.
+#
+# 2. Time filter — only rows whose ``last_attempted_at`` is strictly
+#    before the current run's start watermark (``triggered_at``). A
+#    concurrent live cron writer landing a fresh ``failed`` row mid-
+#    reset survives because its ``last_attempted_at >= reset_started_at``.
+#
+# The reset is idempotent: re-invoking against the same run is a no-op
+# once the predicate's tail-end is empty.
+
+# Per-stage manifest source sets. Pinned here so adding a new stage
+# that writes manifest rows for an existing source family becomes a
+# single-line edit, not a sweep. Stages NOT in this mapping (init /
+# eToro / cusip / cik refresh / bulk download / Phase C bulk
+# ingesters / openfigi sweep / mf_directory_sync / observations
+# backfill / fundamentals_sync) do not write to ``sec_filing_manifest``
+# — their data lands in other tables.
+#
+# The aggregate union (``_BOOTSTRAP_MANIFEST_SOURCES``) is what
+# ``reset_manifest_for_run`` flips. Per-stage breakdown is documented
+# here so a future stage-trim audit can answer "which manifest
+# sources lose coverage if I drop stage X?" without re-reading every
+# invoker body.
+_MANIFEST_SOURCES_BY_STAGE: Final[dict[str, frozenset[str]]] = {
+    # filings_history_seed walks the per-issuer filings history; the
+    # form-type allow-list (``SEC_INGEST_KEEP_FORMS``) covers every
+    # issuer-scoped SEC manifest source.
+    "filings_history_seed": frozenset(
+        {
+            "sec_form3",
+            "sec_form4",
+            "sec_form5",
+            "sec_13d",
+            "sec_13g",
+            "sec_def14a",
+            "sec_10k",
+            "sec_10q",
+            "sec_8k",
+            "sec_xbrl_facts",
+        }
+    ),
+    # sec_first_install_drain is the manifest worker itself; it drains
+    # every pending manifest row regardless of source.
+    "sec_first_install_drain": frozenset(
+        {
+            "sec_form3",
+            "sec_form4",
+            "sec_form5",
+            "sec_13d",
+            "sec_13g",
+            "sec_13f_hr",
+            "sec_def14a",
+            "sec_n_port",
+            "sec_n_csr",
+            "sec_10k",
+            "sec_10q",
+            "sec_8k",
+            "sec_xbrl_facts",
+        }
+    ),
+    "sec_def14a_bootstrap": frozenset({"sec_def14a"}),
+    "sec_business_summary_bootstrap": frozenset({"sec_10k"}),
+    "sec_insider_transactions_backfill": frozenset({"sec_form4"}),
+    "sec_form3_ingest": frozenset({"sec_form3"}),
+    "sec_8k_events_ingest": frozenset({"sec_8k"}),
+    "sec_13f_recent_sweep": frozenset({"sec_13f_hr"}),
+    "sec_n_port_ingest": frozenset({"sec_n_port"}),
+    "sec_n_csr_bootstrap_drain": frozenset({"sec_n_csr"}),
+}
+
+
+def _bootstrap_manifest_sources() -> frozenset[str]:
+    """Union of every manifest source a bootstrap stage drives.
+
+    Computed once at module import (idempotent — pure function over
+    the static map). Returned as a frozenset so callers can pass it
+    straight to the SQL ``ANY()`` binding without aliasing concerns.
+    """
+    out: set[str] = set()
+    for sources in _MANIFEST_SOURCES_BY_STAGE.values():
+        out.update(sources)
+    return frozenset(out)
+
+
+_BOOTSTRAP_MANIFEST_SOURCES: Final[frozenset[str]] = _bootstrap_manifest_sources()
+
+
+def reset_manifest_for_run(
+    conn: psycopg.Connection[Any],
+    *,
+    sources: Iterable[str],
+    reset_started_at: datetime,
+) -> int:
+    """Flip stale ``failed`` manifest rows back to ``pending`` at run start.
+
+    Reasons a row's failure state may be stale at run start:
+
+    * Parser version bumped since the prior attempt — the new parser
+      may extract a previously-failed body successfully.
+    * Backoff watermark (``next_retry_at``) is in the future but the
+      operator deliberately triggered a fresh bootstrap; the watermark
+      semantic targets routine retry pacing, not full-run resets.
+    * The prior failure was transient (network blip mid-fetch); the
+      run-start reset gives every accession a fresh attempt.
+
+    Two filters keep the reset narrow:
+
+    * ``source = ANY(sources)`` — only sources the orchestrator drives.
+      Sources owned by non-bootstrap drivers (FINRA short-interest /
+      RegSHO) are untouched.
+    * ``last_attempted_at < reset_started_at`` — defends against a
+      concurrent live cron worker landing a fresh ``failed`` row
+      mid-reset. Such a row has ``last_attempted_at >= NOW() >=
+      reset_started_at`` and would survive the filter even if the
+      orchestrator's ``UPDATE`` was already in flight when the worker
+      committed.
+
+    Rows in any other ``ingest_status`` (pending / fetched / parsed /
+    tombstoned) are left untouched: a stuck-``pending`` row is the
+    worker's problem; a ``parsed`` row stays parsed; a ``tombstoned``
+    row needs an explicit operator action (``POST /jobs/sec_rebuild``).
+
+    Returns the count of rows flipped for telemetry. Idempotent — a
+    second invocation finds zero matching rows.
+
+    The caller must commit the connection's transaction; the helper
+    does not start its own ``with conn.transaction():`` because the
+    orchestrator's prelude lives outside any open transaction (each
+    ``with psycopg.connect()`` block opens its own).
+    """
+    source_list = list(sources)
+    if not source_list:
+        # Empty source set means no stages in the catalogue write to
+        # ``sec_filing_manifest`` — defense-in-depth no-op. ``ANY('{}'
+        # )`` would match nothing anyway, but the early return saves a
+        # round trip and keeps the log line accurate.
+        logger.info("reset_manifest_for_run: empty source set; nothing to reset")
+        return 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE sec_filing_manifest
+               SET ingest_status     = 'pending',
+                   next_retry_at     = NULL,
+                   error             = NULL,
+                   last_attempted_at = NULL
+             WHERE source = ANY(%(sources)s::text[])
+               AND ingest_status = 'failed'
+               AND last_attempted_at IS NOT NULL
+               AND last_attempted_at < %(reset_started_at)s
+            """,
+            {"sources": source_list, "reset_started_at": reset_started_at},
+        )
+        count = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    logger.info(
+        "reset_manifest_for_run: %d failed rows flipped to pending (reset_started_at=%s, sources=%d)",
+        count,
+        reset_started_at.isoformat(),
+        len(source_list),
+    )
+    return count
+
+
 def run_bootstrap_orchestrator() -> None:
     """``_INVOKERS['bootstrap_orchestrator']`` — drive a queued run
     via lane-aware phase-batched dispatch (#1020).
@@ -1923,6 +2106,54 @@ def run_bootstrap_orchestrator() -> None:
             snapshot.run_status,
         )
         return
+
+    # #1233 PR-5a — manifest reset prelude.
+    #
+    # Runs AFTER the snapshot validation (so we know this run is
+    # actually ``running`` and not a stale ``complete`` row the
+    # orchestrator was re-invoked against) and BEFORE every dispatcher
+    # bookkeeping step (so a flipped row has the maximum time to drain
+    # in the same run). The opt-out key
+    # ``params['reset_failed_manifest']`` defaults to TRUE; an operator
+    # who wants to preserve stale failure state on a re-run can flip
+    # it FALSE at API-call time.
+    #
+    # The reset opens its own short-lived ``psycopg.connect()`` block
+    # rather than reusing the dispatcher's per-stage connections —
+    # the prelude must commit before the first stage runs so a stage
+    # that itself dispatches a manifest-touching invoker sees the
+    # ``pending`` state. Bundling the reset with a long-lived dispatch
+    # transaction would queue every reset row update behind every
+    # stage's row-level locks.
+    #
+    # Opt-out type discipline (Codex pre-push LOW): the JSONB CHECK
+    # only pins object SHAPE — a future internal writer that persists
+    # ``{"reset_failed_manifest": "false"}`` (string) or ``0`` (number)
+    # would pass shape validation, and naive truthiness ``.get()``
+    # would mis-classify the string ``"false"`` as truthy. Test for
+    # exact ``is False``: only the JSON boolean ``false`` (which
+    # psycopg decodes to Python ``False``) flips the prelude off.
+    # Every other persisted value (missing key, ``None``, ``"false"``,
+    # ``0``, ``1``, ``"true"``) preserves the default reset-on
+    # semantic — fail-closed against silent opt-out via type drift.
+    if snapshot.params.get("reset_failed_manifest", True) is not False:
+        with psycopg.connect(database_url) as conn:
+            reset_count = reset_manifest_for_run(
+                conn,
+                sources=_BOOTSTRAP_MANIFEST_SOURCES,
+                reset_started_at=snapshot.triggered_at,
+            )
+            conn.commit()
+        logger.info(
+            "bootstrap_orchestrator: run_id=%d manifest reset flipped %d rows",
+            run_id,
+            reset_count,
+        )
+    else:
+        logger.info(
+            "bootstrap_orchestrator: run_id=%d manifest reset skipped (params.reset_failed_manifest=False)",
+            run_id,
+        )
 
     # PR1c #1064 — build a stage_key → params lookup from the static
     # ``_BOOTSTRAP_STAGE_SPECS`` so the per-stage params dict can be
@@ -2087,6 +2318,7 @@ __all__ = [
     "JOB_MF_DIRECTORY_SYNC",
     "JOB_SEC_N_CSR_BOOTSTRAP_DRAIN",
     "get_bootstrap_stage_specs",
+    "reset_manifest_for_run",
     "run_bootstrap_orchestrator",
 ]
 
