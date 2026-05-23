@@ -846,6 +846,28 @@ def test_ordering_caps_satisfied_on_terminal_failure_but_content_caps_are_not() 
         assert "institutional_dataset_processed" in caps
         assert "institutional_inputs_seeded" not in caps
 
+    # Bot WARNING on PR #1299: ``submissions_processed`` is also a
+    # member of ``_ORDERING_ONLY_CAPS`` and thus gains the
+    # terminal-failure escape hatch. Pre-#1299 the cap fired on
+    # success OR skip only; the extension is intentional — the
+    # cap's semantic is "S8 is done writing filing_events", which
+    # holds whenever S8 terminalises. Without this assertion the
+    # silent extension would be unpinned.
+    for terminal_status in ("blocked", "error", "cancelled"):
+        caps = _satisfied_capabilities(
+            statuses={"sec_submissions_ingest": terminal_status},
+            rows_processed={"sec_submissions_ingest": None},
+        )
+        assert "submissions_processed" in caps, (
+            f"submissions_processed missing on status={terminal_status!r} — "
+            "legacy filings_history_seed would falsely block (PR-1292 + #1299)"
+        )
+        # Content cap MUST stay dead on terminal failure.
+        assert "filing_events_seeded" not in caps, (
+            f"filing_events_seeded leaked on status={terminal_status!r} — "
+            "content cap escaped through the ordering escape hatch"
+        )
+
 
 def test_partial_bulk_failure_legacy_recovers(
     ebull_test_conn: psycopg.Connection[tuple],
