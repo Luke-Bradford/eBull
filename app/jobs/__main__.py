@@ -44,9 +44,10 @@ import os
 import signal
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 
@@ -101,6 +102,178 @@ def _install_signal_handlers(stop_event: threading.Event) -> None:
                 logger.debug("jobs entrypoint: signal %s not registrable on this platform", name)
 
 
+# #1290: application_name stamped on the singleton-fence connection
+# so the stale-lock reaper can identify "our" idle-in-transaction
+# holder PIDs in ``pg_stat_activity``. Any third-party connection
+# that happened to acquire JOBS_PROCESS_LOCK_KEY (vanishingly
+# unlikely given its 64-bit ASCII-bytes value) is excluded by the
+# application_name filter so we never terminate a process that is
+# not ours.
+SINGLETON_FENCE_APPLICATION_NAME: Final[str] = "ebull-jobs-singleton-fence"
+
+# #1290: idle-grace window. A holder that's been ``state='idle'`` for
+# at least this long is assumed dead — its TCP socket from the old
+# python process never sent FIN, so the backend stays around until
+# kernel keepalive (default ~2h). Five minutes is short enough that
+# the operator doesn't twiddle their thumbs after ``kill -9``, long
+# enough that a genuinely starting concurrent boot whose first query
+# happens to be slow does not get terminated.
+#
+# CRITICAL: this only safely identifies a stale holder because the
+# live jobs process runs a fence-heartbeat thread that touches the
+# fence connection every ``SINGLETON_FENCE_HEARTBEAT_PERIOD_SECONDS``.
+# A live process's fence connection therefore advances ``state_change``
+# every period and never crosses the grace boundary. A dead process's
+# fence connection stops advancing the moment the python process
+# dies, and crosses the grace boundary after the configured window.
+# DO NOT REMOVE THE HEARTBEAT — Codex 2 pre-push BLOCKING on #1290:
+# without it, the reaper terminates the live singleton fence.
+SINGLETON_STALE_HOLDER_GRACE_SECONDS: Final[int] = 300
+
+# #1290: fence-heartbeat period. Must be < grace_seconds so a live
+# fence never stays idle long enough to qualify. 30s chosen for the
+# same reasons as the other supervised heartbeat loops: short enough
+# that the grace can be 5-10× without operator-perceptible delay,
+# long enough that the connection is at rest >99% of the time.
+SINGLETON_FENCE_HEARTBEAT_PERIOD_SECONDS: Final[float] = 30.0
+
+
+def _fence_heartbeat_loop(
+    fence: psycopg.Connection[Any],
+    fence_lock: threading.Lock,
+    stop_event: threading.Event,
+    *,
+    period_seconds: float = SINGLETON_FENCE_HEARTBEAT_PERIOD_SECONDS,
+) -> None:
+    """Periodically touch the singleton-fence connection to advance
+    ``pg_stat_activity.state_change``.
+
+    Without this thread, the fence backend goes idle immediately after
+    boot's ``fence.commit()`` and STAYS idle. Five minutes later it
+    looks indistinguishable from a stale post-kill -9 holder, so a
+    parallel jobs-process boot would happily reap the live fence and
+    acquire the lock — two jobs processes running concurrently.
+
+    The heartbeat itself is a trivial ``SELECT 1`` issued under the
+    fence lock so it does not race with the boot-time acquire or the
+    shutdown close. A failure here logs + breaks the loop without
+    raising — the next reaper probe will see the still-stale fence
+    and decide based on its own criteria. The main process keeps
+    running with a working lock until ordinary shutdown closes the
+    fence.
+    """
+    while not stop_event.wait(timeout=period_seconds):
+        try:
+            with fence_lock:
+                if fence.closed:
+                    return
+                # Fence opens with autocommit=True so this trivial
+                # SELECT transitions active → idle WITHOUT a
+                # transaction-bracketed phase. The reaper's
+                # ``state='idle'`` filter then catches a truly dead
+                # fence; a healthy fence's state_change keeps advancing.
+                fence.execute("SELECT 1").fetchone()
+        except Exception:
+            logger.exception(
+                "jobs entrypoint: fence heartbeat failed; the live-fence "
+                "liveness signal is now stale. The lock is still held "
+                "but a concurrent jobs boot >grace_seconds from now "
+                "could reap this fence."
+            )
+            return
+
+
+def _reap_stale_singleton_fence_holder(
+    database_url: str,
+    *,
+    lock_key: int,
+    grace_seconds: int = SINGLETON_STALE_HOLDER_GRACE_SECONDS,
+) -> int | None:
+    """Probe for a stale holder of the singleton advisory lock and
+    terminate it. Returns the reaped PID, or ``None`` if no eligible
+    holder exists.
+
+    Eligibility criteria — ALL must hold:
+
+      * The PID owns an advisory lock with ``locktype='advisory'``,
+        ``objsubid=1`` (session-scope), matching ``classid``/``objid``
+        halves of ``lock_key`` in the CURRENT database.
+      * ``pg_stat_activity.application_name = SINGLETON_FENCE_APPLICATION_NAME``
+        — only stale holders from a prior eBull jobs process are
+        candidates. Third-party connections that happen to have
+        acquired this exact 64-bit advisory key are excluded.
+      * ``pg_stat_activity.state = 'idle'`` AND
+        ``state_change < NOW() - INTERVAL '{grace}'`` — actively-busy
+        holders (state='active') or recently-changed-state holders
+        (potentially still booting) are excluded.
+
+    The probe + terminate happen on a dedicated short-lived
+    connection so the implicit autocommit semantics are explicit.
+
+    Notes:
+      * ``pg_terminate_backend`` requires superuser OR the
+        ``pg_signal_backend`` role membership. In the eBull dev/prod
+        setup the app user has been granted this role (sql/153);
+        without it the call returns ``false`` and the reaper logs +
+        bails. Either way, we never raise.
+      * Idempotent: the reaper is a no-op when no eligible PID
+        exists. Caller retries the lock acquire ONCE after a
+        successful reap — see :func:`_acquire_singleton_fence`.
+    """
+    classid = (lock_key >> 32) & 0xFFFF_FFFF
+    objid = lock_key & 0xFFFF_FFFF
+    try:
+        with psycopg.connect(database_url, autocommit=True) as probe:
+            row = probe.execute(
+                """
+                SELECT a.pid
+                  FROM pg_locks l
+                  JOIN pg_stat_activity a ON a.pid = l.pid
+                  JOIN pg_database d      ON d.oid = l.database
+                 WHERE l.locktype = 'advisory'
+                   AND l.objsubid = 1
+                   AND d.datname = current_database()
+                   AND l.classid = %(classid)s::oid
+                   AND l.objid   = %(objid)s::oid
+                   AND a.application_name = %(app_name)s
+                   AND a.state    = 'idle'
+                   AND a.state_change < NOW() - make_interval(secs => %(grace)s)
+                 LIMIT 1
+                """,
+                {
+                    "classid": classid,
+                    "objid": objid,
+                    "app_name": SINGLETON_FENCE_APPLICATION_NAME,
+                    "grace": grace_seconds,
+                },
+            ).fetchone()
+            if row is None:
+                return None
+            stale_pid = int(row[0])
+            term_row = probe.execute(
+                "SELECT pg_terminate_backend(%(pid)s)",
+                {"pid": stale_pid},
+            ).fetchone()
+            if not (term_row and term_row[0]):
+                logger.warning(
+                    "jobs entrypoint: pg_terminate_backend(%d) returned false "
+                    "— singleton-lock holder remains. Reap requires superuser "
+                    "or pg_signal_backend membership.",
+                    stale_pid,
+                )
+                return None
+            logger.info(
+                "jobs entrypoint: reaped stale singleton-fence holder (pid=%d, idle ≥ %ds, application_name=%r)",
+                stale_pid,
+                grace_seconds,
+                SINGLETON_FENCE_APPLICATION_NAME,
+            )
+            return stale_pid
+    except Exception:
+        logger.exception("jobs entrypoint: stale-holder reap probe failed; treating as no-op")
+        return None
+
+
 def _acquire_singleton_fence(database_url: str) -> psycopg.Connection[Any]:
     """Acquire the session-scoped advisory lock on a dedicated connection.
 
@@ -108,12 +281,59 @@ def _acquire_singleton_fence(database_url: str) -> psycopg.Connection[Any]:
     closes it LAST during shutdown so Postgres releases the lock only
     after every other subsystem has stopped.
 
-    Exits the process with code 2 when the lock is already held.
+    Exits the process with code 2 when the lock is already held AND
+    no stale holder could be reaped (#1290). On first failure we
+    consult :func:`_reap_stale_singleton_fence_holder` — if a prior
+    jobs-process backend is idle-in-postgres past the grace window,
+    terminate it and retry the lock acquire ONE more time. A
+    genuine concurrent boot (busy backend) is preserved.
+
+    The fence connection is opened with ``autocommit=True`` (Codex 2
+    round 2 BLOCKING on #1290): without it, ``SELECT
+    pg_try_advisory_lock(...)`` runs inside an implicit transaction and
+    the backend reports ``state='idle in transaction'`` until
+    ``.commit()`` lands. The reaper SQL filters on ``state='idle'``
+    only — a dead fence stuck mid-statement would be invisible to it
+    and the lock would be unreapable. Autocommit removes the
+    in-transaction window entirely.
+
+    The fence connection carries ``application_name='ebull-jobs-singleton-fence'``
+    so the reaper has a precise key to identify "our" stale backends.
     """
-    fence = psycopg.connect(database_url)
+    fence = psycopg.connect(
+        database_url,
+        autocommit=True,
+        application_name=SINGLETON_FENCE_APPLICATION_NAME,
+    )
     try:
         row = fence.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)).fetchone()
         acquired = bool(row and row[0])
+        if not acquired:
+            # #1290: try once to reap a stale holder before refusing.
+            # The reaper uses its own short-lived connection so a
+            # failure there cannot corrupt the fence we still hold
+            # half-open here.
+            reaped = _reap_stale_singleton_fence_holder(database_url, lock_key=JOBS_PROCESS_LOCK_KEY)
+            if reaped is not None:
+                # Codex 2 round 3 HIGH on #1290: ``pg_terminate_backend``
+                # is ASYNCHRONOUS — it queues a SIGTERM for the target
+                # backend, returning ``true`` once the signal is sent
+                # but BEFORE the backend has actually exited. The
+                # backend's session-scope advisory lock is released
+                # only on exit. An immediate retry of
+                # ``pg_try_advisory_lock`` will still see the lock
+                # held until the OS scheduler runs the doomed backend
+                # one last time. Poll-retry for up to two seconds at
+                # 100 ms intervals — well above the kernel's
+                # SIGTERM-deliver-to-backend-exit latency in practice
+                # but bounded so a non-cooperative backend cannot
+                # delay startup indefinitely.
+                for _ in range(20):
+                    row = fence.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)).fetchone()
+                    acquired = bool(row and row[0])
+                    if acquired:
+                        break
+                    time.sleep(0.1)
         if not acquired:
             logger.error(
                 "jobs entrypoint: another app.jobs process holds the singleton "
@@ -122,7 +342,6 @@ def _acquire_singleton_fence(database_url: str) -> psycopg.Connection[Any]:
             )
             fence.close()
             sys.exit(2)
-        fence.commit()  # release the implicit transaction; lock is session-scoped
     except SystemExit:
         raise
     except Exception:
@@ -381,6 +600,21 @@ def serve(stop_event: threading.Event | None = None) -> int:
     pool = open_pool("jobs_pool", min_size=1, max_size=4)
     fence_conn = _acquire_singleton_fence(settings.database_url)
     logger.info("jobs entrypoint: singleton fence acquired")
+    # #1290: fence-liveness infrastructure. The lock + stop-event are
+    # constructed UP-FRONT so the cleanup paths in the startup-guard
+    # wrappers can reference them — but the heartbeat THREAD itself
+    # starts AFTER every guard has passed. Codex 2 round 2 HIGH on
+    # #1290: if the heartbeat is already running while a guard raises
+    # and calls ``fence_conn.close()`` directly, the heartbeat's next
+    # ``execute()`` races against close on the same psycopg
+    # connection. Delaying the thread start until all guards pass
+    # avoids that race entirely. The startup window (every guard
+    # combined < 1 min on a healthy DB) is well inside the reaper
+    # grace, so a concurrent boot cannot incorrectly reap us during
+    # this pre-thread window.
+    fence_lock = threading.Lock()
+    fence_heartbeat_stop = threading.Event()
+    fence_heartbeat_thread: threading.Thread | None = None
 
     # PR1a #1064 — fail-fast at jobs entrypoint if SCHEDULED_JOBS and
     # _BOOTSTRAP_STAGE_SPECS disagree on a job_name's source. Mirrors
@@ -457,6 +691,21 @@ def serve(stop_event: threading.Event | None = None) -> int:
     credential_health_thread: threading.Thread | None = None
 
     try:
+        # #1290: start the fence heartbeat INSIDE the main try block
+        # so the finally-shutdown path stops it on every exit (Codex 2
+        # round 3 MEDIUM). Every startup guard above has passed, so
+        # the heartbeat thread can run safely; if anything in the
+        # try-body raises (queue boot-drain, runtime.start(), etc.),
+        # the finally clause sets fence_heartbeat_stop + joins the
+        # thread under fence_lock before closing the fence.
+        fence_heartbeat_thread = threading.Thread(
+            target=_fence_heartbeat_loop,
+            args=(fence_conn, fence_lock, fence_heartbeat_stop),
+            name="jobs-fence-heartbeat",
+            daemon=True,
+        )
+        fence_heartbeat_thread.start()
+        logger.info("jobs entrypoint: fence heartbeat started")
         # Step 4 — reaper.
         try:
             reaped = reap_orphaned_syncs(reap_all=True)
@@ -617,12 +866,24 @@ def serve(stop_event: threading.Event | None = None) -> int:
             logger.exception("jobs entrypoint: sync_executor.shutdown raised")
         for t in heartbeat_threads:
             t.join(timeout=2.0)
+        # #1290: stop the fence heartbeat BEFORE closing the fence,
+        # under the fence_lock, so the heartbeat does not race with
+        # close (psycopg's cursor is not thread-safe). The thread may
+        # be None if a startup guard raised before we reached the
+        # thread.start() call — in that case there is nothing to stop.
+        try:
+            fence_heartbeat_stop.set()
+            if fence_heartbeat_thread is not None:
+                fence_heartbeat_thread.join(timeout=2.0)
+        except Exception:
+            logger.exception("jobs entrypoint: fence heartbeat shutdown raised")
         try:
             pool.close()
         except Exception:
             logger.exception("jobs entrypoint: pool.close raised")
         try:
-            fence_conn.close()  # LAST — releases the singleton lock.
+            with fence_lock:
+                fence_conn.close()  # LAST — releases the singleton lock.
             logger.info("jobs entrypoint: singleton fence released")
         except Exception:
             logger.exception("jobs entrypoint: fence_conn.close raised")
