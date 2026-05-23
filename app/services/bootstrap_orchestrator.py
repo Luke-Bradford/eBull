@@ -299,6 +299,18 @@ Capability = Literal[
     # Provided by S25 ``mf_directory_sync``; required by S26
     # ``sec_n_csr_bootstrap_drain``.
     "class_id_mapping_ready",
+    # PR-2 lock-contention fix: S8 (sec_submissions_ingest) and S15
+    # (filings_history_seed) both write to ``filing_events`` for the
+    # same ``(instrument_id, …)`` keys. PR-2's cross-lane parallelism
+    # let them run concurrently → row-level lock contention left S8
+    # stuck on a wait-graph for 17+ min during bootstrap run #5.
+    # Adding a hard ordering: S15 requires ``submissions_processed``
+    # which only S8 provides (on success OR skip). Effect: S15 runs
+    # AFTER S8 terminalises, eliminating concurrent writes.
+    # Provided ON SKIP so the slow-connection fallback (#1041 — S7
+    # skipped → S8 cascade-skipped) still flows into S15 as the
+    # legacy chain owner of ``filing_events_seeded``.
+    "submissions_processed",
 ]
 
 
@@ -327,7 +339,7 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
     # BootstrapPhaseSkipped (#1138 §4.3) so the stage transitions to
     # `skipped` and this provider entry never fires.
     "sec_bulk_download": ("bulk_archives_ready",),
-    "sec_submissions_ingest": ("filing_events_seeded",),
+    "sec_submissions_ingest": ("filing_events_seeded", "submissions_processed"),
     "sec_companyfacts_ingest": ("fundamentals_raw_seeded",),
     # Bulk ownership ingester covers both insider transactions + Form 3.
     "sec_insider_ingest_from_dataset": ("insider_inputs_seeded", "form3_inputs_seeded"),
@@ -357,7 +369,18 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
 # providing the same caps, not on a skipped bulk stage masquerading
 # as a provider. Add an entry here only when a skip is semantically
 # equivalent to success.
-_STAGE_PROVIDES_ON_SKIP: Final[dict[str, tuple[Capability, ...]]] = {}
+_STAGE_PROVIDES_ON_SKIP: Final[dict[str, tuple[Capability, ...]]] = {
+    # PR-2 lock-contention fix: S8 cascade-skipped on slow-connection
+    # (S7 skipped → bulk_archives_ready unprovided → S8 cascade-skipped)
+    # still satisfies the ``submissions_processed`` ordering cap so
+    # S15 (filings_history_seed) — the legacy chain owner of
+    # filing_events seeding on the slow path — proceeds. S8 SUCCESS
+    # also provides this cap (see ``_STAGE_PROVIDES`` above); the
+    # SKIP entry covers the cascade-skip case without "masquerading
+    # as success" — the cap is purely an ordering constraint on S15,
+    # not a content-validity signal.
+    "sec_submissions_ingest": ("submissions_processed",),
+}
 
 
 # #1140 / Task C of #1136 audit — strict-gate row-count floors.
@@ -455,7 +478,10 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     # Phase C' — walker
     "sec_submissions_files_walk": CapRequirement(all_of=("filing_events_seeded",)),
     # Legacy chain
-    "filings_history_seed": CapRequirement(all_of=("cik_mapping_ready",)),
+    # ``submissions_processed`` cap pinned here serialises S15 after
+    # S8 terminalises (success / skip). See cap docstring on
+    # ``submissions_processed`` for the lock-contention rationale.
+    "filings_history_seed": CapRequirement(all_of=("cik_mapping_ready", "submissions_processed")),
     "sec_first_install_drain": CapRequirement(all_of=("cik_mapping_ready",)),
     "sec_def14a_bootstrap": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
     "sec_business_summary_bootstrap": CapRequirement(
