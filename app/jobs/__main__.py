@@ -748,8 +748,7 @@ def serve(stop_event: threading.Event | None = None) -> int:
                 decision = attempt_boot_resume(conn, requested_by=boot_id)
             if decision.decision == "resumed":
                 logger.info(
-                    "jobs entrypoint: bootstrap auto-resume enqueued "
-                    "(run_id=%d, attempt=%d/%d)",
+                    "jobs entrypoint: bootstrap auto-resume enqueued (run_id=%d, attempt=%d/%d)",
                     decision.run_id or -1,
                     decision.attempts,
                     1,  # _MAX_BOOT_RESUMES default; keep in sync if widened
