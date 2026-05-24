@@ -4363,6 +4363,17 @@ def ownership_observations_sync() -> None:
     staler than max(observations.ingested_at) and refresh those that
     drifted.
 
+    **All 7 ownership categories covered** via
+    :data:`app.jobs.ownership_observations_repair._CATEGORIES`:
+    insiders, institutions, blockholders, treasury, def14a, funds,
+    esop. This is the integrity floor.
+
+    Distinct from the one-shot ``JOB_OWNERSHIP_OBSERVATIONS_BACKFILL``
+    job (``ownership_observations_backfill`` below) which calls
+    :func:`app.services.ownership_observations_sync.sync_all` and
+    dispatches only the 5 legacy-mirror categories — funds + esop are
+    handled here, not there.
+
     On a healthy install this finds zero rows and exits in <100ms.
 
     The function name + ``JOB_OWNERSHIP_OBSERVATIONS_SYNC`` constant
@@ -4991,7 +5002,12 @@ def sec_per_cik_poll() -> None:
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
             psycopg.connect(settings.database_url) as conn,
         ):
-            stats = run_per_cik_poll(conn, http_get=_make_sec_http_get(sec))  # type: ignore[arg-type]
+            # Item 7 (#1233): conditional-GET path via Last-Modified
+            # watermark namespace ``sec.last_modified.per_cik_poll``.
+            stats = run_per_cik_poll(
+                conn,
+                http_get_with_meta=_make_sec_http_get_with_meta(sec),  # type: ignore[arg-type]
+            )
             conn.commit()
         tracker.row_count = stats.new_filings_recorded + stats.recheck_new_filings_recorded
         logger.info(
@@ -5194,6 +5210,26 @@ def _make_sec_http_get(sec_provider: object) -> Callable[[str, dict[str, str]], 
     def _impl(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
         response = sec_provider._http.get(url, headers=headers)  # type: ignore[attr-defined]
         return response.status_code, response.content
+
+    return _impl
+
+
+def _make_sec_http_get_with_meta(
+    sec_provider: object,
+) -> Callable[[str, dict[str, str]], tuple[int, bytes, str | None]]:
+    """Item 7 (#1233 run-8-readiness) variant of ``_make_sec_http_get``
+    that ALSO returns the response ``Last-Modified`` header so the
+    caller can round-trip it through ``external_data_watermarks``
+    under the ``sec.last_modified.*`` namespace and short-circuit on
+    HTTP 304.
+
+    Same rate-limited shared client as the legacy adapter — the SEC
+    10 req/s cap remains process-wide.
+    """
+
+    def _impl(url: str, headers: dict[str, str]) -> tuple[int, bytes, str | None]:
+        response = sec_provider._http.get(url, headers=headers)  # type: ignore[attr-defined]
+        return response.status_code, response.content, response.headers.get("Last-Modified")
 
     return _impl
 

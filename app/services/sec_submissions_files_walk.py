@@ -3,6 +3,13 @@ rewritten in Stream A PR-B T1.3 #1233 to consume the
 ``sec_cik_submissions_files_index`` sidecar instead of re-fetching the
 primary submissions.json).
 
+Item 7 (#1233 ``docs/proposals/etl/run-8-readiness-fixes.md``):
+each secondary-page fetch rounds the SEC ``Last-Modified`` header
+through ``external_data_watermarks`` under source-key
+``sec.last_modified.submissions_files`` with key ``<cik>:<page_name>``.
+On 304 the walker skips parse + upsert (filings already known) but
+bumps ``watermark_at`` so the watermark row stays fresh.
+
 The bulk ``submissions.zip`` archive published by SEC contains every
 CIK's ``filings.recent`` block (last ~12 months / 1000 most-recent
 filings). For deeper history, SEC paginates older filings under
@@ -56,8 +63,16 @@ from app.providers.implementations.sec_edgar import (
     _normalise_submissions_block,
 )
 from app.services.filings import _upsert_filing
+from app.services.watermarks import get_watermark, set_watermark
 
 logger = logging.getLogger(__name__)
+
+
+# Item 7 (#1233): dedicated source-key namespace for HTTP Last-Modified
+# round-trip on secondary submissions pages. See
+# ``app/services/watermarks.py`` module docstring §Source-key
+# namespaces in use. Key format: ``<cik>:<page_name>``.
+_SOURCE_KEY_SUBMISSIONS_FILES: str = "sec.last_modified.submissions_files"
 
 
 # Stream A PR-B T1.3 (#1233): sentinel page-name pattern written by
@@ -82,6 +97,10 @@ class FilesWalkResult:
     # double-counting legitimate "no-overflow" CIKs as errors.
     ciks_with_no_overflow: int = 0
     ciks_with_empty_sidecar: int = 0
+    # Item 7 (#1233 run-8-readiness): HTTP 304 short-circuits saved
+    # via If-Modified-Since round-trip. Distinct from parse_errors —
+    # 304 is a success path that conserves the SEC 10 req/s budget.
+    secondary_pages_not_modified: int = 0
 
 
 def _list_cik_secondary_pages(
@@ -210,8 +229,19 @@ def walk_files_pages(
                 # Skip sentinel rows defensively.
                 if page_name == _SIDECAR_SENTINEL_PAGE_NAME:
                     continue
+
+                # Item 7 (#1233): read Last-Modified watermark BEFORE
+                # the fetch so we can inject If-Modified-Since.
+                # Namespaced key keeps us disjoint from the legacy
+                # ``sec.submissions`` source (top-accession semantics).
+                wm_key = f"{cik}:{page_name}"
+                wm = get_watermark(conn, _SOURCE_KEY_SUBMISSIONS_FILES, wm_key)
+                if_modified_since = wm.watermark if wm and wm.watermark else None
                 try:
-                    page = provider.fetch_submissions_page(page_name)
+                    page_result = provider.fetch_submissions_page_conditional(
+                        page_name,
+                        if_modified_since=if_modified_since,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(
                         "files walk: secondary fetch failed for CIK %s/%s: %s",
@@ -221,7 +251,31 @@ def walk_files_pages(
                     )
                     result.parse_errors += 1
                     continue
+                if page_result is None:
+                    # 404 — page absent. Nothing to record; no watermark
+                    # write either (no Last-Modified to persist).
+                    continue
+                if page_result.not_modified:
+                    # CAVEMAN: server said 304. Skip parse + skip upsert
+                    # (filings already known). Bump watermark_at only —
+                    # the stored Last-Modified is still freshest the
+                    # server has sent.
+                    result.secondary_pages_not_modified += 1
+                    with conn.transaction():
+                        if if_modified_since is not None:
+                            set_watermark(
+                                conn,
+                                source=_SOURCE_KEY_SUBMISSIONS_FILES,
+                                key=wm_key,
+                                watermark=if_modified_since,
+                                watermark_at=None,
+                            )
+                    continue
+
+                page = page_result.payload
                 if page is None:
+                    # Defensive: 200 with empty body should not happen,
+                    # but the dataclass shape permits it. Skip safely.
                     continue
 
                 result.secondary_pages_fetched += 1
@@ -241,6 +295,7 @@ def walk_files_pages(
                     result.parse_errors += 1
                     continue
 
+                page_upsert_errors = 0
                 for filing in filings:
                     try:
                         with conn.transaction():
@@ -258,6 +313,28 @@ def walk_files_pages(
                             exc,
                         )
                         result.parse_errors += 1
+                        page_upsert_errors += 1
+
+                # Item 7 (#1233): persist the fresh Last-Modified
+                # watermark. set_watermark asserts INTRANS so it MUST
+                # land inside ``with conn.transaction():``. Write only
+                # when every filing on the page upserted cleanly OR
+                # was intentionally retention-dropped (the
+                # ``_upsert_filing returns False`` case which does NOT
+                # increment page_upsert_errors). If ANY filing raised,
+                # we leave the watermark unchanged so the next tick
+                # re-fetches + retries the failed filings instead of
+                # 304-skipping them forever. Codex 2 pre-push P1 fold
+                # 2026-05-24.
+                if page_result.last_modified is not None and page_upsert_errors == 0:
+                    with conn.transaction():
+                        set_watermark(
+                            conn,
+                            source=_SOURCE_KEY_SUBMISSIONS_FILES,
+                            key=wm_key,
+                            watermark=page_result.last_modified,
+                            watermark_at=None,
+                        )
 
     # End-of-walk SUMMARY warning when ≥ 1 in-universe non-agent CIK
     # had an empty sidecar. Single log line replaces the per-CIK spam
@@ -313,12 +390,14 @@ def sec_submissions_files_walk_job() -> None:
         result = walk_files_pages(conn=conn)
         conn.commit()
     logger.info(
-        "sec_submissions_files_walk: ciks=%d pages=%d filings=%d no_overflow=%d empty_sidecar=%d parse_errors=%d",
+        "sec_submissions_files_walk: ciks=%d pages=%d filings=%d "
+        "no_overflow=%d empty_sidecar=%d not_modified=%d parse_errors=%d",
         result.ciks_visited,
         result.secondary_pages_fetched,
         result.filings_upserted,
         result.ciks_with_no_overflow,
         result.ciks_with_empty_sidecar,
+        result.secondary_pages_not_modified,
         result.parse_errors,
     )
     if run_id is not None:

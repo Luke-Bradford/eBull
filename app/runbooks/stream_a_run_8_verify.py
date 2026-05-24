@@ -31,6 +31,20 @@ alone — operator MUST keep the jobs service stopped (e.g. ``systemctl
 stop ebull-jobs``, not just SIGINT) for the duration. Three probe
 checkpoints raise the alarm if the jobs process appears mid-run.
 
+§6.3 PRE-WIPE PROCEDURE
+-----------------------
+If the current dev DB has been touched by ``pg_resetwal`` (recovery from
+crash/data-corruption), its catalog may carry stale ``multixact``
+state that the next DROP cannot reclaim. Symptoms:
+``job_runtime_heartbeat`` + ``broker_credentials`` show wraparound-class
+SQLSTATE errors mid-bootstrap. The §6.3 procedure in
+``docs/specs/etl/retention-rubric.md`` covers reclaim ordering.
+
+This runbook calls ``assert_no_multixact_wraparound(conn)`` immediately
+after ``assert_dev_db(conn)`` as a pre-flight refusal — wraparound
+proximity raises ``RunbookRefused`` with exit code 2 BEFORE any DROP.
+Operator action on refusal: run §6.3, then re-invoke this runbook.
+
 Exit codes
 ----------
 * ``0`` — bootstrap reached terminal status (success path).
@@ -62,8 +76,10 @@ from app.jobs.locks import JobAlreadyRunning, acquire_jobs_process_fence
 from app.runbooks.safety import (
     RunbookRefused,
     assert_dev_db,
+    assert_dev_db_name_in_url,
     assert_dev_env,
     assert_jobs_process_stopped,
+    assert_no_multixact_wraparound,
     wait_for_jobs_process_started,
 )
 
@@ -409,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         assert_dev_env()
+        assert_dev_db_name_in_url()
     except RunbookRefused as exc:
         print(exc.msg, file=sys.stderr)
         return 2
@@ -445,6 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         with psycopg.connect(settings.database_url) as conn:
             try:
                 assert_dev_db(conn)
+                assert_no_multixact_wraparound(conn)
             except RunbookRefused as exc:
                 print(exc.msg, file=sys.stderr)
                 return 2

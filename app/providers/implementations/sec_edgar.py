@@ -163,6 +163,26 @@ class MasterIndexFetchResult:
     last_modified: str | None
 
 
+@dataclass(frozen=True)
+class SubmissionsPageResult:
+    """Item 7 (#1233 run-8-readiness): result of a conditional-GET
+    fetch of a secondary submissions page (``CIK*-submissions-NNN.json``).
+
+    ``not_modified=True`` signals an HTTP 304 — the caller skips parse
+    + bumps ``watermark_at`` only (the stored ``Last-Modified`` is
+    still the freshest the server has ever sent).
+
+    ``payload`` is ``None`` on 304; the parsed JSON dict on 200.
+    ``last_modified`` carries the server's ``Last-Modified`` header
+    (or the prior ``if_modified_since`` value on 304 so callers can
+    keep treating it as the canonical stored watermark).
+    """
+
+    payload: dict[str, object] | None
+    last_modified: str | None
+    not_modified: bool
+
+
 def parse_master_index(body: bytes) -> list[MasterIndexEntry]:
     """Parse SEC daily master-index bytes into entries.
 
@@ -719,6 +739,49 @@ class SecFilingsProvider(FilingsProvider):
         resp.raise_for_status()
         raw = resp.json()
         return raw  # type: ignore[return-value]
+
+    def fetch_submissions_page_conditional(
+        self,
+        name: str,
+        *,
+        if_modified_since: str | None = None,
+    ) -> SubmissionsPageResult | None:
+        """Item 7 (#1233 run-8-readiness): conditional-GET variant of
+        ``fetch_submissions_page``. Sends ``If-Modified-Since`` when
+        a prior ``Last-Modified`` watermark exists.
+
+        Returns:
+          * ``None`` — 404 (page absent) OR the caller chose to drop it.
+          * ``SubmissionsPageResult(payload=None, last_modified=lm,
+            not_modified=True)`` — 304; caller bumps watermark_at only.
+          * ``SubmissionsPageResult(payload=<dict>, last_modified=lm,
+            not_modified=False)`` — 200; caller parses + persists
+            watermark with the new ``Last-Modified`` string.
+
+        Same rate-limited shared client as ``fetch_submissions_page`` —
+        SEC 10 req/s cap unchanged.
+        """
+        path = f"/submissions/{name}"
+        headers: dict[str, str] = {}
+        if if_modified_since:
+            headers["If-Modified-Since"] = if_modified_since
+        resp = self._http.get(path, headers=headers)
+        if resp.status_code == 304:
+            return SubmissionsPageResult(
+                payload=None,
+                last_modified=if_modified_since,
+                not_modified=True,
+            )
+        if resp.status_code == 404:
+            logger.warning("SEC: submissions page not found: %s", name)
+            return None
+        resp.raise_for_status()
+        raw = resp.json()
+        return SubmissionsPageResult(
+            payload=raw,
+            last_modified=resp.headers.get("Last-Modified"),
+            not_modified=False,
+        )
 
     # ------------------------------------------------------------------
     # Private helpers

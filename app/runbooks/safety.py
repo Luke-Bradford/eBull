@@ -27,10 +27,21 @@ from __future__ import annotations
 
 import os
 import time
+from urllib.parse import urlparse
 
 import psycopg
 
+from app.config import settings
 from app.jobs.locks import probe_jobs_process_running
+
+# Default dev-DB allowlist when EBULL_DEV_DB_NAMES is unset. Matches the
+# post-connection default in ``assert_dev_db`` so pre + post checks agree.
+_DEFAULT_DEV_DB_ALLOWLIST: frozenset[str] = frozenset({"ebull_dev"})
+
+# Multixact-wraparound probe thresholds. PG raises WARNING at
+# ``autovacuum_multixact_freeze_max_age`` and ERROR at 2^31. Our
+# operator-actionable threshold = 80% of the autovacuum freeze max age.
+_MULTIXACT_FREEZE_RATIO = 0.8
 
 
 class RunbookRefused(SystemExit):
@@ -42,12 +53,72 @@ class RunbookRefused(SystemExit):
         self.msg = f"REFUSE: {msg}"
 
 
+def _parse_db_name_from_url(database_url: str) -> str:
+    """Extract the DB name from a postgres URL. Handles ``postgres://``,
+    ``postgresql://``, ``postgresql+psycopg://`` schemes.
+
+    Returns empty string for malformed URLs (caller checks).
+    """
+    parsed = urlparse(database_url)
+    path = parsed.path or ""
+    return path.lstrip("/")
+
+
+def _dev_db_allowlist() -> frozenset[str]:
+    """Read ``EBULL_DEV_DB_NAMES`` env (comma-separated, whitespace-
+    tolerant). Default to ``{"ebull_dev"}`` to match
+    :func:`assert_dev_db` post-connection check.
+    """
+    raw = os.environ.get("EBULL_DEV_DB_NAMES")
+    if raw is None:
+        return _DEFAULT_DEV_DB_ALLOWLIST
+    parsed = {tok.strip() for tok in raw.split(",") if tok.strip()}
+    return frozenset(parsed) if parsed else _DEFAULT_DEV_DB_ALLOWLIST
+
+
+def assert_dev_db_name_in_url() -> None:
+    """Pre-connection variant of :func:`assert_dev_db`.
+
+    Parses the DB name out of ``settings.database_url`` and validates
+    it against ``EBULL_DEV_DB_NAMES`` (default ``{"ebull_dev"}``). Fails
+    BEFORE any psycopg connection attempt — operator gets an
+    actionable error before the deep-stack ``OperationalError`` that
+    would otherwise come from a wrong ``DATABASE_URL``.
+
+    Belt-and-braces with :func:`assert_dev_db` post-connection. Codex 1
+    diff re-pass caught: default match must equal post-check default
+    (``{"ebull_dev"}``) — previously "skip with warning" would let
+    ``DATABASE_URL=postgres://.../ebull`` pass pre-check and only fail
+    after connection.
+    """
+    url = settings.database_url
+    name = _parse_db_name_from_url(url)
+    if not name:
+        raise RunbookRefused(
+            f"DATABASE_URL has no database name in path: {url!r}. "
+            "Expected postgres://USER:PASS@HOST:PORT/DBNAME shape."
+        )
+    allowlist = _dev_db_allowlist()
+    if name not in allowlist:
+        raise RunbookRefused(
+            f"DATABASE_URL points at database {name!r}, not in dev allowlist "
+            f"{sorted(allowlist)}. Set EBULL_DEV_DB_NAMES env var to extend, "
+            f"or point DATABASE_URL at a dev DB."
+        )
+
+
 def assert_dev_env() -> None:
     """``EBULL_ENV`` must be explicitly ``'dev'``.
 
     Fail-closed: no default. An unset env var is refused (would
     otherwise silently pass on PROD machines that don't set EBULL_ENV).
     Caught in PR-D Codex 1 BLOCKING fold.
+
+    **Companion guard**: callers SHOULD also invoke
+    :func:`assert_dev_db_name_in_url` immediately after this — they
+    validate orthogonal failure modes (env var vs URL shape) and are
+    intentionally separate so each can be unit-tested in isolation
+    without leaking ``DATABASE_URL`` state into env-var tests.
     """
     if os.environ.get("EBULL_ENV") != "dev":
         raise RunbookRefused(
@@ -142,3 +213,81 @@ def wait_for_jobs_process_started(
         f"Bootstrap is queued but no orchestrator to drain it. "
         f"Start jobs process; check status at /system/bootstrap-status."
     )
+
+
+def assert_no_multixact_wraparound(conn: psycopg.Connection[object]) -> None:
+    """Catalog-level probe for multixact-wraparound proximity.
+
+    Reads:
+
+    * ``pg_database.datminmxid`` for the current DB — compares against
+      ``autovacuum_multixact_freeze_max_age`` × ``_MULTIXACT_FREEZE_RATIO``
+      (default 0.8). Approaching threshold → refuse.
+    * Top-5 oldest ``pg_class.relminmxid`` in ``public`` schema —
+      same threshold per table.
+
+    Best-effort symptom probe against the historical victim tables
+    (``job_runtime_heartbeat`` + ``broker_credentials``) supplements
+    the catalog check as a non-fatal warning.
+
+    Why: PR12 #1255 + the §6.3 pre-wipe procedure in
+    ``docs/specs/etl/retention-rubric.md`` (formerly
+    ``docs/superpowers/specs/2026-05-19-data-retention-rubric.md``)
+    document the ``pg_resetwal``-damaged dev DB state with multixact
+    wraparound on ``job_runtime_heartbeat`` + ``broker_credentials``.
+    Without this probe, the operator runs ``--apply`` cold and hits
+    the wraparound mid-DROP — partial nuke + manual recovery. Refusing
+    with an actionable error before any destructive op is the gate.
+
+    Raises :class:`RunbookRefused` if any tracked age exceeds
+    threshold. Operator action: run the §6.3 pre-wipe procedure
+    (``pg_resetwal --next-multixact ...`` + manual reclaim) BEFORE
+    re-running this runbook.
+    """
+    cur = conn.execute("SHOW autovacuum_multixact_freeze_max_age")
+    raw = cur.fetchone()
+    if raw is None:
+        # Unreachable on a live PG, but defensive
+        return
+    freeze_max_age = int(raw[0])  # type: ignore[arg-type]
+    threshold = int(freeze_max_age * _MULTIXACT_FREEZE_RATIO)
+
+    cur = conn.execute(
+        "SELECT mxid_age(datminmxid)::BIGINT FROM pg_database "
+        "WHERE datname = current_database()"
+    )
+    db_row = cur.fetchone()
+    if db_row is not None:
+        db_age = int(db_row[0])  # type: ignore[arg-type]
+        if db_age >= threshold:
+            raise RunbookRefused(
+                f"pg_database.datminmxid age = {db_age} for current DB; "
+                f"threshold = {threshold} (80% of "
+                f"autovacuum_multixact_freeze_max_age = {freeze_max_age}). "
+                f"Multixact wraparound proximity detected. Run the §6.3 "
+                f"pre-wipe procedure (see docs/specs/etl/retention-rubric.md "
+                f"+ project_1233_pr12_ownership_merge_writer.md) BEFORE "
+                f"re-running this runbook."
+            )
+
+    cur = conn.execute(
+        "SELECT n.nspname || '.' || c.relname AS qname, "
+        "mxid_age(c.relminmxid)::BIGINT AS age "
+        "FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'public' "
+        "  AND c.relkind IN ('r', 'p') "
+        "  AND c.relminmxid <> '0' "
+        "ORDER BY age DESC LIMIT 5"
+    )
+    rows = cur.fetchall()
+    breaches = [(qname, age) for qname, age in rows if int(age) >= threshold]
+    if breaches:
+        formatted = ", ".join(f"{name}=age{age}" for name, age in breaches)
+        raise RunbookRefused(
+            f"pg_class.relminmxid wraparound proximity (threshold={threshold}) "
+            f"on tables: {formatted}. Run §6.3 pre-wipe procedure "
+            f"(see docs/specs/etl/retention-rubric.md + "
+            f"project_1233_pr12_ownership_merge_writer.md) BEFORE "
+            f"re-running this runbook."
+        )

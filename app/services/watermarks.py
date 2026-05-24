@@ -41,6 +41,40 @@ future adapters reuse names rather than inventing variants.
 The ``watermark`` value is opaque to this module. Callers interpret
 it (ETag string, accession_number, ISO date) in their own domain.
 This module is pure key-value storage.
+
+Source-key namespaces in use
+============================
+
+The ``source`` identifier is a stable short string. To avoid silent
+semantic collisions when one endpoint is read by two distinct fetch
+contracts (e.g. SEC submissions.json is read by BOTH the master-index
+planner — which stores "top accession seen" — AND by the per-CIK
+poll — which stores the HTTP ``Last-Modified`` header), every
+distinct-semantics consumer uses its OWN source name.
+
+Current namespaces:
+
+* ``sec.tickers`` / ``global``                       — company_tickers.json
+  watermark stores HTTP ``Last-Modified``; ``response_hash`` carries
+  sha256 of body for secondary dedup on FMP-style providers.
+* ``sec.master-index`` / ``<YYYY-MM-DD>``            — daily master.idx.
+* ``sec.submissions`` / ``<cik>``                    — stores TOP ACCESSION
+  observed (NOT Last-Modified). Read by the master-index planner at
+  ``app/services/fundamentals/__init__.py:2030`` to decide whether a
+  cik needs a refresh fetch. DO NOT REUSE this key for HTTP conditional-
+  GET — the semantics are different and a write under one contract
+  would corrupt the other.
+* ``sec.last_modified.<endpoint>`` / ``<cik or page_name>``  — DEDICATED
+  namespace for HTTP ``If-Modified-Since`` / ``Last-Modified`` round-
+  tripping. ``watermark`` holds the literal Last-Modified string the
+  server returned (sent verbatim back as If-Modified-Since next tick).
+  Item 7 of ``docs/proposals/etl/run-8-readiness-fixes.md``:
+    * ``sec.last_modified.per_cik_poll`` — per-CIK submissions.json
+      poll at ``app/jobs/sec_per_cik_poll.py``. Key = 10-digit CIK.
+    * ``sec.last_modified.submissions_files`` — secondary submissions
+      page walker at ``app/services/sec_submissions_files_walk.py``.
+      Key = ``<cik>:<page_name>``.
+* ``sec.13f.filer-directory`` / ``<quarter>``        — discovery sweep.
 """
 
 from __future__ import annotations

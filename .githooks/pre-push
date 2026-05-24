@@ -183,6 +183,16 @@ bash scripts/check_ownership_refresh_writer_pattern.sh
 echo "==> Pre-push gate: manifest-parser archive-URL agent-CIK guard"
 bash scripts/check_archive_url_agent_guard.sh
 
+# #1233 run-8-readiness-fixes Item 8 — FINRA caller-owned ingest
+# modules (app/services/finra_*_ingest.py) MUST NOT enter their own
+# `with conn.transaction():` block; the manifest worker drives the
+# transaction lifecycle. Manifest parsers under
+# app/services/manifest_parsers/ legitimately DO and are NOT in scope.
+# AST-based (Codex 1: grep cannot distinguish docstrings; these files
+# document the rule in their module docstring). ~50ms.
+echo "==> Pre-push gate: caller-owned-tx"
+bash scripts/check_caller_owned_tx.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually

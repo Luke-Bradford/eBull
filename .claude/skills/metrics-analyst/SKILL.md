@@ -212,7 +212,7 @@ Future overlays (ESOP #843 / DRS / short-interest #961) will land as additional 
 
 ## 2. Fundamentals
 
-All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/settled-decisions.md` Provider strategy). `app/providers/implementations/sec_fundamentals.py` has the XBRL tag → column map; `app/services/fundamentals.py` is storage layer.
+All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/settled-decisions.md` Provider strategy). `app/providers/implementations/sec_fundamentals.py` has the XBRL tag → column map; `app/services/fundamentals/__init__.py` is storage layer (was `app/services/fundamentals.py`; Stream A PR-C2 / #1310 converted to package + added `app/services/fundamentals/bootstrap.py` for the bootstrap-mode `fundamentals_sync_bootstrap` derivation-only entrypoint).
 
 ### Revenue
 - **Formula**: rolling sum of last four quarterly rows for TTM (gated `is_complete_ttm = TRUE`); single row for quarter / FY.
@@ -533,7 +533,7 @@ After backfill, hit the relevant rollup endpoint and confirm the figure renders 
 
 Fund-level + class-level metadata extracted from N-CSR / N-CSRS iXBRL companions for in-universe ETFs + mutual funds. Source-priority chain `period_end DESC, filed_at DESC, source_accession DESC` settled per [docs/settled-decisions.md](../../../docs/settled-decisions.md) §"Source priority for fund metadata".
 
-**Pipeline**: bootstrap S25 [`mf_directory_sync`](../../../app/workers/scheduler.py#L4326) populates `cik_refresh_mf_directory` + `external_identifiers (provider='sec', identifier_type='class_id')`. Bootstrap S26 [`sec_n_csr_bootstrap_drain`](../../../app/jobs/sec_first_install_drain.py#L744) walks distinct trust CIKs **filtered to universe-mapped trusts only** (#1176 cohort filter at `:582-593`) and enqueues last-2-years N-CSR + N-CSRS accessions to `sec_filing_manifest`. Manifest worker dispatches the [`sec_n_csr.py`](../../../app/services/manifest_parsers/sec_n_csr.py) parser which fans out per-(series, class) → [`fund_metadata_observations`](../../../sql/149_fund_metadata.sql) (partitioned by `period_end`) → [`refresh_fund_metadata_current`](../../../app/services/fund_metadata.py#L57) write-through to `fund_metadata_current`.
+**Pipeline**: bootstrap S26 [`mf_directory_sync`](../../../app/services/bootstrap_orchestrator.py#L1181) populates `cik_refresh_mf_directory` + `external_identifiers (provider='sec', identifier_type='class_id')`. Bootstrap S27 [`sec_n_csr_bootstrap_drain`](../../../app/jobs/sec_first_install_drain.py#L744) walks distinct trust CIKs **filtered to universe-mapped trusts only** (#1176 cohort filter at `:582-593`) and enqueues last-2-years N-CSR + N-CSRS accessions to `sec_filing_manifest`. Manifest worker dispatches the [`sec_n_csr.py`](../../../app/services/manifest_parsers/sec_n_csr.py) parser which fans out per-(series, class) → [`fund_metadata_observations`](../../../sql/149_fund_metadata.sql) (partitioned by `period_end`) → [`refresh_fund_metadata_current`](../../../app/services/fund_metadata.py#L57) write-through to `fund_metadata_current`.
 
 **Cohort scope**: 77 fund trusts on dev DB, 432 universe-mapped instruments (99% of `external_identifiers (class_id, is_primary=TRUE)` cohort). Coverage ceiling capped by symbols present in `instruments` AND `company_tickers_mf.json`. Expanding cohort = expanding `instruments` (out of scope).
 
@@ -575,7 +575,7 @@ UI consumer must branch on `IS NOT NULL` rather than fund-type lookup. The parse
 ### Cadence
 
 - Source: SEC publishes N-CSR (annual) + N-CSRS (semi-annual) within 70 days of period_end. Per-trust cadence = 200 days (matches `app/services/data_freshness.py:_CADENCE`).
-- Bootstrap: S25 + S26 fire once per first-install (~60-90s combined for 77 trusts + ~565 secondary pages).
+- Bootstrap: S26 + S27 fire once per first-install (~60-90s combined for 77 trusts + ~565 secondary pages).
 - Steady-state: Layer 2 daily-index reconciler picks up new accessions; manifest worker drains via per-source dispatch.
 - Rewash: `POST /jobs/sec_rebuild/run -d '{"source": "sec_n_csr"}'` for cohort-wide; `{"source": "sec_n_csr", "subject_id": "<trust_cik>"}` for one trust.
 

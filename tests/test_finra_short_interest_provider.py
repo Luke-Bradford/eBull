@@ -117,6 +117,26 @@ def test_404_raises_finra_not_found() -> None:
         p.fetch_settlement_file(date(2026, 4, 30))
 
 
+def test_403_raises_finra_not_found() -> None:
+    """FINRA CDN returns 403 (not 404) for not-yet-published trade dates.
+
+    Empirically confirmed at #916 RegSHO live smoke. Run-#8-readiness
+    fixes Item 6 (`docs/proposals/etl/run-8-readiness-fixes.md`):
+    bimonthly path must mirror RegSHO and treat 403 + 404 as the same
+    benign "not-yet-published" signal — both map to FinraNotFound so
+    the ScheduledJob skip-and-revisit semantics fire identically.
+    """
+    p = _make_provider()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, request=request)
+
+    _rewire_transport(p, handler)
+
+    with pytest.raises(FinraNotFound, match="shrt20260430.csv"):
+        p.fetch_settlement_file(date(2026, 4, 30))
+
+
 # ----------------------------------------------------------------------
 # 3 — 5xx → HTTPStatusError (with Request attached so raise_for_status fires)
 # ----------------------------------------------------------------------

@@ -800,10 +800,41 @@ def sync_all(
     since: date | None = None,
     limit_per_category: int | None = None,
 ) -> SyncAllResult:
-    """Run every category sync. Caller commits between categories
-    (each ``sync_*`` commits its own observations via the underlying
-    helpers; ``refresh_*_current`` runs inside its own transaction
-    via the ``conn.transaction()`` wrap)."""
+    """Run every legacy-mirror category sync (one-shot backfill).
+
+    Dispatches exactly **5 categories**: insiders, institutions,
+    blockholders, treasury, def14a. These are the categories with
+    legacy typed source tables to mirror into ``ownership_*_observations``.
+
+    **Asymmetric with the daily drift-repair sweep** at
+    :mod:`app.jobs.ownership_observations_repair` (``_CATEGORIES`` lists
+    **7**: the 5 here + ``funds`` + ``esop``). The asymmetry is by-design:
+
+    * **Funds** has no legacy mirror source — fund holdings land via
+      NPORT manifest-worker write-through (``sec_n_port.py`` parser →
+      ``refresh_funds_current``) and via the bulk-dataset ingest path
+      (``sec_bulk_orchestrator_jobs.py``). There is no legacy
+      ``fund_holdings`` table to read from.
+    * **ESOP** rows ARE processed here, but transitively inside
+      ``sync_def14a`` (lines 691-769) — DEF 14A bene-table rows flagged
+      as ESOP route into ``ownership_esop_observations`` + call
+      ``refresh_esop_current``. There is no separate ``sync_esop``
+      entry because ESOP shares the DEF 14A source.
+
+    The daily 03:30 UTC ``JOB_OWNERSHIP_OBSERVATIONS_SYNC`` (which calls
+    ``run_observations_repair_sweep``, NOT ``sync_all``) is the
+    integrity floor for all 7 categories — drift between observations
+    and ``_current`` for any category, including funds + esop, is
+    detected and repaired within 24h regardless of which dispatch path
+    populated the observations.
+
+    Caller commits between categories (each ``sync_*`` commits its own
+    observations via the underlying helpers; ``refresh_*_current`` runs
+    inside its own transaction via the ``conn.transaction()`` wrap).
+
+    See ``.claude/skills/data-engineer/SKILL.md`` §write-through for
+    the canonical statement of these invariants.
+    """
     insiders = sync_insiders(conn, since=since, limit=limit_per_category)
     conn.commit()
     institutions = sync_institutions(conn, since=since, limit=limit_per_category)

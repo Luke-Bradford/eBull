@@ -35,6 +35,16 @@ jobs:
       - name: Pyright typecheck
         run: uv run pyright
 
+      - name: Caller-owned-tx lint (FINRA ingest)
+        # #1233 run-8-readiness-fixes Item 8 — FINRA caller-owned
+        # ingest modules (app/services/finra_*_ingest.py) MUST NOT
+        # enter their own `with conn.transaction():` block. AST-based
+        # (Codex 1: grep cannot distinguish module docstrings, which
+        # document the rule). Manifest parsers under
+        # app/services/manifest_parsers/ legitimately DO use it and
+        # are NOT in scope.
+        run: bash scripts/check_caller_owned_tx.sh
+
       - name: Pre-push hook is executable
         # Hook is committed at .githooks/pre-push and wired via
         # ``git config core.hooksPath .githooks``. On Windows, a

@@ -66,6 +66,17 @@ logger = logging.getLogger(__name__)
 
 # Per-category (current_table, observations_table, category_literal, refresh_callable).
 # Pinned here so adding a new category means one edit, not a sweep.
+#
+# **7 categories tracked** — including ``funds`` + ``esop`` which have
+# NO entry in :func:`app.services.ownership_observations_sync.sync_all`
+# (that 5-category legacy-mirror dispatcher is by-design asymmetric with
+# this 7-category daily drift-repair sweep — see ``sync_all`` docstring
+# + ``data-engineer/SKILL.md`` §write-through).
+#
+# * Funds are event-driven via NPORT manifest-worker write-through;
+#   this sweep is their ONLY daily reconciliation path.
+# * ESOP rows are processed transitively inside ``sync_def14a`` AND get
+#   independent daily reconciliation here.
 _CATEGORIES: list[tuple[str, str, str, Callable[[psycopg.Connection[Any], int], int]]] = [
     (
         "ownership_insiders_current",
