@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import time
+from typing import cast
 from urllib.parse import urlparse
 
 import psycopg
@@ -276,7 +277,7 @@ def assert_no_multixact_wraparound(conn: psycopg.Connection[object]) -> None:
         "  AND c.relminmxid <> '0' "
         "ORDER BY age DESC LIMIT 5"
     )
-    rows = cur.fetchall()
+    rows = cast(list[tuple[str, int]], cur.fetchall())
     breaches = [(qname, age) for qname, age in rows if int(age) >= threshold]
     if breaches:
         formatted = ", ".join(f"{name}=age{age}" for name, age in breaches)
