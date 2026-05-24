@@ -6,7 +6,21 @@
 >
 > **Estimated wall-clock.** Bootstrap = 100-180 min predicted (Stage C analysis); add ~5 min for Stream-C gate JSON envelope.
 >
-> **Source memos.** Stages A-G of the 2026-05-24 ETL sweep (see §11 for cross-references). Code paths verified against working tree at `91aa214` (Stream A PR-D merge).
+> **Source memos.** Stages A-G of the 2026-05-24 ETL sweep (see §11 for cross-references). Code paths verified on `main` post-PR-#1315 / sql/177 (see `pre-run-8-blockers.md` §A for current SHA).
+
+---
+
+## 0.5 Read order (START HERE)
+
+This runbook is the operator drive's single source of truth. Other docs are referenced from §0/§9/§11 and you do NOT need them open up-front. Order to read:
+
+1. **This file** (`docs/operator/runbooks/run-8-readiness.md`) — every action and decision. Read top-to-bottom once.
+2. **`docs/operator/runbooks/pre-run-8-blockers.md`** — the A/B/C/D/E classification of every #1233-adjacent concern. Confirms what is NOT in scope for this drive (B-list) + what gates run before / during / after (C / D). Read alongside §0 of THIS file.
+3. **Per-source spec at `docs/etl/sources/<source>.md`** — only when investigating a specific source's behaviour mid-run (e.g. "what does the C6_funds quiescent status mean?"). Each file has §11 verification queries operator can run against dev DB.
+4. **`app/runbooks/README.md`** — only for runbook discoverability questions (file naming + safety-class table); not part of the drive itself.
+5. **`.claude/skills/data-engineer/etl-source-to-sink-template.md`** — only for adding/modifying a source post-Run-#8. Not relevant to this drive.
+
+If at any point you feel you need to read more than one file at once, STOP and re-check this entry-point order. Mid-drive context-switching is the highest-risk failure pattern per PM lens final-committee finding.
 
 ---
 
@@ -215,7 +229,7 @@ After the runbook returns, evaluate against this rubric before §4 gate:
 **FAIL-LOUD (block #1233 close until triaged):**
 
 - Any stage stuck-pending past 90 min (#1224 exemplar) → file replay against `compute_retryable_view`.
-- Any bulk ingester (S8/S9/S10/S11/S12) writing `rows_processed=NULL` (#1225 partial) → check `job_runs.rows_processed WHERE job_name LIKE 'JOB_SEC_%_INGEST%' ORDER BY started_at DESC LIMIT 10`.
+- Any bulk ingester (S8/S9/S10/S11/S12) writing `rows_processed=NULL` (#1225 partial) → check `job_runs.rows_processed WHERE job_name LIKE 'JOB_SEC_%_INGEST%' ORDER BY started_at DESC LIMIT 10`. **Note:** `rows_processed=0` is NOT a FAIL-LOUD — `=0` means the ingester ran but had no work (empty fetch / market-closed); `NULL` means the ingester forgot to populate the field (code bug). Cross-ref `pre-run-8-blockers.md` B6 (candle_refresh S2 `=0` is by-design).
 - CardinalityViolation on S25 (Run #7 fix-list #5).
 - PG `max_locks_per_transaction` breach (#1187 boot guard; floor=1024).
 - Exit code `3` (concurrent bootstrap detected — see §3.4).

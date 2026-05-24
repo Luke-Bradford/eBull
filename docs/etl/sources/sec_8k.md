@@ -81,20 +81,24 @@ No tombstone columns on `eight_k_filings` — `_write_tombstone` (`app/services/
 
 ```sql
 -- Most-recent 8-K for AAPL
-SELECT accession_number, filed_at, primary_document_url
+-- NOTE: `eight_k_filings` has no `filed_at` column — using `date_of_report` (Item 1.01 trigger date);
+--       cross-reference `sec_filing_manifest.filed_at` for the SEC accept date.
+SELECT accession_number, date_of_report, primary_document_url
   FROM eight_k_filings
- WHERE instrument_id = (SELECT id FROM instruments WHERE symbol='AAPL')
- ORDER BY filed_at DESC LIMIT 5;
+ WHERE instrument_id = (SELECT instrument_id FROM instruments WHERE symbol='AAPL')
+ ORDER BY date_of_report DESC LIMIT 5;
 
 -- Items extracted per accession (cross-check item array against parser output)
-SELECT item_code, item_label FROM eight_k_filing_items
+SELECT item_code, item_label FROM eight_k_items
  WHERE accession_number = '<recent_accession>';
 
 -- Dividend events extracted from 8-K bodies
-SELECT source_accession, announcement_date, ex_date, amount_per_share
+-- NOTE: `dividend_events` columns are declaration_date / ex_date / dps_declared
+--       (no `announcement_date` / `amount_per_share`).
+SELECT source_accession, declaration_date, ex_date, dps_declared
   FROM dividend_events
- WHERE instrument_id = (SELECT id FROM instruments WHERE symbol='AAPL')
- ORDER BY announcement_date DESC LIMIT 5;
+ WHERE instrument_id = (SELECT instrument_id FROM instruments WHERE symbol='AAPL')
+ ORDER BY declaration_date DESC LIMIT 5;
 
 -- Manifest drain audit
 SELECT raw_status, COUNT(*) FROM sec_filing_manifest

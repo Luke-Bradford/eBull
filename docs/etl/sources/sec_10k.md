@@ -86,7 +86,7 @@ The Option C `(filed_at, source_accession)` gate in `upsert_business_summary` (s
 -- AAPL business summary present + recently parsed
 SELECT filed_at, source_accession, length(body) AS body_len, last_parsed_at
   FROM instrument_business_summary
- WHERE instrument_id = (SELECT id FROM instruments WHERE symbol='AAPL')
+ WHERE instrument_id = (SELECT instrument_id FROM instruments WHERE symbol='AAPL')
  ORDER BY filed_at DESC NULLS LAST
  LIMIT 1;
 

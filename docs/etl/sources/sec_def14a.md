@@ -57,14 +57,14 @@ MERGE writer per #1255. Categories `def14a` + `esop` in `_CATEGORIES` (`app/jobs
 -- Latest DEF 14A holders for AAPL.
 SELECT i.symbol, odo.holder_name, odo.holder_role, odo.shares, odo.percent_of_class, odo.period_end
 FROM ownership_def14a_observations odo
-JOIN instruments i ON i.id = odo.instrument_id
+JOIN instruments i ON i.instrument_id = odo.instrument_id
 WHERE i.symbol = 'AAPL' AND odo.known_to IS NULL
 ORDER BY odo.filed_at DESC, odo.shares DESC NULLS LAST LIMIT 20;
 
 -- ESOP plans for HD.
 SELECT i.symbol, oeo.plan_name, oeo.plan_trustee_name, oeo.shares, oeo.period_end
 FROM ownership_esop_observations oeo
-JOIN instruments i ON i.id = oeo.instrument_id
+JOIN instruments i ON i.instrument_id = oeo.instrument_id
 WHERE i.symbol = 'HD' AND oeo.known_to IS NULL
 ORDER BY oeo.filed_at DESC LIMIT 10;
 ```

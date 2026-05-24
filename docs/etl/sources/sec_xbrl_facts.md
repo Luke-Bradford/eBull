@@ -107,12 +107,12 @@ XBRL **discovery** is visible via:
 ```sql
 -- AAPL XBRL fact coverage by taxonomy
 SELECT taxonomy, COUNT(*) FROM financial_facts_raw
- WHERE instrument_id = (SELECT id FROM instruments WHERE symbol='AAPL')
+ WHERE instrument_id = (SELECT instrument_id FROM instruments WHERE symbol='AAPL')
  GROUP BY taxonomy;
 
 -- Most-recent ingestion run for AAPL
 SELECT MAX(ingestion_run_id) FROM financial_facts_raw
- WHERE instrument_id = (SELECT id FROM instruments WHERE symbol='AAPL');
+ WHERE instrument_id = (SELECT instrument_id FROM instruments WHERE symbol='AAPL');
 
 -- Period-end window guard check (#1218): nothing outside [1900, 2100)
 SELECT period_end, COUNT(*) FROM financial_facts_raw

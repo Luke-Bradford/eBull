@@ -1,6 +1,6 @@
 """Contract tests for the Stream-C gate envelope JSONL output.
 
-Pins the envelope's exact 8-key shape via the Pydantic model at
+Pins the envelope's exact 9-key shape via the Pydantic model at
 ``app.runbooks.stream_a_stream_c_gate_schema``. Any rename / addition /
 removal / type change at the runbook emitter without a parallel schema
 update FAILS the canonical-path positive test immediately, blocking
@@ -10,13 +10,16 @@ History: caught by 3 lenses (API B4 + Codex B1 + Test B2) in the
 Stream A ETL-sweep 8-lens committee review (2026-05-24). Run-#8-readiness
 fixes Item 4 spec at ``docs/proposals/etl/run-8-readiness-fixes.md``.
 
-The 5 cases below match the spec § Item 4 acceptance test list verbatim:
-
-* Positive — canonical envelope validates.
-* Negative — missing key.
-* Negative — wrong type.
-* Negative — wrong schema_version.
-* Negative — unknown top-level key (extra='forbid' guarantee).
+**Codex CTO BLOCKING (final committee 2026-05-24) folded:**
+- Envelope updated to 9 keys (added ``exit_code``) — the previous
+  schema declared 8 but the runbook emitted 9 (validated before
+  ``exit_code`` was appended; the on-disk JSONL never matched the
+  validated shape). Schema now pins the emitted shape exactly.
+- ``CheckRecord.status`` now accepts ``warning_category_quiescent_*``
+  via regex — the C6 check legitimately emits this status when no new
+  observations + no upstream manifest rows in 24h (per spec §1.8). The
+  prior Literal["passed", "failed", "error"] would have raised
+  ValidationError on the runbook's own happy-path quiescence output.
 """
 
 from __future__ import annotations
@@ -34,7 +37,9 @@ from app.runbooks.stream_a_stream_c_gate_schema import (
 
 
 def _canonical_envelope() -> dict[str, Any]:
-    """Build a known-valid envelope shaped exactly as the runbook emits."""
+    """Build a known-valid envelope shaped exactly as the runbook emits
+    (9 keys including ``exit_code`` per Codex CTO BLOCKING 2026-05-24).
+    """
     return {
         "schema_version": 1,
         "runbook": "stream_a_stream_c_gate",
@@ -47,6 +52,7 @@ def _canonical_envelope() -> dict[str, Any]:
         ],
         "accepted": True,
         "first_failed": None,
+        "exit_code": 0,
     }
 
 
@@ -112,11 +118,74 @@ def test_envelope_rejects_unknown_top_level_key() -> None:
 
 
 def test_check_record_rejects_unknown_status() -> None:
-    """Belt-and-braces: ``CheckRecord.status`` literal pin prevents a
-    new status string from slipping into a check without explicit
-    schema update. Three allowed: passed / failed / error.
+    """``CheckRecord.status`` regex pin rejects ad-hoc new statuses.
+    Allowed: ``passed`` / ``failed`` / ``error`` /
+    ``warning_category_quiescent_<category>``.
     """
     payload = _canonical_envelope()
     payload["checks"][0]["status"] = "almost-passed"
     with pytest.raises(ValidationError):
         validate_envelope(payload)
+
+
+def test_check_record_accepts_quiescent_status() -> None:
+    """POSITIVE for quiescent: ``warning_category_quiescent_<category>``
+    is a legitimate C6 emit per
+    ``app/runbooks/stream_a_stream_c_gate.py:181`` when no observations
+    + no upstream manifest rows in 24h (per spec §1.8 — DEF 14A /
+    treasury / funds / esop legitimately quiet windows).
+
+    Codex CTO BLOCKING fold (final committee 2026-05-24): prior
+    ``Literal["passed", "failed", "error"]`` would have raised
+    ValidationError on this happy-path output, crashing the gate on
+    its own documented quiescence semantics.
+    """
+    payload = _canonical_envelope()
+    payload["checks"].append(
+        {
+            "id": "c6_treasury",
+            "status": "warning_category_quiescent_treasury",
+            "count": 0,
+            "detail": "treasury manifest quiet 24h — legitimate per spec §1.8",
+        }
+    )
+    payload["checks"].append(
+        {
+            "id": "c6_funds",
+            "status": "warning_category_quiescent_funds",
+            "count": 0,
+            "detail": "funds quiet",
+        }
+    )
+    envelope = validate_envelope(payload)
+    # Find the quiescent statuses and confirm they round-trip.
+    quiescent = [c for c in envelope.checks if c.status.startswith("warning_category_quiescent_")]
+    assert len(quiescent) == 2
+    assert {c.status for c in quiescent} == {
+        "warning_category_quiescent_treasury",
+        "warning_category_quiescent_funds",
+    }
+
+
+def test_envelope_rejects_missing_exit_code() -> None:
+    """NEGATIVE: omitting ``exit_code`` raises. Codex CTO BLOCKING fold
+    (final committee 2026-05-24) — the prior schema had only 8 keys,
+    the runbook added ``exit_code`` AFTER validation, so the on-disk
+    JSONL never matched the validated shape. Now the schema pins
+    ``exit_code`` as required → validation runs after ``exit_code`` is
+    added → emitted shape == validated shape.
+    """
+    payload = _canonical_envelope()
+    del payload["exit_code"]
+    with pytest.raises(ValidationError) as exc_info:
+        validate_envelope(payload)
+    assert "exit_code" in str(exc_info.value)
+
+
+def test_envelope_rejects_non_int_exit_code() -> None:
+    """NEGATIVE: ``exit_code`` must be int, not str."""
+    payload = _canonical_envelope()
+    payload["exit_code"] = "not-an-int"
+    with pytest.raises(ValidationError) as exc_info:
+        validate_envelope(payload)
+    assert "exit_code" in str(exc_info.value)

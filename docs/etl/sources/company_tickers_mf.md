@@ -68,7 +68,7 @@ No dedicated endpoint. Coverage surfaces indirectly via:
 
 ```sql
 -- Vanguard 500 Index Fund (VFINX) classId resolution.
-SELECT class_id, series_id, cik, symbol, last_seen
+SELECT class_id, series_id, trust_cik, symbol, last_seen
   FROM cik_refresh_mf_directory
  WHERE symbol = 'VFINX';
 

@@ -70,7 +70,7 @@ FROM ncen_filer_classifications
 ORDER BY fetched_at DESC LIMIT 20;
 
 -- Cross-check that 13F-HR ingest flow respects N-CEN classification.
-SELECT f.cik, f.filer_name, f.filer_type, n.derived_filer_type
+SELECT f.cik, f.name, f.filer_type, n.derived_filer_type
 FROM institutional_filers f
 LEFT JOIN ncen_filer_classifications n ON n.cik = f.cik
 WHERE f.cik IN ('0001364742', '0000895421', '0000093751')  -- BlackRock, Morgan Stanley, MetLife

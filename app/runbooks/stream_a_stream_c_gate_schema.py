@@ -26,23 +26,39 @@ positive test immediately, blocking the commit.
 
 from __future__ import annotations
 
-from typing import Literal
+import re
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StringConstraints
+
+# CheckRecord.status accepts the three terminal verdicts AND the
+# C6-emitted warning_category_quiescent_<category> sentinel from
+# stream_a_stream_c_gate.py:181. Codex CTO BLOCKING (final committee
+# 2026-05-24): the prior schema's Literal["passed", "failed", "error"]
+# would have raised ValidationError on its own documented happy-path
+# quiescence output. The pattern below allows any quiescent category
+# name (alphanumeric + underscore) so adding a new category to
+# _CATEGORIES at app/jobs/ownership_observations_repair.py doesn't
+# require a parallel schema update.
+_STATUS_PATTERN = r"^(passed|failed|error|warning_category_quiescent_[a-z0-9_]+)$"
+_STATUS_RE = re.compile(_STATUS_PATTERN)
+
+CheckStatus = Annotated[str, StringConstraints(pattern=_STATUS_PATTERN)]
 
 
 class CheckRecord(BaseModel):
     """One per-check row inside :attr:`Envelope.checks`.
 
     Matches :func:`app.runbooks.stream_a_stream_c_gate._check_record`
-    output exactly. Status enum pinned to the three values the runbook
-    actually emits (``passed`` / ``failed`` / ``error``).
+    output exactly. Status accepts the three terminal verdicts
+    (``passed`` / ``failed`` / ``error``) AND the C6-emitted
+    ``warning_category_quiescent_<category>`` sentinel.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    status: Literal["passed", "failed", "error"]
+    status: CheckStatus
     count: int
     detail: str
 
@@ -50,8 +66,9 @@ class CheckRecord(BaseModel):
 class Envelope(BaseModel):
     """Top-level Stream-C gate envelope.
 
-    **Exactly 8 top-level keys** per current emitter at
-    ``app/runbooks/stream_a_stream_c_gate.py:325-334``:
+    **Exactly 9 top-level keys** matching the emitted JSONL at
+    ``app/runbooks/stream_a_stream_c_gate.py:438`` (validated AFTER
+    ``exit_code`` is appended per Codex CTO BLOCKING 2026-05-24):
 
     1. ``schema_version`` — `int`, pinned to 1.
     2. ``runbook`` — `str`, pinned to ``"stream_a_stream_c_gate"``.
@@ -59,9 +76,10 @@ class Envelope(BaseModel):
     4. ``started_at`` — ISO-8601 UTC timestamp.
     5. ``ended_at`` — ISO-8601 UTC timestamp.
     6. ``checks`` — list of :class:`CheckRecord`.
-    7. ``accepted`` — `bool`, overall verdict (NOT ``verdict``).
+    7. ``accepted`` — `bool`, overall verdict.
     8. ``first_failed`` — `str | None`, check ``id`` of the first
        failure or ``None`` if all passed.
+    9. ``exit_code`` — `int` (0 or 1), runbook process exit code.
 
     ``extra='forbid'`` rejects unknown top-level keys — prevents silent
     shape drift via accidental new fields.
@@ -77,6 +95,7 @@ class Envelope(BaseModel):
     checks: list[CheckRecord]
     accepted: bool
     first_failed: str | None
+    exit_code: int
 
 
 def validate_envelope(payload: dict[str, object]) -> Envelope:
@@ -88,8 +107,14 @@ def validate_envelope(payload: dict[str, object]) -> Envelope:
     ``ValueError`` subclasses, which the runbook's outer ``try/except``
     surfaces with exit code 1 (gate-side failure) per
     ``stream_a_run_8_verify.py`` exit-code conventions.
+
+    NOTE: caller MUST add ``exit_code`` to the payload BEFORE calling
+    this function. Validating a pre-``exit_code`` payload (the v1
+    pattern) fails the ``extra='forbid'`` clause; validating a payload
+    that omits ``exit_code`` fails the required-field clause. Both fail
+    at the same place (here) so the contract is enforced exactly once.
     """
     return Envelope.model_validate(payload)
 
 
-__all__ = ["CheckRecord", "Envelope", "validate_envelope"]
+__all__ = ["CheckRecord", "CheckStatus", "Envelope", "validate_envelope"]

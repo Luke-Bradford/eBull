@@ -61,7 +61,7 @@ Extraction flow (spec §8 at `sec_n_csr.py:9-24`):
 SELECT i.symbol, fmc.series_name, fmc.class_name, fmc.expense_ratio_pct,
        fmc.net_assets_amt, fmc.portfolio_turnover_pct, fmc.period_end
 FROM fund_metadata_current fmc
-JOIN instruments i ON i.id = fmc.instrument_id
+JOIN instruments i ON i.instrument_id = fmc.instrument_id
 WHERE i.symbol = 'SPY';
 ```
 Smoke: `curl localhost:8000/instruments/SPY/fund-metadata | jq '.expense_ratio_pct, .net_assets_amt'`. Cross-source: spot-check `expense_ratio_pct` against the fund's published prospectus or `etfdb.com` expense-ratio page.

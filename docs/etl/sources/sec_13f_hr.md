@@ -53,10 +53,10 @@ Extraction:
 ## 11. Verification queries
 ```sql
 -- Latest 13F-HR observation for AAPL.
-SELECT i.symbol, oio.filer_id, ifr.filer_name, oio.shares, oio.value_usd, oio.period_of_report
+SELECT i.symbol, oio.filer_cik, ifr.name AS filer_name, oio.shares, oio.market_value_usd, oio.period_end
 FROM ownership_institutions_observations oio
-JOIN instruments i ON i.id = oio.instrument_id
-JOIN institutional_filers ifr ON ifr.id = oio.filer_id
+JOIN instruments i ON i.instrument_id = oio.instrument_id
+JOIN institutional_filers ifr ON ifr.cik = oio.filer_cik
 WHERE i.symbol = 'AAPL'
 ORDER BY oio.filed_at DESC LIMIT 10;
 ```

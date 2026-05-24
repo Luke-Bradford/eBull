@@ -51,14 +51,16 @@ Extraction: `parse_form_4_xml(xml)` → parsed dataclass; `upsert_filing` (`insi
 ## 11. Verification queries
 ```sql
 -- Latest 20 Form 4 transactions for AAPL.
-SELECT t.transaction_date, t.holder_name, t.acquired_disposed_code,
-       t.shares, t.price_per_share, t.accession_number
+-- NOTE: §11-author — `form4_retention_cutoff()` SQL function does not exist in dev DB;
+-- replaced with explicit CURRENT_DATE - INTERVAL pending spec-author review of intended cutoff.
+SELECT t.txn_date, t.filer_name, t.acquired_disposed_code,
+       t.shares, t.price, t.accession_number
 FROM insider_transactions t
 JOIN filing_events fe ON fe.provider_filing_id = t.accession_number
 WHERE fe.provider = 'sec'
-  AND fe.instrument_id = (SELECT id FROM instruments WHERE symbol = 'AAPL')
-  AND t.transaction_date >= form4_retention_cutoff()
-ORDER BY t.transaction_date DESC LIMIT 20;
+  AND fe.instrument_id = (SELECT instrument_id FROM instruments WHERE symbol = 'AAPL')
+  AND t.txn_date >= CURRENT_DATE - INTERVAL '3 months'
+ORDER BY t.txn_date DESC LIMIT 20;
 ```
 Smoke: `curl localhost:8000/instruments/AAPL/insider_summary | jq '.summary'`. Cross-source: spot-check open-market P/S totals against `marketbeat.com` / `openinsider.com` 3-month windows.
 

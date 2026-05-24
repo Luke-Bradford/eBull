@@ -48,16 +48,16 @@ Form 5 contributes to:
 ## 11. Verification queries
 ```sql
 -- Recent Form 5 transactions for AAPL (within 18mo cap).
-SELECT t.transaction_date, t.holder_name, t.shares,
+SELECT t.txn_date, t.filer_name, t.shares,
        t.acquired_disposed_code, t.accession_number, f.document_type
 FROM insider_transactions t
 JOIN insider_filings f ON f.accession_number = t.accession_number
 JOIN filing_events fe ON fe.provider_filing_id = t.accession_number
 WHERE fe.provider = 'sec'
-  AND fe.instrument_id = (SELECT id FROM instruments WHERE symbol = 'AAPL')
+  AND fe.instrument_id = (SELECT instrument_id FROM instruments WHERE symbol = 'AAPL')
   AND f.document_type LIKE '5%'
   AND f.is_tombstone = FALSE
-ORDER BY t.transaction_date DESC LIMIT 20;
+ORDER BY t.txn_date DESC LIMIT 20;
 ```
 Smoke: `curl localhost:8000/instruments/AAPL/insider_transactions?limit=50 | jq '[.transactions[] | select(.document_type | startswith("5"))]'`. Cross-source: a Form 5 filed in Q1 should appear on `marketbeat.com` insider activity for that issuer.
 
