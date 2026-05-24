@@ -92,7 +92,7 @@ SELECT raw_status, COUNT(*) FROM sec_filing_manifest
 
 -- Companyfacts coverage for AAPL (real audit signal)
 SELECT taxonomy, COUNT(*) FROM financial_facts_raw
- WHERE instrument_id = (SELECT id FROM instruments WHERE symbol='AAPL')
+ WHERE instrument_id = (SELECT instrument_id FROM instruments WHERE symbol='AAPL')
  GROUP BY taxonomy;
 ```
 

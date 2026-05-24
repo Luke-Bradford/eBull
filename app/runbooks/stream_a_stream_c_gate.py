@@ -334,13 +334,12 @@ def _run_gate(conn: psycopg.Connection[Any], *, run_id: int, started_at_iso: str
         "accepted": accepted,
         "first_failed": first_failed,
     }
-    # Validate the envelope shape BEFORE returning. Catches accidental
-    # shape drift (new field added here without parallel schema update;
-    # wrong type; key rename) at emit-time so a malformed envelope
-    # cannot reach the operator's #1233 attestation comment. Pydantic
-    # ValidationError propagates as ValueError; the runbook surfaces
-    # with exit code 1. See app/runbooks/stream_a_stream_c_gate_schema.py.
-    validate_envelope(payload)
+    # NOTE: validation MOVED to main() after ``exit_code`` is added —
+    # see Codex CTO BLOCKING (final committee 2026-05-24). Validating
+    # here would pass against an 8-key payload, then main() would add
+    # a 9th key, then ``extra='forbid'`` schema would reject the
+    # emitted JSONL. Validating after the 9th key is added means the
+    # contract test pins the actual-emitted shape.
     return payload
 
 
@@ -430,6 +429,11 @@ def main(argv: list[str] | None = None) -> int:
                 exit_code = 1 if args.strict else 0
 
             envelope["exit_code"] = exit_code
+            # Validate envelope NOW — after ``exit_code`` is added — so
+            # the validated shape is the emitted shape. Prior code
+            # validated inside _build_envelope (pre-exit_code) which
+            # left a 9th-key gap. Codex CTO BLOCKING fold 2026-05-24.
+            validate_envelope(envelope)
             _persist_status(conn, run_id=run_id, status_value=final_status)
     except psycopg.Error as exc:
         print(f"DB error: {exc}", file=sys.stderr)

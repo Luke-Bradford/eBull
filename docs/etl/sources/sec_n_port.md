@@ -59,12 +59,12 @@ Extraction (`n_port_ingest.py::parse_n_port_payload`, EdgarTools-backed):
 ## 11. Verification queries
 ```sql
 -- Top fund holders for MSFT.
-SELECT i.symbol, sfs.series_name, ofo.shares, ofo.value_usd, ofo.period_end
+SELECT i.symbol, sfs.fund_series_name, ofo.shares, ofo.market_value_usd, ofo.period_end
 FROM ownership_funds_observations ofo
-JOIN instruments i ON i.id = ofo.instrument_id
-JOIN sec_fund_series sfs ON sfs.id = ofo.fund_series_id
+JOIN instruments i ON i.instrument_id = ofo.instrument_id
+JOIN sec_fund_series sfs ON sfs.fund_series_id = ofo.fund_series_id
 WHERE i.symbol = 'MSFT' AND ofo.known_to IS NULL
-ORDER BY ofo.value_usd DESC NULLS LAST LIMIT 20;
+ORDER BY ofo.market_value_usd DESC NULLS LAST LIMIT 20;
 ```
 Smoke: `curl localhost:8000/instruments/MSFT/ownership-rollup | jq '.funds[:10]'`. Cross-source: spot-check top-10 holders against `fintel.io` mutual-fund holdings page or SEC EDGAR direct NPORT-P viewer.
 

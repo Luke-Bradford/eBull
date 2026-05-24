@@ -14,11 +14,12 @@ This doc is the single source of truth for that classification. Maintained as pa
 |---|---|---|---|
 | A1 | sql/174 + sql/175 partition extensions applied to dev | ✅ done 2026-05-24 (PR #1314 `e0f583d`) | none |
 | A2 | XBRL parser-bug junk in financial_facts_raw_default cleaned | ✅ done — 48 rows deleted via baked-in cleanup in sql/175 | none |
-| A3 | sec_n_cen scheduling decision | tracked at #1303 (pre-existing) + #1313 (my filed dup; close as DUPLICATE of #1303) | decide before next bootstrap; current state is operator-run-once classifier — not a Run #8 blocker IF operator confirms acceptance |
+| A3 | sec_n_cen scheduling decision | ✅ tracked at #1303 (pre-existing); #1313 closed as DUPLICATE of #1303 | decide post-Run-#8; current state is operator-run-once classifier — not a Run #8 blocker IF operator confirms acceptance |
 | A4 | uvicorn `--reload` dev backend stuck | ✅ root-cause diagnosed: reload watcher has no worker child; needs restart | operator: restart VS Code dev task |
 | A5 | Per-source source→sink spec | ✅ done — 21 files at `docs/etl/sources/` + lint + smoke gates (PR #1315) | none |
 | A6 | All sweep memo wrong-claim regressions corrected | ✅ done — treasury attribution + sec_n_cen dead-callers + Form 3 retention mix-up all corrected in per-source files | none |
-| A7 | Operator runbook `docs/operator/runbooks/run-8-readiness.md` reflects current state | review + update with per-source spec link + this doc | TODO |
+| A7 | Operator runbook `docs/operator/runbooks/run-8-readiness.md` reflects current state | ✅ done — §0.5 "Read order" added (PM B-PM-1 fold); B6 contradiction reconciled (PM B-PM-2 fold) | none |
+| A8 | Final-committee BLOCKERs folded | ✅ done — Stream-C envelope (Codex C-B1 + C-B2 + API B1) + ownership/FINRA partition extensions (DE BL-1 + BL-2) + skill text (Architect) + per-source §11 SQL (Operator OP-B1, in flight) | confirm sql/176 + sql/177 applied to dev (✅ 2026-05-24); confirm Stream-C contract tests pass (✅ 9 PASS) |
 
 ## B — Genuinely deferrable (post-Run-#8, monitored)
 
@@ -31,7 +32,10 @@ These are real work but operator-time-safe — Run #8 won't trip over them.
 | B3 | #1304 Form 144 + SC 13E sources not wired | Net-new manifest sources; no current data lives there | scope ticket landed |
 | B4 | #1305 bulk-window depths short (13F=4q / N-PORT=4q / insider=8q) | Default cohort coverage; deep history exists via per-CIK overflow walker (Layer 4) | none until operator hits a depth-related gap |
 | B5 | #1274 ingest_all_active_filers serial bottleneck | Perf — under-utilizes SEC 10 req/s budget by ~10×. Bootstrap wall-clock affected, but completes correctly | post-Run-#8 perf sweep |
-| B6 | #1293 candle_refresh S2 rows_processed=0 | Empty fetch with no error; likely benign for weekend / market-closed boot | reproduce + diagnose; tagged for ops-monitor |
+| B6 | #1293 candle_refresh S2 `rows_processed=0` | **`=0` not `NULL`** — distinct from the FAIL-LOUD case in `run-8-readiness.md` §3.3 (which is `NULL`, i.e. ingester forgot to populate the field — code bug). `=0` is the documented happy-path for weekend / market-closed boot when there's nothing to fetch. Reproduce + diagnose; tagged for ops-monitor | spurious-fail rate ≤ 1/week of non-trading-day boots; if higher, escalate to A-list |
+| B11 | `assert_no_multixact_wraparound` false-positive risk on freshly-initialized dev DB | PM lens R3 brainstormed risk: `datminmxid=1` on a brand-new DB could trip the 80% threshold. Empirical check pre-`--apply` — operator runs probe manually + records result. If false-positives, escalate to A-list | empirical probe result captured in §0 post-test |
+| B12 | `jq` one-liner escaping in run-8-readiness.md §4.2 | PM lens R1: shell escaping varies across `jq` versions. Operator's local `jq --version` documented before drive | `jq --version >= 1.6` confirmed |
+| B13 | `var/runbooks/*.jsonl` retention unmanaged | PM lens R2; local-only (`/var/` gitignored), unbounded growth on long-running dev box. Post-Run-#8 ticket | log-rotation pattern in `app/runbooks/README.md` |
 | B7 | #1270 exchanges seed table TRUNCATE wipe | Operator reseeds via admin tool post-bootstrap; documented in runbook | seed-on-bootstrap automation landed |
 | B8 | sec_n_csr + sec_13dg fixture gaps (2 SKIP markers) | Test infrastructure debt; fixture files live in `.tmp/spike-918/` + inline test literals respectively | fixture extraction PR |
 | B9 | CAVEMAN narration comments in `scripts/check_caller_owned_tx.py` | Simplify lens NICE-TO-HAVE; cosmetic | next time the file is touched |

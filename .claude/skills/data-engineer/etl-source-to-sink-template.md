@@ -16,8 +16,8 @@ A source that lacks a spec file is, by definition, not done. The integrity-frame
 
 ## How to add a new source
 
-1. Add the source string to `ManifestSource` Literal at `app/services/sec_manifest.py:106-122` (or to `_AD_HOC_SOURCES` / `_BULK_REFERENCE_SOURCES` in `tests/smoke/test_etl_source_to_sink.py` if it's not a manifest source).
-2. Add the matching name to the smoke test's `_MANIFEST_SOURCES` tuple AND to the lint script's `ALL_SOURCES` list (kept in sync — the registry-invariant test catches drift).
+1. **Manifest source**: add the source string to `ManifestSource` Literal at `app/services/sec_manifest.py:106-122`. The smoke test derives `_MANIFEST_SOURCES` automatically via `get_args(ManifestSource)`; no test/lint edit needed.
+2. **Non-manifest (ad-hoc / bulk-reference) source**: add the source string to `AD_HOC_SOURCES` or `BULK_REFERENCE_SOURCES` in `scripts/_etl_source_inventory.py` (single source of truth — the smoke test AND the lint script both read from there; do NOT edit either file directly).
 3. Copy the template from `docs/etl/sources/README.md § Template` into `docs/etl/sources/<source>.md`.
 4. Fill in all 13 sections. Every concrete claim MUST cite `path:line` from live code. The skill enforces grounding via section grep; the smoke test enforces section presence.
 5. Add the matching manifest parser at `app/services/manifest_parsers/<source>.py` (or `_<source>_*.py` per existing naming). Register it in `app/services/manifest_parsers/__init__.py:register_all_parsers`.

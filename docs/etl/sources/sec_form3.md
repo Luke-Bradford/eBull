@@ -45,15 +45,15 @@ Source priority for Form 3 = `2` in the MERGE source CASE chain at `ownership_ob
 ## 11. Verification queries
 ```sql
 -- Form 3 baseline holdings for AAPL.
-SELECT h.accession_number, h.holder_name, h.shares, f.filing_date
+SELECT h.accession_number, h.filer_name, h.shares, f.period_of_report
 FROM insider_initial_holdings h
 JOIN insider_filings f ON f.accession_number = h.accession_number
 JOIN filing_events fe ON fe.provider_filing_id = h.accession_number
 WHERE f.document_type LIKE '3%'
   AND f.is_tombstone = FALSE
   AND fe.provider = 'sec'
-  AND fe.instrument_id = (SELECT id FROM instruments WHERE symbol = 'AAPL')
-ORDER BY f.filing_date DESC LIMIT 20;
+  AND fe.instrument_id = (SELECT instrument_id FROM instruments WHERE symbol = 'AAPL')
+ORDER BY f.period_of_report DESC LIMIT 20;
 ```
 Smoke: `curl localhost:8000/instruments/AAPL/insider_baseline | jq '.holdings[:5]'`. Cross-source: spot-check a recent Form 3 against the SEC EDGAR per-CIK Atom feed for that issuer.
 

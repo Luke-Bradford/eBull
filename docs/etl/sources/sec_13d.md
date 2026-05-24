@@ -61,7 +61,7 @@ SELECT bf.cik AS primary_filer_cik, bf.name AS primary_filer_name,
 FROM ownership_blockholders_current obc
 JOIN blockholder_filings bfl ON bfl.accession_number = obc.source_accession
 JOIN blockholder_filers bf ON bf.cik = obc.reporter_cik
-WHERE obc.instrument_id = (SELECT id FROM instruments WHERE symbol = 'AAPL')
+WHERE obc.instrument_id = (SELECT instrument_id FROM instruments WHERE symbol = 'AAPL')
   AND obc.source = '13d'
 ORDER BY obc.filed_at DESC;
 ```
