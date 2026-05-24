@@ -6,7 +6,7 @@
 
 **Maintenance.** Skill `data-engineer/etl-source-to-sink-template.md` (NEW) lint-checks that:
 1. Every entry in `ManifestSource` Literal at `app/services/sec_manifest.py:106-122` has a per-source file here.
-2. Every per-source file has the 11 required sections (template below).
+2. Every per-source file has the 13 required sections (template below).
 3. Every per-source file has a corresponding smoke test row at `tests/smoke/test_etl_source_to_sink.py`.
 
 CI gate: `scripts/check_etl_source_docs.sh` enforces.

@@ -117,9 +117,7 @@ def test_manifest_source_has_registered_parser(source: str) -> None:
 #  - sec_xbrl_facts: bulk Companyfacts JSON ingest (no Atom/daily-index
 #    discovery); synth no-op manifest rows written by
 #    ``sec_companyfacts_ingest`` directly. See docs/etl/sources/sec_xbrl_facts.md §6.
-_FORM_MAPPING_EXEMPT: frozenset[str] = frozenset(
-    {"finra_short_interest", "finra_regsho_daily", "sec_xbrl_facts"}
-)
+_FORM_MAPPING_EXEMPT: frozenset[str] = frozenset({"finra_short_interest", "finra_regsho_daily", "sec_xbrl_facts"})
 
 
 @pytest.mark.parametrize("source", _MANIFEST_SOURCES)
@@ -141,6 +139,21 @@ def test_manifest_source_form_mapping_present(source: str) -> None:
         f"the ManifestSource Literal, or add to _FORM_MAPPING_EXEMPT if it "
         f"genuinely doesn't go through form-type discovery (and document "
         f"why in docs/etl/sources/<source>.md §6)."
+    )
+
+
+def test_readme_section_count_matches_required_sections() -> None:
+    """README §Maintenance bullet 2 says "the N required sections".
+    N MUST equal ``len(REQUIRED_SECTIONS)`` from the inventory. Bot
+    iter 1 PREVENTION fold — prevents the 11-vs-13 doc drift that
+    landed in v1 of this PR.
+    """
+    readme = (_DOCS_DIR / "README.md").read_text()
+    expected = f"the {len(_REQUIRED_SECTIONS)} required sections"
+    assert expected in readme, (
+        f"README.md §Maintenance bullet 2 must mention '{expected}' to "
+        f"stay in sync with REQUIRED_SECTIONS ({len(_REQUIRED_SECTIONS)} "
+        f"entries in scripts/_etl_source_inventory.py)."
     )
 
 
