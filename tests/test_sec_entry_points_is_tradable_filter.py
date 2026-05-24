@@ -115,7 +115,10 @@ class TestSubmissionsFilesWalkFiltersDelisted:
 
         rows = _list_cik_secondary_pages(ebull_test_conn)
 
-        ciks = {cik for _, cik, _ in rows}
+        # Tuple shape updated in #1233 Stream A PR-B: now 4-tuple
+        # (instrument_id, cik, symbol, sidecar_pages) — added per-CIK
+        # sidecar page list for S14 to consume without re-fetching primary.
+        ciks = {cik for _, cik, _, _ in rows}
         assert "0000830001" in ciks
         assert "0000830002" not in ciks, "delisted CIK must be filtered (#1233 §6.2)"
 
