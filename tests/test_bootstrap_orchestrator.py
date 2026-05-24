@@ -1382,19 +1382,17 @@ def test_fundamentals_sync_requires_four_caps_after_pr_c1() -> None:
     }, "fundamentals_sync must require the 4-cap PR-C1 tuple (#1233 §13)"
 
 
-def test_fundamentals_sync_stays_on_db_lane_pending_pr_c2() -> None:
-    """Stream A spec v2.3 §5 calls for S25 ``fundamentals_sync`` to be
-    reassigned to ``db_fundamentals_raw``. DEFERRED to PR-C2 because the
-    steady-state ``fundamentals_sync`` ScheduledJob is registered with
-    ``source="db"`` and the lane-source registry cross-check at
-    ``app/jobs/sources.py:get_job_name_to_source`` raises
-    ``JobSourceRegistryError`` if the bootstrap-stage lane diverges
-    from the scheduled-job source for the same job_name. PR-C2
-    introduces a separately-registered ``fundamentals_sync_bootstrap``
-    invoker that CAN safely live on the dedicated lane.
+def test_fundamentals_sync_runs_on_db_fundamentals_raw_lane_after_pr_c2() -> None:
+    """Stream A PR-C2 T1.2 (#1233): S25 dispatches the bootstrap-only
+    ``fundamentals_sync_bootstrap`` invoker (NOT the steady-state
+    ``fundamentals_sync`` job) on the dedicated ``db_fundamentals_raw``
+    lane. The job_name divergence is what lets PR-C2's lane
+    reassignment coexist with the steady-state ScheduledJob's
+    ``source="db"`` registration — see ``app/jobs/sources.py:
+    _build_job_name_to_source`` Pass 1/2 separation.
 
-    This invariant pin is intentional — flip the expected value when
-    PR-C2 lands the bootstrap-only invoker.
+    Flipped from the PR-C1 deferral test that pinned `lane=="db"`
+    pending PR-C2's bootstrap-only invoker.
     """
     fundamentals_spec = next(
         (s for s in _BOOTSTRAP_STAGE_SPECS if s.stage_key == "fundamentals_sync"),
@@ -1402,7 +1400,9 @@ def test_fundamentals_sync_stays_on_db_lane_pending_pr_c2() -> None:
     )
     assert fundamentals_spec is not None, "fundamentals_sync stage missing from _BOOTSTRAP_STAGE_SPECS"
     assert fundamentals_spec.stage_order == 25
-    assert fundamentals_spec.lane == "db", (
-        "fundamentals_sync stays on 'db' until PR-C2 introduces fundamentals_sync_bootstrap "
-        "on its own job_name (#1233 §5 deferral)"
+    assert fundamentals_spec.lane == "db_fundamentals_raw", (
+        "fundamentals_sync (stage_key) runs on db_fundamentals_raw lane post-PR-C2 (#1233 §5)"
+    )
+    assert fundamentals_spec.job_name == "fundamentals_sync_bootstrap", (
+        "fundamentals_sync stage dispatches fundamentals_sync_bootstrap invoker post-PR-C2"
     )
