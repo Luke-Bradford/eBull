@@ -152,6 +152,41 @@ def all_manifest_sources() -> frozenset[ManifestSource]:
     return frozenset(get_args(ManifestSource))
 
 
+# ---------------------------------------------------------------------------
+# Ownership-category → manifest-source mapping (#1233 PR-D)
+# ---------------------------------------------------------------------------
+#
+# Sibling of :data:`CAPABILITY_TO_MANIFEST_SOURCES`. Maps an ownership
+# CATEGORY name (per ``app.jobs.ownership_observations_repair._CATEGORIES``)
+# to the manifest source family that feeds that category's observations.
+#
+# Used by the Stream-C correctness gate runbook
+# (``app/runbooks/stream_a_stream_c_gate.py``) C6 quiescence fallback:
+# when a category has zero NEW observations post-Run-#8 we fall back to
+# asking "did the upstream manifest source receive any rows recently?"
+# Zero-and-zero → emit ``warning_category_quiescent_<cat>`` (NOT a fail
+# — DEF 14A / treasury can legitimately be quiet across a 24h window).
+#
+# WHY HERE: this is the existing single-source-of-truth module for
+# taxonomy mappings keyed on ``ManifestSource``. Co-locating with
+# CAPABILITY_TO_MANIFEST_SOURCES keeps one type, one audit point.
+#
+# TREASURY maps to ``sec_xbrl_facts`` (NOT ``sec_def14a``). Treasury
+# observations are derived from XBRL DEI facts via fundamentals_sync
+# (``app/services/fundamentals/__init__.py`` ``record_treasury_observation``
+# with source='xbrl_dei'), not from DEF 14A proxy parsing. PR-D v3 R3
+# fold.
+CATEGORY_TO_MANIFEST_SOURCES: dict[str, frozenset[ManifestSource]] = {
+    "insiders": frozenset({"sec_form3", "sec_form4", "sec_form5"}),
+    "institutions": frozenset({"sec_13f_hr"}),
+    "blockholders": frozenset({"sec_13d", "sec_13g"}),
+    "treasury": frozenset({"sec_xbrl_facts"}),
+    "def14a": frozenset({"sec_def14a"}),
+    "funds": frozenset({"sec_n_port", "sec_n_csr"}),
+    "esop": frozenset({"sec_def14a"}),
+}
+
+
 def all_capability_providers() -> frozenset[CapabilityProvider]:
     """Every value of the ``CapabilityProvider`` Literal as a frozenset."""
     return frozenset(get_args(CapabilityProvider))

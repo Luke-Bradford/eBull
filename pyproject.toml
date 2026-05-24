@@ -60,4 +60,5 @@ asyncio_mode = "auto"
 addopts = "-q --tb=short -n 4 --durations=20 --dist=loadgroup"
 markers = [
   "integration: marks tests that require a live Postgres connection (deselect with -m 'not integration')",
+  "perf: tests requiring real DB and long wall-clock; nightly tier (deselect with -m 'not perf')",
 ]

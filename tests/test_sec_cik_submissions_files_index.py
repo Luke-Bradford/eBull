@@ -1,4 +1,4 @@
-"""Tests for ``app.services.sec_submissions_ingest._refresh_cik_sidecar``
+"""Tests for ``app.services.sec_submissions_ingest.refresh_cik_sidecar``
 (Stream A PR-B T1.3, #1233) — the sidecar populate path that writes
 ``sec_cik_submissions_files_index`` rows per CIK.
 
@@ -27,7 +27,7 @@ import pytest
 from app.providers.implementations.sec_edgar import KNOWN_FILING_AGENT_CIKS
 from app.services.sec_submissions_ingest import (
     SubmissionsIngestResult,
-    _refresh_cik_sidecar,
+    refresh_cik_sidecar,
 )
 from tests.fixtures.ebull_test_db import test_database_url
 
@@ -66,7 +66,7 @@ def guard_conn() -> Iterator[psycopg.Connection[tuple]]:
     """Autocommit connection to the per-worker test DB — DIVERGES FROM
     PRODUCTION semantics (per PR #1308 review bot iter 2 WARNING).
 
-    Production callers always wrap ``_refresh_cik_sidecar`` in
+    Production callers always wrap ``refresh_cik_sidecar`` in
     ``with conn.transaction()`` (sec_submissions_ingest.py:148-176) so
     DELETE + INSERT are atomic per-CIK: an INSERT failure rolls back
     the DELETE and prior committed sidecar rows for that CIK SURVIVE.
@@ -111,7 +111,7 @@ class TestRefreshCikSidecar:
 
         try:
             result = _empty_result()
-            _refresh_cik_sidecar(
+            refresh_cik_sidecar(
                 ebull_test_conn,
                 cik=agent_cik,
                 payload={
@@ -166,7 +166,7 @@ class TestRefreshCikSidecar:
         }
         result = _empty_result()
 
-        _refresh_cik_sidecar(
+        refresh_cik_sidecar(
             guard_conn,
             cik=_TEST_CIK,
             payload=payload,
@@ -195,7 +195,7 @@ class TestRefreshCikSidecar:
         payload: dict[str, object] = {"filings": {"recent": {}, "files": []}}
         result = _empty_result()
 
-        _refresh_cik_sidecar(
+        refresh_cik_sidecar(
             guard_conn,
             cik=_TEST_CIK,
             payload=payload,
@@ -224,7 +224,7 @@ class TestRefreshCikSidecar:
         _wipe_test_cik(guard_conn)
         result = _empty_result()
 
-        _refresh_cik_sidecar(
+        refresh_cik_sidecar(
             guard_conn,
             cik=_TEST_CIK,
             payload={},
@@ -272,8 +272,8 @@ class TestRefreshCikSidecar:
             },
         }
         result = _empty_result()
-        _refresh_cik_sidecar(guard_conn, cik=_TEST_CIK, payload=first_payload, bootstrap_run_id=None, result=result)
-        _refresh_cik_sidecar(guard_conn, cik=_TEST_CIK, payload=second_payload, bootstrap_run_id=None, result=result)
+        refresh_cik_sidecar(guard_conn, cik=_TEST_CIK, payload=first_payload, bootstrap_run_id=None, result=result)
+        refresh_cik_sidecar(guard_conn, cik=_TEST_CIK, payload=second_payload, bootstrap_run_id=None, result=result)
 
         rows = _read_sidecar_rows(guard_conn, _TEST_CIK)
         assert {r["page_name"] for r in rows} == {
@@ -304,7 +304,7 @@ class TestRefreshCikSidecar:
         }
         result = _empty_result()
 
-        _refresh_cik_sidecar(
+        refresh_cik_sidecar(
             guard_conn,
             cik=_TEST_CIK,
             payload=payload,
@@ -338,7 +338,7 @@ class TestRefreshCikSidecar:
 
         try:
             result = _empty_result()
-            _refresh_cik_sidecar(
+            refresh_cik_sidecar(
                 ebull_test_conn,
                 cik=_TEST_CIK,
                 payload={"filings": {"files": []}},
@@ -365,7 +365,7 @@ class TestSidecarPerCikSavepointAtomicity:
     for that CIK SURVIVE.
 
     These tests exercise the contract end-to-end by simulating the
-    OUTER transaction wrapper around _refresh_cik_sidecar."""
+    OUTER transaction wrapper around refresh_cik_sidecar."""
 
     @pytest.mark.integration
     def test_prior_rows_survive_when_sibling_write_raises_inside_outer_tx(
@@ -385,7 +385,7 @@ class TestSidecarPerCikSavepointAtomicity:
                 ],
             },
         }
-        _refresh_cik_sidecar(
+        refresh_cik_sidecar(
             ebull_test_conn,
             cik=_TEST_CIK,
             payload=prior_payload,
@@ -396,7 +396,7 @@ class TestSidecarPerCikSavepointAtomicity:
         assert len(_read_sidecar_rows(ebull_test_conn, _TEST_CIK)) == 1
 
         # Now simulate the production shape: an OUTER per-CIK
-        # ``with conn.transaction()`` that calls _refresh_cik_sidecar
+        # ``with conn.transaction()`` that calls refresh_cik_sidecar
         # AND then raises in a sibling code path. The savepoint rollback
         # MUST restore the prior committed sidecar row.
         new_payload = {
@@ -412,7 +412,7 @@ class TestSidecarPerCikSavepointAtomicity:
         }
         try:
             with ebull_test_conn.transaction():
-                _refresh_cik_sidecar(
+                refresh_cik_sidecar(
                     ebull_test_conn,
                     cik=_TEST_CIK,
                     payload=new_payload,

@@ -6,8 +6,11 @@
 -- WHAT IT ADDS
 -- ------------
 --   * ``stream_c_gate_status`` TEXT — status of the 7-check
---     post-bootstrap acceptance runbook (``app/cli/runbooks/
---     stream_a_stream_c_gate.py``, ships in PR-D). Status values:
+--     post-bootstrap acceptance runbook (``app/runbooks/
+--     stream_a_stream_c_gate.py``, ships in PR-D). Note: PR-D path
+--     renamed from ``app/cli/runbooks/`` (spec v2.3) to
+--     ``app/runbooks/`` (spec v2.4) to avoid shadowing the existing
+--     ``app/cli.py`` break-glass operator CLI. Status values:
 --       - NULL                  : gate never run for this bootstrap.
 --       - 'pending'             : gate started, not yet decided.
 --       - 'passed'              : all 7 checks passed (or warned).

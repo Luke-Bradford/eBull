@@ -40,6 +40,13 @@ from app.services.sec_entity_profile import parse_entity_profile, upsert_entity_
 
 logger = logging.getLogger(__name__)
 
+__all__ = (
+    "SubmissionsIngestResult",
+    "ingest_submissions_archive",
+    "refresh_cik_sidecar",
+    "repair_cik_sidecar_from_archive",
+)
+
 
 # Stream A PR-B T1.3 (#1233): sentinel row inserted into
 # ``sec_cik_submissions_files_index`` for CIKs with zero overflow
@@ -103,7 +110,7 @@ def _load_current_bootstrap_run_id(
     return int(row[0]) if row else None
 
 
-def _refresh_cik_sidecar(
+def refresh_cik_sidecar(
     conn: psycopg.Connection[Any],
     *,
     cik: str,
@@ -113,6 +120,12 @@ def _refresh_cik_sidecar(
 ) -> None:
     """Stream A PR-B T1.3 (#1233): refresh ``sec_cik_submissions_files_index``
     for one CIK from the in-memory submissions payload.
+
+    Public surface (promoted in #1233 PR-D from a leading-underscore
+    private) so the sidecar repair runbook
+    (``app/runbooks/stream_a_t13_sidecar_repair.py``) and the
+    ``repair_cik_sidecar_from_archive`` helper below can re-use the
+    SAME writer S8 uses. Behaviour unchanged from the original.
 
     Called from the OUTER per-CIK transaction in ``ingest_submissions_archive``
     BEFORE the ``for instrument_id, symbol in matched_instruments:`` sibling
@@ -318,11 +331,13 @@ def ingest_submissions_archive(
                     # PER CIK in the OUTER block (not inside _ingest_one
                     # — that would re-DELETE+INSERT N times for share-
                     # class siblings, per Codex 1 re-pass IMPORTANT).
+                    # Promoted to ``refresh_cik_sidecar`` (public) in
+                    # PR-D so the repair runbook re-uses the same writer.
                     # Atomicity: the surrounding ``with conn.transaction()``
                     # gives "DELETE rolls back if any sibling write
                     # raises" so the sidecar is always consistent with
                     # the rest of the per-CIK ingest.
-                    _refresh_cik_sidecar(
+                    refresh_cik_sidecar(
                         conn,
                         cik=cik,
                         payload=payload,
@@ -396,3 +411,138 @@ def _ingest_one(
         # accurate during the historical bulk archive walk.
         if _upsert_filing(conn, str(instrument_id), "sec", filing):
             result.filings_upserted += 1
+
+
+def repair_cik_sidecar_from_archive(
+    conn: psycopg.Connection[Any],
+    *,
+    archive_path: Path,
+    cik: str | None = None,
+    bootstrap_run_id: int | None = None,
+) -> dict[str, int]:
+    """Rebuild ``sec_cik_submissions_files_index`` rows from on-disk archive.
+
+    Walks ``submissions.zip`` at ``archive_path`` and calls
+    :func:`refresh_cik_sidecar` for each matching CIK entry, in its own
+    per-CIK transaction. The writer is the SAME function S8 uses during
+    bulk ingest, so semantics match exactly:
+
+      * ``KNOWN_FILING_AGENT_CIKS`` are skipped at the writer layer.
+      * Real-page rows have ``page_name`` matching the SEC overflow
+        descriptor; zero-overflow CIKs get a single sentinel row.
+      * Per-CIK DELETE + INSERT — prior committed rows for a different
+        CIK SURVIVE if a later CIK raises.
+
+    IN-UNIVERSE FILTER (per Codex 2 IMPORTANT fold of PR-D pre-push):
+    S8's production path resolves a per-CIK ``matched_instruments`` set
+    via ``_load_cik_to_instrument`` and skips entries with no match —
+    so production NEVER writes sidecar rows for out-of-universe CIKs.
+    The repair helper mirrors this: it loads the same in-universe CIK
+    set up front and skips any archive entry not in that set. Without
+    this filter, repair could inflate the C7 numerator with out-of-
+    universe CIKs and false-pass the Stream-C correctness gate.
+
+    Parameters
+    ----------
+    conn
+        Open psycopg connection. Caller owns lifecycle.
+    archive_path
+        Path to local ``submissions.zip`` (the bulk archive S8 reads
+        from). Not refetched — purely on-disk replay.
+    cik
+        Optional 10-digit padded CIK string. When set, only that entry
+        is replayed AND only if it appears in the in-universe set;
+        otherwise nothing is touched. When None, every in-universe
+        entry in the archive is replayed.
+    bootstrap_run_id
+        Optional bootstrap-run lineage to stamp on inserted rows.
+        ``None`` → ``populate_origin='steady_state'`` + NULL run id.
+        Set → ``populate_origin='bootstrap'`` + bound run id. The
+        operator runbook surfaces this as ``--bootstrap-run-id``
+        (#1233 PR-D F8 fold).
+
+    Returns
+    -------
+    dict[str, int]
+        Telemetry: ``ciks_processed``, ``ciks_sidecared``,
+        ``sidecar_pages_indexed``, ``sentinel_rows_written``,
+        ``ciks_out_of_universe_skipped``, ``parse_errors``.
+
+    Sole external caller: ``app/runbooks/stream_a_t13_sidecar_repair.py``
+    (#1233 PR-D v3 R4 fold).
+    """
+    in_universe = set(_load_cik_to_instrument(conn).keys())
+    result = SubmissionsIngestResult(
+        archive_entries_seen=0,
+        instruments_matched=0,
+        filings_upserted=0,
+        profiles_upserted=0,
+    )
+    ciks_processed = 0
+    ciks_out_of_universe_skipped = 0
+    sentinel_rows_written = 0
+
+    with zipfile.ZipFile(archive_path) as zf:
+        for entry_name in zf.namelist():
+            entry_cik = _cik_from_filename(entry_name)
+            if entry_cik is None:
+                continue
+            if cik is not None and entry_cik != cik:
+                continue
+            if entry_cik not in in_universe:
+                # Mirrors S8: out-of-universe CIKs are skipped at the
+                # ``_load_cik_to_instrument`` boundary before the writer
+                # fires. Without this gate, repair could write sidecar
+                # rows for tickers that don't belong to any tradable
+                # instrument and inflate the C7 numerator.
+                ciks_out_of_universe_skipped += 1
+                continue
+            result.archive_entries_seen += 1
+            ciks_processed += 1
+            pages_before = result.sidecar_pages_indexed
+            ciks_sidecared_before = result.ciks_sidecared
+            try:
+                with conn.transaction():
+                    try:
+                        with zf.open(entry_name) as fh:
+                            payload: dict[str, Any] = json.load(fh)
+                    except (json.JSONDecodeError, KeyError) as exc:
+                        logger.debug(
+                            "repair_cik_sidecar_from_archive: bad payload for %s: %s",
+                            entry_name,
+                            exc,
+                        )
+                        result.parse_errors += 1
+                        raise _SkipEntry from exc
+                    refresh_cik_sidecar(
+                        conn,
+                        cik=entry_cik,
+                        payload=payload,
+                        bootstrap_run_id=bootstrap_run_id,
+                        result=result,
+                    )
+            except _SkipEntry:
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "repair_cik_sidecar_from_archive: per-CIK failure for %s: %s",
+                    entry_name,
+                    exc,
+                )
+                result.parse_errors += 1
+                continue
+            # Writer wrote either real-page rows OR exactly one sentinel
+            # for THIS CIK iff ciks_sidecared advanced; sentinel iff no
+            # real-page delta. Agent CIKs short-circuit at the writer and
+            # do not advance either counter — they contribute zero rows.
+            if result.ciks_sidecared > ciks_sidecared_before and result.sidecar_pages_indexed == pages_before:
+                sentinel_rows_written += 1
+
+    return {
+        "ciks_processed": ciks_processed,
+        "ciks_sidecared": result.ciks_sidecared,
+        "sidecar_pages_indexed": result.sidecar_pages_indexed,
+        "sentinel_rows_written": sentinel_rows_written,
+        "ciks_out_of_universe_skipped": ciks_out_of_universe_skipped,
+        "parse_errors": result.parse_errors,
+    }

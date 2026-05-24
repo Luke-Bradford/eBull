@@ -1,13 +1,27 @@
 # Stream A — Run #8 fixes (post-v3, post-committee, #1233)
 
-> Status: PROPOSAL — v2.3 post-Codex-1-re-pass. Authored 2026-05-24. Supersedes v1 (same path) post-8-lens committee + v2 first-pass post-4-lens committee + v2.1 post-Codex-1 checkpoint.
-> v1 → v2 fixed: 4 hallucinated caps + wrong PK column + wrong stage number + wrong sidecar PK + missing share-class fan-out + weak Stream-C gate.
-> v2 → v2.1 fixed: T1.3 sidecar sentinel-row pattern; `bootstrap_runs.stream_c_gate_status` migration (was phantom); tightened sidecar CHECKs; `EBULL_ENV` guard fail-closed (no default) IN VERIFY RUNBOOK ONLY; `_check_operator_exists_with_cleanup` rename in §1 + §17; PR-B dep clarified; §1.7 option (b) pinned; C6 quiescent demote; §5 lane delta; §15 precedence; §16 inventory; §17 attestation; §20 perf marker; §22 ratio column.
-> v2.1 → v2.2 fixed (post-Codex-1 — 4 BLOCKING + 3 IMPORTANT): (1) §0.1 + §0.13 `nport_dataset_processed` phantom cap REMOVED (file has 3 dataset-processed caps, not 4); (2) §17 sidecar-repair runbook EBULL_ENV fail-closed parity (was still defaulting to "dev"); (3) §1.8 C7 gate subtracts `in-universe ∩ KNOWN_FILING_AGENT_CIKS` not global agent count; (4) §4 `stream_c_gate_status LIKE 'failed_%'` → `LIKE 'failed\_%' ESCAPE '\'` (literal underscore, not wildcard); (5) §21 helper-name regression fixed (`_check_*` not `_ensure_*`); (6) §14 sidecar populate moved from `_ingest_one` to OUTER per-CIK transaction block (one refresh per CIK, not per share-class sibling); (7) §10 `filing_from/to` reconciled with §4 sentinel-NULL composite CHECK; (8) §20 `respx` dep section corrected from `[tool.uv] dev-dependencies` → `[dependency-groups] dev` (PEP 735).
-> v2.2 → v2.3 fixed (post-Codex-1 diff-only re-pass — 1 IMPORTANT + 1 precision): §1.6 PR-B scope cell was still describing the S8 populate hook as "inside `_ingest_one`" (contradicting §14's correct placement); now explicit "OUTER per-CIK block before sibling loop, NOT inside `_ingest_one`". §14 + §7 "savepoint" wording corrected to "TOP-LEVEL transaction" (psycopg3 semantics: `_run_with_conn` opens conn without outer tx, so `with conn.transaction()` at sec_submissions_ingest.py:147 is the top-level tx for that per-CIK iteration — savepoint terminology was technically wrong even though atomicity guarantee is identical).
+> Status: PROPOSAL — v2.4 post-PR-D pre-flight committee + Codex re-pass. Authored 2026-05-24.
+> v2.3 → v2.4 fixed (PR-D pre-flight, post-3-lens-r1 + post-3-lens-r2 + Codex re-pass):
+> (1) **Runbook path rename**: 11 occurrences of `app/cli/runbooks/` → `app/runbooks/` (sql/173 comment also updated). Reason: `app/cli.py` already exists as the break-glass operator credential CLI (`python -m app.cli set-password`); creating a sibling `app/cli/` package would have shadowed it. Caught in PR-D 3-lens-round-2 RV1 BLOCKING; pre-empted before any code shipped.
+> (2) **PG advisory-locks correction**: §17 `acquire_jobs_process_fence(...)` was described as cluster-wide so it could survive `DROP DATABASE` against a sibling DB. **EMPIRICAL CORRECTION**: PG advisory locks are PER-DATABASE in PG 9.0+, not cluster-wide. Caught by `tests/test_jobs_process_probe_fence.py::test_per_database_isolation_regression_gate` during PR-D commit-1 bench (both `postgres` and `ebull_dev` connections successfully acquired the same key). The runbook design now acknowledges the TOCTOU window during `DROP DATABASE` and documents operator-policy: jobs service MUST be stopped (e.g. systemd `stop`, not just SIGINT) through the destructive phase.
+> (3) **Cancel sequence redesigned**: `stream_a_run_8_verify` step 4 changed from "POST /system/bootstrap/cancel, then poll-until-idle (75 min cap)" to FIRE-AND-FORGET. Reason: with jobs stopped (pre-flight gate), no orchestrator observes `cancel_requested_at`, so polling wastes up to 75 minutes. Any `running` bootstrap_runs row vanishes with the DB drop in step 5. Caught in PR-D Codex re-pass BLOCKING 1.
+> (4) **HTTP session-cookie auth**: §17 explicitly threads through that the runbook uses a single `httpx.Client()` instance with cookie persistence. `/auth/setup` returns a `Set-Cookie` (via `_set_session_cookie`); subsequent `/system/*` calls (`/system/bootstrap/run`, `/system/bootstrap-status`) inherit. Loopback (127.0.0.1) + dev `settings.host` skip the setup_token requirement (per `app/services/operator_setup.py:172` Mode A). Caught in PR-D Codex re-pass BLOCKING 2.
+> (5) **C5 phantom column FIXED**: `data_freshness_index.last_seen_at` was phantom; real column is `updated_at` (sql/120). C5 query updated. Caught in PR-D Codex 1 spec-review BLOCKING 1.
+> (6) **C6 7-category expansion**: previous 5-category list (insiders, institutions, blockholders, def14a, funds) was incomplete — `_CATEGORIES` at `app/jobs/ownership_observations_repair.py:69` enumerates 7 (adds treasury + esop). C6 expanded to all 7 with `CATEGORY_TO_MANIFEST_SOURCES` mapping. Treasury maps to `{sec_xbrl_facts}` (NOT `{sec_def14a}`) per `fundamentals/__init__.py:1622` (xbrl_dei source). Caught in PR-D Codex 1 IMPORTANT 11 + 12.
+> (7) **`/auth/setup` credentials**: random 32-char password generated via `secrets.token_urlsafe(24)` + printed once with red banner. Username defaults to `operator`. No env-var requirement (per operator decision during PR-D plan v3 review).
+> (8) **`probe_jobs_process_running` + `acquire_jobs_process_fence`** are NEW public helpers in `app/jobs/locks.py` (commit 1 of PR-D). All three runbooks use the probe; only `stream_a_run_8_verify` uses the fence.
+> (9) **`refresh_cik_sidecar`** is promoted from private `_refresh_cik_sidecar` (commit 1 of PR-D). NEW `repair_cik_sidecar_from_archive` helper at the same location.
+> (10) **`stream_a_stream_c_gate.py` MUST import `app.services.manifest_parsers`** at module load — otherwise `registered_parser_sources()` returns empty frozenset + C4 false-passes. Caught in PR-D Codex 1 IMPORTANT 10.
+> (11) **DROP DATABASE 55006 handling**: terminate + 2s sleep + DROP; on 55006, terminate + 5s sleep + DROP; on second 55006, emit `pg_stat_activity` rows in RECOVERY footer + exit 1.
+> (12) **Migration runner**: in-process `from app.db.migrations import run_migrations; run_migrations()` (NOT alphabetical sql/ walk). Caught in PR-D Codex re-pass IMPORTANT 2.
+> (13) **JSONL log convention**: `var/runbooks/<runbook>-<token>-<ts>.jsonl`. `.gitignore` adds `/var/`.
+> (14) **Drift detection**: `response.current_run_id` (the real field name) compared against captured `run_id`. Mismatch = exit 3 CRITICAL (data-corruption risk); foreign run NOT cancelled.
+> (15) **Timeout**: 90-min poll exit 2 (distinct from gate-fail=1, success=0); bootstrap continues; log curl cancel command + status URL.
+> (16) **Wait-for-jobs-start**: runbook actively waits for `probe_jobs_process_running == True` after dispatch (operator started jobs) before the 90-min poll begins. 10-min cap.
+> (17) **`pyproject.toml` perf marker** registered so `pytest -m "not perf"` excludes nightly-tier tests.
+> Earlier v1 → v2.3 history archived to keep this header focused on the v2.4 changeset.
+> v2 → v2.1 → v2.2 → v2.3 prior changes preserved in commits; rationale lives in `docs/review-prevention-log.md` + PR-A/B/C descriptions.
 > Predecessor: `docs/_archive/2026-05/superseded-etl-rollout-v3.md`.
-> v1 committee (8-lens): 11 BLOCKING + 20 IMPORTANT. v2 first-pass committee (4-lens): 5 real BLOCKING + 8 IMPORTANT folded. Codex 1 (v2.1): 4 BLOCKING + 3 IMPORTANT folded. v2.2 ready for user sign-off.
-> Codex 1 pre-spec review (v2.1): COMPLETE — 4 BLOCKING + 3 IMPORTANT folded into v2.2. Codex 1 re-pass on v2.2: PENDING (lightweight diff-only check before sign-off).
 
 ## §0 Grep proof
 
@@ -160,7 +174,7 @@ $ ls app/cli/ scripts/runbooks/ 2>/dev/null
 (empty)                                     # NEITHER directory exists
 ```
 
-v2 declares `app/cli/runbooks/` as NEW directory (matches `etl-spec-template-usage.md §17` convention); adds `respx` to pyproject.toml; extends real test file `tests/test_bootstrap_orchestrator.py` (NOT inventing `..._catalogue_invariants.py`).
+v2 declares `app/runbooks/` as NEW directory (matches `etl-spec-template-usage.md §17` convention); adds `respx` to pyproject.toml; extends real test file `tests/test_bootstrap_orchestrator.py` (NOT inventing `..._catalogue_invariants.py`).
 
 ### §0.13 Ordering-only cap terminal-status handling (cited in §13)
 
@@ -234,7 +248,7 @@ Single-writer guarantee will be enforced post-PR-B by `tests/test_sec_cik_submis
 3. **T1.8 — Replace v3's hallucinated `master_key.is_bootstrapped()` boot guard with operator-existence check at jobs-process startup.** New helper `_check_operator_exists_with_cleanup(fence_conn)` (NAMED `_check_*` NOT `_ensure_*` — semantic differs from the 5 existing `_ensure_*_with_cleanup` helpers at `app/jobs/__main__.py:446-553` which re-INSERT default singletons; operator absence is unrecoverable without `/auth/setup`, so this helper hard-fails rather than re-seeding — per Architect IMPORTANT). Hard-fail body: `raise SystemExit(2)` after persisting `bootstrap_state.last_jobs_boot_error` + calling `fence_conn.close()` + `pool.close()`. Recovery: `EBULL_JOBS_SKIP_OPERATOR_CHECK=1` environment variable (NOT a CLI flag — env-var is harder to set accidentally; per Operator-lens finding §17). Boot-failure breadcrumb persisted to `bootstrap_state.last_jobs_boot_error TEXT` for `/system/status` surfacing.
 4. **T1.1 — Validate the already-shipped #1222 13F cohort bound on `last_13f_hr_at`** delivers the projected ~22% drop (11.2k → 8.7k CIKs) on Run #8 wall-clock. NO new code. Add a Run #8 verification step.
 5. **Acceptance criterion includes Stream C correctness gate** — strengthened per Codex CTO + DE + Operator lens convergence (see §1.8).
-6. **Operator runbook for Run #8** is executable Python under `app/cli/runbooks/` (matches `etl-spec-template-usage.md §17`; NEW directory; NOT `scripts/runbooks/`). Default `--dry-run`; explicit `--apply` to drop dev DB and re-bootstrap. **HARD GUARD against PROD:** runbook refuses to run when `EBULL_ENV != "dev"` (per Operator-lens finding §17).
+6. **Operator runbook for Run #8** is executable Python under `app/runbooks/` (matches `etl-spec-template-usage.md §17`; NEW directory; NOT `scripts/runbooks/`). Default `--dry-run`; explicit `--apply` to drop dev DB and re-bootstrap. **HARD GUARD against PROD:** runbook refuses to run when `EBULL_ENV != "dev"` (per Operator-lens finding §17).
 7. **T1.4 decomposition of `fundamentals.py` internals is EXPLICITLY DEFERRED to Stream B.** §1.7's package conversion ships only the directory + `__init__.py` re-exports + the new `bootstrap.py` + `_common.py` — the existing 2954-line `fundamentals.py` body is moved verbatim into `fundamentals/scheduler.py` (or kept at `fundamentals/__init__.py` as a single-file re-export — chosen at impl time per §1.7).
 8. **Realistic timeline: 8-12 working days**, not "~1 week" — per PM-lens finding. See §1.6 for PR sequence + cumulative WIP.
 
@@ -267,7 +281,7 @@ Single-writer guarantee will be enforced post-PR-B by `tests/test_sec_cik_submis
 
 v1's gate was "Layer 1/2/3 fire within 24h with `status='success'` and no `bootstrap_not_complete` skips". Codex + DE + API + Operator + PM lenses all flagged this as insufficient (Run #7 had `rows_processed=NULL` on bulk ingesters succeeding silently).
 
-v2 gate (per `app/cli/runbooks/stream_a_stream_c_gate.py`):
+v2 gate (per `app/runbooks/stream_a_stream_c_gate.py`):
 
 | Check | Source | Passes when |
 |---|---|---|
@@ -275,8 +289,8 @@ v2 gate (per `app/cli/runbooks/stream_a_stream_c_gate.py`):
 | **C2.** Layer 2 (Daily index reconcile) fired post-Run-#8 | `job_runs WHERE job_name='sec_daily_index_reconcile' AND status='success' AND started_at > bootstrap_runs.completed_at` | ≥ 1 row |
 | **C3.** Layer 3 (per-CIK poll) fired post-Run-#8 | `job_runs WHERE job_name='sec_per_cik_poll' AND status='success' AND started_at > bootstrap_runs.completed_at` | ≥ 1 row |
 | **C4.** Manifest worker drained ≥ 1 row per registered source | `sec_filing_manifest WHERE updated_at > bootstrap_runs.completed_at AND ingest_status IN ('parsed', 'tombstoned') GROUP BY source` | ≥ 1 row per source from `registered_parser_sources()` (§0.11) |
-| **C5.** At least one `data_freshness_index` row transitioned `current=TRUE` post-Run-#8 | `data_freshness_index WHERE last_seen_at > bootstrap_runs.completed_at AND state='current'` | ≥ 1 row |
-| **C6.** Per write-through category: ≥ 1 NEW observation OR category quiescent | First check: `ownership_<cat>_observations WHERE ingested_at > bootstrap_runs.completed_at` for cat ∈ {insiders, institutions, blockholders, def14a, funds}. If zero, second check: `sec_filing_manifest WHERE source = <category_source> AND filed_at > bootstrap_runs.completed_at - INTERVAL '24h'`. | EITHER ≥ 1 new obs row, OR zero new filings of the matching source (emits `warning_category_quiescent` instead of failing). Per Codex MEDIUM + DE IMPORTANT — DEF 14A / treasury can be quiescent across a 24h window without indicating breakage. |
+| **C5.** At least one `data_freshness_index` row transitioned `current=TRUE` post-Run-#8 | `data_freshness_index WHERE updated_at > bootstrap_runs.completed_at AND state='current'` (v2.4 fold: column was `last_seen_at` in v2.3 → phantom; real column is `updated_at` per sql/120) | ≥ 1 row |
+| **C6.** Per write-through category (7 cats per `_CATEGORIES` at `app/jobs/ownership_observations_repair.py:69`): ≥ 1 NEW observation OR category quiescent | First check: `ownership_<cat>_observations WHERE ingested_at > bootstrap_runs.completed_at` for cat ∈ {insiders, institutions, blockholders, treasury, def14a, funds, esop}. If zero, second check: `sec_filing_manifest WHERE source IN <CATEGORY_TO_MANIFEST_SOURCES[cat]> AND filed_at > bootstrap_runs.completed_at - INTERVAL '24h'`. Mapping is at `app/services/capability_manifest_mapping.py` (v2.4 fold). Treasury → `{sec_xbrl_facts}` (NOT def14a — xbrl_dei source per `fundamentals/__init__.py:1622`). | EITHER ≥ 1 new obs row, OR zero new filings of the matching source (emits `warning_category_quiescent_<cat>` instead of failing). Per Codex MEDIUM + DE IMPORTANT — DEF 14A / treasury can be quiescent across a 24h window without indicating breakage. |
 | **C7.** Sidecar populated for every in-universe CIK (sentinel-aware) | `sec_cik_submissions_files_index WHERE bootstrap_run_id = <latest>` GROUP BY cik | DISTINCT-CIK count ≥ `(in-universe CIK count) - COUNT(in-universe CIK ∩ KNOWN_FILING_AGENT_CIKS)`. Per Codex 1 BLOCKING: subtracting GLOBAL `KNOWN_FILING_AGENT_CIKS count` would false-pass the gate whenever most known agents are out-of-universe. The correct subtrahend is the intersection only. A CIK with only the sentinel row `__no_overflow_pages__` COUNTS toward the populated set (per Codex v2 first-pass BLOCKING — AAPL has 0 overflow pages and must not false-fail C7). |
 
 Gate is RUN as a post-bootstrap acceptance step. Output: structured JSON with per-check pass/fail + count + a single boolean `stream_a_run_8_accepted`. Stream A merge is **gated** on this script existing + passing on a real Run #8 (recorded in PR-D's description per CLAUDE.md ETL clauses 8-12).
@@ -621,79 +635,105 @@ T1.1: already migrated.
 
 ## §17. Operator runbooks
 
-Stream A introduces THREE operator runbooks. All are executable Python under **`app/cli/runbooks/`** (NEW directory; matches `etl-spec-template-usage.md §17` convention).
+Stream A introduces THREE operator runbooks. All are executable Python under **`app/runbooks/`** (NEW directory; matches `etl-spec-template-usage.md §17` convention).
 
-**Convention reconciliation (per Architect + Reviewer OBSERVATION):** the repo's existing `scripts/` directory hosts ad-hoc lint scripts (`check_*.sh`) + benchmark/backfill scripts (`backfill_*.py`, `audit_*.py`) — NOT operator-runnable per-source ETL runbooks under the 22-section spec template. `app/cli/runbooks/` is the spec-template-mandated path. The two coexist; `scripts/` is NOT retired. PR-B description notes the new directory + creates `app/cli/__init__.py` + `app/cli/runbooks/__init__.py` for module resolution.
+**Convention reconciliation (per Architect + Reviewer OBSERVATION):** the repo's existing `scripts/` directory hosts ad-hoc lint scripts (`check_*.sh`) + benchmark/backfill scripts (`backfill_*.py`, `audit_*.py`) — NOT operator-runnable per-source ETL runbooks under the 22-section spec template. `app/runbooks/` is the spec-template-mandated path. The two coexist; `scripts/` is NOT retired. PR-D creates `app/runbooks/__init__.py` for module resolution. NOTE (v2.4 fold of round-2 committee review): the spec originally said `app/cli/runbooks/` here, but `app/cli.py` already exists as the break-glass operator credential CLI (`python -m app.cli set-password`); creating a sibling `app/cli/` package would have shadowed it. Path was renamed to `app/runbooks/` before code landed.
 
 **Merge-gate enforcement (per Architect IMPORTANT):** Stream-C gate is an **OPERATOR ATTESTATION**, not a CI check. PR-D description MUST include the `stream_a_stream_c_gate.py` JSON output with all 7 checks at `passed` OR `warning_*` (C6 quiescent warning is non-blocking), timestamped against the actual Run #8 `bootstrap_run_id`. CI cannot run a 90-minute real Run #8; reviewer enforces via PR description per CLAUDE.md ETL clauses 8-12. Without this clarification a future author could treat green CI as sufficient.
 
-### `app/cli/runbooks/stream_a_run_8_verify.py`
+### `app/runbooks/stream_a_run_8_verify.py`
+
+v2.4 shape — stdlib `argparse` (no `click` dep; `click` is only transitive via uvicorn). Single `--apply` flag (no `--dry-run` flag — default is dry-run when `--apply` absent). Three-tier safety gates from `app.runbooks.safety`. `httpx.Client()` preserves session cookie from `/auth/setup`.
 
 ```python
-import os
-import click
-
-@click.command()
-@click.option("--dry-run", is_flag=True, default=True)
-@click.option("--apply", is_flag=True, default=False)
-def main(dry_run: bool, apply: bool) -> None:
-    """Run #8 verification: drop dev DB, re-bootstrap, capture timings, verify Stream C."""
-    # PER REVIEWER IMPORTANT: no default — EBULL_ENV MUST be explicitly set to 'dev'.
-    # `os.environ.get("EBULL_ENV", "dev")` (v2 first-pass shape) silently PASSES on machines
-    # without the var set, including PROD. Inverted to fail-closed.
-    if os.environ.get("EBULL_ENV") != "dev":
-        raise click.ClickException(
-            "REFUSE: EBULL_ENV must be explicitly set to 'dev' to run this runbook. "
-            "Refusing to run with unset or non-dev env."
-        )
-    if not apply and not dry_run:
-        click.echo("Specify either --dry-run (default) or --apply")
-        return
-    ...
+import argparse
+from app.runbooks.safety import (
+    assert_dev_env, assert_dev_db, assert_jobs_process_stopped,
+    wait_for_jobs_process_started,
+)
+# ... opens psycopg + httpx.Client; cookie set by /auth/setup propagates
+#     automatically to /system/* calls (per app/services/operator_setup.py
+#     Mode A — loopback + no EBULL_BOOTSTRAP_TOKEN → no setup_token needed).
 ```
 
 Actions when `--apply`:
-1. **Pre-flight: §6.3 PG hygiene** — reference `data-engineer/SKILL.md §6.3` pre-wipe procedure for `pg_resetwal`-damaged dev DB (multixact wraparound on `job_runtime_heartbeat` + `broker_credentials`). Do NOT invent a fresh drop-path.
-2. **Pre-flight: disk + WAL check** — fail-closed if `db_size > 50 GB` or `wal_dir > 10 GB` (operator clears before proceeding).
-3. Cancel any in-flight bootstrap (POST `/system/bootstrap/cancel`).
-4. Drop the dev DB + re-run migrations to clean state (via §6.3 procedure).
-5. Re-run operator setup (POST `/auth/setup`).
-6. Trigger bootstrap (POST `/system/bootstrap/run`).
-7. Poll `/system/bootstrap-status` every 30s for up to 90 min; capture per-stage timings.
-8. **Hand off to `stream_a_stream_c_gate.py`** — 24h post-completion, check all 7 gates (C1-C7).
+1. **Pre-flight**: `assert_dev_env()` + `assert_dev_db(conn)` + `assert_jobs_process_stopped(url)` — all fail-closed.
+2. **Pre-flight: disk + WAL check** — `db_size > 50 GB` or `wal_dir > 10 GB` → fail-closed.
+3. **Cancel in-flight bootstrap** — POST `/system/bootstrap/cancel` FIRE-AND-FORGET. Reason (v2.4 fold of Codex re-pass BLOCKING 1): with jobs stopped, no orchestrator observes `cancel_requested_at`, so polling wastes up to 75 min. Any `running` row vanishes with the DB drop in step 4. Acceptable responses: 202 / 404 / 409 — log + continue.
+4. **DROP + CREATE ebull_dev** under `acquire_jobs_process_fence(url)` — connect to `postgres` admin DB, `pg_terminate_backend` other sessions, DROP, on 55006 retry-twice with sleep, on second 55006 emit `pg_stat_activity` rows in RECOVERY footer + exit 1, CREATE.
+   - NOTE (v2.4 fold of PR-D commit-1 empirical correction): PG advisory locks are PER-DATABASE, NOT cluster-wide. The fence dies with `DROP DATABASE ebull_dev`. Operator MUST keep jobs service stopped (e.g. `systemctl stop`) for the destructive phase; the TOCTOU window is unavoidable at the lock layer alone.
+5. **Migrate** — `from app.db.migrations import run_migrations; run_migrations()` in-process (v2.4 fold of Codex re-pass IMPORTANT 4 — NOT alphabetical sql/ walk).
+6. **Re-acquire jobs fence** on fresh ebull_dev DB (commit 1 helper).
+7. **POST /auth/setup** with `{username='operator', password=secrets.token_urlsafe(24)}` via httpx.Client. Response `Set-Cookie` persists in the client jar. Print password ONCE with red banner. No env-var requirement (per operator decision in PR-D plan v3 review).
+8. **POST /system/bootstrap/run** (same httpx.Client, cookie inherits) → capture `run_id` + `request_id` from response.
+9. **Release jobs fence**. Print: "Start jobs process now; runbook will wait up to 10 min."
+10. **`wait_for_jobs_process_started(url, timeout_sec=600)`** (commit 1 inverse probe) — block until jobs entrypoint holds its fence.
+11. **Poll /system/bootstrap-status** every 30s up to 90 min, 3×5s retry per poll on ConnectionRefused/502. Compare `response.current_run_id == captured_run_id`; on mismatch exit 3 CRITICAL (data-corruption risk; foreign run NOT cancelled). On terminal status: capture per-stage timings + exit 0.
+12. On 90-min timeout: exit 2; log curl cancel command + status URL; bootstrap continues.
+13. **JSONL log** at `var/runbooks/stream_a_run_8_verify-<request_id>-<ts>.jsonl` (append-only). `.gitignore` excludes `/var/`.
 
-### `app/cli/runbooks/stream_a_t13_sidecar_repair.py`
+### `app/runbooks/stream_a_t13_sidecar_repair.py`
+
+v2.4 shape — same stdlib argparse + `--apply` collapse + three-tier safety. Adds `--bootstrap-run-id INT` optional (per Codex 1 IMPORTANT 8). `--archive-path` REQUIRED in `--apply`; optional in dry-run (per Operator NIT O14).
 
 ```python
-@click.command()
-@click.option("--cik", type=str, help="Specific CIK to repair; default = all")
-@click.option("--dry-run", is_flag=True, default=True)
-@click.option("--apply", is_flag=True, default=False)
-def main(cik: str | None, dry_run: bool, apply: bool) -> None:
-    """Force-rebuild sec_cik_submissions_files_index from local submissions.zip without re-fetching."""
-    if os.environ.get("EBULL_ENV") != "dev":
-        raise click.ClickException(
-            "REFUSE: EBULL_ENV must be explicitly set to 'dev'. "
-            "Unset or non-dev refused (per Codex 1 BLOCKING — fail-closed parity with stream_a_run_8_verify.py)."
-        )
-    ...
+import argparse
+from app.runbooks.safety import (
+    assert_dev_env, assert_dev_db, assert_jobs_process_stopped,
+)
+from app.services.sec_submissions_ingest import repair_cik_sidecar_from_archive
 ```
+
+Actions when `--apply`:
+1. `assert_dev_env()`
+2. open psycopg → `assert_dev_db(conn)` → `assert_jobs_process_stopped(url)`
+3. `repair_cik_sidecar_from_archive(conn, archive_path=..., cik=..., bootstrap_run_id=...)` (commit 1 helper)
+4. Print telemetry dict + exit 0
+5. On uncaught exception: print RECOVERY: footer + exit 1
 
 Used when sidecar drifts from `submissions.zip` contents (e.g. S8 partial failure between zip extract + sidecar populate). Rebuilds entries from on-disk archive without re-fetching SEC.
 
-### `app/cli/runbooks/stream_a_stream_c_gate.py`
+### `app/runbooks/stream_a_stream_c_gate.py`
+
+v2.4 shape — stdlib argparse + module-load import of `app.services.manifest_parsers` (v2.4 fold of Codex 1 IMPORTANT 10 — registry side-effect populates `registered_parser_sources()` used by C4; without this import C4 false-passes against an empty source set).
 
 ```python
-@click.command()
-@click.option("--bootstrap-run-id", type=int, required=True)
-@click.option("--strict", is_flag=True, default=True,
-              help="Fail-closed if any gate fails. Default behaviour.")
-def main(bootstrap_run_id: int, strict: bool) -> None:
-    """Execute the 7-check Stream-C correctness gate (§1.8). Emit JSON + exit non-zero on fail."""
-    ...
+# CRITICAL: this import side-effects-populates registered_parser_sources().
+import app.services.manifest_parsers  # noqa: F401
+
+import argparse
+from app.jobs.sec_manifest_worker import registered_parser_sources
+from app.jobs.ownership_observations_repair import _CATEGORIES
+from app.services.capability_manifest_mapping import CATEGORY_TO_MANIFEST_SOURCES
+from app.runbooks.safety import assert_dev_env, assert_dev_db
 ```
 
-Runs the C1-C7 checks. Output structured JSON written to stdout + `bootstrap_runs.stream_c_gate_status TEXT` populated (`pending` → `passed` / `failed_<check_id>`). Operator inspects the JSON to triage which check failed.
+Actions:
+1. `assert_dev_env()` + parse `--bootstrap-run-id INT` (required) + `--strict` (default True) + `--json-out PATH` (optional, default stdout).
+2. open psycopg → `assert_dev_db(conn)`.
+3. `UPDATE bootstrap_runs SET stream_c_gate_status='pending' WHERE id=%s` (v2.4 fold of round-1 Reviewer R6 — explicit pending stamp at gate start).
+4. try: run C1..C7 → except: `UPDATE bootstrap_runs SET stream_c_gate_status='failed_runbook_crashed' WHERE id=%s; re-raise` (v2.4 fold of round-2 Operator O6).
+5. `UPDATE bootstrap_runs SET stream_c_gate_status='passed' | 'failed_<cN>' WHERE id=%s`.
+6. Print JSON envelope (schema_version=1) to stdout (or --json-out path).
+7. Exit code: 0 = passed (incl warning_*), 1 = failed strict, 2 = invalid input.
+
+JSON envelope shape (pinned per round-2 Operator O9):
+
+```json
+{
+  "schema_version": 1,
+  "runbook": "stream_a_stream_c_gate",
+  "bootstrap_run_id": 123,
+  "started_at": "2026-05-25T12:34:56+00:00",
+  "ended_at":   "2026-05-25T12:35:01+00:00",
+  "checks": [
+    {"id": "c1", "status": "passed", "count": 1, "detail": "..."},
+    {"id": "c6_treasury", "status": "warning_category_quiescent", "count": 0, "detail": "..."}
+  ],
+  "accepted": true,
+  "exit_code": 0
+}
+```
 
 ## §18. Smoke matrix
 
@@ -789,8 +829,8 @@ Flakiness budget across Stream A: 0 retries on unit + integration. Perf gate has
 **Decision:** Stream-C correctness gate is 7 checks (C1-C7) per §1.8, NOT just "Layer 1/2/3 status='success'".
 **Rejected:** v1's 3-check gate — Codex specifically: "can still pass with row_count=0, no manifest drain, or stale data_freshness_index". DE: "Run-#7 had rows_processed=NULL on bulk ingesters". v2's 7-check gate adds manifest-worker per-source drain + content+watermark assertions.
 
-**Decision:** Runbooks live at `app/cli/runbooks/` (NEW directory).
-**Rejected:** v1's `scripts/runbooks/` — directory doesn't exist + violates `etl-spec-template-usage.md §17` convention. `app/cli/runbooks/` matches the convention + benefits from existing Python module resolution.
+**Decision:** Runbooks live at `app/runbooks/` (NEW directory).
+**Rejected:** v1's `scripts/runbooks/` — directory doesn't exist + violates `etl-spec-template-usage.md §17` convention. `app/runbooks/` matches the convention + benefits from existing Python module resolution.
 
 **Decision:** Runbook `--apply` gated by `EBULL_ENV=='dev'` hard refusal.
 **Rejected:** trust the operator to not run against PROD — same operator who triggered the bug we're fixing. Hard guard is cheap.
