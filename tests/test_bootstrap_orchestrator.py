@@ -1390,7 +1390,11 @@ def test_fundamentals_sync_stays_on_db_lane_pending_pr_c2() -> None:
     This invariant pin is intentional — flip the expected value when
     PR-C2 lands the bootstrap-only invoker.
     """
-    fundamentals_spec = next(s for s in _BOOTSTRAP_STAGE_SPECS if s.stage_key == "fundamentals_sync")
+    fundamentals_spec = next(
+        (s for s in _BOOTSTRAP_STAGE_SPECS if s.stage_key == "fundamentals_sync"),
+        None,
+    )
+    assert fundamentals_spec is not None, "fundamentals_sync stage missing from _BOOTSTRAP_STAGE_SPECS"
     assert fundamentals_spec.stage_order == 25
     assert fundamentals_spec.lane == "db", (
         "fundamentals_sync stays on 'db' until PR-C2 introduces fundamentals_sync_bootstrap "
