@@ -63,7 +63,7 @@ Operator can declare Run #8 done when ALL of:
 3. JSON envelope posted as comment on #1233
 4. Smoke against AAPL / GME / MSFT / JPM / HD: ownership rollup endpoints render expected figures
 5. `/system/postgres-health` still green post-drive
-6. No B-list item escalated to A-list during the drive
+6. **No B-list item escalated to A-list during the drive.** Testable rule (PM I-PM-1 polish fold): if `run-8-readiness.md` §3.3 FAIL-LOUD fires during the drive AND the hit corresponds to a B-list item in §B of THIS doc, **promote the B item to A + STOP** (do not proceed to gate or close-out). If the FAIL-LOUD hit corresponds to a brand-new finding (no B-list match), file a new ticket + classify A or B in §B before resuming.
 
 If any A-list item re-opens during Run #8 → cancel + diagnose; do not declare done.
 

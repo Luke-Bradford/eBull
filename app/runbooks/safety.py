@@ -54,7 +54,7 @@ class RunbookRefused(SystemExit):
         self.msg = f"REFUSE: {msg}"
 
 
-def _parse_db_name_from_url(database_url: str) -> str:
+def parse_db_name_from_url(database_url: str) -> str:
     """Extract the DB name from a postgres URL. Handles ``postgres://``,
     ``postgresql://``, ``postgresql+psycopg://`` schemes.
 
@@ -93,7 +93,7 @@ def assert_dev_db_name_in_url() -> None:
     after connection.
     """
     url = settings.database_url
-    name = _parse_db_name_from_url(url)
+    name = parse_db_name_from_url(url)
     if not name:
         raise RunbookRefused(
             f"DATABASE_URL has no database name in path: {url!r}. Expected postgres://USER:PASS@HOST:PORT/DBNAME shape."
@@ -274,7 +274,7 @@ def assert_no_multixact_wraparound(conn: psycopg.Connection[object]) -> None:
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
         "WHERE n.nspname = 'public' "
         "  AND c.relkind IN ('r', 'p') "
-        "  AND c.relminmxid <> '0' "
+        "  AND c.relminmxid <> 0::xid "
         "ORDER BY age DESC LIMIT 5"
     )
     rows = cast(list[tuple[str, int]], cur.fetchall())

@@ -80,6 +80,7 @@ from app.runbooks.safety import (
     assert_dev_env,
     assert_jobs_process_stopped,
     assert_no_multixact_wraparound,
+    parse_db_name_from_url,
     wait_for_jobs_process_started,
 )
 
@@ -476,7 +477,10 @@ def main(argv: list[str] | None = None) -> int:
         with httpx.Client(follow_redirects=True) as http:
             _post_bootstrap_cancel(client=http, api_base=args.api_base, log=log_entries)
 
-            target_db = urlparse(settings.database_url).path.lstrip("/")
+            # N5 fold (post-final-committee polish): use shared helper
+            # from safety.py instead of inlining urlparse(...).path.lstrip("/").
+            # Keeps URL-parse logic in one place — Architect IMP-1 fold.
+            target_db = parse_db_name_from_url(settings.database_url)
             postgres_url = _postgres_url()
             try:
                 with acquire_jobs_process_fence(settings.database_url):
