@@ -63,11 +63,24 @@ def _wipe_test_cik(conn: psycopg.Connection[tuple]) -> None:
 
 @pytest.fixture
 def guard_conn() -> Iterator[psycopg.Connection[tuple]]:
-    """Autocommit connection to the per-worker test DB — matches the
-    shape that production callers use (each ``_refresh_cik_sidecar``
-    site runs inside an outer ``with conn.transaction()`` block; the
-    guard conn here is a single-tx-per-call substitute fine for
-    deterministic test assertions)."""
+    """Autocommit connection to the per-worker test DB — DIVERGES FROM
+    PRODUCTION semantics (per PR #1308 review bot iter 2 WARNING).
+
+    Production callers always wrap ``_refresh_cik_sidecar`` in
+    ``with conn.transaction()`` (sec_submissions_ingest.py:148-176) so
+    DELETE + INSERT are atomic per-CIK: an INSERT failure rolls back
+    the DELETE and prior committed sidecar rows for that CIK SURVIVE.
+
+    Under THIS fixture's autocommit, the DELETE commits before the
+    INSERT runs; an INSERT failure leaves the CIK with zero rows.
+    The atomicity contract is therefore NOT exercised here — the
+    dedicated test ``TestSidecarPerCikSavepointAtomicity`` uses the
+    transactional ``ebull_test_conn`` fixture for that.
+
+    This fixture is fine for tests that only verify the WRITER's
+    output shape under successful execution (sentinel vs real-pages,
+    populate_origin, idempotent re-runs) — NOT for atomicity tests.
+    """
     conn = psycopg.connect(test_database_url(), autocommit=True)
     try:
         yield conn

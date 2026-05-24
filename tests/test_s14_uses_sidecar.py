@@ -112,10 +112,12 @@ class TestS14SidecarConsume:
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
-        # Capture baseline FIRST, before seeding the test instrument,
-        # so the delta reflects only our row's contribution.
-        baseline = walk_files_pages(conn=ebull_test_conn)
+        # WIPE FIRST so a dirty _REAL_CIK row left by a killed prior
+        # run doesn't get counted in baseline; then capture baseline;
+        # then seed + measure delta (bot review iter 2 WARNING — baseline-
+        # before-wipe was a flake vector).
         _wipe_test_instrument(ebull_test_conn)
+        baseline = walk_files_pages(conn=ebull_test_conn)
         _seed_test_instrument(ebull_test_conn)
         try:
             # No sidecar row inserted for _REAL_CIK — empty sidecar branch.
@@ -132,8 +134,9 @@ class TestS14SidecarConsume:
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
-        baseline = walk_files_pages(conn=ebull_test_conn)
+        # Wipe BEFORE baseline (bot review iter 2 WARNING).
         _wipe_test_instrument(ebull_test_conn)
+        baseline = walk_files_pages(conn=ebull_test_conn)
         _seed_test_instrument(ebull_test_conn)
         try:
             _insert_sidecar(
@@ -189,9 +192,9 @@ class TestS14SidecarConsume:
             after = walk_files_pages(conn=ebull_test_conn)
             # Delta on the three counters that the agent-CIK branch
             # must NOT touch — robust to any other rows in the test DB.
-            assert (
-                after.ciks_with_empty_sidecar == baseline.ciks_with_empty_sidecar
-            ), "agent CIK empty sidecar must NOT count as error"
+            assert after.ciks_with_empty_sidecar == baseline.ciks_with_empty_sidecar, (
+                "agent CIK empty sidecar must NOT count as error"
+            )
             assert after.parse_errors == baseline.parse_errors
             assert after.secondary_pages_fetched == baseline.secondary_pages_fetched
             # And ciks_visited must NOT increment for the agent CIK
