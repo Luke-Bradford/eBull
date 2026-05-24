@@ -591,7 +591,31 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
             "nport_inputs_seeded",
         ),
     ),
-    "fundamentals_sync": CapRequirement(all_of=("fundamentals_raw_seeded",)),
+    # Stream A PR-C1 T1.2 (#1233): strengthened from 1-cap to 4-cap
+    # requirement. Pre-PR-C1, S25 only waited for ``fundamentals_raw_seeded``
+    # (S9 companyfacts ingest). The audit-during-bootstrap defence in
+    # T1.2's bootstrap entrypoint (lands in PR-C2) needs to know that
+    # bulk archives + CIK mapping + S8 terminalisation are all done
+    # too — otherwise ``audit_all_instruments`` would misclassify mid-
+    # bootstrap and re-introduce HTTP backfill.
+    #
+    # Terminal-status safety: ``submissions_processed`` is in
+    # ``_ORDERING_ONLY_CAPS`` (the frozenset defined just above), so
+    # ``_satisfied_capabilities`` adds it on ``blocked|error|cancelled``
+    # terminals + ``_capability_is_dead`` treats those terminal providers
+    # as still satisfying ordering caps — this cap addition does NOT
+    # create a stuck-S25 failure mode when S8 errors. Symbol references
+    # over line refs (line numbers drift; Codex 2 LOW pre-merge review).
+    #
+    # Spec: docs/proposals/etl/stream-a-run-8-fixes.md v2.3 §13.
+    "fundamentals_sync": CapRequirement(
+        all_of=(
+            "bulk_archives_ready",
+            "cik_mapping_ready",
+            "submissions_processed",
+            "fundamentals_raw_seeded",
+        ),
+    ),
 }
 
 
@@ -1138,6 +1162,16 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         },
     ),
     _spec("ownership_observations_backfill", 24, "db", "ownership_observations_backfill"),
+    # Stream A spec v2.3 §5 calls for S25 to be reassigned to the
+    # ``db_fundamentals_raw`` lane. DEFERRED to PR-C2 — the steady-
+    # state ``fundamentals_sync`` ScheduledJob (app/workers/scheduler.py:618)
+    # is registered with source="db" and the lane-source registry
+    # cross-check (app/jobs/sources.py:get_job_name_to_source) raises
+    # JobSourceRegistryError if the bootstrap-stage lane diverges
+    # from the scheduled-job source for the same job_name. PR-C2
+    # introduces a separately-registered ``fundamentals_sync_bootstrap``
+    # invoker that CAN safely live on the dedicated lane without
+    # touching the steady-state job.
     _spec("fundamentals_sync", 25, "db", "fundamentals_sync"),
     # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap
     # drain (T8 deferred from #1171). S25 (post #1233 PR-1b: S26) advertises
