@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.providers.implementations import sec_daily_index as sec_daily_index_mod
 from app.providers.implementations.sec_daily_index import (
     _accession_from_filename,
     parse_daily_index,
@@ -332,3 +334,73 @@ class TestReadDailyIndex:
     def test_non_404_non_200_raises(self) -> None:
         with pytest.raises(RuntimeError, match="status=500"):
             list(read_daily_index(_fake_get(500, b""), date(2026, 4, 30)))
+
+
+def _pin_now_et(monkeypatch: pytest.MonkeyPatch, iso_instant: str) -> None:
+    """Freeze ``datetime.now(_ET)`` inside ``sec_daily_index`` to ``iso_instant`` (ET-local).
+
+    Mirrors ``tests/test_sec_provider_master_index.py::_pin_now_et`` so
+    the daily-index reader's 403-publish-cutoff logic is testable
+    without freezegun.
+    """
+    frozen = datetime.fromisoformat(iso_instant).replace(tzinfo=ZoneInfo("America/New_York"))
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return frozen.astimezone(tz) if tz else frozen.replace(tzinfo=None)
+
+    monkeypatch.setattr(sec_daily_index_mod, "datetime", _FrozenDatetime)
+
+
+class TestReadDailyIndex403:
+    """403 tolerance for weekend / before-publish-cutoff / future dates.
+
+    Mirrors ``SecFilingsProvider.fetch_master_index`` in
+    ``app/providers/implementations/sec_edgar.py`` — the daily-index
+    reader must use the same envelope, otherwise a Sunday-night
+    apscheduler catch-up fires the reconcile job for Saturday and
+    crashes the worker with ``RuntimeError: daily-index fetch failed:
+    status=403``.
+    """
+
+    def test_403_on_saturday_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 2026-05-23 is Saturday — SEC never publishes weekend daily indexes.
+        _pin_now_et(monkeypatch, "2026-05-25T12:00:00")
+        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 5, 23)))
+        assert rows == []
+
+    def test_403_on_sunday_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 2026-05-24 is Sunday.
+        _pin_now_et(monkeypatch, "2026-05-25T12:00:00")
+        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 5, 24)))
+        assert rows == []
+
+    def test_403_on_weekday_before_publish_cutoff_returns_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # 2026-05-25 is Monday; freeze ET clock at 12:00, before the
+        # 22:00-ET publish cutoff — current-day 403 is "not yet published".
+        _pin_now_et(monkeypatch, "2026-05-25T12:00:00")
+        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 5, 25)))
+        assert rows == []
+
+    def test_403_on_weekday_after_publish_cutoff_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # 23:00 ET on a weekday is past the 22:00 publish cutoff. A 403
+        # at that point is SEC actively refusing us (UA/rate-limit/WAF)
+        # — must surface, not silently swallow.
+        _pin_now_et(monkeypatch, "2026-05-25T23:00:00")
+        with pytest.raises(RuntimeError, match="status=403"):
+            list(read_daily_index(_fake_get(403, b""), date(2026, 5, 25)))
+
+    def test_403_on_future_date_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Future-dated 403 tolerated symmetrically with the master-index
+        # provider — callers may iterate a lookback window whose
+        # endpoints straddle midnight across timezones.
+        _pin_now_et(monkeypatch, "2026-05-25T12:00:00")
+        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 5, 26)))
+        assert rows == []
