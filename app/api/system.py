@@ -126,6 +126,21 @@ class CredentialHealthSummary(BaseModel):
     last_error: str | None = None
 
 
+class JobsBootError(BaseModel):
+    """Operator-actionable jobs-process boot breadcrumb.
+
+    Populated by ``app/jobs/__main__.py::_check_operator_exists_with_cleanup``
+    (Stream A PR-A T1.8, #1233) when the jobs process hard-fails to boot
+    because no ``operators`` row exists (i.e. ``/auth/setup`` has not been
+    run yet). Cleared by a successful boot of the same guard.
+
+    Both fields are non-NULL together OR NULL together.
+    """
+
+    message: str
+    at: datetime
+
+
 class SystemStatusResponse(BaseModel):
     checked_at: datetime
     overall_status: OverallStatus
@@ -133,6 +148,10 @@ class SystemStatusResponse(BaseModel):
     jobs: list[JobHealthResponse]
     kill_switch: KillSwitchStateResponse
     credential_health: CredentialHealthSummary
+    # Populated when the jobs process most-recently failed to boot
+    # because of a hard-fail boot-guard condition (today: missing
+    # operator row). NULL on healthy systems. Wired in Stream A PR-A.
+    jobs_boot_error: JobsBootError | None = None
 
 
 class JobOverviewResponse(BaseModel):
@@ -365,6 +384,7 @@ def get_system_status(
         layers = check_all_layers(conn, now=now)
         jobs = [check_job_health(conn, job.name) for job in SCHEDULED_JOBS]
         ks = get_kill_switch_status(conn)
+        jobs_boot_error = _read_jobs_boot_error(conn)
     except Exception as exc:
         # Log the full exception server-side; the HTTP detail is a fixed
         # string so we never leak internal schema, table names, or driver
@@ -386,7 +406,35 @@ def get_system_status(
             reason=ks.get("reason"),
         ),
         credential_health=_build_credential_health_summary(conn),
+        jobs_boot_error=jobs_boot_error,
     )
+
+
+def _read_jobs_boot_error(conn: psycopg.Connection[object]) -> JobsBootError | None:
+    """Surface the jobs-process boot-failure breadcrumb (Stream A PR-A
+    T1.8, #1233).
+
+    Returns the persisted breadcrumb from
+    ``bootstrap_state.{last_jobs_boot_error, last_jobs_boot_error_at}``
+    or ``None`` when the last boot succeeded / never ran post-migration.
+
+    SQL contract: both columns are non-NULL together (per the wrapper
+    in ``app/jobs/__main__.py::_check_operator_exists_with_cleanup`` —
+    the breadcrumb write sets both columns in one UPDATE; the clear-
+    on-success path nulls both). A row with one NULL and one non-NULL
+    is treated as "no breadcrumb" to fail-safe.
+    """
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(
+            "SELECT last_jobs_boot_error, last_jobs_boot_error_at FROM bootstrap_state WHERE id = 1",
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    message, at = row
+    if message is None or at is None:
+        return None
+    return JobsBootError(message=message, at=at)
 
 
 def _build_credential_health_summary(conn: psycopg.Connection[object]) -> CredentialHealthSummary:
