@@ -600,10 +600,12 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     # bootstrap and re-introduce HTTP backfill.
     #
     # Terminal-status safety: ``submissions_processed`` is in
-    # ``_ORDERING_ONLY_CAPS`` (line 515), so the dispatcher at line 764
-    # marks it satisfied on ``blocked|error|cancelled`` terminals too —
-    # this cap addition does NOT create a stuck-S25 failure mode when
-    # S8 errors.
+    # ``_ORDERING_ONLY_CAPS`` (the frozenset defined just above), so
+    # ``_satisfied_capabilities`` adds it on ``blocked|error|cancelled``
+    # terminals + ``_capability_is_dead`` treats those terminal providers
+    # as still satisfying ordering caps — this cap addition does NOT
+    # create a stuck-S25 failure mode when S8 errors. Symbol references
+    # over line refs (line numbers drift; Codex 2 LOW pre-merge review).
     #
     # Spec: docs/proposals/etl/stream-a-run-8-fixes.md v2.3 §13.
     "fundamentals_sync": CapRequirement(

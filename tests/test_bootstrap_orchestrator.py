@@ -962,7 +962,13 @@ def test_intentional_slow_connection_skip_cascade(
         assert statuses[key] == "skipped", f"{key} expected skipped, got {statuses[key]}"
         assert key not in calls["order"], f"{key} should not have been invoked under cascade"
 
-    # S24 fundamentals_sync cascades skipped (sole provider S9 skipped).
+    # S25 fundamentals_sync cascades skipped. Post-PR-C1 (#1233) the
+    # cap requirement is 4-cap (bulk_archives_ready + cik_mapping_ready
+    # + submissions_processed + fundamentals_raw_seeded); under the
+    # slow-connection path S7 (sec_bulk_download) skips → ALL FOUR
+    # cap-providers downstream cascade-skip → S25 cascade-skips. Same
+    # outcome as the pre-PR-C1 1-cap shape (where the sole provider
+    # was S9 sec_companyfacts_ingest); test stays valid.
     assert statuses["fundamentals_sync"] == "skipped"
 
     # Legacy chain runs.
