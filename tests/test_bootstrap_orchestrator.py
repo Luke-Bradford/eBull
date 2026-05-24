@@ -1344,3 +1344,55 @@ def test_strict_cap_exclusion_neutral_provider_does_not_satisfy_or_kill() -> Non
     # (the exclusion is form3-specific), so scenario-1 rows satisfy it.
     caps = _satisfied_capabilities(statuses_only_bulk, rows_only_bulk)
     assert "insider_inputs_seeded" in caps
+
+
+# ---------------------------------------------------------------------------
+# Stream A PR-C1 T1.2 (#1233): fundamentals_sync cap-strengthen + lane delta.
+# ---------------------------------------------------------------------------
+
+
+def test_fundamentals_sync_requires_four_caps_after_pr_c1() -> None:
+    """Stream A PR-C1 T1.2 (#1233): S25 ``fundamentals_sync`` is
+    strengthened from a 1-cap requirement (`fundamentals_raw_seeded`
+    only) to the 4-cap tuple needed by the bootstrap entrypoint's
+    audit-during-bootstrap defence (which lands in PR-C2).
+
+    All four caps are verified real (spec §0.1 grep proof). Terminal-
+    status safety: ``submissions_processed`` is in
+    ``_ORDERING_ONLY_CAPS`` so the dispatcher satisfies the cap on
+    ``blocked|error|cancelled`` as well as ``success|skipped`` — no
+    stuck-S25 failure mode when S8 errors.
+
+    Regression sentinel — relaxing this requirement back to a subset
+    would re-expose the audit-during-bootstrap trap that Codex v3
+    finding #8 flagged.
+    """
+    req = _STAGE_REQUIRES_CAPS["fundamentals_sync"]
+    assert set(req.all_of) == {
+        "bulk_archives_ready",
+        "cik_mapping_ready",
+        "submissions_processed",
+        "fundamentals_raw_seeded",
+    }, "fundamentals_sync must require the 4-cap PR-C1 tuple (#1233 §13)"
+
+
+def test_fundamentals_sync_stays_on_db_lane_pending_pr_c2() -> None:
+    """Stream A spec v2.3 §5 calls for S25 ``fundamentals_sync`` to be
+    reassigned to ``db_fundamentals_raw``. DEFERRED to PR-C2 because the
+    steady-state ``fundamentals_sync`` ScheduledJob is registered with
+    ``source="db"`` and the lane-source registry cross-check at
+    ``app/jobs/sources.py:get_job_name_to_source`` raises
+    ``JobSourceRegistryError`` if the bootstrap-stage lane diverges
+    from the scheduled-job source for the same job_name. PR-C2
+    introduces a separately-registered ``fundamentals_sync_bootstrap``
+    invoker that CAN safely live on the dedicated lane.
+
+    This invariant pin is intentional — flip the expected value when
+    PR-C2 lands the bootstrap-only invoker.
+    """
+    fundamentals_spec = next(s for s in _BOOTSTRAP_STAGE_SPECS if s.stage_key == "fundamentals_sync")
+    assert fundamentals_spec.stage_order == 25
+    assert fundamentals_spec.lane == "db", (
+        "fundamentals_sync stays on 'db' until PR-C2 introduces fundamentals_sync_bootstrap "
+        "on its own job_name (#1233 §5 deferral)"
+    )
