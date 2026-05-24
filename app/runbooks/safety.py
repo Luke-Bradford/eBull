@@ -123,17 +123,19 @@ def wait_for_jobs_process_started(
     Raises :class:`RunbookRefused` on timeout. Operator can re-run
     later with the captured ``run_id``.
     """
-    deadline = time.monotonic() + timeout_sec
-    elapsed = 0
+    started = time.monotonic()
+    deadline = started + timeout_sec
+    next_heartbeat = started + 30
     while time.monotonic() < deadline:
         if probe_jobs_process_running(database_url):
             return
-        elapsed += poll_sec
-        if elapsed % 30 == 0:
+        if time.monotonic() >= next_heartbeat:
+            real_elapsed = int(time.monotonic() - started)
             print(
-                f"WAITING for jobs process to start ({elapsed}s elapsed, timeout at {timeout_sec}s)...",
+                f"WAITING for jobs process to start ({real_elapsed}s elapsed, timeout at {timeout_sec}s)...",
                 flush=True,
             )
+            next_heartbeat += 30
         time.sleep(poll_sec)
     raise RunbookRefused(
         f"jobs process did not start within {timeout_sec}s. "

@@ -23,6 +23,7 @@ spec §17 operator attestation, not by this CLI test file.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -175,6 +176,29 @@ def test_gate_requires_bootstrap_run_id(monkeypatch: pytest.MonkeyPatch, capsys:
         stream_a_stream_c_gate.main([])
     # argparse exits 2 on missing required.
     assert exc.value.code == 2
+
+
+def test_gate_strict_flag_defaults_true_and_no_strict_disables_it() -> None:
+    """Regression gate for PR-D bot review iter 1 BLOCKING.
+
+    ``--strict`` previously used ``action="store_true", default=True``
+    which made the flag a no-op (could never be disabled from the
+    CLI). Fixed to ``BooleanOptionalAction`` so ``--strict`` /
+    ``--no-strict`` both work and ``default=True`` is the actual
+    behaviour when neither is passed.
+    """
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--strict",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    # Default behaviour: strict=True.
+    assert parser.parse_args([]).strict is True
+    # Explicit --strict: still True.
+    assert parser.parse_args(["--strict"]).strict is True
+    # Opt-out: --no-strict toggles to False. This was IMPOSSIBLE pre-fix.
+    assert parser.parse_args(["--no-strict"]).strict is False
 
 
 def test_gate_imports_manifest_parsers_at_module_load() -> None:

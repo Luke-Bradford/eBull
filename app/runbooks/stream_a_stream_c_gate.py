@@ -362,9 +362,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bootstrap-run-id", type=int, required=True)
     parser.add_argument(
         "--strict",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Fail-closed on any failed check (default).",
+        help=(
+            "Fail-closed on any failed check (default True). "
+            "Pass --no-strict to downgrade failures to warnings (exit 0)."
+        ),
     )
     parser.add_argument(
         "--json-out",
