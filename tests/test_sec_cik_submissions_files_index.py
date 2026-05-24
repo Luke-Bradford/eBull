@@ -143,7 +143,6 @@ class TestRefreshCikSidecar:
             ebull_test_conn.commit()
 
     @pytest.mark.integration
-    @pytest.mark.integration
     def test_sidecar_no_per_cik_cap(
         self,
         guard_conn: psycopg.Connection[tuple],
@@ -190,6 +189,7 @@ class TestRefreshCikSidecar:
         )
         assert result.sidecar_pages_indexed == 200
 
+    @pytest.mark.integration
     def test_writes_real_page_rows_when_files_present(
         self,
         guard_conn: psycopg.Connection[tuple],
