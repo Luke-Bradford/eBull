@@ -1162,17 +1162,17 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         },
     ),
     _spec("ownership_observations_backfill", 24, "db", "ownership_observations_backfill"),
-    # Stream A spec v2.3 §5 calls for S25 to be reassigned to the
-    # ``db_fundamentals_raw`` lane. DEFERRED to PR-C2 — the steady-
-    # state ``fundamentals_sync`` ScheduledJob (app/workers/scheduler.py:618)
-    # is registered with source="db" and the lane-source registry
-    # cross-check (app/jobs/sources.py:get_job_name_to_source) raises
-    # JobSourceRegistryError if the bootstrap-stage lane diverges
-    # from the scheduled-job source for the same job_name. PR-C2
-    # introduces a separately-registered ``fundamentals_sync_bootstrap``
-    # invoker that CAN safely live on the dedicated lane without
-    # touching the steady-state job.
-    _spec("fundamentals_sync", 25, "db", "fundamentals_sync"),
+    # Stream A PR-C2 T1.2 (#1233): S25 dispatches the bootstrap-only
+    # ``fundamentals_sync_bootstrap`` invoker (NOT the steady-state
+    # ``fundamentals_sync`` job) on the dedicated ``db_fundamentals_raw``
+    # lane. The job_name divergence (stage_key=fundamentals_sync vs
+    # job_name=fundamentals_sync_bootstrap) is what lets PR-C2's lane
+    # reassignment coexist with the steady-state ScheduledJob's
+    # ``source="db"`` registration — see ``app/jobs/sources.py:
+    # _build_job_name_to_source`` Pass 1/2 separation. The cap
+    # requirement at ``_STAGE_REQUIRES_CAPS["fundamentals_sync"]``
+    # (4-cap tuple from PR-C1) still keys by stage_key and applies.
+    _spec("fundamentals_sync", 25, "db_fundamentals_raw", "fundamentals_sync_bootstrap"),
     # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap
     # drain (T8 deferred from #1171). S25 (post #1233 PR-1b: S26) advertises
     # class_id_mapping_ready; S26 (post #1233 PR-1b: S27, terminal)
