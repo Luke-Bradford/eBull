@@ -471,12 +471,26 @@ def assert_c1b_preconditions(
     bootstrap_run_id: int,
     bulk_dir: Any | None = None,
 ) -> None:
-    """C1.b: C1.a succeeded in current run AND wrote ≥ 1 row.
+    """C1.b: C1.a succeeded in current run AND populated the sidecar.
 
-    Without the rows-written check, a zero-row C1.a (e.g. universe
-    had no SEC-mapped instruments) would pass this gate and let
-    C1.b proceed to walk an empty CIK list. Codex review
-    BLOCKING for #1020.
+    Pre-Stream-A PR-B (#1233), this gated on ``rows_written > 0``
+    (i.e. ``filings_upserted``). That's a false-negative footgun
+    under retention drops: a run where every filing was older than
+    the 10y retention cap would record ``rows_written=0`` even
+    though the sidecar was correctly populated for every CIK, and
+    C1.b would refuse to walk despite having work to do (Codex 2
+    pre-push review MEDIUM).
+
+    Stream A PR-B sidecar telemetry now lives in
+    ``rows_skipped.ciks_sidecared`` (sec_bulk_orchestrator_jobs.py).
+    The gate now accepts EITHER:
+      * ``rows_written > 0`` (legacy — historical filings landed); OR
+      * ``rows_skipped->>'ciks_sidecared' > 0`` (sidecar populated even
+        when retention dropped all filings).
+
+    Original BLOCKING (Codex #1020) is preserved: a truly zero-work
+    run (universe has no SEC-mapped instruments → 0 filings AND
+    0 sidecar rows) still fails the gate.
     """
     if bulk_dir is not None:
         assert_not_fallback_mode(bulk_dir, bootstrap_run_id=bootstrap_run_id)
@@ -488,7 +502,10 @@ def assert_c1b_preconditions(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT rows_written FROM bootstrap_archive_results
+            SELECT
+                rows_written,
+                COALESCE((rows_skipped->>'ciks_sidecared')::INT, 0) AS ciks_sidecared
+            FROM bootstrap_archive_results
             WHERE bootstrap_run_id = %s
               AND stage_key = 'sec_submissions_ingest'
               AND archive_name = 'submissions.zip'
@@ -496,9 +513,17 @@ def assert_c1b_preconditions(
             (bootstrap_run_id,),
         )
         row = cur.fetchone()
-        if row is None or int(row[0]) <= 0:
+        if row is None:
             raise BootstrapPreconditionError(
-                f"PRECONDITION: sec_submissions_ingest wrote 0 rows in run_id={bootstrap_run_id}; C1.b cannot proceed."
+                "PRECONDITION: sec_submissions_ingest audit row missing for "
+                f"run_id={bootstrap_run_id}; C1.b cannot proceed."
+            )
+        rows_written = int(row[0] or 0)
+        ciks_sidecared = int(row[1] or 0)
+        if rows_written <= 0 and ciks_sidecared <= 0:
+            raise BootstrapPreconditionError(
+                f"PRECONDITION: sec_submissions_ingest wrote 0 filings AND 0 sidecar rows in "
+                f"run_id={bootstrap_run_id}; C1.b cannot proceed."
             )
 
 
