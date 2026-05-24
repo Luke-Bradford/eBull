@@ -372,7 +372,7 @@ WHERE s.category = '<cat>'
 
 `_CATEGORIES` is 7 entries (was 5 pre-PR12 — funds + esop added). PG ≥ 17 is asserted at lifespan startup (`app/system/postgres_version_guard.py`).
 
-Spec: `docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md`. Prevention-log entries: "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope clamp on BOTH the ON clause AND the DELETE clause" + "Diff-aware writers must NOT include update-timestamp columns in the diff predicate".
+Spec: `docs/_archive/2026-05/2026-05-21-pr12-ownership-current-writer-merge.md`. Prevention-log entries: "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope clamp on BOTH the ON clause AND the DELETE clause" + "Diff-aware writers must NOT include update-timestamp columns in the diff predicate".
 
 **Batched form for post-ingest hot-paths (#1233 PR-4, SHIPPED 2026-05-23)**:
 
@@ -464,7 +464,7 @@ cur.execute("""
 
 **Companyfacts is NOT on this pattern** — `sec_companyfacts_ingest.py` reads XBRL JSON not TSV and already uses multi-row INSERT chunked at `_UPSERT_PAGE_SIZE=1000` via `upsert_facts_for_instrument`. The per-CIK savepoint there is intentional (one savepoint per CIK-payload, NOT per-row); it stays.
 
-Spec: `docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v2.md` §7. Tests: `tests/test_pr3_copy_refactor.py` (throughput floor, ON_ERROR skip, commit-boundary preservation, idempotency, touched-instrument set).
+Spec: `docs/_archive/2026-05/superseded-bootstrap-etl-optimisation-v2.md` §7. Tests: `tests/test_pr3_copy_refactor.py` (throughput floor, ON_ERROR skip, commit-boundary preservation, idempotency, touched-instrument set).
 
 ### 2.11 Worker / job entry points
 
@@ -685,12 +685,12 @@ PR11 (#1233) spec authoring surfaced this concern; Codex 1b BLOCKING #2 caught a
 - `app/api/bootstrap.py` — `/system/bootstrap/status`, `/system/bootstrap/run`, `/system/bootstrap/mark-complete` (router prefix `/system/bootstrap`).
 
 **Specs**:
-- `docs/superpowers/specs/2026-05-03-ownership-tier0-and-cik-history-design.md`
-- `docs/superpowers/specs/2026-05-04-ownership-full-decomposition-design.md` (Phase 1 + 3)
-- `docs/superpowers/specs/2026-05-04-etl-coverage-model.md` (manifest + freshness + 3-tier polling)
-- `docs/superpowers/specs/2026-05-06-def14a-bene-table-extension-design.md` (#843 ESOP)
-- `docs/superpowers/specs/2026-05-07-first-install-bootstrap.md` (#993)
-- `docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md`
+- `docs/proposals/etl/ownership-tier0-cik-history.md`
+- `docs/proposals/etl/ownership-full-decomposition.md` (Phase 1 + 3)
+- `docs/specs/etl/coverage-model.md` (manifest + freshness + 3-tier polling)
+- `docs/proposals/etl/def14a-bene-table-extension.md` (#843 ESOP)
+- `docs/specs/bootstrap/first-install.md` (#993)
+- `docs/specs/bootstrap/orchestration.md`
 
 **Endpoint coverage matrix**: `.claude/skills/data-engineer/etl-endpoint-coverage.md` — per-endpoint wiring across bootstrap + standard refresh + freshness + watermark + rate-limit + parser. Read this when answering "are we covered for source X?" or "why isn't endpoint Y firing on cadence?". Last audit 2026-05-13.
 
@@ -701,7 +701,7 @@ PR11 (#1233) spec authoring surfaced this concern; Codex 1b BLOCKING #2 caught a
 
 > **State:** This section describes the **post-#1064 target state.** PR1 introduces source-level `JobLock` + `ParamMetadata` + `params_snapshot`; PR3 unifies the `bootstrap_state` gate across scheduled-fire and manual-trigger paths. Pre-PR1 reality: `JobLock` keys on `job_name`, scheduled jobs are zero-arg, and manual `/processes/{id}/trigger` bypasses prerequisites. The "Pre-PRn history" notes below mark each transition.
 >
-> Read before adding a new scheduled job, bootstrap stage, or operator-exposed parameter on an existing job. Cross-reference: [`docs/wiki/job-registry-audit.md`](../../../docs/wiki/job-registry-audit.md) for the per-job parameter surface; [`docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md`](../../../docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md) for the umbrella decisions.
+> Read before adding a new scheduled job, bootstrap stage, or operator-exposed parameter on an existing job. Cross-reference: [`docs/wiki/job-registry-audit.md`](../../../docs/wiki/job-registry-audit.md) for the per-job parameter surface; [`docs/proposals/ui/admin-control-hub-rewrite.md`](../../../docs/proposals/ui/admin-control-hub-rewrite.md) for the umbrella decisions.
 
 ### 6.5.1 Source-level concurrency (PR1 target state)
 
@@ -719,7 +719,30 @@ The reason this matters: SEC's 10 req/s is per-IP, not per-job. Two SEC jobs run
 
 Within-source same-`job_name` semantics: triggering `sec_def14a_ingest` twice with different `params` **still serialises** under the source lock — the second invocation waits for the first to release. Per-param-set lock identity (one lock per `(job_name, params_hash)`) is deferred to v2.
 
-**Bootstrap dispatcher concurrency vs JobLock — separate mechanisms.** The bootstrap orchestrator's `_LANE_MAX_CONCURRENCY` map ([`bootstrap_orchestrator.py:98`](../../../app/services/bootstrap_orchestrator.py#L98)) historically allowed up to 5 parallel `db`-lane stages WITHIN a single bootstrap run. That is a dispatcher knob, not a `JobLock` semantic. Under PR1 source-level locking, same-source jobs serialise across the entire process — the dispatcher's lane-concurrency map is either retired or reinterpreted as a "max queued before the lock kicks in" hint. The locked decision is unambiguous: same-source = serialised at the lock; the lane-concurrency map does not override this.
+**Bootstrap dispatcher concurrency vs JobLock — separate mechanisms.** The bootstrap orchestrator's `_LANE_MAX_CONCURRENCY` map ([`bootstrap_orchestrator.py:237`](../../../app/services/bootstrap_orchestrator.py#L237)) historically allowed up to 5 parallel `db`-lane stages WITHIN a single bootstrap run. That is a dispatcher knob, not a `JobLock` semantic. Under PR1 source-level locking, same-source jobs serialise across the entire process — the dispatcher's lane-concurrency map is either retired or reinterpreted as a "max queued before the lock kicks in" hint. The locked decision is unambiguous: same-source = serialised at the lock; the lane-concurrency map does not override this.
+
+**Bootstrap-lane family split (#1141, post-#1136 Task E).** The pre-#1141 `db` lane was a single-stage chokepoint that added ~4 h to first-install wall-clock by serialising 5 unrelated db-bound stages (5 stages × 283 min serial vs ~110 min cross-lane parallel, measured `bootstrap_run_id=3`). The family split (`bootstrap_orchestrator.py:237-270`) carves `db` into **`db_filings` / `db_fundamentals_raw` / `db_ownership_inst` / `db_ownership_insider` / `db_ownership_funds`** — each cap=1, but cross-family parallel. `db` stays as the catch-all for Phase E derivations + scheduler `db`-source jobs. `openfigi` is its own cap=1 lane (the per-instance `_RateLimiter` in `openfigi_resolver.py` is the budget gate; cross-process isolation = per-worker, NOT shared — multi-worker deploy = N separate budgets). `finra` is a JobLock lane only (`app/jobs/sources.py:74`); the bootstrap dispatcher does not run FINRA stages so the lane is absent from `_LANE_MAX_CONCURRENCY`. When ADDING a new stage that writes to a different table family, add a new `db_<family>` lane rather than reusing `db` — the family split is the load-bearing parallelism mechanism.
+
+**Caller-wraps-transaction discipline (#915 FINRA pattern + #1208 Phase 3 retention).** Service-layer ingesters MUST NOT enter their own `with conn.transaction():` block. The orchestrator owns the transaction boundary — see [`bootstrap_orchestrator.py:2172`](../../../app/services/bootstrap_orchestrator.py#L2172): *"The caller must commit the connection's transaction; the helper does not start its own `with conn.transaction():` because the orchestrator's prelude lives outside any open transaction."* Two coexisting patterns:
+
+| Pattern | Owner of `with conn.transaction()` | Owner of `cur.copy(...)` | Example |
+|---|---|---|---|
+| **Per-archive bulk** (§2.10b) | bootstrap_orchestrator opens fresh conn per archive; per-archive transaction wraps the COPY drain | service `sec_13f_dataset_ingest`, `sec_nport_dataset_ingest`, `sec_insider_dataset_ingest` writes the COPY | `_phase_bulk_ingest` in `bootstrap_orchestrator.py` |
+| **Caller-wraps (G7 / #915)** | `ScheduledJob` wrapper opens conn + transaction | service `finra_short_interest_ingest`, `finra_regsho_ingest` runs raw INSERTs inside the supplied tx | `finra_short_interest_refresh.py` |
+
+`finra` adopted G7 because the fetch + write must be ONE tx (no half-applied bimonthly + half-applied row-count footer validation). The per-archive bulk pattern would split fetch + drain across two transactions which breaks the validation invariant. **Rule:** any new service-level ingester chooses pattern by asking "is fetch + write atomic per logical unit?". If yes (FINRA), G7. If no (multi-million-row SEC bulk archive), per-archive bulk. Never both.
+
+**Multi-writer sink registry (target state — `docs/specs/etl/sinks/<table>.md`).** Several sink tables have ≥ 2 writers and conflict-key declarations drift between callers if managed per-spec:
+
+| Sink table | Writers | Conflict key |
+|---|---|---|
+| `filing_events` | `sec_submissions_files_walk`, `sec_atom_fast_lane`, `sec_daily_index_reconcile`, `sec_per_cik_poll` | `uq_filing_events_provider_unique (provider, provider_filing_id)` |
+| `sec_filing_manifest` | every parser + every discovery layer (~12 writers) | PK `accession_number` |
+| `unresolved_13f_cusips` | `sec_13f_dataset_ingest`, `sec_nport_dataset_ingest`, `institutional_holdings._record_unresolved_cusip` | partial UNIQUE legacy/bulk split (sql/164) |
+| `external_identifiers` (provider='openfigi') | `cusip_resolver.sweep_unresolved_cusips_via_openfigi`, `cusip_universe_backfill` | partial UNIQUE post-sql/143 (split by `provider='sec' AND identifier_type='cik'`) |
+| `ownership_*_observations` | per-source `record_*_observation` + `sec_*_dataset_ingest` bulk COPY drain | per-table identity tuple (§1.2) |
+
+When ADDING a new writer to any sink in this list, sync the conflict key + retention horizon + `parser_version` semantics with every existing writer. The lint guards at `scripts/check_*.sh` enforce the load-bearing pieces (PR12 writer pattern, COPY pattern, business-summary latest-only) but not cross-writer drift. The sink-registry doc — when it lands — is the authoritative cross-writer source.
 
 **Dispatcher mental model (PR-2 #1233 — `as_completed` poll loop).** [`_phase_batched_dispatch`](../../../app/services/bootstrap_orchestrator.py) does NOT wait for a "ready batch" to drain before re-evaluating the runnable set. It uses a `wait(in_flight, return_when=FIRST_COMPLETED, timeout=1.0s)` poll:
 
@@ -851,7 +874,7 @@ The UPDATE is guarded by `AND status = 'running'` so a stage that transitioned t
 * Cannot detect the #1184 re-entrancy edge case where the outer-thread holds the lock but the stage-thread itself crashed — the outer holder will release on its own crash, and the next reaper pass after grace will reset.
 * A stage whose `job_name` is not in the `app.jobs.sources.JOB_NAME_TO_SOURCE` registry is LEFT ALONE (logged as a warning). The reaper must never reset a stage whose lock-key shape it cannot derive — doing so would silently reset a stage whose worker IS alive (registry gap is an operator mistake, not a crash signal).
 
-Acceptance criterion (`docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v3.md` §15): "process crash mid-stage: reaper resets to pending within 6 min (5 min grace + 1 min poll)".
+Acceptance criterion (`docs/proposals/etl/bootstrap-optimisation.md` §15): "process crash mid-stage: reaper resets to pending within 6 min (5 min grace + 1 min poll)".
 
 ### 6.5.10 Cap-ordering for concurrent writers (#1233 PR-1292)
 
@@ -922,6 +945,56 @@ Rate limits (verified empirically, fixtures at `tests/fixtures/openfigi/`):
 429 response body is **plain text**, not JSON — branch on status BEFORE calling `.json()`.
 
 Key loaded via `Settings.openfigi_api_key` (env or `.env` file). `OpenFigiResolver.from_env()` is the canonical entrypoint. See `app/services/openfigi_resolver.py` + `.claude/skills/data-sources/openfigi.md`.
+
+### 6.5.14 Bootstrap stage declaration — `fetch_strategy` discipline
+
+Every bootstrap stage MUST declare a `fetch_strategy` from a closed-set enum. The enum is the operator's contract for "what does this stage TOUCH?" + the dispatcher's load-bearing input for forbidden-HTTP linting in bootstrap mode.
+
+Allowed values:
+
+| Value | Meaning | Bootstrap-mode permission |
+|---|---|---|
+| `bulk_archive` | Fetch fixed-URL SEC bulk archive (zip/tsv). One HTTP per archive | YES |
+| `per_resource_http` | Per-CIK or per-accession HTTP fetch | YES only if no bulk archive exists for the resource |
+| `batched_http` | Multi-resource POST (OpenFIGI `/v3/mapping`, eToro batched lookups). N requests, M resources, N << M | YES if rate-budget bounded |
+| `atom_feed` | RSS/Atom polling for discovery. Steady-state only | NO in bootstrap (use bulk_archive + daily-index seed) |
+| `push` | Server-pushed connection (eToro WebSocket) | NO in bootstrap (steady-state only) |
+| `cache` | Read from a producer stage's persisted artifact (e.g. S14 consuming S8's `submissions.zip` files[] sidecar) | YES |
+| `derive` | Pure SQL — no HTTP at all (audit sweeps, write-throughs, refresh_*_current calls) | YES |
+
+The bootstrap-mode rule (§6.5.15 below) gates stages whose `fetch_strategy ∈ {atom_feed, push}` from running during a bootstrap; `per_resource_http` is permitted only when no `bulk_archive` exists for the same source. The dispatcher logs `forbidden_http_in_bootstrap` when a bootstrap stage's runtime issues HTTP requests that exceed its declared `fetch_strategy` budget — see Codex finding #7 in the v3 committee review for the failure class this prevents.
+
+When ADDING a new bootstrap stage, set `fetch_strategy` on its `StageSpec` (defaulting to a non-existent value MUST fail-closed in the catalogue-invariant test). The full StageSpec extension is documented in the discoverable `etl-stage-declaration` skill.
+
+### 6.5.15 Bootstrap-mode = derivation + idempotent-sink only
+
+**Rule:** bootstrap-mode entrypoints (any stage in `_BOOTSTRAP_STAGE_SPECS` running during a `bootstrap_state.status ∈ {pending,running,partial_error}` window) MUST be derivation-only. They draw from already-persisted SEC archives + DB state; they do NOT issue per-CIK / per-accession HTTP. The carve-outs are explicit and small:
+
+| Carve-out | Why | Implementation |
+|---|---|---|
+| **S6 `cik_refresh`** | CIK directory has no bulk archive | `per_resource_http` against `data.sec.gov/submissions/CIK*.json` for tradable instruments only |
+| **S16 institutional drain** | 13F filer registry has no bulk archive | `per_resource_http` bounded by `institutional_filers.last_13f_hr_at` cohort (#1010, post-#1222) |
+| **S27 N-CSR** | NCEN / NCSR have no bulk archive | `per_resource_http` against `data.sec.gov/submissions/CIK*.json` for RIC trust CIKs |
+| **S13 OpenFIGI sweep** | CUSIP→ticker reverse-lookup has no SEC equivalent | `batched_http` against `api.openfigi.com`, own `openfigi` lane |
+
+Every other bootstrap stage MUST consume already-fetched bulk archives (`bulk_archive`), already-derived DB rows (`cache` / `derive`), or skip. The reason this rule is load-bearing: pre-#1233 runs measured each S25 fundamentals_sync at 101 min because Phase 1 issued 5,105 sequential per-CIK XBRL fetches; the bulk archive (`companyfacts.zip`, S9) had already loaded the same data in 15 min. The HTTP path was redundant AND quadratic-in-CIK-count.
+
+**Coverage-floor pattern** (#1233 PR-1b): when a bootstrap-mode entrypoint DERIVES from a multi-source pool (S25 fundamentals from `financial_facts_raw` + `financial_periods`), validate per-CIK coverage BEFORE deriving. The PR-1b sweep stamps `bootstrap_runs.coverage_floor_met` with `coverage_ratio >= 0.80` post-S13; if FALSE, the derivation is allowed to complete (informational only) but the operator sees an amber chip on the admin panel. The pattern generalises: every bootstrap-mode entrypoint that reads from a sparse table SHOULD record a coverage telemetry signal so a Pyrrhic 25-min Run #8 (passes wall-clock, fails completeness) is immediately visible.
+
+**Audit-during-bootstrap trap** (Codex v3 finding #8, CRITICAL): `audit_all_instruments` ([`coverage.py:1018`](../../../app/services/coverage.py#L1018)) classifies from `filing_events` aggregates. If it runs BEFORE S14/S15 populate filing history, it returns false `insufficient` verdicts that trigger Phase 2 backfills (`scheduler.py:3374-3399`), reintroducing the per-CIK HTTP the bootstrap mode was supposed to prevent. **Rule:** bootstrap-mode `fundamentals_sync_bootstrap` MUST call `audit_all_instruments` only AFTER S14 (sec_submissions_files_walk) AND S15 (filings_history_seed) have terminalised — gate via cap requirement, not stage_order.
+
+### 6.5.16 Hallucinated-API class of defect (post-v3 committee, 2026-05-23)
+
+The v3 spec round produced 4 invented APIs (`_STAGE_CATALOGUE_RENAME_MAP`, `master_key.is_bootstrapped()`, `coverage_audit()`, `financial_facts_raw.cik` column). Every one would have failed at first compile or first runtime. Class is structural: reviewer cited symbols not grepped.
+
+**Defence:** when writing a spec that names a function / column / constant / module path, EVERY identifier MUST be `grep`-verified pre-Codex. The before-spec gate in §0.0 is the load-bearing check. Codex sees what the reviewer pre-checked; it does NOT re-grep every identifier. If the reviewer didn't, Codex misses it.
+
+| Hallucinated reference | Real API |
+|---|---|
+| `_STAGE_CATALOGUE_RENAME_MAP` | Mechanism is automatic: `_BOOTSTRAP_STAGE_SPECS` lookup by `stage_key` ([`bootstrap_orchestrator.py:2586`](../../../app/services/bootstrap_orchestrator.py#L2586)) |
+| `master_key.is_bootstrapped()` | `bootstrap(conn).state ∈ {"clean_install", "normal"}` — for "operator setup done?" use `SELECT 1 FROM operators` (`operators` row is the operator-setup landmark) |
+| `coverage_audit()` from `app.services.coverage` | [`audit_all_instruments(conn)`](../../../app/services/coverage.py#L1018) |
+| `SELECT COUNT(DISTINCT cik) FROM financial_facts_raw` | Table is keyed by `instrument_id`. Use `SELECT COUNT(DISTINCT instrument_id) FROM financial_facts_raw` or join through `external_identifiers WHERE provider='sec' AND identifier_type='cik'` |
 
 ## 6. Known live caveats / tech debt
 

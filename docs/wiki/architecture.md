@@ -1,7 +1,7 @@
 # Architecture
 
 High-level operator-facing overview. For implementation detail, see
-the spec docs at `docs/superpowers/specs/`.
+the spec docs at `docs/_archive/`.
 
 ## Two processes, one database
 
@@ -109,7 +109,7 @@ Every executable trade goes through a guard layer that re-checks
 critical constraints against current state. The guard has its own
 table (`decision_audit`) that records every invocation with per-rule
 results — see the spec at
-`docs/superpowers/specs/2026-04-18-cascade-advisory-lock-design.md`.
+`docs/_archive/2026-04-18-cascade-advisory-lock-design.md`.
 
 Guard rules differ by action:
 - `BUY` / `ADD`: kill switch, config flags, fresh thesis, Tier 1

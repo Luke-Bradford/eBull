@@ -326,7 +326,7 @@ The product-test that lives on independent of the pause: every new
 ticket should still answer yes to *"Would the operator feel this
 moves the product closer to 'I can manage my fund from this
 screen'?"* — else rewrite or drop. Plan + backlog still at
-[`docs/superpowers/plans/2026-04-18-product-visibility-pivot.md`](superpowers/plans/2026-04-18-product-visibility-pivot.md).
+[`docs/_archive/2026-04-18-product-visibility-pivot.md`](superpowers/plans/2026-04-18-product-visibility-pivot.md).
 
 ---
 
@@ -386,7 +386,7 @@ pool with raw `ConnectionPool(...)` — use `open_pool`.
   (in-tx late-cancel probe); FE `CancelConfirmDialog` (cooperative
   default; terminate is a controlled disclosure, not a primary
   affordance).
-- **Spec:** `docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md`
+- **Spec:** `docs/proposals/ui/admin-control-hub-rewrite.md`
   §"Cancel semantics — cooperative" + Codex round 1 amendment B4 +
   round 2 R2-W2.
 
@@ -444,7 +444,7 @@ below for the operational-duplicate redirect semantics.
   fundamentals / submissions / insider data — but the binding is stable
   rather than flapping (strict improvement).
 
-**Spec:** `docs/superpowers/specs/2026-05-10-share-class-cik-uniqueness.md`.
+**Spec:** `docs/proposals/etl/share-class-cik-uniqueness.md`.
 
 ## Canonical-instrument redirect (#819, settled 2026-05-11)
 

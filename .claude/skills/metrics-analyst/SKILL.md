@@ -151,7 +151,7 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 - **Endpoint**: same `/ownership-rollup`, slice `category="funds"`.
 - **Chart**: `OwnershipPanel.tsx` renders memo overlay separately (filtered out of pie math at `:1366-1367`).
 - **Cadence**: `sec_n_port_ingest` monthly day 22 03:00 UTC. Filer directory walker `sec_nport_filer_directory_sync` seeds CIK-trust set (#963).
-- **Caveats**: per `docs/superpowers/specs/2026-05-04-ownership-full-decomposition-design.md`, funds are strict subset of institutional pie wedge and must NEVER add to it. Enforced via `denominator_basis` checks in residual/concentration sums (`:927`, `:948`, `:1366-1367`). PR #962 cutover specifically.
+- **Caveats**: per `docs/proposals/etl/ownership-full-decomposition.md`, funds are strict subset of institutional pie wedge and must NEVER add to it. Enforced via `denominator_basis` checks in residual/concentration sums (`:927`, `:948`, `:1366-1367`). PR #962 cutover specifically.
 - **Validation**: cross-check Vanguard 500's AAPL position separately against Vanguard 13F-HR aggregate — should NOT sum.
 - **denominator_basis**: `institution_subset`.
 
@@ -514,12 +514,12 @@ After backfill, hit the relevant rollup endpoint and confirm the figure renders 
 
 ## 10. Specs to consult
 
-- `docs/superpowers/specs/2026-05-03-ownership-tier0-and-cik-history-design.md`
-- `docs/superpowers/specs/2026-05-04-ownership-full-decomposition-design.md` (Phase 1 + Phase 3)
-- `docs/superpowers/specs/2026-05-04-etl-coverage-model.md`
-- `docs/superpowers/specs/2026-05-06-def14a-bene-table-extension-design.md` (#843 ESOP)
-- `docs/superpowers/specs/2026-05-07-first-install-bootstrap.md` (#993)
-- `docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md`
+- `docs/proposals/etl/ownership-tier0-cik-history.md`
+- `docs/proposals/etl/ownership-full-decomposition.md` (Phase 1 + Phase 3)
+- `docs/specs/etl/coverage-model.md`
+- `docs/proposals/etl/def14a-bene-table-extension.md` (#843 ESOP)
+- `docs/specs/bootstrap/first-install.md` (#993)
+- `docs/specs/bootstrap/orchestration.md`
 
 `docs/settled-decisions.md` — every numbered decision constraining a metric.
 

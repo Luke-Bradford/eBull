@@ -180,6 +180,15 @@ A CUSIP can map to several FIGI rows that share `compositeFIGI` (e.g. one row pe
 
 OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. Operator action if no `US`-row exists: the sweep records `name` + `cusip` to `unresolved_13f_cusips` with a follow-up `partial_data_reason='openfigi_no_us_listing'`.
 
+### 7.6 Per-instance limiter — single-process only
+
+`_RateLimiter` is **per-instance**, NOT module-global ([`openfigi_resolver.py:148-176`](../../../app/services/openfigi_resolver.py#L148-L176); contrast with sec-edgar's `_PROCESS_RATE_LIMIT_CLOCK` module-global pattern). Multiple `OpenFigiResolver` instances in the same process do NOT coordinate budget. Two consequences:
+
+- **Single-process safety:** the bootstrap-orchestrator `openfigi` lane is cap=1 (`.claude/skills/data-engineer/SKILL.md` §6.5.1), so only one `cusip_resolver_post_bulk_sweep` runs at a time. Combined with "instantiate once per sweep" ([`openfigi_resolver.py:258`](../../../app/services/openfigi_resolver.py#L258)), the lane cap is the effective budget gate within a process.
+- **Cross-process / multi-worker:** N workers = N independent budgets = total budget × N at the OpenFIGI account level. Either (a) keep a single worker for OpenFIGI work, or (b) move the budget gate to Redis / Postgres before scaling out. eBull's current topology is single-worker so the per-instance pattern is correct; document any future scale-out as breaking this invariant.
+
+When ADDING a new caller (e.g. a future on-demand resolver from the API layer), reuse a shared module-global `OpenFigiResolver` instance per process — do NOT instantiate per-request. The token bucket starts empty on construction and would silently burn the unkeyed 25/min budget after ~25 requests.
+
 ## 8. Operator runbook
 
 ### 8.1 Refresh the recorded fixtures
@@ -208,6 +217,6 @@ Sign up at <https://www.openfigi.com/api> and provision an API key. Set `OPENFIG
 ## 9. Cross-references
 
 - `docs/settled-decisions.md` → "OpenFIGI as approved external CUSIP-resolver fallback (2026-05-22)" — the SD-1 entry that gates this integration.
-- `docs/superpowers/specs/2026-05-22-bootstrap-etl-optimisation-v3.md` §2 — the PR-0 introduction context; §5 — the PR-1b resolver shape.
+- `docs/proposals/etl/bootstrap-optimisation.md` §2 — the PR-0 introduction context; §5 — the PR-1b resolver shape.
 - `.claude/skills/data-sources/sec-edgar.md` §5 (CUSIP → CIK bridge) — the upstream bridge OpenFIGI complements when 13F Official List name-fuzzy fails.
 - `tests/fixtures/openfigi/README.md` — the recorded fixtures with full request/response payloads.

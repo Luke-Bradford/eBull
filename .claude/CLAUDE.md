@@ -117,7 +117,7 @@ Follow this order unless the user explicitly says otherwise:
 Codex runs at exactly three points in the workflow. Non-negotiable.
 
 1. **Before writing code** — two Codex passes:
-   - **After spec is written, before user final-approves:** `codex.cmd exec "Review this spec for <feature>. Path: docs/superpowers/specs/<...>.md. Focus on correctness gaps, invariant violations, missing edge cases. Reply terse."` Fix issues before presenting spec to user for sign-off.
+   - **After spec is written, before user final-approves:** `codex exec "Review this spec for <feature>. Path: docs/specs/<area>/<topic>.md (live spec) OR docs/proposals/<area>/<topic>.md (unshipped). Focus on correctness gaps, invariant violations, missing edge cases. Reply terse."` Fix issues before presenting spec to user for sign-off.
    - **After implementation plan is written, before first task dispatch:** same invocation against the plan doc. Catches plan-shape bugs (bad task decomposition, missing dependency, wrong contract) before any subagent starts coding.
 2. **Before first push** — after self-review + local gates pass, run `codex.cmd exec review` on the branch. Fix anything real before pushing.
 3. **Before merging on a rebuttal-only round** — if the latest review's findings are all rebuttals (no code changes pending), run Codex to confirm the rebuttals are sound. Without this step, rebuttals are unverified and may hide real bugs the review bot *did* catch in disguise.

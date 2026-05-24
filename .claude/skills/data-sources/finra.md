@@ -58,6 +58,17 @@ Empirically verified 2026-05-18 in live-smoke against `cdn.finra.org/equity/regs
 
 Provider `FinraRegShoProvider.fetch_regsho_daily_file` maps **both 403 + 404 → `FinraNotFound`** so the cron can safely run before EOD publication. The bimonthly provider only maps 404 (no observed 403 behaviour). Future FINRA endpoints should default to 403+404 = not-found UNLESS empirically verified otherwise — FINRA appears to use 403 as a "missing object" idiom on the RegSHO sub-host.
 
+**Cross-source 403 idiom:** SEC's `efts.sec.gov` exhibits a similar "403 ≠ permanent" pattern on weekends — see `.claude/skills/data-sources/sec-edgar.md` §4 "Multi-host shared clock" for the SEC analogue. **Rule for new sources:** never default-treat 403 as "permanently unavailable" without an empirical probe against a known-good vs known-not-yet-published case for that specific CDN/host. The cost of mis-classifying transient 403 as permanent is silent gap; the cost of treating permanent 403 as transient is wasted budget. Probe both directions.
+
+### 2.9 Encoding contract per file
+
+| File | Encoding | Validation site |
+| --- | --- | --- |
+| Bimonthly `shrt{YYYYMMDD}.csv` (pipe-delimited) | UTF-8 | `finra_short_interest_ingest.py:189` (`raw_bytes.decode("utf-8")`) |
+| RegSHO daily `{PREFIX}shvol{YYYYMMDD}.txt` (pipe-delimited) | UTF-8 | `finra_regsho_ingest.py:112` (`raw_bytes.decode("utf-8")`) |
+
+Both files are pure ASCII in practice (ticker symbols + integers + dates + decimals — no diacritics or non-Latin chars). UTF-8 decode is a defensive contract; any decode error on a 200-response body indicates fixture corruption or a FINRA encoding-change incident — bubble to `HeaderCorruptionError`, do NOT silent-replace with `errors='replace'`. SEC's `getcurrent` Atom feed uses `ISO-8859-1` for filer names with diacritics; FINRA's universe is US-only and has no analogue.
+
 ### 2.4 Symbol form — alphanumeric only, NO separators
 
 FINRA strips dot / hyphen / underscore from share-class siblings + preferreds:
