@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services.sec_manifest import FORM_MAPPING_EXEMPT
 from scripts._etl_source_inventory import (
     AD_HOC_SOURCES as _AD_HOC_SOURCES,
 )
@@ -112,22 +113,20 @@ def test_manifest_source_has_registered_parser(source: str) -> None:
     )
 
 
-# Sources intentionally absent from ``_FORM_TO_SOURCE``:
-#  - FINRA: caller-owned ScheduledJob path, not SEC form discovery.
-#  - sec_xbrl_facts: bulk Companyfacts JSON ingest (no Atom/daily-index
-#    discovery); synth no-op manifest rows written by
-#    ``sec_companyfacts_ingest`` directly. See docs/etl/sources/sec_xbrl_facts.md §6.
-_FORM_MAPPING_EXEMPT: frozenset[str] = frozenset({"finra_short_interest", "finra_regsho_daily", "sec_xbrl_facts"})
+# `FORM_MAPPING_EXEMPT` lives at app/services/sec_manifest.py
+# (production is the authoritative source post Architect IMP-2 fold).
+# Imported at top of file.
 
 
 @pytest.mark.parametrize("source", _MANIFEST_SOURCES)
 def test_manifest_source_form_mapping_present(source: str) -> None:
-    """Every ManifestSource (except the exempt list above) MUST appear
-    in ``_FORM_TO_SOURCE`` so the fast-lane Atom feed + daily-index
+    """Every ManifestSource (except the exempt list) MUST appear in
+    ``_FORM_TO_SOURCE`` so the fast-lane Atom feed + daily-index
     reconcile can route filings to the right manifest source.
     Layer 1/2/3 + Layer 4 all consult this dispatch table.
+    Exempt list lives at ``app.services.sec_manifest.FORM_MAPPING_EXEMPT``.
     """
-    if source in _FORM_MAPPING_EXEMPT:
+    if source in FORM_MAPPING_EXEMPT:
         pytest.skip(f"'{source}' is exempt — not discovered via SEC form type")
     from app.services.sec_manifest import _FORM_TO_SOURCE
 

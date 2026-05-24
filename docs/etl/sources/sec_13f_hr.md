@@ -17,7 +17,7 @@ Per-(subject, source) row in `data_freshness_index` keyed on `subject_type='inst
 - Defense-in-depth at `sec_13f_hr.py:141-170`: if `row.cik` is a `KNOWN_FILING_AGENT_CIKS` member, tombstone immediately (discovery bug surfaces loudly instead of every accession 404-tombstoning).
 
 ## 4. Bootstrap path
-Stage 22 `sec_13f_recent_sweep` (`app/services/bootstrap_orchestrator.py:1126-1145`). Lane `sec_rate` (10 req/s shared). Dispatches `JOB_SEC_13F_QUARTERLY_SWEEP` (`sec_13f_quarterly_sweep`, `app/workers/scheduler.py:4490`) with two dynamic-resolved params:
+Stage 22 `sec_13f_recent_sweep` (`app/services/bootstrap_orchestrator.py:1126-1145`). Lane `sec_rate` (10 req/s shared). Dispatches `JOB_SEC_13F_QUARTERLY_SWEEP` (`sec_13f_quarterly_sweep`, `app/workers/scheduler.py:4490`) with two dynamic-resolved params + one static audit label:
 - `min_period_of_report=_PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF` (today − 380d at UTC midnight)
 - `min_last_13f_hr_at=_PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF` (today − 380d, cohort bound)
 - `source_label="sec_edgar_13f_directory_bootstrap"` (audit-only).

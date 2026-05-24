@@ -121,6 +121,19 @@ ManifestSource = Literal[
     "finra_regsho_daily",
 ]
 
+# Sources intentionally absent from ``_FORM_TO_SOURCE``:
+#  - FINRA sources: caller-owned ScheduledJob path, not SEC form discovery.
+#  - sec_xbrl_facts: bulk Companyfacts JSON ingest (no Atom/daily-index
+#    discovery); synth no-op manifest rows written by
+#    ``sec_companyfacts_ingest`` directly. See
+#    ``docs/etl/sources/sec_xbrl_facts.md`` §6.
+#
+# Final-committee Architect IMP-2 fold (2026-05-24): moved here from
+# ``tests/smoke/test_etl_source_to_sink.py`` so production is the
+# authoritative source of "intentionally not form-discoverable" sources.
+# Smoke test imports this constant; lint script can grep it.
+FORM_MAPPING_EXEMPT: frozenset[str] = frozenset({"finra_short_interest", "finra_regsho_daily", "sec_xbrl_facts"})
+
 ManifestSubjectType = Literal[
     "issuer",
     "institutional_filer",

@@ -148,17 +148,17 @@ _FILINGS_HISTORY_KEEP_FORMS_TUPLE: tuple[str, ...] = tuple(sorted(SEC_INGEST_KEE
 # Sentinel for params values that depend on dispatch-time state
 # (e.g. ``date.today()``). Module-load evaluation would freeze the
 # value into ``_BOOTSTRAP_STAGE_SPECS`` for the lifetime of the jobs
-# process; a long-lived process would dispatch stage 21 with a stale
+# process; a long-lived process would dispatch stage 22 with a stale
 # cutoff. ``_resolve_dynamic_params`` materialises the absolute value
 # at dispatch time. The sentinel string is namespaced so it never
 # collides with a legitimate operator value.
 _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF = "<dynamic:bootstrap_13f_cutoff>"
 # #1010 — sibling sentinel for the HR-recency cohort cutoff on stage
-# 21. Filters ``institutional_filers.last_13f_hr_at >= cutoff`` so the
+# 22. Filters ``institutional_filers.last_13f_hr_at >= cutoff`` so the
 # sweep iterates only currently-active HR filers.
 _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF = "<dynamic:bootstrap_13f_hr_cutoff>"
 # #1233 PR7 (mirror of #1010 for N-PORT) — recency cohort cutoff for
-# stage 22 sec_n_port_ingest. Filters
+# stage 23 sec_n_port_ingest. Filters
 # ``sec_nport_filer_directory.last_seen_filed_at >= cutoff`` so the
 # bootstrap sweep iterates only currently-active fund-trust filers.
 # Daily / Admin / manual paths dispatch with empty params → full
@@ -1131,12 +1131,12 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         # ``min_period_of_report`` resolves to ``today() - 380d`` at
         # dispatch time (see ``_resolve_dynamic_params``). Hardcoding
         # ``date.today()`` here would freeze the cutoff at module-load,
-        # so a long-lived jobs process would dispatch stage 21 with a
+        # so a long-lived jobs process would dispatch stage 22 with a
         # stale floor. The sentinel keeps the StageSpec data-only.
         # ``min_last_13f_hr_at`` (#1010) bounds the cohort to filers
         # whose most recent 13F-HR / HR/A is within the same 380-day
         # window — collapses 11,205 → ≈ 3-5k active filers and drops
-        # bootstrap stage 21 wall-clock from ~8h to ≤3h.
+        # bootstrap stage 22 wall-clock from ~8h to ≤3h.
         params={
             "min_period_of_report": _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF,
             "min_last_13f_hr_at": _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF,
@@ -1149,10 +1149,10 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         "sec_rate",
         "sec_n_port_ingest",
         # PR7 #1233 §4.6 — ``min_last_seen_filed_at`` (mirror of #1010
-        # ``min_last_13f_hr_at`` for stage 21) bounds the cohort to
+        # ``min_last_13f_hr_at`` for stage 22) bounds the cohort to
         # trust CIKs whose most recent NPORT-P / NPORT-P/A filed_at is
         # within the 380-day window. Collapses ~5k registered trusts
-        # to ~3-4k actively-filing trusts and drops bootstrap stage 22
+        # to ~3-4k actively-filing trusts and drops bootstrap stage 23
         # wall-clock proportionally. Daily / Admin "Run now" paths
         # dispatch ``sec_n_port_ingest`` with empty params → full
         # cohort (safety-net for previously-inactive trusts re-
@@ -1379,7 +1379,7 @@ def _run_one_stage(
     # via ``consume_params_snapshot()`` to populate
     # ``job_runs.params_snapshot``. Bootstrap dispatch bypasses
     # ``run_with_prelude``'s contextvar set, so we plumb the snapshot
-    # here. Without this, stage 21's audit row would persist ``{}``
+    # here. Without this, stage 22's audit row would persist ``{}``
     # even though the body executed with a real ``min_period_of_report``
     # cutoff + ``source_label`` override.
     from app.jobs.runtime import _params_snapshot_var
@@ -2557,7 +2557,7 @@ def run_bootstrap_orchestrator() -> None:
     # #1136 Phase A.3 dispatch hardening — index the catalogue by
     # ``stage_key`` so the dispatcher resolves ``job_name`` from the
     # spec rather than the DB row's persisted ``job_name``. Removes
-    # the stale-name failure mode observed in run_id=3 stage 21
+    # the stale-name failure mode observed in run_id=3 stage 22
     # (where the DB row carried ``bootstrap_sec_13f_recent_sweep``
     # after PR1c #1064 renamed the canonical to
     # ``JOB_SEC_13F_QUARTERLY_SWEEP``). The DB column stays as the
