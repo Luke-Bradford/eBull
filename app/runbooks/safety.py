@@ -95,8 +95,7 @@ def assert_dev_db_name_in_url() -> None:
     name = _parse_db_name_from_url(url)
     if not name:
         raise RunbookRefused(
-            f"DATABASE_URL has no database name in path: {url!r}. "
-            "Expected postgres://USER:PASS@HOST:PORT/DBNAME shape."
+            f"DATABASE_URL has no database name in path: {url!r}. Expected postgres://USER:PASS@HOST:PORT/DBNAME shape."
         )
     allowlist = _dev_db_allowlist()
     if name not in allowlist:
@@ -252,10 +251,7 @@ def assert_no_multixact_wraparound(conn: psycopg.Connection[object]) -> None:
     freeze_max_age = int(raw[0])  # type: ignore[arg-type]
     threshold = int(freeze_max_age * _MULTIXACT_FREEZE_RATIO)
 
-    cur = conn.execute(
-        "SELECT mxid_age(datminmxid)::BIGINT FROM pg_database "
-        "WHERE datname = current_database()"
-    )
+    cur = conn.execute("SELECT mxid_age(datminmxid)::BIGINT FROM pg_database WHERE datname = current_database()")
     db_row = cur.fetchone()
     if db_row is not None:
         db_age = int(db_row[0])  # type: ignore[arg-type]
