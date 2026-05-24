@@ -45,6 +45,15 @@ jobs:
         # are NOT in scope.
         run: bash scripts/check_caller_owned_tx.sh
 
+      - name: ETL source-to-sink spec docs
+        # Every source in ManifestSource Literal + each ad-hoc + bulk-
+        # reference source MUST have docs/etl/sources/<source>.md with
+        # the 13 required sections. Pinned by docs/etl/sources/README.md
+        # + .claude/skills/data-engineer/etl-source-to-sink-template.md.
+        # Same script that runs in the pre-push hook — duplicated here
+        # so a push that bypasses the local hook still trips at CI.
+        run: bash scripts/check_etl_source_docs.sh
+
       - name: Pre-push hook is executable
         # Hook is committed at .githooks/pre-push and wired via
         # ``git config core.hooksPath .githooks``. On Windows, a
