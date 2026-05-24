@@ -193,6 +193,15 @@ bash scripts/check_archive_url_agent_guard.sh
 echo "==> Pre-push gate: caller-owned-tx"
 bash scripts/check_caller_owned_tx.sh
 
+# Per-source ETL spec docs gate. Every source in ManifestSource Literal
+# + each ad-hoc + bulk-reference source MUST have docs/etl/sources/<source>.md
+# with the 13 required sections. Pinned by docs/etl/sources/README.md +
+# .claude/skills/data-engineer/etl-source-to-sink-template.md. Catches the
+# "added a source to ManifestSource but forgot the spec file" drift
+# class before the push lands. ~50ms.
+echo "==> Pre-push gate: ETL source-to-sink spec docs"
+bash scripts/check_etl_source_docs.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually
