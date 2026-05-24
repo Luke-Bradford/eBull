@@ -62,9 +62,7 @@ def test_probe_returns_false_when_no_holder() -> None:
 def test_probe_returns_true_when_holder_present_on_same_db() -> None:
     """Probe sees a same-DB held fence as ``True``."""
     with psycopg.connect(settings.database_url, autocommit=True) as holder:
-        row = holder.execute(
-            "SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)
-        ).fetchone()
+        row = holder.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)).fetchone()
         assert row is not None and bool(row[0]) is True
         try:
             assert probe_jobs_process_running(settings.database_url) is True
@@ -113,9 +111,7 @@ def test_per_database_isolation_regression_gate() -> None:
     sibling_url = _sibling_postgres_url()
     # Acquire on the sibling DB.
     with psycopg.connect(sibling_url, autocommit=True) as sibling:
-        row = sibling.execute(
-            "SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)
-        ).fetchone()
+        row = sibling.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)).fetchone()
         assert row is not None and bool(row[0]) is True
         try:
             # An acquire on the APPLICATION DB succeeds — locks are

@@ -433,6 +433,15 @@ def repair_cik_sidecar_from_archive(
       * Per-CIK DELETE + INSERT — prior committed rows for a different
         CIK SURVIVE if a later CIK raises.
 
+    IN-UNIVERSE FILTER (per Codex 2 IMPORTANT fold of PR-D pre-push):
+    S8's production path resolves a per-CIK ``matched_instruments`` set
+    via ``_load_cik_to_instrument`` and skips entries with no match —
+    so production NEVER writes sidecar rows for out-of-universe CIKs.
+    The repair helper mirrors this: it loads the same in-universe CIK
+    set up front and skips any archive entry not in that set. Without
+    this filter, repair could inflate the C7 numerator with out-of-
+    universe CIKs and false-pass the Stream-C correctness gate.
+
     Parameters
     ----------
     conn
@@ -442,8 +451,9 @@ def repair_cik_sidecar_from_archive(
         from). Not refetched — purely on-disk replay.
     cik
         Optional 10-digit padded CIK string. When set, only that entry
-        is replayed; the rest are skipped. When None, every entry in
-        the archive is replayed.
+        is replayed AND only if it appears in the in-universe set;
+        otherwise nothing is touched. When None, every in-universe
+        entry in the archive is replayed.
     bootstrap_run_id
         Optional bootstrap-run lineage to stamp on inserted rows.
         ``None`` → ``populate_origin='steady_state'`` + NULL run id.
@@ -456,11 +466,12 @@ def repair_cik_sidecar_from_archive(
     dict[str, int]
         Telemetry: ``ciks_processed``, ``ciks_sidecared``,
         ``sidecar_pages_indexed``, ``sentinel_rows_written``,
-        ``parse_errors``.
+        ``ciks_out_of_universe_skipped``, ``parse_errors``.
 
     Sole external caller: ``app/runbooks/stream_a_t13_sidecar_repair.py``
     (#1233 PR-D v3 R4 fold).
     """
+    in_universe = set(_load_cik_to_instrument(conn).keys())
     result = SubmissionsIngestResult(
         archive_entries_seen=0,
         instruments_matched=0,
@@ -468,6 +479,7 @@ def repair_cik_sidecar_from_archive(
         profiles_upserted=0,
     )
     ciks_processed = 0
+    ciks_out_of_universe_skipped = 0
     sentinel_rows_written = 0
 
     with zipfile.ZipFile(archive_path) as zf:
@@ -476,6 +488,14 @@ def repair_cik_sidecar_from_archive(
             if entry_cik is None:
                 continue
             if cik is not None and entry_cik != cik:
+                continue
+            if entry_cik not in in_universe:
+                # Mirrors S8: out-of-universe CIKs are skipped at the
+                # ``_load_cik_to_instrument`` boundary before the writer
+                # fires. Without this gate, repair could write sidecar
+                # rows for tickers that don't belong to any tradable
+                # instrument and inflate the C7 numerator.
+                ciks_out_of_universe_skipped += 1
                 continue
             result.archive_entries_seen += 1
             ciks_processed += 1
@@ -523,5 +543,6 @@ def repair_cik_sidecar_from_archive(
         "ciks_sidecared": result.ciks_sidecared,
         "sidecar_pages_indexed": result.sidecar_pages_indexed,
         "sentinel_rows_written": sentinel_rows_written,
+        "ciks_out_of_universe_skipped": ciks_out_of_universe_skipped,
         "parse_errors": result.parse_errors,
     }
