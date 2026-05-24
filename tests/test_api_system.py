@@ -34,7 +34,14 @@ _NOW = datetime(2026, 4, 7, 12, 30, 0, tzinfo=UTC)
 
 
 def _mock_conn() -> MagicMock:
-    return MagicMock()
+    conn = MagicMock()
+    # Pre-configure cursor().fetchone() to return None so direct SQL
+    # readers (e.g. ``_read_jobs_boot_error`` since Stream A PR-A
+    # #1233) default to "no breadcrumb" instead of returning a
+    # MagicMock that would fail Pydantic validation. Per-test overrides
+    # can shadow this for tests that need a populated row.
+    conn.cursor.return_value.__enter__.return_value.fetchone.return_value = None
+    return conn
 
 
 def _override_conn(conn: MagicMock) -> None:
@@ -351,6 +358,108 @@ class TestSystemStatus:
 
         assert resp.status_code == 200
         assert resp.json()["overall_status"] == "degraded"
+
+    def test_jobs_boot_error_null_when_no_breadcrumb(self) -> None:
+        """Stream A PR-A T1.8 (#1233): /system/status surfaces NULL
+        ``jobs_boot_error`` when bootstrap_state row has neither column
+        populated (healthy or never-failed boot)."""
+        _override_conn(_mock_conn())  # default fetchone() = None
+
+        with (
+            patch("app.api.system.check_all_layers", return_value=_all_ok_layers()),
+            patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ),
+            patch(
+                "app.api.system.get_kill_switch_status",
+                return_value={
+                    "is_active": False,
+                    "activated_at": None,
+                    "activated_by": None,
+                    "reason": None,
+                },
+            ),
+        ):
+            resp = client.get("/system/status")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "jobs_boot_error" in body
+        assert body["jobs_boot_error"] is None
+
+    def test_jobs_boot_error_surfaces_breadcrumb_when_present(self) -> None:
+        """Stream A PR-A T1.8 (#1233): /system/status surfaces the
+        persisted breadcrumb (both message + timestamp) when the jobs
+        process most-recently hard-failed boot."""
+        conn = _mock_conn()
+        breadcrumb_at = _NOW - timedelta(minutes=5)
+        breadcrumb_msg = (
+            "jobs boot blocked: no operators row in DB. Run POST /auth/setup via the API process to create one."
+        )
+        conn.cursor.return_value.__enter__.return_value.fetchone.return_value = (
+            breadcrumb_msg,
+            breadcrumb_at,
+        )
+        _override_conn(conn)
+
+        with (
+            patch("app.api.system.check_all_layers", return_value=_all_ok_layers()),
+            patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ),
+            patch(
+                "app.api.system.get_kill_switch_status",
+                return_value={
+                    "is_active": False,
+                    "activated_at": None,
+                    "activated_by": None,
+                    "reason": None,
+                },
+            ),
+        ):
+            resp = client.get("/system/status")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["jobs_boot_error"] is not None
+        assert body["jobs_boot_error"]["message"] == breadcrumb_msg
+        # Pydantic emits ISO-8601 with timezone; compare via datetime
+        # parse to avoid serialization quirks.
+        assert datetime.fromisoformat(body["jobs_boot_error"]["at"]) == breadcrumb_at
+
+    def test_jobs_boot_error_fails_safe_on_partial_row(self) -> None:
+        """Defence-in-depth: if a future bug writes only one of the two
+        columns, /system/status MUST treat it as "no breadcrumb"
+        rather than returning a half-populated object."""
+        conn = _mock_conn()
+        conn.cursor.return_value.__enter__.return_value.fetchone.return_value = (
+            "stray message without timestamp",
+            None,
+        )
+        _override_conn(conn)
+
+        with (
+            patch("app.api.system.check_all_layers", return_value=_all_ok_layers()),
+            patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ),
+            patch(
+                "app.api.system.get_kill_switch_status",
+                return_value={
+                    "is_active": False,
+                    "activated_at": None,
+                    "activated_by": None,
+                    "reason": None,
+                },
+            ),
+        ):
+            resp = client.get("/system/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["jobs_boot_error"] is None
 
 
 # ---------------------------------------------------------------------------

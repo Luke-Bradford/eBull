@@ -572,6 +572,149 @@ def _ensure_transaction_cost_config_singleton_with_cleanup(
         raise
 
 
+def _check_operator_exists_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """Stream A PR-A T1.8 (#1233): hard-fail jobs-process boot when no
+    operator row exists.
+
+    Operator absence means ``POST /auth/setup`` has not been run yet.
+    Every scheduled fire would silently reject with
+    ``bootstrap_not_complete`` (operator sees no ingestion + no error
+    until they grep stderr). Surfacing the gap at boot time gives an
+    operator-actionable message AND persists a breadcrumb to
+    ``bootstrap_state.last_jobs_boot_error`` (sql/171) for
+    ``/system/status`` visibility.
+
+    Escape hatch: ``EBULL_JOBS_SKIP_OPERATOR_CHECK=1`` env var skips
+    the check for cold-start scenarios (CI bootstrap, ops automation
+    that creates the operator AFTER jobs starts). Env var deliberately
+    chosen over CLI flag — harder to set in error per
+    docs/proposals/etl/stream-a-run-8-fixes.md §1 T1.8 + §21.
+
+    Semantically distinct from sibling ``_ensure_*_with_cleanup``
+    helpers (which RE-SEED missing default singletons): operator
+    existence cannot be re-seeded — the operator must run
+    ``/auth/setup`` manually. Named ``_check_*`` not ``_ensure_*``
+    to signal "verify; fail if missing" vs "create if missing"
+    (per spec Architect-lens IMPORTANT).
+
+    On hard-fail:
+      1. Persist ``bootstrap_state.last_jobs_boot_error`` so
+         ``/system/status`` surfaces the failure cause.
+      2. Release the singleton fence advisory lock.
+      3. Close the pool.
+      4. ``raise SystemExit(2)``.
+
+    On clean exit (operator present): clear any stale breadcrumb so a
+    recovered boot does not leave a misleading error visible.
+    """
+    from app.jobs.boot_guard import (
+        OPERATOR_MISSING_ERROR_MESSAGE,
+        BootGuardOutcome,
+        check_operator_exists,
+    )
+
+    skip_env_set = os.environ.get("EBULL_JOBS_SKIP_OPERATOR_CHECK") == "1"
+
+    # Architect IMPORTANT: env-skip path MUST NOT dial the DB. Cold-start
+    # is the documented escape-hatch use case — the DB may not yet be
+    # reachable when the operator sets the env var. Returning before
+    # ANY ``psycopg.connect`` call honours that contract.
+    if skip_env_set:
+        logger.info(
+            "jobs entrypoint: operator-existence check skipped via EBULL_JOBS_SKIP_OPERATOR_CHECK=1 "
+            "(env-skip path does not dial DB; stale breadcrumb NOT cleared on this path)",
+        )
+        return
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            outcome = check_operator_exists(guard_conn, skip_env_set=False)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+        raise
+
+    if outcome is BootGuardOutcome.OPERATOR_PRESENT:
+        # Clear any stale breadcrumb from a prior failed boot. Bounded
+        # WHERE keeps this a no-op when nothing to clear (cheap +
+        # auditable in pg_stat_statements). Reviewer + DE IMPORTANT:
+        # log a warning if the clear UPDATE fails so the silent swallow
+        # is visible in stderr — the operator otherwise sees a stale
+        # breadcrumb in /system/status with no explanation.
+        try:
+            with psycopg.connect(settings.database_url, autocommit=True) as clear_conn:
+                with clear_conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bootstrap_state "
+                        "SET last_jobs_boot_error = NULL, last_jobs_boot_error_at = NULL "
+                        "WHERE id = 1 AND last_jobs_boot_error IS NOT NULL",
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "jobs entrypoint: failed to clear stale last_jobs_boot_error breadcrumb: %s",
+                exc,
+            )
+        return
+
+    # SKIPPED_BY_ENV cannot occur here — the early-return above handles
+    # env-skip without opening a connection. Defensive closed-set check
+    # in case ``boot_guard.BootGuardOutcome`` ever gains a 4th member
+    # (the catalogue test in tests/test_jobs_boot_guard.py would also
+    # catch this, but defence-in-depth is cheap).
+    if outcome is not BootGuardOutcome.OPERATOR_ABSENT:
+        raise RuntimeError(
+            f"unhandled BootGuardOutcome {outcome!r}; boot_guard module out of sync with wrapper",
+        )
+
+    # Hard-fail body: persist breadcrumb (best-effort with warning),
+    # then cleanup + SystemExit(2). Wrapped in try/finally so cleanup
+    # + exit ALWAYS run even if breadcrumb write raises something
+    # exotic — matches sibling helpers' except BaseException pattern
+    # (Architect IMPORTANT).
+    #
+    # Reviewer IMPORTANT: ``logger.critical`` not ``logger.error`` —
+    # hard-fail boot is syslog-grade visibility, not a recoverable
+    # runtime error.
+    logger.critical("jobs entrypoint: %s", OPERATOR_MISSING_ERROR_MESSAGE)
+    try:
+        try:
+            with psycopg.connect(settings.database_url, autocommit=True) as breadcrumb_conn:
+                with breadcrumb_conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bootstrap_state "
+                        "SET last_jobs_boot_error = %s, last_jobs_boot_error_at = clock_timestamp() "
+                        "WHERE id = 1",
+                        (OPERATOR_MISSING_ERROR_MESSAGE,),
+                    )
+                    if cur.rowcount == 0:
+                        # bootstrap_state row missing despite the earlier
+                        # _ensure_bootstrap_state_singleton_with_cleanup
+                        # guard. DE IMPORTANT: surface via warning — the
+                        # boot still hard-fails on SystemExit + stderr
+                        # log, but /system/status will not show the
+                        # cause without the breadcrumb row.
+                        logger.warning(
+                            "jobs entrypoint: bootstrap_state singleton row absent at breadcrumb write; "
+                            "/system/status will not show this failure cause",
+                        )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "jobs entrypoint: failed to persist last_jobs_boot_error breadcrumb: %s",
+                exc,
+            )
+    finally:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+    raise SystemExit(2)
+
+
 def _boot_id() -> str:
     """Per-process identifier used as ``claimed_by`` on queue rows.
 
@@ -659,6 +802,19 @@ def serve(stop_event: threading.Event | None = None) -> int:
 
     _ensure_bootstrap_state_singleton_with_cleanup(fence_conn, pool)
     logger.info("jobs entrypoint: bootstrap_state singleton guard passed")
+
+    # #1233 Stream A PR-A T1.8 — hard-fail boot when no operator row
+    # exists. Operator absence means /auth/setup has not run; every
+    # scheduled fire would reject silently with bootstrap_not_complete.
+    # Persists ``bootstrap_state.last_jobs_boot_error`` on hard-fail so
+    # ``/system/status`` surfaces the cause. Escape hatch:
+    # ``EBULL_JOBS_SKIP_OPERATOR_CHECK=1`` env var.
+    #
+    # Runs AFTER ``_ensure_bootstrap_state_singleton_with_cleanup``
+    # because the breadcrumb-write path depends on the
+    # ``bootstrap_state`` row being seeded.
+    _check_operator_exists_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: operator-existence guard passed")
 
     # #1232 follow-up — same singleton-vanish posture for budget_config
     # and transaction_cost_config. Without these mirrors, execution-

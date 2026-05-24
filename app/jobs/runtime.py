@@ -307,6 +307,19 @@ _INVOKERS[_scheduler.JOB_SEC_FIRST_INSTALL_DRAIN] = _scheduler.sec_first_install
 _INVOKERS[_scheduler.JOB_MF_DIRECTORY_SYNC] = _scheduler.mf_directory_sync
 _INVOKERS[_scheduler.JOB_SEC_N_CSR_BOOTSTRAP_DRAIN] = _scheduler.sec_n_csr_bootstrap_drain
 
+# Stream A PR-C2 T1.2 (#1233) — bootstrap-only fundamentals derivation
+# entrypoint. Separately-registered job_name from the steady-state
+# ``fundamentals_sync`` (scheduler.py:JOB_FUNDAMENTALS_SYNC) so the
+# bootstrap dispatch lane (``db_fundamentals_raw``) and steady-state
+# scheduled source (``db``) can coexist without tripping the
+# lane-source registry cross-check at ``app/jobs/sources.py``.
+# Wraps a no-arg derivation function; discards the params dict.
+from app.services.fundamentals import bootstrap as _fundamentals_bootstrap  # noqa: E402
+
+_INVOKERS[_fundamentals_bootstrap.JOB_FUNDAMENTALS_SYNC_BOOTSTRAP] = (
+    _fundamentals_bootstrap.fundamentals_sync_bootstrap_invoker
+)
+
 # #1233 PR-1b — OpenFIGI CUSIP resolver post-bulk sweep (Phase D, S13).
 # Params-aware natively (discards the params dict; no params honoured).
 # Owns the dedicated ``openfigi`` Lane — see ``app/jobs/sources.py``.

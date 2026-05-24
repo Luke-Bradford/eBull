@@ -189,12 +189,21 @@ def sec_submissions_ingest_job() -> None:
         captured["filings_upserted"] = result.filings_upserted
         captured["profiles_upserted"] = result.profiles_upserted
         captured["parse_errors"] = result.parse_errors
+        # Stream A PR-B T1.3 (#1233): per-archive sidecar telemetry
+        # captured here so the audit row below persists it. Without
+        # this, the Stream-C C7 gate has no auditable per-run figure
+        # for sidecar coverage (DE MEDIUM pre-push review).
+        captured["ciks_sidecared"] = result.ciks_sidecared
+        captured["sidecar_pages_indexed"] = result.sidecar_pages_indexed
         logger.info(
-            "sec_submissions_ingest: matched=%d filings_upserted=%d profiles=%d parse_errors=%d",
+            "sec_submissions_ingest: matched=%d filings_upserted=%d profiles=%d parse_errors=%d "
+            "ciks_sidecared=%d sidecar_pages_indexed=%d",
             result.instruments_matched,
             result.filings_upserted,
             result.profiles_upserted,
             result.parse_errors,
+            result.ciks_sidecared,
+            result.sidecar_pages_indexed,
         )
 
     _run_with_conn(_do)
@@ -204,7 +213,11 @@ def sec_submissions_ingest_job() -> None:
             stage_key="sec_submissions_ingest",
             archive_name="submissions.zip",
             rows_written=captured.get("filings_upserted", 0),
-            rows_skipped={"parse_errors": captured.get("parse_errors", 0)},
+            rows_skipped={
+                "parse_errors": captured.get("parse_errors", 0),
+                "ciks_sidecared": captured.get("ciks_sidecared", 0),
+                "sidecar_pages_indexed": captured.get("sidecar_pages_indexed", 0),
+            },
         )
     _delete_archive_after_success(archive)
 

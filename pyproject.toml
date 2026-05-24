@@ -33,6 +33,11 @@ dev = [
   "pytest-xdist>=3.5",
   "pytest-testmon>=2.2",
   "httpx>=0.27.0",
+  # Stream A PR-B T1.3 (#1233): contract test for
+  # sec_submissions_files_walk (S14) asserts ZERO PRIMARY-page HTTP
+  # calls when the sidecar is populated. respx mocks httpx at the
+  # transport layer — smallest primitive that satisfies the contract.
+  "respx>=0.21",
 ]
 
 [tool.ruff]
