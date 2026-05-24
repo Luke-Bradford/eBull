@@ -54,8 +54,10 @@ ALTER TABLE bootstrap_runs
         OR stream_c_gate_status IN ('pending', 'passed')
         OR (
             -- Literal underscore + ≥1 trailing char. Rejects bare 'failed_'
-            -- (Codex 2 LOW pre-push review). ESCAPE '\\' makes '\_' a
-            -- literal underscore, not a LIKE wildcard.
+            -- (Codex 2 LOW pre-push review). ESCAPE '\' makes '\_' a
+            -- literal underscore, not a LIKE wildcard. (Single backslash
+            -- under PG default standard_conforming_strings=on; do NOT
+            -- double-escape — bot review iter 1 nitpick.)
             stream_c_gate_status LIKE 'failed\_%' ESCAPE '\'
             AND length(stream_c_gate_status) > length('failed_')
         )

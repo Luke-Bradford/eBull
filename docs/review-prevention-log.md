@@ -1509,3 +1509,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Prevention: `refreshed_at` (and any update-timestamp column the writer mutates on every call) MUST be EXCLUDED from the diff predicate on both LHS and RHS. The drift watermark for the repair-sweep MUST live in a separate side-table (e.g. `ownership_refresh_state.last_drained_observations_max_ingested_at`) updated on every refresh attempt regardless of MERGE outcome. The watermark value MUST be captured pre-MERGE in a Python variable (race-safe: prevents the post-MERGE UPSERT advancing past observations the MERGE did not see if new obs land between SELECT and MERGE).
 - Generalises to: any diff-aware reconciler (`UPSERT … WHERE EXCLUDED.x IS DISTINCT FROM …`, materialised-view refresh diffs, cache-revalidation predicates). Whenever the predicate compares "what's stored" to "what we just computed", any column the writer mutates on every call must be excluded from the comparison — otherwise the comparison is vacuously true and the optimisation is defeated.
 - Enforced in: `scripts/check_ownership_refresh_writer_pattern.sh` invariant E (refreshed_at not in IS DISTINCT FROM tuples) + invariant I (refreshed_at = now() lives only in UPDATE SET); `tests/test_ownership_refresh_writer_merge.py` case 2 (no-op churn — xmin stability + pgstattuple dead-tuple delta + refreshed_at unchanged) + case 8 (repair-sweep no-loop) + case 9 (known_to expiry watermark alignment); `docs/superpowers/specs/2026-05-21-pr12-ownership-current-writer-merge.md` §3.3 + §4.2; this prevention log.
+
+### Integration tests must use DELTA-based counter assertions, never exact-equality on DB-global counters
+
+- First seen in: 2026-05-24 — #1233 PR-B (PR #1308) bot review iter 1 BLOCKING. Tests in `tests/test_s14_uses_sidecar.py` called `walk_files_pages(conn=ebull_test_conn)` (which iterates EVERY in-universe CIK in the per-worker test DB) and asserted `result.parse_errors == 0`, `result.secondary_pages_fetched == 0`, etc. Any other tradable CIK in the test DB with an empty sidecar would inflate `parse_errors` + `ciks_with_empty_sidecar` and cause spurious failure.
+- Symptom: per-worker test DB picks up `bf719c5`'s prior test residue (or any concurrent test's side effect) — exact-equality assertion fails on a counter that includes rows outside the test's control. Test is green locally on a freshly-wiped DB; fails in CI / on a polluted DB. Classic flake-vector class.
+- Prevention: any integration test that calls a function iterating the full DB cohort MUST use DELTA-based assertions:
+  ```python
+  baseline = walk_files_pages(conn=ebull_test_conn)
+  _seed_test_data(ebull_test_conn)
+  try:
+      after = walk_files_pages(conn=ebull_test_conn)
+      assert after.counter_x - baseline.counter_x == EXPECTED_DELTA
+  finally:
+      _wipe_test_data(ebull_test_conn)
+  ```
+  OR use `>= N` / `<= N` bounds (less precise but acceptable for "at least this happened"); NEVER `== 0` / `== N` on accumulators that include rows outside the test's control.
+- Generalises to: any integration test against a shared per-worker test DB where the function under test iterates rows beyond the fixture-seeded set (`walk_files_pages`, `sync_all_observations`, `compute_coverage_audit`, etc.). The delta pattern is the canonical fix.
+- Enforced in: this prevention log; future bot review will catch on PR-B-style test additions; `.claude/skills/engineering/test-quality.md` should add a "DB-global counter exact-equality forbidden" rule (follow-up tightening).

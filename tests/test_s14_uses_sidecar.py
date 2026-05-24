@@ -102,38 +102,55 @@ def s14_test_instrument(
 
 
 class TestS14SidecarConsume:
+    """All assertions use DELTA against a BASELINE call so the tests are
+    robust to other rows in the shared per-worker test DB (per PR #1308
+    review bot BLOCKING — exact equality on DB-global counters is a
+    flake vector on any non-empty test DB)."""
+
     @pytest.mark.integration
     def test_empty_sidecar_for_in_universe_cik_is_parse_error(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
-        s14_test_instrument: int,
     ) -> None:
-        # No sidecar row inserted — empty.
-        result = walk_files_pages(conn=ebull_test_conn)
+        # Capture baseline FIRST, before seeding the test instrument,
+        # so the delta reflects only our row's contribution.
+        baseline = walk_files_pages(conn=ebull_test_conn)
+        _wipe_test_instrument(ebull_test_conn)
+        _seed_test_instrument(ebull_test_conn)
+        try:
+            # No sidecar row inserted for _REAL_CIK — empty sidecar branch.
+            after = walk_files_pages(conn=ebull_test_conn)
 
-        assert result.ciks_with_empty_sidecar >= 1
-        assert result.parse_errors >= 1
-        assert result.secondary_pages_fetched == 0  # never reached HTTP
+            assert after.ciks_with_empty_sidecar - baseline.ciks_with_empty_sidecar == 1
+            assert after.parse_errors - baseline.parse_errors == 1
+            assert after.secondary_pages_fetched == baseline.secondary_pages_fetched
+        finally:
+            _wipe_test_instrument(ebull_test_conn)
 
     @pytest.mark.integration
     def test_sentinel_row_skips_secondary_walk_silently(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
-        s14_test_instrument: int,
     ) -> None:
-        _insert_sidecar(
-            ebull_test_conn,
-            cik=_REAL_CIK,
-            pages=[("__no_overflow_pages__", None, None)],
-        )
+        baseline = walk_files_pages(conn=ebull_test_conn)
+        _wipe_test_instrument(ebull_test_conn)
+        _seed_test_instrument(ebull_test_conn)
+        try:
+            _insert_sidecar(
+                ebull_test_conn,
+                cik=_REAL_CIK,
+                pages=[("__no_overflow_pages__", None, None)],
+            )
+            after = walk_files_pages(conn=ebull_test_conn)
 
-        result = walk_files_pages(conn=ebull_test_conn)
-
-        assert result.ciks_with_no_overflow >= 1
-        # No HTTP — the sentinel branch never enters the fetch loop.
-        assert result.secondary_pages_fetched == 0
-        # Sentinel-only is NOT an error.
-        assert result.ciks_with_empty_sidecar == 0
+            assert after.ciks_with_no_overflow - baseline.ciks_with_no_overflow == 1
+            # Sentinel branch never enters the fetch loop.
+            assert after.secondary_pages_fetched == baseline.secondary_pages_fetched
+            # Sentinel-only is NOT an error.
+            assert after.ciks_with_empty_sidecar == baseline.ciks_with_empty_sidecar
+            assert after.parse_errors == baseline.parse_errors
+        finally:
+            _wipe_test_instrument(ebull_test_conn)
 
     @pytest.mark.integration
     def test_agent_cik_with_empty_sidecar_is_not_an_error(
@@ -142,9 +159,12 @@ class TestS14SidecarConsume:
     ) -> None:
         """An agent CIK in the universe with no sidecar row is EXPECTED
         (populate filters them out). Must NOT increment parse_errors
-        or ciks_with_empty_sidecar."""
+        or ciks_with_empty_sidecar. Delta-based assertions (per PR #1308
+        review bot BLOCKING)."""
         agent_cik = next(iter(KNOWN_FILING_AGENT_CIKS))
         _wipe_test_instrument(ebull_test_conn)
+
+        baseline = walk_files_pages(conn=ebull_test_conn)
 
         # Seed instrument with the agent CIK.
         with ebull_test_conn.cursor() as cur:
@@ -166,10 +186,17 @@ class TestS14SidecarConsume:
         ebull_test_conn.commit()
 
         try:
-            result = walk_files_pages(conn=ebull_test_conn)
-            assert result.ciks_with_empty_sidecar == 0, "agent CIK empty sidecar must NOT count as error"
-            assert result.parse_errors == 0
-            assert result.secondary_pages_fetched == 0
+            after = walk_files_pages(conn=ebull_test_conn)
+            # Delta on the three counters that the agent-CIK branch
+            # must NOT touch — robust to any other rows in the test DB.
+            assert (
+                after.ciks_with_empty_sidecar == baseline.ciks_with_empty_sidecar
+            ), "agent CIK empty sidecar must NOT count as error"
+            assert after.parse_errors == baseline.parse_errors
+            assert after.secondary_pages_fetched == baseline.secondary_pages_fetched
+            # And ciks_visited must NOT increment for the agent CIK
+            # (Architect IMPORTANT — guard fires before counter).
+            assert after.ciks_visited == baseline.ciks_visited
         finally:
             with ebull_test_conn.cursor() as cur:
                 cur.execute(
