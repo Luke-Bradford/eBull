@@ -9,11 +9,38 @@
 -- defeats partition pruning + retention sweep targets. New quarterly
 -- partitions restore both.
 --
--- Idempotent: every CREATE uses IF NOT EXISTS so re-running the migration
--- is safe.
+-- DEFAULT-stragglers cleanup (POST-MERGE FOLLOW-UP fix on this same
+-- migration file): the DEFAULT partition turned out to contain XBRL
+-- parser garbage (filings dated 2023-2024 claiming period_end years
+-- 2031+ — impossible). #1218 added a parser-side guard rejecting
+-- period_end < 1900 OR ≥ 2100, but the rows that landed before #1218
+-- still sit in DEFAULT and block new quarterly partition CREATE with
+-- "updated partition constraint for default partition would be
+-- violated by some row". 18 such rows in dev as of 2026-05-24 from
+-- 48 total junk rows (others sit in legitimately-named quarters
+-- from year-overflow bugs).
+--
+-- Cleanup predicate (strictly impossible-by-physics):
+--   period_end > filed_date + INTERVAL '5 years'
+-- A claimed fiscal-period end-date more than 5 years past the
+-- filing-date cannot be a real filing — no public company files
+-- accounts for periods 5+ years in the future. Tagging filed_date
+-- IS NOT NULL guards rows where the filing-date is genuinely
+-- unknown (legacy ingest gaps).
+--
+-- Idempotent: cleanup uses DELETE so re-run is a no-op once empty;
+-- every CREATE uses IF NOT EXISTS so re-running the migration is safe.
 --
 -- Run order: after sql/156_financial_facts_raw_partition.sql.
 
+-- Phase 1: defensive cleanup of XBRL parser garbage. Must run BEFORE
+-- partition CREATE so the DEFAULT partition has no in-range rows
+-- blocking the new partition CHECK predicates.
+DELETE FROM financial_facts_raw
+WHERE filed_date IS NOT NULL
+  AND period_end > filed_date + INTERVAL '5 years';
+
+-- Phase 2: extend quarterly partitions through 2040 (10y headroom).
 DO $$
 DECLARE
     y           INT;
