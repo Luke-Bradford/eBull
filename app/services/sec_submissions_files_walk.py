@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 
 
 # Stream A PR-B T1.3 (#1233): sentinel page-name pattern written by
-# the sidecar populate in sec_submissions_ingest._refresh_cik_sidecar.
+# the sidecar populate in sec_submissions_ingest.refresh_cik_sidecar.
 # Distinguishes "CIK processed; no overflow pages" from "CIK not yet
 # populated".
 _SIDECAR_SENTINEL_PAGE_NAME: str = "__no_overflow_pages__"
@@ -168,7 +168,7 @@ def walk_files_pages(
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
         for instrument_id, cik, symbol, sidecar_pages in targets:
             # Agent CIKs are excluded by the populate path
-            # (sec_submissions_ingest._refresh_cik_sidecar) so their
+            # (sec_submissions_ingest.refresh_cik_sidecar) so their
             # sidecar_pages list is empty by design. Skip them here
             # silently — they do NOT count toward ciks_visited (the
             # counter reflects "real CIKs we did or attempted work for"

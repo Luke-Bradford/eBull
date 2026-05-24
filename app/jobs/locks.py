@@ -60,7 +60,9 @@ code never calls this constructor.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import Iterator
 from contextvars import ContextVar, Token
 from types import TracebackType
 
@@ -126,6 +128,86 @@ class JobAlreadyRunning(RuntimeError):
     def __init__(self, job_name: str) -> None:
         super().__init__(f"job {job_name!r} is already running")
         self.job_name = job_name
+
+
+# ---------------------------------------------------------------------------
+# Operator-runbook helpers (#1233 PR-D)
+# ---------------------------------------------------------------------------
+#
+# Two helpers consumed by ``app/runbooks/*``: a side-effect-free PROBE
+# (acquire-and-release on a short-lived autocommit conn) and a
+# CONTEXT-MANAGER FENCE (hold across a destructive phase against the
+# ``postgres`` administrative DB so the session survives
+# ``DROP DATABASE ebull_dev``). Postgres advisory locks are
+# CLUSTER-WIDE so either DB observes the same lock.
+
+
+def probe_jobs_process_running(database_url: str) -> bool:
+    """Return True iff the jobs process appears to be running.
+
+    Tries to acquire ``JOBS_PROCESS_LOCK_KEY`` on a short-lived
+    autocommit connection against ``database_url`` (the APPLICATION
+    DB). If the acquire succeeds, the jobs entrypoint does NOT
+    currently hold the fence on this DB — release immediately and
+    return False. If the acquire fails, the fence is held by another
+    session — return True.
+
+    PG advisory locks are PER-DATABASE (NOT cluster-wide) — verified
+    empirically against PG 17. Two sessions on different databases in
+    the same cluster acquire the same key independently. The jobs
+    entrypoint holds its fence on the application DB; ``database_url``
+    here MUST be the same DB.
+
+    Operator runbooks under ``app/runbooks/`` use this as a pre-flight
+    to refuse running against a live jobs process (#1233 PR-D).
+    """
+    with psycopg.connect(database_url, autocommit=True) as probe:
+        row = probe.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)).fetchone()
+        got = bool(row[0]) if row else False
+        if got:
+            probe.execute("SELECT pg_advisory_unlock(%s)", (JOBS_PROCESS_LOCK_KEY,))
+            return False
+        return True
+
+
+@contextlib.contextmanager
+def acquire_jobs_process_fence(database_url: str) -> Iterator[None]:
+    """Hold ``JOBS_PROCESS_LOCK_KEY`` on the APPLICATION DB.
+
+    Blocks the jobs entrypoint from acquiring its fence (they share
+    the same per-database lockspace). Releases on context exit so
+    the jobs process can acquire.
+
+    LIMITATION (PR-D v3.2 fix — caught by empirical test against PG 17):
+    PG advisory locks are per-database, NOT cluster-wide. The fence
+    connection DIES when ``DROP DATABASE ebull_dev`` runs against the
+    DB it was opened on. Callers that need to bracket a DROP must
+    re-acquire on the FRESH database after CREATE + migration. The
+    TOCTOU window between DROP and re-acquire is unavoidable at the
+    lock layer alone — operators MUST keep the jobs process stopped
+    (e.g. systemd ``stop``, not just SIGINT) for the duration of the
+    destructive phase.
+
+    Raises :class:`JobAlreadyRunning` (``job_name='jobs_process'``) if
+    the fence cannot be acquired.
+
+    Used by ``app/runbooks/stream_a_run_8_verify.py``.
+    """
+    with psycopg.connect(database_url, autocommit=True) as fence:
+        row = fence.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)).fetchone()
+        got = bool(row[0]) if row else False
+        if not got:
+            raise JobAlreadyRunning("jobs_process")
+        try:
+            yield
+        finally:
+            # Best-effort release. If the DB was dropped under us the
+            # conn is dead and this no-ops — Postgres releases the
+            # advisory lock automatically when the session ends.
+            try:
+                fence.execute("SELECT pg_advisory_unlock(%s)", (JOBS_PROCESS_LOCK_KEY,))
+            except psycopg.Error:
+                pass
 
 
 class JobLock:
