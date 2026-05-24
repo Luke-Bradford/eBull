@@ -30,12 +30,21 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
+from zoneinfo import ZoneInfo
 
 from app.providers.implementations.sec_submissions import FilingIndexRow
 from app.services.sec_manifest import is_amendment_form, map_form_to_source
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
+
+# Mirrors ``sec_edgar._MASTER_INDEX_PUBLISH_HOUR_ET`` — SEC publishes
+# the daily master-index ~22:00 ET on the same business day. Before
+# that moment a 403 on the current day is the "not yet published"
+# signal. After it, a 403 means SEC is actively blocking us.
+_MASTER_INDEX_PUBLISH_HOUR_ET = 22
 
 
 HttpGet = Callable[[str, dict[str, str]], tuple[int, bytes]]
@@ -150,6 +159,37 @@ def read_daily_index(
         logger.info("daily-index not published yet for %s (404)", when.isoformat())
         return
         yield  # pragma: no cover — keeps signature as Iterator
+    if status == 403:
+        # SEC's Archives host serves 403 (not 404) inconsistently for
+        # files that do not yet exist. Tolerated classes — mirroring
+        # ``SecFilingsProvider.fetch_master_index`` in sec_edgar.py:
+        #   1. Weekend (Sat/Sun) — SEC never publishes weekend indexes.
+        #   2. Current-day before the ~22:00-ET publish cutoff.
+        #   3. Future-dated (lookback windows straddling midnight TZ).
+        # Anything else (past weekday, or current weekday after the
+        # cutoff) raises — that's SEC refusing us (UA/rate-limit/WAF).
+        # US federal holidays also yield 403 but are not enumerated;
+        # the next business-day reconcile catches what they miss.
+        if when.weekday() >= 5:  # 5=Sat, 6=Sun
+            logger.info(
+                "daily-index 403 on %s treated as weekend (no publish)",
+                when.isoformat(),
+            )
+            return
+        now_et = datetime.now(_ET)
+        publish_due = datetime.combine(
+            when,
+            time(_MASTER_INDEX_PUBLISH_HOUR_ET, 0),
+            tzinfo=_ET,
+        )
+        if now_et < publish_due:
+            logger.info(
+                "daily-index 403 on %s treated as not-yet-published (now_et=%s publish_due=%s)",
+                when.isoformat(),
+                now_et.isoformat(timespec="minutes"),
+                publish_due.isoformat(timespec="minutes"),
+            )
+            return
     if status != 200:
         raise RuntimeError(f"daily-index fetch failed: status={status} when={when.isoformat()}")
 
