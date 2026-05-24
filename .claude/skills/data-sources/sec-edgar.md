@@ -428,6 +428,21 @@ This list is intentionally **maintained as a code constant rather than a DB-conf
 
 The "regardless of the number of machines" phrasing means horizontal scaling does not buy headroom — the budget is per-User-Agent identity. eBull treats 10 r/s as a global semaphore across every ingest job (#728). Empirical sustained ceiling is **5–7 r/s** to avoid transient 429/503; pattern at [app/services/sec_pipelined_fetcher.py:43](../../../app/services/sec_pipelined_fetcher.py#L43).
 
+### Multi-host shared clock
+
+The 10 req/s budget is **per-IP, not per-host**. All four SEC hosts — `data.sec.gov`, `www.sec.gov`, `efts.sec.gov`, and the `Archives/...` paths under `www.sec.gov` — share **one** rolling counter at our IP. eBull enforces this via a single in-process semaphore `_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK` in [app/providers/implementations/sec_edgar.py:72](../../../app/providers/implementations/sec_edgar.py#L72), passed via `shared_last_request=_PROCESS_RATE_LIMIT_CLOCK` to every host client constructor ([sec_edgar.py:246-252](../../../app/providers/implementations/sec_edgar.py#L246-L252)). The same clock is imported by [sec_fundamentals.py](../../../app/providers/implementations/sec_fundamentals.py), [sec_bulk_refresh.py](../../../app/services/sec_bulk_refresh.py), and [concurrent_fetch.py](../../../app/providers/concurrent_fetch.py).
+
+| Host | Serves | Conditional-GET support |
+| --- | --- | --- |
+| `data.sec.gov` | JSON APIs (submissions, companyfacts, companyconcept, frames) | `If-Modified-Since` honoured per-CIK |
+| `www.sec.gov` | Bulk archives, `/Archives/...`, `/files/...`, daily/full-index, cgi-bin Atom | Per-resource: `/Archives/...` honours `If-Modified-Since`; bulk `.zip` does NOT (use HEAD+ETag client-side compare per §4 "Bulk-archive reuse contract") |
+| `efts.sec.gov` | EDGAR full-text search (`/LATEST/search-index`) | None — `efts.sec.gov` does NOT honour conditional headers (empirical, post-2024-12-18) |
+| `archives.sec.gov` / `Feed/` | Daily filing feed | Per-folder modification headers |
+
+**Operator-visible consequence:** burning the budget on `efts.sec.gov` (full-text search) starves `data.sec.gov` (per-CIK polls) and vice versa. Both compete in the same lane (`sec_rate`) at the JobLock layer — see `.claude/skills/data-engineer/SKILL.md` §6.5.1. When adding a new SEC consumer (especially anything that hits `efts.sec.gov` for full-text search), wire it through the same shared clock OR justify a separate IP / proxy with a non-trivial diagnosis.
+
+**`efts.sec.gov` retry posture:** 403 from `efts.sec.gov` on weekends ≈ transient (SEC's full-text index re-indexing typically completes overnight Sun → next-business-day Mon). Retry with exponential backoff up to next-business-day; do NOT mark the CIK or accession as failed. 403 from `data.sec.gov` or `www.sec.gov` is more likely a rate-budget breach — diagnose against the shared clock first.
+
 ### User-Agent header
 
 Required format: `<Name> <email>`. Email must be syntactically valid and routable. eBull config at [app/config.py:29](../../../app/config.py#L29) (`sec_user_agent`). **Default `eBull dev@example.com` is unacceptable for production** — every operator install must override.

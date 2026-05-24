@@ -120,7 +120,9 @@ These endpoints don't have a `ManifestSource` because they're not per-filing dis
 
 ## 5. Bootstrap stage table — for reference
 
-`_BOOTSTRAP_STAGE_SPECS` at `app/services/bootstrap_orchestrator.py:795-900`. 26 stages (#1174 added S25 `mf_directory_sync` + S26 `sec_n_csr_bootstrap_drain`), 5 rate lanes (`init`, `etoro`, `sec_rate`, `sec_bulk_download`, `db`).
+`_BOOTSTRAP_STAGE_SPECS` at `app/services/bootstrap_orchestrator.py:795-900`. 26 stages (#1174 added S25 `mf_directory_sync` + S26 `sec_n_csr_bootstrap_drain`), 5 base rate lanes (`init`, `etoro`, `sec_rate`, `sec_bulk_download`, `db`) + post-#1141 family split (`db_filings`, `db_fundamentals_raw`, `db_ownership_inst`, `db_ownership_insider`, `db_ownership_funds`) + post-PR-1b `openfigi` lane. See `.claude/skills/data-engineer/SKILL.md` §6.5.1 for the full lane catalogue + cap rules.
+
+**Lane → stage mapping** lives in `_STAGE_LANE_OVERRIDES` at [`bootstrap_orchestrator.py:966-987`](../../../app/services/bootstrap_orchestrator.py#L966-L987). Default lane (when a `stage_key` is absent from the override map) is the lane field on the StageSpec itself; the override map is consulted FIRST and wins on collision. When ADDING a new bootstrap stage that needs a non-default lane, add the entry to `_STAGE_LANE_OVERRIDES` AND update this matrix's "Pool" column for the affected source row.
 
 | # | Stage | Lane | Job | Endpoints it seeds |
 |---|---|---|---|---|
@@ -201,6 +203,21 @@ G8-G12 are low-priority — they don't block any operator-visible figure today. 
 
 - `.claude/skills/data-sources/sec-edgar.md` — endpoint inventory authoritative source. §11.5 stranded-source map cross-checked.
 - `.claude/skills/data-sources/edgartools.md` — library coverage matrix.
-- `.claude/skills/data-engineer/SKILL.md` — schema invariants + per-source retention.
+- `.claude/skills/data-engineer/SKILL.md` — schema invariants + per-source retention; §6.5.1 lane catalogue.
 - Spec: `docs/specs/etl/coverage-model.md` — original #863-#873 redesign.
 - Memory: [[us-source-coverage]], [[873-manifest-worker-parser-rollout]], [[etl-freshness-redesign]].
+
+---
+
+## 10. Machine-readable form — tech debt
+
+This matrix is **prose-Markdown**, which is great for humans but unparseable by a pre-push gate. Concrete gaps a CI gate would catch but currently can't:
+
+- A new `ManifestSource` enum value added to `sec_manifest.py` without a §2 row.
+- A `JOB_*` constant referenced in a §2 row but not registered in `_INVOKERS` or `SCHEDULED_JOBS`.
+- A stage_key in `_BOOTSTRAP_STAGE_SPECS` without a §5 entry.
+- A `_STAGE_LANE_OVERRIDES` entry pointing to a non-existent lane.
+
+**Proposed shape:** sibling `coverage.yaml` next to this skill, schema validated, with one block per `(ManifestSource | reference_endpoint | bootstrap_stage)` covering the 5-layer wiring + status. Prose Markdown stays as the human-readable summary; the YAML is the lint source-of-truth.
+
+Status: **NOT YET IMPLEMENTED** — open as a tech-debt issue when the next "stranded source" finding lands. Until then, audit drift catches gaps via human re-read every 2-4 weeks.
