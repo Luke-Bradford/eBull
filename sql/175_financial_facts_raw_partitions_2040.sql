@@ -33,12 +33,43 @@
 --
 -- Run order: after sql/156_financial_facts_raw_partition.sql.
 
--- Phase 1: defensive cleanup of XBRL parser garbage. Must run BEFORE
+-- Phase 1a: defensive cleanup of XBRL parser garbage. Must run BEFORE
 -- partition CREATE so the DEFAULT partition has no in-range rows
 -- blocking the new partition CHECK predicates.
 DELETE FROM financial_facts_raw
 WHERE filed_date IS NOT NULL
   AND period_end > filed_date + INTERVAL '5 years';
+
+-- Phase 1b: complementary assertion — refuse to proceed if any row in
+-- the 2031+ range has NULL filed_date. The Phase 1a predicate cannot
+-- catch those (no filed_date to compare against), but they would
+-- trigger the same CheckViolation on Phase 2. Bot iter 1 WARNING fold
+-- (PR #1314, 2026-05-24): bot caught the gap; dev DB had zero such
+-- rows so dev verification passed silently, but any DB with legacy
+-- NPORT bulk-ingest rows lacking filed_date could hit it.
+--
+-- The operator action on assertion-fail: audit the NULL-filed_date
+-- rows. If legitimate (rare — usually means upstream bulk ingest
+-- dropped the date), backfill filed_date from accession_number's
+-- header data + re-run. If junk, DELETE them explicitly.
+DO $$
+DECLARE
+    null_count INT;
+BEGIN
+    SELECT COUNT(*) INTO null_count
+    FROM financial_facts_raw
+    WHERE filed_date IS NULL
+      AND period_end >= DATE '2031-01-01';
+    IF null_count > 0 THEN
+        RAISE EXCEPTION
+            'sql/175 refuses to proceed: % row(s) in financial_facts_raw have '
+            'filed_date IS NULL AND period_end >= 2031-01-01. These would '
+            'trigger CheckViolation on the new quarterly-partition CREATE. '
+            'Audit + clean these rows first (backfill filed_date from accession '
+            'header data OR DELETE if junk), then re-run.',
+            null_count;
+    END IF;
+END $$;
 
 -- Phase 2: extend quarterly partitions through 2040 (10y headroom).
 DO $$
