@@ -143,6 +143,53 @@ class TestRefreshCikSidecar:
             ebull_test_conn.commit()
 
     @pytest.mark.integration
+    def test_sidecar_no_per_cik_cap(
+        self,
+        guard_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """200-entry synthetic ``filings.files[]`` payload writes exactly
+        200 rows for the CIK — pins the no-per-CIK-cap invariant.
+
+        Defensive regression test from Run-#8-readiness Item 5 (sidecar
+        verdict = API_CONTRACT_WRONG; SEC schema has exactly one primary
+        endpoint per CIK; sidecar indexes overflow descriptors with
+        composite PK ``(cik, page_name)`` and no cap). The optional
+        hardening Codex suggested: a future bug that silently truncates
+        the loop would fail this test.
+
+        See `docs/proposals/etl/run-8-readiness-fixes.md` §Item 5 +
+        ``project_etl_sweep_stage_g_committee_api_contract_2026_05_24.md``.
+        """
+        _wipe_test_cik(guard_conn)
+        files_synthetic: list[dict[str, str]] = []
+        for i in range(1, 201):
+            files_synthetic.append(
+                {
+                    "name": f"CIK{_TEST_CIK}-submissions-{i:03d}.json",
+                    "filingFrom": "2010-01-15",
+                    "filingTo": "2010-06-30",
+                }
+            )
+        payload = {"filings": {"files": files_synthetic}}
+        result = _empty_result()
+
+        refresh_cik_sidecar(
+            guard_conn,
+            cik=_TEST_CIK,
+            payload=payload,
+            bootstrap_run_id=None,
+            result=result,
+        )
+
+        rows = _read_sidecar_rows(guard_conn, _TEST_CIK)
+        assert len(rows) == 200, (
+            f"Expected 200 sidecar rows (no-cap invariant), got {len(rows)}. "
+            f"A regression here would silently truncate mega-fund overflow "
+            f"pages and false-green the C7 gate."
+        )
+        assert result.sidecar_pages_indexed == 200
+
+    @pytest.mark.integration
     def test_writes_real_page_rows_when_files_present(
         self,
         guard_conn: psycopg.Connection[tuple],

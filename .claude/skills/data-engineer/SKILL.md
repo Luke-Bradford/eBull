@@ -330,6 +330,15 @@ sec_n_port_ingest (monthly day 22 03:00 UTC)
 
 **Write-through is wired in ingester service modules. There is no trigger-based write-through** — Postgres TRIGGERs only touch `updated_at` on manifest + freshness. Any new ingest path **must explicitly call** both `record_<cat>_observation` AND `refresh_<cat>_current(instrument_id)` plus update manifest. Forgetting either leaves `_current` empty (prev-log L1162).
 
+**Sync vs repair-sweep category asymmetry (Run-#8-readiness fixes / Architect lens REBUTTED by Codex)**:
+
+The legacy-mirror dispatcher `sync_all` at `app/services/ownership_observations_sync.py:797` covers **5 categories** (insiders, institutions, blockholders, treasury, def14a). The daily 03:30 UTC drift-repair sweep at `app/jobs/ownership_observations_repair._CATEGORIES` covers **7 categories** (the 5 + funds + esop). This asymmetry is **by-design**, NOT a bug:
+
+- **Funds** has no legacy mirror source — fund holdings land via NPORT manifest-worker write-through (`sec_n_port.py` parser → `refresh_funds_current`) and the bulk-dataset path. The daily sweep is funds' ONLY reconciliation path.
+- **ESOP** rows ARE processed by `sync_all` transitively inside `sync_def14a` (lines 691-769) — DEF 14A bene-table rows flagged as ESOP route into `ownership_esop_observations`. ESOP has its own daily reconciliation entry in `_CATEGORIES` in addition to the transitive sync.
+
+DO NOT "fix" the asymmetry by adding `sync_funds`/`sync_esop` — funds has no legacy source to read from; esop is already covered by `sync_def14a`. Both have explicit `tests/.../test_*sync_all_category_invariants.py` pinning the 5-vs-7 shape.
+
 **What write-through does NOT update**:
 - Legacy typed tables (`institutional_holdings`, `def14a_beneficial_holdings`, `insider_transactions`, `insider_initial_holdings`, `blockholder_filings`) — still written by ingesters, NOT read by rollup post-#905. Survive for chart history + drift detection.
 - `data_freshness_index` — separate write-side via `record_poll_outcome`.

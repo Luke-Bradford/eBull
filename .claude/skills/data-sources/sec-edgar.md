@@ -821,15 +821,15 @@ If a future MD&A / risk-factor consumer for 10-Q materialises, that PR replaces 
 
 Eligible adoptions for the same shape: `sec_xbrl_facts` (companyfacts API is the per-period writer; manifest rows can drain via synth no-op); `sec_n_csr` if the #918 spike returns INFEASIBLE.
 
-### 11.6 Discovery layer wiring (Layer 1 / 2 / 3) — audit 2026-05-13
+### 11.6 Discovery layer wiring (Layer 1 / 2 / 3) — wired 2026-05-13 (#1155 / PR #1157)
 
-The #863-#873 freshness redesign's three steady-state discovery layers are coded but **NOT scheduled** as of 2026-05-13:
+The #863-#873 freshness redesign's three steady-state discovery layers shipped wiring via **#1155 / PR #1157 (2026-05-13)**:
 
-- `run_atom_fast_lane` at `app/jobs/sec_atom_fast_lane.py:104` — Layer 1 (5-min Atom).
-- `run_daily_index_reconcile` at `app/jobs/sec_daily_index_reconcile.py:46` — Layer 2 (daily-index 04:00 UTC).
-- `run_per_cik_poll` at `app/jobs/sec_per_cik_poll.py:39` — Layer 3 (per-CIK cadence).
+- `run_atom_fast_lane` at `app/jobs/sec_atom_fast_lane.py:104` — Layer 1 (5-min Atom). Wiring: `_INVOKERS[JOB_SEC_ATOM_FAST_LANE]` at `app/jobs/runtime.py:333` + `ScheduledJob` at `app/workers/scheduler.py:1051`.
+- `run_daily_index_reconcile` at `app/jobs/sec_daily_index_reconcile.py:46` — Layer 2 (daily-index 04:00 UTC; exempt from universal-bootstrap gate per #1181). Wiring: `_INVOKERS[JOB_SEC_DAILY_INDEX_RECONCILE]` at `app/jobs/runtime.py:334` + `ScheduledJob` at `app/workers/scheduler.py:1072`.
+- `run_per_cik_poll` at `app/jobs/sec_per_cik_poll.py:39` — Layer 3 (per-CIK cadence). Wiring: `_INVOKERS[JOB_SEC_PER_CIK_POLL]` at `app/jobs/runtime.py:335` + `ScheduledJob` at `app/workers/scheduler.py:1103`.
 
-None have a `_INVOKERS[]` entry in `app/jobs/runtime.py`. None have a `ScheduledJob` row in `app/workers/scheduler.py:SCHEDULED_JOBS`. Tickets #867 / #868 / #870 are **reopened** as of the audit; umbrella wiring under **#1155**.
+Tickets #867 / #868 / #870 CLOSED 2026-05-13; umbrella #1155 CLOSED in same PR. Operator-facing runbooks live under `app/runbooks/` (NOT `app/cli/runbooks/` — Stream A PR-D / #1311).
 
 Post-#1155 legacy-cron retirement sweep COMPLETE (2026-05-14). All 8 legacy per-form ingest crons retired: `sec_business_summary_ingest` (#1159, full-delete), `sec_def14a_ingest` (#1160, on-demand), `sec_insider_transactions_ingest` (#1161, on-demand), `sec_form3_ingest` (#1162, on-demand), `sec_8k_events_ingest` (#1163, on-demand), `sec_13f_quarterly_sweep` (#1164, on-demand), `sec_n_port_ingest` (#1165, on-demand), `sec_dividend_calendar_ingest` (#1166, full-delete — unblocked by #1158 dividend-extraction in `eight_k.py`). Manifest worker + per-source parsers (`manifest_parsers/*.py`) carry every steady-state write. Full per-endpoint wiring at `.claude/skills/data-engineer/etl-endpoint-coverage.md` §3.
 

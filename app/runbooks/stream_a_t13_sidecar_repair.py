@@ -40,6 +40,7 @@ from app.config import settings
 from app.runbooks.safety import (
     RunbookRefused,
     assert_dev_db,
+    assert_dev_db_name_in_url,
     assert_dev_env,
     assert_jobs_process_stopped,
 )
@@ -121,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         assert_dev_env()
+        assert_dev_db_name_in_url()
     except RunbookRefused as exc:
         print(exc.msg, file=sys.stderr)
         return 2

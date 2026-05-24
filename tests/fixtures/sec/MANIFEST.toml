@@ -1,0 +1,59 @@
+# SEC parser fixture pin manifest — #1233 run-8-readiness Item 9.
+#
+# CAVEMAN: file change -> SHA change -> test red. No surprise edits.
+#
+# Each [[fixture]] row:
+#   path        — repo-relative path to fixture file
+#   parser      — owning parser key (sec_n_port / sec_13f_hr / sec_n_csr / sec_13dg)
+#   accession   — SEC accession number when fixture is a real filing;
+#                 "SYNTHETIC-<purpose>" when hand-crafted for a negative test
+#   sha256      — sha256 of the file bytes at capture time
+#   source_url  — SEC EDGAR canonical URL when real; empty string when synthetic
+#   captured_at — ISO date the SHA was first pinned (not the filing date)
+#
+# Verifier:    tests/test_fixture_pinning.py
+# Spec:        docs/proposals/etl/run-8-readiness-fixes.md §Item 9
+# Refresh:     uv run python scripts/refresh_fixture_pinning.py
+#
+# Scope (v1.3): 4 highest-load-bearing parsers with #932 validation-cliff
+# exposure: sec_n_csr, sec_n_port, sec_13f_hr, sec_13dg. Broader 13-parser
+# sweep deferred to follow-up.
+#
+# Coverage gaps at capture (no committed fixtures — flag, do not block):
+#   * sec_n_csr  — iXBRL spike-cache at .tmp/spike-918/* (gitignored).
+#                  Committed fixture pinning blocked on extracting a small
+#                  redacted iXBRL sample into tests/fixtures/n_csr_ixbrl/.
+#   * sec_13dg   — parser tests use inline XML string literals; no separate
+#                  fixture file exists yet to pin.
+
+[[fixture]]
+path = "tests/fixtures/sec/nport_p_test_fund.xml"
+parser = "sec_n_port"
+accession = "0000036405-26-000074"
+sha256 = "6f65d9d07feabb596006ea07fd3ce5c0d025810163803ebaac1fb400d106cb40"
+source_url = "https://www.sec.gov/Archives/edgar/data/36405/000003640526000074/primary_doc.xml"
+captured_at = "2026-05-24"
+
+[[fixture]]
+path = "tests/fixtures/sec/nport_p_missing_series.xml"
+parser = "sec_n_port"
+accession = "SYNTHETIC-missing-series-negative-test"
+sha256 = "43c0b4aeb2e9b5d086cc536c12126faf445e989c1a9c0aa6dd5decb78b0b6aa8"
+source_url = ""
+captured_at = "2026-05-24"
+
+[[fixture]]
+path = "tests/fixtures/sec/13f/berkshire_2024q3_primary_doc.xml"
+parser = "sec_13f_hr"
+accession = "0000950123-24-011775"
+sha256 = "e28c3c8d4bad32d1841352516d94692ff5f8b835ad5a8676a4a48490c646f9c8"
+source_url = "https://www.sec.gov/Archives/edgar/data/1067983/000095012324011775/primary_doc.xml"
+captured_at = "2026-05-24"
+
+[[fixture]]
+path = "tests/fixtures/sec/13f/berkshire_2024q3_infotable.xml"
+parser = "sec_13f_hr"
+accession = "0000950123-24-011775"
+sha256 = "90190a5e83e7957e350542172aa08396ee311b8a0ac97bf454a2a7a1d98789e7"
+source_url = "https://www.sec.gov/Archives/edgar/data/1067983/000095012324011775/infotable.xml"
+captured_at = "2026-05-24"

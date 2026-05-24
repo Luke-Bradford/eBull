@@ -116,7 +116,10 @@ class FinraShortInterestProvider:
         """
         url = self.settlement_file_url(settlement_date)
         response = self._http.get(url)
-        if response.status_code == 404:
+        # 404 = not yet published; 403 = also not-yet-published on the
+        # FINRA CDN (empirical, confirmed at #916 RegSHO live smoke).
+        # Both map to the same operator semantic ("next-fire revisits").
+        if response.status_code in (403, 404):
             raise FinraNotFound(f"FINRA settlement file not found: {url}")
         response.raise_for_status()
         return response.content

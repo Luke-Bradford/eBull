@@ -74,6 +74,20 @@ must respect the SEC 10 req/s fair-use cap externally — this module
 makes no rate-limiting assumptions."""
 
 
+HttpGetWithMeta = Callable[[str, dict[str, str]], tuple[int, bytes, "str | None"]]
+"""Extended HTTP getter: ``(url, headers) -> (status, body, last_modified)``.
+
+Item 7 of ``docs/proposals/etl/run-8-readiness-fixes.md`` (conditional-
+GET via If-Modified-Since). The legacy ``HttpGet`` discards response
+headers — fine for the unconditional fetch path, but not for callers
+that need to round-trip the ``Last-Modified`` header into
+``external_data_watermarks`` and re-send it as ``If-Modified-Since``
+next tick. ``HttpGetWithMeta`` adds the third tuple element so the
+job-level conditional-GET wrapper can drive the SEC 10 req/s budget
+toward 304-skip on unchanged payloads.
+"""
+
+
 @dataclass(frozen=True)
 class FilingIndexRow:
     """One discovered filing — minimal shape carried across the
@@ -114,6 +128,13 @@ class FreshnessDelta:
     last_filed_at: datetime | None
     has_more_in_files: bool
     files_pages: list[str] = field(default_factory=list)
+    # Item 7 (#1233 run-8-readiness): conditional-GET fields. Default to
+    # "unconditional path" semantics so all existing callers see no
+    # behaviour change — ``not_modified=False`` + ``last_modified=None``.
+    # ``check_freshness_conditional`` populates these when the caller
+    # opts into the conditional path.
+    not_modified: bool = False
+    last_modified: str | None = None
 
 
 def _zero_pad_cik(cik: str) -> str:
@@ -319,4 +340,124 @@ def check_freshness(
         last_filed_at=last_filed_at,
         has_more_in_files=has_more,
         files_pages=files_pages,
+    )
+
+
+def check_freshness_conditional(
+    http_get_with_meta: HttpGetWithMeta,
+    *,
+    cik: str,
+    last_known_filing_id: str | None = None,
+    sources: Iterable[ManifestSource] | None = None,
+    user_agent: str = "eBull research/1.0 contact@example.com",
+    if_modified_since: str | None = None,
+) -> FreshnessDelta:
+    """Conditional-GET variant of ``check_freshness`` — Item 7 of
+    ``docs/proposals/etl/run-8-readiness-fixes.md``.
+
+    CAVEMAN: same job as ``check_freshness`` but the HTTP layer rounds
+    ``Last-Modified`` back to the caller via ``HttpGetWithMeta`` and
+    accepts an ``If-Modified-Since`` value to inject as a request
+    header. On 304 the returned delta has ``not_modified=True`` +
+    ``new_filings=[]`` and the caller MUST bump only ``watermark_at``
+    in the watermark store (NOT ``watermark`` — the stored value is
+    still the freshest Last-Modified we've seen).
+
+    Backwards compatibility: this is a NEW function, not a signature
+    change on ``check_freshness``. All existing callers (drain,
+    rebuild, atom fast lane, daily-index reconcile) stay on the
+    unconditional path.
+
+    The body-parse path is identical to ``check_freshness``: same
+    ``parse_submissions_page`` call, same source filter, same
+    files_pages extraction, same watermark-aware truncation of
+    ``new_filings``. Only the fetch surface differs.
+    """
+    cik_padded = _zero_pad_cik(cik)
+    url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+    headers: dict[str, str] = {
+        "User-Agent": user_agent,
+        "Accept-Encoding": "gzip, deflate",
+    }
+    if if_modified_since:
+        headers["If-Modified-Since"] = if_modified_since
+
+    status, body, last_modified = http_get_with_meta(url, headers)
+
+    if status == 304:
+        # CAVEMAN: server says "nothing new since your watermark." Skip
+        # parse + skip downstream writes. Caller bumps watermark_at
+        # only — the stored Last-Modified is still correct.
+        return FreshnessDelta(
+            cik=cik_padded,
+            new_filings=[],
+            last_filed_at=None,
+            has_more_in_files=False,
+            not_modified=True,
+            last_modified=if_modified_since,
+        )
+    if status == 404:
+        return FreshnessDelta(
+            cik=cik_padded,
+            new_filings=[],
+            last_filed_at=None,
+            has_more_in_files=False,
+            last_modified=last_modified,
+        )
+    if status != 200:
+        raise RuntimeError(f"submissions.json fetch failed: status={status} cik={cik_padded}")
+
+    rows, has_more = parse_submissions_page(body, cik=cik_padded)
+    if sources is not None:
+        wanted = set(sources)
+        rows = [r for r in rows if r.source is not None and r.source in wanted]
+
+    # Mirror the files_pages extraction in ``check_freshness`` — same
+    # warning path on disagreement between row parse + files extraction.
+    files_pages: list[str] = []
+    try:
+        payload = json.loads(body) if isinstance(body, (bytes, str)) else body
+        if isinstance(payload, dict):
+            files_meta = (payload.get("filings", {}) or {}).get("files", []) or []
+            for meta in files_meta:
+                if isinstance(meta, dict):
+                    name = meta.get("name")
+                    if isinstance(name, str) and name:
+                        files_pages.append(name)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning(
+            "check_freshness_conditional: files_pages extraction failed for cik=%s: %s",
+            cik_padded,
+            exc,
+        )
+
+    if has_more and not files_pages:
+        logger.warning(
+            "check_freshness_conditional: cik=%s has_more_in_files=True but files_pages "
+            "extracted empty — rebuild's secondary walk will be skipped",
+            cik_padded,
+        )
+
+    # Watermark-aware truncation — identical semantics to
+    # ``check_freshness``.
+    new_filings: list[FilingIndexRow] = []
+    if last_known_filing_id is None:
+        new_filings = rows
+    else:
+        for row in rows:
+            if row.accession_number == last_known_filing_id:
+                break
+            new_filings.append(row)
+        else:
+            new_filings = rows
+
+    last_filed_at = max((r.filed_at for r in rows), default=None)
+    return FreshnessDelta(
+        cik=cik_padded,
+        new_filings=new_filings,
+        last_filed_at=last_filed_at,
+        has_more_in_files=has_more,
+        files_pages=files_pages,
+        not_modified=False,
+        last_modified=last_modified,
     )

@@ -82,7 +82,7 @@ Numbered. Required unless marked OPTIONAL. Empty sections must say "N/A — <rea
 | 14 | Tombstones + soft-delete | ✅ | Which conditions tombstone. Which conditions soft-delete (`known_to`). NEVER hard-delete observations |
 | 15 | `rows_skipped` closed-set + other | ✅ | Closed enum of skip reasons + an `other` catch-all with `partial_data_reason` free-form. Auditing depends on the enum being finite |
 | 16 | Schema-evolution migration path | ✅ | Dual-parser window if breaking. Parser-version bump rules. Old-data backfill plan |
-| 17 | Operator runbooks | ✅ | Executable: `app/cli/runbooks/<source>_<endpoint>.py` — NOT SQL strings. Includes `--dry-run` for any DELETE |
+| 17 | Operator runbooks | ✅ | Executable: `app/runbooks/<source>_<endpoint>.py` — NOT SQL strings. Includes `--dry-run` for any DELETE. **Path is `app/runbooks/` NOT `app/cli/runbooks/`** — `app/cli.py` already exists as single-file break-glass credential CLI; sibling `app/cli/` package would shadow it (Stream A PR-D / #1311 chose flat layout). |
 | 18 | Smoke matrix | ✅ | Per-source panel (default: AAPL, GME, MSFT, JPM, HD for issuer-keyed). For filer-keyed: 1 large fund-family + 1 small + 1 edge case |
 | 19 | Cross-source verification | ✅ | One external authoritative source (gurufocus, marketbeat, EdgarTools golden file, SEC direct) + the figure compared |
 | 20 | Test placement | ✅ | Which tests are unit / integration / contract / smoke / nightly. Flakiness budget |
@@ -139,7 +139,9 @@ If the source has bootstrap + steady-state forms:
 
 ### §17 Operator runbooks are executable
 
-`docs/specs/etl/<source>.md` § 17 should reference `app/cli/runbooks/<source>_<endpoint>.py` — a runnable Python file with click/typer CLI, NOT a Markdown SQL string the operator copy-pastes. SQL strings drift; runnable scripts type-check + can be unit-tested.
+`docs/specs/etl/<source>.md` § 17 should reference `app/runbooks/<source>_<endpoint>.py` — a runnable Python file with click/typer CLI, NOT a Markdown SQL string the operator copy-pastes. SQL strings drift; runnable scripts type-check + can be unit-tested.
+
+**Path is `app/runbooks/` NOT `app/cli/runbooks/`** — Stream A PR-D / #1311 chose the flat layout because `app/cli.py` already exists as the operator break-glass credential CLI (single-file module); adding a sibling `app/cli/` package would shadow it. The exemplars to copy: `app/runbooks/stream_a_run_8_verify.py` (destructive `--apply`), `app/runbooks/stream_a_t13_sidecar_repair.py` (per-CIK repair without re-fetch), `app/runbooks/stream_a_stream_c_gate.py` (read-only acceptance gate with pinned JSON envelope). Shared safety primitives in `app/runbooks/safety.py`: `assert_dev_env`, `assert_dev_db`, `assert_jobs_process_stopped`, `wait_for_jobs_process_started`.
 
 Every runbook with a destructive action (`DELETE`, `UPDATE`, `TRUNCATE`, schema migration) has `--dry-run` as the default and `--apply` to commit. The §6 prevention-log entry on "always provide --dry-run" applies universally.
 

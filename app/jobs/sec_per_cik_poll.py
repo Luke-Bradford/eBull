@@ -9,6 +9,19 @@ UPSERTs new manifest rows, and updates the scheduler outcome.
 Layer 3 is the per-CIK reconcile path — fires only at predicted-next-
 filing windows. AAPL's DEF 14A poll fires once a year; AAPL's 13F
 poll never fires (issuer subject; AAPL doesn't file 13F).
+
+Item 7 (#1233 ``docs/proposals/etl/run-8-readiness-fixes.md``):
+when the caller supplies the richer ``http_get_with_meta`` callable
+(see ``app/providers/implementations/sec_submissions.py:HttpGetWithMeta``),
+this job rounds the SEC ``Last-Modified`` header through
+``external_data_watermarks`` under source-key
+``sec.last_modified.per_cik_poll`` and short-circuits on HTTP 304 —
+skipping payload parse + scheduler UPSERT entirely while bumping
+``watermark_at`` so the watermark row stays fresh.
+
+Distinct source-key namespace from ``sec.submissions`` (which stores
+top-accession at ``app/services/fundamentals/__init__.py:2030``) to
+avoid corrupting two different fetch contracts.
 """
 
 from __future__ import annotations
@@ -20,7 +33,12 @@ from typing import Any
 
 import psycopg
 
-from app.providers.implementations.sec_submissions import HttpGet, check_freshness
+from app.providers.implementations.sec_submissions import (
+    HttpGet,
+    HttpGetWithMeta,
+    check_freshness,
+    check_freshness_conditional,
+)
 from app.services.data_freshness import (
     FreshnessRow,
     cadence_for,
@@ -29,8 +47,17 @@ from app.services.data_freshness import (
     subjects_due_for_recheck,
 )
 from app.services.sec_manifest import ManifestSource, record_manifest_entry
+from app.services.watermarks import get_watermark, set_watermark
 
 logger = logging.getLogger(__name__)
+
+
+# Item 7 (#1233): dedicated source-key namespace for HTTP Last-Modified
+# round-trip. MUST NOT collide with ``sec.submissions`` (top-accession
+# semantics at ``app/services/fundamentals/__init__.py:2030``). See
+# ``app/services/watermarks.py`` module docstring §Source-key
+# namespaces in use.
+_SOURCE_KEY_PER_CIK_POLL: str = "sec.last_modified.per_cik_poll"
 
 
 @dataclass(frozen=True)
@@ -50,7 +77,8 @@ def _probe_subject(
     conn: psycopg.Connection[Any],
     subject: FreshnessRow,
     *,
-    http_get: HttpGet,
+    http_get: HttpGet | None = None,
+    http_get_with_meta: HttpGetWithMeta | None = None,
 ) -> tuple[int, bool]:
     """Probe one subject. Returns ``(new_filings_recorded, errored)``.
 
@@ -61,16 +89,52 @@ def _probe_subject(
     Caller MUST ensure ``subject.cik is not None`` (FINRA universe
     singleton has no submissions.json to poll). Asserted defensively
     to narrow the type for ``check_freshness``.
+
+    Item 7 (#1233): when ``http_get_with_meta`` is supplied, this
+    function reads any prior ``sec.last_modified.per_cik_poll`` /
+    ``<cik>`` watermark, sends it as ``If-Modified-Since``, and on
+    HTTP 304 short-circuits without scheduler-outcome write (the
+    payload didn't change so neither did the freshness state). On
+    200 with a ``Last-Modified`` header the watermark is upserted
+    inside the same transaction as the manifest writes so a crash
+    mid-ingest cannot leave the watermark ahead of the data.
+
+    Backwards compat: ``http_get`` legacy path is preserved for
+    existing tests (``tests/test_sec_per_cik_poll.py``) that don't
+    care about conditional-GET semantics. Exactly one of the two
+    callables MUST be supplied.
     """
+    if (http_get is None) == (http_get_with_meta is None):
+        raise ValueError("_probe_subject requires exactly one of http_get / http_get_with_meta")
     assert subject.cik is not None, "_probe_subject requires non-None cik"
     sources_to_check: set[ManifestSource] | None = {subject.source} if subject.source else None
+    cik_padded = subject.cik
+    # CAVEMAN: read watermark BEFORE the fetch so we know whether to
+    # inject If-Modified-Since. Watermark read is its own statement —
+    # safe outside any open transaction at this point (the outer caller
+    # opens a per-CIK ``with conn.transaction():`` only around the
+    # writes below).
+    if_modified_since: str | None = None
+    if http_get_with_meta is not None:
+        wm = get_watermark(conn, _SOURCE_KEY_PER_CIK_POLL, cik_padded)
+        if_modified_since = wm.watermark if wm and wm.watermark else None
     try:
-        delta = check_freshness(
-            http_get,
-            cik=subject.cik,
-            last_known_filing_id=subject.last_known_filing_id,
-            sources=sources_to_check,
-        )
+        if http_get_with_meta is not None:
+            delta = check_freshness_conditional(
+                http_get_with_meta,
+                cik=subject.cik,
+                last_known_filing_id=subject.last_known_filing_id,
+                sources=sources_to_check,
+                if_modified_since=if_modified_since,
+            )
+        else:
+            assert http_get is not None  # narrowing for type checker
+            delta = check_freshness(
+                http_get,
+                cik=subject.cik,
+                last_known_filing_id=subject.last_known_filing_id,
+                sources=sources_to_check,
+            )
     except Exception as exc:
         logger.warning(
             "per-cik poll: check_freshness raised for cik=%s source=%s: %s",
@@ -89,6 +153,51 @@ def _probe_subject(
             instrument_id=subject.instrument_id,
         )
         return (0, True)
+
+    # Item 7 (#1233): 304 short-circuit. Server says "nothing new
+    # since your If-Modified-Since." Skip manifest writes (no new
+    # filings) + bump watermark_at only (NOT watermark — the stored
+    # Last-Modified is still the freshest the server has ever sent).
+    # Scheduler outcome still writes ``current`` so expected_next_at
+    # rolls forward and we don't re-poll this CIK immediately.
+    if delta.not_modified:
+        with conn.transaction():
+            # CAVEMAN: re-stamp watermark_at by upserting the same
+            # ``watermark`` string. set_watermark always touches
+            # ``watermark_at`` via NOW() so we don't need a separate
+            # UPDATE path — the upsert with identical watermark value
+            # is the canonical "bump fetched_at" idiom for this
+            # module.
+            if if_modified_since is not None:
+                set_watermark(
+                    conn,
+                    source=_SOURCE_KEY_PER_CIK_POLL,
+                    key=cik_padded,
+                    watermark=if_modified_since,
+                    watermark_at=None,
+                )
+            # Scheduler outcome on 304: same logic as "200 with no new
+            # filings" — current / never depending on prior state.
+            if subject.state == "never_filed":
+                outcome_304: str = "never"
+                next_recheck_304: datetime | None = datetime.now(tz=UTC) + cadence_for(subject.source)
+            else:
+                outcome_304 = "current"
+                next_recheck_304 = None
+            record_poll_outcome(
+                conn,
+                subject_type=subject.subject_type,
+                subject_id=subject.subject_id,
+                source=subject.source,
+                outcome=outcome_304,  # type: ignore[arg-type]
+                last_known_filing_id=subject.last_known_filing_id,
+                last_known_filed_at=subject.last_known_filed_at,
+                new_filings_since=0,
+                next_recheck_at=next_recheck_304,
+                cik=subject.cik,
+                instrument_id=subject.instrument_id,
+            )
+        return (0, False)
 
     # UPSERT manifest rows for the new filings
     recorded = 0
@@ -149,13 +258,41 @@ def _probe_subject(
         cik=subject.cik,
         instrument_id=subject.instrument_id,
     )
+
+    # Item 7 (#1233): persist the fresh Last-Modified watermark. MUST
+    # land in the same transaction as the manifest writes — set_watermark
+    # asserts INTRANS. Only meaningful when the caller is on the
+    # conditional path AND the server returned a Last-Modified header
+    # (older SEC mirrors occasionally omit it; in that case skip
+    # the upsert — next tick will refetch unconditionally).
+    #
+    # Codex 2 pre-push P1 fold 2026-05-24: gate the watermark write on
+    # ``recorded == len(delta.new_filings)``. If ANY record_manifest_entry
+    # raised ValueError above (caught + logged, not re-raised), the
+    # accession was NOT persisted but ``last_known`` still advances at
+    # line 246. Without this gate the next tick gets a 304 and the
+    # unrecorded accession is hidden forever. Letting the watermark
+    # stay stale forces a 200 re-fetch + retry. Retention-dropped
+    # filings + new filings that all upserted cleanly still advance
+    # the watermark (the common case).
+    all_recorded = recorded == len(delta.new_filings)
+    if http_get_with_meta is not None and delta.last_modified and all_recorded:
+        with conn.transaction():
+            set_watermark(
+                conn,
+                source=_SOURCE_KEY_PER_CIK_POLL,
+                key=cik_padded,
+                watermark=delta.last_modified,
+                watermark_at=None,
+            )
     return (recorded, False)
 
 
 def run_per_cik_poll(
     conn: psycopg.Connection[Any],
     *,
-    http_get: HttpGet,
+    http_get: HttpGet | None = None,
+    http_get_with_meta: HttpGetWithMeta | None = None,
     source: ManifestSource | None = None,
     max_subjects: int = 100,
 ) -> PerCikPollStats:
@@ -179,7 +316,16 @@ def run_per_cik_poll(
     paths) is NOT followed here — that lives in the dedicated drain
     + rebuild jobs (#871, #872) which have their own throughput
     budgets. The per-CIK steady-state path uses only the recent array.
+
+    Item 7 (#1233): pass ``http_get_with_meta`` to enable conditional-
+    GET via ``If-Modified-Since`` / ``Last-Modified`` watermarks
+    (``sec.last_modified.per_cik_poll`` namespace). The scheduler
+    invocation at ``app/workers/scheduler.py:_make_sec_http_get_with_meta``
+    supplies it. The legacy ``http_get`` parameter remains for
+    existing unit tests that fake a deterministic 200 body.
     """
+    if (http_get is None) == (http_get_with_meta is None):
+        raise ValueError("run_per_cik_poll requires exactly one of http_get / http_get_with_meta")
     # #1155 G13 — bounded total budget split: 2/3 to poll, ~1/3 to
     # recheck. No max(1, ...) floor so max_subjects=1 stays bounded
     # at total=1 (poll=0, recheck=1).
@@ -202,7 +348,12 @@ def run_per_cik_poll(
             # FINRA universe singleton — no submissions.json poll
             continue
         subjects_polled += 1
-        recorded, errored = _probe_subject(conn, subject, http_get=http_get)
+        recorded, errored = _probe_subject(
+            conn,
+            subject,
+            http_get=http_get,
+            http_get_with_meta=http_get_with_meta,
+        )
         new_filings_recorded += recorded
         if errored:
             poll_errors += 1
@@ -211,7 +362,12 @@ def run_per_cik_poll(
         if subject.cik is None:
             continue
         recheck_subjects_polled += 1
-        recorded, errored = _probe_subject(conn, subject, http_get=http_get)
+        recorded, errored = _probe_subject(
+            conn,
+            subject,
+            http_get=http_get,
+            http_get_with_meta=http_get_with_meta,
+        )
         recheck_new_filings_recorded += recorded
         if errored:
             poll_errors += 1

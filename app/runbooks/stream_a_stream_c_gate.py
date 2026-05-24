@@ -44,8 +44,10 @@ from app.jobs.sec_manifest_worker import registered_parser_sources  # noqa: E402
 from app.runbooks.safety import (  # noqa: E402
     RunbookRefused,
     assert_dev_db,
+    assert_dev_db_name_in_url,
     assert_dev_env,
 )
+from app.runbooks.stream_a_stream_c_gate_schema import validate_envelope  # noqa: E402
 from app.services.capability_manifest_mapping import (  # noqa: E402
     CATEGORY_TO_MANIFEST_SOURCES,
 )
@@ -322,7 +324,7 @@ def _run_gate(conn: psycopg.Connection[Any], *, run_id: int, started_at_iso: str
         if first_failed is None:
             first_failed = "c7"
 
-    return {
+    payload: dict[str, Any] = {
         "schema_version": JSON_SCHEMA_VERSION,
         "runbook": "stream_a_stream_c_gate",
         "bootstrap_run_id": run_id,
@@ -332,6 +334,14 @@ def _run_gate(conn: psycopg.Connection[Any], *, run_id: int, started_at_iso: str
         "accepted": accepted,
         "first_failed": first_failed,
     }
+    # Validate the envelope shape BEFORE returning. Catches accidental
+    # shape drift (new field added here without parallel schema update;
+    # wrong type; key rename) at emit-time so a malformed envelope
+    # cannot reach the operator's #1233 attestation comment. Pydantic
+    # ValidationError propagates as ValueError; the runbook surfaces
+    # with exit code 1. See app/runbooks/stream_a_stream_c_gate_schema.py.
+    validate_envelope(payload)
+    return payload
 
 
 def _persist_status(conn: psycopg.Connection[Any], *, run_id: int, status_value: str) -> None:
@@ -379,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         assert_dev_env()
+        assert_dev_db_name_in_url()
     except RunbookRefused as exc:
         print(exc.msg, file=sys.stderr)
         return 2
