@@ -24,7 +24,11 @@
 #  F. pg_advisory_xact_lock / hashtextextended present (×1).
 #  G. DISTINCT ON columns match per-helper expected tuple.
 #  H. ORDER BY tuple matches per-helper expected list.
-#  I. UPDATE SET clause writes refreshed_at = now() (×1).
+#  I. 5-axis full-column-set invariant (#1256): (a) UPDATE SET cols ==
+#     diff LHS ∪ {refreshed_at}; (b) diff LHS == diff RHS ordered;
+#     (c) refreshed_at exactly-once in UPDATE SET, never in diff;
+#     (d) no duplicate cols in any span; (e) UPDATE assignment
+#     LHS == RHS. Delegates to scripts/_check_ownership_writer_columns.py.
 #  J. INSERT column list omits refreshed_at (DEFAULT now() fires):
 #     refreshed_at appears exactly once in body (UPDATE SET only).
 #  K. Per-helper extra WHERE filter clauses (treasury K1, def14a K1-K3,
@@ -428,23 +432,19 @@ for helper in $HELPERS; do
   fi
 
   # ------------------------------------------------------------------
-  # I — UPDATE SET clause writes refreshed_at = now() exactly once.
+  # I — 5-axis full-column-set invariant (#1256).
   #
-  # Aligned padding ("refreshed_at       = now()" or "refreshed_at =
-  # now()") both pass the && line filter. SQL comments are stripped
-  # before counting so a future `-- refreshed_at = now()` inline note
-  # cannot inflate the count (bot review iter 1 WARNING 2).
+  # Delegates to Python helper. See
+  # scripts/_check_ownership_writer_columns.py for spec.
+  # Pins: (a) UPDATE SET cols == diff LHS ∪ {refreshed_at};
+  #       (b) diff LHS == diff RHS (ordered);
+  #       (c) refreshed_at exactly-once in UPDATE SET, never in diff;
+  #       (d) no duplicate cols in any span;
+  #       (e) UPDATE assignment LHS == RHS (modulo refreshed_at = now()).
   # ------------------------------------------------------------------
-  i_count=$(printf '%s\n' "$body" \
-    | awk '{
-        stripped = $0
-        sub(/^[[:space:]]+/, "", stripped)
-        if (substr(stripped, 1, 2) == "--") next   # strip SQL comment lines
-        if (/refreshed_at/ && /= now\(\)/) print
-      }' \
-    | wc -l | tr -d ' ')
-  if (( i_count != 1 )); then
-    fail "I helper=${helper}: expected exactly 1 'refreshed_at ... = now()' line in UPDATE SET (SQL comments stripped), found ${i_count}."
+  if ! uv run python scripts/_check_ownership_writer_columns.py \
+       --function "refresh_${helper}_current" "$FILE_OBS"; then
+    fail "I helper=${helper}: see python output above"
   fi
 
   # ------------------------------------------------------------------
@@ -493,6 +493,42 @@ for helper in $HELPERS; do
   fi
 
 done  # end per-helper loop
+
+# ======================================================================
+# Invariant I — BATCH HELPERS (#1256).
+#
+# 3 batch helpers (refresh_*_current_batch) share the diff-aware MERGE
+# shape but operate on instrument_id lists. Same drift risk as singles.
+# Codex iter-1 BLOCKING-B2 + iter-3 BLOCKING-1 fold.
+# ======================================================================
+echo "Checking invariant I for 3 batch helpers..."
+for batch_fn in refresh_insiders_current_batch refresh_institutions_current_batch refresh_funds_current_batch; do
+  if ! uv run python scripts/_check_ownership_writer_columns.py \
+       --function "${batch_fn}" "$FILE_OBS"; then
+    fail "I batch=${batch_fn}: see python output above"
+  fi
+done
+
+# Final coverage audit (#1256 Codex iter-3 BLOCKING-1 fold; bot PR #1353
+# review iter-1 BLOCKING fold) — defend against silent double-checking
+# by asserting the Python helper inspected the expected count of
+# functions AND that all of them passed invariant I.
+#
+# CRITICAL: capture exit code via `if !` form. Bare `$()` swallows the
+# Python process's exit, so a helper failing invariant I.a-e would still
+# print "10 functions covered (expected 10)" (because len(found)=10) and
+# the grep would pass — defeating the audit. The exit-code check is
+# load-bearing; the grep is a secondary guard.
+echo "Checking invariant I coverage audit (expected 10 functions, all passing)..."
+if ! coverage_output=$(uv run python scripts/_check_ownership_writer_columns.py \
+    --coverage-report "$FILE_OBS"); then
+  printf '%s\n' "$coverage_output" >&2
+  fail "I coverage audit: Python helper exited non-zero — at least one helper failed invariant I"
+fi
+if ! grep -q "10 functions covered (expected 10)" <<<"$coverage_output"; then
+  printf '%s\n' "$coverage_output" >&2
+  fail "I coverage audit: expected '10 functions covered (expected 10)' line"
+fi
 
 # ======================================================================
 # Cross-cutting invariant M — no raw DELETE FROM ownership_*_current in

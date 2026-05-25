@@ -383,6 +383,8 @@ WHERE s.category = '<cat>'
 
 Spec: `docs/_archive/2026-05/2026-05-21-pr12-ownership-current-writer-merge.md`. Prevention-log entries: "MERGE WHEN NOT MATCHED BY SOURCE must carry the per-scope clamp on BOTH the ON clause AND the DELETE clause" + "Diff-aware writers must NOT include update-timestamp columns in the diff predicate".
 
+**Lint contract (#1256)**: UPDATE SET / diff-tuple column shape is enforced by `scripts/_check_ownership_writer_columns.py` (5-axis invariant I a-e). One col per line in UPDATE SET; comma-separated `prefix.col` tokens per diff-tuple line; no inline comments in either span. The shell wrapper invokes the Python helper per-function for all 10 helpers (7 single + 3 batch).
+
 **Batched form for post-ingest hot-paths (#1233 PR-4, SHIPPED 2026-05-23)**:
 
 Three of the seven helpers also expose a batched form:
