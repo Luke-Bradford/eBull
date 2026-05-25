@@ -87,7 +87,7 @@ from app.runbooks.safety import (
 DEFAULT_API_BASE: str = "http://127.0.0.1:8000"
 DEFAULT_TIMEOUT_MIN: int = 90
 DEFAULT_POLL_SEC: int = 30
-DEFAULT_WAIT_FOR_JOBS_SEC: int = 600
+DEFAULT_WAIT_FOR_JOBS_SEC: int = 1800
 LOG_DIR: Path = Path("var/runbooks")
 
 
