@@ -164,6 +164,39 @@ def test_run_8_verify_postgres_url_strips_db_name() -> None:
     assert urlparse(url).path == "/postgres"
 
 
+def test_run_8_verify_default_wait_for_jobs_sec_constant_is_1800() -> None:
+    """#1327 — constant pinned at 1800 (operator-facing CLI default + docs ref)."""
+    assert stream_a_run_8_verify.DEFAULT_WAIT_FOR_JOBS_SEC == 1800
+
+
+def test_run_8_verify_argparse_default_derives_from_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1327 — argparse --wait-for-jobs-sec default is READ from the constant
+    at build_parser() time, not hardcoded.
+
+    PR #1352 Claude-bot iter-2 NITPICK fold: previous test asserted only
+    value-equality (`args.wait_for_jobs_sec == 1800` + `== constant`), which
+    would silently pass if someone refactored `build_parser` to
+    `default=1800` (hardcoded literal) — both assertions would still hold.
+
+    Genuine fix: monkeypatch the constant to a sentinel value + verify
+    argparse picks it up. If `build_parser` reads the constant (correct),
+    the sentinel propagates. If `build_parser` hardcodes a literal, the
+    sentinel is ignored and the assertion fails.
+    """
+    sentinel = 12345
+    monkeypatch.setattr(stream_a_run_8_verify, "DEFAULT_WAIT_FOR_JOBS_SEC", sentinel)
+    parser = stream_a_run_8_verify.build_parser()
+    args = parser.parse_args([])
+    assert args.wait_for_jobs_sec == sentinel, (
+        f"argparse --wait-for-jobs-sec default did not pick up monkeypatched "
+        f"DEFAULT_WAIT_FOR_JOBS_SEC={sentinel}; got {args.wait_for_jobs_sec}. "
+        f"build_parser() likely hardcodes the default instead of reading the constant. "
+        f"See #1327 + PR #1352 iter-2 NITPICK."
+    )
+
+
 # ---------------------------------------------------------------------------
 # stream_a_stream_c_gate — argparse + EBULL_ENV refusal
 # ---------------------------------------------------------------------------

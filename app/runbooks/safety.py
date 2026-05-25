@@ -175,7 +175,7 @@ def assert_jobs_process_stopped(database_url: str) -> None:
 def wait_for_jobs_process_started(
     database_url: str,
     *,
-    timeout_sec: int = 600,
+    timeout_sec: int,
     poll_sec: int = 10,
 ) -> None:
     """Block until the jobs process acquires ``JOBS_PROCESS_LOCK_KEY``.

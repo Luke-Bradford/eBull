@@ -186,7 +186,7 @@ EBULL_ENV=dev python -m app.runbooks.stream_a_run_8_verify --apply
 | `--api-base` | `http://127.0.0.1:8000` | If API runs on non-default host/port |
 | `--timeout-min` | `90` | **Override to `180`** for realistic-band run; per §3.2 the realistic band exceeds 90 min |
 | `--poll-sec` | `30` | Lower to `10` only if you want more frequent log entries (no orchestrator impact) |
-| `--wait-for-jobs-sec` | `600` | Raise to `1800` if you might step away after dispatch — per O2 the default is 10 min and exceeding it forces a manual restart |
+| `--wait-for-jobs-sec` | `1800` | 30 min walk-away budget post-dispatch. Lower to `600` only if you'll start the jobs process immediately. Exceeding the budget forces a manual restart (no resume). |
 
 **Recommended invocation for this drive:**
 
@@ -493,7 +493,7 @@ These IMPORTANT / OBSERVATION findings won't fail Run #8 outright but will surpr
 
 | # | Finding | Effect during run | Mitigation |
 |---|---|---|---|
-| OP-O2 | `wait_for_jobs_process_started` defaults to 600 s (10 min) | If you walk away after dispatch, jobs-process-start may exceed budget → exit 2 with run_id captured | Use `--wait-for-jobs-sec 1800` per §3.1 |
+| OP-O2 | `wait_for_jobs_process_started` defaults to 1800 s (30 min; raised from 600 in #1327) | If you walk away beyond 30 min after dispatch, jobs-process-start may exceed budget → exit 2 with run_id captured | Default now matches realistic walk-away tolerance. Lower via `--wait-for-jobs-sec 600` only if you'll start jobs immediately |
 | OP-I3 | Poll heartbeat only logs `stage_count` | Cannot tell "stuck" from "slow" at minute 130 | Open §7.1 in second terminal |
 | OP-I7 | Exit 3 (drift) does NOT print foreign run details | You see `CRITICAL: ... observed current_run_id=<int>` but no context | Manually run `SELECT id, started_at, status FROM bootstrap_runs WHERE status='running'` post-exit |
 | ARCH-B1 | `funds` + `esop` only refresh via 03:30 UTC sweep | C6_funds + C6_esop may legitimately warn-quiescent if Run #8 finished after 03:30 UTC | Accept warn; re-run gate after next 03:30 UTC if needed |

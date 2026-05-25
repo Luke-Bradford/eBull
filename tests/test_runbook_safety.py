@@ -17,6 +17,7 @@ focus on the runbook-shaped exception (``RunbookRefused`` raising
 
 from __future__ import annotations
 
+import inspect
 import time
 
 import psycopg
@@ -154,3 +155,21 @@ def test_wait_for_jobs_process_started_times_out_when_lock_never_held() -> None:
         wait_for_jobs_process_started(settings.database_url, timeout_sec=2, poll_sec=1)
     assert exc.value.code == 2
     assert "did not start within" in exc.value.msg
+
+
+def test_wait_for_jobs_process_started_timeout_sec_is_required_kwarg() -> None:
+    """#1327 — `timeout_sec` is a REQUIRED kwarg (no default).
+
+    The single source of truth for the operator-facing default is
+    ``DEFAULT_WAIT_FOR_JOBS_SEC`` in ``stream_a_run_8_verify``. Future
+    callers must make an explicit budget decision; no caller may
+    accidentally inherit a stale default from this helper.
+
+    Asserted via ``inspect.signature`` rather than a slow timeout
+    path (Codex iter-1 #1327 per-PR review NIT fold).
+    """
+    sig = inspect.signature(wait_for_jobs_process_started)
+    timeout_sec_param = sig.parameters["timeout_sec"]
+    assert timeout_sec_param.default is inspect.Parameter.empty, (
+        f"`timeout_sec` must be a REQUIRED kwarg (no default); found default={timeout_sec_param.default!r}. See #1327."
+    )
