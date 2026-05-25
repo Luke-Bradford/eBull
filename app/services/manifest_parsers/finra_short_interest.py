@@ -55,13 +55,18 @@ synth no-op pattern.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 
 logger = logging.getLogger(__name__)
 
 PARSER_VERSION = "finra-si-bimonthly-v1"
+
+# #1322 — synth-noop parity flag. Enforced by
+# tests/smoke/test_etl_source_to_sink.py against MANIFEST_SOURCE_SINKS kind.
+# Flip to False (or remove) if this module ever grows into a real writer.
+_SYNTH_NOOP: Final[bool] = True
 
 
 def _parse_finra_short_interest(

@@ -21,16 +21,23 @@ See ``docs/etl/sources/README.md`` for the full template + invariants.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
+from typing import Any, get_args
 
+import psycopg
 import pytest
 
 from app.services.sec_manifest import FORM_MAPPING_EXEMPT
+from app.services.sec_manifest import ManifestSource as _ManifestSource
 from scripts._etl_source_inventory import (
     AD_HOC_SOURCES as _AD_HOC_SOURCES,
 )
 from scripts._etl_source_inventory import (
     ALL_SOURCES as _ALL_SOURCES,
+)
+from scripts._etl_source_inventory import (
+    MANIFEST_SOURCE_SINKS,
 )
 from scripts._etl_source_inventory import (
     MANIFEST_SOURCES as _MANIFEST_SOURCES,
@@ -171,3 +178,150 @@ def test_manifest_source_has_freshness_cadence(source: str) -> None:
         f"seed_freshness_for_manifest_row cannot populate expected_next_at "
         f"and subjects_due_for_poll will never surface this source."
     )
+
+
+# ---------------------------------------------------------------------------
+# #1322 — manifest source → sink table smoke (per Phase 0 §2.3)
+# ---------------------------------------------------------------------------
+
+
+def _table_exists(conn: psycopg.Connection[Any], table_name: str) -> bool:
+    """Existence check via pg_tables — avoids the UndefinedTable
+    aborted-tx hazard of ``SELECT 1 FROM <table>`` (Codex iter-2
+    BLOCKING fold)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_tables WHERE schemaname='public' AND tablename=%s",
+            (table_name,),
+        )
+        return cur.fetchone() is not None
+
+
+def test_manifest_source_sinks_complete() -> None:
+    """#1322 — closure test: every ManifestSource entry MUST have a sink declaration.
+
+    A future Literal addition (e.g. sec_form6 lands) without a corresponding
+    MANIFEST_SOURCE_SINKS entry fails this test loudly. Catches drift between
+    the type contract (ManifestSource) and the sink mapping (used by all
+    downstream coverage tests). Codex iter-2 IMPORTANT-1 fold.
+    """
+    declared = set(MANIFEST_SOURCE_SINKS.keys())
+    actual = set(get_args(_ManifestSource))
+    only_declared = declared - actual
+    only_actual = actual - declared
+    assert declared == actual, (
+        f"MANIFEST_SOURCE_SINKS drift vs ManifestSource Literal:\n"
+        f"  only in MANIFEST_SOURCE_SINKS (remove): {sorted(only_declared)}\n"
+        f"  only in ManifestSource (add a sink): {sorted(only_actual)}\n"
+        f"Update scripts/_etl_source_inventory.py::MANIFEST_SOURCE_SINKS."
+    )
+
+
+_PARSER_MODULE_BY_SOURCE: dict[str, str] = {
+    "sec_form3": "app.services.manifest_parsers.insider_345",
+    "sec_form4": "app.services.manifest_parsers.insider_345",
+    "sec_form5": "app.services.manifest_parsers.insider_345",
+    "sec_13d": "app.services.manifest_parsers.sec_13dg",
+    "sec_13g": "app.services.manifest_parsers.sec_13dg",
+    "sec_13f_hr": "app.services.manifest_parsers.sec_13f_hr",
+    "sec_def14a": "app.services.manifest_parsers.def14a",
+    "sec_n_port": "app.services.manifest_parsers.sec_n_port",
+    "sec_n_csr": "app.services.manifest_parsers.sec_n_csr",
+    "sec_10k": "app.services.manifest_parsers.sec_10k",
+    "sec_10q": "app.services.manifest_parsers.sec_10q",
+    "sec_8k": "app.services.manifest_parsers.eight_k",
+    "sec_xbrl_facts": "app.services.manifest_parsers.sec_xbrl_facts",
+    "finra_short_interest": "app.services.manifest_parsers.finra_short_interest",
+    "finra_regsho_daily": "app.services.manifest_parsers.finra_regsho_daily",
+}
+
+# #1322 PR #1354 bot iter-1 WARNING fold — parallel-dict drift guard.
+# Module-level closure assertion catches the "new source landed in
+# MANIFEST_SOURCE_SINKS but forgot to add a parser module entry here"
+# regression at COLLECTION time, not at parametrize-iteration time.
+# Mirrors the import-time check in scripts/_etl_source_inventory.py.
+assert set(_PARSER_MODULE_BY_SOURCE) == set(MANIFEST_SOURCE_SINKS), (
+    f"_PARSER_MODULE_BY_SOURCE drift vs MANIFEST_SOURCE_SINKS:\n"
+    f"  only in _PARSER_MODULE_BY_SOURCE: "
+    f"{sorted(set(_PARSER_MODULE_BY_SOURCE) - set(MANIFEST_SOURCE_SINKS))}\n"
+    f"  only in MANIFEST_SOURCE_SINKS: "
+    f"{sorted(set(MANIFEST_SOURCE_SINKS) - set(_PARSER_MODULE_BY_SOURCE))}\n"
+    f"Update _PARSER_MODULE_BY_SOURCE in tests/smoke/test_etl_source_to_sink.py."
+)
+
+
+@pytest.mark.parametrize("source,spec", sorted(MANIFEST_SOURCE_SINKS.items()))
+def test_manifest_source_has_sink_tables(
+    source: str,
+    spec: tuple[tuple[str, ...], str],
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#1322 — every ManifestSource entry's declared sink tables MUST exist
+    in the DB; synth-noop sources MUST declare _SYNTH_NOOP=True in their
+    parser module (bidirectional parity per Codex iter-3 IMPORTANT fold).
+
+    Uses ``ebull_test_conn`` (worker-private DB per CLAUDE.md test isolation)
+    NOT ``settings.database_url`` — pg_tables read is harmless but the
+    convention is to never reach for dev DB from a test.
+    """
+    target_tables, kind = spec
+
+    # Sink-table existence check (read-only via pg_tables)
+    missing = [t for t in target_tables if not _table_exists(ebull_test_conn, t)]
+    assert not missing, (
+        f"Source {source!r} (kind={kind!r}) declares sink tables in "
+        f"MANIFEST_SOURCE_SINKS that don't exist in DB: {missing}. "
+        f"Either add the migration, or update MANIFEST_SOURCE_SINKS to "
+        f"reflect the real shape."
+    )
+
+    # Synth-noop parity: bidirectional flag check
+    module_path = _PARSER_MODULE_BY_SOURCE.get(source)
+    if module_path is None:
+        pytest.fail(
+            f"Source {source!r} missing _PARSER_MODULE_BY_SOURCE entry — "
+            f"update the dict in this test file when adding a new source."
+        )
+    parser_module = importlib.import_module(module_path)
+    flag = getattr(parser_module, "_SYNTH_NOOP", False)
+    expected = kind == "synth_noop"
+    assert flag is expected, (
+        f"Source {source!r} parity mismatch: kind={kind!r} implies "
+        f"_SYNTH_NOOP={expected}, but {module_path}._SYNTH_NOOP={flag}. "
+        f"Either flip the module flag OR update MANIFEST_SOURCE_SINKS kind."
+    )
+
+
+def test_categories_match_ownership_writers(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#1322 — every _CATEGORIES entry must have:
+    (a) a callable refresh_fn (the lambda in the tuple)
+    (b) current_table exists in DB
+    (c) observations_table exists in DB
+    (d) corresponding refresh_<category>_current importable from
+        app.services.ownership_observations namespace
+
+    Direct iteration over _CATEGORIES (multi-agent B2 + Codex iter-1
+    BLOCKING-2 fold — no string templating). Uses ``ebull_test_conn``
+    per CLAUDE.md test isolation.
+    """
+    from app.jobs.ownership_observations_repair import _CATEGORIES
+    from app.services import ownership_observations
+
+    for current_table, observations_table, category_literal, refresh_fn in _CATEGORIES:
+        assert callable(refresh_fn), f"_CATEGORIES entry for {category_literal!r}: refresh_fn is not callable"
+        assert _table_exists(ebull_test_conn, current_table), (
+            f"_CATEGORIES entry for {category_literal!r}: current_table {current_table!r} does not exist in DB"
+        )
+        assert _table_exists(ebull_test_conn, observations_table), (
+            f"_CATEGORIES entry for {category_literal!r}: observations_table "
+            f"{observations_table!r} does not exist in DB"
+        )
+        expected_fn_name = f"refresh_{category_literal}_current"
+        assert hasattr(ownership_observations, expected_fn_name), (
+            f"_CATEGORIES entry for {category_literal!r}: "
+            f"app.services.ownership_observations is missing "
+            f"function {expected_fn_name!r}. Either rename the function "
+            f"or update _CATEGORIES."
+        )
