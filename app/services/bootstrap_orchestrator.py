@@ -1279,6 +1279,35 @@ def _resolve_stage_rows(
        ``JobLock`` for this stage; the upper bound rejects same-
        ``job_name`` scheduled fires that landed after lock release.
 
+    Source contract is structurally asymmetric for the 5 bulk
+    ingester jobs (``sec_submissions_ingest_job``,
+    ``sec_companyfacts_ingest_job``, ``sec_13f_ingest_from_dataset_job``,
+    ``sec_insider_ingest_from_dataset_job``,
+    ``sec_nport_ingest_from_dataset_job``). Per ``#1225`` audit:
+
+    * Source 1 IS populated — each bulk job calls
+      ``_record_archive_result(rows_written=...)`` per archive (see
+      ``app/services/sec_bulk_orchestrator_jobs.py:211/280/386/579/744``).
+    * Source 2 is effectively dead — ``record_archive_result_if_absent``
+      writes ``__job__`` with ``rows_written=0``, so this source
+      always falls through to source 3 for the 5 bulk jobs (they don't
+      overload ``__job__`` themselves).
+    * Source 3 is structurally dead — the 5 bulk jobs are registered
+      via ``_adapt_zero_arg`` (not ``_tracked_job``) at
+      ``app/jobs/runtime.py:371-377``, so no ``job_runs`` row is
+      written. The window query returns nothing.
+
+    Therefore source 1 is load-bearing for these 5 jobs. Any code
+    path that fails to populate ``bootstrap_archive_results`` non-
+    ``__job__`` rows for them produces NULL → strict-gate cap death
+    → downstream blockage. Audit memo at
+    ``docs/proposals/etl/audits/1225-rows-processed-null.md``.
+
+    Caller (``_run_one_stage`` at ``bootstrap_orchestrator.py``) wraps
+    this function in a 2-attempt retry + contained-fail loop. Raising
+    here is acceptable and surfaces as a stage-error rather than a
+    silent NULL on success (#1225 fix).
+
     #1140 / Task C of #1136 audit (spec at
     docs/superpowers/specs/2026-05-13-precondition-final-data-gates.md).
     """
@@ -1500,22 +1529,66 @@ def _run_one_stage(
     # #1140 Task C — resolve rows_processed from the side-channels and
     # commit it onto the stage row so the cap-eval layer + the
     # operator panel aggregate read real numbers instead of NULL.
+    #
+    # #1225 — retry-once + contained-fail on persistent
+    # resolver exception. The original implementation swallowed any
+    # exception (DB blip, serialisation failure, network glitch) into
+    # ``resolved_rows = None``, which then flowed silently into
+    # ``mark_stage_success`` as NULL and tripped the downstream
+    # strict-gate floor at ``_capability_is_dead`` — producing the
+    # run_id=3 (2026-05-17) S23/S24 blocked-on-success symptom.
+    #
+    # The fix: distinguish "resolver ran successfully and legitimately
+    # returned None (no side-channel data)" from "resolver raised on
+    # both attempts" via the ``resolution_succeeded`` flag. On
+    # persistent failure, persist ``mark_stage_error`` + return a
+    # contained ``_StageOutcome(success=False, ...)``. Raw raise is
+    # NOT acceptable — ``fut.result()`` at the dispatcher
+    # (``_phase_batched_dispatch:2040``) would re-raise and tear
+    # through the orchestrator. See docs/proposals/etl/audits/1225-
+    # rows-processed-null.md for forensic context.
     resolved_rows: int | None = None
-    try:
-        with psycopg.connect(database_url) as conn:
-            resolved_rows = _resolve_stage_rows(
-                conn,
-                bootstrap_run_id=run_id,
-                stage_key=stage_key,
-                job_name=job_name,
-                job_runs_id_before=job_runs_id_before,
-                job_runs_id_after=job_runs_id_after,
+    last_resolution_error: str | None = None
+    resolution_succeeded = False
+    for attempt in range(2):
+        try:
+            with psycopg.connect(database_url) as conn:
+                resolved_rows = _resolve_stage_rows(
+                    conn,
+                    bootstrap_run_id=run_id,
+                    stage_key=stage_key,
+                    job_name=job_name,
+                    job_runs_id_before=job_runs_id_before,
+                    job_runs_id_after=job_runs_id_after,
+                )
+            resolution_succeeded = True
+            break  # success — ``resolved_rows`` may legitimately be None (no side-channel)
+        except Exception as exc:  # noqa: BLE001 — captured below for stage error
+            last_resolution_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "bootstrap stage %s: resolve_rows attempt %d failed: %s",
+                stage_key,
+                attempt + 1,
+                exc,
             )
-    except Exception as exc:  # noqa: BLE001 — auditing must not fail the stage
-        logger.warning(
-            "bootstrap stage %s: failed to resolve rows_processed: %s",
-            stage_key,
-            exc,
+
+    if not resolution_succeeded:
+        error_msg = f"rows_processed_resolution_failed after 2 attempts: {last_resolution_error}"
+        # Persist stage status to 'error' BEFORE returning the
+        # contained outcome so the DB matches dispatcher memory.
+        with psycopg.connect(database_url) as conn:
+            mark_stage_error(
+                conn,
+                run_id=run_id,
+                stage_key=stage_key,
+                error_message=error_msg,
+            )
+            conn.commit()
+        return _StageOutcome(
+            stage_key=stage_key,
+            success=False,
+            error=error_msg,
+            rows_processed=None,
         )
 
     with psycopg.connect(database_url) as conn:
