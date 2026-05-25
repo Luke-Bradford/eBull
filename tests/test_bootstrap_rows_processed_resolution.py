@@ -75,10 +75,12 @@ def _seed_run(conn: psycopg.Connection[tuple], stage_key: str) -> int:
     """Create a minimal bootstrap_runs + bootstrap_stages row for the test
     stage. Returns run_id.
 
-    Resets ``bootstrap_state.status`` to ``'idle'`` first — the singleton
-    is NOT truncated by ``_PLANNER_TABLES`` (intentionally; the row is the
-    boot-state lock). A prior test leaving it at ``'running'`` would
-    cause ``start_run`` to raise ``BootstrapAlreadyRunning``.
+    Resets ``bootstrap_state.status`` to ``'pending'`` first — the
+    singleton is NOT truncated by ``_PLANNER_TABLES`` (intentionally;
+    the row is the boot-state lock). A prior test leaving it at
+    ``'running'`` would cause ``start_run`` to raise
+    ``BootstrapAlreadyRunning``. ``'pending'`` is the post-init fresh
+    state allowed by ``bootstrap_state_status_check`` (sql/136).
     """
     with conn.transaction():
         # Valid status values per sql/136 CHECK: pending, running, complete,
