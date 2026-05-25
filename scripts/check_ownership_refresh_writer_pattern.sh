@@ -509,12 +509,22 @@ for batch_fn in refresh_insiders_current_batch refresh_institutions_current_batc
   fi
 done
 
-# Final coverage audit (#1256 Codex iter-3 BLOCKING-1 fold) — defend
-# against silent double-checking by asserting the Python helper
-# inspected the expected count of functions.
-echo "Checking invariant I coverage audit (expected 10 functions)..."
-coverage_output=$(uv run python scripts/_check_ownership_writer_columns.py \
-    --coverage-report "$FILE_OBS")
+# Final coverage audit (#1256 Codex iter-3 BLOCKING-1 fold; bot PR #1353
+# review iter-1 BLOCKING fold) — defend against silent double-checking
+# by asserting the Python helper inspected the expected count of
+# functions AND that all of them passed invariant I.
+#
+# CRITICAL: capture exit code via `if !` form. Bare `$()` swallows the
+# Python process's exit, so a helper failing invariant I.a-e would still
+# print "10 functions covered (expected 10)" (because len(found)=10) and
+# the grep would pass — defeating the audit. The exit-code check is
+# load-bearing; the grep is a secondary guard.
+echo "Checking invariant I coverage audit (expected 10 functions, all passing)..."
+if ! coverage_output=$(uv run python scripts/_check_ownership_writer_columns.py \
+    --coverage-report "$FILE_OBS"); then
+  printf '%s\n' "$coverage_output" >&2
+  fail "I coverage audit: Python helper exited non-zero — at least one helper failed invariant I"
+fi
 if ! grep -q "10 functions covered (expected 10)" <<<"$coverage_output"; then
   printf '%s\n' "$coverage_output" >&2
   fail "I coverage audit: expected '10 functions covered (expected 10)' line"

@@ -71,6 +71,57 @@ def test_real_source_coverage_report_lists_all_10() -> None:
     assert "10 functions covered (expected 10)" in result.stdout
 
 
+def test_coverage_report_exits_nonzero_when_any_helper_fails() -> None:
+    """Regression gate for PR #1353 bot iter-1 BLOCKING — silent exit-code swallow.
+
+    Coverage report MUST exit non-zero when any found helper fails invariant I,
+    even though the "N functions covered (expected M)" line still prints (the
+    line counts found, not passed). The shell wrapper relies on the exit code
+    via ``if ! output=$(...)`` form; if the Python helper exited zero on
+    failures, the shell audit would silently pass.
+
+    Synthetic source: refresh_insiders_current has a dropped column from
+    UPDATE SET (I.a violation); other 9 helpers are stub `def NAME(): pass`
+    which also fail (no MERGE shape). All 10 are "found" → count line prints
+    "10 functions covered (expected 10)" → grep would still pass — but
+    returncode MUST be 2.
+    """
+    synthetic_source = (
+        "def refresh_insiders_current(conn, *, instrument_id):\n"
+        '    """Broken: shares dropped from UPDATE SET."""\n'
+        '    cur.execute("""\n'
+        "        MERGE INTO ownership_insiders_current AS tgt\n"
+        "        WHEN MATCHED AND (\n"
+        "            tgt.shares, tgt.filed_at\n"
+        "        ) IS DISTINCT FROM (\n"
+        "            src.shares, src.filed_at\n"
+        "        ) THEN UPDATE SET\n"
+        "            filed_at     = src.filed_at,\n"
+        "            refreshed_at = now()\n"
+        "        WHEN NOT MATCHED BY TARGET THEN INSERT (...) VALUES (...)\n"
+        '        """)\n'
+        "\n"
+        "def refresh_institutions_current(): pass\n"
+        "def refresh_blockholders_current(): pass\n"
+        "def refresh_treasury_current(): pass\n"
+        "def refresh_def14a_current(): pass\n"
+        "def refresh_funds_current(): pass\n"
+        "def refresh_esop_current(): pass\n"
+        "def refresh_insiders_current_batch(): pass\n"
+        "def refresh_institutions_current_batch(): pass\n"
+        "def refresh_funds_current_batch(): pass\n"
+    )
+    result = _run(["--coverage-report"], source_text=synthetic_source)
+    # Audit MUST fail despite the count line printing
+    assert result.returncode == 2, (
+        f"coverage-report failed to exit non-zero on broken helpers.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # Count line still prints (this is the bug bot caught — grep would silently pass)
+    assert "10 functions covered (expected 10)" in result.stdout
+    # At least one FAIL marker present
+    assert "[FAIL]" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # Minimal helper-body template for negative tests
 # ---------------------------------------------------------------------------
