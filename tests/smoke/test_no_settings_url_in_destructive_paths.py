@@ -132,6 +132,70 @@ _ALLOWED: dict[str, str] = {
     # ``settings.database_url``. No writes anywhere — only
     # ``SELECT column_name FROM information_schema.columns``.
     "smoke/test_schema_drift.py": "read-only information_schema introspection of the live dev DB schema",
+    # Read-only safety-primitive tests. ``test_runbook_safety.py``
+    # (#1233 Stream A PR-D) exercises ``app/runbooks/safety.py``
+    # primitives — ``assert_dev_db`` verifies
+    # ``current_database()`` against an allowlist that
+    # *specifically targets the dev DB name*, and
+    # ``assert_jobs_process_stopped`` /
+    # ``wait_for_jobs_process_started`` probe
+    # ``JOBS_PROCESS_LOCK_KEY`` which is per-database (the
+    # production fence holds against the live dev DB, not a test
+    # one). Routing these to ``ebull_test_<worker>`` would defeat
+    # the test's premise. Read-only: ``SELECT current_database()`` +
+    # ``pg_try_advisory_lock`` + ``pg_advisory_unlock`` — no
+    # destructive writes.
+    "test_runbook_safety.py": (
+        "read-only safety-primitive tests; verify dev-DB-targeted behaviour by design (#1233 Stream A PR-D)"
+    ),
+    # Read-only pg_settings introspection. ``test_pg_settings_call_sites.py``
+    # (#1187) verifies ``max_locks_per_transaction`` GUC on the live
+    # dev DB — the value lives in postgresql.conf, not a test
+    # template, so a per-worker DB derived from the template would
+    # not reflect operator-tunable postgres.conf state. Read-only:
+    # ``SHOW max_locks_per_transaction`` only.
+    "test_pg_settings_call_sites.py": "read-only pg_settings introspection of the live dev DB GUC (#1187)",
+    # Read-only singleton-fence tests. ``test_jobs_process_probe_fence.py``
+    # (#1233 Stream A PR-D) exercises the JOBS_PROCESS_LOCK_KEY
+    # session-scoped advisory lock that the jobs daemon holds against
+    # the dev DB. The fence's correctness depends on testing against
+    # the same DB the daemon connects to. Read-only:
+    # ``pg_try_advisory_lock`` / ``pg_advisory_unlock`` /
+    # ``pg_stat_activity`` introspection — no DML.
+    "test_jobs_process_probe_fence.py": (
+        "read-only singleton-fence advisory-lock tests against the live dev DB (#1233 Stream A PR-D)"
+    ),
+    # Per-worker test DB via monkeypatched ``settings.database_url``.
+    # ``test_orchestrator_cancel.py`` (#1064 PR6) connects via
+    # ``psycopg.connect(settings.database_url)`` INSIDE production
+    # code under test (the orchestrator's cancel checkpoint), but the
+    # ``settings_use_test_db`` fixture monkeypatches
+    # ``settings.database_url`` to ``test_database_url()`` BEFORE any
+    # destructive code runs. The substring match in the docstring +
+    # the production-code description is a false positive: at runtime
+    # all DELETE / INSERT / UPDATE statements hit the per-worker test
+    # DB, never the dev DB.
+    "test_orchestrator_cancel.py": (
+        "monkeypatches settings.database_url to per-worker test DB before any destructive write (#1064 PR6)"
+    ),
+    # Same monkeypatch pattern. ``test_job_lock_reentrancy.py``
+    # (#1184) repoints ``settings.database_url`` to
+    # ``test_database_url()`` via ``monkeypatch.setattr`` at fixture
+    # setup, then exercises JobLock re-entrancy semantics that
+    # production code reaches via ``connect(settings.database_url)``.
+    # Module docstring explicitly documents this routing. No
+    # destructive write hits the dev DB.
+    "test_job_lock_reentrancy.py": (
+        "monkeypatches settings.database_url to per-worker test DB before any destructive write (#1184)"
+    ),
+    # The conftest contains the forbidden substring inside
+    # *docstrings + error-message strings* that warn future authors
+    # about the exact footgun. Including the message in the warning
+    # is the entire point — the smoke gate's substring grep cannot
+    # distinguish "documents the antipattern" from "executes the
+    # antipattern". Verified: no live ``psycopg.connect(settings.database_url)``
+    # call site in tests/conftest.py.
+    "conftest.py": "occurrences are inside docstrings/warning-message strings, not live call sites",
 }
 
 _TESTS_DIR = Path(__file__).resolve().parents[1]
