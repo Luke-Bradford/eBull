@@ -230,3 +230,29 @@ def test_no_test_writes_to_dev_database_url() -> None:
         "database, not the dev DB. See tests/test_operator_setup_race.py "
         "for the pattern, and the docstring of this file for guidance."
     )
+
+
+def test_allowed_keys_resolve_to_real_files() -> None:
+    """Every ``_ALLOWED`` key must resolve to an actual file under tests/.
+
+    The guard uses exact dict-key matching (``rel in _ALLOWED``), so a
+    typo or stale key (e.g. ``"tests/conftest.py"`` vs the correct
+    ``"conftest.py"``) would silently become dead config: it never
+    matches anything, but it also never fails the suite. This invariant
+    asserts every key points at a file that actually exists today.
+
+    Catches the bot-suggested footgun class: "a bare ``conftest.py``
+    silently allowlists every subdir conftest". Under exact-match
+    semantics it does NOT (bot was hedging — the matcher is
+    ``if rel in _ALLOWED:`` not ``any(k in rel for k in _ALLOWED)``),
+    but the invariant test makes that semantic explicit: a key only
+    works if it resolves to one specific file.
+    """
+    missing: list[str] = []
+    for key in _ALLOWED:
+        if not (_TESTS_DIR / key).is_file():
+            missing.append(key)
+    assert not missing, (
+        "_ALLOWED keys must resolve to actual files under tests/. "
+        "These keys point at no file (typo, stale, or wrongly path-prefixed):\n" + "\n".join(f"  {k}" for k in missing)
+    )
