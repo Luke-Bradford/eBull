@@ -165,26 +165,23 @@ def test_run_8_verify_postgres_url_strips_db_name() -> None:
 
 
 def test_run_8_verify_default_wait_for_jobs_sec_is_1800() -> None:
-    """#1327 — operator-facing default raised from 600 to 1800.
+    """#1327 — argparse default for --wait-for-jobs-sec equals 1800.
 
-    Two-part assertion:
+    Three-part assertion (PR #1352 Claude-bot iter-1 NITPICK fold —
+    string-match heuristic replaced with argparse parse_args):
 
-    1. ``DEFAULT_WAIT_FOR_JOBS_SEC`` constant equals 1800 (operator-facing
-       default + value referenced by ``docs/operator/runbooks/run-8-readiness.md``
-       §3.1 and OP-O2).
-    2. ``main``'s argparse ``--wait-for-jobs-sec`` default still references
-       the constant (not a hardcoded literal) — catches a future refactor
-       where someone bumps the constant but accidentally hardcodes argparse
-       at 600 (Codex iter-on-diff NIT fold).
+    1. ``DEFAULT_WAIT_FOR_JOBS_SEC`` constant equals 1800.
+    2. Argparse parser's resolved default equals 1800 (parse_args with
+       no args takes defaults).
+    3. Resolved default IS the constant (not a hardcoded literal that
+       happens to match) — catches future refactor that detaches argparse
+       from the constant.
     """
-    import inspect
-
     assert stream_a_run_8_verify.DEFAULT_WAIT_FOR_JOBS_SEC == 1800
-    main_src = inspect.getsource(stream_a_run_8_verify.main)
-    assert "default=DEFAULT_WAIT_FOR_JOBS_SEC" in main_src, (
-        "argparse --wait-for-jobs-sec default must reference the constant "
-        "DEFAULT_WAIT_FOR_JOBS_SEC, not a hardcoded literal. See #1327."
-    )
+    parser = stream_a_run_8_verify.build_parser()
+    args = parser.parse_args([])
+    assert args.wait_for_jobs_sec == 1800
+    assert args.wait_for_jobs_sec == stream_a_run_8_verify.DEFAULT_WAIT_FOR_JOBS_SEC
 
 
 # ---------------------------------------------------------------------------

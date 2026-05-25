@@ -385,8 +385,9 @@ def _write_log_jsonl(envelope: dict[str, Any]) -> Path:
     return path
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point. Returns process exit code (0/1/2/3)."""
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the argparse parser. Extracted from main() so tests can
+    inspect argparse defaults without invoking main() (#1327)."""
     parser = argparse.ArgumentParser(
         prog="stream_a_run_8_verify",
         description=(
@@ -422,6 +423,12 @@ def main(argv: list[str] | None = None) -> int:
             f"jobs process (default {DEFAULT_WAIT_FOR_JOBS_SEC})."
         ),
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point. Returns process exit code (0/1/2/3)."""
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     try:
