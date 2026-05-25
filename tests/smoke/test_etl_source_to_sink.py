@@ -235,6 +235,20 @@ _PARSER_MODULE_BY_SOURCE: dict[str, str] = {
     "finra_regsho_daily": "app.services.manifest_parsers.finra_regsho_daily",
 }
 
+# #1322 PR #1354 bot iter-1 WARNING fold — parallel-dict drift guard.
+# Module-level closure assertion catches the "new source landed in
+# MANIFEST_SOURCE_SINKS but forgot to add a parser module entry here"
+# regression at COLLECTION time, not at parametrize-iteration time.
+# Mirrors the import-time check in scripts/_etl_source_inventory.py.
+assert set(_PARSER_MODULE_BY_SOURCE) == set(MANIFEST_SOURCE_SINKS), (
+    f"_PARSER_MODULE_BY_SOURCE drift vs MANIFEST_SOURCE_SINKS:\n"
+    f"  only in _PARSER_MODULE_BY_SOURCE: "
+    f"{sorted(set(_PARSER_MODULE_BY_SOURCE) - set(MANIFEST_SOURCE_SINKS))}\n"
+    f"  only in MANIFEST_SOURCE_SINKS: "
+    f"{sorted(set(MANIFEST_SOURCE_SINKS) - set(_PARSER_MODULE_BY_SOURCE))}\n"
+    f"Update _PARSER_MODULE_BY_SOURCE in tests/smoke/test_etl_source_to_sink.py."
+)
+
 
 @pytest.mark.parametrize("source,spec", sorted(MANIFEST_SOURCE_SINKS.items()))
 def test_manifest_source_has_sink_tables(
