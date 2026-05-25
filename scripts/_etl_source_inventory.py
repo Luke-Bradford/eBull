@@ -46,6 +46,92 @@ BULK_REFERENCE_SOURCES: tuple[str, ...] = (
 
 ALL_SOURCES: tuple[str, ...] = tuple(sorted(set(MANIFEST_SOURCES + AD_HOC_SOURCES + BULK_REFERENCE_SOURCES)))
 
+# #1322 — per-source sink declaration. The (source → target_tables, kind) mapping
+# is NOT derivable from ``ManifestSource`` alone:
+#  * 4 sources are pure synth-noop (sec_10q, sec_xbrl_facts, finra_*); the parser
+#    is registered but writes no sink-table rows (scheduled jobs own the writes).
+#  * sec_def14a fans out to TWO ownership categories (def14a + esop) — same parser,
+#    two observation streams.
+#  * sec_n_csr writes fund_metadata_observations, NOT an ownership category.
+#  * sec_10k / sec_8k write to business_summary / eight_k tables, distinct kinds.
+#
+# Each cited table is verified to exist in ``sql/*.sql`` at the time of declaration.
+# The closure test ``test_manifest_source_sinks_complete`` asserts the keyset
+# equals ``set(get_args(ManifestSource))`` so future ``Literal`` additions
+# without a sink declaration fail the smoke loudly.
+#
+# kind ∈ {ownership_observation, fund_metadata, business_summary, eight_k, synth_noop}
+MANIFEST_SOURCE_SINKS: dict[str, tuple[tuple[str, ...], str]] = {
+    "sec_form3": (
+        ("ownership_insiders_observations", "ownership_insiders_current"),
+        "ownership_observation",
+    ),
+    "sec_form4": (
+        ("ownership_insiders_observations", "ownership_insiders_current"),
+        "ownership_observation",
+    ),
+    "sec_form5": (
+        ("ownership_insiders_observations", "ownership_insiders_current"),
+        "ownership_observation",
+    ),
+    "sec_13d": (
+        ("ownership_blockholders_observations", "ownership_blockholders_current"),
+        "ownership_observation",
+    ),
+    "sec_13g": (
+        ("ownership_blockholders_observations", "ownership_blockholders_current"),
+        "ownership_observation",
+    ),
+    "sec_13f_hr": (
+        ("ownership_institutions_observations", "ownership_institutions_current"),
+        "ownership_observation",
+    ),
+    "sec_def14a": (
+        # Fan-out: same parser writes BOTH def14a and esop observation streams.
+        (
+            "ownership_def14a_observations",
+            "ownership_def14a_current",
+            "ownership_esop_observations",
+            "ownership_esop_current",
+        ),
+        "ownership_observation",
+    ),
+    "sec_n_port": (
+        ("ownership_funds_observations", "ownership_funds_current"),
+        "ownership_observation",
+    ),
+    "sec_n_csr": (
+        ("fund_metadata_observations", "fund_metadata_current"),
+        "fund_metadata",
+    ),
+    "sec_10k": (
+        ("instrument_business_summary", "instrument_business_summary_sections"),
+        "business_summary",
+    ),
+    "sec_10q": ((), "synth_noop"),
+    "sec_8k": (
+        ("eight_k_filings", "eight_k_items", "eight_k_exhibits"),
+        "eight_k",
+    ),
+    "sec_xbrl_facts": ((), "synth_noop"),
+    "finra_short_interest": ((), "synth_noop"),
+    "finra_regsho_daily": ((), "synth_noop"),
+}
+
+# Closure check enforced at import-time + by the smoke test.
+_declared = set(MANIFEST_SOURCE_SINKS.keys())
+_actual = set(MANIFEST_SOURCES)
+if _declared != _actual:
+    only_declared = _declared - _actual
+    only_actual = _actual - _declared
+    raise RuntimeError(
+        f"MANIFEST_SOURCE_SINKS drift vs ManifestSource Literal:\n"
+        f"  only in MANIFEST_SOURCE_SINKS (remove): {sorted(only_declared)}\n"
+        f"  only in ManifestSource (add a sink): {sorted(only_actual)}\n"
+        f"Every entry in ``ManifestSource`` (Literal at app/services/sec_manifest.py) "
+        f"MUST have a corresponding sink declaration."
+    )
+
 REQUIRED_SECTIONS: tuple[str, ...] = (
     "## 1. Origin",
     "## 2. Watermarking model",
