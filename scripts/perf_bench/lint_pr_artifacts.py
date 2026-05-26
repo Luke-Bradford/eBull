@@ -87,6 +87,18 @@ def _strip_html_comments(body: str) -> str:
     return HTML_COMMENT_RE.sub("", body)
 
 
+def _has_header_line(body: str, header: str) -> bool:
+    """True iff ``header`` appears as its own Markdown line in ``body``.
+
+    Substring match is too loose: a PR body that *documents* the
+    header pattern (e.g. discussing ``## Performance impact`` inside
+    backticks) would trigger a false positive. Match line-exact after
+    stripping HTML comments + trailing whitespace.
+    """
+    cleaned = _strip_html_comments(body)
+    return any(line.rstrip() == header for line in cleaned.splitlines())
+
+
 def _parse_labels(raw: str) -> list[str]:
     try:
         parsed = json.loads(raw)
@@ -100,11 +112,11 @@ def _parse_labels(raw: str) -> list[str]:
 def _detect_claim(labels: list[str], body: str) -> bool:
     if PERF_LABEL in labels:
         return True
-    return HEADER_PERF in body
+    return _has_header_line(body, HEADER_PERF)
 
 
 def _slice_bypass_section(body: str) -> str | None:
-    if HEADER_BYPASS not in body:
+    if not _has_header_line(body, HEADER_BYPASS):
         return None
     after = body.split(HEADER_BYPASS, 1)[1]
     next_header = re.search(r"^## ", after, re.MULTILINE)
@@ -246,7 +258,7 @@ def _validate_artifacts(ticket: int, sha: str) -> None:
 
 
 def _validate_sections(body: str) -> None:
-    missing = [section for section in REQUIRED_SECTIONS if section not in body]
+    missing = [section for section in REQUIRED_SECTIONS if not _has_header_line(body, section)]
     if missing:
         _err("PR description missing required section(s): " + ", ".join(repr(s) for s in missing))
 

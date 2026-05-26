@@ -429,6 +429,45 @@ def test_16_manifest_floored_target_absent_from_row_counts() -> None:
     assert "absent from row_counts" in result.stderr
 
 
+def test_18_header_in_backticks_is_not_a_claim() -> None:
+    """Regression: PR body that *documents* the perf-claim pattern in
+    backticks (e.g. this PR's own description) MUST NOT trigger detection.
+
+    First-iteration of this PR failed CI on its own description because
+    the detection was a substring match. Detection is now line-exact;
+    a backticked occurrence inside a bullet must NOT count.
+    """
+    body = (
+        "Closes #8000018\n\n"
+        "## Summary\n\n"
+        "claim detection (PR label `perf` OR body `## Performance impact` header)\n\n"
+        "- PR-template `## Performance impact` boilerplate — owned by NEW-B\n"
+    )
+    result = _run_lint(
+        {
+            "GITHUB_PR_LABELS": "[]",
+            "GITHUB_PR_BODY": body,
+            "GITHUB_PR_HEAD_SHA": "deadbeef",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_19_header_on_own_line_does_trigger() -> None:
+    """Sanity: same string on its own line DOES trigger detection."""
+    body = "Closes #8000019\n\n## Performance impact\n\nclaim text here\n\n" + "\n".join(VALID_SECTIONS)
+    result = _run_lint(
+        {
+            "GITHUB_PR_LABELS": "[]",
+            "GITHUB_PR_BODY": body,
+            "GITHUB_PR_HEAD_SHA": "deadbeef",
+        }
+    )
+    # No artifacts → fails. Confirms detection fired.
+    assert result.returncode == 1
+    assert "missing perf artifacts" in result.stderr
+
+
 def test_17_manifest_target_table_null_empty_row_counts_ok() -> None:
     """Non-floor perf claims (target_table=null) MAY have empty row_counts."""
     sha = "sha17"
