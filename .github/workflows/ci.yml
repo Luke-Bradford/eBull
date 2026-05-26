@@ -146,3 +146,68 @@ jobs:
         # advisory-laden and yanked versions; tolerated exceptions
         # belong in this step's allowlist (none today).
         run: pip-audit --strict --requirement /tmp/requirements.txt
+
+  perf-claim-lint:
+    # Phase 0 NEW-A (#1356) — gate every perf-claim PR against the §4
+    # evidence contract. Detects perf claim via PR label ``perf`` OR
+    # body ``## Performance impact`` header; validates 3 artifacts
+    # (var/perf_baselines/<ticket>-<sha>.*) + 3 PR-description sections.
+    # Honours gated bypass (label ``emergency`` + body ``## Bypass
+    # justification`` section + env PERF_CLAIM_LINT_BYPASS=true).
+    #
+    # PR-only: push-to-main has no PR body so the lint cannot resolve a
+    # ticket or claim. Sibling ``lint`` job runs on both events, but
+    # this gate is PR-scoped by contract.
+    #
+    # Untrusted PR inputs (body, labels, head.sha) are passed via the
+    # ``env:`` block — NEVER inlined into ``run:`` — so a malicious PR
+    # title/body cannot inject shell commands. The lint script reads
+    # via ``os.environ.get(...)`` and treats every value as data only.
+    #
+    # Same-repo guard: the job checks out ``pull_request.head.sha`` and
+    # executes ``uv run python -m scripts.perf_bench.lint_pr_artifacts``,
+    # so a fork-authored PR would otherwise run untrusted Python with
+    # access to ``vars.PERF_CLAIM_LINT_BYPASS``. Restrict to PRs whose
+    # head ref lives in this repository. Fork PRs SKIP the job
+    # entirely; the gate is enforced only on operator-owned branches.
+    # (Bot review iter-2 BLOCKING fold.)
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the PR head SHA explicitly so the artifact
+          # filename convention ``<ticket>-<sha>.*`` lines up with
+          # GITHUB_PR_HEAD_SHA in the lint. Default checkout would
+          # resolve to the merge-commit SHA which never matches
+          # author-uploaded artifacts.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        # Pinned to match the sibling ``lint`` + ``supply-chain`` jobs.
+        run: pip install "uv==0.5.21"
+
+      - name: Install dependencies
+        # ``pyyaml`` (load floors.yaml + manifest.yaml) is already in
+        # the dev group via uv.lock; use uv sync for parity with the
+        # local pre-push hook + sibling CI jobs.
+        run: uv sync --group dev
+
+      - name: Perf-claim artifact lint
+        # All untrusted PR inputs are bound via env, not interpolated
+        # into the command line, per GitHub Actions workflow-injection
+        # guidance.
+        run: uv run python -m scripts.perf_bench.lint_pr_artifacts
+        env:
+          GITHUB_PR_BODY: ${{ github.event.pull_request.body }}
+          GITHUB_PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          GITHUB_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PERF_CLAIM_LINT_BYPASS: ${{ vars.PERF_CLAIM_LINT_BYPASS || 'false' }}
