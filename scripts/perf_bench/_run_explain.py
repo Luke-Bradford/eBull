@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -34,6 +35,14 @@ from scripts.perf_bench._floors import load_floors
 REPO_ROOT: Final[Path] = Path(__file__).parent.parent.parent
 ARTIFACT_DIR: Final[Path] = REPO_ROOT / "var" / "perf_baselines"
 EXPLAIN_FLAGS: Final[str] = "EXPLAIN (ANALYZE, BUFFERS, COSTS, FORMAT TEXT)"
+
+# Bot review iter-3 WARNING fold: ``_row_count`` shells out to ``psql -c
+# "SELECT COUNT(*) FROM {table}"`` so ``table`` is interpolated unquoted.
+# Even though the input comes from an operator-authored per-ticket YAML
+# (not an external network input), we validate it against the same
+# identifier shape Postgres expects so a malformed value cannot reach
+# ``_psql`` and execute arbitrary SQL against the bench DB.
+TABLE_IDENT_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
 def _err(msg: str) -> NoReturn:
@@ -102,6 +111,21 @@ def _load_ticket_config(ticket_id: str) -> dict[str, Any]:
     target = cfg["target_table"]
     if target is not None and not isinstance(target, str):
         _err(f"{path.relative_to(REPO_ROOT)}: 'target_table' must be string or null")
+    if isinstance(target, str):
+        if not TABLE_IDENT_RE.fullmatch(target):
+            _err(
+                f"{path.relative_to(REPO_ROOT)}: 'target_table' {target!r} is not "
+                "a valid lowercase Postgres identifier (matches "
+                f"{TABLE_IDENT_RE.pattern}). A floored or sentinel-safe table "
+                "name is expected; SQL fragments are forbidden."
+            )
+        floors = load_floors()
+        if target not in floors:
+            _err(
+                f"{path.relative_to(REPO_ROOT)}: 'target_table' {target!r} not in "
+                "floors.yaml. Add a floor entry or set target_table: null for a "
+                "non-floor perf claim. Both code paths share this validation."
+            )
     return cfg
 
 
@@ -143,6 +167,13 @@ def _fingerprint(db_url: str) -> dict[str, str]:
 
 
 def _row_count(db_url: str, table: str) -> int:
+    # Defence-in-depth: reject anything that does not match a strict
+    # Postgres identifier shape before the unquoted f-string lands in
+    # the ``psql -c`` command line. ``_load_ticket_config`` already
+    # validates the YAML-supplied value, but keeping the guard here
+    # closes the door for any future caller that bypasses the loader.
+    if not TABLE_IDENT_RE.fullmatch(table):
+        _err(f"invalid table identifier passed to _row_count: {table!r}")
     out = _psql(db_url, f"SELECT COUNT(*) FROM {table}").strip()
     try:
         return int(out)

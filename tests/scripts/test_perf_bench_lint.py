@@ -476,6 +476,46 @@ def test_20_workflow_perf_claim_lint_has_same_repo_guard() -> None:
     )
 
 
+def test_22_harness_table_ident_regex_rejects_sql_fragments() -> None:
+    """Bot review iter-3 WARNING regression: ``_row_count`` shells out to
+    ``psql -c "SELECT COUNT(*) FROM {table}"`` so ``table`` is interpolated
+    unquoted. ``TABLE_IDENT_RE`` MUST reject anything that does not match
+    a strict lowercase Postgres identifier shape so a malformed value
+    cannot reach the command line.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from scripts.perf_bench._run_explain import TABLE_IDENT_RE
+    finally:
+        sys.path.pop(0)
+
+    valid = [
+        "ownership_institutions_current",
+        "financial_facts_raw",
+        "x",
+        "table_1",
+        "_underscore_first",
+    ]
+    for name in valid:
+        assert TABLE_IDENT_RE.fullmatch(name), f"valid identifier rejected: {name!r}"
+
+    malicious = [
+        "x; DROP TABLE financial_facts_raw",
+        "x' OR 1=1 --",
+        "x.y",
+        "x; SELECT pg_sleep(60)",
+        "X_UPPERCASE",
+        "1leading_digit",
+        "table-with-dash",
+        'x" --',
+        '"quoted_ident"',
+        "x\nDROP",
+        "",
+    ]
+    for name in malicious:
+        assert not TABLE_IDENT_RE.fullmatch(name), f"malicious identifier accepted: {name!r}"
+
+
 def test_21_bypass_html_comment_trailing_header_does_not_misslice() -> None:
     """Bot review iter-2 WARNING regression: a bypass-justification
     header line with a trailing HTML comment (``## Bypass justification<!-- x -->``)
