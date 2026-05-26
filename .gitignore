@@ -51,5 +51,12 @@ docs/internal/
 # Operator-runbook log output (#1233 PR-D) — JSONL written by
 # ``app/runbooks/*`` on every --apply invocation. Operator-owned; manual
 # purge >30d. Never checked in.
-/var/
+#
+# /var/perf_baselines/ is an EXPLICIT exception: perf-claim PRs commit
+# their evidence bundle (EXPLAIN .txt + 3-trial .json + manifest.yaml)
+# per master plan §4 + perf-claim-lint CI gate. Using /var/* instead of
+# /var/ so the re-include works (gitignore cannot re-include children
+# of an excluded parent directory).
+/var/*
+!/var/perf_baselines/
 
