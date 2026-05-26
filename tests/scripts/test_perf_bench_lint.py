@@ -20,6 +20,10 @@ Scenarios mirror the per-PR plan #1356 acceptance grid:
 15. manifest-target-table-missing → exit non-zero (Codex 2 IMPORTANT-1)
 16. manifest-floored-target-absent-from-row-counts → exit non-zero
 17. manifest-target-table-null-empty-row-counts-ok → exit 0
+18. header-in-backticks-is-not-a-claim → exit 0 (CI iter-1 regression)
+19. header-on-own-line-does-trigger → exit non-zero (sanity)
+20. workflow-perf-claim-lint-has-same-repo-guard → fork-pwn lint (iter-2)
+21. bypass-html-comment-trailing-header-does-not-misslice (iter-2 WARNING)
 
 The lint is invoked via subprocess to match CI's invocation path (so we
 catch import-time failures that ``import + call main()`` would mask).
@@ -451,6 +455,53 @@ def test_18_header_in_backticks_is_not_a_claim() -> None:
         }
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_20_workflow_perf_claim_lint_has_same_repo_guard() -> None:
+    """Bot review iter-2 PREVENTION: any CI job that checks out
+    ``pull_request.head.sha`` AND executes the checked-out code MUST
+    also carry an ``if:`` guard restricting to the operator's own
+    repository. Without it a fork-PR contributor's Python runs in CI
+    with access to repo variables.
+    """
+    ci_yml = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    job_idx = ci_yml.find("perf-claim-lint:")
+    assert job_idx >= 0, "perf-claim-lint job missing from ci.yml"
+    # Slice job body (up to next top-level job or EOF).
+    next_job = re.search(r"^  [a-zA-Z][\w-]*:\s*$", ci_yml[job_idx + 1 :], re.MULTILINE)
+    job_body = ci_yml[job_idx : job_idx + 1 + next_job.start()] if next_job else ci_yml[job_idx:]
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in job_body, (
+        "perf-claim-lint job missing same-repo head.sha guard "
+        "(see docs/review-prevention-log.md 'fork-pwn via pull_request + head-SHA checkout')"
+    )
+
+
+def test_21_bypass_html_comment_trailing_header_does_not_misslice() -> None:
+    """Bot review iter-2 WARNING regression: a bypass-justification
+    header line with a trailing HTML comment (``## Bypass justification<!-- x -->``)
+    must still slice the section correctly. Previously ``_has_header_line``
+    operated on the stripped body while ``split`` operated on the raw
+    body, opening a divergence between guard + slice.
+    """
+    body = (
+        "Closes #8000021\n\n"
+        "## Performance impact\n\n"
+        "claim\n\n" + "\n".join(VALID_SECTIONS) + "\n\n"
+        "## Bypass justification<!-- trailing comment -->\n"
+        "Operator: alice\n"
+        "Reason: legit\n"
+    )
+    result = _run_lint(
+        {
+            "GITHUB_PR_LABELS": json.dumps(["perf", "emergency"]),
+            "GITHUB_PR_BODY": body,
+            "GITHUB_PR_HEAD_SHA": "deadbeef",
+            "PERF_CLAIM_LINT_BYPASS": "true",
+        }
+    )
+    # Bypass fully gated → exit 0 with warning annotation.
+    assert result.returncode == 0, result.stderr
+    assert "::warning::bypass-engaged by alice" in result.stderr
 
 
 def test_19_header_on_own_line_does_trigger() -> None:

@@ -116,9 +116,14 @@ def _detect_claim(labels: list[str], body: str) -> bool:
 
 
 def _slice_bypass_section(body: str) -> str | None:
-    if not _has_header_line(body, HEADER_BYPASS):
+    # Bot review iter-2 WARNING fold: slice the SAME stripped text the
+    # guard inspects so a trailing/embedded HTML comment cannot make the
+    # guard fire while ``split`` lands on a different occurrence (or
+    # leaks HTML-comment debris into the section search window).
+    cleaned = _strip_html_comments(body)
+    if not _has_header_line(cleaned, HEADER_BYPASS):
         return None
-    after = body.split(HEADER_BYPASS, 1)[1]
+    after = cleaned.split(HEADER_BYPASS, 1)[1]
     next_header = re.search(r"^## ", after, re.MULTILINE)
     if next_header is None:
         return after

@@ -163,7 +163,17 @@ jobs:
     # ``env:`` block — NEVER inlined into ``run:`` — so a malicious PR
     # title/body cannot inject shell commands. The lint script reads
     # via ``os.environ.get(...)`` and treats every value as data only.
-    if: github.event_name == 'pull_request'
+    #
+    # Same-repo guard: the job checks out ``pull_request.head.sha`` and
+    # executes ``uv run python -m scripts.perf_bench.lint_pr_artifacts``,
+    # so a fork-authored PR would otherwise run untrusted Python with
+    # access to ``vars.PERF_CLAIM_LINT_BYPASS``. Restrict to PRs whose
+    # head ref lives in this repository. Fork PRs SKIP the job
+    # entirely; the gate is enforced only on operator-owned branches.
+    # (Bot review iter-2 BLOCKING fold.)
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
 
     steps:
