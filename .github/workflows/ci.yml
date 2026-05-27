@@ -91,7 +91,12 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          # Pinned to 10.33.0 because npm registry briefly served a
+          # 404 for the 10.34.0 tarball (2026-05-27) — meta-tag
+          # ``version: 10`` resolved to 10.34.0 and broke supply-chain
+          # CI. Bump only after confirming the target tag's tarball
+          # is reachable via ``curl -I registry.npmjs.org/pnpm/-/pnpm-<v>.tgz``.
+          version: 10.33.0
 
       - name: Set up Node
         uses: actions/setup-node@v4
