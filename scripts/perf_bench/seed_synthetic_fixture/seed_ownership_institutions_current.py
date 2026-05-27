@@ -41,6 +41,7 @@ from collections.abc import Iterator
 from typing import Final
 
 import psycopg
+from psycopg import sql
 
 from scripts.perf_bench._floors import load_floors
 from scripts.perf_bench.seed_synthetic_fixture import (
@@ -221,7 +222,15 @@ def _seed(conn: psycopg.Connection, num_instruments: int, num_filers: int) -> in
         "filed_at",
         "exposure_kind",
     )
-    copy_sql = f"COPY {TARGET_TABLE} ({', '.join(columns)}) FROM STDIN"
+    # ``TARGET_TABLE`` is a hardcoded ``Final`` and column names are a
+    # literal tuple, but compose via ``sql.Identifier`` / ``sql.SQL`` so
+    # the defence-in-depth pattern matches ``validate_floor`` and the
+    # prevention-log entry "Unquoted SQL identifier in shell-out
+    # harness" (Claude review NITPICK fold, PR #1359).
+    copy_sql = sql.SQL("COPY {tbl} ({cols}) FROM STDIN").format(
+        tbl=sql.Identifier(TARGET_TABLE),
+        cols=sql.SQL(", ").join(sql.Identifier(c) for c in columns),
+    )
     written = 0
     with conn.cursor() as cur, cur.copy(copy_sql) as copy:
         for row in _generate_rows(num_instruments, num_filers):
