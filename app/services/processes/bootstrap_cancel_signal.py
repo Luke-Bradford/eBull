@@ -123,6 +123,26 @@ def active_bootstrap_stage_key() -> str | None:
     return ctx.stage_key
 
 
+def active_bootstrap_context() -> tuple[int, str] | None:
+    """Return ``(run_id, stage_key)`` of the in-flight bootstrap stage, or None.
+
+    Issue #1273 PR2. Long-pole stage instrumentation (`set_stage_target`
+    / `set_stage_processed` in :mod:`app.services.bootstrap_state`)
+    reads this to scope progress writes to the active orchestrator
+    dispatch. Outside ``active_bootstrap_run`` the contextvar is unset
+    and this returns ``None``; callers short-circuit progress writes
+    so manual-fire / scheduled / test-fixture paths pay zero overhead.
+
+    Returns a plain tuple so the caller package
+    (:mod:`app.services.bootstrap_state`) can wrap it in its own typed
+    container without importing this module's private ``_BootstrapContext``.
+    """
+    ctx = _active_bootstrap_context.get()
+    if ctx is None:
+        return None
+    return (ctx.run_id, ctx.stage_key)
+
+
 def bootstrap_cancel_requested(
     *,
     conn: psycopg.Connection[Any] | None = None,
@@ -181,6 +201,7 @@ def bootstrap_cancel_requested(
 
 
 __all__ = [
+    "active_bootstrap_context",
     "active_bootstrap_run",
     "active_bootstrap_stage_key",
     "bootstrap_cancel_requested",

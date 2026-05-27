@@ -51,6 +51,7 @@ Spec: docs/proposals/etl/stream-a-run-8-fixes.md v2.3 §1 T1.3 + §13 + §14
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,6 +62,11 @@ from app.providers.implementations.sec_edgar import (
     KNOWN_FILING_AGENT_CIKS,
     SecFilingsProvider,
     _normalise_submissions_block,
+)
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+    set_stage_target,
 )
 from app.services.filings import _upsert_filing
 from app.services.watermarks import get_watermark, set_watermark
@@ -184,8 +190,51 @@ def walk_files_pages(
     result = FilesWalkResult()
     targets = _list_cik_secondary_pages(conn)
 
+    # #1273 PR2 — long-pole stage instrumentation (S14). Pin
+    # target_count + cohort fingerprint when called from the
+    # bootstrap dispatcher. Fingerprint pins the is_tradable filter
+    # + sidecar-state bucket counts so the operator can audit
+    # cohort composition.
+    progress_ctx = resolve_progress_context()
+    if progress_ctx is not None:
+        sentinel_count = sum(1 for t in targets if t[3] == [_SIDECAR_SENTINEL_PAGE_NAME])
+        empty_count = sum(1 for t in targets if not t[3])
+        real_pages_count = len(targets) - sentinel_count - empty_count
+        fingerprint = (
+            f"is_tradable_only=true;"
+            f"sidecar_sentinel={sentinel_count};"
+            f"sidecar_real_pages={real_pages_count};"
+            f"sidecar_empty={empty_count}"
+        )
+        set_stage_target(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            target_count=len(targets),
+            cohort_fingerprint=fingerprint,
+        )
+    _emit_every_n = max(1, len(targets) // 100) if targets else 0
+    _last_progress_emit = time.monotonic()
+    _processed_count = 0
+
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
         for instrument_id, cik, symbol, sidecar_pages in targets:
+            # #1273 PR2 — cadenced emit. Bump _processed_count at the
+            # TOP of every iteration so the bar advances against the
+            # full cohort `len(targets)` even for early-skip branches
+            # (agent CIKs / empty sidecar / sentinel-only). The
+            # operator-visible meaning is "CIKs evaluated" not "HTTP
+            # work done"; the legacy `result.*` counters retain the
+            # finer-grained bucketing for audit log.
+            _processed_count += 1
+            if progress_ctx is not None:
+                _now = time.monotonic()
+                if _processed_count % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+                    set_stage_processed(
+                        run_id=progress_ctx.run_id,
+                        stage_key=progress_ctx.stage_key,
+                        processed_count=_processed_count,
+                    )
+                    _last_progress_emit = _now
             # Agent CIKs are excluded by the populate path
             # (sec_submissions_ingest.refresh_cik_sidecar) so their
             # sidecar_pages list is empty by design. Skip them here
@@ -335,6 +384,14 @@ def walk_files_pages(
                             watermark=page_result.last_modified,
                             watermark_at=None,
                         )
+
+    # #1273 PR2 — final operator-progress emit on exit.
+    if progress_ctx is not None:
+        set_stage_processed(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            processed_count=_processed_count,
+        )
 
     # End-of-walk SUMMARY warning when ≥ 1 in-universe non-agent CIK
     # had an empty sidecar. Single log line replaces the per-CIK spam

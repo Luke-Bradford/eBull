@@ -42,6 +42,12 @@ from typing import Any, Literal, Protocol
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+    set_stage_target,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -1482,6 +1488,30 @@ def bootstrap_business_summaries(
     # #1234 — track WHY the loop exits.
     exit_reason: Literal["drained", "deadline"] = "deadline"
 
+    # #1273 PR2 — long-pole stage instrumentation (S18 streaming).
+    # Pin fingerprint only (target_count=None per Codex 1 BLOCKING 2).
+    # `pending_predicate_v2` records all 4 active branches verbatim
+    # including the `tables_null AND quarantine_elapsed` AND-guard
+    # (PR1 audit memo §3 S18 note).
+    progress_ctx = resolve_progress_context()
+    if progress_ctx is not None:
+        fingerprint = (
+            f"chunk_limit={chunk_limit};"
+            f"max_runtime_seconds={max_runtime_seconds};"
+            f"form_types=10-K,10-K/A;"
+            f"distinct_on=instrument_id;"
+            f"ordering=filing_date_desc,filing_event_id_desc;"
+            f"url_filter=true;"
+            f"pending_predicate_v2=bs_null_OR_acn_diff_OR_retry_due_OR_(tables_null_AND_quarantine_elapsed)"
+        )
+        set_stage_target(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            target_count=None,
+            cohort_fingerprint=fingerprint,
+        )
+    _last_progress_emit = time.monotonic()
+
     while time.monotonic() < deadline:
         chunk = ingest_business_summaries(
             conn,
@@ -1495,9 +1525,29 @@ def bootstrap_business_summaries(
         total_updated += chunk.rows_updated
         total_fetch_errors += chunk.fetch_errors
         total_parse_misses += chunk.parse_misses
+        # #1273 PR2 — page-boundary cumulative emit. Streaming-style:
+        # `total_scanned` is the running cumulative-filings-discovered
+        # counter; operator sees "X processed" climbing across pages.
+        if progress_ctx is not None:
+            _now = time.monotonic()
+            if _now - _last_progress_emit > 30 or chunk.filings_scanned == 0:
+                set_stage_processed(
+                    run_id=progress_ctx.run_id,
+                    stage_key=progress_ctx.stage_key,
+                    processed_count=total_scanned,
+                )
+                _last_progress_emit = _now
         if chunk.filings_scanned == 0:
             exit_reason = "drained"
             break
+
+    # #1273 PR2 — final operator-progress emit on exit.
+    if progress_ctx is not None:
+        set_stage_processed(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            processed_count=total_scanned,
+        )
 
     logger.info(
         "bootstrap_business_summaries complete: scanned=%d inserted=%d updated=%d "

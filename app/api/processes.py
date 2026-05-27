@@ -299,6 +299,12 @@ class BootstrapTimelineStageResponse(BaseModel):
     rows_processed: int | None
     processed_count: int
     target_count: int | None
+    # #1273 PR2 — operator-readable cohort-definition fingerprint set
+    # by ``set_stage_target`` at stage entry. Semicolon-separated
+    # key=value tokens (see spec §4); ``None`` on legacy rows + stages
+    # that never set a fingerprint. Surfaced as a ``title=`` tooltip
+    # on the progress-bar wrapper; no new visual chrome.
+    target_cohort_fingerprint: str | None = None
     archives: list[BootstrapTimelineArchiveResponse]
     # #1140 Task C — operator-readable warning string when the stage
     # finished ``success`` but its ``rows_processed`` failed to satisfy
@@ -691,7 +697,8 @@ def get_bootstrap_timeline(
                 """
                 SELECT stage_key, stage_order, lane, job_name, status,
                        started_at, completed_at, last_error,
-                       rows_processed, processed_count, target_count
+                       rows_processed, processed_count, target_count,
+                       target_cohort_fingerprint
                   FROM bootstrap_stages
                  WHERE bootstrap_run_id = %s
                  ORDER BY stage_order ASC, stage_key ASC
@@ -796,6 +803,7 @@ def get_bootstrap_timeline(
                 rows_processed=row.get("rows_processed"),
                 processed_count=int(row.get("processed_count") or 0),
                 target_count=row.get("target_count"),
+                target_cohort_fingerprint=row.get("target_cohort_fingerprint"),
                 archives=archives_by_stage.get(stage_key, []),
                 warning=warning,
             )

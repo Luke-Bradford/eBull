@@ -4564,6 +4564,35 @@ def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
             psycopg.connect(settings.database_url) as conn,
         ):
             ciks = list_directory_filer_ciks(conn, min_last_13f_hr_at=min_last_13f_hr_at)
+            # #1273 PR2 — long-pole stage instrumentation (S22). Pin
+            # target + fingerprint at the scheduler boundary because
+            # every cohort knob (min_period_of_report,
+            # min_last_13f_hr_at, deadline_seconds, source_label) is
+            # in scope HERE; ingest_all_active_filers only sees the
+            # post-resolution subset. Codex 2 pre-push BLOCKING fold.
+            from app.services.bootstrap_state import (
+                resolve_progress_context as _resolve_progress_context_s22,
+            )
+            from app.services.bootstrap_state import (
+                set_stage_target as _set_stage_target_s22,
+            )
+
+            _progress_ctx_s22 = _resolve_progress_context_s22()
+            if _progress_ctx_s22 is not None:
+                _fp_s22 = (
+                    f"min_period_of_report="
+                    f"{min_period_of_report.isoformat() if min_period_of_report else 'none'};"
+                    f"min_last_13f_hr_at="
+                    f"{min_last_13f_hr_at.date().isoformat() if min_last_13f_hr_at else 'none'};"
+                    f"deadline_seconds={deadline_seconds if deadline_seconds is not None else 'none'};"
+                    f"source_label={source_label}"
+                )
+                _set_stage_target_s22(
+                    run_id=_progress_ctx_s22.run_id,
+                    stage_key=_progress_ctx_s22.stage_key,
+                    target_count=len(ciks),
+                    cohort_fingerprint=_fp_s22,
+                )
             summaries = ingest_all_active_filers(
                 conn,
                 sec,
@@ -4688,6 +4717,32 @@ def filings_history_seed(params: Mapping[str, Any]) -> None:
         instrument_ids = [row[1] for row in cik_rows]
         from_date = date.today() - timedelta(days=days_back)
         to_date = date.today()
+
+        # #1273 PR2 — long-pole stage instrumentation (S15). Pin
+        # target + fingerprint at the scheduler boundary because the
+        # `instrument_id` triage knob is in scope HERE (refresh_filings
+        # only sees the post-resolution subset). Codex 2 pre-push
+        # IMPORTANT fold.
+        from app.services.bootstrap_state import (
+            resolve_progress_context as _resolve_progress_context_s15,
+        )
+        from app.services.bootstrap_state import (
+            set_stage_target as _set_stage_target_s15,
+        )
+
+        _progress_ctx_s15 = _resolve_progress_context_s15()
+        if _progress_ctx_s15 is not None:
+            _fp_s15 = (
+                f"days_back={days_back};"
+                f"filing_types={len(filing_types)};"
+                f"instrument_id={instrument_id_param if instrument_id_param is not None else 'all'}"
+            )
+            _set_stage_target_s15(
+                run_id=_progress_ctx_s15.run_id,
+                stage_key=_progress_ctx_s15.stage_key,
+                target_count=len(instrument_ids),
+                cohort_fingerprint=_fp_s15,
+            )
 
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
@@ -5350,6 +5405,32 @@ def sec_n_port_ingest(params: Mapping[str, Any]) -> None:
                 conn,
                 min_last_seen_filed_at=min_last_seen_filed_at,
             )
+            # #1273 PR2 — long-pole stage instrumentation (S23). Pin
+            # target + fingerprint at the scheduler boundary because
+            # min_last_seen_filed_at is in scope HERE; the helper
+            # ingest_all_fund_filers only sees min_period_of_report.
+            # Codex 2 pre-push BLOCKING fold.
+            from app.services.bootstrap_state import (
+                resolve_progress_context as _resolve_progress_context_s23,
+            )
+            from app.services.bootstrap_state import (
+                set_stage_target as _set_stage_target_s23,
+            )
+
+            _progress_ctx_s23 = _resolve_progress_context_s23()
+            if _progress_ctx_s23 is not None:
+                _fp_s23 = (
+                    f"min_last_seen_filed_at="
+                    f"{min_last_seen_filed_at.date().isoformat() if min_last_seen_filed_at else 'none'};"
+                    f"deadline_seconds={deadline_seconds if deadline_seconds is not None else 'none'};"
+                    f"directory=sec_nport_filer_directory"
+                )
+                _set_stage_target_s23(
+                    run_id=_progress_ctx_s23.run_id,
+                    stage_key=_progress_ctx_s23.stage_key,
+                    target_count=len(ciks),
+                    cohort_fingerprint=_fp_s23,
+                )
 
             summaries = ingest_all_fund_filers(
                 conn,

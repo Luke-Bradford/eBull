@@ -37,12 +37,17 @@ rows on first install (operator audit 2026-05-07).
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 import psycopg
 
 from app.providers.filings import FilingEvent, FilingSearchResult, FilingsProvider
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +331,18 @@ def refresh_filings(
     upserted = 0
     skipped_provider_error = 0
 
+    # #1273 PR2 — long-pole stage instrumentation (S15). Cadenced +
+    # final set_stage_processed emits live in the per-instrument
+    # loop below. NOTE: set_stage_target (cohort_fingerprint +
+    # target_count) is written at the SCHEDULER boundary in
+    # ``app/workers/scheduler.py::filings_history_seed`` AFTER the
+    # cik_rows cohort materializes — that callsite has the
+    # ``instrument_id`` knob in scope, whereas this helper only sees
+    # the post-resolution subset. Codex 2 pre-push IMPORTANT fold.
+    progress_ctx = resolve_progress_context()
+    _emit_every_n = max(1, len(resolved) // 100) if resolved else 0
+    _last_progress_emit = time.monotonic()
+
     # PR3d #1064 follow-up — poll the bootstrap cancel signal between
     # instruments. ``filings_history_seed`` (bootstrap stage 14) walks
     # the full CIK-mapped tradable cohort (~2-12k instruments at
@@ -388,6 +405,27 @@ def refresh_filings(
                 exc_info=True,
             )
             skipped_provider_error += 1
+        # #1273 PR2 — cadenced operator-progress emit. Uses
+        # iter_index (already maintained for the cancel-poll cadence)
+        # so the operator sees attempt-progress identical to the
+        # cancel exception's "iter_index/len(resolved)" message.
+        if progress_ctx is not None:
+            _now = time.monotonic()
+            if iter_index % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+                set_stage_processed(
+                    run_id=progress_ctx.run_id,
+                    stage_key=progress_ctx.stage_key,
+                    processed_count=iter_index,
+                )
+                _last_progress_emit = _now
+
+    # #1273 PR2 — final operator-progress emit on exit.
+    if progress_ctx is not None:
+        set_stage_processed(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            processed_count=iter_index,
+        )
 
     if skipped_no_identifier > 0:
         logger.info(

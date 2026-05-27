@@ -62,6 +62,10 @@ from uuid import uuid4
 
 import psycopg
 
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+)
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
     record_fund_observation,
@@ -815,6 +819,22 @@ def ingest_all_fund_filers(
     first_accession_error: str | None = None
     deadline_hit = False
     filers_attempted = 0
+
+    # #1273 PR2 — long-pole stage instrumentation (S23). Progress
+    # context resolved once; cadenced + final set_stage_processed
+    # emits live in the per-filer loop / finally block below.
+    # NOTE: set_stage_target (cohort_fingerprint + target_count) is
+    # written at the SCHEDULER boundary in
+    # ``app/workers/scheduler.py::sec_n_port_ingest`` AFTER the ciks
+    # cohort materializes — that callsite has every cohort knob
+    # (min_last_seen_filed_at, deadline_seconds, directory) in scope.
+    # Codex 2 pre-push BLOCKING fold (this helper only sees
+    # min_period_of_report, NOT the actual cohort-filter param
+    # min_last_seen_filed_at consumed by list_nport_filer_ciks).
+    progress_ctx = resolve_progress_context()
+    _emit_every_n = max(1, len(ciks) // 100)
+    _last_progress_emit = time.monotonic()
+
     try:
         for cik in ciks:
             if deadline_ts is not None and time.monotonic() >= deadline_ts:
@@ -851,6 +871,16 @@ def ingest_all_fund_filers(
             accession_failures += summary.accessions_failed
             if summary.first_error and first_accession_error is None:
                 first_accession_error = f"{cik} {summary.first_error}"
+            # #1273 PR2 — cadenced operator-progress emit.
+            if progress_ctx is not None:
+                _now = time.monotonic()
+                if filers_attempted % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+                    set_stage_processed(
+                        run_id=progress_ctx.run_id,
+                        stage_key=progress_ctx.stage_key,
+                        processed_count=filers_attempted,
+                    )
+                    _last_progress_emit = _now
     finally:
         # Status precedence mirrors institutional_holdings.ingest_all_active_filers:
         #   deadline beats crash-only; crash-only with summaries beats failed.
@@ -880,6 +910,13 @@ def ingest_all_fund_filers(
             error="; ".join(error_parts) or None,
         )
         conn.commit()
+        # #1273 PR2 — final operator-progress emit on every exit branch.
+        if progress_ctx is not None:
+            set_stage_processed(
+                run_id=progress_ctx.run_id,
+                stage_key=progress_ctx.stage_key,
+                processed_count=filers_attempted,
+            )
 
     return summaries
 

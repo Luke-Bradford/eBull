@@ -38,6 +38,11 @@ from app.providers.implementations.sec_edgar import (
     parse_master_index,
 )
 from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+    set_stage_target,
+)
 from app.services.filings import (
     FILING_EVENTS_RETENTION_YEARS,
     filing_within_retention,
@@ -1645,13 +1650,32 @@ def normalize_financial_periods(
     If ``instrument_ids`` is None, processes all instruments that have
     facts in financial_facts_raw.
     """
-    # Determine which instruments to process
+    # Determine which instruments to process. Capture the caller's
+    # original intent (None = full universe; supplied list = explicit
+    # sub-cohort) BEFORE the None-defaulting overwrites the param so
+    # the #1273 PR2 fingerprint can declare the correct scope.
+    _instrument_scope = "universe_with_facts" if instrument_ids is None else "explicit_list"
     if instrument_ids is None:
         cur = conn.execute("SELECT DISTINCT instrument_id FROM financial_facts_raw")
         instrument_ids = [row[0] for row in cur.fetchall()]
 
     total_raw = 0
     total_canonical = 0
+
+    # #1273 PR2 — long-pole stage instrumentation (S25). Pin target +
+    # fingerprint when called from the bootstrap dispatcher.
+    progress_ctx = resolve_progress_context()
+    if progress_ctx is not None:
+        fingerprint = f"instrument_scope={_instrument_scope};source_table=financial_facts_raw"
+        set_stage_target(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            target_count=len(instrument_ids),
+            cohort_fingerprint=fingerprint,
+        )
+    _emit_every_n = max(1, len(instrument_ids) // 100) if instrument_ids else 0
+    _last_progress_emit = time.monotonic()
+    _processed_count = 0
 
     for iid in instrument_ids:
         try:
@@ -1723,6 +1747,27 @@ def normalize_financial_periods(
                 )
         except Exception:
             logger.exception("Failed to normalize instrument %d", iid)
+        # #1273 PR2 — cadenced operator-progress emit. _processed_count
+        # advances regardless of per-instrument success so the bar
+        # tracks attempt progress (mirrors S22's filers_attempted).
+        _processed_count += 1
+        if progress_ctx is not None:
+            _now = time.monotonic()
+            if _processed_count % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+                set_stage_processed(
+                    run_id=progress_ctx.run_id,
+                    stage_key=progress_ctx.stage_key,
+                    processed_count=_processed_count,
+                )
+                _last_progress_emit = _now
+
+    # #1273 PR2 — final operator-progress emit on exit.
+    if progress_ctx is not None:
+        set_stage_processed(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            processed_count=_processed_count,
+        )
 
     return NormalizationSummary(
         instruments_processed=len(instrument_ids),

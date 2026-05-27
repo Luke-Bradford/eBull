@@ -53,6 +53,10 @@ from app.providers.implementations.sec_13f import (
     parse_primary_doc,
 )
 from app.services import raw_filings
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+)
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
     record_institution_observation,
@@ -1116,6 +1120,23 @@ def ingest_all_active_filers(
     else:
         deadline_ts = time.monotonic() + deadline_seconds
 
+    # #1273 PR2 — long-pole stage instrumentation (S22). Progress
+    # context resolved once; cadenced + final set_stage_processed
+    # emits live in the per-filer loop / finally block below.
+    # NOTE: set_stage_target (cohort_fingerprint + target_count) is
+    # written at the SCHEDULER boundary in
+    # ``app/workers/scheduler.py::sec_13f_quarterly_sweep`` AFTER the
+    # ciks cohort materializes — that callsite has every cohort knob
+    # (min_period_of_report, min_last_13f_hr_at, deadline_seconds,
+    # source_label) in scope, whereas this helper only sees the
+    # post-resolution subset. Codex 2 pre-push BLOCKING fold.
+    # Manual-fire paths get progress_ctx=None and skip every emit.
+    progress_ctx = resolve_progress_context()
+    # Hybrid cadence — emit every max(1, len/100) iterations OR every
+    # 30s wall-clock, whichever first. Per-stage tracking variables.
+    _emit_every_n = max(1, len(ciks) // 100)
+    _last_progress_emit = time.monotonic()
+
     run_id = start_ingestion_run(
         conn,
         source=source_label,
@@ -1193,6 +1214,19 @@ def ingest_all_active_filers(
             accession_failures += summary.accessions_failed
             if summary.first_error and first_accession_error is None:
                 first_accession_error = f"{cik} {summary.first_error}"
+            # #1273 PR2 — cadenced operator-progress emit. Hybrid
+            # rule: every max(1, len/100) iterations OR every 30s
+            # wall-clock. processed_count is the running attempt count
+            # (mirrors the deadline / cancel log messages above).
+            if progress_ctx is not None:
+                _now = time.monotonic()
+                if filers_attempted % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+                    set_stage_processed(
+                        run_id=progress_ctx.run_id,
+                        stage_key=progress_ctx.stage_key,
+                        processed_count=filers_attempted,
+                    )
+                    _last_progress_emit = _now
     finally:
         # Status precedence:
         #   * deadline hit (work was interrupted, partial by definition)
@@ -1250,6 +1284,16 @@ def ingest_all_active_filers(
             error="; ".join(error_parts) or None,
         )
         conn.commit()
+        # #1273 PR2 — final operator-progress emit on every exit
+        # branch (success, deadline_hit, cancel, crash). Lives inside
+        # `finally` so partial-progress survives even if a crash
+        # outside the per-filer try/except escapes the for loop.
+        if progress_ctx is not None:
+            set_stage_processed(
+                run_id=progress_ctx.run_id,
+                stage_key=progress_ctx.stage_key,
+                processed_count=filers_attempted,
+            )
 
     if cancelled_by_operator:
         # Raise after bookkeeping so data_ingestion_runs records the
