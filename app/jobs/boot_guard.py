@@ -75,6 +75,93 @@ def check_operator_exists(
     return BootGuardOutcome.OPERATOR_PRESENT
 
 
+def is_cold_start_state(conn: psycopg.Connection[Any]) -> bool:
+    """Pure check: is the application in pre-/auth/setup cold-start state?
+
+    Returns ``True`` iff ``bootstrap_state.status = 'pending'`` — meaning
+    first-install bootstrap has never been triggered. Operator absence
+    in this state is the expected initial condition (``/auth/setup``
+    has not been run yet), NOT a defect.
+
+    Returns ``False`` when:
+      * ``bootstrap_state.status`` is anything other than ``'pending'``
+        (``'running' | 'complete' | 'partial_error' | 'cancelled'``) —
+        post-install state where operator absence IS a defect.
+      * The ``bootstrap_state`` singleton row is missing entirely
+        (should not happen given the earlier
+        ``_ensure_bootstrap_state_singleton_with_cleanup`` guard; fail
+        closed to preserve hard-fail behaviour rather than mask the
+        anomaly).
+
+    Issue #1363: kept as a stand-alone primitive for direct callers
+    + test coverage. The wrapper at
+    ``app/jobs/__main__.py::_check_operator_exists_with_cleanup``
+    instead uses :func:`read_boot_gate_snapshot` to read operator
+    presence + cold-start signal in ONE SELECT — necessary because
+    READ COMMITTED + autocommit make two separate SELECTs vulnerable
+    to a stale-decision interleaving (Codex 2 P2: /auth/setup + Re-run
+    all can commit between the two probes and flip both facts under
+    the wrapper's nose).
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM bootstrap_state WHERE id = 1")
+        row = cur.fetchone()
+    if row is None:
+        return False
+    return row[0] == "pending"
+
+
+def read_boot_gate_snapshot(conn: psycopg.Connection[Any]) -> tuple[bool, bool]:
+    """Atomic single-SELECT read of (operator_present, is_cold_start).
+
+    Issue #1363 (Codex 2 P2 fold rounds 1 + 2):
+
+    Round 1 (atomicity): the wrapper previously called
+    :func:`check_operator_exists` + :func:`is_cold_start_state` as two
+    separate SELECT statements. Under PostgreSQL's default READ
+    COMMITTED isolation each statement sees the latest committed
+    state, so even on the same connection the two probes can sample
+    different points in time — a concurrent ``/auth/setup`` + Re-run
+    all sequence can commit between the probes and produce a stale
+    verdict. Folding all facts into one SELECT means PostgreSQL
+    evaluates the sub-queries in a single statement-level snapshot —
+    atomic by construction without needing REPEATABLE READ.
+
+    Round 2 (cold-start composition): ``bootstrap_state.status =
+    'pending'`` is necessary but NOT sufficient to identify the
+    pre-setup window. ``/auth/setup`` does NOT mutate
+    ``bootstrap_state`` — only the first Re-run-all click flips status
+    away from ``'pending'``. So a post-setup-but-pre-bootstrap state
+    where the operator row was accidentally deleted is
+    indistinguishable from a true cold-start using status alone. The
+    ``operator_audit`` table records every ``'setup'`` event
+    historically (insert-only, no delete path); the **absence** of any
+    ``'setup'`` row is the load-bearing signal that ``/auth/setup``
+    has never been run on this DB.
+
+    Returns:
+        (operator_present, is_cold_start) where:
+          * ``operator_present`` = ``EXISTS(SELECT 1 FROM operators)``
+          * ``is_cold_start``    = ``status = 'pending'``
+            AND ``NOT EXISTS(setup event in operator_audit)``.
+            False when ``bootstrap_state`` row missing (fail closed).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT "
+            "EXISTS(SELECT 1 FROM operators) AS operator_present, "
+            "(COALESCE((SELECT status FROM bootstrap_state WHERE id = 1), '') = 'pending' "
+            " AND NOT EXISTS(SELECT 1 FROM operator_audit WHERE event_type = 'setup')) "
+            "AS is_cold_start",
+        )
+        row = cur.fetchone()
+    if row is None:
+        # Defensive — SELECT … always returns a single row in PG; this
+        # branch exists for type-checker happiness + future-proofing.
+        return (False, False)
+    return (bool(row[0]), bool(row[1]))
+
+
 OPERATOR_MISSING_ERROR_MESSAGE: str = (
     "jobs boot blocked: no operators row in DB. "
     "Run POST /auth/setup via the API process to create one. "
