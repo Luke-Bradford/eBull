@@ -82,3 +82,7 @@ Quick-reference of what EdgarTools provides per form (cross-check before extendi
 - **N-PORT:** fund_series_id, advisor_id, custodian, shares per holding, fair_value, is_restricted.
 
 If our observations table doesn't carry a field EdgarTools exposes for the same form, EITHER add it now (operator preference per "lets be sure we're maximising what we can get out of the data") OR file a tech-debt ticket to add it before the next form-class expansion.
+
+## Perf-claim diffs
+
+If the diff also asserts a performance improvement (latency, throughput, wall-clock) against any ETL hot path, the [`etl-perf-claims`](etl-perf-claims.md) skill is mandatory in this fresh-agent review pass — load it alongside the financial-plumbing / data-engineer / data-scientist / adversarial lenses so the §4 artifact contract + §5 process rules are part of the lens stack before push.
