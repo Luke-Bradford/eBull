@@ -45,7 +45,12 @@ from app.providers.implementations.sec_submissions import (
     parse_submissions_page,
 )
 from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
-from app.services.bootstrap_state import BootstrapStageCancelled
+from app.services.bootstrap_state import (
+    BootstrapStageCancelled,
+    resolve_progress_context,
+    set_stage_processed,
+    set_stage_target,
+)
 from app.services.manifest_parsers.sec_n_csr import n_csr_retention_cutoff
 from app.services.processes.bootstrap_cancel_signal import (
     active_bootstrap_stage_key,
@@ -316,6 +321,31 @@ def run_first_install_drain(
         )
 
     skip_issuer_http = rows_seeded_from_filing_events > 0
+
+    # #1273 PR2 — long-pole stage instrumentation (S16 streaming).
+    # MUST land here (not at function top) because `fast_path_seeded`
+    # is only known after `seed_manifest_from_filing_events` returns
+    # (Codex 1 IMPORTANT-2 fold). Streaming-style: target_count=None,
+    # fingerprint only — `_iter_in_universe_subjects` is a streaming
+    # cursor with no upfront cohort size. cadenced emits live in the
+    # for-loop below; final emit after exit.
+    import time as _time  # local — drain module otherwise time-free
+
+    progress_ctx = resolve_progress_context()
+    if progress_ctx is not None:
+        fingerprint = (
+            f"max_subjects={max_subjects if max_subjects is not None else 'unbounded'};"
+            f"follow_pagination={follow_pagination};"
+            f"fast_path_seeded={skip_issuer_http}"
+        )
+        set_stage_target(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            target_count=None,
+            cohort_fingerprint=fingerprint,
+        )
+    _last_progress_emit = _time.monotonic()
+
     # PR3d #1064 — cancel-poll cadence. The drain iterates ~12k CIKs
     # at 10 req/s, ~21 minutes wall-clock. Polling for the bootstrap
     # cancel signal every 50 CIKs keeps observation latency under
@@ -355,6 +385,18 @@ def run_first_install_drain(
         ciks_processed += 1
         if not delta.new_filings:
             ciks_skipped += 1
+        # #1273 PR2 — streaming-style cadenced emit. No cohort size
+        # known up-front; emit every 30s wall-clock with the running
+        # ciks_processed counter.
+        if progress_ctx is not None:
+            _now = _time.monotonic()
+            if _now - _last_progress_emit > 30:
+                set_stage_processed(
+                    run_id=progress_ctx.run_id,
+                    stage_key=progress_ctx.stage_key,
+                    processed_count=ciks_processed,
+                )
+                _last_progress_emit = _now
 
         for row in delta.new_filings:
             if row.source is None:
@@ -410,6 +452,14 @@ def run_first_install_drain(
     # threads the counter materially under-reports when the fast
     # path or pagination fires).
     scheduler_rows_seeded = len(inline_seeded_triples)
+
+    # #1273 PR2 — final operator-progress emit on exit.
+    if progress_ctx is not None:
+        set_stage_processed(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            processed_count=ciks_processed,
+        )
 
     logger.info(
         "first-install drain: ciks=%d skipped=%d errors=%d secondary_pages=%d upserted=%d scheduler_seeded=%d",

@@ -399,6 +399,7 @@ function makeTimelinePayload(): BootstrapTimelineResponse {
         rows_processed: 4520,
         processed_count: 4520,
         target_count: null,
+        target_cohort_fingerprint: null,
         archives: [
           {
             archive_name: "__job__",
@@ -422,6 +423,12 @@ function makeTimelinePayload(): BootstrapTimelineResponse {
         rows_processed: null,
         processed_count: 12,
         target_count: null,
+        // #1273 PR2 — fingerprint set on a running stage so the
+        // tooltip-rendering assertion below can verify the bar
+        // wrapper carries the title attribute. The shape mirrors
+        // the §4 streaming-style fingerprint.
+        target_cohort_fingerprint:
+          "max_subjects=unbounded;follow_pagination=true;fast_path_seeded=false",
         warning: null,
         archives: [
           {
@@ -499,6 +506,17 @@ describe("ProcessDetailPage — Timeline tab (bootstrap)", () => {
     // Lane headers render in declared order.
     expect(screen.getByText(/^init$/)).toBeTruthy();
     expect(screen.getByText(/^sec_rate$/)).toBeTruthy();
+    // #1273 PR2 — cohort fingerprint surfaces as a native title= tooltip
+    // on the running stage's progress-bar wrapper. The cik_refresh
+    // fixture above carries target_count=null + processed_count=12,
+    // so the wrapper renders via the no-target branch; the new title
+    // attribute should equal the fixture's fingerprint string.
+    const fingerprintEl = await screen.findByText(/12 processed \(no target set\)/);
+    const barWrapper = fingerprintEl.parentElement;
+    expect(barWrapper).not.toBeNull();
+    expect(barWrapper!.getAttribute("title")).toBe(
+      "max_subjects=unbounded;follow_pagination=true;fast_path_seeded=false",
+    );
   });
 
   it("renders 'no bootstrap run yet' when /timeline returns null run", async () => {

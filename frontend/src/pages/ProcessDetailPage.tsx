@@ -1189,8 +1189,16 @@ function TimelineStageRow({
             const target = stage.target_count;
             const hasTarget = target !== null && target > 0;
             if (!hasTarget && processed === 0) return null;
+            // #1273 PR2 — cohort-definition fingerprint surfaces as a
+            // native `title=` tooltip on the bar wrapper. `?? undefined`
+            // suppresses the tooltip when the field is null (legacy
+            // rows + uninstrumented stages); same affordance Timeline
+            // already uses below for warnings + errors at :1225/:1233.
             return (
-              <div className="mt-1.5">
+              <div
+                className="mt-1.5"
+                title={stage.target_cohort_fingerprint ?? undefined}
+              >
                 {hasTarget ? (
                   <>
                     <div className="h-1 w-full overflow-hidden rounded bg-slate-200 dark:bg-slate-800">

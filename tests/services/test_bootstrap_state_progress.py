@@ -27,7 +27,10 @@ import psycopg
 import pytest
 
 from app.services.bootstrap_state import (
+    BootstrapProgressContext,
     _current_running_stage_key,
+    reset_failed_stages_for_retry,
+    resolve_progress_context,
     set_stage_processed,
     set_stage_target,
 )
@@ -368,3 +371,197 @@ def test_helpers_bump_last_progress_at_heartbeat(
     assert after_processed is not None, "set_stage_processed must bump heartbeat"
     # Second call advances strictly past the first (now() is wall-clock).
     assert after_processed >= after_target  # type: ignore[operator]
+
+
+# ---------------------------------------------------------------------------
+# PR2 (#1273) — fingerprint + reset-helper extension + context resolver tests.
+# ---------------------------------------------------------------------------
+
+
+def _read_stage_full(
+    conn: psycopg.Connection[tuple],
+    *,
+    run_id: int,
+    stage_key: str,
+) -> dict[str, object | None]:
+    """Read all 5 PR2-touched columns + status for a stage row."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, rows_processed, target_count, processed_count,
+                   last_progress_at, target_cohort_fingerprint
+              FROM bootstrap_stages
+             WHERE bootstrap_run_id = %s
+               AND stage_key        = %s
+            """,
+            (run_id, stage_key),
+        )
+        row = cur.fetchone()
+    assert row is not None, "stage row vanished"
+    return {
+        "status": row[0],
+        "rows_processed": row[1],
+        "target_count": row[2],
+        "processed_count": row[3],
+        "last_progress_at": row[4],
+        "target_cohort_fingerprint": row[5],
+    }
+
+
+def test_set_stage_target_writes_fingerprint(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811 — re-exported fixture
+) -> None:
+    """PR2: helper now accepts ``cohort_fingerprint``; writes it
+    alongside target_count + heartbeat in a single UPDATE."""
+    run_id = _seed_run_with_stage(ebull_test_conn, stage_key="S22", job_name="job_S22")
+
+    rowcount = set_stage_target(
+        run_id=run_id,
+        stage_key="S22",
+        target_count=42,
+        cohort_fingerprint="k1=v1;k2=v2",
+    )
+
+    assert rowcount == 1
+    state = _read_stage_full(ebull_test_conn, run_id=run_id, stage_key="S22")
+    assert state["target_count"] == 42
+    assert state["target_cohort_fingerprint"] == "k1=v1;k2=v2"
+    assert state["last_progress_at"] is not None
+
+
+def test_set_stage_target_fingerprint_none_preserves_existing(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811 — re-exported fixture
+) -> None:
+    """PR2 COALESCE branch: a None fingerprint param preserves the
+    existing column value rather than NULL-ing it. Defensive against
+    a future caller writing target_count + fingerprint separately."""
+    run_id = _seed_run_with_stage(ebull_test_conn, stage_key="S22", job_name="job_S22")
+
+    # First write — fingerprint = 'OLD'.
+    set_stage_target(run_id=run_id, stage_key="S22", target_count=10, cohort_fingerprint="OLD")
+    # Second write — only target_count, fingerprint=None → preserve 'OLD'.
+    set_stage_target(run_id=run_id, stage_key="S22", target_count=99, cohort_fingerprint=None)
+
+    state = _read_stage_full(ebull_test_conn, run_id=run_id, stage_key="S22")
+    assert state["target_count"] == 99
+    assert state["target_cohort_fingerprint"] == "OLD"
+
+
+def test_set_stage_target_target_count_none_preserves_existing(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811 — re-exported fixture
+) -> None:
+    """PR2 COALESCE branch: target_count=None preserves the existing
+    int (S16/S17/S18 streaming-style stages pass target_count=None
+    intentionally — must NOT overwrite a previously-set value with
+    NULL if a future caller writes the two fields separately)."""
+    run_id = _seed_run_with_stage(ebull_test_conn, stage_key="S22", job_name="job_S22")
+
+    set_stage_target(run_id=run_id, stage_key="S22", target_count=100, cohort_fingerprint="A")
+    set_stage_target(run_id=run_id, stage_key="S22", target_count=None, cohort_fingerprint="B")
+
+    state = _read_stage_full(ebull_test_conn, run_id=run_id, stage_key="S22")
+    assert state["target_count"] == 100
+    assert state["target_cohort_fingerprint"] == "B"
+
+
+def test_set_stage_target_both_none_only_bumps_heartbeat(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811 — re-exported fixture
+) -> None:
+    """Edge case: both params None. UPDATE still fires (1 row) and
+    bumps last_progress_at; both data columns preserve."""
+    run_id = _seed_run_with_stage(ebull_test_conn, stage_key="S22", job_name="job_S22")
+
+    set_stage_target(run_id=run_id, stage_key="S22", target_count=7, cohort_fingerprint="x=y")
+    state_before = _read_stage_full(ebull_test_conn, run_id=run_id, stage_key="S22")
+
+    rowcount = set_stage_target(
+        run_id=run_id,
+        stage_key="S22",
+        target_count=None,
+        cohort_fingerprint=None,
+    )
+
+    assert rowcount == 1
+    state_after = _read_stage_full(ebull_test_conn, run_id=run_id, stage_key="S22")
+    assert state_after["target_count"] == 7
+    assert state_after["target_cohort_fingerprint"] == "x=y"
+    # Heartbeat strictly advances (or equals — clock granularity).
+    assert state_after["last_progress_at"] >= state_before["last_progress_at"]  # type: ignore[operator]
+
+
+def test_reset_failed_stages_clears_all_five_progress_columns(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811 — re-exported fixture
+) -> None:
+    """PR2 acceptance (audit memo §6): reset_failed_stages_for_retry
+    MUST clear all 5 progress columns alongside rows_processed, else
+    a fresh retry would show last-failed counters + cohort
+    fingerprint."""
+    # Seed: error stage with every progress column populated.
+    run_id = _seed_run_with_stage(
+        ebull_test_conn,
+        stage_key="S22",
+        job_name="job_S22",
+        stage_status="error",
+    )
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE bootstrap_stages
+               SET rows_processed            = 10,
+                   target_count              = 20,
+                   processed_count           = 15,
+                   last_progress_at          = now(),
+                   target_cohort_fingerprint = 'STALE'
+             WHERE bootstrap_run_id = %s AND stage_key = %s
+            """,
+            (run_id, "S22"),
+        )
+        # Flip singleton to partial_error + pin last_run_id so reset
+        # helper's preconditions are satisfied.
+        cur.execute(
+            """
+            UPDATE bootstrap_state
+               SET status      = 'partial_error',
+                   last_run_id = %s
+             WHERE id = 1
+            """,
+            (run_id,),
+        )
+    ebull_test_conn.commit()
+
+    pre = _read_stage_full(ebull_test_conn, run_id=run_id, stage_key="S22")
+    assert pre["rows_processed"] == 10
+    assert pre["target_count"] == 20
+    assert pre["processed_count"] == 15
+    assert pre["target_cohort_fingerprint"] == "STALE"
+
+    returned_run_id, reset_count = reset_failed_stages_for_retry(ebull_test_conn)
+
+    assert returned_run_id == run_id
+    assert reset_count >= 1
+    post = _read_stage_full(ebull_test_conn, run_id=run_id, stage_key="S22")
+    assert post["status"] == "pending"
+    assert post["rows_processed"] is None
+    assert post["target_count"] is None
+    assert post["processed_count"] == 0  # INTEGER NOT NULL DEFAULT 0
+    assert post["last_progress_at"] is None
+    assert post["target_cohort_fingerprint"] is None
+
+
+def test_resolve_progress_context_outside_bootstrap_returns_none() -> None:
+    """Manual-fire path: no bootstrap-dispatch contextvar set →
+    resolver returns None and every callsite skips progress writes."""
+    assert resolve_progress_context() is None
+
+
+def test_resolve_progress_context_inside_dispatch_returns_tuple() -> None:
+    """Inside the orchestrator's ``active_bootstrap_run`` wrapper,
+    resolver returns a BootstrapProgressContext with (run_id, stage_key)."""
+    from app.services.processes.bootstrap_cancel_signal import active_bootstrap_run
+
+    with active_bootstrap_run(run_id=12345, stage_key="S22"):
+        ctx = resolve_progress_context()
+
+    assert isinstance(ctx, BootstrapProgressContext)
+    assert ctx.run_id == 12345
+    assert ctx.stage_key == "S22"

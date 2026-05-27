@@ -776,13 +776,31 @@ def mark_stage_blocked(
 # ---------------------------------------------------------------------------
 
 
-def set_stage_target(*, run_id: int, stage_key: str, target_count: int) -> int:
-    """Write ``bootstrap_stages.target_count`` for an in-flight stage.
+def set_stage_target(
+    *,
+    run_id: int,
+    stage_key: str,
+    target_count: int | None,
+    cohort_fingerprint: str | None = None,
+) -> int:
+    """Write ``target_count`` + ``target_cohort_fingerprint`` for an
+    in-flight stage.
+
+    PR2 (#1273) widens the PR1 signature: ``target_count`` becomes
+    nullable (S16/S17/S18 streaming-style stages pin only the
+    fingerprint per spec §4 table) and ``cohort_fingerprint`` is
+    added. Both inputs are independently optional.
+
+    SQL uses ``COALESCE`` on both columns so a ``None`` param preserves
+    the existing DB value rather than NULL-ing it — call sites are
+    first-write-wins by convention, but the COALESCE branch is
+    defensive against a future caller writing one field per call.
+
+    ``last_progress_at`` always bumps so the heartbeat reflects the
+    stage-entry progress signal (Codex 2 PR1 P2 fold).
 
     Opens its own psycopg connection, commits, and closes. Survives
-    caller rollback per the spec contract above. Also bumps
-    ``last_progress_at`` so the heartbeat reflects the stage-entry
-    progress signal (Codex 2 P2 fold).
+    caller rollback per the spec contract above.
 
     Returns the row-update count. ``1`` on a successful write; ``0``
     when the row is not in ``status='running'`` (late-write no-op).
@@ -791,13 +809,19 @@ def set_stage_target(*, run_id: int, stage_key: str, target_count: int) -> int:
         cur = conn.execute(
             """
             UPDATE bootstrap_stages
-               SET target_count     = %(target_count)s,
-                   last_progress_at = now()
+               SET target_count              = COALESCE(%(target_count)s, target_count),
+                   target_cohort_fingerprint = COALESCE(%(cohort_fingerprint)s, target_cohort_fingerprint),
+                   last_progress_at          = now()
              WHERE bootstrap_run_id = %(run_id)s
                AND stage_key        = %(stage_key)s
                AND status           = 'running'
             """,
-            {"run_id": run_id, "stage_key": stage_key, "target_count": target_count},
+            {
+                "run_id": run_id,
+                "stage_key": stage_key,
+                "target_count": target_count,
+                "cohort_fingerprint": cohort_fingerprint,
+            },
         )
         conn.commit()
         return cur.rowcount or 0
@@ -866,6 +890,55 @@ def _current_running_stage_key(job_name: str) -> str | None:
             {"job_name": job_name},
         ).fetchone()
         return str(row[0]) if row else None
+
+
+@dataclass(frozen=True)
+class BootstrapProgressContext:
+    """Resolved (run_id, stage_key) pair for an in-flight stage.
+
+    #1273 PR2: every long-pole stage invoker calls
+    :func:`resolve_progress_context` on entry and uses the returned
+    context (or None) to gate :func:`set_stage_target` /
+    :func:`set_stage_processed` calls. Manual-fire paths (no in-flight
+    bootstrap run) get ``None`` and skip all progress writes — zero
+    overhead, zero side-effect.
+    """
+
+    run_id: int
+    stage_key: str
+
+
+def resolve_progress_context() -> BootstrapProgressContext | None:
+    """Resolve ``(run_id, stage_key)`` for a stage about to start work.
+
+    Reads the bootstrap-dispatch contextvar set by
+    :func:`app.services.processes.bootstrap_cancel_signal.active_bootstrap_run`
+    (the orchestrator's ``_run_one_stage`` wraps every stage invocation
+    in this context manager). Zero DB queries — the orchestrator
+    already knows both values at the dispatch boundary and pins them
+    on a ContextVar.
+
+    Returns ``None`` outside a bootstrap dispatch (manual-fire,
+    scheduled cron, test fixture without the wrapper). Callers
+    short-circuit progress writes — zero overhead, zero side-effect.
+
+    Mirrors the cancel-signal pattern already used by
+    :func:`bootstrap_cancel_requested` / :func:`active_bootstrap_stage_key`,
+    so PR2's instrumentation shares the same dispatch-boundary
+    contract as PR3d's cancel plumbing.
+    """
+    # Lazy import — bootstrap_cancel_signal imports
+    # bootstrap_state.BootstrapStageCancelled transitively via several
+    # call sites, so a top-of-module import here would close a cycle.
+    from app.services.processes.bootstrap_cancel_signal import (
+        active_bootstrap_context,
+    )
+
+    raw = active_bootstrap_context()
+    if raw is None:
+        return None
+    run_id, stage_key = raw
+    return BootstrapProgressContext(run_id=run_id, stage_key=stage_key)
 
 
 def finalize_run(
@@ -1032,15 +1105,29 @@ def reset_failed_stages_for_retry(
             cursor = conn.execute(
                 """
                 UPDATE bootstrap_stages
-                   SET status         = 'pending',
-                       started_at     = NULL,
-                       completed_at   = NULL,
-                       last_error     = NULL,
+                   SET status                    = 'pending',
+                       started_at                = NULL,
+                       completed_at              = NULL,
+                       last_error                = NULL,
                        -- #1140 Task C: reset rows_processed alongside
                        -- the rest of the stage row so the operator
                        -- timeline / bootstrap_adapter aggregate don't
                        -- show stale counts from the prior failed pass.
-                       rows_processed = NULL
+                       rows_processed            = NULL,
+                       -- #1273 PR2: clear in-flight progress columns
+                       -- alongside rows_processed so the operator
+                       -- timeline doesn't show stale target /
+                       -- processed / fingerprint from the prior
+                       -- failed pass on a fresh retry. Without this,
+                       -- the bar would re-render at last-failed
+                       -- progress and the tooltip would advertise
+                       -- the prior cohort fingerprint even when the
+                       -- retry re-discovers a different cohort
+                       -- (e.g. S22 cutoff drifted overnight).
+                       target_count              = NULL,
+                       processed_count           = 0,
+                       last_progress_at          = NULL,
+                       target_cohort_fingerprint = NULL
                  WHERE bootstrap_run_id = %(run_id)s
                    AND lane             = %(lane)s
                    AND stage_order      >= %(min_order)s
@@ -1739,6 +1826,7 @@ __all__ = [
     "BootstrapNoPriorRun",
     "BootstrapNotResettable",
     "BootstrapNotRunning",
+    "BootstrapProgressContext",
     "BootstrapStageCancelled",
     "BootstrapState",
     "BootstrapStatus",
@@ -1768,6 +1856,7 @@ __all__ = [
     "read_state",
     "reap_orphaned_running",
     "reset_failed_stages_for_retry",
+    "resolve_progress_context",
     "set_stage_processed",
     "set_stage_target",
     "start_run",

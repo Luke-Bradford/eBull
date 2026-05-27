@@ -37,12 +37,18 @@ rows on first install (operator audit 2026-05-07).
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 import psycopg
 
 from app.providers.filings import FilingEvent, FilingSearchResult, FilingsProvider
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+    set_stage_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +332,33 @@ def refresh_filings(
     upserted = 0
     skipped_provider_error = 0
 
+    # #1273 PR2 — long-pole stage instrumentation (S15
+    # filings_history_seed). Pin target + fingerprint when called
+    # from the bootstrap dispatcher; manual-fire / scheduled paths
+    # get progress_ctx=None and skip every helper call. Cohort =
+    # `resolved` (post-identifier-resolution dict) so the bar shows
+    # progress against work actually attempted, not against the
+    # cohort the caller suggested (which would dilute by
+    # skipped_no_identifier).
+    progress_ctx = resolve_progress_context()
+    if progress_ctx is not None:
+        _form_types_count = len(filing_types) if filing_types is not None else 0
+        _days_back = (end_date - start_date).days if (start_date and end_date) else 0
+        fingerprint = (
+            f"provider={provider_name};"
+            f"identifier_type={identifier_type};"
+            f"days_back={_days_back};"
+            f"filing_types={_form_types_count}"
+        )
+        set_stage_target(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            target_count=len(resolved),
+            cohort_fingerprint=fingerprint,
+        )
+    _emit_every_n = max(1, len(resolved) // 100) if resolved else 0
+    _last_progress_emit = time.monotonic()
+
     # PR3d #1064 follow-up — poll the bootstrap cancel signal between
     # instruments. ``filings_history_seed`` (bootstrap stage 14) walks
     # the full CIK-mapped tradable cohort (~2-12k instruments at
@@ -388,6 +421,27 @@ def refresh_filings(
                 exc_info=True,
             )
             skipped_provider_error += 1
+        # #1273 PR2 — cadenced operator-progress emit. Uses
+        # iter_index (already maintained for the cancel-poll cadence)
+        # so the operator sees attempt-progress identical to the
+        # cancel exception's "iter_index/len(resolved)" message.
+        if progress_ctx is not None:
+            _now = time.monotonic()
+            if iter_index % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+                set_stage_processed(
+                    run_id=progress_ctx.run_id,
+                    stage_key=progress_ctx.stage_key,
+                    processed_count=iter_index,
+                )
+                _last_progress_emit = _now
+
+    # #1273 PR2 — final operator-progress emit on exit.
+    if progress_ctx is not None:
+        set_stage_processed(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            processed_count=iter_index,
+        )
 
     if skipped_no_identifier > 0:
         logger.info(

@@ -48,6 +48,11 @@ from app.providers.implementations.sec_def14a import (
     parse_beneficial_ownership_table,
 )
 from app.services import raw_filings
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+    set_stage_target,
+)
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
     record_def14a_observation,
@@ -1201,6 +1206,31 @@ def bootstrap_def14a(
     # #1234 — track WHY the loop exits.
     exit_reason: Literal["drained", "deadline"] = "deadline"
 
+    # #1273 PR2 — long-pole stage instrumentation (S17 streaming).
+    # Pin fingerprint only (target_count=None per Codex 1 BLOCKING 2 —
+    # upfront COUNT over the discovery CTE not defensible as ms-cost).
+    # `_DEF14A_FORM_TYPES` cardinality (computed below) is included so
+    # the operator can audit the cohort form-type set.
+    progress_ctx = resolve_progress_context()
+    if progress_ctx is not None:
+        fingerprint = (
+            f"chunk_limit={chunk_limit};"
+            f"max_runtime_seconds={max_runtime_seconds};"
+            f"form_types={len(_DEF14A_FORM_TYPES)};"
+            f"cap_per_filer={DEF14A_LATEST_PER_FILER_CAP};"
+            f"rank_scope=def14a_with_cik;"
+            f"rank_predicate=type<>DEF14A_OR_cik_null_OR_rank<=cap;"
+            f"url_filter=true;tombstone_filter=true;"
+            f"pending_predicate_v1=true"
+        )
+        set_stage_target(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            target_count=None,
+            cohort_fingerprint=fingerprint,
+        )
+    _last_progress_emit = time.monotonic()
+
     while time.monotonic() < deadline:
         chunk = ingest_def14a(
             conn,
@@ -1217,9 +1247,29 @@ def bootstrap_def14a(
         total_updated += chunk.rows_updated
         if first_error is None and chunk.first_error is not None:
             first_error = chunk.first_error
+        # #1273 PR2 — page-boundary cumulative emit. Streaming-style:
+        # `total_seen` is the running cumulative-accessions-discovered
+        # counter; operator sees "X processed" climbing across pages.
+        if progress_ctx is not None:
+            _now = time.monotonic()
+            if _now - _last_progress_emit > 30 or chunk.accessions_seen == 0:
+                set_stage_processed(
+                    run_id=progress_ctx.run_id,
+                    stage_key=progress_ctx.stage_key,
+                    processed_count=total_seen,
+                )
+                _last_progress_emit = _now
         if chunk.accessions_seen == 0:
             exit_reason = "drained"
             break
+
+    # #1273 PR2 — final operator-progress emit on exit.
+    if progress_ctx is not None:
+        set_stage_processed(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            processed_count=total_seen,
+        )
 
     # Bot review for #839 PR #850: enforce the accounting invariant
     # so a future regression that drops accessions from one of the

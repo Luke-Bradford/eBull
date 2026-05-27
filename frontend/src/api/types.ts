@@ -1427,6 +1427,11 @@ export interface BootstrapTimelineStageResponse {
   rows_processed: number | null;
   processed_count: number;
   target_count: number | null;
+  // #1273 PR2 — operator-readable cohort-definition fingerprint. Set
+  // by `set_stage_target` at stage entry; null on legacy rows and on
+  // stages that never instrument. Rendered as a `title=` tooltip on
+  // the progress-bar wrapper.
+  target_cohort_fingerprint: string | null;
   archives: BootstrapTimelineArchiveResponse[];
   // #1140 Task C — set when stage finished `success` but its
   // rows_processed fell short of a strict-gate capability floor it

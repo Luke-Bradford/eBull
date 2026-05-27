@@ -25,7 +25,10 @@
 | Beta vs SPY | Market data | (deferred) | — |
 | Blockholder ownership % | Ownership | `ownership_blockholders_current` | `/instruments/{symbol}/ownership-rollup` |
 | Bollinger bands (20, 2σ) | Market data | `price_daily.bb_upper / bb_lower` | (TA scoring) |
-| Bootstrap state + stage status | Pipeline | `bootstrap_state`, `bootstrap_stages`, `bootstrap_archive_results` | `/system/bootstrap/status` |
+| Bootstrap stage final row count | Pipeline | `bootstrap_stages.rows_processed` | `/processes/bootstrap/overview` |
+| Bootstrap stage live progress | Pipeline | `bootstrap_stages.target_count + processed_count` | `/processes/bootstrap/timeline` |
+| Bootstrap stage cohort fingerprint | Pipeline | `bootstrap_stages.target_cohort_fingerprint` | `/processes/bootstrap/timeline` (tooltip) |
+| Bootstrap state + run status | Pipeline | `bootstrap_state`, `bootstrap_runs`, `bootstrap_archive_results` | `/system/bootstrap/status`, `/processes/bootstrap/*` |
 | Buyback authorisation | Capital returns | (deferred) | — |
 | Capital event (deposit / withdraw) | Risk + portfolio | `capital_events` | `/budget/events` |
 | Cash + equivalents | Fundamentals | `financial_periods.cash` | `/instruments/{symbol}/financials?statement=balance` |
@@ -469,6 +472,18 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - `bootstrap_runs` (per-click); `bootstrap_stages` (per-stage detail; lane ∈ init/etoro/sec; status ∈ pending/running/success/error/skipped).
 - `bootstrap_archive_results` (per-archive audit).
 - Endpoint: `GET /system/bootstrap/status`.
+
+### Bootstrap stage progress (live, #1273 PR2)
+- **Definition**: per-stage operator-visible progress bar + cohort tooltip on `/admin/process/bootstrap` Timeline; renders only while `bootstrap_stages.status='running'`.
+- **Formula**: list-shaped stages (S14, S15, S22, S23, S25) → `processed_count / target_count` (% complete); streaming-style stages (S16, S17, S18) → `processed_count` cumulative only (no denominator; `target_count IS NULL` by design — upfront `COUNT(*)` over discovery CTE not defensible as ms-cost). Tooltip = `target_cohort_fingerprint` text on every instrumented stage.
+- **Source data**: `set_stage_target` + `set_stage_processed` helpers in `app/services/bootstrap_state.py`, called from 8 long-pole stages.
+- **Storage**: `bootstrap_stages.{target_count, processed_count, target_cohort_fingerprint, last_progress_at}` (sql/140 + sql/178).
+- **Service**: orchestrator-resolved via `resolve_progress_context()` reading the bootstrap-dispatch contextvar (`app/services/processes/bootstrap_cancel_signal.py`); manual-fire paths get `None` and skip (zero overhead).
+- **Endpoint**: `GET /processes/bootstrap/timeline` projects all 4 fields.
+- **Chart**: `frontend/src/pages/ProcessDetailPage.tsx` progress-bar block at `:1186-1226`; tooltip via native `title=`.
+- **Cadence**: list-shaped — every `max(1, len(cohort)//100)` iterations OR every 30s (whichever first); always once on success exit. Streaming — every 30s wall-clock + once on each page-boundary chunk completion (S17/S18) + once on exit.
+- **Caveats**: `target_count IS NULL` for all 3 streaming stages (S16, S17, S18) — frontend renders "X processed (no target set)" instead of a bar. All 5 progress columns reset on `reset_failed_stages_for_retry` so fresh retries do not display stale counters.
+- **Validation**: `tests/services/test_bootstrap_state_progress.py` + `tests/smoke/test_long_pole_progress.py` (8 stage tests). Live SQL: `SELECT stage_key, target_count, processed_count, target_cohort_fingerprint FROM bootstrap_stages WHERE bootstrap_run_id=<id> AND status='running'`.
 
 ### Backfill / SEC manifest pending count
 - `sec_filing_manifest WHERE ingest_status IN ('pending','failed')`.
