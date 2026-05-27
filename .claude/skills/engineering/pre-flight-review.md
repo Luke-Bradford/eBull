@@ -176,5 +176,6 @@ Before pushing, be able to state:
 - settled decisions checked and preserved, or explicit deviation raised before coding
 - prevention log checked; relevant entries identified or confirmed none apply
 - if `frontend/` touched: frontend skills (K) read and applied
+- if the diff asserts a perf improvement (latency / throughput / wall-clock) on an ETL hot path: [`etl-perf-claims`](etl-perf-claims.md) skill read and applied (§4 artifacts + §5 process rules)
 
 If you cannot honestly say that, do not push yet.

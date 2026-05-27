@@ -428,7 +428,18 @@ def refresh_institutions_current(
 
     Watermark captured pre-MERGE in a Python var so the state UPSERT
     cannot advance past observations the MERGE did not see (Codex 1b
-    HIGH-2 race fix)."""
+    HIGH-2 race fix).
+
+    Bench-DB synthetic-fixture note: synthetic rows seeded by
+    ``scripts/perf_bench/seed_synthetic_fixture`` use sentinel
+    ``instrument_id >= 1_000_000_000`` and live ONLY in
+    ``_current`` (never in ``_observations`` or
+    ``ownership_refresh_state``). The drifted-set query at
+    ``app/jobs/ownership_observations_repair.py:_drifted_instruments``
+    is anchored on ``ownership_refresh_state``, so it never returns a
+    sentinel id and this MERGE is never invoked for one. Synthetic
+    rows therefore survive the ``WHEN NOT MATCHED BY SOURCE ... DELETE``
+    clause indefinitely."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """

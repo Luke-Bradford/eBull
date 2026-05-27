@@ -44,3 +44,12 @@ Closes #
 - [ ] `uv run ruff format --check .` passes
 - [ ] `uv run pyright` passes
 - [ ] CI checks pass
+
+<!-- Performance-claim PRs: if this PR asserts a latency / throughput / wall-clock
+     improvement on an ETL hot path, the `perf-claim-lint` CI gate requires:
+       - var/perf_baselines/<ticket>-<sha>.txt | .json | .manifest.yaml committed
+       - "## Sibling-shape audit" + "## Rollback criteria" + "## Post-deploy SLO" sections
+       - manifest row counts meet floors at scripts/perf_bench/floors.yaml
+     See .claude/skills/engineering/etl-perf-claims.md (loaded automatically when the
+     diff touches a hot path) and docs/operator/runbooks/perf-investigation.md.
+-->

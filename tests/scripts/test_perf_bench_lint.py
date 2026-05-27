@@ -49,6 +49,14 @@ ARTIFACT_DIR = REPO_ROOT / "var" / "perf_baselines"
 MASTER_PLAN = REPO_ROOT / "docs" / "proposals" / "etl" / "bootstrap-sub-1h-plan.md"
 REAL_FLOORS_YAML = REPO_ROOT / "scripts" / "perf_bench" / "floors.yaml"
 
+# Pin every test in this module to one xdist worker. The autouse
+# fixture below purges 8000* artifacts from a shared filesystem
+# directory; without the loadgroup pin, a parallel worker writing its
+# own 8000* file gets it deleted by a peer worker's purge between the
+# write and the subprocess invocation. ``--dist=loadgroup`` is already
+# the repo default per pyproject.toml.
+pytestmark = pytest.mark.xdist_group(name="perf_bench_lint_shared_artifact_dir")
+
 VALID_SECTIONS = (
     "## Sibling-shape audit",
     "## Rollback criteria",
