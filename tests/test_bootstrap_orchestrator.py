@@ -695,6 +695,36 @@ def test_filings_history_seed_requires_submissions_processed() -> None:
     )
 
 
+def test_sec_first_install_drain_requires_submissions_processed() -> None:
+    """Issue #1365 — S16 ``sec_first_install_drain`` MUST require
+    ``submissions_processed`` so it waits for the bulk path
+    (``sec_submissions_ingest``) to terminalise before starting.
+
+    Background: S16's fast-path at
+    ``app/jobs/sec_first_install_drain.py::seed_manifest_from_filing_events``
+    runs ONCE at function entry. If ``filing_events`` has no SEC rows
+    yet, S16 falls through to a per-CIK HTTP loop covering ~25k
+    subjects (~85 min observed on Run #8). The fast-path was supposed
+    to fire when the bulk path had already populated ``filing_events``,
+    but pre-#1365 S16 required only ``cik_mapping_ready`` and raced
+    ahead of ``sec_submissions_ingest``.
+
+    Adding ``submissions_processed`` (provided on SUCCESS or SKIP by
+    S8) makes S16 wait for the bulk path to terminalise: success →
+    filing_events populated → fast-path fires; skip → cascade-skip
+    parity preserves the slow-connection fallback.
+
+    Regression sentinel — a future spec edit that drops the requires
+    line would re-introduce the HTTP-instead-of-files fallback
+    silently and re-inflate S16 wall-clock by 5-10×.
+    """
+    req = _STAGE_REQUIRES_CAPS["sec_first_install_drain"]
+    assert "submissions_processed" in req.all_of, (
+        "sec_first_install_drain must require submissions_processed "
+        "(#1365 fast-path ordering invariant — wait for bulk path before draining)"
+    )
+
+
 def test_submissions_processed_provided_by_s8_on_success_and_skip() -> None:
     """Companion invariant to the above. ``submissions_processed`` is
     provided by ``sec_submissions_ingest`` (S8) on BOTH success AND
