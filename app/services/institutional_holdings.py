@@ -56,7 +56,6 @@ from app.services import raw_filings
 from app.services.bootstrap_state import (
     resolve_progress_context,
     set_stage_processed,
-    set_stage_target,
 )
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
@@ -1121,24 +1120,18 @@ def ingest_all_active_filers(
     else:
         deadline_ts = time.monotonic() + deadline_seconds
 
-    # #1273 PR2 — long-pole stage instrumentation (S22). Pin
-    # target_count + cohort fingerprint when called from the
-    # bootstrap dispatcher; manual-fire / scheduled / test fixture
-    # paths get progress_ctx=None and skip every helper call.
+    # #1273 PR2 — long-pole stage instrumentation (S22). Progress
+    # context resolved once; cadenced + final set_stage_processed
+    # emits live in the per-filer loop / finally block below.
+    # NOTE: set_stage_target (cohort_fingerprint + target_count) is
+    # written at the SCHEDULER boundary in
+    # ``app/workers/scheduler.py::sec_13f_quarterly_sweep`` AFTER the
+    # ciks cohort materializes — that callsite has every cohort knob
+    # (min_period_of_report, min_last_13f_hr_at, deadline_seconds,
+    # source_label) in scope, whereas this helper only sees the
+    # post-resolution subset. Codex 2 pre-push BLOCKING fold.
+    # Manual-fire paths get progress_ctx=None and skip every emit.
     progress_ctx = resolve_progress_context()
-    if progress_ctx is not None:
-        fingerprint = (
-            f"min_period_of_report="
-            f"{min_period_of_report.isoformat() if min_period_of_report else 'none'};"
-            f"deadline_seconds={deadline_seconds if deadline_seconds is not None else 'none'};"
-            f"source_label={source_label}"
-        )
-        set_stage_target(
-            run_id=progress_ctx.run_id,
-            stage_key=progress_ctx.stage_key,
-            target_count=len(ciks),
-            cohort_fingerprint=fingerprint,
-        )
     # Hybrid cadence — emit every max(1, len/100) iterations OR every
     # 30s wall-clock, whichever first. Per-stage tracking variables.
     _emit_every_n = max(1, len(ciks) // 100)

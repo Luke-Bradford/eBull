@@ -65,7 +65,6 @@ import psycopg
 from app.services.bootstrap_state import (
     resolve_progress_context,
     set_stage_processed,
-    set_stage_target,
 )
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
@@ -821,23 +820,18 @@ def ingest_all_fund_filers(
     deadline_hit = False
     filers_attempted = 0
 
-    # #1273 PR2 — long-pole stage instrumentation (S23). Same shape as
-    # S22's ingest_all_active_filers; manual-fire / scheduled / test
-    # paths get progress_ctx=None and skip every helper call.
+    # #1273 PR2 — long-pole stage instrumentation (S23). Progress
+    # context resolved once; cadenced + final set_stage_processed
+    # emits live in the per-filer loop / finally block below.
+    # NOTE: set_stage_target (cohort_fingerprint + target_count) is
+    # written at the SCHEDULER boundary in
+    # ``app/workers/scheduler.py::sec_n_port_ingest`` AFTER the ciks
+    # cohort materializes — that callsite has every cohort knob
+    # (min_last_seen_filed_at, deadline_seconds, directory) in scope.
+    # Codex 2 pre-push BLOCKING fold (this helper only sees
+    # min_period_of_report, NOT the actual cohort-filter param
+    # min_last_seen_filed_at consumed by list_nport_filer_ciks).
     progress_ctx = resolve_progress_context()
-    if progress_ctx is not None:
-        fingerprint = (
-            f"min_period_of_report="
-            f"{min_period_of_report.isoformat() if min_period_of_report else 'none'};"
-            f"deadline_seconds={deadline_seconds if deadline_seconds is not None else 'none'};"
-            f"directory=sec_nport_filer_directory"
-        )
-        set_stage_target(
-            run_id=progress_ctx.run_id,
-            stage_key=progress_ctx.stage_key,
-            target_count=len(ciks),
-            cohort_fingerprint=fingerprint,
-        )
     _emit_every_n = max(1, len(ciks) // 100)
     _last_progress_emit = time.monotonic()
 

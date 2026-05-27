@@ -32,29 +32,55 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("module_path", "stage_label"),
-    [
-        ("app.services.sec_submissions_files_walk", "S14"),
-        ("app.services.filings", "S15"),
-        ("app.jobs.sec_first_install_drain", "S16"),
-        ("app.services.def14a_ingest", "S17"),
-        ("app.services.business_summary", "S18"),
-        ("app.services.institutional_holdings", "S22"),
-        ("app.services.n_port_ingest", "S23"),
-        ("app.services.fundamentals.__init__", "S25"),
-    ],
-)
-def test_stage_module_imports_pr2_helpers(module_path: str, stage_label: str) -> None:
-    """Each instrumented module must expose resolve_progress_context,
-    set_stage_target, set_stage_processed at module scope (via top-of-file
-    imports). The from-import statement is preserved as long as the
-    symbol resolves through the module.
+# Per-stage helper expectation. set_stage_target lives at the
+# SCHEDULER boundary for S15/S22/S23 (Codex 2 BLOCKING fold —
+# scheduler has every cohort knob in scope; helpers only see the
+# post-resolution subset). Those modules don't import set_stage_target.
+_STAGE_HELPER_EXPECTATIONS: list[tuple[str, str, tuple[str, ...]]] = [
+    (
+        "app.services.sec_submissions_files_walk",
+        "S14",
+        ("resolve_progress_context", "set_stage_target", "set_stage_processed"),
+    ),
+    # S15: target lives at scheduler.py::filings_history_seed
+    ("app.services.filings", "S15", ("resolve_progress_context", "set_stage_processed")),
+    (
+        "app.jobs.sec_first_install_drain",
+        "S16",
+        ("resolve_progress_context", "set_stage_target", "set_stage_processed"),
+    ),
+    ("app.services.def14a_ingest", "S17", ("resolve_progress_context", "set_stage_target", "set_stage_processed")),
+    ("app.services.business_summary", "S18", ("resolve_progress_context", "set_stage_target", "set_stage_processed")),
+    # S22: target lives at scheduler.py::sec_13f_quarterly_sweep
+    ("app.services.institutional_holdings", "S22", ("resolve_progress_context", "set_stage_processed")),
+    # S23: target lives at scheduler.py::sec_n_port_ingest
+    ("app.services.n_port_ingest", "S23", ("resolve_progress_context", "set_stage_processed")),
+    (
+        "app.services.fundamentals.__init__",
+        "S25",
+        ("resolve_progress_context", "set_stage_target", "set_stage_processed"),
+    ),
+]
+
+
+@pytest.mark.parametrize(("module_path", "stage_label", "expected_helpers"), _STAGE_HELPER_EXPECTATIONS)
+def test_stage_module_imports_pr2_helpers(
+    module_path: str, stage_label: str, expected_helpers: tuple[str, ...]
+) -> None:
+    """Each instrumented module must expose its declared PR2 helpers
+    at module scope (via top-of-file imports). The from-import
+    statement is preserved as long as the symbol resolves through the
+    module.
+
+    S15/S22/S23 instrument set_stage_target at the SCHEDULER boundary
+    (app/workers/scheduler.py) rather than in the deep helper —
+    Codex 2 BLOCKING fold. Their helper modules import only
+    resolve_progress_context + set_stage_processed.
     """
     import importlib
 
     mod = importlib.import_module(module_path)
-    for name in ("resolve_progress_context", "set_stage_target", "set_stage_processed"):
+    for name in expected_helpers:
         assert hasattr(mod, name), (
             f"{stage_label} module {module_path} missing PR2 helper {name!r}; "
             f"top-of-file `from app.services.bootstrap_state import ...` block "
@@ -224,9 +250,10 @@ def test_s16_streaming_fingerprint_pinned_after_seed_fast_path() -> None:
     target_call = target_mock.call_args.kwargs
     assert target_call["target_count"] is None  # streaming
     fingerprint = target_call["cohort_fingerprint"]
-    assert "fast_path_seeded=True" in fingerprint, (
+    assert "fast_path_seeded=true" in fingerprint, (
         "S16 fingerprint MUST be computed AFTER seed_manifest_from_filing_events "
-        "so fast_path_seeded reflects the real outcome — Codex 1 IMPORTANT-2 fold."
+        "so fast_path_seeded reflects the real outcome (Codex 1 IMPORTANT-2 fold) "
+        "AND rendered lowercase per spec §4 booleans (Codex 2 NIT fold)."
     )
     # final emit fires on exit even when subjects stream is empty.
     assert processed_mock.called

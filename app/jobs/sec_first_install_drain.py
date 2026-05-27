@@ -333,10 +333,12 @@ def run_first_install_drain(
 
     progress_ctx = resolve_progress_context()
     if progress_ctx is not None:
+        # Spec §4 — booleans rendered lowercase `true`/`false`
+        # (Python's default str(bool) is `True`/`False`); Codex 2 NIT.
         fingerprint = (
             f"max_subjects={max_subjects if max_subjects is not None else 'unbounded'};"
-            f"follow_pagination={follow_pagination};"
-            f"fast_path_seeded={skip_issuer_http}"
+            f"follow_pagination={str(follow_pagination).lower()};"
+            f"fast_path_seeded={str(skip_issuer_http).lower()}"
         )
         set_stage_target(
             run_id=progress_ctx.run_id,

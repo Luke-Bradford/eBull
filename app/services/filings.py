@@ -47,7 +47,6 @@ from app.providers.filings import FilingEvent, FilingSearchResult, FilingsProvid
 from app.services.bootstrap_state import (
     resolve_progress_context,
     set_stage_processed,
-    set_stage_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -332,30 +331,15 @@ def refresh_filings(
     upserted = 0
     skipped_provider_error = 0
 
-    # #1273 PR2 — long-pole stage instrumentation (S15
-    # filings_history_seed). Pin target + fingerprint when called
-    # from the bootstrap dispatcher; manual-fire / scheduled paths
-    # get progress_ctx=None and skip every helper call. Cohort =
-    # `resolved` (post-identifier-resolution dict) so the bar shows
-    # progress against work actually attempted, not against the
-    # cohort the caller suggested (which would dilute by
-    # skipped_no_identifier).
+    # #1273 PR2 — long-pole stage instrumentation (S15). Cadenced +
+    # final set_stage_processed emits live in the per-instrument
+    # loop below. NOTE: set_stage_target (cohort_fingerprint +
+    # target_count) is written at the SCHEDULER boundary in
+    # ``app/workers/scheduler.py::filings_history_seed`` AFTER the
+    # cik_rows cohort materializes — that callsite has the
+    # ``instrument_id`` knob in scope, whereas this helper only sees
+    # the post-resolution subset. Codex 2 pre-push IMPORTANT fold.
     progress_ctx = resolve_progress_context()
-    if progress_ctx is not None:
-        _form_types_count = len(filing_types) if filing_types is not None else 0
-        _days_back = (end_date - start_date).days if (start_date and end_date) else 0
-        fingerprint = (
-            f"provider={provider_name};"
-            f"identifier_type={identifier_type};"
-            f"days_back={_days_back};"
-            f"filing_types={_form_types_count}"
-        )
-        set_stage_target(
-            run_id=progress_ctx.run_id,
-            stage_key=progress_ctx.stage_key,
-            target_count=len(resolved),
-            cohort_fingerprint=fingerprint,
-        )
     _emit_every_n = max(1, len(resolved) // 100) if resolved else 0
     _last_progress_emit = time.monotonic()
 
