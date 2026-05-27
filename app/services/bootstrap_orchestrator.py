@@ -49,10 +49,12 @@ parallel manual / scheduled trigger cannot run twice simultaneously.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, Final, Literal
 
 import psycopg
@@ -1673,6 +1675,110 @@ class _RunnableStage:
     params: Mapping[str, Any] = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# Phase 0.5 dispatcher residual-idle telemetry (#1275 re-investigation)
+# ---------------------------------------------------------------------------
+#
+# Spec: docs/proposals/etl/phase-0-instrumentation.md §2.9.
+#
+# Captures per-iteration per-lane dispatcher state to JSONL so
+# scripts/dispatcher_idle_analysis.py can answer "did the dispatcher
+# leave actionable work undispatched while a lane sat idle?". The
+# question matters because #1275 hypothesised 30-50% wall-clock waste
+# pre-PR-2 (#1233 batch-join → FIRST_COMPLETED); the hypothesis was
+# never re-validated against the post-PR-2 dispatcher and Phase 0.5
+# is the empirical re-check.
+#
+# Per-lane ``idle_type`` classification (spec §2.9.2):
+#
+#   * ``"A"`` — dependency-natural: no ready stages, only blocked.
+#     This is the dispatcher correctly waiting for upstream caps.
+#   * ``"B"`` — actionable bug: at least one ready stage exists,
+#     the lane is idle anyway. This is the bug-shape #1275 hunts.
+#   * ``None`` — busy (in_flight > 0), drained (no pending), or a
+#     completion iteration (``wait_returned_empty=False``).
+#
+# Telemetry I/O failures are swallowed with a warning — the dispatcher
+# MUST NEVER crash on a telemetry write. The aggregator script runs
+# offline against the JSONL after a bootstrap run completes.
+
+_DISPATCHER_IDLE_DIR: Final[Path] = Path("var/dispatcher_idle")
+
+
+def _emit_dispatcher_telemetry(
+    *,
+    run_id: int,
+    iteration: int,
+    statuses: Mapping[str, str],
+    in_flight_keys: set[str],
+    lane_in_flight_count: Mapping[str, int],
+    caps: set[Capability],
+    by_key: Mapping[str, _RunnableStage],
+    wait_returned_empty: bool,
+    output_dir: Path = _DISPATCHER_IDLE_DIR,
+) -> None:
+    """Append one JSONL line per iteration to ``<output_dir>/<run_id>.jsonl``.
+
+    Fires on BOTH the wait-timeout branch and the completion branch
+    so residual-idle iterations (where no future completed within
+    ``_CANCEL_POLL_INTERVAL``) are captured — those are exactly the
+    iterations Phase 0.5 needs to classify.
+
+    Telemetry write failures are logged and swallowed. The dispatcher
+    must not crash on a telemetry error.
+    """
+    try:
+        pending_keys = [k for k, s in statuses.items() if s == "pending" and k not in in_flight_keys and k in by_key]
+        lane_pending_ready: dict[str, list[str]] = {}
+        lane_pending_blocked: dict[str, list[str]] = {}
+        for key in pending_keys:
+            stage = by_key[key]
+            if _requirement_satisfied(stage.requires, caps):
+                lane_pending_ready.setdefault(stage.lane, []).append(key)
+            else:
+                lane_pending_blocked.setdefault(stage.lane, []).append(key)
+
+        all_lanes = set(lane_in_flight_count.keys()) | set(lane_pending_ready.keys()) | set(lane_pending_blocked.keys())
+
+        lanes_out: dict[str, dict[str, Any]] = {}
+        for lane in sorted(all_lanes):
+            in_flight = lane_in_flight_count.get(lane, 0)
+            ready = sorted(lane_pending_ready.get(lane, []))
+            blocked = sorted(lane_pending_blocked.get(lane, []))
+            if in_flight > 0 or not wait_returned_empty:
+                idle_type: str | None = None
+            elif ready:
+                idle_type = "B"
+            elif blocked:
+                idle_type = "A"
+            else:
+                idle_type = None
+            lanes_out[lane] = {
+                "in_flight": in_flight,
+                "pending_ready": ready,
+                "pending_blocked": blocked,
+                "idle_type": idle_type,
+            }
+
+        record = {
+            "ts": datetime.now(UTC).isoformat(),
+            "run_id": run_id,
+            "iteration": iteration,
+            "wait_returned_empty": wait_returned_empty,
+            "lanes": lanes_out,
+        }
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / f"{run_id}.jsonl"
+        # Single write so an unlikely concurrent run against the same
+        # run_id cannot interleave halves of a line (POSIX append-mode
+        # write is atomic up to PIPE_BUF). Codex 2 fold.
+        with path.open("a") as fp:
+            fp.write(json.dumps(record) + "\n")
+    except Exception as exc:  # noqa: BLE001 - telemetry must not crash dispatcher
+        logger.warning("dispatcher telemetry write failed for run_id=%d: %s", run_id, exc)
+
+
 def _phase_batched_dispatch(
     *,
     run_id: int,
@@ -1831,6 +1937,11 @@ def _phase_batched_dispatch(
     # completed yet, the wait() timeout bounds cancel latency.
     _CANCEL_POLL_INTERVAL = 1.0
 
+    # Phase 0.5 dispatcher telemetry — monotonic per-run iteration
+    # counter so the analysis script can detect max consecutive runs
+    # of idle_type=="B" iterations.
+    iteration = 0
+
     def _check_cancel() -> bool:
         """Return True iff an operator-cancel has been observed.
         Side-effect: terminalises the run + state under a single tx
@@ -1888,6 +1999,7 @@ def _phase_batched_dispatch(
 
     try:
         while True:
+            iteration += 1
             # Cancel checkpoint — fires before EVERY submission round
             # and is re-checked after every completion. Pre-PR-2 only
             # checked between batches; PR-2 reduces observation
@@ -2098,7 +2210,26 @@ def _phase_batched_dispatch(
                 return_when=FIRST_COMPLETED,
                 timeout=_CANCEL_POLL_INTERVAL,
             )
-            if not done:
+            wait_returned_empty = not done
+            # Phase 0.5 telemetry — emit on BOTH branches (timeout +
+            # completion). Residual-idle iterations are exactly the
+            # ``wait_returned_empty=True`` rows; emitting unconditionally
+            # gives the analysis script the busy-iteration denominator
+            # too. ``in_flight`` reflects state BEFORE this iteration's
+            # completion is applied, which is what the classifier wants:
+            # the lane is "busy" if it had work in flight during the
+            # wait, regardless of whether that work just terminalised.
+            _emit_dispatcher_telemetry(
+                run_id=run_id,
+                iteration=iteration,
+                statuses=statuses,
+                in_flight_keys={sk for sk, _ in in_flight.values()},
+                lane_in_flight_count=lane_in_flight_count,
+                caps=caps,
+                by_key=by_key,
+                wait_returned_empty=wait_returned_empty,
+            )
+            if wait_returned_empty:
                 # Timeout fired — fall through to the cancel
                 # checkpoint at the top of the next iteration.
                 continue
