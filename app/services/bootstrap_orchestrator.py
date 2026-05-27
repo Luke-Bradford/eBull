@@ -559,7 +559,20 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     # S8 terminalises (success / skip). See cap docstring on
     # ``submissions_processed`` for the lock-contention rationale.
     "filings_history_seed": CapRequirement(all_of=("cik_mapping_ready", "submissions_processed")),
-    "sec_first_install_drain": CapRequirement(all_of=("cik_mapping_ready",)),
+    # #1365 — S16 fast-path at ``app/jobs/sec_first_install_drain.py:308``
+    # (``seed_manifest_from_filing_events``) only fires when ``filing_events``
+    # has SEC-provider rows AT FUNCTION ENTRY. Pre-#1365 S16 required only
+    # ``cik_mapping_ready`` so it raced ahead of the bulk path: with bulk-
+    # download still in flight, the fast-path read returned 0 rows and S16
+    # fell through to per-CIK HTTP for ~25k subjects (~85min observed on
+    # Run #8, ~3h projected on R1). Adding ``submissions_processed`` makes
+    # S16 wait for the bulk path to terminalise (success → filing_events
+    # populated, fast-path fires; skip → cascade-skip parity preserves the
+    # slow-connection fallback). Same shape as the PR-1292 fold on S15.
+    # Non-issuer subjects (institutional_filer + blockholder_filer) still
+    # walk HTTP — those have no bulk archives; only the issuer cohort
+    # short-circuits via filing_events.
+    "sec_first_install_drain": CapRequirement(all_of=("cik_mapping_ready", "submissions_processed")),
     "sec_def14a_bootstrap": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
     "sec_business_summary_bootstrap": CapRequirement(
         all_of=("filing_events_seeded", "submissions_secondary_pages_walked")
