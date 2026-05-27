@@ -36,6 +36,7 @@ from uuid import UUID
 
 import psycopg
 
+from app.config import settings
 from app.services.process_stop import (
     StopAlreadyPendingError,
     request_stop,
@@ -739,6 +740,132 @@ def mark_stage_blocked(
             "reason": reason[:1000],
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Long-pole stage progress (#1273 PR1) — operator-visible target /
+# processed counters consumed by the bootstrap timeline bar.
+#
+# Three helpers, each opening its own ``psycopg.connect`` against
+# ``settings.database_url`` so the write survives caller rollback. The
+# orchestrator's per-CIK ingest tx may rollback mid-stage on a single
+# bad row; if progress writes shared that connection they would
+# rollback alongside and the bar would not advance even though 9/10
+# CIKs succeeded.
+#
+# Predicate ``status='running'`` on the UPDATEs: a late progress
+# write that lands after the stage transitioned to success / error /
+# cancelled is a benign no-op (rowcount 0). Test #2 + #5 pin the
+# no-op contract.
+#
+# Heartbeat contract (Codex 2 pre-push P2 fold): both helpers also
+# bump ``bootstrap_stages.last_progress_at = now()`` — the heartbeat
+# column documented in sql/140 + mirrored by
+# ``job_telemetry.record_processed`` for sync runs.
+# ``processes.bootstrap_adapter`` aggregates ``MAX(last_progress_at)``
+# over a run's stages and ``processes.stale_detection`` flags
+# ``mid_flight_stuck`` when that heartbeat falls behind the
+# per-process threshold. Without the bump, a long-running stage (S22
+# ~344min) would visibly advance ``processed_count`` while the
+# process panel marked the whole run "stuck" because the heartbeat
+# lagged ``started_at``.
+#
+# Helpers do NOT accept a ``conn`` / ``database_url`` kwarg — tests
+# monkeypatch ``app.config.settings.database_url`` directly. See spec
+# at ``docs/proposals/etl/1273-pr1-cohort-shapes.md``.
+# ---------------------------------------------------------------------------
+
+
+def set_stage_target(*, run_id: int, stage_key: str, target_count: int) -> int:
+    """Write ``bootstrap_stages.target_count`` for an in-flight stage.
+
+    Opens its own psycopg connection, commits, and closes. Survives
+    caller rollback per the spec contract above. Also bumps
+    ``last_progress_at`` so the heartbeat reflects the stage-entry
+    progress signal (Codex 2 P2 fold).
+
+    Returns the row-update count. ``1`` on a successful write; ``0``
+    when the row is not in ``status='running'`` (late-write no-op).
+    """
+    with psycopg.connect(settings.database_url) as conn:
+        cur = conn.execute(
+            """
+            UPDATE bootstrap_stages
+               SET target_count     = %(target_count)s,
+                   last_progress_at = now()
+             WHERE bootstrap_run_id = %(run_id)s
+               AND stage_key        = %(stage_key)s
+               AND status           = 'running'
+            """,
+            {"run_id": run_id, "stage_key": stage_key, "target_count": target_count},
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def set_stage_processed(*, run_id: int, stage_key: str, processed_count: int) -> int:
+    """Write ``bootstrap_stages.processed_count`` for an in-flight stage.
+
+    ``processed_count`` is an ABSOLUTE value, not a delta — caller
+    passes the running total. Intentionally NOT a ``bump`` helper
+    (spec §2.2 #1 Codex iter-1 NIT-1): caller already tracks its own
+    counter and an absolute write is one fewer round-trip and immune
+    to lost-update races.
+
+    Also bumps ``last_progress_at`` so the heartbeat reflects every
+    in-flight progress signal — mirrors
+    ``job_telemetry.record_processed`` at
+    ``app/services/job_telemetry.py:194-205`` (Codex 2 P2 fold).
+
+    Returns the row-update count (mirror of :func:`set_stage_target`).
+    """
+    with psycopg.connect(settings.database_url) as conn:
+        cur = conn.execute(
+            """
+            UPDATE bootstrap_stages
+               SET processed_count  = %(processed_count)s,
+                   last_progress_at = now()
+             WHERE bootstrap_run_id = %(run_id)s
+               AND stage_key        = %(stage_key)s
+               AND status           = 'running'
+            """,
+            {"run_id": run_id, "stage_key": stage_key, "processed_count": processed_count},
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def _current_running_stage_key(job_name: str) -> str | None:
+    """Resolve the ``stage_key`` of the single running stage for ``job_name``.
+
+    Source-of-truth pattern mirrors
+    ``app/services/sec_bulk_orchestrator_jobs.py::_current_running_bootstrap_run_id``
+    at line 90: ``bootstrap_runs.status='running'`` (NOT
+    ``bootstrap_state.last_run_id``, which can lag transiently during
+    finalize). Joined to ``bootstrap_stages`` filtered to the running
+    stage with matching ``job_name``.
+
+    Handles the S25 stage_key / job_name divergence: stage_key=
+    ``'fundamentals_sync'``, job_name=``'fundamentals_sync_bootstrap'``
+    per ``_BOOTSTRAP_STAGE_SPECS``. Returns ``None`` when no run is
+    in flight, when the job_name is unknown, or when the matching
+    stage row has not yet transitioned to ``'running'``.
+    """
+    with psycopg.connect(settings.database_url) as conn:
+        row = conn.execute(
+            """
+            SELECT s.stage_key
+              FROM bootstrap_runs r
+              JOIN bootstrap_stages s ON s.bootstrap_run_id = r.id
+             WHERE r.status     = 'running'
+               AND s.job_name   = %(job_name)s
+               AND s.status     = 'running'
+             ORDER BY r.id DESC
+             LIMIT 1
+            """,
+            {"job_name": job_name},
+        ).fetchone()
+        return str(row[0]) if row else None
 
 
 def finalize_run(
@@ -1641,5 +1768,7 @@ __all__ = [
     "read_state",
     "reap_orphaned_running",
     "reset_failed_stages_for_retry",
+    "set_stage_processed",
+    "set_stage_target",
     "start_run",
 ]
