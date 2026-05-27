@@ -613,7 +613,7 @@ def _check_operator_exists_with_cleanup(
     from app.jobs.boot_guard import (
         OPERATOR_MISSING_ERROR_MESSAGE,
         BootGuardOutcome,
-        check_operator_exists,
+        read_boot_gate_snapshot,
     )
 
     skip_env_set = os.environ.get("EBULL_JOBS_SKIP_OPERATOR_CHECK") == "1"
@@ -629,15 +629,26 @@ def _check_operator_exists_with_cleanup(
         )
         return
 
+    # Issue #1363 (Codex 2 P2 fold): both facts (operator presence +
+    # bootstrap_state.status) MUST be read in a single SELECT. Under
+    # autocommit + READ COMMITTED two separate SELECTs on the same
+    # connection can sample different points in time — a concurrent
+    # /auth/setup + Re-run all sequence committing between the probes
+    # would produce a stale gate decision (e.g. OPERATOR_ABSENT +
+    # status='running' would hard-fail incorrectly). One SELECT with
+    # nested EXISTS + sub-query evaluates within a single statement-
+    # level snapshot — atomic by construction without REPEATABLE READ.
     try:
         with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
-            outcome = check_operator_exists(guard_conn, skip_env_set=False)
+            operator_present, cold_start = read_boot_gate_snapshot(guard_conn)
     except BaseException:
         with contextlib.suppress(Exception):
             fence_conn.close()
         with contextlib.suppress(Exception):
             pool.close()
         raise
+
+    outcome = BootGuardOutcome.OPERATOR_PRESENT if operator_present else BootGuardOutcome.OPERATOR_ABSENT
 
     if outcome is BootGuardOutcome.OPERATOR_PRESENT:
         # Clear any stale breadcrumb from a prior failed boot. Bounded
@@ -670,6 +681,49 @@ def _check_operator_exists_with_cleanup(
         raise RuntimeError(
             f"unhandled BootGuardOutcome {outcome!r}; boot_guard module out of sync with wrapper",
         )
+
+    # Issue #1363 — cold-start tolerance. When bootstrap_state.status is
+    # 'pending' the application has never completed first-install setup;
+    # operator absence is the expected initial state, not a defect. Log
+    # INFO + return cleanly so jobs process boots alongside backend +
+    # frontend (the operator can then run /auth/setup via UI without
+    # racing against a dead jobs process). Scheduled fires that
+    # subsequently run in this window will reject with
+    # ``bootstrap_not_complete`` (the original docstring concern from
+    # Stream A PR-A T1.8) — that is the correct shape: the rejection is
+    # visible per-fire instead of taking the whole jobs process down.
+    if cold_start:
+        # Codex 2 P2 fold: clear ONLY a matching OPERATOR_MISSING
+        # breadcrumb left over from a prior hard-fail boot. Without
+        # this, /system/status would report "jobs boot blocked: no
+        # operators row in DB" while the jobs process is in fact
+        # running, deferred-cleanly under the cold-start branch. Other
+        # breadcrumbs (different boot-failure causes) are NOT touched —
+        # the cold-start gate only knows about its own prior-hard-fail
+        # artefact. The WHERE matches on exact message string so a
+        # future unrelated breadcrumb persisted by another guard is
+        # left visible.
+        try:
+            with psycopg.connect(settings.database_url, autocommit=True) as clear_conn:
+                with clear_conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bootstrap_state "
+                        "SET last_jobs_boot_error = NULL, last_jobs_boot_error_at = NULL "
+                        "WHERE id = 1 AND last_jobs_boot_error = %s",
+                        (OPERATOR_MISSING_ERROR_MESSAGE,),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "jobs entrypoint: cold-start clear of stale OPERATOR_MISSING breadcrumb failed: %s",
+                exc,
+            )
+
+        logger.info(
+            "jobs entrypoint: cold-start detected (bootstrap_state.status='pending'); "
+            "operator absence expected pre-/auth/setup, deferring boot guard. "
+            "Scheduled fires will reject with bootstrap_not_complete until setup runs.",
+        )
+        return
 
     # Hard-fail body: persist breadcrumb (best-effort with warning),
     # then cleanup + SystemExit(2). Wrapped in try/finally so cleanup
