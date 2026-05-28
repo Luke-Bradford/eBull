@@ -59,6 +59,7 @@ from app.services.bootstrap_state import (
     set_stage_processed,
     set_stage_target,
 )
+from app.services.institutional_holdings import thirteen_f_retention_cutoff
 from app.services.manifest_parsers.sec_n_csr import n_csr_retention_cutoff
 from app.services.processes.bootstrap_cancel_signal import (
     active_bootstrap_stage_key,
@@ -403,6 +404,58 @@ def run_first_install_drain(
             zip_handle.close()
 
 
+def _bulk_already_seeded_13f(
+    conn: psycopg.Connection[Any],
+    *,
+    cik: str,
+    filed_before: datetime,
+) -> bool:
+    """#1337 P2 — true iff bulk (S8) has already seeded this institutional
+    filer's FULL parser-admissible 13F-HR window into ``sec_filing_manifest``.
+
+    Coverage proof (do not weaken without re-deriving):
+      * The ``sec_13f_hr`` manifest-worker parser tombstones any 13F-HR
+        whose ``period_of_report`` predates ``thirteen_f_retention_cutoff``
+        (the 8-quarter floor). So only 13F-HRs with
+        ``period_of_report >= cutoff_quarter_end`` ever yield holdings.
+      * A 13F-HR is filed AFTER its quarter ends, so ``filed_at`` >=
+        ``period_of_report`` for every accession.
+      * Therefore a seeded ``sec_13f_hr`` row with ``filed_at < cutoff``
+        necessarily has ``period_of_report < cutoff`` — it is itself
+        parser-INADMISSIBLE. Its presence proves S8's primary ``recent``
+        block reached back PAST the admissible window, so every
+        admissible 13F-HR for this CIK is already in the manifest.
+      * This bridge ("one pre-cutoff row ⇒ admissible window fully
+        present") relies on SEC's submissions ``recent`` block being the
+        contiguous newest-first slice S8 walked — which holds for a
+        first-install bulk write (S8 ran on a clean DB before this
+        drain). The CALLER therefore gates this on bootstrap context
+        (``progress_ctx is not None``); steady-state / manual / retry
+        runs, where stray rows of mixed provenance could falsely satisfy
+        the EXISTS, never take the skip and fall through to the full
+        HTTP walk.
+
+    Scoped to ``source='sec_13f_hr'`` (NOT just ``subject_type``) so an
+    unrelated old row can't prove 13F coverage, and so the query rides
+    ``idx_manifest_cik(cik, source, filed_at)`` directly. ``filed_at <``
+    is strict: a filing exactly on the cutoff quarter-end could be
+    admissible and must not count as proof of pre-window coverage.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM sec_filing_manifest
+            WHERE cik = %(cik)s
+              AND source = 'sec_13f_hr'
+              AND filed_at < %(filed_before)s
+            LIMIT 1
+            """,
+            {"cik": cik, "filed_before": filed_before},
+        )
+        return cur.fetchone() is not None
+
+
 def _run_first_install_drain_inner(
     conn: psycopg.Connection[Any],
     *,
@@ -477,6 +530,15 @@ def _run_first_install_drain_inner(
     # the helper short-circuits to False (contextvar unset), so
     # scheduled / manual triggers of this job are unaffected.
     _CANCEL_POLL_EVERY_N = 50
+
+    # #1337 P2 — institutional-filer fast-path cutoff. Computed once:
+    # ``thirteen_f_retention_cutoff`` returns the 8-quarter-back quarter
+    # END date; anchor it at UTC midnight as a tz-aware datetime so the
+    # ``filed_at`` (TIMESTAMPTZ) comparison in ``_bulk_already_seeded_13f``
+    # is offset-safe (no naive-datetime drift).
+    _filer_skip_cutoff = datetime.combine(thirteen_f_retention_cutoff(), datetime.min.time(), tzinfo=UTC)
+    _in_bootstrap = progress_ctx is not None
+
     for n, (subject, cik) in enumerate(_iter_in_universe_subjects(conn)):  # type: ignore[misc]
         if n % _CANCEL_POLL_EVERY_N == 0 and bootstrap_cancel_requested():
             # #1114: stage_key sourced from contextvar.
@@ -494,6 +556,29 @@ def _run_first_install_drain_inner(
         if skip_issuer_http and subject.subject_type == "issuer":
             ciks_skipped += 1
             continue
+
+        # #1337 P2 — institutional-filer fast-path. When the bulk S8
+        # writer already seeded this filer's full admissible 13F-HR
+        # window (proven by a pre-cutoff ``sec_13f_hr`` manifest row,
+        # see ``_bulk_already_seeded_13f``), skip the per-CIK HTTP walk
+        # — the ~55-60 min critical-path win on a fresh install.
+        #
+        # Gated on ``_in_bootstrap``: the coverage proof relies on S8
+        # having written the contiguous newest-first ``recent`` block
+        # on a clean DB before this stage. Outside a bootstrap dispatch
+        # (steady-state / manual / cron), manifest rows are of mixed
+        # provenance and a stray pre-cutoff row could falsely satisfy
+        # the EXISTS, so we never skip there — full HTTP walk, unchanged.
+        #
+        # blockholder_filer is deliberately NOT skipped: there is no
+        # validated 13D/G analogue of the 13F 8-quarter retention proof,
+        # so skipping would be unsound the moment that cohort is
+        # non-empty. Conservative by construction, not merely "empty
+        # today".
+        if _in_bootstrap and subject.subject_type == "institutional_filer":
+            if _bulk_already_seeded_13f(conn, cik=cik, filed_before=_filer_skip_cutoff):
+                ciks_skipped += 1
+                continue
 
         try:
             delta = check_freshness(
