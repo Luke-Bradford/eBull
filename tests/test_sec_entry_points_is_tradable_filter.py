@@ -7,9 +7,10 @@ operator value.
 
 Covered:
 
-1. ``app/services/sec_submissions_ingest.py::_load_cik_to_instrument``
-   — bulk archive walk; CIK → instrument_id map drives every
-   ``ingest_submissions_archive`` write.
+1. ``app/services/sec_submissions_ingest.py::_load_known_cik_subjects``
+   — bulk archive walk; CIK → subject multimap drives every
+   ``ingest_submissions_archive`` write. The issuer-cohort SELECT
+   (the only one with an ``is_tradable`` join) must filter delisted.
 2. ``app/services/sec_submissions_files_walk.py::_list_cik_secondary_pages``
    — per-CIK secondary-pages walk; same shape.
 3. ``app/services/finra_short_interest_ingest.py::build_preloaded_symbol_resolver``
@@ -72,11 +73,11 @@ def _seed_pair(
 
 
 class TestSubmissionsIngestCikMapFiltersDelisted:
-    def test_load_cik_to_instrument_skips_delisted(
+    def test_load_known_cik_subjects_skips_delisted(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        from app.services.sec_submissions_ingest import _load_cik_to_instrument
+        from app.services.sec_submissions_ingest import _load_known_cik_subjects
 
         _seed_pair(
             ebull_test_conn,
@@ -89,9 +90,13 @@ class TestSubmissionsIngestCikMapFiltersDelisted:
         )
         ebull_test_conn.commit()
 
-        mapping = _load_cik_to_instrument(ebull_test_conn)
+        mapping = _load_known_cik_subjects(ebull_test_conn)
 
+        # The delisted CIK has no issuer subject; it could only appear
+        # if it were also a filer-cohort row (it isn't here), so the
+        # key must be absent entirely.
         assert "0000820001" in mapping, "tradable CIK must be present"
+        assert any(s.subject_type == "issuer" for s in mapping["0000820001"]), "must carry an issuer subject"
         assert "0000820002" not in mapping, "delisted CIK must be filtered (#1233 §6.2)"
 
 

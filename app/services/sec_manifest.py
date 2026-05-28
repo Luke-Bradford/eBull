@@ -967,3 +967,37 @@ def is_amendment_form(form: str) -> bool:
     if canonical.endswith("/A"):
         return True
     return canonical in _NON_SUFFIX_AMENDMENT_FORMS
+
+
+# Per-cohort form allow-list for the bulk submissions.zip filer-writer
+# (#1337 P1 — see docs/proposals/etl/bulk-first-bootstrap.md §4). The
+# bulk path emits ``sec_filing_manifest`` rows for filer-cohort CIKs
+# (institutional_filer + blockholder_filer) by parsing the same
+# submissions.json payload S8 reads for issuers. A filer CIK files many
+# form types; we write a manifest row ONLY for the forms that define its
+# cohort — otherwise an institutional_filer that also files (say) a
+# stray non-13F form would get a misclassified ``institutional_filer``
+# row. Values verified against ``_FORM_TO_SOURCE`` above:
+#  - institutional_filer: 13F-HR / 13F-HR/A are the only 13F forms
+#    ``_FORM_TO_SOURCE`` maps (13F-NT notice-only is intentionally absent
+#    — the HTTP path drops it too).
+#  - blockholder_filer: both the short (``SC 13D``) and legacy long-form
+#    (``SCHEDULE 13D``) variants, original + amendment.
+# A CIK that is BOTH an issuer AND a filer hits both writers via the
+# multimap in ``sec_submissions_ingest._load_known_cik_subjects`` — the
+# issuer path picks up the 10-K, the filer path picks up the 13F.
+_FILER_COHORT_FORMS: dict[ManifestSubjectType, frozenset[str]] = {
+    "institutional_filer": frozenset({"13F-HR", "13F-HR/A"}),
+    "blockholder_filer": frozenset(
+        {
+            "SC 13D",
+            "SC 13D/A",
+            "SC 13G",
+            "SC 13G/A",
+            "SCHEDULE 13D",
+            "SCHEDULE 13D/A",
+            "SCHEDULE 13G",
+            "SCHEDULE 13G/A",
+        }
+    ),
+}
