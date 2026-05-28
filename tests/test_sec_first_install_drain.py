@@ -6,23 +6,259 @@ from __future__ import annotations
 import json
 import zipfile
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import psycopg
 import pytest
 
 from app.jobs.sec_first_install_drain import (
+    _bulk_already_seeded_13f,
     bootstrap_n_csr_drain,
     run_first_install_drain,
     seed_manifest_from_filing_events,
 )
 from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
 from app.services.bootstrap_state import BootstrapStageCancelled
-from app.services.sec_manifest import get_manifest_row
+from app.services.institutional_holdings import thirteen_f_retention_cutoff
+from app.services.processes.bootstrap_cancel_signal import active_bootstrap_run
+from app.services.sec_manifest import get_manifest_row, record_manifest_entry
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 
 pytestmark = pytest.mark.integration
+
+
+_FILER_CUTOFF_DT = datetime.combine(thirteen_f_retention_cutoff(), datetime.min.time(), tzinfo=UTC)
+
+
+def _seed_institutional_filer(conn: psycopg.Connection[tuple], *, cik: str, name: str = "Test Mgr") -> None:
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES (%s, %s) ON CONFLICT (cik) DO NOTHING",
+        (cik, name),
+    )
+    conn.commit()
+
+
+def _seed_blockholder_filer(conn: psycopg.Connection[tuple], *, cik: str, name: str = "Test BH") -> None:
+    conn.execute(
+        "INSERT INTO blockholder_filers (cik, name) VALUES (%s, %s) ON CONFLICT (cik) DO NOTHING",
+        (cik, name),
+    )
+    conn.commit()
+
+
+def _seed_manifest_row(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession: str,
+    cik: str,
+    form: str,
+    source: str,
+    subject_type: str,
+    filed_at: datetime,
+) -> None:
+    record_manifest_entry(
+        conn,
+        accession,
+        cik=cik,
+        form=form,
+        source=source,  # type: ignore[arg-type]
+        subject_type=subject_type,  # type: ignore[arg-type]
+        subject_id=cik,
+        instrument_id=None,
+        filed_at=filed_at,
+    )
+    conn.commit()
+
+
+def _recording_get(payload: dict) -> tuple:
+    """Fake http_get that records every CIK URL it is asked to fetch."""
+    body = json.dumps(payload).encode("utf-8")
+    seen: list[str] = []
+
+    def _impl(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        seen.append(url)
+        return 200, body
+
+    return _impl, seen
+
+
+class TestFilerFastPathSkip:
+    """#1337 P2 — S16 institutional-filer fast-path skip gate."""
+
+    def test_skips_filer_when_bulk_seeded_pre_cutoff(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        cik = "0009100001"
+        _seed_institutional_filer(ebull_test_conn, cik=cik)
+        # A pre-cutoff 13F-HR row proves the recent block spanned the
+        # full admissible window -> safe to skip in bootstrap.
+        _seed_manifest_row(
+            ebull_test_conn,
+            accession="0009100001-22-000001",
+            cik=cik,
+            form="13F-HR",
+            source="sec_13f_hr",
+            subject_type="institutional_filer",
+            filed_at=_FILER_CUTOFF_DT - timedelta(days=1),
+        )
+        http_get, seen = _recording_get(_AAPL_RECENT)
+        with active_bootstrap_run(99, "sec_first_install_drain"):
+            stats = run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
+        ebull_test_conn.commit()
+
+        # CIK-targeted (not `seen == []`): robust even if a future fixture
+        # change stops TRUNCATEing institutional_filers between tests.
+        assert not any(cik in url for url in seen), "filer with pre-cutoff bulk row must be skipped (no HTTP fetch)"
+        assert stats.ciks_skipped >= 1
+
+    def test_no_skip_when_only_in_window_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Overflow-safety: a filer whose only seeded 13F-HR is WITHIN the
+        admissible window has not proven full coverage (older in-window
+        rows may have spilled into files[]) -> must NOT skip."""
+        cik = "0009100002"
+        _seed_institutional_filer(ebull_test_conn, cik=cik)
+        _seed_manifest_row(
+            ebull_test_conn,
+            accession="0009100002-26-000001",
+            cik=cik,
+            form="13F-HR",
+            source="sec_13f_hr",
+            subject_type="institutional_filer",
+            filed_at=_FILER_CUTOFF_DT + timedelta(days=30),
+        )
+        http_get, seen = _recording_get(_AAPL_RECENT)
+        with active_bootstrap_run(99, "sec_first_install_drain"):
+            run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
+        ebull_test_conn.commit()
+
+        assert any(cik in url for url in seen), "in-window-only filer must fall through to HTTP walk"
+
+    def test_no_skip_when_unseeded(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        cik = "0009100003"
+        _seed_institutional_filer(ebull_test_conn, cik=cik)
+        http_get, seen = _recording_get(_AAPL_RECENT)
+        with active_bootstrap_run(99, "sec_first_install_drain"):
+            run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
+        ebull_test_conn.commit()
+
+        assert any(cik in url for url in seen), "unseeded filer must be HTTP-walked"
+
+    def test_no_skip_outside_bootstrap(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Steady-state safety: outside a bootstrap dispatch the coverage
+        proof's contiguous-recent-block assumption does not hold, so a
+        pre-cutoff row must NOT trigger a skip."""
+        cik = "0009100004"
+        _seed_institutional_filer(ebull_test_conn, cik=cik)
+        _seed_manifest_row(
+            ebull_test_conn,
+            accession="0009100004-22-000001",
+            cik=cik,
+            form="13F-HR",
+            source="sec_13f_hr",
+            subject_type="institutional_filer",
+            filed_at=_FILER_CUTOFF_DT - timedelta(days=1),
+        )
+        http_get, seen = _recording_get(_AAPL_RECENT)
+        # NO active_bootstrap_run wrapper -> progress_ctx is None.
+        run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
+        ebull_test_conn.commit()
+
+        assert any(cik in url for url in seen), "steady-state drain must never take the filer skip"
+
+    def test_no_skip_blockholder_even_with_pre_cutoff_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """blockholder_filer is conservatively never skipped (no validated
+        13D/G retention proof), even with a pre-cutoff 13D manifest row."""
+        cik = "0009100005"
+        _seed_blockholder_filer(ebull_test_conn, cik=cik)
+        _seed_manifest_row(
+            ebull_test_conn,
+            accession="0009100005-22-000001",
+            cik=cik,
+            form="SC 13D",
+            source="sec_13d",
+            subject_type="blockholder_filer",
+            filed_at=_FILER_CUTOFF_DT - timedelta(days=1),
+        )
+        http_get, seen = _recording_get(_AAPL_RECENT)
+        with active_bootstrap_run(99, "sec_first_install_drain"):
+            run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
+        ebull_test_conn.commit()
+
+        assert any(cik in url for url in seen), "blockholder must always be HTTP-walked"
+
+
+class TestBulkAlreadySeeded13f:
+    """#1337 P2 — the coverage-proof predicate, exercised directly."""
+
+    def test_true_when_pre_cutoff_13f_hr_row_exists(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        cik = "0009200001"
+        _seed_manifest_row(
+            ebull_test_conn,
+            accession="0009200001-22-000001",
+            cik=cik,
+            form="13F-HR",
+            source="sec_13f_hr",
+            subject_type="institutional_filer",
+            filed_at=_FILER_CUTOFF_DT - timedelta(days=1),
+        )
+        assert _bulk_already_seeded_13f(ebull_test_conn, cik=cik, filed_before=_FILER_CUTOFF_DT) is True
+
+    def test_false_when_only_in_window_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        cik = "0009200002"
+        _seed_manifest_row(
+            ebull_test_conn,
+            accession="0009200002-26-000001",
+            cik=cik,
+            form="13F-HR",
+            source="sec_13f_hr",
+            subject_type="institutional_filer",
+            filed_at=_FILER_CUTOFF_DT + timedelta(days=30),
+        )
+        assert _bulk_already_seeded_13f(ebull_test_conn, cik=cik, filed_before=_FILER_CUTOFF_DT) is False
+
+    def test_false_when_no_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        assert _bulk_already_seeded_13f(ebull_test_conn, cik="0009200003", filed_before=_FILER_CUTOFF_DT) is False
+
+    def test_false_for_pre_cutoff_row_of_other_source(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Source-scoped (Codex 1 BLOCKING): a pre-cutoff row of a
+        non-13F source must NOT prove 13F coverage."""
+        cik = "0009200004"
+        _seed_manifest_row(
+            ebull_test_conn,
+            accession="0009200004-22-000001",
+            cik=cik,
+            form="N-CSR",
+            source="sec_n_csr",
+            subject_type="institutional_filer",
+            filed_at=_FILER_CUTOFF_DT - timedelta(days=1),
+        )
+        assert _bulk_already_seeded_13f(ebull_test_conn, cik=cik, filed_before=_FILER_CUTOFF_DT) is False
 
 
 _AAPL_RECENT = {
