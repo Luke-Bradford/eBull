@@ -159,6 +159,7 @@ S22 actual completion > 344min. Per Run-#7 receipts S22 post-cohort-bound is 75-
 | Phase boundary | sec_rate target | Confidence | Source |
 |---|---|---|---|
 | Baseline (Run #8 partial) | 617 min observed lower bound | — | Run #8 |
+| **Post-Phase-0 incl. side-quest #1365 (extrapolated)** | **≤ 571 min** | **Medium — R2 + R3 to confirm** | **#1365 R1-observed S16 delta (62.7 → ~17 min); see [phase-0-close.md §6](./phase-0-close.md#6-master-plan-3-baseline-revision)** |
 | After Phase 1 | ≤ 500 min | Medium | #1345 jit verified |
 | After Phase 2 | ≤ 350 min | High | #1337/#1341 specs |
 | After Phase 3 | ≤ 260 min | High | #1347/#1343 |
