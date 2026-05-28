@@ -10,6 +10,9 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from app.providers.implementations.sec_edgar import KNOWN_FILING_AGENT_CIKS
+from app.providers.implementations.sec_submissions import parse_submissions_page
+from app.services.sec_manifest import _FILER_COHORT_FORMS, map_form_to_source
 from app.services.sec_submissions_ingest import (
     SubmissionsIngestResult,
     _cik_from_filename,
@@ -36,6 +39,76 @@ class TestCikFromFilename:
     def test_non_cik_filename_rejected(self) -> None:
         assert _cik_from_filename("README.txt") is None
         assert _cik_from_filename("CIK0000320193-submissions-001.json") is None
+
+
+# ---------------------------------------------------------------------------
+# #1337 P1 — filer-cohort form filter (pure unit, no DB)
+# ---------------------------------------------------------------------------
+
+
+def _filer_payload() -> dict:
+    """A filer's submissions payload mixing cohort + off-cohort forms.
+
+    An institutional manager that ALSO filed a stray 10-K and a 13F-NT
+    notice — only the 13F-HR forms should survive the cohort filter.
+    """
+    return {
+        "cik": "0001000001",
+        "name": "Test Asset Manager LLC",
+        "filings": {
+            "recent": {
+                "accessionNumber": [
+                    "0001000001-25-000001",  # 13F-HR  -> kept (institutional)
+                    "0001000001-25-000002",  # 13F-HR/A -> kept
+                    "0001000001-25-000003",  # 13F-NT  -> dropped (unmapped)
+                    "0001000001-25-000004",  # 10-K    -> dropped (off-cohort)
+                    "0001000001-25-000005",  # SC 13G  -> dropped (wrong cohort)
+                ],
+                "filingDate": ["2025-11-14", "2025-11-20", "2025-08-14", "2025-03-01", "2025-02-14"],
+                "form": ["13F-HR", "13F-HR/A", "13F-NT", "10-K", "SC 13G"],
+                "primaryDocument": ["a.htm", "b.htm", "c.htm", "d.htm", "e.htm"],
+            },
+            "files": [],
+        },
+    }
+
+
+class TestFilerCohortForms:
+    """``_FILER_COHORT_FORMS`` must stay in sync with ``_FORM_TO_SOURCE``
+    — a form code that maps to no source would silently never match."""
+
+    def test_every_cohort_form_maps_to_a_source(self) -> None:
+        for cohort, forms in _FILER_COHORT_FORMS.items():
+            for form in forms:
+                assert map_form_to_source(form) is not None, (
+                    f"{cohort} cohort form {form!r} maps to no source — it would never be written"
+                )
+
+    def test_institutional_forms_map_to_13f_hr(self) -> None:
+        sources = {map_form_to_source(f) for f in _FILER_COHORT_FORMS["institutional_filer"]}
+        assert sources == {"sec_13f_hr"}
+
+    def test_blockholder_forms_map_to_13d_or_13g(self) -> None:
+        sources = {map_form_to_source(f) for f in _FILER_COHORT_FORMS["blockholder_filer"]}
+        assert sources == {"sec_13d", "sec_13g"}
+
+
+class TestFilerFormFilterPredicate:
+    """Exercises the exact gate ``_ingest_one_filer`` applies — a row is
+    written iff its source is mapped AND its form is in the cohort set —
+    against the canonical ``parse_submissions_page`` output. No DB."""
+
+    def _kept_forms(self, cohort: str) -> set[str]:
+        allowed = _FILER_COHORT_FORMS[cohort]  # type: ignore[index]
+        rows, _ = parse_submissions_page(_filer_payload(), cik="0001000001")
+        return {r.form.strip() for r in rows if r.source is not None and r.form.strip() in allowed}
+
+    def test_institutional_keeps_only_13f_hr(self) -> None:
+        assert self._kept_forms("institutional_filer") == {"13F-HR", "13F-HR/A"}
+
+    def test_blockholder_keeps_only_13dg(self) -> None:
+        # The sample payload only has SC 13G for the blockholder set.
+        assert self._kept_forms("blockholder_filer") == {"SC 13G"}
 
 
 # ---------------------------------------------------------------------------
@@ -309,3 +382,137 @@ class TestIngestSubmissionsArchive:
             row = cur.fetchone()
             assert row is not None
             assert row[0] == 2, f"expected 2 profiles, got {row[0]}"
+
+
+# ---------------------------------------------------------------------------
+# #1337 P1 — filer-cohort manifest seeding (DB integration)
+# ---------------------------------------------------------------------------
+
+
+def _seed_institutional_filer(conn: psycopg.Connection[tuple], *, cik_padded: str, name: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO institutional_filers (cik, name) VALUES (%s, %s) ON CONFLICT (cik) DO NOTHING",
+            (cik_padded, name),
+        )
+    conn.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestFilerCohortManifestSeeding:
+    def test_institutional_filer_seeds_manifest_not_filing_events(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        cik = "0001000001"
+        _seed_institutional_filer(ebull_test_conn, cik_padded=cik, name="Test Asset Manager LLC")
+
+        archive_path = tmp_path / "submissions.zip"
+        archive_path.write_bytes(_build_archive({cik: _filer_payload()}))
+
+        result = ingest_submissions_archive(conn=ebull_test_conn, archive_path=archive_path)
+        ebull_test_conn.commit()
+
+        # Two cohort forms (13F-HR + 13F-HR/A) written; the 13F-NT / 10-K /
+        # SC 13G rows are dropped by the cohort form-filter.
+        assert result.filer_manifest_rows_upserted == 2
+        assert result.instruments_matched == 0  # not a universe instrument
+        assert result.filings_upserted == 0  # filer path never touches filing_events
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT form, subject_type, subject_id, instrument_id "
+                "FROM sec_filing_manifest WHERE cik = %s ORDER BY form",
+                (cik,),
+            )
+            rows = cur.fetchall()
+            assert {r[0] for r in rows} == {"13F-HR", "13F-HR/A"}
+            for _form, subject_type, subject_id, instrument_id in rows:
+                assert subject_type == "institutional_filer"
+                assert subject_id == cik
+                assert instrument_id is None
+
+            # No issuer-only sidecar rows for a pure-filer CIK (the
+            # filing_events absence is already proven by filings_upserted == 0,
+            # since filing_events is keyed by instrument_id which a pure
+            # filer lacks).
+            cur.execute(
+                "SELECT COUNT(*) FROM sec_cik_submissions_files_index WHERE cik = %s",
+                (cik,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 0, "pure-filer CIK must not seed the issuer-only sidecar"
+
+    def test_agent_cik_in_filer_cohort_is_skipped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        agent_cik = next(iter(KNOWN_FILING_AGENT_CIKS))
+        _seed_institutional_filer(ebull_test_conn, cik_padded=agent_cik, name="Filing Agent Co")
+
+        payload = _filer_payload()
+        payload["cik"] = agent_cik
+        archive_path = tmp_path / "submissions.zip"
+        archive_path.write_bytes(_build_archive({agent_cik: payload}))
+
+        result = ingest_submissions_archive(conn=ebull_test_conn, archive_path=archive_path)
+        ebull_test_conn.commit()
+
+        assert result.filer_manifest_rows_upserted == 0, "agent CIKs must not seed filer manifest rows"
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM sec_filing_manifest WHERE cik = %s", (agent_cik,))
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 0
+
+    def test_dual_role_cik_writes_issuer_filings_and_filer_manifest(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        """A CIK that is BOTH a tradable issuer AND a 13F filer: the
+        issuer path writes filing_events + sidecar (for the 10-K), the
+        filer path writes a 13F-HR manifest row. The multimap exposes
+        both roles on the one CIK (#1337 P1 risk §10.1 + §10.5)."""
+        cik = "0001000001"
+        iid = _seed_universe(ebull_test_conn, symbol="DUAL1", cik_padded=cik)
+        _seed_institutional_filer(ebull_test_conn, cik_padded=cik, name="Self-Managing Manager")
+
+        archive_path = tmp_path / "submissions.zip"
+        archive_path.write_bytes(_build_archive({cik: _filer_payload()}))
+
+        result = ingest_submissions_archive(conn=ebull_test_conn, archive_path=archive_path)
+        ebull_test_conn.commit()
+
+        assert result.instruments_matched == 1  # the issuer role
+        assert result.filer_manifest_rows_upserted == 2  # 13F-HR + 13F-HR/A
+
+        with ebull_test_conn.cursor() as cur:
+            # Issuer path wrote the 10-K to filing_events.
+            cur.execute(
+                "SELECT COUNT(*) FROM filing_events WHERE instrument_id = %s AND provider = 'sec'",
+                (iid,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] >= 1, "issuer path must write the 10-K to filing_events"
+
+            # Issuer path wrote a sidecar row (dual-role CIK still seeds it).
+            cur.execute("SELECT COUNT(*) FROM sec_cik_submissions_files_index WHERE cik = %s", (cik,))
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] >= 1, "dual-role CIK must still seed the issuer sidecar"
+
+            # Filer path wrote the 13F-HR manifest rows (instrument_id NULL).
+            cur.execute(
+                "SELECT COUNT(*) FROM sec_filing_manifest "
+                "WHERE cik = %s AND subject_type = 'institutional_filer' AND instrument_id IS NULL",
+                (cik,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 2
