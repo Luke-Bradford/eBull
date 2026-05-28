@@ -261,3 +261,264 @@ class TestS14ZeroPrimaryHttpContract:
         )
         # secondary_pages_fetched should reflect the real fetch via respx.
         assert result.secondary_pages_fetched >= 1
+
+
+# ---------------------------------------------------------------------------
+# #1341 — chunk-and-drain prefetch shape (walker control-flow tests,
+# pure-unit via monkeypatch — no DB).
+# ---------------------------------------------------------------------------
+
+
+class TestS14ChunkedHelpers:
+    def test_chunked_yields_correct_slices(self) -> None:
+        from app.services.sec_submissions_files_walk import _chunked
+
+        items: list[tuple[int, str, str, str]] = [(i, str(i), str(i), f"page-{i}") for i in range(7)]
+        chunks = list(_chunked(items, 3))
+        assert [len(c) for c in chunks] == [3, 3, 1]
+        # Slices must reassemble to the input in order (no overlap, no drops).
+        flattened: list[tuple[int, str, str, str]] = []
+        for c in chunks:
+            flattened.extend(c)
+        assert flattened == items
+
+    def test_chunked_empty_yields_nothing(self) -> None:
+        from app.services.sec_submissions_files_walk import _chunked
+
+        assert list(_chunked([], 10)) == []
+
+    def test_chunked_size_zero_raises(self) -> None:
+        from app.services.sec_submissions_files_walk import _chunked
+
+        with pytest.raises(ValueError):
+            list(_chunked([(1, "a", "a", "p")], 0))
+
+
+class TestS14LoadAllWatermarks:
+    def test_returns_dict_keyed_by_cik_page_tuple(self) -> None:
+        from app.services.sec_submissions_files_walk import (
+            _SIDECAR_SENTINEL_PAGE_NAME,
+            _load_all_watermarks_for_pages,
+        )
+
+        # Mock a psycopg connection with a cursor that returns rows.
+        class _Cur:
+            def __init__(self) -> None:
+                self.last_sql: str = ""
+                self.last_args: tuple[Any, ...] | None = None
+
+            def __enter__(self) -> _Cur:
+                return self
+
+            def __exit__(self, *a: object) -> None:
+                return None
+
+            def execute(self, sql: str, args: tuple[Any, ...]) -> None:
+                self.last_sql = sql
+                self.last_args = args
+
+            def fetchall(self) -> list[tuple[str, str]]:
+                return [
+                    ("0000320193:CIK0000320193-submissions-001.json", "Mon, 25 May 2026 00:00:00 GMT"),
+                    ("0000789019:CIK0000789019-submissions-002.json", "Tue, 26 May 2026 00:00:00 GMT"),
+                ]
+
+        class _Conn:
+            def __init__(self, cur: _Cur) -> None:
+                self._cur = cur
+
+            def cursor(self) -> _Cur:
+                return self._cur
+
+        cur = _Cur()
+        conn = _Conn(cur)
+        targets = [
+            (1, "0000320193", "AAPL", ["CIK0000320193-submissions-001.json"]),
+            (2, "0000789019", "MSFT", ["CIK0000789019-submissions-002.json"]),
+            # Sentinel-only sidecar — must NOT contribute a key.
+            (3, "0001326380", "GME", [_SIDECAR_SENTINEL_PAGE_NAME]),
+        ]
+        out = _load_all_watermarks_for_pages(conn, targets)  # type: ignore[arg-type]
+        assert out == {
+            ("0000320193", "CIK0000320193-submissions-001.json"): "Mon, 25 May 2026 00:00:00 GMT",
+            ("0000789019", "CIK0000789019-submissions-002.json"): "Tue, 26 May 2026 00:00:00 GMT",
+        }
+        assert cur.last_args is not None
+        # Sentinel page NOT in keys argument (defensive: schema CHECK
+        # also bars it, but the helper itself must skip it client-side).
+        assert _SIDECAR_SENTINEL_PAGE_NAME not in (cur.last_args[1] or [])
+
+    def test_empty_targets_returns_empty_dict(self) -> None:
+        from app.services.sec_submissions_files_walk import _load_all_watermarks_for_pages
+
+        class _Conn:
+            def cursor(self) -> Any:
+                raise AssertionError("must not query when no keys")
+
+        assert _load_all_watermarks_for_pages(_Conn(), []) == {}  # type: ignore[arg-type]
+
+
+class TestS14ChunkAndDrainShape:
+    """Walker control-flow assertions WITHOUT DB. Monkeypatches
+    `_list_cik_secondary_pages` (cohort source) +
+    `_load_all_watermarks_for_pages` (watermark source) +
+    `prefetch_submissions_pages_conditional` (the function under
+    bootstrap mode) + `SecFilingsProvider` (so the underlying
+    ResilientClient never wakes up). DB is never touched."""
+
+    def _install_walker_stubs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        targets: list[tuple[int, str, str, list[str]]],
+        prefetch_seam: list[list[Any]] | None = None,
+        bootstrap: bool,
+    ) -> tuple[list[list[Any]], list[Any]]:
+        """Returns (prefetch_calls, page_calls). page_calls captures
+        per-(name, ims) tuples from the sync fallback provider, which
+        in bootstrap mode should be EMPTY (everything served from
+        prefetch cache)."""
+        from app.providers.implementations.sec_edgar import SubmissionsPageResult
+        from app.services import sec_submissions_files_walk as mod
+        from app.services.bootstrap_state import BootstrapProgressContext
+
+        prefetch_calls: list[list[Any]] = prefetch_seam if prefetch_seam is not None else []
+        page_calls: list[tuple[str, str | None]] = []
+
+        def _fake_targets(_conn: Any) -> list[tuple[int, str, str, list[str]]]:
+            return targets
+
+        def _fake_watermarks(
+            _conn: Any, _targets: list[tuple[int, str, str, list[str]]]
+        ) -> dict[tuple[str, str], str | None]:
+            return {}
+
+        def _fake_prefetch(tasks: list[Any], **_kwargs: Any) -> dict[str, SubmissionsPageResult | None]:
+            prefetch_calls.append(list(tasks))
+            # Cache every task as 404 (None) so walker hits the
+            # 404 short-circuit in `_process_one_page` WITHOUT
+            # touching `conn` (which is a bare object() in these
+            # tests). Wrapper still bumps `cache_hits` for None
+            # values, so chunk-shape + telemetry assertions still
+            # exercise the cache-hit path end-to-end.
+            return dict.fromkeys((task.page_name for task in tasks), None)
+
+        class _StubProvider:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def __enter__(self) -> _StubProvider:
+                return self
+
+            def __exit__(self, *a: object) -> None:
+                return None
+
+            def fetch_submissions_page_conditional(
+                self, name: str, *, if_modified_since: str | None = None
+            ) -> SubmissionsPageResult | None:
+                page_calls.append((name, if_modified_since))
+                return None
+
+        monkeypatch.setattr(mod, "_list_cik_secondary_pages", _fake_targets)
+        monkeypatch.setattr(mod, "_load_all_watermarks_for_pages", _fake_watermarks)
+        monkeypatch.setattr(mod, "prefetch_submissions_pages_conditional", _fake_prefetch)
+        monkeypatch.setattr(mod, "SecFilingsProvider", _StubProvider)
+        if bootstrap:
+            monkeypatch.setattr(
+                mod, "resolve_progress_context", lambda: BootstrapProgressContext(run_id=1, stage_key="x")
+            )
+            # set_stage_target + set_stage_processed are no-ops in test
+            # — they take run_id which isn't a real bootstrap_runs row.
+            monkeypatch.setattr(mod, "set_stage_target", lambda **_kwargs: None)
+            monkeypatch.setattr(mod, "set_stage_processed", lambda **_kwargs: None)
+        else:
+            monkeypatch.setattr(mod, "resolve_progress_context", lambda: None)
+        return prefetch_calls, page_calls
+
+    def test_bootstrap_mode_chunks_2500_into_three_slices(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # 2500 unique CIKs × 1 page each = 2500 tasks. With
+        # DEFAULT_PREFETCH_CHUNK_SIZE=1000 → 3 chunks (1000+1000+500).
+        from app.services.sec_submissions_files_walk import walk_files_pages
+
+        targets: list[tuple[int, str, str, list[str]]] = [
+            (i, f"{i:010d}", f"SYM{i}", [f"CIK{i:010d}-submissions-001.json"]) for i in range(1, 2501)
+        ]
+        prefetch_calls, page_calls = self._install_walker_stubs(monkeypatch, targets=targets, bootstrap=True)
+
+        result = walk_files_pages(conn=object())  # type: ignore[arg-type]
+        assert [len(c) for c in prefetch_calls] == [1000, 1000, 500]
+        # No overlap between chunks — slices are disjoint.
+        seen_names: set[str] = set()
+        for chunk in prefetch_calls:
+            chunk_names = {t.page_name for t in chunk}
+            assert seen_names.isdisjoint(chunk_names)
+            seen_names |= chunk_names
+        assert len(seen_names) == 2500
+        # Cache covered every task → sync fallback NOT exercised.
+        assert page_calls == []
+        # Telemetry summed across chunks.
+        assert result.prefetch_pages_seeded == 2500
+        assert result.loop_pages_from_prefetch == 2500
+        assert result.loop_pages_from_sync_fallback == 0
+        assert result.prefetch_window_seconds_total is not None
+        assert result.prefetch_window_seconds_total >= 0
+
+    def test_steady_state_skips_prefetch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No bootstrap context → walker uses sync provider path; the
+        # prefetch function is NEVER called.
+        from app.services.sec_submissions_files_walk import walk_files_pages
+
+        targets: list[tuple[int, str, str, list[str]]] = [
+            (1, "0000000001", "S1", ["CIK0000000001-submissions-001.json"]),
+            (2, "0000000002", "S2", ["CIK0000000002-submissions-001.json"]),
+        ]
+        prefetch_calls, page_calls = self._install_walker_stubs(monkeypatch, targets=targets, bootstrap=False)
+
+        result = walk_files_pages(conn=object())  # type: ignore[arg-type]
+        assert prefetch_calls == []
+        # Sync provider invoked once per page (cache miss is the only
+        # path in steady-state mode).
+        assert [name for (name, _) in page_calls] == [
+            "CIK0000000001-submissions-001.json",
+            "CIK0000000002-submissions-001.json",
+        ]
+        # Steady-state telemetry: prefetch_window_seconds_total is None.
+        assert result.prefetch_window_seconds_total is None
+        assert result.prefetch_pages_seeded == 0
+        assert result.loop_pages_from_prefetch == 0
+        assert result.loop_pages_from_sync_fallback == 0  # wrapper not used
+
+    def test_short_circuit_targets_do_not_appear_in_fetch_tasks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Agent CIK / empty sidecar / sentinel-only — none should be
+        # in the prefetch task list.
+        from app.providers.implementations.sec_edgar import KNOWN_FILING_AGENT_CIKS
+        from app.services.sec_submissions_files_walk import (
+            _SIDECAR_SENTINEL_PAGE_NAME,
+            walk_files_pages,
+        )
+
+        agent_cik = next(iter(KNOWN_FILING_AGENT_CIKS))
+        targets: list[tuple[int, str, str, list[str]]] = [
+            (1, agent_cik, "AGENT", []),  # agent CIK
+            (2, "0000000099", "EMPTY", []),  # empty sidecar
+            (3, "0000000100", "SENT", [_SIDECAR_SENTINEL_PAGE_NAME]),  # sentinel-only
+            (4, "0000000200", "REAL", ["CIK0000000200-submissions-001.json"]),
+        ]
+        prefetch_calls, _ = self._install_walker_stubs(monkeypatch, targets=targets, bootstrap=True)
+
+        result = walk_files_pages(conn=object())  # type: ignore[arg-type]
+        # Only the REAL CIK's page is in the prefetch.
+        assert len(prefetch_calls) == 1
+        assert [t.page_name for t in prefetch_calls[0]] == ["CIK0000000200-submissions-001.json"]
+        # Counters: agent CIK not visited; empty + sentinel + real all visited.
+        assert result.ciks_visited == 3
+        assert result.ciks_with_empty_sidecar == 1
+        assert result.ciks_with_no_overflow == 1
+        # Empty sidecar bumps parse_errors per existing semantics.
+        assert result.parse_errors == 1

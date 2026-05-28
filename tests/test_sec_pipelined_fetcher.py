@@ -334,3 +334,236 @@ class TestCachedDocFetcher:
         assert wrapped.fetch_document_text("u") == "from_underlying"
         assert wrapped.cache_misses == 1
         assert wrapped.cache_hits == 0
+
+
+# ---------------------------------------------------------------------------
+# #1341 — prefetch_submissions_pages_conditional + _CachedSubmissionsPageFetcher
+# ---------------------------------------------------------------------------
+
+
+class TestPrefetchSubmissionsPagesConditional:
+    def _patch_transport(self, monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ignore[no-untyped-def]
+        transport = httpx.MockTransport(handler)
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs["transport"] = transport
+            original_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
+
+    def test_empty_tasks_returns_empty_dict(self) -> None:
+        from app.services.sec_pipelined_fetcher import prefetch_submissions_pages_conditional
+
+        assert prefetch_submissions_pages_conditional([], user_agent="test/1.0") == {}
+
+    def test_200_returns_page_result_with_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"hello": "world"},
+                headers={"Last-Modified": "Wed, 27 May 2026 12:34:56 GMT"},
+            )
+
+        self._patch_transport(monkeypatch, handler)
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        page_result = result["CIK0000320193-submissions-001.json"]
+        assert page_result is not None
+        assert page_result.payload == {"hello": "world"}
+        assert page_result.last_modified == "Wed, 27 May 2026 12:34:56 GMT"
+        assert page_result.not_modified is False
+
+    def test_304_returns_page_result_with_ims(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        ims = "Tue, 26 May 2026 09:00:00 GMT"
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(304))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000789019-submissions-002.json", if_modified_since=ims)],
+            user_agent="test/1.0",
+        )
+        page_result = result["CIK0000789019-submissions-002.json"]
+        assert page_result is not None
+        assert page_result.payload is None
+        assert page_result.last_modified == ims
+        assert page_result.not_modified is True
+
+    def test_404_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(404))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000000001-submissions-099.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert result == {"CIK0000000001-submissions-099.json": None}
+
+    def test_5xx_omitted_from_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(503))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000019617-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert "CIK0000019617-submissions-001.json" not in result
+
+    def test_429_omitted_from_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(429))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000354950-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert "CIK0000354950-submissions-001.json" not in result
+
+    def test_malformed_json_omitted_from_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        # 200 with non-JSON body → resp.json() raises ValueError →
+        # per-task try/except omits from cache.
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(200, content=b"not-json-at-all"))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0001326380-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert "CIK0001326380-submissions-001.json" not in result
+
+    def test_dedupe_by_page_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        hits: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            hits.append(req.url.path)
+            return httpx.Response(200, json={"x": 1})
+
+        self._patch_transport(monkeypatch, handler)
+        result = prefetch_submissions_pages_conditional(
+            [
+                ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since=None),
+                ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since="ignored"),
+            ],
+            user_agent="test/1.0",
+        )
+        # Dedupe → only one HTTP call.
+        assert len(hits) == 1
+        assert "CIK0000320193-submissions-001.json" in result
+
+    def test_ims_header_sent_when_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        captured_headers: list[dict[str, str]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured_headers.append(dict(req.headers))
+            return httpx.Response(304)
+
+        self._patch_transport(monkeypatch, handler)
+        ims = "Mon, 25 May 2026 00:00:00 GMT"
+        prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since=ims)],
+            user_agent="test/1.0",
+        )
+        # Exactly one HTTP call; If-Modified-Since header present.
+        assert len(captured_headers) == 1
+        assert captured_headers[0].get("if-modified-since") == ims
+
+    def test_ims_header_omitted_when_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        captured_headers: list[dict[str, str]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured_headers.append(dict(req.headers))
+            return httpx.Response(200, json={"x": 1})
+
+        self._patch_transport(monkeypatch, handler)
+        prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert len(captured_headers) == 1
+        assert "if-modified-since" not in captured_headers[0]
+
+
+class TestCachedSubmissionsPageFetcher:
+    def test_cache_hit_returns_cached_result(self) -> None:
+        from app.providers.implementations.sec_edgar import SubmissionsPageResult
+        from app.services.sec_pipelined_fetcher import _CachedSubmissionsPageFetcher
+
+        class _Stub:
+            def fetch_submissions_page_conditional(self, name, *, if_modified_since=None):  # type: ignore[no-untyped-def]
+                raise AssertionError("should not be called on cache hit")
+
+        cached = SubmissionsPageResult(payload={"x": 1}, last_modified="lm", not_modified=False)
+        wrapped = _CachedSubmissionsPageFetcher(_Stub(), {"page": cached})
+        assert wrapped.fetch_submissions_page_conditional("page", if_modified_since="ims") is cached
+        assert wrapped.cache_hits == 1
+        assert wrapped.cache_misses == 0
+
+    def test_cache_hit_with_none_returns_none_no_fallback(self) -> None:
+        from app.services.sec_pipelined_fetcher import _CachedSubmissionsPageFetcher
+
+        calls: list[str] = []
+
+        class _Stub:
+            def fetch_submissions_page_conditional(self, name, *, if_modified_since=None):  # type: ignore[no-untyped-def]
+                calls.append(name)
+                return None
+
+        wrapped = _CachedSubmissionsPageFetcher(_Stub(), {"page": None})
+        assert wrapped.fetch_submissions_page_conditional("page") is None
+        assert calls == []  # cached permanent 404; no fallback
+        assert wrapped.cache_hits == 1
+
+    def test_cache_miss_falls_back_to_underlying_with_ims(self) -> None:
+        from app.providers.implementations.sec_edgar import SubmissionsPageResult
+        from app.services.sec_pipelined_fetcher import _CachedSubmissionsPageFetcher
+
+        calls: list[tuple[str, str | None]] = []
+        underlying_result = SubmissionsPageResult(payload={"y": 2}, last_modified="lm2", not_modified=False)
+
+        class _Stub:
+            def fetch_submissions_page_conditional(self, name, *, if_modified_since=None):  # type: ignore[no-untyped-def]
+                calls.append((name, if_modified_since))
+                return underlying_result
+
+        wrapped = _CachedSubmissionsPageFetcher(_Stub(), {})
+        assert wrapped.fetch_submissions_page_conditional("page", if_modified_since="ims") is underlying_result
+        assert calls == [("page", "ims")]
+        assert wrapped.cache_misses == 1
+        assert wrapped.cache_hits == 0
