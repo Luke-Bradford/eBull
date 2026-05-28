@@ -24,6 +24,7 @@ import logging
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Final, Literal
 
 import anthropic
@@ -4783,15 +4784,72 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
     * ``max_subjects`` (int) — cap the number of CIKs processed.
       Default ``None`` = full universe. Operator-triage path for
       "iterate just N more CIKs from the queue head".
+    * ``use_bulk_zip`` (bool, bootstrap-only via JOB_INTERNAL_KEYS) —
+      route PRIMARY ``submissions.json`` reads through the local
+      ``submissions.zip`` archive S7 landed. Provenance-verified
+      against the current bootstrap-run manifest. Secondary
+      ``CIK<10>-submissions-<NNN>.json`` pages still hit HTTP (not
+      in the bulk archive). Default ``False``. Spec: #1277.
 
-    Internal-only invariants (NOT operator-exposed per audit §6):
-    ``follow_pagination=True`` (we want all pages), ``use_bulk_zip=False``
-    (slow-connection fallback bypassed Phase A3).
+    Internal-only invariants (NOT operator-exposed): ``follow_pagination=True``.
+
+    Disk-hygiene side effect: on SUCCESS, ``submissions.zip`` is
+    deleted from ``<data>/sec/bulk/`` regardless of which drain path
+    ran (zip or HTTP). S8 ``sec_submissions_ingest_job`` deferred its
+    deletion to here so the drain could observe the archive (#1277
+    BLOCKING-1 fold). Unconditional cleanup avoids orphaning the
+    archive on the ``use_bulk_zip=False`` rollback path (#1277
+    IMPORTANT-4 fold).
     """
     from app.jobs.sec_first_install_drain import run_first_install_drain
+    from app.security.master_key import resolve_data_dir
+    from app.services.bootstrap_state import resolve_progress_context
+    from app.services.sec_bulk_download import assert_archive_belongs_to_run
 
     max_subjects_param = params.get("max_subjects")
     max_subjects = int(max_subjects_param) if max_subjects_param is not None else None
+
+    # IMPORTANT-2 fold: strict bool — reject "false" / 0 / None coercion
+    # at the job-param boundary. Bootstrap dispatch passes a bool today;
+    # this guards future regressions (e.g. JSON-deserialised string).
+    use_bulk_zip_param = params.get("use_bulk_zip", False)
+    if isinstance(use_bulk_zip_param, bool):
+        use_bulk_zip = use_bulk_zip_param
+    else:
+        logger.warning(
+            "sec_first_install_drain: use_bulk_zip must be bool, got %r — treating as False",
+            use_bulk_zip_param,
+        )
+        use_bulk_zip = False
+
+    # Resolve candidate UNCONDITIONALLY so the post-drain cleanup fires
+    # regardless of which drain path was taken (IMPORTANT-4 fold).
+    target_dir = resolve_data_dir() / "sec" / "bulk"
+    candidate = target_dir / "submissions.zip"
+
+    archive_path: Path | None = None
+    if use_bulk_zip:
+        if not candidate.exists():
+            logger.warning(
+                "sec_first_install_drain: use_bulk_zip=True but %s missing — HTTP fallback",
+                candidate,
+            )
+            use_bulk_zip = False
+        else:
+            ctx = resolve_progress_context()
+            if ctx is None:
+                logger.warning("sec_first_install_drain: use_bulk_zip=True outside bootstrap dispatch — HTTP fallback")
+                use_bulk_zip = False
+            else:
+                try:
+                    assert_archive_belongs_to_run(target_dir, "submissions.zip", bootstrap_run_id=ctx.run_id)
+                    archive_path = candidate
+                except Exception as exc:  # noqa: BLE001 — downgrade safety
+                    logger.warning(
+                        "sec_first_install_drain: archive provenance mismatch (%s) — HTTP fallback",
+                        exc,
+                    )
+                    use_bulk_zip = False
 
     with _tracked_job(JOB_SEC_FIRST_INSTALL_DRAIN) as tracker:
         with (
@@ -4802,18 +4860,41 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
                 conn,
                 http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
                 follow_pagination=True,
-                use_bulk_zip=False,
+                use_bulk_zip=use_bulk_zip,
+                archive_path=archive_path,
                 max_subjects=max_subjects,
             )
+        # Unconditional post-drain disk-hygiene on the SUCCESS path. S8
+        # deferred its deletion to here. Bypassed when the drain raises
+        # (control flow leaves the with-block before this point).
+        _cleanup_submissions_zip_after_drain(candidate)
         tracker.row_count = stats.manifest_rows_upserted
         logger.info(
-            "sec_first_install_drain: ciks_processed=%d skipped=%d manifest_rows=%d errors=%d max_subjects=%s",
+            "sec_first_install_drain: ciks_processed=%d skipped=%d "
+            "manifest_rows=%d errors=%d max_subjects=%s use_bulk_zip=%s",
             stats.ciks_processed,
             stats.ciks_skipped,
             stats.manifest_rows_upserted,
             stats.errors,
             max_subjects,
+            use_bulk_zip,
         )
+
+
+def _cleanup_submissions_zip_after_drain(archive_path: Path) -> None:
+    """Delete ``submissions.zip`` post-drain. Idempotent missing-ok.
+
+    Mirrors ``_delete_archive_after_success`` semantics
+    (`app/services/sec_bulk_orchestrator_jobs.py:136`). Lifecycle moved
+    from S8 to S16 per #1277 BLOCKING-1: S16 needs to read the archive,
+    so S8 can't drop it post-ingest. After S16 completes (either path),
+    no other stage consumes the zip — safe to delete.
+    """
+    try:
+        archive_path.unlink(missing_ok=True)
+        logger.info("disk hygiene: deleted post-drain submissions.zip at %s", archive_path)
+    except OSError as exc:
+        logger.warning("disk hygiene: failed to delete %s: %s", archive_path, exc)
 
 
 def mf_directory_sync(params: Mapping[str, Any]) -> None:

@@ -502,6 +502,36 @@ class TestJobInternalKeysRegistry:
         for job_name in JOB_INTERNAL_KEYS:
             assert job_name in registry, f"JOB_INTERNAL_KEYS lists {job_name!r} but it's not in the source registry"
 
+    def test_sec_first_install_drain_use_bulk_zip_is_internal(self) -> None:
+        """#1277 T9 — ``use_bulk_zip`` is bootstrap-only. Bootstrap
+        dispatch passes it via StageSpec.params; the validator must
+        accept it with ``allow_internal_keys=True``.
+        """
+        assert "use_bulk_zip" in JOB_INTERNAL_KEYS["sec_first_install_drain"]
+        out = validate_job_params(
+            "sec_first_install_drain",
+            {"use_bulk_zip": True, "max_subjects": None},
+            allow_internal_keys=True,
+            metadata=None,
+        )
+        # Coerced through; bool round-trips clean.
+        assert out["use_bulk_zip"] is True
+
+    def test_sec_first_install_drain_use_bulk_zip_rejected_on_manual_path(self) -> None:
+        """#1277 T8 — operator / cron path MUST reject ``use_bulk_zip``.
+        On-disk archive freshness is only guaranteed inside the
+        bootstrap-run window (S7 → S16); operator-trigger / cron has
+        no such guarantee. Opt-in for those paths is gated on PR #1286
+        daily-refresh freshness telemetry (separate ticket).
+        """
+        with pytest.raises(ParamValidationError, match="unknown param"):
+            validate_job_params(
+                "sec_first_install_drain",
+                {"use_bulk_zip": True},
+                allow_internal_keys=False,
+                metadata=None,
+            )
+
 
 class TestBootstrapOnlyMetadataLookup:
     """Review-bot PR1a [PREVENTION] — _lookup_metadata must not raise on

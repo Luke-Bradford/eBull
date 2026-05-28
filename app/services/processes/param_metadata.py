@@ -177,7 +177,14 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
     # future PR that promotes the jobs into SCHEDULED_JOBS with
     # proper ``ParamMetadata`` declarations.
     "filings_history_seed": frozenset({"days_back", "filing_types", "instrument_id"}),
-    "sec_first_install_drain": frozenset({"max_subjects"}),
+    # #1277 — ``use_bulk_zip`` routes PRIMARY submissions.json reads to
+    # the local bulk archive on the bootstrap path. Manual API rejects
+    # this key because the on-disk archive freshness is only guaranteed
+    # inside the bootstrap-run window (S7 → S16); operator-trigger /
+    # scheduled-cron paths have no such guarantee. Opt-in for those
+    # paths is deferred to a follow-up gated on PR #1286 daily-refresh
+    # freshness telemetry.
+    "sec_first_install_drain": frozenset({"max_subjects", "use_bulk_zip"}),
     # PR7 #1233 §4.6 (mirror of #1010 for N-PORT). ``min_last_seen_filed_at``
     # is the recency cohort filter exclusive to bootstrap stage 22 —
     # exposing it on the manual API would let an operator accidentally

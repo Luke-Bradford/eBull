@@ -219,7 +219,13 @@ def sec_submissions_ingest_job() -> None:
                 "sidecar_pages_indexed": captured.get("sidecar_pages_indexed", 0),
             },
         )
-    _delete_archive_after_success(archive)
+    # #1277 — submissions.zip deletion deferred to S16
+    # sec_first_install_drain so the hybrid HttpGet can read PRIMARY
+    # CIK<10>.json entries from disk for the non-issuer cohort. S16's
+    # ``_cleanup_submissions_zip_after_drain`` is called unconditionally
+    # on the drain SUCCESS path (zip OR HTTP fallback) — disk hygiene
+    # preserved end-to-end. Other bulk archives (companyfacts, etc.)
+    # keep their existing post-ingest deletion in sibling jobs.
 
 
 # ---------------------------------------------------------------------------
