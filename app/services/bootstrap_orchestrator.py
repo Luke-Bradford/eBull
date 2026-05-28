@@ -1118,7 +1118,12 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         16,
         "sec_rate",
         JOB_SEC_FIRST_INSTALL_DRAIN,
-        params={"max_subjects": None},
+        # #1277 — ``use_bulk_zip=True`` routes PRIMARY CIK<10>.json
+        # reads through the local submissions.zip S7 landed (and S8
+        # left on disk per the #1277 deletion deferral). Secondary
+        # pages still hit HTTP (not in the bulk archive). Bootstrap-
+        # only via JOB_INTERNAL_KEYS — manual API path rejects.
+        params={"max_subjects": None, "use_bulk_zip": True},
     ),
     _spec("sec_def14a_bootstrap", 17, "sec_rate", "sec_def14a_bootstrap"),
     _spec("sec_business_summary_bootstrap", 18, "sec_rate", "sec_business_summary_bootstrap"),

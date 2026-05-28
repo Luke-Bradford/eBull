@@ -695,6 +695,31 @@ def test_filings_history_seed_requires_submissions_processed() -> None:
     )
 
 
+def test_sec_first_install_drain_dispatches_use_bulk_zip_true() -> None:
+    """#1277 T7 — S16 StageSpec dispatches ``use_bulk_zip=True`` on the
+    bootstrap path so the drain routes PRIMARY ``CIK<10>.json`` reads
+    through the local ``submissions.zip`` S7 landed.
+
+    Regression sentinel — a future spec edit dropping this flag would
+    silently re-route ~11k non-issuer primary fetches back through HTTP
+    and re-inflate S16 wall-clock by 5-10×. Sibling to the #1366
+    ``submissions_processed`` cap test above — both pin the perf
+    invariant from different angles.
+
+    Companion: ``JOB_INTERNAL_KEYS["sec_first_install_drain"]`` must
+    include ``use_bulk_zip`` so the bootstrap-dispatched param survives
+    validation (see ``tests/test_job_registry.py``).
+    """
+    spec = next(
+        (s for s in _BOOTSTRAP_STAGE_SPECS if s.stage_key == "sec_first_install_drain"),
+        None,
+    )
+    assert spec is not None, "sec_first_install_drain missing from _BOOTSTRAP_STAGE_SPECS"
+    assert spec.params.get("use_bulk_zip") is True, (
+        "S16 must dispatch use_bulk_zip=True (#1277 — local-zip primary-page path)"
+    )
+
+
 def test_sec_first_install_drain_requires_submissions_processed() -> None:
     """Issue #1365 — S16 ``sec_first_install_drain`` MUST require
     ``submissions_processed`` so it waits for the bulk path

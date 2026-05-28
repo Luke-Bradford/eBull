@@ -1,10 +1,13 @@
-"""Tests for first-install drain (#871) + N-CSR bootstrap drain (#1174)."""
+"""Tests for first-install drain (#871) + N-CSR bootstrap drain (#1174) +
+hybrid local-zip path (#1277)."""
 
 from __future__ import annotations
 
 import json
+import zipfile
 from collections.abc import Sequence
 from datetime import date, timedelta
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -60,6 +63,20 @@ def _fake_get(payload: dict):
     return _impl
 
 
+def _build_submissions_zip(tmp_path: Path, ciks_payload: dict[str, dict]) -> Path:
+    """Synthetic ``submissions.zip`` fixture — primary entries only.
+
+    Mirrors the real archive shape (per #1277 IMPORTANT-3 fold +
+    ``app/services/sec_submissions_files_walk.py:16-23``).
+    """
+    archive_path = tmp_path / "submissions.zip"
+    with zipfile.ZipFile(archive_path, "w") as zf:
+        for cik_padded, payload in ciks_payload.items():
+            assert cik_padded.isdigit() and len(cik_padded) == 10
+            zf.writestr(f"CIK{cik_padded}.json", json.dumps(payload).encode("utf-8"))
+    return archive_path
+
+
 class TestDrain:
     def test_drains_universe_in_order(
         self,
@@ -106,16 +123,66 @@ class TestDrain:
             assert row is not None
             assert int(row[0]) == 2
 
-    def test_bulk_zip_raises(
+    def test_bulk_zip_without_archive_falls_back_to_http(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        with pytest.raises(NotImplementedError, match="bulk-zip drain not yet implemented"):
-            run_first_install_drain(
-                ebull_test_conn,
-                http_get=_fake_get(_AAPL_RECENT),
-                use_bulk_zip=True,
-            )
+        # #1277 T3 — drain treats use_bulk_zip=True + missing archive_path
+        # as a safe HTTP-only run rather than raising. The scheduler
+        # invoker is the primary downgrade site; this guard is belt-and-
+        # suspenders for direct callers.
+        _seed_aapl(ebull_test_conn)
+        stats = run_first_install_drain(
+            ebull_test_conn,
+            http_get=_fake_get(_AAPL_RECENT),
+            use_bulk_zip=True,
+            archive_path=None,
+            follow_pagination=False,
+        )
+        ebull_test_conn.commit()
+        assert stats.ciks_processed == 1
+        assert stats.manifest_rows_upserted == 2
+
+    def test_bulk_zip_with_archive_routes_primary_to_zip(
+        self,
+        tmp_path: Path,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #1277 T2 — primary CIK<10>.json URL served from zip bytes,
+        # NOT from the fallback HttpGet. Sentinel fallback raises on
+        # any primary URL to prove the zip path was taken.
+        _seed_aapl(ebull_test_conn)
+        archive_path = _build_submissions_zip(tmp_path, {"0000320193": _AAPL_RECENT})
+
+        primary_calls: list[str] = []
+        secondary_calls: list[str] = []
+
+        def _http(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+            # Track which URLs hit the fallback so the assertions can
+            # prove primary routing. Non-issuer subjects iterate too, but
+            # the seed fixture only has AAPL — single issuer, fast-path
+            # short-circuits at filing_events seed. To exercise the zip
+            # path, we DON'T seed filing_events, so the per-CIK loop
+            # runs through the issuer too.
+            if "-submissions-" in url:
+                secondary_calls.append(url)
+            else:
+                primary_calls.append(url)
+            # Anything that reaches here is a regression.
+            raise AssertionError(f"primary URL {url} should have been served from zip")
+
+        stats = run_first_install_drain(
+            ebull_test_conn,
+            http_get=_http,
+            use_bulk_zip=True,
+            archive_path=archive_path,
+            follow_pagination=False,
+        )
+        ebull_test_conn.commit()
+        assert stats.ciks_processed == 1
+        assert stats.manifest_rows_upserted == 2
+        assert primary_calls == []
+        assert secondary_calls == []
 
     def test_drain_seeds_data_freshness_index(
         self,

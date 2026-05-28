@@ -12,10 +12,16 @@ Three paths:
     cached payloads. No HTTP. ~15s for ~12k issuer events vs ~21min
     of per-CIK fetches.
   - **In-universe HTTP fallback**: per-CIK submissions.json for every
-    CIK in the tradable universe. Used when ``filing_events`` is
-    empty (e.g. fallback mode where the bulk path was bypassed).
-  - **Bulk-zip**: download submissions.zip + companyfacts.zip once.
-    Out of scope; raises NotImplementedError.
+    CIK in the tradable universe. Used for non-issuer subjects
+    (institutional + blockholder filers) and the slow-connection
+    bypass where the bulk path was skipped.
+  - **Hybrid local-zip (#1277, bootstrap-only)**: when
+    ``use_bulk_zip=True`` and S7's local ``submissions.zip`` is
+    present + provenance-verified, PRIMARY ``CIK<10>.json`` reads
+    route to the on-disk archive while secondary
+    ``CIK<10>-submissions-<NNN>.json`` pages still hit HTTP (those
+    are NOT in the bulk archive — see
+    ``app/services/sec_submissions_files_walk.py:16-23``).
 
 Crash-resume: idempotent — re-run drains the remaining pending /
 unknown subjects. ``record_manifest_entry`` UPSERTs, so duplicate
@@ -31,9 +37,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -59,6 +68,64 @@ from app.services.processes.bootstrap_cancel_signal import (
 from app.services.sec_manifest import is_amendment_form, map_form_to_source, record_manifest_entry
 
 logger = logging.getLogger(__name__)
+
+# #1277 — primary submissions URL pattern. Hybrid HttpGet routes these
+# to the local ``submissions.zip`` archive; everything else (secondary
+# pages, other paths) falls through to the real HTTP transport.
+# Secondary pages ``CIK<10>-submissions-<NNN>.json`` are NOT in the bulk
+# archive (canonical reference: app/services/sec_submissions_files_walk.py:16-23),
+# so the regex deliberately excludes them.
+_PRIMARY_SUBMISSIONS_URL_RE = re.compile(r"^https://data\.sec\.gov/submissions/CIK(\d{10})\.json$")
+
+
+def _make_zip_http_get(
+    archive_path: Path,
+    *,
+    fallback_http_get: HttpGet,
+) -> tuple[HttpGet, zipfile.ZipFile]:
+    """Return ``(hybrid HttpGet, open ZipFile)`` for caller-managed lifecycle.
+
+    Routing:
+
+    * Primary submissions URL ``data.sec.gov/submissions/CIK<10>.json``
+      → read entry ``CIK<10>.json`` from ``archive_path``;
+      ``(200, bytes)`` on hit, ``(404, b"")`` on miss (drain treats as
+      ``not_found`` via the existing ``status != 200`` guards).
+    * Anything else (secondary ``CIK<10>-submissions-<NNN>.json``
+      pages, other paths) → delegate to ``fallback_http_get`` unchanged.
+
+    Caller owns close — return tuple's second element is the open
+    ZipFile, wrapped in caller's ``try/finally``. Lazy-callable contracts
+    were rejected at spec time (NIT-1 fold of #1277) because they hide
+    lifecycle and complicate test fixtures.
+
+    Spec: docs/proposals/etl/1277-s16-local-zip.md §3.1.
+    """
+    zf = zipfile.ZipFile(archive_path)
+
+    def _get(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        match = _PRIMARY_SUBMISSIONS_URL_RE.match(url)
+        if match is None:
+            return fallback_http_get(url, headers)
+        entry_name = f"CIK{match.group(1)}.json"
+        try:
+            with zf.open(entry_name) as fh:
+                return (200, fh.read())
+        except KeyError:
+            return (404, b"")
+        except (zipfile.BadZipFile, OSError) as exc:
+            # Read-time zip error — corrupt member, bad CRC, truncated
+            # archive surfaced mid-read. Don't abort S16 over one bad
+            # entry: delegate to the real HTTP transport so the drain
+            # still seeds this CIK's manifest. Codex 2 IMPORTANT fold.
+            logger.warning(
+                "first-install drain: zip entry %s unreadable (%s) — delegating to HTTP",
+                entry_name,
+                exc,
+            )
+            return fallback_http_get(url, headers)
+
+    return _get, zf
 
 
 @dataclass(frozen=True)
@@ -275,24 +342,77 @@ def run_first_install_drain(
     *,
     http_get: HttpGet,
     use_bulk_zip: bool = False,
+    archive_path: Path | None = None,
     follow_pagination: bool = True,
     max_subjects: int | None = None,
 ) -> DrainStats:
     """Drain manifest seeding from every CIK in the universe.
 
-    ``use_bulk_zip=True`` raises NotImplementedError — see module
-    docstring. Operator path will land in a follow-up PR if needed.
+    ``use_bulk_zip=True`` (since #1277) wraps ``http_get`` with a
+    hybrid that routes PRIMARY ``CIK<10>.json`` URLs to the local
+    ``submissions.zip`` at ``archive_path``, while secondary
+    ``CIK<10>-submissions-<NNN>.json`` pages still hit the real
+    transport (those are not in the bulk archive). ``archive_path``
+    must be provided and exist; otherwise the caller is responsible
+    for downgrading ``use_bulk_zip`` to ``False`` and providing the
+    HTTP-only ``http_get`` (the scheduler invoker handles this).
 
     ``max_subjects=None`` drains everything; pass an integer to bound
     a sample run. ``follow_pagination`` controls whether secondary
     submissions pages are fetched when ``has_more_in_files``.
     """
+    zip_handle: zipfile.ZipFile | None = None
+    effective_http_get = http_get
     if use_bulk_zip:
-        raise NotImplementedError(
-            "bulk-zip drain not yet implemented — use the default in-universe path "
-            "or wait for the dedicated bulk-zip PR"
-        )
+        if archive_path is None or not archive_path.exists():
+            # Defensive — caller (scheduler invoker) should have
+            # downgraded use_bulk_zip already. Belt-and-suspenders:
+            # treat as HTTP-only rather than failing the stage.
+            logger.warning(
+                "first-install drain: use_bulk_zip=True but archive_path=%s — falling back to HTTP",
+                archive_path,
+            )
+        else:
+            # Codex 2 IMPORTANT fold: corrupt / truncated archives on
+            # disk must downgrade rather than fail the stage. The
+            # scheduler invoker has no signal to pre-detect this
+            # (size + provenance pass but the inner zip CRC may be
+            # bad). On open failure, log + fall back to HTTP.
+            try:
+                effective_http_get, zip_handle = _make_zip_http_get(archive_path, fallback_http_get=http_get)
+            except (zipfile.BadZipFile, OSError) as exc:
+                logger.warning(
+                    "first-install drain: archive %s unreadable (%s) — falling back to HTTP",
+                    archive_path,
+                    exc,
+                )
+                # zip_handle stays None; effective_http_get stays as the
+                # caller's http_get; per-CIK loop walks HTTP unchanged.
 
+    try:
+        return _run_first_install_drain_inner(
+            conn,
+            http_get=effective_http_get,
+            follow_pagination=follow_pagination,
+            max_subjects=max_subjects,
+        )
+    finally:
+        if zip_handle is not None:
+            zip_handle.close()
+
+
+def _run_first_install_drain_inner(
+    conn: psycopg.Connection[Any],
+    *,
+    http_get: HttpGet,
+    follow_pagination: bool,
+    max_subjects: int | None,
+) -> DrainStats:
+    """Body of the drain. Split out so ``run_first_install_drain`` can
+    own the hybrid ZipFile lifecycle via ``try/finally`` without
+    re-indenting the existing loop. The split is purely structural —
+    semantics match pre-#1277.
+    """
     ciks_processed = 0
     ciks_skipped = 0
     secondary_pages_fetched = 0

@@ -83,7 +83,13 @@ class TestStageSpecParams:
         spec = self._spec_by_key("sec_first_install_drain")
         assert spec.job_name == "sec_first_install_drain"
         # Wrapper hardcoded ``max_subjects=None`` (full universe).
-        assert spec.params == {"max_subjects": None}
+        # #1277 added ``use_bulk_zip=True`` (bootstrap-only via
+        # JOB_INTERNAL_KEYS) — the dedicated sentinel
+        # ``test_sec_first_install_drain_dispatches_use_bulk_zip_true``
+        # in tests/test_bootstrap_orchestrator.py pins the flag's
+        # presence; this assertion keeps tracking the full params dict
+        # so a future spec edit that drops EITHER key is caught here.
+        assert spec.params == {"max_subjects": None, "use_bulk_zip": True}
 
     def test_sec_13f_recent_sweep_params_match_deleted_wrapper(self) -> None:
         spec = self._spec_by_key("sec_13f_recent_sweep")
