@@ -25,6 +25,30 @@ new model.
 This is sub-PR A — foundation + insiders only. Institutions (#840.B),
 blockholders (#840.C), and treasury+def14a (#840.D) follow the same
 pattern in subsequent sub-PRs.
+
+JIT discipline (#1346)
+----------------------
+
+Every ``refresh_*_current`` helper opens with ``cur.execute("SET LOCAL
+jit = off")`` as the first statement inside its ``with conn.transaction(),
+conn.cursor() as cur:`` block. The partition-pruned MERGE plan compiles
+~771 JIT functions for ~307 ms when ``jit_above_cost`` is crossed; the
+actual query work is ~1 ms. 1.86× speedup verified at #1345.
+
+Outer-transaction scope note: ``SET LOCAL`` is transaction-scoped, but
+when a helper is invoked inside an existing ``with conn.transaction()``
+block (e.g. callers under
+``app/services/manifest_parsers/{sec_13f_hr,def14a,sec_n_port}.py``),
+psycopg3's inner ``conn.transaction()`` becomes a SAVEPOINT, NOT a new
+transaction. PG semantics: SET LOCAL changes inside a SAVEPOINT are
+rolled back if the savepoint rolls back, but PERSIST to the outer
+transaction if the savepoint commits. The leak is intentional and
+benign here: outer-tx callers do not run JIT-amortising analytical
+queries after the refresh helper returns (only further INSERTs / refresh
+helpers, which themselves benefit from jit=off); the outer transaction
+ends shortly afterwards and the connection-level GUC is unaffected.
+Lint at ``scripts/check_jit_off_in_refresh_helpers.sh`` enforces the
+``SET LOCAL`` literal at every helper-transaction entry.
 """
 
 from __future__ import annotations
@@ -205,6 +229,7 @@ def refresh_insiders_current(
     cannot advance past observations the MERGE did not see (Codex 1b
     HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(
@@ -441,6 +466,7 @@ def refresh_institutions_current(
     rows therefore survive the ``WHEN NOT MATCHED BY SOURCE ... DELETE``
     clause indefinitely."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(
@@ -672,6 +698,7 @@ def refresh_blockholders_current(
     cannot advance past observations the MERGE did not see (Codex 1b
     HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(
@@ -855,6 +882,7 @@ def refresh_treasury_current(
     cannot advance past observations the MERGE did not see (Codex 1b
     HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(
@@ -1082,6 +1110,7 @@ def refresh_def14a_current(
     cannot advance past observations the MERGE did not see (Codex 1b
     HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(
@@ -1330,6 +1359,7 @@ def refresh_funds_current(conn: psycopg.Connection[Any], *, instrument_id: int) 
     cannot advance past observations the MERGE did not see (Codex 1b
     HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(
@@ -1539,6 +1569,7 @@ def refresh_esop_current(
     cannot advance past observations the MERGE did not see (Codex 1b
     HIGH-2 race fix)."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(
@@ -1788,6 +1819,7 @@ def refresh_insiders_current_batch(
     if not ids:
         return 0
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         # Acquire ALL advisory locks for the batch in hash-key order
         # (deadlock safety — see module-level note). One server-side
         # query sorts the locks deterministically across callers.
@@ -1918,6 +1950,7 @@ def refresh_institutions_current_batch(
     if not ids:
         return 0
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(lk)
@@ -2030,6 +2063,7 @@ def refresh_funds_current_batch(
     if not ids:
         return 0
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
         cur.execute(
             """
             SELECT pg_advisory_xact_lock(lk)
