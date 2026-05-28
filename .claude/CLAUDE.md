@@ -24,6 +24,14 @@ You are helping build **eBull**, a long-horizon AI-assisted investment engine fo
 - No shorting
 - No silent bypass of failed checks
 
+## Engineering discipline (non-negotiable)
+
+- **Grep before cite.** Every file:line, function name, table name, env var, import path — verified at write time, not from memory.
+- **Test before claim.** Run the command, read the output. "X works" requires running X first.
+- **Reuse > reinvent.** Before writing a new helper / script / test pattern, grep `scripts/`, `app/`, sibling files for the same shape. If close-enough exists, use it.
+- **KISS.** Smallest code that solves the problem. No "what if" abstractions. No multi-paragraph design docs for 5-LOC changes.
+- **Minimum prose.** Plans / PR descriptions / commit messages / replies: facts not narrative. Reviewer doesn't need a chapter.
+
 ## Build priorities
 
 1. Tradable universe

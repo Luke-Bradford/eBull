@@ -47,6 +47,7 @@ tmp_pytest/
 
 # Working scratchpads (plans, drafts) — not committed
 docs/internal/
+.scratch/
 
 # Operator-runbook log output (#1233 PR-D) — JSONL written by
 # ``app/runbooks/*`` on every --apply invocation. Operator-owned; manual
