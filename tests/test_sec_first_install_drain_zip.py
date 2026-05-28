@@ -119,9 +119,7 @@ class TestMakeZipHttpGet:
         assert status == 418
         assert fallback_calls == [unrelated]
 
-    def test_corrupt_member_read_falls_back_to_http(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_corrupt_member_read_falls_back_to_http(self, tmp_path: Path, monkeypatch) -> None:
         # Codex 2 IMPORTANT fold — _get must catch read-time zip errors
         # (BadZipFile / OSError on zf.open() or fh.read()), not just
         # open-time errors during _make_zip_http_get construction. A
@@ -143,9 +141,7 @@ class TestMakeZipHttpGet:
 
         def _bad_open(name, *args, **kwargs):
             if name == "CIK0000320193.json":
-                raise zipfile.BadZipFile(
-                    "Bad CRC for entry CIK0000320193.json"
-                )
+                raise zipfile.BadZipFile("Bad CRC for entry CIK0000320193.json")
             return original_open(name, *args, **kwargs)
 
         monkeypatch.setattr(zf, "open", _bad_open)
