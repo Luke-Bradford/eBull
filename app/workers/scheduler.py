@@ -4793,13 +4793,12 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
 
     Internal-only invariants (NOT operator-exposed): ``follow_pagination=True``.
 
-    Disk-hygiene side effect: on SUCCESS, ``submissions.zip`` is
-    deleted from ``<data>/sec/bulk/`` regardless of which drain path
-    ran (zip or HTTP). S8 ``sec_submissions_ingest_job`` deferred its
-    deletion to here so the drain could observe the archive (#1277
-    BLOCKING-1 fold). Unconditional cleanup avoids orphaning the
-    archive on the ``use_bulk_zip=False`` rollback path (#1277
-    IMPORTANT-4 fold).
+    Disk-hygiene note: #1340 moved the post-drain ``submissions.zip``
+    deletion OUT of this stage. S23 ``sec_n_port_ingest`` now also reads
+    the archive (local-zip enumeration of trust submissions), so the
+    cleanup fires at S23's exit instead — see
+    ``_cleanup_submissions_zip_after_drain``. S16 leaves the archive on
+    disk for S23.
     """
     from app.jobs.sec_first_install_drain import run_first_install_drain
     from app.security.master_key import resolve_data_dir
@@ -4864,10 +4863,8 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
                 archive_path=archive_path,
                 max_subjects=max_subjects,
             )
-        # Unconditional post-drain disk-hygiene on the SUCCESS path. S8
-        # deferred its deletion to here. Bypassed when the drain raises
-        # (control flow leaves the with-block before this point).
-        _cleanup_submissions_zip_after_drain(candidate)
+        # #1340 — submissions.zip cleanup moved to S23 (sec_n_port_ingest),
+        # which now also consumes the archive. S16 no longer deletes it.
         tracker.row_count = stats.manifest_rows_upserted
         logger.info(
             "sec_first_install_drain: ciks_processed=%d skipped=%d "
@@ -4886,9 +4883,10 @@ def _cleanup_submissions_zip_after_drain(archive_path: Path) -> None:
 
     Mirrors ``_delete_archive_after_success`` semantics
     (`app/services/sec_bulk_orchestrator_jobs.py:136`). Lifecycle moved
-    from S8 to S16 per #1277 BLOCKING-1: S16 needs to read the archive,
-    so S8 can't drop it post-ingest. After S16 completes (either path),
-    no other stage consumes the zip — safe to delete.
+    S8 → S16 (#1277), then S16 → S23 (#1340): S23 ``sec_n_port_ingest``
+    reads the archive for local-zip enumeration of trust submissions, so
+    it runs after S16 and is the last bootstrap consumer of the zip. S23
+    calls this on its SUCCESS path.
     """
     try:
         archive_path.unlink(missing_ok=True)
@@ -5463,10 +5461,31 @@ def sec_n_port_ingest(params: Mapping[str, Any]) -> None:
         Admin "Run now" / manual sweep paths pass an empty dict, which
         resolves to ``None`` here → full cohort (safety-net for
         previously-inactive trusts re-emerging — #1010 precedent).
+      * ``use_bulk_zip`` (bool, bootstrap-only via JOB_INTERNAL_KEYS) —
+        route the PRIMARY per-CIK ``submissions/CIK<10>.json`` reads
+        (the S23 enumeration long-pole) through the local
+        ``submissions.zip`` that S7 landed (and S8/S16 left on disk per
+        the #1340 deletion deferral) instead of HTTP. NPORT-P document
+        bodies + any zip miss still hit HTTP. Provenance-verified
+        against the current bootstrap-run manifest. Default ``False``.
+        Spec: #1340.
+
+    Disk-hygiene side effect: on SUCCESS, ``submissions.zip`` is deleted
+    from ``<data>/sec/bulk/`` (S23 is the last bootstrap consumer of the
+    archive; #1340 moved the deletion here from S16). Unconditional on
+    the success path regardless of which enumeration path ran.
     """
-    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    import zipfile
+
+    # ``SecFilingsProvider`` is imported at module scope (top of file); the S16
+    # invoker uses the module-level name too. No local re-import (keeps it
+    # patchable via ``scheduler.SecFilingsProvider`` and avoids shadowing).
+    from app.security.master_key import resolve_data_dir
+    from app.services.bootstrap_state import resolve_progress_context
     from app.services.n_port_ingest import ingest_all_fund_filers
+    from app.services.sec_bulk_download import assert_archive_belongs_to_run
     from app.services.sec_nport_filer_directory import list_nport_filer_ciks
+    from app.services.sec_submissions_zip import ZipBackedArchiveFetcher
 
     min_last_seen_filed_at = params.get("min_last_seen_filed_at")
     if min_last_seen_filed_at is not None and not isinstance(min_last_seen_filed_at, datetime):
@@ -5474,6 +5493,51 @@ def sec_n_port_ingest(params: Mapping[str, Any]) -> None:
             "sec_n_port_ingest: ``min_last_seen_filed_at`` must be a datetime; "
             f"got {type(min_last_seen_filed_at).__name__}"
         )
+
+    # #1340 IMPORTANT-2 mirror — strict bool; reject "false"/0/None coercion at
+    # the param boundary. Bootstrap dispatch passes a bool; this guards a future
+    # JSON-deserialised string regression.
+    use_bulk_zip_param = params.get("use_bulk_zip", False)
+    if isinstance(use_bulk_zip_param, bool):
+        use_bulk_zip = use_bulk_zip_param
+    else:
+        logger.warning(
+            "sec_n_port_ingest: use_bulk_zip must be bool, got %r — treating as False",
+            use_bulk_zip_param,
+        )
+        use_bulk_zip = False
+
+    target_dir = resolve_data_dir() / "sec" / "bulk"
+    candidate = target_dir / "submissions.zip"
+    # Whether this is a bootstrap dispatch — gates BOTH the zip provenance
+    # check AND the post-drain cleanup. Unlike S16 (bootstrap-only),
+    # ``sec_n_port_ingest`` ALSO runs monthly + via Admin "Run now"; outside
+    # bootstrap the submissions.zip lifecycle is owned by the bulk-download
+    # path, so S23 must not delete an archive it never managed.
+    progress_ctx = resolve_progress_context()
+    in_bootstrap = progress_ctx is not None
+
+    archive_path: Path | None = None
+    if use_bulk_zip:
+        if not candidate.exists():
+            logger.warning(
+                "sec_n_port_ingest: use_bulk_zip=True but %s missing — HTTP fallback",
+                candidate,
+            )
+            use_bulk_zip = False
+        elif progress_ctx is None:
+            logger.warning("sec_n_port_ingest: use_bulk_zip=True outside bootstrap dispatch — HTTP fallback")
+            use_bulk_zip = False
+        else:
+            try:
+                assert_archive_belongs_to_run(target_dir, "submissions.zip", bootstrap_run_id=progress_ctx.run_id)
+                archive_path = candidate
+            except Exception as exc:  # noqa: BLE001 — downgrade safety
+                logger.warning(
+                    "sec_n_port_ingest: archive provenance mismatch (%s) — HTTP fallback",
+                    exc,
+                )
+                use_bulk_zip = False
 
     deadline_seconds = settings.sec_n_port_sweep_deadline_seconds
 
@@ -5492,34 +5556,61 @@ def sec_n_port_ingest(params: Mapping[str, Any]) -> None:
             # ingest_all_fund_filers only sees min_period_of_report.
             # Codex 2 pre-push BLOCKING fold.
             from app.services.bootstrap_state import (
-                resolve_progress_context as _resolve_progress_context_s23,
-            )
-            from app.services.bootstrap_state import (
                 set_stage_target as _set_stage_target_s23,
             )
 
-            _progress_ctx_s23 = _resolve_progress_context_s23()
-            if _progress_ctx_s23 is not None:
+            if progress_ctx is not None:
                 _fp_s23 = (
                     f"min_last_seen_filed_at="
                     f"{min_last_seen_filed_at.date().isoformat() if min_last_seen_filed_at else 'none'};"
                     f"deadline_seconds={deadline_seconds if deadline_seconds is not None else 'none'};"
+                    f"use_bulk_zip={use_bulk_zip};"
                     f"directory=sec_nport_filer_directory"
                 )
                 _set_stage_target_s23(
-                    run_id=_progress_ctx_s23.run_id,
-                    stage_key=_progress_ctx_s23.stage_key,
+                    run_id=progress_ctx.run_id,
+                    stage_key=progress_ctx.stage_key,
                     target_count=len(ciks),
                     cohort_fingerprint=_fp_s23,
                 )
 
-            summaries = ingest_all_fund_filers(
-                conn,
-                sec,
-                ciks=ciks,
-                deadline_seconds=deadline_seconds,
-                source_label="sec_n_port_ingest",
-            )
+            # #1340 — wrap the real fetcher so PRIMARY submissions reads hit the
+            # local zip; the ZipFile lifecycle is caller-owned (try/finally).
+            # A corrupt/truncated archive that passed exists()+provenance must
+            # NOT fail S23 — open errors downgrade to HTTP (zip = pure
+            # accelerator, never a hard dependency). Codex 2 BLOCKING fold.
+            fetcher: Any = sec
+            zip_handle: zipfile.ZipFile | None = None
+            if archive_path is not None:
+                try:
+                    zip_handle = zipfile.ZipFile(archive_path)
+                    fetcher = ZipBackedArchiveFetcher(zip_handle, fallback=sec)
+                except (zipfile.BadZipFile, OSError) as exc:
+                    logger.warning(
+                        "sec_n_port_ingest: submissions.zip unreadable (%s) — HTTP fallback",
+                        exc,
+                    )
+                    zip_handle = None
+                    fetcher = sec
+            try:
+                summaries = ingest_all_fund_filers(
+                    conn,
+                    fetcher,
+                    ciks=ciks,
+                    deadline_seconds=deadline_seconds,
+                    source_label="sec_n_port_ingest",
+                )
+            finally:
+                if zip_handle is not None:
+                    zip_handle.close()
+
+        # #1340 — post-drain disk-hygiene on the SUCCESS path (after the
+        # with-block; bypassed when the body raises). BOOTSTRAP ONLY: S23 is
+        # the last bootstrap consumer of submissions.zip and owns its deletion
+        # there. Outside bootstrap the archive belongs to the bulk-download
+        # lifecycle — S23 must not delete it (Codex 2 IMPORTANT fold).
+        if in_bootstrap:
+            _cleanup_submissions_zip_after_drain(candidate)
 
         total_filers = len(ciks)
         processed = len(summaries)

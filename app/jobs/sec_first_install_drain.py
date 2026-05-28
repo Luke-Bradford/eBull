@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -66,6 +65,7 @@ from app.services.processes.bootstrap_cancel_signal import (
     bootstrap_cancel_requested,
 )
 from app.services.sec_manifest import is_amendment_form, map_form_to_source, record_manifest_entry
+from app.services.sec_submissions_zip import PRIMARY_SUBMISSIONS_URL_RE
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,9 @@ logger = logging.getLogger(__name__)
 # Secondary pages ``CIK<10>-submissions-<NNN>.json`` are NOT in the bulk
 # archive (canonical reference: app/services/sec_submissions_files_walk.py:16-23),
 # so the regex deliberately excludes them.
-_PRIMARY_SUBMISSIONS_URL_RE = re.compile(r"^https://data\.sec\.gov/submissions/CIK(\d{10})\.json$")
+# #1340 — single source of truth for the primary-URL contract, shared with
+# S23's ``ZipBackedArchiveFetcher`` so the two consumers cannot drift.
+_PRIMARY_SUBMISSIONS_URL_RE = PRIMARY_SUBMISSIONS_URL_RE
 
 
 def _make_zip_http_get(
