@@ -114,6 +114,12 @@ When the tripwire fires: grep the tests directory for `psycopg.connect(settings.
 
 When the orphan sweep stops cleaning (leaked `ebull_test_*` DBs accumulate again): check `pg_stat_activity` for stuck keepalive connections from prior pytest runs; the sweep correctly skips DBs with any active backend. If the sweep itself is broken, `_drop_orphan_workers_older_than` raises `AssertionError` on a regex regression — read the warning and re-tighten the regex.
 
+## Scope shared-DB assertions to the entity under test
+
+In an integration test that runs against a per-worker DB shared across tests in the same worker, do NOT assert on a *global* shape of an accumulating table — `assert seen == []`, `assert len(rows) == 1`, `assert count == N`. Even with a per-test `TRUNCATE` rail, that assertion is implicitly coupled to the truncation behaviour: a future fixture change that stops truncating one table, or a sibling test that commits a row of the same kind, flips the result and the failure reads as a logic regression when it is test cross-talk.
+
+Assert on the **specific entity the test created** instead. Seed a unique key (CIK, accession, symbol) and assert membership on that key — `assert any(cik in url for url in seen)` / `assert not any(...)` — not the whole collection's cardinality. First seen: #1337 P2 (PR #1377) — `assert seen == []` on a recording `http_get` over a per-test-TRUNCATEd `institutional_filers`; the assertion happened to pass but was fragile by construction. The fix is CIK-targeted membership.
+
 ## Slim test-data posture
 
 Migrations are **schema-only**. Any `INSERT`/`UPDATE` in a `sql/NNN_*.sql` migration that puts more than ~5 rows of non-reference data into a public table is a defect — file a follow-up ticket, move the seed into a per-test fixture.

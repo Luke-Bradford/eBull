@@ -108,7 +108,9 @@ class TestFilerFastPathSkip:
             stats = run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
         ebull_test_conn.commit()
 
-        assert seen == [], "filer with pre-cutoff bulk row must be skipped (no HTTP fetch)"
+        # CIK-targeted (not `seen == []`): robust even if a future fixture
+        # change stops TRUNCATEing institutional_filers between tests.
+        assert not any(cik in url for url in seen), "filer with pre-cutoff bulk row must be skipped (no HTTP fetch)"
         assert stats.ciks_skipped >= 1
 
     def test_no_skip_when_only_in_window_rows(
@@ -134,7 +136,7 @@ class TestFilerFastPathSkip:
             run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
         ebull_test_conn.commit()
 
-        assert len(seen) == 1, "in-window-only filer must fall through to HTTP walk"
+        assert any(cik in url for url in seen), "in-window-only filer must fall through to HTTP walk"
 
     def test_no_skip_when_unseeded(
         self,
@@ -147,7 +149,7 @@ class TestFilerFastPathSkip:
             run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
         ebull_test_conn.commit()
 
-        assert len(seen) == 1, "unseeded filer must be HTTP-walked"
+        assert any(cik in url for url in seen), "unseeded filer must be HTTP-walked"
 
     def test_no_skip_outside_bootstrap(
         self,
@@ -172,7 +174,7 @@ class TestFilerFastPathSkip:
         run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
         ebull_test_conn.commit()
 
-        assert len(seen) == 1, "steady-state drain must never take the filer skip"
+        assert any(cik in url for url in seen), "steady-state drain must never take the filer skip"
 
     def test_no_skip_blockholder_even_with_pre_cutoff_row(
         self,
@@ -196,7 +198,7 @@ class TestFilerFastPathSkip:
             run_first_install_drain(ebull_test_conn, http_get=http_get, follow_pagination=False)
         ebull_test_conn.commit()
 
-        assert len(seen) == 1, "blockholder must always be HTTP-walked"
+        assert any(cik in url for url in seen), "blockholder must always be HTTP-walked"
 
 
 class TestBulkAlreadySeeded13f:
