@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,7 +70,13 @@ from app.services.bootstrap_state import (
     set_stage_target,
 )
 from app.services.filings import _upsert_filing
-from app.services.watermarks import get_watermark, set_watermark
+from app.services.sec_pipelined_fetcher import (
+    DEFAULT_PREFETCH_CHUNK_SIZE,
+    ConditionalFetchTask,
+    _CachedSubmissionsPageFetcher,
+    prefetch_submissions_pages_conditional,
+)
+from app.services.watermarks import set_watermark
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +114,18 @@ class FilesWalkResult:
     # via If-Modified-Since round-trip. Distinct from parse_errors —
     # 304 is a success path that conserves the SEC 10 req/s budget.
     secondary_pages_not_modified: int = 0
+    # #1341 — pipelined prefetch telemetry (bootstrap-mode only).
+    # ``prefetch_pages_seeded`` counts unique pages successfully
+    # prefetched (size of returned cache dicts summed across chunks).
+    # ``loop_pages_from_prefetch`` / ``loop_pages_from_sync_fallback``
+    # count per-loop visits (may exceed seeded count for share-class
+    # siblings sharing CIK pages — these are loop consumptions, not
+    # unique fetches saved). ``prefetch_window_seconds_total`` sums
+    # per-chunk prefetch wall-clock deltas; ``None`` in steady-state.
+    prefetch_pages_seeded: int = 0
+    loop_pages_from_prefetch: int = 0
+    loop_pages_from_sync_fallback: int = 0
+    prefetch_window_seconds_total: float | None = None
 
 
 def _list_cik_secondary_pages(
@@ -171,6 +190,170 @@ def _list_cik_secondary_pages(
     return out
 
 
+def _load_all_watermarks_for_pages(
+    conn: psycopg.Connection[Any],
+    targets: list[tuple[int, str, str, list[str]]],
+) -> dict[tuple[str, str], str | None]:
+    """One SELECT → ``{(cik, page_name): if_modified_since}`` for the
+    whole cohort. Replaces ~17k per-page ``get_watermark`` round-trips
+    inside the walker loop (#1341 §6).
+
+    Missing rows map to ``None`` (no prior watermark — full fetch).
+    """
+    keys: list[str] = []
+    for _iid, cik, _sym, sidecar_pages in targets:
+        for page_name in sidecar_pages:
+            if page_name == _SIDECAR_SENTINEL_PAGE_NAME:
+                continue
+            keys.append(f"{cik}:{page_name}")
+    out: dict[tuple[str, str], str | None] = {}
+    if not keys:
+        return out
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT key, watermark
+            FROM external_data_watermarks
+            WHERE source = %s
+              AND key = ANY(%s)
+            """,
+            (_SOURCE_KEY_SUBMISSIONS_FILES, keys),
+        )
+        for row in cur.fetchall():
+            wm_key, watermark = row[0], row[1]
+            cik_part, _, page_part = str(wm_key).partition(":")
+            out[(cik_part, page_part)] = watermark if watermark else None
+    return out
+
+
+def _chunked(
+    seq: list[tuple[int, str, str, str]],
+    size: int,
+) -> Iterator[list[tuple[int, str, str, str]]]:
+    """Yield successive `size`-sized slices of ``seq``. Last slice may
+    be shorter. Empty ``seq`` yields nothing."""
+    if size < 1:
+        raise ValueError("size must be >= 1")
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
+def _process_one_page(
+    conn: psycopg.Connection[Any],
+    *,
+    provider: SecFilingsProvider | _CachedSubmissionsPageFetcher,
+    instrument_id: int,
+    cik: str,
+    symbol: str,
+    page_name: str,
+    if_modified_since: str | None,
+    result: FilesWalkResult,
+) -> None:
+    """Per-(cik, page) drain step extracted from the legacy nested
+    loop. Transaction shape unchanged from pre-#1341:
+    per-filing transaction inside the page loop; per-page watermark
+    write after upsert-all-clean.
+    """
+    wm_key = f"{cik}:{page_name}"
+    try:
+        page_result = provider.fetch_submissions_page_conditional(
+            page_name,
+            if_modified_since=if_modified_since,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "files walk: secondary fetch failed for CIK %s/%s: %s",
+            cik,
+            page_name,
+            exc,
+        )
+        result.parse_errors += 1
+        return
+    if page_result is None:
+        # 404 — page absent. Nothing to record; no watermark
+        # write either (no Last-Modified to persist).
+        return
+    if page_result.not_modified:
+        # Server said 304. Skip parse + skip upsert (filings already
+        # known). Bump watermark_at only — the stored Last-Modified
+        # is still freshest the server has sent.
+        result.secondary_pages_not_modified += 1
+        with conn.transaction():
+            if if_modified_since is not None:
+                set_watermark(
+                    conn,
+                    source=_SOURCE_KEY_SUBMISSIONS_FILES,
+                    key=wm_key,
+                    watermark=if_modified_since,
+                    watermark_at=None,
+                )
+        return
+
+    page = page_result.payload
+    if page is None:
+        # Defensive: 200 with empty body should not happen,
+        # but the dataclass shape permits it. Skip safely.
+        return
+
+    result.secondary_pages_fetched += 1
+    try:
+        # ``symbol`` is the canonical ticker (e.g. "AAPL"),
+        # NOT a stringified instrument_id. Threaded from
+        # the universe lookup at the top of the walk so
+        # ``filing_events.raw_payload_json`` carries the
+        # right value. Codex review BLOCKING for PR #1035.
+        filings = _normalise_submissions_block(
+            page,
+            cik_padded=cik,
+            symbol=symbol or cik,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("files walk: normalise failed for %s: %s", page_name, exc)
+        result.parse_errors += 1
+        return
+
+    page_upsert_errors = 0
+    for filing in filings:
+        try:
+            with conn.transaction():
+                # ``_upsert_filing`` returns False when
+                # the 10y retention cap (#1233 §4.2) drops
+                # a pre-cutoff filing. Count only accepted
+                # rows.
+                if _upsert_filing(conn, str(instrument_id), "sec", filing):
+                    result.filings_upserted += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "files walk: upsert failed for %s/%s: %s",
+                cik,
+                filing.provider_filing_id,
+                exc,
+            )
+            result.parse_errors += 1
+            page_upsert_errors += 1
+
+    # Item 7 (#1233): persist the fresh Last-Modified
+    # watermark. set_watermark asserts INTRANS so it MUST
+    # land inside ``with conn.transaction():``. Write only
+    # when every filing on the page upserted cleanly OR
+    # was intentionally retention-dropped (the
+    # ``_upsert_filing returns False`` case which does NOT
+    # increment page_upsert_errors). If ANY filing raised,
+    # we leave the watermark unchanged so the next tick
+    # re-fetches + retries the failed filings instead of
+    # 304-skipping them forever. Codex 2 pre-push P1 fold
+    # 2026-05-24.
+    if page_result.last_modified is not None and page_upsert_errors == 0:
+        with conn.transaction():
+            set_watermark(
+                conn,
+                source=_SOURCE_KEY_SUBMISSIONS_FILES,
+                key=wm_key,
+                watermark=page_result.last_modified,
+                watermark_at=None,
+            )
+
+
 def walk_files_pages(
     *,
     conn: psycopg.Connection[Any],
@@ -184,18 +367,93 @@ def walk_files_pages(
     CIK's primary ``submissions/CIK<10>.json`` — eliminates ~5,105
     redundant primary HTTP calls per Run-#8.
 
-    Secondary-page fetches over HTTP are UNCHANGED — they were never
-    in the bulk archive.
+    #1341 (2026-05-28): when invoked under the bootstrap orchestrator
+    (``resolve_progress_context()`` returns non-None), the walker
+    prefetches every chunk of secondary pages concurrently (4-way
+    via ``PipelinedSecFetcher`` at the shared 7 req/s ceiling)
+    BEFORE draining each chunk per-(cik, page). Steady-state cron
+    / API path runs OUTSIDE the bootstrap context window → walker
+    uses the serial sync ResilientClient as before.
+
+    Secondary-page fetches over HTTP are UNCHANGED in semantics —
+    they were never in the bulk archive; this PR only compresses
+    the wall-clock via concurrent HTTP for the bootstrap path.
     """
     result = FilesWalkResult()
     targets = _list_cik_secondary_pages(conn)
 
+    progress_ctx = resolve_progress_context()
+    bootstrap_mode = progress_ctx is not None
+
+    # Pre-load watermarks for the whole cohort (one SELECT). Both
+    # bootstrap and steady-state paths use this; the IMS value pinned
+    # in this map is what the prefetch (bootstrap) AND the per-page
+    # loop send to the SEC.
+    watermarks = _load_all_watermarks_for_pages(conn, targets)
+
+    # Flatten the cohort into an ordered (instrument_id, cik, symbol,
+    # page_name) task list, SKIPPING agent CIKs / empty-sidecar /
+    # sentinel-only short-circuits — those don't need HTTP. Counter
+    # bookkeeping mirrors the pre-#1341 loop exactly so end-of-walk
+    # summary log fields line up.
+    fetch_tasks_ordered: list[tuple[int, str, str, str]] = []
+    for instrument_id, cik, symbol, sidecar_pages in targets:
+        # Agent CIKs are excluded by the populate path
+        # (sec_submissions_ingest.refresh_cik_sidecar) so their
+        # sidecar_pages list is empty by design. Skip them here
+        # silently — they do NOT count toward ciks_visited (the
+        # counter reflects "real CIKs we did or attempted work for"
+        # per Architect IMPORTANT — pre-PR-B post-review fix).
+        if cik in KNOWN_FILING_AGENT_CIKS:
+            continue
+
+        result.ciks_visited += 1
+
+        if not sidecar_pages:
+            # Empty sidecar for an in-universe CIK that is NOT an
+            # agent. Indicates an S8 ordering bug or a CIK added
+            # to the universe after S8 ran. Per-CIK log is DEBUG
+            # to avoid stderr spam at scale (8.7k CIK cohort — a
+            # systemic S8 failure would otherwise log 8,700
+            # WARNING lines); a single end-of-walk summary
+            # WARNING is emitted below (per Architect IMPORTANT).
+            logger.debug(
+                "files walk: empty sidecar for in-universe CIK %s; "
+                "S8 must populate sec_cik_submissions_files_index first",
+                cik,
+            )
+            result.ciks_with_empty_sidecar += 1
+            result.parse_errors += 1
+            continue
+
+        if sidecar_pages == [_SIDECAR_SENTINEL_PAGE_NAME]:
+            # CIK processed with zero overflow pages (sentinel
+            # row). No HTTP fetch needed.
+            result.ciks_with_no_overflow += 1
+            continue
+
+        for page_name in sidecar_pages:
+            # Defensive — the only sentinel allowed is
+            # _SIDECAR_SENTINEL_PAGE_NAME; the schema CHECK already
+            # rejects any other sentinel-shaped value. A real CIK
+            # with overflow pages will never have the sentinel
+            # mixed in (the populate path writes one or the other).
+            # Skip sentinel rows defensively.
+            if page_name == _SIDECAR_SENTINEL_PAGE_NAME:
+                continue
+            fetch_tasks_ordered.append((instrument_id, cik, symbol, page_name))
+
     # #1273 PR2 — long-pole stage instrumentation (S14). Pin
     # target_count + cohort fingerprint when called from the
-    # bootstrap dispatcher. Fingerprint pins the is_tradable filter
-    # + sidecar-state bucket counts so the operator can audit
-    # cohort composition.
-    progress_ctx = resolve_progress_context()
+    # bootstrap dispatcher AFTER the flatten loop so the bar's
+    # denominator is the FINAL total (`len(targets)` flatten-pass
+    # bumps + `len(fetch_tasks_ordered)` drain bumps) — otherwise
+    # processed could exceed target. Fingerprint exposes both
+    # buckets so the operator can audit cohort composition.
+    _progress_total = len(targets) + len(fetch_tasks_ordered)
+    _emit_every_n = max(1, _progress_total // 100) if _progress_total else 0
+    _last_progress_emit = time.monotonic()
+    _processed_count = 0
     if progress_ctx is not None:
         sentinel_count = sum(1 for t in targets if t[3] == [_SIDECAR_SENTINEL_PAGE_NAME])
         empty_count = sum(1 for t in targets if not t[3])
@@ -204,186 +462,98 @@ def walk_files_pages(
             f"is_tradable_only=true;"
             f"sidecar_sentinel={sentinel_count};"
             f"sidecar_real_pages={real_pages_count};"
-            f"sidecar_empty={empty_count}"
+            f"sidecar_empty={empty_count};"
+            f"fetch_tasks={len(fetch_tasks_ordered)}"
         )
         set_stage_target(
             run_id=progress_ctx.run_id,
             stage_key=progress_ctx.stage_key,
-            target_count=len(targets),
+            target_count=_progress_total,
             cohort_fingerprint=fingerprint,
         )
-    _emit_every_n = max(1, len(targets) // 100) if targets else 0
-    _last_progress_emit = time.monotonic()
-    _processed_count = 0
+
+    def _emit_progress() -> None:
+        nonlocal _last_progress_emit
+        if progress_ctx is None:
+            return
+        _now = time.monotonic()
+        if _processed_count % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+            set_stage_processed(
+                run_id=progress_ctx.run_id,
+                stage_key=progress_ctx.stage_key,
+                processed_count=_processed_count,
+            )
+            _last_progress_emit = _now
+
+    # Bump once per target evaluated during flatten (covers
+    # agent-skipped / empty-sidecar / sentinel-only short-circuits)
+    # so the bar advances at the same per-target ratio as the
+    # pre-#1341 loop. The chunk drain below bumps once per task.
+    for _ in targets:
+        _processed_count += 1
+        _emit_progress()
+
+    prefetch_window_seconds_total = 0.0 if bootstrap_mode else None
 
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-        for instrument_id, cik, symbol, sidecar_pages in targets:
-            # #1273 PR2 — cadenced emit. Bump _processed_count at the
-            # TOP of every iteration so the bar advances against the
-            # full cohort `len(targets)` even for early-skip branches
-            # (agent CIKs / empty sidecar / sentinel-only). The
-            # operator-visible meaning is "CIKs evaluated" not "HTTP
-            # work done"; the legacy `result.*` counters retain the
-            # finer-grained bucketing for audit log.
-            _processed_count += 1
-            if progress_ctx is not None:
-                _now = time.monotonic()
-                if _processed_count % _emit_every_n == 0 or _now - _last_progress_emit > 30:
-                    set_stage_processed(
-                        run_id=progress_ctx.run_id,
-                        stage_key=progress_ctx.stage_key,
-                        processed_count=_processed_count,
+        # Chunk the task list. Bootstrap → prefetch chunk via
+        # PipelinedSecFetcher; steady-state → skip prefetch.
+        # Per-chunk discipline bounds peak heap: the chunk's
+        # cache dict and the SubmissionsPageResult payloads it
+        # holds are all dropped at the chunk-loop boundary.
+        for chunk in _chunked(fetch_tasks_ordered, DEFAULT_PREFETCH_CHUNK_SIZE):
+            wrapper: _CachedSubmissionsPageFetcher | None = None
+            if bootstrap_mode:
+                prefetch_tasks = [
+                    ConditionalFetchTask(
+                        page_name=page_name,
+                        if_modified_since=watermarks.get((cik_, page_name)),
                     )
-                    _last_progress_emit = _now
-            # Agent CIKs are excluded by the populate path
-            # (sec_submissions_ingest.refresh_cik_sidecar) so their
-            # sidecar_pages list is empty by design. Skip them here
-            # silently — they do NOT count toward ciks_visited (the
-            # counter reflects "real CIKs we did or attempted work for"
-            # per Architect IMPORTANT — pre-PR-B post-review fix).
-            if cik in KNOWN_FILING_AGENT_CIKS:
-                continue
-
-            result.ciks_visited += 1
-
-            if not sidecar_pages:
-                # Empty sidecar for an in-universe CIK that is NOT an
-                # agent. Indicates an S8 ordering bug or a CIK added
-                # to the universe after S8 ran. Per-CIK log is DEBUG
-                # to avoid stderr spam at scale (8.7k CIK cohort — a
-                # systemic S8 failure would otherwise log 8,700
-                # WARNING lines); a single end-of-walk summary
-                # WARNING is emitted below (per Architect IMPORTANT).
-                logger.debug(
-                    "files walk: empty sidecar for in-universe CIK %s; "
-                    "S8 must populate sec_cik_submissions_files_index first",
-                    cik,
+                    for (_iid, cik_, _sym, page_name) in chunk
+                ]
+                _t0 = time.monotonic()
+                chunk_cache = prefetch_submissions_pages_conditional(
+                    prefetch_tasks,
+                    user_agent=settings.sec_user_agent,
                 )
-                result.ciks_with_empty_sidecar += 1
-                result.parse_errors += 1
-                continue
+                assert prefetch_window_seconds_total is not None  # bootstrap_mode guard
+                prefetch_window_seconds_total += time.monotonic() - _t0
+                result.prefetch_pages_seeded += len(chunk_cache)
+                wrapper = _CachedSubmissionsPageFetcher(provider, chunk_cache)
+            provider_for_loop: SecFilingsProvider | _CachedSubmissionsPageFetcher = (
+                wrapper if wrapper is not None else provider
+            )
 
-            if sidecar_pages == [_SIDECAR_SENTINEL_PAGE_NAME]:
-                # CIK processed with zero overflow pages (sentinel
-                # row). No HTTP fetch needed.
-                result.ciks_with_no_overflow += 1
-                continue
+            # Per-(cik, page) drain of THIS chunk.
+            for instrument_id, cik, symbol, page_name in chunk:
+                _processed_count += 1
+                _emit_progress()
+                wm_key = (cik, page_name)
+                if_modified_since = watermarks.get(wm_key)
+                _process_one_page(
+                    conn,
+                    provider=provider_for_loop,
+                    instrument_id=instrument_id,
+                    cik=cik,
+                    symbol=symbol,
+                    page_name=page_name,
+                    if_modified_since=if_modified_since,
+                    result=result,
+                )
 
-            for page_name in sidecar_pages:
-                # Defensive — the only sentinel allowed is
-                # _SIDECAR_SENTINEL_PAGE_NAME; the schema CHECK already
-                # rejects any other sentinel-shaped value. A real CIK
-                # with overflow pages will never have the sentinel
-                # mixed in (the populate path writes one or the other).
-                # Skip sentinel rows defensively.
-                if page_name == _SIDECAR_SENTINEL_PAGE_NAME:
-                    continue
+            # Drain wrapper telemetry into result BEFORE dropping the
+            # wrapper — chunk-boundary `del` would otherwise lose
+            # cache_hits/cache_misses for this chunk.
+            if wrapper is not None:
+                result.loop_pages_from_prefetch += wrapper.cache_hits
+                result.loop_pages_from_sync_fallback += wrapper.cache_misses
 
-                # Item 7 (#1233): read Last-Modified watermark BEFORE
-                # the fetch so we can inject If-Modified-Since.
-                # Namespaced key keeps us disjoint from the legacy
-                # ``sec.submissions`` source (top-accession semantics).
-                wm_key = f"{cik}:{page_name}"
-                wm = get_watermark(conn, _SOURCE_KEY_SUBMISSIONS_FILES, wm_key)
-                if_modified_since = wm.watermark if wm and wm.watermark else None
-                try:
-                    page_result = provider.fetch_submissions_page_conditional(
-                        page_name,
-                        if_modified_since=if_modified_since,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(
-                        "files walk: secondary fetch failed for CIK %s/%s: %s",
-                        cik,
-                        page_name,
-                        exc,
-                    )
-                    result.parse_errors += 1
-                    continue
-                if page_result is None:
-                    # 404 — page absent. Nothing to record; no watermark
-                    # write either (no Last-Modified to persist).
-                    continue
-                if page_result.not_modified:
-                    # CAVEMAN: server said 304. Skip parse + skip upsert
-                    # (filings already known). Bump watermark_at only —
-                    # the stored Last-Modified is still freshest the
-                    # server has sent.
-                    result.secondary_pages_not_modified += 1
-                    with conn.transaction():
-                        if if_modified_since is not None:
-                            set_watermark(
-                                conn,
-                                source=_SOURCE_KEY_SUBMISSIONS_FILES,
-                                key=wm_key,
-                                watermark=if_modified_since,
-                                watermark_at=None,
-                            )
-                    continue
+            # Drop chunk cache + wrapper before next chunk. Python
+            # GC reclaims SubmissionsPageResult payloads. Bounded
+            # peak heap = one chunk's worth.
+            wrapper = None
 
-                page = page_result.payload
-                if page is None:
-                    # Defensive: 200 with empty body should not happen,
-                    # but the dataclass shape permits it. Skip safely.
-                    continue
-
-                result.secondary_pages_fetched += 1
-                try:
-                    # ``symbol`` is the canonical ticker (e.g. "AAPL"),
-                    # NOT a stringified instrument_id. Threaded from
-                    # the universe lookup at the top of the walk so
-                    # ``filing_events.raw_payload_json`` carries the
-                    # right value. Codex review BLOCKING for PR #1035.
-                    filings = _normalise_submissions_block(
-                        page,
-                        cik_padded=cik,
-                        symbol=symbol or cik,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("files walk: normalise failed for %s: %s", page_name, exc)
-                    result.parse_errors += 1
-                    continue
-
-                page_upsert_errors = 0
-                for filing in filings:
-                    try:
-                        with conn.transaction():
-                            # ``_upsert_filing`` returns False when
-                            # the 10y retention cap (#1233 §4.2) drops
-                            # a pre-cutoff filing. Count only accepted
-                            # rows.
-                            if _upsert_filing(conn, str(instrument_id), "sec", filing):
-                                result.filings_upserted += 1
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(
-                            "files walk: upsert failed for %s/%s: %s",
-                            cik,
-                            filing.provider_filing_id,
-                            exc,
-                        )
-                        result.parse_errors += 1
-                        page_upsert_errors += 1
-
-                # Item 7 (#1233): persist the fresh Last-Modified
-                # watermark. set_watermark asserts INTRANS so it MUST
-                # land inside ``with conn.transaction():``. Write only
-                # when every filing on the page upserted cleanly OR
-                # was intentionally retention-dropped (the
-                # ``_upsert_filing returns False`` case which does NOT
-                # increment page_upsert_errors). If ANY filing raised,
-                # we leave the watermark unchanged so the next tick
-                # re-fetches + retries the failed filings instead of
-                # 304-skipping them forever. Codex 2 pre-push P1 fold
-                # 2026-05-24.
-                if page_result.last_modified is not None and page_upsert_errors == 0:
-                    with conn.transaction():
-                        set_watermark(
-                            conn,
-                            source=_SOURCE_KEY_SUBMISSIONS_FILES,
-                            key=wm_key,
-                            watermark=page_result.last_modified,
-                            watermark_at=None,
-                        )
+    result.prefetch_window_seconds_total = prefetch_window_seconds_total
 
     # #1273 PR2 — final operator-progress emit on exit.
     if progress_ctx is not None:
@@ -448,7 +618,9 @@ def sec_submissions_files_walk_job() -> None:
         conn.commit()
     logger.info(
         "sec_submissions_files_walk: ciks=%d pages=%d filings=%d "
-        "no_overflow=%d empty_sidecar=%d not_modified=%d parse_errors=%d",
+        "no_overflow=%d empty_sidecar=%d not_modified=%d parse_errors=%d "
+        "prefetch_seeded=%d loop_from_prefetch=%d loop_from_sync=%d "
+        "prefetch_window_s=%s",
         result.ciks_visited,
         result.secondary_pages_fetched,
         result.filings_upserted,
@@ -456,6 +628,10 @@ def sec_submissions_files_walk_job() -> None:
         result.ciks_with_empty_sidecar,
         result.secondary_pages_not_modified,
         result.parse_errors,
+        result.prefetch_pages_seeded,
+        result.loop_pages_from_prefetch,
+        result.loop_pages_from_sync_fallback,
+        f"{result.prefetch_window_seconds_total:.1f}" if result.prefetch_window_seconds_total is not None else "n/a",
     )
     if run_id is not None:
         # The walker has already committed its writes; a failure of

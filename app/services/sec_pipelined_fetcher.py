@@ -35,6 +35,7 @@ import httpx
 from app.providers.implementations.sec_edgar import (
     _PROCESS_RATE_LIMIT_CLOCK,
     _PROCESS_RATE_LIMIT_LOCK,
+    SubmissionsPageResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_TARGET_RPS: Final[float] = 7.0
 DEFAULT_CONCURRENCY: Final[int] = 4
 DEFAULT_TIMEOUT_S: Final[float] = 30.0
+
+
+# #1341 — caller-managed chunk size for the chunk-and-drain pattern
+# in `walk_files_pages`. Bounded peak heap at ~150-200 MB per chunk
+# (≈50 MB raw JSON + Python overhead). Tunable via module constant
+# without invoker shape change.
+DEFAULT_PREFETCH_CHUNK_SIZE: Final[int] = 1000
+
+
+# Sentinel host check — `SubmissionsPageResult` is keyed by submissions
+# page-name (e.g. `CIKxxxxxxxxxx-submissions-001.json`); URL is
+# constructed below.
+_SEC_SUBMISSIONS_URL_PREFIX: Final[str] = "https://data.sec.gov/submissions/"
 
 
 @dataclass(frozen=True)
@@ -316,3 +330,179 @@ class _CachedDocFetcher:
         self.cache_misses += 1
         # type: ignore[misc, attr-defined] — duck-typed fallback.
         return self._underlying.fetch_document_text(absolute_url)  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# #1341 — secondary-submissions conditional prefetch for S14
+# (`sec_submissions_files_walk`) bootstrap path.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ConditionalFetchTask:
+    """Per-page prefetch task carrying its own If-Modified-Since header.
+
+    Spec: docs/proposals/etl/1341-s14-pipelined-fetch.md §3.1.
+    """
+
+    page_name: str
+    if_modified_since: str | None
+
+
+def prefetch_submissions_pages_conditional(
+    tasks: list[ConditionalFetchTask],
+    *,
+    user_agent: str,
+    target_rps: float = DEFAULT_TARGET_RPS,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> dict[str, SubmissionsPageResult | None]:
+    """Bulk-fetch ONE CHUNK of SEC secondary submissions pages.
+
+    Caller (S14 walker) is responsible for chunking the full cohort
+    via the chunk-and-drain pattern at the walker; this function
+    fetches every task in `tasks` and returns one cache dict. The
+    caller drains the dict and drops it before invoking again for
+    the next chunk so peak heap stays bounded.
+
+    Returns ``{page_name: SubmissionsPageResult | None}``:
+
+    * key absent — fetch failed (transport / 429 / 5xx / malformed
+      body). Caller's cache-miss fallthrough hits the sync provider,
+      which owns the retry/quarantine contract.
+    * value ``None`` — 404; page absent.
+    * value ``SubmissionsPageResult(payload=None, last_modified=ims,
+      not_modified=True)`` — 304.
+    * value ``SubmissionsPageResult(payload=<dict>, last_modified=lm,
+      not_modified=False)`` — 200.
+
+    Per-task failures isolated via ``try/except``; one bad page never
+    aborts the chunk.
+
+    Mirrors ``prefetch_document_texts`` lifecycle: shared
+    ``_PROCESS_RATE_LIMIT_CLOCK`` so concurrent sync SEC traffic
+    co-exists under the 7 req/s ceiling.
+    """
+    if not tasks:
+        return {}
+    # Dedupe by page_name (defensive — sidecar PK guarantees
+    # uniqueness, but a chunking caller could in theory pass dups).
+    deduped: dict[str, ConditionalFetchTask] = {}
+    for task in tasks:
+        deduped.setdefault(task.page_name, task)
+    work = list(deduped.values())
+
+    base_headers = {
+        "User-Agent": user_agent,
+        "Accept-Encoding": "gzip, deflate",
+    }
+
+    async def _run() -> dict[str, SubmissionsPageResult | None]:
+        out: dict[str, SubmissionsPageResult | None] = {}
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            fetcher = PipelinedSecFetcher(
+                client=client,
+                target_rps=target_rps,
+                concurrency=concurrency,
+            )
+            fetch_tasks = [
+                FetchTask(
+                    key=task.page_name,
+                    url=f"{_SEC_SUBMISSIONS_URL_PREFIX}{task.page_name}",
+                    headers={
+                        **base_headers,
+                        **({"If-Modified-Since": task.if_modified_since} if task.if_modified_since else {}),
+                    },
+                )
+                for task in work
+            ]
+            ims_lookup = {task.page_name: task.if_modified_since for task in work}
+            async for result in fetcher.fetch_many(fetch_tasks):
+                page_name = str(result.key)
+                # Per-task failure isolation — omit from cache; loop
+                # fallthrough hits the sync provider's retry path.
+                if result.error is not None or result.response is None:
+                    continue
+                resp = result.response
+                try:
+                    if resp.status_code == 304:
+                        out[page_name] = SubmissionsPageResult(
+                            payload=None,
+                            last_modified=ims_lookup.get(page_name),
+                            not_modified=True,
+                        )
+                        continue
+                    if resp.status_code == 404:
+                        out[page_name] = None
+                        continue
+                    if 200 <= resp.status_code < 300:
+                        payload = resp.json()  # type: ignore[no-untyped-call]
+                        if not isinstance(payload, dict):
+                            # Malformed body — caller falls through.
+                            continue
+                        out[page_name] = SubmissionsPageResult(
+                            payload=payload,
+                            last_modified=resp.headers.get("Last-Modified"),
+                            not_modified=False,
+                        )
+                        continue
+                    # 429 / 5xx / other 4xx — OMIT from cache; loop
+                    # fallthrough hits the sync provider's retry path.
+                except (ValueError, OSError) as exc:
+                    # ValueError covers json.JSONDecodeError (subclass).
+                    logger.debug(
+                        "prefetch_submissions_pages_conditional: malformed body for %s: %s",
+                        page_name,
+                        exc,
+                    )
+                    continue
+        return out
+
+    return asyncio.run(_run())
+
+
+class _CachedSubmissionsPageFetcher:
+    """Wraps a sync ``SecFilingsProvider`` for the bootstrap S14 path.
+
+    Mirror of ``_CachedDocFetcher`` but for
+    ``fetch_submissions_page_conditional`` rather than
+    ``fetch_document_text``. Cache lookups honour the per-page
+    If-Modified-Since the caller passes; cache misses fall through
+    to the underlying provider's sync ResilientClient.
+
+    Cache contract:
+
+    * page_name in cache, value None → 404; return None.
+    * page_name in cache, value SubmissionsPageResult → return it.
+    * page_name NOT in cache → fall through to underlying provider.
+
+    Telemetry:
+
+    * ``cache_hits`` — page_name in cache (any value, including None).
+    * ``cache_misses`` — page_name NOT in cache (caller's per-CIK
+      loop visit went to the sync provider).
+    """
+
+    def __init__(
+        self,
+        underlying: object,
+        cache: dict[str, SubmissionsPageResult | None],
+    ) -> None:
+        self._underlying = underlying
+        self._cache = cache
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+    def fetch_submissions_page_conditional(
+        self,
+        page_name: str,
+        *,
+        if_modified_since: str | None = None,
+    ) -> SubmissionsPageResult | None:
+        if page_name in self._cache:
+            self.cache_hits += 1
+            return self._cache[page_name]
+        self.cache_misses += 1
+        return self._underlying.fetch_submissions_page_conditional(  # type: ignore[attr-defined,no-any-return]
+            page_name, if_modified_since=if_modified_since
+        )
