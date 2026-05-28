@@ -122,14 +122,18 @@ def test_stage_catalogue_lane_composition() -> None:
     by_lane: dict[str, int] = {}
     for spec in specs:
         by_lane[spec.lane] = by_lane.get(spec.lane, 0) + 1
-    # 1 + 1 + 16 + 1 + 7 + 1 = 27 stages.
+    # 1 + 1 + 16 + 1 + 6 + 1 + 1 = 27 stages.
     # The "+ 1 openfigi" is #1233 PR-1b's S13 cusip_resolver_post_bulk_sweep.
+    # ``db_fundamentals_raw`` carries S25 fundamentals_sync (Stream A PR-C2
+    # lane reassignment); this expectation was stale pre-#1340 (expected
+    # db:7 before the split — corrected here to match production).
     assert by_lane == {
         "init": 1,
         "etoro": 1,
         "sec_rate": 16,
         "sec_bulk_download": 1,
-        "db": 7,
+        "db": 6,
+        "db_fundamentals_raw": 1,
         "openfigi": 1,
     }
 
@@ -827,6 +831,27 @@ def test_dataset_processed_caps_provided_by_bulk_ingesters_on_success_and_skip()
     assert "insider_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_insider_ingest_from_dataset"]
     assert "institutional_dataset_processed" in _STAGE_PROVIDES["sec_13f_ingest_from_dataset"]
     assert "institutional_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_13f_ingest_from_dataset"]
+    # #1340 — NPORT family: S12 bulk provides on success + skip.
+    assert "nport_dataset_processed" in _STAGE_PROVIDES["sec_nport_ingest_from_dataset"]
+    assert "nport_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_nport_ingest_from_dataset"]
+
+
+def test_n_port_ingest_requires_nport_dataset_processed() -> None:
+    """#1340 — S23 (sec_n_port_ingest) and S12 (sec_nport_ingest_from_dataset)
+    both write ``ownership_funds_observations`` AND S23 reads the
+    ``n_port_ingest_log`` rows S12 seeds (to skip bulk-loaded accessions).
+    The ordering cap serialises S23 after S12 commits — fixes both the
+    cross-lane (db vs sec_rate) lock contention and the visibility race.
+    """
+    from app.services.bootstrap_orchestrator import _ORDERING_ONLY_CAPS
+
+    s23 = _STAGE_REQUIRES_CAPS["sec_n_port_ingest"]
+    assert "nport_dataset_processed" in s23.all_of, (
+        "sec_n_port_ingest must require nport_dataset_processed (#1340 lock-contention + log-visibility serialisation)"
+    )
+    assert "nport_dataset_processed" in _ORDERING_ONLY_CAPS, (
+        "nport_dataset_processed must be an ordering-only cap (terminalises on any terminal status of S12)"
+    )
 
 
 def test_ordering_only_caps_disjoint_from_strict_gate_caps() -> None:
@@ -848,6 +873,7 @@ def test_ordering_only_caps_disjoint_from_strict_gate_caps() -> None:
             "submissions_processed",
             "insider_dataset_processed",
             "institutional_dataset_processed",
+            "nport_dataset_processed",
         }
     ), (
         "_ORDERING_ONLY_CAPS membership changed without updating the test. "

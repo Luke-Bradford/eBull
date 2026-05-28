@@ -80,6 +80,9 @@ class NPortIngestResult:
     rows_skipped_bad_data: int = 0
     rows_skipped_retention: int = 0  # PR7 #1233 §4.6
     parse_errors: int = 0
+    # #1340 — distinct accessions seeded into n_port_ingest_log so the per-CIK
+    # HTTP sweep (S23) skips bulk-loaded filings.
+    ingest_log_rows_seeded: int = 0
     touched_instrument_ids: set[int] = field(default_factory=set)
 
 
@@ -366,6 +369,51 @@ DO UPDATE SET
 """
 
 
+# #1340 — seed ``n_port_ingest_log`` from the same staging table so the per-CIK
+# HTTP sweep (``sec_n_port_ingest`` / S23) skips every accession the bulk path
+# already loaded (its ``_existing_accessions_for_fund_filer`` reads this log
+# regardless of status). Set-based, one statement, no per-row round-trips.
+# Grouped by accession (the log PK); ``MAX(fund_series_id)`` picks one of the
+# accession's series for the informational column — every staged value already
+# satisfies the ``^S[0-9]{9}$`` CHECK (it passed the observations drain above).
+# ``status='success'`` is honest for a SEEDED accession: every seeded
+# accession had all its in-universe holdings resolved (recoverable-miss
+# accessions are excluded via ``%(unresolved_accns)s``), so S23 re-fetching
+# it would yield nothing new. ``COUNT(*)`` is the staged-row count for the
+# accession (an informational figure; the DISTINCT-ON drain may collapse a
+# handful of duplicate holding-ids, so it is an upper bound, not an exact
+# landed count). Runs BEFORE commit while ``_stg_nport`` (ON COMMIT DROP)
+# is alive, and BEFORE ``series_upsert_buffer.clear()``.
+_SEED_NPORT_INGEST_LOG_SQL = """
+INSERT INTO n_port_ingest_log (
+    accession_number, filer_cik, fund_series_id, period_of_report,
+    status, holdings_inserted, holdings_skipped, error
+)
+SELECT
+    source_accession,
+    MAX(fund_filer_cik),
+    MAX(fund_series_id),
+    MAX(period_end),
+    'success',
+    COUNT(*),
+    0,
+    NULL
+FROM _stg_nport
+WHERE source_accession IS NOT NULL
+  AND source_accession <> ALL(%(unresolved_accns)s::text[])
+GROUP BY source_accession
+ON CONFLICT (accession_number) DO UPDATE SET
+    filer_cik = EXCLUDED.filer_cik,
+    fund_series_id = EXCLUDED.fund_series_id,
+    period_of_report = EXCLUDED.period_of_report,
+    status = EXCLUDED.status,
+    holdings_inserted = EXCLUDED.holdings_inserted,
+    holdings_skipped = EXCLUDED.holdings_skipped,
+    error = EXCLUDED.error,
+    fetched_at = NOW()
+"""
+
+
 # ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
@@ -423,6 +471,16 @@ def ingest_nport_dataset_archive(
     # #1233 PR-1a — buffer of (cusip, filer_cik, period_end) triples
     # for every unresolved-CUSIP holding. Mirrors the 13F path.
     unresolved_buffer: list[tuple[str, str, date]] = []
+
+    # #1340 — accessions with at least one holding whose CUSIP is valid but
+    # NOT YET in the cusip_map (buffered above for the S13 OpenFIGI sweep).
+    # These are RECOVERABLE: a later resolution could ingest the held-back
+    # holdings, so S23's per-CIK sweep must keep them re-fetchable. We
+    # therefore EXCLUDE these accessions from the n_port_ingest_log seed
+    # below — only fully-resolved accessions are marked done. (Empty-CUSIP
+    # holdings are permanently unresolvable for everyone, so accessions that
+    # only lose empty-CUSIP rows stay eligible to seed.)
+    unresolved_accns: set[str] = set()
 
     # PR-3: CREATE TEMP TABLE before opening the COPY context.
     with conn.cursor() as cur:
@@ -563,6 +621,10 @@ def ingest_nport_dataset_archive(
                     if filer_cik_raw_buf and period_end_early is not None:
                         filer_cik_buf = filer_cik_raw_buf.zfill(10)
                         unresolved_buffer.append((cusip, filer_cik_buf, period_end_early))
+                    # #1340 — recoverable miss: hold this accession back from
+                    # the n_port_ingest_log seed so S23 can re-fetch it after
+                    # the CUSIP resolves.
+                    unresolved_accns.add(accn)
                     result.rows_skipped_unresolved_cusip += 1
                     continue
 
@@ -690,6 +752,19 @@ def ingest_nport_dataset_archive(
             )
             series_failed.add(series_id)
             result.parse_errors += 1
+
+    # #1340 — seed n_port_ingest_log from staging so S23's per-CIK HTTP sweep
+    # skips the accessions this bulk path FULLY loaded. Accessions with any
+    # recoverable (valid-but-unmapped) CUSIP are held back so S23 can still
+    # re-fetch them after resolution. Must run before commit (while _stg_nport
+    # is alive) and before the buffer clear below.
+    with conn.cursor() as cur:
+        cur.execute(
+            _SEED_NPORT_INGEST_LOG_SQL,
+            {"unresolved_accns": sorted(unresolved_accns)},
+        )
+        result.ingest_log_rows_seeded = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
     series_upsert_buffer.clear()
 
     # Flush accumulated unresolved CUSIPs AFTER the staging drain so

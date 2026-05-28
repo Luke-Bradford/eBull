@@ -190,7 +190,11 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
     # exposing it on the manual API would let an operator accidentally
     # drop the standalone path's full-cohort safety-net (mirror of the
     # ``min_last_13f_hr_at`` posture on sec_13f_quarterly_sweep above).
-    "sec_n_port_ingest": frozenset({"min_last_seen_filed_at"}),
+    # #1340 — ``use_bulk_zip`` routes PRIMARY per-CIK submissions.json
+    # enumeration reads to the local bulk archive on the bootstrap path
+    # (same posture + freshness caveat as sec_first_install_drain above).
+    # Manual API rejects it for the same on-disk-freshness reason.
+    "sec_n_port_ingest": frozenset({"min_last_seen_filed_at", "use_bulk_zip"}),
 }
 
 

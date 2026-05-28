@@ -332,12 +332,21 @@ Capability = Literal[
     #     largest write fanout of any audited pair (institutional 13F
     #     rows during a full bootstrap can total tens of millions).
     #
-    # Both caps are PROVIDED on SUCCESS by their respective bulk
+    #   * ``nport_dataset_processed`` (#1340) — S12 sec_nport_ingest_from_dataset
+    #     and S23 sec_n_port_ingest both write ``ownership_funds_observations``.
+    #     They run on different lanes (db vs sec_rate) so PR-2 ``as_completed``
+    #     parallelism would let them write concurrently. Same row-lock shape;
+    #     ALSO required for correctness — S23 reads the ``n_port_ingest_log``
+    #     rows S12 seeds (#1340) to skip bulk-loaded accessions, so S23 must
+    #     run after S12 commits.
+    #
+    # All caps are PROVIDED on SUCCESS by their respective bulk
     # ingester and ON SKIP for cascade-skip parity. Required by the
     # legacy stages downstream so they serialise after the bulk
     # ingester terminalises.
     "insider_dataset_processed",
     "institutional_dataset_processed",
+    "nport_dataset_processed",
 ]
 
 
@@ -383,7 +392,7 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
         "institutional_inputs_seeded",
         "institutional_dataset_processed",
     ),
-    "sec_nport_ingest_from_dataset": ("nport_inputs_seeded",),
+    "sec_nport_ingest_from_dataset": ("nport_inputs_seeded", "nport_dataset_processed"),
     "sec_submissions_files_walk": ("submissions_secondary_pages_walked",),
     "filings_history_seed": ("filing_events_seeded",),
     # sec_first_install_drain runs with follow_pagination=True
@@ -429,6 +438,11 @@ _STAGE_PROVIDES_ON_SKIP: Final[dict[str, tuple[Capability, ...]]] = {
     # ``submissions_processed`` cascade-skip entry.
     "sec_insider_ingest_from_dataset": ("insider_dataset_processed",),
     "sec_13f_ingest_from_dataset": ("institutional_dataset_processed",),
+    # #1340 — S12 NPORT bulk ingester. Cascade-skip parity: if S7 is
+    # skipped on slow-connection fallback, S12 cascade-skips but the
+    # ordering cap still flows so S23 proceeds (it falls back to the
+    # full HTTP enumeration path with an empty n_port_ingest_log).
+    "sec_nport_ingest_from_dataset": ("nport_dataset_processed",),
 }
 
 
@@ -517,6 +531,7 @@ _ORDERING_ONLY_CAPS: Final[frozenset[Capability]] = frozenset(
         "submissions_processed",
         "insider_dataset_processed",
         "institutional_dataset_processed",
+        "nport_dataset_processed",
     }
 )
 
@@ -589,7 +604,11 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     "sec_form3_ingest": CapRequirement(all_of=("cik_mapping_ready", "insider_dataset_processed")),
     "sec_8k_events_ingest": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
     "sec_13f_recent_sweep": CapRequirement(all_of=("cik_mapping_ready", "institutional_dataset_processed")),
-    "sec_n_port_ingest": CapRequirement(all_of=("cik_mapping_ready",)),
+    # #1340 — ``nport_dataset_processed`` orders S23 after S12 (the bulk NPORT
+    # ingester): both write ``ownership_funds_observations`` (lock contention)
+    # AND S23 reads the ``n_port_ingest_log`` rows S12 seeds to skip bulk-loaded
+    # accessions, so S12 must commit first.
+    "sec_n_port_ingest": CapRequirement(all_of=("cik_mapping_ready", "nport_dataset_processed")),
     # #1174 — dedicated MF directory refresh + N-CSR drain (S25 + S26).
     "mf_directory_sync": CapRequirement(all_of=("universe_seeded",)),
     "sec_n_csr_bootstrap_drain": CapRequirement(all_of=("class_id_mapping_ready",)),
@@ -1177,8 +1196,15 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         # dispatch ``sec_n_port_ingest`` with empty params → full
         # cohort (safety-net for previously-inactive trusts re-
         # emerging).
+        # #1340 — ``use_bulk_zip=True`` routes the PRIMARY per-CIK
+        # ``submissions/CIK<10>.json`` enumeration reads through the local
+        # submissions.zip (S7 landed it; S8/S16 leave it on disk per the
+        # #1340 deletion deferral) instead of HTTP. Document bodies + zip
+        # misses still hit HTTP. Bootstrap-only via JOB_INTERNAL_KEYS —
+        # manual API path rejects. S23 deletes the zip on its success path.
         params={
             "min_last_seen_filed_at": _PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF,
+            "use_bulk_zip": True,
         },
     ),
     _spec("ownership_observations_backfill", 24, "db", "ownership_observations_backfill"),

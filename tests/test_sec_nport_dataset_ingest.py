@@ -165,6 +165,132 @@ class TestIngestNPortDatasetArchive:
             assert period.isoformat() == "2025-09-30"
             assert source == "nport"
 
+    def test_bulk_seeds_n_port_ingest_log(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        # #1340 — every accession the bulk path loads gets a 'success'
+        # n_port_ingest_log row so the per-CIK HTTP sweep (S23) skips it.
+        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        accn = "0001234567-25-000042"
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {
+                    "ACCESSION_NUMBER": accn,
+                    "FILING_DATE": "2025-11-30",
+                    "SUB_TYPE": "NPORT-P",
+                    "REPORT_DATE": "2025-09-30",
+                },
+            ],
+            registrants=[
+                {"ACCESSION_NUMBER": accn, "CIK": "1234567", "REGISTRANT_NAME": "Big Fund Trust"},
+            ],
+            fund_info=[
+                {"ACCESSION_NUMBER": accn, "SERIES_ID": "S000004310", "SERIES_NAME": "Big Fund Equity Series"},
+            ],
+            holdings=[
+                {
+                    "ACCESSION_NUMBER": accn,
+                    "HOLDING_ID": "1",
+                    "ISSUER_CUSIP": "037833100",
+                    "BALANCE": "500000",
+                    "UNIT": "NS",
+                    "CURRENCY_CODE": "USD",
+                    "CURRENCY_VALUE": "75000000",
+                    "PAYOFF_PROFILE": "Long",
+                    "ASSET_CAT": "EC",
+                },
+            ],
+        )
+        archive_path = tmp_path / "nport.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.ingest_log_rows_seeded == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT filer_cik, fund_series_id, period_of_report, status, holdings_inserted
+                FROM n_port_ingest_log
+                WHERE accession_number = %s
+                """,
+                (accn,),
+            )
+            row = cur.fetchone()
+        assert row is not None, "bulk ingest must seed n_port_ingest_log for S23 skip"
+        (filer_cik, series_id, period, status, inserted) = row
+        assert filer_cik == "0001234567"
+        assert series_id == "S000004310"
+        assert period.isoformat() == "2025-09-30"
+        assert status == "success"
+        assert inserted == 1
+
+    def test_bulk_skips_seeding_accession_with_unresolved_cusip(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        # #1340 — an accession with a valid-but-unmapped CUSIP holding is
+        # RECOVERABLE (buffered for the S13 OpenFIGI sweep). It must NOT be
+        # seeded into n_port_ingest_log, so S23 can re-fetch it after the
+        # CUSIP resolves. Universe seeded for AAPL only; the holding's CUSIP
+        # (a fake) is unmapped.
+        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        accn = "0009999999-25-000077"
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {
+                    "ACCESSION_NUMBER": accn,
+                    "FILING_DATE": "2025-11-30",
+                    "SUB_TYPE": "NPORT-P",
+                    "REPORT_DATE": "2025-09-30",
+                },
+            ],
+            registrants=[
+                {"ACCESSION_NUMBER": accn, "CIK": "9999999", "REGISTRANT_NAME": "Unmapped Fund Trust"},
+            ],
+            fund_info=[
+                {"ACCESSION_NUMBER": accn, "SERIES_ID": "S000009999", "SERIES_NAME": "Unmapped Series"},
+            ],
+            holdings=[
+                {
+                    "ACCESSION_NUMBER": accn,
+                    "HOLDING_ID": "1",
+                    "ISSUER_CUSIP": "000000001",  # not in cusip_map
+                    "BALANCE": "500000",
+                    "UNIT": "NS",
+                    "CURRENCY_CODE": "USD",
+                    "CURRENCY_VALUE": "75000000",
+                    "PAYOFF_PROFILE": "Long",
+                    "ASSET_CAT": "EC",
+                },
+            ],
+        )
+        archive_path = tmp_path / "nport.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+
+        assert result.rows_skipped_unresolved_cusip == 1
+        assert result.ingest_log_rows_seeded == 0
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM n_port_ingest_log WHERE accession_number = %s", (accn,))
+            assert cur.fetchone() is None, (
+                "accession with an unresolved CUSIP must NOT be seeded — S23 retry path preserved"
+            )
+
     def test_non_ec_asset_skipped(
         self,
         ebull_test_conn: psycopg.Connection[tuple],

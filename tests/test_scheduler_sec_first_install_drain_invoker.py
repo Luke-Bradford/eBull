@@ -7,8 +7,13 @@ Covers T6 / T6b / T6c (spec §4) without requiring a live PG:
   * Archive provenance mismatch downgrades to HTTP.
   * Outside-bootstrap-dispatch downgrades to HTTP.
   * Missing archive downgrades to HTTP.
-  * Unconditional cleanup deletes the archive on success regardless of path.
-  * Cleanup is bypassed when ``run_first_install_drain`` raises.
+
+#1340 UPDATE: S16 no longer deletes ``submissions.zip``. S23
+``sec_n_port_ingest`` now also consumes the archive (local-zip
+enumeration) and is the last bootstrap consumer, so it owns the
+deletion. S16 PRESERVES the archive on every path — these tests assert
+the archive survives the drain (the deletion assertions moved to
+``tests/test_scheduler_sec_n_port_ingest_invoker.py``).
 
 These complement the integration tests in
 ``tests/test_sec_first_install_drain.py`` (T2 / T3) which exercise the
@@ -19,8 +24,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from app.jobs.sec_first_install_drain import DrainStats
 from app.services.bootstrap_state import BootstrapProgressContext
@@ -132,8 +135,8 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        # Archive deleted unconditionally on success.
-        assert not archive.exists()
+        # #1340 — S16 preserves the archive for S23 (no longer deletes).
+        assert archive.exists()
 
     def test_outside_bootstrap_dispatch_downgrades(self, tmp_path: Path) -> None:
         # T6 — use_bulk_zip=True but no progress context → downgrade.
@@ -147,7 +150,8 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        assert not archive.exists()
+        # #1340 — S16 preserves the archive for S23.
+        assert archive.exists()
 
     def test_missing_archive_downgrades(self, tmp_path: Path) -> None:
         # T6 — use_bulk_zip=True but archive missing → downgrade.
@@ -163,7 +167,7 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        # Cleanup still tries; file already missing.
+        # File was never created; S16 doesn't create it.
         assert not archive.exists()
 
     def test_provenance_mismatch_downgrades(self, tmp_path: Path) -> None:
@@ -181,9 +185,8 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        # Archive STILL deleted post-drain — cleanup is unconditional
-        # (IMPORTANT-4 fold of #1277 spec v1.2).
-        assert not archive.exists()
+        # #1340 — S16 preserves the archive for S23 on every path.
+        assert archive.exists()
 
     def test_use_bulk_zip_true_with_provenanced_archive(self, tmp_path: Path) -> None:
         # T6 — use_bulk_zip=True + archive present + provenance passes →
@@ -198,30 +201,12 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is True
         assert call.kwargs["archive_path"] == archive
-        # Archive deleted post-drain.
-        assert not archive.exists()
-
-    def test_cleanup_skipped_when_drain_raises(self, tmp_path: Path) -> None:
-        # T12 — drain raise leaves the archive on disk for operator
-        # triage. Control flow exits the with-block before
-        # _cleanup_submissions_zip_after_drain.
-        archive = _bulk_archive_at(tmp_path)
-        patches, drain_spy = _patch_invoker_dependencies(
-            archive,
-            progress_context=BootstrapProgressContext(run_id=42, stage_key="sec_first_install_drain"),
-        )
-        drain_spy.side_effect = RuntimeError("boom")
-        with _stack(patches):
-            with pytest.raises(RuntimeError, match="boom"):
-                scheduler.sec_first_install_drain({"use_bulk_zip": True})
-        assert archive.exists(), (
-            "Drain raise must leave submissions.zip on disk for operator triage — cleanup is on the success path only"
-        )
+        # #1340 — S16 preserves the archive for S23 (deletion moved to S23).
+        assert archive.exists()
 
     def test_use_bulk_zip_false_default_no_zip_path(self, tmp_path: Path) -> None:
         # Default-path sanity: use_bulk_zip omitted → drain called with
-        # use_bulk_zip=False + archive_path=None. Archive STILL deleted
-        # (unconditional cleanup; IMPORTANT-4).
+        # use_bulk_zip=False + archive_path=None.
         archive = _bulk_archive_at(tmp_path)
         patches, drain_spy = _patch_invoker_dependencies(
             archive,
@@ -232,6 +217,5 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        # Cleanup still fires — locks the rollback path's disk-clean
-        # invariant (T11b sibling).
-        assert not archive.exists()
+        # #1340 — S16 preserves the archive for S23 on the HTTP-default path too.
+        assert archive.exists()
