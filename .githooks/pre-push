@@ -174,6 +174,14 @@ bash scripts/check_13dg_retention.sh
 echo "==> Pre-push gate: ownership_*_current MERGE writer invariant lint"
 bash scripts/check_ownership_refresh_writer_pattern.sh
 
+# #1346 — every ownership_*_current MERGE helper transaction MUST run
+# `SET LOCAL jit = off` as its first statement. PG JIT overhead (771
+# functions ≈ 307 ms) dominates the small partition-pruned MERGE work
+# (≈ 1 ms); the GUC override is the cheapest available win (~70 min
+# wall-clock saved per bootstrap, 1.86× verified at #1345). ~30 ms.
+echo "==> Pre-push gate: jit=off in ownership refresh helpers (#1346)"
+bash scripts/check_jit_off_in_refresh_helpers.sh
+
 # #1249 / #1250 cleanup — every manifest_parsers/sec_*.py that calls
 # _archive_file_url(<cik>, ...) where <cik> is row.cik (filer_cik /
 # similar) MUST also reference KNOWN_FILING_AGENT_CIKS for the agent-
