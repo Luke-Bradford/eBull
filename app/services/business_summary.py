@@ -47,6 +47,7 @@ from app.services.bootstrap_state import (
     set_stage_processed,
     set_stage_target,
 )
+from app.services.filings import bootstrap_filings_recency_floor
 
 logger = logging.getLogger(__name__)
 
@@ -1494,6 +1495,13 @@ def bootstrap_business_summaries(
     # including the `tables_null AND quarantine_elapsed` AND-guard
     # (PR1 audit memo §3 S18 note).
     progress_ctx = resolve_progress_context()
+    # #1347 — the 13-month recency floor applies ONLY under an orchestrated
+    # bootstrap run. The weekly safety-net auto-fire (Sun 04:00 UTC), manual
+    # POST, and post-outage catch-up fire this chunker WITHOUT a bootstrap
+    # context (progress_ctx None) → unbounded full-backlog drain, unchanged.
+    # This is also what repairs an active-but-delinquent filer (latest 10-K
+    # >13mo) skipped by the bounded first-install run — within ≤7 days.
+    min_filing_date = bootstrap_filings_recency_floor() if progress_ctx is not None else None
     if progress_ctx is not None:
         fingerprint = (
             f"chunk_limit={chunk_limit};"
@@ -1502,7 +1510,8 @@ def bootstrap_business_summaries(
             f"distinct_on=instrument_id;"
             f"ordering=filing_date_desc,filing_event_id_desc;"
             f"url_filter=true;"
-            f"pending_predicate_v2=bs_null_OR_acn_diff_OR_retry_due_OR_(tables_null_AND_quarantine_elapsed)"
+            f"pending_predicate_v2=bs_null_OR_acn_diff_OR_retry_due_OR_(tables_null_AND_quarantine_elapsed);"
+            f"min_filing_date={min_filing_date.isoformat() if min_filing_date is not None else 'none'}"
         )
         set_stage_target(
             run_id=progress_ctx.run_id,
@@ -1519,6 +1528,7 @@ def bootstrap_business_summaries(
             limit=chunk_limit,
             prefetch_urls=prefetch_urls,
             prefetch_user_agent=prefetch_user_agent,
+            min_filing_date=min_filing_date,
         )
         total_scanned += chunk.filings_scanned
         total_inserted += chunk.rows_inserted
@@ -1614,6 +1624,7 @@ def ingest_business_summaries(
     limit: int = 200,
     prefetch_urls: bool = False,
     prefetch_user_agent: str | None = None,
+    min_filing_date: date | None = None,
 ) -> IngestResult:
     """Scan 10-K filings, fetch primary doc, extract Item 1, upsert.
 
@@ -1665,6 +1676,8 @@ def ingest_business_summaries(
                 WHERE fe.provider = 'sec'
                   AND fe.filing_type IN ('10-K', '10-K/A')
                   AND fe.primary_document_url IS NOT NULL
+                  AND (%(min_filing_date)s::date IS NULL
+                       OR fe.filing_date >= %(min_filing_date)s)
                 ORDER BY fe.instrument_id, fe.filing_date DESC, fe.filing_event_id DESC
             )
             SELECT lpi.instrument_id,
@@ -1695,9 +1708,9 @@ def ingest_business_summaries(
                    )
                )
             ORDER BY lpi.filing_date DESC, lpi.filing_event_id DESC
-            LIMIT %s
+            LIMIT %(limit)s
             """,
-            (limit,),
+            {"limit": limit, "min_filing_date": min_filing_date},
         )
         for row in cur.fetchall():
             candidates.append((int(row[0]), str(row[1]), str(row[2]), str(row[3]), row[4]))
