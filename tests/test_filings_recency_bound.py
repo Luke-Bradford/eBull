@@ -108,7 +108,8 @@ _FLOOR = date(2025, 1, 1)
 
 class TestDef14aDiscoverRecencyBound:
     def test_floor_excludes_pre_within_cap(
-        self, ebull_test_conn: psycopg.Connection[tuple]  # noqa: F811
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         """Two DEF 14A — both within the latest-2-per-filer cap, so the cap
         drops neither. The floor is the ONLY discriminator: with the floor,
@@ -136,7 +137,8 @@ class TestDef14aDiscoverRecencyBound:
         assert unbounded == ours  # both within cap → unbounded returns both
 
     def test_boundary_is_inclusive(
-        self, ebull_test_conn: psycopg.Connection[tuple]  # noqa: F811
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         """A filing dated exactly on the floor is retained (``>=``)."""
         conn = ebull_test_conn
@@ -182,7 +184,8 @@ class TestBusinessSummaryRecencyBound:
         )
 
     def test_stale_latest_10k_excluded_by_floor(
-        self, ebull_test_conn: psycopg.Connection[tuple]  # noqa: F811
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         conn = ebull_test_conn
         iid = 1_347_010
@@ -191,7 +194,9 @@ class TestBusinessSummaryRecencyBound:
         conn.commit()
 
         result = ingest_business_summaries(
-            conn, cast("object", self._NullFetcher()), min_filing_date=_FLOOR  # type: ignore[arg-type]
+            conn,
+            cast("object", self._NullFetcher()),
+            min_filing_date=_FLOOR,  # type: ignore[arg-type]
         )
         scanned = {
             iid
@@ -205,7 +210,8 @@ class TestBusinessSummaryRecencyBound:
         assert result.filings_scanned == 0
 
     def test_within_floor_10k_scanned(
-        self, ebull_test_conn: psycopg.Connection[tuple]  # noqa: F811
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         conn = ebull_test_conn
         iid = 1_347_011
@@ -214,12 +220,15 @@ class TestBusinessSummaryRecencyBound:
         conn.commit()
 
         result = ingest_business_summaries(
-            conn, cast("object", self._NullFetcher()), min_filing_date=_FLOOR  # type: ignore[arg-type]
+            conn,
+            cast("object", self._NullFetcher()),
+            min_filing_date=_FLOOR,  # type: ignore[arg-type]
         )
         assert result.filings_scanned == 1
 
     def test_none_is_unbounded(
-        self, ebull_test_conn: psycopg.Connection[tuple]  # noqa: F811
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         conn = ebull_test_conn
         iid = 1_347_012
@@ -228,6 +237,8 @@ class TestBusinessSummaryRecencyBound:
         conn.commit()
 
         result = ingest_business_summaries(
-            conn, cast("object", self._NullFetcher()), min_filing_date=None  # type: ignore[arg-type]
+            conn,
+            cast("object", self._NullFetcher()),
+            min_filing_date=None,  # type: ignore[arg-type]
         )
         assert result.filings_scanned == 1
