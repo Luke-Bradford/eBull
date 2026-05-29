@@ -327,6 +327,17 @@ function CoverageSummaryCard({
           No instruments currently stuck below the analysable bar.
         </p>
       )}
+      {/* #1305 — operator awareness: bulk bootstrap seeds a rolling-window
+          DEPTH FLOOR, not full history. Source of truth for the depths:
+          app/services/sec_bulk_download.py:241-243 (n_quarters_13f=4,
+          n_quarters_insider=8, n_quarters_nport=4). Static note by design —
+          v1 has no API exposing these params (issue #1305: "no code change
+          for v1" beyond this note). If the defaults change, update this copy. */}
+      <p className="text-xs text-slate-500">
+        Bulk bootstrap covers a rolling-window depth floor: 13F ≈ 12 months,
+        N-PORT 1 year, insider (Form 3/4/5) 2 years. Deeper history requires a
+        re-bootstrap with widened depth params.
+      </p>
     </div>
   );
 }
