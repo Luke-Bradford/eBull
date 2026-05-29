@@ -53,6 +53,7 @@ from app.services.bootstrap_state import (
     set_stage_processed,
     set_stage_target,
 )
+from app.services.filings import bootstrap_filings_recency_floor
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
     record_def14a_observation,
@@ -196,9 +197,18 @@ def discover_pending_def14a(
     *,
     instrument_id: int | None = None,
     limit: int = 100,
+    min_filing_date: date | None = None,
 ) -> list[AccessionRef]:
     """Return DEF 14A accessions in ``filing_events`` that have not
     yet been attempted (no row in ``def14a_ingest_log``).
+
+    ``min_filing_date`` (#1347) is an OPTIONAL recency floor: when set,
+    only accessions with ``filing_date >= min_filing_date`` are
+    considered. ``None`` (default) = full historical backlog. The
+    bootstrap chunker passes the 13-month floor under an orchestrated
+    first-install run; steady-state / weekly safety-net / per-instrument
+    triage pass ``None`` (unbounded). Applied inside the rank CTE so it
+    bounds the ``DEF14A_LATEST_PER_FILER_CAP`` universe before ranking.
 
     Filters on ``filing_type IN _DEF14A_FORM_TYPES`` and
     ``primary_document_url IS NOT NULL`` — accessions without a
@@ -246,6 +256,8 @@ def discover_pending_def14a(
                       AND fe.primary_document_url IS NOT NULL
                       AND log.accession_number IS NULL
                       AND fe.instrument_id = %(iid)s
+                      AND (%(min_filing_date)s::date IS NULL
+                           OR fe.filing_date >= %(min_filing_date)s)
                     ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
                     LIMIT %(limit)s
                     """,
@@ -253,6 +265,7 @@ def discover_pending_def14a(
                         "forms": list(_DEF14A_FORM_TYPES),
                         "iid": instrument_id,
                         "limit": limit,
+                        "min_filing_date": min_filing_date,
                     },
                 )
             else:
@@ -269,6 +282,8 @@ def discover_pending_def14a(
                         WHERE fe.provider = 'sec'
                           AND fe.filing_type = ANY(%(forms)s)
                           AND isp.cik = %(target_cik)s
+                          AND (%(min_filing_date)s::date IS NULL
+                               OR fe.filing_date >= %(min_filing_date)s)
                         ORDER BY fe.provider_filing_id, fe.instrument_id
                     ),
                     ranked AS (
@@ -301,6 +316,7 @@ def discover_pending_def14a(
                         "target_cik": target_cik,
                         "cap": DEF14A_LATEST_PER_FILER_CAP,
                         "limit": limit,
+                        "min_filing_date": min_filing_date,
                     },
                 )
         else:
@@ -321,6 +337,8 @@ def discover_pending_def14a(
                         ON isp.instrument_id = fe.instrument_id
                     WHERE fe.provider = 'sec'
                       AND fe.filing_type = ANY(%(forms)s)
+                      AND (%(min_filing_date)s::date IS NULL
+                           OR fe.filing_date >= %(min_filing_date)s)
                     ORDER BY fe.provider_filing_id, (isp.cik IS NULL),
                              fe.instrument_id
                 ),
@@ -349,6 +367,7 @@ def discover_pending_def14a(
                     "forms": list(_DEF14A_FORM_TYPES),
                     "cap": DEF14A_LATEST_PER_FILER_CAP,
                     "limit": limit,
+                    "min_filing_date": min_filing_date,
                 },
             )
         rows = cur.fetchall()
@@ -973,6 +992,7 @@ def ingest_def14a(
     limit: int = 100,
     prefetch_urls: bool = False,
     prefetch_user_agent: str | None = None,
+    min_filing_date: date | None = None,
 ) -> IngestSummary:
     """Discover pending DEF 14A accessions and ingest each.
 
@@ -986,7 +1006,7 @@ def ingest_def14a(
     matching log entries). Mirrors the institutional-holdings
     ingester's commit cadence.
     """
-    pending = discover_pending_def14a(conn, instrument_id=instrument_id, limit=limit)
+    pending = discover_pending_def14a(conn, instrument_id=instrument_id, limit=limit, min_filing_date=min_filing_date)
     if not pending:
         return IngestSummary(
             accessions_seen=0,
@@ -1212,6 +1232,11 @@ def bootstrap_def14a(
     # `_DEF14A_FORM_TYPES` cardinality (computed below) is included so
     # the operator can audit the cohort form-type set.
     progress_ctx = resolve_progress_context()
+    # #1347 — the 13-month recency floor applies ONLY under an orchestrated
+    # bootstrap run. The weekly safety-net auto-fire (Sun 02:30 UTC), manual
+    # POST, and post-outage catch-up fire this chunker WITHOUT a bootstrap
+    # context (progress_ctx None) → unbounded full-backlog drain, unchanged.
+    min_filing_date = bootstrap_filings_recency_floor() if progress_ctx is not None else None
     if progress_ctx is not None:
         fingerprint = (
             f"chunk_limit={chunk_limit};"
@@ -1221,7 +1246,8 @@ def bootstrap_def14a(
             f"rank_scope=def14a_with_cik;"
             f"rank_predicate=type<>DEF14A_OR_cik_null_OR_rank<=cap;"
             f"url_filter=true;tombstone_filter=true;"
-            f"pending_predicate_v1=true"
+            f"pending_predicate_v1=true;"
+            f"min_filing_date={min_filing_date.isoformat() if min_filing_date is not None else 'none'}"
         )
         set_stage_target(
             run_id=progress_ctx.run_id,
@@ -1238,6 +1264,7 @@ def bootstrap_def14a(
             limit=chunk_limit,
             prefetch_urls=prefetch_urls,
             prefetch_user_agent=prefetch_user_agent,
+            min_filing_date=min_filing_date,
         )
         total_seen += chunk.accessions_seen
         total_succeeded += chunk.accessions_succeeded

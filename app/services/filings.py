@@ -39,7 +39,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 
@@ -116,6 +116,40 @@ def filing_within_retention(filing_date: date, now: datetime | None = None) -> b
     retained (no off-by-one drop on the rolling boundary).
     """
     return filing_date >= filing_events_retention_cutoff(now)
+
+
+# ---------------------------------------------------------------------------
+# #1347 — first-install cohort recency floor for S17 (DEF 14A bootstrap) and
+# S18 (business-summary bootstrap). These two stages otherwise walk the FULL
+# historical filing_events backlog and deadline-cut at 60 min (Run #8). The
+# floor is applied ONLY under an orchestrated bootstrap run (the chunkers gate
+# on ``resolve_progress_context()``); the weekly safety-net auto-fire + manual
+# POST + post-outage catch-up stay unbounded. 13 months ≈ latest annual proxy /
+# 10-K per issuer + a fiscal-year-boundary buffer. Single-symbol edit with grep
+# visibility, not a hidden magic number per writer.
+# ---------------------------------------------------------------------------
+BOOTSTRAP_FILINGS_RECENCY_DAYS: int = 396
+
+
+def bootstrap_filings_recency_floor(now: datetime | None = None) -> date:
+    """Earliest ``filing_date`` an orchestrated first-install bootstrap of S17 /
+    S18 considers. Returns a ``date`` (``filing_events.filing_date`` is a DATE
+    column — no time-of-day semantics).
+
+    Mirrors :func:`app.services.institutional_holdings.thirteen_f_retention_cutoff`:
+    reject a naive ``now`` then normalise to UTC, so the calendar day never
+    drifts with the host timezone (``date.today()`` would — Codex catch on
+    #1010's cutoff). ``now`` is injectable for tests.
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    # ``tzinfo is None`` OR a tzinfo whose ``utcoffset()`` is None is naive by
+    # Python's definition — ``astimezone(UTC)`` would then assume host-local
+    # time and defeat the UTC contract (Codex #1347 LOW). Stricter than the
+    # sibling thirteen_f_retention_cutoff guard on purpose.
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("bootstrap_filings_recency_floor requires a tz-aware now")
+    return now.astimezone(UTC).date() - timedelta(days=BOOTSTRAP_FILINGS_RECENCY_DAYS)
 
 
 # ---------------------------------------------------------------------------
