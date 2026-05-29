@@ -271,6 +271,13 @@ def seed_manifest_from_filing_events(
                 filed_at=filed_at,
                 primary_document_url=primary_doc_url,
                 is_amendment=is_amendment,
+                # #1343 — defer 10-K Item 1 + 8-K item bodies to first user
+                # view: seed these 'deferred' so the post-bootstrap
+                # catch_up_on_boot manifest worker (iter_pending /
+                # iter_retryable select only pending/failed) never eagerly
+                # drains the body backlog. Other issuer sources stay
+                # 'pending' for the worker to fetch eagerly.
+                initial_ingest_status="deferred" if source in ("sec_10k", "sec_8k") else "pending",
             )
             upserted += 1
             if seeded_triples is not None:

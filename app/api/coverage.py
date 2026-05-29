@@ -322,6 +322,7 @@ class ManifestParserSourceRowResponse(BaseModel):
     rows_parsed: int
     rows_failed: int
     rows_tombstoned: int
+    rows_deferred: int
     stuck_no_parser: int
 
 
@@ -380,6 +381,7 @@ def get_manifest_parser_audit(
                 rows_parsed=r.rows_parsed,
                 rows_failed=r.rows_failed,
                 rows_tombstoned=r.rows_tombstoned,
+                rows_deferred=r.rows_deferred,
                 stuck_no_parser=r.stuck_no_parser,
             )
             for r in report.sources

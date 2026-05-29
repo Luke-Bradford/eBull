@@ -38,6 +38,18 @@ These are the ONLY four bootstrap stages permitted to issue per-resource HTTP. A
 
 Each carve-out's `fetch_strategy` is `per_resource_http` (S6/S16/S27) or `batched_http` (S13). No other `fetch_strategy ∈ {per_resource_http, batched_http}` is permitted during bootstrap without joining this table.
 
+## User-triggered lazy fill (#1343) — NOT a bootstrap-stage fetch
+
+The bootstrap-mode HTTP rule governs bootstrap **stages** (code the orchestrator dispatches while `bootstrap_state.status != 'complete'`). It does NOT govern a per-resource HTTP fetch triggered by a **user API read** — e.g. #1343's lazy 10-K Item 1 / 8-K body fill, where viewing an instrument's panel fetches a single deferred body on first access (`app/api/instruments.py` → `fetch_business_summary_body_now` / `fetch_eight_k_body_now`).
+
+Sanctioned because it is:
+
+- **User-paced + single-doc** — one document per click, not an N-CIK sweep; no quadratic-in-cohort cost.
+- **Not a stage** — runs in the request path, never from `_BOOTSTRAP_STAGE_SPECS`; the orchestrator can't schedule it, so it can't blow a stage's wall-clock budget.
+- **The whole point** — #1343 deliberately moves the body fetch OUT of bootstrap (S16 seeds the manifest row `'deferred'`; S18/S21 seed metadata only) so the fetch happens lazily, on demand, after bootstrap.
+
+A lazy fill may run while `bootstrap_state` is still `running` (an operator viewing a panel mid-bootstrap) — that single fetch is fine. What stays forbidden is a bootstrap **stage** issuing per-resource HTTP outside the four carve-outs above.
+
 ## Physical-separation pattern
 
 A service that exists in both bootstrap and steady-state forms MUST physically separate the two entrypoints. Three patterns:

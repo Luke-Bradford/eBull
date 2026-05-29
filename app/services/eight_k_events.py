@@ -27,10 +27,12 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import psycopg
 
+from app.services.bootstrap_state import resolve_progress_context
+from app.services.filings import bootstrap_filings_recency_floor
 from app.services.sec_manifest import is_amendment_form
 
 logger = logging.getLogger(__name__)
@@ -423,8 +425,8 @@ def upsert_8k_filing(
                 is_amendment, date_of_report, reporting_party,
                 signature_name, signature_title, signature_date,
                 remarks, primary_document_url, parser_version,
-                is_tombstone
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+                is_tombstone, body_deferred
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, FALSE)
             ON CONFLICT (accession_number) DO UPDATE SET
                 document_type        = EXCLUDED.document_type,
                 is_amendment         = EXCLUDED.is_amendment,
@@ -437,6 +439,7 @@ def upsert_8k_filing(
                 primary_document_url = EXCLUDED.primary_document_url,
                 parser_version       = EXCLUDED.parser_version,
                 is_tombstone         = FALSE,
+                body_deferred        = FALSE,
                 fetched_at           = NOW()
             """,
             (
@@ -494,6 +497,220 @@ def upsert_8k_filing(
                     """,
                     (accession_number, ex.exhibit_number, ex.description),
                 )
+
+
+def seed_eight_k_metadata(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+    document_type: str,
+    is_amendment: bool,
+    date_of_report: date | None,
+    primary_document_url: str,
+    known_items: tuple[str, ...],
+    item_labels: dict[str, tuple[str, str | None]] | None = None,
+) -> bool:
+    """Seed a deferred 8-K metadata row (#1343 bootstrap path).
+
+    Writes the filing header (``document_type`` / ``is_amendment`` /
+    ``date_of_report`` from ``filing_events`` metadata — NO body fetch)
+    plus one ``eight_k_items`` row per ``known_items`` code (label /
+    severity from ``sec_8k_item_codes``, ``body=''``), with
+    ``body_deferred=TRUE`` and ``is_tombstone=FALSE``. The events rail
+    renders from this metadata; item bodies + exhibits + signature
+    fields fill lazily on first 8-K detail open (the
+    ``/eight_k_filings/{accession}/body`` endpoint).
+
+    ``date_of_report`` is sourced from ``filing_events.report_date``
+    (submissions.json reportDate) so the rail orders correctly with no
+    fetch. ``ON CONFLICT DO NOTHING`` — never clobbers a fetched filing
+    or an existing deferred row. Returns True iff the filing row was
+    inserted (its items are seeded in the same call). Caller owns the
+    transaction boundary.
+    """
+    labels = item_labels or {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO eight_k_filings (
+                accession_number, instrument_id, document_type,
+                is_amendment, date_of_report, primary_document_url,
+                parser_version, is_tombstone, body_deferred
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, TRUE)
+            ON CONFLICT (accession_number) DO NOTHING
+            RETURNING accession_number
+            """,
+            (
+                accession_number,
+                instrument_id,
+                document_type,
+                is_amendment,
+                date_of_report,
+                primary_document_url,
+                _PARSER_VERSION,
+            ),
+        )
+        if cur.fetchone() is None:
+            return False
+        # The filing row is brand new (ON CONFLICT DO NOTHING returned a
+        # row), so no eight_k_items exist yet for it — plain INSERT is
+        # safe. Dedup codes defensively (filing_events.items can repeat).
+        for order, code in enumerate(dict.fromkeys(known_items)):
+            label, severity = labels.get(code, (code, None))
+            cur.execute(
+                """
+                INSERT INTO eight_k_items
+                    (accession_number, item_code, item_label,
+                     severity, item_order, body)
+                VALUES (%s, %s, %s, %s, %s, '')
+                """,
+                (accession_number, code, label, severity, order),
+            )
+    return True
+
+
+def fetch_eight_k_body_now(
+    conn: psycopg.Connection[Any],
+    fetcher: _DocFetcher,
+    *,
+    accession_number: str,
+) -> Literal["filled", "already", "not_deferred", "no_source", "failed"]:
+    """Lazily fetch + cache a deferred 8-K filing body (#1343).
+
+    Called by the 8-K body API when the rail detail for a filing whose
+    ``body_deferred=TRUE`` is opened. Fetches the primary document,
+    parses items + exhibits + signature, upserts (which clears
+    ``body_deferred`` + fills item bodies/exhibits), stores raw, and
+    transitions the manifest ``'deferred'→'parsed'`` (#938 raw-before-
+    parsed honoured here — the worker guard does not cover this path).
+
+    A blocking per-accession advisory lock collapses the concurrent
+    double-open herd (advisory ``hashtext`` namespace, matching
+    ``app/jobs/locks.py``; never blocks the manifest worker). Determin-
+    istic failure converts the deferred row to a tombstone (so the rail
+    drops it — matching the eager path) + manifest ``→'tombstoned'`` and
+    returns ``'failed'`` (API → 2xx empty). A transient error RAISES
+    (API → 503). Caller owns the request; this commits its own units.
+    """
+    from app.services.raw_filings import store_raw
+    from app.services.sec_manifest import transition_status
+
+    lock_key = f"sec_lazy_body_8k:{accession_number}"
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id, primary_document_url, body_deferred "
+            "FROM eight_k_filings WHERE accession_number = %s",
+            (accession_number,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    if row is None or not bool(row[2]):
+        return "not_deferred"
+    instrument_id = int(row[0])
+    url = row[1]
+
+    def _tombstone(reason: str) -> None:
+        with conn.cursor() as cur:
+            # Drop the seeded metadata item rows so the detail returns a
+            # clean empty state, not placeholder labels with empty bodies
+            # (Codex ckpt2). The filing row stays tombstoned → the rail
+            # excludes it and it isn't re-fetched.
+            cur.execute("DELETE FROM eight_k_items WHERE accession_number = %s", (accession_number,))
+            cur.execute(
+                "UPDATE eight_k_filings SET is_tombstone = TRUE, body_deferred = FALSE, "
+                "fetched_at = NOW() WHERE accession_number = %s",
+                (accession_number,),
+            )
+        try:
+            transition_status(conn, accession_number, ingest_status="tombstoned", error=reason)
+        except Exception:
+            logger.warning(
+                "fetch_eight_k_body_now: manifest tombstone transition skipped accession=%s",
+                accession_number,
+                exc_info=True,
+            )
+        conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_lock(hashtext(%s)::int)", (lock_key,))
+    conn.commit()
+    try:
+        # Re-read under the lock — a concurrent holder may have just filled it.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT body_deferred FROM eight_k_filings WHERE accession_number = %s",
+                (accession_number,),
+            )
+            r2 = cur.fetchone()
+        conn.commit()
+        if r2 is None or not bool(r2[0]):
+            return "already"
+
+        if not url:
+            # No fetchable URL (malformed seed) — tombstone so the row
+            # EXITS the deferred state rather than being re-attempted on
+            # every click (bot review BLOCKING: no_source infinite-defer).
+            _tombstone("no primary_document_url")
+            return "no_source"
+
+        labels = _load_item_labels(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(items, ARRAY[]::TEXT[]) FROM filing_events "
+                "WHERE provider = 'sec' AND provider_filing_id = %s LIMIT 1",
+                (accession_number,),
+            )
+            irow = cur.fetchone()
+        conn.commit()
+        known_items = tuple(str(c) for c in (irow[0] if irow and irow[0] else []))
+
+        try:
+            html = fetcher.fetch_document_text(str(url))
+        except Exception:
+            logger.warning("fetch_eight_k_body_now: fetch failed accession=%s", accession_number, exc_info=True)
+            raise  # transient → API 503
+
+        if html is None:
+            _tombstone("lazy fetch: empty or non-200")
+            return "failed"
+
+        parsed = parse_8k_filing(html, known_items=known_items, item_labels=labels)
+        if parsed is None:
+            _tombstone("lazy fetch: parse miss")
+            return "failed"
+
+        upsert_8k_filing(
+            conn,
+            instrument_id=instrument_id,
+            accession_number=accession_number,
+            primary_document_url=str(url),
+            parsed=parsed,
+            item_labels=labels,
+        )
+        try:
+            store_raw(
+                conn,
+                accession_number=accession_number,
+                document_kind="primary_doc",
+                payload=html,
+                source_url=str(url),
+            )
+            transition_status(conn, accession_number, ingest_status="parsed", raw_status="stored")
+        except Exception:
+            logger.warning(
+                "fetch_eight_k_body_now: manifest deferred→parsed transition skipped "
+                "accession=%s (body cached; split non-fatal)",
+                accession_number,
+                exc_info=True,
+            )
+        conn.commit()
+        return "filled"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::int)", (lock_key,))
+        conn.commit()
 
 
 def _write_tombstone(
@@ -555,6 +772,7 @@ class EightKFilingRow:
     signature_title: str | None
     signature_date: date | None
     primary_document_url: str | None
+    body_deferred: bool
     items: tuple[EightKItemRow, ...]
     exhibits: tuple[EightKExhibitRow, ...]
 
@@ -579,17 +797,27 @@ def list_8k_filings(
                 f.accession_number, f.document_type, f.is_amendment,
                 f.date_of_report, f.reporting_party,
                 f.signature_name, f.signature_title, f.signature_date,
-                f.primary_document_url
+                f.primary_document_url, f.body_deferred,
+                COALESCE(f.date_of_report, fe.filing_date) AS effective_date
             FROM eight_k_filings f
+            JOIN LATERAL (
+                -- Per-share-class bridge (#1117 PR-B) + #1343 effective
+                -- date. LATERAL + LIMIT 1 avoids row fan-out when an
+                -- accession maps to multiple filing_events siblings, and
+                -- exposes filing_date so a deferred row (date_of_report
+                -- NULL until lazy fill) orders by its filing date instead
+                -- of sinking to the bottom of the rail.
+                SELECT fe.filing_date
+                FROM filing_events fe
+                WHERE fe.provider_filing_id = f.accession_number
+                  AND fe.provider = 'sec'
+                  AND fe.instrument_id = %s
+                  AND fe.filing_type IN ('8-K', '8-K/A')
+                ORDER BY fe.filing_event_id
+                LIMIT 1
+            ) fe ON TRUE
             WHERE f.is_tombstone = FALSE
-              AND EXISTS (
-                  SELECT 1 FROM filing_events fe
-                  WHERE fe.provider_filing_id = f.accession_number
-                    AND fe.provider = 'sec'
-                    AND fe.instrument_id = %s
-                    AND fe.filing_type IN ('8-K', '8-K/A')
-              )
-            ORDER BY f.date_of_report DESC NULLS LAST, f.fetched_at DESC
+            ORDER BY effective_date DESC NULLS LAST, f.fetched_at DESC
             LIMIT %s
             """,
             (instrument_id, limit),
@@ -649,11 +877,75 @@ def list_8k_filings(
                 signature_title=r[6],
                 signature_date=r[7],
                 primary_document_url=r[8],
+                body_deferred=bool(r[9]),
                 items=tuple(items_by_acc.get(acc, [])),
                 exhibits=tuple(exhibits_by_acc.get(acc, [])),
             )
         )
     return rows
+
+
+def get_8k_filing(
+    conn: psycopg.Connection[Any],
+    *,
+    accession_number: str,
+) -> EightKFilingRow | None:
+    """Read one 8-K filing (header + items + exhibits) by accession.
+
+    Used by the lazy-body API after :func:`fetch_eight_k_body_now` fills
+    a deferred filing, to return the now-complete row. Returns None if
+    the accession has no row. (Unlike :func:`list_8k_filings`, this does
+    not filter tombstones — the caller inspects the row.)"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT accession_number, document_type, is_amendment,
+                   date_of_report, reporting_party,
+                   signature_name, signature_title, signature_date,
+                   primary_document_url, body_deferred
+            FROM eight_k_filings
+            WHERE accession_number = %s
+            """,
+            (accession_number,),
+        )
+        frow = cur.fetchone()
+        if frow is None:
+            return None
+        cur.execute(
+            """
+            SELECT item_code, item_label, severity, body
+            FROM eight_k_items WHERE accession_number = %s
+            ORDER BY item_order
+            """,
+            (accession_number,),
+        )
+        items = tuple(
+            EightKItemRow(item_code=str(c), item_label=str(lbl), severity=sev, body=str(b))
+            for c, lbl, sev, b in cur.fetchall()
+        )
+        cur.execute(
+            """
+            SELECT exhibit_number, description
+            FROM eight_k_exhibits WHERE accession_number = %s
+            ORDER BY exhibit_number
+            """,
+            (accession_number,),
+        )
+        exhibits = tuple(EightKExhibitRow(exhibit_number=str(n), description=d) for n, d in cur.fetchall())
+    return EightKFilingRow(
+        accession_number=str(frow[0]),
+        document_type=str(frow[1]),
+        is_amendment=bool(frow[2]),
+        date_of_report=frow[3],
+        reporting_party=frow[4],
+        signature_name=frow[5],
+        signature_title=frow[6],
+        signature_date=frow[7],
+        primary_document_url=frow[8],
+        body_deferred=bool(frow[9]),
+        items=items,
+        exhibits=exhibits,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -717,7 +1009,16 @@ def ingest_8k_events(
     conn.commit()
     labels = _load_item_labels(conn)
 
-    candidates: list[tuple[int, str, str, tuple[str, ...]]] = []
+    # #1343 — under an orchestrated bootstrap, seed 8-K METADATA only
+    # (header + item codes/dates from filing_events; no body fetch),
+    # recency-bounded like S18. The weekly safety-net / manual POST
+    # (progress_ctx None) keep the eager fetch+parse path. Bodies fill
+    # lazily on first 8-K detail open.
+    progress_ctx = resolve_progress_context()
+    metadata_only = progress_ctx is not None
+    min_filing_date = bootstrap_filings_recency_floor() if metadata_only else None
+
+    candidates: list[tuple[int, str, str, tuple[str, ...], str, date | None, date]] = []
     with conn.cursor() as cur:
         # Per-#1117 PR-B: filing_events fans out per share-class
         # sibling under sql/144. Universe-wide candidate selectors
@@ -732,6 +1033,7 @@ def ingest_8k_events(
                 SELECT DISTINCT ON (fe.provider_filing_id)
                     fe.instrument_id, fe.provider_filing_id,
                     fe.primary_document_url, fe.items, fe.filing_date,
+                    fe.filing_type, fe.report_date,
                     fe.filing_event_id
                 FROM filing_events fe
                 LEFT JOIN eight_k_filings ekf
@@ -740,15 +1042,18 @@ def ingest_8k_events(
                   AND fe.filing_type IN ('8-K', '8-K/A')
                   AND fe.primary_document_url IS NOT NULL
                   AND ekf.accession_number IS NULL
+                  AND (%(min_filing_date)s::date IS NULL
+                       OR fe.filing_date >= %(min_filing_date)s)
                 ORDER BY fe.provider_filing_id, fe.instrument_id
             )
             SELECT instrument_id, provider_filing_id, primary_document_url,
-                   COALESCE(items, ARRAY[]::TEXT[])
+                   COALESCE(items, ARRAY[]::TEXT[]),
+                   filing_type, report_date, filing_date
             FROM per_accession
             ORDER BY filing_date DESC, filing_event_id DESC
-            LIMIT %s
+            LIMIT %(limit)s
             """,
-            (limit,),
+            {"limit": (None if metadata_only else limit), "min_filing_date": min_filing_date},
         )
         for row in cur.fetchall():
             candidates.append(
@@ -757,6 +1062,9 @@ def ingest_8k_events(
                     str(row[1]),
                     str(row[2]),
                     tuple(str(c) for c in (row[3] or [])),
+                    str(row[4]),
+                    row[5],
+                    row[6],
                 )
             )
     conn.commit()
@@ -769,7 +1077,7 @@ def ingest_8k_events(
     # #1045 fast path: prefetch the cohort's primary documents via the
     # pipelined fetcher so per-filing fetch_document_text reads from
     # cache. Misses fall back to the underlying sync fetcher.
-    if prefetch_urls and candidates:
+    if prefetch_urls and candidates and not metadata_only:
         from app.services.sec_pipelined_fetcher import _CachedDocFetcher, prefetch_document_texts
 
         urls = [c[2] for c in candidates]
@@ -777,7 +1085,33 @@ def ingest_8k_events(
         cache = prefetch_document_texts(urls, user_agent=ua)
         fetcher = _CachedDocFetcher(fetcher, cache)  # type: ignore[assignment]
 
-    for instrument_id, accession, url, known_items in candidates:
+    seeded = 0
+    for instrument_id, accession, url, known_items, filing_type, report_date, filing_date in candidates:
+        if metadata_only:
+            # #1343 — bootstrap metadata-only seed: header + item codes
+            # from filing_events (no HTTP, no exhibits/bodies/signatures).
+            # date_of_report from report_date (submissions reportDate),
+            # falling back to filing_date so the rail still orders right.
+            if seed_eight_k_metadata(
+                conn,
+                instrument_id=instrument_id,
+                accession_number=accession,
+                document_type=filing_type,
+                is_amendment=is_amendment_form(filing_type),
+                date_of_report=report_date or filing_date,
+                primary_document_url=url,
+                known_items=known_items,
+                item_labels=labels,
+            ):
+                seeded += 1
+                filings_parsed += 1
+                items_inserted += len(dict.fromkeys(known_items))
+            # DB-only seed: commit per chunk (no per-row HTTP crash-resume
+            # need) so a 30-80k-row recency cohort doesn't pay a round-trip
+            # per row.
+            if seeded % 500 == 0:
+                conn.commit()
+            continue
         try:
             html = fetcher.fetch_document_text(url)
         except Exception:
@@ -843,6 +1177,16 @@ def ingest_8k_events(
 
         filings_parsed += 1
         items_inserted += len(parsed.items)
+
+    if metadata_only:
+        conn.commit()
+        logger.info(
+            "ingest_8k_events: metadata-only seed — cohort=%d seeded=%d "
+            "min_filing_date=%s (bodies deferred to first view, #1343)",
+            len(candidates),
+            seeded,
+            min_filing_date.isoformat() if min_filing_date is not None else "none",
+        )
 
     return IngestResult(
         filings_scanned=len(candidates),

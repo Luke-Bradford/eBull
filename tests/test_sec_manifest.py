@@ -713,6 +713,20 @@ class TestFormMapping:
         # fetched is transient — no self-loop
         assert "fetched" not in _ALLOWED_TRANSITIONS["fetched"]
 
+    def test_deferred_transitions(self) -> None:
+        # #1343 — 'deferred' = metadata seeded, body fetch deferred to
+        # first user view. Reachable from pending/failed (S16 seeds it
+        # via initial_ingest_status, runbook re-queues). Exits to pending
+        # (force-drain), parsed (lazy fill ok), tombstoned (lazy fill
+        # deterministic fail). NO self-loop — a re-tick must no-op via the
+        # iter_pending exclusion, not a transition.
+        from app.services.sec_manifest import _ALLOWED_TRANSITIONS
+
+        assert "deferred" in _ALLOWED_TRANSITIONS["pending"]
+        assert "deferred" in _ALLOWED_TRANSITIONS["failed"]
+        assert _ALLOWED_TRANSITIONS["deferred"] == frozenset({"pending", "parsed", "tombstoned"})
+        assert "deferred" not in _ALLOWED_TRANSITIONS["deferred"]
+
 
 # ---------------------------------------------------------------------------
 # ingested_at on observations (migration 119)
