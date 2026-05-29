@@ -17,7 +17,6 @@ floor helper, which is where the correctness lives.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta, timezone
-from typing import cast
 
 import psycopg
 import pytest
@@ -195,8 +194,8 @@ class TestBusinessSummaryRecencyBound:
 
         result = ingest_business_summaries(
             conn,
-            cast("object", self._NullFetcher()),
-            min_filing_date=_FLOOR,  # type: ignore[arg-type]
+            self._NullFetcher(),
+            min_filing_date=_FLOOR,
         )
         scanned = {
             iid
@@ -221,8 +220,8 @@ class TestBusinessSummaryRecencyBound:
 
         result = ingest_business_summaries(
             conn,
-            cast("object", self._NullFetcher()),
-            min_filing_date=_FLOOR,  # type: ignore[arg-type]
+            self._NullFetcher(),
+            min_filing_date=_FLOOR,
         )
         assert result.filings_scanned == 1
 
@@ -238,7 +237,7 @@ class TestBusinessSummaryRecencyBound:
 
         result = ingest_business_summaries(
             conn,
-            cast("object", self._NullFetcher()),
-            min_filing_date=None,  # type: ignore[arg-type]
+            self._NullFetcher(),
+            min_filing_date=None,
         )
         assert result.filings_scanned == 1
