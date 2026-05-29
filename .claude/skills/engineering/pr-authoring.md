@@ -74,6 +74,12 @@ A good PR description answers:
 
 A bad PR description is just a restatement of the ticket title.
 
+## `verify-issue-link` CI gate — every `#N` in the TITLE needs a verb-link in the body
+
+The `verify-issue-link` job greps **every** `#N` out of the PR *title* and fails unless each appears in the body preceded by a recognised verb (`close[sd]`/`closing`/`fix(es|ed|ing)`/`resolve[sd]`/`resolving`/`refs?`/`references?`/`track[sd]`/`tracking`/`part of`/`umbrella`) + whitespace/colon + `#N`. Inline code and fenced/comment blocks are stripped first, so a `Closes #N` inside backticks or `<!-- -->` does **not** count.
+
+Trap: a title like `feat(#1384): … (#1343 PR-B)` references **two** issues. `Closes #1384` satisfies one; the other (`#1343`) must also be verb-linked — bare prose ("half of #1343") fails. Fix: add `Part of #1343.` (or `Refs #1343.`). Don't reference a closed/parent issue in the title unless you'll verb-link it. (PR #1385.)
+
 ## Pre-submit check
 
 Before opening or updating the PR, ask:

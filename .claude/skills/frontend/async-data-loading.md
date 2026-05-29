@@ -141,6 +141,22 @@ this destructuring pattern is what lets ESLint see the contract.
 refs as local const bindings so ESLint can see their identity..."). Mirror it
 on every page that aggregates multiple `useAsync` calls.
 
+### `asyncData ?? prop` is unsafe when the two can describe different entities
+
+`useAsync` clears stale `data` **inside its effect** — i.e. *after* the render where `deps` changed. The `cancelled` flag stops a stale *resolution* from landing, but it does nothing about the render in between. So deriving displayed state as `asyncData ?? fallbackProp` flashes the *previous* entity for one frame whenever the selection changes.
+
+```tsx
+// WRONG — switching rows shows filing A's body under filing B for one render
+const body = useAsync(() => fetchBody(selected.id), [selected.id]);
+const shown = body.data ?? selected;   // body.data is still A on B's first render
+
+// RIGHT — prove the fetched data belongs to the current selection
+const shown =
+  body.data?.id === selected?.id ? body.data : selected;
+```
+
+Rule: when both `asyncData` and the fallback can describe *different* records, gate `asyncData` on an identity field (id / accession / symbol) before using it. Only safe to write `asyncData ?? prop` when they describe the *same* slot (e.g. a detail of the same fixed entity). Caught by Codex on #1343 PR-B (`EightKListPage` 8-K fetch-on-select).
+
 ### Cancellation
 
 Every effect that resolves async data must check a `cancelled` flag before calling state setters, so a stale resolution cannot overwrite a newer one. If you write a new async hook, this is non-negotiable.
