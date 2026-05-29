@@ -299,3 +299,39 @@ def test_lazy_fill_transient_error_leaves_row_deferred(conn: psycopg.Connection[
         assert row is not None and bool(row[0]) is True  # still deferred → next view retries
     finally:
         _cleanup(conn, iid)
+
+
+def test_lazy_8k_no_source_tombstones_and_exits_deferred(conn: psycopg.Connection[Any]) -> None:
+    """A deferred 8-K with no primary_document_url must EXIT deferred.
+
+    Bot review BLOCKING: without tombstoning, the row stays
+    body_deferred=TRUE and is re-attempted on every detail open (silent
+    infinite-defer, no backoff)."""
+    from app.services.eight_k_events import fetch_eight_k_body_now, seed_eight_k_metadata
+
+    iid = _seed_instrument(conn)
+    acc = f"000-{uuid4().hex[:12]}"
+    try:
+        seed_eight_k_metadata(
+            conn,
+            instrument_id=iid,
+            accession_number=acc,
+            document_type="8-K",
+            is_amendment=False,
+            date_of_report=datetime.now(tz=UTC).date(),
+            primary_document_url="",  # malformed: no fetchable URL
+            known_items=("1.01",),
+        )
+        outcome = fetch_eight_k_body_now(conn, _RaisingFetcher(), accession_number=acc)
+        assert outcome == "no_source"
+        with conn.cursor() as cur:
+            cur.execute("SELECT is_tombstone, body_deferred FROM eight_k_filings WHERE accession_number=%s", (acc,))
+            row = cur.fetchone()
+        assert row is not None
+        assert bool(row[0]) is True and bool(row[1]) is False  # tombstoned, exited deferred
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM eight_k_items WHERE accession_number=%s", (acc,))
+            count_row = cur.fetchone()
+        assert count_row is not None and int(count_row[0]) == 0  # seeded items dropped
+    finally:
+        _cleanup(conn, iid)

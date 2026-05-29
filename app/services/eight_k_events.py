@@ -610,8 +610,6 @@ def fetch_eight_k_body_now(
         return "not_deferred"
     instrument_id = int(row[0])
     url = row[1]
-    if not url:
-        return "no_source"
 
     def _tombstone(reason: str) -> None:
         with conn.cursor() as cur:
@@ -649,6 +647,13 @@ def fetch_eight_k_body_now(
         conn.commit()
         if r2 is None or not bool(r2[0]):
             return "already"
+
+        if not url:
+            # No fetchable URL (malformed seed) — tombstone so the row
+            # EXITS the deferred state rather than being re-attempted on
+            # every click (bot review BLOCKING: no_source infinite-defer).
+            _tombstone("no primary_document_url")
+            return "no_source"
 
         labels = _load_item_labels(conn)
         with conn.cursor() as cur:

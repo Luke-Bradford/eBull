@@ -19,6 +19,12 @@ should be RUNNING — the manifest worker is what then drains the
 re-queued rows. A flip while ``bootstrap_state`` is not ``'complete'``
 is a no-op (the worker is gated during bootstrap) — refused (exit 2).
 
+Dev-only BY DESIGN (``assert_dev_env`` + ``assert_dev_db``): the project
+is demo-first / dev-first and bootstrap runs on the dev DB. A future
+small-capital production deployment that needs this escape hatch would
+add an explicit ``--force-prod`` opt-in then; it is intentionally NOT
+runnable against prod today (bot review WARNING — intent confirmed).
+
 Spec: ``docs/proposals/etl/1343-s18-s21-lazy-on-click.md`` §17.
 
 Exit codes: ``0`` ok / ``1`` DB error / ``2`` refused precondition.

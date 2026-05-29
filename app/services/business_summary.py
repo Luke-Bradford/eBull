@@ -1079,6 +1079,12 @@ def fetch_business_summary_body_now(
             urow = cur.fetchone()
         conn.commit()
         if urow is None:
+            # No fetchable URL for this accession — record a parse attempt
+            # (which clears body_deferred) so the row EXITS the deferred
+            # state instead of being re-attempted on every panel view
+            # (bot review BLOCKING: no_source infinite-defer).
+            record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession, reason="fetch_other")
+            conn.commit()
             return "no_source"
         url = str(urow[0])
 
