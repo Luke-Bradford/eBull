@@ -162,6 +162,11 @@ export interface EightKFiling {
   signature_title: string | null;
   signature_date: string | null;
   primary_document_url: string | null;
+  /** #1343 — true when the body is a deferred bootstrap placeholder
+   *  (item codes + dates present, item/exhibit bodies empty). The
+   *  body is lazily fetched on first detail-view via
+   *  `fetchEightKFilingBody`; a filled filing has `body_deferred=false`. */
+  body_deferred: boolean;
   items: EightKItem[];
   exhibits: EightKExhibit[];
 }
@@ -180,6 +185,27 @@ export function fetchEightKFilings(
   if (provider !== undefined) params.set("provider", provider);
   return apiFetch<EightKFilingsResponse>(
     `/instruments/${encodeURIComponent(symbol)}/eight_k_filings?${params.toString()}`,
+  );
+}
+
+/**
+ * #1343 — lazily fetch + cache one 8-K filing's bodies + exhibits. The
+ * events rail seeds 8-K metadata (item codes + dates) at bootstrap with
+ * the body deferred; opening a filing's detail calls this to fill it.
+ *
+ * Side-effecting GET by design. Error contract (mirrors the backend):
+ * a transient fetch failure → 503 (ApiError, caller retries); a
+ * deterministic miss tombstones server-side and returns the (empty)
+ * filing with 200 so the caller renders an empty state, not an error.
+ */
+export function fetchEightKFilingBody(
+  symbol: string,
+  accessionNumber: string,
+): Promise<EightKFiling> {
+  return apiFetch<EightKFiling>(
+    `/instruments/${encodeURIComponent(symbol)}/eight_k_filings/${encodeURIComponent(
+      accessionNumber,
+    )}/body`,
   );
 }
 
@@ -217,7 +243,12 @@ export interface BusinessSection {
  * "No 10-K Item 1 on file" empty state.
  */
 export interface BusinessSectionsParseStatus {
-  state: "not_attempted" | "parse_failed" | "no_item_1" | "sections_pending";
+  state:
+    | "not_attempted"
+    | "parse_failed"
+    | "no_item_1"
+    | "sections_pending"
+    | "deferred";
   failure_reason: string | null;
   /** ISO timestamp (UTC). Backoff schedule applies; the next ingester
    * pass after this timestamp will retry. */

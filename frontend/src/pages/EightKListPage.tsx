@@ -6,7 +6,7 @@
  * dateFrom / dateTo / accession=) so deep-links work.
  */
 
-import { fetchEightKFilings } from "@/api/instruments";
+import { fetchEightKFilingBody, fetchEightKFilings } from "@/api/instruments";
 import type { EightKFiling, EightKFilingsResponse } from "@/api/instruments";
 import {
   Section,
@@ -108,6 +108,32 @@ export function EightKListPage(): JSX.Element {
     selectedAccession !== null
       ? (filtered.find((f) => f.accession_number === selectedAccession) ?? null)
       : null;
+
+  // #1343 — a bootstrap-deferred filing carries item codes + dates but
+  // empty bodies. Lazily fetch the body when such a row is selected. The
+  // fetcher resolves `null` (no network) for non-deferred rows, so the
+  // detail panel falls back to the rail-loaded copy. Keyed on the
+  // selected accession so switching rows re-fetches; useAsync's cancelled
+  // guard drops stale resolutions.
+  const bodyDeferred = selected?.body_deferred === true;
+  const bodyAccession = selected?.accession_number ?? null;
+  const bodyState = useAsync<EightKFiling | null>(
+    // useAsync captures fn via a ref — fresh arrow per render is fine.
+    () =>
+      bodyDeferred && bodyAccession !== null
+        ? fetchEightKFilingBody(symbol, bodyAccession)
+        : Promise.resolve(null),
+    [symbol, bodyAccession, bodyDeferred],
+  );
+  // Only use the lazily-fetched body when it belongs to the currently
+  // selected row. useAsync clears stale `data` in its effect (post-render),
+  // so on the render where the selection changes, `bodyState.data` still
+  // holds the previous filing — gating on accession prevents flashing
+  // filing A's body under filing B for one frame (Codex ckpt2).
+  const detailFiling =
+    bodyState.data?.accession_number === bodyAccession
+      ? bodyState.data
+      : selected;
 
   function setFilters(next: EightKFilters): void {
     setSearchParams(writeFilters(searchParams, next), { replace: true });
@@ -238,7 +264,12 @@ export function EightKListPage(): JSX.Element {
                 </p>
               )}
             </div>
-            <EightKDetailPanel filing={selected} />
+            <EightKDetailPanel
+              filing={detailFiling}
+              bodyLoading={bodyDeferred && bodyState.loading}
+              bodyError={bodyDeferred && bodyState.error !== null}
+              onRetryBody={bodyState.refetch}
+            />
           </div>
         )}
       </Section>

@@ -2,17 +2,34 @@
  * EightKDetailPanel — right-side detail for the row currently
  * selected in the 8-K filterable list. Shows item bodies +
  * exhibits + primary_document_url link (#559).
+ *
+ * #1343 — a bootstrap-deferred filing arrives with item codes + dates
+ * but empty bodies; the parent (EightKListPage) lazily fetches the body
+ * on select and drives the three states here: `bodyLoading` while the
+ * fetch is in flight, `bodyError` on a transient (503) failure, and the
+ * filled filing on success. The filing header (accession / date) renders
+ * in all three so the operator keeps context during the ~0.5-1s fetch.
  */
 
 import type { EightKFiling } from "@/api/instruments";
+import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { SEVERITY_TONE } from "@/components/instrument/eightKSeverity";
 
 export interface EightKDetailPanelProps {
   readonly filing: EightKFiling | null;
+  /** #1343 — deferred-body fetch is in flight for this filing. */
+  readonly bodyLoading?: boolean;
+  /** #1343 — deferred-body fetch failed transiently (503); show retry. */
+  readonly bodyError?: boolean;
+  /** #1343 — re-attempt the deferred-body fetch. */
+  readonly onRetryBody?: () => void;
 }
 
 export function EightKDetailPanel({
   filing,
+  bodyLoading = false,
+  bodyError = false,
+  onRetryBody,
 }: EightKDetailPanelProps): JSX.Element {
   if (filing === null) {
     return (
@@ -33,7 +50,16 @@ export function EightKDetailPanel({
           {filing.is_amendment ? " · amendment" : ""}
         </div>
       </div>
-      {filing.items.map((item) => (
+      {bodyLoading ? (
+        <SectionSkeleton rows={4} />
+      ) : bodyError ? (
+        <SectionError onRetry={onRetryBody ?? (() => {})} />
+      ) : filing.items.length === 0 ? (
+        <div className="text-xs italic text-slate-500">
+          No item bodies were parsed for this filing.
+        </div>
+      ) : (
+        filing.items.map((item) => (
         <section key={item.item_code}>
           <header className="flex items-baseline gap-2">
             <span
@@ -51,7 +77,8 @@ export function EightKDetailPanel({
             {item.body}
           </p>
         </section>
-      ))}
+        ))
+      )}
       {filing.exhibits.length > 0 && (
         <section>
           <div className="text-[10px] uppercase tracking-wider text-slate-500">
