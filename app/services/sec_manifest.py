@@ -142,7 +142,7 @@ ManifestSubjectType = Literal[
     "finra_universe",
 ]
 
-IngestStatus = Literal["pending", "fetched", "parsed", "tombstoned", "failed"]
+IngestStatus = Literal["pending", "fetched", "parsed", "tombstoned", "failed", "deferred"]
 RawStatus = Literal["absent", "stored", "compacted"]
 
 
@@ -157,14 +157,14 @@ _ALLOWED_TRANSITIONS: dict[IngestStatus, frozenset[IngestStatus]] = {
     # parsed) and the backfill / write-through path (pending -> parsed
     # direct, when the body either lives in filing_raw_documents already
     # or was never separately stored).
-    "pending": frozenset({"pending", "fetched", "parsed", "failed", "tombstoned"}),
+    "pending": frozenset({"pending", "fetched", "parsed", "failed", "tombstoned", "deferred"}),
     # ``fetched`` is transient — must transition out, no self-loop.
     "fetched": frozenset({"parsed", "tombstoned", "failed"}),
     # ``failed`` self-loop: a worker re-fetch that fails again should
     # update the error/retry without raising. Without the self-loop
     # in the allowed set, the second call would silently no-op (Claude
     # bot review #879 WARNING).
-    "failed": frozenset({"pending", "fetched", "parsed", "tombstoned", "failed"}),
+    "failed": frozenset({"pending", "fetched", "parsed", "tombstoned", "failed", "deferred"}),
     # ``parsed`` -> ``pending`` is the only legal exit (rebuild path
     # in #872). No self-loop — re-parses must go through ``pending``
     # so the rewash gate is explicit.
@@ -173,6 +173,14 @@ _ALLOWED_TRANSITIONS: dict[IngestStatus, frozenset[IngestStatus]] = {
     # resurrect it back to pending for an explicit operator retry.
     # No self-loop.
     "tombstoned": frozenset({"pending"}),
+    # ``deferred`` (#1343) — metadata seeded at bootstrap, 10-K/8-K body
+    # fetch deferred to first user view. Exits: ``pending`` (operator
+    # force-drain re-queues for eager fetch), ``parsed`` (lazy fill
+    # succeeded), ``tombstoned`` (lazy fill hit a deterministic failure).
+    # No self-loop. No ``failed`` — a transient lazy failure leaves the
+    # row ``deferred`` for the next click; backoff lives in the typed
+    # table (instrument_business_summary / eight_k_filings), not here.
+    "deferred": frozenset({"pending", "parsed", "tombstoned"}),
 }
 
 
@@ -219,6 +227,7 @@ def record_manifest_entry(
     primary_document_url: str | None = None,
     is_amendment: bool = False,
     amends_accession: str | None = None,
+    initial_ingest_status: IngestStatus = "pending",
 ) -> None:
     """UPSERT one manifest row keyed by ``accession_number``.
 
@@ -228,6 +237,12 @@ def record_manifest_entry(
     ``parser_version`` / ``raw_status`` / retry state — those are
     owned by ``transition_status``. ``updated_at`` is touched by the
     table trigger.
+
+    ``initial_ingest_status`` (#1343) sets the lifecycle state ONLY on
+    INSERT (default ``'pending'``); it is NOT applied on conflict, so a
+    re-discovery never overwrites a live row's state. S16 passes
+    ``'deferred'`` for sec_10k/sec_8k so the post-bootstrap worker skips
+    the body backlog (bodies fill lazily on first view).
 
     Validates the issuer-vs-instrument cross-check at the call site:
     issuer-scoped rows MUST have ``instrument_id`` set; non-issuer rows
@@ -256,13 +271,18 @@ def record_manifest_entry(
                 accession_number, cik, form, source,
                 subject_type, subject_id, instrument_id,
                 filed_at, accepted_at, primary_document_url,
-                is_amendment, amends_accession
+                is_amendment, amends_accession, ingest_status
             ) VALUES (
                 %(accession)s, %(cik)s, %(form)s, %(source)s,
                 %(stype)s, %(sid)s, %(iid)s,
                 %(filed_at)s, %(accepted_at)s, %(url)s,
-                %(is_amend)s, %(amends)s
+                %(is_amend)s, %(amends)s, %(ingest_status)s
             )
+            -- ``ingest_status`` is applied ONLY on INSERT; the ON CONFLICT
+            -- SET below deliberately omits it so a re-discovery never
+            -- clobbers a live row's lifecycle state (owned by
+            -- ``transition_status``). #1343 S16 passes
+            -- ``initial_ingest_status='deferred'`` for sec_10k/sec_8k.
             ON CONFLICT (accession_number) DO UPDATE SET
                 cik = EXCLUDED.cik,
                 form = EXCLUDED.form,
@@ -293,6 +313,7 @@ def record_manifest_entry(
                 "url": primary_document_url,
                 "is_amend": is_amendment,
                 "amends": amends_accession,
+                "ingest_status": initial_ingest_status,
             },
         )
 
@@ -473,6 +494,14 @@ def transition_status(
             if raw_status is not None:
                 set_clauses.append(sql.SQL("raw_status = %(raw_status)s"))
                 params["raw_status"] = raw_status
+        elif ingest_status == "deferred":
+            # #1343 — metadata seeded, body fetch deferred to first user
+            # view. Clear any prior failure state; raw_status stays
+            # 'absent' (no body fetched). The evidence-downgrade guard
+            # above already prevents clobbering a previously-stored body,
+            # so a deferred transition never loses raw bytes.
+            set_clauses.append(sql.SQL("error = NULL"))
+            set_clauses.append(sql.SQL("next_retry_at = NULL"))
 
         update_query = sql.SQL(
             "UPDATE sec_filing_manifest SET {set_clause} WHERE accession_number = %(accession)s"

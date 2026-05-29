@@ -13,7 +13,7 @@
 #    (definitions excluded). Anyone adding a new INSERT also adds a
 #    gate, or parity fails.
 #
-# B. `app/services/fundamentals.py` — ONE `INSERT INTO filing_events`
+# B. `app/services/fundamentals/__init__.py` — ONE `INSERT INTO filing_events`
 #    chokepoint (`_upsert_filing_from_master_index`). Same parity
 #    contract: one INSERT, one gate call.
 #
@@ -32,7 +32,10 @@
 set -euo pipefail
 
 FILE_FILINGS="app/services/filings.py"
-FILE_FUNDAMENTALS="app/services/fundamentals.py"
+# ``fundamentals`` is a package — the master-index writer lives in its
+# __init__.py (was a flat module when this guard was written; the path
+# went stale on the package refactor and silently passed nothing).
+FILE_FUNDAMENTALS="app/services/fundamentals/__init__.py"
 
 violations=0
 fail() {
@@ -88,7 +91,7 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# B. fundamentals.py — 1 INSERT chokepoint + 1 retention-gate call
+# B. fundamentals/__init__.py — 1 INSERT chokepoint + 1 retention-gate call
 # ----------------------------------------------------------------------
 
 if [[ ! -f "$FILE_FUNDAMENTALS" ]]; then
@@ -114,7 +117,7 @@ fi
 # count (not FILE count — bot review iter 1 NITPICK).
 stray_occurrences=$(grep -rc "INSERT INTO filing_events" app --include="*.py" 2>/dev/null \
     | awk -F: '
-        $1 != "app/services/filings.py" && $1 != "app/services/fundamentals.py" && $2 > 0 {
+        $1 != "app/services/filings.py" && $1 != "app/services/fundamentals/__init__.py" && $2 > 0 {
           sum += $2
         }
         END { print (sum ? sum : 0) }
@@ -122,7 +125,7 @@ stray_occurrences=$(grep -rc "INSERT INTO filing_events" app --include="*.py" 2>
 if (( stray_occurrences != 0 )); then
   fail "C: found ${stray_occurrences} 'INSERT INTO filing_events' occurrence(s) outside the 2 canonical files. Every writer must route through filings.py or fundamentals.py to inherit the retention gate."
   grep -rln "INSERT INTO filing_events" app --include="*.py" 2>/dev/null \
-    | grep -v -E "^(app/services/filings\.py|app/services/fundamentals\.py)$" >&2 || true
+    | grep -v -E "^(app/services/filings\.py|app/services/fundamentals/__init__\.py)$" >&2 || true
 fi
 
 # ----------------------------------------------------------------------

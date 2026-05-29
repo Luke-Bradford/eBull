@@ -947,7 +947,8 @@ def upsert_business_summary(
                 last_parsed_at      = NOW(),
                 attempt_count       = 0,
                 last_failure_reason = NULL,
-                next_retry_at       = NULL
+                next_retry_at       = NULL,
+                body_deferred       = FALSE
             WHERE
                 instrument_business_summary.filed_at IS NULL
                 OR (EXCLUDED.filed_at IS NOT NULL
@@ -962,6 +963,204 @@ def upsert_business_summary(
     if row is None:
         return "suppressed"
     return "inserted" if bool(row[0]) else "updated"
+
+
+def seed_business_summary_metadata(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    source_accession: str,
+    filed_at: datetime | None,
+) -> bool:
+    """Seed a deferred 10-K Item 1 placeholder (#1343 bootstrap path).
+
+    Records that the instrument HAS a 10-K (so the business panel +
+    coverage know it exists) WITHOUT fetching the body. ``body=''`` +
+    ``body_deferred=TRUE`` marks "fetch on first view"; the lazy API
+    (``get_instrument_business_sections``) fills the body + clears the
+    flag on first access.
+
+    Writes NO ``instrument_business_summary_sections`` rows — sections
+    come from the body parse, so a deferred row has none. That keeps it
+    out of the #560 ``tables_json IS NULL`` re-select arm of the
+    candidate query (belt-and-braces with the explicit
+    ``body_deferred = FALSE`` guard there).
+
+    ``ON CONFLICT DO NOTHING`` — only fills a gap; never clobbers a real
+    body or an existing deferred row. Returns True iff a row was
+    inserted. Caller owns the transaction boundary.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO instrument_business_summary
+                (instrument_id, body, source_accession, filed_at, body_deferred)
+            VALUES (%s, '', %s, %s, TRUE)
+            ON CONFLICT (instrument_id) DO NOTHING
+            RETURNING instrument_id
+            """,
+            (instrument_id, source_accession, filed_at),
+        )
+        return cur.fetchone() is not None
+
+
+def fetch_business_summary_body_now(
+    conn: psycopg.Connection[Any],
+    fetcher: _DocFetcher,
+    *,
+    instrument_id: int,
+) -> Literal["filled", "already", "not_deferred", "no_source", "failed"]:
+    """Lazily fetch + cache a deferred 10-K Item 1 body (#1343).
+
+    Called by the business-sections API when an instrument's parse
+    status is ``'deferred'`` (a bootstrap metadata placeholder). Fetches
+    the 10-K primary document, extracts Item 1 + sections, upserts (which
+    clears ``body_deferred``), stores the raw body, and transitions the
+    manifest row ``'deferred'→'parsed'``. The #938 raw-before-parsed
+    invariant is honoured HERE (``store_raw`` before the parsed
+    transition) because the manifest worker's guard does not cover this
+    API write path.
+
+    A blocking per-instrument advisory lock collapses the concurrent
+    double-load herd (React StrictMode / two simultaneous viewers): the
+    second caller waits, re-reads under the lock, sees the body filled,
+    and returns ``'already'`` (the handler then reads the now-present
+    sections). The lock is advisory (``hashtext`` namespace, matching
+    ``app/jobs/locks.py``) so it never blocks the manifest worker or a
+    force-drain.
+
+    Outcomes: ``filled`` (this call fetched + cached), ``already``
+    (a concurrent call filled it), ``not_deferred`` (no deferred row),
+    ``no_source`` (no fetchable URL), ``failed`` (deterministic 404 / no
+    Item 1 — backoff recorded; API maps to a 2xx empty-state). A
+    transient fetch error RAISES (API maps to 503). Caller owns the
+    outer request; this function commits its own units.
+    """
+    from app.services.raw_filings import store_raw
+    from app.services.sec_manifest import transition_status
+
+    lock_key = f"sec_lazy_body_10k:{instrument_id}"
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_accession, filed_at, body_deferred "
+            "FROM instrument_business_summary WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    if row is None or not bool(row[2]):
+        return "not_deferred"
+    accession = str(row[0])
+    filed_at = row[1]
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_lock(hashtext(%s)::int)", (lock_key,))
+    conn.commit()
+    try:
+        # Re-read under the lock — a concurrent holder may have just filled it.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT body_deferred FROM instrument_business_summary WHERE instrument_id = %s",
+                (instrument_id,),
+            )
+            r2 = cur.fetchone()
+        conn.commit()
+        if r2 is None or not bool(r2[0]):
+            return "already"
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT primary_document_url FROM filing_events "
+                "WHERE provider = 'sec' AND provider_filing_id = %s "
+                "AND primary_document_url IS NOT NULL LIMIT 1",
+                (accession,),
+            )
+            urow = cur.fetchone()
+        conn.commit()
+        if urow is None:
+            return "no_source"
+        url = str(urow[0])
+
+        try:
+            html = fetcher.fetch_document_text(url)
+        except Exception:
+            # Transient (timeout / connection / 5xx): leave the row
+            # DEFERRED so the next view retries, and surface 503. Do NOT
+            # record_parse_attempt here — it clears body_deferred (that
+            # path is for DETERMINISTIC content failures), which would
+            # wrongly exit the deferred state on a transient blip and stop
+            # the panel ever retrying the lazy fetch (Codex ckpt2 BLOCKING).
+            logger.warning(
+                "fetch_business_summary_body_now: transient fetch error accession=%s",
+                accession,
+                exc_info=True,
+            )
+            raise
+
+        if html is None:
+            record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession, reason="fetch_other")
+            conn.commit()
+            return "failed"
+
+        try:
+            body = extract_business_section(html)
+        except Exception:
+            logger.warning("fetch_business_summary_body_now: parse exception accession=%s", accession, exc_info=True)
+            record_parse_attempt(
+                conn, instrument_id=instrument_id, source_accession=accession, reason="parse_exception"
+            )
+            conn.commit()
+            return "failed"
+        if body is None:
+            record_parse_attempt(
+                conn, instrument_id=instrument_id, source_accession=accession, reason="no_item_1_marker"
+            )
+            conn.commit()
+            return "failed"
+
+        outcome = upsert_business_summary(
+            conn, instrument_id=instrument_id, body=body, source_accession=accession, filed_at=filed_at
+        )
+        if outcome != "suppressed":
+            sections = extract_business_sections(html)
+            if sections:
+                try:
+                    upsert_business_sections(
+                        conn, instrument_id=instrument_id, source_accession=accession, sections=sections
+                    )
+                except Exception:
+                    logger.warning(
+                        "fetch_business_summary_body_now: section upsert failed accession=%s "
+                        "(blob stored; degrades to blob-only)",
+                        accession,
+                        exc_info=True,
+                    )
+        # #938 — store raw THEN flip the manifest deferred→parsed. Best-
+        # effort: the typed body is already cached (the user sees it), so a
+        # missing manifest row / transition error must not fail the fill.
+        try:
+            store_raw(
+                conn,
+                accession_number=accession,
+                document_kind="primary_doc",
+                payload=html,
+                source_url=url,
+            )
+            transition_status(conn, accession, ingest_status="parsed", raw_status="stored")
+        except Exception:
+            logger.warning(
+                "fetch_business_summary_body_now: manifest deferred→parsed transition skipped "
+                "accession=%s (body cached; manifest/typed split is non-fatal)",
+                accession,
+                exc_info=True,
+            )
+        conn.commit()
+        return "filled"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::int)", (lock_key,))
+        conn.commit()
 
 
 def upsert_business_sections(
@@ -1080,6 +1279,13 @@ def record_parse_attempt(
             )
             ON CONFLICT (instrument_id) DO UPDATE SET
                 source_accession    = EXCLUDED.source_accession,
+                -- #1343 — a recorded parse attempt means the row is no
+                -- longer a "deferred, not-yet-tried" placeholder: clear
+                -- the flag so get_parse_status reports parse_failed /
+                -- no_item_1 (not 'deferred') and the panel stops
+                -- re-triggering the lazy fetch (prevention-log §1265).
+                -- No-op on the eager path (already FALSE).
+                body_deferred       = FALSE,
                 last_parsed_at      = NOW(),
                 attempt_count       = instrument_business_summary.attempt_count + 1,
                 last_failure_reason = EXCLUDED.last_failure_reason,
@@ -1149,7 +1355,7 @@ class ParseStatus:
     layer; lifted here so service-side tests can assert on it without
     pulling in FastAPI."""
 
-    state: str  # 'not_attempted' | 'parse_failed' | 'no_item_1' | 'sections_pending'
+    state: str  # 'not_attempted' | 'parse_failed' | 'no_item_1' | 'sections_pending' | 'deferred'
     failure_reason: str | None = None
     next_retry_at: object | None = None  # datetime, kept loose to avoid datetime import
     last_attempted_at: object | None = None
@@ -1165,6 +1371,8 @@ def get_parse_status(
     Returns None when sections DO exist (caller shouldn't be asking).
     Otherwise returns one of:
       * ``not_attempted`` — no parent row.
+      * ``deferred`` — #1343 metadata placeholder (body_deferred=TRUE);
+        body fetch deferred to first user view (checked first).
       * ``parse_failed`` — parent body empty + explicit failure_reason
         other than the no-Item-1 marker.
       * ``no_item_1`` — parent body empty AND failure_reason indicates
@@ -1179,7 +1387,7 @@ def get_parse_status(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT body, last_failure_reason, next_retry_at, last_parsed_at
+            SELECT body, last_failure_reason, next_retry_at, last_parsed_at, body_deferred
             FROM instrument_business_summary
             WHERE instrument_id = %s
             """,
@@ -1194,6 +1402,15 @@ def get_parse_status(
     failure_reason = row[1]
     next_retry_at = row[2]
     last_parsed_at = row[3]
+    body_deferred = bool(row[4])
+
+    if body_deferred:
+        # #1343 — metadata seeded at bootstrap, body fetch deferred to
+        # first view. Checked BEFORE the body-empty failure branches: a
+        # deferred row has body='' + failure_reason NULL, which would
+        # otherwise misclassify as parse_failed. The business panel's
+        # lazy fill fetches the body on first access.
+        return ParseStatus(state="deferred", last_attempted_at=last_parsed_at)
 
     if body:
         # Body extracted but the splitter hasn't written sections yet —
@@ -1502,6 +1719,11 @@ def bootstrap_business_summaries(
     # This is also what repairs an active-but-delinquent filer (latest 10-K
     # >13mo) skipped by the bounded first-install run — within ≤7 days.
     min_filing_date = bootstrap_filings_recency_floor() if progress_ctx is not None else None
+    # #1343 — under an orchestrated bootstrap, seed metadata-only deferred
+    # placeholders (no body fetch). The weekly safety-net / manual POST /
+    # post-outage catch-up (progress_ctx None) keep the eager fetch+parse
+    # path that fills bodies for new / superseding filings.
+    metadata_only = progress_ctx is not None
     if progress_ctx is not None:
         fingerprint = (
             f"chunk_limit={chunk_limit};"
@@ -1510,7 +1732,8 @@ def bootstrap_business_summaries(
             f"distinct_on=instrument_id;"
             f"ordering=filing_date_desc,filing_event_id_desc;"
             f"url_filter=true;"
-            f"pending_predicate_v2=bs_null_OR_acn_diff_OR_retry_due_OR_(tables_null_AND_quarantine_elapsed);"
+            f"pending_predicate_v3=bs_null_OR_acn_diff_OR_(not_deferred_AND_(retry_due_OR_(tables_null_AND_quarantine_elapsed)));"
+            f"metadata_only={str(metadata_only).lower()};"
             f"min_filing_date={min_filing_date.isoformat() if min_filing_date is not None else 'none'}"
         )
         set_stage_target(
@@ -1529,6 +1752,7 @@ def bootstrap_business_summaries(
             prefetch_urls=prefetch_urls,
             prefetch_user_agent=prefetch_user_agent,
             min_filing_date=min_filing_date,
+            metadata_only=metadata_only,
         )
         total_scanned += chunk.filings_scanned
         total_inserted += chunk.rows_inserted
@@ -1625,8 +1849,14 @@ def ingest_business_summaries(
     prefetch_urls: bool = False,
     prefetch_user_agent: str | None = None,
     min_filing_date: date | None = None,
+    metadata_only: bool = False,
 ) -> IngestResult:
     """Scan 10-K filings, fetch primary doc, extract Item 1, upsert.
+
+    ``metadata_only`` (#1343) — bootstrap path: seed a deferred
+    placeholder per candidate (``body_deferred=TRUE``, no HTTP, no
+    sections) instead of fetching. Bodies fill lazily on first view.
+    The steady-state / weekly path leaves this False (eager fetch).
 
     Candidate selector (shape addresses Codex #428 findings, extended
     in #533 with backoff/quarantine, in #560 with tables_json
@@ -1690,21 +1920,33 @@ def ingest_business_summaries(
                    ON bs.instrument_id = lpi.instrument_id
             WHERE bs.instrument_id IS NULL
                OR bs.source_accession <> lpi.provider_filing_id
-               OR (bs.next_retry_at IS NOT NULL AND bs.next_retry_at <= NOW())
                OR (
-                   -- #560 backfill: re-select parent rows whose child
-                   -- sections still have tables_json IS NULL (pre-075
-                   -- ingest). AND-guarded by the quarantine clock so
-                   -- a repeatedly-failing reparse doesn't bypass
-                   -- exponential backoff (#533) and re-fetch on every
-                   -- ingest pass.
-                   (bs.next_retry_at IS NULL OR bs.next_retry_at <= NOW())
-                   AND EXISTS (
-                       SELECT 1
-                       FROM instrument_business_summary_sections s
-                       WHERE s.instrument_id = bs.instrument_id
-                         AND s.source_accession = bs.source_accession
-                         AND s.tables_json IS NULL
+                   -- #1343 — the rework arms (retry-due, #560 tables_json
+                   -- backfill) MUST NOT re-select a deferred placeholder
+                   -- (body_deferred=TRUE). A deferred row is filled only
+                   -- by the lazy API on first view; the weekly safety-net
+                   -- must not eagerly fetch it. Supersession by a newer
+                   -- accession (arm 2 above) stays ungated — a fresh 10-K
+                   -- still triggers an eager fetch that clears the flag.
+                   bs.body_deferred = FALSE
+                   AND (
+                       (bs.next_retry_at IS NOT NULL AND bs.next_retry_at <= NOW())
+                       OR (
+                           -- #560 backfill: re-select parent rows whose child
+                           -- sections still have tables_json IS NULL (pre-075
+                           -- ingest). AND-guarded by the quarantine clock so
+                           -- a repeatedly-failing reparse doesn't bypass
+                           -- exponential backoff (#533) and re-fetch on every
+                           -- ingest pass.
+                           (bs.next_retry_at IS NULL OR bs.next_retry_at <= NOW())
+                           AND EXISTS (
+                               SELECT 1
+                               FROM instrument_business_summary_sections s
+                               WHERE s.instrument_id = bs.instrument_id
+                                 AND s.source_accession = bs.source_accession
+                                 AND s.tables_json IS NULL
+                           )
+                       )
                    )
                )
             ORDER BY lpi.filing_date DESC, lpi.filing_event_id DESC
@@ -1726,7 +1968,7 @@ def ingest_business_summaries(
     # then wrap the sync fetcher with a cache. Per-filing TCP+SSL
     # handshake overlaps with adjacent fetches, hiding latency on
     # large 10-K backfills without breaching the rate floor.
-    if prefetch_urls and candidates:
+    if prefetch_urls and candidates and not metadata_only:
         from app.services.sec_pipelined_fetcher import _CachedDocFetcher, prefetch_document_texts
 
         urls = [c[2] for c in candidates]
@@ -1735,6 +1977,21 @@ def ingest_business_summaries(
         fetcher = _CachedDocFetcher(fetcher, cache)  # type: ignore[assignment]
 
     for instrument_id, accession, url, filing_type, filing_date in candidates:
+        if metadata_only:
+            # #1343 — bootstrap metadata-only seed: record the deferred
+            # placeholder (no HTTP, no sections). Body fills lazily on
+            # first business-panel view. A fresh placeholder counts as
+            # inserted; an existing row (real or deferred) is a no-op via
+            # ON CONFLICT DO NOTHING.
+            if seed_business_summary_metadata(
+                conn,
+                instrument_id=instrument_id,
+                source_accession=accession,
+                filed_at=_filing_date_to_filed_at(filing_date),
+            ):
+                inserted += 1
+            conn.commit()
+            continue
         try:
             html = fetcher.fetch_document_text(url)
         except Exception as exc:

@@ -31,7 +31,7 @@ from typing import Literal, get_args
 import httpx
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
@@ -1159,6 +1159,7 @@ class EightKFilingModel(BaseModel):
     signature_title: str | None
     signature_date: date | None
     primary_document_url: str | None
+    body_deferred: bool = False
     items: list[EightKItemModel]
     exhibits: list[EightKExhibitModel]
 
@@ -1257,6 +1258,7 @@ def get_instrument_8k_filings(
                 signature_title=f.signature_title,
                 signature_date=f.signature_date,
                 primary_document_url=f.primary_document_url,
+                body_deferred=f.body_deferred,
                 items=[
                     EightKItemModel(
                         item_code=i.item_code,
@@ -1275,6 +1277,114 @@ def get_instrument_8k_filings(
                 ],
             )
             for f in filings
+        ],
+    )
+
+
+@router.get(
+    "/{symbol}/eight_k_filings/{accession_number}/body",
+    response_model=EightKFilingModel,
+)
+def get_instrument_8k_filing_body(
+    symbol: str,
+    accession_number: str,
+    response: Response,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> EightKFilingModel:
+    """Lazily fetch + return one 8-K filing's bodies + exhibits (#1343).
+
+    The events rail seeds 8-K metadata (item codes + dates) at bootstrap
+    with the body deferred. Opening a filing's detail calls this: if the
+    row is ``body_deferred``, fetch the primary document, parse, cache,
+    and return the now-complete filing; an already-fetched filing returns
+    immediately (idempotent). Side-effecting GET by design (#1343).
+
+    Error contract: a deterministic failure (404 / parse-miss) tombstones
+    and returns the (empty) filing with 200 so the FE renders an empty
+    state, not an error toast; a transient fetch error → 503.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.eight_k_events import fetch_eight_k_body_now, get_8k_filing
+
+    response.headers["Cache-Control"] = "no-store"
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    accession_clean = accession_number.strip()
+    if not accession_clean:
+        raise HTTPException(status_code=400, detail="accession_number is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+    # Scope the accession to THIS instrument via the filing_events bridge
+    # so a URL-manipulated cross-issuer accession can't be fetched or
+    # returned (Codex ckpt2). 404 if the accession isn't this issuer's 8-K.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM filing_events WHERE provider = 'sec' "
+            "AND provider_filing_id = %s AND instrument_id = %s "
+            "AND filing_type IN ('8-K', '8-K/A') LIMIT 1",
+            (accession_clean, instrument_id),
+        )
+        if cur.fetchone() is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"8-K filing {accession_clean} not found for {symbol}",
+            )
+
+    try:
+        with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+            fetch_eight_k_body_now(conn, provider, accession_number=accession_clean)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — transient fetch / network → 503
+        raise HTTPException(
+            status_code=503,
+            detail="8-K body temporarily unavailable; try again",
+        ) from exc
+
+    filing = get_8k_filing(conn, accession_number=accession_clean)
+    if filing is None:
+        raise HTTPException(status_code=404, detail=f"8-K filing {accession_clean} not found")
+    return EightKFilingModel(
+        accession_number=filing.accession_number,
+        document_type=filing.document_type,
+        is_amendment=filing.is_amendment,
+        date_of_report=filing.date_of_report,
+        reporting_party=filing.reporting_party,
+        signature_name=filing.signature_name,
+        signature_title=filing.signature_title,
+        signature_date=filing.signature_date,
+        primary_document_url=filing.primary_document_url,
+        body_deferred=filing.body_deferred,
+        items=[
+            EightKItemModel(
+                item_code=i.item_code,
+                item_label=i.item_label,
+                severity=i.severity,
+                body=i.body,
+            )
+            for i in filing.items
+        ],
+        exhibits=[
+            EightKExhibitModel(
+                exhibit_number=e.exhibit_number,
+                description=e.description,
+            )
+            for e in filing.exhibits
         ],
     )
 
@@ -1332,7 +1442,7 @@ class BusinessSectionsParseStatus(BaseModel):
         children yet. Should be transient.
     """
 
-    state: Literal["not_attempted", "parse_failed", "no_item_1", "sections_pending"]
+    state: Literal["not_attempted", "parse_failed", "no_item_1", "sections_pending", "deferred"]
     failure_reason: str | None = None
     next_retry_at: datetime | None = None
     last_attempted_at: datetime | None = None
@@ -1369,6 +1479,7 @@ class BusinessSectionsResponse(BaseModel):
 )
 def get_instrument_business_sections(
     symbol: str,
+    response: Response,
     accession: str | None = Query(
         None,
         description="Specific 10-K accession; omit for the latest filing.",
@@ -1388,7 +1499,11 @@ def get_instrument_business_sections(
     specific historical filing. Returns 404 when no sections exist for
     the requested accession (#559).
     """
-    from app.services.business_summary import get_business_sections, get_parse_status
+    from app.services.business_summary import (
+        fetch_business_summary_body_now,
+        get_business_sections,
+        get_parse_status,
+    )
 
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -1416,6 +1531,34 @@ def get_instrument_business_sections(
             status_code=404,
             detail=f"no 10-K sections for {symbol} accession {accession}",
         )
+
+    # #1343 — lazy fill on first view: if the latest-filing path is empty
+    # because the 10-K Item 1 is a deferred bootstrap placeholder, fetch +
+    # cache it now (~0.5-1s first load; instant + cached after), then
+    # re-read. A transient fetch error → 503 (the row stays deferred, so a
+    # retry / next view re-attempts); a deterministic miss does NOT raise
+    # (exits deferred via the backoff path) and re-reads as parse_failed /
+    # no_item_1 below — a normal 200 empty-state.
+    if not sections and accession is None:
+        ps_pre = get_parse_status(conn, instrument_id=instrument_id)
+        if ps_pre is not None and ps_pre.state == "deferred":
+            from app.providers.implementations.sec_edgar import SecFilingsProvider
+
+            # Side-effecting fill — don't let an intermediary cache the
+            # transient deferred/empty state (Codex ckpt2).
+            response.headers["Cache-Control"] = "no-store"
+            try:
+                with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                    fetch_business_summary_body_now(conn, provider, instrument_id=instrument_id)
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001 — transient fetch / network → 503
+                raise HTTPException(
+                    status_code=503,
+                    detail="10-K Item 1 temporarily unavailable; try again",
+                ) from exc
+            sections = get_business_sections(conn, instrument_id=instrument_id, accession=accession)
+
     source_accession = sections[0].source_accession if sections else None
 
     # #648 — when the latest-filing path returns empty, classify why

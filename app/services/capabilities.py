@@ -189,7 +189,13 @@ _PRESENCE_QUERIES: dict[tuple[str, str], str] = {
         "AND fe.instrument_id = %s))"
     ),
     ("business_summary", "sec_10k_item1"): (
-        "SELECT EXISTS(SELECT 1 FROM instrument_business_summary b WHERE b.instrument_id = %s)"
+        # #1343 — a deferred placeholder (body_deferred=TRUE, body='') is
+        # NOT a usable Item 1 narrative; this capability means the body is
+        # actually present, so exclude deferred rows. (The 8-K capability
+        # above stays true while deferred — its rail renders from metadata
+        # alone; only the per-item body is deferred.)
+        "SELECT EXISTS(SELECT 1 FROM instrument_business_summary b "
+        "WHERE b.instrument_id = %s AND b.body_deferred = FALSE)"
     ),
     ("insider", "sec_form4"): (
         # Per-#1117 PR-B: insider_transactions is entity-level

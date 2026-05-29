@@ -607,18 +607,19 @@ def _upsert_filing_event(
         INSERT INTO filing_events (
             instrument_id, filing_date, filing_type,
             provider, provider_filing_id, source_url, primary_document_url,
-            raw_payload_json
+            report_date, raw_payload_json
         )
         VALUES (
             %(instrument_id)s, %(filing_date)s, %(filing_type)s,
             %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
-            %(raw_payload_json)s
+            %(report_date)s, %(raw_payload_json)s
         )
         ON CONFLICT (provider, provider_filing_id, instrument_id) DO UPDATE SET
             filing_date          = EXCLUDED.filing_date,
             filing_type          = EXCLUDED.filing_type,
             source_url           = EXCLUDED.source_url,
-            primary_document_url = EXCLUDED.primary_document_url
+            primary_document_url = EXCLUDED.primary_document_url,
+            report_date          = COALESCE(EXCLUDED.report_date, filing_events.report_date)
         """,
         {
             "instrument_id": instrument_id,
@@ -628,6 +629,10 @@ def _upsert_filing_event(
             "provider_filing_id": event.provider_filing_id,
             "source_url": event.primary_document_url,
             "primary_document_url": event.primary_document_url,
+            # #1343 — promote reportDate to a column (was raw_payload_json-only;
+            # a §903 structured-field-in-SQL gap). Feeds the 8-K metadata seed's
+            # date_of_report with no body fetch.
+            "report_date": event.period_of_report,
             "raw_payload_json": json.dumps(
                 {
                     "provider_filing_id": event.provider_filing_id,
@@ -677,18 +682,19 @@ def _upsert_filing(
         INSERT INTO filing_events (
             instrument_id, filing_date, filing_type,
             provider, provider_filing_id, source_url, primary_document_url,
-            raw_payload_json
+            report_date, raw_payload_json
         )
         VALUES (
             %(instrument_id)s, %(filing_date)s, %(filing_type)s,
             %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
-            %(raw_payload_json)s
+            %(report_date)s, %(raw_payload_json)s
         )
         ON CONFLICT (provider, provider_filing_id, instrument_id) DO UPDATE SET
             filing_date          = EXCLUDED.filing_date,
             filing_type          = EXCLUDED.filing_type,
             source_url           = EXCLUDED.source_url,
-            primary_document_url = EXCLUDED.primary_document_url
+            primary_document_url = EXCLUDED.primary_document_url,
+            report_date          = COALESCE(EXCLUDED.report_date, filing_events.report_date)
         """,
         {
             "instrument_id": instrument_id,
@@ -698,6 +704,9 @@ def _upsert_filing(
             "provider_filing_id": result.provider_filing_id,
             "source_url": result.primary_document_url,
             "primary_document_url": result.primary_document_url,
+            # #1343 — promote reportDate to a column (was raw_payload_json-only;
+            # a §903 structured-field-in-SQL gap).
+            "report_date": result.period_of_report,
             # Serialise the normalised metadata fields as the auditable payload.
             # Full document text is out of scope for v1; disk persistence of the
             # raw provider response is handled by _persist_raw in each provider.

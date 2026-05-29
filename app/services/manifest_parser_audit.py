@@ -66,6 +66,11 @@ class ManifestParserSourceRow:
     rows_parsed: int
     rows_failed: int
     rows_tombstoned: int
+    # #1343 — 'deferred' = body metadata seeded, fetch deferred to first
+    # user view (a terminal, non-stuck state). Surfaced so sec_10k / sec_8k
+    # rows that moved to deferred at bootstrap don't appear to "vanish"
+    # from the per-source counts. Deliberately NOT in total_stuck_no_parser.
+    rows_deferred: int
 
     @property
     def stuck_no_parser(self) -> int:
@@ -164,6 +169,7 @@ def compute_manifest_parser_audit(
                 rows_parsed=counts.get("parsed", 0),
                 rows_failed=counts.get("failed", 0),
                 rows_tombstoned=counts.get("tombstoned", 0),
+                rows_deferred=counts.get("deferred", 0),
             )
         )
 
