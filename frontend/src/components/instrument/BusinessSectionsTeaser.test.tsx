@@ -1,5 +1,5 @@
 import { describe, beforeEach, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
@@ -190,6 +190,34 @@ describe("BusinessSectionsTeaser", () => {
     expect(screen.getByText(/ACME Corp/)).toBeInTheDocument();
     expect(screen.getByText(/best widgets/)).toBeInTheDocument();
     expect(screen.getByText(/retail and institutional/)).toBeInTheDocument();
+  });
+
+  it("renders a loading skeleton (not parse-failed copy) for the deferred state (#1343)", async () => {
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
+      symbol: "GME",
+      source_accession: null,
+      cik: null,
+      sections: [],
+      parse_status: {
+        state: "deferred",
+        failure_reason: null,
+        next_retry_at: null,
+        last_attempted_at: null,
+      },
+    } as never);
+    render(
+      <MemoryRouter>
+        <BusinessSectionsTeaser symbol="GME" />
+      </MemoryRouter>,
+    );
+    // The deferred placeholder fills lazily server-side — show a loading
+    // affordance, never a parse-failure or "not parsed" empty state.
+    await waitFor(() => {
+      const statuses = screen.getAllByRole("status");
+      expect(statuses.length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText(/parse failed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not yet parsed/i)).not.toBeInTheDocument();
   });
 
   it("falls back to the legacy generic empty state when the API omits parse_status", async () => {

@@ -100,6 +100,14 @@ function ParseStatusEmptyState({ status }: ParseStatusEmptyStateProps): JSX.Elem
   // Distinct copy per state so the operator can tell at a glance
   // whether the empty panel needs investigation, will fix itself, or
   // is intrinsic to the filing.
+  if (status.state === "deferred") {
+    // #1343 — the body is a deferred bootstrap placeholder being filled
+    // lazily server-side (~0.5-1s on first view). The API normally fills
+    // it inline before returning, so this branch is the rare race where a
+    // still-deferred row surfaces. Show a loading affordance, never the
+    // alarming parse-failed copy.
+    return <SectionSkeleton rows={2} />;
+  }
   if (status.state === "no_item_1") {
     return (
       <EmptyState
