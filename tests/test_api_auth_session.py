@@ -222,10 +222,19 @@ class TestCombinedDepCookiePath:
         app.dependency_overrides.pop(get_conn, None)
 
     def test_valid_cookie_grants_access(self) -> None:
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
+
+        def _fake_get_conn(_request: object):
+            # The combined dep now resolves the session conn LAZILY by
+            # calling get_conn(request) directly (#1325), so FastAPI's
+            # dependency_overrides[get_conn] does NOT intercept it —
+            # patch the symbol at its use site instead. get_active_session
+            # is patched below, so the yielded conn is never really used.
+            yield MagicMock()
 
         now = datetime.now(UTC)
         with (
+            patch("app.api.auth.get_conn", _fake_get_conn),
             patch(
                 "app.api.auth.get_active_session",
                 return_value=SessionRow(

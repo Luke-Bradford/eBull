@@ -239,3 +239,53 @@ class TestAuthGate:
             mock_settings.session_idle_timeout_minutes = 60
             resp = client.get("/system/postgres-health")
         assert resp.status_code == 401
+
+
+class TestDbDownReturns503:
+    """#1325 / #1217: with the real auth dependency active and a valid
+    bearer token, a DB-down ``/system/postgres-health`` returns 503 —
+    NOT 401. Proves the auth dep no longer eagerly resolves get_conn,
+    so a valid-token operator request reaches the handler (which then
+    surfaces the genuine DB-unavailable 503) instead of being masked as
+    an auth failure.
+
+    Note: no ``get_conn`` override is installed here (unlike
+    ``TestAuthGate`` above) — the whole point of the fix is that the
+    auth dep no longer drags ``get_conn`` into FastAPI's signature
+    resolution, so the bearer path needs no DB at all.
+    """
+
+    _VALID_TOKEN = "test-operator-token-with-32-chars"
+
+    def setup_method(self) -> None:
+        # Track presence separately (prevention-log #234: don't use the
+        # value as a presence sentinel). Capture via subscript only when
+        # present, so the stored value is non-Optional.
+        self._had = require_session_or_service_token in app.dependency_overrides
+        if self._had:
+            self._prior = app.dependency_overrides[require_session_or_service_token]
+        app.dependency_overrides.pop(require_session_or_service_token, None)
+
+    def teardown_method(self) -> None:
+        # Restore unconditionally when the key was present (#234).
+        if self._had:
+            app.dependency_overrides[require_session_or_service_token] = self._prior
+        else:
+            app.dependency_overrides.pop(require_session_or_service_token, None)
+
+    def test_valid_bearer_db_down_returns_503_not_401(self) -> None:
+        with (
+            patch("app.api.auth.settings") as mock_settings,
+            patch(
+                "app.services.postgres_health.psycopg.connect",
+                side_effect=psycopg.OperationalError("connection refused"),
+            ),
+        ):
+            mock_settings.service_token = self._VALID_TOKEN
+            mock_settings.session_cookie_name = "ebull_session"
+            mock_settings.session_idle_timeout_minutes = 60
+            resp = client.get(
+                "/system/postgres-health",
+                headers={"Authorization": f"Bearer {self._VALID_TOKEN}"},
+            )
+        assert resp.status_code == 503, resp.text
