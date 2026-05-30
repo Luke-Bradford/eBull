@@ -57,4 +57,8 @@ if [[ "$status" -ne 0 ]]; then
   exit 1
 fi
 
-echo "==> check_ci_mirrors_prepush: parity OK ($(printf '%s\n' "$hook_set" | grep -c .) lints in both)."
+# `grep -c .` returns exit 1 when the count is 0; `|| true` keeps the
+# success-path echo from tripping `set -e` if the lint set is ever empty
+# (it counts correctly — 0 — which `wc -l` would not, since printf emits
+# a trailing newline). Review NITPICK PR #1391.
+echo "==> check_ci_mirrors_prepush: parity OK ($(printf '%s\n' "$hook_set" | grep -c . || true) lints in both)."
