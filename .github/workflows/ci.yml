@@ -73,6 +73,13 @@ jobs:
       - name: INSERT INTO instruments lint
         run: bash scripts/check_instruments_inserts.sh
 
+      - name: INSERT INTO external_identifiers lint (#1173)
+        # Every INSERT INTO external_identifiers must list is_primary
+        # (readers filter on it to pick the canonical row). Mirrors the
+        # is_tradable guard; ALLOW_LIST escape hatch for intentional-
+        # DEFAULT sites lives in the script.
+        run: bash scripts/check_external_identifiers_inserts.sh
+
       - name: Form 4 retention cap lint
         run: bash scripts/check_form4_retention.sh
 

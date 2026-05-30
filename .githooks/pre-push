@@ -57,6 +57,14 @@ bash scripts/check_shellcheck.sh
 echo "==> Pre-push gate: INSERT INTO instruments lint"
 bash scripts/check_instruments_inserts.sh
 
+# #1173 — every INSERT INTO external_identifiers must list is_primary in
+# its column list (or sit on the script's ALLOW_LIST with a reason).
+# Readers filter on is_primary to pick the canonical (provider,
+# identifier) row; an omitting writer couples correctness to the column
+# DEFAULT (PR #1172 BLOCKING + prevention-log). ~50ms.
+echo "==> Pre-push gate: INSERT INTO external_identifiers lint"
+bash scripts/check_external_identifiers_inserts.sh
+
 # #1233 §4.3 PR4 — every Form 4 ingest chokepoint must honour the 3y
 # retention cap (legacy SQL `%(retention_cutoff)s` bindings, manifest-
 # worker pre-fetch gate, bulk-dataset per-loop gates, sync_insiders
