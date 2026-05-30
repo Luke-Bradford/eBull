@@ -2,9 +2,9 @@
 
 Invariants:
 
-* I1 — the helper file must contain EXACTLY 10
+* I1 — the helper file must contain EXACTLY 14
   ``cur.execute("SET LOCAL jit = off")`` statements (one per refresh
-  helper transaction).
+  helper transaction — 7 single + 7 batch).
 * I2 — every ``with conn.transaction(), conn.cursor() as cur:`` opener
   must be IMMEDIATELY followed by the jit=off statement (allowing only
   blank / comment lines in between, and stopping at the first
@@ -42,27 +42,32 @@ def _good_block(name: str) -> str:
     )
 
 
-def _ten_good_helpers() -> str:
-    return "\n".join(_good_block(f"refresh_helper_{i}") for i in range(10))
+# Must match EXPECTED_COUNT in check_jit_off_in_refresh_helpers.sh
+# (7 single + 7 batch refresh helpers — #1345 PR-A).
+_HELPER_COUNT = 14
+
+
+def _all_good_helpers() -> str:
+    return "\n".join(_good_block(f"refresh_helper_{i}") for i in range(_HELPER_COUNT))
 
 
 def test_real_helper_file_passes() -> None:
     """The shipped app/services/ownership_observations.py passes both gates."""
     result = _run()
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "10/10 helper transactions have jit=off" in result.stdout
+    assert f"{_HELPER_COUNT}/{_HELPER_COUNT} helper transactions have jit=off" in result.stdout
 
 
-def test_synthetic_ten_good_blocks_pass(tmp_path: Path) -> None:
+def test_synthetic_all_good_blocks_pass(tmp_path: Path) -> None:
     fixture = tmp_path / "synthetic.py"
-    fixture.write_text(_ten_good_helpers())
+    fixture.write_text(_all_good_helpers())
     result = _run(fixture)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_i1_too_few_jit_off_statements_fails(tmp_path: Path) -> None:
-    """9 jit=off lines (one helper missing) → I1 fail."""
-    body = _ten_good_helpers()
+    """One helper missing its jit=off line → I1 fail."""
+    body = _all_good_helpers()
     # Drop ONE jit=off line.
     body = body.replace(
         '        cur.execute("SET LOCAL jit = off")\n',
@@ -74,25 +79,25 @@ def test_i1_too_few_jit_off_statements_fails(tmp_path: Path) -> None:
     result = _run(fixture)
     assert result.returncode != 0
     assert "FAIL (I1)" in result.stderr
-    assert "found 9" in result.stderr
+    assert f"found {_HELPER_COUNT - 1}" in result.stderr
 
 
 def test_i1_extra_jit_off_statements_fails(tmp_path: Path) -> None:
-    """11 jit=off lines → I1 fail (extra means unrelated SQL drift)."""
-    body = _ten_good_helpers()
+    """An extra jit=off line → I1 fail (extra means unrelated SQL drift)."""
+    body = _all_good_helpers()
     body += '        cur.execute("SET LOCAL jit = off")\n'  # spurious extra
     fixture = tmp_path / "synthetic.py"
     fixture.write_text(body)
     result = _run(fixture)
     assert result.returncode != 0
     assert "FAIL (I1)" in result.stderr
-    assert "found 11" in result.stderr
+    assert f"found {_HELPER_COUNT + 1}" in result.stderr
 
 
 def test_i2_jit_off_not_first_executable_fails(tmp_path: Path) -> None:
     """jit=off must precede the first cur.execute(advisory_lock)."""
     body = ""
-    for i in range(10):
+    for i in range(_HELPER_COUNT):
         body += (
             f"def refresh_helper_{i}(conn, *, instrument_id):\n"
             "    with conn.transaction(), conn.cursor() as cur:\n"
@@ -112,7 +117,7 @@ def test_i2_jit_off_not_first_executable_fails(tmp_path: Path) -> None:
 def test_i2_allows_comment_lines_before_jit_off(tmp_path: Path) -> None:
     """A leading comment line inside the block is fine; jit=off counts as first executable."""
     body = ""
-    for i in range(10):
+    for i in range(_HELPER_COUNT):
         body += (
             f"def refresh_helper_{i}(conn, *, instrument_id):\n"
             "    with conn.transaction(), conn.cursor() as cur:\n"

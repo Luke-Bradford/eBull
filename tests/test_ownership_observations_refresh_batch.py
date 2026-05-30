@@ -23,10 +23,10 @@ Six pinned cases per batched helper:
    instrument into ``ownership_refresh_state`` with the matching
    category, mirroring the single-instrument helper.
 
-Three batched helpers covered (insiders / institutions / funds —
-matches the PR-4 scope; the other 4 categories keep the single-
-instrument path because nothing in the bulk orchestrator loops over
-them at scale).
+All SEVEN batched helpers covered (insiders / institutions / funds from
+PR-4; blockholders / treasury / def14a / esop added in #1345 PR-A so the
+sync + repair sweeps can route through the batch path). Case 5b adds an
+open-outer-tx deadlock variant (both sweep callers are non-autocommit).
 """
 
 from __future__ import annotations
@@ -81,6 +81,41 @@ BATCH_HELPERS: list[BatchHelperCase] = [
         "ownership_funds_observations",
         "funds",
     ),
+    # #1345 PR-A — the remaining 4 categories. Batch DISTINCT ON / ORDER BY
+    # / ON are instrument_id-prefixed; the equivalence test (case 1) is the
+    # guard against a missing prefix collapsing rows across instruments.
+    BatchHelperCase(
+        "blockholders",
+        lambda c, i: oo.refresh_blockholders_current(c, instrument_id=i),
+        lambda c, ids: oo.refresh_blockholders_current_batch(c, instrument_ids=ids),
+        "ownership_blockholders_current",
+        "ownership_blockholders_observations",
+        "blockholders",
+    ),
+    BatchHelperCase(
+        "treasury",
+        lambda c, i: oo.refresh_treasury_current(c, instrument_id=i),
+        lambda c, ids: oo.refresh_treasury_current_batch(c, instrument_ids=ids),
+        "ownership_treasury_current",
+        "ownership_treasury_observations",
+        "treasury",
+    ),
+    BatchHelperCase(
+        "def14a",
+        lambda c, i: oo.refresh_def14a_current(c, instrument_id=i),
+        lambda c, ids: oo.refresh_def14a_current_batch(c, instrument_ids=ids),
+        "ownership_def14a_current",
+        "ownership_def14a_observations",
+        "def14a",
+    ),
+    BatchHelperCase(
+        "esop",
+        lambda c, i: oo.refresh_esop_current(c, instrument_id=i),
+        lambda c, ids: oo.refresh_esop_current_batch(c, instrument_ids=ids),
+        "ownership_esop_current",
+        "ownership_esop_observations",
+        "esop",
+    ),
 ]
 
 
@@ -102,7 +137,7 @@ def _seed_one(conn, helper: BatchHelperCase, instrument_id: int, *, idx: int = 0
     """Insert one observation appropriate to the helper's natural key.
 
     Mirrors the seed helper in ``test_ownership_refresh_writer_merge.py``
-    but narrowed to the three categories PR-4 batches.
+    for all seven categories.
     """
     run_id = uuid4()
     doc_id = f"PR4-{helper.name}-{instrument_id}-{idx}"
@@ -178,6 +213,90 @@ def _seed_one(conn, helper: BatchHelperCase, instrument_id: int, *, idx: int = 0
             market_value_usd=Decimal("25000"),
             payoff_profile="Long",
             asset_category="EC",
+        )
+    elif helper.name == "blockholders":
+        # Natural key (reporter_cik, ownership_nature) stable per instrument
+        # so idx-varied seeds contend through DISTINCT ON; doc_id varies per
+        # idx so the observations ON CONFLICT key does not pre-collapse them.
+        oo.record_blockholder_observation(
+            conn,
+            instrument_id=instrument_id,
+            reporter_cik=f"{instrument_id:010d}",
+            reporter_name="Test Reporter",
+            ownership_nature="beneficial",
+            submission_type="SC 13G",
+            status_flag=None,
+            source="13g",
+            source_document_id=doc_id,
+            source_accession=None,
+            source_field=None,
+            source_url=None,
+            filed_at=filed,
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=run_id,
+            aggregate_amount_owned=Decimal("200"),
+            percent_of_class=Decimal("5.25"),
+        )
+    elif helper.name == "treasury":
+        # Single-PK (instrument_id); treasury_shares NOT NULL so the row
+        # survives the refresh filter. doc_id varies per idx.
+        oo.record_treasury_observation(
+            conn,
+            instrument_id=instrument_id,
+            source="xbrl_dei",
+            source_document_id=doc_id,
+            source_accession=None,
+            source_field=None,
+            source_url=None,
+            filed_at=filed,
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=run_id,
+            treasury_shares=Decimal("300"),
+        )
+    elif helper.name == "def14a":
+        # holder_role != 'esop', non-ESOP holder_name, shares NOT NULL →
+        # survives the 3-clause ESOP-exclusion filter (else the contracts
+        # would pass vacuously against an empty _current). holder_name
+        # stable per instrument so idx seeds contend through DISTINCT ON.
+        oo.record_def14a_observation(
+            conn,
+            instrument_id=instrument_id,
+            holder_name="Test Holder",
+            holder_role="principal",
+            ownership_nature="beneficial",
+            source="def14a",
+            source_document_id=doc_id,
+            source_accession=None,
+            source_field=None,
+            source_url=None,
+            filed_at=filed,
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=run_id,
+            shares=Decimal("400"),
+            percent_of_class=Decimal("3.5"),
+        )
+    elif helper.name == "esop":
+        # No ownership_nature / source params — fixed by schema CHECK.
+        # plan_name stable per instrument; shares > 0 (record-time guard).
+        oo.record_esop_observation(
+            conn,
+            instrument_id=instrument_id,
+            plan_name=f"Test ESOP {instrument_id}",
+            plan_trustee_name="Fidelity",
+            plan_trustee_cik=f"{instrument_id:010d}",
+            source_document_id=doc_id,
+            source_accession=None,
+            source_field=None,
+            source_url=None,
+            filed_at=filed,
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=run_id,
+            shares=Decimal("600"),
+            percent_of_class=Decimal("2.1"),
         )
     else:
         pytest.fail(f"unknown helper: {helper.name}")
@@ -364,6 +483,7 @@ def test_batch_not_matched_by_source_scope_clamped(conn, helper):
 # ----------------------------------------------------------------------
 # Case 5: deadlock safety under concurrent batches
 # ----------------------------------------------------------------------
+@pytest.mark.xdist_group("ownership_refresh_lock")
 @pytest.mark.parametrize("helper", BATCH_HELPERS, ids=lambda h: h.name)
 def test_batch_deadlock_safe_under_concurrent_overlap(conn, helper):
     """Two threads call the batched helper with overlapping instrument
@@ -425,6 +545,64 @@ def test_batch_deadlock_safe_under_concurrent_overlap(conn, helper):
 
     assert not ta.is_alive() and not tb.is_alive(), (
         "one or both worker threads still alive after 30s — likely deadlocked"
+    )
+    assert not errors, f"unexpected worker errors: {errors!r}"
+
+
+# ----------------------------------------------------------------------
+# Case 5b: deadlock safety when the batch runs inside an OPEN OUTER TX
+# (#1345 PR-A — committee/Codex). Both sweep callers are non-autocommit:
+# the batch helper's `with conn.transaction()` is then a SAVEPOINT and the
+# advisory xact-locks survive to the END of the outer tx, not the helper.
+# This is the case that could deadlock if locks were acquired per-chunk or
+# out of order. The whole-set single-pass ORDER BY lk acquire is what makes
+# it safe even when locks accumulate to outer-tx end.
+# ----------------------------------------------------------------------
+@pytest.mark.xdist_group("ownership_refresh_lock")
+@pytest.mark.parametrize("helper", BATCH_HELPERS, ids=lambda h: h.name)
+def test_batch_deadlock_safe_with_open_outer_transaction(conn, helper):
+    """Two threads, each holding an OPEN outer transaction, call the
+    batched helper with overlapping but differently-ordered id-sets.
+    Locks are held to the outer commit (savepoint semantics); the global
+    ORDER BY lk acquire still prevents a cross-worker cycle."""
+    ids = [1, 2, 3, 4, 5]
+    _insert_instruments(conn, ids)
+    for iid in ids:
+        _seed_one(conn, helper, iid, idx=0)
+    conn.commit()
+
+    url = test_database_url()
+    thread_a_ids = [1, 2, 3, 4, 5]
+    thread_b_ids = [5, 4, 3, 2, 1]
+    # Both workers reach the batch call with an already-open outer tx so
+    # the real contention (locks surviving to outer-tx end) is exercised.
+    barrier = threading.Barrier(2, timeout=30)
+    errors: list[BaseException] = []
+
+    def _worker(target_ids: list[int]) -> None:
+        try:
+            # Default (autocommit=False): the first execute opens an
+            # implicit top-level tx, so the helper's with-transaction is a
+            # SAVEPOINT and its advisory locks live until this block commits.
+            with psycopg.connect(url) as worker_conn:
+                with worker_conn.cursor() as cur:
+                    cur.execute("SELECT 1")  # open the outer tx
+                barrier.wait()
+                helper.batch_fn(worker_conn, target_ids)
+                worker_conn.commit()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    ta = threading.Thread(target=_worker, args=(thread_a_ids,))
+    tb = threading.Thread(target=_worker, args=(thread_b_ids,))
+    ta.start()
+    tb.start()
+    ta.join(timeout=30)
+    tb.join(timeout=30)
+
+    assert not ta.is_alive() and not tb.is_alive(), (
+        "one or both worker threads still alive after 30s — likely deadlocked "
+        "under open-outer-tx (advisory locks held to outer commit)"
     )
     assert not errors, f"unexpected worker errors: {errors!r}"
 

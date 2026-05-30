@@ -2161,3 +2161,461 @@ def refresh_funds_current_batch(
             rows,
         )
     return len(ids)
+
+
+def refresh_blockholders_current_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_ids: Iterable[int],
+) -> int:
+    """Batched form of :func:`refresh_blockholders_current`.
+
+    See :func:`refresh_insiders_current_batch` for the design contract.
+    DISTINCT ON / ORDER BY / ON are prepended with ``instrument_id`` (the
+    per-instrument helper omits it as partition-of-one — #1345 PR-A)."""
+    ids = _normalise_instrument_ids(instrument_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(lk)
+              FROM (
+                SELECT (hashtextextended('refresh_blockholders_current', 0) # iid::bigint) AS lk
+                  FROM unnest(%(ids)s::bigint[]) AS iid
+                 ORDER BY lk
+              ) AS ordered_locks
+            """,
+            {"ids": ids},
+        )
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(ingested_at)
+              FROM ownership_blockholders_observations
+             WHERE instrument_id = ANY(%(ids)s::bigint[])
+             GROUP BY instrument_id
+            """,
+            {"ids": ids},
+        )
+        watermarks: dict[int, datetime | None] = {int(r[0]): r[1] for r in cur.fetchall()}
+        cur.execute(
+            """
+            MERGE INTO ownership_blockholders_current AS tgt
+            USING (
+                SELECT DISTINCT ON (instrument_id, reporter_cik, ownership_nature)
+                    instrument_id, reporter_cik, reporter_name, ownership_nature,
+                    submission_type, status_flag,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    aggregate_amount_owned, percent_of_class
+                FROM ownership_blockholders_observations
+                WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
+                ORDER BY
+                    instrument_id,
+                    reporter_cik,
+                    ownership_nature,
+                    filed_at DESC,
+                    period_end DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = src.instrument_id
+               AND tgt.reporter_cik = src.reporter_cik
+               AND tgt.ownership_nature = src.ownership_nature
+            WHEN MATCHED AND (
+                tgt.reporter_name, tgt.submission_type, tgt.status_flag,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.aggregate_amount_owned, tgt.percent_of_class
+            ) IS DISTINCT FROM (
+                src.reporter_name, src.submission_type, src.status_flag,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.aggregate_amount_owned, src.percent_of_class
+            ) THEN UPDATE SET
+                reporter_name        = src.reporter_name,
+                submission_type      = src.submission_type,
+                status_flag          = src.status_flag,
+                source               = src.source,
+                source_document_id   = src.source_document_id,
+                source_accession     = src.source_accession,
+                source_url           = src.source_url,
+                filed_at             = src.filed_at,
+                period_start         = src.period_start,
+                period_end           = src.period_end,
+                aggregate_amount_owned = src.aggregate_amount_owned,
+                percent_of_class     = src.percent_of_class,
+                refreshed_at         = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, reporter_cik, reporter_name, ownership_nature,
+                submission_type, status_flag,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                aggregate_amount_owned, percent_of_class
+            ) VALUES (
+                src.instrument_id, src.reporter_cik, src.reporter_name, src.ownership_nature,
+                src.submission_type, src.status_flag,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.aggregate_amount_owned, src.percent_of_class
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE
+            """,
+            {"ids": ids},
+        )
+        rows = [(iid, watermarks.get(iid)) for iid in ids]
+        cur.executemany(
+            """
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%s, 'blockholders', %s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
+            """,
+            rows,
+        )
+    return len(ids)
+
+
+def refresh_treasury_current_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_ids: Iterable[int],
+) -> int:
+    """Batched form of :func:`refresh_treasury_current`.
+
+    See :func:`refresh_insiders_current_batch` for the design contract.
+    Single-column PK ``(instrument_id)`` — DISTINCT ON already keys on
+    ``instrument_id`` and the ON clause is the ``tgt.instrument_id =
+    src.instrument_id`` equi-join (lint D1=0). ``treasury_shares IS NOT
+    NULL`` filter preserved verbatim."""
+    ids = _normalise_instrument_ids(instrument_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(lk)
+              FROM (
+                SELECT (hashtextextended('refresh_treasury_current', 0) # iid::bigint) AS lk
+                  FROM unnest(%(ids)s::bigint[]) AS iid
+                 ORDER BY lk
+              ) AS ordered_locks
+            """,
+            {"ids": ids},
+        )
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(ingested_at)
+              FROM ownership_treasury_observations
+             WHERE instrument_id = ANY(%(ids)s::bigint[])
+             GROUP BY instrument_id
+            """,
+            {"ids": ids},
+        )
+        watermarks: dict[int, datetime | None] = {int(r[0]): r[1] for r in cur.fetchall()}
+        cur.execute(
+            """
+            MERGE INTO ownership_treasury_current AS tgt
+            USING (
+                SELECT DISTINCT ON (instrument_id)
+                    instrument_id, ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end, treasury_shares
+                FROM ownership_treasury_observations
+                WHERE instrument_id = ANY(%(ids)s::bigint[])
+                  AND known_to IS NULL
+                  AND treasury_shares IS NOT NULL
+                ORDER BY
+                    instrument_id,
+                    period_end DESC,
+                    filed_at DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = src.instrument_id
+            WHEN MATCHED AND (
+                tgt.ownership_nature,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.treasury_shares
+            ) IS DISTINCT FROM (
+                src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.treasury_shares
+            ) THEN UPDATE SET
+                ownership_nature   = src.ownership_nature,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                treasury_shares    = src.treasury_shares,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end, treasury_shares
+            ) VALUES (
+                src.instrument_id, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end, src.treasury_shares
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE
+            """,
+            {"ids": ids},
+        )
+        rows = [(iid, watermarks.get(iid)) for iid in ids]
+        cur.executemany(
+            """
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%s, 'treasury', %s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
+            """,
+            rows,
+        )
+    return len(ids)
+
+
+def refresh_def14a_current_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_ids: Iterable[int],
+) -> int:
+    """Batched form of :func:`refresh_def14a_current`.
+
+    See :func:`refresh_insiders_current_batch` for the design contract.
+    Carries the 3-clause ESOP-exclusion filter verbatim (shares NOT NULL
+    + holder_role != 'esop' + holder_name !~* regex) with the
+    ``%(esop_regex)s`` named placeholder coexisting with the ``%(ids)s``
+    array — psycopg3 named style throughout, never mixed with positional
+    (#843 double-count guard; #1345 PR-A)."""
+    ids = _normalise_instrument_ids(instrument_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(lk)
+              FROM (
+                SELECT (hashtextextended('refresh_def14a_current', 0) # iid::bigint) AS lk
+                  FROM unnest(%(ids)s::bigint[]) AS iid
+                 ORDER BY lk
+              ) AS ordered_locks
+            """,
+            {"ids": ids},
+        )
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(ingested_at)
+              FROM ownership_def14a_observations
+             WHERE instrument_id = ANY(%(ids)s::bigint[])
+             GROUP BY instrument_id
+            """,
+            {"ids": ids},
+        )
+        watermarks: dict[int, datetime | None] = {int(r[0]): r[1] for r in cur.fetchall()}
+        cur.execute(
+            """
+            MERGE INTO ownership_def14a_current AS tgt
+            USING (
+                SELECT DISTINCT ON (instrument_id, holder_name_key, ownership_nature)
+                    instrument_id, holder_name, holder_name_key, holder_role, ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    shares, percent_of_class
+                FROM ownership_def14a_observations
+                WHERE instrument_id = ANY(%(ids)s::bigint[])
+                  AND known_to IS NULL
+                  AND shares IS NOT NULL
+                  AND holder_role IS DISTINCT FROM 'esop'
+                  AND holder_name !~* %(esop_regex)s
+                ORDER BY
+                    instrument_id,
+                    holder_name_key,
+                    ownership_nature,
+                    period_end DESC,
+                    filed_at DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = src.instrument_id
+               AND tgt.holder_name_key = src.holder_name_key
+               AND tgt.ownership_nature = src.ownership_nature
+            WHEN MATCHED AND (
+                tgt.holder_name, tgt.holder_role,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares, tgt.percent_of_class
+            ) IS DISTINCT FROM (
+                src.holder_name, src.holder_role,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.percent_of_class
+            ) THEN UPDATE SET
+                holder_name        = src.holder_name,
+                holder_role        = src.holder_role,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                percent_of_class   = src.percent_of_class,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, holder_name, holder_name_key, holder_role, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, percent_of_class
+            ) VALUES (
+                src.instrument_id, src.holder_name, src.holder_name_key, src.holder_role, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.percent_of_class
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE
+            """,
+            {"ids": ids, "esop_regex": _ESOP_HOLDER_NAME_SQL_REGEX},
+        )
+        rows = [(iid, watermarks.get(iid)) for iid in ids]
+        cur.executemany(
+            """
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%s, 'def14a', %s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
+            """,
+            rows,
+        )
+    return len(ids)
+
+
+def refresh_esop_current_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_ids: Iterable[int],
+) -> int:
+    """Batched form of :func:`refresh_esop_current`.
+
+    See :func:`refresh_insiders_current_batch` for the design contract.
+    DISTINCT ON / ON prepended with ``instrument_id`` — ``plan_name``
+    alone is not instrument-scoped, so two issuers sharing a generic
+    plan name would cross-match without the ``instrument_id`` equi-join
+    (#1345 PR-A)."""
+    ids = _normalise_instrument_ids(instrument_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL jit = off")  # #1346 — partition-pruned MERGE too small for JIT; 1.86× verified #1345
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(lk)
+              FROM (
+                SELECT (hashtextextended('refresh_esop_current', 0) # iid::bigint) AS lk
+                  FROM unnest(%(ids)s::bigint[]) AS iid
+                 ORDER BY lk
+              ) AS ordered_locks
+            """,
+            {"ids": ids},
+        )
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(ingested_at)
+              FROM ownership_esop_observations
+             WHERE instrument_id = ANY(%(ids)s::bigint[])
+             GROUP BY instrument_id
+            """,
+            {"ids": ids},
+        )
+        watermarks: dict[int, datetime | None] = {int(r[0]): r[1] for r in cur.fetchall()}
+        cur.execute(
+            """
+            MERGE INTO ownership_esop_current AS tgt
+            USING (
+                SELECT DISTINCT ON (instrument_id, plan_name)
+                    instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
+                    ownership_nature,
+                    source, source_document_id, source_accession, source_url,
+                    filed_at, period_start, period_end,
+                    shares, percent_of_class
+                FROM ownership_esop_observations
+                WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
+                ORDER BY
+                    instrument_id,
+                    plan_name,
+                    filed_at DESC,
+                    period_end DESC,
+                    source_document_id ASC
+            ) AS src
+            ON tgt.instrument_id = src.instrument_id
+               AND tgt.plan_name = src.plan_name
+            WHEN MATCHED AND (
+                tgt.plan_trustee_name, tgt.plan_trustee_cik, tgt.ownership_nature,
+                tgt.source, tgt.source_document_id, tgt.source_accession, tgt.source_url,
+                tgt.filed_at, tgt.period_start, tgt.period_end,
+                tgt.shares, tgt.percent_of_class
+            ) IS DISTINCT FROM (
+                src.plan_trustee_name, src.plan_trustee_cik, src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.percent_of_class
+            ) THEN UPDATE SET
+                plan_trustee_name  = src.plan_trustee_name,
+                plan_trustee_cik   = src.plan_trustee_cik,
+                ownership_nature   = src.ownership_nature,
+                source             = src.source,
+                source_document_id = src.source_document_id,
+                source_accession   = src.source_accession,
+                source_url         = src.source_url,
+                filed_at           = src.filed_at,
+                period_start       = src.period_start,
+                period_end         = src.period_end,
+                shares             = src.shares,
+                percent_of_class   = src.percent_of_class,
+                refreshed_at       = now()
+            WHEN NOT MATCHED BY TARGET THEN INSERT (
+                instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
+                ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, percent_of_class
+            ) VALUES (
+                src.instrument_id, src.plan_name, src.plan_trustee_name, src.plan_trustee_cik,
+                src.ownership_nature,
+                src.source, src.source_document_id, src.source_accession, src.source_url,
+                src.filed_at, src.period_start, src.period_end,
+                src.shares, src.percent_of_class
+            )
+            WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE
+            """,
+            {"ids": ids},
+        )
+        rows = [(iid, watermarks.get(iid)) for iid in ids]
+        cur.executemany(
+            """
+            INSERT INTO ownership_refresh_state (
+                instrument_id, category,
+                last_drained_observations_max_ingested_at, last_refresh_attempted_at
+            ) VALUES (%s, 'esop', %s, now())
+            ON CONFLICT (instrument_id, category) DO UPDATE SET
+                last_drained_observations_max_ingested_at = EXCLUDED.last_drained_observations_max_ingested_at,
+                last_refresh_attempted_at = EXCLUDED.last_refresh_attempted_at
+            """,
+            rows,
+        )
+    return len(ids)

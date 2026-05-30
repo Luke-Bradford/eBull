@@ -333,11 +333,16 @@ echo "Checking invariant H (repo-wide record_institution_observation source='13f
 # already-approved file would otherwise slip past a path-set check.
 # Each approved file currently has exactly ONE such call-site:
 #   * app/services/institutional_holdings.py (1)
-#   * app/services/sec_13f_dataset_ingest.py (1)
 #   * app/services/ownership_observations_sync.py (1)
-# Total = 3. Tighten the check to count ``record_institution_observation(``
-# call-sites that sit within ±20 lines of a ``source = '13f'`` /
-# ``source = "13f"`` kwarg match.
+# Total = 2. (#1382 fix: was 3 — sec_13f_dataset_ingest.py no longer
+# routes through the per-row ``record_institution_observation`` helper;
+# the bulk dataset path uses a bulk INSERT writer whose 8-quarter
+# retention gate is asserted independently by invariant E above
+# (``ingest_13f_dataset_archive`` short-circuits before write). So H's
+# per-row count is legitimately 2, not 3 — relaxing it does not weaken
+# coverage of the bulk path, which E owns.) Tighten the check to count
+# ``record_institution_observation(`` call-sites that sit within ±20
+# lines of a ``source = '13f'`` / ``source = "13f"`` kwarg match.
 total_writer_calls=0
 declare -a writer_call_files=()
 for cand in $(find app -type f -name '*.py' 2>/dev/null | grep -v 'app/services/ownership_observations.py' | sort -u); do
@@ -371,7 +376,7 @@ for cand in $(find app -type f -name '*.py' 2>/dev/null | grep -v 'app/services/
   fi
 done
 
-expected_writers=3
+expected_writers=2
 if (( total_writer_calls != expected_writers )); then
   fail "expected exactly ${expected_writers} call-sites of record_institution_observation(... source='13f'|\"13f\") in app/, found ${total_writer_calls}: ${writer_call_files[*]}. Update the lint guard if you intentionally added/removed a writer."
 fi
