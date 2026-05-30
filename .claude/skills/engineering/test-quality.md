@@ -150,3 +150,13 @@ Method names describe the scenario and expected outcome:
 - `test_insert` ✗
 
 No test longer than ~20 lines. If it's longer, the function under test probably does too much, or the test is testing too many things at once.
+
+## DB-down / 503 tests must pin the connection state, not just a service mock
+
+A test that claims to prove a "Postgres unreachable → 503" path must make the DB-down condition **deterministic and environment-independent** — not rely on whatever the shared `TestClient` happens to carry in CI.
+
+- If the endpoint **self-connects** (`psycopg.connect`, e.g. `/system/postgres-health`), patch that symbol → the 503 is independent of the pool. Say so in a comment so a reader doesn't assume the pool matters.
+- If the endpoint uses the pooled **`get_conn`** path (e.g. `/system/status`), force the failure via `app.dependency_overrides[get_conn]` (raise the 503, or yield from a dead pool), NOT by mutating `app.state.db_pool`. `app.state` is shared global state — mutating it leaks across tests (a `delattr`/restore in teardown silently broke an unrelated `/auth/me` test in PR #1394). `dependency_overrides` is the designed-for-tests seam; save/restore it tracking presence separately (prevention-log #234).
+- Cover BOTH `/system/*` flavors when both exist (self-connect handler + `Depends(get_conn)` handler) — they fail through different code paths. Unit-test `get_conn`'s own error→503 mapping separately.
+
+Origin: PR #1394 review (#1325/#1217). A bearer-path 503 test that only patched the service-layer `psycopg.connect` was flagged as potentially passing for the wrong reason; the first fix (mutating `app.state.db_pool`) then leaked across tests — `dependency_overrides` is the leak-free seam.

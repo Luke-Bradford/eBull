@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import psycopg
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.auth import require_session_or_service_token
@@ -239,3 +240,92 @@ class TestAuthGate:
             mock_settings.session_idle_timeout_minutes = 60
             resp = client.get("/system/postgres-health")
         assert resp.status_code == 401
+
+
+class TestDbDownReturns503:
+    """#1325 / #1217: with the real auth dependency active and a valid
+    bearer token, a DB-down ``/system/postgres-health`` returns 503 —
+    NOT 401. Proves the auth dep no longer eagerly resolves get_conn,
+    so a valid-token operator request reaches the handler (which then
+    surfaces the genuine DB-unavailable 503) instead of being masked as
+    an auth failure.
+
+    Note: no ``get_conn`` override is installed here (unlike
+    ``TestAuthGate`` above) — the whole point of the fix is that the
+    auth dep no longer drags ``get_conn`` into FastAPI's signature
+    resolution, so the bearer path needs no DB at all.
+    """
+
+    _VALID_TOKEN = "test-operator-token-with-32-chars"
+
+    def setup_method(self) -> None:
+        # Track presence separately (prevention-log #234: don't use the
+        # value as a presence sentinel). Capture via subscript only when
+        # present, so the stored value is non-Optional.
+        self._had = require_session_or_service_token in app.dependency_overrides
+        if self._had:
+            self._prior = app.dependency_overrides[require_session_or_service_token]
+        app.dependency_overrides.pop(require_session_or_service_token, None)
+        # Deterministic DB-down for get_conn-handler endpoints: override
+        # get_conn to raise the 503 it would produce on a dead pool. This
+        # is the designed-for-tests mechanism (no shared app.state
+        # mutation — review #1394 WARNING "bearer-path DB-down test
+        # portability"; mutating app.state.db_pool leaked across tests).
+        self._had_conn = get_conn in app.dependency_overrides
+        if self._had_conn:
+            self._prior_conn = app.dependency_overrides[get_conn]
+
+        def _conn_503() -> object:
+            raise HTTPException(status_code=503, detail="database temporarily unavailable")
+
+        app.dependency_overrides[get_conn] = _conn_503
+
+    def teardown_method(self) -> None:
+        # Restore unconditionally when the key was present (#234).
+        if self._had:
+            app.dependency_overrides[require_session_or_service_token] = self._prior
+        else:
+            app.dependency_overrides.pop(require_session_or_service_token, None)
+        if self._had_conn:
+            app.dependency_overrides[get_conn] = self._prior_conn
+        else:
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_valid_bearer_postgres_health_db_down_returns_503_not_401(self) -> None:
+        """postgres-health SELF-connects via psycopg.connect (patched to
+        fail) — it does NOT read the pool, so its 503 is independent of
+        app.state.db_pool. With a valid bearer the auth dep no longer
+        blocks, so the handler is reached and surfaces its own 503 (not
+        a 401)."""
+        with (
+            patch("app.api.auth.settings") as mock_settings,
+            patch(
+                "app.services.postgres_health.psycopg.connect",
+                side_effect=psycopg.OperationalError("connection refused"),
+            ),
+        ):
+            mock_settings.service_token = self._VALID_TOKEN
+            mock_settings.session_cookie_name = "ebull_session"
+            mock_settings.session_idle_timeout_minutes = 60
+            resp = client.get(
+                "/system/postgres-health",
+                headers={"Authorization": f"Bearer {self._VALID_TOKEN}"},
+            )
+        assert resp.status_code == 503, resp.text
+
+    def test_valid_bearer_system_status_db_down_returns_503_not_401(self) -> None:
+        """/system/status depends on get_conn (the pooled path). With
+        get_conn forced to its DB-down 503 (setup override) and a valid
+        bearer, the endpoint returns 503 — proving the get_conn-handler
+        /system/* endpoints degrade to 503, not 401/500, once the auth
+        dep stops blocking. (get_conn's own OperationalError->503 mapping
+        is unit-tested in test_api_auth_db_down.py.)"""
+        with patch("app.api.auth.settings") as mock_settings:
+            mock_settings.service_token = self._VALID_TOKEN
+            mock_settings.session_cookie_name = "ebull_session"
+            mock_settings.session_idle_timeout_minutes = 60
+            resp = client.get(
+                "/system/status",
+                headers={"Authorization": f"Bearer {self._VALID_TOKEN}"},
+            )
+        assert resp.status_code == 503, resp.text

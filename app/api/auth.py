@@ -125,7 +125,6 @@ def require_session(
 def require_session_or_service_token(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-    conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> None:
     """Accepts either a valid session cookie OR a valid bearer service token.
 
@@ -133,10 +132,24 @@ def require_session_or_service_token(
       1. If a bearer header is present, evaluate it. A present-but-wrong
          bearer is a hard 401 -- we do NOT silently fall back to the
          session path, because the caller has explicitly chosen which auth
-         mode they intended.
-      2. Otherwise, fall back to the session cookie path.
+         mode they intended. **The bearer path needs no DB.**
+      2. Otherwise, fall back to the session cookie path, which resolves
+         the cookie against the ``sessions`` table.
 
-    Both branches end in the same generic 401 on failure.
+    Both branches end in the same generic 401 on auth failure.
+
+    DB connection is resolved LAZILY inside the session branch, NOT via a
+    function-signature ``Depends(get_conn)`` (#1325 / #1217). FastAPI
+    evaluates signature sub-dependencies before the function body, so an
+    eager ``Depends(get_conn)`` would open a pooled connection on EVERY
+    request to a protected route -- including bearer-token requests that
+    need no DB, and including ``/system/*`` diagnostic endpoints whose
+    whole purpose is reporting DB health. With the DB down that eager
+    resolution surfaced as a 500/AttributeError (or masked the real
+    failure as a 401), forcing the operator to guess "auth wrong vs DB
+    down". Driving ``get_conn`` manually here means: bearer path skips the
+    DB entirely; the no-cookie path 401s before touching the DB; and a
+    DB-down session lookup surfaces ``get_conn``'s 503 verbatim.
     """
     if credentials is not None:
         expected = settings.service_token
@@ -152,11 +165,20 @@ def require_session_or_service_token(
     if not cookie:
         raise _unauthorized()
 
-    row = get_active_session(
-        conn,
-        session_id=cookie,
-        idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes),
-    )
+    # Lazy DB acquisition — only the session branch needs it. ``get_conn``
+    # is a generator dependency; drive it by hand so its DB-down -> 503
+    # mapping (and pool checkout / SELECT-1 validation) still applies. A
+    # 503 raised by ``next(...)`` propagates untouched.
+    conn_gen = get_conn(request)
+    conn = next(conn_gen)
+    try:
+        row = get_active_session(
+            conn,
+            session_id=cookie,
+            idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes),
+        )
+    finally:
+        conn_gen.close()
     if row is None:
         raise _unauthorized()
 

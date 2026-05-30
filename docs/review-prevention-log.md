@@ -253,6 +253,14 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Auth deps that resolve the DB conn before branching mask DB-down failure modes
+- First seen in: #1208 PR #1216 (Codex 2 HIGH, DEFERRED) → fixed in #1325 / #1217.
+- Symptom: `require_session_or_service_token` declared `conn: psycopg.Connection = Depends(get_conn)` in its signature. FastAPI resolves signature sub-dependencies BEFORE the function body, so a pooled connection was opened on EVERY request to a protected route — including bearer-token requests that need no DB, and the `/system/*` diagnostic endpoints whose whole purpose is reporting DB health. With the dev DB down, that eager resolution surfaced as a 500/`AttributeError` (pool absent) or masked the real failure as a 401 — so the operator hitting `/system/postgres-health` to diagnose "is PG down?" got an auth error instead of the meaningful 503.
+- Prevention: An auth/authorization dependency that can short-circuit (bearer-vs-session branch, public-vs-private, feature-flag) must NOT take `Depends(get_conn)` (or any DB-touching sub-dependency) in its signature — that resolves eagerly for every path. Acquire the connection LAZILY inside the branch that needs it. When driving a generator dependency (`get_conn`) by hand (`gen = get_conn(request); conn = next(gen); try: … finally: gen.close()`), remember the manual call BYPASSES `app.dependency_overrides` — tests must inject via `request.app.state.db_pool`, not the get_conn override. Pair with: `get_conn` maps every "no usable connection" failure (missing pool / `OperationalError` / `PoolTimeout`) to a fixed-phrase 503 so the DB-down signal is unambiguous.
+- Enforced in: `app/api/auth.py::require_session_or_service_token` (lazy conn) + `app/db/__init__.py::get_conn` (503 mapping) + `tests/test_api_auth_db_down.py` + `tests/test_api_postgres_health.py::TestDbDownReturns503`.
+
+---
+
 ### Frontend async render-surface isolation
 - First seen in: #89
 - Prevention: See `.claude/skills/frontend/async-data-loading.md`
