@@ -1,9 +1,16 @@
 """Operator-driven cleanup helper for leaked test databases.
 
-Drops every ``ebull_test_*`` database **except** ``ebull_test_template``
-on the configured Postgres cluster. Used after a crashed pytest run
-leaves a worker DB orphaned (the session-finish hook would normally
-clean up, but a SIGKILL'd worker skips it).
+Drops every ``ebull_test_*`` and ``ebull_mig*`` database **except**
+``ebull_test_template`` on the configured Postgres cluster. Used after a
+crashed pytest run leaves a worker DB (``ebull_test_*_gwN``) or a
+migration-replay temp DB (``ebull_mig*``, e.g. from
+``test_migration_156_partition_swap``) orphaned — the session-finish
+hook would normally clean up, but a SIGKILL'd worker skips it (#1401).
+
+Force-drops with ``WITH (FORCE)``, so it also clears INVALID
+(``datconnlimit = -2``) corpses left by an interrupted drop, which a
+plain ``DROP`` cannot evict. Run this when no pytest invocation is
+active (it makes no concurrent-run safety checks).
 
 Usage:
 
@@ -28,7 +35,15 @@ def main() -> int:
     skipped: list[str] = []
     with psycopg.connect(_admin_database_url(), autocommit=True) as admin:
         with admin.cursor() as cur:
-            cur.execute("SELECT datname FROM pg_database WHERE datname LIKE 'ebull_test_%' ORDER BY datname")
+            # ``_`` is a LIKE wildcard; escape it (ESCAPE '!') so the
+            # predicate matches the literal ``ebull_test_`` / ``ebull_mig``
+            # prefixes only.
+            cur.execute(
+                "SELECT datname FROM pg_database "
+                "WHERE datname LIKE 'ebull!_test!_%' ESCAPE '!' "
+                "   OR datname LIKE 'ebull!_mig%' ESCAPE '!' "
+                "ORDER BY datname"
+            )
             names = [row[0] for row in cur.fetchall()]
         for name in names:
             if name == TEMPLATE_DB_NAME:
