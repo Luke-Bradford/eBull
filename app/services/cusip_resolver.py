@@ -1247,6 +1247,52 @@ def _tombstone_bulk_rows_for_cusip(
         return int(cur.rowcount)
 
 
+def purge_unresolved_bulk_rows_outside_retention(
+    conn: psycopg.Connection[tuple],
+    *,
+    source: BulkCusipSource,
+    cutoff: date,
+    limit: int = 100_000,
+) -> int:
+    """Delete up to ``limit`` bulk-partition rows for ``source`` whose
+    ``period_end`` is older than ``cutoff`` (the per-source ingest
+    retention floor). Returns the number of rows deleted (#1349 PR1).
+
+    Such rows are markers for periods that **no pipeline will ever
+    materialise** — the bulk ingest rejects ``period_end < cutoff`` at
+    its retention gate (`sec_13f_dataset_ingest.py:621`; the N-PORT bulk
+    ingest applies the same floor) — so the observation is permanently
+    unrecoverable and the marker is pure dead weight. This period-based
+    predicate is the ONLY provably-safe cleanup: it does not depend on
+    the coarse ``(cusip, filer_cik, period_end, source)`` bulk-row grain,
+    which cannot prove redundancy against the fine-grained
+    ``ownership_institutions_observations`` /
+    ``ownership_funds_observations`` tables (spec
+    `docs/proposals/etl/1349-unresolved-13f-cusips-bloat.md` §2a).
+
+    **Single bounded pass.** ``ctid``-capped at ``limit`` *physical rows*
+    (not distinct CUSIPs — one high-fanout CUSIP must not blow the cap).
+    Does **not** commit: the caller owns the transaction (matches
+    :func:`sweep_unresolved_cusips_via_openfigi`). The caller loops +
+    commits per pass to drain a large backlog without one giant txn.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM unresolved_13f_cusips
+             WHERE ctid IN (
+                 SELECT ctid
+                   FROM unresolved_13f_cusips
+                  WHERE source = %(source)s
+                    AND period_end < %(cutoff)s
+                  LIMIT %(limit)s
+             )
+            """,
+            {"source": source, "cutoff": cutoff, "limit": limit},
+        )
+        return int(cur.rowcount)
+
+
 def sweep_unresolved_cusips_via_openfigi(
     conn: psycopg.Connection[tuple],
     *,

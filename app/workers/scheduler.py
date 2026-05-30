@@ -5043,6 +5043,42 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
                     )
             conn.commit()
 
+            # #1349 PR1 — drain bulk unresolved rows for periods outside
+            # the per-source retention floor. They are markers for
+            # periods no pipeline will re-materialise (the bulk ingest
+            # rejects period_end < cutoff at its retention gate), so they
+            # are pure dead weight. Period-based purge is the only
+            # grain-safe predicate (spec §2a). Bounded ctid passes,
+            # committed per pass so a large backlog drains without one
+            # giant txn. _MAX_PURGE_PASSES is the termination guarantee:
+            # the per-invocation matching set is finite, and even if a
+            # concurrent old-archive 13F ingest records fresh < cutoff
+            # markers (it captures the marker before its retention gate),
+            # the cap bounds total passes — the next cadenced run drains
+            # any residue.
+            from app.services.cusip_resolver import (
+                BulkCusipSource,
+                purge_unresolved_bulk_rows_outside_retention,
+            )
+            from app.services.institutional_holdings import thirteen_f_retention_cutoff
+            from app.services.n_port_ingest import n_port_retention_cutoff
+
+            _MAX_PURGE_PASSES: Final = 1000
+            purged_total = 0
+            purge_specs: tuple[tuple[BulkCusipSource, date], ...] = (
+                ("bulk_13f_dataset", thirteen_f_retention_cutoff()),
+                ("bulk_nport_dataset", n_port_retention_cutoff()),
+            )
+            for purge_source, purge_cutoff in purge_specs:
+                for _ in range(_MAX_PURGE_PASSES):
+                    deleted = purge_unresolved_bulk_rows_outside_retention(
+                        conn, source=purge_source, cutoff=purge_cutoff
+                    )
+                    conn.commit()
+                    purged_total += deleted
+                    if deleted == 0:
+                        break
+
         tracker.row_count = report.promoted
         logger.info(
             "cusip_resolver_post_bulk_sweep: candidates=%d resolved=%d promoted=%d "
@@ -5059,6 +5095,10 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
             coverage.ratio * 100,
             coverage_floor * 100,
             coverage.ratio >= coverage_floor,
+        )
+        logger.info(
+            "cusip_resolver_post_bulk_sweep: purged %d out-of-retention bulk unresolved rows (#1349)",
+            purged_total,
         )
 
 
