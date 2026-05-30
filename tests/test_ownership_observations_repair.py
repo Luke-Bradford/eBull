@@ -103,7 +103,15 @@ class TestRepairSweep:
         ebull_test_conn.commit()
         per_insider = next(c for c in stats.per_category if c.category == "ownership_insiders_current")
         assert per_insider.drifted_instruments == 1
-        assert per_insider.refreshed_rows == 2  # Alice + Bob
+        # #1345 PR-B: metric reconciled rows→instruments (batch MERGE can't
+        # cheaply count rows). One drifted instrument → 1 (was 2 = Alice+Bob
+        # _current rows). Both holders still land in _current; assert below.
+        assert per_insider.refreshed_instruments == 1
+        assert per_insider.failed_instruments == 0
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM ownership_insiders_current WHERE instrument_id = 1")
+            row = cur.fetchone()
+        assert row is not None and row[0] == 2  # Alice + Bob both materialised
 
         # 4. Second sweep is now a no-op (_current is current)
         stats2 = run_observations_repair_sweep(ebull_test_conn)

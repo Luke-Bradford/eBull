@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -1800,6 +1800,57 @@ def _normalise_instrument_ids(instrument_ids: Iterable[int]) -> list[int]:
     list rather than a set cannot inflate the lock-acquire count or
     feed duplicate src rows to MERGE."""
     return sorted({int(i) for i in instrument_ids})
+
+
+def refresh_current_with_batch_fallback(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_ids: Iterable[int],
+    refresh_batch_fn: Callable[..., int],
+    refresh_one_fn: Callable[..., int],
+) -> tuple[int, list[tuple[int, Exception]]]:
+    """Refresh ``_current`` for a whole instrument set via the batch
+    MERGE writer, falling back to the per-instrument writer on failure.
+
+    The batch MERGE is atomic — one poison instrument aborts all N. So
+    on any batch exception we retry per-instrument to (a) isolate the
+    poison id and (b) still refresh every healthy instrument. The
+    ``try/except`` is OUTSIDE ``refresh_batch_fn``'s own ``with
+    conn.transaction()`` (#1345 PR-A); when the batch raises, its
+    SAVEPOINT has already rolled back to before the helper and the
+    connection is usable for the fallback loop. (Both sweep callers run
+    on non-autocommit connections, so the batch's ``conn.transaction()``
+    is a SAVEPOINT and the outer sweep transaction survives the rollback
+    — Codex ckpt1 BLOCKING, #1345 spec §4.3.)
+
+    Returns ``(refreshed_count, failures)`` where ``refreshed_count`` is
+    the number of INSTRUMENTS refreshed (not ``_current`` rows — the
+    batch path cannot cheaply count rows) and ``failures`` is
+    ``[(instrument_id, exc), ...]`` for ids that failed even the
+    per-instrument fallback. Callers map ``failures`` to their own
+    operator-visible sink (sync → ``SyncSummary.orphans``; repair →
+    ``CategoryRepairStats.failed_instruments``)."""
+    ids = _normalise_instrument_ids(instrument_ids)
+    if not ids:
+        return 0, []
+    try:
+        refresh_batch_fn(conn, instrument_ids=ids)
+        return len(ids), []
+    except Exception:
+        logger.warning(
+            "batch refresh failed for %d instruments; falling back per-instrument",
+            len(ids),
+        )
+        n = 0
+        failures: list[tuple[int, Exception]] = []
+        for iid in ids:
+            try:
+                refresh_one_fn(conn, instrument_id=iid)
+                n += 1
+            except Exception as exc:
+                logger.exception("refresh failed instrument_id=%d", iid)
+                failures.append((iid, exc))
+        return n, failures
 
 
 def refresh_insiders_current_batch(
