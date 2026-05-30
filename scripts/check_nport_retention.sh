@@ -33,18 +33,28 @@
 #         ``record_fund_observation(`` call.
 #       - ``rows_skipped_retention`` field on ``NPortIngestResult`` +
 #         ≥ 1 increment.
-#  H. Repo-wide writer discovery — exactly 3 ``record_fund_observation(``
+#  H. Repo-wide writer discovery — exactly 2 ``record_fund_observation(``
 #     call-sites total across production *.py files under app/
-#     (excluding ownership_observations.py and tests). The guard
-#     sums per-file call-sites; a single file with 2 call-sites and a
-#     second file with 1 produces the same total as three files with
-#     1 each, by design — adding a NEW call-site (anywhere) trips the
-#     guard. (N-PORT's helper hardcodes ``source='nport'`` so there
-#     is no per-call ``source='nport'`` co-located marker as in PR6
-#     invariant H — plain call-site discovery suffices.)
-#  I. Repo-wide writer discovery — exactly 1 production *.py file
-#     under app/ contains ``INSERT INTO ownership_funds_observations
-#     (`` (note trailing column-list paren).
+#     (excluding ownership_observations.py and tests): the manifest-worker
+#     parser (``sec_n_port.py``) + the single-accession ingest
+#     (``n_port_ingest.py``). The guard sums per-file call-sites; adding a
+#     NEW per-row call-site (anywhere) trips the guard. (N-PORT's helper
+#     hardcodes ``source='nport'`` so there is no per-call ``source='nport'``
+#     co-located marker as in PR6 invariant H — plain call-site discovery
+#     suffices.) NOTE the bulk-dataset ingester
+#     (``sec_nport_dataset_ingest.py``) does NOT call the per-row helper;
+#     it writes via a direct bulk ``INSERT … SELECT FROM _stg_nport`` and is
+#     retention-gated independently by invariant F (the per-row
+#     ``period_end_early < retention_cutoff`` ``continue`` upstream of the
+#     staging table). Count relaxed 3→2 when that bulk path landed (#1387;
+#     same class as #1382's 13F-HR invariant H).
+#  I. Repo-wide writer discovery — exactly 2 production *.py files
+#     under app/ contain ``INSERT INTO ownership_funds_observations (``
+#     (note trailing column-list paren): the canonical per-row helper in
+#     ``ownership_observations.py`` AND the retention-gated bulk
+#     ``INSERT … SELECT`` in ``sec_nport_dataset_ingest.py`` (invariant F
+#     proves its gate). Count relaxed 1→2 when the bulk path landed
+#     (#1387).
 #
 # Exits non-zero on the first invariant violation. Wired into
 # ``.githooks/pre-push`` after ``check_13f_hr_retention.sh``.
@@ -308,7 +318,11 @@ for cand in $(find app -type f -name '*.py' 2>/dev/null | grep -v 'app/services/
   fi
 done
 
-expected_writers=3
+# 2: sec_n_port.py (manifest parser) + n_port_ingest.py (single-accession).
+# The bulk ingester sec_nport_dataset_ingest.py does NOT use the per-row
+# helper (direct bulk INSERT…SELECT, retention-gated by invariant F) — see
+# header note. Relaxed 3→2 with the bulk path (#1387; cf. #1382).
+expected_writers=2
 if (( total_writer_calls != expected_writers )); then
   fail "expected exactly ${expected_writers} call-sites of record_fund_observation( in app/, found ${total_writer_calls}: ${writer_call_files[*]}. Update the lint guard if you intentionally added/removed a writer."
 fi
@@ -322,7 +336,10 @@ total_insert_calls=$(find app -type f -name '*.py' 2>/dev/null -exec grep -cE "I
 insert_files=$(grep -lE "INSERT INTO ownership_funds_observations \(" \
   $(find app -type f -name '*.py' 2>/dev/null) 2>/dev/null | sort -u || true)
 
-expected_inserts=1
+# 2: ownership_observations.py (canonical per-row helper) +
+# sec_nport_dataset_ingest.py (retention-gated bulk INSERT…SELECT, proven by
+# invariant F). Relaxed 1→2 with the bulk path (#1387).
+expected_inserts=2
 if (( total_insert_calls != expected_inserts )); then
   fail "expected exactly ${expected_inserts} 'INSERT INTO ownership_funds_observations (' call-site in app/, found ${total_insert_calls} across files: ${insert_files}. Update the lint guard if you intentionally added/removed a writer."
 fi
