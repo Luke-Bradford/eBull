@@ -482,6 +482,15 @@ class TestProductionInvokerRegistry:
             # partition resolution; the OpenFIGI sweep runs only as
             # part of the bootstrap orchestrator's S13 dispatch.
             "cusip_resolver_post_bulk_sweep",
+            # #1233 Stream A PR-C2 (#1397) — bootstrap-only fundamentals
+            # derivation entrypoint dispatched by the orchestrator at
+            # stage 25 (``db_fundamentals_raw`` lane). Separately-registered
+            # job_name from the steady-state ``fundamentals_sync``
+            # SCHEDULED_JOB so the bootstrap dispatch lane and the
+            # scheduled ``db`` source coexist without tripping the
+            # lane-source cross-check at ``app/jobs/sources.py``. No
+            # cadence → on-demand/bootstrap-only, like its S13 sibling.
+            "fundamentals_sync_bootstrap",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "
