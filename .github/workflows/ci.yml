@@ -54,6 +54,68 @@ jobs:
         # so a push that bypasses the local hook still trips at CI.
         run: bash scripts/check_etl_source_docs.sh
 
+      # #1329 — mirror the remaining .githooks/pre-push chokepoint-lint
+      # scripts into CI. A `--no-verify` push of a chokepoint regression
+      # otherwise lands green at CI (this is how #1382 / #1387 drifted
+      # unnoticed). The full rationale for each guard lives in the
+      # matching pre-push hook comment; these steps are the CI mirror.
+      # Source-of-truth is the hook's script list, NOT the #1329 issue
+      # body (which predates check_jit_off_in_refresh_helpers.sh, #1346).
+      # All pure-shell over the repo tree — no DB / docker / Python.
+      - name: INSERT INTO instruments lint
+        run: bash scripts/check_instruments_inserts.sh
+
+      - name: Form 4 retention cap lint
+        run: bash scripts/check_form4_retention.sh
+
+      - name: filing_events retention cap lint
+        run: bash scripts/check_filing_events_retention.sh
+
+      - name: DEF 14A latest-N cap lint
+        run: bash scripts/check_def14a_cap.sh
+
+      - name: 13F-HR 8-quarter retention cap lint
+        run: bash scripts/check_13f_hr_retention.sh
+
+      - name: N-PORT 8-quarter retention cap lint
+        run: bash scripts/check_nport_retention.sh
+
+      - name: N-CSR 730d retention cap lint
+        run: bash scripts/check_n_csr_retention.sh
+
+      - name: N-CEN latest-only invariant lint
+        run: bash scripts/check_ncen_latest_only.sh
+
+      - name: business_summary latest-only invariant lint
+        run: bash scripts/check_business_summary_latest_only.sh
+
+      - name: bulk-ingest COPY pattern lint
+        run: bash scripts/check_bulk_ingest_copy_pattern.sh
+
+      - name: Form 5 retention cap lint
+        run: bash scripts/check_form5_retention.sh
+
+      - name: Form 3 latest-per-pair invariant lint
+        run: bash scripts/check_form3_latest_per_pair.sh
+
+      - name: 13D/G retention cap invariant lint
+        run: bash scripts/check_13dg_retention.sh
+
+      - name: ownership_*_current MERGE writer invariant lint
+        run: bash scripts/check_ownership_refresh_writer_pattern.sh
+
+      - name: jit=off in ownership refresh helpers lint (#1346)
+        run: bash scripts/check_jit_off_in_refresh_helpers.sh
+
+      - name: manifest-parser archive-URL agent-CIK guard lint
+        run: bash scripts/check_archive_url_agent_guard.sh
+
+      - name: pre-push <-> ci.yml lint parity (#1329)
+        # Self-enforcing mirror: fails if any `bash scripts/check_*.sh`
+        # runs in only one of .githooks/pre-push / this file. Stops the
+        # mirror from silently drifting the moment a new hook lint lands.
+        run: bash scripts/check_ci_mirrors_prepush.sh
+
       - name: Pre-push hook is executable
         # Hook is committed at .githooks/pre-push and wired via
         # ``git config core.hooksPath .githooks``. On Windows, a
