@@ -9,7 +9,14 @@ services:
     # sql/155_postgres_runtime_tuning.sql) need the container to actually
     # have memory available; default shm_size of 64MB starves PG17
     # parallel workers under load.
-    mem_limit: 4g
+    #
+    # Raised 4g→6g (#1395, 2026-05-30): with shared_buffers=2GB reserved, a 4g
+    # cap left too little headroom for WAL replay over the partitioned
+    # ownership tables — the kernel OOM-killer kept killing the startup
+    # process (signal 9) mid-recovery, so crash recovery never completed
+    # and the container crash-looped (RestartCount hit 12). 6g (host VM
+    # has ~8g) lets recovery finish.
+    mem_limit: 6g
     shm_size: 1g
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ebull}
