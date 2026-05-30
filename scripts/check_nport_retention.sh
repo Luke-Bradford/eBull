@@ -341,7 +341,7 @@ insert_files=$(grep -lE "INSERT INTO ownership_funds_observations \(" \
 # invariant F). Relaxed 1→2 with the bulk path (#1387).
 expected_inserts=2
 if (( total_insert_calls != expected_inserts )); then
-  fail "expected exactly ${expected_inserts} 'INSERT INTO ownership_funds_observations (' call-site in app/, found ${total_insert_calls} across files: ${insert_files}. Update the lint guard if you intentionally added/removed a writer."
+  fail "expected exactly ${expected_inserts} 'INSERT INTO ownership_funds_observations (' call-sites in app/, found ${total_insert_calls} across files: ${insert_files}. Update the lint guard if you intentionally added/removed a writer."
 fi
 
 # ======================================================================
