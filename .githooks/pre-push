@@ -210,6 +210,12 @@ bash scripts/check_caller_owned_tx.sh
 echo "==> Pre-push gate: ETL source-to-sink spec docs"
 bash scripts/check_etl_source_docs.sh
 
+# #1329 — parity guard: every chokepoint lint here MUST also run in
+# .github/workflows/ci.yml (and vice versa), so a --no-verify push
+# cannot dodge a lint that exists only in the hook. ~20ms.
+echo "==> Pre-push gate: pre-push <-> ci.yml lint parity"
+bash scripts/check_ci_mirrors_prepush.sh
+
 # Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
 # (no upstream yet, e.g. brand-new branch), assume worst-case: run the
 # full suite under xdist. The first push of a brand-new branch usually
