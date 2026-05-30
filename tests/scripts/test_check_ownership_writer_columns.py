@@ -64,11 +64,11 @@ def test_real_helper_passes(function_name: str) -> None:
     )
 
 
-def test_real_source_coverage_report_lists_all_10() -> None:
-    """Coverage report finds all 10 expected helpers + reports them PASS."""
+def test_real_source_coverage_report_lists_all_14() -> None:
+    """Coverage report finds all 14 expected helpers + reports them PASS."""
     result = _run(["--coverage-report", str(OWNERSHIP_OBSERVATIONS)])
     assert result.returncode == 0, result.stderr
-    assert "10 functions covered (expected 10)" in result.stdout
+    assert "14 functions covered (expected 14)" in result.stdout
 
 
 def test_coverage_report_exits_nonzero_when_any_helper_fails() -> None:
@@ -81,9 +81,9 @@ def test_coverage_report_exits_nonzero_when_any_helper_fails() -> None:
     failures, the shell audit would silently pass.
 
     Synthetic source: refresh_insiders_current has a dropped column from
-    UPDATE SET (I.a violation); other 9 helpers are stub `def NAME(): pass`
-    which also fail (no MERGE shape). All 10 are "found" → count line prints
-    "10 functions covered (expected 10)" → grep would still pass — but
+    UPDATE SET (I.a violation); other 13 helpers are stub `def NAME(): pass`
+    which also fail (no MERGE shape). All 14 are "found" → count line prints
+    "14 functions covered (expected 14)" → grep would still pass — but
     returncode MUST be 2.
     """
     synthetic_source = (
@@ -110,6 +110,10 @@ def test_coverage_report_exits_nonzero_when_any_helper_fails() -> None:
         "def refresh_insiders_current_batch(): pass\n"
         "def refresh_institutions_current_batch(): pass\n"
         "def refresh_funds_current_batch(): pass\n"
+        "def refresh_blockholders_current_batch(): pass\n"
+        "def refresh_treasury_current_batch(): pass\n"
+        "def refresh_def14a_current_batch(): pass\n"
+        "def refresh_esop_current_batch(): pass\n"
     )
     result = _run(["--coverage-report"], source_text=synthetic_source)
     # Audit MUST fail despite the count line printing
@@ -117,7 +121,7 @@ def test_coverage_report_exits_nonzero_when_any_helper_fails() -> None:
         f"coverage-report failed to exit non-zero on broken helpers.\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     # Count line still prints (this is the bug bot caught — grep would silently pass)
-    assert "10 functions covered (expected 10)" in result.stdout
+    assert "14 functions covered (expected 14)" in result.stdout
     # At least one FAIL marker present
     assert "[FAIL]" in result.stdout
 

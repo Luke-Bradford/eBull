@@ -14,7 +14,7 @@
 # Invariants:
 #
 #   I1. The helper file (app/services/ownership_observations.py) MUST
-#       contain EXACTLY 10 occurrences of the literal
+#       contain EXACTLY 14 occurrences of the literal
 #       `cur.execute("SET LOCAL jit = off")` — one per helper transaction:
 #         refresh_insiders_current
 #         refresh_institutions_current
@@ -26,6 +26,10 @@
 #         refresh_insiders_current_batch
 #         refresh_institutions_current_batch
 #         refresh_funds_current_batch
+#         refresh_blockholders_current_batch  (#1345 PR-A)
+#         refresh_treasury_current_batch      (#1345 PR-A)
+#         refresh_def14a_current_batch        (#1345 PR-A)
+#         refresh_esop_current_batch          (#1345 PR-A)
 #
 #   I2. Every `with conn.transaction(), conn.cursor() as cur:` block in
 #       the helper file MUST be IMMEDIATELY followed by the jit=off
@@ -46,7 +50,7 @@ if [[ ! -f "$HELPER_FILE" ]]; then
   exit 1
 fi
 
-EXPECTED_COUNT=10
+EXPECTED_COUNT=14
 
 # I1 — count of jit=off statements
 JIT_COUNT=$(grep -c '^[[:space:]]*cur\.execute("SET LOCAL jit = off")' "$HELPER_FILE" || true)
@@ -93,9 +97,9 @@ for idx, line in enumerate(lines):
             f"line {idx + 1}: `with conn.transaction(), conn.cursor() as cur:` block does not have `SET LOCAL jit = off` as the first executable statement"
         )
 
-if opener_count != 10:
+if opener_count != 14:
     print(
-        f"FAIL (I2): expected exactly 10 `with conn.transaction(), conn.cursor() as cur:` openers, found {opener_count}",
+        f"FAIL (I2): expected exactly 14 `with conn.transaction(), conn.cursor() as cur:` openers, found {opener_count}",
         file=sys.stderr,
     )
     sys.exit(1)

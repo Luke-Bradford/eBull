@@ -102,6 +102,36 @@ extract_helper_body() {
   ' "$FILE_OBS"
 }
 
+# Extract the body of an EXACT function name (e.g. refresh_def14a_current_batch)
+# from FILE_OBS. Spans from `def <fn>(` to the next column-0 def/class/EOF.
+# Used for the batch helpers (invariant Q) — the short-name extractor above
+# appends `_current(` and so cannot match `_current_batch(`.
+extract_named_fn_body() {
+  local fn="$1"
+  awk -v fn="$fn" '
+    BEGIN {
+      in_fn = 0
+      anchor = "def " fn "("
+    }
+    {
+      if (!in_fn) {
+        stripped = $0
+        sub(/^[[:space:]]+/, "", stripped)
+        if (index(stripped, anchor) == 1) {
+          in_fn = 1
+          fn_start_nr = NR
+        }
+        next
+      }
+      if (NR > fn_start_nr && (substr($0, 1, 4) == "def " || substr($0, 1, 6) == "class ")) {
+        in_fn = 0
+        next
+      }
+      print $0
+    }
+  ' "$FILE_OBS"
+}
+
 # Extract SQL-only span of helper body: skip the function docstring (text
 # between the first `"""` and the matching closing `"""`). Symbols inside
 # the docstring (e.g. `refreshed_at` in prose) must NOT count toward
@@ -497,17 +527,66 @@ done  # end per-helper loop
 # ======================================================================
 # Invariant I — BATCH HELPERS (#1256).
 #
-# 3 batch helpers (refresh_*_current_batch) share the diff-aware MERGE
+# 7 batch helpers (refresh_*_current_batch) share the diff-aware MERGE
 # shape but operate on instrument_id lists. Same drift risk as singles.
-# Codex iter-1 BLOCKING-B2 + iter-3 BLOCKING-1 fold.
+# Codex iter-1 BLOCKING-B2 + iter-3 BLOCKING-1 fold. #1345 PR-A added
+# blockholders/treasury/def14a/esop batch variants.
 # ======================================================================
-echo "Checking invariant I for 3 batch helpers..."
-for batch_fn in refresh_insiders_current_batch refresh_institutions_current_batch refresh_funds_current_batch; do
+BATCH_HELPERS="refresh_insiders_current_batch refresh_institutions_current_batch refresh_funds_current_batch refresh_blockholders_current_batch refresh_treasury_current_batch refresh_def14a_current_batch refresh_esop_current_batch"
+echo "Checking invariant I for 7 batch helpers..."
+for batch_fn in $BATCH_HELPERS; do
   if ! uv run python scripts/_check_ownership_writer_columns.py \
        --function "${batch_fn}" "$FILE_OBS"; then
     fail "I batch=${batch_fn}: see python output above"
   fi
 done
+
+# ======================================================================
+# Invariant Q — BATCH-SPECIFIC structural pins (#1345 PR-A).
+#
+# Invariant I only checks the column-set diff shape. These pins guard
+# the batch-specific failure modes the committee flagged:
+#   Q1. SET LOCAL jit = off present (×1 per batch helper).
+#   Q2. ordered advisory-lock pass over unnest(%(ids)s) (×1).
+#   Q3. ANY(%(ids)s::bigint[]) in the NOT MATCHED BY SOURCE DELETE clamp
+#       (L1496 batch form — guards catastrophic cross-batch delete).
+#   Q4. DISTINCT ON leads with instrument_id (guards cross-instrument
+#       row-collapse — DE BLOCKING). Exception: single-PK helpers whose
+#       DISTINCT ON is exactly (instrument_id) already satisfy this.
+#   Q5. ORDER BY leads with instrument_id (same guard).
+#   Q6. def14a batch carries the %(esop_regex)s placeholder + the 3
+#       extra WHERE clauses (#843 ESOP double-count guard).
+# ======================================================================
+echo "Checking invariant Q (batch-specific structural pins)..."
+for batch_fn in $BATCH_HELPERS; do
+  body=$(extract_named_fn_body "$batch_fn")
+
+  q1=$(printf '%s\n' "$body" | grep -Fc "SET LOCAL jit = off" || true)
+  (( q1 == 1 )) || fail "Q1 batch=${batch_fn}: expected 1 'SET LOCAL jit = off', found ${q1}."
+
+  q2=$(printf '%s\n' "$body" | grep -Fc "unnest(%(ids)s::bigint[]) AS iid" || true)
+  (( q2 == 1 )) || fail "Q2 batch=${batch_fn}: expected 1 ordered-lock 'unnest(%(ids)s::bigint[]) AS iid', found ${q2}."
+
+  q3=$(printf '%s\n' "$body" | grep -Fc "WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE" || true)
+  (( q3 == 1 )) || fail "Q3 batch=${batch_fn}: expected 1 'NOT MATCHED BY SOURCE ... ANY(%(ids)s::bigint[]) THEN DELETE' clamp, found ${q3}."
+
+  q4=$(printf '%s\n' "$body" | grep -Ec "SELECT DISTINCT ON \(instrument_id[,)]" || true)
+  (( q4 == 1 )) || fail "Q4 batch=${batch_fn}: expected 1 'SELECT DISTINCT ON (instrument_id' (instrument_id-led), found ${q4}. Guards cross-instrument row-collapse."
+
+  # Q5 — leading ORDER BY key is instrument_id. The source ORDER BY block
+  # opens with `ORDER BY` then `instrument_id,` on the next non-blank line.
+  q5=$(printf '%s\n' "$body" | grep -A1 -E "^\s*ORDER BY\s*$" | grep -Ec "^\s*instrument_id," || true)
+  (( q5 >= 1 )) || fail "Q5 batch=${batch_fn}: source ORDER BY must lead with 'instrument_id,' (cross-instrument collapse guard)."
+done
+
+# Q6 — def14a batch ESOP-exclusion filter (verbatim from single helper).
+def14a_batch_body=$(extract_named_fn_body "refresh_def14a_current_batch")
+q6_regex=$(printf '%s\n' "$def14a_batch_body" | grep -Fc "holder_name !~* %(esop_regex)s" || true)
+(( q6_regex == 1 )) || fail "Q6 def14a batch: expected 1 'holder_name !~* %(esop_regex)s', found ${q6_regex} (#843 ESOP double-count guard)."
+q6_role=$(printf '%s\n' "$def14a_batch_body" | grep -Fc "holder_role IS DISTINCT FROM 'esop'" || true)
+(( q6_role == 1 )) || fail "Q6 def14a batch: expected 1 \"holder_role IS DISTINCT FROM 'esop'\", found ${q6_role}."
+q6_shares=$(printf '%s\n' "$def14a_batch_body" | grep -Fc "shares IS NOT NULL" || true)
+(( q6_shares == 1 )) || fail "Q6 def14a batch: expected 1 'shares IS NOT NULL', found ${q6_shares}."
 
 # Final coverage audit (#1256 Codex iter-3 BLOCKING-1 fold; bot PR #1353
 # review iter-1 BLOCKING fold) — defend against silent double-checking
@@ -519,13 +598,13 @@ done
 # print "10 functions covered (expected 10)" (because len(found)=10) and
 # the grep would pass — defeating the audit. The exit-code check is
 # load-bearing; the grep is a secondary guard.
-echo "Checking invariant I coverage audit (expected 10 functions, all passing)..."
+echo "Checking invariant I coverage audit (expected 14 functions, all passing)..."
 if ! coverage_output=$(uv run python scripts/_check_ownership_writer_columns.py \
     --coverage-report "$FILE_OBS"); then
   printf '%s\n' "$coverage_output" >&2
   fail "I coverage audit: Python helper exited non-zero — at least one helper failed invariant I"
 fi
-if ! grep -q "10 functions covered (expected 10)" <<<"$coverage_output"; then
+if ! grep -q "14 functions covered (expected 14)" <<<"$coverage_output"; then
   printf '%s\n' "$coverage_output" >&2
   fail "I coverage audit: expected '10 functions covered (expected 10)' line"
 fi

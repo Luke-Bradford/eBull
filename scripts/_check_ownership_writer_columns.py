@@ -15,7 +15,7 @@ strengthened via #1256):
   pair must be ``col = src.col`` (LHS bare name equals RHS-after-``src.``-strip)
 
 Invoked from ``scripts/check_ownership_refresh_writer_pattern.sh`` per-function
-(7 single-instrument helpers + 3 batch helpers = 10 total).
+(7 single-instrument helpers + 7 batch helpers = 14 total).
 
 CLI:
     uv run python scripts/_check_ownership_writer_columns.py \\
@@ -56,6 +56,10 @@ _BATCH_HELPERS: tuple[str, ...] = (
     "refresh_insiders_current_batch",
     "refresh_institutions_current_batch",
     "refresh_funds_current_batch",
+    "refresh_blockholders_current_batch",
+    "refresh_treasury_current_batch",
+    "refresh_def14a_current_batch",
+    "refresh_esop_current_batch",
 )
 ALL_HELPERS: tuple[str, ...] = _SINGLE_HELPERS + _BATCH_HELPERS
 
@@ -305,10 +309,10 @@ def check_invariants(function_name: str, source: str) -> None:
 
 
 def coverage_report(source: str) -> None:
-    """Print every helper in ``ALL_HELPERS`` found in source; exit 0 if all 10
+    """Print every helper in ``ALL_HELPERS`` found in source; exit 0 if all 14
     present + invariant-checked OK, exit 2 otherwise.
 
-    Shell wrapper greps the final line for ``10 functions covered`` to defend
+    Shell wrapper greps the final line for ``14 functions covered`` to defend
     against silent double-checking (Codex iter-3 BLOCKING-1).
     """
     found: list[str] = []
