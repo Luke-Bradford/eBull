@@ -393,9 +393,16 @@ echo "Checking invariant I (INSERT INTO institutional_holdings ( discovery)..."
 # ``app/services/institutional_holdings.py`` — exactly one match
 # repo-wide. Note the trailing column-list paren distinguishes from
 # the ``_ingest_log`` table.
-total_insert_calls=$(find app -type f -name '*.py' 2>/dev/null -exec grep -cE "INSERT INTO institutional_holdings \(" {} \; 2>/dev/null | awk '{s+=$1} END {print s+0}')
-insert_files=$(grep -lE "INSERT INTO institutional_holdings \(" \
-  $(find app -type f -name '*.py' 2>/dev/null) 2>/dev/null | sort -u || true)
+# grep -r over app/ rather than `find … -exec grep` so a single
+# stderr redirect applies cleanly (shellcheck SC2261/SC2227/SC2046:
+# the find form had two competing `2>/dev/null` and an unquoted
+# command-substitution file list). `grep -rc` prints `path:N` per
+# .py file (0 for non-matching); awk sums the count field. The
+# trailing `|| true` keeps the zero-match case (writer removed —
+# grep exits 1, propagated by `set -o pipefail`) from aborting the
+# assignment before the count-mismatch check below reports it. #1257.
+total_insert_calls=$(grep -rcE "INSERT INTO institutional_holdings \(" app --include='*.py' 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}' || true)
+insert_files=$(grep -rlE "INSERT INTO institutional_holdings \(" app --include='*.py' 2>/dev/null | sort -u || true)
 
 expected_inserts=1
 if (( total_insert_calls != expected_inserts )); then
