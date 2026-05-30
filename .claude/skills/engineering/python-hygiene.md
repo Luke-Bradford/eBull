@@ -75,6 +75,8 @@ When a helper raises and is called from an orchestrator with `except Exception`,
 
 Before pushing any helper that raises: trace who catches it and what the failure scope is. If a single bad instrument would kill the whole batch run, that's the wrong failure mode.
 
+When an `except Exception` swallows the error to trigger a **fallback** path, log it with `exc_info=True` (or `logger.exception(...)`). The fallback may fully recover (e.g. a transient batch-level serialization/deadlock abort that succeeds on per-instrument retry), so without `exc_info` there is *zero* record of why the primary path failed — root-cause diagnosis in prod becomes impossible. Bare `logger.warning("X failed; falling back", ...)` on a swallowed-then-recovered exception is a silent drop.
+
 ## Production invariants
 
 Never use `assert` for a condition that must hold in production.

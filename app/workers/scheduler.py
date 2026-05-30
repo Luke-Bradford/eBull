@@ -4393,12 +4393,19 @@ def ownership_observations_sync() -> None:
             stats = run_observations_repair_sweep(conn)
             conn.commit()
 
-        tracker.row_count = sum(c.refreshed_rows for c in stats.per_category)
+        # #1345 PR-B: ``refreshed_instruments`` (instruments refreshed),
+        # not ``_current`` row count — the batch MERGE path can't cheaply
+        # count rows. ``failed_instruments`` surfaces poison ids that
+        # failed even the per-instrument fallback.
+        tracker.row_count = sum(c.refreshed_instruments for c in stats.per_category)
         logger.info(
-            "ownership_observations_sync (repair-sweep): total_drifted=%d %s",
+            "ownership_observations_sync (repair-sweep): total_drifted=%d total_failed=%d %s",
             stats.total_drifted,
+            stats.total_failed,
             ", ".join(
-                f"{c.category}=drifted{c.drifted_instruments}/refreshed{c.refreshed_rows}" for c in stats.per_category
+                f"{c.category}=drifted{c.drifted_instruments}"
+                f"/refreshed{c.refreshed_instruments}/failed{c.failed_instruments}"
+                for c in stats.per_category
             ),
         )
 

@@ -303,8 +303,8 @@ def _run_gate(conn: psycopg.Connection[Any], *, run_id: int, started_at_iso: str
         if first_failed is None:
             first_failed = "c5"
 
-    for current_table, observations_table, category, _refresh_fn in _CATEGORIES:
-        del current_table, _refresh_fn  # only category + observations_table used
+    for current_table, observations_table, category, _refresh_batch_fn, _refresh_one_fn in _CATEGORIES:
+        del current_table, _refresh_batch_fn, _refresh_one_fn  # only category + observations_table used
         status, count, detail = _check_c6_category(
             conn,
             category=category,

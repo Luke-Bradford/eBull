@@ -53,19 +53,35 @@ from psycopg import sql
 
 from app.services.ownership_observations import (
     refresh_blockholders_current,
+    refresh_blockholders_current_batch,
+    refresh_current_with_batch_fallback,
     refresh_def14a_current,
+    refresh_def14a_current_batch,
     refresh_esop_current,
+    refresh_esop_current_batch,
     refresh_funds_current,
+    refresh_funds_current_batch,
     refresh_insiders_current,
+    refresh_insiders_current_batch,
     refresh_institutions_current,
+    refresh_institutions_current_batch,
     refresh_treasury_current,
+    refresh_treasury_current_batch,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# Per-category (current_table, observations_table, category_literal, refresh_callable).
+# Per-category (current_table, observations_table, category_literal,
+# refresh_batch_fn, refresh_one_fn).
 # Pinned here so adding a new category means one edit, not a sweep.
+#
+# #1345 PR-B: each category now carries BOTH the whole-set batch MERGE
+# writer (happy path) AND the per-instrument writer (fallback when the
+# atomic batch fails on a poison id). Both are keyword-only
+# ``(conn, *, instrument_ids=...)`` / ``(conn, *, instrument_id=...)``
+# and are dispatched through
+# :func:`refresh_current_with_batch_fallback`.
 #
 # **7 categories tracked** — including ``funds`` + ``esop`` which have
 # NO entry in :func:`app.services.ownership_observations_sync.sync_all`
@@ -77,48 +93,55 @@ logger = logging.getLogger(__name__)
 #   this sweep is their ONLY daily reconciliation path.
 # * ESOP rows are processed transitively inside ``sync_def14a`` AND get
 #   independent daily reconciliation here.
-_CATEGORIES: list[tuple[str, str, str, Callable[[psycopg.Connection[Any], int], int]]] = [
+_CATEGORIES: list[tuple[str, str, str, Callable[..., int], Callable[..., int]]] = [
     (
         "ownership_insiders_current",
         "ownership_insiders_observations",
         "insiders",
-        lambda c, i: refresh_insiders_current(c, instrument_id=i),
+        refresh_insiders_current_batch,
+        refresh_insiders_current,
     ),
     (
         "ownership_institutions_current",
         "ownership_institutions_observations",
         "institutions",
-        lambda c, i: refresh_institutions_current(c, instrument_id=i),
+        refresh_institutions_current_batch,
+        refresh_institutions_current,
     ),
     (
         "ownership_blockholders_current",
         "ownership_blockholders_observations",
         "blockholders",
-        lambda c, i: refresh_blockholders_current(c, instrument_id=i),
+        refresh_blockholders_current_batch,
+        refresh_blockholders_current,
     ),
     (
         "ownership_treasury_current",
         "ownership_treasury_observations",
         "treasury",
-        lambda c, i: refresh_treasury_current(c, instrument_id=i),
+        refresh_treasury_current_batch,
+        refresh_treasury_current,
     ),
     (
         "ownership_def14a_current",
         "ownership_def14a_observations",
         "def14a",
-        lambda c, i: refresh_def14a_current(c, instrument_id=i),
+        refresh_def14a_current_batch,
+        refresh_def14a_current,
     ),
     (
         "ownership_funds_current",
         "ownership_funds_observations",
         "funds",
-        lambda c, i: refresh_funds_current(c, instrument_id=i),
+        refresh_funds_current_batch,
+        refresh_funds_current,
     ),
     (
         "ownership_esop_current",
         "ownership_esop_observations",
         "esop",
-        lambda c, i: refresh_esop_current(c, instrument_id=i),
+        refresh_esop_current_batch,
+        refresh_esop_current,
     ),
 ]
 
@@ -127,7 +150,18 @@ _CATEGORIES: list[tuple[str, str, str, Callable[[psycopg.Connection[Any], int], 
 class CategoryRepairStats:
     category: str
     drifted_instruments: int
-    refreshed_rows: int
+    # #1345 PR-B: count of INSTRUMENTS refreshed, NOT ``_current`` rows.
+    # The pre-PR-B per-instrument loop summed each helper's row-count
+    # return; the batch MERGE path cannot cheaply count rows, so the
+    # metric is reconciled to instruments (renamed from ``refreshed_rows``
+    # to make the rows→instruments shift explicit, never silent — spec
+    # §4.3). On the happy path this equals ``drifted_instruments``.
+    refreshed_instruments: int
+    # Instruments that failed even the per-instrument fallback. A poison
+    # instrument that fails every sweep is operator-visible here rather
+    # than masked as transient drift-churn (its watermark never advances
+    # → it re-drifts forever). DE+test committee BLOCKING.
+    failed_instruments: int
 
 
 @dataclass(frozen=True)
@@ -137,6 +171,10 @@ class RepairSweepStats:
     @property
     def total_drifted(self) -> int:
         return sum(c.drifted_instruments for c in self.per_category)
+
+    @property
+    def total_failed(self) -> int:
+        return sum(c.failed_instruments for c in self.per_category)
 
 
 def _drifted_instruments(
@@ -175,33 +213,44 @@ def run_observations_repair_sweep(
     exists.
     """
     per_category: list[CategoryRepairStats] = []
-    for current_table, observations_table, category_literal, refresh_fn in _CATEGORIES:
+    for current_table, observations_table, category_literal, refresh_batch_fn, refresh_one_fn in _CATEGORIES:
         drifted = _drifted_instruments(conn, current_table, observations_table, category_literal)
-        refreshed_rows = 0
-        for instrument_id in drifted:
-            try:
-                refreshed_rows += refresh_fn(conn, instrument_id)
-            except Exception as exc:
-                logger.warning(
-                    "repair sweep: refresh failed category=%s instrument_id=%d: %s",
-                    current_table,
-                    instrument_id,
-                    exc,
-                )
+        # #1345 PR-B: route the whole drifted set through the batch MERGE
+        # writer, falling back to the per-instrument writer on a poison
+        # id. ``failures`` carries the ids that failed even the fallback.
+        refreshed_instruments, failures = refresh_current_with_batch_fallback(
+            conn,
+            instrument_ids=drifted,
+            refresh_batch_fn=refresh_batch_fn,
+            refresh_one_fn=refresh_one_fn,
+        )
+        for instrument_id, exc in failures:
+            logger.warning(
+                "repair sweep: refresh failed category=%s instrument_id=%d: %s",
+                current_table,
+                instrument_id,
+                exc,
+            )
         per_category.append(
             CategoryRepairStats(
                 category=current_table,
                 drifted_instruments=len(drifted),
-                refreshed_rows=refreshed_rows,
+                refreshed_instruments=refreshed_instruments,
+                failed_instruments=len(failures),
             )
         )
         logger.info(
-            "repair sweep %s: drifted=%d refreshed_rows=%d",
+            "repair sweep %s: drifted=%d refreshed_instruments=%d failed=%d",
             current_table,
             len(drifted),
-            refreshed_rows,
+            refreshed_instruments,
+            len(failures),
         )
 
     stats = RepairSweepStats(per_category=per_category)
-    logger.info("repair sweep total drifted instruments: %d", stats.total_drifted)
+    logger.info(
+        "repair sweep total: drifted_instruments=%d failed_instruments=%d",
+        stats.total_drifted,
+        stats.total_failed,
+    )
     return stats

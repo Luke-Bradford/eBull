@@ -309,8 +309,11 @@ def test_categories_match_ownership_writers(
     from app.jobs.ownership_observations_repair import _CATEGORIES
     from app.services import ownership_observations
 
-    for current_table, observations_table, category_literal, refresh_fn in _CATEGORIES:
-        assert callable(refresh_fn), f"_CATEGORIES entry for {category_literal!r}: refresh_fn is not callable"
+    for current_table, observations_table, category_literal, refresh_batch_fn, refresh_one_fn in _CATEGORIES:
+        assert callable(refresh_batch_fn), (
+            f"_CATEGORIES entry for {category_literal!r}: refresh_batch_fn is not callable"
+        )
+        assert callable(refresh_one_fn), f"_CATEGORIES entry for {category_literal!r}: refresh_one_fn is not callable"
         assert _table_exists(ebull_test_conn, current_table), (
             f"_CATEGORIES entry for {category_literal!r}: current_table {current_table!r} does not exist in DB"
         )
@@ -318,10 +321,12 @@ def test_categories_match_ownership_writers(
             f"_CATEGORIES entry for {category_literal!r}: observations_table "
             f"{observations_table!r} does not exist in DB"
         )
-        expected_fn_name = f"refresh_{category_literal}_current"
-        assert hasattr(ownership_observations, expected_fn_name), (
-            f"_CATEGORIES entry for {category_literal!r}: "
-            f"app.services.ownership_observations is missing "
-            f"function {expected_fn_name!r}. Either rename the function "
-            f"or update _CATEGORIES."
-        )
+        # #1345 PR-B: each category carries both the per-instrument writer
+        # (fallback) and its whole-set batch writer (happy path).
+        for expected_fn_name in (f"refresh_{category_literal}_current", f"refresh_{category_literal}_current_batch"):
+            assert hasattr(ownership_observations, expected_fn_name), (
+                f"_CATEGORIES entry for {category_literal!r}: "
+                f"app.services.ownership_observations is missing "
+                f"function {expected_fn_name!r}. Either rename the function "
+                f"or update _CATEGORIES."
+            )

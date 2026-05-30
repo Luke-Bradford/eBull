@@ -62,11 +62,18 @@ from app.services.ownership_observations import (
     record_institution_observation,
     record_treasury_observation,
     refresh_blockholders_current,
+    refresh_blockholders_current_batch,
+    refresh_current_with_batch_fallback,
     refresh_def14a_current,
+    refresh_def14a_current_batch,
     refresh_esop_current,
+    refresh_esop_current_batch,
     refresh_insiders_current,
+    refresh_insiders_current_batch,
     refresh_institutions_current,
+    refresh_institutions_current_batch,
     refresh_treasury_current,
+    refresh_treasury_current_batch,
     resolve_filer_cik_or_raise,
 )
 
@@ -94,26 +101,31 @@ def _refresh_for_instruments(
     conn: psycopg.Connection[Any],
     *,
     instrument_ids: Iterable[int],
-    refresh_fn: Any,
+    refresh_batch_fn: Any,
+    refresh_one_fn: Any,
     summary: SyncSummary,
 ) -> int:
-    """Refresh ``_current`` for every touched instrument.
+    """Refresh ``_current`` for every touched instrument via the batch
+    MERGE writer (#1345 PR-B), falling back to the per-instrument writer
+    if the atomic batch fails.
 
-    Codex review for #840.E-prep: refresh failures must surface in
-    the operator-visible summary, not get logged-and-swallowed —
-    otherwise sync_all reports success while ``_current`` stays stale
-    for the failed instruments and the next rollup read returns
-    inconsistent data. Append to ``summary.orphans`` so the run
-    status reflects the failure."""
-    n = 0
-    for iid in sorted(set(instrument_ids)):
-        try:
-            refresh_fn(conn, instrument_id=iid)
-            n += 1
-        except Exception as exc:
-            logger.exception("ownership_observations_sync: refresh failed for instrument_id=%d", iid)
-            summary.orphans.append(f"refresh failed instrument_id={iid}: {exc}")
-    return n
+    Codex review for #840.E-prep: refresh failures must surface in the
+    operator-visible summary, not get logged-and-swallowed — otherwise
+    sync_all reports success while ``_current`` stays stale for the
+    failed instruments and the next rollup read returns inconsistent
+    data. The shared helper returns the ids that failed even the
+    per-instrument fallback; map each onto ``summary.orphans`` so the
+    run status reflects the failure (same contract as the old
+    per-instrument loop)."""
+    refreshed, failures = refresh_current_with_batch_fallback(
+        conn,
+        instrument_ids=instrument_ids,
+        refresh_batch_fn=refresh_batch_fn,
+        refresh_one_fn=refresh_one_fn,
+    )
+    for iid, exc in failures:
+        summary.orphans.append(f"refresh failed instrument_id={iid}: {exc}")
+    return refreshed
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +340,11 @@ def sync_insiders(
             summary.orphans.append(f"insider_initial_holdings accession={row['accession_number']}: {exc}")
 
     summary.instruments_refreshed = _refresh_for_instruments(
-        conn, instrument_ids=instruments_touched, refresh_fn=refresh_insiders_current, summary=summary
+        conn,
+        instrument_ids=instruments_touched,
+        refresh_batch_fn=refresh_insiders_current_batch,
+        refresh_one_fn=refresh_insiders_current,
+        summary=summary,
     )
     return summary
 
@@ -430,7 +446,11 @@ def sync_institutions(
             summary.orphans.append(f"institutional_holdings accession={row['accession_number']}: {exc}")
 
     summary.instruments_refreshed = _refresh_for_instruments(
-        conn, instrument_ids=instruments_touched, refresh_fn=refresh_institutions_current, summary=summary
+        conn,
+        instrument_ids=instruments_touched,
+        refresh_batch_fn=refresh_institutions_current_batch,
+        refresh_one_fn=refresh_institutions_current,
+        summary=summary,
     )
     return summary
 
@@ -552,7 +572,11 @@ def sync_blockholders(
             summary.orphans.append(f"blockholder_filings accession={row['accession_number']}: {exc}")
 
     summary.instruments_refreshed = _refresh_for_instruments(
-        conn, instrument_ids=instruments_touched, refresh_fn=refresh_blockholders_current, summary=summary
+        conn,
+        instrument_ids=instruments_touched,
+        refresh_batch_fn=refresh_blockholders_current_batch,
+        refresh_one_fn=refresh_blockholders_current,
+        summary=summary,
     )
     return summary
 
@@ -633,7 +657,11 @@ def sync_treasury(
             summary.orphans.append(f"treasury instrument_id={iid} period={period_end}: {exc}")
 
     summary.instruments_refreshed = _refresh_for_instruments(
-        conn, instrument_ids=instruments_touched, refresh_fn=refresh_treasury_current, summary=summary
+        conn,
+        instrument_ids=instruments_touched,
+        refresh_batch_fn=refresh_treasury_current_batch,
+        refresh_one_fn=refresh_treasury_current,
+        summary=summary,
     )
     return summary
 
@@ -761,11 +789,19 @@ def sync_def14a(
             summary.orphans.append(f"def14a accession={row['accession_number']} holder={row['holder_name']}: {exc}")
 
     summary.instruments_refreshed = _refresh_for_instruments(
-        conn, instrument_ids=instruments_touched, refresh_fn=refresh_def14a_current, summary=summary
+        conn,
+        instrument_ids=instruments_touched,
+        refresh_batch_fn=refresh_def14a_current_batch,
+        refresh_one_fn=refresh_def14a_current,
+        summary=summary,
     )
     if esop_instruments_touched:
         summary.instruments_refreshed += _refresh_for_instruments(
-            conn, instrument_ids=esop_instruments_touched, refresh_fn=refresh_esop_current, summary=summary
+            conn,
+            instrument_ids=esop_instruments_touched,
+            refresh_batch_fn=refresh_esop_current_batch,
+            refresh_one_fn=refresh_esop_current,
+            summary=summary,
         )
     return summary
 
