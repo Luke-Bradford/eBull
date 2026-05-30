@@ -1837,9 +1837,14 @@ def refresh_current_with_batch_fallback(
         refresh_batch_fn(conn, instrument_ids=ids)
         return len(ids), []
     except Exception:
+        # exc_info=True so the batch-level root cause survives even when
+        # every per-instrument retry below succeeds (a transient batch
+        # failure — e.g. a serialization/deadlock abort — would otherwise
+        # leave zero record of WHY the batch failed). Bot review #1389.
         logger.warning(
             "batch refresh failed for %d instruments; falling back per-instrument",
             len(ids),
+            exc_info=True,
         )
         n = 0
         failures: list[tuple[int, Exception]] = []
