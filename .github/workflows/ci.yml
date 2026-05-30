@@ -35,6 +35,14 @@ jobs:
       - name: Pyright typecheck
         run: uv run pyright
 
+      - name: shellcheck scripts lint (#1257)
+        # Lint scripts/*.sh at -S warning (errors + warnings). The
+        # chokepoint-lint guards below are awk-/grep-heavy where silent
+        # shell bugs hide (clobbered vars, competing redirects, unquoted
+        # word-splits). uv provides shellcheck via the dev group, so the
+        # gate resolves the binary even before a system install.
+        run: bash scripts/check_shellcheck.sh
+
       - name: Caller-owned-tx lint (FINRA ingest)
         # #1233 run-8-readiness-fixes Item 8 — FINRA caller-owned
         # ingest modules (app/services/finra_*_ingest.py) MUST NOT

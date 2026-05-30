@@ -43,6 +43,13 @@ uv run ruff format --check .
 echo "==> Pre-push gate: pyright"
 uv run pyright
 
+# #1257 — shellcheck the repo's shell scripts at -S warning (errors +
+# warnings) before the chokepoint-lint guards below run. Catches the
+# clobbered-variable / competing-redirect / unquoted-word-split bug
+# classes the awk-heavy guards are prone to. ~200ms.
+echo "==> Pre-push gate: shellcheck scripts"
+bash scripts/check_shellcheck.sh
+
 # #1233 §6.2 — every INSERT INTO instruments must list is_tradable in
 # its column list. Extends the prevention-log §"INSERT INTO instruments
 # fixtures must supply is_tradable" gate from tests/fixtures/ to the
