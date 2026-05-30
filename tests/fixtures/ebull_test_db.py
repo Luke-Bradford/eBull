@@ -223,6 +223,24 @@ _PLANNER_TABLES: tuple[str, ...] = (
 )
 
 
+# #1401 — worker-DB relation-count tripwire ceiling.
+#
+# The per-worker private DB is cloned from ``ebull_test_template``
+# (≈9.6k pg_class rows: tables + indexes + toast + sequences across the
+# full migration set) and is REUSED across every test on that worker —
+# per-test cleanup is ``TRUNCATE`` only, which wipes rows but never
+# drops relations. Any test (or app code under test) that ``CREATE``s a
+# table/index/partition without dropping it leaks relations that
+# accumulate for the whole session. One such runaway ballooned a worker
+# DB past ~2.1M relations and bloated the dev-PG data dir to 13.1M
+# files (#1401). 50k gives ~5x headroom over the template baseline so
+# legitimate transient relations never trip it, while catching a
+# runaway long before it becomes a data-dir disaster. When this fires,
+# the FAILING TEST is the (or the first) culprit — bound its relation
+# creation and tear it down via a registered finalizer.
+_WORKER_DB_RELATION_CEILING = 50_000
+
+
 def _swap_database(url: str, new_db: str) -> str:
     parsed = urlparse(url)
     return urlunparse(parsed._replace(path=f"/{new_db}"))
@@ -317,6 +335,73 @@ def _ensure_database(admin: psycopg.Connection[object], db_name: str) -> bool:
     with admin.cursor() as cur:
         cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
         return cur.fetchone() is not None
+
+
+def _force_drop_invalid_test_dbs() -> list[str]:
+    """Force-drop INVALID test-owned databases (``datconnlimit = -2``).
+
+    Postgres marks a database ``datconnlimit = -2`` when a ``DROP
+    DATABASE`` is interrupted — e.g. a SIGKILL'd pytest worker (the
+    recurring pre-push xdist + PG-lock OOM event) whose
+    ``finally`` / ``pytest_sessionfinish`` teardown never completed, or
+    a ``DROP ... WITH (FORCE)`` whose backend got wedged mid-drop. Such
+    a database is a corpse: PG refuses ALL new connections, so it can
+    ONLY be dropped and there is no concurrent-invocation safety
+    concern — unlike the live worker-DB sweep, no age gate or activity
+    rail is needed. Plain ``DROP`` is blocked by the wedged backend that
+    interrupted the original drop, so ``WITH (FORCE)`` is required.
+
+    These corpses are what bloated the dev-PG data dir to 13.1M files
+    (#1401): two ``ebull_mig*`` DBs and the ``ebull_test_*`` worker DBs
+    the old sweep could not clear (it matched only ``ebull_test%``, used
+    a 1h age gate, and used plain DROP). Targets ``ebull_test_*``
+    (per-worker private DBs) and ``ebull_mig*`` (migration-replay temp
+    DBs from ``test_migration_156_partition_swap`` et al.).
+
+    Best-effort: never raises on operational failure. ``_NEVER_DROP``
+    names are skipped (the template legitimately matches ``ebull_test%``
+    and must never be force-dropped here). Returns the dropped names.
+    """
+    if os.getenv("CI") == "true":
+        return []
+    dropped: list[str] = []
+    try:
+        with psycopg.connect(_admin_database_url(), autocommit=True) as admin:
+            with admin.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+                # ``_`` is a LIKE wildcard; escape it so the predicate
+                # matches the literal ``ebull_test_`` / ``ebull_mig``
+                # prefixes only (ESCAPE '!' avoids backslash ambiguity
+                # in the SQL string literal).
+                cur.execute(
+                    "SELECT datname FROM pg_database "
+                    "WHERE datconnlimit = -2 "
+                    "AND (datname LIKE 'ebull!_test!_%' ESCAPE '!' "
+                    "     OR datname LIKE 'ebull!_mig%' ESCAPE '!')"
+                )
+                names = [row[0] for row in cur.fetchall()]
+            for name in names:
+                # Belt-and-braces: ``ebull_test_template`` matches the
+                # ``ebull_test%`` predicate. A -2 template is a separate
+                # (out-of-scope) problem handled by the template rebuild
+                # path, never by this reaper.
+                if name in _NEVER_DROP:
+                    continue
+                try:
+                    _drop_database_force(admin, name)
+                    dropped.append(name)
+                except Exception as exc:
+                    warnings.warn(
+                        f"Failed to force-drop invalid test DB {name!r}: {type(exc).__name__}: {exc}",
+                        stacklevel=2,
+                    )
+    except Exception as exc:
+        warnings.warn(
+            f"Invalid-test-DB reaper failed: {type(exc).__name__}: {exc}. "
+            f"Run `uv run python -m tests.fixtures.cleanup_test_dbs` to "
+            f"reclaim leaked databases.",
+            stacklevel=2,
+        )
+    return dropped
 
 
 def _drop_database_force(admin: psycopg.Connection[object], db_name: str) -> None:
@@ -570,6 +655,13 @@ def build_template_if_stale() -> None:
             # the helper never raises on operational failure.
             _drop_orphan_workers_older_than()
 
+            # #1401 — force-drop INVALID (datconnlimit=-2) corpses the
+            # age-gated, plain-DROP sweep above cannot clear. These are
+            # the leaked worker/mig DBs that bloated the data dir to
+            # 13.1M files. Runs every controller start; cheap (one
+            # SELECT, rare drops). Best-effort, never raises.
+            _force_drop_invalid_test_dbs()
+
             template_exists = _ensure_database(admin, TEMPLATE_DB_NAME)
             if template_exists and cached == current:
                 return
@@ -768,6 +860,32 @@ def _truncate_planner_tables(conn: psycopg.Connection[tuple]) -> None:
             conn.commit()
 
 
+def _assert_worker_relations_under_ceiling(conn: psycopg.Connection[tuple]) -> None:
+    """Fail if the worker DB's relation count exceeds the ceiling.
+
+    Tripwire (#1401): a test that ``CREATE``s relations without
+    dropping them leaks into the session-reused worker DB (per-test
+    cleanup is ``TRUNCATE`` only — it never drops relations). This
+    catches the runaway at the first test that crosses the ceiling
+    instead of letting it silently bloat the data dir to millions of
+    files. See ``_WORKER_DB_RELATION_CEILING``.
+    """
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute("SELECT count(*) FROM pg_class")
+        row = cur.fetchone()
+    count = int(row[0]) if row and row[0] is not None else 0
+    assert count <= _WORKER_DB_RELATION_CEILING, (
+        f"TRIPWIRE: worker test DB {test_db_name()!r} holds {count} "
+        f"pg_class relations (ceiling {_WORKER_DB_RELATION_CEILING}; "
+        f"template baseline ≈9.6k). A test CREATEd relations without "
+        f"dropping them — they accumulate across the session because "
+        f"per-test cleanup is TRUNCATE only. The failing test is the "
+        f"(or first) culprit: bound its relation creation and tear it "
+        f"down via a registered finalizer. Do NOT raise this ceiling to "
+        f"silence it. See #1401."
+    )
+
+
 @pytest.fixture
 def ebull_test_conn() -> Iterator[psycopg.Connection[tuple]]:
     """Yield a fresh connection to the worker's private test DB.
@@ -793,6 +911,9 @@ def ebull_test_conn() -> Iterator[psycopg.Connection[tuple]]:
             pass
         try:
             _truncate_planner_tables(conn)
+            # #1401 — tripwire on the same conn before close so a
+            # relation leak fails THIS test and names the culprit.
+            _assert_worker_relations_under_ceiling(conn)
         finally:
             conn.close()
 
@@ -852,6 +973,7 @@ __all__ = [
     "EBULL_TEMPLATE_LOCK",
     "TEMPLATE_DB_NAME",
     "_drop_orphan_workers_older_than",
+    "_force_drop_invalid_test_dbs",
     "_worker_db_keepalive",
     "assert_test_db",
     "build_template_if_stale",

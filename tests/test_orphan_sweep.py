@@ -27,10 +27,13 @@ from tests.fixtures.ebull_test_db import (
     _NEVER_DROP,
     TEMPLATE_DB_NAME,
     _admin_database_url,
+    _assert_worker_relations_under_ceiling,
     _create_empty_database,
     _drop_orphan_workers_older_than,
     _ensure_database,
+    _force_drop_invalid_test_dbs,
     _swap_database,
+    template_database_url,
     test_db_available,
 )
 
@@ -138,3 +141,106 @@ def test_ci_short_circuit_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("CI", "true")
     dropped = _drop_orphan_workers_older_than(timedelta(seconds=0))
     assert dropped == []
+
+
+# ── #1401 — invalid-DB (datconnlimit=-2) force-reaper ────────────────
+#
+# A SIGKILL'd worker (or an interrupted DROP ... WITH (FORCE)) leaves a
+# database marked ``datconnlimit = -2``: PG refuses all new connections,
+# so it can only be force-dropped. The age-gated, plain-DROP orphan
+# sweep above cannot clear it. ``UPDATE pg_database SET datconnlimit =
+# -2`` faithfully reproduces the corpse (verified: connections are
+# refused; ``DROP ... WITH (FORCE)`` still works).
+
+_INVALID_TEST_NAME = "ebull_test_9999999999_dead01_gw95"
+_INVALID_MIG_NAME = "ebull_mig156_deadbeef"
+_VALID_TEST_NAME = "ebull_test_9999999999_dead02_gw94"
+
+
+def _mark_invalid(admin: psycopg.Connection[object], name: str) -> None:
+    """Mark a database ``datconnlimit = -2`` (interrupted-drop corpse)."""
+    with admin.cursor() as cur:
+        cur.execute("UPDATE pg_database SET datconnlimit = -2 WHERE datname = %s", (name,))
+
+
+@pytest.mark.integration
+def test_force_drops_invalid_worker_db(_admin_conn: psycopg.Connection[object]) -> None:
+    """A ``datconnlimit=-2`` ``ebull_test_*`` corpse is force-dropped."""
+    _drop_if_exists(_admin_conn, _INVALID_TEST_NAME)
+    _create_empty_database(_admin_conn, _INVALID_TEST_NAME)
+    _mark_invalid(_admin_conn, _INVALID_TEST_NAME)
+    try:
+        dropped = _force_drop_invalid_test_dbs()
+        assert _INVALID_TEST_NAME in dropped, f"invalid worker corpse must be reaped; got {dropped!r}"
+        assert not _ensure_database(_admin_conn, _INVALID_TEST_NAME), "corpse still present after reap"
+    finally:
+        _drop_if_exists(_admin_conn, _INVALID_TEST_NAME)
+
+
+@pytest.mark.integration
+def test_force_drops_invalid_mig_db(_admin_conn: psycopg.Connection[object]) -> None:
+    """A ``datconnlimit=-2`` ``ebull_mig*`` corpse is force-dropped.
+
+    The original sweep matched only ``ebull_test%`` — these mig DBs were
+    the family that leaked uncovered (#1401).
+    """
+    _drop_if_exists(_admin_conn, _INVALID_MIG_NAME)
+    _create_empty_database(_admin_conn, _INVALID_MIG_NAME)
+    _mark_invalid(_admin_conn, _INVALID_MIG_NAME)
+    try:
+        dropped = _force_drop_invalid_test_dbs()
+        assert _INVALID_MIG_NAME in dropped, f"invalid mig corpse must be reaped; got {dropped!r}"
+        assert not _ensure_database(_admin_conn, _INVALID_MIG_NAME), "mig corpse still present after reap"
+    finally:
+        _drop_if_exists(_admin_conn, _INVALID_MIG_NAME)
+
+
+@pytest.mark.integration
+def test_invalid_reaper_leaves_valid_db(_admin_conn: psycopg.Connection[object]) -> None:
+    """A VALID (datconnlimit=-1) test DB is never touched by the invalid reaper.
+
+    Guards against the reaper widening into the live-worker-DB sweep's
+    territory: only corpses (-2) are its concern.
+    """
+    _drop_if_exists(_admin_conn, _VALID_TEST_NAME)
+    _create_empty_database(_admin_conn, _VALID_TEST_NAME)
+    try:
+        dropped = _force_drop_invalid_test_dbs()
+        assert _VALID_TEST_NAME not in dropped, f"valid DB must survive invalid reaper; got {dropped!r}"
+        assert _ensure_database(_admin_conn, _VALID_TEST_NAME), "valid DB wrongly dropped"
+    finally:
+        _drop_if_exists(_admin_conn, _VALID_TEST_NAME)
+
+
+@pytest.mark.integration
+def test_invalid_reaper_ci_short_circuit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI=true short-circuits the invalid reaper (ephemeral containers never accumulate corpses)."""
+    monkeypatch.setenv("CI", "true")
+    assert _force_drop_invalid_test_dbs() == []
+
+
+# ── #1401 — worker-DB relation-count tripwire ────────────────────────
+
+
+@pytest.mark.integration
+def test_relation_ceiling_passes_for_template(
+    _admin_conn: psycopg.Connection[object],
+) -> None:
+    """The fully-migrated template (≈9.6k relations) is well under the ceiling."""
+    with psycopg.connect(template_database_url()) as conn:
+        _assert_worker_relations_under_ceiling(conn)  # must not raise
+
+
+@pytest.mark.integration
+def test_relation_ceiling_tripwire_fires(
+    _admin_conn: psycopg.Connection[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the relation count exceeds the ceiling, the tripwire fails loudly."""
+    monkeypatch.setattr(
+        "tests.fixtures.ebull_test_db._WORKER_DB_RELATION_CEILING",
+        1,
+    )
+    with psycopg.connect(template_database_url()) as conn:
+        with pytest.raises(AssertionError, match="TRIPWIRE"):
+            _assert_worker_relations_under_ceiling(conn)
