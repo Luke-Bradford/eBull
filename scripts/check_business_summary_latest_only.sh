@@ -9,8 +9,10 @@
 # second row per instrument. The cap is enforced structurally by
 # (A) the schema PK, (B) the canonical UPSERT writer carrying a
 # no-demotion predicate on ``(filed_at, source_accession)``, (C) the
-# count of UPSERT writer paths against the table (upsert path +
-# tombstone path = exactly 2), and (D) the manifest worker never
+# count of writer paths against the table (gated-upsert + tombstone =
+# 2 DO UPDATE, plus the #1343 deferred-seed gap-filler = 1 DO NOTHING;
+# every INSERT carries an ON CONFLICT clause, no naked append), and
+# (D) the manifest worker never
 # routing through the source_accession-mutating tombstone helper
 # ``record_parse_attempt`` (filed_at-ASC drains would otherwise
 # corrupt the incumbent's provenance — pinned by the existing test
@@ -54,15 +56,19 @@
 #           time — the closing of the no-demotion comparison's RHS
 #           tuple. Pins the full shape end-to-end.
 #  C. UPSERT writer surface bounded — INSERT AND UPDATE chokepoints.
-#       C.1 ``app/services/business_summary.py`` contains exactly 2
+#       C.1 ``app/services/business_summary.py`` contains exactly 3
 #           canonical ``INSERT INTO instrument_business_summary``
 #           chokepoints (word-bounded so the sibling
 #           ``instrument_business_summary_sections`` writes don't
 #           inflate the count) — ``upsert_business_summary`` (the
-#           gated writer; B above) and ``record_parse_attempt`` (the
-#           tombstone helper; D below). The matching
-#           ``ON CONFLICT (instrument_id) DO UPDATE SET`` count MUST
-#           equal the INSERT count.
+#           gated writer; B above), ``record_parse_attempt`` (the
+#           tombstone helper; D below), and ``seed_business_summary_metadata``
+#           (#1343 deferred-10-K bootstrap gap-filler). Every INSERT
+#           MUST carry an ``ON CONFLICT (instrument_id)`` clause: exactly
+#           2 ``DO UPDATE SET`` (upsert + tombstone) + exactly 1
+#           ``DO NOTHING`` (the seed, which never overwrites so it is
+#           latest-only-safe by construction without the no-demotion
+#           predicate). Counts pinned exactly.
 #       C.2 NO other production *.py file under ``app/`` contains a
 #           canonical ``INSERT INTO instrument_business_summary``
 #           (word-bounded). A new writer path must either share the
@@ -276,15 +282,32 @@ TABLE_UPDATE_REGEX="UPDATE instrument_business_summary([^A-Za-z0-9_]|$)"
 if [[ ! -f "$FILE_SERVICE" ]]; then
   fail "missing file: $FILE_SERVICE"
 else
-  # C.1 — exactly 2 canonical INSERTs in the service module
+  # C.1 — exactly 3 canonical INSERTs in the service module:
+  #   - upsert_business_summary    (gated no-demotion DO UPDATE; B above)
+  #   - record_parse_attempt       (tombstone DO UPDATE; D below)
+  #   - seed_business_summary_metadata (#1343 deferred-10-K gap-filler;
+  #     DO NOTHING — never overwrites, so latest-only-safe by construction
+  #     without the no-demotion predicate).
   inserts_in_service=$(count_regex "$FILE_SERVICE" "$TABLE_INSERT_REGEX")
-  if (( inserts_in_service != 2 )); then
-    fail "$FILE_SERVICE: expected exactly 2 canonical 'INSERT INTO instrument_business_summary' chokepoints (upsert_business_summary + record_parse_attempt), found ${inserts_in_service}."
+  if (( inserts_in_service != 3 )); then
+    fail "$FILE_SERVICE: expected exactly 3 canonical 'INSERT INTO instrument_business_summary' chokepoints (upsert_business_summary + record_parse_attempt + seed_business_summary_metadata), found ${inserts_in_service}."
   fi
 
-  upsert_in_service=$(count_literal "$FILE_SERVICE" "ON CONFLICT (instrument_id) DO UPDATE SET")
-  if (( upsert_in_service != inserts_in_service )); then
-    fail "$FILE_SERVICE: 'ON CONFLICT (instrument_id) DO UPDATE SET' count (${upsert_in_service}) must equal INSERT count (${inserts_in_service}) — every INSERT must carry an UPSERT clause."
+  # Every INSERT must carry an ON CONFLICT clause (no naked append path).
+  # Two carry DO UPDATE SET (the gated upsert + the tombstone); one carries
+  # DO NOTHING (the seed gap-filler). Pin each count exactly so a future
+  # writer can't smuggle in a 4th INSERT without an explicit guard update,
+  # and can't silently flip the seed's DO NOTHING to a demoting DO UPDATE.
+  do_update_in_service=$(count_literal "$FILE_SERVICE" "ON CONFLICT (instrument_id) DO UPDATE SET")
+  do_nothing_in_service=$(count_literal "$FILE_SERVICE" "ON CONFLICT (instrument_id) DO NOTHING")
+  if (( do_update_in_service != 2 )); then
+    fail "$FILE_SERVICE: expected exactly 2 'ON CONFLICT (instrument_id) DO UPDATE SET' clauses (upsert_business_summary + record_parse_attempt), found ${do_update_in_service}."
+  fi
+  if (( do_nothing_in_service != 1 )); then
+    fail "$FILE_SERVICE: expected exactly 1 'ON CONFLICT (instrument_id) DO NOTHING' clause (seed_business_summary_metadata gap-filler), found ${do_nothing_in_service}."
+  fi
+  if (( do_update_in_service + do_nothing_in_service != inserts_in_service )); then
+    fail "$FILE_SERVICE: ON CONFLICT clause count (${do_update_in_service} DO UPDATE + ${do_nothing_in_service} DO NOTHING) must equal INSERT count (${inserts_in_service}) — every INSERT must carry an ON CONFLICT clause (no naked append)."
   fi
 fi
 
