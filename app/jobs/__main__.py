@@ -572,6 +572,32 @@ def _ensure_transaction_cost_config_singleton_with_cleanup(
         raise
 
 
+def _ensure_exchanges_seeded_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """#1270 — reseed canonical ``exchanges`` rows if the table is empty.
+
+    This jobs-side mirror is the load-bearing one: ``daily_cik_refresh``
+    (a bootstrap stage) runs in THIS process and joins ``exchanges`` to
+    pick the ``us_equity`` cohort. An empty table → zero CIKs stamped →
+    all issuer-side SEC ingest processes zero issuers. ``exchanges`` is
+    reference data seeded once by sql/067, not in any clean-DB-wipe
+    preserve list, so a wipe leaves it empty with no reseed path.
+    """
+    from app.services.exchanges import ensure_exchanges_seeded
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_exchanges_seeded(guard_conn)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            fence_conn.close()
+        with contextlib.suppress(Exception):
+            pool.close()
+        raise
+
+
 def _check_operator_exists_with_cleanup(
     fence_conn: psycopg.Connection[Any],
     pool: Any,
@@ -879,6 +905,13 @@ def serve(stop_event: threading.Event | None = None) -> int:
 
     _ensure_transaction_cost_config_singleton_with_cleanup(fence_conn, pool)
     logger.info("jobs entrypoint: transaction_cost_config singleton guard passed")
+
+    # #1270 — reseed canonical exchanges rows if empty. Load-bearing for
+    # the bootstrap: daily_cik_refresh's us_equity cohort JOIN runs in
+    # this process; an empty exchanges table → zero CIKs → all
+    # issuer-side SEC ingest no-ops.
+    _ensure_exchanges_seeded_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: exchanges seed guard passed")
 
     _bootstrap_master_key(pool)
 
