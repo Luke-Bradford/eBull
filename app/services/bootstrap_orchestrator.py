@@ -600,8 +600,30 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     # the row-lock storm shape that killed bootstrap run #5. Caps are
     # ``*_dataset_processed`` (provided by S11 / S10 on success or
     # skip), so the legacy stages run AFTER the bulk path terminalises.
-    "sec_insider_transactions_backfill": CapRequirement(all_of=("cik_mapping_ready", "insider_dataset_processed")),
-    "sec_form3_ingest": CapRequirement(all_of=("cik_mapping_ready", "insider_dataset_processed")),
+    #
+    # #1407 — S19 + S20 additionally require ``filing_events_seeded``.
+    # Both WALK ``filing_events`` for their source accessions
+    # (``insider_transactions.py`` Form 4 / ``insider_form3_ingest.py``
+    # Form 3), but the DAG executes by capability readiness across
+    # parallel lanes — ``insider_dataset_processed`` only orders them
+    # after the BULK insider path, NOT after ``filing_events`` is
+    # populated (S8 / S15 / S16). On the first clean end-to-end run
+    # (run_id=1, first to pass #1270/#1265) S20 fired while
+    # ``filing_events`` was still empty -> 0 Form 3 rows -> the bulk
+    # provider is excluded from ``form3_inputs_seeded`` (see
+    # ``_STRICT_CAP_PROVIDER_EXCLUSIONS``) so the floor was unmet ->
+    # S24 ``ownership_observations_backfill`` blocked. Adding the cap is
+    # additive (preserves the lock-ordering cap) and turns a silent
+    # 0-row pass into a loud block if ``filing_events`` ever fails to
+    # seed. Invariant pinned in
+    # ``tests/test_bootstrap_orchestrator.py`` (filing_events-reader
+    # stages must require ``filing_events_seeded``).
+    "sec_insider_transactions_backfill": CapRequirement(
+        all_of=("cik_mapping_ready", "insider_dataset_processed", "filing_events_seeded")
+    ),
+    "sec_form3_ingest": CapRequirement(
+        all_of=("cik_mapping_ready", "insider_dataset_processed", "filing_events_seeded")
+    ),
     "sec_8k_events_ingest": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
     "sec_13f_recent_sweep": CapRequirement(all_of=("cik_mapping_ready", "institutional_dataset_processed")),
     # #1340 — ``nport_dataset_processed`` orders S23 after S12 (the bulk NPORT

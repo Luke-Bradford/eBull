@@ -457,9 +457,12 @@ def test_orchestrator_skips_stages_already_success(
     # The pre-marked stages were not re-invoked.
     for key in skip_keys:
         assert key not in calls["order"], f"{key} should have been skipped"
-    # A1 + the rest of SEC-lane stages still ran.
+    # A1 + the rest of SEC-lane stages still ran. ``calls["order"]``
+    # records JOB/invoker names, not stage keys — the S25 stage
+    # ``fundamentals_sync`` dispatches the ``fundamentals_sync_bootstrap``
+    # invoker (job_name divergence introduced by #1400 / #1397).
     assert "nightly_universe_sync" in calls["order"]
-    assert "fundamentals_sync" in calls["order"]
+    assert "fundamentals_sync_bootstrap" in calls["order"]
 
 
 def test_orchestrator_unknown_job_name_recorded_as_error(
@@ -696,6 +699,46 @@ def test_filings_history_seed_requires_submissions_processed() -> None:
     req = _STAGE_REQUIRES_CAPS["filings_history_seed"]
     assert "submissions_processed" in req.all_of, (
         "filings_history_seed must require submissions_processed (PR-2 lock-contention serialisation invariant)"
+    )
+
+
+# #1407 — every bootstrap stage whose job WALKS ``filing_events`` for its
+# source accessions MUST directly require ``filing_events_seeded`` so the
+# DAG never lets it run against an unpopulated table (across parallel
+# lanes, an ``*_dataset_processed`` ordering cap does NOT imply
+# filing_events is seeded — that bit S20 ``sec_form3_ingest`` on run_id=1).
+#
+# Manually maintained: when a new stage that reads ``filing_events`` is
+# added, list it here. Provider stages that SEED filing_events
+# (``sec_submissions_ingest`` S8, ``filings_history_seed`` S15,
+# ``sec_first_install_drain`` S16) are deliberately excluded — they may
+# read it but must not require the cap they themselves provide.
+# ``ownership_observations_backfill`` (S24) reads filing_events as a
+# bridge but is gated transitively (``form3_inputs_seeded`` -> S20), so it
+# is excluded from the DIRECT-require assertion below.
+_FILING_EVENTS_READER_STAGES: frozenset[str] = frozenset(
+    {
+        "sec_submissions_files_walk",  # S14
+        "sec_def14a_bootstrap",  # S17
+        "sec_business_summary_bootstrap",  # S18
+        "sec_insider_transactions_backfill",  # S19 (#1407)
+        "sec_form3_ingest",  # S20 (#1407)
+        "sec_8k_events_ingest",  # S21
+    }
+)
+
+
+@pytest.mark.parametrize("stage_key", sorted(_FILING_EVENTS_READER_STAGES))
+def test_filing_events_reader_stages_require_filing_events_seeded(stage_key: str) -> None:
+    """#1407 regression sentinel: a stage that walks ``filing_events``
+    must require ``filing_events_seeded`` directly, or it can fire across
+    a parallel lane before S8/S15/S16 populate the table — producing a
+    silent 0-row pass (the failure that blocked S24 on run_id=1).
+    """
+    req = _STAGE_REQUIRES_CAPS[stage_key]
+    assert req.all_of and "filing_events_seeded" in req.all_of, (
+        f"{stage_key} walks filing_events but does not require "
+        "filing_events_seeded (#1407 read-before-seed ordering invariant)"
     )
 
 
