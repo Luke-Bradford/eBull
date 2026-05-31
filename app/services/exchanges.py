@@ -20,12 +20,96 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import psycopg
 
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 
 logger = logging.getLogger(__name__)
+
+
+# #1270 — canonical exchange seed. Mirrors the explicit rows pinned by
+# sql/067 (the eight ids the SEC mapper has used since #496 + crypto).
+# Kept in sync with that migration's seed block.
+_CANONICAL_EXCHANGE_SEED: tuple[tuple[str, str | None, str], ...] = (
+    ("2", "US", "us_equity"),
+    ("4", "US", "us_equity"),
+    ("5", "US", "us_equity"),
+    ("6", "US", "us_equity"),
+    ("7", "US", "us_equity"),
+    ("19", "US", "us_equity"),
+    ("20", "US", "us_equity"),
+    ("8", None, "crypto"),
+)
+
+
+def ensure_exchanges_seeded(conn: psycopg.Connection[Any]) -> None:
+    """Re-seed the canonical exchange rows if the table is empty (#1270).
+
+    ``sql/067`` seeds the SEC-mapper exchange ids exactly once via
+    ``INSERT ... ON CONFLICT DO NOTHING``; ``schema_migrations`` blocks
+    the migration from re-running, and **no bootstrap stage reseeds
+    ``exchanges``**. ``exchanges`` is not in any clean-DB-wipe preserve
+    list, so after a TRUNCATE / dev-DB reset the table is empty. An
+    empty ``exchanges`` table silently breaks the whole issuer pipeline:
+    ``daily_cik_refresh`` selects its CIK-mapping cohort with
+    ``JOIN exchanges e ON e.exchange_id = i.exchange WHERE
+    e.asset_class = 'us_equity'`` (``app/workers/scheduler.py``), which
+    returns zero rows → zero CIKs stamped onto ``external_identifiers``
+    → the bulk submissions ingester reads an empty issuer cohort → ALL
+    issuer-side SEC ingest (companyfacts, submissions, insider, 8-K,
+    DEF 14A, business summary, fundamentals) processes zero issuers. A
+    clean bootstrap then either hard-errors on the cohort precondition
+    guard or "completes" having ingested nothing.
+
+    This boot guard closes that hole, mirroring the
+    ``ensure_*_singleton`` reference-row guards wired in
+    ``app/main.py`` / ``app/jobs/__main__.py``. It fires ONLY on the
+    empty-table wipe case — when any row exists, operator curation and
+    the weekly eToro refresh own steady state, so it is a no-op. The
+    canonical rows are re-inserted ``ON CONFLICT DO NOTHING`` so a
+    concurrent reseed can't collide.
+
+    Connection contract: caller MUST pass an autocommit conn (the
+    helper opens its own real ``conn.transaction()`` BEGIN, preserving
+    the service-layer no-bare-commit invariant).
+
+    Idempotent: no-op when ``exchanges`` is non-empty.
+    """
+    # Enforce the autocommit contract, mirroring the ensure_*_singleton
+    # guards (Codex MEDIUM): a non-autocommit caller would degrade the
+    # helper's ``conn.transaction()`` BEGIN into a SAVEPOINT under their
+    # outer tx, so a later rollback could silently undo the reseed and
+    # re-open the boot hole. Fail loud at the boundary.
+    if not conn.autocommit:
+        raise RuntimeError(
+            "ensure_exchanges_seeded requires an autocommit connection — "
+            "pass psycopg.connect(url, autocommit=True). The helper opens "
+            "its own real BEGIN via conn.transaction(); a non-autocommit "
+            "caller would degrade that into a SAVEPOINT."
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM exchanges")
+        row = cur.fetchone()
+        count = int(row[0]) if row and row[0] is not None else 0
+    if count > 0:
+        return
+    logger.warning(
+        "exchanges table empty at boot — reseeding %d canonical rows "
+        "(sql/067 seed lost to a clean-DB wipe; #1270 boot guard). "
+        "Without this the us_equity cohort JOIN is empty and all "
+        "issuer-side SEC ingest processes zero issuers.",
+        len(_CANONICAL_EXCHANGE_SEED),
+    )
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO exchanges (exchange_id, country, asset_class) "
+                "VALUES (%s, %s, %s) ON CONFLICT (exchange_id) DO NOTHING",
+                _CANONICAL_EXCHANGE_SEED,
+            )
 
 
 @dataclass(frozen=True)

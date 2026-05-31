@@ -215,6 +215,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await asyncio.to_thread(_ensure_transaction_cost_config_singleton_probe)
 
+    # #1270 — reseed the canonical ``exchanges`` rows if the table is
+    # empty. Unlike the singletons above this is reference data seeded
+    # once by sql/067; a clean-DB wipe (exchanges is not in any preserve
+    # list) leaves it empty → the us_equity cohort JOIN in
+    # daily_cik_refresh returns zero rows → zero CIKs stamped → ALL
+    # issuer-side SEC ingest processes zero issuers and a bootstrap
+    # either hard-errors on the cohort guard or "completes" empty.
+    from app.services.exchanges import ensure_exchanges_seeded
+
+    def _ensure_exchanges_seeded_probe() -> None:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            ensure_exchanges_seeded(guard_conn)
+
+    await asyncio.to_thread(_ensure_exchanges_seeded_probe)
+
     # Open the connection pool after migrations so the schema is up to date.
     pool = open_pool("db_pool", min_size=1, max_size=10)
     logger.info("Connection pool opened (min=1, max=10).")
