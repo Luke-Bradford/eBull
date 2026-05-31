@@ -116,6 +116,17 @@ def clear_active_key() -> None:
         _aesgcm = None
 
 
+def is_active_key_loaded() -> bool:
+    """True iff a broker-encryption key is currently installed.
+
+    Read-only predicate (under ``_aesgcm_lock``) for the lazy-reload
+    guard in :func:`app.security.master_key.ensure_broker_key_loaded`
+    (#1265). No side effects.
+    """
+    with _aesgcm_lock:
+        return _aesgcm is not None
+
+
 def _get_aesgcm() -> AESGCM:
     cached = _aesgcm
     if cached is None:
