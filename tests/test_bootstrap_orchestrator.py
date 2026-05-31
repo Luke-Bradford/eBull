@@ -736,7 +736,7 @@ def test_filing_events_reader_stages_require_filing_events_seeded(stage_key: str
     silent 0-row pass (the failure that blocked S24 on run_id=1).
     """
     req = _STAGE_REQUIRES_CAPS[stage_key]
-    assert "filing_events_seeded" in req.all_of, (
+    assert req.all_of and "filing_events_seeded" in req.all_of, (
         f"{stage_key} walks filing_events but does not require "
         "filing_events_seeded (#1407 read-before-seed ordering invariant)"
     )
