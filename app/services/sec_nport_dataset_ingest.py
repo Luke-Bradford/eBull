@@ -852,6 +852,12 @@ def ingest_nport_dataset_archive(
     # drain so the delete and obs writes commit/rollback together.
     if materialised_markers:
         with conn.cursor() as cur:
+            # _stg_nport.fund_filer_cik is populated from the SAME
+            # ``filer_cik`` variable (zfilled reg CIK) that keyed the
+            # marker set above — the column name differs but the value
+            # is identical, so the reconcile join is exact. Pinned by
+            # tests/test_sec_nport_dataset_ingest.py::
+            # test_resolved_cusip_deletes_bulk_marker (#1399, review bot).
             cur.execute("SELECT DISTINCT instrument_id, fund_filer_cik, period_end FROM _stg_nport")
             survived = {(r[0], r[1], r[2]) for r in cur.fetchall()}
         to_delete = reconcile_survived_markers(materialised_markers, survived)
