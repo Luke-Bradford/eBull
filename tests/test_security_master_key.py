@@ -514,3 +514,42 @@ class TestLazyBrokerKeyLoad:
         monkeypatch.setattr(master_key.settings, "secrets_key", None)
         assert master_key.ensure_broker_key_loaded(ebull_test_conn) is False
         assert secrets_crypto.is_active_key_loaded() is False
+
+    def test_load_etoro_credentials_propagates_when_key_unloadable(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        isolated_data_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        """The no-silent-success guarantee (Codex BLOCKING): when creds
+        exist but NO key is derivable (no env key, no root-secret file),
+        the lazy reload returns False and the decrypt raises
+        MasterKeyNotLoadedError, which MUST propagate — never be
+        converted to a clean ``None`` (that would let a bootstrap-
+        dispatched universe_sync 'succeed' with no universe)."""
+        from app.security.secrets_crypto import MasterKeyNotLoadedError
+        from app.workers.scheduler import _load_etoro_credentials
+        from tests.fixtures.ebull_test_db import test_database_url
+
+        monkeypatch.setattr(master_key.settings, "secrets_key", None)
+        # _load_etoro_credentials opens its OWN conn to settings.database_url;
+        # point it at this worker's test DB so it sees the seeded rows.
+        monkeypatch.setattr(master_key.settings, "database_url", test_database_url())
+        # One operator + an etoro api_key cred in the configured env,
+        # encrypted under some key — but no key is loadable in-process.
+        op_id = _insert_operator(ebull_test_conn)
+        env = master_key.settings.etoro_env
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO broker_credentials "
+                "(id, operator_id, provider, label, environment, ciphertext, "
+                " last_four, key_version, health_state, revoked_at) "
+                "VALUES (%s, %s, 'etoro', 'api_key', %s, %s, 'abcd', 1, 'untested', NULL)",
+                (uuid4(), op_id, env, _encrypted_blob(op_id, label="api_key", key=os.urandom(32))),
+            )
+        ebull_test_conn.commit()
+
+        assert secrets_crypto.is_active_key_loaded() is False
+        with pytest.raises(MasterKeyNotLoadedError):
+            _load_etoro_credentials("test_job")
