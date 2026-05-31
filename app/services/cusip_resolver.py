@@ -405,6 +405,149 @@ def flush_unresolved_cusips_bulk(
         return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
 
+# Internal — staging-table column list for the resolved-marker delete.
+# Order pinned because the ``cur.copy(...)`` write binds by position.
+_RESOLVED_STG_COLS: Final = ("cusip", "filer_cik", "period_end")
+
+
+def in_window_bulk_markers_exist(
+    conn: psycopg.Connection[Any],
+    source: BulkCusipSource,
+    cutoff: date,
+) -> bool:
+    """Preflight gate for :func:`delete_resolved_bulk_markers` (#1399).
+
+    True iff any bulk marker for ``source`` has ``period_end >= cutoff``.
+    A resolved observation is always in-window (the ingest materialise
+    gate rejects out-of-retention rows), so a marker the ingest could
+    delete sits at ``period_end >= cutoff``. When none exist the
+    ingester skips collection entirely — no set growth, no temp table,
+    no DELETE. Post-PR1 (#1398 retention purge) the in-window marker set
+    is small and shrinking, so most steady-state runs short-circuit
+    here, keeping the inline delete from building an archive-scale temp
+    that matches ~0 rows (Codex ckpt-1 efficiency gate).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM unresolved_13f_cusips "
+            "WHERE source = %(source)s AND period_end >= %(cutoff)s)",
+            {"source": source, "cutoff": cutoff},
+        )
+        row = cur.fetchone()
+    return bool(row and row[0])
+
+
+def reconcile_survived_markers(
+    markers: Iterable[tuple[str, str, date, int]],
+    survived_obs_keys: set[tuple[int, str, date]],
+) -> set[tuple[str, str, date]]:
+    """Keep only markers whose observation survived the COPY into staging.
+
+    The bulk ingesters collect ``(cusip, filer_cik, period_end,
+    instrument_id)`` for every CUSIP that resolves during the archive
+    walk — appended right after ``copy.write_row``, BEFORE the
+    ``ON_ERROR ignore`` COPY confirms the row coerced into the staging
+    table. A wire-skipped holding therefore never reaches staging, so
+    deleting its marker would drop a hint for an observation that never
+    materialised (#1399, Codex ckpt-2 HIGH).
+
+    This filters the collected set against ``survived_obs_keys`` — the
+    DISTINCT ``(instrument_id, filer_cik, period_end)`` obs grain read
+    back from the per-archive staging table AFTER the drain. A marker is
+    deletable iff a row for its obs grain actually landed. Returns the
+    marker-grain ``(cusip, filer_cik, period_end)`` set to delete.
+    """
+    return {
+        (cusip, filer_cik, period_end)
+        for (cusip, filer_cik, period_end, instrument_id) in markers
+        if (instrument_id, filer_cik, period_end) in survived_obs_keys
+    }
+
+
+def delete_resolved_bulk_markers(
+    conn: psycopg.Connection[Any],
+    buffer: Iterable[tuple[str, str, date]],
+    *,
+    source: BulkCusipSource,
+) -> int:
+    """Delete ``unresolved_13f_cusips`` bulk markers a later run resolved.
+
+    When a bulk ingest materialises an observation for a ``(cusip,
+    filer_cik, period_end)`` that an EARLIER run recorded as unresolved
+    (the CUSIP was unmapped then, is mapped now), the marker row is
+    redundant — the observation now exists. Drains the buffered
+    now-resolved triples into a TEMP staging table and deletes the EXACT
+    matching bulk rows in one ``DELETE ... USING`` pass.
+
+    Precise grain (spec §2a): the match is the full bulk-marker key
+    ``(source, cusip, filer_cik, period_end)`` with the same COALESCE
+    sentinels as ``unresolved_13f_cusips_bulk_idx`` (sql/164) so the
+    planner uses that index and no coarser observation row can
+    false-positive a delete. ``source`` is always non-null for bulk
+    markers (the index is partial ``WHERE source IS NOT NULL``), so the
+    literal equality is exact — no COALESCE needed on it.
+
+    Malformed triples (empty cusip/filer or NULL period) are filtered in
+    the COPY pass, mirroring :func:`flush_unresolved_cusips_bulk`; both
+    callers only buffer fully-populated triples so this is belt-and-
+    braces.
+
+    Transaction safety: like :func:`flush_unresolved_cusips_bulk`, this
+    helper does NOT own a savepoint — a raise leaves the caller's tx in
+    ``InFailedSqlTransaction``. Callers MUST wrap in
+    ``with conn.transaction():`` for failure isolation. A delete failure
+    is non-fatal: a redundant marker is harmless (the retention purge or
+    a later run reclaims it) — markers are a hint, not source of truth.
+
+    Returns the number of rows deleted.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TEMP TABLE IF NOT EXISTS _stg_resolved_markers (
+                cusip       TEXT NOT NULL,
+                filer_cik   TEXT,
+                period_end  DATE
+            ) ON COMMIT DROP
+            """
+        )
+        # Clear any rows left by a prior invocation in the same tx
+        # (tests, or a multi-archive caller reusing the connection).
+        cur.execute("TRUNCATE _stg_resolved_markers")
+
+        copy_sql = (
+            "COPY _stg_resolved_markers ("
+            + ", ".join(_RESOLVED_STG_COLS)
+            + ") FROM STDIN WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)"
+        )
+        staged = 0
+        with cur.copy(copy_sql) as copy:
+            for cusip, filer_cik, period_end in buffer:
+                if not cusip or not filer_cik or period_end is None:
+                    continue
+                copy.write_row((cusip.strip().upper(), filer_cik.strip(), period_end))
+                staged += 1
+        if staged == 0:
+            return 0
+
+        # ``source`` equality is exact (bulk markers are always
+        # non-null source). COALESCE on filer_cik/period_end mirrors the
+        # bulk partial UNIQUE INDEX expression so the planner can use it.
+        cur.execute(
+            """
+            DELETE FROM unresolved_13f_cusips u
+             USING _stg_resolved_markers s
+             WHERE u.source = %(source)s
+               AND u.cusip = s.cusip
+               AND COALESCE(u.filer_cik, '') = COALESCE(s.filer_cik, '')
+               AND COALESCE(u.period_end, '0001-01-01'::date)
+                   = COALESCE(s.period_end, '0001-01-01'::date)
+            """,
+            {"source": source},
+        )
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+
 # ---------------------------------------------------------------------------
 # Normalisation
 # ---------------------------------------------------------------------------
