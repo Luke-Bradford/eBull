@@ -1527,6 +1527,17 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
     """
     try:
         with psycopg.connect(settings.database_url) as conn:
+            # #1265 — lazily (re)load the broker-encryption key if this
+            # process booted before broker creds existed (clean-DB jobs
+            # process + creds added later via the API). Read-only resolve
+            # from the env key / root-secret file; no mutation. If no key
+            # is derivable the decrypt below still raises
+            # MasterKeyNotLoadedError and propagates as a loud stage error
+            # (NOT converted to a clean skip — a genuine no-key must not
+            # let a bootstrap-dispatched universe_sync "succeed" empty).
+            from app.security.master_key import ensure_broker_key_loaded
+
+            ensure_broker_key_loaded(conn)
             op_id = sole_operator_id(conn)
             api_key = load_credential_for_provider_use(
                 conn,

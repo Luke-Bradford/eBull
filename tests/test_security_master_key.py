@@ -383,3 +383,173 @@ class TestBootstrap:
         assert result.state == "clean_install"
         assert result.broker_encryption_key is None
         assert _active_count(ebull_test_conn) == 0
+
+
+# ---------------------------------------------------------------------------
+# #1265 — read-only lazy broker-key reload
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def reset_crypto() -> Iterator[None]:
+    """Start + end with the AES-GCM cache cleared (unloaded)."""
+    secrets_crypto._reset_for_tests()
+    yield
+    secrets_crypto._reset_for_tests()
+
+
+class TestLazyBrokerKeyLoad:
+    def test_is_active_key_loaded_reflects_set_clear(self, reset_crypto: None) -> None:
+        assert secrets_crypto.is_active_key_loaded() is False
+        secrets_crypto.set_active_key(os.urandom(32))
+        assert secrets_crypto.is_active_key_loaded() is True
+        secrets_crypto.clear_active_key()
+        assert secrets_crypto.is_active_key_loaded() is False
+
+    def test_load_existing_returns_env_key(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        raw = base64.b64encode(os.urandom(32)).decode()
+        monkeypatch.setattr(master_key.settings, "secrets_key", raw)
+        # No creds → no mismatch check → returns the decoded env key.
+        key = master_key.load_existing_broker_key(ebull_test_conn)
+        assert key == secrets_crypto.decode_env_key(raw)
+
+    def test_load_existing_returns_file_key(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        isolated_data_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        monkeypatch.setattr(master_key.settings, "secrets_key", None)
+        secret = os.urandom(32)
+        write_root_secret(secret)
+        key = master_key.load_existing_broker_key(ebull_test_conn)
+        assert key == derive_broker_encryption_key(secret)
+
+    def test_load_existing_returns_none_when_no_key(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        isolated_data_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        monkeypatch.setattr(master_key.settings, "secrets_key", None)
+        # isolated_data_dir is empty → no root secret file.
+        assert master_key.load_existing_broker_key(ebull_test_conn) is None
+
+    def test_load_existing_fail_loud_on_env_mismatch(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        """ADR-0003 §9: env key set + newest active ciphertext not
+        decryptable under it → raise, never silently recover."""
+        env_key = os.urandom(32)
+        monkeypatch.setattr(master_key.settings, "secrets_key", base64.b64encode(env_key).decode())
+        op_id = _insert_operator(ebull_test_conn)
+        wrong = os.urandom(32)
+        blob = _encrypted_blob(op_id, label="api_key", key=wrong)
+        _insert_credential(ebull_test_conn, operator_id=op_id, label="api_key", ciphertext=blob)
+
+        with pytest.raises(MasterKeyError, match="ADR-0003"):
+            master_key.load_existing_broker_key(ebull_test_conn)
+
+    def test_load_existing_does_not_revoke(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        isolated_data_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        """The read-only loader must NOT run the stale-revoke pass — the
+        key behavioural difference from bootstrap. Seed a cred encrypted
+        under a key that does NOT match the file-derived key; the
+        file-path loader returns the file key and leaves the row active
+        (bootstrap would soft-revoke it)."""
+        monkeypatch.setattr(master_key.settings, "secrets_key", None)
+        write_root_secret(os.urandom(32))  # file path active
+        op_id = _insert_operator(ebull_test_conn)
+        blob = _encrypted_blob(op_id, label="api_key", key=os.urandom(32))  # mismatched
+        _insert_credential(ebull_test_conn, operator_id=op_id, label="api_key", ciphertext=blob)
+
+        key = master_key.load_existing_broker_key(ebull_test_conn)
+        assert key is not None
+        # No revoke side-effect — the mismatched row is still active.
+        assert _active_count(ebull_test_conn) == 1
+
+    def test_ensure_noop_when_already_loaded(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        reset_crypto: None,
+    ) -> None:
+        loaded = os.urandom(32)
+        secrets_crypto.set_active_key(loaded)
+        assert master_key.ensure_broker_key_loaded(ebull_test_conn) is True
+        assert secrets_crypto.is_active_key_loaded() is True
+
+    def test_ensure_loads_when_derivable(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        monkeypatch.setattr(master_key.settings, "secrets_key", base64.b64encode(os.urandom(32)).decode())
+        assert secrets_crypto.is_active_key_loaded() is False
+        assert master_key.ensure_broker_key_loaded(ebull_test_conn) is True
+        assert secrets_crypto.is_active_key_loaded() is True
+
+    def test_ensure_false_when_not_derivable(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        isolated_data_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        monkeypatch.setattr(master_key.settings, "secrets_key", None)
+        assert master_key.ensure_broker_key_loaded(ebull_test_conn) is False
+        assert secrets_crypto.is_active_key_loaded() is False
+
+    def test_load_etoro_credentials_propagates_when_key_unloadable(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+        isolated_data_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reset_crypto: None,
+    ) -> None:
+        """The no-silent-success guarantee (Codex BLOCKING): when creds
+        exist but NO key is derivable (no env key, no root-secret file),
+        the lazy reload returns False and the decrypt raises
+        MasterKeyNotLoadedError, which MUST propagate — never be
+        converted to a clean ``None`` (that would let a bootstrap-
+        dispatched universe_sync 'succeed' with no universe)."""
+        from app.security.secrets_crypto import MasterKeyNotLoadedError
+        from app.workers.scheduler import _load_etoro_credentials
+        from tests.fixtures.ebull_test_db import test_database_url
+
+        monkeypatch.setattr(master_key.settings, "secrets_key", None)
+        # _load_etoro_credentials opens its OWN conn to settings.database_url;
+        # point it at this worker's test DB so it sees the seeded rows.
+        monkeypatch.setattr(master_key.settings, "database_url", test_database_url())
+        # One operator + an etoro api_key cred in the configured env,
+        # encrypted under some key — but no key is loadable in-process.
+        op_id = _insert_operator(ebull_test_conn)
+        env = master_key.settings.etoro_env
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO broker_credentials "
+                "(id, operator_id, provider, label, environment, ciphertext, "
+                " last_four, key_version, health_state, revoked_at) "
+                "VALUES (%s, %s, 'etoro', 'api_key', %s, %s, 'abcd', 1, 'untested', NULL)",
+                (uuid4(), op_id, env, _encrypted_blob(op_id, label="api_key", key=os.urandom(32))),
+            )
+        ebull_test_conn.commit()
+
+        assert secrets_crypto.is_active_key_loaded() is False
+        with pytest.raises(MasterKeyNotLoadedError):
+            _load_etoro_credentials("test_job")

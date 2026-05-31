@@ -47,7 +47,11 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from platformdirs import user_data_dir
 
 from app.config import settings
-from app.security.secrets_crypto import decode_env_key
+from app.security.secrets_crypto import (
+    decode_env_key,
+    is_active_key_loaded,
+    set_active_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -430,6 +434,88 @@ def bootstrap(conn: psycopg.Connection[object]) -> BootResult:
         state=state,
         broker_encryption_key=derived if install_key else None,
     )
+
+
+def load_existing_broker_key(conn: psycopg.Connection[object]) -> bytes | None:
+    """Resolve the broker-encryption key WITHOUT mutating any state (#1265).
+
+    Read-only counterpart to :func:`bootstrap`, for the jobs-process
+    lazy reload: it derives the key from ``EBULL_SECRETS_KEY`` (env) else
+    the persisted root-secret file, but runs **no** stale-revoke pass and
+    no boot-state transition — so it is safe to call on the credential-
+    load hot path. ``bootstrap`` stays the sole boot-time entry point
+    that revokes / transitions.
+
+    Why this exists: a clean-DB jobs process boots with no key installed
+    (``install_key=False``); the operator then adds creds via the API,
+    whose first-save lazy-gen creates the root-secret file. This lets the
+    jobs process pick that file up on demand (the file is written before
+    the DB cred row, so a visible cred row implies the file exists).
+
+    ADR-0003 §9 fail-loud preserved (and made order-robust): when
+    ``EBULL_SECRETS_KEY`` is set AND a credential exists AND the newest
+    active ciphertext does NOT decrypt under the env key, raise
+    :class:`MasterKeyError` — the same single-row check ``bootstrap``
+    uses, but evaluated on the true (un-revoked) credential set. The
+    file-secret path does not raise on a mismatch (the file-derived key
+    is authoritative; a bad match surfaces as ``CredentialDecryptError``
+    at decrypt time, which AES-GCM makes safe — never wrong plaintext).
+
+    Returns the derived key, or ``None`` when no key is derivable yet
+    (no env key and no root-secret file — e.g. a clean install before
+    the first credential save).
+    """
+    if settings.secrets_key:
+        derived: bytes | None = decode_env_key(settings.secrets_key)
+    else:
+        root_secret = read_root_secret()
+        derived = derive_broker_encryption_key(root_secret) if root_secret is not None else None
+
+    if derived is None:
+        return None
+
+    # ADR-0003 §9 — env override + existing creds + key that does not
+    # match the newest active ciphertext is a misconfiguration, not a
+    # recovery scenario. Fail loud (mirrors bootstrap's check, minus the
+    # revoke that would otherwise reorder this).
+    if settings.secrets_key and _credentials_exist(conn) and not _newest_active_decryptable(conn, derived):
+        raise MasterKeyError(
+            "EBULL_SECRETS_KEY does not match existing broker credential ciphertext. "
+            "Refusing to lazily load the broker key. See ADR-0003 §9."
+        )
+
+    return derived
+
+
+def ensure_broker_key_loaded(conn: psycopg.Connection[object]) -> bool:
+    """Ensure the process-global broker-encryption key is installed (#1265).
+
+    Returns ``True`` if a key is (now) installed, ``False`` if none is
+    derivable yet. Idempotent + read-only: once a key is loaded this is a
+    pure in-memory check with no DB touch. When the key is not yet loaded
+    it attempts a one-shot read-only resolve via
+    :func:`load_existing_broker_key` and installs it via
+    ``set_active_key``.
+
+    Re-entrancy: ``set_active_key`` is mutex-guarded and idempotent, and
+    the resolve is read-only, so concurrent jobs racing here at most
+    duplicate a read + install of the same key — no lock needed. A
+    :class:`MasterKeyError` from the env-mismatch guard propagates
+    (fail-loud, never swallowed).
+
+    Callers MUST NOT convert a subsequent ``MasterKeyNotLoadedError``
+    into a normal return inside a bootstrap-dispatched job: a genuine
+    no-key must surface as a loud stage error, not a silent success that
+    would let the bootstrap "complete" with no universe.
+    """
+    if is_active_key_loaded():
+        return True
+    key = load_existing_broker_key(conn)
+    if key is None:
+        return False
+    set_active_key(key)
+    logger.info("lazily loaded broker-encryption key on demand (#1265)")
+    return True
 
 
 def _newest_active_decryptable(
