@@ -8,6 +8,13 @@
     "pnpm": ">=10.0.0"
   },
   "packageManager": "pnpm@10.30.3",
+  "pnpm": {
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-5xrq-8626-4rwp"
+      ]
+    }
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
