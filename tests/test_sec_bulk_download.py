@@ -13,9 +13,11 @@ import pytest
 
 from app.services.sec_bulk_download import (
     PROBE_BYTES,
+    ArchiveDownloadResult,
     BulkArchive,
     BulkDownloadResult,
     _download_one,
+    _fatal_download_failures,
     _purge_archive_artifacts,
     _zip_round_trip,
     build_bulk_archive_inventory,
@@ -122,6 +124,23 @@ class TestInventory:
         assert any(n.startswith("insider_") for n in names)
         assert any(n.startswith("nport_") for n in names)
 
+    def test_newest_13f_window_is_optional_rest_required(self) -> None:
+        # #1423 — the newest 13F rolling window is the just-closed quarter;
+        # SEC publishes it weeks after close, so the day after a boundary it
+        # 404s. Mark ONLY that one optional so its absence doesn't fatal the
+        # stage. today=2026-06-01: newest completed window is Mar-May 2026.
+        inventory = build_bulk_archive_inventory(today=date(2026, 6, 1))
+        form13f = [a for a in inventory if a.name.startswith("form13f_")]
+        # Newest-first ordering: index 0 is the most recent window.
+        assert form13f[0].name == "form13f_01mar2026-31may2026.zip"
+        assert form13f[0].optional is True, "newest 13F window must be optional"
+        # Every other 13F window and every non-13F archive stays required.
+        for a in form13f[1:]:
+            assert a.optional is False, f"{a.name} must stay required"
+        for a in inventory:
+            if not a.name.startswith("form13f_"):
+                assert a.optional is False, f"{a.name} must stay required"
+
     def test_archive_urls_use_correct_path_prefixes(self) -> None:
         inventory = build_bulk_archive_inventory(today=date(2026, 5, 8))
         by_name = {a.name: a.url for a in inventory}
@@ -136,6 +155,70 @@ class TestInventory:
         assert any(
             "/files/dera/data/form-n-port-data-sets/" in u and u.endswith("_nport.zip") for u in by_name.values()
         )
+
+
+# ---------------------------------------------------------------------------
+# Fatal-failure filter (#1423)
+# ---------------------------------------------------------------------------
+
+
+class TestFatalDownloadFailures:
+    """An optional archive's error must NOT count as a fatal failure.
+
+    This is the gate that decides whether ``sec_bulk_download`` raises
+    ``BootstrapPartialDownloadError`` (→ stage error → db-lane cascade
+    blocked) or marks success. Only the newest 13F window is optional.
+    """
+
+    @staticmethod
+    def _result(name: str, *, error: str | None, optional: bool) -> ArchiveDownloadResult:
+        return ArchiveDownloadResult(
+            name=name,
+            path=None,
+            bytes_downloaded=0,
+            error=error,
+            optional=optional,
+        )
+
+    def test_optional_404_is_not_fatal(self) -> None:
+        # A 404 on the optional newest window = not yet published → tolerated.
+        results = [
+            self._result("submissions.zip", error=None, optional=False),
+            self._result(
+                "form13f_01mar2026-31may2026.zip",
+                error="HEAD failed: status=404 url=https://sec.gov/...",
+                optional=True,
+            ),
+        ]
+        assert _fatal_download_failures(results) == []
+
+    def test_optional_non_404_error_is_fatal(self) -> None:
+        # A 500/timeout/corrupt on the optional window is a real problem and
+        # must stay fatal — only not-published 404 is tolerated (#1423).
+        bad = self._result(
+            "form13f_01mar2026-31may2026.zip",
+            error="GET failed: status=500",
+            optional=True,
+        )
+        results = [self._result("submissions.zip", error=None, optional=False), bad]
+        assert _fatal_download_failures(results) == [bad]
+
+    def test_required_archive_error_is_fatal(self) -> None:
+        bad = self._result("companyfacts.zip", error="HEAD failed: status=500", optional=False)
+        results = [self._result("submissions.zip", error=None, optional=False), bad]
+        assert _fatal_download_failures(results) == [bad]
+
+    def test_optional_404_does_not_mask_required_error(self) -> None:
+        bad = self._result("insider_2026q1.zip", error="transfer failed: timeout", optional=False)
+        results = [
+            self._result(
+                "form13f_01mar2026-31may2026.zip",
+                error="HEAD failed: status=404",
+                optional=True,
+            ),
+            bad,
+        ]
+        assert _fatal_download_failures(results) == [bad]
 
 
 # ---------------------------------------------------------------------------
