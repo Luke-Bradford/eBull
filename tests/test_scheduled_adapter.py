@@ -6,9 +6,11 @@ DB-backed against the worker ``ebull_test`` template.
 from __future__ import annotations
 
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
 from app.services.processes import scheduled_adapter
+from app.services.processes.param_metadata import ParamMetadata
 from app.workers.scheduler import JOB_FUNDAMENTALS_SYNC, JOB_RETRY_DEFERRED
 
 
@@ -266,7 +268,16 @@ def test_watermark_surfaces_filed_at_for_sec_ingest_job(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     """PR4: SEC freshness-driven jobs surface a ``filed_at`` watermark
-    on the ProcessRow."""
+    on the ProcessRow.
+
+    Targets ``fundamentals_sync`` — a still-scheduled job with a PURE
+    ``freshness_source`` (``sec_xbrl_facts``) so its watermark resolves
+    to the ``filed_at`` cursor. The original target ``sec_form3_ingest``
+    was dropped from SCHEDULED_JOBS by #1413; ``sec_filing_documents_ingest``
+    is unsuitable here because it ALSO declares a ``manifest_source``,
+    which makes its watermark an accession cursor (None without seeded
+    manifest rows), not ``filed_at`` (watermarks.py::_JOB_REGISTRY).
+    """
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.execute(
         """
@@ -281,13 +292,13 @@ def test_watermark_surfaces_filed_at_for_sec_ingest_job(
         INSERT INTO data_freshness_index
             (subject_type, subject_id, source, last_known_filed_at, state,
              instrument_id)
-        VALUES ('issuer', '9100001', 'sec_form3', '2026-05-08T12:00:00Z',
+        VALUES ('issuer', '9100001', 'sec_xbrl_facts', '2026-05-08T12:00:00Z',
                 'current', 9100001)
         """
     )
     ebull_test_conn.commit()
 
-    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="fundamentals_sync")
     assert row is not None
     assert row.watermark is not None
     assert row.watermark.cursor_kind == "filed_at"
@@ -308,7 +319,7 @@ def test_pending_retry_status_when_freshness_recheck_covers_failed_scope(
     _ensure_kill_switch_off(ebull_test_conn)
     _make_run(
         ebull_test_conn,
-        job_name="sec_form3_ingest",
+        job_name="sec_filing_documents_ingest",
         status="failure",
         finished=True,
         rows_errored=1,
@@ -334,13 +345,13 @@ def test_pending_retry_status_when_freshness_recheck_covers_failed_scope(
         INSERT INTO data_freshness_index
             (subject_type, subject_id, source, state, next_recheck_at,
              instrument_id)
-        VALUES ('issuer', '9100002', 'sec_form3', 'error',
+        VALUES ('issuer', '9100002', 'sec_form4', 'error',
                 now() + interval '5 minutes', 9100002)
         """
     )
     ebull_test_conn.commit()
 
-    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_filing_documents_ingest")
     assert row is not None
     assert row.status == "pending_retry"
     assert row.last_n_errors == ()
@@ -354,7 +365,7 @@ def test_failed_status_when_no_freshness_recheck_covers_failed_scope(
     _ensure_kill_switch_off(ebull_test_conn)
     _make_run(
         ebull_test_conn,
-        job_name="sec_form3_ingest",
+        job_name="sec_filing_documents_ingest",
         status="failure",
         finished=True,
         rows_errored=1,
@@ -369,7 +380,7 @@ def test_failed_status_when_no_freshness_recheck_covers_failed_scope(
     )
     ebull_test_conn.commit()
 
-    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_filing_documents_ingest")
     assert row is not None
     assert row.status == "failed"
     assert len(row.last_n_errors) == 1
@@ -438,13 +449,13 @@ def test_watermark_gap_surfaces_when_freshness_overdue(
         INSERT INTO data_freshness_index
             (subject_type, subject_id, source, state, expected_next_at,
              instrument_id)
-        VALUES ('issuer', '9100009', 'sec_form3', 'current',
+        VALUES ('issuer', '9100009', 'sec_form4', 'current',
                 now() - interval '10 minutes', 9100009)
         """
     )
     ebull_test_conn.commit()
 
-    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_filing_documents_ingest")
     assert row is not None
     assert "watermark_gap" in row.stale_reasons
 
@@ -637,25 +648,52 @@ def test_queue_stuck_does_not_fire_on_recently_claimed_dispatched(
 # ---------------------------------------------------------------------------
 
 
-def test_params_metadata_surfaces_for_sec_13f_quarterly_sweep(
+def test_params_metadata_surfaces_for_scheduled_job_with_declaration(
     ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ScheduledJob.params_metadata flows verbatim onto ProcessRow.
 
-    Pins the foundation that the FE Advanced tab depends on: a job that
-    declares ``params_metadata`` surfaces its full tuple on the row,
-    enabling the drill-in to render one form field per entry. Drift
+    Pins the foundation that the FE Advanced tab depends on: a scheduled
+    job that declares ``params_metadata`` surfaces its full tuple on the
+    row, enabling the drill-in to render one form field per entry. Drift
     here silently breaks the renderer.
+
+    Uses a SYNTHETIC scheduled job rather than a real registry entry.
+    The original version pinned on ``sec_13f_quarterly_sweep``, which
+    #1413 (bulk-only bootstrap) moved out of ``SCHEDULED_JOBS`` into the
+    manual-trigger surface — silently breaking this test. No current
+    scheduled job declares ``params_metadata``, so coupling to any one
+    is fragile; the synthetic job exercises the forwarding contract
+    independent of registry churn. See docs/review-prevention-log.md.
     """
-    from app.workers.scheduler import JOB_SEC_13F_QUARTERLY_SWEEP, SCHEDULED_JOBS
+    from app.workers.scheduler import Cadence, ScheduledJob
+
+    synth = ScheduledJob(
+        name="_synthetic_params_metadata_job",
+        description="synthetic job exercising params_metadata forwarding",
+        cadence=Cadence.daily(hour=3, minute=0),
+        source="db",
+        display_name="Synthetic Params Metadata Job",
+        params_metadata=(
+            ParamMetadata(
+                name="min_period_of_report",
+                label="Recency floor",
+                help_text="Synthetic date param for the forwarding test.",
+                field_type="date",
+                default=None,
+                advanced_group=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(scheduled_adapter, "SCHEDULED_JOBS", (*scheduled_adapter.SCHEDULED_JOBS, synth))
 
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.commit()
 
-    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_SEC_13F_QUARTERLY_SWEEP)
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=synth.name)
     assert row is not None
-    job = next(j for j in SCHEDULED_JOBS if j.name == JOB_SEC_13F_QUARTERLY_SWEEP)
-    assert row.params_metadata == job.params_metadata
+    assert row.params_metadata == synth.params_metadata
     assert len(row.params_metadata) == 1
     assert row.params_metadata[0].name == "min_period_of_report"
     assert row.params_metadata[0].field_type == "date"

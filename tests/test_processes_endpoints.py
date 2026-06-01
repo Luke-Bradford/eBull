@@ -98,16 +98,53 @@ def test_list_processes_returns_envelope_shape(conn_override: None, ebull_test_c
 
 
 def test_get_process_returns_params_metadata_for_declared_job(
-    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+    conn_override: None,
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PR2 #1064 — a job with declared ``params_metadata`` surfaces it
-    on ``/system/processes/{id}`` so the FE Advanced disclosure
-    renders one form field per entry.
+    """PR2 #1064 — a scheduled job with declared ``params_metadata``
+    surfaces it on ``/system/processes/{id}`` so the FE Advanced
+    disclosure renders one form field per entry.
+
+    Uses a SYNTHETIC scheduled job. The original pinned on
+    ``sec_13f_quarterly_sweep``, which #1413 (bulk-only bootstrap) moved
+    out of ``SCHEDULED_JOBS`` into the manual-trigger surface — silently
+    breaking this test (404). No current scheduled job declares
+    ``params_metadata``, so the synthetic job exercises the endpoint
+    surfacing contract independent of registry churn. The endpoint
+    classifies a process as ``scheduled_job`` via ``VALID_JOB_NAMES``
+    and builds its row from ``scheduled_adapter.SCHEDULED_JOBS``, so
+    both are patched to include the synthetic name.
     """
+    from app.api import processes as processes_api
+    from app.services.processes import scheduled_adapter
+    from app.services.processes.param_metadata import ParamMetadata
+    from app.workers.scheduler import Cadence, ScheduledJob
+
+    synth = ScheduledJob(
+        name="_synthetic_params_metadata_endpoint_job",
+        description="synthetic job exercising params_metadata endpoint surfacing",
+        cadence=Cadence.daily(hour=3, minute=0),
+        source="db",
+        display_name="Synthetic Params Metadata Endpoint Job",
+        params_metadata=(
+            ParamMetadata(
+                name="min_period_of_report",
+                label="Recency floor",
+                help_text="Synthetic date param for the endpoint surfacing test.",
+                field_type="date",
+                default=None,
+                advanced_group=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(scheduled_adapter, "SCHEDULED_JOBS", (*scheduled_adapter.SCHEDULED_JOBS, synth))
+    monkeypatch.setattr(processes_api, "VALID_JOB_NAMES", processes_api.VALID_JOB_NAMES | {synth.name})
+
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.commit()
 
-    resp = client.get("/system/processes/sec_13f_quarterly_sweep")
+    resp = client.get(f"/system/processes/{synth.name}")
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     assert payload["mechanism"] == "scheduled_job"
@@ -637,12 +674,17 @@ def test_mixed_covered_and_uncovered_failed_rows_stays_failed(
     """
     from app.services.processes import scheduled_adapter
 
+    # Use a current SCHEDULED job that maps to a data_freshness_index
+    # source. ``sec_form3_ingest`` (the original target) was moved out of
+    # SCHEDULED_JOBS by #1413 (bulk-only bootstrap) — ``get_row`` returns
+    # None for it now. ``sec_filing_documents_ingest`` is still scheduled
+    # and maps to freshness source ``sec_form4`` (watermarks.py).
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.execute(
         """
         INSERT INTO job_runs (job_name, started_at, finished_at, status,
                               error_classes, rows_errored)
-        VALUES ('sec_form3_ingest', now() - interval '5 minutes', now(),
+        VALUES ('sec_filing_documents_ingest', now() - interval '5 minutes', now(),
                 'failure', %s, 2)
         """,
         (
@@ -674,15 +716,15 @@ def test_mixed_covered_and_uncovered_failed_rows_stays_failed(
              instrument_id)
         VALUES
             -- Covered: retry due in 5 minutes (well within next fire)
-            ('issuer', '9200201', 'sec_form3', 'error',
+            ('issuer', '9200201', 'sec_form4', 'error',
              now() + interval '5 minutes', 9200201),
             -- Uncovered: NULL next_recheck_at means no scheduled retry
-            ('issuer', '9200202', 'sec_form3', 'error', NULL, 9200202)
+            ('issuer', '9200202', 'sec_form4', 'error', NULL, 9200202)
         """
     )
     ebull_test_conn.commit()
 
-    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_filing_documents_ingest")
     assert row is not None
     # Mixed coverage → status stays failed, errors visible.
     assert row.status == "failed"
