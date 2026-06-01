@@ -335,6 +335,8 @@ JOB_SEC_ATOM_FAST_LANE = "sec_atom_fast_lane"
 JOB_SEC_DAILY_INDEX_RECONCILE = "sec_daily_index_reconcile"
 JOB_SEC_PER_CIK_POLL = "sec_per_cik_poll"
 JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP = "sec_master_idx_quarterly_sweep"
+# #1415 — bootstrap-only recent-window gap-close (filing-metadata scoped).
+JOB_SEC_MASTER_IDX_GAP_CLOSE = "sec_master_idx_gap_close"
 JOB_SEC_REBUILD = "sec_rebuild"
 JOB_FINRA_SHORT_INTEREST_REFRESH = "finra_short_interest_refresh"
 JOB_FINRA_REGSHO_DAILY_REFRESH = "finra_regsho_daily_refresh"
@@ -5289,6 +5291,60 @@ def sec_master_idx_quarterly_sweep() -> None:
             ]
             raise RuntimeError(
                 f"sec_master_idx_quarterly_sweep: {stats.failed_quarters} of "
+                f"{len(stats.quarters)} quarters failed; "
+                f"total_upserted={stats.total_upserted}; "
+                f"failed: {'; '.join(failed_details)}"
+            )
+
+
+def sec_master_idx_gap_close() -> None:
+    """``_INVOKERS['sec_master_idx_gap_close']`` — #1415 bootstrap stage S15.
+
+    Recent-window gap-close: walks the current + previous calendar quarter
+    ``full-index/{year}/QTR{q}/form.idx`` ONCE per quarter (two ~50MB
+    downloads, ZERO per-CIK HTTP) to close the gap between the bulk-archive
+    cutoff and ~now in FILING-METADATA coverage. Reuses
+    ``run_master_idx_quarterly_sweep`` but scoped via
+    ``GAP_CLOSE_FILING_METADATA_SOURCES`` so it NEVER seeds a manifest /
+    freshness row for a bulk-dataset ownership source (13F-HR / N-PORT /
+    Form-3/4/5) — advancing those watermarks from discovery would push the
+    steady-state cursor ahead of the parsed observations (silent gap, spec
+    §4.3 pillar 3). Bootstrap-only; the unscoped weekly G12
+    ``sec_master_idx_quarterly_sweep`` stays full-discovery.
+
+    Per-quarter commit / rollback isolation lives inside
+    ``run_master_idx_quarterly_sweep``; failure surfaces as a
+    ``RuntimeError`` so ``_tracked_job`` records ``status='failure'`` with
+    the failed-quarter detail (mirror of the G12 invoker).
+    """
+    from app.jobs.sec_master_idx_quarterly_sweep import (
+        GAP_CLOSE_FILING_METADATA_SOURCES,
+        run_master_idx_quarterly_sweep,
+    )
+
+    with _tracked_job(JOB_SEC_MASTER_IDX_GAP_CLOSE) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            stats = run_master_idx_quarterly_sweep(
+                conn,
+                http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
+                source_allowlist=GAP_CLOSE_FILING_METADATA_SOURCES,
+            )
+        tracker.row_count = stats.total_upserted
+        logger.info(
+            "sec_master_idx_gap_close: quarters=%d total_upserted=%d failed=%d (filing-metadata only)",
+            len(stats.quarters),
+            stats.total_upserted,
+            stats.failed_quarters,
+        )
+        if stats.failed_quarters > 0:
+            failed_details = [
+                f"{q.year}Q{q.quarter}: {q.error_detail or 'unknown'}" for q in stats.quarters if q.failed
+            ]
+            raise RuntimeError(
+                f"sec_master_idx_gap_close: {stats.failed_quarters} of "
                 f"{len(stats.quarters)} quarters failed; "
                 f"total_upserted={stats.total_upserted}; "
                 f"failed: {'; '.join(failed_details)}"

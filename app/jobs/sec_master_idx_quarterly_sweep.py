@@ -37,6 +37,30 @@ from app.services.sec_manifest import record_manifest_entry
 logger = logging.getLogger(__name__)
 
 
+# #1415 — FILING-METADATA sources the bootstrap recent-window gap-close
+# (``sec_master_idx_gap_close``) is allowed to seed + advance. EXCLUDES the
+# bulk-dataset-sourced ownership families (sec_13f_hr / sec_n_port /
+# sec_form3 / sec_form4 / sec_form5): their observations come from the
+# quarterly bulk datasets (bootstrap S10/S11/S12), NOT the manifest worker,
+# so a discovery-side watermark advance from this pass would push the
+# steady-state cursor ahead of loaded data (silent gap, spec §4.3 pillar 3).
+# DEF14A / 13D / 13G ARE included — the manifest worker parses their
+# observations from the seeded manifest rows post-bootstrap, so seeding +
+# advancing the watermark is eventually consistent (the worker fills the
+# observation; the watermark only says "we know this filing exists").
+# ``sec_n_csr`` is deliberately NOT included: N-CSR filers are fund TRUSTS,
+# whose CIKs are not in ``build_preloaded_subject_resolver`` (issuers +
+# institutional + blockholder only) until S26 ``mf_directory_sync`` seeds the
+# fund directory — which runs AFTER this stage (order 15). N-CSR rows here
+# would resolve as unknown-subject and never seed; N-CSR discovery is
+# steady-state's job (post-S26 directory + Atom/daily-index), and N-CSR is
+# not panel-relevant (funds slice = bulk N-PORT). The unscoped weekly G12
+# sweep passes source_allowlist=None (full discovery).
+GAP_CLOSE_FILING_METADATA_SOURCES: frozenset[str] = frozenset(
+    {"sec_8k", "sec_10k", "sec_10q", "sec_def14a", "sec_13d", "sec_13g"}
+)
+
+
 @dataclass(frozen=True)
 class QuarterStats:
     year: int
@@ -150,6 +174,7 @@ def run_master_idx_quarterly_sweep(
     now: datetime | None = None,
     subject_resolver: SubjectResolver | None = None,
     quarters: Sequence[tuple[int, int]] | None = None,
+    source_allowlist: frozenset[str] | None = None,
 ) -> MasterIdxSweepStats:
     """One quarterly-sweep cycle.
 
@@ -165,6 +190,18 @@ def run_master_idx_quarterly_sweep(
     ``subject_resolver=None`` (default) preloads the universe map via
     ``build_preloaded_subject_resolver``. Tests inject a pre-built
     resolver.
+
+    ``source_allowlist=None`` (default) discovers EVERY mapped form (the
+    steady-state G12 safety-net behaviour). The #1413/#1415 bootstrap
+    gap-close passes a FILING-METADATA allowlist (the
+    ``GAP_CLOSE_FILING_METADATA_SOURCES`` set — 8-K / 10-K / 10-Q / DEF14A /
+    13D / 13G) so the recent-window pass advances only those filing-metadata
+    watermarks and NEVER seeds a manifest/freshness row for a bulk-dataset
+    ownership source (13F-HR/N-PORT/Form-3/4/5). Those observations come from
+    the quarterly bulk datasets, not the manifest worker, so a discovery-side
+    watermark advance would push the steady-state cursor ahead of loaded data
+    (silent gap, spec §4.3 pillar 3). N-CSR is also excluded — see
+    ``GAP_CLOSE_FILING_METADATA_SOURCES`` for why.
     """
     if now is None:
         now = datetime.now(tz=UTC)
@@ -187,6 +224,15 @@ def run_master_idx_quarterly_sweep(
             for row in read_master_idx(http_get, year, q, allow_404=is_current):
                 index_rows += 1
                 if row.source is None:
+                    skipped_unmapped += 1
+                    continue
+                # #1415 — bootstrap gap-close guard: skip any source outside
+                # the filing-metadata allowlist so the recent-window pass
+                # never seeds a manifest/freshness row for a bulk-dataset
+                # ownership source (would advance its watermark ahead of the
+                # parsed observations). Counted as skipped_unmapped (mapped
+                # form, out of this sweep's scope).
+                if source_allowlist is not None and row.source not in source_allowlist:
                     skipped_unmapped += 1
                     continue
                 subject: ResolvedSubject | None = resolver(conn, row.cik)

@@ -145,6 +145,29 @@ CIK|Company Name|Form Type|Date Filed|Filename
 320193|Apple Inc.|S-1|2026-05-15|edgar/data/320193/0000320193-26-000099.txt
 """
 
+# #1415 — a filing-metadata form (8-K → sec_8k) AND a bulk-dataset
+# ownership form (13F-HR → sec_13f_hr) in the same quarter, for the
+# source_allowlist filter test.
+_MIXED_8K_AND_13FHR_Q2 = b"""\
+Description:           Master Index of EDGAR Dissemination Feed
+Last Data Received:    June 30, 2026
+
+CIK|Company Name|Form Type|Date Filed|Filename
+--------------------------------------------------------------------------------
+320193|Apple Inc.|8-K|2026-05-15|edgar/data/320193/0000320193-26-000042.txt
+1067983|Berkshire Hathaway Inc|13F-HR|2026-05-15|edgar/data/1067983/0001067983-26-000002.txt
+"""
+
+# Header-only (zero rows) valid index — used as the prev-quarter body so
+# it neither fails nor adds rows.
+_EMPTY_IDX = b"""\
+Description:           Master Index of EDGAR Dissemination Feed
+Last Data Received:    March 31, 2026
+
+CIK|Company Name|Form Type|Date Filed|Filename
+--------------------------------------------------------------------------------
+"""
+
 
 # -- Tests: pure-function helpers -------------------------------------------
 
@@ -233,6 +256,58 @@ class TestRunMasterIdxQuarterlySweep:
         assert q1.upserted == 1
         # Total
         assert stats.total_upserted == 2
+
+    def test_source_allowlist_filters_ownership_sources(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#1415 — the bootstrap gap-close passes a filing-metadata
+        ``source_allowlist`` so it advances ONLY filing-metadata watermarks,
+        never the bulk-dataset ownership sources (13F-HR / N-PORT / Form-3/4/5
+        — their observations come from the quarterly bulk datasets, NOT the
+        manifest worker, so a discovery-side watermark advance would push the
+        steady-state cursor ahead of loaded data: silent gap, spec §4.3).
+
+        A 13F-HR row alongside an 8-K must be SKIPPED (no manifest row, no
+        ``data_freshness_index`` row) when ``source_allowlist={"sec_8k"}``.
+        """
+        _seed_issuer(ebull_test_conn, instrument_id=7, cik="0000320193", symbol="AAPL")
+        _seed_institutional_filer(ebull_test_conn, cik="0001067983", name="Berkshire Hathaway Inc")
+        ebull_test_conn.commit()
+
+        now = datetime(2026, 5, 17, tzinfo=UTC)  # CQ=Q2, CQ-1=Q1
+        resolver = _static_resolver(
+            {
+                "0000320193": ResolvedSubject(subject_type="issuer", subject_id="7", instrument_id=7),
+                "0001067983": ResolvedSubject(
+                    subject_type="institutional_filer", subject_id="0001067983", instrument_id=None
+                ),
+            }
+        )
+        stats = run_master_idx_quarterly_sweep(
+            ebull_test_conn,
+            http_get=_make_dispatch_http_get(
+                {
+                    _quarter_url(2026, 2): (200, _MIXED_8K_AND_13FHR_Q2),
+                    _quarter_url(2026, 1): (200, _EMPTY_IDX),
+                }
+            ),
+            now=now,
+            subject_resolver=resolver,
+            source_allowlist=frozenset({"sec_8k"}),
+        )
+        ebull_test_conn.commit()
+
+        # Only the 8-K upserted; the 13F-HR row is filtered by the allowlist.
+        assert stats.failed_quarters == 0
+        assert stats.total_upserted == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM sec_filing_manifest WHERE source = 'sec_8k'")
+            assert cur.fetchone()[0] == 1  # type: ignore[index]
+            cur.execute("SELECT count(*) FROM sec_filing_manifest WHERE source = 'sec_13f_hr'")
+            assert cur.fetchone()[0] == 0, "13F-HR must NOT be seeded by the guarded gap-close"  # type: ignore[index]
+            cur.execute("SELECT count(*) FROM data_freshness_index WHERE source = 'sec_13f_hr'")
+            assert cur.fetchone()[0] == 0, "ownership-source watermark must NOT advance from gap-close discovery"  # type: ignore[index]
 
     def test_unmapped_form_skipped(
         self,

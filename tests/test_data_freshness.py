@@ -171,6 +171,43 @@ class TestSeedFromManifest:
         )
         transition_status(conn, accession, ingest_status="parsed")
 
+    def test_freshness_watermark_is_data_event_date_not_load_time(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#650 contamination lock (P3 / #1415) — ``last_known_filed_at`` MUST
+        reflect the filing's real ``filed_at`` (data-event date), NEVER
+        ``now()`` / load-extraction time. The bulk archives lag real-time by
+        days; a watermark set from ``now()`` would silently skip the gap
+        between the archive's filed_at and now (spec §4.3 pillar 3). Seed a
+        manifest row whose filed_at is 5 days in the past; the watermark must
+        equal that filed_at, not ~now.
+        """
+        _seed_instrument(ebull_test_conn, iid=1701, symbol="AAPL", cik="0000320193")
+        now = datetime.now(tz=UTC)
+        archive_filed_at = (now - timedelta(days=5)).replace(microsecond=0)
+        self._seed_manifest_row(
+            ebull_test_conn,
+            accession="ACC-650",
+            subject_type="issuer",
+            subject_id="1701",
+            source="sec_form4",
+            cik="0000320193",
+            instrument_id=1701,
+            filed_at=archive_filed_at,
+        )
+        ebull_test_conn.commit()
+
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1701", source="sec_form4")
+        assert row is not None
+        assert row.last_known_filed_at is not None
+        assert row.last_known_filed_at == archive_filed_at, (
+            "freshness watermark must be the archive's filed_at, not load time"
+        )
+        # Explicit anti-contamination: the watermark is provably ~5d old, so it
+        # was NOT silently set to now()/extraction time.
+        assert (now - row.last_known_filed_at) >= timedelta(days=4, hours=23)
+
     def test_seeds_one_row_per_subject_source(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

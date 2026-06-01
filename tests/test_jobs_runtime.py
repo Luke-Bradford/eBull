@@ -491,6 +491,13 @@ class TestProductionInvokerRegistry:
             # lane-source cross-check at ``app/jobs/sources.py``. No
             # cadence → on-demand/bootstrap-only, like its S13 sibling.
             "fundamentals_sync_bootstrap",
+            # #1415 (P3) — bootstrap-only recent-window gap-close (S15 slot).
+            # Reuses the G12 sweep logic but scoped to filing-metadata sources
+            # (source_allowlist guard). Separate job_name from the weekly
+            # SCHEDULED G12 ``sec_master_idx_quarterly_sweep`` so the
+            # filing-metadata-scoped bootstrap dispatch and the unscoped
+            # weekly cron coexist. No cadence → on-demand/bootstrap-only.
+            "sec_master_idx_gap_close",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "

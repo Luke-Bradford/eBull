@@ -124,8 +124,8 @@ def test_bootstrap_end_to_end(
     assert met is False
     assert "first-install bootstrap not complete" in reason
 
-    # 2. start_run seeds 19 stages atomically (#1413 bulk-only bootstrap
-    # dropped 8 per-CIK HTTP stages: 27 - 8 = 19).
+    # 2. start_run seeds 20 stages atomically (#1413 dropped 8 per-CIK HTTP
+    # stages + #1415 added the master.idx gap-close: 27 - 8 + 1 = 20).
     run_id = start_run(
         ebull_test_conn,
         operator_id=None,
@@ -136,7 +136,7 @@ def test_bootstrap_end_to_end(
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None
     assert snap.run_id == run_id
-    assert len(snap.stages) == 19
+    assert len(snap.stages) == 20
     assert all(s.status == "pending" for s in snap.stages)
 
     # 3. State is running, gate stays closed.
@@ -148,8 +148,8 @@ def test_bootstrap_end_to_end(
     # 4. Orchestrator drives Phase A → B → C with the stubbed invokers.
     run_bootstrap_orchestrator()
 
-    # 5. Every fake invoker fired once (19 stages post-#1413 bulk-only).
-    assert len(calls["order"]) == 19
+    # 5. Every fake invoker fired once (20 stages post-#1413/#1415).
+    assert len(calls["order"]) == 20
 
     # 6. State is complete; gate releases.
     state = read_state(ebull_test_conn)

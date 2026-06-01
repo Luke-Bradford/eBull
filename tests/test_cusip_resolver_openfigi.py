@@ -634,8 +634,8 @@ def test_stage_orders_are_unique_and_ascending() -> None:
     orders = [spec.stage_order for spec in _BOOTSTRAP_STAGE_SPECS]
     assert orders == sorted(orders), f"stage_order not ascending: {orders}"
     assert len(set(orders)) == len(orders), f"duplicate stage_orders: {orders}"
-    # Pin the post-collapse count (27 - 8 per-CIK HTTP stages = 19; gap-close deferred to P3).
-    assert len(_BOOTSTRAP_STAGE_SPECS) == 19
+    # Pin the post-collapse count (27 - 8 per-CIK HTTP stages + 1 master.idx gap-close (#1415) = 20).
+    assert len(_BOOTSTRAP_STAGE_SPECS) == 20
 
 
 def test_openfigi_lane_in_max_concurrency_map() -> None:
