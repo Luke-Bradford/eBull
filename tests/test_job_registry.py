@@ -331,6 +331,37 @@ class TestRegistryConflictDetection:
             # Restore real cache so subsequent tests use the canonical registry.
             reset_job_name_to_source_cache()
 
+    def test_real_registry_has_no_conflicting_lane_duplicates(self) -> None:
+        """PREVENTION (PR #1414 review) — positive invariant on the LIVE
+        registries (the sibling test only injects a synthetic conflict).
+
+        A job_name may legitimately appear in more than one source dict —
+        the ``finra_*`` jobs are SCHEDULED crons AND manual-triggerable;
+        several stages are both SCHEDULED and a bootstrap stage — but every
+        path MUST resolve it to the SAME lane. ``_build_job_name_to_source``
+        raises ``JobSourceRegistryError`` on a different-lane collision at
+        first call (lifespan / first ``JobLock``); this pins it at test
+        time so a mis-homed entry — e.g. a per-CIK job dropped from the
+        bootstrap catalogue and re-homed to the WRONG ``MANUAL_TRIGGER_JOB_SOURCES``
+        lane (#1413) — fails fast in CI rather than at operator boot.
+        """
+        from app.jobs.sources import MANUAL_TRIGGER_JOB_SOURCES
+        from app.services.bootstrap_orchestrator import (
+            _BOOTSTRAP_STAGE_SPECS,
+            _effective_lane,
+        )
+
+        lanes_by_job: dict[str, set[str]] = {}
+        for job in SCHEDULED_JOBS:
+            lanes_by_job.setdefault(job.name, set()).add(job.source)
+        for spec in _BOOTSTRAP_STAGE_SPECS:
+            lanes_by_job.setdefault(spec.job_name, set()).add(_effective_lane(spec.stage_key, spec.lane))
+        for job_name, manual_lane in MANUAL_TRIGGER_JOB_SOURCES.items():
+            lanes_by_job.setdefault(job_name, set()).add(manual_lane)
+
+        conflicts = {name: sorted(lanes) for name, lanes in lanes_by_job.items() if len(lanes) > 1}
+        assert not conflicts, f"job_names registered under conflicting lanes: {conflicts}"
+
 
 class TestParamMetadataValidation:
     """validate_job_params + _coerce_value + _check_bounds coverage."""
@@ -516,6 +547,34 @@ class TestJobInternalKeysRegistry:
         )
         # Coerced through; bool round-trips clean.
         assert out["use_bulk_zip"] is True
+
+    def test_sec_first_install_drain_follow_pagination_is_internal(self) -> None:
+        """#1413 Step 2.3 — ``follow_pagination`` is bootstrap-only. The
+        bootstrap StageSpec passes ``follow_pagination=False`` to collapse
+        the secondary-page HTTP walk; the validator must accept it with
+        ``allow_internal_keys=True``. The steady-state safety-net keeps
+        the invoker default (``True``); the manual API path rejects the
+        key (operator must not silently disable deep-history coverage).
+        """
+        assert "follow_pagination" in JOB_INTERNAL_KEYS["sec_first_install_drain"]
+        out = validate_job_params(
+            "sec_first_install_drain",
+            {"follow_pagination": False, "use_bulk_zip": True, "max_subjects": None},
+            allow_internal_keys=True,
+            metadata=None,
+        )
+        assert out["follow_pagination"] is False
+
+    def test_sec_first_install_drain_follow_pagination_rejected_on_manual_path(self) -> None:
+        """#1413 Step 2.3 — operator API path MUST reject
+        ``follow_pagination`` even though it's bootstrap-internal."""
+        with pytest.raises(ParamValidationError, match="unknown param"):
+            validate_job_params(
+                "sec_first_install_drain",
+                {"follow_pagination": False},
+                allow_internal_keys=False,
+                metadata=(),
+            )
 
     def test_sec_first_install_drain_use_bulk_zip_rejected_on_manual_path(self) -> None:
         """#1277 T8 — operator / cron path MUST reject ``use_bulk_zip``.

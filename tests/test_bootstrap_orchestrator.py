@@ -26,13 +26,14 @@ import pytest
 from app.services.bootstrap_orchestrator import (
     _BOOTSTRAP_STAGE_SPECS,
     _CAPABILITY_PROVIDERS,
+    _STAGE_LANE_OVERRIDES,
     _STAGE_PROVIDES,
+    _STAGE_PROVIDES_ON_SKIP,
     _STAGE_REQUIRES_CAPS,
     JOB_BOOTSTRAP_ORCHESTRATOR,
     JOB_DAILY_CIK_REFRESH,
     JOB_DAILY_FINANCIAL_FACTS,
     _run_one_stage,
-    _satisfied_capabilities,
     _should_run,
     get_bootstrap_stage_specs,
     run_bootstrap_orchestrator,
@@ -103,18 +104,21 @@ def _register_synthetic_jobs(monkeypatch: pytest.MonkeyPatch, mapping: dict[str,
 # ---------------------------------------------------------------------------
 
 
-def test_stage_catalogue_has_twenty_seven_stages() -> None:
+def test_stage_catalogue_has_nineteen_stages() -> None:
     """Catalogue size pinned to surface adds/removes in code review.
 
-    27 = 1 init + 1 etoro + 4 sec_rate (B-stages) + 1 sec_bulk_download
-    + 5 db (Phase C ingesters) + 1 openfigi (#1233 PR-1b S13
-    cusip_resolver_post_bulk_sweep) + 1 sec_rate (C1.b walker)
-    + 7 sec_rate (legacy chain) + 2 sec_rate (legacy 13F/N-PORT recent
-    sweeps) + 2 db (E-stages) + 2 sec_rate (#1174: S26 mf_directory_sync
-    + S27 sec_n_csr_bootstrap_drain).
+    #1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages
+    (S14 submissions_files_walk, S15 filings_history_seed, S17 def14a,
+    S19 insider_transactions_backfill, S20 form3, S22 13f_recent_sweep,
+    S23 n_port_ingest, S27 sec_n_csr_bootstrap_drain) → 27 - 8 = 19.
+    (The master.idx recent-window gap-close is deferred to P3 — its
+    watermark per-source guard lands atomically with it.)
+
+    19 = 1 init + 1 etoro + 8 sec_rate + 1 sec_bulk_download + 6 db
+    + 1 db_fundamentals_raw + 1 openfigi.
     """
     specs = get_bootstrap_stage_specs()
-    assert len(specs) == 27
+    assert len(specs) == 19
 
 
 def test_stage_catalogue_lane_composition() -> None:
@@ -122,15 +126,14 @@ def test_stage_catalogue_lane_composition() -> None:
     by_lane: dict[str, int] = {}
     for spec in specs:
         by_lane[spec.lane] = by_lane.get(spec.lane, 0) + 1
-    # 1 + 1 + 16 + 1 + 6 + 1 + 1 = 27 stages.
-    # The "+ 1 openfigi" is #1233 PR-1b's S13 cusip_resolver_post_bulk_sweep.
-    # ``db_fundamentals_raw`` carries S25 fundamentals_sync (Stream A PR-C2
-    # lane reassignment); this expectation was stale pre-#1340 (expected
-    # db:7 before the split — corrected here to match production).
+    # #1413 — 1 + 1 + 8 + 1 + 6 + 1 + 1 = 19 stages. sec_rate: 16 − 8 per-CIK
+    # HTTP stages removed (incl. S27 N-CSR drain) = 8. ``db`` = 6 (5 bulk
+    # ingesters + ownership_observations_backfill); ``db_fundamentals_raw`` =
+    # 1 (S25 fundamentals_sync); ``openfigi`` = 1 (S13 cusip_resolver_post_bulk_sweep).
     assert by_lane == {
         "init": 1,
         "etoro": 1,
-        "sec_rate": 16,
+        "sec_rate": 8,
         "sec_bulk_download": 1,
         "db": 6,
         "db_fundamentals_raw": 1,
@@ -138,10 +141,16 @@ def test_stage_catalogue_lane_composition() -> None:
     }
 
 
-def test_stage_orders_are_unique_and_contiguous() -> None:
+def test_stage_orders_are_unique_and_ascending() -> None:
+    # #1413 — stage_orders are no longer contiguous: dropping the 7 per-CIK
+    # stages leaves gaps (…13, 16, 18, 21, 24…). Gaps are intentional — they
+    # preserve operator traceability (stage 22 stays "the 13F sweep") and
+    # visibly signal removed stages. The invariant is unique + strictly
+    # ascending (catches dup / mis-ordered specs), not contiguity.
     specs = get_bootstrap_stage_specs()
-    orders = sorted(spec.stage_order for spec in specs)
-    assert orders == list(range(1, len(specs) + 1))
+    orders = [spec.stage_order for spec in specs]
+    assert orders == sorted(orders), "stage_order must be ascending in catalogue order"
+    assert len(set(orders)) == len(orders), "stage_order values must be unique"
 
 
 def test_critical_constants_exposed() -> None:
@@ -340,10 +349,9 @@ def test_orchestrator_happy_path_completes(
     state = read_state(ebull_test_conn)
     assert state.status == "complete"
 
-    # All 27 invokers called (#1174 added S25 + S26; #1233 PR-1b
-    # inserted S13 cusip_resolver_post_bulk_sweep, renumbering
-    # S13-S26 to S14-S27).
-    assert len(calls["order"]) == 27
+    # #1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages → 19
+    # invokers fire on the happy path.
+    assert len(calls["order"]) == 19
     # Phase A's universe sync was first.
     assert calls["order"][0] == "nightly_universe_sync"
 
@@ -387,7 +395,9 @@ def test_orchestrator_mid_sec_lane_failure_continues_lane_and_etoro(
     _bind_settings_to_test_db(monkeypatch)
     calls = _patch_invokers_with_fakes(
         monkeypatch,
-        failing_jobs={"sec_def14a_bootstrap"},  # mid-SEC-lane (S9)
+        # #1413 — sec_def14a_bootstrap (old S17) dropped under bulk-only;
+        # fail a surviving mid-sec_rate-lane stage instead.
+        failing_jobs={"sec_business_summary_bootstrap"},  # mid-SEC-lane (S18)
     )
 
     start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
@@ -404,7 +414,7 @@ def test_orchestrator_mid_sec_lane_failure_continues_lane_and_etoro(
     # Init succeeded.
     assert statuses["universe_sync"] == "success"
     # Failed stage marked error.
-    assert statuses["sec_def14a_bootstrap"] == "error"
+    assert statuses["sec_business_summary_bootstrap"] == "error"
     # Subsequent SEC-lane stages still ran (continue past errors per spec §Goal 4).
     assert statuses["fundamentals_sync"] == "success"
 
@@ -413,7 +423,7 @@ def test_orchestrator_mid_sec_lane_failure_continues_lane_and_etoro(
 
     # The failed invoker still appears in the call log because the
     # invoker raised; we record that as one call.
-    assert "sec_def14a_bootstrap" in calls["order"]
+    assert "sec_business_summary_bootstrap" in calls["order"]
 
 
 def test_orchestrator_skips_stages_already_success(
@@ -536,14 +546,17 @@ def test_dispatch_resolves_job_name_from_spec_by_stage_key(
         operator_id=None,
         stage_specs=get_bootstrap_stage_specs(),
     )
-    # Rewrite the S21 stage row to carry the stale wrapper name —
-    # this is what an in-flight retry of pre-PR1c run looks like.
+    # #1413 — re-pointed from the dropped S22 ``sec_13f_recent_sweep`` to
+    # the surviving stage_key≠job_name divergence: S25 stage_key
+    # ``fundamentals_sync`` dispatches job_name ``fundamentals_sync_bootstrap``.
+    # Rewrite its DB row to a stale wrapper name — what an in-flight retry
+    # of a pre-rename run looks like.
     ebull_test_conn.execute(
         """
         UPDATE bootstrap_stages
-           SET job_name = 'bootstrap_sec_13f_recent_sweep'
+           SET job_name = 'bootstrap_fundamentals_sync_stale'
          WHERE bootstrap_run_id = %s
-           AND stage_key = 'sec_13f_recent_sweep'
+           AND stage_key = 'fundamentals_sync'
         """,
         (run_id,),
     )
@@ -553,18 +566,15 @@ def test_dispatch_resolves_job_name_from_spec_by_stage_key(
 
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None
-    s21 = next(s for s in snap.stages if s.stage_key == "sec_13f_recent_sweep")
+    fs = next(s for s in snap.stages if s.stage_key == "fundamentals_sync")
     # Post-fix: stage runs to success under the canonical name even
     # though the DB row still carries the stale string.
-    assert s21.status == "success", s21.last_error
-    # The canonical invoker — not the stale wrapper — appears in the
-    # call log.
-    from app.workers.scheduler import JOB_SEC_13F_QUARTERLY_SWEEP
-
-    assert JOB_SEC_13F_QUARTERLY_SWEEP in calls["order"]
-    assert "bootstrap_sec_13f_recent_sweep" not in calls["order"]
+    assert fs.status == "success", fs.last_error
+    # The canonical invoker — not the stale wrapper — appears in the call log.
+    assert "fundamentals_sync_bootstrap" in calls["order"]
+    assert "bootstrap_fundamentals_sync_stale" not in calls["order"]
     # DB column stays as the audit snapshot — never silently rewritten.
-    assert s21.job_name == "bootstrap_sec_13f_recent_sweep"
+    assert fs.job_name == "bootstrap_fundamentals_sync_stale"
 
 
 def test_dispatch_unknown_stage_key_fails_closed(
@@ -680,26 +690,30 @@ def test_every_stage_appears_in_requires_caps() -> None:
     assert not missing, f"stages without _STAGE_REQUIRES_CAPS entry: {missing}"
 
 
-def test_filings_history_seed_requires_submissions_processed() -> None:
-    """Pin the PR-2 lock-contention fix: ``filings_history_seed`` (S15)
-    MUST require ``submissions_processed`` so it waits for S8
-    (``sec_submissions_ingest``) to terminalise before starting.
+def test_stage_keyed_dicts_reference_only_real_stages() -> None:
+    """Every stage_key used as a key in the four stage-keyed catalogue
+    dicts MUST be a stage present in ``_BOOTSTRAP_STAGE_SPECS``.
 
-    Background: S8 and S15 both write to ``filing_events`` for the same
-    ``(instrument_id, …)`` keys. Pre-PR-2 the dispatcher serialised
-    them via ``wait(ALL_COMPLETED)``; PR-2's cross-lane parallelism
-    let them run concurrently → row-lock contention left S8 stuck for
-    17+ min in bootstrap run #5. The fix expresses the ordering via
-    a ``submissions_processed`` capability that S8 provides on
-    success OR skip; S15 requires it.
-
-    Regression sentinel — a future spec edit that drops the requires
-    line would re-introduce the row-lock contention silently.
+    Codex checkpoint-1 (HIGH) on the bulk-only-bootstrap redesign:
+    ``_CAPABILITY_PROVIDERS`` is built from ``_STAGE_PROVIDES`` WITHOUT
+    filtering to the live stage set. So dropping a stage from
+    ``_BOOTSTRAP_STAGE_SPECS`` while leaving its ``_STAGE_PROVIDES`` /
+    ``_STAGE_PROVIDES_ON_SKIP`` / ``_STAGE_REQUIRES_CAPS`` /
+    ``_STAGE_LANE_OVERRIDES`` entry behind would let the catalogue
+    tests pass while runtime sees no status for that stage — the cap is
+    silently mis-attributed to a stage that never runs. This invariant
+    fails at test time the moment a dropped stage leaves a stale entry,
+    so the dropping PR must clean all four dicts in lockstep.
     """
-    req = _STAGE_REQUIRES_CAPS["filings_history_seed"]
-    assert "submissions_processed" in req.all_of, (
-        "filings_history_seed must require submissions_processed (PR-2 lock-contention serialisation invariant)"
-    )
+    spec_keys = {spec.stage_key for spec in _BOOTSTRAP_STAGE_SPECS}
+    for name, mapping in (
+        ("_STAGE_PROVIDES", _STAGE_PROVIDES),
+        ("_STAGE_PROVIDES_ON_SKIP", _STAGE_PROVIDES_ON_SKIP),
+        ("_STAGE_REQUIRES_CAPS", _STAGE_REQUIRES_CAPS),
+        ("_STAGE_LANE_OVERRIDES", _STAGE_LANE_OVERRIDES),
+    ):
+        stale = set(mapping.keys()) - spec_keys
+        assert not stale, f"{name} references stages not in _BOOTSTRAP_STAGE_SPECS: {stale}"
 
 
 # #1407 — every bootstrap stage whose job WALKS ``filing_events`` for its
@@ -710,19 +724,20 @@ def test_filings_history_seed_requires_submissions_processed() -> None:
 #
 # Manually maintained: when a new stage that reads ``filing_events`` is
 # added, list it here. Provider stages that SEED filing_events
-# (``sec_submissions_ingest`` S8, ``filings_history_seed`` S15,
-# ``sec_first_install_drain`` S16) are deliberately excluded — they may
-# read it but must not require the cap they themselves provide.
-# ``ownership_observations_backfill`` (S24) reads filing_events as a
-# bridge but is gated transitively (``form3_inputs_seeded`` -> S20), so it
-# is excluded from the DIRECT-require assertion below.
+# (``sec_submissions_ingest`` S8, ``sec_first_install_drain`` S16) are
+# deliberately excluded — they may read it but must not require the cap
+# they themselves provide. ``ownership_observations_backfill`` (S24)
+# reads filing_events as a bridge but is gated transitively via the
+# ownership input caps, so it is excluded from the DIRECT-require
+# assertion below.
+#
+# #1413 — S14 submissions_files_walk, S17 def14a, S19 insider_backfill,
+# S20 form3 DROPPED (bulk-only). The surviving filing_events readers that
+# seed typed metadata are S18 (business summary) + S21 (8-K); both still
+# require ``filing_events_seeded`` directly.
 _FILING_EVENTS_READER_STAGES: frozenset[str] = frozenset(
     {
-        "sec_submissions_files_walk",  # S14
-        "sec_def14a_bootstrap",  # S17
         "sec_business_summary_bootstrap",  # S18
-        "sec_insider_transactions_backfill",  # S19 (#1407)
-        "sec_form3_ingest",  # S20 (#1407)
         "sec_8k_events_ingest",  # S21
     }
 )
@@ -765,6 +780,52 @@ def test_sec_first_install_drain_dispatches_use_bulk_zip_true() -> None:
     assert spec.params.get("use_bulk_zip") is True, (
         "S16 must dispatch use_bulk_zip=True (#1277 — local-zip primary-page path)"
     )
+
+
+def test_sec_first_install_drain_dispatches_follow_pagination_false() -> None:
+    """#1413 Step 2.3 — S16 StageSpec dispatches ``follow_pagination=False``
+    on the bootstrap path so the drain NEVER fetches secondary
+    ``CIK<10>-submissions-<NNN>.json`` pages (the last per-CIK HTTP
+    source in the bootstrap lane). Secondary-page (deep-history) coverage
+    is deferred to steady-state Layer 2/3.
+
+    The steady-state safety-net invoker keeps ``follow_pagination=True``
+    by default; only the bootstrap dispatch flips it via the StageSpec
+    params + the ``JOB_INTERNAL_KEYS`` allow-list. Regression sentinel —
+    dropping this flag re-introduces ~per-CIK secondary-page HTTP and
+    re-inflates the bootstrap wall-clock.
+    """
+    spec = next(
+        (s for s in _BOOTSTRAP_STAGE_SPECS if s.stage_key == "sec_first_install_drain"),
+        None,
+    )
+    assert spec is not None, "sec_first_install_drain missing from _BOOTSTRAP_STAGE_SPECS"
+    assert spec.params.get("follow_pagination") is False, (
+        "S16 must dispatch follow_pagination=False (#1413 — zero secondary-page HTTP in bootstrap)"
+    )
+
+
+def test_s16_no_longer_provides_secondary_pages_walked() -> None:
+    """#1413 Step 2.3 — with ``follow_pagination=False`` S16 no longer
+    walks secondary pages, so it must NOT advertise
+    ``submissions_secondary_pages_walked``. The cap is removed end-to-end
+    (Capability Literal + provides + every consumer).
+    """
+    assert "submissions_secondary_pages_walked" not in _STAGE_PROVIDES.get("sec_first_install_drain", ())
+
+
+@pytest.mark.parametrize("stage_key", ["sec_business_summary_bootstrap", "sec_8k_events_ingest"])
+def test_typed_metadata_stages_do_not_require_secondary_pages_walked(stage_key: str) -> None:
+    """#1413 Step 2.3 — S18 (business summary) + S21 (8-K) typed-metadata
+    seed stages gate ONLY on ``filing_events_seeded`` now; the
+    ``submissions_secondary_pages_walked`` requirement is dropped (S16 no
+    longer provides it, and recent deep-history bodies are lazy-on-view
+    per #1343). Leaving the requirement would make these stages
+    permanently unsatisfiable once the cap is removed.
+    """
+    req = _STAGE_REQUIRES_CAPS[stage_key]
+    assert "submissions_secondary_pages_walked" not in req.all_of
+    assert "filing_events_seeded" in req.all_of
 
 
 def test_sec_first_install_drain_requires_submissions_processed() -> None:
@@ -822,42 +883,6 @@ def test_submissions_processed_provided_by_s8_on_success_and_skip() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_insider_legacy_backfills_require_insider_dataset_processed() -> None:
-    """S19 (sec_insider_transactions_backfill) and S20 (sec_form3_ingest)
-    BOTH write ``ownership_insiders_observations`` via the legacy
-    per-filing path. S11 (sec_insider_ingest_from_dataset) writes the
-    same table from the bulk dataset. PR-2 cross-lane parallelism would
-    let them run concurrently against overlapping
-    (instrument_id, holder, observed_at) rows — same row-lock storm
-    shape that PR-1292 fixed for S15↔S8.
-
-    Regression sentinel: any future edit that drops the
-    ``insider_dataset_processed`` requirement from S19 or S20 would
-    re-introduce the contention silently.
-    """
-    s19 = _STAGE_REQUIRES_CAPS["sec_insider_transactions_backfill"]
-    s20 = _STAGE_REQUIRES_CAPS["sec_form3_ingest"]
-    assert "insider_dataset_processed" in s19.all_of, (
-        "sec_insider_transactions_backfill must require insider_dataset_processed (#1233 lock-contention serialisation)"
-    )
-    assert "insider_dataset_processed" in s20.all_of, (
-        "sec_form3_ingest must require insider_dataset_processed (#1233 lock-contention serialisation)"
-    )
-
-
-def test_thirteen_f_recent_sweep_requires_institutional_dataset_processed() -> None:
-    """S22 (sec_13f_recent_sweep) and S10 (sec_13f_ingest_from_dataset)
-    both write ``ownership_institutions_observations``. Same shape as
-    the S19/S20 case above but on the institutional family — and the
-    largest write fanout of any audited pair (institutional 13F rows
-    during a full bootstrap can total tens of millions).
-    """
-    s22 = _STAGE_REQUIRES_CAPS["sec_13f_recent_sweep"]
-    assert "institutional_dataset_processed" in s22.all_of, (
-        "sec_13f_recent_sweep must require institutional_dataset_processed (#1233 lock-contention serialisation)"
-    )
-
-
 def test_dataset_processed_caps_provided_by_bulk_ingesters_on_success_and_skip() -> None:
     """Companion invariant to the requires-side tests. Each new
     ordering cap is advertised by its bulk ingester on BOTH success
@@ -877,24 +902,6 @@ def test_dataset_processed_caps_provided_by_bulk_ingesters_on_success_and_skip()
     # #1340 — NPORT family: S12 bulk provides on success + skip.
     assert "nport_dataset_processed" in _STAGE_PROVIDES["sec_nport_ingest_from_dataset"]
     assert "nport_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_nport_ingest_from_dataset"]
-
-
-def test_n_port_ingest_requires_nport_dataset_processed() -> None:
-    """#1340 — S23 (sec_n_port_ingest) and S12 (sec_nport_ingest_from_dataset)
-    both write ``ownership_funds_observations`` AND S23 reads the
-    ``n_port_ingest_log`` rows S12 seeds (to skip bulk-loaded accessions).
-    The ordering cap serialises S23 after S12 commits — fixes both the
-    cross-lane (db vs sec_rate) lock contention and the visibility race.
-    """
-    from app.services.bootstrap_orchestrator import _ORDERING_ONLY_CAPS
-
-    s23 = _STAGE_REQUIRES_CAPS["sec_n_port_ingest"]
-    assert "nport_dataset_processed" in s23.all_of, (
-        "sec_n_port_ingest must require nport_dataset_processed (#1340 lock-contention + log-visibility serialisation)"
-    )
-    assert "nport_dataset_processed" in _ORDERING_ONLY_CAPS, (
-        "nport_dataset_processed must be an ordering-only cap (terminalises on any terminal status of S12)"
-    )
 
 
 def test_ordering_only_caps_disjoint_from_strict_gate_caps() -> None:
@@ -993,160 +1000,32 @@ def test_ordering_caps_satisfied_on_terminal_failure_but_content_caps_are_not() 
         )
 
 
-def test_partial_bulk_failure_legacy_recovers(
-    ebull_test_conn: psycopg.Connection[tuple],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """#1138 §8 test 1 — `sec_bulk_download` errors (NOT skips). Every
-    legacy ownership stage succeeds. Per-family ownership caps are
-    satisfied by their legacy providers, so
-    `ownership_observations_backfill` reaches `success`. The 5 Phase C
-    bulk ingesters cascade to `blocked` (error-classified) because
-    `bulk_archives_ready` is error-dead.
-    """
-    _reset_state(ebull_test_conn)
-    _bind_settings_to_test_db(monkeypatch)
-    calls = _patch_invokers_with_fakes(
-        monkeypatch,
-        failing_jobs={"sec_bulk_download"},
-    )
-
-    start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
-    ebull_test_conn.commit()
-
-    run_bootstrap_orchestrator()
-
-    snap = read_latest_run_with_stages(ebull_test_conn)
-    assert snap is not None
-    statuses = {stage.stage_key: stage.status for stage in snap.stages}
-
-    # S7 error.
-    assert statuses["sec_bulk_download"] == "error"
-    # 5 Phase C bulk ingesters cascade-blocked (error-dead bulk_archives_ready).
-    phase_c_bulk = {
-        "sec_submissions_ingest",
-        "sec_companyfacts_ingest",
-        "sec_13f_ingest_from_dataset",
-        "sec_insider_ingest_from_dataset",
-        "sec_nport_ingest_from_dataset",
-    }
-    for key in phase_c_bulk:
-        assert statuses[key] == "blocked", f"{key} expected blocked, got {statuses[key]}"
-    # Phase C invokers NOT called (cascade-block transitions directly).
-    for key in phase_c_bulk:
-        assert key not in calls["order"], f"{key} should not have been invoked"
-    # Legacy ownership stages succeeded → per-family caps satisfied.
-    assert statuses["ownership_observations_backfill"] == "success"
-    # Fundamentals also blocks because S9 (its sole provider) is blocked.
-    assert statuses["fundamentals_sync"] == "blocked"
-
-    state = read_state(ebull_test_conn)
-    assert state.status == "partial_error"
-
-
-def test_intentional_slow_connection_skip_cascade(
-    ebull_test_conn: psycopg.Connection[tuple],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """#1138 §8 test 2 — `sec_bulk_download` raises
-    `BootstrapPhaseSkipped` (the new fallback path). Phase C cascades
-    to `skipped` per §6.3; legacy chain succeeds; downstream reaches
-    `success` via legacy per-family caps. Walker S13 runs to success
-    because legacy drain S15 provides `filing_events_seeded`.
-    """
-    _reset_state(ebull_test_conn)
-    _bind_settings_to_test_db(monkeypatch)
-
-    calls = _patch_invokers_with_fakes(
-        monkeypatch,
-        phase_skip_jobs={"sec_bulk_download"},
-    )
-
-    start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
-    ebull_test_conn.commit()
-
-    run_bootstrap_orchestrator()
-
-    snap = read_latest_run_with_stages(ebull_test_conn)
-    assert snap is not None
-    statuses = {stage.stage_key: stage.status for stage in snap.stages}
-
-    # S7 transitioned to `skipped` via BootstrapPhaseSkipped.
-    assert statuses["sec_bulk_download"] == "skipped"
-
-    # 5 Phase C bulk ingesters cascade to skipped without invocation.
-    phase_c_bulk = {
-        "sec_submissions_ingest",
-        "sec_companyfacts_ingest",
-        "sec_13f_ingest_from_dataset",
-        "sec_insider_ingest_from_dataset",
-        "sec_nport_ingest_from_dataset",
-    }
-    for key in phase_c_bulk:
-        assert statuses[key] == "skipped", f"{key} expected skipped, got {statuses[key]}"
-        assert key not in calls["order"], f"{key} should not have been invoked under cascade"
-
-    # S25 fundamentals_sync cascades skipped. Post-PR-C1 (#1233) the
-    # cap requirement is 4-cap (bulk_archives_ready + cik_mapping_ready
-    # + submissions_processed + fundamentals_raw_seeded); under the
-    # slow-connection path S7 (sec_bulk_download) skips → ALL FOUR
-    # cap-providers downstream cascade-skip → S25 cascade-skips. Same
-    # outcome as the pre-PR-C1 1-cap shape (where the sole provider
-    # was S9 sec_companyfacts_ingest); test stays valid.
-    assert statuses["fundamentals_sync"] == "skipped"
-
-    # Legacy chain runs.
-    assert statuses["filings_history_seed"] == "success"
-    assert statuses["sec_first_install_drain"] == "success"
-    # Walker runs to success via filing_events_seeded from legacy drain.
-    assert statuses["sec_submissions_files_walk"] == "success"
-    # Typed parsers run via submissions_secondary_pages_walked from drain.
-    assert statuses["sec_def14a_bootstrap"] == "success"
-    assert statuses["sec_business_summary_bootstrap"] == "success"
-    assert statuses["sec_8k_events_ingest"] == "success"
-    # Ownership backfill reaches success via legacy per-family providers.
-    assert statuses["ownership_observations_backfill"] == "success"
-
-    # Caps invariant — skipped S7 does NOT advertise bulk_archives_ready.
-    caps = _satisfied_capabilities(statuses)
-    assert "bulk_archives_ready" not in caps
-
-    state = read_state(ebull_test_conn)
-    # All-success-or-skip → complete.
-    assert state.status == "complete"
-
-
 def test_both_ownership_paths_fail_blocks_final_stage(
     ebull_test_conn: psycopg.Connection[tuple],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1138 §8 test 3 — bulk AND legacy ownership stages all error,
-    so every per-family ownership cap is error-dead.
-    `ownership_observations_backfill` transitions to `blocked` with
-    a structured "missing capability" reason naming at least one
-    per-family cap.
+    """#1138 §8 test 3 (reworked for #1413 bulk-only bootstrap) — the
+    legacy per-CIK ownership stages (S19/S20/S22/S23) are dropped, so
+    the bulk ingesters S10/S11/S12 are the SOLE providers of the
+    per-family ownership caps. Failing S7 ``sec_bulk_download``
+    error-deads ``bulk_archives_ready`` → S10/S11/S12 cascade-block →
+    every per-family cap is error-dead → ``ownership_observations_backfill``
+    transitions to ``blocked`` with a structured "missing capability"
+    reason naming at least one per-family cap.
     """
     _reset_state(ebull_test_conn)
     _bind_settings_to_test_db(monkeypatch)
 
-    # Fail S7 AND every legacy ownership stage. Bulk Phase C is then
-    # error-blocked from S7 (error-dead bulk_archives_ready); legacy
-    # ownership stages fail directly.
+    # Fail S7 only. Under bulk-only bootstrap there is no longer a
+    # legacy ownership path — the bulk Phase C ingesters are the only
+    # per-family-cap providers, and they cascade-block from the
+    # error-dead ``bulk_archives_ready`` S7 would have provided.
     #
     # Resolve job_name from stage_key via the catalogue so a future
-    # rename (e.g. JOB_SEC_13F_QUARTERLY_SWEEP underlies stage_key
-    # `sec_13f_recent_sweep`) doesn't silently no-op the failing set.
-    # Claude review WARNING for #1138: hardcoded `"sec_13f_quarterly_sweep"`
-    # with only a comment would mask a job-name drift; resolving
-    # through `get_bootstrap_stage_specs()` raises on a typo.
+    # rename doesn't silently no-op the failing set (resolving through
+    # ``get_bootstrap_stage_specs()`` raises on a typo).
     _job_by_stage = {spec.stage_key: spec.job_name for spec in get_bootstrap_stage_specs()}
-    failing_stage_keys = {
-        "sec_bulk_download",
-        "sec_insider_transactions_backfill",
-        "sec_form3_ingest",
-        "sec_13f_recent_sweep",
-        "sec_n_port_ingest",
-    }
+    failing_stage_keys = {"sec_bulk_download"}
     failing = {_job_by_stage[key] for key in failing_stage_keys}
     _patch_invokers_with_fakes(monkeypatch, failing_jobs=failing)
 
@@ -1166,7 +1045,6 @@ def test_both_ownership_paths_fail_blocks_final_stage(
     # The reason should name at least one per-family ownership cap.
     family_caps = (
         "insider_inputs_seeded",
-        "form3_inputs_seeded",
         "institutional_inputs_seeded",
         "nport_inputs_seeded",
     )
@@ -1174,22 +1052,6 @@ def test_both_ownership_paths_fail_blocks_final_stage(
 
     state = read_state(ebull_test_conn)
     assert state.status == "partial_error"
-
-
-def test_phase_c_provides_are_per_family() -> None:
-    """Sanity: bulk insider ingester provides BOTH insider+form3 caps;
-    the per-family split keeps bulk-vs-legacy alternatives expressible
-    at the provider side (no consumer-side any_of needed).
-    """
-    bulk_insider = _STAGE_PROVIDES["sec_insider_ingest_from_dataset"]
-    assert "insider_inputs_seeded" in bulk_insider
-    assert "form3_inputs_seeded" in bulk_insider
-    # Legacy insider txns covers Form 4 only.
-    legacy_insider = _STAGE_PROVIDES["sec_insider_transactions_backfill"]
-    assert legacy_insider == ("insider_inputs_seeded",)
-    # Legacy Form 3 covers Form 3 only.
-    legacy_form3 = _STAGE_PROVIDES["sec_form3_ingest"]
-    assert legacy_form3 == ("form3_inputs_seeded",)
 
 
 def test_cascade_recompute_on_non_topological_pending_order(
@@ -1331,43 +1193,6 @@ def test_strict_cap_blocks_consumer_on_zero_rows(
     assert state.status == "partial_error"
 
 
-def test_strict_cap_satisfied_by_one_of_two_providers(
-    ebull_test_conn: psycopg.Connection[tuple],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Per-family ownership cap with two providers (bulk + legacy):
-    one lands ``success`` with ``rows_processed=0`` (under floor), the
-    other lands ``success`` with ``rows_processed > 0``. The cap is
-    satisfied via the surviving provider so ``ownership_observations_backfill``
-    runs to success. Run finalises ``complete``.
-    """
-    _reset_state(ebull_test_conn)
-    _bind_settings_to_test_db(monkeypatch)
-    _patch_invokers_with_fakes(
-        monkeypatch,
-        # Bulk insider wash lands but writes 0 rows; legacy backfill
-        # writes rows. insider_inputs_seeded cap stays alive via legacy.
-        rows_by_job={"sec_insider_ingest_from_dataset": 0},
-    )
-
-    start_run(ebull_test_conn, operator_id=None, stage_specs=get_bootstrap_stage_specs())
-    ebull_test_conn.commit()
-
-    run_bootstrap_orchestrator()
-
-    snap = read_latest_run_with_stages(ebull_test_conn)
-    assert snap is not None
-    statuses = {stage.stage_key: stage.status for stage in snap.stages}
-
-    assert statuses["sec_insider_ingest_from_dataset"] == "success"
-    assert statuses["sec_insider_transactions_backfill"] == "success"
-    # All four per-family caps satisfied → backfill runs.
-    assert statuses["ownership_observations_backfill"] == "success"
-
-    state = read_state(ebull_test_conn)
-    assert state.status == "complete"
-
-
 def test_strict_cap_dead_on_zero_rows_classifies_error_not_skip() -> None:
     """Unit test for the cap-eval helpers — confirms a strict cap
     where the only provider is ``success`` with under-floor rows is
@@ -1413,67 +1238,6 @@ def test_strict_caps_have_at_least_one_provider() -> None:
 
     missing = [c for c in _CAPABILITY_MIN_ROWS if not _CAPABILITY_PROVIDERS.get(c)]  # type: ignore[arg-type]
     assert not missing, f"strict-gate caps with no provider: {missing}"
-
-
-def test_strict_cap_exclusion_neutral_provider_does_not_satisfy_or_kill() -> None:
-    """Codex pre-push round 2 BLOCKING regression — bulk insider
-    (excluded provider for ``form3_inputs_seeded``) is NEUTRAL for the
-    strict cap.
-
-    Scenarios:
-    1. Bulk insider success+rows=10, legacy form3 absent → cap dead
-       (no non-excluded provider met the floor). Classification is
-       "error" (the legacy provider hasn't been reached yet → fall
-       through to "error" default since no skipped provider exists).
-    2. Bulk insider success+rows=10, legacy form3 success+rows=5 →
-       cap alive (legacy meets floor).
-    3. Bulk insider success+rows=10, legacy form3 success+rows=0 →
-       cap dead, classified error (legacy under floor — that's the
-       responsible signal). Bulk's success+rows=10 is neutral, NOT
-       a satisfier, NOT a killer.
-    """
-    from app.services.bootstrap_orchestrator import (
-        _capability_is_dead,
-        _classify_dead_cap,
-        _satisfied_capabilities,
-    )
-
-    # Scenario 1: only bulk ran (legacy still pending unmodelled).
-    statuses_only_bulk = {"sec_insider_ingest_from_dataset": "success"}
-    rows_only_bulk = {"sec_insider_ingest_from_dataset": 10}
-    caps = _satisfied_capabilities(statuses_only_bulk, rows_only_bulk)
-    assert "form3_inputs_seeded" not in caps
-    # form3_inputs_seeded providers: bulk insider + legacy form3. Only
-    # bulk has reported — legacy is unknown (treated as no-info, not
-    # alive). With bulk neutral and no live legacy → cap dead.
-    assert _capability_is_dead("form3_inputs_seeded", statuses_only_bulk, rows_only_bulk) is True
-
-    # Scenario 2: bulk + legacy succeed with rows.
-    statuses_both = {
-        "sec_insider_ingest_from_dataset": "success",
-        "sec_form3_ingest": "success",
-    }
-    rows_both = {"sec_insider_ingest_from_dataset": 10, "sec_form3_ingest": 5}
-    caps = _satisfied_capabilities(statuses_both, rows_both)
-    assert "form3_inputs_seeded" in caps  # legacy carries it
-    assert _capability_is_dead("form3_inputs_seeded", statuses_both, rows_both) is False
-
-    # Scenario 3: bulk rows>0, legacy rows=0 → cap dead via legacy.
-    statuses_legacy_zero = {
-        "sec_insider_ingest_from_dataset": "success",
-        "sec_form3_ingest": "success",
-    }
-    rows_legacy_zero = {"sec_insider_ingest_from_dataset": 10, "sec_form3_ingest": 0}
-    caps = _satisfied_capabilities(statuses_legacy_zero, rows_legacy_zero)
-    assert "form3_inputs_seeded" not in caps
-    assert _capability_is_dead("form3_inputs_seeded", statuses_legacy_zero, rows_legacy_zero) is True
-    # Classification: bulk is excluded (skipped), legacy under floor → error.
-    assert _classify_dead_cap("form3_inputs_seeded", statuses_legacy_zero, rows_legacy_zero) == "error"
-
-    # Bonus: insider_inputs_seeded is NOT excluded for the bulk provider
-    # (the exclusion is form3-specific), so scenario-1 rows satisfy it.
-    caps = _satisfied_capabilities(statuses_only_bulk, rows_only_bulk)
-    assert "insider_inputs_seeded" in caps
 
 
 # ---------------------------------------------------------------------------

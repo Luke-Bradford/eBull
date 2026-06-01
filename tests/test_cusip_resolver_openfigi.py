@@ -620,15 +620,22 @@ def test_s13_requires_bulk_inputs_seeded() -> None:
     assert "nport_inputs_seeded" in req.all_of
 
 
-def test_stage_orders_are_dense_1_through_27() -> None:
-    """Renumber invariant: every catalogue slot 1..N is populated, no
-    gaps, no duplicates. Post-PR-1b the catalogue has 27 stages."""
+def test_stage_orders_are_unique_and_ascending() -> None:
+    """Ordering invariant: stage_orders are unique + strictly ascending.
+
+    #1413 (bulk-only bootstrap) dropped 7 per-CIK sec_rate stages,
+    leaving INTENTIONAL gaps in the stage_order sequence (…13, 16, 18,
+    21, 24…) so operator traceability is preserved (stage 22 still
+    means "the 13F sweep"). Density is no longer an invariant; the
+    contract is unique + ascending (catches dup / mis-ordered specs).
+    """
     from app.services.bootstrap_orchestrator import _BOOTSTRAP_STAGE_SPECS
 
-    orders = sorted(spec.stage_order for spec in _BOOTSTRAP_STAGE_SPECS)
-    assert orders == list(range(1, len(_BOOTSTRAP_STAGE_SPECS) + 1)), f"non-dense stage_orders: {orders}"
-    # Pin the post-renumber count.
-    assert len(_BOOTSTRAP_STAGE_SPECS) == 27
+    orders = [spec.stage_order for spec in _BOOTSTRAP_STAGE_SPECS]
+    assert orders == sorted(orders), f"stage_order not ascending: {orders}"
+    assert len(set(orders)) == len(orders), f"duplicate stage_orders: {orders}"
+    # Pin the post-collapse count (27 - 8 per-CIK HTTP stages = 19; gap-close deferred to P3).
+    assert len(_BOOTSTRAP_STAGE_SPECS) == 19
 
 
 def test_openfigi_lane_in_max_concurrency_map() -> None:

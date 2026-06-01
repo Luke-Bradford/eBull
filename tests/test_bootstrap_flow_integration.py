@@ -124,8 +124,8 @@ def test_bootstrap_end_to_end(
     assert met is False
     assert "first-install bootstrap not complete" in reason
 
-    # 2. start_run seeds 27 stages atomically (#1174 added S25 + S26;
-    # #1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep).
+    # 2. start_run seeds 19 stages atomically (#1413 bulk-only bootstrap
+    # dropped 8 per-CIK HTTP stages: 27 - 8 = 19).
     run_id = start_run(
         ebull_test_conn,
         operator_id=None,
@@ -136,7 +136,7 @@ def test_bootstrap_end_to_end(
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None
     assert snap.run_id == run_id
-    assert len(snap.stages) == 27
+    assert len(snap.stages) == 19
     assert all(s.status == "pending" for s in snap.stages)
 
     # 3. State is running, gate stays closed.
@@ -148,8 +148,8 @@ def test_bootstrap_end_to_end(
     # 4. Orchestrator drives Phase A → B → C with the stubbed invokers.
     run_bootstrap_orchestrator()
 
-    # 5. Every fake invoker fired once (27 stages post-#1233 PR-1b).
-    assert len(calls["order"]) == 27
+    # 5. Every fake invoker fired once (19 stages post-#1413 bulk-only).
+    assert len(calls["order"]) == 19
 
     # 6. State is complete; gate releases.
     state = read_state(ebull_test_conn)
@@ -189,8 +189,10 @@ def test_bootstrap_partial_error_then_retry_failed(
     _bind_settings_to_test_db(monkeypatch)
 
     # First pass: one SEC-lane stage fails. Track which invokers fired.
+    # #1413 — sec_def14a_bootstrap (old S17) dropped under bulk-only;
+    # fail a surviving mid-sec_rate-lane stage (S18 business summary).
     calls_pass1: dict[str, list[str]] = {"order": []}
-    failing = {"sec_def14a_bootstrap"}
+    failing = {"sec_business_summary_bootstrap"}
 
     def _make_pass1(name: str) -> Callable[..., None]:
         def _fake(_params: object = None) -> None:
@@ -245,8 +247,11 @@ def test_bootstrap_partial_error_then_retry_failed(
     assert "daily_candle_refresh" not in calls_pass2["order"]
     assert "fundamentals_sync" not in calls_pass2["order"]
     # Failed stage and downstream peers in the SAME (sec_rate) lane re-fired.
-    assert "sec_def14a_bootstrap" in calls_pass2["order"]
+    # #1413 — S18 business_summary failed → reset_failed_stages_for_retry
+    # (lane-MIN + order) resets it + later-ordered sec_rate peers (S21 8-K,
+    # S26 mf_directory, S27 n_csr); they re-fire regardless of pass-1 status.
     assert "sec_business_summary_bootstrap" in calls_pass2["order"]
+    assert "sec_8k_events_ingest" in calls_pass2["order"]
 
     state = read_state(ebull_test_conn)
     assert state.status == "complete"

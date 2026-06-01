@@ -102,8 +102,6 @@ JOB_BOOTSTRAP_ORCHESTRATOR = "bootstrap_orchestrator"
 # Constants imported from the scheduler so the bootstrap-stage entries
 # below carry the canonical names and a future rename is single-site.
 from app.workers.scheduler import (  # noqa: E402  (after dataclass to avoid cycle)
-    JOB_FILINGS_HISTORY_SEED,
-    JOB_SEC_13F_QUARTERLY_SWEEP,
     JOB_SEC_FIRST_INSTALL_DRAIN,
 )
 
@@ -291,9 +289,10 @@ Capability = Literal[
     "cusip_mapping_ready",
     "bulk_archives_ready",
     "filing_events_seeded",
-    "submissions_secondary_pages_walked",
+    # #1413 Step 2.3 — ``submissions_secondary_pages_walked`` removed. S16
+    # no longer walks secondary pages in bootstrap (follow_pagination=False)
+    # and the typed-metadata consumers (S18/S21) gate on filing_events_seeded.
     "insider_inputs_seeded",
-    "form3_inputs_seeded",
     "institutional_inputs_seeded",
     "nport_inputs_seeded",
     "fundamentals_raw_seeded",
@@ -383,9 +382,13 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
     # (insider) and S22 (institutional) so the legacy backfills wait
     # for the bulk path to terminalise. See ``insider_dataset_processed``
     # / ``institutional_dataset_processed`` docstrings.
+    # #1413 — bulk insider dataset ingest writes ownership_insiders_observations
+    # for BOTH Form 4 transactions AND Form 3 initial-holdings (NONDERIV_HOLDING
+    # path), so it carries the insider content cap directly. ``form3_inputs_seeded``
+    # removed entirely (the legacy per-CIK S20 that owned it is dropped; S24 no
+    # longer requires a form3-specific gate — bulk S11 covers form3 observations).
     "sec_insider_ingest_from_dataset": (
         "insider_inputs_seeded",
-        "form3_inputs_seeded",
         "insider_dataset_processed",
     ),
     "sec_13f_ingest_from_dataset": (
@@ -393,18 +396,13 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
         "institutional_dataset_processed",
     ),
     "sec_nport_ingest_from_dataset": ("nport_inputs_seeded", "nport_dataset_processed"),
-    "sec_submissions_files_walk": ("submissions_secondary_pages_walked",),
-    "filings_history_seed": ("filing_events_seeded",),
-    # sec_first_install_drain runs with follow_pagination=True
-    # (app/workers/scheduler.py) so it walks the same
-    # filings.files[] surface as the dedicated walker (S13). Providing
-    # both caps lets typed parsers run on the legacy / slow-connection
-    # path where S13 is cascade-skipped or self-skipped.
-    "sec_first_install_drain": ("filing_events_seeded", "submissions_secondary_pages_walked"),
-    "sec_insider_transactions_backfill": ("insider_inputs_seeded",),
-    "sec_form3_ingest": ("form3_inputs_seeded",),
-    "sec_13f_recent_sweep": ("institutional_inputs_seeded",),
-    "sec_n_port_ingest": ("nport_inputs_seeded",),
+    # #1413 — S14 sec_submissions_files_walk + S15 filings_history_seed
+    # dropped; ``filing_events_seeded`` re-homed to S8 (success) + S16.
+    # S16 sec_first_install_drain seeds filing_events from bulk. Step 2.3
+    # sets ``follow_pagination=False`` so S16 no longer walks secondary
+    # pages → it no longer provides ``submissions_secondary_pages_walked``
+    # (the cap is removed end-to-end; recent deep history is steady-state).
+    "sec_first_install_drain": ("filing_events_seeded",),
     # #1174 — dedicated MF directory refresh advertises class_id_mapping_ready.
     # S26 ``sec_n_csr_bootstrap_drain`` is terminal (no provides entry).
     "mf_directory_sync": ("class_id_mapping_ready",),
@@ -467,7 +465,6 @@ _STAGE_PROVIDES_ON_SKIP: Final[dict[str, tuple[Capability, ...]]] = {
 _CAPABILITY_MIN_ROWS: Final[dict[Capability, int]] = {
     "fundamentals_raw_seeded": 1,
     "insider_inputs_seeded": 1,
-    "form3_inputs_seeded": 1,
     "institutional_inputs_seeded": 1,
     "nport_inputs_seeded": 1,
     # #1174 — refresh_mf_directory returns directory_rows=0 on an empty
@@ -502,9 +499,13 @@ _CAPABILITY_MIN_ROWS: Final[dict[Capability, int]] = {
 # When per-family bulk row counts land (follow-up ticket) this map
 # entry can be dropped and the bulk provider can satisfy form3
 # directly.
-_STRICT_CAP_PROVIDER_EXCLUSIONS: Final[dict[Capability, frozenset[str]]] = {
-    "form3_inputs_seeded": frozenset({"sec_insider_ingest_from_dataset"}),
-}
+#
+# #1413 — emptied. The sole entry was ``form3_inputs_seeded`` (excluding
+# the bulk insider ingester from satisfying the form3 floor via its
+# aggregate row count). That cap is removed entirely in the bulk-only
+# bootstrap: bulk S11 writes Form-3 observations directly and S24 no
+# longer gates on a form3-specific cap. Kept as an (empty) extension hook.
+_STRICT_CAP_PROVIDER_EXCLUSIONS: Final[dict[Capability, frozenset[str]]] = {}
 
 
 # #1233 lock-contention cap-gates — "ordering-only" caps that
@@ -567,82 +568,47 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     "cusip_resolver_post_bulk_sweep": CapRequirement(
         all_of=("institutional_inputs_seeded", "nport_inputs_seeded"),
     ),
-    # Phase C' — walker
-    "sec_submissions_files_walk": CapRequirement(all_of=("filing_events_seeded",)),
-    # Legacy chain
-    # ``submissions_processed`` cap pinned here serialises S15 after
-    # S8 terminalises (success / skip). See cap docstring on
-    # ``submissions_processed`` for the lock-contention rationale.
-    "filings_history_seed": CapRequirement(all_of=("cik_mapping_ready", "submissions_processed")),
-    # #1365 — S16 fast-path at ``app/jobs/sec_first_install_drain.py:308``
-    # (``seed_manifest_from_filing_events``) only fires when ``filing_events``
-    # has SEC-provider rows AT FUNCTION ENTRY. Pre-#1365 S16 required only
-    # ``cik_mapping_ready`` so it raced ahead of the bulk path: with bulk-
-    # download still in flight, the fast-path read returned 0 rows and S16
-    # fell through to per-CIK HTTP for ~25k subjects (~85min observed on
-    # Run #8, ~3h projected on R1). Adding ``submissions_processed`` makes
-    # S16 wait for the bulk path to terminalise (success → filing_events
-    # populated, fast-path fires; skip → cascade-skip parity preserves the
-    # slow-connection fallback). Same shape as the PR-1292 fold on S15.
-    # Non-issuer subjects (institutional_filer + blockholder_filer) still
-    # walk HTTP — those have no bulk archives; only the issuer cohort
-    # short-circuits via filing_events.
+    # Legacy chain (#1413 bulk-only bootstrap — S14 walker + S15
+    # filings_history_seed dropped; filing_events_seeded re-homed to S8+S16).
+    # #1365 — S16 fast-path (``seed_manifest_from_filing_events``) only
+    # fires when ``filing_events`` has SEC-provider rows at entry, so it
+    # requires ``submissions_processed`` to wait for the bulk path (S8) to
+    # terminalise rather than racing ahead into per-CIK HTTP. (#1413 also
+    # adds S16 ``follow_pagination=False`` in bootstrap so its secondary-
+    # page HTTP walk is collapsed too — Step 2.3.)
     "sec_first_install_drain": CapRequirement(all_of=("cik_mapping_ready", "submissions_processed")),
-    "sec_def14a_bootstrap": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
-    "sec_business_summary_bootstrap": CapRequirement(
-        all_of=("filing_events_seeded", "submissions_secondary_pages_walked")
-    ),
-    # #1233 lock-contention cap-gates — same shape as PR-1292 for
-    # S15↔S8. The legacy backfills (S19/S20) and the legacy 13F sweep
-    # (S22) all write the same observation table their bulk
-    # counterparts (S11 / S10) write. Without the ordering cap, PR-2
-    # cross-lane parallelism lets them run concurrently and produces
-    # the row-lock storm shape that killed bootstrap run #5. Caps are
-    # ``*_dataset_processed`` (provided by S11 / S10 on success or
-    # skip), so the legacy stages run AFTER the bulk path terminalises.
-    #
-    # #1407 — S19 + S20 additionally require ``filing_events_seeded``.
-    # Both WALK ``filing_events`` for their source accessions
-    # (``insider_transactions.py`` Form 4 / ``insider_form3_ingest.py``
-    # Form 3), but the DAG executes by capability readiness across
-    # parallel lanes — ``insider_dataset_processed`` only orders them
-    # after the BULK insider path, NOT after ``filing_events`` is
-    # populated (S8 / S15 / S16). On the first clean end-to-end run
-    # (run_id=1, first to pass #1270/#1265) S20 fired while
-    # ``filing_events`` was still empty -> 0 Form 3 rows -> the bulk
-    # provider is excluded from ``form3_inputs_seeded`` (see
-    # ``_STRICT_CAP_PROVIDER_EXCLUSIONS``) so the floor was unmet ->
-    # S24 ``ownership_observations_backfill`` blocked. Adding the cap is
-    # additive (preserves the lock-ordering cap) and turns a silent
-    # 0-row pass into a loud block if ``filing_events`` ever fails to
-    # seed. Invariant pinned in
-    # ``tests/test_bootstrap_orchestrator.py`` (filing_events-reader
-    # stages must require ``filing_events_seeded``).
-    "sec_insider_transactions_backfill": CapRequirement(
-        all_of=("cik_mapping_ready", "insider_dataset_processed", "filing_events_seeded")
-    ),
-    "sec_form3_ingest": CapRequirement(
-        all_of=("cik_mapping_ready", "insider_dataset_processed", "filing_events_seeded")
-    ),
-    "sec_8k_events_ingest": CapRequirement(all_of=("filing_events_seeded", "submissions_secondary_pages_walked")),
-    "sec_13f_recent_sweep": CapRequirement(all_of=("cik_mapping_ready", "institutional_dataset_processed")),
-    # #1340 — ``nport_dataset_processed`` orders S23 after S12 (the bulk NPORT
-    # ingester): both write ``ownership_funds_observations`` (lock contention)
-    # AND S23 reads the ``n_port_ingest_log`` rows S12 seeds to skip bulk-loaded
-    # accessions, so S12 must commit first.
-    "sec_n_port_ingest": CapRequirement(all_of=("cik_mapping_ready", "nport_dataset_processed")),
-    # #1174 — dedicated MF directory refresh + N-CSR drain (S25 + S26).
+    # #1413 — S17 sec_def14a_bootstrap, S19 sec_insider_transactions_backfill,
+    # S20 sec_form3_ingest, S22 sec_13f_recent_sweep, S23 sec_n_port_ingest
+    # DROPPED (bulk-only). The bulk ingesters S10/S11/S12 already write the
+    # ownership observation tables; the legacy per-CIK backfills were
+    # redundant. S18 (business summary) + S21 (8-K) stay as DB-bound
+    # metadata-only seed stages. Step 2.3 — they now gate ONLY on
+    # ``filing_events_seeded`` (the ``submissions_secondary_pages_walked``
+    # requirement is dropped: S16 no longer provides it, and recent
+    # deep-history bodies are lazy-on-view per #1343). The
+    # ``*_dataset_processed`` ordering caps now have no consumers (the legacy
+    # stages that required them are gone) — they remain provided-but-
+    # unconsumed (harmless; cleanup later).
+    "sec_business_summary_bootstrap": CapRequirement(all_of=("filing_events_seeded",)),
+    "sec_8k_events_ingest": CapRequirement(all_of=("filing_events_seeded",)),
+    # #1174 — dedicated MF directory refresh (bounded mf.json fetch).
+    # #1413 Step 2.7 — S27 ``sec_n_csr_bootstrap_drain`` (per-trust HTTP
+    # body-walk) dropped from bootstrap; its requires entry is removed.
     "mf_directory_sync": CapRequirement(all_of=("universe_seeded",)),
-    "sec_n_csr_bootstrap_drain": CapRequirement(all_of=("class_id_mapping_ready",)),
     # Phase E — final derivations. Per-family caps in §4 of the spec
     # encode the bulk-OR-legacy alternative at the *provider* side
     # (each cap has both a bulk and a legacy producer), so the
     # consumer can simply require all four families with `all_of`.
+    # #1413 — ``form3_inputs_seeded`` removed from the all_of. It was a
+    # redundant legacy-path gate: S24 mirrors legacy tables into
+    # ownership_*_observations + refreshes _current, but bulk S11 already
+    # writes ownership_insiders_observations incl. Form-3 holdings directly,
+    # so ``insider_inputs_seeded`` (provided by bulk S11) is the correct
+    # gate. ``form3_inputs_seeded`` is dropped from the capability set.
     "ownership_observations_backfill": CapRequirement(
         all_of=(
             "cik_mapping_ready",
             "insider_inputs_seeded",
-            "form3_inputs_seeded",
             "institutional_inputs_seeded",
             "nport_inputs_seeded",
         ),
@@ -1061,11 +1027,10 @@ _STAGE_LANE_OVERRIDES: Final[dict[str, str]] = {
     "sec_13f_ingest_from_dataset": "db_ownership_inst",
     "sec_insider_ingest_from_dataset": "db_ownership_insider",
     "sec_nport_ingest_from_dataset": "db_ownership_funds",
-    "sec_submissions_files_walk": "sec_rate",
-    "sec_def14a_bootstrap": "sec_rate",
+    # #1413 — S14/S17/S22 lane overrides dropped with their stages.
+    # S18/S21 stay (metadata-only seed stages).
     "sec_business_summary_bootstrap": "sec_rate",
     "sec_8k_events_ingest": "sec_rate",
-    "sec_13f_recent_sweep": "sec_rate",
 }
 
 
@@ -1083,9 +1048,6 @@ from app.services.sec_bulk_orchestrator_jobs import (  # noqa: E402
     JOB_SEC_INSIDER_INGEST_FROM_DATASET,
     JOB_SEC_NPORT_INGEST_FROM_DATASET,
     JOB_SEC_SUBMISSIONS_INGEST,
-)
-from app.services.sec_submissions_files_walk import (  # noqa: E402
-    JOB_SEC_SUBMISSIONS_FILES_WALK,
 )
 
 _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
@@ -1133,27 +1095,24 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         "openfigi",
         JOB_CUSIP_RESOLVER_POST_BULK_SWEEP,
     ),
-    # Phase C' — per-CIK secondary-pages walk for deep-history parity.
-    _spec("sec_submissions_files_walk", 14, "sec_rate", JOB_SEC_SUBMISSIONS_FILES_WALK),
-    # Legacy per-filing stages — kept as a fallback path. After the
-    # bulk pass these are largely idempotent DB no-ops on populated
-    # observation tables; on the slow-connection bypass path they are
-    # the primary write path.
-    # PR1c #1064 — three bespoke wrappers in this module collapsed into
-    # the SCHEDULED_JOBS-side ``filings_history_seed`` /
-    # ``sec_first_install_drain`` / ``sec_13f_quarterly_sweep`` bodies.
-    # Bootstrap-only knobs ride here as ``StageSpec.params``; the bodies
-    # consume the same dict shape that the manual API publishes.
-    _spec(
-        "filings_history_seed",
-        15,
-        "sec_rate",
-        JOB_FILINGS_HISTORY_SEED,
-        params={
-            "days_back": 730,
-            "filing_types": tuple(_FILINGS_HISTORY_KEEP_FORMS_TUPLE),
-        },
-    ),
+    # #1413 (bulk-only bootstrap) — S14 ``sec_submissions_files_walk`` and
+    # S15 ``filings_history_seed`` DROPPED. Both re-derived data the bulk
+    # path already produces: S14 walked ``filings.files[]`` overflow pages
+    # (deep history beyond the recent block) per-CIK over HTTP → deferred
+    # to steady-state Layer 2/3; S15 fetched ``filings.recent`` per-CIK,
+    # byte-for-byte what S8 ``sec_submissions_ingest`` already wrote from
+    # submissions.zip. ``filing_events_seeded`` is re-homed to S8 (+ S16).
+    #
+    # NOTE: the master.idx recent-window gap-close (bulk-lag → filing-
+    # metadata coverage) was DEFERRED to P3 (watermark hardening). Its
+    # correctness is inseparable from the per-source watermark guard —
+    # ``record_manifest_entry`` advances ``data_freshness_index`` for the
+    # form's source, so an un-guarded gap-close would push OWNERSHIP-source
+    # watermarks (13F/N-PORT/Form-3/4) ahead of the parsed observations
+    # (silent-gap, pillar 3). P3 adds the stage WITH the guard atomically.
+    # S16 ``sec_first_install_drain`` stays (DB-bound manifest seed from
+    # bulk filing_events); #1413 adds its ``follow_pagination=False``
+    # bootstrap param so its secondary-page HTTP walk is also collapsed.
     _spec(
         "sec_first_install_drain",
         16,
@@ -1161,74 +1120,40 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         JOB_SEC_FIRST_INSTALL_DRAIN,
         # #1277 — ``use_bulk_zip=True`` routes PRIMARY CIK<10>.json
         # reads through the local submissions.zip S7 landed (and S8
-        # left on disk per the #1277 deletion deferral). Secondary
-        # pages still hit HTTP (not in the bulk archive). Bootstrap-
-        # only via JOB_INTERNAL_KEYS — manual API path rejects.
-        params={"max_subjects": None, "use_bulk_zip": True},
+        # left on disk per the #1277 deletion deferral).
+        # #1413 Step 2.3 — ``follow_pagination=False`` collapses the
+        # secondary ``CIK<10>-submissions-<NNN>.json`` HTTP walk (the last
+        # per-CIK source in the bootstrap lane); recent deep history is
+        # deferred to steady-state Layer 2/3. Both keys are bootstrap-only
+        # via JOB_INTERNAL_KEYS — the manual API path rejects them.
+        params={"max_subjects": None, "use_bulk_zip": True, "follow_pagination": False},
     ),
-    _spec("sec_def14a_bootstrap", 17, "sec_rate", "sec_def14a_bootstrap"),
+    # #1413 — S17 sec_def14a_bootstrap, S19 sec_insider_transactions_backfill,
+    # S20 sec_form3_ingest DROPPED (bulk-only bootstrap). S17 provides no
+    # capability; DEF14A holder tables are manifest-worker/lazy-on-view
+    # (worker gated during bootstrap → ownership_def14a_current fills
+    # post-complete; panel per-slice-tolerant). S19/S20: bulk S11
+    # ``sec_insider_dataset_ingest`` already writes ownership_insiders_observations
+    # incl. Form-3 initial-holdings (its docstring: "Replaces S9+S10 on a
+    # fresh install"), so the legacy per-CIK Form 3/4 body fetches are
+    # redundant. S18 (business summary) + S21 (8-K) stay as DB-bound
+    # metadata-only seed stages (#1343 lazy-on-view bodies).
     _spec("sec_business_summary_bootstrap", 18, "sec_rate", "sec_business_summary_bootstrap"),
-    _spec("sec_insider_transactions_backfill", 19, "sec_rate", "sec_insider_transactions_backfill"),
-    _spec("sec_form3_ingest", 20, "sec_rate", "sec_form3_ingest"),
     _spec("sec_8k_events_ingest", 21, "sec_rate", "sec_8k_events_ingest"),
-    # #1008 — first-install bootstrap uses a recency-bounded sweep
-    # (last 4 quarters, ~12 months) instead of the full historical
-    # sweep. Walking decades of pre-2013 filings yields zero rows
-    # (no machine-readable primary_doc/infotable) and turns the
-    # bootstrap into an 11+ hour wait. Standalone weekly cron keeps
-    # the full historical sweep — same job, no min_period_of_report
-    # bound. On the bulk path (#1020) C3 has already populated
-    # ownership_institutions_observations; this stage tops up.
-    #
-    # PR1c #1064: bootstrap-only ``source_label`` overrides the default
-    # so audit history distinguishes this bounded sweep from the
-    # standalone weekly run. The validator allows ``source_label`` here
-    # via ``JOB_INTERNAL_KEYS`` (PR1a) — manual API rejects it.
-    _spec(
-        "sec_13f_recent_sweep",
-        22,
-        "sec_rate",
-        JOB_SEC_13F_QUARTERLY_SWEEP,
-        # ``min_period_of_report`` resolves to ``today() - 380d`` at
-        # dispatch time (see ``_resolve_dynamic_params``). Hardcoding
-        # ``date.today()`` here would freeze the cutoff at module-load,
-        # so a long-lived jobs process would dispatch stage 22 with a
-        # stale floor. The sentinel keeps the StageSpec data-only.
-        # ``min_last_13f_hr_at`` (#1010) bounds the cohort to filers
-        # whose most recent 13F-HR / HR/A is within the same 380-day
-        # window — collapses 11,205 → ≈ 3-5k active filers and drops
-        # bootstrap stage 22 wall-clock from ~8h to ≤3h.
-        params={
-            "min_period_of_report": _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF,
-            "min_last_13f_hr_at": _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF,
-            "source_label": "sec_edgar_13f_directory_bootstrap",
-        },
-    ),
-    _spec(
-        "sec_n_port_ingest",
-        23,
-        "sec_rate",
-        "sec_n_port_ingest",
-        # PR7 #1233 §4.6 — ``min_last_seen_filed_at`` (mirror of #1010
-        # ``min_last_13f_hr_at`` for stage 22) bounds the cohort to
-        # trust CIKs whose most recent NPORT-P / NPORT-P/A filed_at is
-        # within the 380-day window. Collapses ~5k registered trusts
-        # to ~3-4k actively-filing trusts and drops bootstrap stage 23
-        # wall-clock proportionally. Daily / Admin "Run now" paths
-        # dispatch ``sec_n_port_ingest`` with empty params → full
-        # cohort (safety-net for previously-inactive trusts re-
-        # emerging).
-        # #1340 — ``use_bulk_zip=True`` routes the PRIMARY per-CIK
-        # ``submissions/CIK<10>.json`` enumeration reads through the local
-        # submissions.zip (S7 landed it; S8/S16 leave it on disk per the
-        # #1340 deletion deferral) instead of HTTP. Document bodies + zip
-        # misses still hit HTTP. Bootstrap-only via JOB_INTERNAL_KEYS —
-        # manual API path rejects. S23 deletes the zip on its success path.
-        params={
-            "min_last_seen_filed_at": _PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF,
-            "use_bulk_zip": True,
-        },
-    ),
+    # #1413 — S22 ``sec_13f_recent_sweep`` and S23 ``sec_n_port_ingest``
+    # DROPPED (bulk-only bootstrap). Both wrote the SAME observation
+    # tables their bulk counterparts already populate: S22 →
+    # ``ownership_institutions_observations`` (= bulk S10
+    # ``sec_13f_ingest_from_dataset``); S23 → ``ownership_funds_observations``
+    # (= bulk S12 ``sec_nport_ingest_from_dataset``, whose docstring states
+    # it "Replaces S14 sec_n_port_ingest entirely on a fresh install").
+    # Both re-enumerated per-CIK ``submissions/CIK<10>.json`` over HTTP to
+    # rediscover accessions the quarterly bulk dataset already enumerated.
+    # The operator-visible ownership rollup renders from the bulk
+    # observation tables; the legacy per-CIK sweeps remain as steady-state
+    # scheduled jobs (post-complete) for the recency-window delta + the
+    # legacy ``institutional_holdings`` table. The dynamic recency sentinels
+    # (_PARAM_DYNAMIC_BOOTSTRAP_*) are now unused by the bootstrap path.
     _spec("ownership_observations_backfill", 24, "db", "ownership_observations_backfill"),
     # Stream A PR-C2 T1.2 (#1233): S25 dispatches the bootstrap-only
     # ``fundamentals_sync_bootstrap`` invoker (NOT the steady-state
@@ -1241,23 +1166,23 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # requirement at ``_STAGE_REQUIRES_CAPS["fundamentals_sync"]``
     # (4-cap tuple from PR-C1) still keys by stage_key and applies.
     _spec("fundamentals_sync", 25, "db_fundamentals_raw", "fundamentals_sync_bootstrap"),
-    # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap
-    # drain (T8 deferred from #1171). S25 (post #1233 PR-1b: S26) advertises
-    # class_id_mapping_ready; S26 (post #1233 PR-1b: S27, terminal)
-    # drains N-CSR + N-CSRS accessions per trust for the #1171
-    # fund-metadata parser to consume.
+    # #1174 — dedicated MF directory refresh (bounded mf.json directory
+    # fetch — one download, NOT per-CIK). Advertises class_id_mapping_ready
+    # for the steady-state N-CSR fund-metadata parser. Kept in bootstrap so
+    # the classId→instrument map is seeded; the per-trust N-CSR body drain
+    # (old S27) is dropped below.
     _spec("mf_directory_sync", 26, "sec_rate", JOB_MF_DIRECTORY_SYNC),
-    # #1233 §4.12 / PR8 — terminal stage. Dispatches with no params.
-    # The 730d retention window is hard-pinned at
-    # ``app/services/manifest_parsers/sec_n_csr.py::N_CSR_RETENTION_DAYS``
-    # and the previous ``horizon_days`` param was removed (single
-    # source of truth for every N-CSR writer chokepoint).
-    _spec(
-        "sec_n_csr_bootstrap_drain",
-        27,
-        "sec_rate",
-        JOB_SEC_N_CSR_BOOTSTRAP_DRAIN,
-    ),
+    # #1413 Step 2.7 — S27 ``sec_n_csr_bootstrap_drain`` DROPPED from
+    # bootstrap. It is a per-trust HTTP body-walk (``bootstrap_n_csr_drain``:
+    # ``for trust_cik in _iter_trust_ciks: _enqueue_n_csr_for_trust(http_get=…)``)
+    # — exactly the doc-body fetching the bulk-only mandate defers to
+    # steady-state / lazy-on-view (N-CSR annual-report bodies have NO bulk
+    # artifact). It provided no required capability (terminal). The funds
+    # panel slice renders from bulk N-PORT (S12 ownership_funds_observations),
+    # not N-CSR. N-CSR DISCOVERY (manifest rows) is still bulk-seeded via S8
+    # + the master.idx gap-close; the steady-state manifest worker parses the
+    # bodies post-complete. ``class_id_mapping_ready`` (provided by S26) is
+    # now provided-but-unconsumed (harmless; S26 stays for the steady-state map).
 )
 
 
@@ -2990,11 +2915,12 @@ __all__ = [
 # Stage count assertion — pin so a future refactor that adds /
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
-# current 27-stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 27, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 27 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+# current stage shape.
+assert len(_BOOTSTRAP_STAGE_SPECS) == 19, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 19 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
     "update the spec, frontend, runbook, and stage_count tests in lockstep. "
-    "#1027 added 7 bulk-archive stages (sec_bulk_download + C1.a/C2/C3/C4/C5 ingesters + C1.b walker); "
-    "#1174 added 2 fund-stages (S25 mf_directory_sync + S26 sec_n_csr_bootstrap_drain); "
-    "#1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep (renumbering S13-S26 to S14-S27)."
+    "#1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep; "
+    "#1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages "
+    "(S14/S15/S17/S19/S20/S22/S23 + S27 sec_n_csr_bootstrap_drain): 27 - 8 = 19. "
+    "The master.idx recent-window gap-close is deferred to P3 (watermark hardening)."
 )

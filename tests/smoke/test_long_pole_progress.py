@@ -180,7 +180,7 @@ def test_s17_streaming_pattern_pins_target_count_none() -> None:
     assert processed_mock.called, "S17 must emit final processed_count on exit"
 
 
-def test_s18_streaming_pattern_pins_pending_predicate_v2() -> None:
+def test_s18_streaming_pattern_pins_pending_predicate_v3() -> None:
     """S18 (business_summary bootstrap) streaming-style. Fingerprint
     declares all 4 pending-predicate branches verbatim including the
     quarantine AND-guard on the tables_null backfill branch.
@@ -214,7 +214,9 @@ def test_s18_streaming_pattern_pins_pending_predicate_v2() -> None:
     assert target_call["target_count"] is None
     fingerprint = target_call["cohort_fingerprint"]
     assert "form_types=10-K,10-K/A" in fingerprint
-    assert "pending_predicate_v2=" in fingerprint
+    # #1343/#1347 bumped the fingerprint label v2→v3 (added the
+    # min_filing_date recency floor); this pin-test had not been updated.
+    assert "pending_predicate_v3=" in fingerprint
     assert "tables_null_AND_quarantine_elapsed" in fingerprint, (
         "S18 fingerprint MUST declare the quarantine AND-guard on the tables_null branch — Codex 1 v1.1 GAP B1 fold."
     )
