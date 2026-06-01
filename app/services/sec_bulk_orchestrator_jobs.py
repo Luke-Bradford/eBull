@@ -303,19 +303,17 @@ def sec_companyfacts_ingest_job() -> None:
 
 def sec_13f_ingest_from_dataset_job() -> None:
     from app.services.bootstrap_preconditions import assert_c3_preconditions
-    from app.services.sec_bulk_download import BootstrapPartialDownloadError
+    from app.services.sec_bulk_download import BootstrapPartialDownloadError, read_run_manifest
 
     run_id = _current_running_bootstrap_run_id()
     archives = _list_archives_matching("form13f_")
 
     if run_id is not None:
         # #1423 — the newest 13F rolling window is optional (SEC publishes
-        # it weeks after the quarter closes). Split required (gates the
-        # stage) from ingest-if-present (all windows, so a published optional
-        # window is still ingested while stale prior-run archives are not).
+        # it weeks after the quarter closes). Only the non-optional windows
+        # gate the stage; the optional one may legitimately be absent.
         inventory_13f = [a for a in build_bulk_archive_inventory() if a.name.startswith("form13f_")]
         required = [a.name for a in inventory_13f if not a.optional]
-        ingestable = {a.name for a in inventory_13f}
         with psycopg.connect(settings.database_url) as conn:
             assert_c3_preconditions(
                 conn,
@@ -323,10 +321,14 @@ def sec_13f_ingest_from_dataset_job() -> None:
                 bulk_dir=_bulk_dir(),
                 expected_archive_names=required,
             )
-        # Restrict loop to inventory-backed names so stale archives left
-        # on disk from a prior run are NOT ingested under the current run.
-        # A present optional window IS ingested (it's in ``ingestable``).
-        archives = [a for a in archives if a.name in ingestable]
+        # Restrict the loop to archives recorded in THIS run's manifest.
+        # The manifest only lists archives that landed (or were ETag-reused)
+        # under the current bootstrap_run_id, so this is the provenance gate:
+        # it admits a successfully-downloaded optional window while excluding
+        # a stale same-name zip left on disk from a prior run (Codex ckpt-2).
+        manifest = read_run_manifest(_bulk_dir())
+        manifest_names = {entry["name"] for entry in manifest.get("archives", [])} if manifest else set()
+        archives = [a for a in archives if a.name in manifest_names]
         # Every REQUIRED file MUST be on disk after manifest provenance
         # passes; missing physical file is a partial-download failure. An
         # optional window may be absent (not yet published) — not fatal.
