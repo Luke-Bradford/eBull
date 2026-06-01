@@ -71,7 +71,11 @@ def _insert_run(conn: psycopg.Connection[tuple], *, run_status: str = "complete"
         (run_status, run_status),
     ).fetchone()
     assert row is not None
-    return int(row[0])
+    run_id = int(row[0])
+    # #1409 P5 §5.4 — the timeline endpoint pins on bootstrap_state.last_run_id
+    # (not ORDER BY id DESC). Advance the pointer like production start_run.
+    conn.execute("UPDATE bootstrap_state SET last_run_id=%s WHERE id=1", (run_id,))
+    return run_id
 
 
 def _insert_stage(

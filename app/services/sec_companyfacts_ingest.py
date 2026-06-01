@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,11 @@ from app.providers.implementations.sec_fundamentals import (
     _ALL_TRACKED_TAGS,
     _default_retention_cutoff,
     _extract_facts_from_section,
+)
+from app.services.bootstrap_state import (
+    resolve_progress_context,
+    set_stage_processed,
+    set_stage_target,
 )
 from app.services.fundamentals import (
     finish_ingestion_run,
@@ -184,13 +190,50 @@ def ingest_companyfacts_archive(
         ingestion_run_id=run_id,
     )
 
+    # #1409 P5 Step 5.2 — stage progress instrumentation. Inside a
+    # bootstrap dispatch (resolve_progress_context returns non-None) the
+    # stage sets target_count to the CIK-entry count up front and ticks
+    # processed_count per entry seen, so the operator sees `n / N` climb
+    # instead of `0 / -` for the archive's whole runtime. Manual-fire +
+    # test paths resolve None and skip every progress write (zero
+    # overhead). Ticking on archive_entries_seen (not instruments
+    # matched) keeps processed bounded by the same denominator.
+    progress_ctx = resolve_progress_context()
+
     try:
         with zipfile.ZipFile(archive_path) as zf:
-            for entry_name in zf.namelist():
+            entry_names = zf.namelist()
+            cik_entry_total = sum(1 for name in entry_names if _cik_from_filename(name) is not None)
+
+            _emit_every_n = max(1, cik_entry_total // 100)
+            _last_progress_emit = time.monotonic()
+            if progress_ctx is not None:
+                set_stage_target(
+                    run_id=progress_ctx.run_id,
+                    stage_key=progress_ctx.stage_key,
+                    target_count=cik_entry_total,
+                    cohort_fingerprint=f"cik_entries={cik_entry_total}",
+                )
+
+            def _emit_progress() -> None:
+                nonlocal _last_progress_emit
+                if progress_ctx is None:
+                    return
+                _now = time.monotonic()
+                if result.archive_entries_seen % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+                    set_stage_processed(
+                        run_id=progress_ctx.run_id,
+                        stage_key=progress_ctx.stage_key,
+                        processed_count=result.archive_entries_seen,
+                    )
+                    _last_progress_emit = _now
+
+            for entry_name in entry_names:
                 cik = _cik_from_filename(entry_name)
                 if cik is None:
                     continue
                 result.archive_entries_seen += 1
+                _emit_progress()
                 matched_instruments = cik_to_instrument.get(cik, [])
                 if not matched_instruments:
                     result.archive_entries_skipped_universe_gap += 1
@@ -259,6 +302,16 @@ def ingest_companyfacts_archive(
         )
         conn.commit()
         raise
+
+    # Final tick — ensure processed_count lands on the exact entry total
+    # even when the cadence gate skipped the last batch (e.g. fewer than
+    # _emit_every_n entries remained, or <30s since the last emit).
+    if progress_ctx is not None:
+        set_stage_processed(
+            run_id=progress_ctx.run_id,
+            stage_key=progress_ctx.stage_key,
+            processed_count=result.archive_entries_seen,
+        )
 
     terminal_status = "partial" if result.parse_errors else "success"
     finish_ingestion_run(

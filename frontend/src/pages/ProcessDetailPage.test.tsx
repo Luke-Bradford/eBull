@@ -399,6 +399,11 @@ function makeTimelinePayload(): BootstrapTimelineResponse {
         rows_processed: 4520,
         processed_count: 4520,
         target_count: null,
+        last_progress_at: "2026-05-09T10:00:30Z",
+        rate: null,
+        eta_seconds: null,
+        heartbeat_age_seconds: null,
+        is_stale: false,
         target_cohort_fingerprint: null,
         archives: [
           {
@@ -423,6 +428,13 @@ function makeTimelinePayload(): BootstrapTimelineResponse {
         rows_processed: null,
         processed_count: 12,
         target_count: null,
+        // #1409 P5 — live signals on the running stage: rate set,
+        // eta null (no target), fresh heartbeat, not stale.
+        last_progress_at: "2026-05-09T10:05:00Z",
+        rate: 15600,
+        eta_seconds: null,
+        heartbeat_age_seconds: 8,
+        is_stale: false,
         // #1273 PR2 — fingerprint set on a running stage so the
         // tooltip-rendering assertion below can verify the bar
         // wrapper carries the title attribute. The shape mirrors
@@ -546,6 +558,66 @@ describe("ProcessDetailPage — Timeline tab (bootstrap)", () => {
     const chip = await screen.findByTestId("stage-warning-chip");
     expect(chip).toBeTruthy();
     expect(chip.getAttribute("title")).toContain("fundamentals_raw_seeded");
+  });
+
+  // #1409 P5 — live signals on a running stage: rate + heartbeat age.
+  it("renders rate and heartbeat age on a running stage", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    mockedTimeline.mockResolvedValueOnce(makeTimelinePayload());
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    const meta = await screen.findByTestId("stage-live-meta");
+    // rate=15600 → "15.6k rows/s"; heartbeat_age=8 → "updated 8s ago".
+    expect(meta.textContent).toContain("15.6k rows/s");
+    expect(meta.textContent).toContain("updated 8s ago");
+  });
+
+  // #1409 P5 — stale chip when the server flags a wedged running stage.
+  it("renders the stale chip when a running stage is flagged is_stale", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    const payload = makeTimelinePayload();
+    payload.stages[1]!.is_stale = true;
+    payload.stages[1]!.heartbeat_age_seconds = 2400;
+    payload.stages[1]!.rate = null;
+    mockedTimeline.mockResolvedValueOnce(payload);
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    expect(await screen.findByTestId("stage-stale-chip")).toBeTruthy();
+  });
+
+  // #1409 P5 — no stale chip when a non-running stage has an old heartbeat.
+  it("does NOT render the stale chip for non-running stages", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    mockedTimeline.mockResolvedValueOnce(makeTimelinePayload());
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    await screen.findByText("Universe Sync");
+    // is_stale is false on both fixture stages.
+    expect(screen.queryByTestId("stage-stale-chip")).toBeNull();
+  });
+
+  // #1409 P5 §5.5 — last-refreshed caption renders once a payload lands.
+  it("renders the last-refreshed caption", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    mockedTimeline.mockResolvedValueOnce(makeTimelinePayload());
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    const caption = await screen.findByTestId("timeline-refreshed-at");
+    // Running fixture → "Auto-refreshing · last refreshed …".
+    expect(caption.textContent).toContain("Auto-refreshing");
+    expect(caption.textContent).toContain("last refreshed");
   });
 
   // #1140 Task C — run-level amber dot on complete + has_warnings.

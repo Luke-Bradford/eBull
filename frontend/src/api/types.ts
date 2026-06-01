@@ -1427,6 +1427,19 @@ export interface BootstrapTimelineStageResponse {
   rows_processed: number | null;
   processed_count: number;
   target_count: number | null;
+  // #1409 P5 — live-timeline fields (server-computed). `last_progress_at`
+  // is the per-stage heartbeat. `rate` is rows/sec, null when not
+  // measurable (processed_count 0 / no window). `eta_seconds` is the
+  // projected seconds-to-target, null when target unknown or already
+  // met (no fake 100% / negative ETA). `heartbeat_age_seconds` is
+  // now()−last_progress_at on the DB clock. `is_stale` is true only for
+  // a running stage whose heartbeat exceeds the 1800s bootstrap
+  // threshold — "slow but alive" vs "wedged".
+  last_progress_at: string | null;
+  rate: number | null;
+  eta_seconds: number | null;
+  heartbeat_age_seconds: number | null;
+  is_stale: boolean;
   // #1273 PR2 — operator-readable cohort-definition fingerprint. Set
   // by `set_stage_target` at stage entry; null on legacy rows and on
   // stages that never instrument. Rendered as a `title=` tooltip on

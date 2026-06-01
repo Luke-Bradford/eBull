@@ -12,7 +12,7 @@
  */
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
@@ -49,12 +49,23 @@ import {
   reasonTooltip,
 } from "@/components/admin/processStatus";
 import { useAsync } from "@/lib/useAsync";
-import { formatDateTime } from "@/lib/format";
+import {
+  formatDateTime,
+  formatEta,
+  formatHeartbeatAge,
+  formatRate,
+} from "@/lib/format";
 
 type TabKey = "overview" | "history" | "errors" | "dag" | "timeline" | "advanced";
 
 const ORCHESTRATOR_FULL_SYNC_ID = "orchestrator_full_sync";
 const BOOTSTRAP_PROCESS_ID = "bootstrap";
+
+// #1409 P5 — timeline auto-refresh cadence + the number of extra polls
+// to run after a run reaches a terminal state (the run row can flip
+// terminal a beat before the final stage rows commit).
+const TIMELINE_POLL_MS = 5000;
+const TIMELINE_POST_TERMINAL_POLLS = 3;
 
 // Lane order for the bootstrap timeline tab. Stages within a lane are
 // sorted by stage_order ASC; lanes themselves render in the order
@@ -147,20 +158,51 @@ export function ProcessDetailPage() {
     }
   }, [tab, isOrchestrator, isBootstrap, showAdvanced]);
 
-  // #1271 — Auto-refresh the timeline while the bootstrap run is
-  // actively in flight so the operator sees stage transitions +
-  // processed_count growth without manually navigating away and back.
-  // Polls every 5s while on Timeline tab AND run.status === 'running'.
-  // Stops once run reaches a terminal state (complete / partial_error /
-  // cancelled) so we are not hammering the API after the work is done.
+  // #1271 / #1409 P5 — Auto-refresh the timeline while the bootstrap run
+  // is in flight so the operator sees stage transitions + processed_count
+  // growth without navigating away and back. Polls every 5s while
+  // running. #1409 §5.5 adds a short grace window AFTER the run reaches a
+  // terminal state: the run row can flip terminal a beat before the final
+  // stage rows commit, so we poll a few more times to catch the settled
+  // end-state, then stop (we don't hammer the API on a long-finished run).
+  // Starts at 0 so a fresh mount on a no-run / long-terminal run polls
+  // zero times — the grace budget is granted only after we observe a
+  // running run (the running branch below) so it spends on the run we
+  // watched finish (Codex ckpt-2).
+  const postTerminalRef = useRef(0);
   const timelineRefetch = timeline.refetch;
   const timelineRunStatus = timeline.data?.run?.status ?? null;
   useEffect(() => {
     if (tab !== "timeline" || !isBootstrap) return;
-    if (timelineRunStatus !== "running") return;
-    const id = window.setInterval(() => timelineRefetch(), 5000);
+    if (timelineRunStatus === "running") {
+      // Reset the grace budget while live so it's full when the run ends.
+      postTerminalRef.current = TIMELINE_POST_TERMINAL_POLLS;
+      const id = window.setInterval(() => timelineRefetch(), TIMELINE_POLL_MS);
+      return () => window.clearInterval(id);
+    }
+    // Terminal (or no run yet). Only poll if we still owe grace polls
+    // from a run we watched finish — a fresh mount on a long-done run
+    // (budget already 0) polls zero times.
+    if (postTerminalRef.current <= 0) return;
+    const id = window.setInterval(() => {
+      postTerminalRef.current -= 1;
+      timelineRefetch();
+      if (postTerminalRef.current <= 0) window.clearInterval(id);
+    }, TIMELINE_POLL_MS);
     return () => window.clearInterval(id);
   }, [tab, isBootstrap, timelineRunStatus, timelineRefetch]);
+
+  // #1409 §5.5 — "last refreshed" stamp. Updated on every timeline
+  // payload the fetch layer hands back so the operator can tell live
+  // polling from a frozen view. A plain timestamp (not an accumulator)
+  // — no stale-closure hazard.
+  const [timelineRefreshedAt, setTimelineRefreshedAt] = useState<string | null>(
+    null,
+  );
+  const timelineData = timeline.data;
+  useEffect(() => {
+    if (timelineData) setTimelineRefreshedAt(new Date().toISOString());
+  }, [timelineData]);
 
   // Extract the refetch refs as local const bindings so ESLint can
   // see their identity and verify the dep array — `useAsync` wraps
@@ -349,6 +391,7 @@ export function ProcessDetailPage() {
             loading={timeline.loading}
             error={timeline.error}
             onRetry={timeline.refetch}
+            refreshedAt={timelineRefreshedAt}
           />
         ) : tab === "advanced" && showAdvanced && detail.data ? (
           <AdvancedTab
@@ -973,11 +1016,13 @@ function TimelineTab({
   loading,
   error,
   onRetry,
+  refreshedAt,
 }: {
   payload: BootstrapTimelineResponse | null;
   loading: boolean;
   error: unknown;
   onRetry: () => void;
+  refreshedAt: string | null;
 }) {
   const [archive, setArchive] = useState<{
     stageDisplayName: string;
@@ -995,9 +1040,22 @@ function TimelineTab({
     );
   }
 
+  const isRunning = payload.run.status === "running";
   return (
     <div className="space-y-4">
       <TimelineRunSummary run={payload.run} />
+      {/* #1409 §5.5 — last-refreshed caption. A live (running) view
+          auto-polls every 5s; the stamp lets the operator tell a moving
+          view from a frozen one. */}
+      {refreshedAt ? (
+        <p
+          className="text-[10px] text-slate-400 dark:text-slate-500"
+          data-testid="timeline-refreshed-at"
+        >
+          {isRunning ? "Auto-refreshing · " : ""}last refreshed{" "}
+          {formatDateTime(refreshedAt)}
+        </p>
+      ) : null}
       <TimelineLanesGrid
         stages={payload.stages}
         onArchiveClick={(stage, archiveRow) =>
@@ -1163,6 +1221,19 @@ function TimelineStageRow({
                 warning
               </span>
             ) : null}
+            {/* #1409 P5 — stale chip. Server flags a running stage whose
+                heartbeat exceeds the 1800s threshold; distinguishes a
+                wedged stage from one that is simply slow. */}
+            {stage.is_stale ? (
+              <span
+                className="inline-flex items-center rounded-full border border-red-500/40 bg-red-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-red-800 dark:border-red-400/30 dark:bg-red-950/60 dark:text-red-200"
+                title={`No progress for ${formatHeartbeatAge(stage.heartbeat_age_seconds).replace("updated ", "").replace(" ago", "")} — exceeds the 30-minute stall threshold`}
+                aria-label="Stage appears stalled — no recent progress"
+                data-testid="stage-stale-chip"
+              >
+                stalled
+              </span>
+            ) : null}
             <span
               className="truncate font-medium text-slate-700 dark:text-slate-200"
               title={stage.display_name}
@@ -1188,12 +1259,22 @@ function TimelineStageRow({
             const processed = stage.processed_count ?? 0;
             const target = stage.target_count;
             const hasTarget = target !== null && target > 0;
-            if (!hasTarget && processed === 0) return null;
+            // #1409 P5 — server-computed live signals. Rendered for EVERY
+            // running stage (even 0/- with no bar) so a slow-but-alive
+            // stage is visibly distinct from a wedged one — the whole
+            // point of #1409. `formatHeartbeatAge` consumes the server's
+            // skew-free `heartbeat_age_seconds` rather than re-deriving
+            // from the client clock.
+            const rateLabel = formatRate(stage.rate);
+            const etaLabel = formatEta(stage.eta_seconds);
+            const meta: string[] = [];
+            if (stage.rate !== null) meta.push(rateLabel);
+            if (stage.eta_seconds !== null) meta.push(`ETA ${etaLabel}`);
+            if (stage.heartbeat_age_seconds !== null)
+              meta.push(formatHeartbeatAge(stage.heartbeat_age_seconds));
             // #1273 PR2 — cohort-definition fingerprint surfaces as a
             // native `title=` tooltip on the bar wrapper. `?? undefined`
-            // suppresses the tooltip when the field is null (legacy
-            // rows + uninstrumented stages); same affordance Timeline
-            // already uses below for warnings + errors at :1225/:1233.
+            // suppresses the tooltip when the field is null.
             return (
               <div
                 className="mt-1.5"
@@ -1219,11 +1300,19 @@ function TimelineStageRow({
                       ({((processed / (target as number)) * 100).toFixed(1)}%)
                     </div>
                   </>
-                ) : (
+                ) : processed > 0 ? (
                   <div className="text-[10px] text-slate-500 dark:text-slate-400">
                     {processed.toLocaleString()} processed (no target set)
                   </div>
-                )}
+                ) : null}
+                {meta.length > 0 ? (
+                  <div
+                    className={`mt-0.5 text-[10px] ${stage.is_stale ? "text-red-600 dark:text-red-400" : "text-slate-500 dark:text-slate-400"}`}
+                    data-testid="stage-live-meta"
+                  >
+                    {meta.join(" · ")}
+                  </div>
+                ) : null}
               </div>
             );
           })()}
