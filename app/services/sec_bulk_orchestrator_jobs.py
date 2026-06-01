@@ -308,24 +308,30 @@ def sec_13f_ingest_from_dataset_job() -> None:
     run_id = _current_running_bootstrap_run_id()
     archives = _list_archives_matching("form13f_")
 
-    expected: list[str] | None = None
     if run_id is not None:
-        expected = [a.name for a in build_bulk_archive_inventory() if a.name.startswith("form13f_")]
+        # #1423 — the newest 13F rolling window is optional (SEC publishes
+        # it weeks after the quarter closes). Split required (gates the
+        # stage) from ingest-if-present (all windows, so a published optional
+        # window is still ingested while stale prior-run archives are not).
+        inventory_13f = [a for a in build_bulk_archive_inventory() if a.name.startswith("form13f_")]
+        required = [a.name for a in inventory_13f if not a.optional]
+        ingestable = {a.name for a in inventory_13f}
         with psycopg.connect(settings.database_url) as conn:
             assert_c3_preconditions(
                 conn,
                 bootstrap_run_id=run_id,
                 bulk_dir=_bulk_dir(),
-                expected_archive_names=expected,
+                expected_archive_names=required,
             )
-        # Restrict loop to the expected manifest-backed names so
-        # stale archives left on disk from a prior run are NOT
-        # ingested under the current run.
-        archives = [a for a in archives if a.name in set(expected)]
-        # All expected files MUST be on disk after manifest provenance
-        # passes; missing physical file is a partial-download failure.
+        # Restrict loop to inventory-backed names so stale archives left
+        # on disk from a prior run are NOT ingested under the current run.
+        # A present optional window IS ingested (it's in ``ingestable``).
+        archives = [a for a in archives if a.name in ingestable]
+        # Every REQUIRED file MUST be on disk after manifest provenance
+        # passes; missing physical file is a partial-download failure. An
+        # optional window may be absent (not yet published) — not fatal.
         present_names = {a.name for a in archives}
-        missing = [n for n in expected if n not in present_names]
+        missing = [n for n in required if n not in present_names]
         if missing:
             from app.services.sec_bulk_download import BootstrapPartialDownloadError
 

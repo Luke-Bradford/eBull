@@ -95,6 +95,17 @@ class BulkArchive:
 
     name: str
     url: str
+    optional: bool = False
+    """Best-effort archive: a download/HEAD error does NOT fatal the stage.
+
+    #1423 — set only on the newest Form 13F rolling window. That window
+    is the quarter that just closed; SEC publishes the dataset weeks
+    after the window ends, so the day after a boundary it 404s. Treating
+    its absence as fatal blocks every db-lane stage (the bulk_archives_ready
+    cascade). It is still HEAD-probed each run, so it self-heals the day
+    SEC posts it. Every other archive stays required — a real outage on
+    them still fails loudly.
+    """
 
 
 @dataclass
@@ -119,6 +130,10 @@ class ArchiveDownloadResult:
     skipped: bool = False
     error: str | None = None
     reuse_reason: Literal["downloaded_in_run", "etag_match_sha256_verified"] | None = None
+    optional: bool = False
+    """Mirrors ``BulkArchive.optional`` — stamped after the download gather
+    so the job's fatal-failure filter can tell an expected-missing newest
+    13F window from a genuine archive failure (#1423)."""
 
 
 @dataclass
@@ -254,11 +269,16 @@ def build_bulk_archive_inventory(
             url=f"{SEC_BASE_URL}/Archives/edgar/daily-index/xbrl/companyfacts.zip",
         ),
     ]
-    for label in last_n_13f_periods(n_quarters_13f, today=today):
+    # ``last_n_13f_periods`` returns newest-first; index 0 is the just-closed
+    # window. SEC publishes 13F rolling-window datasets weeks after the window
+    # ends, so the newest one is expected-404 immediately after a boundary —
+    # mark it optional (#1423) so its absence doesn't fatal the stage.
+    for idx, label in enumerate(last_n_13f_periods(n_quarters_13f, today=today)):
         archives.append(
             BulkArchive(
                 name=f"form13f_{label}.zip",
                 url=f"{SEC_BASE_URL}/files/structureddata/data/form-13f-data-sets/{label}_form13f.zip",
+                optional=(idx == 0),
             )
         )
     for q in last_n_quarters(n_quarters_insider, today=today):
@@ -1369,6 +1389,12 @@ async def download_bulk_archives(
 
         results = await asyncio.gather(*(_resolve(a) for a in archives))
 
+    # Propagate the archive's optional flag onto its result so the job's
+    # fatal-failure filter (#1423) can distinguish an expected-missing newest
+    # 13F window from a genuine failure. ``_resolve`` preserves input order.
+    for archive, result in zip(archives, results, strict=True):
+        result.optional = archive.optional
+
     return BulkDownloadResult(
         mode="bulk",
         measured_mbps=measured,
@@ -1397,6 +1423,34 @@ class BootstrapPartialDownloadError(RuntimeError):
 
     Spec: docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md
     """
+
+
+def _is_not_published_error(error: str) -> bool:
+    """True iff ``error`` indicates the archive is not yet published (HTTP 404).
+
+    SEC returns 404 for a rolling-window / quarterly dataset that has not been
+    posted yet. Both the HEAD pre-flight (``HEAD failed: status=404 …``) and
+    the GET path (``GET failed: status=404``) embed ``status=404``. Any other
+    failure (500, timeout, size mismatch, corrupt zip) is a genuine problem
+    even for an optional archive and must stay fatal (#1423, Codex ckpt-2).
+    """
+    return "status=404" in error
+
+
+def _fatal_download_failures(
+    archives: list[ArchiveDownloadResult],
+) -> list[ArchiveDownloadResult]:
+    """Return the archives whose error must fail the stage.
+
+    An optional archive (the newest 13F rolling window, #1423) is excluded
+    ONLY when its error is a not-yet-published 404 — SEC has not posted the
+    just-closed quarter. A non-404 failure on the same optional archive
+    (500/timeout/corrupt) stays fatal. Every required archive's error is
+    fatal: it raises ``BootstrapPartialDownloadError``, which the orchestrator
+    surfaces as a stage error rather than letting downstream Phase C stages
+    no-op on missing files.
+    """
+    return [r for r in archives if r.error is not None and not (r.optional and _is_not_published_error(r.error))]
 
 
 def sec_bulk_download_job() -> None:
@@ -1438,12 +1492,25 @@ def sec_bulk_download_job() -> None:
 
     if result.mode == "bulk":
         ok = sum(1 for r in result.archives if r.error is None)
-        failed_archives = [r for r in result.archives if r.error is not None]
+        failed_archives = _fatal_download_failures(result.archives)
+        # Optional archives that errored are expected-missing (newest 13F
+        # window not yet published by SEC, #1423). Log them so the operator
+        # sees coverage is best-effort, but they do NOT fail the stage.
+        skipped_optional = [
+            r for r in result.archives if r.error is not None and r.optional and _is_not_published_error(r.error)
+        ]
+        for r in skipped_optional:
+            logger.info(
+                "sec_bulk_download: optional archive not yet published (best-effort, #1423): %s: %s",
+                r.name,
+                r.error,
+            )
         logger.info(
-            "sec_bulk_download: mode=bulk mbps=%.1f archives_ok=%d archives_failed=%d",
+            "sec_bulk_download: mode=bulk mbps=%.1f archives_ok=%d archives_failed=%d optional_skipped=%d",
             result.measured_mbps or 0.0,
             ok,
             len(failed_archives),
+            len(skipped_optional),
         )
         if failed_archives:
             # Surface partial-failure as a stage error so downstream
