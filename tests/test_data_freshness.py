@@ -200,6 +200,7 @@ class TestSeedFromManifest:
 
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1701", source="sec_form4")
         assert row is not None
+        assert row.last_known_filed_at is not None
         assert row.last_known_filed_at == archive_filed_at, (
             "freshness watermark must be the archive's filed_at, not load time"
         )

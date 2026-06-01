@@ -194,12 +194,13 @@ def run_master_idx_quarterly_sweep(
     ``source_allowlist=None`` (default) discovers EVERY mapped form (the
     steady-state G12 safety-net behaviour). The #1413/#1415 bootstrap
     gap-close passes a FILING-METADATA allowlist so the recent-window pass
-    advances only filing-metadata watermarks (8-K/10-K/DEF14A/13D-G/N-CSR)
-    and NEVER seeds a manifest/freshness row for a bulk-dataset ownership
-    source (13F-HR/N-PORT/Form-3/4/5). Those observations come from the
-    quarterly bulk datasets, not the manifest worker, so a discovery-side
-    watermark advance would push the steady-state cursor ahead of loaded
-    data (silent gap, spec §4.3 pillar 3).
+    advances only filing-metadata watermarks (8-K/10-K/DEF14A/13D-G) and
+    NEVER seeds a manifest/freshness row for a bulk-dataset ownership source
+    (13F-HR/N-PORT/Form-3/4/5). Those observations come from the quarterly
+    bulk datasets, not the manifest worker, so a discovery-side watermark
+    advance would push the steady-state cursor ahead of loaded data (silent
+    gap, spec §4.3 pillar 3). (N-CSR is also excluded — see
+    ``GAP_CLOSE_FILING_METADATA_SOURCES`` for why.)
     """
     if now is None:
         now = datetime.now(tz=UTC)
