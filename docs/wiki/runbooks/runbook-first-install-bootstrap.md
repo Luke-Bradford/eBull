@@ -27,17 +27,24 @@ Click "Run bootstrap" on the admin page when:
 Do **not** run it as part of routine ops: scheduled jobs handle
 incremental refresh once bootstrap is complete.
 
-## 2. What runs (26 stages)
+## 2. What runs (21 stages)
 
 Phases in order; the catalogue lives in
 ``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS`` and
-is the source of truth (asserted == 26 at module load). Spec:
-``docs/specs/bootstrap/orchestration.md``.
+is the source of truth (asserted == 21 at module load). Spec:
+``docs/proposals/etl/2026-06-01-bootstrap-etl-redesign-design.md``.
 
-Issue #1174 added S25 ``mf_directory_sync`` (dedicated MF-directory refresh
-for N-CSR classId resolution) + S26 ``sec_n_csr_bootstrap_drain``
-(fund-scoped manifest enqueue for the #1171 fund-metadata parser). Both
-ride the ``sec_rate`` lane.
+**Bulk-only bootstrap (#1413, P2).** The bootstrap path makes ZERO per-CIK
+HTTP calls. The eight per-CIK SEC stages were dropped — S14
+``sec_submissions_files_walk``, S15 ``filings_history_seed``, S17
+``sec_def14a_bootstrap``, S19 ``sec_insider_transactions_backfill``, S20
+``sec_form3_ingest``, S22 ``sec_13f_recent_sweep``, S23 ``sec_n_port_ingest``,
+S27 ``sec_n_csr_bootstrap_drain`` — because the bulk archives (S7–S12)
+already produce the operator-visible rollup data. They remain steady-state
+scheduled jobs (post-complete). Original S-numbers are preserved below as
+stage_order gaps for operator traceability. #1415 (P3) added the
+filing-metadata recent-window gap-close (order 15); #1419 (P4) added the
+terminal ``bootstrap_validation`` stage (order 27).
 
 1. **Phase A — init** (sequential, ``init`` lane, single thread):
    - S1 ``universe_sync`` (``nightly_universe_sync``; ~30s, ~1.5k rows).
@@ -51,38 +58,50 @@ ride the ``sec_rate`` lane.
 1. **Phase A3 — bulk archive download** (``sec_bulk_download`` lane;
    disjoint from ``sec_rate``):
    - S7 ``sec_bulk_download`` (#1020; fixed-URL SEC archives).
-1. **Phase C — DB-bound bulk ingesters** (``db`` lane; same-source
-   serialisation under one ``JobLock`` per #1064):
+1. **Phase C — DB-bound bulk ingesters** (``db`` + ``db_*`` family lanes;
+   cross-lane parallel per #1141):
    - S8 ``sec_submissions_ingest``
    - S9 ``sec_companyfacts_ingest``
    - S10 ``sec_13f_ingest_from_dataset``
-   - S11 ``sec_insider_ingest_from_dataset``
+   - S11 ``sec_insider_ingest_from_dataset`` (writes Form 4 transactions
+     AND Form 3 initial-holdings — replaces the dropped S19/S20)
    - S12 ``sec_nport_ingest_from_dataset``
-1. **Phase C' — secondary-pages walker** (``sec_rate``):
-   - S13 ``sec_submissions_files_walk``
-1. **Legacy / fallback chain** (``sec_rate``; idempotent no-ops when
-   Phase C populated rows; primary write path on the slow-connection
-   bypass — see #1041):
-   - S14 ``filings_history_seed`` (``params={days_back: 730,
-     filing_types: <three-tier allow-list>}``)
-   - S15 ``sec_first_install_drain`` (``params={max_subjects: None}``)
-   - S16 ``sec_def14a_bootstrap``
-   - S17 ``sec_business_summary_bootstrap``
-   - S18 ``sec_insider_transactions_backfill``
-   - S19 ``sec_form3_ingest``
-   - S20 ``sec_8k_events_ingest``
-   - S21 ``sec_13f_recent_sweep`` (``sec_13f_quarterly_sweep`` with
-     ``min_period_of_report`` ≈ today − 380d; #1008 bound)
-   - S22 ``sec_n_port_ingest``
-1. **Phase E — final derivations** (``db`` lane):
-   - S23 ``ownership_observations_backfill``
-   - S24 ``fundamentals_sync``
+1. **Phase D — OpenFIGI CUSIP resolver sweep** (``openfigi`` lane,
+   disjoint from every SEC budget):
+   - S13 ``cusip_resolver_post_bulk_sweep`` (#1233 PR-1b)
+1. **Phase C'' — filing-metadata recent-window gap-close** (``sec_rate``):
+   - (order 15) ``sec_master_idx_gap_close`` (#1415; current + prev quarter
+     ``master.idx``, one download/quarter, ZERO per-CIK; source-allowlist
+     scoped to filing-metadata sources so it never advances ownership
+     watermarks)
+1. **Phase C''' — manifest drain + typed metadata seed** (``sec_rate``;
+   DB-bound, no per-CIK HTTP):
+   - (order 16) ``sec_first_install_drain`` (``params={max_subjects: None,
+     use_bulk_zip: True, follow_pagination: False}`` — secondary-page HTTP
+     walk collapsed, #1413 Step 2.3)
+   - (order 18) ``sec_business_summary_bootstrap`` (metadata-only seed;
+     bodies lazy-on-view per #1343)
+   - (order 21) ``sec_8k_events_ingest`` (metadata-only seed; bodies
+     lazy-on-view per #1343)
+1. **Phase E — final derivations** (``db`` / ``db_fundamentals_raw`` lanes):
+   - (order 24) ``ownership_observations_backfill`` (refreshes
+     ``ownership_*_current``; advertises ``ownership_current_refreshed``)
+   - (order 25) ``fundamentals_sync`` (``fundamentals_sync_bootstrap``)
 1. **Phase F — fund metadata** (``sec_rate``):
-   - S25 ``mf_directory_sync`` (advertises ``class_id_mapping_ready``
-     for S26)
-   - S26 ``sec_n_csr_bootstrap_drain`` (fund-scoped N-CSR / N-CSRS
-     manifest enqueue; 730d retention pinned at
-     ``app/services/manifest_parsers/sec_n_csr.py::N_CSR_RETENTION_DAYS``)
+   - (order 26) ``mf_directory_sync`` (bounded mf.json directory fetch;
+     advertises ``class_id_mapping_ready`` for the steady-state N-CSR path)
+1. **Phase G — load-time validation gate** (``db`` lane; #1419, P4):
+   - (order 27) ``bootstrap_validation`` — runs LAST (requires a cap from
+     every data/derivation stage: the bulk leaf caps + ``ownership_current_refreshed``
+     (S24) + ``fundamentals_synced`` (S25) + ``class_id_mapping_ready`` (S26),
+     so the cap-driven dispatcher cannot run it until all have terminalised).
+     Three checks: absolute
+     per-source row-count floors, per-slice-tolerant panel render
+     (AAPL/GME/MSFT/JPM/HD), and offline cross-source reconciliation. A
+     hard-floor breach errors the stage → ``finalize_run`` → ``partial_error``
+     (the universal bootstrap gate stays closed). The verdict is recorded on
+     ``bootstrap_runs.validation_gate_status`` (passed / warned /
+     failed_<check_id>).
 
 Total wall-clock: typically **60–90 minutes** on the bulk path,
 dominated by ``sec_bulk_download`` + ``sec_submissions_files_walk``.

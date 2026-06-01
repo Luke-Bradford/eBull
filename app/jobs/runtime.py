@@ -337,6 +337,14 @@ _INVOKERS[_scheduler.JOB_SEC_PER_CIK_POLL] = _adapt_zero_arg(_scheduler.sec_per_
 _INVOKERS[_scheduler.JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP] = _adapt_zero_arg(_scheduler.sec_master_idx_quarterly_sweep)
 # #1415 — bootstrap S15 recent-window gap-close (filing-metadata scoped).
 _INVOKERS[_scheduler.JOB_SEC_MASTER_IDX_GAP_CLOSE] = _adapt_zero_arg(_scheduler.sec_master_idx_gap_close)
+# #1419 (P4) — terminal load-time validation gate (bootstrap-only, lane db).
+# Zero-arg; reads the active run from the bootstrap contextvar. Raises on a
+# hard-floor breach so the stage errors → finalize_run → partial_error.
+from app.services import bootstrap_validation as _bootstrap_validation  # noqa: E402
+
+_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_VALIDATION] = _adapt_zero_arg(
+    _bootstrap_validation.run_bootstrap_validation
+)
 _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking, no _adapt_zero_arg
 # G6/#915 — FINRA bimonthly short interest (daily 12:00 UTC). Zero-param
 # manual surface; extended-window backfill via REPL runbook.

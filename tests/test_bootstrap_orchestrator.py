@@ -104,7 +104,7 @@ def _register_synthetic_jobs(monkeypatch: pytest.MonkeyPatch, mapping: dict[str,
 # ---------------------------------------------------------------------------
 
 
-def test_stage_catalogue_has_twenty_stages() -> None:
+def test_stage_catalogue_has_twenty_one_stages() -> None:
     """Catalogue size pinned to surface adds/removes in code review.
 
     #1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages
@@ -113,12 +113,13 @@ def test_stage_catalogue_has_twenty_stages() -> None:
     S23 n_port_ingest, S27 sec_n_csr_bootstrap_drain) → 27 - 8 = 19.
     #1415 (P3) added the S15-slot master.idx recent-window gap-close
     (filing-metadata-scoped, with the per-source watermark guard) → 20.
+    #1419 (P4) added the terminal bootstrap_validation stage → 21.
 
-    20 = 1 init + 1 etoro + 9 sec_rate + 1 sec_bulk_download + 6 db
+    21 = 1 init + 1 etoro + 9 sec_rate + 1 sec_bulk_download + 7 db
     + 1 db_fundamentals_raw + 1 openfigi.
     """
     specs = get_bootstrap_stage_specs()
-    assert len(specs) == 20
+    assert len(specs) == 21
 
 
 def test_stage_catalogue_lane_composition() -> None:
@@ -127,16 +128,17 @@ def test_stage_catalogue_lane_composition() -> None:
     for spec in specs:
         by_lane[spec.lane] = by_lane.get(spec.lane, 0) + 1
     # #1413 — sec_rate: 16 − 8 per-CIK HTTP stages removed (incl. S27 N-CSR
-    # drain) = 8; #1415 + 1 master.idx gap-close = 9. Total 1 + 1 + 9 + 1 + 6
-    # + 1 + 1 = 20. ``db`` = 6 (5 bulk ingesters + ownership_observations_backfill);
-    # ``db_fundamentals_raw`` = 1 (S25 fundamentals_sync); ``openfigi`` = 1
-    # (S13 cusip_resolver_post_bulk_sweep).
+    # drain) = 8; #1415 + 1 master.idx gap-close = 9. #1419 (P4) + 1 db stage
+    # (bootstrap_validation) → db = 7. Total 1 + 1 + 9 + 1 + 7 + 1 + 1 = 21.
+    # ``db`` = 7 (5 bulk ingesters + ownership_observations_backfill +
+    # bootstrap_validation); ``db_fundamentals_raw`` = 1 (S25 fundamentals_sync);
+    # ``openfigi`` = 1 (S13 cusip_resolver_post_bulk_sweep).
     assert by_lane == {
         "init": 1,
         "etoro": 1,
         "sec_rate": 9,
         "sec_bulk_download": 1,
-        "db": 6,
+        "db": 7,
         "db_fundamentals_raw": 1,
         "openfigi": 1,
     }
@@ -351,10 +353,18 @@ def test_orchestrator_happy_path_completes(
     assert state.status == "complete"
 
     # #1413 dropped 8 per-CIK HTTP stages + #1415 added the master.idx
-    # gap-close → 20 invokers fire on the happy path.
-    assert len(calls["order"]) == 20
+    # gap-close + #1419 (P4) added the terminal bootstrap_validation stage
+    # → 21 invokers fire on the happy path.
+    assert len(calls["order"]) == 21
     # Phase A's universe sync was first.
     assert calls["order"][0] == "nightly_universe_sync"
+    # #1419 (P4) — validation is genuinely TERMINAL: it requires a cap from
+    # every data/derivation stage (S24 ownership_current_refreshed, S25
+    # fundamentals_synced, S26 class_id_mapping_ready), so it must run after all
+    # three. stage_order does not order execution — the caps do.
+    val_idx = calls["order"].index("bootstrap_validation")
+    for prior_job in ("ownership_observations_backfill", "fundamentals_sync_bootstrap", "mf_directory_sync"):
+        assert val_idx > calls["order"].index(prior_job), prior_job
 
 
 def test_orchestrator_init_failure_skips_phase_b(
