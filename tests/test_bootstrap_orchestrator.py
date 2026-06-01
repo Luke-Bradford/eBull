@@ -104,21 +104,21 @@ def _register_synthetic_jobs(monkeypatch: pytest.MonkeyPatch, mapping: dict[str,
 # ---------------------------------------------------------------------------
 
 
-def test_stage_catalogue_has_nineteen_stages() -> None:
+def test_stage_catalogue_has_twenty_stages() -> None:
     """Catalogue size pinned to surface adds/removes in code review.
 
     #1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages
     (S14 submissions_files_walk, S15 filings_history_seed, S17 def14a,
     S19 insider_transactions_backfill, S20 form3, S22 13f_recent_sweep,
     S23 n_port_ingest, S27 sec_n_csr_bootstrap_drain) → 27 - 8 = 19.
-    (The master.idx recent-window gap-close is deferred to P3 — its
-    watermark per-source guard lands atomically with it.)
+    #1415 (P3) added the S15-slot master.idx recent-window gap-close
+    (filing-metadata-scoped, with the per-source watermark guard) → 20.
 
-    19 = 1 init + 1 etoro + 8 sec_rate + 1 sec_bulk_download + 6 db
+    20 = 1 init + 1 etoro + 9 sec_rate + 1 sec_bulk_download + 6 db
     + 1 db_fundamentals_raw + 1 openfigi.
     """
     specs = get_bootstrap_stage_specs()
-    assert len(specs) == 19
+    assert len(specs) == 20
 
 
 def test_stage_catalogue_lane_composition() -> None:
@@ -126,14 +126,15 @@ def test_stage_catalogue_lane_composition() -> None:
     by_lane: dict[str, int] = {}
     for spec in specs:
         by_lane[spec.lane] = by_lane.get(spec.lane, 0) + 1
-    # #1413 — 1 + 1 + 8 + 1 + 6 + 1 + 1 = 19 stages. sec_rate: 16 − 8 per-CIK
-    # HTTP stages removed (incl. S27 N-CSR drain) = 8. ``db`` = 6 (5 bulk
-    # ingesters + ownership_observations_backfill); ``db_fundamentals_raw`` =
-    # 1 (S25 fundamentals_sync); ``openfigi`` = 1 (S13 cusip_resolver_post_bulk_sweep).
+    # #1413 — sec_rate: 16 − 8 per-CIK HTTP stages removed (incl. S27 N-CSR
+    # drain) = 8; #1415 + 1 master.idx gap-close = 9. Total 1 + 1 + 9 + 1 + 6
+    # + 1 + 1 = 20. ``db`` = 6 (5 bulk ingesters + ownership_observations_backfill);
+    # ``db_fundamentals_raw`` = 1 (S25 fundamentals_sync); ``openfigi`` = 1
+    # (S13 cusip_resolver_post_bulk_sweep).
     assert by_lane == {
         "init": 1,
         "etoro": 1,
-        "sec_rate": 8,
+        "sec_rate": 9,
         "sec_bulk_download": 1,
         "db": 6,
         "db_fundamentals_raw": 1,
@@ -349,9 +350,9 @@ def test_orchestrator_happy_path_completes(
     state = read_state(ebull_test_conn)
     assert state.status == "complete"
 
-    # #1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages → 19
-    # invokers fire on the happy path.
-    assert len(calls["order"]) == 19
+    # #1413 dropped 8 per-CIK HTTP stages + #1415 added the master.idx
+    # gap-close → 20 invokers fire on the happy path.
+    assert len(calls["order"]) == 20
     # Phase A's universe sync was first.
     assert calls["order"][0] == "nightly_universe_sync"
 
@@ -812,6 +813,34 @@ def test_s16_no_longer_provides_secondary_pages_walked() -> None:
     (Capability Literal + provides + every consumer).
     """
     assert "submissions_secondary_pages_walked" not in _STAGE_PROVIDES.get("sec_first_install_drain", ())
+
+
+def test_master_idx_gap_close_stage_present() -> None:
+    """#1415 (P3) — the recent-window gap-close occupies the freed S15 slot
+    (order 15), runs on ``sec_rate``, and dispatches the bootstrap-only
+    ``sec_master_idx_gap_close`` invoker (NOT the unscoped weekly G12
+    ``sec_master_idx_quarterly_sweep``). The dedicated invoker is what carries
+    the filing-metadata ``source_allowlist`` so the gap-close never advances
+    an ownership-source watermark (the per-source guard). It gates on
+    ``cik_mapping_ready`` + ``submissions_processed`` and provides NO
+    capability (pure filing-metadata discovery — must never advertise an
+    ownership cap, P3 invariant).
+    """
+    spec = next(
+        (s for s in _BOOTSTRAP_STAGE_SPECS if s.stage_key == "sec_master_idx_gap_close"),
+        None,
+    )
+    assert spec is not None, "sec_master_idx_gap_close missing from _BOOTSTRAP_STAGE_SPECS"
+    assert spec.stage_order == 15
+    assert spec.lane == "sec_rate"
+    assert spec.job_name == "sec_master_idx_gap_close", (
+        "must dispatch the source-allowlist-scoped bootstrap invoker, not the unscoped G12 sweep"
+    )
+    req = _STAGE_REQUIRES_CAPS["sec_master_idx_gap_close"]
+    assert set(req.all_of) == {"cik_mapping_ready", "submissions_processed"}
+    assert req.any_of == ()
+    assert "sec_master_idx_gap_close" not in _STAGE_PROVIDES
+    assert "sec_master_idx_gap_close" not in _STAGE_PROVIDES_ON_SKIP
 
 
 @pytest.mark.parametrize("stage_key", ["sec_business_summary_bootstrap", "sec_8k_events_ingest"])

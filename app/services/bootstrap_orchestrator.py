@@ -103,6 +103,7 @@ JOB_BOOTSTRAP_ORCHESTRATOR = "bootstrap_orchestrator"
 # below carry the canonical names and a future rename is single-site.
 from app.workers.scheduler import (  # noqa: E402  (after dataclass to avoid cycle)
     JOB_SEC_FIRST_INSTALL_DRAIN,
+    JOB_SEC_MASTER_IDX_GAP_CLOSE,
 )
 
 # These already exist as scheduled jobs but were not registered in
@@ -577,6 +578,13 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     # adds S16 ``follow_pagination=False`` in bootstrap so its secondary-
     # page HTTP walk is collapsed too — Step 2.3.)
     "sec_first_install_drain": CapRequirement(all_of=("cik_mapping_ready", "submissions_processed")),
+    # #1415 (P3) — recent-window gap-close. Needs the issuer CIK map
+    # (``cik_mapping_ready``, S6) for subject resolution and waits for the
+    # bulk submissions ingest (``submissions_processed``, S8 ordering cap) so
+    # the two manifest writers don't contend. Provides no capability — pure
+    # filing-metadata discovery (the ``sec_master_idx_gap_close`` invoker is
+    # source-allowlist-scoped so it never touches ownership watermarks).
+    "sec_master_idx_gap_close": CapRequirement(all_of=("cik_mapping_ready", "submissions_processed")),
     # #1413 — S17 sec_def14a_bootstrap, S19 sec_insider_transactions_backfill,
     # S20 sec_form3_ingest, S22 sec_13f_recent_sweep, S23 sec_n_port_ingest
     # DROPPED (bulk-only). The bulk ingesters S10/S11/S12 already write the
@@ -1103,13 +1111,19 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # byte-for-byte what S8 ``sec_submissions_ingest`` already wrote from
     # submissions.zip. ``filing_events_seeded`` is re-homed to S8 (+ S16).
     #
-    # NOTE: the master.idx recent-window gap-close (bulk-lag → filing-
-    # metadata coverage) was DEFERRED to P3 (watermark hardening). Its
-    # correctness is inseparable from the per-source watermark guard —
-    # ``record_manifest_entry`` advances ``data_freshness_index`` for the
-    # form's source, so an un-guarded gap-close would push OWNERSHIP-source
-    # watermarks (13F/N-PORT/Form-3/4) ahead of the parsed observations
-    # (silent-gap, pillar 3). P3 adds the stage WITH the guard atomically.
+    # #1415 (P3) — recent-window gap-close in the freed S15 slot (order 15).
+    # The bulk archives lag real-time by days; this walks the current + prev
+    # quarter ``full-index/{year}/QTR{q}/form.idx`` ONCE per quarter (two
+    # ~50MB downloads, ZERO per-CIK HTTP) to close the bulk-cutoff→now gap in
+    # FILING-METADATA coverage. The ``sec_master_idx_gap_close`` invoker is
+    # scoped via ``GAP_CLOSE_FILING_METADATA_SOURCES`` so it advances ONLY
+    # filing-metadata watermarks (8-K/10-K/10-Q/DEF14A/13D/13G), NEVER the
+    # bulk-dataset ownership sources (13F-HR/N-PORT/Form-3/4/5) — that
+    # would push their cursor ahead of the parsed observations (silent-gap,
+    # spec §4.3 pillar 3). Requires cik_mapping_ready (subject resolution) +
+    # submissions_processed (serialise after bulk S8 to avoid manifest write
+    # contention). Provides nothing — pure filing-metadata discovery.
+    _spec("sec_master_idx_gap_close", 15, "sec_rate", JOB_SEC_MASTER_IDX_GAP_CLOSE),
     # S16 ``sec_first_install_drain`` stays (DB-bound manifest seed from
     # bulk filing_events); #1413 adds its ``follow_pagination=False``
     # bootstrap param so its secondary-page HTTP walk is also collapsed.
@@ -1179,10 +1193,13 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # steady-state / lazy-on-view (N-CSR annual-report bodies have NO bulk
     # artifact). It provided no required capability (terminal). The funds
     # panel slice renders from bulk N-PORT (S12 ownership_funds_observations),
-    # not N-CSR. N-CSR DISCOVERY (manifest rows) is still bulk-seeded via S8
-    # + the master.idx gap-close; the steady-state manifest worker parses the
-    # bodies post-complete. ``class_id_mapping_ready`` (provided by S26) is
-    # now provided-but-unconsumed (harmless; S26 stays for the steady-state map).
+    # not N-CSR. N-CSR DISCOVERY is steady-state's job: the S15 gap-close
+    # deliberately excludes ``sec_n_csr`` (fund-trust CIKs aren't in the S15
+    # subject resolver until S26 seeds the MF directory), and post-complete
+    # the Atom/daily-index layers + manifest worker discover + parse N-CSR
+    # against the S26-seeded fund directory. ``class_id_mapping_ready``
+    # (provided by S26) is now provided-but-unconsumed (harmless; S26 stays
+    # to seed the fund directory the steady-state N-CSR path needs).
 )
 
 
@@ -2916,11 +2933,11 @@ __all__ = [
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
 # current stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 19, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 19 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+assert len(_BOOTSTRAP_STAGE_SPECS) == 20, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 20 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
     "update the spec, frontend, runbook, and stage_count tests in lockstep. "
     "#1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep; "
     "#1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages "
-    "(S14/S15/S17/S19/S20/S22/S23 + S27 sec_n_csr_bootstrap_drain): 27 - 8 = 19. "
-    "The master.idx recent-window gap-close is deferred to P3 (watermark hardening)."
+    "(S14/S15/S17/S19/S20/S22/S23 + S27 sec_n_csr_bootstrap_drain): 27 - 8 = 19; "
+    "#1415 (P3) added the S15-slot master.idx recent-window gap-close: 19 + 1 = 20."
 )

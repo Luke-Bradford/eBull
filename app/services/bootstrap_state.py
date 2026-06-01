@@ -7,8 +7,9 @@ singleton scheduler-gate state. Spec:
 Three tables (sql/129_bootstrap_state.sql):
 
   - ``bootstrap_runs``    — one row per "Run bootstrap" click.
-  - ``bootstrap_stages``  — one row per stage in a run (19 stages today,
-                            #1413 bulk-only collapse; catalogue lives in
+  - ``bootstrap_stages``  — one row per stage in a run (20 stages today,
+                            #1413 bulk-only collapse + #1415 master.idx
+                            gap-close; catalogue lives in
                             ``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS``).
   - ``bootstrap_state``   — singleton row (id=1) with the canonical
                             ``_bootstrap_complete`` gate status.

@@ -335,6 +335,8 @@ _INVOKERS[_scheduler.JOB_SEC_DAILY_INDEX_RECONCILE] = _adapt_zero_arg(_scheduler
 _INVOKERS[_scheduler.JOB_SEC_PER_CIK_POLL] = _adapt_zero_arg(_scheduler.sec_per_cik_poll)
 # G12 — Layer-4 cross-quarter discovery (weekly Sun 05:15 UTC).
 _INVOKERS[_scheduler.JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP] = _adapt_zero_arg(_scheduler.sec_master_idx_quarterly_sweep)
+# #1415 — bootstrap S15 recent-window gap-close (filing-metadata scoped).
+_INVOKERS[_scheduler.JOB_SEC_MASTER_IDX_GAP_CLOSE] = _adapt_zero_arg(_scheduler.sec_master_idx_gap_close)
 _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking, no _adapt_zero_arg
 # G6/#915 — FINRA bimonthly short interest (daily 12:00 UTC). Zero-param
 # manual surface; extended-window backfill via REPL runbook.
