@@ -118,6 +118,13 @@ JOB_SEC_N_CSR_BOOTSTRAP_DRAIN = "sec_n_csr_bootstrap_drain"
 # Owns the ``openfigi`` Lane (cap=1). Invoker registered in
 # ``app/jobs/runtime.py`` alongside the other bootstrap-only jobs.
 JOB_CUSIP_RESOLVER_POST_BULK_SWEEP = "cusip_resolver_post_bulk_sweep"
+# #1419 (P4) — terminal load-time validation gate. Bootstrap-only stage
+# (lane ``db``); invoker registered in ``app/jobs/runtime.py``. Runs after
+# every data stage (gated on ``ownership_current_refreshed`` + the bulk
+# leaf caps) and raises on a hard-floor breach so ``finalize_run`` maps the
+# run to ``partial_error`` (the universal gate stays closed). See
+# ``app/services/bootstrap_validation.py``.
+JOB_BOOTSTRAP_VALIDATION = "bootstrap_validation"
 # PR1c #1064 — bootstrap-bounded 13F sweep recency cut-off. Used to
 # live as a constant inside the deleted ``bootstrap_sec_13f_recent_sweep_job``
 # wrapper. 4 quarters (~380 days) = current + 3 prior periods, matches
@@ -347,6 +354,22 @@ Capability = Literal[
     "insider_dataset_processed",
     "institutional_dataset_processed",
     "nport_dataset_processed",
+    # #1419 (P4) — S24 ``ownership_observations_backfill`` refreshed the
+    # ``ownership_*_current`` tables the rollup reads. Provided ONLY by S24
+    # (terminal db-lane stage that otherwise advertised nothing), required by
+    # the terminal ``bootstrap_validation`` stage so it runs AFTER the current-
+    # table refresh. The dispatcher is cap-driven — stage_order does not order
+    # execution — so a no-provides terminal stage is invisible to downstream
+    # gating without this cap. Status-only (NOT a strict-cap floor): S24 is
+    # idempotent and a re-run can legitimately refresh 0 net rows.
+    "ownership_current_refreshed",
+    # #1419 (P4) — S25 ``fundamentals_sync`` terminalised (normalises
+    # financial_facts_raw → financial_periods). Provided ONLY by S25 (another
+    # no-provides terminal stage), required by ``bootstrap_validation`` so it is
+    # genuinely the LAST stage — without it the cap-driven dispatcher could run +
+    # 'pass' validation while S25 is still in flight or about to fail. Status-only
+    # (idempotent re-run can normalise 0 net rows).
+    "fundamentals_synced",
 ]
 
 
@@ -407,6 +430,17 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
     # #1174 — dedicated MF directory refresh advertises class_id_mapping_ready.
     # S26 ``sec_n_csr_bootstrap_drain`` is terminal (no provides entry).
     "mf_directory_sync": ("class_id_mapping_ready",),
+    # #1419 (P4) — S24 refreshes ``ownership_*_current``; advertise it so the
+    # terminal validation stage gates AFTER the refresh (see the cap docstring
+    # in the ``Capability`` Literal). NOT in ``_STAGE_PROVIDES_ON_SKIP``: a
+    # skipped S24 (slow-connection cascade) means the current tables were not
+    # refreshed, so validation should cascade-skip too rather than validate
+    # stale/empty data.
+    "ownership_observations_backfill": ("ownership_current_refreshed",),
+    # #1419 (P4) — S25 advertises completion so ``bootstrap_validation`` gates
+    # after it (terminal-gate ordering, not a content cap). NOT on skip: a
+    # skipped S25 means fundamentals were not normalised → validation cascades.
+    "fundamentals_sync": ("fundamentals_synced",),
 }
 
 
@@ -644,6 +678,35 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
             "cik_mapping_ready",
             "submissions_processed",
             "fundamentals_raw_seeded",
+        ),
+    ),
+    # #1419 (P4) — terminal load-time validation gate. Requires a cap from
+    # EVERY data/derivation stage so the cap-driven dispatcher cannot run it
+    # until they have all terminalised (``stage_order`` does NOT order
+    # execution — a validation that ran early could 'pass' while a later stage
+    # was still in flight or about to fail). The full terminal set:
+    #   filing_events_seeded        → S8/S16 (filing_events row floor)
+    #   fundamentals_raw_seeded     → S9 (financial_facts_raw → shares_outstanding)
+    #   insider_inputs_seeded       → S11 (ownership_insiders_observations)
+    #   institutional_inputs_seeded → S10 (ownership_institutions_observations)
+    #   nport_inputs_seeded         → S12 (ownership_funds_observations)
+    #   ownership_current_refreshed → S24 (ownership_*_current → panel slices)
+    #   fundamentals_synced         → S25 (financial_periods normalisation)
+    #   class_id_mapping_ready      → S26 (mf_directory_sync — last by order)
+    # All ``all_of``: if any provider errors, the cap is error-dead → validation
+    # is propagated to ``blocked`` (counts toward partial_error in finalize_run),
+    # which is correct — a failed prerequisite means the run is already
+    # partial_error and validation cannot meaningfully bless it.
+    "bootstrap_validation": CapRequirement(
+        all_of=(
+            "filing_events_seeded",
+            "fundamentals_raw_seeded",
+            "insider_inputs_seeded",
+            "institutional_inputs_seeded",
+            "nport_inputs_seeded",
+            "ownership_current_refreshed",
+            "fundamentals_synced",
+            "class_id_mapping_ready",
         ),
     ),
 }
@@ -1200,6 +1263,15 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # against the S26-seeded fund directory. ``class_id_mapping_ready``
     # (provided by S26) is now provided-but-unconsumed (harmless; S26 stays
     # to seed the fund directory the steady-state N-CSR path needs).
+    #
+    # #1419 (P4) — terminal load-time validation gate. Runs LAST (gated on the
+    # bulk leaf caps + ``ownership_current_refreshed`` from S24, not on
+    # stage_order). Lane ``db`` (pure DB reads; auto-covered by the source
+    # registry via Pass 2 of ``_build_job_name_to_source``). Raises on a hard-
+    # floor breach → ``_run_one_stage`` marks the stage ``error`` →
+    # ``finalize_run`` → ``partial_error`` (gate stays closed). Soft warnings →
+    # success + ``bootstrap_runs.validation_gate_status`` verdict (sql/180).
+    _spec("bootstrap_validation", 27, "db", JOB_BOOTSTRAP_VALIDATION),
 )
 
 
@@ -2933,11 +3005,12 @@ __all__ = [
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
 # current stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 20, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 20 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+assert len(_BOOTSTRAP_STAGE_SPECS) == 21, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 21 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
     "update the spec, frontend, runbook, and stage_count tests in lockstep. "
     "#1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep; "
     "#1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages "
     "(S14/S15/S17/S19/S20/S22/S23 + S27 sec_n_csr_bootstrap_drain): 27 - 8 = 19; "
-    "#1415 (P3) added the S15-slot master.idx recent-window gap-close: 19 + 1 = 20."
+    "#1415 (P3) added the S15-slot master.idx recent-window gap-close: 19 + 1 = 20; "
+    "#1419 (P4) added the terminal bootstrap_validation stage: 20 + 1 = 21."
 )
