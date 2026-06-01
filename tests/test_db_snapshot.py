@@ -147,3 +147,31 @@ def test_snapshot_read_restores_isolation_level_on_exception(
         with snapshot_read(ebull_test_conn):
             raise RuntimeError("boom")
     assert ebull_test_conn.isolation_level == prior
+
+
+def test_snapshot_read_leaves_autocommit_conn_idle_on_exception() -> None:
+    """#1419 P4 (PR #1420 bot WARNING + PREVENTION): ``bootstrap_validation``
+    runs ``snapshot_read`` on an AUTOCOMMIT connection (floors use autocommit
+    for partition-lock hygiene; the panel rollups share one snapshot). If a
+    read inside the block raises — e.g. ``get_ownership_rollup`` hitting a
+    psycopg error — psycopg's ``conn.transaction()`` must roll back so the
+    connection is left IDLE + usable, NOT in an aborted-transaction state.
+
+    The non-autocommit exception test above only asserts isolation is
+    restored; this pins the autocommit interaction the validation invoker
+    relies on. Opens its own autocommit connection (the pooled fixture conn is
+    autocommit-off)."""
+    conn = psycopg.connect(_test_database_url(), autocommit=True)
+    try:
+        with pytest.raises(RuntimeError, match="boom"):
+            with snapshot_read(conn):
+                conn.execute("SELECT 1")
+                raise RuntimeError("boom")
+        # An aborted-transaction state would make the next statement raise
+        # InFailedSqlTransaction; a clean rollback leaves it executable.
+        row = conn.execute("SELECT 42").fetchone()
+        assert row is not None and row[0] == 42
+        assert conn.autocommit is True
+        assert conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+    finally:
+        conn.close()
