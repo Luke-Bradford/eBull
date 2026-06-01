@@ -331,6 +331,37 @@ class TestRegistryConflictDetection:
             # Restore real cache so subsequent tests use the canonical registry.
             reset_job_name_to_source_cache()
 
+    def test_real_registry_has_no_conflicting_lane_duplicates(self) -> None:
+        """PREVENTION (PR #1414 review) — positive invariant on the LIVE
+        registries (the sibling test only injects a synthetic conflict).
+
+        A job_name may legitimately appear in more than one source dict —
+        the ``finra_*`` jobs are SCHEDULED crons AND manual-triggerable;
+        several stages are both SCHEDULED and a bootstrap stage — but every
+        path MUST resolve it to the SAME lane. ``_build_job_name_to_source``
+        raises ``JobSourceRegistryError`` on a different-lane collision at
+        first call (lifespan / first ``JobLock``); this pins it at test
+        time so a mis-homed entry — e.g. a per-CIK job dropped from the
+        bootstrap catalogue and re-homed to the WRONG ``MANUAL_TRIGGER_JOB_SOURCES``
+        lane (#1413) — fails fast in CI rather than at operator boot.
+        """
+        from app.jobs.sources import MANUAL_TRIGGER_JOB_SOURCES
+        from app.services.bootstrap_orchestrator import (
+            _BOOTSTRAP_STAGE_SPECS,
+            _effective_lane,
+        )
+
+        lanes_by_job: dict[str, set[str]] = {}
+        for job in SCHEDULED_JOBS:
+            lanes_by_job.setdefault(job.name, set()).add(job.source)
+        for spec in _BOOTSTRAP_STAGE_SPECS:
+            lanes_by_job.setdefault(spec.job_name, set()).add(_effective_lane(spec.stage_key, spec.lane))
+        for job_name, manual_lane in MANUAL_TRIGGER_JOB_SOURCES.items():
+            lanes_by_job.setdefault(job_name, set()).add(manual_lane)
+
+        conflicts = {name: sorted(lanes) for name, lanes in lanes_by_job.items() if len(lanes) > 1}
+        assert not conflicts, f"job_names registered under conflicting lanes: {conflicts}"
+
 
 class TestParamMetadataValidation:
     """validate_job_params + _coerce_value + _check_bounds coverage."""
