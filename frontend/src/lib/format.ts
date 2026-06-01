@@ -109,3 +109,36 @@ export function formatRelativeTime(iso: string | null | undefined): string {
   if (deltaS < 604800) return `${Math.floor(deltaS / 86400)}d ago`;
   return formatDate(iso);
 }
+
+/** #1409 P5 — server-computed rows/sec for a running bootstrap stage.
+ *  null (not measurable) → "—"; ≥1000 abbreviated with `k`. */
+export function formatRate(rowsPerSec: number | null | undefined): string {
+  if (rowsPerSec === null || rowsPerSec === undefined) return "—";
+  if (rowsPerSec >= 1000) return `${(rowsPerSec / 1000).toFixed(1)}k rows/s`;
+  return `${rowsPerSec.toFixed(1)} rows/s`;
+}
+
+/** #1409 P5 — projected seconds-to-target for a running stage.
+ *  null (unknown target / already met) → "—"; <60s → "<1m"; the `~`
+ *  prefix marks it an estimate. */
+export function formatEta(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined) return "—";
+  if (seconds < 60) return "<1m";
+  const totalMin = Math.floor(seconds / 60);
+  if (totalMin < 60) return `~${totalMin}m`;
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  return `~${hours}h ${mins}m`;
+}
+
+/** #1409 P5 — render a server-computed heartbeat age (seconds since the
+ *  stage last wrote progress) as "updated Ns/Nm/Nh ago". null → "—".
+ *  Takes a number (not an ISO string) so it stays on the DB clock the
+ *  server measured against — no client-skew re-derivation. */
+export function formatHeartbeatAge(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined) return "—";
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `updated ${s}s ago`;
+  if (s < 3600) return `updated ${Math.floor(s / 60)}m ago`;
+  return `updated ${Math.floor(s / 3600)}h ago`;
+}

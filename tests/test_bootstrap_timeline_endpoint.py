@@ -54,7 +54,15 @@ def _insert_bootstrap_run(
     completed: bool = False,
     cancel_requested: bool = False,
 ) -> int:
-    """Insert one ``bootstrap_runs`` row and return its id."""
+    """Insert one ``bootstrap_runs`` row and return its id.
+
+    Also advances ``bootstrap_state.last_run_id`` to the new id, mirroring
+    production ``start_run`` (app/services/bootstrap_state.py:507). The
+    timeline endpoint pins on that pointer (#1409 P5 Step 5.4), so a run
+    that is never pointed-to is invisible — the helper keeps the pointer
+    on the most-recently-inserted run, which is what every test below
+    expects ("latest run wins").
+    """
     row = conn.execute(
         """
         INSERT INTO bootstrap_runs (status, completed_at, cancel_requested_at)
@@ -68,7 +76,9 @@ def _insert_bootstrap_run(
         (run_status, completed, cancel_requested),
     ).fetchone()
     assert row is not None
-    return int(row[0])
+    run_id = int(row[0])
+    conn.execute("UPDATE bootstrap_state SET last_run_id=%s WHERE id=1", (run_id,))
+    return run_id
 
 
 def _insert_bootstrap_stage(
@@ -269,7 +279,10 @@ def test_timeline_happy_path_groups_archives_per_stage(
 def test_timeline_returns_latest_run_when_multiple_runs_exist(
     conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
 ) -> None:
-    """``ORDER BY id DESC LIMIT 1`` — newest run wins."""
+    """Pointer follows the most-recently-started run (#1409 §5.4: pin on
+    ``bootstrap_state.last_run_id``). The helper advances the pointer per
+    insert, so the newer run is the pinned one and the older-run stages
+    must not leak."""
     _wipe_bootstrap_state(ebull_test_conn)
     older = _insert_bootstrap_run(ebull_test_conn, run_status="complete", completed=True)
     newer = _insert_bootstrap_run(ebull_test_conn, run_status="running")

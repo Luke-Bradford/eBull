@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatRelativeTime } from "@/lib/format";
+import {
+  formatEta,
+  formatHeartbeatAge,
+  formatRate,
+  formatRelativeTime,
+} from "@/lib/format";
 
 describe("formatRelativeTime", () => {
   const NOW = new Date("2026-04-21T12:00:00Z");
@@ -44,5 +49,57 @@ describe("formatRelativeTime", () => {
     const result = formatRelativeTime("2026-04-10T12:00:00Z");
     expect(result).toMatch(/2026/);
     vi.useRealTimers();
+  });
+});
+
+describe("formatRate", () => {
+  it("renders '—' for null", () => {
+    expect(formatRate(null)).toBe("—");
+  });
+
+  it("renders sub-1000 rates with one decimal + rows/s", () => {
+    expect(formatRate(8.4)).toBe("8.4 rows/s");
+    expect(formatRate(0.5)).toBe("0.5 rows/s");
+  });
+
+  it("abbreviates thousands with k", () => {
+    expect(formatRate(15600)).toBe("15.6k rows/s");
+  });
+});
+
+describe("formatEta", () => {
+  it("renders '—' for null", () => {
+    expect(formatEta(null)).toBe("—");
+  });
+
+  it("renders '<1m' for sub-minute ETAs", () => {
+    expect(formatEta(40)).toBe("<1m");
+  });
+
+  it("renders whole minutes under an hour", () => {
+    expect(formatEta(852)).toBe("~14m");
+  });
+
+  it("renders hours + minutes over an hour", () => {
+    expect(formatEta(3 * 3600 + 5 * 60)).toBe("~3h 5m");
+  });
+});
+
+describe("formatHeartbeatAge", () => {
+  it("renders '—' for null", () => {
+    expect(formatHeartbeatAge(null)).toBe("—");
+  });
+
+  it("renders seconds under a minute", () => {
+    expect(formatHeartbeatAge(0)).toBe("updated 0s ago");
+    expect(formatHeartbeatAge(45)).toBe("updated 45s ago");
+  });
+
+  it("renders minutes under an hour", () => {
+    expect(formatHeartbeatAge(180)).toBe("updated 3m ago");
+  });
+
+  it("renders hours past an hour", () => {
+    expect(formatHeartbeatAge(7200)).toBe("updated 2h ago");
   });
 });

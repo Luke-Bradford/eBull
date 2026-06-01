@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from uuid import UUID
 
 import psycopg
@@ -77,6 +77,7 @@ from app.services.processes import (
 )
 from app.services.processes.ingest_sweep_adapter import is_sweep
 from app.services.processes.param_metadata import ParamMetadata
+from app.services.processes.stale_thresholds import get_threshold
 from app.services.processes.watermarks import (
     acquire_shared_source_locks,
     atom_etag_target_for,
@@ -299,6 +300,23 @@ class BootstrapTimelineStageResponse(BaseModel):
     rows_processed: int | None
     processed_count: int
     target_count: int | None
+    # #1409 P5 — live-timeline fields. ``last_progress_at`` is the
+    # per-stage heartbeat (was dropped from the payload). ``rate`` is
+    # server-computed rows/sec = processed_count / (last_progress_at −
+    # started_at); NULL when processed_count is 0 or the window is not
+    # measurable. ``eta_seconds`` = (target_count − processed_count) /
+    # rate; NULL when target_count is unknown, rate is NULL, or the
+    # stage is already at/over target (no fake 100% / negative ETA).
+    # ``heartbeat_age_seconds`` = now() − last_progress_at (DB clock,
+    # skew-free). ``is_stale`` is True only for a running stage whose
+    # heartbeat exceeds the bootstrap stale threshold (1800s) — a
+    # positive liveness signal that distinguishes "slow but alive"
+    # from "wedged".
+    last_progress_at: datetime | None = None
+    rate: float | None = None
+    eta_seconds: float | None = None
+    heartbeat_age_seconds: float | None = None
+    is_stale: bool = False
     # #1273 PR2 — operator-readable cohort-definition fingerprint set
     # by ``set_stage_target`` at stage entry. Semicolon-separated
     # key=value tokens (see spec §4); ``None`` on legacy rows + stages
@@ -651,6 +669,69 @@ def _humanise_stage_key(stage_key: str) -> str:
     return stage_key.replace("_", " ").strip().title() or stage_key
 
 
+class _LiveTimelineFields(NamedTuple):
+    last_progress_at: datetime | None
+    rate: float | None
+    eta_seconds: float | None
+    heartbeat_age_seconds: float | None
+    is_stale: bool
+
+
+def _compute_live_timeline_fields(
+    *,
+    status: str,
+    started_at: datetime | None,
+    last_progress_at: datetime | None,
+    processed_count: int,
+    target_count: int | None,
+    db_now: datetime,
+    stale_threshold_s: int,
+) -> _LiveTimelineFields:
+    """Derive rate / ETA / heartbeat-age / staleness for one stage row.
+
+    #1409 P5 Step 5.1/5.3. ``processed_count`` is ABSOLUTE (running
+    total since ``started_at``), so rate = processed / (window seconds).
+
+    The rate window is ``last_progress_at − started_at`` — the span over
+    which the recorded work actually happened — NOT ``now − started_at``.
+    Using the last-progress timestamp keeps rate stable when a stage goes
+    idle (the heartbeat age, computed separately against ``db_now``,
+    carries the "is it still moving?" signal). Both timestamps are DB
+    clock, so rate is skew-free and deterministic in tests.
+
+    All quotients are guarded: NULL (not 0, not a div-by-zero) when an
+    input is missing or non-positive. Rate is NULL unless we have BOTH a
+    ``started_at`` and a ``last_progress_at`` heartbeat — a row with
+    ``processed_count > 0`` but no heartbeat (legacy / partially
+    instrumented) is "not measurable", never a synthetic now()-based
+    rate (Codex ckpt-2). ETA is NULL when the target is unknown OR the
+    stage is already at/over target — no fake 100% and no negative ETA.
+    """
+    rate: float | None = None
+    if started_at is not None and last_progress_at is not None and processed_count > 0:
+        elapsed_s = (last_progress_at - started_at).total_seconds()
+        if elapsed_s > 0:
+            rate = processed_count / elapsed_s
+
+    eta_seconds: float | None = None
+    if rate is not None and rate > 0 and target_count is not None and processed_count < target_count:
+        eta_seconds = (target_count - processed_count) / rate
+
+    heartbeat_age_seconds: float | None = None
+    if last_progress_at is not None:
+        heartbeat_age_seconds = (db_now - last_progress_at).total_seconds()
+
+    is_stale = status == "running" and heartbeat_age_seconds is not None and heartbeat_age_seconds > stale_threshold_s
+
+    return _LiveTimelineFields(
+        last_progress_at=last_progress_at,
+        rate=rate,
+        eta_seconds=eta_seconds,
+        heartbeat_age_seconds=heartbeat_age_seconds,
+        is_stale=is_stale,
+    )
+
+
 @router.get("/{process_id}/timeline", response_model=BootstrapTimelineResponse)
 def get_bootstrap_timeline(
     process_id: str = Path(..., min_length=1),
@@ -676,17 +757,41 @@ def get_bootstrap_timeline(
     spec_by_key = {spec.stage_key: spec for spec in get_bootstrap_stage_specs()}
 
     with snapshot_read(conn):
+        # #1409 P5 Step 5.4 — pin run selection on
+        # ``bootstrap_state.last_run_id`` rather than ``ORDER BY id DESC
+        # LIMIT 1``. The two diverge transiently during ``start_run`` and
+        # any post-restart sweep that re-seeded a row without touching the
+        # singleton (see read_run_with_stages docstring at
+        # app/services/bootstrap_state.py:326). ``GET /system/bootstrap-status``
+        # already pins on the pointer; the timeline now matches so an
+        # operator reading both endpoints sees a single consistent run.
+        # NULL pointer (fresh install pre-first-trigger) → empty envelope.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT now() AS db_now, (SELECT last_run_id FROM bootstrap_state WHERE id = 1) AS last_run_id")
+            pointer_row = cur.fetchone()
+
+        assert pointer_row is not None  # bootstrap_state singleton is seeded at migration time
+        db_now: datetime = pointer_row["db_now"]
+        last_run_id = pointer_row["last_run_id"]
+
+        if last_run_id is None:
+            return BootstrapTimelineResponse(run=None, stages=[])
+
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
                 SELECT id, status, triggered_at, completed_at, cancel_requested_at
                   FROM bootstrap_runs
-                 ORDER BY id DESC
-                 LIMIT 1
-                """
+                 WHERE id = %s
+                """,
+                (last_run_id,),
             )
             run_row = cur.fetchone()
 
+        # Pointer set but the run row was deleted out-of-band (manual
+        # cleanup). Surface the empty envelope rather than 500 — the
+        # operator-visible state is "no current run". Mirrors the
+        # read_run_with_stages None contract.
         if run_row is None:
             return BootstrapTimelineResponse(run=None, stages=[])
 
@@ -696,7 +801,7 @@ def get_bootstrap_timeline(
             cur.execute(
                 """
                 SELECT stage_key, stage_order, lane, job_name, status,
-                       started_at, completed_at, last_error,
+                       started_at, last_progress_at, completed_at, last_error,
                        rows_processed, processed_count, target_count,
                        target_cohort_fingerprint
                   FROM bootstrap_stages
@@ -752,6 +857,10 @@ def get_bootstrap_timeline(
         _STRICT_CAP_PROVIDER_EXCLUSIONS,
     )
 
+    # #1409 P5 — bootstrap stage stale threshold (1800s); shared across
+    # all stages in the run, resolved once.
+    stale_threshold_s = get_threshold(BOOTSTRAP_PROCESS_ID)
+
     stage_payload: list[BootstrapTimelineStageResponse] = []
     has_warnings = False
     for row in stage_rows:
@@ -789,6 +898,18 @@ def get_bootstrap_timeline(
                 )
                 has_warnings = True
 
+        processed_count = int(row.get("processed_count") or 0)
+        target_count = row.get("target_count")
+        live = _compute_live_timeline_fields(
+            status=row["status"],
+            started_at=row.get("started_at"),
+            last_progress_at=row.get("last_progress_at"),
+            processed_count=processed_count,
+            target_count=target_count,
+            db_now=db_now,
+            stale_threshold_s=stale_threshold_s,
+        )
+
         stage_payload.append(
             BootstrapTimelineStageResponse(
                 stage_key=stage_key,
@@ -801,8 +922,13 @@ def get_bootstrap_timeline(
                 completed_at=row.get("completed_at"),
                 last_error=row.get("last_error"),
                 rows_processed=row.get("rows_processed"),
-                processed_count=int(row.get("processed_count") or 0),
-                target_count=row.get("target_count"),
+                processed_count=processed_count,
+                target_count=target_count,
+                last_progress_at=live.last_progress_at,
+                rate=live.rate,
+                eta_seconds=live.eta_seconds,
+                heartbeat_age_seconds=live.heartbeat_age_seconds,
+                is_stale=live.is_stale,
                 target_cohort_fingerprint=row.get("target_cohort_fingerprint"),
                 archives=archives_by_stage.get(stage_key, []),
                 warning=warning,
