@@ -5,10 +5,9 @@ services:
     restart: unless-stopped
     # #1208 Sub 1 — bound container memory + give PG enough shared memory
     # for parallel workers + autovacuum on partitioned ownership tables.
-    # shared_buffers=2GB + maintenance_work_mem=512MB (set in
-    # sql/155_postgres_runtime_tuning.sql) need the container to actually
-    # have memory available; default shm_size of 64MB starves PG17
-    # parallel workers under load.
+    # shared_buffers=2GB (set in the ``command`` block below) needs the
+    # container to actually have memory available; default shm_size of 64MB
+    # starves PG17 parallel workers under load.
     #
     # Raised 4g→6g (#1395, 2026-05-30): with shared_buffers=2GB reserved, a 4g
     # cap left too little headroom for WAL replay over the partitioned
@@ -18,6 +17,61 @@ services:
     # has ~8g) lets recovery finish.
     mem_limit: 6g
     shm_size: 1g
+    # #1410 — runtime tuning as command-line ``-c`` flags (single source of
+    # truth in repo; survives a pgdata volume wipe). Command-line options
+    # take precedence over ``postgresql.conf`` AND ``ALTER SYSTEM`` /
+    # ``postgresql.auto.conf`` (PG docs §19.1.4), so these are the effective
+    # values and they SUPERSEDE the now-legacy ALTER SYSTEM statements in
+    # ``sql/155_postgres_runtime_tuning.sql`` (which carried OOM-causing
+    # values: max_wal_size=4GB, work_mem=32MB, no bgwriter/autovacuum caps).
+    #
+    # Why command flags, not a migration:
+    #   - ``max_locks_per_transaction`` and ``shared_buffers`` are
+    #     restart-required. A migration's ALTER SYSTEM cannot make them take
+    #     effect on a fresh install (nothing restarts PG between migrate and
+    #     bootstrap), so the #1187 max_locks guard would hard-fail boot at 64
+    #     and shared_buffers would sit at the 128MB default → OOM.
+    #   - command flags apply at every container start with zero restart
+    #     dance, so a fresh ``docker compose up`` boots correctly.
+    #
+    # OOM-safe values validated live under the 6g cgroup (#1395): held PG
+    # memory ~67% (peak 72%) through the companyfacts ingest peak. Smaller
+    # max_wal_size + aggressive bgwriter + capped autovacuum keep the
+    # checkpointer's dirty-page/WAL backlog inside the cgroup limit.
+    command:
+      - postgres
+      - -c
+      - max_locks_per_transaction=1024  # #1187 floor — guard hard-fails below this
+      - -c
+      # Bound the work_mem×connections×hash_mem product (executor memory). The 3
+      # app pools (#719) cap real backend conns at ~18; 30 = headroom while keeping
+      # the OOM exposure provably bounded regardless of pool config drift. Without
+      # this, PG defaults to 100 → 100×16MB×2.0 ≈ 3.2GB executor alone.
+      - max_connections=30
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - effective_cache_size=4GB
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - min_wal_size=256MB
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - bgwriter_lru_maxpages=1000
+      - -c
+      - bgwriter_delay=50ms
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - autovacuum_work_mem=128MB
+      - -c
+      - autovacuum_max_workers=2
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ebull}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

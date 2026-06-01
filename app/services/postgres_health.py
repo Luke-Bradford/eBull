@@ -7,9 +7,11 @@ live readout for:
   the pre-push hook gate at `.githooks/pre-push`).
 - Leaked `ebull_test_*` DB count + names (Phase 2 enforced zero leaks
   but had no operator surface).
-- WAL: `wal_dir_bytes` (size of pg_wal/ on disk) against
-  `max_wal_size=4 GB`, plus `wal_since_checkpoint_bytes` as the
-  informational burst-pressure signal.
+- WAL: `wal_dir_bytes` (size of pg_wal/ on disk) against a 4 GB
+  absolute bloat alarm (effective `max_wal_size=1 GB` via the
+  docker-compose `command:` flag, #1410), plus
+  `wal_since_checkpoint_bytes` as the informational burst-pressure
+  signal.
 - Autovacuum top-10 by `n_dead_tup` (Phase 3's partition + retention
   motivation).
 - `financial_facts_raw_default` row count against the 5000-row alarm
@@ -47,7 +49,12 @@ logger = logging.getLogger(__name__)
 # test asserts the two stay aligned by parsing the hook file.
 
 DB_SIZE_WARN_BYTES: int = 10 * 1024 * 1024 * 1024  # 10 GB
-WAL_WARN_BYTES: int = 4 * 1024 * 1024 * 1024  # 4 GB (= max_wal_size from sql/155)
+# 4 GB absolute pg_wal disk-bloat alarm. Effective max_wal_size is 1 GB
+# (docker-compose `command:` flag, #1410), so steady-state pg_wal sits
+# well below this even during bootstrap write bursts; crossing 4 GB
+# signals a stuck WAL archiver / replication slot or runaway WAL, not
+# normal checkpoint pressure.
+WAL_WARN_BYTES: int = 4 * 1024 * 1024 * 1024  # 4 GB
 DEFAULT_PARTITION_WARN_ROWS: int = 5000
 
 
