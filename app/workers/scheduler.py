@@ -4808,15 +4808,19 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
       against the current bootstrap-run manifest. Secondary
       ``CIK<10>-submissions-<NNN>.json`` pages still hit HTTP (not
       in the bulk archive). Default ``False``. Spec: #1277.
+    * ``follow_pagination`` (bool, bootstrap-only via JOB_INTERNAL_KEYS) —
+      whether to fetch secondary ``CIK<10>-submissions-<NNN>.json`` pages
+      when ``has_more_in_files``. Default ``True`` (steady-state
+      safety-net keeps deep-history coverage). Bootstrap dispatch passes
+      ``False`` (#1413) so the bootstrap path makes ZERO secondary-page
+      HTTP calls — the last per-CIK source in the bootstrap lane; recent
+      deep history is deferred to steady-state Layer 2/3.
 
-    Internal-only invariants (NOT operator-exposed): ``follow_pagination=True``.
-
-    Disk-hygiene note: #1340 moved the post-drain ``submissions.zip``
-    deletion OUT of this stage. S23 ``sec_n_port_ingest`` now also reads
-    the archive (local-zip enumeration of trust submissions), so the
-    cleanup fires at S23's exit instead — see
-    ``_cleanup_submissions_zip_after_drain``. S16 leaves the archive on
-    disk for S23.
+    Disk-hygiene note: #1340 had moved the post-drain ``submissions.zip``
+    deletion to S23 ``sec_n_port_ingest`` (the then-last bootstrap reader).
+    #1413 dropped S23 from the bootstrap stage set, so S16 is again the last
+    bootstrap consumer and owns the delete on its success path — see
+    ``_cleanup_submissions_zip_after_drain``.
     """
     from app.jobs.sec_first_install_drain import run_first_install_drain
     from app.security.master_key import resolve_data_dir
@@ -4838,6 +4842,24 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
             use_bulk_zip_param,
         )
         use_bulk_zip = False
+
+    # #1413 Step 2.3 — strict bool, default True (steady-state safety-net
+    # walks secondary deep-history pages). Bootstrap dispatch passes
+    # ``follow_pagination=False`` via the StageSpec params (allow-listed in
+    # JOB_INTERNAL_KEYS) so the secondary ``CIK<10>-submissions-<NNN>.json``
+    # HTTP walk — the last per-CIK source in the bootstrap lane — is
+    # collapsed; recent deep history is deferred to steady-state Layer 2/3.
+    # A non-bool (e.g. JSON "false" string) must NOT silently disable
+    # pagination → falls back to the safe default True (mirror use_bulk_zip).
+    follow_pagination_param = params.get("follow_pagination", True)
+    if isinstance(follow_pagination_param, bool):
+        follow_pagination = follow_pagination_param
+    else:
+        logger.warning(
+            "sec_first_install_drain: follow_pagination must be bool, got %r — treating as True",
+            follow_pagination_param,
+        )
+        follow_pagination = True
 
     # Resolve candidate UNCONDITIONALLY so the post-drain cleanup fires
     # regardless of which drain path was taken (IMPORTANT-4 fold).
@@ -4876,13 +4898,11 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
             stats = run_first_install_drain(
                 conn,
                 http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
-                follow_pagination=True,
+                follow_pagination=follow_pagination,
                 use_bulk_zip=use_bulk_zip,
                 archive_path=archive_path,
                 max_subjects=max_subjects,
             )
-        # #1340 — submissions.zip cleanup moved to S23 (sec_n_port_ingest),
-        # which now also consumes the archive. S16 no longer deletes it.
         tracker.row_count = stats.manifest_rows_upserted
         logger.info(
             "sec_first_install_drain: ciks_processed=%d skipped=%d "
@@ -4894,6 +4914,14 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
             max_subjects,
             use_bulk_zip,
         )
+        # #1413 — S23 sec_n_port_ingest was dropped from the bootstrap stage
+        # set (bulk-only), so S16 is again the LAST bootstrap consumer of
+        # submissions.zip (S8 + S16's use_bulk_zip path both read it; nothing
+        # after S16 does). #1340 had moved this delete to S23; restore it here
+        # so a fresh bootstrap doesn't leak the ~1.5GB archive. Idempotent /
+        # missing-ok. Only the success path reaches here — an errored drain
+        # re-raises out of ``_tracked_job`` first, leaving the zip for retry.
+        _cleanup_submissions_zip_after_drain(candidate)
 
 
 def _cleanup_submissions_zip_after_drain(archive_path: Path) -> None:
@@ -4901,10 +4929,11 @@ def _cleanup_submissions_zip_after_drain(archive_path: Path) -> None:
 
     Mirrors ``_delete_archive_after_success`` semantics
     (`app/services/sec_bulk_orchestrator_jobs.py:136`). Lifecycle moved
-    S8 → S16 (#1277), then S16 → S23 (#1340): S23 ``sec_n_port_ingest``
-    reads the archive for local-zip enumeration of trust submissions, so
-    it runs after S16 and is the last bootstrap consumer of the zip. S23
-    calls this on its SUCCESS path.
+    S8 → S16 (#1277), then S16 → S23 (#1340), then BACK to S16 (#1413 —
+    S23 ``sec_n_port_ingest`` dropped from bootstrap, so S16 is once more
+    the last bootstrap consumer). Called on S16's SUCCESS path. The S23
+    invoker still calls it too (line below) for the steady-state / manual
+    ``sec_n_port_ingest`` path, where it remains idempotent + missing-ok.
     """
     try:
         archive_path.unlink(missing_ok=True)

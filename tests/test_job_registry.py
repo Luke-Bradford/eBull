@@ -517,6 +517,34 @@ class TestJobInternalKeysRegistry:
         # Coerced through; bool round-trips clean.
         assert out["use_bulk_zip"] is True
 
+    def test_sec_first_install_drain_follow_pagination_is_internal(self) -> None:
+        """#1413 Step 2.3 — ``follow_pagination`` is bootstrap-only. The
+        bootstrap StageSpec passes ``follow_pagination=False`` to collapse
+        the secondary-page HTTP walk; the validator must accept it with
+        ``allow_internal_keys=True``. The steady-state safety-net keeps
+        the invoker default (``True``); the manual API path rejects the
+        key (operator must not silently disable deep-history coverage).
+        """
+        assert "follow_pagination" in JOB_INTERNAL_KEYS["sec_first_install_drain"]
+        out = validate_job_params(
+            "sec_first_install_drain",
+            {"follow_pagination": False, "use_bulk_zip": True, "max_subjects": None},
+            allow_internal_keys=True,
+            metadata=None,
+        )
+        assert out["follow_pagination"] is False
+
+    def test_sec_first_install_drain_follow_pagination_rejected_on_manual_path(self) -> None:
+        """#1413 Step 2.3 — operator API path MUST reject
+        ``follow_pagination`` even though it's bootstrap-internal."""
+        with pytest.raises(ParamValidationError, match="unknown param"):
+            validate_job_params(
+                "sec_first_install_drain",
+                {"follow_pagination": False},
+                allow_internal_keys=False,
+                metadata=(),
+            )
+
     def test_sec_first_install_drain_use_bulk_zip_rejected_on_manual_path(self) -> None:
         """#1277 T8 — operator / cron path MUST reject ``use_bulk_zip``.
         On-disk archive freshness is only guaranteed inside the

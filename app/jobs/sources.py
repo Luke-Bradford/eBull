@@ -274,6 +274,21 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # Lane — module-global throttle clock shared with bimonthly so the
     # in-process FINRA budget never exceeds 1 req/s combined.
     "finra_regsho_daily_refresh": "finra",
+    # --- #1413 bulk-only bootstrap — per-CIK SEC jobs dropped from
+    # ``_BOOTSTRAP_STAGE_SPECS`` but KEPT in ``_INVOKERS`` as on-demand
+    # (steady-state safety-net + sec_rebuild + Admin "Run now"). Their
+    # ONLY source-registry path was the bootstrap stage; dropping the
+    # stages orphaned them from ``source_for`` → JobLock KeyError on the
+    # next non-bootstrap invocation. Re-home here (lane ``sec_rate`` —
+    # SEC per-IP rate clock, same lane they carried as bootstrap stages).
+    # ``sec_def14a_bootstrap`` + ``sec_insider_transactions_backfill`` are
+    # NOT listed because they remain in SCHEDULED_JOBS (Pass 1 covers them).
+    "filings_history_seed": "sec_rate",
+    "sec_submissions_files_walk": "sec_rate",
+    "sec_form3_ingest": "sec_rate",
+    "sec_13f_quarterly_sweep": "sec_rate",
+    "sec_n_port_ingest": "sec_rate",
+    "sec_n_csr_bootstrap_drain": "sec_rate",
 }
 
 

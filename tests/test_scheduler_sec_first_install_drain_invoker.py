@@ -8,12 +8,11 @@ Covers T6 / T6b / T6c (spec §4) without requiring a live PG:
   * Outside-bootstrap-dispatch downgrades to HTTP.
   * Missing archive downgrades to HTTP.
 
-#1340 UPDATE: S16 no longer deletes ``submissions.zip``. S23
-``sec_n_port_ingest`` now also consumes the archive (local-zip
-enumeration) and is the last bootstrap consumer, so it owns the
-deletion. S16 PRESERVES the archive on every path — these tests assert
-the archive survives the drain (the deletion assertions moved to
-``tests/test_scheduler_sec_n_port_ingest_invoker.py``).
+#1413 UPDATE: S23 ``sec_n_port_ingest`` was dropped from the bootstrap
+stage set (bulk-only collapse), so S16 is again the LAST bootstrap
+consumer of ``submissions.zip`` and owns the post-drain delete on its
+success path (#1340 had moved it to S23). These tests assert the archive
+is DELETED after a successful drain on every path.
 
 These complement the integration tests in
 ``tests/test_sec_first_install_drain.py`` (T2 / T3) which exercise the
@@ -135,8 +134,8 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        # #1340 — S16 preserves the archive for S23 (no longer deletes).
-        assert archive.exists()
+        # #1413 — S16 deletes submissions.zip on success (S23 dropped).
+        assert not archive.exists()
 
     def test_outside_bootstrap_dispatch_downgrades(self, tmp_path: Path) -> None:
         # T6 — use_bulk_zip=True but no progress context → downgrade.
@@ -150,8 +149,8 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        # #1340 — S16 preserves the archive for S23.
-        assert archive.exists()
+        # #1413 — S16 deletes submissions.zip on success (S23 dropped).
+        assert not archive.exists()
 
     def test_missing_archive_downgrades(self, tmp_path: Path) -> None:
         # T6 — use_bulk_zip=True but archive missing → downgrade.
@@ -185,8 +184,48 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        # #1340 — S16 preserves the archive for S23 on every path.
-        assert archive.exists()
+        # #1413 — S16 deletes submissions.zip on success on every path
+        # (provenance-mismatch downgraded to HTTP, but the drain still
+        # succeeded, so the stale archive is cleaned up).
+        assert not archive.exists()
+
+    def test_follow_pagination_defaults_true(self, tmp_path: Path) -> None:
+        # #1413 Step 2.3 — no param → steady-state safety-net default
+        # follow_pagination=True (secondary deep-history pages walked).
+        archive = _bulk_archive_at(tmp_path)
+        patches, drain_spy = _patch_invoker_dependencies(
+            archive,
+            progress_context=BootstrapProgressContext(run_id=42, stage_key="sec_first_install_drain"),
+        )
+        with _stack(patches):
+            scheduler.sec_first_install_drain({})
+        assert drain_spy.call_args.kwargs["follow_pagination"] is True
+
+    def test_follow_pagination_false_passed_through(self, tmp_path: Path) -> None:
+        # #1413 Step 2.3 — bootstrap dispatch passes follow_pagination=False
+        # → ZERO secondary-page HTTP. The invoker must thread it through,
+        # not hardcode True.
+        archive = _bulk_archive_at(tmp_path)
+        patches, drain_spy = _patch_invoker_dependencies(
+            archive,
+            progress_context=BootstrapProgressContext(run_id=42, stage_key="sec_first_install_drain"),
+        )
+        with _stack(patches):
+            scheduler.sec_first_install_drain({"follow_pagination": False})
+        assert drain_spy.call_args.kwargs["follow_pagination"] is False
+
+    def test_follow_pagination_strict_bool_non_bool_defaults_true(self, tmp_path: Path) -> None:
+        # #1413 Step 2.3 — strict-bool boundary (mirror use_bulk_zip): a
+        # non-bool (e.g. JSON "false" string) must NOT silently disable
+        # pagination; it falls back to the safe default True.
+        archive = _bulk_archive_at(tmp_path)
+        patches, drain_spy = _patch_invoker_dependencies(
+            archive,
+            progress_context=BootstrapProgressContext(run_id=42, stage_key="sec_first_install_drain"),
+        )
+        with _stack(patches):
+            scheduler.sec_first_install_drain({"follow_pagination": "false"})
+        assert drain_spy.call_args.kwargs["follow_pagination"] is True
 
     def test_use_bulk_zip_true_with_provenanced_archive(self, tmp_path: Path) -> None:
         # T6 — use_bulk_zip=True + archive present + provenance passes →
@@ -201,8 +240,8 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is True
         assert call.kwargs["archive_path"] == archive
-        # #1340 — S16 preserves the archive for S23 (deletion moved to S23).
-        assert archive.exists()
+        # #1413 — S16 deletes submissions.zip on success (S23 dropped).
+        assert not archive.exists()
 
     def test_use_bulk_zip_false_default_no_zip_path(self, tmp_path: Path) -> None:
         # Default-path sanity: use_bulk_zip omitted → drain called with
@@ -217,5 +256,5 @@ class TestSchedulerInvoker:
         call = drain_spy.call_args
         assert call.kwargs["use_bulk_zip"] is False
         assert call.kwargs["archive_path"] is None
-        # #1340 — S16 preserves the archive for S23 on the HTTP-default path too.
-        assert archive.exists()
+        # #1413 — S16 deletes submissions.zip on success on the HTTP-default path too.
+        assert not archive.exists()

@@ -184,7 +184,11 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
     # scheduled-cron paths have no such guarantee. Opt-in for those
     # paths is deferred to a follow-up gated on PR #1286 daily-refresh
     # freshness telemetry.
-    "sec_first_install_drain": frozenset({"max_subjects", "use_bulk_zip"}),
+    # #1413 — ``follow_pagination`` collapses the secondary-page HTTP walk
+    # on the bootstrap path (passed False via the StageSpec). Manual API
+    # rejects it: an operator must not silently disable deep-history
+    # coverage on the steady-state safety-net path (default True).
+    "sec_first_install_drain": frozenset({"max_subjects", "use_bulk_zip", "follow_pagination"}),
     # PR7 #1233 §4.6 (mirror of #1010 for N-PORT). ``min_last_seen_filed_at``
     # is the recency cohort filter exclusive to bootstrap stage 22 —
     # exposing it on the manual API would let an operator accidentally
