@@ -544,7 +544,9 @@ class TestLayer123ExemptionWiring:
         """#1435 — broker portfolio + FX must populate the dashboard
         DURING bootstrap, not after. Exempt + catch_up_on_boot=True;
         FK safety comes from the portfolio_sync layer-init PREREQ_SKIP,
-        not the universal gate. See settled-decisions §4.2 motivation b."""
+        not the universal gate. See spec lane-b-discovery.md §4.2
+        (motivation b) + settled-decisions §"Safety-net catch-up gate
+        carve-out"."""
         job = _job_by_name(JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC)
         assert job is not None
         assert job.exempt_from_universal_bootstrap_gate is True
