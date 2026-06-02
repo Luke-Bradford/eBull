@@ -262,6 +262,10 @@ def _parse_rate_content(msg: dict[str, object]) -> QuoteUpdate | None:
         ask = Decimal(str(payload["Ask"]))
         last_raw = payload.get("LastExecution")
         last = Decimal(str(last_raw)) if last_raw is not None else None
+        # #1429: a non-positive last is not a real trade (eToro pushes 0 for
+        # un-freshly-traded instruments) — persist NULL, never a fake 0.
+        if last is not None and last <= 0:
+            last = None
         date_str = str(payload["Date"])
         if date_str.endswith("Z"):
             date_str = date_str[:-1] + "+00:00"

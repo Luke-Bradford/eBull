@@ -551,12 +551,20 @@ def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
         except Exception:
             logger.debug("Failed to parse conversion rate for instrument %s", instrument_id)
 
+    # #1429: eToro returns lastExecution=0 for un-freshly-traded instruments
+    # (bid/ask present, no recent trade). A non-positive last is not a real
+    # trade price — persist NULL so the read-side derives a mark from bid/ask
+    # rather than a fake 0 (which reads as a −100% loss, #1428).
+    last_val = Decimal(str(raw_last)) if raw_last is not None else None
+    if last_val is not None and last_val <= 0:
+        last_val = None
+
     return Quote(
         instrument_id=int(str(instrument_id)),
         timestamp=quoted_at,
         bid=bid,
         ask=ask,
-        last=Decimal(str(raw_last)) if raw_last is not None else None,
+        last=last_val,
         conversion_rate=conversion_rate,
     )
 
