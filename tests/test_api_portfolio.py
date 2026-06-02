@@ -19,6 +19,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
@@ -44,6 +45,8 @@ def _make_position_row(
     source: str = "ebull",
     updated_at: datetime = _NOW,
     last: float | None = 190.00,
+    bid: float | None = None,
+    ask: float | None = None,
 ) -> dict[str, Any]:
     """Build a dict matching the positions+instruments+quotes joined query shape."""
     return {
@@ -58,6 +61,8 @@ def _make_position_row(
         "source": source,
         "updated_at": updated_at,
         "last": last,
+        "bid": bid,
+        "ask": ask,
     }
 
 
@@ -217,6 +222,60 @@ class TestGetPortfolio:
         assert item["market_value"] == 1800.0  # fallback to cost_basis
         assert item["unrealized_pnl"] == 0.0  # no price signal
         assert body["total_aum"] == 6800.0  # 1800 + 5000
+
+    def test_zero_last_uses_bid_ask_mid_not_zero(self) -> None:
+        """#1428: quotes.last=0.00 (not freshly traded) must NOT mark the
+        position at 0 → fake −100%. Fall back to live bid/ask mid."""
+        # VOO live: last=0.00, bid/ask 697.16/697.22 → mid 697.19.
+        pos = _make_position_row(
+            current_units=10.0, cost_basis=6000.0, last=0.0, bid=697.16, ask=697.22
+        )
+        _with_conn([[pos], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        item = resp.json()["positions"][0]
+
+        assert item["market_value"] == pytest.approx(6971.9)  # 10 * 697.19 (mid), NOT 0
+        assert item["unrealized_pnl"] == pytest.approx(971.9)  # 6971.9 - 6000
+        assert item["valuation_source"] == "quote"  # live quote, not cost-based
+
+    def test_negative_last_treated_as_missing(self) -> None:
+        """A negative last is not a valid mark; fall back like a zero last."""
+        pos = _make_position_row(
+            current_units=10.0, cost_basis=6000.0, last=-1.0, bid=697.16, ask=697.22
+        )
+        _with_conn([[pos], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        item = resp.json()["positions"][0]
+        assert item["market_value"] == pytest.approx(6971.9)
+
+    def test_zero_last_no_quote_falls_back_to_daily_close(self) -> None:
+        """last=0 and no usable bid/ask → daily_close (not 0, not cost)."""
+        pos = _make_position_row(
+            current_units=10.0, cost_basis=1800.0, last=0.0, bid=None, ask=None
+        )
+        pos["daily_close"] = 175.0
+        _with_conn([[pos], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        item = resp.json()["positions"][0]
+        assert item["market_value"] == 1750.0  # 10 * 175 daily_close
+        assert item["valuation_source"] == "daily_close"
+
+    def test_zero_last_zero_bid_ask_no_close_falls_back_to_cost(self) -> None:
+        """last=0, bid/ask=0 (no live market), no daily_close → cost basis, pnl 0."""
+        pos = _make_position_row(
+            current_units=10.0, cost_basis=1800.0, last=0.0, bid=0.0, ask=0.0
+        )
+        _with_conn([[pos], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        item = resp.json()["positions"][0]
+        assert item["market_value"] == 1800.0  # cost basis
+        assert item["unrealized_pnl"] == 0.0
+        assert item["valuation_source"] == "cost_basis"
 
     def test_empty_positions_returns_empty_list(self) -> None:
         cash = _make_cash_row(5000.0)
@@ -716,6 +775,8 @@ def _make_instrument_row(
     currency: str = "USD",
     quote_last: float | None = 200.0,
     daily_close: float | None = None,
+    quote_bid: float | None = None,
+    quote_ask: float | None = None,
 ) -> dict[str, Any]:
     """Build a row matching the instrument_sql shape in get_instrument_positions."""
     return {
@@ -725,6 +786,8 @@ def _make_instrument_row(
         "currency": currency,
         "quote_last": quote_last,
         "daily_close": daily_close,
+        "quote_bid": quote_bid,
+        "quote_ask": quote_ask,
     }
 
 
@@ -890,3 +953,31 @@ class TestInstrumentPositionsOpenConversionRate:
 
         assert body["trades"][0]["market_value"] == 1250.0
         assert body["trades"][0]["unrealized_pnl"] == 0.0
+
+    def test_zero_quote_last_uses_bid_ask_mid(self) -> None:
+        """#1428 (detail endpoint): quote_last=0.00 must fall back to live
+        bid/ask mid, not mark the trade at 0."""
+        instrument = _make_instrument_row(
+            instrument_id=1,
+            symbol="VOO",
+            currency="USD",
+            quote_last=0.0,
+            quote_bid=697.16,
+            quote_ask=697.22,
+        )
+        pos = _make_broker_position_row(
+            units=10.0, amount=6000.0, open_rate=600.0, open_conversion_rate=1.0
+        )
+        conn = _mock_conn([[instrument], [pos]])
+
+        def _override() -> Iterator[MagicMock]:
+            yield conn
+
+        app.dependency_overrides[get_conn] = _override
+
+        resp = client.get("/portfolio/instruments/1")
+        assert resp.status_code == 200
+        body = resp.json()
+        # mid 697.19; mv = 6000 + 10 * (697.19 - 600) * 1.0 = 6971.9
+        assert body["trades"][0]["market_value"] == pytest.approx(6971.9)
+        assert body["trades"][0]["current_price"] == pytest.approx(697.19)

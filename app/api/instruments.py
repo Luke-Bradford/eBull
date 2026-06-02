@@ -3183,14 +3183,16 @@ def get_instrument_summary(
 
     # Price: ``quotes`` row. ``last`` is preferred, ``bid`` is the
     # fallback when last hasn't been written (some providers only
-    # publish bid/ask). Day change + 52w range stay null until a
-    # SEC-derived computation lands; the frontend renders "—".
+    # publish bid/ask). A non-positive last is not a valid price (#1428 —
+    # eToro persists last=0.00 for un-freshly-traded instruments); treat
+    # it as missing and fall back to bid. Day change + 52w range stay null
+    # until a SEC-derived computation lands; the frontend renders "—".
     quote_last = row.get("last")
     quote_bid = row.get("bid")
     current_price: Decimal | None = None
-    if quote_last is not None:
+    if quote_last is not None and Decimal(str(quote_last)) > 0:
         current_price = Decimal(str(quote_last))
-    elif quote_bid is not None:
+    elif quote_bid is not None and Decimal(str(quote_bid)) > 0:
         current_price = Decimal(str(quote_bid))
     price_block = (
         InstrumentPrice(

@@ -199,6 +199,38 @@ def test_bid_fallback_when_last_missing(client: TestClient) -> None:
     assert body["price"]["current"] == "12.34"
 
 
+def test_zero_last_falls_back_to_bid(client: TestClient) -> None:
+    """#1428: ``last = 0.00`` (eToro persists 0 for un-freshly-traded
+    instruments) is NOT a valid price; fall back to bid so the operator
+    does not see a $0.00 current price."""
+    row = {
+        "instrument_id": 101,
+        "symbol": "VOO",
+        "company_name": "Vanguard S&P 500 ETF",
+        "exchange": "NYSE",
+        "currency": "USD",
+        "sector": None,
+        "industry": None,
+        "country": None,
+        "is_tradable": True,
+        "coverage_tier": 2,
+        "bid": Decimal("697.16"),
+        "ask": Decimal("697.22"),
+        "last": Decimal("0.00"),
+    }
+    conn = _make_conn(row=row)
+
+    _install_conn(conn)
+    try:
+        resp = client.get("/instruments/VOO/summary")
+    finally:
+        _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["price"]["current"] == "697.16"  # bid, NOT 0.00
+
+
 def test_local_company_name_authoritative(client: TestClient) -> None:
     """Local DB company_name is the only source — no yfinance display
     fallback can override it."""

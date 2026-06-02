@@ -33,7 +33,7 @@ import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api._helpers import parse_optional_float
+from app.api._helpers import parse_optional_float, resolve_quote_price
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.domain.positions import PositionSource
@@ -199,17 +199,23 @@ def _parse_position(
     current_units = float(row["current_units"])  # type: ignore[arg-type]
     native_currency: str = str(row.get("currency") or "USD")  # fallback for un-enriched
 
-    # Mark-to-market hierarchy: quote.last → price_daily.close → cost_basis.
-    # valuation_source tells the dashboard which tier produced the value.
-    last_price = parse_optional_float(row, "last")
+    # Mark-to-market hierarchy: live quote (last>0 → bid/ask mid) →
+    # price_daily.close → cost_basis. A non-positive last/close is not a
+    # valid mark (#1428). valuation_source tells the dashboard which tier
+    # produced the value.
+    quote_price = resolve_quote_price(
+        parse_optional_float(row, "last"),
+        parse_optional_float(row, "bid"),
+        parse_optional_float(row, "ask"),
+    )
     daily_close = parse_optional_float(row, "daily_close")
 
-    if last_price is not None:
-        current_price: float | None = last_price
-        market_value = current_units * last_price
+    if quote_price is not None:
+        current_price: float | None = quote_price
+        market_value = current_units * quote_price
         unrealized_pnl = market_value - cost_basis
         valuation_source = "quote"
-    elif daily_close is not None:
+    elif daily_close is not None and daily_close > 0:
         current_price = daily_close
         market_value = current_units * daily_close
         unrealized_pnl = market_value - cost_basis
@@ -345,7 +351,7 @@ def get_portfolio(
         SELECT p.instrument_id, i.symbol, i.company_name, i.currency,
                p.open_date, p.avg_cost, p.current_units, p.cost_basis,
                p.source, p.updated_at,
-               q.last,
+               q.last, q.bid, q.ask,
                pd.close AS daily_close
         FROM positions p
         JOIN instruments i USING (instrument_id)
@@ -400,9 +406,20 @@ def get_portfolio(
     price_by_instrument: dict[int, tuple[float | None, str]] = {}
     for r in pos_rows:
         iid = r["instrument_id"]
-        last_p = parse_optional_float(r, "last")
+        quote_p = resolve_quote_price(
+            parse_optional_float(r, "last"),
+            parse_optional_float(r, "bid"),
+            parse_optional_float(r, "ask"),
+        )
         daily_c = parse_optional_float(r, "daily_close")
-        price_by_instrument[iid] = (last_p if last_p is not None else daily_c, str(r.get("currency") or "USD"))
+        # Live quote → positive daily_close → None (caller falls back to amount).
+        if quote_p is not None:
+            mark: float | None = quote_p
+        elif daily_c is not None and daily_c > 0:
+            mark = daily_c
+        else:
+            mark = None
+        price_by_instrument[iid] = (mark, str(r.get("currency") or "USD"))
 
     # Group broker positions by instrument_id.
     trades_by_instrument: dict[int, list[BrokerPositionItem]] = defaultdict(list)
@@ -581,7 +598,7 @@ def get_instrument_positions(
     """Drill-through: all broker positions for one instrument in native currency."""
     instrument_sql = """
         SELECT i.instrument_id, i.symbol, i.company_name, i.currency,
-               q.last AS quote_last,
+               q.last AS quote_last, q.bid AS quote_bid, q.ask AS quote_ask,
                pd.close AS daily_close
         FROM instruments i
         LEFT JOIN quotes q USING (instrument_id)
@@ -610,10 +627,21 @@ def get_instrument_positions(
         cur.execute(trades_sql, {"iid": instrument_id})
         trade_rows = cur.fetchall()
 
-    # Current price in native currency (no FX conversion)
-    quote_last = parse_optional_float(inst, "quote_last")
+    # Current price in native currency (no FX conversion). Live quote
+    # (last>0 → bid/ask mid) → positive daily_close. A non-positive mark is
+    # not a valid price (#1428).
+    quote_price = resolve_quote_price(
+        parse_optional_float(inst, "quote_last"),
+        parse_optional_float(inst, "quote_bid"),
+        parse_optional_float(inst, "quote_ask"),
+    )
     daily_close = parse_optional_float(inst, "daily_close")
-    current_price = quote_last if quote_last is not None else daily_close
+    if quote_price is not None:
+        current_price: float | None = quote_price
+    elif daily_close is not None and daily_close > 0:
+        current_price = daily_close
+    else:
+        current_price = None
     native_ccy = str(inst.get("currency") or "USD")
 
     trades: list[NativeTradeItem] = []

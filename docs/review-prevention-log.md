@@ -107,6 +107,15 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Non-positive price treated as a valid mark (0.00 ≠ missing)
+- First seen in: #1428 — eToro persists `quotes.last = 0.00` for instruments not freshly traded (bid/ask populated, no recent trade). `get_portfolio` / copy-trading MTM used `last is not None`, so `0.00 is not None` → position marked at 0 → market_value 0 → fake −100% P&L (VOO/IEP/BBBY). Same class as "Zero-value fills persisted as real fills" (#68), on the valuation surface.
+- Symptom: a `None`-sentinel for "no price" collides with a legitimate-looking `0.00`. `parse_optional_float(row, "last") is not None` passes for a zero last; downstream `units * 0` or `(0 - open_rate)` produces catastrophic fake losses that look like real P&L.
+- Prevention: a usable quote/mark is STRICTLY POSITIVE. In Python, resolve marks through the shared `app/api/_helpers.py::resolve_quote_price(last, bid, ask)` (last>0 → bid/ask mid → None), never a raw `is not None`; guard every downstream fallback the same way (`daily_close > 0`, not `is not None`). In SQL, never `COALESCE(q.last, ...)` directly — a `last=0` row is non-null and wins; use `COALESCE(NULLIF(GREATEST(q.last, 0), 0), <next tier>)` or filter the LATERAL with `AND last > 0`. Grep `quote_last is not None` / `"last") ... is not None` (Python) and `COALESCE(q.last` / `COALESCE(NULLIF(q.last` (SQL) on any valuation/exposure path. The read-side fallback is defensive; the canonical repair is the writer never persisting `last ≤ 0` (#1429).
+- Enforced in: this prevention log; `app/api/_helpers.py::resolve_quote_price`; `app/api/portfolio.py` (`_parse_position`, `price_by_instrument`, `get_instrument_positions`); `app/api/copy_trading.py::_compute_position_mtm`; `app/api/instruments.py` (instrument-summary current_price); `app/services/portfolio.py` (`load_mirror_breakdowns` mirror AUM, `_load_mirror_equity`, portfolio-review LATERAL); `app/services/execution_guard.py` (sector-exposure market_value); `tests/test_resolve_quote_price.py`.
+- Verification step: `tests/test_resolve_quote_price.py` green; `grep -rn "COALESCE(q.last" app/` returns nothing (all wrapped in `NULLIF(GREATEST(...))` or filtered `last > 0`); `grep -rn "quote_last is not None" app/api/` returns no valuation-path raw guard.
+
+---
+
 ### Dimensional mismatch in field multiplication
 - First seen in: #68
 - Symptom: `target_entry * suggested_size_pct` — price x fraction = nonsense. Correct: `cash * size_pct`.

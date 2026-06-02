@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+import pytest
+
 from app.api.portfolio import _parse_position
 
 
@@ -89,17 +91,27 @@ class TestValuationHierarchy:
         expected_mv = float(Decimal("1550.0") * Decimal("0.78"))
         assert abs(pos.market_value - expected_mv) < 0.01
 
-    def test_zero_last_price_is_not_none(self) -> None:
-        """A quote.last of 0.0 is a valid price, not a missing value.
+    def test_zero_last_price_is_treated_as_missing(self) -> None:
+        """#1428: a quote.last of 0.0 is NOT a valid mark.
 
-        This matters for instruments that can trade at very low prices.
-        parse_optional_float returns 0.0 for zero values, so the quote
-        path should be chosen.
+        eToro persists last=0.00 for instruments not freshly traded. Using
+        0 as the mark values the position at 0 → fake −100% P&L. With no
+        usable bid/ask, the next real signal (daily_close) must be chosen.
         """
         row = _row(current_units=100.0, cost_basis=500.0, last=0.0, daily_close=5.0)
         rates: dict[tuple[str, str], Decimal] = {}
         pos = _parse_position(row, "USD", rates)
 
-        # parse_optional_float returns 0.0 for a zero value, which is not None
+        assert pos.valuation_source == "daily_close"
+        assert pos.market_value == 500.0  # 100 * 5.0, NOT 0
+
+    def test_zero_last_uses_bid_ask_mid(self) -> None:
+        """#1428: last=0 with a live two-sided book values at the mid."""
+        row = _row(current_units=10.0, cost_basis=6000.0, last=0.0)
+        row["bid"] = 697.16
+        row["ask"] = 697.22
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _parse_position(row, "USD", rates)
+
         assert pos.valuation_source == "quote"
-        assert pos.market_value == 0.0
+        assert pos.market_value == pytest.approx(6971.9)  # 10 * 697.19 mid

@@ -23,6 +23,8 @@ def _pos_row(
     open_date_time: datetime = datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
     quote_last: float | None = None,
     daily_close: float | None = None,
+    quote_bid: float | None = None,
+    quote_ask: float | None = None,
 ) -> dict[str, object]:
     return {
         "mirror_id": mirror_id,
@@ -38,6 +40,8 @@ def _pos_row(
         "open_date_time": open_date_time,
         "quote_last": quote_last,
         "daily_close": daily_close,
+        "quote_bid": quote_bid,
+        "quote_ask": quote_ask,
     }
 
 
@@ -76,6 +80,44 @@ class TestPriceHierarchy:
         assert pos.current_price is None
         assert pos.unrealized_pnl == 0.0
         assert pos.market_value == 1500.0
+
+    def test_zero_quote_last_treated_as_missing(self) -> None:
+        """#1428: quote_last=0.00 is not a valid mark. It must fall through
+        to daily_close, not value the position at native_price=0 (which
+        produces a huge fake loss)."""
+        row = _pos_row(units=10, amount=1500, open_rate=150.0, quote_last=0.0, daily_close=155.0)
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _compute_position_mtm(row, "USD", rates)
+
+        assert pos.current_price is not None
+        assert abs(pos.current_price - 155.0) < 0.01  # daily_close, NOT 0
+        assert abs(pos.unrealized_pnl - 50.0) < 0.01
+        assert abs(pos.market_value - 1550.0) < 0.01
+
+    def test_zero_quote_last_no_close_falls_to_open_rate(self) -> None:
+        """#1428: quote_last=0 and no daily_close → open_rate fallback, P&L 0."""
+        row = _pos_row(units=10, amount=1500, open_rate=150.0, quote_last=0.0, daily_close=None)
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _compute_position_mtm(row, "USD", rates)
+
+        assert pos.current_price is None
+        assert pos.unrealized_pnl == 0.0
+        assert pos.market_value == 1500.0
+
+    def test_zero_quote_last_uses_bid_ask_mid(self) -> None:
+        """#1428: quote_last=0 with a live two-sided book values at the mid,
+        ahead of daily_close."""
+        row = _pos_row(
+            units=10, amount=1500, open_rate=150.0,
+            quote_last=0.0, quote_bid=159.98, quote_ask=160.02, daily_close=155.0,
+        )
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _compute_position_mtm(row, "USD", rates)
+
+        assert pos.current_price is not None
+        assert abs(pos.current_price - 160.0) < 0.01  # mid, not daily_close 155
+        assert abs(pos.unrealized_pnl - 100.0) < 0.01
+        assert abs(pos.market_value - 1600.0) < 0.01
 
 
 class TestFxConversion:

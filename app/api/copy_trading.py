@@ -22,7 +22,7 @@ import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api._helpers import parse_optional_float
+from app.api._helpers import parse_optional_float, resolve_quote_price
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.services.fx import FxRateNotFound, convert, load_live_fx_rates_with_metadata
@@ -115,13 +115,22 @@ def _compute_position_mtm(
     is_buy = row["is_buy"]
     direction = 1.0 if is_buy else -1.0
 
-    # Price hierarchy for the instrument's native currency price
-    quote_last = parse_optional_float(row, "quote_last")
+    # Price hierarchy for the instrument's native currency price. A
+    # non-positive quote_last is not a valid mark (#1428 — eToro persists
+    # last=0.00 for un-freshly-traded instruments); treat it as missing
+    # (last>0 → live bid/ask mid → daily_close → open_rate) so P&L is not
+    # computed against a 0 price.
+    quote_price = resolve_quote_price(
+        parse_optional_float(row, "quote_last"),
+        parse_optional_float(row, "quote_bid"),
+        parse_optional_float(row, "quote_ask"),
+    )
     daily_close = parse_optional_float(row, "daily_close")
 
-    if quote_last is not None:
-        native_price = quote_last
-    elif daily_close is not None:
+    has_signal = quote_price is not None or (daily_close is not None and daily_close > 0)
+    if quote_price is not None:
+        native_price = quote_price
+    elif daily_close is not None and daily_close > 0:
         native_price = daily_close
     else:
         native_price = open_rate  # fallback — P&L will be zero
@@ -132,7 +141,7 @@ def _compute_position_mtm(
 
     # current_price in display terms: native_price converted, but only
     # if we have a real price signal (not the open_rate fallback)
-    if quote_last is not None or daily_close is not None:
+    if has_signal:
         current_price_usd: float | None = native_price * open_conv
     else:
         current_price_usd = None
@@ -237,7 +246,7 @@ def get_copy_trading(
                cmp.is_buy, cmp.units, cmp.amount,
                cmp.open_rate, cmp.open_conversion_rate,
                cmp.open_date_time,
-               q.last AS quote_last,
+               q.last AS quote_last, q.bid AS quote_bid, q.ask AS quote_ask,
                pd.close AS daily_close
         FROM copy_mirror_positions cmp
         LEFT JOIN instruments i ON i.instrument_id = cmp.instrument_id
@@ -358,7 +367,7 @@ def get_mirror_detail(
                cmp.is_buy, cmp.units, cmp.amount,
                cmp.open_rate, cmp.open_conversion_rate,
                cmp.open_date_time,
-               q.last AS quote_last,
+               q.last AS quote_last, q.bid AS quote_bid, q.ask AS quote_ask,
                pd.close AS daily_close
         FROM copy_mirror_positions cmp
         LEFT JOIN instruments i ON i.instrument_id = cmp.instrument_id
