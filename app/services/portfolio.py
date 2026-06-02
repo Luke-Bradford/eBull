@@ -150,7 +150,10 @@ def _load_positions(conn: psycopg.Connection[Any]) -> dict[int, PositionState]:
                 SELECT last
                 FROM quotes
                 WHERE instrument_id = p.instrument_id
-                  AND last IS NOT NULL
+                  -- #1428: last <= 0 is not a valid mark (eToro persists 0
+                  -- for un-freshly-traded instruments); exclude so the row
+                  -- falls back to cost_basis with quote_is_fallback=True.
+                  AND last > 0
                 ORDER BY quoted_at DESC
                 LIMIT 1
             ) q ON TRUE
@@ -226,7 +229,7 @@ def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdow
                       cmp.amount
                     + (CASE WHEN cmp.is_buy THEN 1 ELSE -1 END)
                       * cmp.units
-                      * (COALESCE(q.last, pd.close, cmp.open_rate) - cmp.open_rate)
+                      * (COALESCE(NULLIF(GREATEST(q.last, 0), 0), pd.close, cmp.open_rate) - cmp.open_rate)
                       * cmp.open_conversion_rate
                    ) AS mv,
                    COUNT(*) AS pos_count
@@ -316,7 +319,7 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
                       cmp.amount
                     + (CASE WHEN cmp.is_buy THEN 1 ELSE -1 END)
                       * cmp.units
-                      * (COALESCE(q.last, pd.close, cmp.open_rate) - cmp.open_rate)
+                      * (COALESCE(NULLIF(GREATEST(q.last, 0), 0), pd.close, cmp.open_rate) - cmp.open_rate)
                       * cmp.open_conversion_rate
                 ) AS mv
                 FROM copy_mirror_positions cmp

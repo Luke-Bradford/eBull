@@ -279,7 +279,12 @@ def _load_sector_exposure(
             SELECT
                 i.sector,
                 SUM(
-                    COALESCE(q.last, p.cost_basis / NULLIF(p.current_units, 0)) * p.current_units
+                    -- #1428: a non-positive q.last is not a valid mark
+                    -- (eToro persists last=0.00 for un-freshly-traded
+                    -- instruments); treat it as missing so sector exposure
+                    -- is not undervalued, weakening the concentration check.
+                    COALESCE(NULLIF(GREATEST(q.last, 0), 0), p.cost_basis / NULLIF(p.current_units, 0))
+                    * p.current_units
                 ) AS market_value
             FROM positions p
             JOIN instruments i ON i.instrument_id = p.instrument_id

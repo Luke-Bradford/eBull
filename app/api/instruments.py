@@ -35,6 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+from app.api._helpers import resolve_quote_price
 from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
@@ -3181,17 +3182,18 @@ def get_instrument_summary(
         canonical_symbol=row.get("canonical_symbol"),  # type: ignore[arg-type]
     )
 
-    # Price: ``quotes`` row. ``last`` is preferred, ``bid`` is the
-    # fallback when last hasn't been written (some providers only
-    # publish bid/ask). Day change + 52w range stay null until a
-    # SEC-derived computation lands; the frontend renders "—".
-    quote_last = row.get("last")
-    quote_bid = row.get("bid")
-    current_price: Decimal | None = None
-    if quote_last is not None:
-        current_price = Decimal(str(quote_last))
-    elif quote_bid is not None:
-        current_price = Decimal(str(quote_bid))
+    # Price: ``quotes`` row. Mark hierarchy is the shared #1428 contract —
+    # live trade ``last`` (>0) → bid/ask mid → none — so the instrument
+    # summary current price matches the position mark on the same
+    # instrument. A non-positive last is not a valid price (eToro persists
+    # last=0.00 for un-freshly-traded instruments). Day change + 52w range
+    # stay null until a SEC-derived computation lands; the frontend renders "—".
+    mark = resolve_quote_price(
+        float(row["last"]) if row.get("last") is not None else None,
+        float(row["bid"]) if row.get("bid") is not None else None,
+        float(row["ask"]) if row.get("ask") is not None else None,
+    )
+    current_price: Decimal | None = Decimal(str(mark)) if mark is not None else None
     price_block = (
         InstrumentPrice(
             current=current_price,
