@@ -43,6 +43,18 @@ services:
       - -c
       - max_locks_per_transaction=1024  # #1187 floor — guard hard-fails below this
       - -c
+      # #1444 — crash-recovery dead-time lever. Default ``fsync`` recursively
+      # open()+fsync()s EVERY file under PGDATA during the pre-fsync pass after
+      # an unclean shutdown; that walk is file-count-bound and costs HOURS when
+      # leaked test-worker DBs bloat the data dir to tens of millions of files
+      # (observed 2026-06-02: ~30M files → multi-hour recovery). ``syncfs``
+      # issues one syncfs() per filesystem instead of per-file opens, making
+      # recovery seconds regardless of file count. Linux-only (Docker Desktop
+      # runs a Linux VM, so syncfs() is available); acceptable for single-volume
+      # dev. Does NOT remove the need to reap orphan DBs (catalog/planner bloat)
+      # — it removes the recovery STALL. See data-engineer SKILL §14.
+      - recovery_init_sync_method=syncfs
+      - -c
       # Bound the work_mem×connections×hash_mem product (executor memory). The 3
       # app pools (#719) cap real backend conns at ~18; 30 = headroom while keeping
       # the OOM exposure provably bounded regardless of pool config drift. Without

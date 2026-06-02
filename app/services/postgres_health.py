@@ -79,6 +79,14 @@ class PostgresHealthSnapshot:
     db_size_breached_warn: bool | None
     leaked_test_db_count: int | None
     leaked_test_db_names: list[str] | None
+    # #1444 — total on-disk size of leaked ``ebull_test_*`` DBs. Bloat
+    # visibility: a large value warns the operator BEFORE the next crash
+    # recovery has to fsync-walk those files (the multi-hour-stall risk).
+    # Size is the connection-free proxy for file/relation count —
+    # counting relations would require connecting to each leaked DB,
+    # which can hang on a ``datconnlimit=-2`` corpse (#1393).
+    leaked_test_db_total_bytes: int | None
+    leaked_test_db_total_pretty: str | None
     wal_dir_bytes: int | None
     wal_dir_pretty: str | None
     wal_since_checkpoint_bytes: int | None
@@ -141,6 +149,35 @@ def _q_leaked_test_dbs(conn: psycopg.Connection[tuple]) -> list[str]:
             " ORDER BY datname"
         )
         return [str(r[0]) for r in cur.fetchall()]
+
+
+def _q_leaked_test_db_bytes(conn: psycopg.Connection[tuple]) -> tuple[int, str]:
+    """Total on-disk size of leaked ``ebull_test_*`` DBs (#1444).
+
+    Guarded by a short ``statement_timeout`` so a wedged
+    ``pg_database_size`` on a ``datconnlimit=-2`` corpse (the #1393 hang)
+    surfaces as a caught timeout via the ``_safe`` wrapper instead of
+    blocking the whole health endpoint. The conn is autocommit + reused
+    across probes, so the timeout is reset in a ``finally``.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = '2s'")
+        try:
+            cur.execute(
+                "SELECT COALESCE(sum(pg_database_size(datname)), 0)::bigint, "
+                "       pg_size_pretty(COALESCE(sum(pg_database_size(datname)), 0)::bigint) "
+                "  FROM pg_database "
+                " WHERE datname LIKE 'ebull_test_%' "
+                "   AND datname != 'ebull_test_template'"
+            )
+            row = cur.fetchone()
+        finally:
+            # RESET (not ``SET = 0``) restores the role/cluster default
+            # rather than hard-disabling the timeout for the autocommit
+            # conn's later probes (Codex #1444).
+            cur.execute("RESET statement_timeout")
+    assert row is not None
+    return int(row[0]), str(row[1])
 
 
 def _q_wal_dir(conn: psycopg.Connection[tuple]) -> tuple[int, str]:
@@ -245,6 +282,8 @@ def collect_postgres_health(
     db_size_bytes: int | None = None
     db_size_pretty: str | None = None
     leaked_names: list[str] | None = None
+    leaked_bytes: int | None = None
+    leaked_pretty: str | None = None
     wal_dir_bytes: int | None = None
     wal_dir_pretty: str | None = None
     wal_since_ckpt: int | None = None
@@ -258,6 +297,10 @@ def collect_postgres_health(
             db_size_bytes, db_size_pretty = result
 
         leaked_names = _safe(conn, "leaked_test_dbs", _q_leaked_test_dbs, errors)
+
+        leaked_size = _safe(conn, "leaked_test_db_bytes", _q_leaked_test_db_bytes, errors)
+        if leaked_size is not None:
+            leaked_bytes, leaked_pretty = leaked_size
 
         wal_result = _safe(conn, "wal_dir", _q_wal_dir, errors)
         if wal_result is not None:
@@ -280,6 +323,8 @@ def collect_postgres_health(
         db_size_breached_warn=db_size_breached,
         leaked_test_db_count=leaked_count,
         leaked_test_db_names=leaked_names,
+        leaked_test_db_total_bytes=leaked_bytes,
+        leaked_test_db_total_pretty=leaked_pretty,
         wal_dir_bytes=wal_dir_bytes,
         wal_dir_pretty=wal_dir_pretty,
         wal_since_checkpoint_bytes=wal_since_ckpt,
