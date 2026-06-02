@@ -8,6 +8,8 @@ at 0 → fake −100% P&L). Fall back to the live bid/ask mid when available.
 
 from __future__ import annotations
 
+import pytest
+
 from app.api._helpers import resolve_quote_price
 
 
@@ -16,15 +18,15 @@ def test_positive_last_is_used() -> None:
 
 
 def test_zero_last_falls_back_to_bid_ask_mid() -> None:
-    assert resolve_quote_price(0.0, 697.16, 697.22) == 697.19
+    assert resolve_quote_price(0.0, 697.16, 697.22) == pytest.approx(697.19)
 
 
 def test_negative_last_falls_back_to_bid_ask_mid() -> None:
-    assert resolve_quote_price(-1.0, 10.0, 12.0) == 11.0
+    assert resolve_quote_price(-1.0, 10.0, 12.0) == pytest.approx(11.0)
 
 
 def test_none_last_falls_back_to_bid_ask_mid() -> None:
-    assert resolve_quote_price(None, 10.0, 12.0) == 11.0
+    assert resolve_quote_price(None, 10.0, 12.0) == pytest.approx(11.0)
 
 
 def test_zero_last_and_no_usable_bid_ask_returns_none() -> None:

@@ -168,9 +168,10 @@ def test_no_quote_returns_null_price_block(client: TestClient) -> None:
     assert body["source"]["price"] == "unavailable"
 
 
-def test_bid_fallback_when_last_missing(client: TestClient) -> None:
+def test_bid_ask_mid_when_last_missing(client: TestClient) -> None:
     """Some instruments only publish bid/ask; ``last`` is null. The
-    endpoint falls back to ``bid`` so the operator sees a number."""
+    endpoint uses the bid/ask mid (shared #1428 mark contract) so the
+    operator sees a number consistent with the position mark."""
     row = {
         "instrument_id": 100,
         "symbol": "FOO",
@@ -196,13 +197,13 @@ def test_bid_fallback_when_last_missing(client: TestClient) -> None:
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["price"]["current"] == "12.34"
+    assert body["price"]["current"] == "12.35"  # (12.34 + 12.36) / 2 mid
 
 
-def test_zero_last_falls_back_to_bid(client: TestClient) -> None:
+def test_zero_last_uses_bid_ask_mid(client: TestClient) -> None:
     """#1428: ``last = 0.00`` (eToro persists 0 for un-freshly-traded
-    instruments) is NOT a valid price; fall back to bid so the operator
-    does not see a $0.00 current price."""
+    instruments) is NOT a valid price; use the bid/ask mid so the operator
+    does not see a $0.00 current price and it matches the position mark."""
     row = {
         "instrument_id": 101,
         "symbol": "VOO",
@@ -228,7 +229,7 @@ def test_zero_last_falls_back_to_bid(client: TestClient) -> None:
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["price"]["current"] == "697.16"  # bid, NOT 0.00
+    assert body["price"]["current"] == "697.19"  # (697.16 + 697.22) / 2 mid, NOT 0.00
 
 
 def test_local_company_name_authoritative(client: TestClient) -> None:

@@ -108,8 +108,13 @@ class TestPriceHierarchy:
         """#1428: quote_last=0 with a live two-sided book values at the mid,
         ahead of daily_close."""
         row = _pos_row(
-            units=10, amount=1500, open_rate=150.0,
-            quote_last=0.0, quote_bid=159.98, quote_ask=160.02, daily_close=155.0,
+            units=10,
+            amount=1500,
+            open_rate=150.0,
+            quote_last=0.0,
+            quote_bid=159.98,
+            quote_ask=160.02,
+            daily_close=155.0,
         )
         rates: dict[tuple[str, str], Decimal] = {}
         pos = _compute_position_mtm(row, "USD", rates)

@@ -227,9 +227,7 @@ class TestGetPortfolio:
         """#1428: quotes.last=0.00 (not freshly traded) must NOT mark the
         position at 0 → fake −100%. Fall back to live bid/ask mid."""
         # VOO live: last=0.00, bid/ask 697.16/697.22 → mid 697.19.
-        pos = _make_position_row(
-            current_units=10.0, cost_basis=6000.0, last=0.0, bid=697.16, ask=697.22
-        )
+        pos = _make_position_row(current_units=10.0, cost_basis=6000.0, last=0.0, bid=697.16, ask=697.22)
         _with_conn([[pos], [_make_cash_row(0.0)]])
 
         resp = client.get("/portfolio")
@@ -242,9 +240,7 @@ class TestGetPortfolio:
 
     def test_negative_last_treated_as_missing(self) -> None:
         """A negative last is not a valid mark; fall back like a zero last."""
-        pos = _make_position_row(
-            current_units=10.0, cost_basis=6000.0, last=-1.0, bid=697.16, ask=697.22
-        )
+        pos = _make_position_row(current_units=10.0, cost_basis=6000.0, last=-1.0, bid=697.16, ask=697.22)
         _with_conn([[pos], [_make_cash_row(0.0)]])
 
         resp = client.get("/portfolio")
@@ -253,9 +249,7 @@ class TestGetPortfolio:
 
     def test_zero_last_no_quote_falls_back_to_daily_close(self) -> None:
         """last=0 and no usable bid/ask → daily_close (not 0, not cost)."""
-        pos = _make_position_row(
-            current_units=10.0, cost_basis=1800.0, last=0.0, bid=None, ask=None
-        )
+        pos = _make_position_row(current_units=10.0, cost_basis=1800.0, last=0.0, bid=None, ask=None)
         pos["daily_close"] = 175.0
         _with_conn([[pos], [_make_cash_row(0.0)]])
 
@@ -266,9 +260,7 @@ class TestGetPortfolio:
 
     def test_zero_last_zero_bid_ask_no_close_falls_back_to_cost(self) -> None:
         """last=0, bid/ask=0 (no live market), no daily_close → cost basis, pnl 0."""
-        pos = _make_position_row(
-            current_units=10.0, cost_basis=1800.0, last=0.0, bid=0.0, ask=0.0
-        )
+        pos = _make_position_row(current_units=10.0, cost_basis=1800.0, last=0.0, bid=0.0, ask=0.0)
         _with_conn([[pos], [_make_cash_row(0.0)]])
 
         resp = client.get("/portfolio")
@@ -965,9 +957,7 @@ class TestInstrumentPositionsOpenConversionRate:
             quote_bid=697.16,
             quote_ask=697.22,
         )
-        pos = _make_broker_position_row(
-            units=10.0, amount=6000.0, open_rate=600.0, open_conversion_rate=1.0
-        )
+        pos = _make_broker_position_row(units=10.0, amount=6000.0, open_rate=600.0, open_conversion_rate=1.0)
         conn = _mock_conn([[instrument], [pos]])
 
         def _override() -> Iterator[MagicMock]:
