@@ -538,23 +538,45 @@ row is written; the static registry allow-list is the audit trail.
 **Eligibility (enforced by `tests/test_universal_gate_carve_out.py`
 allow-list + invariant assertions):**
 
-1. `catch_up_on_boot=True` — carve-out exists for the boot-time-only
-   `catch_up` evaluation trap (a prereq-blocked catch-up cannot
-   re-fire when bootstrap completes later).
+1. `catch_up_on_boot=True` AND ONE of two admissible motivations:
+   (a) safety-net where a missed cadence window is lost forever
+   (the boot-time-only `catch_up` evaluation trap — a prereq-blocked
+   catch-up cannot re-fire when bootstrap completes later); or
+   (b) operator-visible live state that bootstrap would otherwise hide
+   for hours (#1435 — broker portfolio / FX). Recoverable per cadence,
+   but blanking the dashboard for the whole bootstrap is unacceptable;
+   `catch_up_on_boot=True` fires it at boot, not the first tick.
 2. `prerequisite is None` — carve-out rests on body-safe-against-
    empty-DB; a non-None prereq creates two opinions on the same
    install-state question.
 3. Body is empty-DB safe (natural no-op against an empty/partial DB,
-   no destructive write, no expensive fetch loop).
+   no destructive write, no expensive fetch loop). For composite
+   layer-runners (b), each constituent layer must itself self-skip
+   cleanly until its own init/credential preconditions hold.
 4. Bounded cost per fire (single-digit MB fetch max).
 
 **Current carve-out members:**
 
-- `sec_daily_index_reconcile` — Layer 2 of the #863-#873 ETL freshness
-  redesign. Daily 04:00 UTC reads yesterday's ~1MB daily-index
-  master.idx; `subject_resolver` filters every unknown CIK so an
-  empty/partial-bootstrap universe is a natural no-op. Missed
+- `sec_daily_index_reconcile` (motivation a) — Layer 2 of the #863-#873
+  ETL freshness redesign. Daily 04:00 UTC reads yesterday's ~1MB
+  daily-index master.idx; `subject_resolver` filters every unknown CIK
+  so an empty/partial-bootstrap universe is a natural no-op. Missed
   cadence = lost-forever reconcile.
+- `orchestrator_high_frequency_sync` (motivation b, #1435) — every-5-min
+  `portfolio_sync` + `fx_rates` refresh. `portfolio_sync` carries
+  `requires_layer_initialized=("universe",)`, so the executor cleanly
+  `PREREQ_SKIP`s it (FK-safe once `nightly_universe_sync` commits the
+  universe transaction atomically; otherwise skipped) until the universe
+  stage lands early in bootstrap; `fx_rates` is independent. `prerequisite
+  =None`; bounded cost (broker positions + FX). FK safety stays with the
+  layer-init gate, NOT the universal bootstrap gate — so the dashboard
+  populates as soon as `universe` is initialized instead of after the
+  full multi-hour SEC bootstrap. NOTE: this job writes `sync_runs`, not
+  `job_runs`, so the job_runs-based boot catch-up always treats it as
+  never-run — `catch_up_on_boot=True` therefore fires it on every
+  controller boot (intended for motivation b: populate dashboard at boot;
+  bounded cost). The layer-init guard is fail-open on a transient
+  init-check DB error (pre-existing; fail-closing tracked separately).
 
 **Adding a new carve-out requires:**
 

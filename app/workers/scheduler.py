@@ -575,13 +575,30 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # (portfolio_sync + fx_rates). The orchestrator's partial unique
     # index gate ensures this cannot overlap with a still-running FULL
     # sync — the wrapper catches SyncAlreadyRunning and logs.
+    #
+    # #1435 — universal-bootstrap-gate carve-out (motivation b, settled-
+    # decisions §"Safety-net catch-up gate carve-out"). Without this the
+    # broker portfolio + FX dashboard stays blank for the entire multi-
+    # hour SEC bootstrap, since the universal gate skips every dispatch
+    # path until bootstrap_state='complete'. Portfolio/FX depend only on
+    # the eToro universe (available early), not SEC ingestion. Empty-DB
+    # safety holds without the gate: the portfolio_sync layer carries
+    # requires_layer_initialized=("universe",) so the executor PREREQ_SKIPs
+    # it (FK-safe) until the universe commits; fx_rates is independent.
+    # catch_up_on_boot=True is required by the carve-out invariant AND
+    # fires the job at boot so the dashboard populates immediately. NOTE:
+    # this job writes sync_runs (prelude opt-out), so the job_runs-based
+    # boot catch-up always treats it as never-run — it therefore fires on
+    # every controller boot, not just after a missed window. Intended +
+    # bounded (one portfolio + FX fetch per fire).
     ScheduledJob(
         name=JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
         display_name="Orchestrator high-frequency sync",
         source="db",
         description="Orchestrator high-frequency sync — portfolio_sync + fx_rates every 5 minutes.",
         cadence=Cadence.every_n_minutes(interval=5),
-        catch_up_on_boot=False,
+        catch_up_on_boot=True,
+        exempt_from_universal_bootstrap_gate=True,
     ),
     # -- Outside-DAG jobs (5 kept on their own cron triggers) ------------
     # These have empty JOB_TO_LAYERS entries and remain independently
