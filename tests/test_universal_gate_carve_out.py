@@ -35,6 +35,7 @@ from app.jobs.runtime import _INVOKERS, JobRuntime
 from app.workers.scheduler import (
     JOB_FINRA_REGSHO_DAILY_REFRESH,
     JOB_FINRA_SHORT_INTEREST_REFRESH,
+    JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     JOB_SEC_ATOM_FAST_LANE,
     JOB_SEC_DAILY_INDEX_RECONCILE,
     JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP,
@@ -487,7 +488,15 @@ class TestExemptRegistryInvariants:
         settled-decisions update fails here.
         """
         actual_names = {j.name for j in self._exempt_jobs()}
-        expected_names = {JOB_SEC_DAILY_INDEX_RECONCILE}
+        expected_names = {
+            JOB_SEC_DAILY_INDEX_RECONCILE,
+            # #1435 (motivation b) — broker portfolio + FX must not stay
+            # hidden for the whole multi-hour SEC bootstrap. Empty-DB-safe
+            # via the portfolio_sync layer-init PREREQ_SKIP; fx_rates
+            # independent. See settled-decisions §"Safety-net catch-up
+            # gate carve-out" + spec §4.2.
+            JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+        }
         assert actual_names == expected_names, (
             f"Exempt allow-list drifted. Expected exactly "
             f"{expected_names}, got {actual_names}. Adding a new exempt "
@@ -530,6 +539,19 @@ class TestLayer123ExemptionWiring:
         job = _job_by_name(JOB_SEC_DAILY_INDEX_RECONCILE)
         assert job is not None
         assert job.exempt_from_universal_bootstrap_gate is True
+
+    def test_orchestrator_high_frequency_sync_exempt(self) -> None:
+        """#1435 — broker portfolio + FX must populate the dashboard
+        DURING bootstrap, not after. Exempt + catch_up_on_boot=True;
+        FK safety comes from the portfolio_sync layer-init PREREQ_SKIP,
+        not the universal gate. See spec lane-b-discovery.md §4.2
+        (motivation b) + settled-decisions §"Safety-net catch-up gate
+        carve-out"."""
+        job = _job_by_name(JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC)
+        assert job is not None
+        assert job.exempt_from_universal_bootstrap_gate is True
+        assert job.catch_up_on_boot is True
+        assert job.prerequisite is None
 
     def test_layer3_per_cik_poll_not_exempt(self) -> None:
         """Layer 3's _bootstrap_complete prereq IS the right gate."""
