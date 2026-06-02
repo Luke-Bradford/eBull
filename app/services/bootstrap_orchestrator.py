@@ -278,6 +278,50 @@ _LANE_MAX_CONCURRENCY: Final[dict[str, int]] = {
 }
 
 
+# #1426 — Global heavy-ingest concurrency cap (memory guard).
+#
+# The five Phase-C bulk-ingest stages each live in their OWN family lane
+# (cap=1) so they run CROSS-LANE in parallel — the deliberate #1141 win
+# (serial Phase C added ~4h: 283min vs 110min). But each is a PG backend
+# COPYing/INSERTing into an 84-86-leaf PARTITIONED table; running all five
+# at once multiplies per-backend relcache + lock + buffer pressure and
+# OOM-crashed the 6GB Postgres container during the P6 clean bootstrap.
+#
+# This is a SECOND admission gate layered ON TOP of the per-lane caps: at
+# most ``_HEAVY_INGEST_MAX_CONCURRENCY`` of these stages may be in flight
+# simultaneously, regardless of lane. It bounds aggregate DB-writer memory
+# while preserving ~2x parallelism — it does NOT collapse the family lanes
+# back to the known-bad serial path. Set to 2 (Codex + analysis consensus,
+# #1426): companyfacts (financial_facts_raw) can overlap one ownership/
+# submissions stage, but not all five at once.
+_HEAVY_INGEST_STAGES: Final[frozenset[str]] = frozenset(
+    {
+        "sec_companyfacts_ingest",
+        "sec_submissions_ingest",
+        "sec_13f_ingest_from_dataset",
+        "sec_insider_ingest_from_dataset",
+        "sec_nport_ingest_from_dataset",
+    }
+)
+_HEAVY_INGEST_MAX_CONCURRENCY: Final[int] = 2
+
+
+def _heavy_ingest_admits(in_flight_stage_keys: Iterable[str], candidate_stage_key: str) -> bool:
+    """Whether ``candidate_stage_key`` may be dispatched under the global
+    heavy-ingest cap (#1426).
+
+    Non-heavy stages are always admitted (the cap only governs the
+    partition-touching bulk-ingest family). A heavy stage is admitted only
+    if fewer than ``_HEAVY_INGEST_MAX_CONCURRENCY`` heavy stages are already
+    in flight. ``in_flight_stage_keys`` must include any heavy stages
+    submitted earlier in the SAME dispatch iteration.
+    """
+    if candidate_stage_key not in _HEAVY_INGEST_STAGES:
+        return True
+    heavy_in_flight = sum(1 for k in in_flight_stage_keys if k in _HEAVY_INGEST_STAGES)
+    return heavy_in_flight < _HEAVY_INGEST_MAX_CONCURRENCY
+
+
 # ---------------------------------------------------------------------------
 # Capability layer (#1138 / Task A of #1136 audit)
 # ---------------------------------------------------------------------------
@@ -2185,11 +2229,23 @@ def _phase_batched_dispatch(
             # gate also prevents JobLock collisions between same-lane
             # siblings dispatched in the same outer iteration.
             submitted_this_iteration: list[str] = []
+            # #1426 — heavy-ingest stages already in flight (across all
+            # lanes). Mutated as we submit this iteration so a single
+            # iteration can't admit more than the global cap allows.
+            heavy_in_flight_keys: list[str] = [sk for sk, _ln in in_flight.values() if sk in _HEAVY_INGEST_STAGES]
             for stage in ready:
                 lane = stage.lane
                 cap = _LANE_MAX_CONCURRENCY.get(lane, 1)
                 if lane_in_flight_count.get(lane, 0) >= cap:
                     continue  # at-cap; leave pending for next iteration
+
+                # #1426 — global memory guard: cap concurrent heavy bulk-
+                # ingest stages regardless of lane. Bounds aggregate PG
+                # backend memory (partition relcache/locks/buffers) that
+                # OOM-crashed the 6GB container, without reverting the
+                # #1141 cross-lane parallelism to the serial path.
+                if not _heavy_ingest_admits(heavy_in_flight_keys, stage.stage_key):
+                    continue  # heavy-ingest at cap; leave pending
 
                 # PR1c #1064: resolve dispatch-time dynamic values
                 # (e.g. _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF →
@@ -2235,6 +2291,8 @@ def _phase_batched_dispatch(
                 )
                 in_flight[fut] = (stage.stage_key, lane)
                 lane_in_flight_count[lane] = lane_in_flight_count.get(lane, 0) + 1
+                if stage.stage_key in _HEAVY_INGEST_STAGES:
+                    heavy_in_flight_keys.append(stage.stage_key)  # #1426 in-iteration accounting
                 submitted_this_iteration.append(stage.stage_key)
 
             if submitted_this_iteration:
