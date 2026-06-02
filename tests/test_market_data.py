@@ -381,6 +381,21 @@ class TestNormaliseRate:
         assert quote is not None
         assert quote.last is None
 
+    def test_zero_last_execution_coerced_to_none(self) -> None:
+        """#1429: eToro returns lastExecution=0 for un-freshly-traded
+        instruments (bid/ask present). A 0 last must never be persisted —
+        coerce to None so the read-side derives a mark from bid/ask."""
+        item = {**FIXTURE_RATE, "lastExecution": 0.0}
+        quote = _normalise_rate(item)
+        assert quote is not None
+        assert quote.last is None  # NOT Decimal("0")
+
+    def test_negative_last_execution_coerced_to_none(self) -> None:
+        item = {**FIXTURE_RATE, "lastExecution": -1.0}
+        quote = _normalise_rate(item)
+        assert quote is not None
+        assert quote.last is None
+
     def test_timestamp_parsed(self) -> None:
         quote = _normalise_rate(FIXTURE_RATE)
         assert quote is not None

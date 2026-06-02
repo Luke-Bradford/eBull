@@ -118,6 +118,44 @@ class TestParseRateMessage:
         assert update is not None
         assert update.last is None
 
+    def test_zero_last_execution_coerced_to_none(self) -> None:
+        """#1429: eToro pushes LastExecution=0 for un-freshly-traded
+        instruments (bid/ask present). A 0 last must never be persisted —
+        coerce to None so the read-side derives a mark from bid/ask."""
+        raw = json.dumps(
+            {
+                "type": "Trading.Instrument.Rate",
+                "data": {
+                    "InstrumentID": 1001,
+                    "Bid": "697.16",
+                    "Ask": "697.22",
+                    "LastExecution": "0.00",
+                    "Date": "2026-04-24T14:30:00Z",
+                },
+            }
+        )
+        update = parse_rate_message(raw)
+        assert update is not None
+        assert update.bid == Decimal("697.16")
+        assert update.last is None  # NOT Decimal("0.00")
+
+    def test_negative_last_execution_coerced_to_none(self) -> None:
+        raw = json.dumps(
+            {
+                "type": "Trading.Instrument.Rate",
+                "data": {
+                    "InstrumentID": 1001,
+                    "Bid": "10.00",
+                    "Ask": "10.02",
+                    "LastExecution": "-1.0",
+                    "Date": "2026-04-24T14:30:00Z",
+                },
+            }
+        )
+        update = parse_rate_message(raw)
+        assert update is not None
+        assert update.last is None
+
     def test_non_rate_message_returns_none(self) -> None:
         assert parse_rate_message(json.dumps({"type": "Trading.OrderForCloseMultiple.Update", "data": {}})) is None
 
