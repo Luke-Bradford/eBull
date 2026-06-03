@@ -209,6 +209,18 @@ export function ProcessesTable({
           <span className="font-semibold">{bootstrapStatus}</span>. Other
           categories are gated until bootstrap reaches{" "}
           <span className="font-semibold">complete</span> —{" "}
+          {/*
+            Deliberately keyed on `bootstrapStatus === "pending"` (the
+            bootstrap-status-endpoint vocabulary: pending|running|complete|
+            partial_error, wired from AdminPage `bootstrap.data?.status`),
+            NOT on the row-level `status === "pending_first_run"`
+            (ProcessStatus vocabulary) used by ProcessRow / ProcessDetailPage.
+            They are two enums over the SAME underlying `bootstrap_state`:
+            state 'pending' → endpoint "pending" AND row "pending_first_run",
+            so on a real first run both predicates fire together. Do NOT
+            "align" the literals — they intentionally differ because they
+            read different (but co-derived) status fields. (#1452)
+          */}
           {bootstrapStatus === "pending"
             ? "run the bootstrap from the bootstrap row."
             : "re-run failed stages or re-run all from the bootstrap row."}
