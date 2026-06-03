@@ -187,7 +187,9 @@ def _do_sweep(*, min_age: timedelta, now: datetime | None) -> list[str]:
             cur.execute(
                 "SELECT d.datname, "
                 "       EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname) "
-                "  FROM pg_database d WHERE d.datname LIKE 'ebull_test%'"
+                # ESCAPE '!' — the ``_`` is literal, not a LIKE wildcard
+                # (bot #1446; mirrors force_drop_invalid_test_dbs below).
+                "  FROM pg_database d WHERE d.datname LIKE 'ebull!_test%' ESCAPE '!'"
             )
             candidates = [(str(row[0]), bool(row[1])) for row in cur.fetchall()]
 
