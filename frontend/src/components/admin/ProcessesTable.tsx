@@ -208,8 +208,10 @@ export function ProcessesTable({
           First-install bootstrap is{" "}
           <span className="font-semibold">{bootstrapStatus}</span>. Other
           categories are gated until bootstrap reaches{" "}
-          <span className="font-semibold">complete</span> — re-run failed
-          stages or re-run all from the bootstrap row.
+          <span className="font-semibold">complete</span> —{" "}
+          {bootstrapStatus === "pending"
+            ? "run the bootstrap from the bootstrap row."
+            : "re-run failed stages or re-run all from the bootstrap row."}
         </div>
       ) : (
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -342,11 +344,27 @@ function FullWashConfirmDialog({
   // button itself stays red so the destructive intent is still clear;
   // the Cancel button remains as the obvious bail-out.
   const isBootstrap = row.mechanism === "bootstrap";
-  const heading = isBootstrap ? "Confirm Re-run all" : "Confirm full-wash";
-  const verb = isBootstrap ? "Re-run all" : "Full-wash";
-  const description = isBootstrap
-    ? `Re-run all resets every stage of ${row.display_name} to pending and replays the full first-install bootstrap. Stages re-run from scratch; ingested rows are deduped at the destination by ON CONFLICT.`
-    : `Full-wash resets the watermark for ${row.display_name} and re-fetches from epoch. ON CONFLICT idempotency prevents row duplication; the cost is bandwidth and rate-budget.`;
+  // First install (#1432): nothing has run yet, so this is a *start*, not
+  // a destructive re-run. Non-destructive copy + a primary (blue) confirm
+  // button rather than the red "wipe everything" framing the re-run states
+  // use. The underlying POST is still mode='full_wash' (resets stages to
+  // pending), but on a never-run row there is nothing to wipe.
+  const isFirstRun = isBootstrap && row.status === "pending_first_run";
+  const heading = isFirstRun
+    ? "Start bootstrap"
+    : isBootstrap
+      ? "Confirm Re-run all"
+      : "Confirm full-wash";
+  const verb = isFirstRun
+    ? "Run bootstrap"
+    : isBootstrap
+      ? "Re-run all"
+      : "Full-wash";
+  const description = isFirstRun
+    ? `Start the first-install bootstrap for ${row.display_name}. Walks the init → eToro → SEC stage sequence to populate the tradable universe and filings. Safe to run — this is the first run, nothing is overwritten.`
+    : isBootstrap
+      ? `Re-run all resets every stage of ${row.display_name} to pending and replays the full first-install bootstrap. Stages re-run from scratch; ingested rows are deduped at the destination by ON CONFLICT.`
+      : `Full-wash resets the watermark for ${row.display_name} and re-fetches from epoch. ON CONFLICT idempotency prevents row duplication; the cost is bandwidth and rate-budget.`;
   return (
     <Modal
       isOpen={true}
@@ -375,7 +393,11 @@ function FullWashConfirmDialog({
           onClick={onConfirm}
           disabled={busy}
           autoFocus
-          className="rounded border border-red-400 bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-700 dark:bg-red-700 dark:hover:bg-red-800"
+          className={
+            isFirstRun
+              ? "rounded border border-blue-600 bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-500 dark:bg-blue-600 dark:hover:bg-blue-700"
+              : "rounded border border-red-400 bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-700 dark:bg-red-700 dark:hover:bg-red-800"
+          }
         >
           {busy ? "Triggering…" : verb}
         </button>

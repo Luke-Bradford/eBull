@@ -223,6 +223,44 @@ describe("ProcessDetailPage", () => {
     expect(screen.queryByRole("button", { name: "Iterate" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Full-wash" })).toBeNull();
   });
+
+  it("first-install bootstrap shows only 'Run bootstrap' + 'Start bootstrap' modal", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        display_name: "First-install bootstrap",
+        status: "pending_first_run",
+        can_iterate: false,
+        can_full_wash: true,
+        can_cancel: false,
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    render(
+      <MemoryRouter initialEntries={["/admin/processes/bootstrap"]}>
+        <Routes>
+          <Route path="admin/processes/:id" element={<ProcessDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Run bootstrap" }),
+      ).toBeTruthy(),
+    );
+    // Inapplicable affordances hidden on a never-run row.
+    expect(screen.queryByRole("button", { name: "Re-run failed" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Re-run all" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    // Confirm modal uses non-destructive start framing.
+    fireEvent.click(screen.getByRole("button", { name: "Run bootstrap" }));
+    expect(
+      await screen.findByRole("heading", { name: /Start bootstrap/i }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Safe to run/i)).toBeTruthy();
+    expect(screen.queryByText(/resets every stage/i)).toBeNull();
+  });
 });
 
 

@@ -450,48 +450,66 @@ function ActionBar({
   // Mechanism-specific labels — bootstrap maps iterate/full_wash to
   // "Re-run failed" / "Re-run all" per data-engineer skill §7.3.
   const isBootstrap = row.mechanism === "bootstrap";
+  // First install (#1432): collapse to a single non-destructive "Run
+  // bootstrap" button — mirrors the table-row affordance. "Re-run failed"
+  // / "Cancel" cannot apply on a never-run row.
+  const isFirstRun = isBootstrap && row.status === "pending_first_run";
   const iterateLabel = isBootstrap ? "Re-run failed" : "Iterate";
-  const fullWashLabel = isBootstrap ? "Re-run all" : "Full-wash";
+  const fullWashLabel = isFirstRun
+    ? "Run bootstrap"
+    : isBootstrap
+      ? "Re-run all"
+      : "Full-wash";
   const iterateTooltip = row.can_iterate
     ? isBootstrap
       ? "Resume incomplete + failed stages from where they stopped."
       : watermarkTooltip
     : `${iterateLabel} is not available right now.`;
-  const fullWashTooltip = row.can_full_wash
-    ? isBootstrap
-      ? "Reset every stage to pending; full first-install replay (typed-name confirm required)."
-      : "Reset watermark and re-fetch from epoch (typed-name confirm required)."
-    : `${fullWashLabel} is not available right now.`;
+  const fullWashTooltip = isFirstRun
+    ? "Start the first-install bootstrap — populates the universe + filings. Asks for confirmation first."
+    : row.can_full_wash
+      ? isBootstrap
+        ? "Reset every stage to pending; full first-install replay (confirm required)."
+        : "Reset watermark and re-fetch from epoch (confirm required)."
+      : `${fullWashLabel} is not available right now.`;
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onIterate}
-          disabled={!row.can_iterate || busy}
-          title={iterateTooltip}
-          className="rounded border border-slate-300 bg-white px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800/40"
-        >
-          {iterateLabel}
-        </button>
+        {isFirstRun ? null : (
+          <button
+            type="button"
+            onClick={onIterate}
+            disabled={!row.can_iterate || busy}
+            title={iterateTooltip}
+            className="rounded border border-slate-300 bg-white px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800/40"
+          >
+            {iterateLabel}
+          </button>
+        )}
         <button
           type="button"
           onClick={onFullWash}
           disabled={!row.can_full_wash || busy}
           title={fullWashTooltip}
-          className="rounded border border-red-300 bg-white px-3 py-1 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
+          className={
+            isFirstRun
+              ? "rounded border border-blue-600 bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-500 dark:bg-blue-600 dark:hover:bg-blue-700"
+              : "rounded border border-red-300 bg-white px-3 py-1 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
+          }
         >
           {fullWashLabel}
         </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={!row.can_cancel || busy}
-          title={row.can_cancel ? "Cooperative cancel — the worker stops at its next checkpoint." : "No active run to cancel."}
-          className="rounded border border-amber-300 bg-white px-3 py-1 text-sm font-medium text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-900 dark:bg-slate-900 dark:text-amber-300 dark:hover:bg-amber-950/40"
-        >
-          Cancel
-        </button>
+        {isFirstRun ? null : (
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={!row.can_cancel || busy}
+            title={row.can_cancel ? "Cooperative cancel — the worker stops at its next checkpoint." : "No active run to cancel."}
+            className="rounded border border-amber-300 bg-white px-3 py-1 text-sm font-medium text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-900 dark:bg-slate-900 dark:text-amber-300 dark:hover:bg-amber-950/40"
+          >
+            Cancel
+          </button>
+        )}
       </div>
       {triggerError ? (
         <div
@@ -1445,8 +1463,19 @@ function FullWashConfirmDialog({
   // process names are internal identifiers, double-confirm with a
   // single click on the red verb button is the operator-locked UX.
   const isBootstrap = row.mechanism === "bootstrap";
-  const heading = isBootstrap ? "Confirm Re-run all" : "Confirm full-wash";
-  const verb = isBootstrap ? "Re-run all" : "Full-wash";
+  // First install (#1432): non-destructive "Start bootstrap" framing +
+  // blue confirm, mirroring the table-row modal.
+  const isFirstRun = isBootstrap && row.status === "pending_first_run";
+  const heading = isFirstRun
+    ? "Start bootstrap"
+    : isBootstrap
+      ? "Confirm Re-run all"
+      : "Confirm full-wash";
+  const verb = isFirstRun
+    ? "Run bootstrap"
+    : isBootstrap
+      ? "Re-run all"
+      : "Full-wash";
   return (
     <Modal isOpen={true} onRequestClose={onCancel} labelledBy="detail-fw-title">
       <h2
@@ -1456,7 +1485,15 @@ function FullWashConfirmDialog({
         {heading}
       </h2>
       <p className="mt-2 text-sm text-slate-700 dark:text-slate-300">
-        {isBootstrap ? (
+        {isFirstRun ? (
+          <>
+            Start the first-install bootstrap for{" "}
+            <span className="font-medium">{row.display_name}</span>. Walks the
+            init → eToro → SEC stage sequence to populate the tradable universe
+            and filings. Safe to run — this is the first run, nothing is
+            overwritten.
+          </>
+        ) : isBootstrap ? (
           <>
             Re-run all resets every stage of{" "}
             <span className="font-medium">{row.display_name}</span> to pending
@@ -1485,7 +1522,11 @@ function FullWashConfirmDialog({
           onClick={onConfirm}
           disabled={busy}
           autoFocus
-          className="rounded border border-red-400 bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-700 dark:bg-red-700 dark:hover:bg-red-800"
+          className={
+            isFirstRun
+              ? "rounded border border-blue-600 bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-500 dark:bg-blue-600 dark:hover:bg-blue-700"
+              : "rounded border border-red-400 bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-700 dark:bg-red-700 dark:hover:bg-red-800"
+          }
         >
           {busy ? "Triggering…" : verb}
         </button>

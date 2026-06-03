@@ -76,8 +76,20 @@ export function ProcessRow({
   // (iterate / full_wash modes on the trigger endpoint) unchanged; only
   // the operator-visible label changes per mechanism.
   const isBootstrap = row.mechanism === "bootstrap";
+  // First install: nothing has ever run, so the only meaningful action is
+  // *starting* the bootstrap. "Re-run failed" / "Cancel" cannot apply
+  // (no failed stages, no active run) and "Re-run all" is the wrong verb —
+  // it's a first run, not a re-run, and there is nothing to wipe. Collapse
+  // to a single non-destructive "Run bootstrap" button (#1432). All other
+  // bootstrap states (partial_error / cancelled / running / complete) keep
+  // the full re-run / cancel vocabulary.
+  const isFirstRun = isBootstrap && row.status === "pending_first_run";
   const iterateLabel = isBootstrap ? "Re-run failed" : "Iterate";
-  const fullWashLabel = isBootstrap ? "Re-run all" : "Full-wash";
+  const fullWashLabel = isFirstRun
+    ? "Run bootstrap"
+    : isBootstrap
+      ? "Re-run all"
+      : "Full-wash";
 
   const iterateDisabled = !row.can_iterate || busy;
   const iterateTooltip = row.can_iterate
@@ -87,11 +99,13 @@ export function ProcessRow({
     : `${iterateLabel} is not available right now — open the process detail page for the precondition that is blocking it.`;
 
   const fullWashDisabled = !row.can_full_wash || busy;
-  const fullWashTooltip = row.can_full_wash
-    ? isBootstrap
-      ? "Reset every stage to pending; full first-install replay (typed-name confirm required)."
-      : "Reset watermark and re-fetch from epoch (typed-name confirm required)."
-    : `${fullWashLabel} is not available right now.`;
+  const fullWashTooltip = isFirstRun
+    ? "Start the first-install bootstrap — populates the universe + filings. Asks for confirmation first."
+    : row.can_full_wash
+      ? isBootstrap
+        ? "Reset every stage to pending; full first-install replay (confirm required)."
+        : "Reset watermark and re-fetch from epoch (confirm required)."
+      : `${fullWashLabel} is not available right now.`;
 
   const cancelDisabled = !row.can_cancel || busy;
   const cancelTooltip = row.can_cancel
@@ -158,25 +172,29 @@ export function ProcessRow({
       </td>
       <td className="px-2 py-2 text-right">
         <div className="flex flex-wrap items-center justify-end gap-1">
-          <ActionButton
-            label={iterateLabel}
-            tooltip={iterateTooltip}
-            disabled={iterateDisabled}
-            onClick={() => onIterate(row)}
-          />
+          {isFirstRun ? null : (
+            <ActionButton
+              label={iterateLabel}
+              tooltip={iterateTooltip}
+              disabled={iterateDisabled}
+              onClick={() => onIterate(row)}
+            />
+          )}
           <ActionButton
             label={fullWashLabel}
             tooltip={fullWashTooltip}
             disabled={fullWashDisabled}
             onClick={() => onFullWash(row)}
-            tone="danger"
+            tone={isFirstRun ? "primary" : "danger"}
           />
-          <ActionButton
-            label="Cancel"
-            tooltip={cancelTooltip}
-            disabled={cancelDisabled}
-            onClick={() => onCancel(row)}
-          />
+          {isFirstRun ? null : (
+            <ActionButton
+              label="Cancel"
+              tooltip={cancelTooltip}
+              disabled={cancelDisabled}
+              onClick={() => onCancel(row)}
+            />
+          )}
         </div>
         {triggerError ? (
           <div
@@ -275,12 +293,14 @@ function ActionButton({
   tooltip: string;
   disabled: boolean;
   onClick: () => void;
-  tone?: "default" | "danger";
+  tone?: "default" | "danger" | "primary";
 }) {
   const toneClass =
     tone === "danger"
       ? "border-red-300 bg-white text-red-700 hover:bg-red-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
-      : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800/40";
+      : tone === "primary"
+        ? "border-blue-600 bg-blue-600 text-white hover:bg-blue-700 dark:border-blue-500 dark:bg-blue-600 dark:text-white dark:hover:bg-blue-700"
+        : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800/40";
   return (
     <button
       type="button"
