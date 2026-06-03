@@ -101,6 +101,19 @@ _RUN_ID_ENV = "EBULL_PYTEST_RUN_ID"
 _TEST_DB_URL_ENV = "EBULL_TEST_DATABASE_URL"
 _TEST_CLUSTER_PORT = os.environ.get("POSTGRES_TEST_PORT", "5433")
 
+# Snapshot the operator's dev database URL AT IMPORT — before any test can
+# ``monkeypatch.setattr(settings, "database_url", test_database_url())`` to
+# redirect app-under-test code at the per-worker test DB. Both the test-base-URL
+# derivation and the C1 dev-cluster guard must reference the REAL dev DB, not a
+# live (mutable) ``settings.database_url``: once a test redirects it to the test
+# cluster (5433), reading it live makes the guard compute dev==test and mis-fire
+# on the SECOND ``test_database_url()`` call (e.g. an autouse redirect fixture
+# followed by a ``psycopg.connect(test_database_url())`` in a `conn` fixture —
+# the redirect-then-reconnect pattern in test_reaper_split / test_jobs_queue_* /
+# test_sync_orchestrator_dispatcher). Module import happens at collection time,
+# which always precedes per-test fixtures, so this captures the genuine dev URL.
+_DEV_DATABASE_URL: str = settings.database_url
+
 
 # Path to the migration-hash cache file. Lives under the user's cache
 # dir so the value survives across pytest invocations.
@@ -277,7 +290,7 @@ def _swap_port(url: str, new_port: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc))
 
 
-def _assert_not_dev_cluster(test_base_url: str) -> None:
+def _assert_not_dev_cluster(test_base_url: str, dev_url: str | None = None) -> None:
     """Fail loud if the test base URL resolves to the dev ``ebull`` cluster.
 
     C1 invariant (#1447): the suite must never share a cluster with the
@@ -285,7 +298,16 @@ def _assert_not_dev_cluster(test_base_url: str) -> None:
     test DB can wedge ebull's crash recovery. Enforced in code so a stray
     ``EBULL_TEST_DATABASE_URL`` or a future default change can't silently
     re-couple them.
+
+    ``dev_url`` defaults to the import-time dev-URL snapshot
+    (``_DEV_DATABASE_URL``), NOT live ``settings.database_url``: a test may
+    have already redirected the live value to the test cluster, which would
+    make the guard compare the test cluster against itself and mis-fire (the
+    redirect-then-reconnect pattern — #1445). The snapshot is the genuine dev
+    DB captured before any redirect. Tests inject ``dev_url`` explicitly to
+    exercise the comparison without depending on the import-time value.
     """
+    dev_url = dev_url if dev_url is not None else _DEV_DATABASE_URL
 
     def _canon(host: str | None) -> str:
         # Loopback aliases all name the same local cluster — collapse them so
@@ -293,7 +315,7 @@ def _assert_not_dev_cluster(test_base_url: str) -> None:
         h = (host or "localhost").lower()
         return "localhost" if h in {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""} else h
 
-    dev = urlparse(settings.database_url)
+    dev = urlparse(dev_url)
     test = urlparse(test_base_url)
     dev_hostport = (_canon(dev.hostname), dev.port or 5432)
     test_hostport = (_canon(test.hostname), test.port or 5432)
@@ -310,12 +332,14 @@ def _assert_not_dev_cluster(test_base_url: str) -> None:
 def _test_cluster_base_url() -> str:
     """Base URL for the dedicated pytest cluster (NOT the dev ``ebull`` DB).
 
-    Default derives from ``settings.database_url`` with the port swapped to
-    the test cluster, so creds/host stay aligned with the dev setup while the
-    cluster is physically distinct. Override via ``EBULL_TEST_DATABASE_URL``.
+    Default derives from the import-time dev-URL snapshot (``_DEV_DATABASE_URL``)
+    with the port swapped to the test cluster, so creds/host stay aligned with
+    the dev setup while the cluster is physically distinct — and so a test that
+    has redirected the live ``settings.database_url`` to the test DB can't skew
+    the derivation. Override via ``EBULL_TEST_DATABASE_URL``.
     """
     explicit = os.environ.get(_TEST_DB_URL_ENV)
-    base = explicit if explicit else _swap_port(settings.database_url, _TEST_CLUSTER_PORT)
+    base = explicit if explicit else _swap_port(_DEV_DATABASE_URL, _TEST_CLUSTER_PORT)
     _assert_not_dev_cluster(base)
     return base
 
