@@ -37,6 +37,16 @@ from tests.fixtures.ebull_test_db import (
     test_db_available,
 )
 
+# #1444 — these tests CREATE/DROP/UPDATE globally-named databases + invoke
+# the global sweep, which takes cluster-wide CREATE/DROP DATABASE locks.
+# Run concurrently across xdist workers they deadlock each other (observed:
+# 3 workers wedged 40min on mutual DROP of the same fixed-name DBs). Pin the
+# whole module to one xdist group (with --dist=loadgroup) so every real-DB
+# reaper test — here and in test_dev_test_db_reaper.py — serialises onto a
+# single worker. (The refined long-term shape is to unit-test the pure rail
+# policy and keep real-DB tests minimal — see test_dev_test_db_reaper.py.)
+pytestmark = pytest.mark.xdist_group("reaper_db_ops")
+
 _STALE_EPOCH_NAME = "ebull_test_0000000001_aaaaaa_gw99"
 _STALE_ACTIVE_NAME = "ebull_test_0000000001_cccccc_gw97"
 

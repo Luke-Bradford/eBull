@@ -58,6 +58,7 @@ import psycopg
 # row even when parser modules exist on disk.
 import app.services.manifest_parsers  # noqa: F401, E402
 from app.config import settings
+from app.db.dev_test_db_reaper import run_orphan_test_db_reap
 from app.db.pool import open_pool
 from app.jobs.boot_sweep import run_boot_freshness_sweep
 from app.jobs.credential_health_listener import (
@@ -1069,6 +1070,17 @@ def serve(stop_event: threading.Event | None = None) -> int:
 
         # Step 10 — boot freshness sweep.
         run_boot_freshness_sweep()
+
+        # Step 10b — reap leaked test DBs (#1444). Dev-only (no-op in
+        # prod); the long-lived jobs process is the one place a sweep can
+        # run while no pytest invocation is active, breaking the
+        # chicken-and-egg where the test-session-start reaper cannot run
+        # because PG is wedged in crash recovery over the very bloat it
+        # would clear. Best-effort: never block boot on hygiene.
+        try:
+            run_orphan_test_db_reap()
+        except Exception:
+            logger.exception("orphan test-DB reap raised at boot; continuing")
 
         # Credential-health listener (#976 / #974/B). Process-local
         # cache populated by initial full-scan + LISTEN/NOTIFY +

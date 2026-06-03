@@ -613,6 +613,8 @@ class PostgresHealthResponse(BaseModel):
     db_size_breached_warn: bool | None
     leaked_test_db_count: int | None
     leaked_test_db_names: list[str] | None
+    leaked_test_db_total_bytes: int | None
+    leaked_test_db_total_pretty: str | None
     wal_dir_bytes: int | None
     wal_dir_pretty: str | None
     wal_since_checkpoint_bytes: int | None
@@ -805,6 +807,8 @@ def get_postgres_health() -> PostgresHealthResponse:
         db_size_breached_warn=snapshot.db_size_breached_warn,
         leaked_test_db_count=snapshot.leaked_test_db_count,
         leaked_test_db_names=snapshot.leaked_test_db_names,
+        leaked_test_db_total_bytes=snapshot.leaked_test_db_total_bytes,
+        leaked_test_db_total_pretty=snapshot.leaked_test_db_total_pretty,
         wal_dir_bytes=snapshot.wal_dir_bytes,
         wal_dir_pretty=snapshot.wal_dir_pretty,
         wal_since_checkpoint_bytes=snapshot.wal_since_checkpoint_bytes,

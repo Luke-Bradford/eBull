@@ -36,11 +36,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import time
 import warnings
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
 from urllib.parse import urlparse, urlunparse
@@ -52,33 +51,26 @@ import pytest
 from psycopg import sql
 
 from app.config import settings
+from app.db.dev_test_db_reaper import (
+    NEVER_DROP as _NEVER_DROP,  # noqa: F401 — re-exported for tests/conftest + test_orphan_sweep
+)
+from app.db.dev_test_db_reaper import (
+    force_drop_invalid_test_dbs as _prod_force_drop_invalid,
+)
+from app.db.dev_test_db_reaper import (
+    sweep_orphan_test_databases as _prod_sweep_orphans,
+)
 
 TEMPLATE_DB_NAME = "ebull_test_template"
 _SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
 
-# #1208 Phase 2 — orphan sweep constants.
-#
-# DB-name layout produced by ``test_db_name()`` is fixed:
-#   ebull_test_{int(time.time())}_{token_hex(3)}_{worker_id}
-# The {10}-digit epoch holds until year 2286; widening would require a
-# co-located fixture-name bump, so the regex lives next to the producer.
-_ORPHAN_NAME_PATTERN = re.compile(
-    r"^ebull_test_(?P<epoch>\d{10})_[0-9a-f]{6}_(?:gw\d+|main|sanity\d*)$",
-)
-
-# Final literal guard against a future regex regression. Every entry
-# already fails ``_ORPHAN_NAME_PATTERN``; this is belt-on-belt safety
-# for the operator dev DB, the reusable template, and the maintenance
-# DBs PG would refuse to drop anyway.
-_NEVER_DROP: frozenset[str] = frozenset(
-    {
-        "ebull",
-        "ebull_test_template",
-        "postgres",
-        "template0",
-        "template1",
-    },
-)
+# #1208 Phase 2 / #1444 — the orphan-sweep safety rails (name regex +
+# ``_NEVER_DROP`` protect-set) now live in ``app/db/dev_test_db_reaper.py``
+# so the jobs-process boot/cadence reaper and this test fixture share ONE
+# source of truth. ``_NEVER_DROP`` is re-exported above for the existing
+# ``test_orphan_sweep`` + ``conftest`` consumers. ``app`` must not import
+# ``tests``, hence the rails live under ``app/`` and the fixture consumes
+# them — not the reverse.
 
 # Advisory lock keys. Cross-pytest-invocation locks live on the
 # maintenance ``postgres`` DB so they don't collide with application
@@ -338,70 +330,17 @@ def _ensure_database(admin: psycopg.Connection[object], db_name: str) -> bool:
 
 
 def _force_drop_invalid_test_dbs() -> list[str]:
-    """Force-drop INVALID test-owned databases (``datconnlimit = -2``).
+    """Force-drop INVALID (``datconnlimit = -2``) test-DB corpses.
 
-    Postgres marks a database ``datconnlimit = -2`` when a ``DROP
-    DATABASE`` is interrupted — e.g. a SIGKILL'd pytest worker (the
-    recurring pre-push xdist + PG-lock OOM event) whose
-    ``finally`` / ``pytest_sessionfinish`` teardown never completed, or
-    a ``DROP ... WITH (FORCE)`` whose backend got wedged mid-drop. Such
-    a database is a corpse: PG refuses ALL new connections, so it can
-    ONLY be dropped and there is no concurrent-invocation safety
-    concern — unlike the live worker-DB sweep, no age gate or activity
-    rail is needed. Plain ``DROP`` is blocked by the wedged backend that
-    interrupted the original drop, so ``WITH (FORCE)`` is required.
-
-    These corpses are what bloated the dev-PG data dir to 13.1M files
-    (#1401): two ``ebull_mig*`` DBs and the ``ebull_test_*`` worker DBs
-    the old sweep could not clear (it matched only ``ebull_test%``, used
-    a 1h age gate, and used plain DROP). Targets ``ebull_test_*``
-    (per-worker private DBs) and ``ebull_mig*`` (migration-replay temp
-    DBs from ``test_migration_156_partition_swap`` et al.).
-
-    Best-effort: never raises on operational failure. ``_NEVER_DROP``
-    names are skipped (the template legitimately matches ``ebull_test%``
-    and must never be force-dropped here). Returns the dropped names.
+    Thin delegate to the canonical reaper in
+    ``app/db/dev_test_db_reaper.py`` (#1444 single-source-of-truth).
+    A SIGKILL'd worker or a wedged ``DROP ... WITH (FORCE)`` leaves a
+    ``datconnlimit = -2`` corpse that refuses ALL new connections — no
+    age/activity rail is needed, ``WITH (FORCE)`` is required. Targets
+    ``ebull_test_*`` + ``ebull_mig*``; ``_NEVER_DROP`` names skipped.
+    Best-effort; returns the dropped names.
     """
-    if os.getenv("CI") == "true":
-        return []
-    dropped: list[str] = []
-    try:
-        with psycopg.connect(_admin_database_url(), autocommit=True) as admin:
-            with admin.cursor(row_factory=psycopg.rows.tuple_row) as cur:
-                # ``_`` is a LIKE wildcard; escape it so the predicate
-                # matches the literal ``ebull_test_`` / ``ebull_mig``
-                # prefixes only (ESCAPE '!' avoids backslash ambiguity
-                # in the SQL string literal).
-                cur.execute(
-                    "SELECT datname FROM pg_database "
-                    "WHERE datconnlimit = -2 "
-                    "AND (datname LIKE 'ebull!_test!_%' ESCAPE '!' "
-                    "     OR datname LIKE 'ebull!_mig%' ESCAPE '!')"
-                )
-                names = [row[0] for row in cur.fetchall()]
-            for name in names:
-                # Belt-and-braces: ``ebull_test_template`` matches the
-                # ``ebull_test%`` predicate. A -2 template is a separate
-                # (out-of-scope) problem handled by the template rebuild
-                # path, never by this reaper.
-                if name in _NEVER_DROP:
-                    continue
-                try:
-                    _drop_database_force(admin, name)
-                    dropped.append(name)
-                except Exception as exc:
-                    warnings.warn(
-                        f"Failed to force-drop invalid test DB {name!r}: {type(exc).__name__}: {exc}",
-                        stacklevel=2,
-                    )
-    except Exception as exc:
-        warnings.warn(
-            f"Invalid-test-DB reaper failed: {type(exc).__name__}: {exc}. "
-            f"Run `uv run python -m tests.fixtures.cleanup_test_dbs` to "
-            f"reclaim leaked databases.",
-            stacklevel=2,
-        )
-    return dropped
+    return _prod_force_drop_invalid()
 
 
 def _drop_database_force(admin: psycopg.Connection[object], db_name: str) -> None:
@@ -427,111 +366,19 @@ def _drop_orphan_workers_older_than(
     *,
     now: datetime | None = None,
 ) -> list[str]:
-    """Drop ``ebull_test_<epoch>_<hex>_<suffix>`` databases older than ``min_age``.
+    """Drop stale-named inactive worker DBs (test-session-start path).
 
-    Three independent rails decide eligibility (#1208 Phase 2 spec §4.3):
-
-    1. **Session-lifetime keepalive** (``_worker_db_keepalive``) gives
-       every live worker DB a backend in ``pg_stat_activity`` through
-       the whole pytest session — even between tests.
-    2. **Activity** — candidates with any ``pg_stat_activity`` row for
-       their datname are skipped.
-    3. **Age** — ``now - parsed_epoch >= min_age`` (default 1h) is the
-       backstop for leaked DBs whose backends have since drained.
-
-    Final literal guard ``_NEVER_DROP`` re-checks the name immediately
-    before the DROP and raises ``AssertionError`` on hit. The outer
-    try/except deliberately re-raises ``AssertionError`` so a regex
-    regression cannot silently fall through.
-
-    DROP runs without ``WITH (FORCE)``: plain DROP raises
-    ``ObjectInUse`` atomically if a backend reconnected in the
-    activity-check gap. Eviction-without-proof-of-ownership is the
-    failure mode this rail eliminates.
-
-    Returns the list of dropped DB names (for logging + test inspection).
-    Never raises on operational failure — orphan sweep is a hygiene
-    step, not a correctness gate.
+    Thin delegate to the canonical reaper in
+    ``app/db/dev_test_db_reaper.py`` (#1444). The sweep uses plain
+    ``DROP`` (never ``WITH (FORCE)``): it raises ``ObjectInUse``
+    (skipped) if a backend reconnected in the Rail-2→DROP gap, rather
+    than evicting it — the #1208 concurrent-pytest-safe semantics. The
+    three rails (name regex + ``pg_stat_activity`` + age) plus the
+    ``_NEVER_DROP`` guard live in the prod module now so the
+    jobs-process cadence reaper shares them. Returns dropped names;
+    never raises except the Rail-0 ``AssertionError``.
     """
-    if os.getenv("CI") == "true":
-        return []
-    try:
-        return _do_orphan_sweep(min_age=min_age, now=now)
-    except AssertionError:
-        raise
-    except Exception as exc:
-        warnings.warn(
-            f"Orphan sweep failed: {type(exc).__name__}: {exc}. "
-            f"Template build will continue; cleanup deferred to next "
-            f"pytest invocation.",
-            stacklevel=2,
-        )
-        return []
-
-
-def _do_orphan_sweep(
-    *,
-    min_age: timedelta,
-    now: datetime | None,
-) -> list[str]:
-    """Inner sweep body — see ``_drop_orphan_workers_older_than`` docstring."""
-    threshold = (now or datetime.now(UTC)) - min_age
-    threshold_epoch = int(threshold.timestamp())
-    dropped: list[str] = []
-
-    with psycopg.connect(_admin_database_url(), autocommit=True) as admin:
-        with admin.cursor(row_factory=psycopg.rows.tuple_row) as cur:
-            # Rail 2 — candidates with NO backend in pg_stat_activity.
-            cur.execute(
-                "SELECT d.datname FROM pg_database d "
-                "WHERE d.datname LIKE 'ebull_test%' "
-                "AND NOT EXISTS ("
-                "  SELECT 1 FROM pg_stat_activity a "
-                "  WHERE a.datname = d.datname"
-                ")"
-            )
-            candidates = [row[0] for row in cur.fetchall()]
-
-        for name in candidates:
-            # Rail 1 — name regex (epoch parse).
-            match = _ORPHAN_NAME_PATTERN.match(name)
-            if match is None:
-                continue
-            epoch = int(match.group("epoch"))
-
-            # Rail 3 — age backstop.
-            if epoch >= threshold_epoch:
-                continue
-
-            try:
-                # Rail 0 — final literal guard.
-                assert name not in _NEVER_DROP, (
-                    f"Refusing to DROP protected database {name!r}: "
-                    f"matched _ORPHAN_NAME_PATTERN AND age filter AND "
-                    f"_NEVER_DROP — regex regression."
-                )
-
-                query = sql.SQL("DROP DATABASE IF EXISTS {name}").format(
-                    name=sql.Identifier(name),
-                )
-                with admin.cursor() as cur:
-                    cur.execute(query)
-                dropped.append(name)
-            except AssertionError:
-                raise
-            except psycopg.errors.ObjectInUse:
-                # Backend reconnected in the gap between Rail 2 and
-                # DROP. Skip + try again next invocation. Expected
-                # under benign races, not a failure.
-                continue
-            except Exception as exc:
-                warnings.warn(
-                    f"Failed to drop orphan {name!r}: {type(exc).__name__}: {exc}",
-                    stacklevel=3,
-                )
-                continue
-
-    return dropped
+    return _prod_sweep_orphans(min_age, now=now)
 
 
 def _create_database_from_template(
@@ -900,6 +747,14 @@ def ebull_test_conn() -> Iterator[psycopg.Connection[tuple]]:
     url = test_database_url()
     with psycopg.connect(url) as setup_conn:
         _truncate_planner_tables(setup_conn)
+        # #1444 — creation-time relation budget. The teardown tripwire
+        # below is skipped by a ``kill -9`` (OOM / Ctrl-C), which is
+        # exactly how a runaway test left ~6-10M-relfile worker DBs that
+        # stalled crash recovery for hours (2026-06-02). Asserting at
+        # SETUP too means the FIRST surviving test after a skipped
+        # teardown fails fast and names the worker DB, bounding the
+        # accumulation a single session can reach.
+        _assert_worker_relations_under_ceiling(setup_conn)
 
     conn = psycopg.connect(url)
     try:

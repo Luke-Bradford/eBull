@@ -276,6 +276,7 @@ JOB_SEED_COST_MODELS = "seed_cost_models"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_FINANCIAL_FACTS_RETENTION_SWEEP = "financial_facts_retention_sweep"
+JOB_ORPHAN_TEST_DB_REAP = "orphan_test_db_reap"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
@@ -888,6 +889,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=2, minute=45),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # no-op on empty DB pre-bootstrap
+    ),
+    ScheduledJob(
+        name=JOB_ORPHAN_TEST_DB_REAP,
+        display_name="Orphan test-DB reap",
+        source="db",
+        description=(
+            "#1444 — daily reap of leaked ``ebull_test_*`` / ``ebull_mig*`` "
+            "databases (SIGKILL'd pytest workers, interrupted migration "
+            "replays). Dev-only: a hard no-op when app_env != dev. Force-"
+            "drops datconnlimit=-2 corpses then force-sweeps stale-named "
+            "inactive orphans (3 rails: name regex + pg_stat_activity + "
+            "age). Bounds the file-count an unclean shutdown's crash-"
+            "recovery fsync pass must walk. The boot path (jobs Step 10b) "
+            "reaps on every process start; this catches leaks accumulated "
+            "while a long-lived jobs process stays up."
+        ),
+        # 03:15 UTC — after the retention sweeps, low-traffic window.
+        cadence=Cadence.daily(hour=3, minute=15),
+        catch_up_on_boot=False,  # Step 10b already reaps at boot
     ),
     ScheduledJob(
         name=JOB_EXCHANGES_METADATA_REFRESH,
@@ -4021,6 +4041,29 @@ def financial_facts_retention_sweep() -> None:
             "financial_facts_retention_sweep complete: instruments=%d rows_deleted=%d",
             summary.instruments,
             summary.rows_deleted,
+        )
+
+
+def orphan_test_db_reap() -> None:
+    """Daily reap of leaked test databases (#1444).
+
+    Thin scheduler-side wrapper around
+    :func:`app.db.dev_test_db_reaper.run_orphan_test_db_reap`, which is a
+    hard no-op outside a dev-like ``app_env``. Adds job-runs telemetry
+    (``row_count`` = number of DBs reaped). Idempotent — a clean cluster
+    reaps 0.
+    """
+    from app.db.dev_test_db_reaper import run_orphan_test_db_reap
+
+    with _tracked_job(JOB_ORPHAN_TEST_DB_REAP) as tracker:
+        result = run_orphan_test_db_reap()
+        tracker.row_count = result.total_reaped
+        logger.info(
+            "orphan_test_db_reap complete: skipped=%s reaped=%d invalid=%r orphans=%r",
+            result.skipped,
+            result.total_reaped,
+            result.invalid,
+            result.orphans,
         )
 
 

@@ -104,3 +104,24 @@ def test_safe_wrapper_catches_non_psycopg_exceptions(
     # Every other metric unaffected.
     assert snapshot.db_size_bytes is not None
     assert snapshot.last_checkpoint_at is not None
+
+
+@pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
+def test_leaked_test_db_total_bytes_reflects_bloat() -> None:
+    """#1444 — the bloat-visibility metric reports the on-disk size of
+    leaked ``ebull_test_*`` DBs so an operator sees accumulating bloat
+    BEFORE the next crash recovery has to fsync-walk it.
+
+    The worker DB this suite runs against itself matches ``ebull_test_%``
+    (it is excluded from the dev cluster but counted here), so with at
+    least one leaked DB present the total is a positive int that is
+    consistent with the reported count.
+    """
+    snapshot = collect_postgres_health(database_url=test_database_url())
+
+    assert snapshot.leaked_test_db_count is not None
+    assert snapshot.leaked_test_db_total_bytes is not None
+    assert snapshot.leaked_test_db_total_bytes >= 0
+    if snapshot.leaked_test_db_count > 0:
+        assert snapshot.leaked_test_db_total_bytes > 0
+    assert snapshot.leaked_test_db_total_pretty is not None

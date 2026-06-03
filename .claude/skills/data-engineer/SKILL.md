@@ -1436,3 +1436,50 @@ When ADDING a new storage-side retention sweep for another mega-table (`filing_r
 Every metric is nullable + every breach flag is nullable; a failed probe (e.g. `pg_ls_waldir()` requires `pg_monitor` role on a non-superuser DB) returns `null` rather than `0` so a silent collection failure can't masquerade as "all clear". The `metric_errors` field lists which probes failed for ops triage.
 
 When adding a new storage discipline rule (retention, sweep, partition retrofit), wire its operator-visible signal into this endpoint AND into `.githooks/pre-push` if it's a push-time concern. The two surfaces share a single threshold constant (`DB_SIZE_WARN_BYTES` is the working example) so an operator never sees one surface clean while the other is breached.
+
+## 14. Postgres crash-recovery fsync tax — diagnosis runbook (#1444, 2026-06-02)
+
+**Symptom:** dev PG stuck in `the database system is in recovery mode` for tens of minutes to HOURS, rejecting every connection. Blocks bootstrap, live verification, DB-backed tests.
+
+**It is almost never WAL replay.** PG 17 after an unclean shutdown runs a **full-data-directory fsync** before accepting connections — `LOG: syncing data directory (pre-fsync), elapsed time: NNNN s, current path: ./base/<oid>/...`. This pass `fsync()`s **every file** in PGDATA. It is **file-count-bound, not data-size-bound**: 41 GB across 30M tiny files is far slower than 200 GB across 50k files. It IS progressing if `elapsed time` climbs across log lines; it is not deadlocked, just slow.
+
+**The bloat source is almost always leaked test worker DBs, NOT `ebull`.** Each `kill -9`'d xdist worker / interrupted migration-replay can leave a multi-million-relation `ebull_test_*_gwN` / `ebull_mig*` database on disk (TRUNCATE-only per-test cleanup means a test that `CREATE`s relations without dropping accumulates them across the whole session; `kill -9` skips the teardown that would trip the 50k `_assert_worker_relations_under_ceiling`). Real `ebull` is ~10-15k files (instruments + bounded `RANGE(period_end)` partitions + indexes). A 6-10M-file base dir is a leaked test DB. **Confirmed 2026-06-02:** 4 leaked DBs (OIDs 33553986-89, consecutive = gw0-3) at 6-10M files each = ~30M files = multi-hour recovery; `ebull` (OID 58791433) was a healthy 10,889 files.
+
+### Diagnosis commands (read-only — safe while PG is down)
+
+```bash
+# 1. Confirm it's the fsync pass, not WAL replay (look for "syncing data directory"):
+docker logs ebull-postgres --tail 40 2>&1 | grep -i "syncing data directory\|redo\|recovery"
+
+# 2. Per-DB file counts — find the bloated dir(s):
+docker exec ebull-postgres bash -lc 'for d in /var/lib/postgresql/data/base/*/; do printf "%s " "$(basename $d)"; ls -f "$d" | wc -l; done' | sort -k2 -rn | head
+
+# 3. Confirm bloat = permanent relations, not temp (sample filenames):
+#    temp files start t<backend>_ ; permanent main forks are plain-numeric.
+docker exec ebull-postgres bash -lc "ls -f /var/lib/postgresql/data/base/<oid> | head -300000 | awk '/^t[0-9]/{t++} /^[0-9]+$/{n++} END{print \"temp=\"t\" permanent=\"n}'"
+```
+
+`ebull`'s OID = the one with ~10-15k files (NOT one of the multi-million outliers). Disambiguates "production schema leak" (rare, serious) from "orphaned test DB" (common, the usual culprit).
+
+### Remediation
+
+1. **Do NOT `docker restart` / `docker compose up -d` to "fix" a slow recovery** — both recreate/restart the container and the official `postgres` entrypoint then runs `find /var/lib/postgresql/data ! -user postgres -exec chown postgres` over EVERY file (a D-state disk walk, minutes at high file count) BEFORE the postmaster even starts, then PG still does WAL redo on top. Confirmed #1444 (2026-06-02): a recreate to clear a wedged `datconnlimit=-2` corpse cost ~270s chown + ~8min WAL redo (the killed full-suite had written GBs of WAL). `syncfs` removes the per-file *fsync* walk but NOT the entrypoint chown and NOT WAL redo. Restart/recreate is the right move ONLY when PG is genuinely wedged (a corpse `WITH (FORCE)` won't drop, advisory lock stuck) — not to speed up a recovery that is already progressing. Let an in-progress recovery finish.
+2. **After PG accepts connections:** `uv run python -m tests.fixtures.cleanup_test_dbs` — force-drops every `ebull_test_*` / `ebull_mig*` (WITH FORCE, clears `datconnlimit=-2` corpses too) except `ebull_test_template`. Removes the orphan files → next crash-recovery drops from hours to seconds.
+
+### Reaper gaps that let this recur (`tests/fixtures/ebull_test_db.py`)
+
+- `_assert_worker_relations_under_ceiling` (50k) runs in **teardown** — `kill -9` skips it. Not a kill-9-proof backstop.
+- `_force_drop_invalid_test_dbs` drops only `datconnlimit=-2` corpses.
+- `_drop_orphan_workers_older_than` uses **plain DROP** (no FORCE) → a held connection blocks it; and both reapers run **only at test-session start**, which can't happen while PG is in recovery (chicken-and-egg).
+
+**The single biggest dead-time lever (Codex-validated against PG17 docs): `recovery_init_sync_method=syncfs`.** Default is `fsync`, which "recursively opens and synchronizes ALL files" under PGDATA — the per-file walk that costs hours at 30M files. `syncfs` issues one `syncfs()` per filesystem instead, skipping the per-file open. Set it on the dev Docker Postgres (`command: -c recovery_init_sync_method=syncfs` in `docker-compose.yml`, or `postgresql.conf`). Linux-only; acceptable for single-volume dev. This makes future crash recovery seconds regardless of file count — it does NOT remove the need to drop orphans (catalog bloat, planner cost) but removes the recovery stall.
+
+Durable fix (#1444 — SHIPPED, see locations):
+- ✅ **`recovery_init_sync_method=syncfs`** on dev PG — `docker-compose.yml` `command:` block (the direct fix for recovery dead-time; makes the next crash recovery seconds regardless of file count).
+- ✅ **Canonical reaper** `app/db/dev_test_db_reaper.py` is the single source of truth for the safety rails (name regex + `NEVER_DROP`). The test fixture (`tests/fixtures/ebull_test_db.py`) imports the constants + delegates its sweep to it (`app` must not import `tests` — rails live under `app/`, fixture consumes them). **FORCE vs plain DROP is load-bearing** (a #1444 Codex BLOCKING-equivalent): live-capable orphans (`datconnlimit=-1`) use **plain `DROP`** in `sweep_orphan_test_databases` — the activity rail proves no backend only at snapshot time, so a sibling that connects in the snapshot→DROP gap raises `ObjectInUse` and is skipped, never evicted (#1208 invariant). `DROP ... WITH (FORCE)` is reserved for `datconnlimit=-2` **corpses** (`force_drop_invalid_test_dbs`), which refuse ALL connections (superuser included) so have no live sibling to kill. `REVOKE CONNECT` is NOT a guard in a `postgres`-user dev cluster (owner/superusers bypass `CONNECT`).
+- ✅ **Run on a cadence + at jobs-process start:** `run_orphan_test_db_reap()` (dev-only via `app_env`; hard no-op in prod) called at jobs boot (`app/jobs/__main__.py` Step 10b) + daily `ScheduledJob` `orphan_test_db_reap` (`app/workers/scheduler.py`, 03:15 UTC). Breaks the chicken-and-egg where the test-session-start sweep can't run while PG is wedged in recovery over the very bloat it would clear.
+- ✅ **Creation-time relation budget:** `_assert_worker_relations_under_ceiling` now runs at fixture **setup** too (`ebull_test_conn`), not only teardown — a `kill -9` skips teardown, so the first surviving test after a skipped teardown fails fast + names the worker DB, bounding per-session accumulation.
+- ✅ **Bloat alarm on `/system/postgres-health`:** `leaked_test_db_total_bytes` / `_pretty` (`app/services/postgres_health.py::_q_leaked_test_db_bytes`, `statement_timeout='2s'`-guarded so a `datconnlimit=-2` corpse hang surfaces as a caught timeout, not a wedge). Size is the connection-free proxy — per-DB relation count would need connecting to each leaked DB (the #1393 hang). Joins the existing `leaked_test_db_count` / `_names`.
+- ⏳ **Find the test(s) that `CREATE` relations without dropping** — still open (tracked separately). The now-doubled tripwire (setup + teardown) NAMES the culprit worker DB on the next occurrence; fixing requires that reproduction signal. Migration-replay tests (`ebull_mig*`) create separate DBs (reaper-handled), NOT the worker-DB relation leak. Suspect: partition-creating tests accumulating across the session.
+
+Do NOT: manually `rm base/<oid>`, `pg_resetwal`, or `fsync=off` — those risk whole-cluster loss. The safe shortcut for THIS recovery is to let it finish; `syncfs` is for NEXT time.

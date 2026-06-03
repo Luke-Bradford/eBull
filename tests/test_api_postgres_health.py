@@ -49,6 +49,8 @@ def _snapshot(**overrides: object) -> PostgresHealthSnapshot:
         "db_size_breached_warn": False,
         "leaked_test_db_count": 0,
         "leaked_test_db_names": [],
+        "leaked_test_db_total_bytes": 0,
+        "leaked_test_db_total_pretty": "0 bytes",
         "wal_dir_bytes": 2 * 1024 * 1024 * 1024,  # 2 GB — below 4 GB
         "wal_dir_pretty": "2 GB",
         "wal_since_checkpoint_bytes": 1_000_000,
@@ -90,6 +92,8 @@ def test_endpoint_returns_200_with_all_fields() -> None:
         "db_size_breached_warn",
         "leaked_test_db_count",
         "leaked_test_db_names",
+        "leaked_test_db_total_bytes",
+        "leaked_test_db_total_pretty",
         "wal_dir_bytes",
         "wal_dir_pretty",
         "wal_since_checkpoint_bytes",
