@@ -124,6 +124,7 @@ def sweep_orphan_test_databases(
     min_age: timedelta = timedelta(hours=1),
     *,
     now: datetime | None = None,
+    admin_url: str | None = None,
 ) -> list[str]:
     """Drop stale-named, inactive ``ebull_test_*`` orphan DBs. See module docstring.
 
@@ -137,7 +138,7 @@ def sweep_orphan_test_databases(
     if os.getenv("CI") == "true":
         return []
     try:
-        return _do_sweep(min_age=min_age, now=now)
+        return _do_sweep(min_age=min_age, now=now, admin_url=admin_url)
     except AssertionError:
         raise
     except Exception as exc:  # noqa: BLE001 — best-effort hygiene step
@@ -178,11 +179,11 @@ def select_orphans_to_drop(
     return out
 
 
-def _do_sweep(*, min_age: timedelta, now: datetime | None) -> list[str]:
+def _do_sweep(*, min_age: timedelta, now: datetime | None, admin_url: str | None = None) -> list[str]:
     resolved_now = now or datetime.now(UTC)
     dropped: list[str] = []
 
-    with psycopg.connect(admin_database_url(), autocommit=True) as admin:
+    with psycopg.connect(admin_url or admin_database_url(), autocommit=True) as admin:
         with admin.cursor(row_factory=psycopg.rows.tuple_row) as cur:
             cur.execute(
                 "SELECT d.datname, "
@@ -233,7 +234,11 @@ class ReapResult:
         return len(self.invalid) + len(self.orphans)
 
 
-def run_orphan_test_db_reap(min_age: timedelta = timedelta(hours=1)) -> ReapResult:
+def run_orphan_test_db_reap(
+    min_age: timedelta = timedelta(hours=1),
+    *,
+    admin_url: str | None = None,
+) -> ReapResult:
     """Jobs-process entrypoint: reap leaked test DBs (boot + daily cadence).
 
     Runs ONLY in a dev-like ``app_env`` (``dev`` / ``test`` / ``local``);
@@ -246,14 +251,14 @@ def run_orphan_test_db_reap(min_age: timedelta = timedelta(hours=1)) -> ReapResu
     if settings.app_env not in _DEV_LIKE_ENVS:
         logger.info("orphan test-DB reap skipped: app_env=%s", settings.app_env)
         return ReapResult(skipped=True)
-    invalid = force_drop_invalid_test_dbs()
-    orphans = sweep_orphan_test_databases(min_age)
+    invalid = force_drop_invalid_test_dbs(admin_url=admin_url)
+    orphans = sweep_orphan_test_databases(min_age, admin_url=admin_url)
     if invalid or orphans:
         logger.warning("reaped leaked test DBs (#1444): invalid=%r orphans=%r", invalid, orphans)
     return ReapResult(skipped=False, invalid=invalid, orphans=orphans)
 
 
-def force_drop_invalid_test_dbs() -> list[str]:
+def force_drop_invalid_test_dbs(*, admin_url: str | None = None) -> list[str]:
     """Force-drop INVALID (``datconnlimit = -2``) test-owned DB corpses.
 
     PG marks a DB ``datconnlimit = -2`` when a ``DROP DATABASE`` is
@@ -267,7 +272,7 @@ def force_drop_invalid_test_dbs() -> list[str]:
         return []
     dropped: list[str] = []
     try:
-        with psycopg.connect(admin_database_url(), autocommit=True) as admin:
+        with psycopg.connect(admin_url or admin_database_url(), autocommit=True) as admin:
             with admin.cursor(row_factory=psycopg.rows.tuple_row) as cur:
                 cur.execute(
                     "SELECT datname FROM pg_database "

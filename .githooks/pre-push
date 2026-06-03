@@ -280,6 +280,30 @@ else
   done <<< "${changed_files}"
 fi
 
+# C1 (#1447): the pytest suite runs on the dedicated 'postgres-test' cluster
+# (port 5433, disk volume pgdata_test) — NOT the dev 'ebull' cluster — so a
+# leaked/abandoned test DB can never wedge ebull's crash recovery (RCA
+# 2026-06-03). Ensure it's up before pytest. Profile-gated, so a normal
+# `docker compose up` never starts it. Skipped when EBULL_TEST_DATABASE_URL is
+# set (CI / custom cluster — caller owns provisioning there).
+if [[ -z "${EBULL_TEST_DATABASE_URL:-}" ]]; then
+  echo "==> Pre-push gate: ensuring 'postgres-test' cluster (5433) is up"
+  if ! docker compose --profile test up -d postgres-test >/dev/null 2>&1; then
+    echo "ERROR: could not start the postgres-test cluster."
+    echo "       docker compose --profile test up -d postgres-test"
+    exit 1
+  fi
+  _pt_ready=""
+  for _i in $(seq 1 30); do
+    if docker exec ebull-postgres-test pg_isready -U postgres >/dev/null 2>&1; then _pt_ready=1; break; fi
+    sleep 1
+  done
+  if [[ -z "${_pt_ready}" ]]; then
+    echo "ERROR: postgres-test cluster did not become ready within 30s."
+    exit 1
+  fi
+fi
+
 case "${run_mode}" in
   prime)
     # testmon is incompatible with pytest-xdist, so -n0 is forced.
