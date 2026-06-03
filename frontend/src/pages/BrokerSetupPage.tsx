@@ -37,6 +37,7 @@ import {
   createBrokerCredential,
   revokeBrokerCredential,
   validateBrokerCredential,
+  validateStoredCredentials,
 } from "@/api/brokerCredentials";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
 import { ENVIRONMENT } from "@/lib/credentialSetMode";
@@ -161,6 +162,24 @@ export function BrokerSetupPage(): JSX.Element {
           }
         }
         throw saveErr;
+      }
+
+      // Record health on the freshly-stored rows. The transient
+      // validateBrokerCredential above proved the keys authenticate, but
+      // /validate does NOT persist health — the stored rows land UNTESTED,
+      // and the high-frequency sync's portfolio_sync layer is gated on
+      // health=VALID. Without this probe the operator completes setup but
+      // the portfolio/dashboard silently never populate (positions + quotes
+      // are never fetched). validate-stored is the canonical source='probe'
+      // path that flips UNTESTED→VALID. Best-effort: a transient failure
+      // here must not strand the operator on /setup/broker (the keys are
+      // already saved and the Settings "Test connection" button is the
+      // recovery path), so we swallow and proceed.
+      try {
+        await validateStoredCredentials();
+      } catch {
+        // Non-fatal: keys are stored; health stays UNTESTED until the
+        // operator re-validates from Settings. Setup still completes.
       }
 
       // Flip the RequireAuth gate.
