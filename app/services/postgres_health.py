@@ -143,8 +143,11 @@ def _q_db_size(conn: psycopg.Connection[tuple]) -> tuple[int, str]:
 def _q_leaked_test_dbs(conn: psycopg.Connection[tuple]) -> list[str]:
     with conn.cursor() as cur:
         cur.execute(
+            # ``_`` is a LIKE wildcard; escape it (ESCAPE '!') so the
+            # predicate matches the literal ``ebull_test_`` prefix only —
+            # consistent with force_drop_invalid_test_dbs (bot #1446).
             "SELECT datname FROM pg_database "
-            " WHERE datname LIKE 'ebull_test_%' "
+            " WHERE datname LIKE 'ebull!_test!_%' ESCAPE '!' "
             "   AND datname != 'ebull_test_template' "
             " ORDER BY datname"
         )
@@ -164,10 +167,12 @@ def _q_leaked_test_db_bytes(conn: psycopg.Connection[tuple]) -> tuple[int, str]:
         cur.execute("SET statement_timeout = '2s'")
         try:
             cur.execute(
+                # ESCAPE '!' so the literal ``_`` are matched, not LIKE
+                # wildcards (bot #1446; mirrors _q_leaked_test_dbs above).
                 "SELECT COALESCE(sum(pg_database_size(datname)), 0)::bigint, "
                 "       pg_size_pretty(COALESCE(sum(pg_database_size(datname)), 0)::bigint) "
                 "  FROM pg_database "
-                " WHERE datname LIKE 'ebull_test_%' "
+                " WHERE datname LIKE 'ebull!_test!_%' ESCAPE '!' "
                 "   AND datname != 'ebull_test_template'"
             )
             row = cur.fetchone()
