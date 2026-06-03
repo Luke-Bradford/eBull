@@ -280,14 +280,14 @@ else
   done <<< "${changed_files}"
 fi
 
-# C1 (#1447): the pytest suite runs on the dedicated EPHEMERAL 'postgres-test'
-# cluster (port 5433, tmpfs) — NOT the dev 'ebull' cluster — so a leaked/
-# abandoned test DB can never wedge ebull's crash recovery (RCA 2026-06-03).
-# Ensure it's up before pytest. Profile-gated, so a normal `docker compose up`
-# never starts it. Skipped when EBULL_TEST_DATABASE_URL is set (CI / custom
-# cluster — caller owns provisioning there).
+# C1 (#1447): the pytest suite runs on the dedicated 'postgres-test' cluster
+# (port 5433, disk volume pgdata_test) — NOT the dev 'ebull' cluster — so a
+# leaked/abandoned test DB can never wedge ebull's crash recovery (RCA
+# 2026-06-03). Ensure it's up before pytest. Profile-gated, so a normal
+# `docker compose up` never starts it. Skipped when EBULL_TEST_DATABASE_URL is
+# set (CI / custom cluster — caller owns provisioning there).
 if [[ -z "${EBULL_TEST_DATABASE_URL:-}" ]]; then
-  echo "==> Pre-push gate: ensuring ephemeral 'postgres-test' cluster (5433) is up"
+  echo "==> Pre-push gate: ensuring 'postgres-test' cluster (5433) is up"
   if ! docker compose --profile test up -d postgres-test >/dev/null 2>&1; then
     echo "ERROR: could not start the postgres-test cluster."
     echo "       docker compose --profile test up -d postgres-test"

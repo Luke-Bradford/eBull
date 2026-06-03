@@ -257,16 +257,24 @@ def _swap_database(url: str, new_db: str) -> str:
 
 
 def _swap_port(url: str, new_port: str) -> str:
-    """Return ``url`` with its port replaced, preserving userinfo + host."""
+    """Return ``url`` with its port replaced, preserving the ORIGINAL
+    (percent-encoded) netloc — userinfo, IPv6 brackets, and all.
+
+    Rebuilding the netloc from ``urlparse``'s ``.username`` / ``.password``
+    would corrupt the URL, because those accessors return the percent-DECODED
+    values: a password URL-encoded as ``p%40ss`` round-trips to a literal
+    ``p@ss`` and the connection breaks (#1448 bot BLOCKING). So splice only
+    the port out of the raw netloc string.
+    """
     parsed = urlparse(url)
-    host = parsed.hostname or "localhost"
-    userinfo = ""
-    if parsed.username:
-        userinfo = parsed.username
-        if parsed.password:
-            userinfo += f":{parsed.password}"
-        userinfo += "@"
-    return urlunparse(parsed._replace(netloc=f"{userinfo}{host}:{new_port}"))
+    if parsed.port is None:
+        netloc = f"{parsed.netloc}:{new_port}"
+    else:
+        # When a port is present it is always the final ``:``-segment of the
+        # netloc (IPv6 hosts are bracketed, so the only bare trailing colon is
+        # the port). rsplit-from-the-right is robust to ``:`` inside userinfo.
+        netloc = f"{parsed.netloc.rsplit(':', 1)[0]}:{new_port}"
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
 def _assert_not_dev_cluster(test_base_url: str) -> None:
