@@ -378,6 +378,24 @@ describe("ProcessesTable", () => {
     ).toBeNull();
   });
 
+  it("gate banner uses 'run the bootstrap' copy (not 're-run') when pending", () => {
+    renderTableWithStatus(
+      [
+        makeProcessRow({
+          process_id: "bootstrap",
+          mechanism: "bootstrap",
+          display_name: "First-install bootstrap",
+          status: "pending_first_run",
+        }),
+      ],
+      "pending",
+    );
+    expect(
+      screen.getByText(/run the bootstrap from the bootstrap row/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/re-run failed stages/i)).toBeNull();
+  });
+
   it("renders all rows when bootstrap status is complete", () => {
     renderTableWithStatus(
       [
@@ -424,6 +442,31 @@ describe("ProcessesTable", () => {
       screen.getByText(/replays the full first-install bootstrap/i),
     ).toBeTruthy();
     expect(screen.queryByText(/resets the watermark/i)).toBeNull();
+  });
+
+  it("first-install bootstrap modal uses 'Start bootstrap' heading + non-destructive copy", async () => {
+    renderTableWithStatus(
+      [
+        makeProcessRow({
+          process_id: "bootstrap",
+          mechanism: "bootstrap",
+          display_name: "First-install bootstrap",
+          status: "pending_first_run",
+          can_iterate: false,
+          can_full_wash: true,
+          can_cancel: false,
+        }),
+      ],
+      "pending",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Run bootstrap" }));
+    expect(
+      await screen.findByRole("heading", { name: /Start bootstrap/i }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Safe to run/i)).toBeTruthy();
+    // Destructive re-run copy must NOT appear on a never-run row.
+    expect(screen.queryByText(/resets every stage/i)).toBeNull();
+    expect(screen.queryByRole("heading", { name: /Re-run all/i })).toBeNull();
   });
 
   it("scheduled_job full-wash modal keeps original watermark copy", async () => {

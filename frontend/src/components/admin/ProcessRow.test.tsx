@@ -321,6 +321,29 @@ describe("ProcessRow", () => {
     expect(screen.queryByRole("button", { name: "Full-wash" })).toBeNull();
   });
 
+  it("first-install bootstrap shows only 'Run bootstrap' (no Re-run/Cancel)", () => {
+    renderRow({
+      row: makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        display_name: "First-install bootstrap",
+        status: "pending_first_run",
+        can_iterate: false,
+        can_full_wash: true,
+        can_cancel: false,
+      }),
+    });
+    const runBtn = screen.getByRole("button", {
+      name: "Run bootstrap",
+    }) as HTMLButtonElement;
+    expect(runBtn).toBeTruthy();
+    expect(runBtn.disabled).toBe(false);
+    // Inapplicable affordances are hidden, not greyed, on a never-run row.
+    expect(screen.queryByRole("button", { name: "Re-run failed" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Re-run all" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
   it("scheduled_job row keeps Iterate / Full-wash labels", () => {
     renderRow({
       row: makeProcessRow({
