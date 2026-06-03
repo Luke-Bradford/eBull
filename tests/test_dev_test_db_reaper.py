@@ -136,11 +136,18 @@ def test_reap_drops_real_orphan_end_to_end(monkeypatch: pytest.MonkeyPatch) -> N
             cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         _create_empty_database(admin, name)
         try:
-            result = run_orphan_test_db_reap()
+            # admin_url pins the reap to the SEPARATE test cluster (C1 #1447)
+            # — the same cluster the orphan was created on above. The
+            # jobs-process default would target the dev ``ebull`` cluster.
+            result = run_orphan_test_db_reap(admin_url=_admin_database_url())
             assert result.skipped is False
             assert name in result.orphans, f"got {result!r}"
             assert not _ensure_database(admin, name), "orphan still present after reap"
-            assert _ensure_database(admin, "ebull"), "operator dev DB vanished"
+            # Protect-rail check: a non-``ebull_test_*`` DB (the maintenance
+            # ``postgres`` DB) must survive — the sweep only targets the
+            # test-DB name pattern. (Post-C1 the dev ``ebull`` DB does not
+            # live on this cluster, so assert against ``postgres`` instead.)
+            assert _ensure_database(admin, "postgres"), "maintenance DB vanished"
         finally:
             with admin.cursor() as cur:
                 cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))

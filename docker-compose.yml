@@ -2,19 +2,32 @@ services:
   postgres:
     image: postgres:17
     container_name: ebull-postgres
-    restart: unless-stopped
+    # restart on-failure:5 (NOT unless-stopped) — #1446 follow-up / RCA
+    # 2026-06-03. unless-stopped converted an OOM-during-recovery into a
+    # SILENT 18h infinite loop (RestartCount hit 19): each restart replayed
+    # the same frozen redo pointer, OOM'd at the cgroup, restarted. on-failure
+    # with a cap surfaces the wedge instead of hiding it. Do NOT wire the
+    # healthcheck below to auto-restart — that re-creates the loop.
+    restart: on-failure:5
     # #1208 Sub 1 — bound container memory + give PG enough shared memory
     # for parallel workers + autovacuum on partitioned ownership tables.
     # shared_buffers=2GB (set in the ``command`` block below) needs the
     # container to actually have memory available; default shm_size of 64MB
     # starves PG17 parallel workers under load.
     #
-    # Raised 4g→6g (#1395, 2026-05-30): with shared_buffers=2GB reserved, a 4g
-    # cap left too little headroom for WAL replay over the partitioned
-    # ownership tables — the kernel OOM-killer kept killing the startup
-    # process (signal 9) mid-recovery, so crash recovery never completed
-    # and the container crash-looped (RestartCount hit 12). 6g (host VM
-    # has ~8g) lets recovery finish.
+    # NOTE (RCA 2026-06-03, docs/proposals/etl/2026-06-03-pg-recovery-oom-rca.md):
+    # the recurring recovery OOM is NOT a shared_buffers / WAL-replay-headroom
+    # problem (the old #1395 framing below is FALSIFIED). The driver is
+    # per-relation memory (relcache/smgr + kernel dentry/inode slab) over
+    # ~700k LEAKED test-DB relation files written into THIS cluster's WAL by
+    # the full pytest suite. No knob under the 6g cap fixes a 700k-relation
+    # replay. The structural fix is keeping the test suite on a SEPARATE/tmpfs
+    # cluster (C1) so its WAL can never enter ebull recovery; this is tracked
+    # and MUST land before declaring the loop closed. shared_buffers stays 2GB
+    # (lowering it frees ~0 — it only ever faults ~720MB during recovery).
+    #
+    # Historical (#1395, 2026-05-30) — raised 4g→6g believing recovery was
+    # WAL-replay-headroom bound. Superseded by the RCA above.
     mem_limit: 6g
     shm_size: 1g
     # #1410 — runtime tuning as command-line ``-c`` flags (single source of
@@ -96,6 +109,69 @@ services:
       - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # Surfaces a wedged cluster as STATUS=unhealthy (visible to a crash-loop
+    # detector / `docker ps`) without auto-restarting — auto-restart on
+    # unhealthy would re-create the silent loop. start_period 90m: a legit
+    # large recovery can run >60min; shorter would flap healthy↔unhealthy.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ebull"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90m
+
+  # Dedicated EPHEMERAL cluster for the pytest suite (C1, #1447 / RCA
+  # docs/proposals/etl/2026-06-03-pg-recovery-oom-rca.md).
+  #
+  # WHY THIS EXISTS: the suite used to create its ebull_test_* DBs in the
+  # dev `postgres` service above — same cluster, same pg_wal as the
+  # operator's `ebull`. A kill-9'd / OOM'd full-suite run leaked ~700k
+  # relations and wrote ~20GB WAL into that shared pg_wal; ebull's crash
+  # recovery then had to replay it, OOM'd on the per-relation memory at the
+  # 6g cgroup, and looped silently for 18h. Putting the suite on a SEPARATE
+  # cluster makes that structurally impossible: its WAL lives in its own
+  # pg_wal and can never enter `ebull` recovery.
+  #
+  # DISK-backed (NOT tmpfs): on the ~7.75g Docker VM, a tmpfs PGDATA charges
+  # every byte of test-DB data to the container memory cgroup, so parallel
+  # xdist worker-DB clones + a bootstrap test OOM a small mem_limit (observed:
+  # tmpfs cluster OOM-killed at 2g mid-suite, then recursed into its own
+  # recovery OOM — the very mode we're isolating). A disk volume keeps DB data
+  # off RAM so mem_limit only bounds process/recovery memory. Throwaway data:
+  # fsync/full_page_writes/synchronous_commit off for speed; the volume is
+  # wipeable any time (`docker compose rm -sfv postgres-test`) with zero data
+  # loss. restart on-failure:3 (NOT unless-stopped) so a crash surfaces
+  # instead of silently looping — and it is isolated from `ebull` regardless.
+  #
+  # Profile-gated: a normal `docker compose up` does NOT start it, so it never
+  # contends for RAM with the 6g dev cluster. Start it for the suite (the
+  # pre-push hook does this automatically):
+  #   docker compose --profile test up -d postgres-test
+  postgres-test:
+    image: postgres:17
+    container_name: ebull-postgres-test
+    profiles: ["test"]
+    restart: on-failure:3
+    mem_limit: 3g
+    shm_size: 512m
+    command:
+      - postgres
+      - -c
+      - max_locks_per_transaction=1024   # partitioned ownership tables need it (#1187)
+      - -c
+      - fsync=off                        # throwaway test data — durability irrelevant, faster
+      - -c
+      - full_page_writes=off
+      - -c
+      - synchronous_commit=off
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "${POSTGRES_TEST_BIND:-127.0.0.1}:${POSTGRES_TEST_PORT:-5433}:5432"
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
@@ -109,3 +185,4 @@ services:
 
 volumes:
   pgdata:
+  pgdata_test:

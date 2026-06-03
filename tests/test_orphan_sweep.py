@@ -22,7 +22,6 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from app.config import settings
 from tests.fixtures.ebull_test_db import (
     _NEVER_DROP,
     TEMPLATE_DB_NAME,
@@ -86,8 +85,12 @@ def test_drops_stale_orphan_leaves_protected_dbs(
         # Rail 0 — protect set survives regardless.
         for protected in _NEVER_DROP:
             assert protected not in dropped, f"{protected!r} must never appear in sweep output"
-        # Specifically pin the operator dev DB + template.
-        assert _ensure_database(_admin_conn, "ebull"), "operator dev DB vanished"
+        # Pin a non-``ebull_test_*`` DB (maintenance ``postgres``) + the
+        # template. Post-C1 (#1447) this runs on the SEPARATE test cluster
+        # (5433) where the dev ``ebull`` DB does not exist, so ``postgres``
+        # is the stand-in proving the sweep leaves non-test DBs untouched;
+        # the template (in ``_NEVER_DROP``) proves Rail 0.
+        assert _ensure_database(_admin_conn, "postgres"), "maintenance DB vanished"
         assert _ensure_database(_admin_conn, TEMPLATE_DB_NAME), "test-template DB vanished"
     finally:
         _drop_if_exists(_admin_conn, _STALE_EPOCH_NAME)
@@ -108,7 +111,10 @@ def test_old_but_active_db_is_not_dropped(
     _drop_if_exists(_admin_conn, _STALE_ACTIVE_NAME)
     _create_empty_database(_admin_conn, _STALE_ACTIVE_NAME)
 
-    keepalive_url = _swap_database(settings.database_url, _STALE_ACTIVE_NAME)
+    # Keepalive must connect to the DB on the SAME (test) cluster it was
+    # created on — _admin_database_url() is the 5433 test cluster (C1 #1447),
+    # NOT settings.database_url (the dev 5432 cluster).
+    keepalive_url = _swap_database(_admin_database_url(), _STALE_ACTIVE_NAME)
     keepalive: psycopg.Connection[object] | None = None
     try:
         keepalive = psycopg.connect(

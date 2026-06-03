@@ -26,10 +26,16 @@ The strategy:
    to by the test suite, with the documented exception of
    ``tests/smoke/test_app_boots.py`` (the lifespan smoke gate).
 
-Critically: the dev DB at ``settings.database_url`` is never touched
-by anything in this module. ``_assert_test_db`` enforces that any
-destructive op runs against an ``ebull_test_*`` database, never
-``ebull``.
+C1 (#1447 / RCA 2026-06-03): every DB this module touches lives on a
+SEPARATE cluster (``postgres-test``, port 5433) resolved via
+``_test_cluster_base_url()`` — NOT the dev ``ebull`` cluster (5432).
+This is the structural guarantee that a leaked/abandoned test DB can
+never bloat ebull's WAL and wedge its crash recovery (the failure that
+looped the dev DB for 18h). ``_assert_not_dev_cluster`` fails loud if a
+misconfiguration ever re-couples them; the orphan reaper is pinned to
+the test cluster via its ``admin_url`` argument. ``_assert_test_db``
+still enforces that any destructive op targets an ``ebull_test_*``
+database, never ``ebull``.
 """
 
 from __future__ import annotations
@@ -82,6 +88,18 @@ EBULL_SMOKE_LIFESPAN_LOCK = 0x65427554534D4B  # ASCII "eBuTSMK"
 # Run-id env var. Set once in the controller; xdist propagates env to
 # spawned workers automatically.
 _RUN_ID_ENV = "EBULL_PYTEST_RUN_ID"
+
+# C1 (#1447 / RCA 2026-06-03): the pytest suite MUST run on a cluster
+# separate from the operator's dev ``ebull`` so its WAL can never enter
+# ebull's crash recovery (leaked test-DB relations once bloated the shared
+# pg_wal and wedged ebull recovery in an 18h OOM loop). The suite's base
+# URL is resolved here, NOT from ``settings.database_url`` (the dev DB).
+# Default = the dev URL with the port swapped to the dedicated test cluster
+# (compose service ``postgres-test``, disk-backed, port 5433); override via
+# ``EBULL_TEST_DATABASE_URL`` (e.g. CI). ``_assert_not_dev_cluster`` makes a
+# misconfiguration fail loud instead of silently re-coupling the clusters.
+_TEST_DB_URL_ENV = "EBULL_TEST_DATABASE_URL"
+_TEST_CLUSTER_PORT = os.environ.get("POSTGRES_TEST_PORT", "5433")
 
 
 # Path to the migration-hash cache file. Lives under the user's cache
@@ -238,6 +256,62 @@ def _swap_database(url: str, new_db: str) -> str:
     return urlunparse(parsed._replace(path=f"/{new_db}"))
 
 
+def _swap_port(url: str, new_port: str) -> str:
+    """Return ``url`` with its port replaced, preserving userinfo + host."""
+    parsed = urlparse(url)
+    host = parsed.hostname or "localhost"
+    userinfo = ""
+    if parsed.username:
+        userinfo = parsed.username
+        if parsed.password:
+            userinfo += f":{parsed.password}"
+        userinfo += "@"
+    return urlunparse(parsed._replace(netloc=f"{userinfo}{host}:{new_port}"))
+
+
+def _assert_not_dev_cluster(test_base_url: str) -> None:
+    """Fail loud if the test base URL resolves to the dev ``ebull`` cluster.
+
+    C1 invariant (#1447): the suite must never share a cluster with the
+    operator's dev DB. Same (host, port) ⇒ same pg_wal ⇒ a leaked/abandoned
+    test DB can wedge ebull's crash recovery. Enforced in code so a stray
+    ``EBULL_TEST_DATABASE_URL`` or a future default change can't silently
+    re-couple them.
+    """
+
+    def _canon(host: str | None) -> str:
+        # Loopback aliases all name the same local cluster — collapse them so
+        # localhost:5432 vs 127.0.0.1:5432 vs ::1:5432 can't bypass the guard.
+        h = (host or "localhost").lower()
+        return "localhost" if h in {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""} else h
+
+    dev = urlparse(settings.database_url)
+    test = urlparse(test_base_url)
+    dev_hostport = (_canon(dev.hostname), dev.port or 5432)
+    test_hostport = (_canon(test.hostname), test.port or 5432)
+    if dev_hostport == test_hostport:
+        raise RuntimeError(
+            f"Test cluster {test_hostport} == dev cluster {dev_hostport}. The "
+            "pytest suite must run on the SEPARATE 'postgres-test' cluster "
+            "(port 5433) so its WAL can never enter ebull's crash recovery "
+            "(C1 / #1447). Start it:  docker compose --profile test up -d "
+            "postgres-test.  Override the URL via EBULL_TEST_DATABASE_URL."
+        )
+
+
+def _test_cluster_base_url() -> str:
+    """Base URL for the dedicated pytest cluster (NOT the dev ``ebull`` DB).
+
+    Default derives from ``settings.database_url`` with the port swapped to
+    the test cluster, so creds/host stay aligned with the dev setup while the
+    cluster is physically distinct. Override via ``EBULL_TEST_DATABASE_URL``.
+    """
+    explicit = os.environ.get(_TEST_DB_URL_ENV)
+    base = explicit if explicit else _swap_port(settings.database_url, _TEST_CLUSTER_PORT)
+    _assert_not_dev_cluster(base)
+    return base
+
+
 def _admin_database_url() -> str:
     """URL for the maintenance ``postgres`` DB.
 
@@ -245,7 +319,7 @@ def _admin_database_url() -> str:
     cross-invocation advisory lock. Must never be confused with the
     operator's dev DB.
     """
-    return _swap_database(settings.database_url, "postgres")
+    return _swap_database(_test_cluster_base_url(), "postgres")
 
 
 def _run_id() -> str:
@@ -284,14 +358,14 @@ test_db_name.__test__ = False  # type: ignore[attr-defined]
 
 
 def test_database_url() -> str:
-    return _swap_database(settings.database_url, test_db_name())
+    return _swap_database(_test_cluster_base_url(), test_db_name())
 
 
 test_database_url.__test__ = False  # type: ignore[attr-defined]
 
 
 def template_database_url() -> str:
-    return _swap_database(settings.database_url, TEMPLATE_DB_NAME)
+    return _swap_database(_test_cluster_base_url(), TEMPLATE_DB_NAME)
 
 
 def _migration_hash() -> str:
@@ -340,7 +414,9 @@ def _force_drop_invalid_test_dbs() -> list[str]:
     ``ebull_test_*`` + ``ebull_mig*``; ``_NEVER_DROP`` names skipped.
     Best-effort; returns the dropped names.
     """
-    return _prod_force_drop_invalid()
+    # admin_url pins the reaper to the SEPARATE test cluster (C1 #1447) — the
+    # reaper's own default is the dev ``ebull`` cluster (jobs-process context).
+    return _prod_force_drop_invalid(admin_url=_admin_database_url())
 
 
 def _drop_database_force(admin: psycopg.Connection[object], db_name: str) -> None:
@@ -378,7 +454,8 @@ def _drop_orphan_workers_older_than(
     jobs-process cadence reaper shares them. Returns dropped names;
     never raises except the Rail-0 ``AssertionError``.
     """
-    return _prod_sweep_orphans(min_age, now=now)
+    # admin_url pins the reaper to the SEPARATE test cluster (C1 #1447).
+    return _prod_sweep_orphans(min_age, now=now, admin_url=_admin_database_url())
 
 
 def _create_database_from_template(
