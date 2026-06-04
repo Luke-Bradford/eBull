@@ -136,7 +136,7 @@ def test_bootstrap_end_to_end(
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None
     assert snap.run_id == run_id
-    assert len(snap.stages) == 20
+    assert len(snap.stages) == 21  # #1419 added terminal bootstrap_validation
     assert all(s.status == "pending" for s in snap.stages)
 
     # 3. State is running, gate stays closed.

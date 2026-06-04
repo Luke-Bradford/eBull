@@ -17,6 +17,8 @@ time), so the empty→reseed tests self-restore to the original state.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import psycopg
 import pytest
 
@@ -25,6 +27,32 @@ from tests.fixtures.ebull_test_db import (
     ebull_test_conn,  # noqa: F401 — fixture re-export
     test_database_url,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_exchanges(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> Iterator[None]:
+    """Snapshot + restore the FULL `exchanges` table around each test.
+
+    `exchanges` is reference data NOT in the per-test TRUNCATE list, and
+    these tests `DELETE FROM exchanges`. The reseed via `ensure_exchanges_
+    seeded` only restores (exchange_id, country, asset_class) — NOT the
+    migration-071 capability columns (filings/analyst/...) — so without a
+    full restore, sibling tests on the same xdist worker (e.g.
+    test_migration_071) see an `exchanges` table stripped of its capability
+    data and fail. Snapshot every column before, restore after (#1445).
+    """
+    ebull_test_conn.rollback()
+    ebull_test_conn.execute("DROP TABLE IF EXISTS _exchanges_backup")
+    ebull_test_conn.execute("CREATE TEMP TABLE _exchanges_backup AS TABLE exchanges")
+    ebull_test_conn.commit()
+    yield
+    ebull_test_conn.rollback()
+    ebull_test_conn.execute("DELETE FROM exchanges")
+    ebull_test_conn.execute("INSERT INTO exchanges SELECT * FROM _exchanges_backup")
+    ebull_test_conn.execute("DROP TABLE _exchanges_backup")
+    ebull_test_conn.commit()
 
 
 def _rows(conn: psycopg.Connection[tuple]) -> set[tuple[str, str]]:
