@@ -69,9 +69,10 @@ class TestNormaliseInstrument:
         assert record.sector == "42"
         assert record.is_tradable is True
 
-    def test_currency_is_none_without_enrichment(self) -> None:
-        """currency is None — eToro instruments endpoint does not expose
-        a currency field. Enrichment (FMP profile) fills the real value."""
+    def test_currency_is_none_from_normaliser(self) -> None:
+        """currency is None from the normaliser — the eToro instruments
+        endpoint does not expose it. universe.py derives it from the
+        operator-curated exchanges.currency join (sql/159, #1431)."""
         record = _normalise_instrument(FIXTURE_INSTRUMENT)
         assert record is not None
         assert record.currency is None
@@ -519,3 +520,118 @@ class TestUniverseCountryDerivesFromExchanges:
         ebull_test_conn.commit()
         # exchanges.country wins.
         assert _read_country(ebull_test_conn, 970004) == "US"
+
+
+# ---------------------------------------------------------------------------
+# sync_universe — currency derives from exchanges.currency (#1431)
+# ---------------------------------------------------------------------------
+
+
+def _read_currency(conn: psycopg.Connection[tuple], instrument_id: int) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT currency FROM instruments WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _seed_exchange_currency(
+    conn: psycopg.Connection[tuple], *, exchange_id: str, currency: str | None, asset_class: str
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO exchanges (exchange_id, currency, asset_class)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (exchange_id) DO UPDATE SET currency = EXCLUDED.currency, asset_class = EXCLUDED.asset_class
+            """,
+            (exchange_id, currency, asset_class),
+        )
+
+
+@pytest.mark.integration
+class TestUniverseCurrencyDerivesFromExchanges:
+    """``instruments.currency`` is derived from ``exchanges.currency`` via
+    the ``instruments.exchange = exchanges.exchange_id`` join — eToro
+    does not expose currency in the instruments endpoint (#1431)."""
+
+    def test_curated_exchange_populates_currency(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_exchange_currency(ebull_test_conn, exchange_id="4", currency="USD", asset_class="us_equity")
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="972001", symbol="USCCY1", exchange="4"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_currency(ebull_test_conn, 972001) == "USD"
+
+    def test_currency_null_for_uncurated_exchange(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # Crypto exchange has NULL currency — no single trading fiat.
+        _seed_exchange_currency(ebull_test_conn, exchange_id="8", currency=None, asset_class="crypto")
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="972002", symbol="CRYPTOCCY", exchange="8"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_currency(ebull_test_conn, 972002) is None
+
+    def test_currency_refreshes_when_operator_recurates_exchange(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Operator curates an exchange NULL→GBP; the next sync_universe
+        propagates the new currency."""
+        _seed_exchange_currency(ebull_test_conn, exchange_id="972", currency=None, asset_class="unknown")
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="972003", symbol="CCYRECLASS", exchange="972"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_currency(ebull_test_conn, 972003) is None
+
+        _seed_exchange_currency(ebull_test_conn, exchange_id="972", currency="GBP", asset_class="uk_equity")
+        ebull_test_conn.commit()
+
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_currency(ebull_test_conn, 972003) == "GBP"
+
+    def test_missing_exchange_row_preserves_prior_currency(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """If the exchange row is missing (transient bootstrap order), the
+        upsert preserves the existing ``instruments.currency`` rather than
+        wiping it to NULL — same CASE shape as country."""
+        _seed_exchange_currency(ebull_test_conn, exchange_id="973", currency="USD", asset_class="us_equity")
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="972005", symbol="STALECCY", exchange="973"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_currency(ebull_test_conn, 972005) == "USD"
+
+        provider.get_tradable_instruments.return_value = [
+            _make_record_with_exchange(provider_id="972005", symbol="STALECCY", exchange="99998"),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_currency(ebull_test_conn, 972005) == "USD"
+
+    def test_record_currency_field_ignored(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """``InstrumentRecord.currency`` is NOT wired through the upsert
+        (binding removed in #1431) — the upsert sources currency from
+        ``exchanges`` only. A record carrying USD cannot override the
+        operator-curated exchanges.currency='GBP'."""
+        _seed_exchange_currency(ebull_test_conn, exchange_id="974", currency="GBP", asset_class="uk_equity")
+        provider = MagicMock()
+        # _make_record_with_exchange hardcodes currency='USD' on the record.
+        rec = _make_record_with_exchange(provider_id="972004", symbol="CCYOVERRIDE", exchange="974")
+        assert rec.currency == "USD"
+        provider.get_tradable_instruments.return_value = [rec]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        # exchanges.currency wins over the record's USD.
+        assert _read_currency(ebull_test_conn, 972004) == "GBP"
