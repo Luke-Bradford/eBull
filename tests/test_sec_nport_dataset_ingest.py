@@ -165,6 +165,61 @@ class TestIngestNPortDatasetArchive:
             assert period.isoformat() == "2025-09-30"
             assert source == "nport"
 
+    @pytest.mark.parametrize("bad_report_date", ["6016-09-30", "1899-12-31", "2100-01-01"])
+    def test_out_of_window_period_end_skipped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+        bad_report_date: str,
+    ) -> None:
+        # #1433 — a REPORT_DATE outside [1900, 2100) is rejected at the
+        # submission level before any holding is processed, so it cannot
+        # reach the DEFAULT partition (mirrors the #1218 XBRL guard).
+        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "FILING_DATE": "2025-11-30",
+                    "SUB_TYPE": "NPORT-P",
+                    "REPORT_DATE": bad_report_date,
+                },
+            ],
+            registrants=[
+                {"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1234567", "REGISTRANT_NAME": "Big Fund Trust"},
+            ],
+            fund_info=[
+                {"ACCESSION_NUMBER": "0001234567-25-000001", "SERIES_ID": "S000004310", "SERIES_NAME": "S"},
+            ],
+            holdings=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "HOLDING_ID": "1",
+                    "ISSUER_CUSIP": "037833100",
+                    "BALANCE": "500000",
+                    "UNIT": "NS",
+                    "CURRENCY_CODE": "USD",
+                    "CURRENCY_VALUE": "75000000",
+                    "PAYOFF_PROFILE": "Long",
+                    "ASSET_CAT": "EC",
+                },
+            ],
+        )
+        archive_path = tmp_path / "nport.zip"
+        archive_path.write_bytes(archive_bytes)
+        result = ingest_nport_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+        # The real invariant: an out-of-window period_end is never written.
+        assert result.rows_written == 0
+        # The #1433 bounds guard runs BEFORE the §4.6 retention gate, so every
+        # out-of-window date — future (6016 / the exclusive 2100 ceiling) and
+        # pre-1900 alike — is routed to rows_skipped_bad_data, not retention.
+        assert result.rows_skipped_bad_data >= 1
+
     def test_resolved_cusip_deletes_bulk_marker(
         self,
         ebull_test_conn: psycopg.Connection[tuple],

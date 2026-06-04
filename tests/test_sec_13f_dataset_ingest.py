@@ -400,6 +400,91 @@ class TestRealArchiveEdgeCases:
         assert result.rows_written == 0
         assert result.rows_skipped_bad_data == 1
 
+    @pytest.mark.parametrize("bad_shares", ["0", "0.0", "-5", "-100000", ""])
+    def test_non_positive_or_null_shares_skipped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+        bad_shares: str,
+    ) -> None:
+        # #1433 — an SH-type holding with NULL / 0 / negative SSHPRNAMT is
+        # malformed and must not be summed into the ownership rollup.
+        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1", "FILING_DATE": "2025-11-14"},
+            ],
+            coverpages=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "FILINGMANAGER_NAME": "Mgr",
+                    "REPORTCALENDARORQUARTER": "2025-09-30",
+                },
+            ],
+            infotable=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "CUSIP": "037833100",
+                    "VALUE": "1000",
+                    "SSHPRNAMT": bad_shares,
+                    "SSHPRNAMTTYPE": "SH",
+                },
+            ],
+        )
+        archive_path = tmp_path / "form13f.zip"
+        archive_path.write_bytes(archive_bytes)
+        result = ingest_13f_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+        assert result.rows_written == 0
+        assert result.rows_skipped_bad_data == 1
+
+    @pytest.mark.parametrize("bad_period", ["6016-09-30", "1899-12-31", "2100-01-01"])
+    def test_out_of_window_period_end_skipped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+        bad_period: str,
+    ) -> None:
+        # #1433 — a period_end outside [1900, 2100) (parser-bug year-6016,
+        # pre-1900, or the exclusive 2100 ceiling) must be skipped before it
+        # reaches the DEFAULT partition.
+        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1", "FILING_DATE": "2025-11-14"},
+            ],
+            coverpages=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "FILINGMANAGER_NAME": "Mgr",
+                    "REPORTCALENDARORQUARTER": bad_period,
+                },
+            ],
+            infotable=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "CUSIP": "037833100",
+                    "VALUE": "1000",
+                    "SSHPRNAMT": "100000",
+                    "SSHPRNAMTTYPE": "SH",
+                },
+            ],
+        )
+        archive_path = tmp_path / "form13f.zip"
+        archive_path.write_bytes(archive_bytes)
+        result = ingest_13f_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+        assert result.rows_written == 0
+        assert result.rows_skipped_bad_data == 1
+
     def test_value_pre_2023_cutover_multiplied_by_thousands(
         self,
         ebull_test_conn: psycopg.Connection[tuple],

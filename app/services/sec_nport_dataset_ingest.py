@@ -53,7 +53,7 @@ from app.services.cusip_resolver import (
     reconcile_survived_markers,
 )
 from app.services.n_port_ingest import n_port_retention_cutoff
-from app.services.ownership_observations import upsert_sec_fund_series
+from app.services.ownership_observations import period_end_within_bounds, upsert_sec_fund_series
 
 logger = logging.getLogger(__name__)
 
@@ -612,7 +612,18 @@ def ingest_nport_dataset_archive(
                 period_end_early = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(
                     sub.get("REPORT_ENDING_PERIOD")
                 )
-                if period_end_early is not None and period_end_early < retention_cutoff:
+                # #1433 — reject a NULL or out-of-[1900,2100) period_end
+                # BEFORE the retention gate and the unresolved-CUSIP buffer,
+                # so a junk year-6016 with an unresolved CUSIP never leaks
+                # into unresolved markers, and a pre-1900 date is counted as
+                # bad_data rather than masked as retention (mirrors the #1218
+                # XBRL guard; shared bound via period_end_within_bounds).
+                # period_end_early == the staged period_end (same
+                # REPORT_DATE / REPORT_ENDING_PERIOD expression below).
+                if not period_end_within_bounds(period_end_early):
+                    result.rows_skipped_bad_data += 1
+                    continue
+                if period_end_early < retention_cutoff:
                     result.rows_skipped_retention += 1
                     continue
 
@@ -671,7 +682,8 @@ def ingest_nport_dataset_archive(
                 instrument_id = cusip_map.get(cusip)
                 if instrument_id is None:
                     filer_cik_raw_buf = (reg.get("CIK") or "").strip()
-                    if filer_cik_raw_buf and period_end_early is not None:
+                    # period_end_early guaranteed non-None by the #1433 guard.
+                    if filer_cik_raw_buf:
                         filer_cik_buf = filer_cik_raw_buf.zfill(10)
                         unresolved_buffer.append((cusip, filer_cik_buf, period_end_early))
                     # #1340 — recoverable miss: hold this accession back from
@@ -695,8 +707,12 @@ def ingest_nport_dataset_archive(
                 filer_cik = filer_cik_raw.zfill(10)
 
                 filed_at = _parse_filing_date(sub.get("FILING_DATE"))
-                period_end = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(sub.get("REPORT_ENDING_PERIOD"))
-                if filed_at is None or period_end is None:
+                # period_end == period_end_early (same REPORT_DATE /
+                # REPORT_ENDING_PERIOD), already validated in-window by the
+                # #1433 guard above — reuse it (non-None) and only null-check
+                # filed_at here.
+                period_end = period_end_early
+                if filed_at is None:
                     result.rows_skipped_bad_data += 1
                     continue
 

@@ -59,6 +59,7 @@ from app.services.cusip_resolver import (
     reconcile_survived_markers,
 )
 from app.services.institutional_holdings import thirteen_f_retention_cutoff
+from app.services.ownership_observations import period_end_within_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -644,16 +645,26 @@ def ingest_13f_dataset_archive(
                 filer_cik = filer_cik_raw.zfill(10)
 
                 period_end = _parse_period_end(cover.get("REPORTCALENDARORQUARTER"))
+                # #1433 — reject a NULL or out-of-[1900,2100) period_end
+                # before it reaches the partitioned table. Mirrors the
+                # #1218 XBRL guard: a year-6016 / pre-1900 value would land
+                # in the DEFAULT partition and silently skew every
+                # period-bounded institutional rollup. A 13F-HR with no
+                # parseable cover period has nothing to rewash either, so
+                # this also keeps it out of the unresolved-CUSIP buffer.
+                if not period_end_within_bounds(period_end):
+                    result.rows_skipped_bad_data += 1
+                    continue
                 filed_at = _parse_filing_date(sub.get("FILING_DATE") or sub.get("DATE_FILED"))
 
                 instrument_id = cusip_map.get(cusip)
                 if instrument_id is None:
                     result.rows_skipped_unresolved_cusip += 1
                     # PR-1a — record (cusip, filer, period) so the
-                    # PR-1b OpenFIGI sweep can rewash. Skip if period
-                    # parse failed (bulk-path index requires period).
-                    if period_end is not None:
-                        unresolved_buffer.append((cusip, filer_cik, period_end))
+                    # PR-1b OpenFIGI sweep can rewash. period_end is
+                    # guaranteed in-window (non-None) by the #1433 guard
+                    # above, so the bulk-path index always has a period.
+                    unresolved_buffer.append((cusip, filer_cik, period_end))
                     continue
 
                 filer_name = (cover.get("FILINGMANAGER_NAME") or "").strip()
@@ -662,7 +673,9 @@ def ingest_13f_dataset_archive(
                     # the CIK to keep the row instead of dropping it.
                     filer_name = f"CIK{filer_cik}"
 
-                if filed_at is None or period_end is None:
+                # period_end already validated in-window above (#1433); only
+                # filed_at remains to null-check here.
+                if filed_at is None:
                     result.rows_skipped_bad_data += 1
                     continue
 
@@ -683,6 +696,14 @@ def ingest_13f_dataset_archive(
                     result.rows_skipped_bad_data += 1
                     continue
                 shares = _parse_decimal(row.get("SSHPRNAMT"))
+                # #1433 — an SH-type 13F holding must carry a positive share
+                # count. NULL / 0 / negative SSHPRNAMT is malformed (the
+                # schema column is nullable, sql/114, so the guard lives
+                # here at parse) and would otherwise be summed into the
+                # institutional ownership rollup as a phantom position.
+                if shares is None or shares <= 0:
+                    result.rows_skipped_bad_data += 1
+                    continue
                 # VALUE column unit changed 2023-01-03 — pre-cutover it
                 # was reported in $thousands, post-cutover in $dollars.
                 # See _VALUE_DOLLARS_CUTOVER constant at module top.
