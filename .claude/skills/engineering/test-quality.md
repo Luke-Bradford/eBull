@@ -164,3 +164,16 @@ A test that claims to prove a "Postgres unreachable → 503" path must make the 
 - Cover BOTH `/system/*` flavors when both exist (self-connect handler + `Depends(get_conn)` handler) — they fail through different code paths. Unit-test `get_conn`'s own error→503 mapping separately.
 
 Origin: PR #1394 review (#1325/#1217). A bearer-path 503 test that only patched the service-layer `psycopg.connect` was flagged as potentially passing for the wrong reason; the first fix (mutating `app.state.db_pool`) then leaked across tests — `dependency_overrides` is the leak-free seam.
+
+## Migration-behaviour tests: strip the BEGIN/COMMIT wrapper before inline execution
+
+A migration-behaviour test (seed pre-state → run the migration SQL inline → assert post-state) must NOT `cur.execute()` the raw migration file when that file carries its own `BEGIN; … COMMIT;` wrapper. The embedded `COMMIT` commits out from under the test's transaction control; the trailing `conn.commit()` then flushes an empty implicit transaction, and whether that raises depends on the test connection's autocommit mode — the test passes by accident.
+
+- Strip the standalone `BEGIN;`/`COMMIT;` lines and execute the body inside the fixture's transaction, letting the test commit once:
+  ```python
+  _BODY = "\n".join(l for l in _MIGRATION_SQL.splitlines() if l.strip() not in ("BEGIN;", "COMMIT;"))
+  ```
+- Or run the file via a dedicated `autocommit=True` connection. Either way the wrapper must not be executed inline through the regular fixture cursor.
+- Migrations with NO embedded transaction (e.g. `sql/111`) are fine to execute directly — the issue is only the embedded `BEGIN/COMMIT`.
+
+Origin: PR #1467 (#1320) review WARNING — `test_migration_182_pre14a_purge.py` executed `sql/182` (which wraps in `BEGIN;…COMMIT;`) inline then called `conn.commit()` again. EXTRACTED here rather than as a grep lint: the failure mode is narrow (migration tests only) and the fix is a one-liner at the call site.

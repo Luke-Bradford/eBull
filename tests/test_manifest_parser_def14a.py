@@ -402,11 +402,12 @@ def test_parse_phase_exception_preserves_stored_raw_status(
 def test_pre_14a_tombstones_to_match_legacy(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
-    """PRE 14A (preliminary proxy) routes to sec_def14a in the
-    manifest but the legacy ingester excludes it. The parser
-    tombstones PRE 14A to keep dual-path accounting consistent
-    during cutover — no body fetch, no holdings write. (Codex
-    pre-push P1.)"""
+    """PRE 14A (preliminary proxy) is no longer mapped to sec_def14a
+    at discovery (#1320 removed the `_FORM_TO_SOURCE` entry). This
+    test seeds a PRE 14A manifest row directly to verify the parser's
+    PRE-14A tombstone branch remains as defense-in-depth: any PRE row
+    that reaches the worker via a legacy/manual seed is tombstoned
+    pre-fetch — no body fetch, no holdings write. (Codex pre-push P1.)"""
     import app.services.manifest_parsers  # noqa: F401 — register
 
     iid = 8740006
