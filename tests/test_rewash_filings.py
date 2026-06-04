@@ -91,6 +91,34 @@ def _seed_raw(
     conn.commit()
 
 
+def _seed_blockholder_manifest(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession: str,
+    cik: str = "0000111000",
+    source: str = "sec_13g",
+    form: str = "SC 13G",
+) -> None:
+    """Seed the canonical ``sec_filing_manifest`` row required by
+    ``_apply_blockholders`` (#1233 PR11). Without it the apply skips
+    before parse — the manifest is the canonical source for
+    source/form/cik/filed_at. ``filed_at`` is recent so the rescue-path
+    retention gate (existing_rows == 0) never fires for these tests.
+    instrument_id is NULL: chk_manifest_issuer_has_instrument requires
+    NULL for non-issuer subject_types (sql/118)."""
+    conn.execute(
+        """
+        INSERT INTO sec_filing_manifest (
+            accession_number, cik, form, source,
+            subject_type, subject_id, instrument_id, filed_at
+        ) VALUES (%s, %s, %s, %s,
+                  'blockholder_filer', %s, NULL, now())
+        ON CONFLICT (accession_number) DO NOTHING
+        """,
+        (accession, cik, form, source, cik),
+    )
+
+
 def test_register_parser_overwrites_on_same_kind(isolated_registry: None) -> None:
     def _apply_a(_conn: object, _doc: object) -> bool:
         return True
@@ -735,7 +763,7 @@ def test_def14a_apply_replaces_holders_on_rewash(
 
     conn = ebull_test_conn
     instrument_id = 950_051
-    accession = "0001234567-26-def14a-replace"
+    accession = "0001234567-26-000001"
     conn.execute(
         """
         INSERT INTO instruments (
@@ -821,7 +849,7 @@ def test_def14a_apply_rescues_tombstoned_accession(
 
     conn = ebull_test_conn
     instrument_id = 950_060
-    accession = "0001234567-26-def14a-rescue"
+    accession = "0001234567-26-000002"
     conn.execute(
         """
         INSERT INTO instruments (
@@ -941,6 +969,7 @@ def test_blockholders_apply_raises_on_parse_failure(
         (filer_id, accession, instrument_id),
     )
     _seed_raw(conn, accession=accession, kind="primary_doc_13dg", parser_version="13dg-primary-v0")
+    _seed_blockholder_manifest(conn, accession=accession)
     conn.commit()
 
     def _boom(_xml: str) -> dict:
@@ -1080,6 +1109,7 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
         payload=_MIN_PARSEABLE_13D_XML,
         parser_version="13dg-primary-v0",
     )
+    _seed_blockholder_manifest(conn, accession=accession)
     conn.commit()
 
     # Stub the adapter to return the NEW cusip (simulating the bug
@@ -1199,6 +1229,7 @@ def test_blockholders_apply_raises_on_empty_reporting_persons(
         payload=_MIN_PARSEABLE_13D_XML,
         parser_version="13dg-primary-v0",
     )
+    _seed_blockholder_manifest(conn, accession=accession)
     conn.commit()
 
     fake_filing = BlockholderFiling(
@@ -1426,7 +1457,7 @@ def test_13f_infotable_apply_replaces_holdings_with_re_resolved_instrument(
     conn = ebull_test_conn
     old_iid = 950_080
     new_iid = 950_081
-    accession = "0001234567-26-13f-cusip"
+    accession = "0001234567-26-000004"
     conn.execute(
         """
         INSERT INTO instruments (
@@ -1644,7 +1675,7 @@ def test_13f_infotable_apply_rescues_tombstoned_accession(
 
     conn = ebull_test_conn
     iid = 950_100
-    accession = "0001234567-26-13f-rescue"
+    accession = "0001234567-26-000003"
     conn.execute(
         """
         INSERT INTO instruments (

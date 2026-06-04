@@ -29,6 +29,25 @@ def _seed_instrument(conn: psycopg.Connection[tuple], iid: int, symbol: str) -> 
     )
 
 
+def _seed_filing_event(
+    conn: psycopg.Connection[tuple], *, iid: int, accession: str
+) -> None:
+    """Bridge row required by the drillthrough per-sibling EXISTS gate
+    (#1117 PR-B): the entity tables carry instrument_id but the
+    drillthrough only counts a sibling when a ``filing_events`` row
+    (provider='sec', provider_filing_id=accession, instrument_id=iid)
+    proves the link. filing_date/provider/provider_filing_id are NOT
+    NULL."""
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, provider, provider_filing_id
+        ) VALUES (%s, '2025-01-15', 'sec', %s)
+        """,
+        (iid, accession),
+    )
+
+
 def test_unknown_instrument_returns_none(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
@@ -90,6 +109,8 @@ def test_form4_state_counts_transactions_and_tombstones(
             """,
             (970_002, row_num),
         )
+    _seed_filing_event(conn, iid=970_002, accession="a-26-1")
+    _seed_filing_event(conn, iid=970_002, accession="a-26-2")
     conn.commit()
 
     result = get_instrument_drillthrough(conn, instrument_id=970_002)
@@ -130,6 +151,7 @@ def test_form3_state_counts_initial_holdings_not_headers(
             """,
             (970_006, row_num),
         )
+    _seed_filing_event(conn, iid=970_006, accession="a-26-f3")
     conn.commit()
 
     result = get_instrument_drillthrough(conn, instrument_id=970_006)
@@ -165,6 +187,7 @@ def test_form4_body_count_excludes_tombstoned_filings(
         ) VALUES ('a-26-tmb', 'form4_xml', '<x/>')
         """,
     )
+    _seed_filing_event(conn, iid=970_010, accession="a-26-tmb")
     conn.commit()
 
     result = get_instrument_drillthrough(conn, instrument_id=970_010)
@@ -304,6 +327,7 @@ def test_form4_raw_body_without_typed_row_surfaces_rewash_note(
         ) VALUES ('a-26-3', 'form4_xml', '<x/>', 'form4-v1')
         """,
     )
+    _seed_filing_event(conn, iid=970_003, accession="a-26-3")
     conn.commit()
 
     result = get_instrument_drillthrough(conn, instrument_id=970_003)

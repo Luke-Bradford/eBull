@@ -1194,7 +1194,7 @@ class TestUniverseSweep:
         # than raising StopIteration) so any extra deadline checks
         # added in future refactors don't make the test brittle.
         # Codex pre-push review #913.
-        clock_ticks = [0.0, 0.0, 5.0]
+        clock_ticks = [0.0, 0.0, 0.0, 5.0]
         clock_idx = [0]
 
         def _fake_monotonic() -> float:

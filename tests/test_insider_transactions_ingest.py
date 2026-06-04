@@ -336,7 +336,7 @@ class TestIngestInsiderTransactions:
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="0000001-24-000001",
+            accession="0000000001-24-000001",
             url="https://www.sec.gov/Archives/form4-rich.xml",
             filing_date=date.today().isoformat(),
         )
@@ -361,7 +361,7 @@ class TestIngestInsiderTransactions:
                        signature_name, signature_date, is_tombstone, parser_version
                 FROM insider_filings WHERE accession_number = %s
                 """,
-                ("0000001-24-000001",),
+                ("0000000001-24-000001",),
             )
             f = cur.fetchone()
             assert f is not None
@@ -381,7 +381,7 @@ class TestIngestInsiderTransactions:
                        is_officer, officer_title
                 FROM insider_filers WHERE accession_number = %s
                 """,
-                ("0000001-24-000001",),
+                ("0000000001-24-000001",),
             )
             rows = cur.fetchall()
             assert len(rows) == 1
@@ -397,7 +397,7 @@ class TestIngestInsiderTransactions:
                 SELECT footnote_id, footnote_text
                 FROM insider_transaction_footnotes WHERE accession_number = %s
                 """,
-                ("0000001-24-000001",),
+                ("0000000001-24-000001",),
             )
             fn_rows = cur.fetchall()
             assert len(fn_rows) == 1
@@ -412,7 +412,7 @@ class TestIngestInsiderTransactions:
                        equity_swap_involved, footnote_refs
                 FROM insider_transactions WHERE accession_number = %s
                 """,
-                ("0000001-24-000001",),
+                ("0000000001-24-000001",),
             )
             tx = cur.fetchone()
             assert tx is not None
@@ -592,7 +592,7 @@ class TestIngestInsiderTransactions:
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="REAL-ACC",
+            accession="0000000005-24-000001",
             url="https://www.sec.gov/real.xml",
             filing_date=date.today().isoformat(),
         )
@@ -618,7 +618,7 @@ class TestIngestInsiderTransactions:
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="XSL-1",
+            accession="0000000006-24-000001",
             url="https://www.sec.gov/Archives/edgar/data/320193/0001/xslF345X06/form4.xml",
             filing_date=date.today().isoformat(),
         )
@@ -900,7 +900,7 @@ class TestListInsiderTransactions:
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="RICH-1",
+            accession="0000000007-24-000001",
             url="https://www.sec.gov/Archives/rich.xml",
             filing_date=date.today().isoformat(),
         )
@@ -973,7 +973,7 @@ class TestBackfill:
         url_map: dict[str, str | None] = {}
         # DEEP: 3 filings; SHAL: 1 filing. DEEP should drain in one pass.
         for i in range(3):
-            acc = f"DEEP-{i:02d}"
+            acc = f"0000000001-26-0000{i:02d}"
             url = f"https://www.sec.gov/Archives/deep-{i}.xml"
             _seed_form_4(
                 ebull_test_conn,
@@ -986,7 +986,7 @@ class TestBackfill:
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid_shallow,
-            accession="SHAL-01",
+            accession="0000000002-26-000001",
             url="https://www.sec.gov/Archives/shal.xml",
             filing_date=today_iso,
         )

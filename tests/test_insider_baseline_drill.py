@@ -207,6 +207,14 @@ def test_drill_no_filings_note_only_when_no_evidence_at_all(
         ) VALUES ('t-26-1', 971_012, '3', 'u', 1, TRUE, '2025-01-15')
         """,
     )
+    # Bridge row for the drillthrough per-sibling EXISTS gate (#1117).
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, provider, provider_filing_id
+        ) VALUES (971_012, '2025-01-15', 'sec', 't-26-1')
+        """,
+    )
     conn.commit()
 
     resp = client.get("/instruments/TOMB3/insider_baseline/drill")
