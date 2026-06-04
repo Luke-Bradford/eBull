@@ -169,6 +169,12 @@ def _jobs_process_running() -> bool:
         from app.config import settings
         from app.jobs.locks import JOBS_PROCESS_LOCK_KEY
 
+        # Decode assumes a non-negative key: Python's arbitrary-precision
+        # >> on a negative int would yield a negative high half that the
+        # mask silently "corrects". The key is a fixed positive constant;
+        # assert it so a future sign change fails loud, not silently
+        # mis-decoded (bot #1455 NITPICK).
+        assert JOBS_PROCESS_LOCK_KEY >= 0, "JOBS_PROCESS_LOCK_KEY must be non-negative for pg_locks decode"
         classid = (JOBS_PROCESS_LOCK_KEY >> 32) & 0xFFFFFFFF
         objid = JOBS_PROCESS_LOCK_KEY & 0xFFFFFFFF
         with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
