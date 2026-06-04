@@ -494,6 +494,7 @@ class TestSystemJobs:
                 "daily",
                 "weekly",
                 "monthly",
+                "yearly",
             )
             assert job["next_run_time"]
             assert job["next_run_time_source"] == "declared"

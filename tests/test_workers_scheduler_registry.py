@@ -211,6 +211,19 @@ class TestCadenceValidators:
         # weekday=0 is Monday
         assert Cadence.weekly(weekday=0, hour=5).label == "weekly on Mon at 05:00 UTC"
 
+    @pytest.mark.parametrize("month", [0, 13])
+    def test_yearly_invalid_month_raises(self, month: int) -> None:
+        with pytest.raises(ValueError, match="yearly month"):
+            Cadence.yearly(month=month, day=1, hour=5)
+
+    @pytest.mark.parametrize("day", [0, 29])
+    def test_yearly_invalid_day_raises(self, day: int) -> None:
+        with pytest.raises(ValueError, match="yearly day"):
+            Cadence.yearly(month=4, day=day, hour=5)
+
+    def test_label_yearly(self) -> None:
+        assert Cadence.yearly(month=4, day=1, hour=5).label == "yearly on Apr 1 at 05:00 UTC"
+
 
 # ---------------------------------------------------------------------------
 # compute_next_run
@@ -288,3 +301,77 @@ class TestComputeNextRun:
         plus_one = _NOW.astimezone(tz=__import__("datetime").timezone(timedelta(hours=1)))
         result = compute_next_run(Cadence.daily(hour=18), plus_one)
         assert result == datetime(2026, 4, 7, 18, 0, 0, tzinfo=UTC)
+
+    # ---------- yearly (#1303) ----------
+
+    def test_yearly_this_year_already_passed_rolls_to_next_year(self) -> None:
+        # _NOW is 2026-04-07; Apr 1 has passed → 2027-04-01.
+        result = compute_next_run(Cadence.yearly(month=4, day=1, hour=5), _NOW)
+        assert result == datetime(2027, 4, 1, 5, 0, 0, tzinfo=UTC)
+
+    def test_yearly_later_this_year(self) -> None:
+        # _NOW is 2026-04-07; Jun 15 is still ahead this year.
+        result = compute_next_run(Cadence.yearly(month=6, day=15, hour=5), _NOW)
+        assert result == datetime(2026, 6, 15, 5, 0, 0, tzinfo=UTC)
+
+    def test_yearly_strictly_after_now_on_boundary(self) -> None:
+        on_boundary = datetime(2026, 4, 1, 5, 0, 0, tzinfo=UTC)
+        result = compute_next_run(Cadence.yearly(month=4, day=1, hour=5), on_boundary)
+        assert result == datetime(2027, 4, 1, 5, 0, 0, tzinfo=UTC)
+
+
+# ---------------------------------------------------------------------------
+# N-CEN classifier annual schedule (#1303)
+# ---------------------------------------------------------------------------
+
+
+class TestNcenClassifierSchedule:
+    def test_registered_in_scheduled_jobs(self) -> None:
+        names = {job.name for job in SCHEDULED_JOBS}
+        assert "ncen_classifier_yearly" in names
+
+    def test_cadence_yearly_apr_1_05_00(self) -> None:
+        job = next(j for j in SCHEDULED_JOBS if j.name == "ncen_classifier_yearly")
+        assert job.cadence.kind == "yearly"
+        assert job.cadence.month == 4
+        assert job.cadence.day == 1
+        assert job.cadence.hour == 5
+        assert job.cadence.minute == 0
+
+    def test_runs_on_sec_rate_lane(self) -> None:
+        job = next(j for j in SCHEDULED_JOBS if j.name == "ncen_classifier_yearly")
+        assert job.source == "sec_rate"
+
+    def test_catches_up_on_boot(self) -> None:
+        # Annual cadence: a missed Apr-1 fire costs a year of classification
+        # drift, so catch up when genuinely overdue (#1303).
+        job = next(j for j in SCHEDULED_JOBS if j.name == "ncen_classifier_yearly")
+        assert job.catch_up_on_boot is True
+
+    def test_not_exempt_from_bootstrap_gate(self) -> None:
+        # Heavy SEC sweep — must wait for bootstrap to complete.
+        job = next(j for j in SCHEDULED_JOBS if j.name == "ncen_classifier_yearly")
+        assert job.exempt_from_universal_bootstrap_gate is False
+
+    def test_invokable_via_invokers(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+
+        assert "ncen_classifier_yearly" in _INVOKERS
+
+    def test_admin_process_lane_is_ownership(self) -> None:
+        # Classifies institutional filers → ownership domain, like the
+        # adjacent 13F/N-PORT filer jobs. Without the explicit mapping it
+        # would default to 'ops' (Codex #1303 review).
+        from app.services.processes.scheduled_adapter import _lane_for
+
+        assert _lane_for("ncen_classifier_yearly") == "ownership"
+
+    def test_trigger_for_yearly_sets_month(self) -> None:
+        from app.jobs.runtime import _trigger_for
+
+        trigger = _trigger_for(Cadence.yearly(month=4, day=1, hour=5))
+        # APScheduler CronTrigger stringifies its fields; month=4 + day=1 pin it.
+        rendered = str(trigger)
+        assert "month='4'" in rendered
+        assert "day='1'" in rendered
+        assert "hour='5'" in rendered

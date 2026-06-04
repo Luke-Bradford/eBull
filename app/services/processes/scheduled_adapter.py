@@ -101,6 +101,7 @@ _LANE_BY_JOB: dict[str, ProcessLane] = {
     "sec_13f_quarterly_sweep": "ownership",
     "sec_nport_filer_directory_sync": "ownership",
     "sec_n_port_ingest": "ownership",
+    "ncen_classifier_yearly": "ownership",
     # Fundamentals
     "fundamentals_sync": "fundamentals",
     "sec_business_summary_bootstrap": "fundamentals",
@@ -152,6 +153,8 @@ def _cron_for(cadence: Cadence) -> str:
         return f"{cadence.minute} {cadence.hour} * * {cron_dow}"
     if cadence.kind == "monthly":
         return f"{cadence.minute} {cadence.hour} {cadence.day} * *"
+    if cadence.kind == "yearly":
+        return f"{cadence.minute} {cadence.hour} {cadence.day} {cadence.month} *"
     # Cadence.kind is a Literal — every value is enumerated above. The
     # fallthrough is a safety net for a future-added kind that forgets
     # to extend this function.

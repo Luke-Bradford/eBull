@@ -55,6 +55,8 @@ export type CadenceKind =
   | "hourly"
   | "daily"
   | "weekly"
+  | "monthly"
+  | "yearly"
   | "every_n_minutes";
 
 export interface LayerHealthResponse {
