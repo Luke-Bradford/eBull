@@ -24,6 +24,8 @@ Stage 17 `sec_def14a_bootstrap` (`app/services/bootstrap_orchestrator.py:1108`).
 ## 6. Manifest insert
 `sec_filing_manifest.source = 'sec_def14a'`. `subject_type='issuer'`, `subject_id=<issuer_cik_zero_padded>`, `instrument_id=<primary_share_class_iid>`. Option C `filed_at` gate at `record_manifest_entry`. Pre-cap accessions can still discover (no early gate); cap enforced post-parse so audit trail captures the supersession.
 
+**Form scope (`_FORM_TO_SOURCE`).** `DEF 14A` (definitive) + `DEFA14A` (additional definitive) + `DEFM14A` (merger) + `DEFR14A` (revised definitive) map to `sec_def14a`. **`PRE 14A` is deliberately excluded (#1320)** — preliminary proxies are pre-finalisation drafts, classified metadata-only; the definitive DEF 14A that follows is what we ingest. Mapping PRE 14A routed 6k+ drafts into this manifest namespace which the parser tombstoned pre-fetch (§7) — wasted worker cycles + polluted `WHERE source='sec_def14a'` reads. It is now skipped at discovery (`map_form_to_source('PRE 14A') is None`). The parser's PRE-14A tombstone branch stays as defense-in-depth for any PRE row that reaches the worker via a legacy/manual seed. Existing mis-seeded rows purged by `sql/182_purge_pre14a_manifest_rows.sql`.
+
 ## 7. Parser
 `app/services/manifest_parsers/def14a.py::_parse_def14a`. Version `_PARSER_VERSION_DEF14A` (`def14a_ingest.py:66`). Registered with `requires_raw_payload=True` — HTML body saved to `filing_raw_documents` BEFORE parse.
 

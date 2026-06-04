@@ -933,7 +933,16 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     "DEFA14A": "sec_def14a",
     "DEFM14A": "sec_def14a",
     "DEFR14A": "sec_def14a",
-    "PRE 14A": "sec_def14a",
+    # ``PRE 14A`` (preliminary proxy) is deliberately NOT mapped (#1320).
+    # It is a pre-finalisation draft, classified metadata-only
+    # (test_filings_form_allowlist), whose ownership figures we never
+    # historically counted — the definitive DEF 14A that follows is what we
+    # ingest. Mapping it routed 6k+ drafts into the sec_def14a manifest
+    # namespace, which the parser then tombstoned pre-fetch (wasted worker
+    # cycles + polluted coverage). Skipping it at discovery (None → skip) is
+    # strictly better than seed-then-tombstone. The parser PRE-14A tombstone
+    # branch (manifest_parsers/def14a.py) stays as defense-in-depth for any
+    # PRE row that reaches the worker via a legacy/manual seed.
     # Fund (Phase 3). SEC EDGAR submissions API uses both ``NPORT-P`` /
     # ``NPORT-P/A`` (current spelling, no internal dash, "-P" suffix
     # marking the public-quarterly version) and ``N-PORT`` / ``N-PORT/A``

@@ -672,6 +672,16 @@ class TestFormMapping:
         assert map_form_to_source("CORRESP") is None
         assert map_form_to_source("") is None
 
+    def test_pre_14a_is_not_mapped(self) -> None:
+        """#1320: PRE 14A (preliminary proxy) is a metadata-only draft — it
+        must NOT route to sec_def14a. Mapping it seeded 6k+ preliminary
+        drafts into the sec_def14a manifest namespace which the parser then
+        tombstoned pre-fetch (wasted worker cycles + polluted coverage). It
+        is now skipped at discovery, consistent with its metadata-only
+        classification (test_filings_form_allowlist). The definitive DEF 14A
+        that follows is what we ingest."""
+        assert map_form_to_source("PRE 14A") is None
+
     def test_whitespace_tolerant(self) -> None:
         assert map_form_to_source("13F-HR  ") == "sec_13f_hr"
         assert map_form_to_source("  4  ") == "sec_form4"
