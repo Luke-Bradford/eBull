@@ -349,9 +349,14 @@ Archive-URL CIK varies by form type:
 - **Form 4 / Form 3 / Form 5** — `/Archives/edgar/data/{ISSUER_CIK}/{acc_no_dashes}/...`. Insider Form 4 filings for AAPL are submitted by various filer-agent CIKs but stored under Apple's CIK 0000320193.
 - **13F-HR / 13G/D / N-PORT-P** — `/Archives/edgar/data/{FILER_CIK}/{acc_no_dashes}/...`. The filing-manager / blockholder / fund-trust IS the filer; there is no separate "issuer" in those forms. eBull's 13F builder uses the filer CIK at [app/services/sec_13f_dataset_ingest.py:334](../../../app/services/sec_13f_dataset_ingest.py#L334).
 
-### 3.4 LEI (Legal Entity Identifier)
+### 3.4 LEI (Legal Entity Identifier) + FIGI
 
-20-character alphanumeric ISO 17442 code. Required on N-PORT, N-CSR, N-MFP, certain swap reports, and (since 2023-01-03) on Form 13F. Resolve via GLEIF API: `https://api.gleif.org/api/v1/lei-records/{lei}`.
+**LEI** — 20-character alphanumeric ISO 17442 code. Present in the **N-PORT** dataset INFOTABLE (`lei`, the issuer of the held security). Resolve via GLEIF API: `https://api.gleif.org/api/v1/lei-records/{lei}`.
+
+**Form 13F has NO LEI** (empirically verified 2026-06-04 against the published `*_form13f.zip` headers — #1302). What the **13F structured dataset** gained on 2023-01-03, alongside the VALUE $thousands→$dollars cutover, is a **`FIGI`** column in `INFOTABLE.tsv`, NOT an LEI. The full post-2023 INFOTABLE header is:
+`ACCESSION_NUMBER, INFOTABLE_SK, NAMEOFISSUER, TITLEOFCLASS, CUSIP, FIGI, VALUE, SSHPRNAMT, SSHPRNAMTTYPE, PUTCALL, INVESTMENTDISCRETION, OTHERMANAGER, VOTING_AUTH_SOLE, VOTING_AUTH_SHARED, VOTING_AUTH_NONE`. No LEI appears in any 13F dataset file (COVERPAGE/SUBMISSION/SUMMARYPAGE/SIGNATURE/OTHERMANAGER checked).
+
+**FIGI** — 12-character uppercase-alphanumeric OpenFIGI/Bloomberg global security identifier (e.g. `BBG000B9XRY4`), per-security (per CUSIP). `sec_13f_dataset_ingest._persist_figi_external_identifiers` (#1302) captures distinct `FIGI → instrument` into `external_identifiers (provider='sec', identifier_type='figi')` at instrument grain. It is the OpenFIGI bridge key (settled-decision: OpenFIGI is the approved CUSIP-resolution fallback).
 
 ### 3.5 Series ID / Class ID — fund hierarchy
 
