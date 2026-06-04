@@ -48,6 +48,7 @@ import pytest  # noqa: E402
 from app.api.auth import require_session_or_service_token  # noqa: E402
 from app.main import app  # noqa: E402
 from tests.fixtures.ebull_test_db import (  # noqa: E402, F401
+    _force_drop_invalid_test_dbs,  # noqa: E402 — #1455 session-start corpse sweep
     _run_id,  # noqa: E402
     build_template_if_stale,
     drop_worker_database,
@@ -124,11 +125,69 @@ def _reassert_auth_bypass() -> None:
 #
 # Limits: misses deletes (size flat or shrinks), HOT updates (in-place
 # page rewrites), and may false-positive on autovacuum / vacuum / stats
-# work running concurrently. When this tripwire fires, grep the tests
-# directory for raw ``psycopg.connect(settings.database_url)`` and
-# route each use through ``tests/fixtures/ebull_test_db.py::test_database_url``.
+# work running concurrently. Additionally (#1455): when a live jobs
+# process holds JOBS_PROCESS_LOCK_KEY on 'ebull', its legitimate writes
+# are indistinguishable by size from a leak, so the assertion is skipped
+# (warn-only) for that session. This is a conscious tradeoff — the
+# exemption is coarse (jobs-running, not jobs-attributed), so a genuine
+# leak that coincides with a running jobs process is downgraded to a
+# warning rather than a failure. Acceptable because this is a secondary
+# tripwire: the PRIMARY defenses (assert_test_db + the static grep smoke
+# test above) still fail hard on any destructive op against a non-test DB.
+# When this tripwire fires, grep the tests directory for raw
+# ``psycopg.connect(settings.database_url)`` and route each use through
+# ``tests/fixtures/ebull_test_db.py::test_database_url``.
 # Never silence by raising the threshold — fix the offending test.
 _DEV_DB_GROWTH_TOLERANCE_BYTES = 1_000_000
+
+
+def _jobs_process_running() -> bool:
+    """True iff a jobs process holds ``JOBS_PROCESS_LOCK_KEY`` on the dev DB.
+
+    When the operator's local jobs process (``python -m app.jobs``) is alive
+    during a long full-suite run, it legitimately writes to ``ebull``
+    (heartbeat, job_runs, sync_runs, ingested rows) — tens of MB across a
+    78-minute run. That growth is NOT a leaked ``psycopg.connect(
+    settings.database_url)`` from a test, so the size tripwire must not fail
+    on it (#1455).
+
+    Detection reads ``pg_locks`` directly rather than calling
+    ``probe_jobs_process_running`` (which momentarily *acquires* the fence):
+    a passive tripwire must never perturb lock state — an acquire-probe has a
+    sub-ms window where a cold-starting ``python -m app.jobs`` could lose the
+    race for its own fence and refuse startup (Codex #1455). A ``bigint``
+    advisory lock splits across ``pg_locks`` as ``classid = key>>32``,
+    ``objid = key & 0xffffffff``, ``objsubid = 1``. Advisory locks are
+    per-database, so we read on the same DB the jobs process fences.
+
+    Best-effort: any error → False (fall through to the normal assertion
+    rather than masking a real leak).
+    """
+    try:
+        import psycopg
+
+        from app.config import settings
+        from app.jobs.locks import JOBS_PROCESS_LOCK_KEY
+
+        # Decode assumes a non-negative key: Python's arbitrary-precision
+        # >> on a negative int would yield a negative high half that the
+        # mask silently "corrects". The key is a fixed positive constant;
+        # assert it so a future sign change fails loud, not silently
+        # mis-decoded (bot #1455 NITPICK).
+        assert JOBS_PROCESS_LOCK_KEY >= 0, "JOBS_PROCESS_LOCK_KEY must be non-negative for pg_locks decode"
+        classid = (JOBS_PROCESS_LOCK_KEY >> 32) & 0xFFFFFFFF
+        objid = JOBS_PROCESS_LOCK_KEY & 0xFFFFFFFF
+        with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pg_locks "
+                "WHERE locktype = 'advisory' AND classid = %s AND objid = %s "
+                "  AND objsubid = 1 AND granted "
+                "LIMIT 1",
+                (classid, objid),
+            ).fetchone()
+        return row is not None
+    except Exception:
+        return False
 
 
 def _read_dev_db_size() -> int | None:
@@ -167,6 +226,21 @@ def _dev_db_size_tripwire() -> Iterator[None]:
     if end_size is None:
         return
     delta_bytes = end_size - start_size
+    if delta_bytes >= _DEV_DB_GROWTH_TOLERANCE_BYTES and _jobs_process_running():
+        # A live jobs process holds JOBS_PROCESS_LOCK_KEY on 'ebull' and is
+        # the expected author of this growth (#1455). Skip the hard assertion
+        # but WARN, so a genuine leak coinciding with a running jobs process
+        # is still surfaced in the log rather than silently exempted.
+        import warnings
+
+        warnings.warn(
+            f"dev DB 'ebull' grew by {delta_bytes} bytes during the session, "
+            f"but a jobs process holds JOBS_PROCESS_LOCK_KEY on it — growth "
+            f"attributed to the live jobs process; size tripwire skipped "
+            f"(#1455). If no jobs process should be running, investigate.",
+            stacklevel=2,
+        )
+        return
     assert delta_bytes < _DEV_DB_GROWTH_TOLERANCE_BYTES, (
         f"TRIPWIRE: dev DB 'ebull' grew by {delta_bytes} bytes during "
         f"the test session (tolerance {_DEV_DB_GROWTH_TOLERANCE_BYTES}). "
@@ -208,6 +282,29 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     if _is_xdist_worker(config):
         return
+
+    # #1455 — force-drop datconnlimit=-2 corpses UNCONDITIONALLY at session
+    # start, BEFORE build_template_if_stale opens its admin connection. A
+    # SIGKILL'd / OOM'd worker (the #1444 18h-crash-loop signature) leaves a
+    # -2 corpse that pg_database_size() hangs on, which both wedges
+    # postgres_health-backed tests and causes collateral failures across
+    # unrelated tests in the same run. build_template_if_stale runs its own
+    # corpse sweep, but only AFTER acquiring the template lock + the orphan
+    # sweep — and the whole call is best-effort: if any earlier step raises
+    # against a degraded cluster, the exception is swallowed as a warning
+    # below and the inner sweep never runs. Sweeping first, unconditionally,
+    # un-degrades the cluster before any size query or template work.
+    try:
+        dropped = _force_drop_invalid_test_dbs()
+        if dropped:
+            import warnings
+
+            warnings.warn(
+                f"Swept {len(dropped)} datconnlimit=-2 test-DB corpse(s) at session start (#1455): {dropped}",
+                stacklevel=2,
+            )
+    except Exception:  # pragma: no cover - best-effort; inner sweep retries
+        pass
 
     try:
         build_template_if_stale()
