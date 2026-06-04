@@ -59,7 +59,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 from uuid import UUID
 
 import psycopg
@@ -73,6 +73,33 @@ import psycopg.rows
 # ``ValueError`` instead of a Postgres CHECK error rolling the
 # whole transaction.
 _FUND_SERIES_ID_RE = re.compile(r"^S[0-9]{9}$")
+
+# Sanity window for an ownership ``period_end`` before it reaches the
+# partitioned observation tables (#1433). Mirrors the #1218 XBRL guard
+# (``sec_fundamentals._PERIOD_MIN/_MAX``): EDGAR began 1993, so pre-1900
+# has no filer use-case; the 2100 ceiling catches parser-bug junk (the
+# year-6016 / pre-1900 shapes #1218 found in the wild) before it lands in
+# the DEFAULT partition. Single source for both the 13F and N-PORT bulk
+# ingesters. Half-open: ``[MIN, MAX)``.
+OWNERSHIP_PERIOD_END_MIN: date = date(1900, 1, 1)
+OWNERSHIP_PERIOD_END_MAX: date = date(2100, 1, 1)
+
+
+def period_end_within_bounds(period_end: date | None) -> TypeGuard[date]:
+    """True iff ``period_end`` is a non-NULL date in ``[1900, 2100)`` (#1433).
+
+    A NULL or out-of-window ``period_end`` is malformed: the bulk ingesters
+    skip the row rather than persist it into the DEFAULT partition where a
+    year-6016 value would silently corrupt every period-bounded rollup.
+
+    Declared as a ``TypeGuard[date]`` so a caller that bails on the False
+    case (``if not period_end_within_bounds(pe): continue``) narrows ``pe``
+    to a non-Optional ``date`` for the rest of the loop body.
+    """
+    if period_end is None:
+        return False
+    return OWNERSHIP_PERIOD_END_MIN <= period_end < OWNERSHIP_PERIOD_END_MAX
+
 
 logger = logging.getLogger(__name__)
 
