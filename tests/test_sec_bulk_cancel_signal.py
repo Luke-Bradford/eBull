@@ -164,6 +164,11 @@ def test_each_job_calls_only_its_own_ingester(
                 rows_skipped_unresolved_cusip=0,
                 rows_skipped_unresolved_cik=0,
                 rows_skipped_non_equity=0,
+                # PR6 #1233 §4.5 — all three ingest-result dataclasses now
+                # carry a retention-skip counter the orchestrator reads.
+                rows_skipped_retention=0,
+                # NPortIngestResult-specific field the orchestrator reads.
+                holdings_seen=0,
                 touched_instrument_ids=set(),
             )
 

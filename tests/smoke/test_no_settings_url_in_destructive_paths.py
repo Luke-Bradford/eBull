@@ -188,6 +188,12 @@ _ALLOWED: dict[str, str] = {
     "test_job_lock_reentrancy.py": (
         "monkeypatches settings.database_url to per-worker test DB before any destructive write (#1184)"
     ),
+    # Same monkeypatch pattern (#1273 PR2 — bootstrap stage-progress
+    # instrumentation tests). Lives under tests/services/, so the key carries
+    # the subdirectory prefix per the posix-relative-path contract below.
+    "services/test_bootstrap_state_progress.py": (
+        "monkeypatches settings.database_url to per-worker test DB before any destructive write"
+    ),
     # The conftest contains the forbidden substring inside
     # *docstrings + error-message strings* that warn future authors
     # about the exact footgun. Including the message in the warning
