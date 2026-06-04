@@ -49,10 +49,19 @@ def _restore_exchanges(
     ebull_test_conn.commit()
     yield
     ebull_test_conn.rollback()
-    ebull_test_conn.execute("DELETE FROM exchanges")
-    ebull_test_conn.execute("INSERT INTO exchanges SELECT * FROM _exchanges_backup")
-    ebull_test_conn.execute("DROP TABLE _exchanges_backup")
-    ebull_test_conn.commit()
+    try:
+        ebull_test_conn.execute("DELETE FROM exchanges")
+        ebull_test_conn.execute("INSERT INTO exchanges SELECT * FROM _exchanges_backup")
+        ebull_test_conn.commit()
+    finally:
+        # Always drop the temp table even if the restore INSERT aborted the
+        # transaction (rollback first so the DROP runs on a clean tx). The
+        # setup's DROP IF EXISTS also self-heals a leak, and temp tables die
+        # on session close — but the explicit finally keeps it tidy (review
+        # WARNING #1456).
+        ebull_test_conn.rollback()
+        ebull_test_conn.execute("DROP TABLE IF EXISTS _exchanges_backup")
+        ebull_test_conn.commit()
 
 
 def _rows(conn: psycopg.Connection[tuple]) -> set[tuple[str, str]]:
