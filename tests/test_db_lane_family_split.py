@@ -75,9 +75,7 @@ class TestSourceRegistry:
         family_sources = {assignment[1] for assignment in _FAMILY_ASSIGNMENTS}
         for source in family_sources:
             holders = {name for name, src in registry.items() if src == source}
-            expected_job = next(
-                name for name, expected in _FAMILY_ASSIGNMENTS if expected == source
-            )
+            expected_job = next(name for name, expected in _FAMILY_ASSIGNMENTS if expected == source)
             allowed = {expected_job} | self._ALLOWED_BOOTSTRAP_SIBLINGS.get(source, set())
             assert holders == allowed, (
                 f"family source {source!r} owned by {sorted(holders)!r}; "

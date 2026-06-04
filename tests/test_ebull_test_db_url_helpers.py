@@ -61,24 +61,18 @@ _DEV = "postgresql://postgres:postgres@localhost:5432/ebull"
 
 def test_assert_not_dev_cluster_rejects_same_cluster() -> None:
     with pytest.raises(RuntimeError, match="must run on the SEPARATE"):
-        _assert_not_dev_cluster(
-            "postgresql://postgres:postgres@localhost:5432/postgres", dev_url=_DEV
-        )
+        _assert_not_dev_cluster("postgresql://postgres:postgres@localhost:5432/postgres", dev_url=_DEV)
 
 
 def test_assert_not_dev_cluster_rejects_loopback_alias() -> None:
     # localhost vs 127.0.0.1 are the SAME local cluster — must still reject.
     with pytest.raises(RuntimeError):
-        _assert_not_dev_cluster(
-            "postgresql://postgres:postgres@127.0.0.1:5432/postgres", dev_url=_DEV
-        )
+        _assert_not_dev_cluster("postgresql://postgres:postgres@127.0.0.1:5432/postgres", dev_url=_DEV)
 
 
 def test_assert_not_dev_cluster_accepts_different_port() -> None:
     # 5433 is a different cluster — no raise.
-    _assert_not_dev_cluster(
-        "postgresql://postgres:postgres@localhost:5433/postgres", dev_url=_DEV
-    )
+    _assert_not_dev_cluster("postgresql://postgres:postgres@localhost:5433/postgres", dev_url=_DEV)
 
 
 def test_guard_ignores_redirected_live_settings(

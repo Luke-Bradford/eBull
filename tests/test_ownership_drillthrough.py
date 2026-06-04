@@ -29,9 +29,7 @@ def _seed_instrument(conn: psycopg.Connection[tuple], iid: int, symbol: str) -> 
     )
 
 
-def _seed_filing_event(
-    conn: psycopg.Connection[tuple], *, iid: int, accession: str
-) -> None:
+def _seed_filing_event(conn: psycopg.Connection[tuple], *, iid: int, accession: str) -> None:
     """Bridge row required by the drillthrough per-sibling EXISTS gate
     (#1117 PR-B): the entity tables carry instrument_id but the
     drillthrough only counts a sibling when a ``filing_events`` row
