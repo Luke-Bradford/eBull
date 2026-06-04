@@ -601,11 +601,20 @@ def _layer_initialization_blocks(layer: LayerPlan) -> str | None:
                     if row is None or not row[0]:
                         return f"layer {dep_name} not yet initialized"
     except Exception:
+        # #1442 — fail CLOSED. A transient DB error during the init-check must
+        # not let the layer run before its FK dependency is proven visible —
+        # that is the entire point of ``requires_layer_initialized``. Treat the
+        # failed check as "not yet initialized" → PREREQ_SKIP; the layer retries
+        # on the next dispatch once the DB recovers. Previously this returned
+        # None (fail-open), which #1435 made reachable during bootstrap (the
+        # high-frequency-sync carve-out runs ``portfolio_sync`` gated only by
+        # this check) — a transient error could let it run before ``universe``
+        # is visible and FK-violate the adapter.
         logger.exception(
-            "init-check gate: DB lookup failed for layer %s; not blocking",
+            "init-check gate: DB lookup failed for layer %s; failing CLOSED (skipping the layer)",
             layer.name,
         )
-        return None
+        return f"init-check DB error for layer {layer.name}"
 
     return None
 
