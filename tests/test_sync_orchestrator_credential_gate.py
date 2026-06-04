@@ -289,6 +289,28 @@ class TestLayerInitializationBlocks:
         result = _layer_initialization_blocks(plan)
         assert result is None
 
+    def test_db_error_during_init_check_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1442: a transient DB error during the init-check must FAIL CLOSED —
+        return a skip reason (→ PREREQ_SKIP) rather than None (which would let
+        the layer run before its FK dependency is proven visible). Previously
+        fail-open."""
+
+        def _raise(*_args: object, **_kwargs: object) -> object:
+            raise psycopg.OperationalError("connection refused (transient)")
+
+        monkeypatch.setattr(
+            "app.services.sync_orchestrator.executor.psycopg.connect",
+            _raise,
+        )
+        plan = _make_plan("portfolio_sync", ("portfolio_sync",))
+        result = _layer_initialization_blocks(plan)
+        assert result is not None
+        assert "init-check DB error" in result
+        assert "portfolio_sync" in result
+
 
 # ---------------------------------------------------------------------------
 # AUTH_EXPIRED suppression in failure-history queries

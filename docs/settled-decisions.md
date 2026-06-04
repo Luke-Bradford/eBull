@@ -575,8 +575,10 @@ allow-list + invariant assertions):**
   `job_runs`, so the job_runs-based boot catch-up always treats it as
   never-run — `catch_up_on_boot=True` therefore fires it on every
   controller boot (intended for motivation b: populate dashboard at boot;
-  bounded cost). The layer-init guard is fail-open on a transient
-  init-check DB error (pre-existing; fail-closing tracked separately).
+  bounded cost). The layer-init guard fails CLOSED on a transient
+  init-check DB error (#1442): a DB failure during the check treats the
+  layer as not-yet-initialized → `PREREQ_SKIP`, so it never runs before
+  its FK dependency is proven visible; it retries on the next dispatch.
 
 **Adding a new carve-out requires:**
 
