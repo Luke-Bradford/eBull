@@ -215,12 +215,10 @@ class TestIngestNPortDatasetArchive:
         ebull_test_conn.commit()
         # The real invariant: an out-of-window period_end is never written.
         assert result.rows_written == 0
-        # Future dates (6016 / the exclusive 2100 ceiling) are caught by the
-        # #1433 bad_data guard; a pre-1900 date is caught a step earlier by
-        # the §4.6 retention gate — either way it is skipped, not persisted.
-        assert result.rows_skipped_bad_data + result.rows_skipped_retention >= 1
-        if bad_report_date >= "2100":
-            assert result.rows_skipped_bad_data >= 1
+        # The #1433 bounds guard runs BEFORE the §4.6 retention gate, so every
+        # out-of-window date — future (6016 / the exclusive 2100 ceiling) and
+        # pre-1900 alike — is routed to rows_skipped_bad_data, not retention.
+        assert result.rows_skipped_bad_data >= 1
 
     def test_resolved_cusip_deletes_bulk_marker(
         self,
