@@ -331,6 +331,65 @@ class TestSyntheticFill:
         assert result.status == "filled"
         assert result.filled_units == Decimal("0")
 
+    def test_buy_zero_ask_does_not_override_valid_last(self) -> None:
+        """#1439: a non-positive ask must not price the fill at 0.
+
+        eToro persists ``bid=ask=0.00`` for an instrument with no
+        recent two-sided book. The directional ``BUY at ask`` branch
+        used ``ask is not None`` — a 0.00 ask is non-None, so it won
+        over a perfectly valid ``last``, filling the BUY at price 0.
+        A non-positive book side is treated as missing; the fill falls
+        back to the valid ``last``.
+        """
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="BUY",
+            quote_price=Decimal("150"),
+            requested_amount=Decimal("300"),
+            requested_units=None,
+            bid=Decimal("0"),
+            ask=Decimal("0"),
+        )
+        assert result.status == "filled"
+        assert result.filled_price == Decimal("150")
+        assert result.filled_units == Decimal("2.000000")
+
+    def test_exit_zero_bid_does_not_fail_when_last_valid(self) -> None:
+        """#1439: a non-positive bid must not price the EXIT at 0.
+
+        ``EXIT at bid`` used ``bid is not None`` — a 0.00 bid won over
+        a valid ``last`` and tripped the price==0 EXIT fail-closed,
+        wrongly refusing an exit that has a usable last price. The
+        non-positive bid is ignored; the EXIT fills at the valid last.
+        """
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="EXIT",
+            quote_price=Decimal("200"),
+            requested_amount=None,
+            requested_units=Decimal("5"),
+            bid=Decimal("0"),
+            ask=Decimal("0"),
+        )
+        assert result.status == "filled"
+        assert result.filled_price == Decimal("200")
+        assert result.filled_units == Decimal("5")
+
+    def test_zero_last_with_valid_ask_fills_at_ask(self) -> None:
+        """#1439 canonical scenario: last=0 (no recent trade) but a
+        valid two-sided book. BUY fills at ask, never at the 0 last.
+        """
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="BUY",
+            quote_price=Decimal("0"),
+            requested_amount=Decimal("500"),
+            requested_units=None,
+            bid=Decimal("99.80"),
+            ask=Decimal("100.20"),
+        )
+        assert result.filled_price == Decimal("100.20")
+
 
 # ---------------------------------------------------------------------------
 # TestSyntheticFillSpreadCost
@@ -484,6 +543,18 @@ class TestLoadHelpers:
         price = _load_latest_quote_price(conn, 1)
         assert price is None
 
+    def test_quote_price_none_when_last_is_zero(self) -> None:
+        """#1439: last=0.00 is not a usable mark — treat as missing."""
+        conn = _make_conn([_make_cursor([{"last": 0}])])
+        price = _load_latest_quote_price(conn, 1)
+        assert price is None
+
+    def test_quote_price_none_when_last_is_negative(self) -> None:
+        """#1439: a negative last is impossible/garbage — treat as missing."""
+        conn = _make_conn([_make_cursor([{"last": -1.5}])])
+        price = _load_latest_quote_price(conn, 1)
+        assert price is None
+
     def test_position_units_returns_decimal(self) -> None:
         conn = _make_conn([_position_cursor(current_units=10.5)])
         units = _load_position_units(conn, 1)
@@ -616,6 +687,39 @@ class TestExecuteOrderDemoMode:
         # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
         # rec status update, audit = 4 (no fill/position/cash)
         assert conn.execute.call_count == 4
+
+    @patch("app.services.order_client._synthetic_fill")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_filled_zero_price_positive_units_not_persisted(
+        self, _mock_now: MagicMock, mock_fill: MagicMock
+    ) -> None:
+        """#1439 defense-in-depth: a 'filled' broker result with price=0 but
+        positive units must NOT persist a fill (free holdings, prevention-log
+        #68). The persistence guard requires ``fp > 0`` for every action.
+        """
+        mock_fill.return_value = BrokerOrderResult(
+            broker_order_ref="DEMO-1-BUY",
+            status="filled",
+            filled_price=Decimal("0"),
+            filled_units=Decimal("5"),
+            fees=Decimal("0"),
+            raw_payload={"demo": True},
+        )
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
+            _order_returning_cursor(order_id=3),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(conn, recommendation_id=42, decision_id=10)
+        assert result.fill_id is None
+        assert result.outcome == "failed"
+        sql_calls = [str(c.args[0]) for c in conn.execute.call_args_list]
+        assert not any("INSERT INTO fills" in s for s in sql_calls)
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_mode_never_calls_broker(self, _mock_now: MagicMock) -> None:
