@@ -64,3 +64,28 @@ def test_swallows_arbitrary_exceptions() -> None:
     with patch("app.jobs.boot_sweep.run_sync") as run:
         run.side_effect = RuntimeError("boom")
         run_boot_freshness_sweep()  # must not raise
+
+
+def test_boot_sweep_thread_target_runs_sweep() -> None:
+    """#1479: the daemon thread target invokes ``run_boot_freshness_sweep``."""
+    from app.jobs.__main__ import _run_boot_freshness_sweep_thread
+
+    with patch("app.jobs.__main__.run_boot_freshness_sweep") as sweep:
+        _run_boot_freshness_sweep_thread()
+    sweep.assert_called_once_with()
+
+
+def test_boot_sweep_thread_target_swallows_unexpected_escape() -> None:
+    """An unexpected escape from the sweep must be logged, not raised out of
+    the daemon thread (which would only surface as an unraisable-thread
+    traceback). ``run_boot_freshness_sweep`` already swallows its own
+    ``SyncAlreadyRunning`` / arbitrary exceptions; this guards the residual
+    BaseException-shaped escape path."""
+    from app.jobs.__main__ import _run_boot_freshness_sweep_thread
+
+    with (
+        patch("app.jobs.__main__.run_boot_freshness_sweep", side_effect=RuntimeError("boom")),
+        patch("app.jobs.__main__.logger") as log,
+    ):
+        _run_boot_freshness_sweep_thread()  # must not raise
+    log.exception.assert_called_once()

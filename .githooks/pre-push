@@ -225,6 +225,13 @@ bash scripts/check_caller_owned_tx.sh
 echo "==> Pre-push gate: ETL source-to-sink spec docs"
 bash scripts/check_etl_source_docs.sh
 
+# #1479 — every app/ Anthropic client MUST be built via the
+# make_anthropic_client factory (bounded timeout + max_retries). A raw
+# anthropic.Anthropic(...) reintroduces the unbounded 600s SDK default
+# that wedged the jobs boot ~43min on 2026-06-04. ~20ms.
+echo "==> Pre-push gate: bounded Anthropic client construction"
+bash scripts/check_anthropic_timeout.sh
+
 # #1329 — parity guard: every chokepoint lint here MUST also run in
 # .github/workflows/ci.yml (and vice versa), so a --no-verify push
 # cannot dodge a lint that exists only in the hook. ~20ms.

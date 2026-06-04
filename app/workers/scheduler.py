@@ -27,7 +27,6 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal
 
-import anthropic
 import psycopg
 import psycopg.rows
 import psycopg.sql
@@ -39,6 +38,7 @@ from app.providers.implementations.companies_house import CompaniesHouseFilingsP
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
+from app.services.anthropic_client import make_anthropic_client
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import bootstrap_missing_coverage_rows, review_coverage, seed_coverage
 from app.services.deferred_retry import retry_deferred_recommendations
@@ -2507,7 +2507,7 @@ def daily_financial_facts() -> None:
                 # returns the empty-noop CascadeOutcome when both
                 # the retry queue and instrument_ids are empty.
                 changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
-                cascade_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+                cascade_client = make_anthropic_client(settings.anthropic_api_key)
                 cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
                 # Persist any cascade-side writes before the
                 # failure-surfacing raise below. compute_rankings
@@ -2636,7 +2636,7 @@ def daily_thesis_refresh() -> None:
             len(stale_t2),
         )
 
-        claude_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        claude_client = make_anthropic_client(settings.anthropic_api_key)
 
         generated = 0
         skipped = 0

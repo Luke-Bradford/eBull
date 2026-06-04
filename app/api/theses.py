@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import get_conn
+from app.services.anthropic_client import make_anthropic_client
 from app.services.thesis import generate_thesis
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ def get_anthropic_client() -> anthropic.Anthropic:
             status_code=503,
             detail="ANTHROPIC_API_KEY not configured — thesis generation unavailable",
         )
-    return anthropic.Anthropic(api_key=api_key)
+    return make_anthropic_client(api_key)
 
 
 MAX_PAGE_LIMIT = 200

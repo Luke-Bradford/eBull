@@ -96,9 +96,12 @@ class ClaudeSentimentScorer(SentimentScorer):
     MAX_TOKENS = 64
 
     def __init__(self, api_key: str) -> None:
-        import anthropic  # lazy import — keep Anthropic types out of module scope
+        # Lazy import — keep the Anthropic factory (and its anthropic/httpx
+        # imports) out of module scope; pulled in only when a classifier is
+        # constructed. The factory applies the bounded #1479 timeout.
+        from app.services.anthropic_client import make_anthropic_client
 
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = make_anthropic_client(api_key)
 
     def _call_with_retry(self, user_content: str):
         """Send the messages.create call with retry on transient errors.
