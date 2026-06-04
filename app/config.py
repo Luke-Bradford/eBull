@@ -1,3 +1,5 @@
+import os
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -7,6 +9,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # applies to the operator browser session credential and to the service
 # token used by tests / scripts / cron jobs.
 _MIN_SERVICE_TOKEN_LEN = 32
+
+# --- libpq connect timeout (single source) — #1472 PR0 ---------------------
+# Bound the connect phase of EVERY psycopg connection — raw or pooled —
+# across every process (API / jobs / one-off scripts / tests). libpq has no
+# default connect timeout, so a connect that stalls mid-SCRAM-auth under a
+# cadence-boundary connection herd hangs *forever*. When that happens inside
+# the scheduled-fire wrapper's gate/prereq connect (app/jobs/runtime.py:1511,
+# :1541) — which runs BEFORE record_job_start — the job's APScheduler
+# instance counter never decrements and max_instances=1 then silently
+# suppresses every later fire of that job (the 2026-06-04 SEC discovery-layer
+# freeze, #1474). libpq reads PGCONNECT_TIMEOUT from the environment for all
+# connections, so setting it here — at config import, before any connect —
+# bounds all 115 raw psycopg.connect sites + the pools with no DSN or
+# call-site change. setdefault means an explicit value in the PROCESS
+# environment (shell / systemd / Docker) wins — PGCONNECT_TIMEOUT is a
+# libpq env var, not a Settings/.env field, so the process env is its
+# knob (a repo `.env` entry would NOT override it). See
+# docs/proposals/infra/2026-06-04-db-connection-discipline.md (GAP-A).
+DB_CONNECT_TIMEOUT_S = 10
+os.environ.setdefault("PGCONNECT_TIMEOUT", str(DB_CONNECT_TIMEOUT_S))
 
 
 class Settings(BaseSettings):
