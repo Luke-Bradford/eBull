@@ -112,10 +112,10 @@
         }
       },
       "osx": {
-        "command": "pgrep -f 'python -m app.jobs' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"
+        "command": "pgrep -f '[p]ython3 -m app.jobs($|[[:space:]])' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"
       },
       "linux": {
-        "command": "pgrep -f 'python -m app.jobs' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"
+        "command": "pgrep -f '[p]ython3 -m app.jobs($|[[:space:]])' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"
       },
       "isBackground": true,
       "presentation": {
