@@ -33,6 +33,7 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.providers.broker import BrokerOrderResult
 from app.services.ops_monitor import get_kill_switch_status
+from app.services.quote_marks import positive_decimal_or_none
 from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,8 @@ def _synthetic_fill(
     units: Decimal | None,
 ) -> BrokerOrderResult:
     """Build a synthetic BrokerOrderResult for demo mode."""
-    price = quote_price if quote_price is not None else Decimal("0")
+    # A non-positive quote is not a usable mark (#1439): never fill at 0.
+    price = quote_price if quote_price is not None and quote_price > 0 else Decimal("0")
     if units is not None:
         fill_units = units
     elif amount is not None and price > 0:
@@ -137,16 +139,21 @@ def _load_latest_quote_price(
     conn: psycopg.Connection[Any],
     instrument_id: int,
 ) -> Decimal | None:
-    """Return the latest quote last-price, or None if unavailable."""
+    """Return the latest strictly-positive quote last-price, or None.
+
+    A last=0.00 row (eToro's no-recent-trade marker) is not a usable mark
+    (#1439) — return None so demo orders fail closed / fall back to open_rate
+    rather than filling at 0.
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT last FROM quotes WHERE instrument_id = %(iid)s ORDER BY quoted_at DESC LIMIT 1",
             {"iid": instrument_id},
         )
         row = cur.fetchone()
-    if row is None or row["last"] is None:
+    if row is None:
         return None
-    return Decimal(str(row["last"]))
+    return positive_decimal_or_none(row["last"])
 
 
 def _persist_order_and_fill(
@@ -202,8 +209,12 @@ def _persist_order_and_fill(
         fp = broker_result.filled_price
         fu = broker_result.filled_units
 
-        # 2. If filled with positive units, persist fill + position + cash
-        if order_status == "filled" and fp is not None and fu is not None and fu > 0:
+        # 2. If filled with a strictly-positive price AND units, persist fill
+        #    + position + cash. A zero-PRICE fill is never real — never book
+        #    free holdings (#1439, prevention-log #68). Symmetric with the
+        #    order_client persistence guard; upstream already fails closed, so
+        #    this is defense-in-depth.
+        if order_status == "filled" and fp is not None and fp > 0 and fu is not None and fu > 0:
             gross = fp * fu
 
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -597,9 +608,20 @@ def close_position(
                 detail=f"units_to_deduct ({close_units}) exceeds position units ({position_units})",
             )
 
-    # Use current quote for realistic P&L; fall back to open_rate if unavailable.
+    # Use current quote for realistic P&L; fall back to open_rate if
+    # unavailable. Both are floored to strictly-positive (#1439): a 0.00
+    # quote OR a 0/garbage open_rate must not price the EXIT at 0 — fail
+    # closed so _persist_order_and_fill never books a zero-price sale.
     quote_price = _load_latest_quote_price(conn, instrument_id)
-    fill_price = quote_price if quote_price is not None else Decimal(str(pos_row["open_rate"]))
+    fill_price = quote_price if quote_price is not None else positive_decimal_or_none(pos_row["open_rate"])
+    if fill_price is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"No usable price for position {position_id} "
+                "(quote and open_rate both non-positive) — cannot price the close."
+            ),
+        )
 
     broker_result = _synthetic_fill(
         instrument_id=instrument_id,

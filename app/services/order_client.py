@@ -33,6 +33,7 @@ import psycopg.rows
 from psycopg.types.json import Jsonb
 
 from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
+from app.services.quote_marks import positive_decimal_or_none
 from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import get_runtime_config
 from app.services.transaction_cost import (
@@ -110,7 +111,7 @@ def _load_latest_quote_price(
     conn: psycopg.Connection[Any],
     instrument_id: int,
 ) -> Decimal | None:
-    """Return the latest quote last-price, or None if unavailable."""
+    """Return the latest strictly-positive quote last-price, or None."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -123,9 +124,9 @@ def _load_latest_quote_price(
             {"iid": instrument_id},
         )
         row = cur.fetchone()
-    if row is None or row["last"] is None:
+    if row is None:
         return None
-    return Decimal(str(row["last"]))
+    return positive_decimal_or_none(row["last"])
 
 
 def _load_quote_for_execution(
@@ -230,12 +231,14 @@ def _synthetic_fill(
       on EXIT). See issue #255.
     Falls back to last price with zero fees when bid/ask unavailable.
     """
-    # Determine fill price: BUY at ask, EXIT at bid, fallback to last
-    if action in ("BUY", "ADD") and ask is not None:
+    # Determine fill price: BUY at ask, EXIT at bid, fallback to last.
+    # A non-positive book side / last is treated as missing (#1439): a 0.00
+    # ask must not override a valid last and price the fill at 0.
+    if action in ("BUY", "ADD") and ask is not None and ask > 0:
         price = ask
-    elif action == "EXIT" and bid is not None:
+    elif action == "EXIT" and bid is not None and bid > 0:
         price = bid
-    elif quote_price is not None:
+    elif quote_price is not None and quote_price > 0:
         price = quote_price
     else:
         price = Decimal("0")
@@ -942,7 +945,9 @@ def execute_order(
             )
     else:
         quote_data = _load_quote_for_execution(conn, instrument_id)
-        quote_price = Decimal(str(quote_data["last"])) if quote_data and quote_data.get("last") is not None else None
+        # Floor last/bid/ask to strictly-positive (#1439): a 0.00 row is not
+        # a usable mark and must never price a synthetic fill at 0.
+        quote_price = positive_decimal_or_none(quote_data.get("last")) if quote_data else None
         broker_result = _synthetic_fill(
             instrument_id=instrument_id,
             action=action,
@@ -950,8 +955,8 @@ def execute_order(
             requested_amount=requested_amount,
             requested_units=requested_units,
             params=order_params,
-            bid=Decimal(str(quote_data["bid"])) if quote_data and quote_data.get("bid") is not None else None,
-            ask=Decimal(str(quote_data["ask"])) if quote_data and quote_data.get("ask") is not None else None,
+            bid=positive_decimal_or_none(quote_data.get("bid")) if quote_data else None,
+            ask=positive_decimal_or_none(quote_data.get("ask")) if quote_data else None,
         )
         logger.info(
             "demo mode: instrument_id=%d action=%s price=%s units=%s",
@@ -1049,9 +1054,14 @@ def execute_order(
         fp = broker_result.filled_price
         fu = broker_result.filled_units
 
-        # Guard: a fill must have positive units to be persisted.
-        # A zero-unit fill (e.g. demo mode with no quote) is not a real fill.
-        if order_status == "filled" and fp is not None and fu is not None and fu > 0:
+        # Guard: a fill must have a strictly-positive price AND units to be
+        # persisted. A zero-unit fill (demo mode, no quote) is not a real
+        # fill; neither is a zero-PRICE fill — a units-based demo BUY/ADD with
+        # no usable bid/ask/last would otherwise persist free holdings at
+        # price 0 (#1439, prevention-log "Zero-value fills persisted as real
+        # fills" #68). _synthetic_fill only fail-closes zero-price EXIT; this
+        # guard closes the same hole for every action.
+        if order_status == "filled" and fp is not None and fp > 0 and fu is not None and fu > 0:
             fill_id = _persist_fill(
                 conn,
                 order_id=order_id,
