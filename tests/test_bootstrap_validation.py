@@ -92,6 +92,34 @@ def test_count_at_least_bounded_and_accurate_shortfall(ebull_test_conn: psycopg.
 # ---------------------------------------------------------------------------
 
 
+def test_row_floors_are_calibrated_not_placeholders() -> None:
+    """#1434 — the floors were calibrated off the run-3 clean baseline. Guard
+    against an accidental revert to the old ``1`` placeholders (which only
+    caught a totally empty table, not a DEGRADED fractional-fill)."""
+    # No leftover placeholder: every floor is a calibrated absolute minimum,
+    # not the old non-empty sentinel.
+    assert all(floor >= 10_000 for floor in bv._ROW_FLOORS.values()), bv._ROW_FLOORS
+    # instruments is NOT floored here — a correct floor needs a tradable-aware
+    # count (sync_universe soft-deletes via is_tradable=FALSE), tracked in #1462.
+    assert "instruments" not in bv._ROW_FLOORS
+    # The bulk-backed observation/current tables stay floored.
+    for table in (
+        "filing_events",
+        "financial_facts_raw",
+        "ownership_institutions_current",
+        "ownership_funds_current",
+        "ownership_insiders_current",
+    ):
+        assert bv._ROW_FLOORS.get(table, 0) > 1, table
+    # Deferred / cross-stage-ambiguous slices stay UNfloored (scope rules).
+    for table in (
+        "ownership_treasury_current",
+        "ownership_blockholders_current",
+        "ownership_def14a_current",
+    ):
+        assert table not in bv._ROW_FLOORS, table
+
+
 def test_check_row_floors_raises_when_table_empty(
     ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
 ) -> None:
