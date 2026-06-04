@@ -1034,3 +1034,70 @@ class TestRefreshMarketDataForceBackfill:
         # force_backfill bypasses both freshness skip AND incremental
         # fetch-count logic — provider gets the full lookback verbatim.
         provider.get_daily_candles.assert_called_once_with(42, 1000)
+
+    def test_fresh_instrument_counted_in_candles_skipped(self) -> None:
+        """#1293: a freshness-skipped instrument increments candles_skipped
+        so the caller can tell 'all fresh' from 'all failed'."""
+        from app.services.market_data import refresh_market_data
+
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = []
+        conn = self._mock_conn_fresh()
+        summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
+        assert summary.candles_skipped == 1
+        assert summary.candles_failed == 0
+        assert summary.candle_rows_upserted == 0
+
+    def test_fetch_exception_counted_in_candles_failed(self) -> None:
+        """#1293: a candle fetch that raises increments candles_failed (the
+        silent-failure signal — eToro session lapse / API outage)."""
+        from app.services.market_data import refresh_market_data
+
+        # conn whose _candles_are_fresh returns False (old latest date) so the
+        # fetch is attempted, then the provider raises.
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (date(2020, 1, 1),)
+        conn.execute.return_value = cursor
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = ctx
+
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = RuntimeError("eToro 401 session expired")
+
+        summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
+        assert summary.candles_failed == 1
+        assert summary.candles_skipped == 0
+        assert summary.candle_rows_upserted == 0
+
+    def test_rollback_after_upsert_does_not_count_rows(self) -> None:
+        """#1293 (Codex): if the upsert succeeds but feature-compute (still
+        inside the transaction) raises, the write rolls back — candle_rows_upserted
+        must NOT count it, and the instrument is counted as failed."""
+        from unittest.mock import patch as _patch
+
+        from app.services import market_data
+        from app.services.market_data import refresh_market_data
+
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (date(2020, 1, 1),)  # not fresh → attempt fetch
+        conn.execute.return_value = cursor
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = ctx
+
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = [MagicMock()]  # non-empty bars
+
+        with (
+            _patch.object(market_data, "_upsert_candles", return_value=5),
+            _patch.object(market_data, "_compute_and_store_features", side_effect=RuntimeError("feature boom")),
+        ):
+            summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
+
+        assert summary.candle_rows_upserted == 0  # the 5 rolled back — not counted
+        assert summary.candles_failed == 1
