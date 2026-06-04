@@ -32,9 +32,25 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def _route_settings_to_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the drain helper + dispatcher at the worker's test DB."""
+def _route_settings_to_test_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None]:
+    """Point the drain helper + dispatcher at the worker's test DB, and mark
+    bootstrap complete.
+
+    The universal bootstrap gate (#1064/#1181) rejects non-exempt jobs (e.g.
+    ``fundamentals_sync``) with ``bootstrap_not_complete`` until
+    ``bootstrap_state.status='complete'``. This drain test predates that gate
+    and exercises generic claim mechanics, so seed ``complete`` for the run.
+    The singleton row is not truncated by the per-test fixture, so reset it to
+    ``pending`` on teardown.
+    """
     monkeypatch.setattr("app.config.settings.database_url", test_database_url())
+    with psycopg.connect(test_database_url(), autocommit=True) as conn:
+        conn.execute("UPDATE bootstrap_state SET status = 'complete' WHERE id = 1")
+    yield
+    with psycopg.connect(test_database_url(), autocommit=True) as conn:
+        conn.execute("UPDATE bootstrap_state SET status = 'pending' WHERE id = 1")
 
 
 @pytest.fixture()
@@ -53,8 +69,13 @@ def _cleanup_requests() -> Generator[list[int]]:
 def test_drain_pending_at_boot_claims_each_row(
     _cleanup_requests: list[int],
 ) -> None:
-    rid_a = publish_manual_job_request("fundamentals_sync")
-    rid_b = publish_manual_job_request("fundamentals_sync")
+    # nightly_universe_sync: a valid on-demand invoker with NO data
+    # prerequisite (not in SCHEDULED_JOBS, so the listener skips the
+    # prerequisite gate). This keeps the test about claim mechanics rather
+    # than fundamentals_sync's coverage-table prerequisite, which an empty
+    # test DB cannot satisfy.
+    rid_a = publish_manual_job_request("nightly_universe_sync")
+    rid_b = publish_manual_job_request("nightly_universe_sync")
     _cleanup_requests.extend([rid_a, rid_b])
 
     runtime = MagicMock()

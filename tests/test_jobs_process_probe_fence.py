@@ -17,7 +17,7 @@ Empirical test against the local PG 17 instance during PR-D bench
 forced this design correction — see
 :func:`acquire_jobs_process_fence` docstring + spec §17.
 
-All tests use ``settings.database_url`` — advisory locks are
+All tests use ``test_database_url()`` — advisory locks are
 session-scoped and no rows are written.
 
 Same ``xdist_group`` marker as ``tests/test_joblock_per_source.py``
@@ -31,67 +31,67 @@ from urllib.parse import urlparse, urlunparse
 import psycopg
 import pytest
 
-from app.config import settings
 from app.jobs.locks import (
     JOBS_PROCESS_LOCK_KEY,
     JobAlreadyRunning,
     acquire_jobs_process_fence,
     probe_jobs_process_running,
 )
+from tests.fixtures.ebull_test_db import test_database_url
 
 pytestmark = pytest.mark.xdist_group(name="joblock_source_serial")
 
 
 def _sibling_postgres_url() -> str:
-    """Same cluster as ``settings.database_url``, but ``postgres`` DB.
+    """Same cluster as ``test_database_url()``, but ``postgres`` DB.
 
     Used by :func:`test_per_database_isolation_regression_gate` to
     verify the per-database lockspace invariant.
     """
-    parsed = urlparse(settings.database_url)
+    parsed = urlparse(test_database_url())
     return urlunparse(parsed._replace(path="/postgres"))
 
 
 def test_probe_returns_false_when_no_holder() -> None:
     """Happy-path probe: no holder → returns False + releases cleanly."""
-    assert probe_jobs_process_running(settings.database_url) is False
+    assert probe_jobs_process_running(test_database_url()) is False
     # Lock must NOT remain held — second probe is also False.
-    assert probe_jobs_process_running(settings.database_url) is False
+    assert probe_jobs_process_running(test_database_url()) is False
 
 
 def test_probe_returns_true_when_holder_present_on_same_db() -> None:
     """Probe sees a same-DB held fence as ``True``."""
-    with psycopg.connect(settings.database_url, autocommit=True) as holder:
+    with psycopg.connect(test_database_url(), autocommit=True) as holder:
         row = holder.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)).fetchone()
         assert row is not None and bool(row[0]) is True
         try:
-            assert probe_jobs_process_running(settings.database_url) is True
+            assert probe_jobs_process_running(test_database_url()) is True
         finally:
             holder.execute("SELECT pg_advisory_unlock(%s)", (JOBS_PROCESS_LOCK_KEY,))
 
     # After release the probe is False again.
-    assert probe_jobs_process_running(settings.database_url) is False
+    assert probe_jobs_process_running(test_database_url()) is False
 
 
 def test_fence_acquires_and_releases_on_application_db() -> None:
     """Fence context-manager round-trip on the application DB."""
-    with acquire_jobs_process_fence(settings.database_url):
+    with acquire_jobs_process_fence(test_database_url()):
         # Inside the context, probe on the SAME DB sees a holder.
-        assert probe_jobs_process_running(settings.database_url) is True
+        assert probe_jobs_process_running(test_database_url()) is True
     # Released on exit.
-    assert probe_jobs_process_running(settings.database_url) is False
+    assert probe_jobs_process_running(test_database_url()) is False
 
 
 def test_fence_raises_when_already_held_on_same_db() -> None:
     """Second fence acquire on the same DB contends and raises."""
-    with acquire_jobs_process_fence(settings.database_url):
+    with acquire_jobs_process_fence(test_database_url()):
         with pytest.raises(JobAlreadyRunning) as exc_info:
-            with acquire_jobs_process_fence(settings.database_url):
+            with acquire_jobs_process_fence(test_database_url()):
                 pytest.fail("inner fence acquire should have raised")
         assert exc_info.value.job_name == "jobs_process"
 
     # Released after outer exit.
-    assert probe_jobs_process_running(settings.database_url) is False
+    assert probe_jobs_process_running(test_database_url()) is False
 
 
 def test_per_database_isolation_regression_gate() -> None:
@@ -116,6 +116,6 @@ def test_per_database_isolation_regression_gate() -> None:
         try:
             # An acquire on the APPLICATION DB succeeds — locks are
             # per-database.
-            assert probe_jobs_process_running(settings.database_url) is False
+            assert probe_jobs_process_running(test_database_url()) is False
         finally:
             sibling.execute("SELECT pg_advisory_unlock(%s)", (JOBS_PROCESS_LOCK_KEY,))

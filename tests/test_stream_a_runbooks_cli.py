@@ -36,6 +36,19 @@ from app.runbooks import (
     stream_a_t13_sidecar_repair,
 )
 
+
+@pytest.fixture(autouse=True)
+def _allow_dev_db_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runbooks' dev-DB guard (``assert_dev_db_name_in_url``) checks the
+    DATABASE_URL database name against ``EBULL_DEV_DB_NAMES`` (default
+    ``{"ebull_dev"}``). The local dev DB is named ``ebull`` (.env), so without
+    this the dry-run tests refuse with RunbookRefused(2). Allow-list ``ebull``
+    for the whole module; the EBULL_ENV-refusal tests fail earlier on
+    EBULL_ENV and are unaffected.
+    """
+    monkeypatch.setenv("EBULL_DEV_DB_NAMES", "ebull")
+
+
 # ---------------------------------------------------------------------------
 # Common: EBULL_ENV refusal (shared across all three runbooks)
 # ---------------------------------------------------------------------------

@@ -87,7 +87,10 @@ def test_partitioned_table_metadata(ebull_test_conn: psycopg.Connection[tuple]) 
 
 
 def test_partition_inventory(ebull_test_conn: psycopg.Connection[tuple]) -> None:
-    """Exactly 86 leaf partitions: 1 pre2010 + 84 quarterly + 1 default."""
+    """Exactly 126 leaf partitions: 1 pre2010 + 124 quarterly + 1 default.
+
+    Quarterly leaves extended 84→124 by sql/175 (2031q1–2040q4, #1233 DE IMP2).
+    """
     with ebull_test_conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) "
@@ -97,7 +100,7 @@ def test_partition_inventory(ebull_test_conn: psycopg.Connection[tuple]) -> None
         )
         row = cur.fetchone()
     assert row is not None
-    assert row[0] == 86, f"expected 86 leaf partitions, got {row[0]}"
+    assert row[0] == 126, f"expected 126 leaf partitions, got {row[0]}"
 
     # Spot-check three named partitions
     with ebull_test_conn.cursor() as cur:
@@ -293,9 +296,9 @@ def test_each_leaf_partition_has_attached_child_indexes(
             """
         )
         results = cur.fetchall()
-    # 86 leaves, each with 5 child indexes attached (one per parent
-    # partitioned index).
-    assert len(results) == 86, f"expected 86 leaves, got {len(results)}"
+    # 126 leaves, each with 5 child indexes attached (one per parent
+    # partitioned index). Extended 86→126 by sql/175 (#1233 DE IMP2).
+    assert len(results) == 126, f"expected 126 leaves, got {len(results)}"
     for leaf_name, attached in results:
         assert attached == 5, f"leaf {leaf_name!r} has {attached} attached child indexes, expected 5"
 

@@ -45,8 +45,10 @@ def test_sec_bulk_jobs_overridden() -> None:
     """
     for process_id in (
         "sec_filing_documents_ingest",
-        "sec_13f_quarterly_sweep",
-        "sec_n_port_ingest",
+        # The 13F / N-PORT stale-detection surfaces are the ingest-sweep
+        # ProcessRows, not the retired/internal job names (#1445).
+        "sec_13f_sweep",
+        "nport_sweep",
         "sec_def14a_bootstrap",
         "sec_business_summary_bootstrap",
         "ownership_observations_backfill",
@@ -61,10 +63,20 @@ def test_override_keys_resolve_to_real_process_ids() -> None:
     Cross-check every override key against the live registry — bootstrap
     is special-cased; all others must match a ``ScheduledJob.name``.
     """
+    from app.services.processes.ingest_sweep_adapter import sweep_process_ids
     from app.workers.scheduler import SCHEDULED_JOBS
 
-    valid_job_names = {job.name for job in SCHEDULED_JOBS}
+    # An override key must resolve to a real stale-detection surface — a
+    # ProcessRow.process_id that ops-monitor actually keys ``get_threshold``
+    # by. That surface is scheduled jobs ∪ ingest sweeps ∪ the bootstrap row,
+    # NOT the raw _INVOKERS registry (which includes retired/internal job
+    # names that surface no ProcessRow — keying an override to one of those
+    # silently no-ops, #1445).
+    valid_process_ids = {job.name for job in SCHEDULED_JOBS} | set(sweep_process_ids())
     for process_id in overridden_process_ids():
         if process_id == "bootstrap":
             continue
-        assert process_id in valid_job_names, f"override key {process_id!r} does not resolve to a real ScheduledJob"
+        assert process_id in valid_process_ids, (
+            f"override key {process_id!r} does not resolve to a real "
+            "stale-detection ProcessRow (scheduled job or ingest sweep)"
+        )

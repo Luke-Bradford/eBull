@@ -40,14 +40,26 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def _route_settings_to_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point app.config.settings.database_url at the worker's test DB.
+def _route_settings_to_test_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None]:
+    """Point app.config.settings.database_url at the worker's test DB, and
+    mark bootstrap complete.
 
-    ``publish_manual_job_request`` and friends read
-    ``settings.database_url`` at call time, so a per-test monkeypatch
-    is sufficient — no production code change needed.
+    ``publish_manual_job_request`` and friends read ``settings.database_url``
+    at call time, so a per-test monkeypatch is sufficient. The universal
+    bootstrap gate (#1064/#1181) rejects non-exempt jobs (e.g.
+    ``fundamentals_sync``) with ``bootstrap_not_complete`` until
+    ``bootstrap_state.status='complete'``; this dispatch test predates that
+    gate, so seed ``complete`` and reset the (non-truncated) singleton to
+    ``pending`` on teardown.
     """
     monkeypatch.setattr("app.config.settings.database_url", test_database_url())
+    with psycopg.connect(test_database_url(), autocommit=True) as conn:
+        conn.execute("UPDATE bootstrap_state SET status = 'complete' WHERE id = 1")
+    yield
+    with psycopg.connect(test_database_url(), autocommit=True) as conn:
+        conn.execute("UPDATE bootstrap_state SET status = 'pending' WHERE id = 1")
 
 
 @pytest.fixture()
@@ -87,8 +99,14 @@ def test_dispatch_manual_job_with_unknown_name_marks_rejected(_cleanup_requests:
 def test_dispatch_manual_job_with_valid_name_calls_runtime() -> None:
     """A valid job_name must be forwarded to ``runtime.submit_manual_with_request``."""
     runtime = MagicMock()
-    _dispatch_manual_job(runtime=runtime, request_id=42, job_name="fundamentals_sync")
-    runtime.submit_manual_with_request.assert_called_once_with("fundamentals_sync", request_id=42)
+    # nightly_universe_sync: valid on-demand invoker with NO data prerequisite
+    # (not in SCHEDULED_JOBS). Keeps this test about dispatch forwarding rather
+    # than fundamentals_sync's coverage-table prerequisite (an empty test DB
+    # cannot satisfy it).
+    _dispatch_manual_job(runtime=runtime, request_id=42, job_name="nightly_universe_sync")
+    runtime.submit_manual_with_request.assert_called_once_with(
+        "nightly_universe_sync", request_id=42, mode=None, params={}
+    )
 
 
 def test_dispatch_sync_with_invalid_payload_marks_rejected(

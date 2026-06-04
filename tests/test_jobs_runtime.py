@@ -427,6 +427,9 @@ class TestProductionInvokerRegistry:
             # but registered in _INVOKERS so the orchestrator can call
             # them via JobLock + so admin Run-now still works:
             "bootstrap_orchestrator",
+            # #1419 — terminal bootstrap_validation stage. Dispatched as the
+            # final bootstrap stage; registered in _INVOKERS, not SCHEDULED.
+            "bootstrap_validation",
             # PR1c #1064 — promoted from bespoke wrappers:
             #   bootstrap_filings_history_seed   → filings_history_seed
             #   sec_first_install_drain_job      → sec_first_install_drain (same name)

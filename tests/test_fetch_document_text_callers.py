@@ -88,7 +88,6 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "tests/test_eight_k_events_ingest.py",
         "tests/test_concurrent_fetch.py",
         "tests/test_institutional_holdings_ingester.py",
-        "tests/test_blockholders_ingester.py",
         "tests/test_def14a_ingest.py",
         "tests/test_ncen_classifier.py",
         "tests/test_n_port_ingest.py",
@@ -159,6 +158,25 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # to inject a fake mf.json body and assert the no-fail-soft +
         # tracker.row_count + capability contracts.
         "tests/test_mf_directory_sync_wrapper.py",
+        # #916 — FINRA RegSHO daily parser is a synth-noop (docstring-only
+        # mention of fetch_document_text; the real fetch uses its own
+        # httpx.Client, mirroring finra_short_interest.py above). Test
+        # patches a raising sentinel to enforce the non-call invariant.
+        "app/services/manifest_parsers/finra_regsho_daily.py",
+        "tests/test_manifest_parser_finra_regsho_daily.py",
+        # #1340 — sec_submissions_zip is a transport-only accelerator that
+        # delegates to the wrapped fetcher (mirrors concurrent_fetch.py /
+        # sec_pipelined_fetcher.py); no new disk-only persistence path.
+        "app/services/sec_submissions_zip.py",
+        "tests/test_sec_submissions_zip.py",
+        # Retention/recency/lazy-body cap tests — each monkeypatches
+        # fetch_document_text with a stub/sentinel to assert the cap gate
+        # (no real fetch + no new persistence surface).
+        "tests/test_def14a_latest_n_cap.py",
+        "tests/test_filings_recency_bound.py",
+        "tests/test_insider_transactions_retention_cap.py",
+        "tests/test_lazy_body_deferred.py",
+        "tests/test_thirteen_f_retention_cap.py",
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",

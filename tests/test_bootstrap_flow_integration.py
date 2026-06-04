@@ -136,7 +136,7 @@ def test_bootstrap_end_to_end(
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None
     assert snap.run_id == run_id
-    assert len(snap.stages) == 20
+    assert len(snap.stages) == 21  # #1419 added terminal bootstrap_validation
     assert all(s.status == "pending" for s in snap.stages)
 
     # 3. State is running, gate stays closed.
@@ -148,8 +148,10 @@ def test_bootstrap_end_to_end(
     # 4. Orchestrator drives Phase A → B → C with the stubbed invokers.
     run_bootstrap_orchestrator()
 
-    # 5. Every fake invoker fired once (20 stages post-#1413/#1415).
-    assert len(calls["order"]) == 20
+    # 5. Every fake invoker fired once (21 stages post-#1413/#1415/#1419 —
+    # incl. the terminal bootstrap_validation stage).
+    assert len(calls["order"]) == 21
+    assert "bootstrap_validation" in calls["order"]
 
     # 6. State is complete; gate releases.
     state = read_state(ebull_test_conn)

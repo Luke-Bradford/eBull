@@ -32,6 +32,7 @@ from app.runbooks.safety import (
     assert_jobs_process_stopped,
     wait_for_jobs_process_started,
 )
+from tests.fixtures.ebull_test_db import test_database_url
 
 pytestmark = pytest.mark.xdist_group(name="joblock_source_serial")
 
@@ -114,16 +115,16 @@ def test_assert_dev_db_strips_whitespace_in_allowlist(
 
 
 def test_assert_jobs_process_stopped_passes_when_lock_free() -> None:
-    assert_jobs_process_stopped(settings.database_url)  # no raise
+    assert_jobs_process_stopped(test_database_url())  # no raise
 
 
 def test_assert_jobs_process_stopped_refuses_when_lock_held() -> None:
-    with psycopg.connect(settings.database_url, autocommit=True) as holder:
+    with psycopg.connect(test_database_url(), autocommit=True) as holder:
         row = holder.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,)).fetchone()
         assert row is not None and bool(row[0]) is True
         try:
             with pytest.raises(RunbookRefused) as exc:
-                assert_jobs_process_stopped(settings.database_url)
+                assert_jobs_process_stopped(test_database_url())
             assert exc.value.code == 2
             assert "JOBS_PROCESS_LOCK_KEY held" in exc.value.msg
         finally:
@@ -137,11 +138,11 @@ def test_assert_jobs_process_stopped_refuses_when_lock_held() -> None:
 
 def test_wait_for_jobs_process_started_returns_immediately_when_already_held() -> None:
     """Happy path: lock already held → return immediately, no sleep."""
-    with psycopg.connect(settings.database_url, autocommit=True) as holder:
+    with psycopg.connect(test_database_url(), autocommit=True) as holder:
         holder.execute("SELECT pg_try_advisory_lock(%s)", (JOBS_PROCESS_LOCK_KEY,))
         try:
             start = time.monotonic()
-            wait_for_jobs_process_started(settings.database_url, timeout_sec=60, poll_sec=10)
+            wait_for_jobs_process_started(test_database_url(), timeout_sec=60, poll_sec=10)
             elapsed = time.monotonic() - start
             # Returns within the first poll without sleeping.
             assert elapsed < 2.0
@@ -152,7 +153,7 @@ def test_wait_for_jobs_process_started_returns_immediately_when_already_held() -
 def test_wait_for_jobs_process_started_times_out_when_lock_never_held() -> None:
     """Tight timeout (2s) + 1s poll → 2 polls then RunbookRefused."""
     with pytest.raises(RunbookRefused) as exc:
-        wait_for_jobs_process_started(settings.database_url, timeout_sec=2, poll_sec=1)
+        wait_for_jobs_process_started(test_database_url(), timeout_sec=2, poll_sec=1)
     assert exc.value.code == 2
     assert "did not start within" in exc.value.msg
 

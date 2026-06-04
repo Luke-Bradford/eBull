@@ -12,7 +12,11 @@ from urllib.parse import unquote, urlparse
 import pytest
 
 from app.config import settings
-from tests.fixtures.ebull_test_db import _assert_not_dev_cluster, _swap_port
+from tests.fixtures.ebull_test_db import (
+    _assert_not_dev_cluster,
+    _swap_port,
+    test_database_url,
+)
 
 
 def test_swap_port_basic() -> None:
@@ -48,20 +52,43 @@ def test_swap_port_ipv6_host() -> None:
     assert urlparse(out).hostname == "::1"
 
 
-def test_assert_not_dev_cluster_rejects_same_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "database_url", "postgresql://postgres:postgres@localhost:5432/ebull")
+# The guard compares against an injected ``dev_url`` (default: the import-time
+# snapshot ``_DEV_DATABASE_URL``), NOT live ``settings.database_url`` — see
+# #1445. Tests therefore pass ``dev_url=`` explicitly rather than monkeypatching
+# settings, which the guard intentionally no longer reads.
+_DEV = "postgresql://postgres:postgres@localhost:5432/ebull"
+
+
+def test_assert_not_dev_cluster_rejects_same_cluster() -> None:
     with pytest.raises(RuntimeError, match="must run on the SEPARATE"):
-        _assert_not_dev_cluster("postgresql://postgres:postgres@localhost:5432/postgres")
+        _assert_not_dev_cluster("postgresql://postgres:postgres@localhost:5432/postgres", dev_url=_DEV)
 
 
-def test_assert_not_dev_cluster_rejects_loopback_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_assert_not_dev_cluster_rejects_loopback_alias() -> None:
     # localhost vs 127.0.0.1 are the SAME local cluster — must still reject.
-    monkeypatch.setattr(settings, "database_url", "postgresql://postgres:postgres@localhost:5432/ebull")
     with pytest.raises(RuntimeError):
-        _assert_not_dev_cluster("postgresql://postgres:postgres@127.0.0.1:5432/postgres")
+        _assert_not_dev_cluster("postgresql://postgres:postgres@127.0.0.1:5432/postgres", dev_url=_DEV)
 
 
-def test_assert_not_dev_cluster_accepts_different_port(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "database_url", "postgresql://postgres:postgres@localhost:5432/ebull")
+def test_assert_not_dev_cluster_accepts_different_port() -> None:
     # 5433 is a different cluster — no raise.
-    _assert_not_dev_cluster("postgresql://postgres:postgres@localhost:5433/postgres")
+    _assert_not_dev_cluster("postgresql://postgres:postgres@localhost:5433/postgres", dev_url=_DEV)
+
+
+def test_guard_ignores_redirected_live_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for #1445: the redirect-then-reconnect pattern.
+
+    Tests routinely ``monkeypatch.setattr(settings, "database_url",
+    test_database_url())`` to point app-under-test code at the per-worker test
+    DB. A SECOND ``test_database_url()`` call (e.g. in a ``conn`` fixture) must
+    not raise: the guard reads the import-time dev snapshot, not the now-
+    redirected live ``settings.database_url``. Before the fix this raised
+    ``RuntimeError`` because the guard saw dev==test (both the test cluster).
+    """
+    redirected = test_database_url()  # first call: guard OK, returns 5433 URL
+    monkeypatch.setattr(settings, "database_url", redirected)
+    # Second call with live settings now pointing at the test cluster — must
+    # NOT raise.
+    assert test_database_url() == redirected

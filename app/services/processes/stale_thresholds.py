@@ -43,8 +43,13 @@ _OVERRIDES: Final[dict[str, int]] = {
     # ingest jobs are slow-tick by design. 30 min sits well above the
     # observed worst-case inter-tick gap.
     "sec_filing_documents_ingest": 1800,
-    "sec_13f_quarterly_sweep": 1800,
-    "sec_n_port_ingest": 1800,
+    # The 13F + N-PORT stale-detection surfaces are the ingest-sweep
+    # ProcessRows ``sec_13f_sweep`` / ``nport_sweep`` (ingest_sweep_adapter),
+    # NOT the retired/internal job names ``sec_13f_quarterly_sweep`` /
+    # ``sec_n_port_ingest`` — those key no real ProcessRow, so the override
+    # never applied (#1445: caught while repairing the stale-threshold test).
+    "sec_13f_sweep": 1800,
+    "nport_sweep": 1800,
     "sec_def14a_bootstrap": 1800,
     "sec_business_summary_bootstrap": 1800,
     "ownership_observations_backfill": 1800,
