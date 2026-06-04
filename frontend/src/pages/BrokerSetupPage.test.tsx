@@ -109,6 +109,10 @@ describe("BrokerSetupPage", () => {
     await user.type(screen.getByLabelText(/Private key/i), "user-key-value");
     await user.click(screen.getByRole("button", { name: /Save & continue/i }));
 
+    // The rejecting probe must actually have been invoked — otherwise the
+    // "swallow" assertion below would be vacuously true (it would pass even
+    // if the validateStoredCredentials call were deleted entirely).
+    await waitFor(() => expect(mockValidateStored).toHaveBeenCalledTimes(1));
     // Setup still completes: the gate is flipped and we navigate home even
     // though validate-stored threw.
     await waitFor(() => expect(refreshBootstrapState).toHaveBeenCalledTimes(1));
