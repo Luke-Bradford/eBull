@@ -450,10 +450,14 @@ function ActionBar({
   // Mechanism-specific labels — bootstrap maps iterate/full_wash to
   // "Re-run failed" / "Re-run all" per data-engineer skill §7.3.
   const isBootstrap = row.mechanism === "bootstrap";
-  // First install (#1432): collapse to a single non-destructive "Run
+  // First install (#1264): collapse to a single non-destructive "Run
   // bootstrap" button — mirrors the table-row affordance. "Re-run failed"
   // / "Cancel" cannot apply on a never-run row.
   const isFirstRun = isBootstrap && row.status === "pending_first_run";
+  // Clean-complete (#1432): bootstrap finished with every stage successful
+  // — "Re-run all" stays available but loses its red destructive tone, since
+  // nothing failed. Mirrors the table-row affordance.
+  const isCleanComplete = isBootstrap && row.status === "ok";
   const iterateLabel = isBootstrap ? "Re-run failed" : "Iterate";
   const fullWashLabel = isFirstRun
     ? "Run bootstrap"
@@ -468,9 +472,11 @@ function ActionBar({
   const fullWashTooltip = isFirstRun
     ? "Start the first-install bootstrap — populates the universe + filings. Asks for confirmation first."
     : row.can_full_wash
-      ? isBootstrap
-        ? "Reset every stage to pending; full first-install replay (confirm required)."
-        : "Reset watermark and re-fetch from epoch (confirm required)."
+      ? isCleanComplete
+        ? "Last bootstrap completed cleanly — this wipes every stage and replays the full install from scratch. Only needed to fully re-bootstrap (confirm required)."
+        : isBootstrap
+          ? "Reset every stage to pending; full first-install replay (confirm required)."
+          : "Reset watermark and re-fetch from epoch (confirm required)."
       : `${fullWashLabel} is not available right now.`;
   return (
     <div className="flex flex-col items-end gap-1">
@@ -494,7 +500,9 @@ function ActionBar({
           className={
             isFirstRun
               ? "rounded border border-blue-600 bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-500 dark:bg-blue-600 dark:hover:bg-blue-700"
-              : "rounded border border-red-300 bg-white px-3 py-1 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
+              : isCleanComplete
+                ? "rounded border border-slate-300 bg-white px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800/40"
+                : "rounded border border-red-300 bg-white px-3 py-1 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
           }
         >
           {fullWashLabel}
