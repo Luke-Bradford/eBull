@@ -195,6 +195,13 @@ export function AdminPage() {
         onOpenOrchestrator={openOrchestratorFor}
       />
 
+      <FundDataRow
+        coverage={coverage.data}
+        coverageError={coverage.error !== null}
+        recommendations={recs.data}
+        recommendationsError={recs.error !== null}
+      />
+
       <CollapsibleSection
         title="Processes"
         summary="control hub"
@@ -223,13 +230,6 @@ export function AdminPage() {
           />
         ) : null}
       </CollapsibleSection>
-
-      <FundDataRow
-        coverage={coverage.data}
-        coverageError={coverage.error !== null}
-        recommendations={recs.data}
-        recommendationsError={recs.error !== null}
-      />
 
       <CollapsibleSection
         title="Background tasks"

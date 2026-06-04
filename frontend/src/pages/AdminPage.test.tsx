@@ -3,9 +3,11 @@
  *
  * Post-PR9 (#1085) AdminPage shape:
  *   1. ProblemsPanel — failing layers + failing jobs + coverage anomalies.
- *   2. Processes table — unified mechanism rows; bootstrap row + DAG drill-in
+ *   2. FundDataRow — at-a-glance fund stats header (moved above Processes
+ *      so it reads as the page header, not a footer buried under 40 rows).
+ *   3. Processes table — unified mechanism rows; bootstrap row + DAG drill-in
  *      + Timeline drill-in routes live under /admin/processes/:id.
- *   3. FundDataRow + Background tasks + Filings coverage.
+ *   4. Background tasks + Filings coverage.
  *
  * Decommissioned in PR6 (no longer covered here):
  *   - Sync-now button (top-level)
