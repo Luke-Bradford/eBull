@@ -12,12 +12,14 @@ import psycopg
 import pytest
 
 from app.services.sec_13f_dataset_ingest import (
+    _FIGI_RE,
     Form13FIngestResult,
     _map_putcall,
     _map_voting_authority,
     _parse_decimal,
     _parse_filing_date,
     _parse_period_end,
+    _persist_figi_external_identifiers,
     ingest_13f_dataset_archive,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn
@@ -547,3 +549,156 @@ class TestRealArchiveEdgeCases:
             mv = row[0]
         # 5,000,000 thousands = 5B USD (pre-2023 multiplier applied).
         assert mv == Decimal("5000000000.00")
+
+
+# ---------------------------------------------------------------------------
+# #1302 — FIGI capture (the 13F INFOTABLE column added 2023-01-03; NOT LEI)
+# ---------------------------------------------------------------------------
+
+
+class TestFigiRegex:
+    def test_accepts_valid_12char_figi(self) -> None:
+        assert _FIGI_RE.match("BBG000B9XRY4")
+
+    def test_rejects_wrong_length(self) -> None:
+        assert _FIGI_RE.match("BBG000B9XRY") is None  # 11
+        assert _FIGI_RE.match("BBG000B9XRY44") is None  # 13
+
+    def test_rejects_lowercase_and_symbols(self) -> None:
+        assert _FIGI_RE.match("bbg000b9xry4") is None
+        assert _FIGI_RE.match("BBG000B9-RY4") is None
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestPersistFigiExternalIdentifiers:
+    def _seed_iid(self, conn: psycopg.Connection[tuple], symbol: str, cusip: str) -> int:
+        return _seed_universe_with_cusip(conn, symbol=symbol, cusip=cusip)
+
+    def test_inserts_new_figi_mapping(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = self._seed_iid(ebull_test_conn, "FOO", "111111111")
+        result = Form13FIngestResult()
+        _persist_figi_external_identifiers(ebull_test_conn, {"BBG000B9XRY4": iid}, result=result)
+        ebull_test_conn.commit()
+        assert result.figi_identifiers_seen == 1
+        assert result.figi_identifiers_written == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT instrument_id, is_primary FROM external_identifiers "
+                "WHERE provider='sec' AND identifier_type='figi' AND identifier_value='BBG000B9XRY4'"
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == iid
+        assert row[1] is False  # never claims primary
+
+    def test_do_nothing_on_existing_figi(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A FIGI already mapped (even to a DIFFERENT instrument) is never
+        clobbered — DO NOTHING preserves the existing row."""
+        iid_a = self._seed_iid(ebull_test_conn, "AAA", "222222222")
+        iid_b = self._seed_iid(ebull_test_conn, "BBB", "333333333")
+        r1 = Form13FIngestResult()
+        _persist_figi_external_identifiers(ebull_test_conn, {"BBG00000FIG1": iid_a}, result=r1)
+        ebull_test_conn.commit()
+        # Second persist with the same FIGI pointed at a different instrument.
+        r2 = Form13FIngestResult()
+        _persist_figi_external_identifiers(ebull_test_conn, {"BBG00000FIG1": iid_b}, result=r2)
+        ebull_test_conn.commit()
+        assert r2.figi_identifiers_written == 0
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT instrument_id FROM external_identifiers "
+                "WHERE provider='sec' AND identifier_type='figi' AND identifier_value='BBG00000FIG1'"
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == iid_a  # original mapping preserved
+
+    def test_empty_mapping_is_noop(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        result = Form13FIngestResult()
+        _persist_figi_external_identifiers(ebull_test_conn, {}, result=result)
+        assert result.figi_identifiers_seen == 0
+        assert result.figi_identifiers_written == 0
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestIngest13FFigiCapture:
+    def test_figi_column_captured_during_archive_ingest(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        iid = _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        archive_bytes = _build_dataset_zip(
+            submissions=[{"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1234567", "FILING_DATE": "2025-11-14"}],
+            coverpages=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "FILINGMANAGER_NAME": "Big Fund LLC",
+                    "REPORTCALENDARORQUARTER": "2025-09-30",
+                }
+            ],
+            infotable=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "CUSIP": "037833100",
+                    "FIGI": "BBG000B9XRY4",
+                    "VALUE": "5000000",
+                    "SSHPRNAMT": "100000",
+                    "PUTCALL": "",
+                },
+            ],
+        )
+        archive_path = tmp_path / "form13f.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_13f_dataset_archive(conn=ebull_test_conn, archive_path=archive_path, ingest_run_id=uuid4())
+        ebull_test_conn.commit()
+
+        assert result.figi_identifiers_seen == 1
+        assert result.figi_identifiers_written == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT instrument_id FROM external_identifiers "
+                "WHERE provider='sec' AND identifier_type='figi' AND identifier_value='BBG000B9XRY4'"
+            )
+            row = cur.fetchone()
+        assert row is not None and row[0] == iid
+
+    def test_malformed_or_missing_figi_not_captured(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        archive_bytes = _build_dataset_zip(
+            submissions=[{"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1234567", "FILING_DATE": "2025-11-14"}],
+            coverpages=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "FILINGMANAGER_NAME": "Big Fund LLC",
+                    "REPORTCALENDARORQUARTER": "2025-09-30",
+                }
+            ],
+            infotable=[
+                # Pre-2023 row shape (no FIGI column) + a malformed FIGI row.
+                {"ACCESSION_NUMBER": "0001234567-25-000001", "CUSIP": "037833100", "VALUE": "100", "SSHPRNAMT": "10"},
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "CUSIP": "037833100",
+                    "FIGI": "NOTAFIGI",  # wrong length → rejected
+                    "VALUE": "200",
+                    "SSHPRNAMT": "20",
+                    "PUTCALL": "Put",
+                },
+            ],
+        )
+        archive_path = tmp_path / "form13f.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_13f_dataset_archive(conn=ebull_test_conn, archive_path=archive_path, ingest_run_id=uuid4())
+        ebull_test_conn.commit()
+
+        assert result.figi_identifiers_seen == 0
+        assert result.figi_identifiers_written == 0

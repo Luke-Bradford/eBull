@@ -41,6 +41,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -86,7 +87,59 @@ class Form13FIngestResult:
     rows_skipped_retention: int = 0  # PR6 #1233 §4.5
     parse_errors: int = 0
     resolved_markers_deleted: int = 0  # #1399 — inline-deleted bulk markers
+    figi_identifiers_seen: int = 0  # #1302 — distinct FIGIs collected this archive
+    figi_identifiers_written: int = 0  # #1302 — newly inserted external_identifiers rows
     touched_instrument_ids: set[int] = field(default_factory=set)
+
+
+# #1302 — the 13F INFOTABLE gained a ``FIGI`` column on 2023-01-03 (NOT
+# ``LEI`` — empirically verified against the published dataset header; there
+# is no LEI anywhere in the 13F structured data). FIGI is the 12-char
+# OpenFIGI/Bloomberg global security identifier; ISO/BBG form is uppercase
+# alphanumeric exactly 12 long. Reject anything else (empty / malformed) so
+# only clean values reach external_identifiers.
+_FIGI_RE = re.compile(r"^[A-Z0-9]{12}$")
+
+
+# Persist the distinct CUSIP-derived FIGI -> instrument mappings at INSTRUMENT
+# grain (NOT per holding-row): FIGI identifies the security, so storing it
+# per (filer, period) observation would denormalise the same value across
+# millions of rows of an already-bloated partitioned table (#1219/#1349). The
+# settled-decisions home for a provider-native security identifier is
+# ``external_identifiers``. Bounded by distinct securities held in the archive
+# (~thousands). ``DO NOTHING`` never clobbers a curated/prior mapping; a FIGI
+# already bound to a DIFFERENT instrument is a data anomaly left for audit,
+# not silently rebound. The ON CONFLICT predicate targets the non-CIK partial
+# unique index ``uq_external_identifiers_provider_value_non_cik`` (#1102).
+_FIGI_UPSERT_SQL = """
+INSERT INTO external_identifiers (
+    instrument_id, provider, identifier_type, identifier_value, is_primary
+) VALUES (%(iid)s, 'sec', 'figi', %(figi)s, FALSE)
+ON CONFLICT (provider, identifier_type, identifier_value)
+    WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+DO NOTHING
+"""
+
+
+def _persist_figi_external_identifiers(
+    conn: psycopg.Connection[Any],
+    figi_to_instrument: dict[str, int],
+    *,
+    result: Form13FIngestResult,
+) -> None:
+    """Batch-upsert collected FIGI -> instrument mappings (#1302).
+
+    Idempotent + clobber-safe (DO NOTHING). Runs in the caller's per-archive
+    transaction so it commits/rolls back atomically with the holdings drain.
+    """
+    if not figi_to_instrument:
+        return
+    result.figi_identifiers_seen += len(figi_to_instrument)
+    params = [{"iid": iid, "figi": figi} for figi, iid in figi_to_instrument.items()]
+    with conn.cursor() as cur:
+        cur.executemany(_FIGI_UPSERT_SQL, params)
+        if cur.rowcount and cur.rowcount > 0:
+            result.figi_identifiers_written += cur.rowcount
 
 
 def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
@@ -600,6 +653,10 @@ def ingest_13f_dataset_archive(
     # row must not delete a marker for an obs that never landed).
     materialised_markers: set[tuple[str, str, date, int]] = set()
 
+    # #1302 — distinct FIGI -> instrument mappings collected across the
+    # archive; batch-upserted into external_identifiers after the drain.
+    figi_to_instrument: dict[str, int] = {}
+
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
         coverpages = _open_tsv(zf, "COVERPAGE.tsv")
@@ -666,6 +723,15 @@ def ingest_13f_dataset_archive(
                     # above, so the bulk-path index always has a period.
                     unresolved_buffer.append((cusip, filer_cik, period_end))
                     continue
+
+                # #1302 — capture the security's FIGI (12-char OpenFIGI id,
+                # new INFOTABLE column 2023-01-03) against the instrument it
+                # resolved to. Collected before the share/retention gates
+                # below: the FIGI<->instrument identity holds regardless of
+                # whether THIS holding row is a valid current position.
+                figi = (row.get("FIGI") or "").strip().upper()
+                if figi and _FIGI_RE.match(figi):
+                    figi_to_instrument.setdefault(figi, instrument_id)
 
                 filer_name = (cover.get("FILINGMANAGER_NAME") or "").strip()
                 if not filer_name:
@@ -809,6 +875,11 @@ def ingest_13f_dataset_archive(
             # Driver couldn't tag the result. Fall back to staged
             # count so the count is a lower bound rather than 0.
             result.rows_written = accepted_via_copy
+
+    # #1302 — persist the archive's distinct FIGI -> instrument mappings.
+    # Same per-archive transaction as the drain, so it commits/rolls back
+    # atomically with the holdings.
+    _persist_figi_external_identifiers(conn, figi_to_instrument, result=result)
 
     # #1399 — delete bulk markers a prior run recorded for CUSIPs that
     # resolved this run. Reconcile against _stg_13f FIRST: only the
