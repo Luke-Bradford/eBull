@@ -209,8 +209,12 @@ def _persist_order_and_fill(
         fp = broker_result.filled_price
         fu = broker_result.filled_units
 
-        # 2. If filled with positive units, persist fill + position + cash
-        if order_status == "filled" and fp is not None and fu is not None and fu > 0:
+        # 2. If filled with a strictly-positive price AND units, persist fill
+        #    + position + cash. A zero-PRICE fill is never real — never book
+        #    free holdings (#1439, prevention-log #68). Symmetric with the
+        #    order_client persistence guard; upstream already fails closed, so
+        #    this is defense-in-depth.
+        if order_status == "filled" and fp is not None and fp > 0 and fu is not None and fu > 0:
             gross = fp * fu
 
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
