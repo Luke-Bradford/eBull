@@ -99,25 +99,23 @@ def test_row_floors_are_calibrated_not_placeholders() -> None:
     # No leftover placeholder: every floor is a calibrated absolute minimum,
     # not the old non-empty sentinel.
     assert all(floor >= 10_000 for floor in bv._ROW_FLOORS.values()), bv._ROW_FLOORS
-    # instruments is NOT floored here — a correct floor needs a tradable-aware
-    # count (sync_universe soft-deletes via is_tradable=FALSE), tracked in #1462.
-    assert "instruments" not in bv._ROW_FLOORS
-    # The bulk-backed observation/current tables stay floored.
-    for table in (
+    # Exact floored-table set (per the scope rules): asserting the whole set —
+    # not a subset loop — so DROPPING a key (e.g. silently losing an
+    # ownership_*_observations table) fails the test, not just bad values.
+    assert set(bv._ROW_FLOORS) == {
         "filing_events",
         "financial_facts_raw",
+        "ownership_insiders_observations",
+        "ownership_institutions_observations",
+        "ownership_funds_observations",
+        "ownership_insiders_current",
         "ownership_institutions_current",
         "ownership_funds_current",
-        "ownership_insiders_current",
-    ):
-        assert bv._ROW_FLOORS.get(table, 0) > 1, table
-    # Deferred / cross-stage-ambiguous slices stay UNfloored (scope rules).
-    for table in (
-        "ownership_treasury_current",
-        "ownership_blockholders_current",
-        "ownership_def14a_current",
-    ):
-        assert table not in bv._ROW_FLOORS, table
+    }, sorted(bv._ROW_FLOORS)
+    # instruments stays OUT (correct floor needs a tradable-aware count,
+    # #1462); the deferred treasury / blockholders / def14a slices stay OUT
+    # too — both enforced by the exact-set assertion above.
+    assert "instruments" not in bv._ROW_FLOORS
 
 
 def test_check_row_floors_raises_when_table_empty(
