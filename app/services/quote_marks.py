@@ -16,12 +16,21 @@ API to the execution service.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 
 def positive_decimal_or_none(value: object) -> Decimal | None:
-    """Return ``value`` as a strictly-positive ``Decimal``, else ``None``."""
+    """Return ``value`` as a strictly-positive ``Decimal``, else ``None``.
+
+    Non-finite / unparseable inputs (a stray ``float('nan')`` slipping past
+    psycopg's type coercion, an ``inf``) are treated as missing — a mark must
+    be a finite positive number. ``InvalidOperation`` is caught explicitly so
+    this shared primitive is unconditionally safe against DB weirdness.
+    """
     if value is None:
         return None
-    dec = Decimal(str(value))
-    return dec if dec > 0 else None
+    try:
+        dec = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return dec if dec.is_finite() and dec > 0 else None
