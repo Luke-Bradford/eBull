@@ -69,10 +69,35 @@ class BootstrapValidationError(RuntimeError):
 
 # --- Check 1: absolute row-count floors ------------------------------------
 #
-# PLACEHOLDER floors: every bulk-backed table must be non-empty (>0) after a
-# successful bulk-only bootstrap. P6 (clean-bootstrap drive) replaces these with
-# the first clean run's measured baselines (#1419 / plan Phase 6). Keep this a
-# plain {table: int} knob — no hardcoded ratios.
+# Calibrated absolute floors (#1434). Each is ~50% of the first clean-run
+# baseline measured on the dev DB 2026-06-04 (the run-3 baseline #1426 asked
+# for), rounded down to a clean figure. The half-baseline margin catches a
+# DEGRADED bootstrap — a bulk stage that errored mid-run and silently wrote a
+# fraction of expected (e.g. the 13F sweep dying after 2 of 11 cohorts) — while
+# leaving wide headroom against legitimate variance. SEC data only accumulates
+# and the bootstrap horizons are bounded (13F ~12mo, N-PORT 1yr, insider 2yr),
+# so these absolute minimums stay valid as future baselines grow; raise them
+# (never lower) when a later clean run measures a materially higher floor.
+# Plain {table: int} knob — no hardcoded ratios.
+#
+# Measured baseline → floor (2026-06-04):
+#   filing_events                     2,706,453 →  1,300,000
+#   financial_facts_raw              16,552,616 →  8,000,000
+#   ownership_insiders_observations     606,500 →    300,000
+#   ownership_institutions_observations 2,856,833 → 1,400,000
+#   ownership_funds_observations      2,247,669 →  1,100,000
+#   ownership_insiders_current           61,188 →     30,000
+#   ownership_institutions_current    1,151,745 →    575,000
+#   ownership_funds_current             695,750 →    340,000
+#
+# ``instruments`` is deliberately NOT floored here (#1462): the generic
+# ``_check_row_floors`` does ``COUNT(*)``, but ``sync_universe`` marks delisted
+# instruments ``is_tradable = FALSE`` rather than deleting them, so the total
+# row count never shrinks after one good sync — a later partial eToro response
+# leaves ``COUNT(*) >= floor`` and the degraded-universe shape goes undetected.
+# A correct instruments floor needs a ``WHERE is_tradable = TRUE`` count (or a
+# run-local provider-return count), which is a check-mechanism change, not a
+# value tweak — tracked in #1462.
 #
 # Scope rules (which tables are SAFE to hard-floor):
 #  * The three observation tables + filing_events + financial_facts_raw are
@@ -85,19 +110,19 @@ class BootstrapValidationError(RuntimeError):
 #    but S24 runs before/parallel to S25 (no cap between them), so treasury
 #    _current can be empty/stale at completion even on a healthy run. The panel
 #    render check still exercises treasury as a rollup slice; a hard floor here
-#    would false-fail. P6 re-scopes once treasury refresh is ordered after S25.
+#    would false-fail. Re-scope once treasury refresh is ordered after S25.
 #  * ``ownership_blockholders_current`` / ``ownership_def14a_current`` are
 #    deferred (manifest-worker / lazy-on-view) slices, legitimately empty at
 #    completion (spec §4.4) — never floored.
 _ROW_FLOORS: Final[dict[str, int]] = {
-    "filing_events": 1,
-    "financial_facts_raw": 1,
-    "ownership_insiders_observations": 1,
-    "ownership_institutions_observations": 1,
-    "ownership_funds_observations": 1,
-    "ownership_insiders_current": 1,
-    "ownership_institutions_current": 1,
-    "ownership_funds_current": 1,
+    "filing_events": 1_300_000,
+    "financial_facts_raw": 8_000_000,
+    "ownership_insiders_observations": 300_000,
+    "ownership_institutions_observations": 1_400_000,
+    "ownership_funds_observations": 1_100_000,
+    "ownership_insiders_current": 30_000,
+    "ownership_institutions_current": 575_000,
+    "ownership_funds_current": 340_000,
 }
 
 # --- Check 2: panel render -------------------------------------------------

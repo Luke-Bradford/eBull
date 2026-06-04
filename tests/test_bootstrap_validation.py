@@ -92,6 +92,32 @@ def test_count_at_least_bounded_and_accurate_shortfall(ebull_test_conn: psycopg.
 # ---------------------------------------------------------------------------
 
 
+def test_row_floors_are_calibrated_not_placeholders() -> None:
+    """#1434 — the floors were calibrated off the run-3 clean baseline. Guard
+    against an accidental revert to the old ``1`` placeholders (which only
+    caught a totally empty table, not a DEGRADED fractional-fill)."""
+    # No leftover placeholder: every floor is a calibrated absolute minimum,
+    # not the old non-empty sentinel.
+    assert all(floor >= 10_000 for floor in bv._ROW_FLOORS.values()), bv._ROW_FLOORS
+    # Exact floored-table set (per the scope rules): asserting the whole set —
+    # not a subset loop — so DROPPING a key (e.g. silently losing an
+    # ownership_*_observations table) fails the test, not just bad values.
+    assert set(bv._ROW_FLOORS) == {
+        "filing_events",
+        "financial_facts_raw",
+        "ownership_insiders_observations",
+        "ownership_institutions_observations",
+        "ownership_funds_observations",
+        "ownership_insiders_current",
+        "ownership_institutions_current",
+        "ownership_funds_current",
+    }, sorted(bv._ROW_FLOORS)
+    # instruments stays OUT (correct floor needs a tradable-aware count,
+    # #1462); the deferred treasury / blockholders / def14a slices stay OUT
+    # too — both enforced by the exact-set assertion above.
+    assert "instruments" not in bv._ROW_FLOORS
+
+
 def test_check_row_floors_raises_when_table_empty(
     ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
 ) -> None:
