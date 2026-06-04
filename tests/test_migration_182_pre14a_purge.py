@@ -76,9 +76,18 @@ def _seed_pre_migration_state(conn: psycopg.Connection[tuple]) -> None:
     conn.commit()
 
 
+# Strip the migration's own BEGIN;/COMMIT; wrapper before inline execution:
+# the test drives transaction control via the ebull_test_conn fixture, so an
+# embedded COMMIT inside the executed string would commit out from under it and
+# leave the trailing conn.commit() flushing an empty implicit transaction
+# (behaviour then depends on the fixture's autocommit mode). Run the migration
+# body inside the fixture's transaction and let the test commit once.
+_MIGRATION_BODY = "\n".join(line for line in _MIGRATION_SQL.splitlines() if line.strip() not in ("BEGIN;", "COMMIT;"))
+
+
 def _run_migration(conn: psycopg.Connection[tuple]) -> None:
     with psycopg.ClientCursor(conn) as cur:
-        cur.execute(_MIGRATION_SQL)  # type: ignore[call-overload]
+        cur.execute(_MIGRATION_BODY)  # type: ignore[call-overload]
     conn.commit()
 
 
