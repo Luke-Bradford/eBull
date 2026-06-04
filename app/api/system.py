@@ -61,6 +61,7 @@ from app.services.ops_monitor import (
 )
 from app.workers.scheduler import (
     SCHEDULED_JOBS,
+    CadenceKind,
     ScheduledJob,
     compute_next_run,
 )
@@ -165,7 +166,10 @@ class JobOverviewResponse(BaseModel):
     display_name: str | None
     description: str
     cadence: str
-    cadence_kind: Literal["every_n_minutes", "hourly", "daily", "weekly", "monthly"]
+    # Reuse the scheduler's CadenceKind so a new cadence kind (e.g. 'yearly',
+    # #1303) can never drift this DTO out of sync — adding a kind there is a
+    # one-place change, not a hunt for every mirrored Literal.
+    cadence_kind: CadenceKind
     next_run_time: datetime
     # `next_run_time_source` retained for frontend compat; always
     # "declared" since #719 — the API no longer hosts APScheduler so

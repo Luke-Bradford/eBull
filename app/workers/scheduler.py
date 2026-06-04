@@ -106,7 +106,7 @@ logger = logging.getLogger(__name__)
 # next-fire-time from APScheduler; ``compute_next_run`` is retained as
 # a pure utility for catch-up-on-boot and tests.
 
-CadenceKind = Literal["every_n_minutes", "hourly", "daily", "weekly", "monthly"]
+CadenceKind = Literal["every_n_minutes", "hourly", "daily", "weekly", "monthly", "yearly"]
 
 
 @dataclass(frozen=True)
@@ -122,7 +122,8 @@ class Cadence:
     minute: int = 0
     hour: int = 0
     weekday: int = 0  # 0=Mon (matches datetime.weekday())
-    day: int = 0  # 1..28 for monthly cadence
+    day: int = 0  # 1..28 for monthly + yearly cadence
+    month: int = 0  # 1..12 for yearly cadence
     interval_minutes: int = 0  # every_n_minutes cadence (e.g. 5 for every 5 min)
 
     @classmethod
@@ -169,6 +170,21 @@ class Cadence:
             raise ValueError(f"monthly minute must be 0..59, got {minute}")
         return cls(kind="monthly", day=day, hour=hour, minute=minute)
 
+    @classmethod
+    def yearly(cls, *, month: int, day: int, hour: int, minute: int = 0) -> Cadence:
+        """Annual cadence — fires once a year on ``month``/``day`` at
+        ``hour``:``minute`` UTC. ``day`` capped at 28 so the fire date
+        exists in every month (no Feb-29 / 30-vs-31 ambiguity)."""
+        if not 1 <= month <= 12:
+            raise ValueError(f"yearly month must be 1..12, got {month}")
+        if not 1 <= day <= 28:
+            raise ValueError(f"yearly day must be 1..28, got {day}")
+        if not 0 <= hour <= 23:
+            raise ValueError(f"yearly hour must be 0..23, got {hour}")
+        if not 0 <= minute <= 59:
+            raise ValueError(f"yearly minute must be 0..59, got {minute}")
+        return cls(kind="yearly", month=month, day=day, hour=hour, minute=minute)
+
     @property
     def label(self) -> str:
         """Human-readable label for API responses."""
@@ -181,6 +197,22 @@ class Cadence:
         if self.kind == "weekly":
             weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             return f"weekly on {weekday_names[self.weekday]} at {self.hour:02d}:{self.minute:02d} UTC"
+        if self.kind == "yearly":
+            month_names = [
+                "Jan",
+                "Feb",
+                "Mar",
+                "Apr",
+                "May",
+                "Jun",
+                "Jul",
+                "Aug",
+                "Sep",
+                "Oct",
+                "Nov",
+                "Dec",
+            ]
+            return f"yearly on {month_names[self.month - 1]} {self.day} at {self.hour:02d}:{self.minute:02d} UTC"
         # monthly
         return f"monthly on day {self.day} at {self.hour:02d}:{self.minute:02d} UTC"
 
@@ -295,6 +327,7 @@ JOB_SEC_13F_FILER_DIRECTORY_SYNC = "sec_13f_filer_directory_sync"
 JOB_SEC_13F_QUARTERLY_SWEEP = "sec_13f_quarterly_sweep"
 JOB_SEC_NPORT_FILER_DIRECTORY_SYNC = "sec_nport_filer_directory_sync"
 JOB_SEC_N_PORT_INGEST = "sec_n_port_ingest"
+JOB_NCEN_CLASSIFIER = "ncen_classifier_yearly"
 JOB_CUSIP_UNIVERSE_BACKFILL = "cusip_universe_backfill"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
@@ -1027,6 +1060,46 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # benefit from firing on every dev restart.
         catch_up_on_boot=False,
     ),
+    ScheduledJob(
+        name=JOB_NCEN_CLASSIFIER,
+        display_name="N-CEN filer classifier (annual)",
+        source="sec_rate",
+        description=(
+            "Annual sweep that classifies every active institutional filer "
+            "(broker-dealer / investment-manager / fund) from its latest "
+            "N-CEN census filing (#782), populating "
+            "``ncen_filer_classifications`` — the table "
+            "``ncen_classifier.compose_filer_type`` reads to resolve "
+            "``institutional_filers.filer_type`` (#1303). Walks active "
+            "``institutional_filer_seeds``; per filer fetches submissions.json "
+            "+ the latest N-CEN primary doc via the shared sec_rate budget "
+            "(10 req/s). Empty seeds = natural no-op. Without this schedule "
+            "the classification table only refreshed on an ad-hoc operator "
+            "trigger, so new filers stayed unclassified for a year+ (drift). "
+            "Cadence: yearly Apr 1 05:00 UTC — most N-CEN filings (75 days "
+            "after fiscal-year-end; Dec-FYE funds dominate) have landed by "
+            "end of Q1. Idempotent (latest-only UPSERT per CIK, #1245)."
+        ),
+        cadence=Cadence.yearly(month=4, day=1, hour=5, minute=0),
+        # Annual cadence: a missed Apr-1 fire cannot roll forward cheaply
+        # (a weekly job's missed window costs 7 days; this one costs a YEAR
+        # of classification drift). catch_up_on_boot=True re-fires only when
+        # genuinely overdue (last success > 1y ago, or never run) — after a
+        # successful run next_fire is ~12 months out so a routine restart
+        # does NOT re-trigger the heavy sweep.
+        #
+        # NOT exempt from the universal bootstrap gate, and it CANNOT be: the
+        # carve-out (#1181) requires bounded single-digit-MB cost, but this is
+        # a heavy per-filer SEC sweep. Consequence (the boot-time catch_up
+        # evaluation trap): if the jobs process boots mid-bootstrap, the
+        # catch-up is skipped with ``bootstrap_not_complete`` and does NOT
+        # auto-re-fire when bootstrap later flips complete — it waits for the
+        # next jobs-process restart (catch-up re-evaluates, now unblocked) or
+        # the next Apr 1. Acceptable for an annual classifier: compose_filer_type
+        # degrades to the 'INV' default until then, and the operator can
+        # manually trigger it post-bootstrap (it is in _INVOKERS).
+        catch_up_on_boot=True,
+    ),
     # `sec_n_port_ingest` retired from SCHEDULED_JOBS post-#1155:
     # Layer 1/2/3 + sec_manifest_worker + manifest_parsers/sec_n_port.py
     # (#1133) carry every NPORT-P write to ownership_funds_observations
@@ -1383,6 +1456,19 @@ def compute_next_run(cadence: Cadence, now: datetime) -> datetime:
         candidate += timedelta(days=days_ahead)
         if candidate <= now_utc:
             candidate += timedelta(days=7)
+        return candidate
+
+    if cadence.kind == "yearly":
+        candidate = now_utc.replace(
+            month=cadence.month,
+            day=cadence.day,
+            hour=cadence.hour,
+            minute=cadence.minute,
+            second=0,
+            microsecond=0,
+        )
+        if candidate <= now_utc:
+            candidate = candidate.replace(year=candidate.year + 1)
         return candidate
 
     # monthly
@@ -5636,6 +5722,42 @@ def sec_nport_filer_directory_sync() -> None:
             result.filers_inserted,
             result.filers_refreshed,
             result.skipped_empty_name,
+        )
+
+
+def ncen_classifier_yearly() -> None:
+    """Annual N-CEN filer-classification sweep (#1303).
+
+    Classifies every active institutional filer from its latest N-CEN
+    census filing into ``ncen_filer_classifications``, the table
+    :func:`app.services.ncen_classifier.compose_filer_type` reads to
+    resolve ``institutional_filers.filer_type``. Previously orphaned —
+    the classifier existed but had no ``ScheduledJob``, so the
+    classification table only refreshed on an ad-hoc operator trigger.
+
+    Empty filer-seed list = natural no-op (the classifier logs and
+    returns early), so this is safe to fire post-bootstrap on a
+    partially-populated directory.
+    """
+    from app.services.ncen_classifier import classify_filers_via_ncen
+
+    with _tracked_job(JOB_NCEN_CLASSIFIER) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            report = classify_filers_via_ncen(conn, sec)
+
+        tracker.row_count = report.classifications_written
+        logger.info(
+            "ncen_classifier_yearly: filers_seen=%d classifications_written=%d "
+            "no_ncen_found=%d parse_failures=%d fetch_failures=%d crash_failures=%d",
+            report.filers_seen,
+            report.classifications_written,
+            report.no_ncen_found,
+            report.parse_failures,
+            report.fetch_failures,
+            report.crash_failures,
         )
 
 

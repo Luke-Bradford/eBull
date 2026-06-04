@@ -83,6 +83,7 @@ from app.workers.scheduler import (
     JOB_MONITOR_POSITIONS,
     JOB_MONTHLY_REPORT,
     JOB_MORNING_CANDIDATE_REVIEW,
+    JOB_NCEN_CLASSIFIER,
     JOB_NIGHTLY_UNIVERSE_SYNC,
     JOB_ORCHESTRATOR_FULL_SYNC,
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
@@ -129,6 +130,7 @@ from app.workers.scheduler import (
     monitor_positions_job,
     monthly_report,
     morning_candidate_review,
+    ncen_classifier_yearly,
     nightly_universe_sync,
     orchestrator_full_sync,
     orchestrator_high_frequency_sync,
@@ -250,6 +252,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # ``min_period_of_report`` + ``source_label`` via StageSpec.params.
     JOB_SEC_13F_QUARTERLY_SWEEP: sec_13f_quarterly_sweep,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC: _adapt_zero_arg(sec_nport_filer_directory_sync),
+    JOB_NCEN_CLASSIFIER: _adapt_zero_arg(ncen_classifier_yearly),
     # PR7 #1233 §4.6 — sec_n_port_ingest migrated to native JobInvoker
     # (params-aware). Bootstrap stage 22 passes ``min_last_seen_filed_at``
     # via StageSpec.params; daily / Admin path dispatches with an empty
@@ -842,6 +845,14 @@ def _trigger_for(cadence: Cadence) -> CronTrigger:
         )
     if cadence.kind == "monthly":
         return CronTrigger(
+            day=cadence.day,
+            hour=cadence.hour,
+            minute=cadence.minute,
+            timezone="UTC",
+        )
+    if cadence.kind == "yearly":
+        return CronTrigger(
+            month=cadence.month,
             day=cadence.day,
             hour=cadence.hour,
             minute=cadence.minute,
