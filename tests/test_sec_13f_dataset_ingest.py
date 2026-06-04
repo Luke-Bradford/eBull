@@ -592,6 +592,29 @@ class TestPersistFigiExternalIdentifiers:
         assert row[0] == iid
         assert row[1] is False  # never claims primary
 
+    def test_multiple_distinct_figis_counted_cumulatively(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """``figi_identifiers_written`` is the CUMULATIVE insert count across
+        the whole ``executemany`` batch, not the last statement's rowcount.
+
+        Empirically verified: psycopg 3.3.3 accumulates ``cur.rowcount`` over a
+        non-returning ``executemany`` (3 distinct ON CONFLICT DO NOTHING
+        inserts → rowcount 3; 1 conflict + 1 new → rowcount 1). This test pins
+        that invariant so a driver-version bump that changes the semantic is
+        caught here (rebuts the review WARNING claiming it reflects only the
+        last statement)."""
+        a = self._seed_iid(ebull_test_conn, "MUL1", "444444444")
+        b = self._seed_iid(ebull_test_conn, "MUL2", "555555555")
+        c = self._seed_iid(ebull_test_conn, "MUL3", "666666666")
+        result = Form13FIngestResult()
+        _persist_figi_external_identifiers(
+            ebull_test_conn,
+            {"BBG00000MUL1": a, "BBG00000MUL2": b, "BBG00000MUL3": c},
+            result=result,
+        )
+        ebull_test_conn.commit()
+        assert result.figi_identifiers_seen == 3
+        assert result.figi_identifiers_written == 3  # cumulative, not 1
+
     def test_do_nothing_on_existing_figi(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """A FIGI already mapped (even to a DIFFERENT instrument) is never
         clobbered — DO NOTHING preserves the existing row."""

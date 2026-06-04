@@ -152,3 +152,18 @@ fees = raw.get("Fees") if raw.get("Fees") is not None else raw.get("fees")
 
 For string fields (order ref, status label), `or`-chaining is fine because empty strings are invalid.
 For numeric fields (price, units, fees), use explicit `is not None` checks.
+
+## psycopg3 `executemany` rowcount IS cumulative (verified)
+
+`cursor.rowcount` after a **non-returning** `executemany(...)` reflects the **sum** of affected rows across the whole batch in psycopg 3.3.3 — NOT the last statement only. Empirically verified (2026-06-04):
+
+```python
+cur.executemany("INSERT ... ON CONFLICT DO NOTHING", [3 distinct rows])  # cur.rowcount == 3
+cur.executemany("INSERT ... ON CONFLICT DO NOTHING", [1 conflict, 1 new]) # cur.rowcount == 1
+```
+
+So using `cur.rowcount` as a batch insert/affected total after `executemany` is correct for this driver. Two caveats:
+- It is **driver/version-specific** (DB-API leaves it implementation-defined; some drivers/older psycopg return -1 or the last count). When the total matters across a version bump, **pin it with a regression test** that inserts N distinct rows and asserts the count == N (e.g. `tests/test_sec_13f_dataset_ingest.py::...test_multiple_distinct_figis_counted_cumulatively`), rather than trusting the doc.
+- It does NOT hold for `executemany(..., returning=True)` — that path iterates result sets differently.
+
+Origin: PR #1468 (#1302) review WARNING claimed the FIGI counter "will be at most 1"; rebutted by empirical probe + the pinned regression test.
