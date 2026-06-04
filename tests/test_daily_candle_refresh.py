@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.workers.scheduler import _T3_BOOTSTRAP_BATCH_SIZE, daily_candle_refresh
 
 
@@ -76,6 +78,10 @@ class TestDailyCandleRefreshT3Bootstrap:
         mock_summary.quotes_updated = 0
         mock_summary.quotes_skipped = 0
         mock_summary.spread_flags_set = 0
+        # #1293 — must be real ints; the disambiguation branch compares them
+        # (`> 0`), and a bare MagicMock attribute raises on comparison.
+        mock_summary.candles_failed = 0
+        mock_summary.candles_skipped = 0
 
         with (
             patch(_PATCHES["creds"], return_value=("key", "ukey")),
@@ -149,6 +155,8 @@ class TestDailyCandleRefreshT3Bootstrap:
         mock_tracker.__exit__ = MagicMock(return_value=False)
         mock_summary = MagicMock()
         mock_summary.candle_rows_upserted = 1
+        mock_summary.candles_failed = 0
+        mock_summary.candles_skipped = 0
 
         with (
             patch(_PATCHES["creds"], return_value=("key", "ukey")),
@@ -170,3 +178,115 @@ class TestDailyCandleRefreshT3Bootstrap:
     def test_bootstrap_batch_size_is_200(self) -> None:
         """Sanity check the constant value."""
         assert _T3_BOOTSTRAP_BATCH_SIZE == 200
+
+
+# ---------------------------------------------------------------------------
+# #1293 — empty-fetch / candles=0 disambiguation
+# ---------------------------------------------------------------------------
+
+
+class TestDailyCandleRefreshEmptyFetchDisambiguation:
+    """S2 run #6 completed in 9s with rows_processed=0. Without structured
+    logging a healthy 'all already fresh' run and a broken 'every fetch
+    failed' run both look like a clean SUCCESS. These tests pin the three
+    cases to distinct log levels (#1293)."""
+
+    def _run_with_summary(
+        self,
+        *,
+        tier12_rows: list[tuple[int, str]],
+        candle_rows_upserted: int,
+        candles_failed: int,
+        candles_skipped: int,
+    ) -> None:
+        mock_conn = _make_mock_conn(tier12_rows, [], None)
+        mock_provider = MagicMock()
+        mock_provider.__enter__ = MagicMock(return_value=mock_provider)
+        mock_provider.__exit__ = MagicMock(return_value=False)
+        mock_tracker = MagicMock()
+        mock_tracker.__enter__ = MagicMock(return_value=mock_tracker)
+        mock_tracker.__exit__ = MagicMock(return_value=False)
+        mock_summary = MagicMock()
+        mock_summary.candle_rows_upserted = candle_rows_upserted
+        mock_summary.instruments_refreshed = len(tier12_rows)
+        mock_summary.features_computed = 0
+        mock_summary.quotes_updated = 0
+        mock_summary.quotes_skipped = 0
+        mock_summary.spread_flags_set = 0
+        mock_summary.candles_failed = candles_failed
+        mock_summary.candles_skipped = candles_skipped
+        with (
+            patch(_PATCHES["creds"], return_value=("key", "ukey")),
+            patch(_PATCHES["tracked"], return_value=mock_tracker),
+            patch(_PATCHES["provider_cls"], return_value=mock_provider),
+            patch(_PATCHES["connect"], return_value=mock_conn),
+            patch(_PATCHES["refresh"], return_value=mock_summary),
+        ):
+            daily_candle_refresh()
+
+    def test_empty_scope_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        # Empty held + T1/T2 + T3 → refresh never called; WARNING surfaced.
+        mock_conn = _make_mock_conn([], [], None)
+        mock_provider = MagicMock()
+        mock_provider.__enter__ = MagicMock(return_value=mock_provider)
+        mock_provider.__exit__ = MagicMock(return_value=False)
+        mock_tracker = MagicMock()
+        mock_tracker.__enter__ = MagicMock(return_value=mock_tracker)
+        mock_tracker.__exit__ = MagicMock(return_value=False)
+        with (
+            patch(_PATCHES["creds"], return_value=("key", "ukey")),
+            patch(_PATCHES["tracked"], return_value=mock_tracker),
+            patch(_PATCHES["provider_cls"], return_value=mock_provider),
+            patch(_PATCHES["connect"], return_value=mock_conn),
+            caplog.at_level("WARNING", logger="app.workers.scheduler"),
+        ):
+            daily_candle_refresh()
+        assert any("refresh scope is EMPTY" in r.message for r in caplog.records)
+
+    def test_all_fetches_failed_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING", logger="app.workers.scheduler"):
+            self._run_with_summary(
+                tier12_rows=[(1, "AAPL"), (2, "MSFT"), (3, "GME")],
+                candle_rows_upserted=0,
+                candles_failed=3,
+                candles_skipped=0,
+            )
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("refreshes FAILED" in r.message and "Investigate" in r.message for r in warnings)
+
+    def test_all_fresh_logs_info_not_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("INFO", logger="app.workers.scheduler"):
+            self._run_with_summary(
+                tier12_rows=[(1, "AAPL"), (2, "MSFT")],
+                candle_rows_upserted=0,
+                candles_failed=0,
+                candles_skipped=2,
+            )
+        assert any("already fresh" in r.message for r in caplog.records if r.levelname == "INFO")
+        # The healthy no-op must NOT raise a failure warning.
+        assert not any(r.levelname == "WARNING" and "FAILED" in r.message for r in caplog.records)
+
+    def test_partial_failure_with_some_writes_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        # #1293 (Codex): candles>0 AND failed>0 must still WARN — a partial
+        # failure is not a clean success.
+        with caplog.at_level("WARNING", logger="app.workers.scheduler"):
+            self._run_with_summary(
+                tier12_rows=[(1, "AAPL"), (2, "MSFT"), (3, "GME")],
+                candle_rows_upserted=20,
+                candles_failed=1,
+                candles_skipped=0,
+            )
+        assert any("refreshes FAILED" in r.message for r in caplog.records if r.levelname == "WARNING")
+
+    def test_zero_writes_no_failures_not_all_fresh_logs_no_new_bars(self, caplog: pytest.LogCaptureFixture) -> None:
+        # #1293 (Codex): non-empty scope, 0 written, 0 failed, not-all-fresh →
+        # instruments returned no new bars (benign), logged at INFO, no WARNING.
+        with caplog.at_level("INFO", logger="app.workers.scheduler"):
+            self._run_with_summary(
+                tier12_rows=[(1, "AAPL"), (2, "MSFT")],
+                candle_rows_upserted=0,
+                candles_failed=0,
+                candles_skipped=1,  # 1 fresh, 1 fetched-but-no-bars
+            )
+        assert any("no new bars" in r.message for r in caplog.records if r.levelname == "INFO")
+        assert not any(r.levelname == "WARNING" and "FAILED" in r.message for r in caplog.records)

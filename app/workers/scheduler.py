@@ -1959,7 +1959,16 @@ def daily_candle_refresh() -> None:
                 ordered.append((iid, str(row[1])))
 
             if not ordered:
-                logger.info("daily_candle_refresh: no instruments to refresh, skipping")
+                # #1293 — S2 is gated on ``universe_seeded`` (cap requirement),
+                # and the daily job normally has held + T1/T2 + T3 scope, so an
+                # empty refresh set is anomalous (empty universe / coverage not
+                # seeded). Surface as a WARNING, not a silent info, so a
+                # bootstrap S2 that completes with rows=0 because the scope was
+                # empty is distinguishable from a healthy run in the log.
+                logger.warning(
+                    "daily_candle_refresh: refresh scope is EMPTY (0 held + 0 T1/T2 + 0 T3) — "
+                    "nothing to fetch; universe/coverage may not be seeded"
+                )
                 tracker.row_count = 0
                 return
 
@@ -1979,14 +1988,56 @@ def daily_candle_refresh() -> None:
         tracker.row_count = summary.candle_rows_upserted
 
     logger.info(
-        "Market refresh complete: instruments=%d candles=%d features=%d quotes=%d quotes_skipped=%d spread_flags=%d",
+        "Market refresh complete: instruments=%d candles=%d features=%d quotes=%d "
+        "quotes_skipped=%d spread_flags=%d candles_fresh_skipped=%d candles_failed=%d",
         summary.instruments_refreshed,
         summary.candle_rows_upserted,
         summary.features_computed,
         summary.quotes_updated,
         summary.quotes_skipped,
         summary.spread_flags_set,
+        summary.candles_skipped,
+        summary.candles_failed,
     )
+
+    # #1293 — disambiguate the outcome. Run #6 completed S2 in 9s with
+    # rows_processed=0; without this a healthy "all fresh" run and a broken
+    # "every refresh failed" run both look like a clean SUCCESS.
+    if summary.candles_failed > 0:
+        # Any refresh failures — partial OR total. The per-instrument
+        # transaction wraps fetch + upsert + feature compute, so the cause is
+        # an eToro session lapse / API outage OR a DB write error; do not
+        # over-attribute. NOT a healthy no-op: the candles for the failed
+        # instruments were not written.
+        logger.warning(
+            "daily_candle_refresh: %d/%d instrument refreshes FAILED "
+            "(eToro session lapse / API outage or a DB write error) — "
+            "%d candles written, %d already fresh. Investigate; the expected "
+            "candles for the failed instruments are missing.",
+            summary.candles_failed,
+            len(instruments),
+            summary.candle_rows_upserted,
+            summary.candles_skipped,
+        )
+    elif summary.candle_rows_upserted == 0 and len(instruments) > 0:
+        if summary.candles_skipped == len(instruments):
+            # Every instrument's candles were already fresh — a legitimate
+            # no-op (e.g. S2 re-run shortly after a prior run).
+            logger.info(
+                "daily_candle_refresh: 0 candles written — all %d instruments already fresh (no fetch needed)",
+                len(instruments),
+            )
+        else:
+            # Non-empty scope, no failures, not all fresh → instruments were
+            # fetched successfully but returned no new bars (benign: no new
+            # trading data since the last run). Surfaced so it is not mistaken
+            # for the failure case above.
+            logger.info(
+                "daily_candle_refresh: 0 candles written — %d instrument(s) returned no new bars, "
+                "%d already fresh, 0 failed",
+                len(instruments) - summary.candles_skipped,
+                summary.candles_skipped,
+            )
 
 
 def _cik_destination_is_empty(conn: psycopg.Connection) -> bool:  # type: ignore[type-arg]

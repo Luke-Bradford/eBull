@@ -46,6 +46,17 @@ class MarketRefreshSummary:
     quotes_updated: int
     quotes_skipped: int
     spread_flags_set: int
+    # #1293 — disambiguate a candle_rows_upserted=0 outcome. ``candles_skipped``
+    # counts instruments skipped because their candles were already fresh
+    # (legitimate no-op). ``candles_failed`` counts instruments whose refresh
+    # raised — that wraps the WHOLE per-instrument transaction (provider
+    # fetch + ``_upsert_candles`` + feature compute), so a DB/write error
+    # counts too, not only an eToro fetch/session failure; callers must phrase
+    # the cause accordingly. Without these the caller cannot tell a healthy
+    # "everything already fresh" run from a broken "every fetch failed" run;
+    # both report 0 candles written.
+    candles_skipped: int = 0
+    candles_failed: int = 0
 
 
 def refresh_market_data(
@@ -86,6 +97,7 @@ def refresh_market_data(
 
     today = date.today()
     candles_skipped = 0
+    candles_failed = 0
 
     # --- Candles: per-instrument (with freshness skip + two-mode fetch) ---
     # Two-mode fetch (#271):
@@ -114,15 +126,23 @@ def refresh_market_data(
             fetch_count = lookback_days
         else:
             fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=today)
+        upserted = 0
+        computed = 0
         try:
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
                 if bars:
                     upserted = _upsert_candles(conn, instrument_id, bars)
-                    candle_rows_upserted += upserted
                     computed = _compute_and_store_features(conn, instrument_id)
-                    features_computed += computed
+            # Accumulate the running totals ONLY after the transaction has
+            # committed cleanly (#1293 / Codex): incrementing inside the
+            # ``with`` block would over-report rows for an instrument whose
+            # feature-compute or commit later raised and rolled the write back
+            # — and that same instrument is also counted in ``candles_failed``.
+            candle_rows_upserted += upserted
+            features_computed += computed
         except Exception:
+            candles_failed += 1
             logger.warning("Failed to refresh candles for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
         report_progress(idx, total)
 
@@ -178,6 +198,8 @@ def refresh_market_data(
         quotes_updated=quotes_updated,
         quotes_skipped=quotes_skipped,
         spread_flags_set=spread_flags_set,
+        candles_skipped=candles_skipped,
+        candles_failed=candles_failed,
     )
 
 
