@@ -224,6 +224,35 @@ describe("ProcessDetailPage", () => {
     expect(screen.queryByRole("button", { name: "Full-wash" })).toBeNull();
   });
 
+  it("clean-complete bootstrap de-emphasises 'Re-run all' to a neutral tone (#1432)", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        display_name: "First-install bootstrap",
+        status: "ok",
+        can_iterate: false,
+        can_full_wash: true,
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    render(
+      <MemoryRouter initialEntries={["/admin/processes/bootstrap"]}>
+        <Routes>
+          <Route path="admin/processes/:id" element={<ProcessDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const btn = (await screen.findByRole("button", {
+      name: "Re-run all",
+    })) as HTMLButtonElement;
+    // Still available, but no red destructive styling — nothing failed.
+    expect(btn.disabled).toBe(false);
+    expect(btn.className).not.toContain("text-red-700");
+    expect(btn.className).toContain("text-slate-700");
+    expect(btn.title).toContain("completed cleanly");
+  });
+
   it("first-install bootstrap shows only 'Run bootstrap' + 'Start bootstrap' modal", async () => {
     mockedDetail.mockResolvedValue(
       makeProcessRow({

@@ -80,10 +80,16 @@ export function ProcessRow({
   // *starting* the bootstrap. "Re-run failed" / "Cancel" cannot apply
   // (no failed stages, no active run) and "Re-run all" is the wrong verb —
   // it's a first run, not a re-run, and there is nothing to wipe. Collapse
-  // to a single non-destructive "Run bootstrap" button (#1432). All other
-  // bootstrap states (partial_error / cancelled / running / complete) keep
-  // the full re-run / cancel vocabulary.
+  // to a single non-destructive "Run bootstrap" button (#1264). All other
+  // bootstrap states keep the full re-run / cancel vocabulary.
   const isFirstRun = isBootstrap && row.status === "pending_first_run";
+  // Clean-complete: the bootstrap finished with every stage successful
+  // (status='ok'). "Re-run all" is still a legal action (full re-bootstrap)
+  // but it is NOT the expected next step — nothing failed — so it must not
+  // wear the red destructive styling that signals "fix the failure here".
+  // Keep it enabled but de-emphasised to a neutral tone (#1432). The
+  // confirm dialog still guards the wipe.
+  const isCleanComplete = isBootstrap && row.status === "ok";
   const iterateLabel = isBootstrap ? "Re-run failed" : "Iterate";
   const fullWashLabel = isFirstRun
     ? "Run bootstrap"
@@ -102,9 +108,11 @@ export function ProcessRow({
   const fullWashTooltip = isFirstRun
     ? "Start the first-install bootstrap — populates the universe + filings. Asks for confirmation first."
     : row.can_full_wash
-      ? isBootstrap
-        ? "Reset every stage to pending; full first-install replay (confirm required)."
-        : "Reset watermark and re-fetch from epoch (confirm required)."
+      ? isCleanComplete
+        ? "Last bootstrap completed cleanly — this wipes every stage and replays the full install from scratch. Only needed to fully re-bootstrap (confirm required)."
+        : isBootstrap
+          ? "Reset every stage to pending; full first-install replay (confirm required)."
+          : "Reset watermark and re-fetch from epoch (confirm required)."
       : `${fullWashLabel} is not available right now.`;
 
   const cancelDisabled = !row.can_cancel || busy;
@@ -185,7 +193,7 @@ export function ProcessRow({
             tooltip={fullWashTooltip}
             disabled={fullWashDisabled}
             onClick={() => onFullWash(row)}
-            tone={isFirstRun ? "primary" : "danger"}
+            tone={isFirstRun ? "primary" : isCleanComplete ? "default" : "danger"}
           />
           {isFirstRun ? null : (
             <ActionButton

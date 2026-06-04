@@ -344,6 +344,44 @@ describe("ProcessRow", () => {
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 
+  it("clean-complete bootstrap de-emphasises 'Re-run all' to a neutral tone (#1432)", () => {
+    renderRow({
+      row: makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        status: "ok",
+        can_iterate: false,
+        can_full_wash: true,
+      }),
+    });
+    const btn = screen.getByRole("button", {
+      name: "Re-run all",
+    }) as HTMLButtonElement;
+    // Still available — full re-bootstrap is a legal action.
+    expect(btn.disabled).toBe(false);
+    // ...but no red destructive styling, since nothing failed.
+    expect(btn.className).not.toContain("text-red-700");
+    expect(btn.className).toContain("text-slate-700");
+    expect(btn.title).toContain("completed cleanly");
+  });
+
+  it("failed bootstrap keeps the red destructive 'Re-run all' tone", () => {
+    renderRow({
+      row: makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        status: "failed",
+        can_iterate: true,
+        can_full_wash: true,
+      }),
+    });
+    const btn = screen.getByRole("button", {
+      name: "Re-run all",
+    }) as HTMLButtonElement;
+    expect(btn.className).toContain("text-red-700");
+    expect(btn.className).not.toContain("text-slate-700");
+  });
+
   it("scheduled_job row keeps Iterate / Full-wash labels", () => {
     renderRow({
       row: makeProcessRow({
