@@ -69,15 +69,10 @@ class TestStageSpecParams:
                 return spec
         raise AssertionError(f"unknown stage_key {key!r}")
 
-    def test_filings_history_seed_params_match_deleted_wrapper(self) -> None:
-        from app.services.filings import SEC_INGEST_KEEP_FORMS
-
-        spec = self._spec_by_key("filings_history_seed")
-        assert spec.job_name == "filings_history_seed"
-        assert spec.params["days_back"] == 730
-        # Bootstrap stage carries the canonical three-tier allow-list as
-        # an immutable tuple (frozen StageSpec compat).
-        assert tuple(spec.params["filing_types"]) == tuple(sorted(SEC_INGEST_KEEP_FORMS))
+    # NOTE: ``filings_history_seed`` and ``sec_13f_recent_sweep`` stages were
+    # deleted by #1413 (bulk-only bootstrap dropped the per-CIK stages); their
+    # param-pin tests were removed with them. S8/S16 now seed filing_events and
+    # 13F is bulk-ingested via S10.
 
     def test_sec_first_install_drain_params_match_deleted_wrapper(self) -> None:
         spec = self._spec_by_key("sec_first_install_drain")
@@ -88,19 +83,14 @@ class TestStageSpecParams:
         # ``test_sec_first_install_drain_dispatches_use_bulk_zip_true``
         # in tests/test_bootstrap_orchestrator.py pins the flag's
         # presence; this assertion keeps tracking the full params dict
-        # so a future spec edit that drops EITHER key is caught here.
-        assert spec.params == {"max_subjects": None, "use_bulk_zip": True}
-
-    def test_sec_13f_recent_sweep_params_match_deleted_wrapper(self) -> None:
-        spec = self._spec_by_key("sec_13f_recent_sweep")
-        # Stage 21 now dispatches the SCHEDULED ``sec_13f_quarterly_sweep`` body
-        # with bootstrap-only overrides; the previous bespoke job name is gone.
-        assert spec.job_name == "sec_13f_quarterly_sweep"
-        # ``source_label`` rides as audit-only via JOB_INTERNAL_KEYS (PR1a).
-        assert spec.params["source_label"] == "sec_edgar_13f_directory_bootstrap"
-        # ``min_period_of_report`` is the dispatch-time sentinel — module-load
-        # ``date.today()`` would freeze the cutoff in a long-lived process.
-        assert spec.params["min_period_of_report"] == _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF
+        # so a future spec edit that drops a key is caught here.
+        # #1413 Step 2.3 added ``follow_pagination=False`` (bulk-only drain
+        # does not walk per-CIK submission pages).
+        assert spec.params == {
+            "max_subjects": None,
+            "use_bulk_zip": True,
+            "follow_pagination": False,
+        }
 
 
 class TestResolveDynamicParams:

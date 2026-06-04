@@ -53,19 +53,35 @@ class TestSourceRegistry:
     def test_phase_c_job_resolves_to_family_source(self, job_name: str, expected_source: str) -> None:
         assert source_for(job_name) == expected_source
 
-    def test_each_family_source_has_exactly_one_job(self) -> None:
-        """Inverse check: each family source maps to exactly one job_name.
+    # Bootstrap-only siblings that legitimately SHARE a family source with
+    # their steady-state Phase C job. They write the same table family, so
+    # sharing the JobLock source is correct — it serialises them against the
+    # steady-state job rather than re-introducing CROSS-family serialisation.
+    # #1233 PR-C2 (#1397): ``fundamentals_sync_bootstrap`` (bootstrap-only,
+    # _INVOKERS) shares ``db_fundamentals_raw`` with ``sec_companyfacts_ingest``.
+    _ALLOWED_BOOTSTRAP_SIBLINGS: dict[str, set[str]] = {
+        "db_fundamentals_raw": {"fundamentals_sync_bootstrap"},
+    }
 
-        Catches accidental cross-wiring (e.g. two Phase C stages on the
-        same family source would re-introduce intra-family
-        serialisation that the split is designed to remove).
+    def test_each_family_source_has_exactly_one_job(self) -> None:
+        """Inverse check: each family source is owned by its Phase C job plus
+        at most the known bootstrap-only sibling(s).
+
+        Catches accidental cross-wiring (e.g. two DIFFERENT Phase C stages on
+        the same family source would re-introduce intra-family serialisation
+        the split is designed to remove). A new, unlisted holder still fails.
         """
         registry = get_job_name_to_source()
         family_sources = {assignment[1] for assignment in _FAMILY_ASSIGNMENTS}
         for source in family_sources:
-            holders = [name for name, src in registry.items() if src == source]
-            assert holders == [next(name for name, expected in _FAMILY_ASSIGNMENTS if expected == source)], (
-                f"family source {source!r} owned by {holders!r}; expected exactly one Phase C job"
+            holders = {name for name, src in registry.items() if src == source}
+            expected_job = next(
+                name for name, expected in _FAMILY_ASSIGNMENTS if expected == source
+            )
+            allowed = {expected_job} | self._ALLOWED_BOOTSTRAP_SIBLINGS.get(source, set())
+            assert holders == allowed, (
+                f"family source {source!r} owned by {sorted(holders)!r}; "
+                f"expected {sorted(allowed)!r} (Phase C job + known bootstrap siblings)"
             )
 
 

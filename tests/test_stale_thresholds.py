@@ -61,10 +61,19 @@ def test_override_keys_resolve_to_real_process_ids() -> None:
     Cross-check every override key against the live registry — bootstrap
     is special-cased; all others must match a ``ScheduledJob.name``.
     """
+    from app.jobs.runtime import _INVOKERS
     from app.workers.scheduler import SCHEDULED_JOBS
 
-    valid_job_names = {job.name for job in SCHEDULED_JOBS}
+    # A "real job" is any registered invoker, not only SCHEDULED_JOBS: several
+    # jobs were retired from the scheduler post-#1155 (e.g.
+    # ``sec_13f_quarterly_sweep``) but still run via bootstrap-stage / manual
+    # dispatch through ``_INVOKERS`` and still produce monitored output, so a
+    # staleness override on them is legitimate.
+    valid_job_names = {job.name for job in SCHEDULED_JOBS} | set(_INVOKERS)
     for process_id in overridden_process_ids():
         if process_id == "bootstrap":
             continue
-        assert process_id in valid_job_names, f"override key {process_id!r} does not resolve to a real ScheduledJob"
+        assert process_id in valid_job_names, (
+            f"override key {process_id!r} does not resolve to a real job "
+            "(scheduled or invoker)"
+        )

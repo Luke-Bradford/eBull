@@ -30,10 +30,14 @@ from app.workers.scheduler import (
     JOB_MONITOR_POSITIONS,
     JOB_NIGHTLY_UNIVERSE_SYNC,
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+    JOB_ORPHAN_TEST_DB_REAP,
     JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_SEC_13F_FILER_DIRECTORY_SYNC,
+    JOB_SEC_DAILY_INDEX_RECONCILE,
+    JOB_SEC_MANIFEST_TOMBSTONE_STALE,
+    JOB_SEC_MANIFEST_WORKER,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
     JOB_WEEKLY_REPORT,
@@ -114,6 +118,18 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         JOB_RAW_DATA_RETENTION_SWEEP,
         JOB_SEED_COST_MODELS,
         JOB_WEEKLY_REPORT,
+        # Janitorial / infra jobs that MUST run regardless of bootstrap
+        # state (default prerequisite=None by design):
+        #   * orphan_test_db_reap — reaps leaked test DBs (#1444); gating it
+        #     would re-enable the crash-loop it exists to prevent.
+        #   * sec_manifest_worker — self-gates internally; safe to run during
+        #     bootstrap (it drains the manifest the bootstrap seeds).
+        #   * sec_daily_index_reconcile / sec_manifest_tombstone_stale —
+        #     idempotent maintenance, no-op on an empty DB (#1155).
+        JOB_ORPHAN_TEST_DB_REAP,
+        JOB_SEC_MANIFEST_WORKER,
+        JOB_SEC_DAILY_INDEX_RECONCILE,
+        JOB_SEC_MANIFEST_TOMBSTONE_STALE,
     }
 )
 
