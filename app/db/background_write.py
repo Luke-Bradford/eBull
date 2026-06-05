@@ -22,7 +22,6 @@ behaviour) so API / test / CLI callers are unchanged.
 
 from __future__ import annotations
 
-import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -87,16 +86,17 @@ def background_write_connection() -> Iterator[psycopg.Connection[Any]]:
     """
     pool = get_background_pool()
     if pool is not None:
+        yielded = False
         try:
-            cm = pool.connection()
-            conn = cm.__enter__()
-        except BackgroundPoolClosed, PoolClosed:
-            pass  # pool closed (shutdown race) → fall through to raw
-        else:
-            try:
+            with pool.connection() as conn:
+                yielded = True
                 yield conn
-            finally:
-                cm.__exit__(*sys.exc_info())
             return
+        except BackgroundPoolClosed, PoolClosed:
+            # A closed pool raises at CHECKOUT (before yield) — fall through to
+            # the raw fallback (shutdown race). If we had already yielded, the
+            # error came from the caller's WORK, not checkout, so re-raise it.
+            if yielded:
+                raise
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         yield conn
