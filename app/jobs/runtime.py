@@ -50,12 +50,14 @@ from typing import Any, Final
 
 import psycopg
 import psycopg.sql
+from apscheduler.events import EVENT_JOB_MAX_INSTANCES, JobSubmissionEvent
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from app.config import settings
+from app.db.background_write import background_write_connection
 from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.jobs.sources import JobInvoker
@@ -412,6 +414,16 @@ _INVOKERS[_canonical_redirects.JOB_POPULATE_CANONICAL_REDIRECTS] = _adapt_zero_a
 # unknown names return 404 from the API rather than landing as a
 # ``rejected`` row the operator must reconcile.
 VALID_JOB_NAMES: Final[frozenset[str]] = frozenset(_INVOKERS.keys())
+
+# #1472 PR-visibility — scheduled jobs are added with APScheduler id
+# ``recurring:{job.name}`` (see ``JobRuntime.start``); the max-instances
+# listener strips this prefix to recover the job_name for the skip row.
+_RECURRING_JOB_ID_PREFIX: Final[str] = "recurring:"
+# job_runs.error_msg reason for a fire suppressed by ``max_instances=1``. NOT
+# 'wedged' — the event fires for ANY suppression (a legitimately slow-but-
+# running job triggers it too), so the honest label is "an instance is already
+# active"; the operator tells wedge from slow via the running row's age.
+_MAX_INSTANCES_SKIP_REASON: Final[str] = "max_instances_active"
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +968,15 @@ class JobRuntime:
                 "max_instances": 1,
             },
         )
+        # #1472 PR-visibility (GAP-C) — make the silent max_instances freeze
+        # VISIBLE. When a fire wedges (``wrapped()`` never returns), APScheduler
+        # never decrements ``_instances[job]`` → ``max_instances=1`` silently
+        # skips every later fire (no row, no thread, no log) — the #1474 RCA's
+        # ~21h invisible freeze. This listener records each suppressed fire as a
+        # ``job_runs`` 'skipped' row so the operator console shows it. It is
+        # ALERT/MARK-ONLY: it cannot decrement ``_instances`` or un-wedge (that
+        # is PR0's connect-timeout + a jobs restart).
+        self._scheduler.add_listener(self._on_job_max_instances, EVENT_JOB_MAX_INSTANCES)
         # Manual-trigger executor sized so that distinct jobs do NOT
         # queue behind each other -- one slot per wired invoker means
         # every wired job can be in flight simultaneously without
@@ -1025,6 +1046,35 @@ class JobRuntime:
             logger.debug("EBULL_SKIP_CATCH_UP=1; skipping catch-up on boot")
         else:
             self._catch_up()
+
+    def _on_job_max_instances(self, event: JobSubmissionEvent) -> None:
+        """APScheduler ``EVENT_JOB_MAX_INSTANCES`` handler (#1472 PR-visibility).
+
+        Runs on the scheduler thread whenever a scheduled fire is suppressed
+        because an instance is already running (``max_instances=1``). Records a
+        ``job_runs`` 'skipped' row so the otherwise-silent suppression is
+        operator-visible. Kept short — a blocked DB borrow here delays scheduler
+        dispatch — and fully fail-safe: a listener that raised would break
+        APScheduler's event dispatch, so EVERY path (id parsing + DB write) is
+        wrapped. The write uses the PR4c background-write seam (autocommit,
+        bounded pool when registered, raw fallback otherwise)."""
+        try:
+            job_id = getattr(event, "job_id", None)
+            if not isinstance(job_id, str) or not job_id.startswith(_RECURRING_JOB_ID_PREFIX):
+                # Manual / non-recurring add_job ids are not scheduled fires.
+                return
+            job_name = job_id.removeprefix(_RECURRING_JOB_ID_PREFIX)
+            with background_write_connection() as conn:
+                record_job_skip(conn, job_name, _MAX_INSTANCES_SKIP_REASON)
+            logger.warning(
+                "scheduled job %s: fire suppressed (max_instances active) — recorded 'skipped' job_runs row",
+                job_name,
+            )
+        except Exception:
+            logger.exception(
+                "max-instances listener failed for event job_id=%r",
+                getattr(event, "job_id", "?"),
+            )
 
     def _catch_up(self) -> None:
         """Fire overdue jobs after startup (fire-and-forget).
