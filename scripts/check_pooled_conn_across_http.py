@@ -64,18 +64,15 @@ EXTERNAL_MARKERS: frozenset[str] = frozenset(
     }
 )
 
-# KNOWN-DEFERRED violations (#1472 PR2 audit V3/V4). These two lazy-fill
-# routes hold a per-key ``pg_advisory_lock`` on the pooled conn across the
-# SEC fetch INSIDE the service (eight_k_events.py / business_summary.py) —
-# the lock is session-scoped so the conn cannot be released without
-# dropping it. Fixing reworks the lock/fetch ordering + drags filings-ETL
-# DoD; tracked in #1492. Remove these when #1492 lands.
-ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("app/api/instruments.py", "get_instrument_8k_filing_body"),
-        ("app/api/instruments.py", "get_instrument_business_sections"),
-    }
-)
+# Per-route waivers, keyed by (relpath, function name). Empty: the two
+# former entries (V3/V4 — get_instrument_8k_filing_body /
+# get_instrument_business_sections) were the lazy-fill routes that held a
+# session ``pg_advisory_lock`` on the pooled conn across the SEC fetch.
+# #1492 reworked them to fetch-first (the service borrows + releases its
+# own short-lived pool conns; the routes drive ``get_conn`` by hand and no
+# longer take ``Depends(get_conn)``), so the tripwire is re-armed against
+# both. Add a route here only with a tracking issue + a removal trigger.
+ALLOWLIST: frozenset[tuple[str, str]] = frozenset()
 
 
 def _is_depends_get_conn(node: ast.expr) -> bool:

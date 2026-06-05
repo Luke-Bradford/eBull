@@ -11,20 +11,23 @@ PoolTimeout, ``max_waiting=0``).
 
 Pins:
 1. Positive — the real ``app/api/*.py`` tree is clean (exit 0): V1
-   (intraday-candles) + V2 (validate-stored) were fixed to release the
-   conn before the external call, and the two KNOWN-DEFERRED routes
-   (#1492) are on the script's ALLOWLIST.
+   (intraday-candles), V2 (validate-stored), and V3/V4 (8-K body +
+   business-sections lazy-fill, fixed in #1492) all release the pooled
+   conn before the external call — none take ``Depends(get_conn)`` while
+   referencing an external client.
 2. Negative — a synthetic violator (``Depends(get_conn)`` + a
    ``SecFilingsProvider`` reference) trips the guard (exit 1 + the
    function name printed).
 3. The fixture's DB-only ``clean_route`` is NOT flagged (no external
    marker).
-4. Allowlist — the two deferred routes in ``app/api/instruments.py`` are
-   not flagged even though they reference ``SecFilingsProvider``.
+4. Re-armed — the ALLOWLIST is empty (#1492 removed V3/V4), and the two
+   former-deferred routes pass on their own (fetch-first), not via a
+   waiver.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -40,7 +43,7 @@ def _run(*extra_paths: str | Path) -> subprocess.CompletedProcess[str]:
 
 
 def test_real_api_tree_is_clean() -> None:
-    """The production app/api tree passes (V1/V2 fixed, V3/V4 allowlisted)."""
+    """The production app/api tree passes (V1-V4 all fixed; allowlist empty)."""
     result = _run()
     assert result.returncode == 0, (
         f"guard flagged a real route — a Depends(get_conn) route holds the "
@@ -69,9 +72,20 @@ def test_clean_route_in_fixture_not_flagged() -> None:
     assert "clean_route" not in result.stdout
 
 
-def test_allowlisted_deferred_routes_not_flagged() -> None:
-    """The two KNOWN-DEFERRED routes (#1492) in instruments.py are allowlisted."""
+def test_former_deferred_routes_pass_unallowlisted() -> None:
+    """The two former-deferred routes (#1492) now pass on their own merit —
+    fetch-first, no ``Depends(get_conn)`` — not via a waiver."""
     result = _run(REPO_ROOT / "app" / "api" / "instruments.py")
-    assert result.returncode == 0, f"allowlist not honoured:\n{result.stdout}"
+    assert result.returncode == 0, f"a former-deferred route regressed:\n{result.stdout}"
     assert "get_instrument_8k_filing_body" not in result.stdout
     assert "get_instrument_business_sections" not in result.stdout
+
+
+def test_allowlist_is_empty() -> None:
+    """#1492 re-armed the tripwire: the ALLOWLIST carries no waivers, so a
+    future ``Depends(get_conn)``-shaped regression on either route trips."""
+    spec = importlib.util.spec_from_file_location("check_pooled_conn_across_http", SCRIPT_PY)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.ALLOWLIST == frozenset()

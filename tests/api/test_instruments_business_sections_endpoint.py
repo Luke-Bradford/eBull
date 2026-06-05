@@ -8,7 +8,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.instruments import router as instruments_router
-from app.db import get_conn
 from app.services.business_summary import (
     BusinessSectionRow,
     ParsedCrossReference,
@@ -19,11 +18,15 @@ from app.services.business_summary import (
 def _build_app(conn: MagicMock) -> FastAPI:
     app = FastAPI()
     app.include_router(instruments_router)
-
-    def _yield_conn():  # type: ignore[return]
-        yield conn
-
-    app.dependency_overrides[get_conn] = _yield_conn
+    # #1472 PR2 V4: the business_sections route drives get_conn by hand (no
+    # Depends(get_conn)) so it can release the pooled conn around the SEC
+    # fetch. Inject the mock conn via a fake app.state.db_pool whose
+    # .connection() yields it — dependency_overrides is bypassed by the
+    # manual get_conn(request) call (prevention-log #265).
+    pool = MagicMock()
+    pool.connection.return_value.__enter__.return_value = conn
+    pool.connection.return_value.__exit__.return_value = None
+    app.state.db_pool = pool
     return app
 
 
