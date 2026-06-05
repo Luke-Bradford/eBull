@@ -59,7 +59,7 @@ from app.api.watchlist import router as watchlist_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
-from app.db.pool import open_pool
+from app.db.pool import AUDIT_POOL_MAX_SIZE, DB_POOL_MAX_SIZE, open_pool
 from app.jobs.credential_health_listener import listener_loop as credential_health_listener_loop
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
@@ -132,6 +132,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             enforce_max_locks_floor(guard_conn)
 
     await asyncio.to_thread(_probe_pg_locks_floor)
+
+    # #1472 PR1 — fail-fast if configured connection demand cannot fit
+    # the dev co-deployment's usable budget (max_connections −
+    # superuser_reserved_connections). Mirrors the locks-floor probe
+    # above (``asyncio.to_thread`` keeps the sync connect off the event
+    # loop). A mathematically-impossible pool config refuses to boot here
+    # instead of silently degrading into a cadence-boundary connection
+    # herd at runtime. Spec:
+    # ``docs/proposals/infra/2026-06-04-db-connection-discipline.md`` PR1.
+    from app.db.pg_settings import enforce_connection_budget
+
+    def _probe_connection_budget() -> None:
+        with psycopg.connect(settings.database_url) as guard_conn:
+            enforce_connection_budget(guard_conn, process="api")
+
+    await asyncio.to_thread(_probe_connection_budget)
 
     # #1233 PR12 — fail-fast if PG < 17. PR12 rewrote every
     # ``refresh_*_current`` helper to PG17 ``MERGE … WHEN NOT MATCHED
@@ -231,8 +247,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await asyncio.to_thread(_ensure_exchanges_seeded_probe)
 
     # Open the connection pool after migrations so the schema is up to date.
-    pool = open_pool("db_pool", min_size=1, max_size=10)
-    logger.info("Connection pool opened (min=1, max=10).")
+    pool = open_pool("db_pool", min_size=1, max_size=DB_POOL_MAX_SIZE)
+    logger.info("Connection pool opened (min=1, max=%d).", DB_POOL_MAX_SIZE)
     app.state.db_pool = pool
 
     # #111: dedicated small pool for durable credential-access audit
@@ -243,8 +259,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # are short-lived single-row INSERTs that don't need
     # parallelism. ADR 0001 requires audit-on-every-decryption to
     # be durable independent of caller outcome.
-    audit_pool = open_pool("audit_pool", min_size=1, max_size=2)
-    logger.info("Audit pool opened (min=1, max=2).")
+    audit_pool = open_pool("audit_pool", min_size=1, max_size=AUDIT_POOL_MAX_SIZE)
+    logger.info("Audit pool opened (min=1, max=%d).", AUDIT_POOL_MAX_SIZE)
     app.state.audit_pool = audit_pool
 
     # First-run bootstrap token (issue #106 / ADR 0002).

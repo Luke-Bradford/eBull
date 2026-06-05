@@ -9,7 +9,7 @@ entry guards against.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 from psycopg_pool import ConnectionPool
@@ -36,6 +36,27 @@ _POOL_CONNECTION_KWARGS: dict[str, int] = {
     "keepalives_interval": 10,
     "keepalives_count": 3,
 }
+
+
+# Pool max-sizes as named constants (#1472 PR1) — single source of truth
+# shared by the ``open_pool`` call sites and the connection-budget boot
+# guard (``app/db/pg_settings.py``), so the guard's arithmetic can never
+# silently drift from the pools it is meant to bound. PR2 of #1472 shrinks
+# the API pools once the connection-lifetime audit is clean.
+#
+# Adding a NEW pool: add its max here AND into
+# ``pg_settings._dev_profile_connection_demand`` — otherwise the budget
+# guard under-counts and stops bounding real demand. (Settled decision
+# #719 already discourages a third raw pool; this keeps the two in lockstep
+# if one is added through ``open_pool``.)
+DB_POOL_MAX_SIZE: Final[int] = 10
+"""API request pool (``app/main.py``). PR2 of #1472 shrinks 10→4."""
+
+AUDIT_POOL_MAX_SIZE: Final[int] = 2
+"""API credential-audit pool (``app/main.py``, #111). PR2 shrinks 2→1."""
+
+JOBS_POOL_MAX_SIZE: Final[int] = 4
+"""Jobs-process pool (``app/jobs/__main__.py``)."""
 
 
 def open_pool(name: str, *, min_size: int, max_size: int) -> ConnectionPool[psycopg.Connection[Any]]:

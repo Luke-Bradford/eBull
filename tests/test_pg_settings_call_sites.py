@@ -27,13 +27,21 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
+from typing import Literal
 from unittest.mock import MagicMock
 
 import psycopg
 import pytest
 
-from app.db.pg_settings import PG_LOCKS_FLOOR, PgLocksFloorBreached
-from app.jobs.__main__ import _enforce_pg_locks_with_cleanup
+from app.db.pg_settings import (
+    PG_LOCKS_FLOOR,
+    ConnectionBudgetExceeded,
+    PgLocksFloorBreached,
+)
+from app.jobs.__main__ import (
+    _enforce_connection_budget_with_cleanup,
+    _enforce_pg_locks_with_cleanup,
+)
 
 
 def _db_reachable() -> bool:
@@ -112,6 +120,36 @@ def test_lifespan_propagates_pg_locks_breach(monkeypatch: pytest.MonkeyPatch) ->
                 pytest.fail("lifespan should have raised before yield")
     assert exc.value.value == 64
     assert exc.value.floor == PG_LOCKS_FLOOR
+
+
+@pytest.mark.xdist_group("dev_db_smoke")
+@pytest.mark.skipif(
+    not _db_reachable(),
+    reason="dev Postgres not reachable; lifespan test requires the real DB",
+)
+def test_lifespan_propagates_connection_budget_breach(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch ``enforce_connection_budget`` to raise; assert the lifespan
+    surfaces ``ConnectionBudgetExceeded`` through ``TestClient`` enter —
+    proving the #1472 PR1 guard is actually wired into the boot path and
+    fails fast before serving requests. The locks-floor guard ahead of it
+    runs for real (dev max_locks=1024 passes), so this isolates the budget
+    guard's propagation."""
+    from fastapi.testclient import TestClient
+
+    from app import main as app_main
+
+    def _raise(_conn: object, *, process: Literal["api", "jobs"]) -> None:
+        raise ConnectionBudgetExceeded(process=process, demand=99, usable=10)
+
+    monkeypatch.setattr("app.db.pg_settings.enforce_connection_budget", _raise)
+
+    with _dev_db_lifespan_lock():
+        with pytest.raises(ConnectionBudgetExceeded) as exc:
+            with TestClient(app_main.app):
+                pytest.fail("lifespan should have raised before yield")
+    assert exc.value.process == "api"
+    assert exc.value.demand == 99
+    assert exc.value.usable == 10
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +231,63 @@ def test_enforce_pg_locks_with_cleanup_swallows_secondary_close_errors(
 
     with pytest.raises(PgLocksFloorBreached):
         _enforce_pg_locks_with_cleanup(fence_conn, pool)
+
+
+def test_enforce_connection_budget_with_cleanup_closes_fence_and_pool_on_guard_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real ``_enforce_connection_budget_with_cleanup`` helper must
+    close BOTH ``fence_conn`` and ``pool`` before re-raising — same
+    stale-advisory-lock invariant as the locks guard. Reorder / deletion
+    / regression in the helper itself fails this test."""
+    _patch_jobs_psycopg_connect(monkeypatch)
+
+    fence_close_called = {"flag": False}
+    pool_close_called = {"flag": False}
+
+    fence_conn = MagicMock(spec=psycopg.Connection)
+    fence_conn.close.side_effect = lambda: fence_close_called.update(flag=True)
+
+    pool = MagicMock()
+    pool.close.side_effect = lambda: pool_close_called.update(flag=True)
+
+    def _raise(_conn: object, *, process: Literal["api", "jobs"]) -> None:
+        raise ConnectionBudgetExceeded(process=process, demand=99, usable=10)
+
+    monkeypatch.setattr("app.db.pg_settings.enforce_connection_budget", _raise)
+
+    with pytest.raises(ConnectionBudgetExceeded):
+        _enforce_connection_budget_with_cleanup(fence_conn, pool)
+
+    assert fence_close_called["flag"] is True, (
+        "fence_conn.close() must run before re-raise so the singleton "
+        "advisory lock is released and the next jobs-process boot can "
+        "acquire it"
+    )
+    assert pool_close_called["flag"] is True, "pool.close() must also run before re-raise"
+
+
+def test_enforce_connection_budget_with_cleanup_swallows_secondary_close_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``fence_conn.close()`` / ``pool.close()`` raise during cleanup,
+    the original ``ConnectionBudgetExceeded`` must still propagate (close
+    errors suppressed via ``contextlib.suppress``)."""
+    _patch_jobs_psycopg_connect(monkeypatch)
+
+    fence_conn = MagicMock(spec=psycopg.Connection)
+    fence_conn.close.side_effect = RuntimeError("fence close failed during cleanup")
+
+    pool = MagicMock()
+    pool.close.side_effect = RuntimeError("pool close also failed")
+
+    def _raise(_conn: object, *, process: Literal["api", "jobs"]) -> None:
+        raise ConnectionBudgetExceeded(process=process, demand=99, usable=10)
+
+    monkeypatch.setattr("app.db.pg_settings.enforce_connection_budget", _raise)
+
+    with pytest.raises(ConnectionBudgetExceeded):
+        _enforce_connection_budget_with_cleanup(fence_conn, pool)
 
 
 def test_lifespan_has_no_bare_sync_psycopg_connect() -> None:
