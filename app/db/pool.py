@@ -9,6 +9,7 @@ entry guards against.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Final
 
 import psycopg
@@ -62,19 +63,61 @@ AUDIT_POOL_MAX_SIZE: Final[int] = 1
 JOBS_POOL_MAX_SIZE: Final[int] = 4
 """Jobs-process pool (``app/jobs/__main__.py``)."""
 
+BACKGROUND_POOL_MAX_SIZE: Final[int] = 2
+"""Jobs-process bounded background pool (#1472 PR4b,
+``app/jobs/background_pool.py``). High-frequency short-lived background
+WRITES (progress/result/audit rows) borrow from this dedicated pool so
+the jobs process's concurrent connection footprint is capped regardless
+of cadence concurrency — instead of opening a fresh raw
+``psycopg.connect`` per write (the cadence-boundary herd PR4 removes).
+Sized small: these are sub-millisecond upserts, not long transactions.
+Add to ``pg_settings._dev_profile_connection_demand`` (done) so the boot
+budget guard counts it."""
 
-def open_pool(name: str, *, min_size: int, max_size: int) -> ConnectionPool[psycopg.Connection[Any]]:
+
+def open_pool(
+    name: str,
+    *,
+    min_size: int,
+    max_size: int,
+    autocommit: bool = False,
+    application_name: str | None = None,
+) -> ConnectionPool[psycopg.Connection[Any]]:
     """Open a hardened psycopg ConnectionPool. Caller owns the pool's lifetime.
 
     The settings module's ``database_url`` is read at call time, so a
     test that monkey-patches it before invoking ``open_pool`` gets a
     pool against the override URL — no caching, no closure capture.
+
+    ``autocommit`` (#1472 PR4b): when True, a ``configure`` callback sets
+    ``conn.autocommit = True`` on every pooled connection. Background
+    WRITERS rely on this — on a NON-autocommit pooled conn,
+    ``with conn.transaction()`` becomes a SAVEPOINT (psycopg3 quirk)
+    instead of a real BEGIN/COMMIT, silently breaking write durability /
+    rollback isolation. Default False preserves existing pool behaviour.
+
+    ``application_name`` (#1472 PR4b, PR3 labelling convention): stamps the
+    pooled connections in ``pg_stat_activity`` so the pool's footprint is
+    attributable. Merged into the libpq connection kwargs.
     """
+    kwargs: dict[str, Any] = dict(_POOL_CONNECTION_KWARGS)
+    if application_name is not None:
+        kwargs["application_name"] = application_name
+
+    configure: Callable[[psycopg.Connection[Any]], None] | None = None
+    if autocommit:
+
+        def _set_autocommit(conn: psycopg.Connection[Any]) -> None:
+            conn.autocommit = True
+
+        configure = _set_autocommit
+
     pool: ConnectionPool[psycopg.Connection[Any]] = ConnectionPool(
         settings.database_url,
         min_size=min_size,
         max_size=max_size,
-        kwargs=_POOL_CONNECTION_KWARGS,
+        kwargs=kwargs,
+        configure=configure,
         check=ConnectionPool.check_connection,
         max_idle=600.0,
         max_lifetime=1800.0,

@@ -65,6 +65,7 @@ from app.config import settings
 from app.db.dev_test_db_reaper import run_orphan_test_db_reap
 from app.db.pg_settings import JOBS_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
 from app.db.pool import JOBS_POOL_MAX_SIZE, open_pool
+from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.boot_sweep import run_boot_freshness_sweep
 from app.jobs.credential_health_listener import (
     listener_loop as credential_health_listener_loop,
@@ -1016,7 +1017,22 @@ def serve(stop_event: threading.Event | None = None) -> int:
     credential_health_stop: threading.Event | None = None
     credential_health_thread: threading.Thread | None = None
 
+    # #1472 PR4b — pre-declare the bounded background pool so the finally:
+    # clean-up block can close it even if the try-body raises before it is
+    # opened. Opened INSIDE the try (Codex PR4b-ckpt-1b): the pre-try boot
+    # guards above clean up only fence_conn + jobs_pool on raise, so opening
+    # the bg pool there would leak it; inside the try the finally closes it.
+    background_pool: BackgroundConnectionPool | None = None
+
     try:
+        # #1472 PR4b — open the bounded background pool now that every boot
+        # guard has passed (Postgres is reachable, budget fits). Pure infra in
+        # PR4b: it is lifecycle-managed + budget-counted, and handed to the
+        # runtime as the PR4c handoff point; no writer borrows from it yet.
+        background_pool = BackgroundConnectionPool()
+        runtime.background_pool = background_pool
+        logger.info("jobs entrypoint: background pool opened")
+
         # #1290: start the fence heartbeat INSIDE the main try block
         # so the finally-shutdown path stops it on every exit (Codex 2
         # round 3 MEDIUM). Every startup guard above has passed, so
@@ -1307,6 +1323,14 @@ def serve(stop_event: threading.Event | None = None) -> int:
                 fence_heartbeat_thread.join(timeout=2.0)
         except Exception:
             logger.exception("jobs entrypoint: fence heartbeat shutdown raised")
+        # #1472 PR4b — close the background pool before the main jobs_pool.
+        # Pre-declared None, so this is a no-op if the try-body raised before
+        # the pool was opened.
+        if background_pool is not None:
+            try:
+                background_pool.close()
+            except Exception:
+                logger.exception("jobs entrypoint: background_pool.close raised")
         try:
             pool.close()
         except Exception:
