@@ -56,6 +56,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from app.config import settings
+from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.jobs.sources import JobInvoker
 from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
@@ -900,8 +901,16 @@ class JobRuntime:
         database_url: str | None = None,
         invokers: dict[str, JobInvoker] | None = None,
         pool: ConnectionPool[psycopg.Connection[Any]] | None = None,
+        background_pool: BackgroundConnectionPool | None = None,
     ) -> None:
         self._database_url = database_url or settings.database_url
+        # #1472 PR4b — the jobs-process bounded background pool
+        # (``__main__.serve`` owns its lifetime and passes it here). PR4b is
+        # pure infrastructure: the pool exists + is lifecycle-managed + budget-
+        # counted, but no writer borrows from it yet. PR4c sweeps the eligible
+        # high-frequency raw-connect background writers onto it. None in the
+        # in-process API runtime / unit tests.
+        self.background_pool: BackgroundConnectionPool | None = background_pool
         # #1472 PR4a-bis — the jobs-process pool (``__main__.serve`` passes
         # the already-open ``jobs_pool``). The scheduled-fire gate +
         # prerequisite checks borrow ONE pooled connection per fire instead

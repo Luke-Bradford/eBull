@@ -32,7 +32,12 @@ from typing import Any, Final, Literal
 
 import psycopg
 
-from app.db.pool import AUDIT_POOL_MAX_SIZE, DB_POOL_MAX_SIZE, JOBS_POOL_MAX_SIZE
+from app.db.pool import (
+    AUDIT_POOL_MAX_SIZE,
+    BACKGROUND_POOL_MAX_SIZE,
+    DB_POOL_MAX_SIZE,
+    JOBS_POOL_MAX_SIZE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +258,7 @@ def _dev_profile_connection_demand() -> int:
         + AUDIT_POOL_MAX_SIZE
         + API_FIXED_LONGLIVED_CONNS
         + JOBS_POOL_MAX_SIZE
+        + BACKGROUND_POOL_MAX_SIZE
         + JOBS_FIXED_LONGLIVED_CONNS
         + JOBS_STEADY_STATE_EXEC_CONNS
         + ORCHESTRATOR_GATE_CHECK_CONN
@@ -275,7 +281,8 @@ class ConnectionBudgetExceeded(RuntimeError):
             f"superuser_reserved_connections). The dev box co-deploys API + jobs "
             f"+ Postgres; the configured pools cannot fit. Primary fix: SHRINK "
             f"pool sizes (app/db/pool.py: DB_POOL_MAX_SIZE / AUDIT_POOL_MAX_SIZE "
-            f"/ JOBS_POOL_MAX_SIZE) or stop duplicate processes. Raising "
+            f"/ JOBS_POOL_MAX_SIZE / BACKGROUND_POOL_MAX_SIZE) or stop duplicate "
+            f"processes. Raising "
             f"max_connections is DIAGNOSTIC-ONLY, not a remediation — it adds "
             f"backend RAM + WAL pressure on the OOM-fragile dev box (#1472). Set "
             f"{CONNECTION_BUDGET_OVERRIDE_ENV}=1 to boot anyway (niche "
