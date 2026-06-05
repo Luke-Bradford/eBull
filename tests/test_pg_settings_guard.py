@@ -13,11 +13,24 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.db.pg_settings import (
+    API_FIXED_LONGLIVED_CONNS,
+    CONNECTION_BUDGET_OVERRIDE_ENV,
+    CONNECTION_BUDGET_RESERVE,
+    JOBS_FIXED_LONGLIVED_CONNS,
+    JOBS_STEADY_STATE_EXEC_CONNS,
     PG_LOCKS_FLOOR,
     PG_LOCKS_OVERRIDE_ENV,
+    ConnectionBudgetExceeded,
     PgLocksFloorBreached,
+    check_connection_budget,
     check_max_locks_per_transaction,
+    enforce_connection_budget,
     enforce_max_locks_floor,
+)
+from app.db.pool import (
+    AUDIT_POOL_MAX_SIZE,
+    DB_POOL_MAX_SIZE,
+    JOBS_POOL_MAX_SIZE,
 )
 
 
@@ -121,3 +134,118 @@ def test_breached_message_includes_actionable_alter(
     assert str(PG_LOCKS_FLOOR) in msg
     assert "restart Postgres" in msg
     assert PG_LOCKS_OVERRIDE_ENV in msg
+
+
+# ---------------------------------------------------------------------------
+# #1472 PR1 — connection-budget guard
+# ---------------------------------------------------------------------------
+
+# Expected dev-profile demand, derived from the same source constants the
+# guard sums (not a hardcoded 23) so a deliberate pool-size change updates
+# the expectation through the constants, never silently.
+_EXPECTED_DEMAND = (
+    DB_POOL_MAX_SIZE
+    + AUDIT_POOL_MAX_SIZE
+    + API_FIXED_LONGLIVED_CONNS
+    + JOBS_POOL_MAX_SIZE
+    + JOBS_FIXED_LONGLIVED_CONNS
+    + JOBS_STEADY_STATE_EXEC_CONNS
+    + CONNECTION_BUDGET_RESERVE
+)
+
+
+def _fake_conn_budget(max_conn: int, reserved: int) -> MagicMock:
+    """Fake conn answering the two SHOWs ``check_connection_budget`` issues:
+    ``max_connections`` → ``max_conn``, ``superuser_reserved_connections``
+    → ``reserved``. SQL-branching (not call-order) so the fake stays correct
+    if the probe order ever changes."""
+    conn = MagicMock()
+
+    def _execute(sql: str, *args: object, **kwargs: object) -> MagicMock:
+        result = MagicMock()
+        if "superuser_reserved_connections" in sql:
+            result.fetchone.return_value = (str(reserved),)
+        else:
+            result.fetchone.return_value = (str(max_conn),)
+        return result
+
+    conn.execute.side_effect = _execute
+    return conn
+
+
+def test_budget_passes_at_real_dev_config() -> None:
+    """Acceptance: the guard PASSES at the real dev cluster
+    (max_connections=30, superuser_reserved_connections=3 → 27 usable)
+    with the shipped pool sizes. A regression that makes the real config
+    refuse to boot trips here."""
+    passes, demand, usable = check_connection_budget(_fake_conn_budget(30, 3), process="api")
+    assert passes is True
+    assert demand == _EXPECTED_DEMAND
+    assert usable == 27
+
+
+def test_budget_demand_tracks_pool_constants() -> None:
+    """demand == both processes' pool maxes + fixed long-lived conns +
+    reserve. Pins the model to its source constants."""
+    _passes, demand, _usable = check_connection_budget(_fake_conn_budget(30, 3), process="jobs")
+    assert demand == _EXPECTED_DEMAND
+
+
+def test_budget_fails_when_usable_below_demand() -> None:
+    passes, demand, usable = check_connection_budget(_fake_conn_budget(20, 3), process="api")
+    assert passes is False
+    assert usable == 17
+    assert demand > usable
+
+
+def test_enforce_budget_passes_at_real_dev_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(CONNECTION_BUDGET_OVERRIDE_ENV, raising=False)
+    enforce_connection_budget(_fake_conn_budget(30, 3), process="api")  # no raise
+
+
+def test_enforce_budget_raises_when_over_budget_no_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(CONNECTION_BUDGET_OVERRIDE_ENV, raising=False)
+    with pytest.raises(ConnectionBudgetExceeded) as exc:
+        enforce_connection_budget(_fake_conn_budget(20, 3), process="jobs")
+    assert exc.value.process == "jobs"
+    assert exc.value.usable == 17
+    assert exc.value.demand == _EXPECTED_DEMAND
+
+
+def test_enforce_budget_skips_when_env_override_set(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv(CONNECTION_BUDGET_OVERRIDE_ENV, "1")
+    with caplog.at_level("WARNING", logger="app.db.pg_settings"):
+        enforce_connection_budget(_fake_conn_budget(20, 3), process="api")  # no raise
+    assert any(
+        "running anyway because" in rec.message and CONNECTION_BUDGET_OVERRIDE_ENV in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_enforce_budget_fail_open_on_show_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient SHOW failure must not block startup: ``check_*``
+    fail-opens with ``(True, 0, 0)``; ``enforce_*`` sees ``passes=True``
+    and returns without raising."""
+    monkeypatch.delenv(CONNECTION_BUDGET_OVERRIDE_ENV, raising=False)
+    enforce_connection_budget(_fake_conn_raising(RuntimeError("transient SHOW failure")), process="api")
+
+
+def test_budget_exceeded_message_steers_to_shrink_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The raise must steer the operator to SHRINK configured demand and
+    name raising ``max_connections`` as diagnostic-only — never present
+    raising the ceiling as the remediation (the #1472 anti-goal)."""
+    monkeypatch.delenv(CONNECTION_BUDGET_OVERRIDE_ENV, raising=False)
+    with pytest.raises(ConnectionBudgetExceeded) as exc:
+        enforce_connection_budget(_fake_conn_budget(20, 3), process="jobs")
+    msg = str(exc.value)
+    assert "SHRINK" in msg
+    assert "DIAGNOSTIC-ONLY" in msg
+    assert CONNECTION_BUDGET_OVERRIDE_ENV in msg
+    assert "jobs boot" in msg

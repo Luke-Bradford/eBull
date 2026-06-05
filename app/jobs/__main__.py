@@ -63,7 +63,7 @@ import psycopg
 import app.services.manifest_parsers  # noqa: F401, E402
 from app.config import settings
 from app.db.dev_test_db_reaper import run_orphan_test_db_reap
-from app.db.pool import open_pool
+from app.db.pool import JOBS_POOL_MAX_SIZE, open_pool
 from app.jobs.boot_sweep import run_boot_freshness_sweep
 from app.jobs.credential_health_listener import (
     listener_loop as credential_health_listener_loop,
@@ -446,6 +446,40 @@ def _enforce_pg_locks_with_cleanup(
             fence_conn.close()
         with contextlib.suppress(Exception):
             pool.close()
+        raise
+
+
+def _enforce_connection_budget_with_cleanup(
+    fence_conn: psycopg.Connection[Any],
+    pool: Any,
+) -> None:
+    """Run the #1472 PR1 connection-budget guard with fence + pool
+    cleanup on raise.
+
+    Same cleanup invariant as ``_enforce_pg_locks_with_cleanup``: the
+    guard runs BEFORE the jobs entrypoint's main try/finally, so a raise
+    must release the singleton-fence advisory lock + close the pool —
+    else the next jobs-process boot is blocked by a stale lock on the
+    singleton key. Extracted for the same unit-testability reason
+    (`tests/test_pg_settings_call_sites.py`).
+    """
+    from app.db.pg_settings import enforce_connection_budget
+
+    try:
+        with psycopg.connect(settings.database_url) as guard_conn:
+            enforce_connection_budget(guard_conn, process="jobs")
+    except BaseException:
+        # Close the pool BEFORE releasing the singleton fence: on a
+        # boot-guard raise a waiting successor jobs-process can acquire
+        # the fence the instant it is released, so dropping our pooled
+        # connections first keeps peak concurrent demand lower during the
+        # handoff — on-theme for #1472 (Codex ckpt-2). Both are
+        # best-effort (suppressed) so either still runs if the other
+        # raises.
+        with contextlib.suppress(Exception):
+            pool.close()
+        with contextlib.suppress(Exception):
+            fence_conn.close()
         raise
 
 
@@ -855,7 +889,7 @@ def serve(stop_event: threading.Event | None = None) -> int:
     boot_id = _boot_id()
     logger.info("jobs entrypoint: starting (boot_id=%s)", boot_id)
 
-    pool = open_pool("jobs_pool", min_size=1, max_size=4)
+    pool = open_pool("jobs_pool", min_size=1, max_size=JOBS_POOL_MAX_SIZE)
     fence_conn = _acquire_singleton_fence(settings.database_url)
     logger.info("jobs entrypoint: singleton fence acquired")
     # #1290: fence-liveness infrastructure. The lock + stop-event are
@@ -897,6 +931,14 @@ def serve(stop_event: threading.Event | None = None) -> int:
     # could regress to leak the fence without any test catching it.
     _enforce_pg_locks_with_cleanup(fence_conn, pool)
     logger.info("jobs entrypoint: max_locks_per_transaction guard passed")
+
+    # #1472 PR1 — fail-fast if configured connection demand cannot fit
+    # the dev co-deployment's usable budget (max_connections −
+    # superuser_reserved_connections). Same cleanup-on-raise contract as
+    # the locks guard above (release fence + close pool so a stale
+    # advisory lock cannot block the next boot).
+    _enforce_connection_budget_with_cleanup(fence_conn, pool)
+    logger.info("jobs entrypoint: connection-budget guard passed")
 
     # #1208 Sub 6 — defensive re-seed of runtime_config singleton in case
     # it vanished after the API applied migrations. API-first contract
