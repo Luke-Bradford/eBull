@@ -330,7 +330,7 @@ def _read_latest_terminal_sync_run(conn: psycopg.Connection[Any], *, scope: str)
               FROM sync_runs
              WHERE scope = %(scope)s
                AND status IN ('complete', 'partial', 'failed', 'cancelled')
-             ORDER BY started_at DESC
+             ORDER BY started_at DESC, sync_run_id DESC
              LIMIT 1
             """,
             {"scope": scope},
