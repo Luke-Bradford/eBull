@@ -30,6 +30,7 @@ from datetime import date
 from typing import Any, Literal, Protocol
 
 import psycopg
+from psycopg_pool import ConnectionPool
 
 from app.services.bootstrap_state import resolve_progress_context
 from app.services.filings import bootstrap_filings_recency_floor
@@ -570,8 +571,44 @@ def seed_eight_k_metadata(
     return True
 
 
-def fetch_eight_k_body_now(
+def _tombstone_deferred_8k(
     conn: psycopg.Connection[Any],
+    accession_number: str,
+    *,
+    reason: str,
+) -> None:
+    """Convert a deferred 8-K row to a tombstone so the rail drops it
+    and it isn't re-fetched on the next click. Runs inside the caller's
+    locked transaction (no commit). The manifest ``→'tombstoned'``
+    transition is best-effort in its own savepoint (``transition_status``
+    opens ``with conn.transaction()``); a manifest failure rolls back
+    only that savepoint, never the filing-row tombstone."""
+    # Inline import: matches the lazy-fill caller's pattern (the
+    # raw_filings / sec_manifest services re-enter this module's helpers).
+    from app.services.sec_manifest import transition_status
+
+    with conn.cursor() as cur:
+        # Drop the seeded metadata item rows so the detail returns a clean
+        # empty state, not placeholder labels with empty bodies (Codex
+        # ckpt2). The filing row stays tombstoned → the rail excludes it.
+        cur.execute("DELETE FROM eight_k_items WHERE accession_number = %s", (accession_number,))
+        cur.execute(
+            "UPDATE eight_k_filings SET is_tombstone = TRUE, body_deferred = FALSE, "
+            "fetched_at = NOW() WHERE accession_number = %s",
+            (accession_number,),
+        )
+    try:
+        transition_status(conn, accession_number, ingest_status="tombstoned", error=reason)
+    except Exception:
+        logger.warning(
+            "fetch_eight_k_body_now: manifest tombstone transition skipped accession=%s",
+            accession_number,
+            exc_info=True,
+        )
+
+
+def fetch_eight_k_body_now(
+    pool: ConnectionPool[psycopg.Connection[Any]],
     fetcher: _DocFetcher,
     *,
     accession_number: str,
@@ -585,132 +622,122 @@ def fetch_eight_k_body_now(
     transitions the manifest ``'deferred'→'parsed'`` (#938 raw-before-
     parsed honoured here — the worker guard does not cover this path).
 
-    A blocking per-accession advisory lock collapses the concurrent
-    double-open herd (advisory ``hashtext`` namespace, matching
-    ``app/jobs/locks.py``; never blocks the manifest worker). Determin-
-    istic failure converts the deferred row to a tombstone (so the rail
-    drops it — matching the eager path) + manifest ``→'tombstoned'`` and
-    returns ``'failed'`` (API → 2xx empty). A transient error RAISES
-    (API → 503). Caller owns the request; this commits its own units.
+    Connection discipline (#1472 PR2 V3): borrows short-lived conns from
+    ``pool`` and holds **no** conn across the SEC fetch. The fetch runs
+    unlocked (phase 2); a transaction-scoped ``pg_advisory_xact_lock``
+    (phase 3) collapses the concurrent double-WRITE — the second caller
+    re-checks ``body_deferred`` under the lock and returns ``'already'``.
+    The lock is released at commit, so it can never leak into a pooled
+    conn (a session ``pg_advisory_lock`` would). A duplicate concurrent
+    fetch is wasteful but harmless (the upsert is idempotent).
+
+    Deterministic failure converts the deferred row to a tombstone (so
+    the rail drops it — matching the eager path) + manifest
+    ``→'tombstoned'`` and returns ``'failed'`` (API → 2xx empty). A
+    transient error RAISES (API → 503). Owns the conns it borrows.
     """
     from app.services.raw_filings import store_raw
     from app.services.sec_manifest import transition_status
 
     lock_key = f"sec_lazy_body_8k:{accession_number}"
 
-    with conn.cursor() as cur:
+    # Phase 1 (unlocked, read-only) — is the row still deferred, and is
+    # there a URL to fetch? Released before the SEC fetch.
+    with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT instrument_id, primary_document_url, body_deferred "
             "FROM eight_k_filings WHERE accession_number = %s",
             (accession_number,),
         )
         row = cur.fetchone()
-    conn.commit()
     if row is None or not bool(row[2]):
         return "not_deferred"
     instrument_id = int(row[0])
     url = row[1]
 
-    def _tombstone(reason: str) -> None:
-        with conn.cursor() as cur:
-            # Drop the seeded metadata item rows so the detail returns a
-            # clean empty state, not placeholder labels with empty bodies
-            # (Codex ckpt2). The filing row stays tombstoned → the rail
-            # excludes it and it isn't re-fetched.
-            cur.execute("DELETE FROM eight_k_items WHERE accession_number = %s", (accession_number,))
-            cur.execute(
-                "UPDATE eight_k_filings SET is_tombstone = TRUE, body_deferred = FALSE, "
-                "fetched_at = NOW() WHERE accession_number = %s",
-                (accession_number,),
-            )
-        try:
-            transition_status(conn, accession_number, ingest_status="tombstoned", error=reason)
-        except Exception:
-            logger.warning(
-                "fetch_eight_k_body_now: manifest tombstone transition skipped accession=%s",
-                accession_number,
-                exc_info=True,
-            )
-        conn.commit()
-
-    with conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_lock(hashtext(%s)::int)", (lock_key,))
-    conn.commit()
-    try:
-        # Re-read under the lock — a concurrent holder may have just filled it.
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT body_deferred FROM eight_k_filings WHERE accession_number = %s",
-                (accession_number,),
-            )
-            r2 = cur.fetchone()
-        conn.commit()
-        if r2 is None or not bool(r2[0]):
-            return "already"
-
-        if not url:
-            # No fetchable URL (malformed seed) — tombstone so the row
-            # EXITS the deferred state rather than being re-attempted on
-            # every click (bot review BLOCKING: no_source infinite-defer).
-            _tombstone("no primary_document_url")
-            return "no_source"
-
-        labels = _load_item_labels(conn)
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(items, ARRAY[]::TEXT[]) FROM filing_events "
-                "WHERE provider = 'sec' AND provider_filing_id = %s LIMIT 1",
-                (accession_number,),
-            )
-            irow = cur.fetchone()
-        conn.commit()
-        known_items = tuple(str(c) for c in (irow[0] if irow and irow[0] else []))
-
+    # Phase 2 (NO conn held) — fetch the primary document. Transient error
+    # RAISES (API → 503). Skipped when there's no URL (handled as a
+    # no_source tombstone under the lock below).
+    html: str | None = None
+    if url:
         try:
             html = fetcher.fetch_document_text(str(url))
         except Exception:
             logger.warning("fetch_eight_k_body_now: fetch failed accession=%s", accession_number, exc_info=True)
             raise  # transient → API 503
 
-        if html is None:
-            _tombstone("lazy fetch: empty or non-200")
-            return "failed"
-
-        parsed = parse_8k_filing(html, known_items=known_items, item_labels=labels)
-        if parsed is None:
-            _tombstone("lazy fetch: parse miss")
-            return "failed"
-
-        upsert_8k_filing(
-            conn,
-            instrument_id=instrument_id,
-            accession_number=accession_number,
-            primary_document_url=str(url),
-            parsed=parsed,
-            item_labels=labels,
-        )
-        try:
-            store_raw(
-                conn,
-                accession_number=accession_number,
-                document_kind="primary_doc",
-                payload=html,
-                source_url=str(url),
-            )
-            transition_status(conn, accession_number, ingest_status="parsed", raw_status="stored")
-        except Exception:
-            logger.warning(
-                "fetch_eight_k_body_now: manifest deferred→parsed transition skipped "
-                "accession=%s (body cached; split non-fatal)",
-                accession_number,
-                exc_info=True,
-            )
-        conn.commit()
-        return "filled"
-    finally:
+    # Phase 3 (locked write) — re-borrow, take a transaction-scoped
+    # advisory lock (first statement opens the implicit tx; lock released
+    # at commit), re-check the deferred flag under the lock, then write.
+    # All mutations are serialized here.
+    outcome: Literal["filled", "already", "no_source", "failed"]
+    with pool.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::int)", (lock_key,))
-        conn.commit()
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::int)", (lock_key,))
+            cur.execute(
+                "SELECT body_deferred FROM eight_k_filings WHERE accession_number = %s",
+                (accession_number,),
+            )
+            r2 = cur.fetchone()
+        if r2 is None or not bool(r2[0]):
+            # A concurrent caller filled it while we were fetching.
+            outcome = "already"
+        elif not url:
+            # No fetchable URL (malformed seed) — tombstone so the row
+            # EXITS the deferred state rather than being re-attempted on
+            # every click (bot review BLOCKING: no_source infinite-defer).
+            _tombstone_deferred_8k(conn, accession_number, reason="no primary_document_url")
+            outcome = "no_source"
+        elif html is None:
+            _tombstone_deferred_8k(conn, accession_number, reason="lazy fetch: empty or non-200")
+            outcome = "failed"
+        else:
+            labels = _load_item_labels(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(items, ARRAY[]::TEXT[]) FROM filing_events "
+                    "WHERE provider = 'sec' AND provider_filing_id = %s LIMIT 1",
+                    (accession_number,),
+                )
+                irow = cur.fetchone()
+            known_items = tuple(str(c) for c in (irow[0] if irow and irow[0] else []))
+
+            parsed = parse_8k_filing(html, known_items=known_items, item_labels=labels)
+            if parsed is None:
+                _tombstone_deferred_8k(conn, accession_number, reason="lazy fetch: parse miss")
+                outcome = "failed"
+            else:
+                upsert_8k_filing(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession_number,
+                    primary_document_url=str(url),
+                    parsed=parsed,
+                    item_labels=labels,
+                )
+                # #938 — store raw THEN flip manifest deferred→parsed.
+                # Best-effort in a SAVEPOINT so a raw/manifest failure rolls
+                # back only that savepoint, never the body upsert (the typed
+                # body is the user-visible value; the split is non-fatal).
+                try:
+                    with conn.transaction():
+                        store_raw(
+                            conn,
+                            accession_number=accession_number,
+                            document_kind="primary_doc",
+                            payload=html,
+                            source_url=str(url),
+                        )
+                        transition_status(conn, accession_number, ingest_status="parsed", raw_status="stored")
+                except Exception:
+                    logger.warning(
+                        "fetch_eight_k_body_now: manifest deferred→parsed transition skipped "
+                        "accession=%s (body cached; split non-fatal)",
+                        accession_number,
+                        exc_info=True,
+                    )
+                outcome = "filled"
+    return outcome
 
 
 def _write_tombstone(

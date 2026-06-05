@@ -24,6 +24,8 @@ from __future__ import annotations
 import csv
 import io
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal, get_args
@@ -57,6 +59,34 @@ from app.services.operators import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
+
+
+@contextmanager
+def _short_lived_conn(request: Request) -> Iterator[psycopg.Connection[object]]:
+    """Borrow a pooled conn for the duration of the ``with`` block, then
+    release it — WITHOUT ``Depends(get_conn)``, so the conn is NOT pinned
+    for the whole request.
+
+    #1472 PR2 (V3/V4): the lazy-fill 8-K body + business-sections routes
+    must NOT hold a pooled conn across the external SEC fetch. The fetch
+    happens inside the service on its own short pool borrow; the route
+    does its own DB reads on these scoped borrows and releases each one
+    around the service call. Reuses ``get_conn``'s pool-from-state + 503
+    mapping (#717). Hand-driving bypasses ``app.dependency_overrides`` —
+    tests inject via ``app.state.db_pool`` (prevention-log #265).
+
+    READ-ONLY by contract: ``gen.close()`` injects ``GeneratorExit`` at
+    ``get_conn``'s yield, so ``pool.connection()``'s ``with conn:`` exits
+    via exception → ROLLS BACK. Do not write through this helper — a write
+    would be silently discarded. Writers own their connection lifecycle
+    (the lazy-fill services borrow + commit their own pool conns).
+    """
+    gen = get_conn(request)
+    conn = next(gen)
+    try:
+        yield conn
+    finally:
+        gen.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1311,7 +1341,7 @@ def get_instrument_8k_filing_body(
     symbol: str,
     accession_number: str,
     response: Response,
-    conn: psycopg.Connection[object] = Depends(get_conn),
+    request: Request,
 ) -> EightKFilingModel:
     """Lazily fetch + return one 8-K filing's bodies + exhibits (#1343).
 
@@ -1324,6 +1354,11 @@ def get_instrument_8k_filing_body(
     Error contract: a deterministic failure (404 / parse-miss) tombstones
     and returns the (empty) filing with 200 so the FE renders an empty
     state, not an error toast; a transient fetch error → 503.
+
+    Connection discipline (#1472 PR2 V3): drives ``get_conn`` by hand via
+    :func:`_short_lived_conn` so the pooled conn is released BEFORE the SEC
+    fetch — the lazy-fill service borrows its own short-lived pool conns
+    and holds none across the external I/O.
     """
     from app.providers.implementations.sec_edgar import SecFilingsProvider
     from app.services.eight_k_events import fetch_eight_k_body_now, get_8k_filing
@@ -1336,40 +1371,44 @@ def get_instrument_8k_filing_body(
     if not accession_clean:
         raise HTTPException(status_code=400, detail="accession_number is required")
 
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT instrument_id FROM instruments
-            WHERE UPPER(symbol) = %(s)s
-            ORDER BY is_primary_listing DESC, instrument_id ASC
-            LIMIT 1
-            """,
-            {"s": symbol_clean},
-        )
-        inst_row = cur.fetchone()
-    if inst_row is None:
-        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
-    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
-
-    # Scope the accession to THIS instrument via the filing_events bridge
-    # so a URL-manipulated cross-issuer accession can't be fetched or
-    # returned (Codex ckpt2). 404 if the accession isn't this issuer's 8-K.
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM filing_events WHERE provider = 'sec' "
-            "AND provider_filing_id = %s AND instrument_id = %s "
-            "AND filing_type IN ('8-K', '8-K/A') LIMIT 1",
-            (accession_clean, instrument_id),
-        )
-        if cur.fetchone() is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"8-K filing {accession_clean} not found for {symbol}",
+    # Pre-reads on a short borrow, released BEFORE the SEC fetch: resolve
+    # the instrument + scope the accession to it via the filing_events
+    # bridge so a URL-manipulated cross-issuer accession can't be fetched
+    # or returned (Codex ckpt2). 404 if the accession isn't this issuer's.
+    with _short_lived_conn(request) as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_id FROM instruments
+                WHERE UPPER(symbol) = %(s)s
+                ORDER BY is_primary_listing DESC, instrument_id ASC
+                LIMIT 1
+                """,
+                {"s": symbol_clean},
             )
+            inst_row = cur.fetchone()
+        if inst_row is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+        instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
 
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM filing_events WHERE provider = 'sec' "
+                "AND provider_filing_id = %s AND instrument_id = %s "
+                "AND filing_type IN ('8-K', '8-K/A') LIMIT 1",
+                (accession_clean, instrument_id),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"8-K filing {accession_clean} not found for {symbol}",
+                )
+
+    # Lazy-fill holds NO pooled conn across the SEC fetch — the service
+    # borrows its own short-lived conns from the pool (#1472 PR2 V3).
     try:
         with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-            fetch_eight_k_body_now(conn, provider, accession_number=accession_clean)
+            fetch_eight_k_body_now(request.app.state.db_pool, provider, accession_number=accession_clean)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — transient fetch / network → 503
@@ -1378,7 +1417,8 @@ def get_instrument_8k_filing_body(
             detail="8-K body temporarily unavailable; try again",
         ) from exc
 
-    filing = get_8k_filing(conn, accession_number=accession_clean)
+    with _short_lived_conn(request) as conn:
+        filing = get_8k_filing(conn, accession_number=accession_clean)
     if filing is None:
         raise HTTPException(status_code=404, detail=f"8-K filing {accession_clean} not found")
     return EightKFilingModel(
@@ -1502,11 +1542,11 @@ class BusinessSectionsResponse(BaseModel):
 def get_instrument_business_sections(
     symbol: str,
     response: Response,
+    request: Request,
     accession: str | None = Query(
         None,
         description="Specific 10-K accession; omit for the latest filing.",
     ),
-    conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> BusinessSectionsResponse:
     """Return the 10-K Item 1 subsection breakdown for an instrument (#449).
 
@@ -1520,6 +1560,12 @@ def get_instrument_business_sections(
     Pass ``?accession=<accession_number>`` to retrieve sections for a
     specific historical filing. Returns 404 when no sections exist for
     the requested accession (#559).
+
+    Connection discipline (#1472 PR2 V4): drives ``get_conn`` by hand via
+    :func:`_short_lived_conn` so the pooled conn is released BEFORE the SEC
+    fetch — the lazy-fill service borrows its own short-lived pool conns
+    and holds none across the external I/O. The route reads on two scoped
+    borrows (decide → fill → re-read/classify) bracketing the fill.
     """
     from app.services.business_summary import (
         fetch_business_summary_body_now,
@@ -1531,94 +1577,100 @@ def get_instrument_business_sections(
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT instrument_id, symbol FROM instruments
-            WHERE UPPER(symbol) = %(s)s
-            ORDER BY is_primary_listing DESC, instrument_id ASC
-            LIMIT 1
-            """,
-            {"s": symbol_clean},
-        )
-        inst_row = cur.fetchone()
+    # Borrow #1 (released BEFORE any SEC fetch): resolve the instrument,
+    # read current sections, decide whether a lazy fill is needed.
+    with _short_lived_conn(request) as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, symbol FROM instruments
+                WHERE UPPER(symbol) = %(s)s
+                ORDER BY is_primary_listing DESC, instrument_id ASC
+                LIMIT 1
+                """,
+                {"s": symbol_clean},
+            )
+            inst_row = cur.fetchone()
+        if inst_row is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+        instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+        symbol_out = str(inst_row["symbol"])  # type: ignore[arg-type]
+        sections = get_business_sections(conn, instrument_id=instrument_id, accession=accession)
+        if accession is not None and not sections:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no 10-K sections for {symbol} accession {accession}",
+            )
+        # #1343 — lazy fill on first view when the latest-filing path is
+        # empty because the 10-K Item 1 is a deferred bootstrap placeholder.
+        need_fill = False
+        if not sections and accession is None:
+            ps_pre = get_parse_status(conn, instrument_id=instrument_id)
+            need_fill = ps_pre is not None and ps_pre.state == "deferred"
 
-    if inst_row is None:
-        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    # Lazy fill (~0.5-1s first load; instant + cached after) holds NO pooled
+    # conn across the SEC fetch — the service borrows its own short-lived
+    # conns from the pool (#1472 PR2 V4). A transient fetch error → 503 (the
+    # row stays deferred, so a retry / next view re-attempts); a
+    # deterministic miss does NOT raise (exits deferred via the backoff
+    # path) and re-reads as parse_failed / no_item_1 below — a 200 empty.
+    if need_fill:
+        from app.providers.implementations.sec_edgar import SecFilingsProvider
 
-    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
-    sections = get_business_sections(conn, instrument_id=instrument_id, accession=accession)
-    if accession is not None and not sections:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no 10-K sections for {symbol} accession {accession}",
-        )
+        # Side-effecting fill — don't let an intermediary cache the
+        # transient deferred/empty state (Codex ckpt2).
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                fetch_business_summary_body_now(request.app.state.db_pool, provider, instrument_id=instrument_id)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 — transient fetch / network → 503
+            raise HTTPException(
+                status_code=503,
+                detail="10-K Item 1 temporarily unavailable; try again",
+            ) from exc
 
-    # #1343 — lazy fill on first view: if the latest-filing path is empty
-    # because the 10-K Item 1 is a deferred bootstrap placeholder, fetch +
-    # cache it now (~0.5-1s first load; instant + cached after), then
-    # re-read. A transient fetch error → 503 (the row stays deferred, so a
-    # retry / next view re-attempts); a deterministic miss does NOT raise
-    # (exits deferred via the backoff path) and re-reads as parse_failed /
-    # no_item_1 below — a normal 200 empty-state.
-    if not sections and accession is None:
-        ps_pre = get_parse_status(conn, instrument_id=instrument_id)
-        if ps_pre is not None and ps_pre.state == "deferred":
-            from app.providers.implementations.sec_edgar import SecFilingsProvider
-
-            # Side-effecting fill — don't let an intermediary cache the
-            # transient deferred/empty state (Codex ckpt2).
-            response.headers["Cache-Control"] = "no-store"
-            try:
-                with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-                    fetch_business_summary_body_now(conn, provider, instrument_id=instrument_id)
-            except HTTPException:
-                raise
-            except Exception as exc:  # noqa: BLE001 — transient fetch / network → 503
-                raise HTTPException(
-                    status_code=503,
-                    detail="10-K Item 1 temporarily unavailable; try again",
-                ) from exc
+    # Borrow #2 (post-fill): re-read sections if we filled, classify the
+    # empty case (#648), and plumb the CIK (#563).
+    parse_status_model: BusinessSectionsParseStatus | None = None
+    with _short_lived_conn(request) as conn:
+        if need_fill:
             sections = get_business_sections(conn, instrument_id=instrument_id, accession=accession)
+        # #648 — classify why the latest-filing path is empty so the UI can
+        # render distinct empty states (only on the accession=None path —
+        # an explicit-accession miss already 404'd above).
+        if not sections and accession is None:
+            ps = get_parse_status(conn, instrument_id=instrument_id)
+            if ps is not None:
+                parse_status_model = BusinessSectionsParseStatus(
+                    # The Literal narrows it for the response model — the
+                    # service-layer dataclass uses str so the service
+                    # tests don't pull in fastapi.
+                    state=ps.state,  # type: ignore[arg-type]
+                    failure_reason=ps.failure_reason,
+                    next_retry_at=ps.next_retry_at,  # type: ignore[arg-type]
+                    last_attempted_at=ps.last_attempted_at,  # type: ignore[arg-type]
+                )
+
+        # #563: plumb CIK so the frontend can build direct iXBRL viewer
+        # URLs. Single SELECT against the existing primary SEC link;
+        # returns None for instruments without one (non-US tickers).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT identifier_value FROM external_identifiers "
+                "WHERE instrument_id = %(iid)s AND provider = 'sec' "
+                "AND identifier_type = 'cik' AND is_primary = TRUE "
+                "LIMIT 1",
+                {"iid": instrument_id},
+            )
+            cik_row = cur.fetchone()
+        cik = str(cik_row["identifier_value"]) if cik_row is not None else None  # type: ignore[index]
 
     source_accession = sections[0].source_accession if sections else None
 
-    # #648 — when the latest-filing path returns empty, classify why
-    # so the operator UI can render distinct empty states. We only
-    # attempt classification on the latest-filing path (accession=None)
-    # — when an explicit accession was requested and missed, the 404
-    # above is the right answer; parse status is for the "is the
-    # narrative panel waiting on parsing or did it fail?" use case.
-    parse_status_model: BusinessSectionsParseStatus | None = None
-    if not sections and accession is None:
-        ps = get_parse_status(conn, instrument_id=instrument_id)
-        if ps is not None:
-            parse_status_model = BusinessSectionsParseStatus(
-                # The Literal narrows it for the response model — the
-                # service-layer dataclass uses str so the service
-                # tests don't pull in fastapi.
-                state=ps.state,  # type: ignore[arg-type]
-                failure_reason=ps.failure_reason,
-                next_retry_at=ps.next_retry_at,  # type: ignore[arg-type]
-                last_attempted_at=ps.last_attempted_at,  # type: ignore[arg-type]
-            )
-
-    # #563: plumb CIK so the frontend can build direct iXBRL viewer
-    # URLs. Single SELECT against the existing primary SEC link;
-    # returns None for instruments without one (non-US tickers).
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            "SELECT identifier_value FROM external_identifiers "
-            "WHERE instrument_id = %(iid)s AND provider = 'sec' "
-            "AND identifier_type = 'cik' AND is_primary = TRUE "
-            "LIMIT 1",
-            {"iid": instrument_id},
-        )
-        cik_row = cur.fetchone()
-    cik = str(cik_row["identifier_value"]) if cik_row is not None else None  # type: ignore[index]
-
     return BusinessSectionsResponse(
-        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        symbol=symbol_out,
         source_accession=source_accession,
         cik=cik,
         sections=[

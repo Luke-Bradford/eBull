@@ -41,6 +41,7 @@ from typing import Any, Literal, Protocol
 
 import psycopg
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from app.services.bootstrap_state import (
     resolve_progress_context,
@@ -1005,7 +1006,7 @@ def seed_business_summary_metadata(
 
 
 def fetch_business_summary_body_now(
-    conn: psycopg.Connection[Any],
+    pool: ConnectionPool[psycopg.Connection[Any]],
     fetcher: _DocFetcher,
     *,
     instrument_id: int,
@@ -1021,53 +1022,41 @@ def fetch_business_summary_body_now(
     transition) because the manifest worker's guard does not cover this
     API write path.
 
-    A blocking per-instrument advisory lock collapses the concurrent
-    double-load herd (React StrictMode / two simultaneous viewers): the
-    second caller waits, re-reads under the lock, sees the body filled,
-    and returns ``'already'`` (the handler then reads the now-present
-    sections). The lock is advisory (``hashtext`` namespace, matching
-    ``app/jobs/locks.py``) so it never blocks the manifest worker or a
-    force-drain.
+    Connection discipline (#1472 PR2 V4): borrows short-lived conns from
+    ``pool`` and holds **no** conn across the SEC fetch. The fetch runs
+    unlocked (phase 2); a transaction-scoped ``pg_advisory_xact_lock``
+    (phase 3) collapses the concurrent double-WRITE (React StrictMode /
+    two simultaneous viewers): the second caller re-checks ``body_deferred``
+    under the lock and returns ``'already'``. The lock releases at commit,
+    so it can never leak into a pooled conn. A stale fetch (a newer 10-K
+    landed meanwhile) cannot clobber the fresher row — ``upsert_business_
+    summary``'s ``(filed_at, source_accession)`` monotonicity gate (#1151)
+    suppresses it. A duplicate concurrent fetch is wasteful but harmless.
 
     Outcomes: ``filled`` (this call fetched + cached), ``already``
     (a concurrent call filled it), ``not_deferred`` (no deferred row),
     ``no_source`` (no fetchable URL), ``failed`` (deterministic 404 / no
     Item 1 — backoff recorded; API maps to a 2xx empty-state). A
-    transient fetch error RAISES (API maps to 503). Caller owns the
-    outer request; this function commits its own units.
+    transient fetch error RAISES (API maps to 503). Owns the conns it
+    borrows.
     """
-    from app.services.raw_filings import store_raw
-    from app.services.sec_manifest import transition_status
-
     lock_key = f"sec_lazy_body_10k:{instrument_id}"
 
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT source_accession, filed_at, body_deferred "
-            "FROM instrument_business_summary WHERE instrument_id = %s",
-            (instrument_id,),
-        )
-        row = cur.fetchone()
-    conn.commit()
-    if row is None or not bool(row[2]):
-        return "not_deferred"
-    accession = str(row[0])
-    filed_at = row[1]
-
-    with conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_lock(hashtext(%s)::int)", (lock_key,))
-    conn.commit()
-    try:
-        # Re-read under the lock — a concurrent holder may have just filled it.
+    # Phase 1 (unlocked, read-only) — is the row still deferred, and is
+    # there a fetchable URL for its source accession? Released before the
+    # SEC fetch.
+    with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT body_deferred FROM instrument_business_summary WHERE instrument_id = %s",
+                "SELECT source_accession, filed_at, body_deferred "
+                "FROM instrument_business_summary WHERE instrument_id = %s",
                 (instrument_id,),
             )
-            r2 = cur.fetchone()
-        conn.commit()
-        if r2 is None or not bool(r2[0]):
-            return "already"
+            row = cur.fetchone()
+        if row is None or not bool(row[2]):
+            return "not_deferred"
+        accession = str(row[0])
+        filed_at = row[1]
 
         with conn.cursor() as cur:
             cur.execute(
@@ -1077,26 +1066,20 @@ def fetch_business_summary_body_now(
                 (accession,),
             )
             urow = cur.fetchone()
-        conn.commit()
-        if urow is None:
-            # No fetchable URL for this accession — record a parse attempt
-            # (which clears body_deferred) so the row EXITS the deferred
-            # state instead of being re-attempted on every panel view
-            # (bot review BLOCKING: no_source infinite-defer).
-            record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession, reason="fetch_other")
-            conn.commit()
-            return "no_source"
-        url = str(urow[0])
+    url = str(urow[0]) if urow is not None else None
 
+    # Phase 2 (NO conn held) — fetch the primary document. A transient
+    # error RAISES (API → 503): leave the row DEFERRED so the next view
+    # retries. Do NOT record_parse_attempt here — that clears body_deferred
+    # (reserved for DETERMINISTIC content failures), which would wrongly
+    # exit the deferred state on a transient blip (Codex ckpt2 BLOCKING).
+    # No URL → skip the fetch; handled as a no_source attempt under the
+    # lock below.
+    html: str | None = None
+    if url is not None:
         try:
             html = fetcher.fetch_document_text(url)
         except Exception:
-            # Transient (timeout / connection / 5xx): leave the row
-            # DEFERRED so the next view retries, and surface 503. Do NOT
-            # record_parse_attempt here — it clears body_deferred (that
-            # path is for DETERMINISTIC content failures), which would
-            # wrongly exit the deferred state on a transient blip and stop
-            # the panel ever retrying the lazy fetch (Codex ckpt2 BLOCKING).
             logger.warning(
                 "fetch_business_summary_body_now: transient fetch error accession=%s",
                 accession,
@@ -1104,48 +1087,107 @@ def fetch_business_summary_body_now(
             )
             raise
 
-        if html is None:
+    # Phase 3 (locked write) — re-borrow, take a transaction-scoped
+    # advisory lock (first statement opens the implicit tx; lock released
+    # at commit), re-check under the lock, then write.
+    outcome: Literal["filled", "already", "no_source", "failed"]
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::int)", (lock_key,))
+            cur.execute(
+                "SELECT source_accession, body_deferred FROM instrument_business_summary WHERE instrument_id = %s",
+                (instrument_id,),
+            )
+            r2 = cur.fetchone()
+        # Drift guard (Codex ckpt2): the row must still be deferred AND still
+        # point at the accession we fetched. If a concurrent reseed advanced
+        # it to a NEWER 10-K (different accession, still deferred) during the
+        # fetch window, both our body write AND a failure-path
+        # record_parse_attempt would target the stale accession — and
+        # record_parse_attempt clears body_deferred unconditionally (the
+        # #1151 monotonicity gate only guards the success/body path, not the
+        # failure writes), wrongly exiting the NEW accession's deferred state.
+        # Treat drift as 'already' and leave the row for its own lazy fill.
+        if r2 is None or not bool(r2[1]) or str(r2[0]) != accession:
+            # A concurrent caller filled it (or advanced it) while we fetched.
+            outcome = "already"
+        elif url is None:
+            # No fetchable URL for this accession — record a parse attempt
+            # (which clears body_deferred) so the row EXITS the deferred
+            # state instead of being re-attempted on every panel view
+            # (bot review BLOCKING: no_source infinite-defer).
             record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession, reason="fetch_other")
-            conn.commit()
-            return "failed"
-
-        try:
-            body = extract_business_section(html)
-        except Exception:
-            logger.warning("fetch_business_summary_body_now: parse exception accession=%s", accession, exc_info=True)
-            record_parse_attempt(
-                conn, instrument_id=instrument_id, source_accession=accession, reason="parse_exception"
+            outcome = "no_source"
+        elif html is None:
+            record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession, reason="fetch_other")
+            outcome = "failed"
+        else:
+            outcome = _write_business_summary_body(
+                conn,
+                instrument_id=instrument_id,
+                accession=accession,
+                filed_at=filed_at,
+                url=url,
+                html=html,
             )
-            conn.commit()
-            return "failed"
-        if body is None:
-            record_parse_attempt(
-                conn, instrument_id=instrument_id, source_accession=accession, reason="no_item_1_marker"
-            )
-            conn.commit()
-            return "failed"
+    return outcome
 
-        outcome = upsert_business_summary(
-            conn, instrument_id=instrument_id, body=body, source_accession=accession, filed_at=filed_at
-        )
-        if outcome != "suppressed":
-            sections = extract_business_sections(html)
-            if sections:
-                try:
-                    upsert_business_sections(
-                        conn, instrument_id=instrument_id, source_accession=accession, sections=sections
-                    )
-                except Exception:
-                    logger.warning(
-                        "fetch_business_summary_body_now: section upsert failed accession=%s "
-                        "(blob stored; degrades to blob-only)",
-                        accession,
-                        exc_info=True,
-                    )
-        # #938 — store raw THEN flip the manifest deferred→parsed. Best-
-        # effort: the typed body is already cached (the user sees it), so a
-        # missing manifest row / transition error must not fail the fill.
-        try:
+
+def _write_business_summary_body(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession: str,
+    filed_at: datetime | None,
+    url: str,
+    html: str,
+) -> Literal["filled", "failed"]:
+    """Parse + persist a fetched 10-K Item 1 body inside the caller's
+    locked transaction (phase 3 of :func:`fetch_business_summary_body_now`).
+
+    Deterministic parse failures record a backoff attempt (clears
+    ``body_deferred``) and return ``'failed'``. On success the body upsert
+    is monotonicity-gated (#1151) and the sections + raw + manifest writes
+    follow; the raw/manifest split is best-effort in a savepoint so it
+    can't abort the body upsert."""
+    # Inline imports: circular-import avoidance, matching the parent
+    # (raw_filings / sec_manifest pull service helpers that re-enter here).
+    from app.services.raw_filings import store_raw
+    from app.services.sec_manifest import transition_status
+
+    try:
+        body = extract_business_section(html)
+    except Exception:
+        logger.warning("fetch_business_summary_body_now: parse exception accession=%s", accession, exc_info=True)
+        record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession, reason="parse_exception")
+        return "failed"
+    if body is None:
+        record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession, reason="no_item_1_marker")
+        return "failed"
+
+    upsert_outcome = upsert_business_summary(
+        conn, instrument_id=instrument_id, body=body, source_accession=accession, filed_at=filed_at
+    )
+    if upsert_outcome != "suppressed":
+        sections = extract_business_sections(html)
+        if sections:
+            try:
+                upsert_business_sections(
+                    conn, instrument_id=instrument_id, source_accession=accession, sections=sections
+                )
+            except Exception:
+                logger.warning(
+                    "fetch_business_summary_body_now: section upsert failed accession=%s "
+                    "(blob stored; degrades to blob-only)",
+                    accession,
+                    exc_info=True,
+                )
+    # #938 — store raw THEN flip the manifest deferred→parsed. Best-effort
+    # in a SAVEPOINT so a raw/manifest failure rolls back only that
+    # savepoint, never the body upsert (the typed body is already cached;
+    # the manifest/typed split is non-fatal).
+    try:
+        with conn.transaction():
             store_raw(
                 conn,
                 accession_number=accession,
@@ -1154,19 +1196,14 @@ def fetch_business_summary_body_now(
                 source_url=url,
             )
             transition_status(conn, accession, ingest_status="parsed", raw_status="stored")
-        except Exception:
-            logger.warning(
-                "fetch_business_summary_body_now: manifest deferred→parsed transition skipped "
-                "accession=%s (body cached; manifest/typed split is non-fatal)",
-                accession,
-                exc_info=True,
-            )
-        conn.commit()
-        return "filled"
-    finally:
-        with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::int)", (lock_key,))
-        conn.commit()
+    except Exception:
+        logger.warning(
+            "fetch_business_summary_body_now: manifest deferred→parsed transition skipped "
+            "accession=%s (body cached; manifest/typed split is non-fatal)",
+            accession,
+            exc_info=True,
+        )
+    return "filled"
 
 
 def upsert_business_sections(
