@@ -110,15 +110,32 @@ def test_handler_writes_via_registered_background_pool(settings_use_test_db: str
 
 def test_handler_swallows_db_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A listener that raised would break APScheduler event dispatch — the
-    handler must swallow every error."""
+    handler must swallow every error.
+
+    The seam is stubbed to yield a fake conn (no DB) so the test
+    DETERMINISTICALLY reaches the patched ``record_job_skip`` and exercises the
+    write-error path regardless of DB availability — otherwise a raw-connect
+    failure would be swallowed first and silently skip the path under test
+    (bot WARNING, PR #1501)."""
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
     rt = _runtime()
+    reached: list[int] = []
+
+    @contextmanager
+    def _fake_seam() -> Iterator[MagicMock]:
+        yield MagicMock(name="conn")
 
     def _boom(*_a: object, **_k: object) -> int:
+        reached.append(1)
         raise RuntimeError("synthetic DB failure")
 
+    monkeypatch.setattr(runtime_mod, "background_write_connection", _fake_seam)
     monkeypatch.setattr(runtime_mod, "record_job_skip", _boom)
     # Must NOT raise even though the write blows up.
     rt._on_job_max_instances(_max_instances_event("recurring:nightly_universe_sync"))
+    assert reached == [1]  # the record_job_skip error path was actually exercised
 
 
 def _job_runs_count(url: str) -> int:
