@@ -80,7 +80,9 @@ def test_boot_sweep_thread_target_swallows_unexpected_escape() -> None:
     the daemon thread (which would only surface as an unraisable-thread
     traceback). ``run_boot_freshness_sweep`` already swallows its own
     ``SyncAlreadyRunning`` / arbitrary exceptions; this guards the residual
-    BaseException-shaped escape path."""
+    unexpected-``Exception`` escape path (the wrapper's ``except Exception``;
+    ``BaseException`` subclasses like ``KeyboardInterrupt`` are deliberately
+    not caught)."""
     from app.jobs.__main__ import _run_boot_freshness_sweep_thread
 
     with (
