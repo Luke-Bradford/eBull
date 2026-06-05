@@ -767,3 +767,82 @@ def test_params_metadata_default_empty_for_jobs_without_declarations(
     row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
     assert row is not None
     assert row.params_metadata == ()
+
+
+# ---------------------------------------------------------------------------
+# #1474 Part 2 — orchestrator last-run resolved from sync_runs
+# ---------------------------------------------------------------------------
+#
+# DB-free unit tests (mocked cursor) so they pin the sync_runs status
+# normalization + dispatch even when dev PG is down — CI runs no pytest,
+# so this is the always-on regression gate for the new mapping.
+
+
+def _mock_conn_returning_sync_row(row: dict | None):
+    from unittest.mock import MagicMock
+
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = row
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    return conn
+
+
+@pytest.mark.parametrize(
+    ("sync_status", "expected_job_status"),
+    [
+        ("complete", "success"),
+        ("failed", "failure"),
+        ("partial", "failure"),  # left a layer behind → actionable, not green
+        ("cancelled", "cancelled"),
+    ],
+)
+def test_sync_run_status_normalised_to_job_vocabulary(sync_status: str, expected_job_status: str) -> None:
+    from datetime import UTC, datetime
+
+    started = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
+    finished = datetime(2026, 6, 5, 12, 0, 5, tzinfo=UTC)
+    conn = _mock_conn_returning_sync_row(
+        {"sync_run_id": 42, "started_at": started, "finished_at": finished, "status": sync_status}
+    )
+    out = scheduled_adapter._read_latest_terminal_sync_run(conn, scope="high_frequency")
+    assert out is not None
+    assert out["run_id"] == 42  # sync_run_id → run_id
+    assert out["status"] == expected_job_status
+    assert out["started_at"] == started
+    # sync_runs has no per-error / row-count columns → None defaults that
+    # _build_last_run coerces to {} / 0.
+    assert out["row_count"] is None
+    assert out["rows_skipped_by_reason"] is None
+    assert out["error_classes"] is None
+    # cancelled carries cancelled_at; terminal-success does not.
+    assert out["cancelled_at"] == (finished if expected_job_status == "cancelled" else None)
+
+
+def test_sync_run_none_when_no_terminal_row() -> None:
+    conn = _mock_conn_returning_sync_row(None)
+    assert scheduled_adapter._read_latest_terminal_sync_run(conn, scope="high_frequency") is None
+
+
+def test_resolve_terminal_row_dispatches_orchestrator_to_sync_runs() -> None:
+    from unittest.mock import patch
+
+    fake_conn = object()
+    with (
+        patch.object(
+            scheduled_adapter, "_read_latest_terminal_sync_run", return_value={"sentinel": "sync"}
+        ) as sync_reader,
+        patch.object(scheduled_adapter, "_read_latest_terminal_run", return_value={"sentinel": "job"}) as job_reader,
+    ):
+        # orchestrator-driven → sync_runs (scope='high_frequency')
+        out = scheduled_adapter._resolve_terminal_row(fake_conn, job_name="orchestrator_high_frequency_sync")  # type: ignore[arg-type]
+        assert out == {"sentinel": "sync"}
+        sync_reader.assert_called_once_with(fake_conn, scope="high_frequency")
+        job_reader.assert_not_called()
+
+        # everything else → job_runs
+        out2 = scheduled_adapter._resolve_terminal_row(fake_conn, job_name="monitor_positions")  # type: ignore[arg-type]
+        assert out2 == {"sentinel": "job"}
+        job_reader.assert_called_once_with(fake_conn, job_name="monitor_positions")

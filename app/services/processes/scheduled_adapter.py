@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 import psycopg.rows
@@ -283,6 +283,107 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
             {"name": job_name},
         )
         return cur.fetchone()
+
+
+# #1474 Part 2 — orchestrator-driven jobs record completions in
+# ``sync_runs`` (the #260/#1155 orchestrator migration), NOT
+# ``job_runs``. Their ``job_runs`` "last run" is frozen at whenever they
+# last wrote one → permanent false ``schedule_missed`` even though the
+# work fires every cadence. For these jobs the adapter resolves the
+# terminal row from ``sync_runs`` (keyed by scope) instead.
+#
+# Currently ONLY ``orchestrator_high_frequency_sync`` is genuinely
+# telemetry-frozen (it writes ``sync_runs`` scope='high_frequency'
+# ``complete`` every 5m). The Layer-1/2/3 standalone crons write
+# ``job_runs`` again after a clean restart, so they are deliberately NOT
+# re-homed here (per the #1474 2026-06-04 triage). Add a job_name here
+# only when it is confirmed to record solely in ``sync_runs``.
+_ORCHESTRATOR_SYNC_SCOPE: Final[dict[str, str]] = {
+    "orchestrator_high_frequency_sync": "high_frequency",
+}
+
+# ``sync_runs.status`` → the ``job_runs`` terminal vocabulary that
+# ``_RUN_STATUS_TO_SUMMARY`` + ``_status_for`` consume. ``partial`` (a
+# sync that completed but left a layer behind) surfaces as ``failure`` —
+# actionable, not a green ``success`` (Codex ckpt-1).
+_SYNC_STATUS_TO_JOB_TERMINAL: Final[dict[str, str]] = {
+    "complete": "success",
+    "failed": "failure",
+    "partial": "failure",
+    "cancelled": "cancelled",
+}
+
+
+def _read_latest_terminal_sync_run(conn: psycopg.Connection[Any], *, scope: str) -> dict[str, Any] | None:
+    """Latest terminal ``sync_runs`` row for ``scope``, shaped like a
+    ``job_runs`` terminal row so the shared ``_build_row`` /
+    ``_build_last_run`` path consumes it unchanged (#1474 Part 2).
+
+    ``sync_runs`` has no per-error-class / row-count columns, so those
+    map to ``None`` (``_build_last_run`` coerces to ``{}`` / ``0``). The
+    status is normalised into the job_runs vocabulary up-front.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT sync_run_id, started_at, finished_at, status
+              FROM sync_runs
+             WHERE scope = %(scope)s
+               AND status IN ('complete', 'partial', 'failed', 'cancelled')
+             ORDER BY started_at DESC
+             LIMIT 1
+            """,
+            {"scope": scope},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    job_status = _SYNC_STATUS_TO_JOB_TERMINAL.get(row["status"], "skipped")
+    return {
+        "run_id": row["sync_run_id"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "status": job_status,
+        "row_count": None,
+        "error_msg": None,
+        "error_classes": None,
+        "rows_skipped_by_reason": None,
+        "rows_errored": None,
+        "cancelled_at": row["finished_at"] if job_status == "cancelled" else None,
+    }
+
+
+def _resolve_terminal_row(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
+    """Terminal row for last-run + staleness: from ``sync_runs`` for
+    orchestrator-driven jobs (#1474 Part 2), else ``job_runs``.
+
+    Scope (intentional — #1474 targets the Processes control-hub
+    ``schedule_missed`` chip, which was permanently false for
+    ``orchestrator_high_frequency_sync``). This fixes the process-row
+    **terminal** read only. Deliberately NOT changed, each still reading
+    ``job_runs`` for these jobs:
+
+      * **Active/running state** (``_read_running_run``): an in-flight
+        high-frequency sync writes a ``sync_runs`` 'running' row, not a
+        ``job_runs`` one, so during the (seconds-long, every-5-min)
+        active window the row shows the last terminal run instead of
+        "running"/progress. Strictly better than the *permanent*
+        ``schedule_missed`` it replaces — and ``schedule_missed`` itself
+        is now correct, because the recent terminal ``sync_runs`` row
+        keeps ``expected_fire_at`` current (only a genuinely-stalled HF
+        sync, whose latest terminal row ages out, will re-raise it,
+        which is the right behaviour).
+      * **History tab** (``list_runs`` / ``list_run_errors``).
+      * **Legacy** ``/system/jobs`` / ``/system/status``
+        (``ops_monitor.check_job_health``).
+
+    Widen those only if the operator needs full sync_runs parity for
+    these jobs; tracked as a #1474 follow-up if so.
+    """
+    scope = _ORCHESTRATOR_SYNC_SCOPE.get(job_name)
+    if scope is not None:
+        return _read_latest_terminal_sync_run(conn, scope=scope)
+    return _read_latest_terminal_run(conn, job_name=job_name)
 
 
 def _has_inflight_manual_request(conn: psycopg.Connection[Any], *, job_name: str) -> bool:
@@ -720,7 +821,7 @@ def list_rows(conn: psycopg.Connection[Any]) -> list[ProcessRow]:
     rows: list[ProcessRow] = []
     for job in SCHEDULED_JOBS:
         active_row = _read_running_run(conn, job_name=job.name)
-        terminal_row = _read_latest_terminal_run(conn, job_name=job.name)
+        terminal_row = _resolve_terminal_row(conn, job_name=job.name)
         has_inflight_request = _has_inflight_manual_request(conn, job_name=job.name)
         fence_held = _has_pending_full_wash_fence(conn, process_id=job.name)
         rows.append(
@@ -746,7 +847,7 @@ def get_row(conn: psycopg.Connection[Any], *, process_id: str) -> ProcessRow | N
         job,
         conn=conn,
         active_row=_read_running_run(conn, job_name=job.name),
-        terminal_row=_read_latest_terminal_run(conn, job_name=job.name),
+        terminal_row=_resolve_terminal_row(conn, job_name=job.name),
         has_inflight_request=_has_inflight_manual_request(conn, job_name=job.name),
         fence_held=_has_pending_full_wash_fence(conn, process_id=job.name),
         kill_switch_active=_kill_switch_active(conn),
