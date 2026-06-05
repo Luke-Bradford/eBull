@@ -63,6 +63,7 @@ Lane = Literal[
     "init",
     "etoro",
     "sec_rate",
+    "sec_manifest",
     "sec_bulk_download",
     "db",
     "db_filings",
@@ -77,12 +78,28 @@ Lane = Literal[
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
 jobs serialise under one ``JobLock``; cross-source jobs run in parallel.
 
+NOTE (#1478): a lane is a **job-overlap** bucket, NOT a request-rate limiter.
+The SEC 10 req/s per-IP budget is enforced separately at the HTTP layer
+(``app/providers/implementations/sec_edgar.py`` ``_PROCESS_RATE_LIMIT_CLOCK`` +
+``_PROCESS_RATE_LIMIT_LOCK`` — a process-wide atomic inter-request floor, safe
+under concurrent fetchers). Two SEC jobs on DIFFERENT lanes still cannot exceed
+that floor. Do NOT collapse SEC lanes back together believing the lane bounds
+the rate — it does not.
+
 * ``init`` — universe-sync only. Pre-everything fence; one job total.
 * ``etoro`` — eToro REST budget. ``execute_approved_orders`` +
   ``daily_candle_refresh`` + ``etoro_lookups_refresh`` +
   ``exchanges_metadata_refresh`` serialise.
-* ``sec_rate`` — SEC 10 req/s shared per-IP bucket. Every per-CIK +
-  per-accession SEC fetch competes here.
+* ``sec_rate`` — the SEC discovery/producer jobs (per-CIK + per-accession
+  fetchers). They serialise under one ``JobLock`` to bound job overlap, NOT
+  request rate (the HTTP floor above bounds rate). #1478 extracted the heavy
+  ``sec_manifest_worker`` drainer out of this lane so it stops starving the
+  lighter producers.
+* ``sec_manifest`` — ``sec_manifest_worker`` only (#1478). The manifest drainer
+  spends most of its run on DB tombstoning, not SEC calls; keeping it in
+  ``sec_rate`` made it hold the producers' lane for 20-37s and starve them
+  (7/7 vs 0/7). Its own lane lets it run concurrently with the producers while
+  its single-instance self-lock + the shared HTTP floor still hold.
 * ``sec_bulk_download`` — fixed-URL SEC archive downloads. Disjoint
   from ``sec_rate`` — large fixed downloads, no per-issuer iteration.
 * ``db`` — DB-bound stages NOT owned by a finer family lane — Phase E

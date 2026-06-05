@@ -39,6 +39,11 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         "init",
         "etoro",
         "sec_rate",
+        # #1478 — sec_manifest_worker extracted from sec_rate into its own
+        # lane so the heavy drainer stops starving the SEC producers. A lane
+        # is a job-overlap bucket, not a rate gate (the HTTP throttle bounds
+        # the 10 req/s budget); see app/jobs/sources.py::Lane.
+        "sec_manifest",
         "sec_bulk_download",
         "db",
         # #1141 — Phase C bulk-ingest family sources. Bootstrap-only
@@ -670,3 +675,31 @@ class TestParamMetadataMisconfiguration:
         )
         with pytest.raises(ParamValidationError, match="requires enum_values"):
             validate_job_params("anyjob", {"broken": ["x"]}, allow_internal_keys=False, metadata=meta)
+
+
+class TestSecManifestLaneExtraction:
+    """#1478 — ``sec_manifest_worker`` lives in its OWN lane, distinct from the
+    SEC producers it used to starve. These are DB-free (``source_for`` reads the
+    in-memory registry), so they run as the always-on regression gate even when
+    dev PG is down / under ``--no-verify`` — the cross-thread JobLock tests in
+    ``test_joblock_per_source.py`` need a live DB and skip when it's absent.
+    """
+
+    def test_sec_manifest_worker_has_own_lane(self) -> None:
+        assert source_for("sec_manifest_worker") == "sec_manifest"
+
+    def test_sec_manifest_worker_lane_differs_from_every_starved_producer(self) -> None:
+        """The whole point: the worker no longer shares a lane with the
+        producers it starved (7/7 vs 0/7). If a future change re-collapses
+        them, this re-breaks."""
+        worker_lane = source_for("sec_manifest_worker")
+        for producer in (
+            "sec_atom_fast_lane",
+            "sec_per_cik_poll",
+            "sec_filing_documents_ingest",
+            "sec_insider_transactions_backfill",
+        ):
+            assert source_for(producer) != worker_lane, (
+                f"{producer} shares lane {worker_lane!r} with sec_manifest_worker — "
+                "the #1478 starvation extraction has regressed"
+            )

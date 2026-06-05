@@ -1145,7 +1145,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_SEC_MANIFEST_WORKER,
         display_name="SEC manifest worker tick",
-        source="sec_rate",
+        # #1478: own lane (not sec_rate). The drainer runs 20-37s mostly on DB
+        # tombstoning; holding the producers' sec_rate lane that long starved
+        # them (7/7 vs 0/7). Its own lane runs concurrently with the producers
+        # — the per-IP 10 req/s budget is still enforced by the HTTP-layer
+        # throttle (sec_edgar.py _PROCESS_RATE_LIMIT_*), not by this lane.
+        source="sec_manifest",
         description=(
             "Drain pending + retryable sec_filing_manifest rows. "
             "Per-tick dispatch fetches the body, persists raw, parses, "
