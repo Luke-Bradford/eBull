@@ -26,9 +26,13 @@ got bitten by a different ordering bug):
     8.  scheduler.start() — registers cron triggers, kicks
         BackgroundScheduler.
     9.  JobRuntime._catch_up() (already wired into start()).
-    10. Boot freshness sweep (best-effort `scope='behind'`).
-    11. Listener thread started.
-    12. Heartbeat threads started (one per supervised subsystem).
+    10. Heartbeat threads started (one per supervised subsystem) —
+        #1479: BEFORE the best-effort boot freshness sweep, so a
+        slow/hung sweep can never gate process liveness.
+    11. Boot freshness sweep (best-effort `scope='behind'`) —
+        #1479: dispatched FIRE-AND-FORGET onto a dedicated daemon
+        thread, never run inline on the boot thread.
+    12. Listener thread started (via the supervisor).
     13. Main loop sleeps on stop_event with periodic supervision.
 
 Shutdown reverses, with the singleton fence connection closing LAST
@@ -806,6 +810,35 @@ def _boot_id() -> str:
     return f"jobs-{os.getpid()}-{datetime.now(UTC).isoformat()}"
 
 
+def _run_boot_freshness_sweep_thread() -> None:
+    """Thread target running the best-effort boot freshness sweep (#1479).
+
+    The sweep runs on a dedicated ``daemon=True`` thread (NOT inline on
+    the boot thread, and NOT on a ``ThreadPoolExecutor`` whose
+    ``concurrent.futures`` atexit join would block interpreter exit on a
+    hung sweep). A daemon thread:
+
+      * never blocks the boot thread (fire-and-forget), so a slow/hung
+        outbound call inside the sweep can no longer wedge startup; and
+      * never blocks shutdown/exit — if the sweep is still mid-flight
+        when the process is asked to stop, the daemon thread is
+        abandoned. A sweep abandoned mid-write leaves an orphaned
+        ``sync_runs`` 'running' row, which the next boot's
+        ``reap_orphaned_syncs(reap_all=True)`` (step 4) transitions to a
+        terminal state — the same recovery path a SIGKILL mid-sweep
+        already relied on.
+
+    ``run_boot_freshness_sweep`` already swallows ``SyncAlreadyRunning``
+    and honours ``EBULL_SKIP_BOOT_SWEEP``; the broad guard here only
+    catches an unanticipated escape so it lands in the log rather than
+    an unraisable-thread-exception traceback.
+    """
+    try:
+        run_boot_freshness_sweep()
+    except Exception:
+        logger.exception("jobs entrypoint: boot freshness sweep thread raised")
+
+
 def serve(stop_event: threading.Event | None = None) -> int:
     """Run the jobs process until ``stop_event`` (or signal) fires.
 
@@ -1068,8 +1101,49 @@ def serve(stop_event: threading.Event | None = None) -> int:
         except Exception:
             logger.exception("jobs entrypoint: runtime.start() raised; continuing without scheduler")
 
-        # Step 10 — boot freshness sweep.
-        run_boot_freshness_sweep()
+        # Step 10 (#1479) — heartbeat threads come up RIGHT AFTER the
+        # scheduler is started and BEFORE the best-effort boot freshness
+        # sweep, so a slow/hung sweep can never gate process liveness.
+        #
+        # Pre-#1479 the fan-out started AFTER a SYNCHRONOUS
+        # ``run_boot_freshness_sweep()`` that could block the boot thread
+        # ~43 min on an unbounded outbound read (the behind-sweep can fire
+        # ``daily_research_refresh`` → an Anthropic call with no explicit
+        # timeout). While blocked, every subsystem's heartbeat row stayed
+        # frozen at the PRIOR boot's pid → the operator console saw a
+        # dead/stale process even though the new process was alive. See
+        # docs/proposals/infra/2026-06-05-jobs-boot-liveness-and-outbound-timeouts.md.
+        #
+        # ``manual_listener`` / ``queue_drainer`` necessarily beat before
+        # the blocking ``supervise()`` loop actually wires the listener —
+        # this is the same tolerance the pre-#1479 ordering already had
+        # (the fan-out ran before ``supervise()`` then too); the only
+        # change is that it now runs ahead of the sweep instead of behind
+        # it. The fresh beats also overwrite the prior boot's stale rows
+        # immediately, so a restart no longer shows a stale pid.
+        for subsystem in ("scheduler", "manual_listener", "queue_drainer", "main"):
+            t = threading.Thread(
+                target=heartbeat_loop,
+                args=(heartbeat, subsystem, stop_event),
+                kwargs={"tick_seconds": 10.0},
+                name=f"jobs-heartbeat-{subsystem}",
+                daemon=True,
+            )
+            t.start()
+            heartbeat_threads.append(t)
+
+        # Step 11 (#1479) — boot freshness sweep, now FIRE-AND-FORGET on a
+        # dedicated ``daemon=True`` thread instead of running inline on the
+        # boot thread. Daemon (not a ThreadPoolExecutor) so a hung sweep
+        # blocks neither boot nor shutdown — see
+        # ``_run_boot_freshness_sweep_thread`` for the abandon-and-reap
+        # rationale. Isolated from ``sync_executor`` (the listener's
+        # sync-request queue) so it can never block real sync requests.
+        threading.Thread(
+            target=_run_boot_freshness_sweep_thread,
+            name="jobs-boot-sweep",
+            daemon=True,
+        ).start()
 
         # Step 10b — reap leaked test DBs (#1444). Dev-only (no-op in
         # prod); the long-lived jobs process is the one place a sweep can
@@ -1100,18 +1174,6 @@ def serve(stop_event: threading.Event | None = None) -> int:
             daemon=True,
         )
         credential_health_thread.start()
-
-        # Step 12 — heartbeat threads (one per supervised subsystem).
-        for subsystem in ("scheduler", "manual_listener", "queue_drainer", "main"):
-            t = threading.Thread(
-                target=heartbeat_loop,
-                args=(heartbeat, subsystem, stop_event),
-                kwargs={"tick_seconds": 10.0},
-                name=f"jobs-heartbeat-{subsystem}",
-                daemon=True,
-            )
-            t.start()
-            heartbeat_threads.append(t)
 
         # Step 11+13 — listener via the supervisor (so a stalled
         # listener gets restarted automatically).

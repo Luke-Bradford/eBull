@@ -204,7 +204,7 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
         ),
         patch("app.services.refresh_cascade.cascade_refresh", return_value=cascade_outcome),
         patch("app.services.refresh_cascade.changed_instruments_from_outcome", return_value=[42]),
-        patch("app.workers.scheduler.anthropic.Anthropic"),
+        patch("app.workers.scheduler.make_anthropic_client"),
     ):
         filings_cls.return_value.__enter__.return_value = MagicMock()
         fundamentals_cls.return_value.__enter__.return_value = MagicMock()

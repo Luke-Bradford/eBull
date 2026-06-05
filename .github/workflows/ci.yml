@@ -125,6 +125,13 @@ jobs:
       - name: manifest-parser archive-URL agent-CIK guard lint
         run: bash scripts/check_archive_url_agent_guard.sh
 
+      - name: bounded Anthropic client construction lint (#1479)
+        # Every app/ Anthropic client MUST go through the
+        # make_anthropic_client factory (bounded timeout + max_retries);
+        # a raw anthropic.Anthropic(...) reintroduces the unbounded 600s
+        # SDK default that wedged the jobs boot ~43min on 2026-06-04.
+        run: bash scripts/check_anthropic_timeout.sh
+
       - name: pre-push <-> ci.yml lint parity (#1329)
         # Self-enforcing mirror: fails if any `bash scripts/check_*.sh`
         # runs in only one of .githooks/pre-push / this file. Stops the

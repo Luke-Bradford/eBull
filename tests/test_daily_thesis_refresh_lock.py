@@ -32,7 +32,7 @@ def mocked_env():  # type: ignore[no-untyped-def]
         patch.object(scheduler, "_tracked_job") as tracked_cm,
         patch.object(scheduler, "_record_prereq_skip"),
         patch.object(scheduler, "find_stale_instruments") as find_stale,
-        patch.object(scheduler, "anthropic") as anthropic_mod,
+        patch.object(scheduler, "make_anthropic_client") as make_client,
         patch.object(scheduler, "psycopg") as psycopg_mod,
         patch.object(scheduler, "generate_thesis") as gen,
         patch.object(scheduler, "report_progress"),
@@ -46,7 +46,7 @@ def mocked_env():  # type: ignore[no-untyped-def]
         tracker.row_count = 0
         tracked_cm.return_value.__enter__.return_value = tracker
         find_stale.side_effect = [[stale_item], []]  # T1 has one, T2 empty
-        anthropic_mod.Anthropic.return_value = MagicMock()
+        make_client.return_value = MagicMock()
 
         conn_mock = MagicMock()
         psycopg_mod.connect.return_value.__enter__.return_value = conn_mock
