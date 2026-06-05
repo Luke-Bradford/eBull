@@ -1,28 +1,40 @@
 """Source-level advisory locks.
 
-A job that hits a shared rate-bucket must not be allowed to start
-concurrently with another job in the same bucket -- whether the second
-start comes from a manual trigger double-click, an APScheduler fire
-overlapping a still-running manual run, two operators clicking the
-same button at once, OR a different job_name that happens to share
-the same source. The serialisation primitive is a Postgres
-session-scoped advisory lock keyed on a deterministic hash of the
-job's **source** (operator-locked decision #1064; PR1a refactor).
+A job must not start concurrently with another job in the same
+**lane** (job-overlap bucket) -- whether the second start comes from a
+manual trigger double-click, an APScheduler fire overlapping a
+still-running manual run, two operators clicking the same button at
+once, OR a different job_name that happens to share the same source.
+The serialisation primitive is a Postgres session-scoped advisory lock
+keyed on a deterministic hash of the job's **source** (operator-locked
+decision #1064; PR1a refactor).
+
+A lane bounds job overlap, NOT request rate (#1478): the SEC 10 req/s
+per-IP budget is enforced separately at the HTTP layer (see the
+"Source-level vs per-job semantics" section below). Do not conflate
+the two.
 
 ## Source-level vs per-job semantics
 
-Pre-PR1a: lock keyed on ``hashtext(job_name)``. Two different SEC jobs
-running concurrently would each acquire their own lock and starve the
-shared SEC 10 req/s rate budget — the budget is per-IP, not per-job,
-so per-job locking conflated independent rate buckets.
+This lock bounds **job overlap**, not request rate. (#1478 correction —
+the earlier docstring wrongly implied per-job locking would "starve the
+SEC rate budget"; it cannot. The SEC 10 req/s per-IP budget is enforced
+at the HTTP layer by ``app/providers/implementations/sec_edgar.py``
+``_PROCESS_RATE_LIMIT_CLOCK`` + ``_PROCESS_RATE_LIMIT_LOCK`` — a
+process-wide atomic inter-request floor, safe under concurrent fetchers.
+Two SEC jobs on different lanes still cannot exceed that floor.)
+
+Pre-PR1a: lock keyed on ``hashtext(job_name)`` (per-job).
 
 Post-PR1a: lock keyed on ``hashtext(f'job_source:{source}')`` where
 ``source`` is resolved from the canonical
 ``app.jobs.sources.JOB_NAME_TO_SOURCE`` registry. Same-source jobs
-serialise under one lock; cross-source jobs run in parallel. This
-matches the rate-bucket reality: ``sec_rate`` is one bucket;
-``etoro`` is another; ``db`` is another; ``sec_bulk_download`` is
-disjoint from ``sec_rate``.
+serialise under one lock; cross-source jobs run in parallel. The lane
+is a job-overlap bucket chosen per operator policy (#1064), NOT a rate
+gate: ``etoro`` serialises eToro-budget jobs; ``sec_rate`` groups the
+SEC discovery/producer jobs; ``sec_manifest`` is ``sec_manifest_worker``
+alone (#1478 — extracted so the heavy drainer stops starving the
+producers); ``sec_bulk_download`` is disjoint from ``sec_rate``.
 
 Same-``job_name`` + different ``params`` semantics: the second
 invocation still serialises under the source lock (Codex round-1

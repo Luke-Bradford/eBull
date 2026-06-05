@@ -14,11 +14,12 @@ Locked decision in [`bootstrap_orchestrator.py:_LANE_MAX_CONCURRENCY`](../../app
 |---|---|---|---|
 | `init` | 1 | universe-sync only | Pre-everything fence |
 | `etoro` | 1 | eToro REST budget | Separate from SEC budgets |
-| `sec_rate` | 1 | SEC 10 req/s shared bucket (per-IP) | Every per-CIK / per-accession SEC fetch |
+| `sec_rate` | 1 | SEC discovery/producer jobs (per-CIK / per-accession fetchers) | Job-overlap bucket, NOT a rate gate (#1478) — the 10 req/s budget is the HTTP-layer throttle, see below |
+| `sec_manifest` | 1 | `sec_manifest_worker` only (#1478) | Extracted from `sec_rate` so the heavy DB-bound drainer stops starving the producers; runs concurrently with them |
 | `sec_bulk_download` | 1 | Fixed-URL SEC archive downloads | Disjoint budget — large fixed downloads, no per-issuer iteration |
 | `db` | 5 | DB-only ingest of pre-staged bulk data | Parallel-safe (no SEC HTTP, only psycopg I/O) |
 
-Source-level `JobLock` (PR1): same-source jobs serialise; cross-source run parallel. SEC bulk download + per-CIK fetches do NOT compete (different rate budgets). DB-bound bulk ingesters don't block per-CIK polls. This is the rate-bucket reality formalised.
+Source-level `JobLock` (PR1): same-source jobs serialise; cross-source run parallel. **A lane is a job-overlap bucket, not a request-rate limiter (#1478).** The SEC 10 req/s per-IP budget is enforced at the HTTP layer by `app/providers/implementations/sec_edgar.py` (`_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK`, a process-wide atomic inter-request floor safe under concurrent fetchers) — so `sec_rate` + `sec_manifest` jobs running concurrently still cannot exceed it. Do NOT collapse SEC lanes back together believing the lane bounds the rate.
 
 ---
 

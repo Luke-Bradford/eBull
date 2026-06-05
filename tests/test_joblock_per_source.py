@@ -132,6 +132,34 @@ class TestJobLockSourceLevel:
             with JobLock(settings.database_url, "sec_bulk_download"):  # sec_bulk_download
                 pass
 
+    def test_sec_manifest_worker_runs_concurrently_with_producer(self) -> None:
+        """#1478: ``sec_manifest_worker`` (lane ``sec_manifest``) and a SEC
+        producer ``sec_atom_fast_lane`` (lane ``sec_rate``) are now DIFFERENT
+        lanes → both acquire simultaneously. This is the un-starving fix: the
+        20-37s manifest drainer no longer holds the producers' lane.
+
+        The SEC 10 req/s budget is NOT relaxed by this — it is enforced by the
+        HTTP-layer throttle (``sec_edgar.py`` ``_PROCESS_RATE_LIMIT_*``), which
+        is lane-agnostic; see ``test_sec_rate_limit_clock`` for that floor.
+        """
+        with JobLock(settings.database_url, "sec_manifest_worker"):  # lane sec_manifest
+            with JobLock(settings.database_url, "sec_atom_fast_lane"):  # lane sec_rate
+                # Both held simultaneously — no exception means they no longer
+                # mutually exclude.
+                pass
+
+    def test_sec_manifest_worker_serialises_same_job_cross_thread(self) -> None:
+        """#1478: two ``sec_manifest_worker`` instances MUST still mutually
+        exclude. The single-instance guarantee is load-bearing — the drains
+        (``iter_pending`` / ``iter_retryable``) do NOT use FOR UPDATE SKIP
+        LOCKED, so a second concurrent worker would duplicate fetch/parse.
+
+        MUST be cross-thread: a same-context same-lane acquire hits the #1184
+        ``_HELD_SOURCES`` re-entrancy bypass and would silently NOT raise
+        (false-pass).
+        """
+        _assert_cross_thread_serialises("sec_manifest_worker", "sec_manifest_worker")
+
 
 class TestJobLockUnknownJobName:
     """Unknown job_name MUST raise KeyError, never silently fall back."""
