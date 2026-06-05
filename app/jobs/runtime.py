@@ -42,15 +42,18 @@ import contextvars
 import logging
 import os
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Final
 
 import psycopg
+import psycopg.sql
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
@@ -476,6 +479,19 @@ _PRELUDE_OPT_OUT_JOBS: frozenset[str] = frozenset(
 )
 
 
+# #1472 PR4a-bis — scoped statement_timeout for the scheduled-fire
+# bootstrap-gate + prerequisite checks. These are fast singleton-row /
+# existence reads; the bound is generous (won't false-kill under load)
+# yet caps a pathological hang on the shared check connection. It is
+# applied per-connection via ``SET statement_timeout`` and reset on
+# return (see ``JobRuntime._scheduled_fire_check_connection``) — NEVER a
+# process-global ``PGOPTIONS``, which would also kill legitimate long ETL
+# (bulk SEC downloads run minutes, large MERGEs, multi-minute bootstrap
+# stages). See docs/proposals/infra/2026-06-04-db-connection-discipline.md
+# GAP-A/GAP-B.
+_SCHEDULED_FIRE_CHECK_STATEMENT_TIMEOUT_MS: Final[int] = 15_000
+
+
 # Carries the prelude-allocated run_id into ``_tracked_job``. Module-
 # scoped ContextVar so async refactors stay safe; under the current
 # synchronous BackgroundScheduler / ThreadPoolExecutor model each worker
@@ -883,8 +899,20 @@ class JobRuntime:
         *,
         database_url: str | None = None,
         invokers: dict[str, JobInvoker] | None = None,
+        pool: ConnectionPool[psycopg.Connection[Any]] | None = None,
     ) -> None:
         self._database_url = database_url or settings.database_url
+        # #1472 PR4a-bis — the jobs-process pool (``__main__.serve`` passes
+        # the already-open ``jobs_pool``). The scheduled-fire gate +
+        # prerequisite checks borrow ONE pooled connection per fire instead
+        # of opening two fresh raw ``psycopg.connect()`` — removing the
+        # per-fire-per-job SCRAM-auth connection herd at cadence boundaries
+        # that slowed auth and wedged SEC discovery (#1474). When None (the
+        # in-process API runtime, direct unit tests) the checks fall back to
+        # a single owned raw connection — still collapsed two→one. The pool
+        # is reused, NOT created here (settled #719: no third raw pool; PR4b
+        # adds the dedicated bounded background pool later).
+        self._pool: ConnectionPool[psycopg.Connection[Any]] | None = pool
         # Copy so callers cannot mutate after construction.
         self._invokers: dict[str, JobInvoker] = dict(invokers if invokers is not None else _INVOKERS)
         # Per-job in-process lock for synchronous 409 detection on
@@ -1426,6 +1454,65 @@ class JobRuntime:
         if exc is not None:
             logger.error("executor future raised unexpectedly: %s", exc, exc_info=exc)
 
+    @contextmanager
+    def _scheduled_fire_check_connection(self) -> Iterator[psycopg.Connection[Any]]:
+        """Yield ONE ``autocommit=True`` connection for the scheduled-fire
+        bootstrap-gate + prerequisite checks (#1472 PR4a-bis).
+
+        Collapses the previous *two* raw ``psycopg.connect()`` per fire
+        (gate + prereq, both pre-``record_job_start``) into a single
+        connection reused for both checks, removing the cadence-boundary
+        connection herd that slowed SCRAM auth and wedged SEC discovery
+        (#1474).
+
+        * ``autocommit=True`` — each check's read auto-commits, so the
+          shared connection NEVER accumulates one long implicit
+          transaction spanning both checks (Codex ckpt-1 #6).
+        * ``statement_timeout`` is SCOPED to this connection only and
+          reset before it returns to the pool — never a process-global
+          ``PGOPTIONS`` (which would kill legitimate long ETL). psycopg_pool
+          3.3 ``_reset_connection`` rolls back open transactions only; it
+          does NOT reset session GUCs or ``autocommit`` — so this method
+          restores both itself before the connection re-enters the pool.
+
+        When ``self._pool`` is None (in-process API runtime / unit tests)
+        a single owned raw connection is used instead — still collapsed
+        two→one; ``with`` closes it so no session reset is needed.
+        """
+        # ``SET`` is a Postgres utility statement — it rejects bound
+        # protocol parameters (``SET ... = $1`` → syntax error), so the
+        # timeout is composed as a server-side literal. Injection-safe:
+        # the value is a trusted module-level int, never user input. Reset
+        # uses ``DEFAULT`` (no params). Verified against dev PG: the literal
+        # form yields ``statement_timeout='15s'``, ``DEFAULT`` → ``'0'``.
+        set_timeout = psycopg.sql.SQL("SET statement_timeout = {}").format(
+            psycopg.sql.Literal(_SCHEDULED_FIRE_CHECK_STATEMENT_TIMEOUT_MS)
+        )
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                prev_autocommit = conn.autocommit
+                # The setup (autocommit + SET) is INSIDE the try so the
+                # restore ``finally`` runs even if ``SET`` raises after
+                # ``autocommit`` was flipped — otherwise the connection
+                # could re-enter ``jobs_pool`` with ``autocommit=True``
+                # (psycopg_pool does not reset GUCs / autocommit on return).
+                try:
+                    conn.autocommit = True
+                    conn.execute(set_timeout)
+                    yield conn
+                finally:
+                    # Restore session state for the next pool borrower
+                    # (e.g. the credential-health scan that shares
+                    # ``jobs_pool``).
+                    try:
+                        conn.execute("SET statement_timeout = DEFAULT")
+                    finally:
+                        conn.autocommit = prev_autocommit
+        else:
+            with psycopg.connect(self._database_url, autocommit=True) as conn:
+                conn.execute(set_timeout)
+                yield conn
+
     def _wrap_invoker(self, job_name: str, invoker: JobInvoker) -> Callable[[], None]:
         """Wrap a scheduled invoker with prerequisite check + advisory lock.
 
@@ -1506,59 +1593,87 @@ class JobRuntime:
             # docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md
             # §4.2.
             is_exempt = job is not None and job.exempt_from_universal_bootstrap_gate
-            if not is_exempt:
+            prerequisite = job.prerequisite if job is not None else None
+            needs_gate = not is_exempt
+            needs_prereq = prerequisite is not None
+            # #1472 PR4a-bis — both pre-``record_job_start`` checks share
+            # ONE pooled, autocommit, statement_timeout-scoped connection
+            # instead of opening two fresh raw ``psycopg.connect()`` per
+            # fire. The outer ``try`` fails open if the connection itself
+            # cannot be obtained (e.g. ``PoolTimeout`` under load, connect
+            # failure): a slow/failed connect must let the job RUN, never
+            # pin APScheduler ``max_instances=1`` forever (#1474 / PR0).
+            # Each check keeps its OWN inner fail-open so a gate error does
+            # not bypass the prereq skip (semantics preserved from the two
+            # prior independent ``try`` blocks).
+            if needs_gate or needs_prereq:
                 try:
-                    with psycopg.connect(database_url, autocommit=True) as conn:
-                        allowed, reason = check_bootstrap_state_gate(
-                            conn,
-                            job_name=job_name,
-                            invocation_path="scheduled",
-                            override_present=False,
-                        )
-                        if not allowed:
-                            record_job_skip(conn, job_name, reason, params_snapshot=dict(params))
-                            logger.info(
-                                "scheduled fire of %r skipped — %s",
-                                job_name,
-                                reason,
-                            )
-                            return
-                except Exception:
-                    # Fail-open mirrors the prereq path below — silently
-                    # dropping a real run is worse than running against a
-                    # half-installed DB; the body's own checks then surface
-                    # the issue.
-                    logger.warning(
-                        "bootstrap_state gate for %r failed; running anyway",
-                        job_name,
-                        exc_info=True,
-                    )
+                    with self._scheduled_fire_check_connection() as conn:
+                        # Bootstrap-state gate (#1064 PR1b-2). Runs BEFORE
+                        # the per-job prereq so the operator-visible reason
+                        # ``bootstrap_not_complete`` is the actionable
+                        # signal when both would block. Scheduled fires
+                        # never override.
+                        if needs_gate:
+                            try:
+                                allowed, reason = check_bootstrap_state_gate(
+                                    conn,
+                                    job_name=job_name,
+                                    invocation_path="scheduled",
+                                    override_present=False,
+                                )
+                                if not allowed:
+                                    record_job_skip(conn, job_name, reason, params_snapshot=dict(params))
+                                    logger.info(
+                                        "scheduled fire of %r skipped — %s",
+                                        job_name,
+                                        reason,
+                                    )
+                                    return
+                            except Exception:
+                                # Fail-open — silently dropping a real run is
+                                # worse than running against a half-installed
+                                # DB; the body's own checks then surface the
+                                # issue.
+                                logger.warning(
+                                    "bootstrap_state gate for %r failed; running anyway",
+                                    job_name,
+                                    exc_info=True,
+                                )
 
-            # Prerequisite gate (scheduled fires only — manual triggers
-            # bypass prerequisites so the operator can force a run).
-            if job is not None and job.prerequisite is not None:
-                try:
-                    with psycopg.connect(database_url, autocommit=True) as conn:
-                        met, reason = job.prerequisite(conn)
-                        if not met:
-                            record_job_skip(
-                                conn,
-                                job_name,
-                                reason,
-                                params_snapshot=dict(params),
-                            )
-                            logger.info(
-                                "scheduled fire of %r skipped — prerequisite not met: %s",
-                                job_name,
-                                reason,
-                            )
-                            return
+                        # Prerequisite gate (scheduled fires only — manual
+                        # triggers bypass prerequisites so the operator can
+                        # force a run).
+                        if prerequisite is not None:
+                            try:
+                                met, reason = prerequisite(conn)
+                                if not met:
+                                    record_job_skip(
+                                        conn,
+                                        job_name,
+                                        reason,
+                                        params_snapshot=dict(params),
+                                    )
+                                    logger.info(
+                                        "scheduled fire of %r skipped — prerequisite not met: %s",
+                                        job_name,
+                                        reason,
+                                    )
+                                    return
+                            except Exception:
+                                # Failing open is safer than silently
+                                # skipping real work.
+                                logger.warning(
+                                    "prerequisite check for %r failed; running job anyway",
+                                    job_name,
+                                    exc_info=True,
+                                )
                 except Exception:
-                    # If the prerequisite check itself fails, let the
-                    # job run — failing open is safer than silently
-                    # skipping real work.
+                    # The shared check connection could not be obtained or
+                    # configured (e.g. ``PoolTimeout``, connect failure).
+                    # Fail open — never wedge the schedule on an infra blip.
                     logger.warning(
-                        "prerequisite check for %r failed; running job anyway",
+                        "scheduled-fire gate/prereq connection for %r failed; running anyway",
                         job_name,
                         exc_info=True,
                     )

@@ -27,7 +27,7 @@ Rejected (option A). On an OOM/WAL-fragile box each backend ≈ 5–10 MB; 30→
 
 ## Workstreams (each its own PR, ordered by ROI-vs-risk)
 
-### PR1 — fail-fast "demand fits supply" boot guard  *(do first; pure tightening, zero runtime risk)*
+### PR1 — fail-fast "demand fits supply" boot guard  *(do first; pure tightening, zero runtime risk)* — **MERGED `c7b854a` (#1490), 2026-06-05.**
 Mirror the existing `check_max_locks_per_transaction` (#1187) in `app/db/pg_settings.py`.
 - New `check_connection_budget(conn, *, process)`: each boot path asserts a **per-process "enabled local processes" budget**, NOT a blind sum (Codex ckpt-1 #1). The budget = *this* process's pool max(es) + the fixed long-lived conns it owns + the fixed demand of the peers that co-run in the **dev single-box profile** (API + jobs + 1 DB always co-deployed — state this assumption explicitly; prod sizing is out of scope). The model must not fail the API for jobs capacity that is not actually running, so the peer term is the documented dev co-deployment, conservative (over-estimates → only fails when genuinely impossible).
 - Pool max-sizes from a **single source of truth** — extract API/jobs pool sizes to named constants so the guard and `open_pool` callers agree (no magic numbers).

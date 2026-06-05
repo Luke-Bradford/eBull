@@ -996,7 +996,12 @@ def serve(stop_event: threading.Event | None = None) -> int:
 
     listener_state = ListenerState()
     listener_stop = threading.Event()
-    runtime = JobRuntime()
+    # #1472 PR4a-bis — hand the already-open jobs_pool to the runtime so the
+    # scheduled-fire bootstrap-gate + prerequisite checks borrow ONE pooled
+    # connection per fire instead of opening two fresh raw psycopg.connect()
+    # at every cadence boundary (the SCRAM-auth connection herd that wedged
+    # SEC discovery, #1474). Pool is reused, not a new one (settled #719).
+    runtime = JobRuntime(pool=pool)
     heartbeat = HeartbeatWriter(
         settings.database_url,
         pid=os.getpid(),

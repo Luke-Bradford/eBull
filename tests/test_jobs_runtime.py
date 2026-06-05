@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+import psycopg
 import pytest
 
 from app.jobs.locks import JobAlreadyRunning
@@ -991,6 +992,269 @@ class TestScheduledFirePrerequisite:
 
         wrapped = rt._wrap_invoker("prereq_met_job", _adapt_zero_arg(invoker))
         wrapped()
+        assert invocations == [1]
+
+
+# ---------------------------------------------------------------------------
+# #1472 PR4a-bis — scheduled-fire gate + prereq share ONE connection
+# ---------------------------------------------------------------------------
+
+
+class _FakeCheckConn:
+    """Stand-in for the pooled connection used by the scheduled-fire checks.
+
+    Records the *rendered* SQL of ``execute`` calls (so the scoped
+    ``statement_timeout`` set/reset can be asserted) and lets the test
+    observe ``autocommit`` toggling. Crucially it mimics Postgres
+    rejecting a bound protocol parameter on a ``SET`` utility statement
+    (``SET ... = $1`` → syntax error) — that is the regression a pure
+    MagicMock hides, since SET does not accept ``%s`` params.
+    """
+
+    def __init__(self, *, raise_on_set_timeout: bool = False) -> None:
+        self.autocommit = False
+        self.executed: list[str] = []
+        self._raise_on_set_timeout = raise_on_set_timeout
+
+    def execute(self, sql: object, params: object = None) -> MagicMock:
+        as_string = getattr(sql, "as_string", None)
+        text = str(as_string(None)) if callable(as_string) else str(sql)
+        if params is not None and text.lstrip().upper().startswith("SET "):
+            raise psycopg.errors.SyntaxError("cannot bind parameter in SET utility statement")
+        if self._raise_on_set_timeout and text.startswith("SET statement_timeout = 1"):
+            # Simulate the scoped-timeout SET failing AFTER autocommit was
+            # flipped, to pin the restore-on-setup-failure discipline.
+            raise psycopg.OperationalError("connection broke during SET")
+        self.executed.append(text)
+        return MagicMock()
+
+    def __enter__(self) -> _FakeCheckConn:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakePool:
+    """Minimal ``ConnectionPool`` stand-in: counts checkouts and can raise
+    on ``__enter__`` to simulate ``PoolTimeout``."""
+
+    def __init__(self, conn: _FakeCheckConn, *, enter_exc: BaseException | None = None) -> None:
+        self._conn = conn
+        self._enter_exc = enter_exc
+        self.connection_calls = 0
+
+    def connection(self) -> object:
+        self.connection_calls += 1
+        pool = self
+
+        class _CM:
+            def __enter__(self) -> _FakeCheckConn:
+                if pool._enter_exc is not None:
+                    raise pool._enter_exc
+                return pool._conn
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+        return _CM()
+
+
+def _scheduled_job(
+    name: str,
+    *,
+    prerequisite: object = None,
+    exempt: bool = False,
+) -> ScheduledJob:
+    return ScheduledJob(
+        name=name,
+        description=f"PR4a-bis test job {name}",
+        cadence=Cadence.daily(hour=2, minute=0),
+        source="db",
+        catch_up_on_boot=True,
+        prerequisite=prerequisite,  # type: ignore[arg-type]
+        exempt_from_universal_bootstrap_gate=exempt,
+    )
+
+
+class TestScheduledFireSharedCheckConnection:
+    """#1472 PR4a-bis: the bootstrap-gate + prerequisite checks must reuse a
+    single connection per fire (not two raw ``psycopg.connect()``), with a
+    scoped+reset ``statement_timeout``, and must fail OPEN on any infra blip
+    so a slow/failed connect can never pin ``max_instances`` forever."""
+
+    def _build(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        job: ScheduledJob,
+        *,
+        pool: _FakePool | None,
+        invocations: list[int],
+    ) -> JobRuntime:
+        from app.jobs.runtime import _adapt_zero_arg
+
+        monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [job])
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        return JobRuntime(
+            database_url="postgresql://stub/stub",
+            invokers={job.name: _adapt_zero_arg(invoker)},  # type: ignore[dict-item]
+            pool=pool,  # type: ignore[arg-type]  # _FakePool is a structural stand-in
+        )
+
+    def test_gate_and_prereq_share_one_pooled_connection(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        conn = _FakeCheckConn()
+        pool = _FakePool(conn)
+        gate_conns: list[object] = []
+        prereq_conns: list[object] = []
+
+        monkeypatch.setattr(
+            "app.jobs.runtime.check_bootstrap_state_gate",
+            lambda c, **_kw: (gate_conns.append(c), (True, ""))[1],
+        )
+        monkeypatch.setattr("app.jobs.runtime.record_job_skip", lambda *_a, **_kw: 0)
+        job = _scheduled_job(
+            "shared_conn_job",
+            prerequisite=lambda c: (prereq_conns.append(c), (True, ""))[1],
+        )
+        invocations: list[int] = []
+        rt = self._build(monkeypatch, job, pool=pool, invocations=invocations)
+
+        rt._wrap_invoker(job.name, rt._invokers[job.name])()
+
+        # ONE checkout served BOTH checks (collapsed two raw connects → one).
+        assert pool.connection_calls == 1
+        assert len(gate_conns) == 1 and len(prereq_conns) == 1
+        assert gate_conns[0] is conn and prereq_conns[0] is conn
+        # Job ran (both checks passed).
+        assert invocations == [1]
+        # statement_timeout scoped to this connection then reset; autocommit
+        # restored so the next pool borrower is not polluted. The value is
+        # composed as a server-side LITERAL (15000), never a bound %s param
+        # (SET rejects bound params — regression guard in _FakeCheckConn).
+        assert "SET statement_timeout = 15000" in conn.executed
+        assert "SET statement_timeout = DEFAULT" in conn.executed
+        assert conn.autocommit is False
+
+    def test_pool_open_failure_fails_open(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from psycopg_pool import PoolTimeout
+
+        pool = _FakePool(_FakeCheckConn(), enter_exc=PoolTimeout("pool exhausted"))
+        monkeypatch.setattr("app.jobs.runtime.record_job_skip", lambda *_a, **_kw: 0)
+        job = _scheduled_job("pool_timeout_job", prerequisite=lambda _c: (True, ""))
+        invocations: list[int] = []
+        rt = self._build(monkeypatch, job, pool=pool, invocations=invocations)
+
+        rt._wrap_invoker(job.name, rt._invokers[job.name])()
+
+        # Connection never obtained → fail OPEN → job runs (never wedge).
+        assert invocations == [1]
+
+    def test_gate_exception_does_not_bypass_unmet_prereq(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A gate-check error must fail open for the GATE only — the prereq
+        # still runs on the shared connection and can still skip the fire
+        # (semantics preserved from the two prior independent try blocks).
+        conn = _FakeCheckConn()
+        pool = _FakePool(conn)
+        skips: list[str] = []
+
+        def _boom_gate(_c: object, **_kw: object) -> tuple[bool, str]:
+            raise RuntimeError("gate check blew up")
+
+        monkeypatch.setattr("app.jobs.runtime.check_bootstrap_state_gate", _boom_gate)
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _c, _n, reason, **_kw: skips.append(reason) or 0,
+        )
+        job = _scheduled_job(
+            "gate_boom_prereq_unmet_job",
+            prerequisite=lambda _c: (False, "no coverage rows"),
+        )
+        invocations: list[int] = []
+        rt = self._build(monkeypatch, job, pool=pool, invocations=invocations)
+
+        rt._wrap_invoker(job.name, rt._invokers[job.name])()
+
+        assert pool.connection_calls == 1  # still ONE connection
+        assert invocations == []  # prereq skip still wins
+        assert skips == ["no coverage rows"]
+
+    def test_setup_failure_restores_autocommit_and_fails_open(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # If the scoped-timeout SET raises AFTER autocommit was flipped, the
+        # connection must NOT re-enter the pool with autocommit=True
+        # (psycopg_pool does not reset it), and the fire must run (fail open).
+        conn = _FakeCheckConn(raise_on_set_timeout=True)
+        pool = _FakePool(conn)
+        monkeypatch.setattr("app.jobs.runtime.record_job_skip", lambda *_a, **_kw: 0)
+        job = _scheduled_job("setup_fail_job", prerequisite=lambda _c: (True, ""))
+        invocations: list[int] = []
+        rt = self._build(monkeypatch, job, pool=pool, invocations=invocations)
+
+        rt._wrap_invoker(job.name, rt._invokers[job.name])()
+
+        assert conn.autocommit is False  # restored despite setup failure
+        assert invocations == [1]  # failed open → job ran
+
+    def test_exempt_no_prereq_opens_no_connection(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        conn = _FakeCheckConn()
+        pool = _FakePool(conn)
+        job = _scheduled_job("exempt_no_prereq_job", exempt=True, prerequisite=None)
+        invocations: list[int] = []
+        rt = self._build(monkeypatch, job, pool=pool, invocations=invocations)
+
+        rt._wrap_invoker(job.name, rt._invokers[job.name])()
+
+        # No gate (exempt) + no prereq → no check connection opened at all.
+        assert pool.connection_calls == 0
+        assert invocations == [1]
+
+    def test_fallback_collapses_to_single_raw_connect(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # pool=None (in-process API runtime / unit tests): the checks fall
+        # back to a single OWNED raw connection reused for both — still
+        # collapsed two→one (the prior code opened two).
+        connect_calls: list[object] = []
+        conn = _FakeCheckConn()
+
+        def _fake_connect(_url: object, **_kw: object) -> _FakeCheckConn:
+            connect_calls.append(_url)
+            return conn
+
+        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", _fake_connect)
+        monkeypatch.setattr("app.jobs.runtime.check_bootstrap_state_gate", lambda _c, **_kw: (True, ""))
+        monkeypatch.setattr("app.jobs.runtime.record_job_skip", lambda *_a, **_kw: 0)
+        job = _scheduled_job("fallback_single_connect_job", prerequisite=lambda _c: (True, ""))
+        invocations: list[int] = []
+        rt = self._build(monkeypatch, job, pool=None, invocations=invocations)
+
+        rt._wrap_invoker(job.name, rt._invokers[job.name])()
+
+        assert len(connect_calls) == 1  # ONE connect for both checks
         assert invocations == [1]
 
 
