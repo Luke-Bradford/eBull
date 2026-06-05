@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 import psycopg
 
 from app.config import settings
+from app.db.pg_settings import LISTENER_APPLICATION_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,17 @@ class AutovacuumTableLag:
 
 
 @dataclass(frozen=True)
+class ListenerConnectionCount:
+    """Count of LISTEN connections carrying a given ``application_name``
+    (#1472 PR3). One per known listener label; ``count`` 0 means that
+    process is not currently running, ``count > 1`` is a duplicate-instance
+    listener."""
+
+    application_name: str
+    count: int
+
+
+@dataclass(frozen=True)
 class PostgresHealthSnapshot:
     db_size_bytes: int | None
     db_size_pretty: str | None
@@ -97,6 +109,13 @@ class PostgresHealthSnapshot:
     financial_facts_raw_default_rows: int | None
     financial_facts_raw_default_warn_threshold: int
     financial_facts_raw_default_breached_warn: bool | None
+    # #1472 PR3 — per-application_name count of eBull LISTEN connections,
+    # zero-filled across every known listener label. ``listener_duplicate_detected``
+    # keys on any label with count > 1 (a duplicate-instance listener; the
+    # RCA's ebull_credential_health ×3). Warn-only: a transient reconnect can
+    # momentarily show 2.
+    listener_connections: list[ListenerConnectionCount] | None
+    listener_duplicate_detected: bool | None
     metric_errors: list[str]
     collected_at: datetime
 
@@ -245,6 +264,37 @@ def _q_autovacuum_top10(conn: psycopg.Connection[tuple]) -> list[AutovacuumTable
     return out
 
 
+def _q_listener_connections(conn: psycopg.Connection[tuple]) -> list[ListenerConnectionCount]:
+    """Count eBull LISTEN connections per ``application_name`` (#1472 PR3).
+
+    Returns one entry per KNOWN listener label (zero-filled when absent),
+    so a duplicate-instance listener (count > 1) is detectable. A label
+    with count 0 means that process is not currently running (e.g. the
+    jobs labels when only the API serves this endpoint). All eBull
+    connections use the same role, so ``application_name`` is fully
+    visible in ``pg_stat_activity`` without ``pg_monitor``.
+
+    Scoped to ``datname = current_database()``: ``pg_stat_activity`` is
+    cluster-wide, but the API + jobs listeners both connect to the same
+    ``ebull`` database, so this still counts every real listener while
+    excluding stray labelled connections in transient ``ebull_test_*``
+    databases (which would otherwise inflate the prod count — and make the
+    probe cross-talk between xdist test workers sharing the cluster).
+    """
+    names = sorted(LISTENER_APPLICATION_NAMES)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT application_name, count(*)::int "
+            "  FROM pg_stat_activity "
+            " WHERE application_name = ANY(%s) "
+            "   AND datname = current_database() "
+            " GROUP BY application_name",
+            (names,),
+        )
+        observed = {str(r[0]): int(r[1]) for r in cur.fetchall()}
+    return [ListenerConnectionCount(application_name=n, count=observed.get(n, 0)) for n in names]
+
+
 def _q_default_partition_rows(conn: psycopg.Connection[tuple]) -> int:
     # Full seq scan on the DEFAULT partition. Current size ~1055 rows
     # post-Phase-3; scan stays cheap until the 5000-row alarm fires,
@@ -295,6 +345,7 @@ def collect_postgres_health(
     last_ckpt: datetime | None = None
     top10: list[AutovacuumTableLag] | None = None
     default_rows: int | None = None
+    listener_conns: list[ListenerConnectionCount] | None = None
 
     with psycopg.connect(url, autocommit=True) as conn:
         result = _safe(conn, "db_size", _q_db_size, errors)
@@ -315,11 +366,13 @@ def collect_postgres_health(
         last_ckpt = _safe(conn, "last_checkpoint", _q_last_checkpoint, errors)
         top10 = _safe(conn, "autovacuum_top10", _q_autovacuum_top10, errors)
         default_rows = _safe(conn, "default_partition_rows", _q_default_partition_rows, errors)
+        listener_conns = _safe(conn, "listener_connections", _q_listener_connections, errors)
 
     db_size_breached: bool | None = None if db_size_bytes is None else db_size_bytes > db_size_warn_threshold_bytes
     wal_breached: bool | None = None if wal_dir_bytes is None else wal_dir_bytes > wal_warn_threshold_bytes
     default_breached: bool | None = None if default_rows is None else default_rows > default_partition_warn_rows
     leaked_count: int | None = None if leaked_names is None else len(leaked_names)
+    listener_dup: bool | None = None if listener_conns is None else any(lc.count > 1 for lc in listener_conns)
 
     return PostgresHealthSnapshot(
         db_size_bytes=db_size_bytes,
@@ -340,6 +393,8 @@ def collect_postgres_health(
         financial_facts_raw_default_rows=default_rows,
         financial_facts_raw_default_warn_threshold=default_partition_warn_rows,
         financial_facts_raw_default_breached_warn=default_breached,
+        listener_connections=listener_conns,
+        listener_duplicate_detected=listener_dup,
         metric_errors=errors,
         collected_at=datetime.now(UTC),
     )

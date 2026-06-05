@@ -34,6 +34,7 @@ import psycopg.sql
 from psycopg_pool import ConnectionPool
 
 from app.config import settings
+from app.db.pg_settings import API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
 from app.services.credential_health import (
     NOTIFY_CHANNEL,
     get_operator_credential_health,
@@ -68,15 +69,22 @@ def listener_loop(
     cache: CredentialHealthCache,
     pool: ConnectionPool[psycopg.Connection[Any]],
     stop_event: threading.Event,
+    application_name: str = API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME,
     listen_conn_factory: Callable[[], psycopg.Connection[Any]] | None = None,
 ) -> None:
     """Run startup scan + LISTEN/NOTIFY loop until ``stop_event`` is set.
 
+    ``application_name`` (#1472 PR3) labels the LISTEN connection in
+    ``pg_stat_activity``. This loop runs in BOTH the API and the jobs
+    process, so each caller passes its own label
+    (``API_*`` / ``JOBS_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME``)
+    to keep the two distinguishable + cardinality-checkable.
+
     ``listen_conn_factory`` is overridable for tests — the default
     opens a fresh autocommit psycopg.Connection against
-    ``settings.database_url``.
+    ``settings.database_url`` stamped with ``application_name``.
     """
-    factory = listen_conn_factory or _default_listen_conn_factory
+    factory = listen_conn_factory or (lambda: _default_listen_conn_factory(application_name))
 
     # 1. Initial scan with retry-with-backoff. Until this succeeds the
     #    cache reports MISSING (fail-safe).
@@ -109,14 +117,23 @@ def listener_loop(
             return
 
 
-def _default_listen_conn_factory() -> psycopg.Connection[Any]:
+def _default_listen_conn_factory(
+    application_name: str = API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME,
+) -> psycopg.Connection[Any]:
     """Open a fresh autocommit connection for LISTEN.
 
     autocommit is required so LISTEN takes effect immediately; the
     same connection is held for the life of the inner loop and closed
     on exit so a Postgres-side reset releases all queued notifies.
+
+    #1472 PR3: ``application_name`` labels the connection in
+    ``pg_stat_activity`` (API vs jobs credential-health listener).
     """
-    return psycopg.connect(settings.database_url, autocommit=True)
+    return psycopg.connect(
+        settings.database_url,
+        autocommit=True,
+        application_name=application_name,
+    )
 
 
 def _run_initial_scan(
