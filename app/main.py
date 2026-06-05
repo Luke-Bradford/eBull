@@ -59,6 +59,7 @@ from app.api.watchlist import router as watchlist_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
+from app.db.pg_settings import API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
 from app.db.pool import AUDIT_POOL_MAX_SIZE, DB_POOL_MAX_SIZE, open_pool
 from app.jobs.credential_health_listener import listener_loop as credential_health_listener_loop
 from app.security import master_key
@@ -340,6 +341,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "cache": credential_health_cache,
             "pool": pool,
             "stop_event": credential_health_stop,
+            # #1472 PR3 — label the API's LISTEN conn in pg_stat_activity.
+            "application_name": API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME,
         },
         name="api-credential-health-listener",
         daemon=True,

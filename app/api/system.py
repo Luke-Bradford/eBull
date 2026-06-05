@@ -610,6 +610,11 @@ class AutovacuumTableLagSchema(BaseModel):
     dead_fraction: float | None
 
 
+class ListenerConnectionCountSchema(BaseModel):
+    application_name: str
+    count: int
+
+
 class PostgresHealthResponse(BaseModel):
     db_size_bytes: int | None
     db_size_pretty: str | None
@@ -629,6 +634,8 @@ class PostgresHealthResponse(BaseModel):
     financial_facts_raw_default_rows: int | None
     financial_facts_raw_default_warn_threshold: int
     financial_facts_raw_default_breached_warn: bool | None
+    listener_connections: list[ListenerConnectionCountSchema] | None
+    listener_duplicate_detected: bool | None
     metric_errors: list[str]
     collected_at: datetime
 
@@ -837,6 +844,15 @@ def get_postgres_health() -> PostgresHealthResponse:
         financial_facts_raw_default_rows=snapshot.financial_facts_raw_default_rows,
         financial_facts_raw_default_warn_threshold=(snapshot.financial_facts_raw_default_warn_threshold),
         financial_facts_raw_default_breached_warn=(snapshot.financial_facts_raw_default_breached_warn),
+        listener_connections=(
+            None
+            if snapshot.listener_connections is None
+            else [
+                ListenerConnectionCountSchema(application_name=lc.application_name, count=lc.count)
+                for lc in snapshot.listener_connections
+            ]
+        ),
+        listener_duplicate_detected=snapshot.listener_duplicate_detected,
         metric_errors=snapshot.metric_errors,
         collected_at=snapshot.collected_at,
     )

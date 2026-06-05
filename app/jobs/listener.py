@@ -39,6 +39,7 @@ import psycopg
 import psycopg.sql
 
 from app.config import settings
+from app.db.pg_settings import JOB_REQUEST_LISTENER_APPLICATION_NAME
 from app.jobs.runtime import VALID_JOB_NAMES, JobRuntime
 from app.services.processes.bootstrap_gate import check_bootstrap_state_gate
 from app.services.processes.param_metadata import (
@@ -556,8 +557,16 @@ def _default_listen_conn_factory() -> psycopg.Connection[Any]:
     autocommit is required for LISTEN to take effect immediately; the
     same connection is held for the life of the inner loop and closed
     on exit so a Postgres-side reset releases all queued notifies.
+
+    #1472 PR3: stamps ``application_name`` so this LISTEN connection is
+    identifiable in ``pg_stat_activity`` and the listener-cardinality
+    probe (``/system/postgres-health``) can detect a duplicate instance.
     """
-    return psycopg.connect(settings.database_url, autocommit=True)
+    return psycopg.connect(
+        settings.database_url,
+        autocommit=True,
+        application_name=JOB_REQUEST_LISTENER_APPLICATION_NAME,
+    )
 
 
 def _dispatch_notify(

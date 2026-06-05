@@ -63,6 +63,7 @@ import psycopg
 import app.services.manifest_parsers  # noqa: F401, E402
 from app.config import settings
 from app.db.dev_test_db_reaper import run_orphan_test_db_reap
+from app.db.pg_settings import JOBS_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
 from app.db.pool import JOBS_POOL_MAX_SIZE, open_pool
 from app.jobs.boot_sweep import run_boot_freshness_sweep
 from app.jobs.credential_health_listener import (
@@ -1233,6 +1234,10 @@ def serve(stop_event: threading.Event | None = None) -> int:
                 "cache": credential_health_cache,
                 "pool": pool,
                 "stop_event": credential_health_stop,
+                # #1472 PR3 — label the jobs process's LISTEN conn distinctly
+                # from the API's so pg_stat_activity / the cardinality probe
+                # can tell the two ebull_credential_health listeners apart.
+                "application_name": JOBS_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME,
             },
             name="jobs-credential-health-listener",
             daemon=True,

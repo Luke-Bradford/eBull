@@ -125,3 +125,47 @@ def test_leaked_test_db_total_bytes_reflects_bloat() -> None:
     if snapshot.leaked_test_db_count > 0:
         assert snapshot.leaked_test_db_total_bytes > 0
     assert snapshot.leaked_test_db_total_pretty is not None
+
+
+@pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
+def test_listener_connections_probe_counts_labelled_conns() -> None:
+    """#1472 PR3 — the listener-cardinality probe counts LISTEN connections
+    per ``application_name`` and zero-fills every known label."""
+    from app.db.pg_settings import JOB_REQUEST_LISTENER_APPLICATION_NAME
+
+    url = test_database_url()
+    # No labelled conn open yet: every known label reports 0, no duplicate.
+    baseline = collect_postgres_health(database_url=url)
+    assert baseline.listener_connections is not None
+    by_name = {lc.application_name: lc.count for lc in baseline.listener_connections}
+    assert JOB_REQUEST_LISTENER_APPLICATION_NAME in by_name  # zero-filled
+    assert baseline.listener_duplicate_detected is False
+
+    # Hold one labelled conn open across the collect → that label counts >= 1.
+    held = psycopg.connect(url, autocommit=True, application_name=JOB_REQUEST_LISTENER_APPLICATION_NAME)
+    try:
+        snap = collect_postgres_health(database_url=url)
+        assert snap.listener_connections is not None
+        counts = {lc.application_name: lc.count for lc in snap.listener_connections}
+        assert counts[JOB_REQUEST_LISTENER_APPLICATION_NAME] >= 1
+    finally:
+        held.close()
+
+
+@pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
+def test_listener_connections_probe_detects_duplicate() -> None:
+    """Two LISTEN conns with the SAME label → count > 1 → duplicate flagged."""
+    from app.db.pg_settings import JOB_REQUEST_LISTENER_APPLICATION_NAME
+
+    url = test_database_url()
+    a = psycopg.connect(url, autocommit=True, application_name=JOB_REQUEST_LISTENER_APPLICATION_NAME)
+    b = psycopg.connect(url, autocommit=True, application_name=JOB_REQUEST_LISTENER_APPLICATION_NAME)
+    try:
+        snap = collect_postgres_health(database_url=url)
+        assert snap.listener_connections is not None
+        counts = {lc.application_name: lc.count for lc in snap.listener_connections}
+        assert counts[JOB_REQUEST_LISTENER_APPLICATION_NAME] >= 2
+        assert snap.listener_duplicate_detected is True
+    finally:
+        a.close()
+        b.close()

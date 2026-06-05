@@ -194,6 +194,50 @@ max_connections' — that is rejected in #1472 (adds backend RAM + WAL
 pressure on the OOM-fragile box); the remediation is to SHRINK demand."""
 
 
+# ---------------------------------------------------------------------------
+# Listener connection labels + expected cardinality (#1472 PR3)
+# ---------------------------------------------------------------------------
+#
+# Each LISTEN connection eBull opens is stamped with a distinct
+# ``application_name`` so ``pg_stat_activity`` shows ownership and a
+# cardinality probe (``/system/postgres-health``) can detect a
+# duplicate-instance listener. The #1472 RCA observed
+# ``ebull_credential_health`` LISTEN ×3 where the intended topology is 2
+# (one per subscribing process: API + jobs). That over-count was a
+# reconnect-overlap artifact of the restart-herd crash-loop
+# (``listener_restarts=1439``), not a genuine double-start — PR0's
+# connect-timeout already removed the crash-loop. PR3 makes the count
+# observable + asserts it so a real future duplicate surfaces immediately.
+
+JOB_REQUEST_LISTENER_APPLICATION_NAME: Final[str] = "ebull-jobs-job-request-listener"
+"""``application_name`` for the jobs-process ``LISTEN ebull_job_request``
+connection (``app/jobs/listener.py``). Exactly one, in the jobs process."""
+
+JOBS_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME: Final[str] = "ebull-jobs-credential-health-listener"
+"""``application_name`` for the jobs-process ``LISTEN ebull_credential_health``
+connection (``app/jobs/credential_health_listener.py`` started from
+``app/jobs/__main__.py``). Exactly one, in the jobs process."""
+
+API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME: Final[str] = "ebull-api-credential-health-listener"
+"""``application_name`` for the API-process ``LISTEN ebull_credential_health``
+connection (started from ``app/main.py`` lifespan). Exactly one, in the API
+process."""
+
+LISTENER_APPLICATION_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        JOB_REQUEST_LISTENER_APPLICATION_NAME,
+        JOBS_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME,
+        API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME,
+    }
+)
+"""Every labelled LISTEN connection. In a healthy single-instance topology
+each name appears AT MOST ONCE in ``pg_stat_activity`` (0 when that process
+is not running, e.g. the jobs labels when only the API is up). A count > 1
+for any name is a duplicate-instance listener — surfaced warn-only via
+``/system/postgres-health`` (a transient reconnect can momentarily show 2,
+so the probe is informational, not a hard gate)."""
+
+
 def _dev_profile_connection_demand() -> int:
     """Steady-state connection demand of the dev single-box profile
     (API + jobs co-deployed), excluding the transient reserve.

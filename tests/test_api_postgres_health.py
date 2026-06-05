@@ -31,6 +31,7 @@ from app.db import get_conn
 from app.main import app
 from app.services.postgres_health import (
     AutovacuumTableLag,
+    ListenerConnectionCount,
     PostgresHealthSnapshot,
 )
 
@@ -70,6 +71,12 @@ def _snapshot(**overrides: object) -> PostgresHealthSnapshot:
         "financial_facts_raw_default_rows": 1055,
         "financial_facts_raw_default_warn_threshold": 5000,
         "financial_facts_raw_default_breached_warn": False,
+        "listener_connections": [
+            ListenerConnectionCount(application_name="ebull-jobs-job-request-listener", count=1),
+            ListenerConnectionCount(application_name="ebull-jobs-credential-health-listener", count=1),
+            ListenerConnectionCount(application_name="ebull-api-credential-health-listener", count=1),
+        ],
+        "listener_duplicate_detected": False,
         "metric_errors": [],
         "collected_at": _NOW,
     }
@@ -104,12 +111,20 @@ def test_endpoint_returns_200_with_all_fields() -> None:
         "financial_facts_raw_default_rows",
         "financial_facts_raw_default_warn_threshold",
         "financial_facts_raw_default_breached_warn",
+        "listener_connections",
+        "listener_duplicate_detected",
         "metric_errors",
         "collected_at",
     }
     assert expected_keys.issubset(body.keys())
     assert body["metric_errors"] == []
     assert body["autovacuum_top10"][0]["relname"] == "financial_facts_raw_2024q3"
+    assert body["listener_duplicate_detected"] is False
+    assert {lc["application_name"] for lc in body["listener_connections"]} == {
+        "ebull-jobs-job-request-listener",
+        "ebull-jobs-credential-health-listener",
+        "ebull-api-credential-health-listener",
+    }
 
 
 def test_db_size_breach_flag_above_threshold() -> None:
