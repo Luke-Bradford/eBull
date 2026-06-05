@@ -166,6 +166,18 @@ but ≥1 is live at steady state (the RCA idle snapshot caught exactly 1),
 so the budget counts one. Concurrent execution beyond 1 is part of the
 cadence-boundary burst that PR2/PR4 bound, NOT PR1 (Codex ckpt-2)."""
 
+ORCHESTRATOR_GATE_CHECK_CONN: Final[int] = 1
+"""The sync orchestrator's ``_run_layers_loop`` holds ONE run-scoped
+autocommit connection for the per-layer read gate-checks (cancel poll,
+credential health, layer init, dependency lookup) for the whole walk
+(#1472 PR4a — replaces the prior fresh-connect-per-check-per-layer herd).
+The orchestrator high-frequency sync fires every 5 min and is frequently
+the steady-state executing job, so the budget counts this slot as held
+alongside ``JOBS_STEADY_STATE_EXEC_CONNS`` (the same job's JobLock conn).
+Conservative: the slot is released between walks (``finally: gate_conn.close``),
+so counting it always over-estimates. Single sync run at a time (advisory
+lock + sync_runs single-running unique index) bounds it to exactly one."""
+
 CONNECTION_BUDGET_RESERVE: Final[int] = 3
 """Headroom over the steady-state baseline for transient connections
 that briefly coexist with it: serialized boot singleton-probes, the
@@ -199,6 +211,7 @@ def _dev_profile_connection_demand() -> int:
         + JOBS_POOL_MAX_SIZE
         + JOBS_FIXED_LONGLIVED_CONNS
         + JOBS_STEADY_STATE_EXEC_CONNS
+        + ORCHESTRATOR_GATE_CHECK_CONN
     )
 
 

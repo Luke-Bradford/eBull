@@ -26,7 +26,8 @@ import hashlib
 import logging
 import re
 import traceback
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 import psycopg
@@ -361,6 +362,70 @@ def _safe_run_and_finalize(
 # ---------------------------------------------------------------------------
 
 
+class _GateCheckConnection:
+    """Run-scoped autocommit connection for the per-layer READ gate-checks
+    in ``_run_layers_loop`` (#1472 PR4a).
+
+    Before PR4a every gate-check — cancel poll, credential health, layer
+    init, dependency-outcome lookup — opened a FRESH raw ``psycopg.connect``
+    per layer. That per-fire raw-connect herd at cadence boundaries was the
+    #1472 RCA (SCRAM-auth contention under the restart herd → wedged
+    discovery layer). This holder is opened ONCE per orchestrator walk and
+    reused for every read gate-check, collapsing N_layers×N_checks connects
+    to one.
+
+    ``autocommit=True`` (Codex PR4a caveat): the shared conn never carries a
+    long implicit transaction across the walk — each statement is its own
+    snapshot, and a failed statement leaves the conn IDLE (verified
+    empirically: ``transaction_status`` stays ``0`` after an
+    ``UndefinedTable`` error, next statement succeeds without rollback), so
+    a gate-check that swallows a SQL error cannot poison the conn for the
+    next check (prevention-log §"conn.rollback() needed after caught
+    exception on a shared connection" is moot under autocommit).
+
+    Lazy + self-reconnecting (Codex PR4a-review #1/#7): ``get()`` (re)opens
+    when the conn is unset, ``closed`` or ``broken``, so a mid-walk Postgres
+    restart / EOF degrades to a reconnect on the next gate-check — matching
+    the per-check recovery the old fresh-connect path got for free. The full
+    PoolTimeout/reconnect-metric + hard-recreate self-heal is PR4b.
+
+    Writes are NOT moved onto this conn: the ``_record_layer_*`` /
+    ``_finalize_*`` audit writers keep their own fresh autocommit conns
+    (rollback isolation — a layer rollback must never erase its own progress
+    row). The single conditional write that DOES run on this conn is the
+    cancel-observation short tx in ``_check_cancel_signal``, which is
+    terminal (it raises right after committing).
+    """
+
+    def __init__(self) -> None:
+        self._conn: psycopg.Connection[Any] | None = None
+
+    def get(self) -> psycopg.Connection[Any]:
+        if self._conn is None or self._conn.closed or self._conn.broken:
+            self._conn = psycopg.connect(settings.database_url, autocommit=True)
+        return self._conn
+
+    def close(self) -> None:
+        if self._conn is not None and not self._conn.closed:
+            self._conn.close()
+        self._conn = None
+
+
+@contextmanager
+def _gate_check_conn(
+    holder: _GateCheckConnection | None,
+) -> Iterator[psycopg.Connection[Any]]:
+    """Yield the run-scoped gate-check conn when ``holder`` is provided
+    (reused — NOT closed here, the walk owns its lifetime), else open a
+    fresh short-lived autocommit conn for standalone / test callers (the
+    pre-PR4a per-call behaviour). Both paths are ``autocommit=True``."""
+    if holder is not None:
+        yield holder.get()
+    else:
+        with psycopg.connect(settings.database_url, autocommit=True) as owned:
+            yield owned
+
+
 def _run_layers_loop(
     sync_run_id: int,
     plan: ExecutionPlan,
@@ -377,104 +442,116 @@ def _run_layers_loop(
     """
     from app.services.sync_orchestrator.registry import LAYERS
 
-    for layer_plan in plan.layers_to_refresh:
-        # Cancel checkpoint (#1078 — admin control hub PR6).
-        # Spec §"Cancel — cooperative" / §"sync_runs analogue":
-        # cancel between layers in the DAG fixed-point loop. Mid-layer
-        # cancel is NOT supported; the layer body runs to completion.
-        # Worst-case observation latency = duration of the longest
-        # in-flight layer. Acceptable v1.
-        _check_cancel_signal(sync_run_id)
+    # PR4a (#1472): ONE run-scoped autocommit conn for every per-layer read
+    # gate-check (cancel poll, credential health, layer init, dependency
+    # lookup), replacing the prior fresh-connect-per-check-per-layer herd.
+    # Closed in the finally so a SyncCancelled / any raise still releases the
+    # slot. Audit WRITES keep their own fresh conns (see _GateCheckConnection
+    # docstring). Only one sync run executes at a time (orchestrator advisory
+    # lock + sync_runs single-running unique index), so only one gate conn
+    # ever exists.
+    gate_conn = _GateCheckConnection()
+    try:
+        for layer_plan in plan.layers_to_refresh:
+            # Cancel checkpoint (#1078 — admin control hub PR6).
+            # Spec §"Cancel — cooperative" / §"sync_runs analogue":
+            # cancel between layers in the DAG fixed-point loop. Mid-layer
+            # cancel is NOT supported; the layer body runs to completion.
+            # Worst-case observation latency = duration of the longest
+            # in-flight layer. Acceptable v1.
+            _check_cancel_signal(sync_run_id, gate_conn=gate_conn)
 
-        upstream_outcomes = _build_upstream_outcomes(layer_plan, outcomes)
+            upstream_outcomes = _build_upstream_outcomes(layer_plan, outcomes, gate_conn=gate_conn)
 
-        # Pre-flight gate #1 — credential health (#977 / #974/C).
-        # Layers tagged ``requires_broker_credential=True`` PREREQ_SKIP
-        # when the operator's aggregate health is anything other than
-        # VALID. Stops the cascade where every credential-using layer
-        # 401s on each tick before the operator has even fixed their
-        # keys.
-        cred_skip = _credential_health_blocks(layer_plan)
-        if cred_skip is not None:
+            # Pre-flight gate #1 — credential health (#977 / #974/C).
+            # Layers tagged ``requires_broker_credential=True`` PREREQ_SKIP
+            # when the operator's aggregate health is anything other than
+            # VALID. Stops the cascade where every credential-using layer
+            # 401s on each tick before the operator has even fixed their
+            # keys.
+            cred_skip = _credential_health_blocks(layer_plan, gate_conn=gate_conn)
+            if cred_skip is not None:
+                for emit in layer_plan.emits:
+                    _record_layer_skipped(sync_run_id, emit, cred_skip)
+                    outcomes[emit] = LayerOutcome.PREREQ_SKIP
+                continue
+
+            # Pre-flight gate #2 — layer initialization (#977 / #974/C).
+            # Layers tagged ``requires_layer_initialized=("dep",)`` skip
+            # until ``INIT_CHECKS["dep"]`` returns true. Used by
+            # portfolio_sync to wait for ``instruments`` to be non-empty
+            # before writing positions (FK constraint).
+            init_skip = _layer_initialization_blocks(layer_plan, gate_conn=gate_conn)
+            if init_skip is not None:
+                for emit in layer_plan.emits:
+                    _record_layer_skipped(sync_run_id, emit, init_skip)
+                    outcomes[emit] = LayerOutcome.PREREQ_SKIP
+                continue
+
+            blocking_failure = _blocking_dependency_failed(layer_plan, upstream_outcomes)
+            if blocking_failure is not None:
+                for emit in layer_plan.emits:
+                    _record_layer_skipped(sync_run_id, emit, blocking_failure)
+                    outcomes[emit] = LayerOutcome.DEP_SKIPPED
+                continue
+
             for emit in layer_plan.emits:
-                _record_layer_skipped(sync_run_id, emit, cred_skip)
-                outcomes[emit] = LayerOutcome.PREREQ_SKIP
-            continue
+                _record_layer_started(sync_run_id, emit)
 
-        # Pre-flight gate #2 — layer initialization (#977 / #974/C).
-        # Layers tagged ``requires_layer_initialized=("dep",)`` skip
-        # until ``INIT_CHECKS["dep"]`` returns true. Used by
-        # portfolio_sync to wait for ``instruments`` to be non-empty
-        # before writing positions (FK constraint).
-        init_skip = _layer_initialization_blocks(layer_plan)
-        if init_skip is not None:
-            for emit in layer_plan.emits:
-                _record_layer_skipped(sync_run_id, emit, init_skip)
-                outcomes[emit] = LayerOutcome.PREREQ_SKIP
-            continue
+            # Invoke adapter via LAYERS[emits[0]].refresh (all emits of a
+            # composite share a single refresh callable per spec §2.3.1).
+            refresh = LAYERS[layer_plan.emits[0]].refresh
+            try:
+                results = refresh(
+                    sync_run_id=sync_run_id,
+                    progress=_make_progress_callback(sync_run_id, layer_plan.emits),
+                    upstream_outcomes=upstream_outcomes,
+                )
+            except Exception as exc:
+                logger.exception("layer %s failed", layer_plan.name)
+                for emit in layer_plan.emits:
+                    _record_layer_failed(sync_run_id, emit, error=exc)
+                    outcomes[emit] = LayerOutcome.FAILED
+                continue
 
-        blocking_failure = _blocking_dependency_failed(layer_plan, upstream_outcomes)
-        if blocking_failure is not None:
-            for emit in layer_plan.emits:
-                _record_layer_skipped(sync_run_id, emit, blocking_failure)
-                outcomes[emit] = LayerOutcome.DEP_SKIPPED
-            continue
+            # Contract guard: adapter must return exactly the planned emits.
+            returned_names = [name for name, _ in results]
+            if sorted(returned_names) != sorted(layer_plan.emits) or len(set(returned_names)) != len(returned_names):
+                logger.error(
+                    "layer %s violated refresh contract: emits=%s returned=%s",
+                    layer_plan.name,
+                    layer_plan.emits,
+                    returned_names,
+                )
+                # Sort BOTH sequences so the message text is deterministic
+                # across worker restarts. `set` repr ordering is
+                # hash-seed-dependent (PYTHONHASHSEED varies per process),
+                # which would otherwise make the #645 error_fingerprint
+                # for the same contract violation hash to a different value
+                # on every restart and defeat the repeat-grouping intent.
+                contract_exc = RuntimeError(
+                    f"refresh contract violation: expected {sorted(layer_plan.emits)}, got {sorted(returned_names)}"
+                )
+                for emit in layer_plan.emits:
+                    _record_layer_failed(sync_run_id, emit, error=contract_exc)
+                    outcomes[emit] = LayerOutcome.FAILED
+                continue
 
-        for emit in layer_plan.emits:
-            _record_layer_started(sync_run_id, emit)
+            for emit, result in results:
+                _record_layer_result(sync_run_id, emit, result)
+                outcomes[emit] = result.outcome
 
-        # Invoke adapter via LAYERS[emits[0]].refresh (all emits of a
-        # composite share a single refresh callable per spec §2.3.1).
-        refresh = LAYERS[layer_plan.emits[0]].refresh
-        try:
-            results = refresh(
-                sync_run_id=sync_run_id,
-                progress=_make_progress_callback(sync_run_id, layer_plan.emits),
-                upstream_outcomes=upstream_outcomes,
-            )
-        except Exception as exc:
-            logger.exception("layer %s failed", layer_plan.name)
-            for emit in layer_plan.emits:
-                _record_layer_failed(sync_run_id, emit, error=exc)
-                outcomes[emit] = LayerOutcome.FAILED
-            continue
-
-        # Contract guard: adapter must return exactly the planned emits.
-        returned_names = [name for name, _ in results]
-        if sorted(returned_names) != sorted(layer_plan.emits) or len(set(returned_names)) != len(returned_names):
-            logger.error(
-                "layer %s violated refresh contract: emits=%s returned=%s",
-                layer_plan.name,
-                layer_plan.emits,
-                returned_names,
-            )
-            # Sort BOTH sequences so the message text is deterministic
-            # across worker restarts. `set` repr ordering is
-            # hash-seed-dependent (PYTHONHASHSEED varies per process),
-            # which would otherwise make the #645 error_fingerprint
-            # for the same contract violation hash to a different value
-            # on every restart and defeat the repeat-grouping intent.
-            contract_exc = RuntimeError(
-                f"refresh contract violation: expected {sorted(layer_plan.emits)}, got {sorted(returned_names)}"
-            )
-            for emit in layer_plan.emits:
-                _record_layer_failed(sync_run_id, emit, error=contract_exc)
-                outcomes[emit] = LayerOutcome.FAILED
-            continue
-
-        for emit, result in results:
-            _record_layer_result(sync_run_id, emit, result)
-            outcomes[emit] = result.outcome
-
-    # Codex pre-push review #1 (#1078): cancel signal arriving DURING
-    # the final layer was previously dropped — the per-iteration
-    # checkpoint runs only at the TOP of each layer, so a stop request
-    # inserted mid-final-layer left ``process_stop_requests.completed_at``
-    # NULL and ``sync_runs.status='complete'`` (or partial). Add a
-    # post-loop checkpoint so a late cancel still observes + transitions
-    # the run to ``cancelled`` (with all layers terminal — counts stay
-    # honest via the cancel-branch finalizer).
-    _check_cancel_signal(sync_run_id)
+        # Codex pre-push review #1 (#1078): cancel signal arriving DURING
+        # the final layer was previously dropped — the per-iteration
+        # checkpoint runs only at the TOP of each layer, so a stop request
+        # inserted mid-final-layer left ``process_stop_requests.completed_at``
+        # NULL and ``sync_runs.status='complete'`` (or partial). Add a
+        # post-loop checkpoint so a late cancel still observes + transitions
+        # the run to ``cancelled`` (with all layers terminal — counts stay
+        # honest via the cancel-branch finalizer).
+        _check_cancel_signal(sync_run_id, gate_conn=gate_conn)
+    finally:
+        gate_conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -482,14 +559,19 @@ def _run_layers_loop(
 # ---------------------------------------------------------------------------
 
 
-def _credential_health_blocks(layer: LayerPlan) -> str | None:
+def _credential_health_blocks(
+    layer: LayerPlan,
+    *,
+    gate_conn: _GateCheckConnection | None = None,
+) -> str | None:
     """Return skip_reason if any emit needs broker creds and aggregate != VALID.
 
-    Reads operator credential health on a fresh autocommit connection
-    per gate check. Per-tick DB hit is acceptable because the
-    orchestrator runs as discrete sync ticks, not per-request. The
-    cache at ``app.services.credential_health_cache`` exists for the
-    request-path consumers (admin UI, WS subscriber) where DB latency
+    Reads operator credential health on the run-scoped gate-check conn
+    (``gate_conn``, PR4a) when called from ``_run_layers_loop``, else on a
+    fresh autocommit connection (standalone / test callers). Per-tick DB hit
+    is acceptable because the orchestrator runs as discrete sync ticks, not
+    per-request. The cache at ``app.services.credential_health_cache`` exists
+    for the request-path consumers (admin UI, WS subscriber) where DB latency
     matters; the orchestrator goes direct.
 
     Environment scoping (review #983 BLOCKING): gates on EVERY
@@ -515,7 +597,7 @@ def _credential_health_blocks(layer: LayerPlan) -> str | None:
         return None
 
     try:
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with _gate_check_conn(gate_conn) as conn:
             try:
                 op_id = sole_operator_id(conn)
             except (NoOperatorError, AmbiguousOperatorError) as exc:
@@ -566,12 +648,19 @@ def _operator_active_environments(
         return [row[0] for row in cur.fetchall()]
 
 
-def _layer_initialization_blocks(layer: LayerPlan) -> str | None:
+def _layer_initialization_blocks(
+    layer: LayerPlan,
+    *,
+    gate_conn: _GateCheckConnection | None = None,
+) -> str | None:
     """Return skip_reason if any required init-dep is not content-initialized.
 
     INIT_CHECKS is a registry mapping layer name -> SQL EXISTS query.
     Each requires_layer_initialized entry must have an INIT_CHECKS
     mapping or the gate fails closed (logged + skipped).
+
+    Reads on the run-scoped gate-check conn (``gate_conn``, PR4a) when called
+    from ``_run_layers_loop``, else a fresh autocommit conn.
     """
     from app.services.sync_orchestrator.registry import LAYERS
 
@@ -582,7 +671,7 @@ def _layer_initialization_blocks(layer: LayerPlan) -> str | None:
         return None
 
     try:
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with _gate_check_conn(gate_conn) as conn:
             with conn.cursor() as cur:
                 for dep_name in sorted(init_deps):  # deterministic order
                     init_sql = INIT_CHECKS.get(dep_name)
@@ -645,20 +734,29 @@ def _blocking_dependency_failed(
 def _build_upstream_outcomes(
     layer_plan: LayerPlan,
     outcomes: dict[str, LayerOutcome],
+    *,
+    gate_conn: _GateCheckConnection | None = None,
 ) -> Mapping[str, LayerOutcome]:
     """Resolve dependency outcomes: in-run map first, else last-counting
     job_runs row. Missing deps (never-run) default to FAILED so they
-    cannot pass the blocking gate silently."""
+    cannot pass the blocking gate silently.
+
+    ``gate_conn`` (PR4a) threads the run-scoped gate-check conn to the
+    per-dep job_runs lookup."""
     resolved: dict[str, LayerOutcome] = {}
     for dep in layer_plan.dependencies:
         if dep in outcomes:
             resolved[dep] = outcomes[dep]
         else:
-            resolved[dep] = _last_counting_outcome_from_job_runs(dep)
+            resolved[dep] = _last_counting_outcome_from_job_runs(dep, gate_conn=gate_conn)
     return resolved
 
 
-def _last_counting_outcome_from_job_runs(layer_name: str) -> LayerOutcome:
+def _last_counting_outcome_from_job_runs(
+    layer_name: str,
+    *,
+    gate_conn: _GateCheckConnection | None = None,
+) -> LayerOutcome:
     """Read last counting job_runs row for the job that emits layer_name,
     convert to LayerOutcome. Used when the dep was already fresh and not
     planned in this sync run."""
@@ -673,8 +771,10 @@ def _last_counting_outcome_from_job_runs(layer_name: str) -> LayerOutcome:
 
     # autocommit=True per orchestrator convention — SELECT must not leave
     # an idle implicit transaction open across dependency-resolution
-    # calls during the _run_layers_loop walk.
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    # calls during the _run_layers_loop walk. PR4a: reuse the run-scoped
+    # gate-check conn (``gate_conn``) when called from the walk, else open
+    # a fresh autocommit conn (standalone / test callers).
+    with _gate_check_conn(gate_conn) as conn:
         row = conn.execute(
             """
             SELECT status, row_count, error_msg
@@ -701,7 +801,11 @@ def _last_counting_outcome_from_job_runs(layer_name: str) -> LayerOutcome:
 # ---------------------------------------------------------------------------
 
 
-def _check_cancel_signal(sync_run_id: int) -> None:
+def _check_cancel_signal(
+    sync_run_id: int,
+    *,
+    gate_conn: _GateCheckConnection | None = None,
+) -> None:
     """Poll ``process_stop_requests`` between layers; raise on observation.
 
     Issue #1078 (umbrella #1064) — admin control hub PR6.
@@ -724,12 +828,21 @@ def _check_cancel_signal(sync_run_id: int) -> None:
          slot for future cancels.
       4. raise ``SyncCancelled``.
 
-    Each call opens its own short-lived autocommit conn — the orchestrator
-    convention (see other audit writers) where every poll is its own
-    transaction so a long-running adapter doesn't carry a stale read
-    snapshot.
+    PR4a (#1472): when called from ``_run_layers_loop`` this reuses the
+    run-scoped autocommit gate-check conn (``gate_conn``); standalone / test
+    callers (``gate_conn=None``) open a fresh autocommit conn. Either way the
+    conn is ``autocommit=True``, so every poll is its own snapshot (no stale
+    read carried across a long-running adapter) AND the cancel-observation
+    write below is a real BEGIN/COMMIT that durably commits before the raise.
     """
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with _gate_check_conn(gate_conn) as conn:
+        # Durable cancel-before-raise (Codex PR4a-review #2/#3) requires a
+        # real BEGIN/COMMIT, which ``conn.transaction()`` only issues on an
+        # autocommit conn; on a non-autocommit borrowed conn it would be a
+        # SAVEPOINT inside a caller tx that a later rollback could discard.
+        # Both gate_conn paths guarantee autocommit — assert rather than
+        # silently risk a stranded ``observed_at IS NULL`` stop row.
+        assert conn.autocommit, "cancel checkpoint requires an autocommit connection"
         stop = is_stop_requested(
             conn,
             target_run_kind="sync_run",
