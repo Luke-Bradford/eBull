@@ -9,6 +9,7 @@ isolated.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -54,6 +55,26 @@ def _mock_conn_with_lookup(row: object) -> MagicMock:
     return conn
 
 
+@contextmanager
+def _fake_db_pool(conn: object) -> Iterator[None]:
+    """Install a fake ``app.state.db_pool`` whose ``.connection()`` yields ``conn``.
+
+    #1472 PR2: the intraday route now drives ``get_conn`` by hand so it can
+    release the pooled conn BEFORE the eToro REST call. Manual-drive reads
+    ``app.state.db_pool`` directly, bypassing ``dependency_overrides``
+    (prevention-log #267), so the conn must be injected via a fake pool.
+    """
+    pool = MagicMock()
+    pool.connection.return_value.__enter__.return_value = conn
+    pool.connection.return_value.__exit__.return_value = None
+    saved = getattr(app.state, "db_pool", None)
+    app.state.db_pool = pool
+    try:
+        yield
+    finally:
+        app.state.db_pool = saved
+
+
 def _bar(close: str = "100.5") -> IntradayBar:
     return IntradayBar(
         timestamp=datetime(2026, 4, 27, 14, 30, tzinfo=UTC),
@@ -70,95 +91,58 @@ _DEFAULT_CRED_SECRETS = ("api-key-value", "user-key-value")
 
 
 def test_intraday_unknown_symbol_returns_404(client: TestClient) -> None:
-    from app.db import get_conn
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _mock_conn_with_lookup(None)
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
+    with _fake_db_pool(_mock_conn_with_lookup(None)):
         resp = client.get("/instruments/NOTREAL/intraday-candles?interval=OneMinute&count=100")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
     assert resp.status_code == 404
 
 
 def test_intraday_invalid_interval_returns_422(client: TestClient) -> None:
-    from app.db import get_conn
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield MagicMock()
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
+    # 422 fires at FastAPI Query validation, before the handler / any conn.
+    with _fake_db_pool(MagicMock()):
         resp = client.get("/instruments/AAPL/intraday-candles?interval=BogusInterval&count=100")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
     assert resp.status_code == 422
 
 
 def test_intraday_count_above_cap_returns_422(client: TestClient) -> None:
-    from app.db import get_conn
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield MagicMock()
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
+    # 422 fires at FastAPI Query validation, before the handler / any conn.
+    with _fake_db_pool(MagicMock()):
         resp = client.get("/instruments/AAPL/intraday-candles?interval=OneMinute&count=99999")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
     assert resp.status_code == 422
 
 
 def test_intraday_missing_credentials_returns_503(client: TestClient) -> None:
-    from app.db import get_conn
     from app.services.broker_credentials import CredentialNotFound
 
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        with (
-            patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
-            patch(
-                "app.api.instruments.load_credential_for_provider_use",
-                side_effect=CredentialNotFound("api_key not configured"),
-            ),
-        ):
-            resp = client.get("/instruments/AAPL/intraday-candles?interval=OneMinute&count=100")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
+    with (
+        _fake_db_pool(_mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})),
+        patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
+        patch(
+            "app.api.instruments.load_credential_for_provider_use",
+            side_effect=CredentialNotFound("api_key not configured"),
+        ),
+    ):
+        resp = client.get("/instruments/AAPL/intraday-candles?interval=OneMinute&count=100")
     assert resp.status_code == 503
     assert "credentials" in resp.text.lower()
 
 
 def test_intraday_happy_path_returns_bars_with_iso_timestamps(client: TestClient) -> None:
-    from app.db import get_conn
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        with (
-            patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
-            patch(
-                "app.api.instruments.load_credential_for_provider_use",
-                side_effect=list(_DEFAULT_CRED_SECRETS),
-            ),
-            patch("app.api.instruments.EtoroMarketDataProvider") as MockProv,
-        ):
-            mock_provider = MagicMock()
-            mock_provider.__enter__.return_value = mock_provider
-            mock_provider.get_intraday_candles.return_value = [_bar("180.50")]
-            MockProv.return_value = mock_provider
-            resp = client.get(
-                "/instruments/AAPL/intraday-candles?interval=OneMinute&count=100",
-            )
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
+    with (
+        _fake_db_pool(_mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})),
+        patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
+        patch(
+            "app.api.instruments.load_credential_for_provider_use",
+            side_effect=list(_DEFAULT_CRED_SECRETS),
+        ),
+        patch("app.api.instruments.EtoroMarketDataProvider") as MockProv,
+    ):
+        mock_provider = MagicMock()
+        mock_provider.__enter__.return_value = mock_provider
+        mock_provider.get_intraday_candles.return_value = [_bar("180.50")]
+        MockProv.return_value = mock_provider
+        resp = client.get(
+            "/instruments/AAPL/intraday-candles?interval=OneMinute&count=100",
+        )
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -175,97 +159,73 @@ def test_intraday_happy_path_returns_bars_with_iso_timestamps(client: TestClient
 
 
 def test_intraday_rate_limit_returns_503_with_retry_after(client: TestClient) -> None:
-    from app.db import get_conn
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        with (
-            patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
-            patch(
-                "app.api.instruments.load_credential_for_provider_use",
-                side_effect=list(_DEFAULT_CRED_SECRETS),
-            ),
-            patch("app.api.instruments.EtoroMarketDataProvider") as MockProv,
-        ):
-            mock_provider = MagicMock()
-            mock_provider.__enter__.return_value = mock_provider
-            response_429 = httpx.Response(429, headers={"Retry-After": "60"}, request=httpx.Request("GET", "https://x"))
-            mock_provider.get_intraday_candles.side_effect = httpx.HTTPStatusError(
-                "rate limited", request=response_429.request, response=response_429
-            )
-            MockProv.return_value = mock_provider
-            resp = client.get(
-                "/instruments/AAPL/intraday-candles?interval=OneMinute&count=100",
-            )
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
+    with (
+        _fake_db_pool(_mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})),
+        patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
+        patch(
+            "app.api.instruments.load_credential_for_provider_use",
+            side_effect=list(_DEFAULT_CRED_SECRETS),
+        ),
+        patch("app.api.instruments.EtoroMarketDataProvider") as MockProv,
+    ):
+        mock_provider = MagicMock()
+        mock_provider.__enter__.return_value = mock_provider
+        response_429 = httpx.Response(429, headers={"Retry-After": "60"}, request=httpx.Request("GET", "https://x"))
+        mock_provider.get_intraday_candles.side_effect = httpx.HTTPStatusError(
+            "rate limited", request=response_429.request, response=response_429
+        )
+        MockProv.return_value = mock_provider
+        resp = client.get(
+            "/instruments/AAPL/intraday-candles?interval=OneMinute&count=100",
+        )
 
     assert resp.status_code == 503
     assert resp.headers.get("retry-after") == "60"
 
 
 def test_intraday_provider_5xx_returns_502(client: TestClient) -> None:
-    from app.db import get_conn
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        with (
-            patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
-            patch(
-                "app.api.instruments.load_credential_for_provider_use",
-                side_effect=list(_DEFAULT_CRED_SECRETS),
-            ),
-            patch("app.api.instruments.EtoroMarketDataProvider") as MockProv,
-        ):
-            mock_provider = MagicMock()
-            mock_provider.__enter__.return_value = mock_provider
-            response_500 = httpx.Response(500, request=httpx.Request("GET", "https://x"))
-            mock_provider.get_intraday_candles.side_effect = httpx.HTTPStatusError(
-                "server error", request=response_500.request, response=response_500
-            )
-            MockProv.return_value = mock_provider
-            resp = client.get(
-                "/instruments/AAPL/intraday-candles?interval=OneMinute&count=100",
-            )
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
+    with (
+        _fake_db_pool(_mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})),
+        patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
+        patch(
+            "app.api.instruments.load_credential_for_provider_use",
+            side_effect=list(_DEFAULT_CRED_SECRETS),
+        ),
+        patch("app.api.instruments.EtoroMarketDataProvider") as MockProv,
+    ):
+        mock_provider = MagicMock()
+        mock_provider.__enter__.return_value = mock_provider
+        response_500 = httpx.Response(500, request=httpx.Request("GET", "https://x"))
+        mock_provider.get_intraday_candles.side_effect = httpx.HTTPStatusError(
+            "server error", request=response_500.request, response=response_500
+        )
+        MockProv.return_value = mock_provider
+        resp = client.get(
+            "/instruments/AAPL/intraday-candles?interval=OneMinute&count=100",
+        )
 
     assert resp.status_code == 502
 
 
 def test_intraday_second_call_within_ttl_skips_provider(client: TestClient) -> None:
     """Two successive requests should hit the provider once, not twice."""
-    from app.db import get_conn
+    with (
+        _fake_db_pool(_mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})),
+        patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
+        # Cred patch returns 4 secrets — 2 per request × 2 requests.
+        patch(
+            "app.api.instruments.load_credential_for_provider_use",
+            side_effect=["api-key", "user-key", "api-key", "user-key"],
+        ),
+        patch("app.api.instruments.EtoroMarketDataProvider") as MockProv,
+    ):
+        mock_provider = MagicMock()
+        mock_provider.__enter__.return_value = mock_provider
+        mock_provider.get_intraday_candles.return_value = [_bar()]
+        MockProv.return_value = mock_provider
 
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _mock_conn_with_lookup({"instrument_id": 42, "symbol": "AAPL"})
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        with (
-            patch("app.api.instruments.sole_operator_id", return_value=_OPERATOR_ID),
-            # Cred patch returns 4 secrets — 2 per request × 2 requests.
-            patch(
-                "app.api.instruments.load_credential_for_provider_use",
-                side_effect=["api-key", "user-key", "api-key", "user-key"],
-            ),
-            patch("app.api.instruments.EtoroMarketDataProvider") as MockProv,
-        ):
-            mock_provider = MagicMock()
-            mock_provider.__enter__.return_value = mock_provider
-            mock_provider.get_intraday_candles.return_value = [_bar()]
-            MockProv.return_value = mock_provider
-
-            r1 = client.get("/instruments/AAPL/intraday-candles?interval=OneMinute&count=100")
-            r2 = client.get("/instruments/AAPL/intraday-candles?interval=OneMinute&count=100")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
+        r1 = client.get("/instruments/AAPL/intraday-candles?interval=OneMinute&count=100")
+        r2 = client.get("/instruments/AAPL/intraday-candles?interval=OneMinute&count=100")
 
     assert r1.status_code == 200
     assert r2.status_code == 200

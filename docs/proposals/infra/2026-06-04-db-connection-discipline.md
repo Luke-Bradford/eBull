@@ -36,8 +36,18 @@ Mirror the existing `check_max_locks_per_transaction` (#1187) in `app/db/pg_sett
 - Tests: guard passes at the real config; raises when a synthetic over-budget config is injected.
 - **Acceptance:** boot refuses to start when the configured demand cannot fit the dev profile — a mathematically-impossible config can never again silently degrade at runtime.
 
-### PR2 — connection-lifetime audit + fixes + right-size the API pool  *(one PR: audit → fix → shrink, in order)*
+### PR2 — connection-lifetime audit + fixes + right-size the API pool  *(audit → fix → shrink)*
 Restructured so it is independently safe (Codex ckpt-1 #3, #4): the shrink does NOT land until the audit is clean.
+
+**Audit outcome (2026-06-05).** Full request-call-graph trace found **4** routes holding a pooled `db_pool` conn (via `Depends(get_conn)`, a generator dependency → conn held for the whole body) across external HTTP:
+- **V1** `GET /instruments/{symbol}/intraday-candles` → eToro REST. **Idle-hold** (conn used only for DB reads before the call). **FIXED** — drops `Depends(get_conn)`, drives get_conn by hand, releases via `gen.close()` before the eToro call (prevention-log #267).
+- **V2** `POST /broker-credentials/validate-stored` → eToro probe. **Idle-hold** (post-probe health write-through already uses a fresh pool conn). **FIXED** — same pattern.
+- **V3** `GET /instruments/{symbol}/eight_k_filings/{accession}/body` → SEC EDGAR. **Structural** — `fetch_eight_k_body_now` holds a per-accession `pg_advisory_lock` ON the conn across the SEC fetch (`eight_k_events.py:637→670`). Session-scoped lock ⇒ cannot release without dropping it. **DEFERRED → #1492** (filings-ETL lock/fetch reorder; drags DoD clauses 8-12).
+- **V4** `GET /instruments/{symbol}/business_sections` → SEC EDGAR. Same advisory-lock-across-fetch shape (`business_summary.py:1058→1092`). **DEFERRED → #1492.**
+
+**Lint/test gate:** `scripts/check_pooled_conn_across_http.py` (+ `.sh`, wired into pre-push + ci.yml; `tests/lint/test_check_pooled_conn_across_http.py`) flags any `Depends(get_conn)` route referencing an external-provider HTTP marker. V3/V4 are on the script's ALLOWLIST tied to #1492 — removed when #1492 lands, at which point the guard re-arms.
+
+**SHRINK DEFERRED (operator decision 2026-06-05).** This PR lands the V1/V2 fixes + the guard + #1492 ONLY. The shrink (`db_pool` 10→4, `audit_pool` 2→1) is **held until #1492 closes V3/V4**, so the shrink never lands with a known conn-across-I/O violation outstanding. Strict reading of "fix all violations before shrinking." The shrink + `_dev_profile_connection_demand` arithmetic (already constant-derived, so a one-line change of the two `pool.py` constants) moves to a follow-up PR after #1492.
 - **Step 1 — contract-based audit (blocking):** the contract is *no checked-out pooled connection may span slow external I/O, `sleep`/long-poll, or any unbounded work — anywhere in the request call graph*, not just the route body (services/helpers reached by the route count). `psycopg_pool` `timeout=15` + default `max_waiting=0` means a shrunk pool **queues** waiters (block-then-`PoolTimeout`), it does not drop them — so a conn held across eToro/SEC/GLEIF I/O becomes a latency stall under a smaller pool. Produce a **recorded manual trace** of the high-risk routes (anything that calls an external provider) + a lint/test that flags a pooled conn held across an outbound HTTP call.
 - **Step 2 — fix any violations** found (release the conn around the external call) *before* shrinking. If none, record "audit clean."
 - **Step 3 — shrink:** `db_pool` `max_size 10→4`, `audit_pool` `max_size 2→1` (`app/main.py:234,246`), via the PR1 named constants.
@@ -88,7 +98,9 @@ Triage of #1474 (operator-console "stale") proved the herd has a **second, more 
 - **GAP-D — liveness watchdog (silent-failure alarm).** The freeze was invisible ~21h and read as healthy. Operationalise the ops-monitor mandate ("silent failure = failure"): a watchdog comparing **expected fires (cadence) vs actual `job_runs`** per job; alert on a gap ≥K cycles. This is the guard that CATCHES a recurrence regardless of mechanism. New work item under the #1472 umbrella.
 
 ### Revised sequence
-`PR0 (PGCONNECT_TIMEOUT env)` → `PR1 (boot guard)` → `PR4a-bis (scheduled-fire prelude: collapse gate+prereq to ONE connection + scoped statement_timeout — the validated freeze surface, moved up per Codex)` → `PR2 (audit + shrink)` → `PR4a ∥ PR3` → `PR4b (bounded bg pool + hard-recreate self-heal)` → `PR4c (sweep)` → `PR-visibility (EVENT_JOB_MAX_INSTANCES listener + liveness watchdog + job_runs orphan reaper)`.
+`PR0 (PGCONNECT_TIMEOUT env)` → `PR1 (boot guard)` → `PR4a-bis (scheduled-fire prelude: collapse gate+prereq to ONE connection + scoped statement_timeout — the validated freeze surface, moved up per Codex)` → `PR2a (audit + V1/V2 fixes + guard)` → `#1492 (V3/V4 SEC lazy-fill lock/fetch reorder)` → `PR2b (shrink db_pool 10→4 / audit_pool 2→1 once audit fully clean)` → `PR4a ∥ PR3` → `PR4b (bounded bg pool + hard-recreate self-heal)` → `PR4c (sweep)` → `PR-visibility (EVENT_JOB_MAX_INSTANCES listener + liveness watchdog + job_runs orphan reaper)`.
+
+(PR2 was split per the operator's 2026-06-05 decision: land the audit + clean idle-hold fixes + the lint gate now (**PR2a**), hold the shrink (**PR2b**) until #1492 closes the two structural V3/V4 violations, so the shrink never lands with a known conn-across-I/O violation outstanding.)
 (With PR0 landed, the wedge is already *prevented*; PR4a-bis additionally removes those per-fire connects from the cadence-boundary herd that makes SCRAM auth slow.)
 
 ### Immediate operational relief (separate from code)

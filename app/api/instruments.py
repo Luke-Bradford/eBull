@@ -803,7 +803,6 @@ def get_instrument_intraday_candles(
     symbol: str,
     interval: IntradayInterval = Query(default="OneMinute"),
     count: int = Query(default=390, ge=1, le=_MAX_INTRADAY_COUNT),
-    conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> InstrumentIntradayCandles:
     """Provider-backed intraday OHLCV bars.
 
@@ -833,63 +832,85 @@ def get_instrument_intraday_candles(
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    # Symbol → instrument_id (primary-listing tiebreaker, matches
-    # the daily endpoint).
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT instrument_id, symbol FROM instruments
-            WHERE UPPER(symbol) = %(s)s
-            ORDER BY is_primary_listing DESC, instrument_id ASC
-            LIMIT 1
-            """,
-            {"s": symbol_clean},
-        )
-        inst_row = cur.fetchone()
-
-    if inst_row is None:
-        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
-
-    # Load eToro credentials. #111: pass the pool so the audit row
-    # is written on a side connection — durable independent of this
-    # handler's transaction state, so network failures on the
-    # external eToro call cannot drop the audit trail.
-    try:
-        op_id = sole_operator_id(conn)
-    except (NoOperatorError, AmbiguousOperatorError) as exc:
-        logger.warning("intraday-candles: operator lookup failed: %s", exc)
-        raise HTTPException(status_code=503, detail="No operator configured") from exc
-
     # #111: dedicated audit pool from lifespan; falls back to None
     # for tests that don't set up app.state (legacy caller-conn audit).
     audit_pool = getattr(request.app.state, "audit_pool", None)
-    try:
-        api_key = load_credential_for_provider_use(
-            conn,
-            operator_id=op_id,
-            provider="etoro",
-            label="api_key",
-            environment=settings.etoro_env,
-            caller="intraday_candles_endpoint",
-            audit_pool=audit_pool,
-        )
-        user_key = load_credential_for_provider_use(
-            conn,
-            operator_id=op_id,
-            provider="etoro",
-            label="user_key",
-            environment=settings.etoro_env,
-            caller="intraday_candles_endpoint",
-            audit_pool=audit_pool,
-        )
-    except CredentialNotFound as exc:
-        logger.warning("intraday-candles: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail="eToro credentials not configured",
-        ) from exc
 
-    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    # #1472 PR2: the pooled connection MUST NOT be held across the eToro
+    # REST call below — a conn pinned across external I/O stalls a small
+    # pool (block-then-PoolTimeout, max_waiting=0). Drive get_conn by hand
+    # so its pool-from-state + 503 mapping (#717) is reused, do all DB
+    # reads inside this scope, then release the conn via gen.close() BEFORE
+    # the external call. Materialized reads (inst_row, plaintext keys)
+    # survive the release — they are plain data, not cursor-backed.
+    gen = get_conn(request)
+    conn = next(gen)
+    try:
+        # Symbol → instrument_id (primary-listing tiebreaker, matches
+        # the daily endpoint).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, symbol FROM instruments
+                WHERE UPPER(symbol) = %(s)s
+                ORDER BY is_primary_listing DESC, instrument_id ASC
+                LIMIT 1
+                """,
+                {"s": symbol_clean},
+            )
+            inst_row = cur.fetchone()
+
+        if inst_row is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+        # Load eToro credentials. #111: pass the pool so the audit row
+        # is written on a side connection — durable independent of this
+        # handler's transaction state, so network failures on the
+        # external eToro call cannot drop the audit trail.
+        try:
+            op_id = sole_operator_id(conn)
+        except (NoOperatorError, AmbiguousOperatorError) as exc:
+            logger.warning("intraday-candles: operator lookup failed: %s", exc)
+            raise HTTPException(status_code=503, detail="No operator configured") from exc
+
+        try:
+            api_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="api_key",
+                environment=settings.etoro_env,
+                caller="intraday_candles_endpoint",
+                audit_pool=audit_pool,
+            )
+            user_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="user_key",
+                environment=settings.etoro_env,
+                caller="intraday_candles_endpoint",
+                audit_pool=audit_pool,
+            )
+        except CredentialNotFound as exc:
+            logger.warning("intraday-candles: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="eToro credentials not configured",
+            ) from exc
+
+        symbol_out = str(inst_row["symbol"])  # type: ignore[arg-type]
+        instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+        # Commit the caller-conn write before releasing. load_credential_
+        # for_provider_use UPDATEs broker_credentials.last_used_at on this
+        # conn (caller owns the commit). gen.close() injects GeneratorExit
+        # at get_conn's yield, so pool.connection()'s `with conn:` exits
+        # via exception → ROLLS BACK — which would silently drop last_used_at
+        # (Codex ckpt-2). Mirror validate-stored: commit before close.
+        conn.commit()
+    finally:
+        gen.close()
 
     try:
         with EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider:
@@ -920,7 +941,7 @@ def get_instrument_intraday_candles(
         raise HTTPException(status_code=502, detail="Upstream provider unreachable") from exc
 
     return InstrumentIntradayCandles(
-        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        symbol=symbol_out,
         interval=interval,
         # Echo the actual number of bars returned, not the operator's
         # request — eToro can return fewer than `count` near market
