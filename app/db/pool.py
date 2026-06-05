@@ -49,11 +49,15 @@ _POOL_CONNECTION_KWARGS: dict[str, int] = {
 # guard under-counts and stops bounding real demand. (Settled decision
 # #719 already discourages a third raw pool; this keeps the two in lockstep
 # if one is added through ``open_pool``.)
-DB_POOL_MAX_SIZE: Final[int] = 10
-"""API request pool (``app/main.py``). PR2 of #1472 shrinks 10→4."""
+DB_POOL_MAX_SIZE: Final[int] = 4
+"""API request pool (``app/main.py``). #1472 PR2b shrank 10→4: a single-
+user dev box does not need 10 idle conns, and #1492 ensured no request
+holds a pooled conn across external I/O, so a 4-conn pool no longer
+stalls (block-then-PoolTimeout, ``max_waiting=0``)."""
 
-AUDIT_POOL_MAX_SIZE: Final[int] = 2
-"""API credential-audit pool (``app/main.py``, #111). PR2 shrinks 2→1."""
+AUDIT_POOL_MAX_SIZE: Final[int] = 1
+"""API credential-audit pool (``app/main.py``, #111). #1472 PR2b shrank
+2→1: audit rows are written on a short side connection, one at a time."""
 
 JOBS_POOL_MAX_SIZE: Final[int] = 4
 """Jobs-process pool (``app/jobs/__main__.py``)."""

@@ -153,6 +153,16 @@ _EXPECTED_DEMAND = (
     + CONNECTION_BUDGET_RESERVE
 )
 
+# A cluster config guaranteed OVER budget regardless of the current demand:
+# usable sits a fixed margin below the derived demand. Deriving from
+# _EXPECTED_DEMAND (not a literal max_connections=20) means a pool-size
+# change re-tracks instead of silently turning "over budget" into "fits" —
+# exactly what #1472 PR2b (demand 24→17) would have done to the old
+# usable=17 fixtures (which then equal, not exceed, the new demand).
+_OVER_BUDGET_SUPERUSER_RESERVED = 3
+_OVER_BUDGET_USABLE = _EXPECTED_DEMAND - 5
+_OVER_BUDGET_MAX_CONN = _OVER_BUDGET_USABLE + _OVER_BUDGET_SUPERUSER_RESERVED
+
 
 def _fake_conn_budget(max_conn: int, reserved: int) -> MagicMock:
     """Fake conn answering the two SHOWs ``check_connection_budget`` issues:
@@ -192,9 +202,11 @@ def test_budget_demand_tracks_pool_constants() -> None:
 
 
 def test_budget_fails_when_usable_below_demand() -> None:
-    passes, demand, usable = check_connection_budget(_fake_conn_budget(20, 3), process="api")
+    passes, demand, usable = check_connection_budget(
+        _fake_conn_budget(_OVER_BUDGET_MAX_CONN, _OVER_BUDGET_SUPERUSER_RESERVED), process="api"
+    )
     assert passes is False
-    assert usable == 17
+    assert usable == _OVER_BUDGET_USABLE
     assert demand > usable
 
 
@@ -208,9 +220,11 @@ def test_enforce_budget_raises_when_over_budget_no_override(
 ) -> None:
     monkeypatch.delenv(CONNECTION_BUDGET_OVERRIDE_ENV, raising=False)
     with pytest.raises(ConnectionBudgetExceeded) as exc:
-        enforce_connection_budget(_fake_conn_budget(20, 3), process="jobs")
+        enforce_connection_budget(
+            _fake_conn_budget(_OVER_BUDGET_MAX_CONN, _OVER_BUDGET_SUPERUSER_RESERVED), process="jobs"
+        )
     assert exc.value.process == "jobs"
-    assert exc.value.usable == 17
+    assert exc.value.usable == _OVER_BUDGET_USABLE
     assert exc.value.demand == _EXPECTED_DEMAND
 
 
@@ -220,7 +234,9 @@ def test_enforce_budget_skips_when_env_override_set(
 ) -> None:
     monkeypatch.setenv(CONNECTION_BUDGET_OVERRIDE_ENV, "1")
     with caplog.at_level("WARNING", logger="app.db.pg_settings"):
-        enforce_connection_budget(_fake_conn_budget(20, 3), process="api")  # no raise
+        enforce_connection_budget(
+            _fake_conn_budget(_OVER_BUDGET_MAX_CONN, _OVER_BUDGET_SUPERUSER_RESERVED), process="api"
+        )  # over budget, but override set → no raise
     assert any(
         "running anyway because" in rec.message and CONNECTION_BUDGET_OVERRIDE_ENV in rec.message
         for rec in caplog.records
@@ -243,7 +259,9 @@ def test_budget_exceeded_message_steers_to_shrink_not_raise(
     raising the ceiling as the remediation (the #1472 anti-goal)."""
     monkeypatch.delenv(CONNECTION_BUDGET_OVERRIDE_ENV, raising=False)
     with pytest.raises(ConnectionBudgetExceeded) as exc:
-        enforce_connection_budget(_fake_conn_budget(20, 3), process="jobs")
+        enforce_connection_budget(
+            _fake_conn_budget(_OVER_BUDGET_MAX_CONN, _OVER_BUDGET_SUPERUSER_RESERVED), process="jobs"
+        )
     msg = str(exc.value)
     assert "SHRINK" in msg
     assert "DIAGNOSTIC-ONLY" in msg
