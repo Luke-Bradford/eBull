@@ -356,6 +356,59 @@ def record_job_finish(
     conn.commit()
 
 
+def reap_orphaned_job_runs(
+    conn: psycopg.Connection[Any],
+    *,
+    timeout: timedelta = timedelta(hours=1),
+    reap_all: bool = False,
+) -> int:
+    """Transition stale ``job_runs`` rows stuck in ``status='running'``
+    to ``status='failure'`` so the operator console stops showing them
+    as "RUNNING / NO PROGRESS NNNNm" forever (#1474).
+
+    A ``running`` row survives a jobs-process restart when the worker
+    thread that owned it died without writing a terminal status (e.g. a
+    double-dispatch orphan, ``kill -9``, OOM). ``job_runs`` carries no
+    boot-id, so this mirrors ``reap_orphaned_syncs``: at boot the caller
+    passes ``reap_all=True`` and EVERY ``running`` row is reaped, which
+    is safe because this runs at boot **Step 4** — before boot-drain /
+    ``runtime.start()`` / ``_catch_up`` dispatch any job — so no row can
+    belong to the live process yet. The steady-state ``timeout``
+    predicate exists for a future periodic watchdog; boot uses
+    ``reap_all`` to avoid the timedelta-collapses-to-zero boundary bug
+    the sync reaper documents.
+
+    Takes a caller-owned connection (ops_monitor convention — the boot
+    caller opens an autocommit conn, mirroring the other boot-recovery
+    steps). Returns the count of rows reaped.
+    """
+    # Deferred import: layer_types sits under TYPE_CHECKING at module
+    # level (the sync_orchestrator package re-exports modules that import
+    # back from ops_monitor — a cycle). A local import here breaks the
+    # cycle while keeping the typed constant (no magic 'internal_error'
+    # string) at the one runtime site that needs it.
+    from app.services.sync_orchestrator.layer_types import FailureCategory
+
+    reaped = conn.execute(
+        """
+        UPDATE job_runs
+        SET status = 'failure',
+            finished_at = now(),
+            error_msg = 'orphaned: reaped at boot (owning worker thread died without a terminal status)',
+            error_category = %(category)s
+        WHERE status = 'running'
+          AND (%(reap_all)s OR started_at < now() - %(timeout)s::interval)
+        RETURNING run_id
+        """,
+        {
+            "category": FailureCategory.INTERNAL_ERROR.value,
+            "reap_all": reap_all,
+            "timeout": timeout,
+        },
+    ).fetchall()
+    return len(reaped)
+
+
 def record_job_skip(
     conn: psycopg.Connection[Any],
     job_name: str,

@@ -641,3 +641,55 @@ class TestKillSwitch:
         status = get_kill_switch_status(conn)
         assert status["is_active"] is True
         assert "corrupt" in status["reason"]
+
+
+class TestReapOrphanedJobRuns:
+    """#1474 — orphaned job_runs 'running' reaper."""
+
+    def _conn_returning(self, run_ids: list[tuple[int]]) -> MagicMock:
+        conn = MagicMock()
+        result = MagicMock()
+        result.fetchall.return_value = run_ids
+        conn.execute.return_value = result
+        return conn
+
+    def test_returns_count_of_reaped_rows(self) -> None:
+        from app.services.ops_monitor import reap_orphaned_job_runs
+
+        conn = self._conn_returning([(1,), (67,), (99,)])
+        assert reap_orphaned_job_runs(conn, reap_all=True) == 3
+
+    def test_zero_when_no_running_rows(self) -> None:
+        from app.services.ops_monitor import reap_orphaned_job_runs
+
+        conn = self._conn_returning([])
+        assert reap_orphaned_job_runs(conn, reap_all=True) == 0
+
+    def test_sql_invariants_and_params(self) -> None:
+        """Pin the contract: transitions running→failure, gated on
+        status='running', with the reap_all branch + a typed (not
+        magic-string) error_category."""
+        from app.services.ops_monitor import reap_orphaned_job_runs
+        from app.services.sync_orchestrator.layer_types import FailureCategory
+
+        conn = self._conn_returning([(1,)])
+        reap_orphaned_job_runs(conn, reap_all=True)
+
+        sql, params = conn.execute.call_args[0]
+        assert "UPDATE job_runs" in sql
+        assert "status = 'failure'" in sql
+        assert "WHERE status = 'running'" in sql
+        assert "%(reap_all)s OR started_at < now()" in sql  # reap_all bypasses age
+        assert params["reap_all"] is True
+        assert params["category"] == FailureCategory.INTERNAL_ERROR.value
+
+    def test_age_path_when_not_reap_all(self) -> None:
+        """Default reap_all=False passes the timeout through for the
+        future periodic-watchdog path."""
+        from app.services.ops_monitor import reap_orphaned_job_runs
+
+        conn = self._conn_returning([])
+        reap_orphaned_job_runs(conn, timeout=timedelta(hours=2))
+        _, params = conn.execute.call_args[0]
+        assert params["reap_all"] is False
+        assert params["timeout"] == timedelta(hours=2)

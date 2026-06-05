@@ -76,6 +76,7 @@ from app.jobs.supervisor import supervise
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
 from app.services.credential_health_cache import CredentialHealthCache
+from app.services.ops_monitor import reap_orphaned_job_runs
 from app.services.sync_orchestrator.dispatcher import (
     claim_oldest_pending,
     reset_stale_in_flight,
@@ -990,6 +991,22 @@ def serve(stop_event: threading.Event | None = None) -> int:
                 logger.info("jobs entrypoint: reaper transitioned %d sync_runs row(s)", reaped)
         except Exception:
             logger.exception("jobs entrypoint: reaper failed; continuing")
+
+        # Step 4a (#1474) — orphaned job_runs 'running' reaper. A worker
+        # thread that died without writing a terminal status leaves a
+        # job_runs row stuck 'running' across the restart → the operator
+        # console shows "RUNNING / NO PROGRESS NNNNm" forever (e.g.
+        # sec_daily_index_reconcile run_id 67). job_runs carries no
+        # boot-id, but at THIS step (before boot-drain / runtime.start /
+        # _catch_up dispatch anything) no live-process job has started a
+        # row yet, so reap_all is safe — mirrors reap_orphaned_syncs above.
+        try:
+            with psycopg.connect(settings.database_url, autocommit=True) as conn:
+                reaped_jobs = reap_orphaned_job_runs(conn, reap_all=True)
+            if reaped_jobs:
+                logger.info("jobs entrypoint: reaper transitioned %d orphaned job_runs row(s)", reaped_jobs)
+        except Exception:
+            logger.exception("jobs entrypoint: job_runs reaper failed; continuing")
 
         # Step 4b — bootstrap recovery (#994 + #1296).
         #
