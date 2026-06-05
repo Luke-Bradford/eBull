@@ -372,7 +372,7 @@ def _write_durable_audit(
 
     Pool sizing: production callers should pass the DEDICATED
     audit pool from ``app.state.audit_pool`` (created in the
-    lifespan, sized min=1/max=2). Passing the request pool that
+    lifespan, sized min=1/max=``AUDIT_POOL_MAX_SIZE``). Passing the request pool that
     backs ``get_conn`` would risk losing audit rows under request-
     pool saturation, since each handler already holds one slot for
     the read and would need a second for the audit. The dedicated

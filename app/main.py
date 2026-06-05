@@ -255,10 +255,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # writes. Using the request pool risks losing audit rows under
     # saturation (the request handler holds one slot for the read,
     # acquires another for the audit, and a saturated request pool
-    # would drop the audit). Sized at min=1, max=2 — audit writes
-    # are short-lived single-row INSERTs that don't need
-    # parallelism. ADR 0001 requires audit-on-every-decryption to
-    # be durable independent of caller outcome.
+    # would drop the audit). Sized at min=1, max=AUDIT_POOL_MAX_SIZE
+    # (1 after #1472 PR2b) — audit writes are short-lived single-row
+    # INSERTs that don't need parallelism. ADR 0001 requires audit-on-
+    # every-decryption to be durable independent of caller outcome.
     audit_pool = open_pool("audit_pool", min_size=1, max_size=AUDIT_POOL_MAX_SIZE)
     logger.info("Audit pool opened (min=1, max=%d).", AUDIT_POOL_MAX_SIZE)
     app.state.audit_pool = audit_pool
