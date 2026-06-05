@@ -4,7 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/api/client";
 import { makeProcessRow, makeError } from "@/components/admin/__fixtures__/processes";
-import { ProcessRow } from "@/components/admin/ProcessRow";
+import { ProcessRow, processRowSignature } from "@/components/admin/ProcessRow";
+import type { ProcessRowResponse } from "@/api/types";
 
 function renderRow(props: Partial<Parameters<typeof ProcessRow>[0]> = {}) {
   const row = props.row ?? makeProcessRow();
@@ -14,6 +15,7 @@ function renderRow(props: Partial<Parameters<typeof ProcessRow>[0]> = {}) {
         <tbody>
           <ProcessRow
             row={row}
+            signature={processRowSignature(row)}
             triggerError={undefined}
             cancelError={undefined}
             busy={false}
@@ -25,6 +27,37 @@ function renderRow(props: Partial<Parameters<typeof ProcessRow>[0]> = {}) {
         </tbody>
       </table>
     </MemoryRouter>,
+  );
+}
+
+// Stable handler refs shared across rerenders — the memo comparator
+// reference-compares the callbacks, so fresh `vi.fn()`s per render would
+// (correctly) force a repaint and mask the signature-gating behaviour
+// under test.
+const STABLE_HANDLERS = {
+  onIterate: vi.fn(),
+  onFullWash: vi.fn(),
+  onCancel: vi.fn(),
+};
+
+function rowMarkup(row: ProcessRowResponse, signature: string) {
+  return (
+    <MemoryRouter>
+      <table>
+        <tbody>
+          <ProcessRow
+            row={row}
+            signature={signature}
+            triggerError={undefined}
+            cancelError={undefined}
+            busy={false}
+            onIterate={STABLE_HANDLERS.onIterate}
+            onFullWash={STABLE_HANDLERS.onFullWash}
+            onCancel={STABLE_HANDLERS.onCancel}
+          />
+        </tbody>
+      </table>
+    </MemoryRouter>
   );
 }
 
@@ -495,5 +528,96 @@ describe("ProcessRow", () => {
     expect(
       screen.queryByTestId("process-description-tooltip"),
     ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------
+// #1480 — content signature + React.memo anti-flicker contract.
+// ---------------------------------------------------------------------
+
+describe("processRowSignature", () => {
+  it("is identical for a deep-cloned row — the unchanged-poll case", () => {
+    const a = makeProcessRow({ status: "ok" });
+    // A real poll returns a fresh JSON parse: new object identity at
+    // every level (nested last_run / watermark too), same content. The
+    // signature must collapse that back to equality so memo skips.
+    const b: ProcessRowResponse = JSON.parse(JSON.stringify(a));
+    expect(a).not.toBe(b);
+    expect(a.last_run).not.toBe(b.last_run);
+    expect(processRowSignature(a)).toBe(processRowSignature(b));
+  });
+
+  it("changes when a rendered field changes", () => {
+    const base = makeProcessRow({ status: "ok" });
+    const changed: ProcessRowResponse = { ...base, status: "failed" };
+    expect(processRowSignature(base)).not.toBe(processRowSignature(changed));
+  });
+
+  // The stuck-row elapsed suffix is the one part of the signature NOT
+  // already implied by JSON.stringify(row): last_progress_at is frozen
+  // while a process is wedged, so without a wall-clock term the chip
+  // ("no progress Nm") would freeze too and the operator loses the
+  // wedge signal (#1474 / #1478). These two tests prove the suffix
+  // earns its place — comparing stuck-vs-non-stuck would NOT, since
+  // stale_reasons already lands in the JSON.
+  it("advances a stuck row's signature as wall-clock elapses, with frozen data", () => {
+    const frozen = "2026-05-08T13:00:00+00:00";
+    const stuck = makeProcessRow({
+      status: "running",
+      stale_reasons: ["mid_flight_stuck"],
+      active_run: {
+        run_id: 99,
+        started_at: frozen,
+        rows_processed_so_far: 0,
+        progress_units_done: null,
+        progress_units_total: null,
+        last_progress_at: frozen, // never moves — the process is wedged
+        is_cancelling: false,
+      },
+    });
+    const base = Date.parse(frozen);
+    const nowSpy = vi.spyOn(Date, "now");
+
+    nowSpy.mockReturnValue(base + 60_000); // 1m wedged
+    const at1m = processRowSignature(stuck);
+    nowSpy.mockReturnValue(base + 10 * 60_000); // 10m wedged, same row data
+    const at10m = processRowSignature(stuck);
+
+    expect(at1m).not.toBe(at10m);
+    nowSpy.mockRestore();
+  });
+
+  it("does not add a time term for quiescent rows — stable across wall-clock", () => {
+    const ok = makeProcessRow({ status: "ok", stale_reasons: [] });
+    const nowSpy = vi.spyOn(Date, "now");
+
+    nowSpy.mockReturnValue(1_000_000);
+    const early = processRowSignature(ok);
+    nowSpy.mockReturnValue(500_000_000);
+    const late = processRowSignature(ok);
+
+    // A healthy row must never repaint merely because time passed.
+    expect(early).toBe(late);
+    nowSpy.mockRestore();
+  });
+});
+
+describe("ProcessRow memoisation (#1480)", () => {
+  it("skips repaint when the signature is unchanged despite a new row object", () => {
+    const a = makeProcessRow({ display_name: "Alpha" });
+    const { rerender } = render(rowMarkup(a, "SIG-1"));
+    expect(screen.getByRole("link", { name: "Alpha" })).toBeTruthy();
+
+    // New row object, DIFFERENT content, but SAME signature → memo must
+    // skip the repaint and keep showing the prior content. This is the
+    // unchanged-poll case: snapshot identity churns, content does not.
+    const b = makeProcessRow({ display_name: "Beta" });
+    rerender(rowMarkup(b, "SIG-1"));
+    expect(screen.queryByRole("link", { name: "Beta" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Alpha" })).toBeTruthy();
+
+    // Signature changes → memo lets the repaint through.
+    rerender(rowMarkup(b, "SIG-2"));
+    expect(screen.getByRole("link", { name: "Beta" })).toBeTruthy();
   });
 });

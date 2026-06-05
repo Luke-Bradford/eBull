@@ -12,7 +12,7 @@
  * `prefers-reduced-motion` setting.
  */
 
-import { useEffect, useId, useRef, useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { ProcessRowResponse, StaleReason } from "@/api/types";
@@ -27,6 +27,18 @@ import {
 
 export interface ProcessRowProps {
   readonly row: ProcessRowResponse;
+  // Content signature computed by the parent (`processRowSignature`).
+  // Drives the `React.memo` skip decision (#1480): each poll hands the
+  // table a fresh JSON snapshot, so every `row` object has a new
+  // identity even when nothing changed. A reference compare would
+  // repaint all 40 rows every tick (visible flicker + reflow over
+  // RDP). The signature lets memo repaint only the rows whose rendered
+  // content actually changed. It MUST be a prop (computed at the
+  // parent's render time and stored by React), not recomputed inside
+  // the comparator — the comparator sees `prev`/`next` at the same
+  // instant, so any `Date.now()`-derived term computed there cancels
+  // out and the stuck-process elapsed chip would never advance.
+  readonly signature: string;
   readonly triggerError: unknown;
   readonly cancelError: unknown;
   readonly busy: boolean;
@@ -35,10 +47,46 @@ export interface ProcessRowProps {
   readonly onCancel: (row: ProcessRowResponse) => void;
 }
 
+/**
+ * Stable content signature for a process row (#1480).
+ *
+ * Conservative by design: serialise the whole envelope so any field
+ * change forces a repaint, plus the live elapsed-since-heartbeat label
+ * for stuck rows so the `no progress Nm` chip keeps advancing (it is
+ * the operator's wedge signal — #1474 / #1478) while every quiescent
+ * row stays frozen between polls. Cheap for ~40 small objects per tick.
+ */
+export function processRowSignature(row: ProcessRowResponse): string {
+  const heartbeatBase =
+    row.active_run?.last_progress_at ?? row.active_run?.started_at ?? null;
+  const elapsed =
+    row.stale_reasons.includes("mid_flight_stuck") && heartbeatBase !== null
+      ? formatElapsedSince(heartbeatBase)
+      : "";
+  return `${JSON.stringify(row)}|${elapsed}`;
+}
+
+function arePropsEqual(prev: ProcessRowProps, next: ProcessRowProps): boolean {
+  // `onIterate` / `onFullWash` / `onCancel` are stable refs from the
+  // parent (useCallback / useState setters) — compared by reference so
+  // a future regression that passes an inline arrow re-renders rather
+  // than silently going stale. `triggerError` / `cancelError` are
+  // mutation-only (unchanged across polls) — reference compare is right.
+  return (
+    prev.signature === next.signature &&
+    prev.busy === next.busy &&
+    prev.triggerError === next.triggerError &&
+    prev.cancelError === next.cancelError &&
+    prev.onIterate === next.onIterate &&
+    prev.onFullWash === next.onFullWash &&
+    prev.onCancel === next.onCancel
+  );
+}
+
 const PENDING_RETRY_TOOLTIP =
   "hiding prior errors during retry — re-shown if retry also fails or fails to reattempt failed subjects.";
 
-export function ProcessRow({
+function ProcessRowImpl({
   row,
   triggerError,
   cancelError,
@@ -226,6 +274,14 @@ export function ProcessRow({
     </tr>
   );
 }
+
+/**
+ * Memoised row. Repaints only when `arePropsEqual` returns false —
+ * i.e. when the content signature, busy flag, or an error ref changes.
+ * Polls that return an unchanged snapshot are a no-op at the DOM layer,
+ * which is what kills the per-tick flicker + reflow (#1480).
+ */
+export const ProcessRow = memo(ProcessRowImpl, arePropsEqual);
 
 function StaleChips({ row }: { row: ProcessRowResponse }) {
   // Stale-reason chips (PR8 / #1083). One subtle pill per reason;
