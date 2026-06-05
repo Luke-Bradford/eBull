@@ -702,7 +702,6 @@ def validate(
 def validate_stored(
     request: Request,
     session: SessionRow = Depends(require_session),
-    conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> ValidateCredentialResponse:
     """Validate already-stored eToro credentials against the real API.
 
@@ -723,49 +722,63 @@ def validate_stored(
     # working via the legacy caller-conn audit path.
     audit_pool = getattr(request.app.state, "audit_pool", None)
 
+    # #1472 PR2: the pooled connection MUST NOT be held across the external
+    # eToro probe below — a conn pinned across external I/O stalls a small
+    # pool (block-then-PoolTimeout, max_waiting=0). Drive get_conn by hand
+    # so its pool-from-state + 503 mapping (#717) is reused, do the
+    # credential load + commit + credential-id lookup inside this scope,
+    # then release the conn via gen.close() BEFORE the probe. The decrypted
+    # keys + cred_ids survive the release — they are plain data. The
+    # post-probe health write-through already uses a fresh request_pool
+    # connection, not this one.
+    gen = get_conn(request)
+    conn = next(gen)
     try:
-        api_key = load_credential_for_provider_use(
+        try:
+            api_key = load_credential_for_provider_use(
+                conn,
+                operator_id=session.operator_id,
+                provider="etoro",
+                label="api_key",
+                environment=environment,
+                caller="validate-stored",
+                audit_pool=audit_pool,
+            )
+            user_key = load_credential_for_provider_use(
+                conn,
+                operator_id=session.operator_id,
+                provider="etoro",
+                label="user_key",
+                environment=environment,
+                caller="validate-stored",
+                audit_pool=audit_pool,
+            )
+        except CredentialNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Both api_key and user_key must be stored before validating.",
+            ) from exc
+        except CredentialDecryptError as exc:
+            logger.error("validate-stored: decryption failed", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Credential decryption failed. Check server key material.",
+            ) from exc
+
+        # Commit audit rows before the external probe call (audit durability).
+        conn.commit()
+
+        # Look up credential_ids before the probe so we can write through
+        # health outcomes (#975 / #974/A). Side-tx writes from
+        # record_health_outcome use the request app's pool.
+        cred_ids = _lookup_active_credential_ids(
             conn,
             operator_id=session.operator_id,
             provider="etoro",
-            label="api_key",
             environment=environment,
-            caller="validate-stored",
-            audit_pool=audit_pool,
         )
-        user_key = load_credential_for_provider_use(
-            conn,
-            operator_id=session.operator_id,
-            provider="etoro",
-            label="user_key",
-            environment=environment,
-            caller="validate-stored",
-            audit_pool=audit_pool,
-        )
-    except CredentialNotFound as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Both api_key and user_key must be stored before validating.",
-        ) from exc
-    except CredentialDecryptError as exc:
-        logger.error("validate-stored: decryption failed", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Credential decryption failed. Check server key material.",
-        ) from exc
-
-    # Commit audit rows before the external probe call (audit durability).
-    conn.commit()
-
-    # Look up credential_ids before the probe so we can write through
-    # health outcomes (#975 / #974/A). Side-tx writes from
-    # record_health_outcome use the request app's pool.
-    cred_ids = _lookup_active_credential_ids(
-        conn,
-        operator_id=session.operator_id,
-        provider="etoro",
-        environment=environment,
-    )
+    finally:
+        gen.close()
 
     try:
         result = _probe_etoro(api_key, user_key, environment)

@@ -53,6 +53,15 @@ jobs:
         # are NOT in scope.
         run: bash scripts/check_caller_owned_tx.sh
 
+      - name: Pooled-conn-across-HTTP lint
+        # #1472 PR2 — a route declaring `conn = Depends(get_conn)` holds
+        # the pooled connection for its whole body; it MUST NOT reach an
+        # external provider's HTTP client (eToro / SEC EDGAR) while
+        # holding it (a conn pinned across slow external I/O stalls a
+        # small pool — block-then-PoolTimeout, max_waiting=0). AST-based;
+        # allowlists the two KNOWN-DEFERRED lazy-fill routes (#1492).
+        run: bash scripts/check_pooled_conn_across_http.sh
+
       - name: ETL source-to-sink spec docs
         # Every source in ManifestSource Literal + each ad-hoc + bulk-
         # reference source MUST have docs/etl/sources/<source>.md with

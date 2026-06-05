@@ -95,6 +95,18 @@ def _isolate_state() -> Iterator[None]:
     app.dependency_overrides[get_conn] = _gen
     app.dependency_overrides[require_session] = _session_row
 
+    # #1472 PR2: validate-stored no longer takes Depends(get_conn) — it
+    # drives get_conn by hand so it can release the pooled conn BEFORE the
+    # external eToro probe. Manual-drive reads app.state.db_pool directly
+    # (bypassing dependency_overrides, per prevention-log #267), so install
+    # a fake pool whose .connection() yields the SAME mock conn the override
+    # feeds the other (Depends-based) routes — keeps both paths consistent.
+    saved_pool = getattr(app.state, "db_pool", None)
+    fake_pool = MagicMock()
+    fake_pool.connection.return_value.__enter__.return_value = conn
+    fake_pool.connection.return_value.__exit__.return_value = None
+    app.state.db_pool = fake_pool
+
     # POST /broker-credentials no longer mounts require_master_key
     # (the create handler self-gates so it can lazy-generate on
     # first save). We still set these flags so the lazy-gen branch
@@ -119,6 +131,7 @@ def _isolate_state() -> Iterator[None]:
     app.state.boot_state = saved_state[0]
     app.state.broker_key_loaded = saved_state[1]
     app.state.recovery_required = saved_state[2]
+    app.state.db_pool = saved_pool
     client.cookies.clear()
 
 
