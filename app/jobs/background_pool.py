@@ -44,6 +44,7 @@ from typing import Any, Final
 import psycopg
 from psycopg_pool import ConnectionPool, PoolTimeout
 
+from app.db.background_write import BackgroundPoolClosed
 from app.db.pool import BACKGROUND_POOL_MAX_SIZE, open_pool
 
 logger = logging.getLogger(__name__)
@@ -118,7 +119,10 @@ class BackgroundConnectionPool:
         """
         with self._lock:
             if self._closed:
-                raise RuntimeError("BackgroundConnectionPool is closed")
+                # BackgroundPoolClosed (a RuntimeError subclass) so the
+                # background-write seam can catch the shutdown race precisely
+                # and fall back to a raw connection (#1472 PR4c-ckpt-2).
+                raise BackgroundPoolClosed("BackgroundConnectionPool is closed")
             pool = self._pool
             gen = self._generation
 

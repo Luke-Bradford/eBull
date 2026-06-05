@@ -62,6 +62,7 @@ import psycopg
 # row even when parser modules exist on disk.
 import app.services.manifest_parsers  # noqa: F401, E402
 from app.config import settings
+from app.db.background_write import set_background_pool
 from app.db.dev_test_db_reaper import run_orphan_test_db_reap
 from app.db.pg_settings import JOBS_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
 from app.db.pool import JOBS_POOL_MAX_SIZE, open_pool
@@ -1026,11 +1027,14 @@ def serve(stop_event: threading.Event | None = None) -> int:
 
     try:
         # #1472 PR4b — open the bounded background pool now that every boot
-        # guard has passed (Postgres is reachable, budget fits). Pure infra in
-        # PR4b: it is lifecycle-managed + budget-counted, and handed to the
-        # runtime as the PR4c handoff point; no writer borrows from it yet.
+        # guard has passed (Postgres is reachable, budget fits). PR4c — register
+        # it as the process-global BEFORE any sync work can dispatch (reaper /
+        # boot-drain / runtime.start / listener all come below), so the
+        # orchestrator audit/progress writers borrow from it instead of opening
+        # a fresh raw connection per write.
         background_pool = BackgroundConnectionPool()
         runtime.background_pool = background_pool
+        set_background_pool(background_pool)
         logger.info("jobs entrypoint: background pool opened")
 
         # #1290: start the fence heartbeat INSIDE the main try block
@@ -1323,6 +1327,14 @@ def serve(stop_event: threading.Event | None = None) -> int:
                 fence_heartbeat_thread.join(timeout=2.0)
         except Exception:
             logger.exception("jobs entrypoint: fence heartbeat shutdown raised")
+        # #1472 PR4c — clear the process-global BEFORE closing the pool so a
+        # NEW background write degrades to the raw fallback. sync_executor.
+        # shutdown above uses wait=False, so a sync may still be FINALIZING
+        # here; a write that already read the pool can still race close() —
+        # the seam (background_write_connection) catches BackgroundPoolClosed /
+        # PoolClosed and falls back to raw, so a late audit write is never lost
+        # (Codex PR4c-ckpt-2).
+        set_background_pool(None)
         # #1472 PR4b — close the background pool before the main jobs_pool.
         # Pre-declared None, so this is a no-op if the try-body raised before
         # the pool was opened.

@@ -34,6 +34,7 @@ import psycopg
 import psycopg.sql
 
 from app.config import settings
+from app.db.background_write import background_write_connection
 from app.services.credential_health import (
     CredentialHealth,
     get_operator_credential_health,
@@ -919,7 +920,7 @@ def _finalize_cancelled_sync_run(sync_run_id: int) -> None:
     would no-op the count refresh and leave stale layers_* values
     (Codex pre-impl review B1).
     """
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with background_write_connection() as conn:
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute(
@@ -960,7 +961,7 @@ def _finalize_cancelled_sync_run(sync_run_id: int) -> None:
 
 
 def _record_layer_started(sync_run_id: int, layer_name: str) -> None:
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with background_write_connection() as conn:
         with conn.transaction():
             conn.execute(
                 """
@@ -987,7 +988,7 @@ def _record_layer_result(
         LayerOutcome.DEP_SKIPPED: "skipped",
     }
     status = status_map[result.outcome]
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with background_write_connection() as conn:
         with conn.transaction():
             conn.execute(
                 """
@@ -1059,7 +1060,7 @@ def _record_layer_failed(
     error: BaseException,
 ) -> None:
     error_message, error_traceback, error_fingerprint = _build_forensics(error)
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with background_write_connection() as conn:
         with conn.transaction():
             conn.execute(
                 """
@@ -1088,7 +1089,7 @@ def _record_layer_skipped(
     layer_name: str,
     reason: str,
 ) -> None:
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with background_write_connection() as conn:
         with conn.transaction():
             conn.execute(
                 """
@@ -1122,7 +1123,7 @@ def _fail_unfinished_layers(sync_run_id: int) -> dict[str, LayerOutcome]:
     """
     cancelled: dict[str, LayerOutcome] = {}
     failed: dict[str, LayerOutcome] = {}
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with background_write_connection() as conn:
         with conn.transaction():
             cancelled_rows = conn.execute(
                 """
@@ -1174,7 +1175,7 @@ def _finalize_sync_run(
     cancel-branch terminal status is preserved.
     """
     late_cancel_observed = False
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with background_write_connection() as conn:
         with conn.transaction():
             # Lock the sync_runs row to serialise against the cancel
             # API's ``SELECT ... FOR UPDATE`` — whichever path commits
@@ -1333,7 +1334,7 @@ def _make_progress_callback(sync_run_id: int, emits: tuple[str, ...]):
     layer plan. Opens a short-lived autocommit connection per call."""
 
     def _callback(items_done: int, items_total: int | None = None) -> None:
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with background_write_connection() as conn:
             with conn.transaction():
                 for emit in emits:
                     conn.execute(
