@@ -1172,10 +1172,18 @@ export type ProcessStatus =
   | "running"
   | "ok"
   | "failed"
-  | "stale"
   | "pending_retry"
   | "cancelled"
   | "disabled";
+
+/**
+ * #1512 — single computed health verdict that collapses the two
+ * orthogonal axes (`status` + `stale_reasons`) into one signal. The
+ * main Processes row renders this pill, not the raw axes, so
+ * contradictory combos ("ok + schedule missed") are impossible. Derived
+ * by `app/services/processes/health_verdict.py::compute_verdict`.
+ */
+export type HealthVerdict = "current" | "working" | "self_healing" | "attention";
 
 export type ProcessRunStatus =
   | "success"
@@ -1257,6 +1265,13 @@ export interface ProcessRowResponse {
   can_cancel: boolean;
   last_n_errors: ErrorClassSummaryResponse[];
   stale_reasons: StaleReason[];
+  // #1512 — single computed health verdict + inline reason. The main
+  // row renders `health_verdict`; `status` + `stale_reasons` stay on the
+  // payload for the drill-in. `verdict_reason` is the inline explanation
+  // (folds #1230 — reason visible without hover).
+  health_verdict: HealthVerdict;
+  self_healing: boolean;
+  verdict_reason: string;
   // PR2 #1064 — operator-exposable params for the drill-in Advanced
   // disclosure. Empty list for bootstrap + ingest_sweep mechanisms.
   // Non-empty only for scheduled jobs that declare

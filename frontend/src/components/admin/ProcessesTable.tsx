@@ -31,7 +31,7 @@ import { LaneFilter } from "@/components/admin/LaneFilter";
 import { ProcessRow, processRowSignature } from "@/components/admin/ProcessRow";
 import { StaleBanner } from "@/components/admin/StaleBanner";
 import {
-  STATUS_SORT_PRIORITY,
+  VERDICT_SORT_PRIORITY,
   reasonTooltip,
 } from "@/components/admin/processStatus";
 
@@ -323,20 +323,14 @@ export function ProcessesTable({
 }
 
 function compareRows(a: ProcessRowResponse, b: ProcessRowResponse): number {
-  // PR8 (#1083): stale rows float up to just below `failed`. The new
-  // four-case stale model surfaces via `stale_reasons` rather than
-  // flipping `status` to `"stale"`, so the sort must consult the
-  // tuple directly. Codex pre-push WARNING — without this, an `ok` /
-  // `idle` row that goes stale stays buried below `failed` and is
-  // easy to miss despite the chips + banner.
-  const aStale = a.stale_reasons.length > 0;
-  const bStale = b.stale_reasons.length > 0;
-  const sa = aStale
-    ? STATUS_SORT_PRIORITY.stale
-    : (STATUS_SORT_PRIORITY[a.status] ?? 99);
-  const sb = bStale
-    ? STATUS_SORT_PRIORITY.stale
-    : (STATUS_SORT_PRIORITY[b.status] ?? 99);
+  // #1512: sort by the single health verdict — attention floats to the
+  // top, then self-healing, working, current. This replaces the prior
+  // status-based priority + synthetic `stale` rank (the two-axis model
+  // is collapsed into one verdict), so an `ok`/`idle` row that goes
+  // overdue (now verdict=attention) surfaces at the top without a
+  // separate stale-tuple consult.
+  const sa = VERDICT_SORT_PRIORITY[a.health_verdict] ?? 99;
+  const sb = VERDICT_SORT_PRIORITY[b.health_verdict] ?? 99;
   if (sa !== sb) return sa - sb;
   // Failed jobs without a next-fire (one-shot) come after the ones
   // that will actually retry — operator action vs auto-recovery.

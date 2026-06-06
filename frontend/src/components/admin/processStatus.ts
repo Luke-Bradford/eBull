@@ -8,6 +8,7 @@
  */
 
 import type {
+  HealthVerdict,
   ProcessStatus,
   StaleReason,
   TriggerConflictReason,
@@ -52,12 +53,6 @@ export const STATUS_VISUAL: Record<ProcessStatus, StatusVisual> = {
     toneClass:
       "border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300",
     pulse: false,
-  },
-  stale: {
-    label: "stale",
-    toneClass:
-      "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300",
-    pulse: true,
   },
   pending_retry: {
     label: "pending retry",
@@ -146,18 +141,47 @@ export const STALE_REASON_LABEL: Record<StaleReason, string> = {
 };
 
 /**
- * Sort priority: failed/stale first, running next, terminal states by
- * lane order. Spec §"Error display rules" — failed processes float to
- * top so the operator sees them without scrolling.
+ * Visuals for the single computed health verdict (#1512). The main
+ * Processes row renders THIS pill instead of the raw `status` +
+ * `stale_reasons` axes, so the operator never sees two cells that
+ * disagree. `working` / `self_healing` pulse (something is in motion);
+ * `current` / `attention` are static.
  */
-export const STATUS_SORT_PRIORITY: Record<ProcessStatus, number> = {
-  failed: 0,
-  stale: 1,
-  pending_retry: 2,
-  running: 3,
-  cancelled: 4,
-  pending_first_run: 5,
-  idle: 6,
-  ok: 7,
-  disabled: 8,
+export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
+  current: {
+    label: "current",
+    toneClass:
+      "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300",
+    pulse: false,
+  },
+  working: {
+    label: "working",
+    toneClass:
+      "border-sky-300 bg-sky-50 text-sky-800 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200",
+    pulse: true,
+  },
+  self_healing: {
+    label: "self-healing",
+    toneClass:
+      "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300",
+    pulse: true,
+  },
+  attention: {
+    label: "needs attention",
+    toneClass:
+      "border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300",
+    pulse: false,
+  },
+};
+
+/**
+ * Sort priority: attention first so it floats to the top, then
+ * self-healing, working, current last (#1512 — replaces the
+ * status-based STATUS_SORT_PRIORITY + synthetic `stale` priority).
+ */
+export const VERDICT_SORT_PRIORITY: Record<HealthVerdict, number> = {
+  attention: 0,
+  self_healing: 1,
+  working: 2,
+  current: 3,
 };

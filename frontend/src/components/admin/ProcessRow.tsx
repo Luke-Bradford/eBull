@@ -15,13 +15,12 @@
 import { memo, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import type { ProcessRowResponse, StaleReason } from "@/api/types";
+import type { ProcessRowResponse } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
 
 import {
   REASON_TOOLTIP,
-  STALE_REASON_LABEL,
-  STATUS_VISUAL,
+  VERDICT_VISUAL,
   reasonTooltip,
 } from "@/components/admin/processStatus";
 
@@ -95,19 +94,20 @@ function ProcessRowImpl({
   onFullWash,
   onCancel,
 }: ProcessRowProps) {
-  const visual = STATUS_VISUAL[row.status];
-  // Pulse precedence (spec §"Visible-motion rules"): stale rows pulse
-  // amber even while running, because mid_flight_stuck overlaps
-  // status="running" by definition. `motion-reduce:animate-none`
-  // keeps the colour but stops the animation for operators with
-  // prefers-reduced-motion (PR8 carve-out from PR9 a11y sweep — avoid
-  // a regression window).
-  const isStale = row.stale_reasons.length > 0;
-  const pulseBorder = isStale
-    ? "border-l-4 border-l-amber-500 animate-pulse motion-reduce:animate-none"
-    : visual.pulse
-      ? "border-l-4 border-l-sky-500 animate-pulse motion-reduce:animate-none"
-      : "border-l-4 border-l-transparent";
+  // Pulse precedence keyed off the single verdict (#1512): self-healing
+  // and attention pulse amber/red (something is recovering or wrong);
+  // working pulses sky (a run is in flight); current is static.
+  // `motion-reduce:animate-none` keeps the colour but stops the
+  // animation for operators with prefers-reduced-motion (PR8 carve-out).
+  const verdict = row.health_verdict;
+  const pulseBorder =
+    verdict === "self_healing"
+      ? "border-l-4 border-l-amber-500 animate-pulse motion-reduce:animate-none"
+      : verdict === "attention"
+        ? "border-l-4 border-l-red-500"
+        : verdict === "working"
+          ? "border-l-4 border-l-sky-500 animate-pulse motion-reduce:animate-none"
+          : "border-l-4 border-l-transparent";
 
   const lastRunLabel = row.last_run
     ? `${formatDateTime(row.last_run.finished_at)} · ${formatDuration(row.last_run.duration_seconds)} · ${
@@ -204,7 +204,7 @@ function ProcessRowImpl({
       </td>
       <td className="px-2 py-2">
         <StatusPill row={row} />
-        {isStale ? <StaleChips row={row} /> : null}
+        <VerdictReason row={row} />
       </td>
       <td className="px-2 py-2 text-xs text-slate-600 dark:text-slate-400">
         {lastRunLabel}
@@ -283,62 +283,40 @@ function ProcessRowImpl({
  */
 export const ProcessRow = memo(ProcessRowImpl, arePropsEqual);
 
-function StaleChips({ row }: { row: ProcessRowResponse }) {
-  // Stale-reason chips (PR8 / #1083). One subtle pill per reason;
-  // mid_flight_stuck includes the elapsed-since-heartbeat suffix
-  // computed from `active_run.last_progress_at` (or `started_at` as
-  // fallback) so the operator sees "no progress 7m" rather than just
-  // "no progress".
+function VerdictReason({ row }: { row: ProcessRowResponse }) {
+  // #1512 — one inline reason line (folds #1230: visible, not hover-only).
+  // For a wedged run we append the live elapsed-since-heartbeat ("running
+  // but no progress 7m") — the operator's wedge signal (#1474 / #1478),
+  // computed client-side from active_run so it keeps advancing between
+  // polls. Empty reason (current / plain working) renders nothing.
+  if (!row.verdict_reason) return null;
   const heartbeatBase =
     row.active_run?.last_progress_at ?? row.active_run?.started_at ?? null;
+  const elapsed =
+    row.stale_reasons.includes("mid_flight_stuck") && heartbeatBase !== null
+      ? ` ${formatElapsedSince(heartbeatBase)}`
+      : "";
   return (
     <div
-      className="mt-1 flex flex-wrap gap-1"
-      data-testid="stale-chips"
+      data-testid="verdict-reason"
+      className="mt-1 text-[11px] text-slate-600 dark:text-slate-400"
     >
-      {row.stale_reasons.map((reason) => (
-        <StaleChip
-          key={reason}
-          reason={reason}
-          heartbeatBase={heartbeatBase}
-        />
-      ))}
+      {row.verdict_reason}
+      {elapsed}
     </div>
   );
 }
 
-function StaleChip({
-  reason,
-  heartbeatBase,
-}: {
-  reason: StaleReason;
-  heartbeatBase: string | null;
-}) {
-  const label = STALE_REASON_LABEL[reason];
-  const text =
-    reason === "mid_flight_stuck" && heartbeatBase !== null
-      ? `${label} ${formatElapsedSince(heartbeatBase)}`
-      : label;
-  return (
-    <span
-      data-stale-reason={reason}
-      aria-label={`Stale reason: ${text}`}
-      className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-200"
-    >
-      {text}
-    </span>
-  );
-}
-
 function StatusPill({ row }: { row: ProcessRowResponse }) {
-  const visual = STATUS_VISUAL[row.status];
-  const tooltip =
-    row.status === "pending_retry" ? PENDING_RETRY_TOOLTIP : undefined;
+  // #1512 — render the single computed verdict, not the raw status.
+  const visual = VERDICT_VISUAL[row.health_verdict];
+  const tooltip = row.self_healing ? PENDING_RETRY_TOOLTIP : undefined;
   return (
     <span
       data-testid="status-pill"
+      data-verdict={row.health_verdict}
       title={tooltip}
-      aria-label={`Status: ${visual.label}`}
+      aria-label={`Health: ${visual.label}`}
       className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${visual.toneClass}`}
     >
       {visual.label}

@@ -44,11 +44,17 @@ ProcessStatus = Literal[
     "running",
     "ok",
     "failed",
-    "stale",
     "pending_retry",
     "cancelled",
     "disabled",
 ]
+
+# #1512 — single computed health verdict that collapses the two
+# orthogonal axes (``status`` + ``stale_reasons``) the operator used to
+# see rendered side-by-side as contradictory chips. Derived (not stored)
+# at the API layer (``app/api/processes.py::_convert_row`` →
+# ``health_verdict.compute_verdict``). The FE renders ONE verdict pill.
+HealthVerdict = Literal["current", "working", "self_healing", "attention"]
 
 RunStatus = Literal["success", "failure", "partial", "cancelled", "skipped"]
 
@@ -216,6 +222,7 @@ class ProcessSnapshot:
 __all__ = [
     "ActiveRunSummary",
     "ErrorClassSummary",
+    "HealthVerdict",
     "ProcessLane",
     "ProcessMechanism",
     "ProcessRow",

@@ -151,9 +151,9 @@ describe("ProcessRow", () => {
     expect(screen.queryByText("ConnectionTimeout")).toBeNull();
   });
 
-  it("renders pending_retry tooltip on the status pill", () => {
-    renderRow({ row: makeProcessRow({ status: "pending_retry" }) });
-    const pill = screen.getByText(/pending retry/i);
+  it("renders auto-hide tooltip on the self-healing (pending_retry) pill", () => {
+    renderRow({ row: makeProcessRow({ status: "pending_retry", stale_reasons: [] }) });
+    const pill = screen.getByText(/self-healing/i);
     expect(pill.getAttribute("title")).toContain("hiding");
     expect(pill.getAttribute("title")).toContain("retry");
   });
@@ -177,40 +177,41 @@ describe("ProcessRow", () => {
   });
 
   // ---------------------------------------------------------------------
-  // PR8 (#1083) — four-case stale model chips + pulsing border.
+  // #1512 — single computed verdict pill + one inline reason line.
+  // The two-axis stale chips are gone; an overdue row is one red
+  // "needs attention" pill with an inline reason.
   // ---------------------------------------------------------------------
 
-  it("renders no stale chips when stale_reasons is empty", () => {
+  it("renders no verdict-reason line for a clean (current) row", () => {
     const { container } = renderRow({
       row: makeProcessRow({ status: "ok", stale_reasons: [] }),
     });
-    expect(
-      container.querySelector("[data-testid='stale-chips']"),
-    ).toBeNull();
+    expect(container.querySelector("[data-testid='verdict-reason']")).toBeNull();
+    expect(container.querySelector("[data-testid='stale-chips']")).toBeNull();
   });
 
-  it("renders one chip per stale reason (multiple can fire)", () => {
+  it("renders ONE verdict pill (not two contradictory axes) for ok+overdue", () => {
     const { container } = renderRow({
       row: makeProcessRow({
         status: "ok",
         stale_reasons: ["schedule_missed", "watermark_gap"],
       }),
     });
-    const chips = container.querySelector(
-      "[data-testid='stale-chips']",
+    const pill = container.querySelector(
+      "[data-testid='status-pill']",
     ) as HTMLElement;
-    expect(chips).toBeTruthy();
-    expect(
-      chips.querySelectorAll("[data-stale-reason='schedule_missed']").length,
-    ).toBe(1);
-    expect(
-      chips.querySelectorAll("[data-stale-reason='watermark_gap']").length,
-    ).toBe(1);
-    expect(chips.textContent).toContain("schedule missed");
-    expect(chips.textContent).toContain("source has fresh data");
+    expect(pill.getAttribute("data-verdict")).toBe("attention");
+    expect(pill.textContent?.toLowerCase()).toContain("needs attention");
+    // No second axis — the old stale-chips cluster is gone.
+    expect(container.querySelector("[data-testid='stale-chips']")).toBeNull();
+    const reason = container.querySelector(
+      "[data-testid='verdict-reason']",
+    ) as HTMLElement;
+    // First reason in fixed order wins the headline.
+    expect(reason.textContent).toContain("schedule missed");
   });
 
-  it("mid_flight_stuck chip suffixes elapsed-since-heartbeat", () => {
+  it("mid_flight_stuck verdict-reason suffixes elapsed-since-heartbeat", () => {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const { container } = renderRow({
       row: makeProcessRow({
@@ -227,36 +228,37 @@ describe("ProcessRow", () => {
         },
       }),
     });
-    const chip = container.querySelector(
-      "[data-stale-reason='mid_flight_stuck']",
+    const reason = container.querySelector(
+      "[data-testid='verdict-reason']",
     ) as HTMLElement;
-    expect(chip).toBeTruthy();
-    expect(chip.textContent).toMatch(/no progress\s+\d+m/);
+    expect(reason).toBeTruthy();
+    expect(reason.textContent).toMatch(/running but no progress\s+\d+m/);
   });
 
-  it("pulsing amber border applies when stale_reasons non-empty", () => {
+  it("attention verdict paints a red left border", () => {
     const { container } = renderRow({
-      row: makeProcessRow({
-        status: "ok",
-        stale_reasons: ["watermark_gap"],
-      }),
+      row: makeProcessRow({ status: "ok", stale_reasons: ["watermark_gap"] }),
     });
     const tr = container.querySelector("tr") as HTMLElement;
+    expect(tr.className).toContain("border-l-red-500");
+  });
+
+  it("self_healing verdict pulses amber", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({ status: "pending_retry", stale_reasons: [] }),
+    });
+    const tr = container.querySelector("tr") as HTMLElement;
+    expect(tr.className).toContain("border-l-amber-500");
     expect(tr.className).toContain("animate-pulse");
-    expect(tr.className).toContain("motion-reduce:animate-none");
-    expect(tr.className).toContain("border-l-amber-500");
   });
 
-  it("amber stale border outranks sky running border on overlap", () => {
+  it("running (not stuck) pulses sky, not amber", () => {
     const { container } = renderRow({
-      row: makeProcessRow({
-        status: "running",
-        stale_reasons: ["mid_flight_stuck"],
-      }),
+      row: makeProcessRow({ status: "running", stale_reasons: [] }),
     });
     const tr = container.querySelector("tr") as HTMLElement;
-    expect(tr.className).toContain("border-l-amber-500");
-    expect(tr.className).not.toContain("border-l-sky-500");
+    expect(tr.className).toContain("border-l-sky-500");
+    expect(tr.className).not.toContain("border-l-amber-500");
   });
 
   // ---------------------------------------------------------------------
@@ -277,57 +279,14 @@ describe("ProcessRow", () => {
     expect(chip).toHaveAccessibleName("Lane: sec");
   });
 
-  it("status pill's accessible name includes the human label with screen-reader prefix", () => {
+  it("verdict pill's accessible name includes the verdict label with screen-reader prefix", () => {
     const { container } = renderRow({
-      row: makeProcessRow({ status: "running" }),
+      row: makeProcessRow({ status: "running", stale_reasons: [] }),
     });
     const pill = container.querySelector(
       "[data-testid='status-pill']",
     ) as HTMLElement;
-    expect(pill).toHaveAccessibleName("Status: running");
-  });
-
-  it("stale chip's accessible name carries the reason with screen-reader prefix", () => {
-    const { container } = renderRow({
-      row: makeProcessRow({
-        status: "ok",
-        stale_reasons: ["schedule_missed", "queue_stuck"],
-      }),
-    });
-    const scheduleChip = container.querySelector(
-      "[data-stale-reason='schedule_missed']",
-    ) as HTMLElement;
-    const queueChip = container.querySelector(
-      "[data-stale-reason='queue_stuck']",
-    ) as HTMLElement;
-    expect(scheduleChip).toHaveAccessibleName("Stale reason: schedule missed");
-    expect(queueChip).toHaveAccessibleName("Stale reason: queue stuck");
-  });
-
-  it("mid_flight_stuck stale chip's accessible name includes the elapsed suffix", () => {
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    const { container } = renderRow({
-      row: makeProcessRow({
-        status: "running",
-        stale_reasons: ["mid_flight_stuck"],
-        active_run: {
-          run_id: 99,
-          started_at: fiveMinutesAgo,
-          rows_processed_so_far: 0,
-          progress_units_done: null,
-          progress_units_total: null,
-          last_progress_at: fiveMinutesAgo,
-          is_cancelling: false,
-        },
-      }),
-    });
-    const chip = container.querySelector(
-      "[data-stale-reason='mid_flight_stuck']",
-    ) as HTMLElement;
-    // Visible text is `no progress 5m`; the accessible name layers the
-    // `Stale reason:` prefix on top so a screen reader announces the
-    // full meaning rather than the bare phrase.
-    expect(chip).toHaveAccessibleName(/^Stale reason: no progress\s+\d+m$/);
+    expect(pill).toHaveAccessibleName("Health: working");
   });
 
   // ---------------------------------------------------------------------

@@ -62,6 +62,7 @@ from app.services.process_stop import (
 from app.services.processes import (
     ActiveRunSummary,
     ErrorClassSummary,
+    HealthVerdict,
     ProcessLane,
     ProcessMechanism,
     ProcessRow,
@@ -75,6 +76,7 @@ from app.services.processes import (
     ingest_sweep_adapter,
     scheduled_adapter,
 )
+from app.services.processes.health_verdict import compute_verdict
 from app.services.processes.ingest_sweep_adapter import is_sweep
 from app.services.processes.param_metadata import ParamMetadata
 from app.services.processes.stale_thresholds import get_threshold
@@ -167,6 +169,15 @@ class ProcessRowResponse(BaseModel):
     can_cancel: bool
     last_n_errors: list[ErrorClassSummaryResponse]
     stale_reasons: list[StaleReason]
+    # #1512 — single computed health verdict collapsing the ``status`` +
+    # ``stale_reasons`` axes. The FE main row renders this pill (not the
+    # two raw axes), so contradictory combos ("ok + schedule_missed")
+    # are impossible by construction. ``status`` + ``stale_reasons`` stay
+    # on the payload (non-breaking — drill-in + tests still read them).
+    # ``verdict_reason`` is the inline explanation (folds #1230).
+    health_verdict: HealthVerdict
+    self_healing: bool
+    verdict_reason: str
     # PR2 #1064 — operator-exposable params for the Advanced disclosure
     # tab on /admin/processes/{id}. Empty list for bootstrap +
     # ingest_sweep mechanisms; non-empty only for scheduled jobs that
@@ -406,6 +417,10 @@ def _convert_error(err: ErrorClassSummary) -> ErrorClassSummaryResponse:
 
 
 def _convert_row(row: ProcessRow) -> ProcessRowResponse:
+    verdict, self_healing, verdict_reason = compute_verdict(
+        status=row.status,
+        stale_reasons=row.stale_reasons,
+    )
     return ProcessRowResponse(
         process_id=row.process_id,
         display_name=row.display_name,
@@ -423,6 +438,9 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         can_cancel=row.can_cancel,
         last_n_errors=[_convert_error(e) for e in row.last_n_errors],
         stale_reasons=list(row.stale_reasons),
+        health_verdict=verdict,
+        self_healing=self_healing,
+        verdict_reason=verdict_reason,
         params_metadata=list(row.params_metadata),
         description=row.description,
     )

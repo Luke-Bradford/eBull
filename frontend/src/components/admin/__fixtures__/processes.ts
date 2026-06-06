@@ -5,14 +5,71 @@
 
 import type {
   ErrorClassSummaryResponse,
+  HealthVerdict,
   ProcessLane,
   ProcessListResponse,
   ProcessRowResponse,
   ProcessStatus,
   ProcessWatermarkResponse,
+  StaleReason,
 } from "@/api/types";
 
 let nextRunId = 1;
+
+const REASON_LABEL: Record<StaleReason, string> = {
+  schedule_missed: "schedule missed",
+  watermark_gap: "source has fresh data",
+  queue_stuck: "queue stuck",
+  mid_flight_stuck: "no progress",
+};
+const REASON_ORDER: StaleReason[] = [
+  "schedule_missed",
+  "watermark_gap",
+  "queue_stuck",
+  "mid_flight_stuck",
+];
+
+/**
+ * Mirror of `app/services/processes/health_verdict.py::compute_verdict`
+ * so fixtures built from `{status, stale_reasons}` carry a coherent
+ * verdict without every test spelling it out. Keep in lock-step with
+ * the BE precedence table (#1512).
+ */
+export function deriveVerdict(
+  status: ProcessStatus,
+  staleReasons: StaleReason[],
+): { health_verdict: HealthVerdict; self_healing: boolean; verdict_reason: string } {
+  const actionable = REASON_ORDER.filter((r) => staleReasons.includes(r));
+  if (status === "disabled")
+    return { health_verdict: "attention", self_healing: false, verdict_reason: "kill switch active" };
+  const headline = actionable[0];
+  if (headline !== undefined) {
+    const reason =
+      status === "failed"
+        ? "last run failed"
+        : status === "running" && actionable.includes("mid_flight_stuck")
+          ? "running but no progress"
+          : REASON_LABEL[headline];
+    return { health_verdict: "attention", self_healing: false, verdict_reason: reason };
+  }
+  switch (status) {
+    case "running":
+      return { health_verdict: "working", self_healing: false, verdict_reason: "" };
+    case "pending_retry":
+      return { health_verdict: "self_healing", self_healing: true, verdict_reason: "retry scheduled" };
+    case "failed":
+      return { health_verdict: "attention", self_healing: false, verdict_reason: "last run failed" };
+    case "cancelled":
+      return { health_verdict: "attention", self_healing: false, verdict_reason: "last run cancelled" };
+    case "pending_first_run":
+      return { health_verdict: "working", self_healing: false, verdict_reason: "first run pending" };
+    case "ok":
+    case "idle":
+      return { health_verdict: "current", self_healing: false, verdict_reason: "" };
+    default:
+      return { health_verdict: "attention", self_healing: false, verdict_reason: "unknown state" };
+  }
+}
 
 export function makeWatermark(
   overrides: Partial<ProcessWatermarkResponse> = {},
@@ -45,6 +102,7 @@ export function makeProcessRow(
 ): ProcessRowResponse {
   const status: ProcessStatus = overrides.status ?? "ok";
   const lane: ProcessLane = overrides.lane ?? "sec";
+  const derived = deriveVerdict(status, overrides.stale_reasons ?? []);
   return {
     process_id: "sec_form4_ingest",
     display_name: "Insider Form 4 ingest",
@@ -72,6 +130,7 @@ export function makeProcessRow(
     can_cancel: false,
     last_n_errors: [],
     stale_reasons: [],
+    ...derived,
     params_metadata: [],
     description: "Operator-facing description for the Insider Form 4 ingest.",
     ...overrides,
