@@ -202,6 +202,27 @@ _ALLOWED: dict[str, str] = {
     # antipattern". Verified: no live ``psycopg.connect(settings.database_url)``
     # call site in tests/conftest.py.
     "conftest.py": "occurrences are inside docstrings/warning-message strings, not live call sites",
+    # #1472 fallout (#1503): the forbidden substring appears once, inside
+    # an ASSERTION LITERAL that pins the seam contract — the test asserts
+    # production source does NOT contain
+    # ``psycopg.connect(settings.database_url, autocommit=True) as conn:``
+    # (line ~131). It is documenting/forbidding the antipattern, not
+    # executing it. Verified: no live call site; the only DB access is via
+    # a ``settings_use_test_db`` fixture that monkeypatches
+    # ``settings.database_url`` to ``test_database_url()`` first.
+    "test_background_write_seam.py": (
+        "forbidden substring is inside an assertion literal pinning the "
+        "no-raw-connect seam contract, not a live call site (#1472/#1503)"
+    ),
+    # #1472 fallout (#1503): the forbidden substring appears once, inside
+    # the module DOCSTRING describing the historical footgun
+    # (``a raw psycopg.connect(settings.database_url) ... wrote to the dev
+    # DB``). No live call site — the tests monkeypatch the jobs-process
+    # probe and never open a dev-DB connection.
+    "test_tripwire_jobs_exemption.py": (
+        "forbidden substring is inside the module docstring describing the "
+        "antipattern, not a live call site (#1472/#1503)"
+    ),
 }
 
 _TESTS_DIR = Path(__file__).resolve().parents[1]

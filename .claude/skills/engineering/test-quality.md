@@ -18,6 +18,29 @@ def test_generate_thesis_returns_correct_version():
     assert result.confidence == pytest.approx(0.8)
 ```
 
+## A content-hash / signature test must isolate the term it claims to test
+
+When a function builds a composite key (a memo signature, cache key, ETag, dedup hash) from several inputs, a test named after **one** contributing term must vary **only that term** between two otherwise-identical inputs — and ideally mutation-prove it.
+
+The trap: comparing two inputs that already differ in a field the hash *also* serialises. The assertion passes for the wrong reason and would still pass if the term under test were deleted.
+
+```ts
+// Garbage — claims to test the "stuck elapsed" term, but the two rows
+// also differ in `stale_reasons`, which is already in JSON.stringify(row).
+// Deleting the elapsed term entirely leaves this test green.
+expect(sig({ ...row, stale_reasons: ["stuck"] }))
+  .not.toBe(sig({ ...row, stale_reasons: [] }));
+
+// Coverage — hold the data frozen, vary ONLY wall-clock (the novel term),
+// and prove the quiescent case stays stable.
+nowSpy.mockReturnValue(base + 60_000);  const at1m  = sig(stuckRow);
+nowSpy.mockReturnValue(base + 600_000); const at10m = sig(stuckRow);
+expect(at1m).not.toBe(at10m);           // time term advances a frozen row
+expect(sig(okRow_at_t0)).toBe(sig(okRow_at_t1)); // …but not a healthy one
+```
+
+Mutation check before trusting it: delete the term from the production hash, run the test, confirm it **fails**, revert. If it still passes, the test proves nothing about that term. Origin: #1480 (`processRowSignature` stuck-clock suffix) — the first draft compared stuck-vs-non-stuck and was caught in self-review.
+
 ## Mandatory boundary cases
 
 For every function, identify and test:
