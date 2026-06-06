@@ -85,13 +85,20 @@ export function ProcessesTable({
   const bootstrapOnly =
     bootstrapStatus !== null && bootstrapStatus !== "complete";
 
-  const baseRows = useMemo(
-    () =>
-      bootstrapOnly
-        ? snapshot.rows.filter((r) => r.mechanism === "bootstrap")
-        : snapshot.rows,
-    [snapshot.rows, bootstrapOnly],
-  );
+  const baseRows = useMemo(() => {
+    if (bootstrapOnly) {
+      return snapshot.rows.filter((r) => r.mechanism === "bootstrap");
+    }
+    // #1508 — once bootstrap is ``complete`` the first-install row is done
+    // and does not belong in the steady-state ops list (operator: "there
+    // are still bootstrap jobs showing"). Fail-open: when the status fetch
+    // returned null (pending/errored) keep the row rather than hide
+    // information on uncertainty.
+    if (bootstrapStatus === "complete") {
+      return snapshot.rows.filter((r) => r.mechanism !== "bootstrap");
+    }
+    return snapshot.rows;
+  }, [snapshot.rows, bootstrapOnly, bootstrapStatus]);
 
   const counts = useMemo(() => {
     const out: Partial<Record<ProcessLane, number>> = {};
