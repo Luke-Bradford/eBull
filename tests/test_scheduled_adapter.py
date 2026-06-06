@@ -5,6 +5,8 @@ DB-backed against the worker ``ebull_test`` template.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
@@ -846,3 +848,82 @@ def test_resolve_terminal_row_dispatches_orchestrator_to_sync_runs() -> None:
         out2 = scheduled_adapter._resolve_terminal_row(fake_conn, job_name="monitor_positions")  # type: ignore[arg-type]
         assert out2 == {"sentinel": "job"}
         job_reader.assert_called_once_with(fake_conn, job_name="monitor_positions")
+
+
+# --- #1511 / T5 source_watermark_fresh look-through signal --------------
+
+
+def _seed_xbrl_freshness(conn: psycopg.Connection[tuple], *, filed_at: datetime, instrument_id: int) -> None:
+    """Insert an issuer freshness row for sec_xbrl_facts (covered source)."""
+    conn.execute(
+        """
+        INSERT INTO data_freshness_index
+               (subject_type, subject_id, source, cik, instrument_id,
+                last_known_filed_at, state)
+        VALUES ('issuer', '320193', 'sec_xbrl_facts', '0000320193', %s, %s, 'current')
+        """,
+        (instrument_id, filed_at),
+    )
+
+
+def test_source_watermark_fresh_true_for_covered_fresh_source(
+    ebull_test_conn: psycopg.Connection[tuple],
+    seeded_instrument_id: int,
+) -> None:
+    """fundamentals_sync (→ sec_xbrl_facts, bootstrap-covered) with a recent
+    filing reads source_watermark_fresh=True even with no job_runs row."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _seed_xbrl_freshness(
+        ebull_test_conn,
+        filed_at=datetime.now(UTC) - timedelta(days=1),
+        instrument_id=seeded_instrument_id,
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_FUNDAMENTALS_SYNC)
+    assert row is not None
+    assert row.status == "pending_first_run"
+    assert row.source_watermark_fresh is True
+
+
+def test_source_watermark_fresh_false_when_source_stale(
+    ebull_test_conn: psycopg.Connection[tuple],
+    seeded_instrument_id: int,
+) -> None:
+    """A covered source whose newest filing is older than its cadence window
+    (sec_xbrl_facts = 120d) is NOT fresh → stays 'first run pending'."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _seed_xbrl_freshness(
+        ebull_test_conn,
+        filed_at=datetime.now(UTC) - timedelta(days=400),
+        instrument_id=seeded_instrument_id,
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_FUNDAMENTALS_SYNC)
+    assert row is not None
+    assert row.source_watermark_fresh is False
+
+
+def test_source_watermark_fresh_false_when_no_freshness_row(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """No data_freshness_index row for the source → not fresh."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_FUNDAMENTALS_SYNC)
+    assert row is not None
+    assert row.source_watermark_fresh is False
+
+
+def test_source_watermark_fresh_false_for_job_without_source(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A job with no registered freshness source never reads fresh."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.source_watermark_fresh is False

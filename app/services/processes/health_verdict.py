@@ -25,14 +25,16 @@ queue_stuck`` would render blue "working" while a worker is wedged, and
 dispatched request is stuck — re-introducing the masking the verdict
 exists to kill.
 
-**v1 scope:** T3 (retry/``next_retry_at``), T4 (watchdog re-enqueue) and
-T5 (post-bootstrap seed + watermark look-through) are not yet landed, so
-the only ``self_healing`` source is the existing ``pending_retry``
-status. An overdue row with no recovery mechanism reads **attention** —
-honest, because it currently IS stuck (the bug #1511 fixes). When
-T3/T4/T5 land they extend this function (add ``next_retry_at`` /
-liveness inputs) to reclassify *covered* overdue rows from ``attention``
-to ``self_healing`` with a "will retry HH:MM" reason.
+**v1 scope:** T5's watermark look-through is wired here (the
+``watermark_is_fresh`` input promotes a ``pending_first_run`` job on a
+bootstrap-covered, still-fresh source to Current — #1511). T3
+(retry/``next_retry_at``) and T4 (watchdog re-enqueue) are not yet
+landed, so the only ``self_healing`` source remains the existing
+``pending_retry`` status. An overdue row with no recovery mechanism
+reads **attention** — honest, because it currently IS stuck. When T3/T4
+land they extend this function (add ``next_retry_at`` / liveness inputs)
+to reclassify *covered* overdue rows from ``attention`` to
+``self_healing`` with a "will retry HH:MM" reason.
 """
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ def compute_verdict(
     *,
     status: ProcessStatus,
     stale_reasons: tuple[StaleReason, ...],
+    watermark_is_fresh: bool = False,
 ) -> tuple[HealthVerdict, bool, str]:
     """Collapse ``status`` + ``stale_reasons`` into one verdict.
 
@@ -118,6 +121,16 @@ def compute_verdict(
     if status == "cancelled":
         return ("attention", False, "last run cancelled")
     if status == "pending_first_run":
+        # Look-through (#1511 / T5): a never-run steady-state poll whose
+        # SEC source bootstrap already seeded — and which is still fresh
+        # (``watermark_is_fresh``, computed by the adapter as covered-source
+        # + MAX(filed_at) within cadence) — reads Current, not "first run
+        # pending". The DATA is current; the job just has not reached its
+        # first natural cadence slot. A covered-but-stale source returns
+        # ``watermark_is_fresh=False`` here and stays "working" (and an
+        # actionable stale reason, handled above, still outranks).
+        if watermark_is_fresh:
+            return ("current", False, "")
         return ("working", False, "first run pending")
     if status == "ok":
         return ("current", False, "")

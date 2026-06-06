@@ -420,6 +420,7 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
     verdict, self_healing, verdict_reason = compute_verdict(
         status=row.status,
         stale_reasons=row.stale_reasons,
+        watermark_is_fresh=row.source_watermark_fresh,
     )
     return ProcessRowResponse(
         process_id=row.process_id,

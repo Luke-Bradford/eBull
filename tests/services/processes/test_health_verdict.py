@@ -150,3 +150,54 @@ def test_idle_overdue_is_attention() -> None:
     """idle + schedule_missed (catch-up trap surface) → attention."""
     v, _, _ = compute_verdict(status="idle", stale_reasons=("schedule_missed",))
     assert v == "attention"
+
+
+# --- #1511 / T5 watermark look-through ----------------------------------
+
+
+def test_watermark_default_preserves_first_run_pending() -> None:
+    """Default ``watermark_is_fresh=False`` keeps the shipped behaviour:
+    a never-run job reads blue 'first run pending'."""
+    v, sh, reason = compute_verdict(status="pending_first_run", stale_reasons=())
+    assert (v, sh, reason) == ("working", False, "first run pending")
+
+
+def test_pending_first_run_fresh_watermark_reads_current() -> None:
+    """Look-through: a never-run job whose bootstrap-covered source is still
+    fresh reads green Current, not 'first run pending'."""
+    v, sh, reason = compute_verdict(status="pending_first_run", stale_reasons=(), watermark_is_fresh=True)
+    assert (v, sh, reason) == ("current", False, "")
+
+
+def test_pending_first_run_stale_watermark_stays_working() -> None:
+    """Covered-but-stale (watermark_is_fresh=False) stays 'first run pending'."""
+    v, sh, reason = compute_verdict(status="pending_first_run", stale_reasons=(), watermark_is_fresh=False)
+    assert (v, sh, reason) == ("working", False, "first run pending")
+
+
+@pytest.mark.parametrize("reason", _ALL_REASONS)
+def test_fresh_watermark_never_overrides_actionable_stale(reason: StaleReason) -> None:
+    """The look-through must not mask an actionable stale reason: a fresh
+    watermark on a pending_first_run row with a real stale reason still reads
+    attention (stale precedence is above the status branch)."""
+    v, sh, _ = compute_verdict(status="pending_first_run", stale_reasons=(reason,), watermark_is_fresh=True)
+    assert v == "attention"
+    assert sh is False
+
+
+@pytest.mark.parametrize("status", [s for s in _ALL_STATUSES if s != "pending_first_run"])
+def test_fresh_watermark_only_affects_pending_first_run(status: ProcessStatus) -> None:
+    """Only ``pending_first_run`` consumes ``watermark_is_fresh`` — every other
+    status maps identically with the flag set or unset."""
+    base = compute_verdict(status=status, stale_reasons=())
+    with_fresh = compute_verdict(status=status, stale_reasons=(), watermark_is_fresh=True)
+    assert base == with_fresh
+
+
+@pytest.mark.parametrize("status", _ALL_STATUSES)
+@pytest.mark.parametrize("reasons", _all_reason_subsets())
+def test_total_and_single_valued_with_fresh_watermark(status: ProcessStatus, reasons: tuple[StaleReason, ...]) -> None:
+    """Totality holds with the look-through flag set, too."""
+    verdict, self_healing, _ = compute_verdict(status=status, stale_reasons=reasons, watermark_is_fresh=True)
+    assert verdict in _VALID_VERDICTS
+    assert self_healing == (verdict == "self_healing")

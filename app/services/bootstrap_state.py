@@ -1029,7 +1029,7 @@ def finalize_run(
             """,
             {"status": terminal, "run_id": run_id},
         )
-        conn.execute(
+        state_result = conn.execute(
             """
             UPDATE bootstrap_state
                SET status            = %(status)s,
@@ -1040,6 +1040,28 @@ def finalize_run(
             """,
             {"status": terminal, "run_id": run_id},
         )
+        state_transitioned = state_result.rowcount == 1
+
+    # Post-bootstrap auto-current (#1511 / T5). Runs AFTER the completion tx
+    # has committed — status is durable and the universal gate is open — so a
+    # best-effort kick can never roll the transition back. (Codex ckpt-1
+    # BLOCKING: a caught DB error inside the tx above would leave it aborted
+    # and fail the commit, rolling completion back. Doing this post-commit, in
+    # the activation's own per-candidate transactions, isolates it entirely.)
+    # Only on the call that actually won the running→complete transition.
+    if terminal == "complete" and state_transitioned:
+        try:
+            from app.services.processes.post_bootstrap_activation import (
+                activate_post_bootstrap,
+            )
+
+            activate_post_bootstrap(conn, run_id=run_id)
+        except Exception:
+            logger.exception(
+                "finalize_run: post-bootstrap activation failed for run %s; "
+                "completion stands (jobs recover via the now-open gate + cadence)",
+                run_id,
+            )
 
     return terminal
 
