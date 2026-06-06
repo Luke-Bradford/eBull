@@ -244,12 +244,16 @@ describe("ProcessesTable", () => {
     expect(links[1]).toBe("A_ok");
   });
 
-  it("failed rows still outrank stale rows", () => {
+  it("#1512: failed and overdue rows are peers (both attention), tie-broken deterministically", () => {
+    // Under the single verdict a failed row and an ok+overdue row both
+    // collapse to `attention` — there is no failed>stale hierarchy any
+    // more. With equal verdict + equal next_fire_at the tiebreak is
+    // display_name, so A_overdue precedes B_failed.
     const { container } = renderTable([
       makeProcessRow({
-        process_id: "stale",
+        process_id: "overdue",
         status: "ok",
-        display_name: "A_stale",
+        display_name: "A_overdue",
         stale_reasons: ["queue_stuck"],
       }),
       makeProcessRow({
@@ -258,11 +262,15 @@ describe("ProcessesTable", () => {
         display_name: "B_failed",
       }),
     ]);
+    const pills = Array.from(
+      container.querySelectorAll("[data-testid='status-pill']"),
+    ).map((p) => p.getAttribute("data-verdict"));
+    expect(pills).toEqual(["attention", "attention"]);
     const links = Array.from(container.querySelectorAll("tbody a")).map(
       (a) => a.textContent ?? "",
     );
-    expect(links[0]).toBe("B_failed");
-    expect(links[1]).toBe("A_stale");
+    expect(links[0]).toBe("A_overdue");
+    expect(links[1]).toBe("B_failed");
   });
 
   // ---------------------------------------------------------------------
