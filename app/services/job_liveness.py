@@ -217,7 +217,10 @@ def fetch_active_runs(
         runs.append(
             ActiveRun(
                 job_name=row["job_name"],
-                started_at=row["started_at"],
+                # Store the tz-normalised value (not the raw row), so the
+                # stored field and ``age_seconds`` stay consistent and
+                # callers always get a tz-aware datetime (PR #1507 review).
+                started_at=started_at,
                 age_seconds=max(0.0, (now - started_at).total_seconds()),
             )
         )

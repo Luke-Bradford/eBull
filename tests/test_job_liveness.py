@@ -221,6 +221,10 @@ class TestFetchActiveRuns:
         conn = _make_conn([_make_cursor([{"job_name": "j", "started_at": naive}])])
         result = fetch_active_runs(conn, _NOW)
         assert result[0].age_seconds == pytest.approx(600.0, abs=1.0)
+        # PR #1507 review (PREVENTION): the STORED started_at must be the
+        # tz-normalised value, not the raw naive row — consistent with the
+        # value age_seconds was derived from, and tz-aware for callers.
+        assert result[0].started_at.tzinfo is not None
 
 
 # ---------------------------------------------------------------------------
