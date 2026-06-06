@@ -60,6 +60,8 @@ from app.services.ops_monitor import (
     get_kill_switch_status,
 )
 from app.workers.scheduler import (
+    JOB_ORCHESTRATOR_FULL_SYNC,
+    JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     SCHEDULED_JOBS,
     CadenceKind,
     ScheduledJob,
@@ -585,6 +587,80 @@ def get_jobs(
         raise HTTPException(status_code=503, detail="job overview unavailable") from exc
 
     return JobsListResponse(checked_at=now, jobs=overviews, jobs_process=jobs_process)
+
+
+# ---------------------------------------------------------------------------
+# Jobs liveness watchdog readout (#1500 / GAP-D)
+# ---------------------------------------------------------------------------
+
+
+class StalledJobResponse(BaseModel):
+    job_name: str
+    window_seconds: float
+    last_fire_at: datetime | None
+
+
+class ActiveRunResponse(BaseModel):
+    job_name: str
+    started_at: datetime
+    age_seconds: float
+
+
+class JobLivenessResponse(BaseModel):
+    checked_at: datetime
+    # Jobs that recorded zero fires over K cadence cycles despite firing
+    # historically, and are not currently running (#1500).
+    stalled_jobs: list[StalledJobResponse]
+    # Oldest still-'running' row per job — surfaces a wedge masked by
+    # newer 'skipped' rows on the latest-row health path.
+    active_runs: list[ActiveRunResponse]
+
+
+@router.get("/job-liveness", response_model=JobLivenessResponse)
+def get_job_liveness(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> JobLivenessResponse:
+    """Per-job stall + aged-running readout (#1500 / GAP-D).
+
+    Stalled = zero ``job_runs`` rows over K cadence cycles despite firing
+    before, and not currently running. ``active_runs`` exposes the oldest
+    still-``running`` row per job so a wedge is visible even when newer
+    ``skipped`` rows top the latest-row health path. Self-tracked
+    orchestrator jobs (``sync_runs``) are excluded.
+
+    Scheduler/process-wide death is covered by the heartbeat surface
+    (``/system/jobs`` → ``jobs_process``), not here.
+    """
+    from app.services.job_liveness import evaluate_liveness
+
+    excluded = {JOB_ORCHESTRATOR_FULL_SYNC, JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC}
+    jobs = [(j.name, j.cadence) for j in SCHEDULED_JOBS if j.name not in excluded]
+    now = _utcnow()
+    try:
+        stalled, active = evaluate_liveness(conn, jobs, now)
+    except Exception as exc:
+        logger.exception("get_job_liveness: failed to evaluate liveness")
+        raise HTTPException(status_code=503, detail="job liveness unavailable") from exc
+
+    return JobLivenessResponse(
+        checked_at=now,
+        stalled_jobs=[
+            StalledJobResponse(
+                job_name=s.job_name,
+                window_seconds=s.window_seconds,
+                last_fire_at=s.last_fire_at,
+            )
+            for s in stalled
+        ],
+        active_runs=[
+            ActiveRunResponse(
+                job_name=a.job_name,
+                started_at=a.started_at,
+                age_seconds=a.age_seconds,
+            )
+            for a in active
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -309,6 +309,7 @@ JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_FINANCIAL_FACTS_RETENTION_SWEEP = "financial_facts_retention_sweep"
 JOB_ORPHAN_TEST_DB_REAP = "orphan_test_db_reap"
+JOB_LIVENESS_WATCHDOG = "jobs_liveness_watchdog"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
@@ -941,6 +942,30 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # 03:15 UTC — after the retention sweeps, low-traffic window.
         cadence=Cadence.daily(hour=3, minute=15),
         catch_up_on_boot=False,  # Step 10b already reaps at boot
+    ),
+    ScheduledJob(
+        name=JOB_LIVENESS_WATCHDOG,
+        display_name="Jobs liveness watchdog",
+        source="db",
+        description=(
+            "#1500 (GAP-D) — per-job stall detector. Every 15m, flags any "
+            "scheduled job that has recorded ZERO job_runs rows over K=3 "
+            "cadence cycles despite firing historically, and surfaces the "
+            "oldest still-'running' row per job. Catches the silent class the "
+            "EVENT_JOB_MAX_INSTANCES listener (#1501) does not: a job that "
+            "stops firing for ANY reason. Any-status rows count as a fire (a "
+            "gate 'skipped' row proves the scheduler fired), so bootstrap-"
+            "gated jobs are not false-flagged. Self-tracked orchestrator jobs "
+            "(sync_runs) are excluded. Scheduler/process-wide death is OUT of "
+            "scope — owned by the job_runtime_heartbeat / supervisor path "
+            "(#719); a watchdog that is itself a scheduled job cannot report "
+            "its own stall."
+        ),
+        cadence=Cadence.every_n_minutes(interval=15),
+        # No per-job prerequisite: gated by the universal bootstrap gate
+        # like any non-exempt job (so it pauses cleanly during bootstrap,
+        # writing 'skipped' rows). Listed in the bootstrap-gating drift
+        # test's NON_GATED_SCHEDULED accordingly.
     ),
     ScheduledJob(
         name=JOB_EXCHANGES_METADATA_REFRESH,
@@ -4206,6 +4231,55 @@ def orphan_test_db_reap() -> None:
             result.total_reaped,
             result.invalid,
             result.orphans,
+        )
+
+
+def jobs_liveness_watchdog() -> None:
+    """#1500 (GAP-D) — per-job stall watchdog.
+
+    Flags scheduled jobs that have gone silent (zero ``job_runs`` rows
+    over K cadence cycles despite firing before, and not currently
+    running) and logs the oldest still-``running`` row per job. Read-only
+    + idempotent: an empty DB yields no stalls. See
+    :mod:`app.services.job_liveness` for the detection contract.
+    """
+    from datetime import UTC, datetime
+
+    from app.services.job_liveness import evaluate_liveness
+
+    # Self-tracked jobs write ``sync_runs`` not ``job_runs`` — excluding
+    # them avoids a permanent false-stall (Codex ckpt-1).
+    excluded = {JOB_ORCHESTRATOR_FULL_SYNC, JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC}
+    jobs = [(j.name, j.cadence) for j in SCHEDULED_JOBS if j.name not in excluded]
+
+    with _tracked_job(JOB_LIVENESS_WATCHDOG) as tracker:
+        now = datetime.now(UTC)
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            stalled, active = evaluate_liveness(conn, jobs, now)
+        tracker.row_count = len(stalled)
+        for job in stalled:
+            logger.warning(
+                "liveness: job %r STALLED — 0 fires in %.0fs (last fire %s)",
+                job.job_name,
+                job.window_seconds,
+                job.last_fire_at,
+            )
+        # Aged-running visibility: log runs older than 2h (the same
+        # threshold check_job_health treats as "likely crashed").
+        for run in active:
+            if run.age_seconds > 2 * 3600:
+                logger.warning(
+                    "liveness: job %r has a run still 'running' for %.0fs "
+                    "(since %s) — possible wedge; the #1474 reaper will "
+                    "terminalise it past its threshold",
+                    run.job_name,
+                    run.age_seconds,
+                    run.started_at,
+                )
+        logger.info(
+            "jobs_liveness_watchdog: %d stalled, %d active run(s)",
+            len(stalled),
+            len(active),
         )
 
 

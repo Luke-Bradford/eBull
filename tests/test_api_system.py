@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.main import app
+from app.services.job_liveness import ActiveRun, StalledJob
 from app.services.ops_monitor import (
     LAYER_QUERY_FAILED_DETAIL_TEMPLATE,
     JobHealth,
@@ -619,3 +620,62 @@ class TestSystemAuthWiring:
             mock_settings.session_idle_timeout_minutes = 60
             resp = client.get("/system/jobs")
         assert resp.status_code == 401
+
+
+class TestJobLiveness:
+    """/system/job-liveness — per-job stall + aged-running readout (#1500)."""
+
+    def teardown_method(self) -> None:
+        _clear_conn_override()
+
+    def test_returns_stalled_and_active_shape(self) -> None:
+        _override_conn(_mock_conn())
+        stalled = [
+            StalledJob(
+                job_name="daily_news_refresh",
+                window_seconds=259200.0,
+                last_fire_at=_NOW - timedelta(days=10),
+            )
+        ]
+        active = [
+            ActiveRun(
+                job_name="fundamentals_sync",
+                started_at=_NOW - timedelta(hours=5),
+                age_seconds=18000.0,
+            )
+        ]
+        with patch(
+            "app.services.job_liveness.evaluate_liveness",
+            return_value=(stalled, active),
+        ):
+            resp = client.get("/system/job-liveness")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["stalled_jobs"][0]["job_name"] == "daily_news_refresh"
+        assert body["stalled_jobs"][0]["window_seconds"] == 259200.0
+        assert body["active_runs"][0]["job_name"] == "fundamentals_sync"
+        assert body["active_runs"][0]["age_seconds"] == 18000.0
+        assert "checked_at" in body
+
+    def test_empty_when_all_healthy(self) -> None:
+        _override_conn(_mock_conn())
+        with patch(
+            "app.services.job_liveness.evaluate_liveness",
+            return_value=([], []),
+        ):
+            resp = client.get("/system/job-liveness")
+        assert resp.status_code == 200
+        assert resp.json()["stalled_jobs"] == []
+        assert resp.json()["active_runs"] == []
+
+    def test_service_exception_returns_503_without_leaking_internals(self) -> None:
+        _override_conn(_mock_conn())
+        secret_marker = "secret-table-name-do-not-leak"
+        with patch(
+            "app.services.job_liveness.evaluate_liveness",
+            side_effect=RuntimeError(secret_marker),
+        ):
+            resp = client.get("/system/job-liveness")
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "job liveness unavailable"
+        assert secret_marker not in resp.text

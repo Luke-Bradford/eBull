@@ -27,6 +27,7 @@ from app.workers.scheduler import (
     JOB_EXCHANGES_METADATA_REFRESH,
     JOB_EXECUTE_APPROVED_ORDERS,
     JOB_FX_RATES_REFRESH,
+    JOB_LIVENESS_WATCHDOG,
     JOB_MONITOR_POSITIONS,
     JOB_NCEN_CLASSIFIER,
     JOB_NIGHTLY_UNIVERSE_SYNC,
@@ -143,6 +144,11 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         # _bootstrap_complete would double-gate. Belongs here (the
         # "deliberately no per-job prereq" set), not as a bug.
         JOB_NCEN_CLASSIFIER,
+        # #1500 — jobs_liveness_watchdog carries no per-job prereq (it is
+        # a monitor); gated by the universal bootstrap gate like any
+        # non-exempt job (pauses cleanly during bootstrap). No bootstrap
+        # dependency on its own.
+        JOB_LIVENESS_WATCHDOG,
     }
 )
 
