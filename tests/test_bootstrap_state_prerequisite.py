@@ -28,6 +28,7 @@ from app.workers.scheduler import (
     JOB_EXECUTE_APPROVED_ORDERS,
     JOB_FX_RATES_REFRESH,
     JOB_MONITOR_POSITIONS,
+    JOB_NCEN_CLASSIFIER,
     JOB_NIGHTLY_UNIVERSE_SYNC,
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     JOB_ORPHAN_TEST_DB_REAP,
@@ -130,6 +131,18 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         JOB_SEC_MANIFEST_WORKER,
         JOB_SEC_DAILY_INDEX_RECONCILE,
         JOB_SEC_MANIFEST_TOMBSTONE_STALE,
+        # #1504 — ncen_classifier_yearly carries NO per-job
+        # _bootstrap_complete prereq by design: it is gated by the
+        # UNIVERSAL bootstrap gate (#1181), which runs check_bootstrap_state_gate
+        # on every scheduled fire for any non-exempt registered job
+        # (app/jobs/runtime.py::_wrap_invoker, needs_gate = not is_exempt),
+        # BEFORE the per-job prereq. The job is non-exempt
+        # (exempt_from_universal_bootstrap_gate=False, scheduler.py:1091-1100)
+        # so its Apr-1 scheduled fire rejects with bootstrap_not_complete
+        # until bootstrap completes — adding a redundant per-job
+        # _bootstrap_complete would double-gate. Belongs here (the
+        # "deliberately no per-job prereq" set), not as a bug.
+        JOB_NCEN_CLASSIFIER,
     }
 )
 
