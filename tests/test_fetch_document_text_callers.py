@@ -180,6 +180,15 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",
+        # #1503 — synthetic AST-only violator fixture for the
+        # pooled-conn-across-HTTP lint (`scripts/check_pooled_conn_across_http.py`).
+        # It calls `provider.fetch_document_text(...)` purely to trip that
+        # guard when scanned by explicit path; the file is NEVER imported
+        # or executed (parsed as AST only, names are `Any` stubs) and
+        # persists nothing. Not a real caller — listed here so the
+        # pinned-caller regex scan does not misread it as one. Added by
+        # #1472 without this entry, which reddened the pre-push hook.
+        "tests/fixtures/lint/pooled_conn_across_http_violator.py",
     }
 )
 
