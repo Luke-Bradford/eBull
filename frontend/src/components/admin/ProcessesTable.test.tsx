@@ -396,7 +396,9 @@ describe("ProcessesTable", () => {
     expect(screen.queryByText(/re-run failed stages/i)).toBeNull();
   });
 
-  it("renders all rows when bootstrap status is complete", () => {
+  it("hides the completed bootstrap row but shows steady-state rows when complete", () => {
+    // #1508 — once bootstrap is complete the first-install row is done and is
+    // removed from the steady-state ops list; the other categories appear.
     renderTableWithStatus(
       [
         makeProcessRow({
@@ -413,12 +415,36 @@ describe("ProcessesTable", () => {
       "complete",
     );
     expect(
-      screen.getByRole("link", { name: "First-install bootstrap" }),
-    ).toBeTruthy();
+      screen.queryByRole("link", { name: "First-install bootstrap" }),
+    ).toBeNull();
     expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
     expect(
       screen.queryByText(/Other categories are gated/i),
     ).toBeNull();
+  });
+
+  it("keeps the bootstrap row when status is unknown (fail-open)", () => {
+    // null = bootstrap-status fetch pending/errored: don't hide information
+    // on uncertainty — render the full table including the bootstrap row.
+    renderTableWithStatus(
+      [
+        makeProcessRow({
+          process_id: "bootstrap",
+          mechanism: "bootstrap",
+          display_name: "First-install bootstrap",
+        }),
+        makeProcessRow({
+          process_id: "daily_cik_refresh",
+          mechanism: "scheduled_job",
+          display_name: "CIK refresh",
+        }),
+      ],
+      null,
+    );
+    expect(
+      screen.getByRole("link", { name: "First-install bootstrap" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
   });
 
   it("bootstrap full-wash modal uses 'Re-run all' heading + replay copy", async () => {
