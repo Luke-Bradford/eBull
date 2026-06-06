@@ -203,6 +203,13 @@ class ProcessRow:
     # underlying ``ScheduledJob.params_metadata`` so the FE knows
     # which form fields to render.
     params_metadata: tuple[ParamMetadata, ...] = field(default_factory=tuple)
+    # #1511 / T5 — set by scheduled_adapter when the job's data_freshness
+    # source is bootstrap-covered AND its newest filing is within cadence.
+    # Fed to ``compute_verdict(watermark_is_fresh=...)`` so a never-run
+    # (``pending_first_run``) poll whose source bootstrap already seeded
+    # reads Current instead of "first run pending". Bootstrap + ingest_sweep
+    # adapters keep the default — the look-through is scheduled-job-only.
+    source_watermark_fresh: bool = False
 
 
 @dataclass(frozen=True, slots=True)

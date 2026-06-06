@@ -27,11 +27,12 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import psycopg
 import psycopg.rows
 
+from app.services.data_freshness import cadence_for
 from app.services.processes import (
     ActiveRunSummary,
     ErrorClassSummary,
@@ -41,6 +42,9 @@ from app.services.processes import (
     ProcessStatus,
     RunStatus,
     StaleReason,
+)
+from app.services.processes.bootstrap_coverage import (
+    BOOTSTRAP_COVERED_FRESHNESS_SOURCES,
 )
 from app.services.processes.stale_detection import (
     QUEUE_STUCK_THRESHOLD_S,
@@ -54,6 +58,7 @@ from app.services.processes.watermarks import (
     manifest_source_for,
     resolve_watermark,
 )
+from app.services.sec_manifest import ManifestSource
 from app.workers.scheduler import (
     SCHEDULED_JOBS,
     Cadence,
@@ -437,6 +442,41 @@ def _has_data_freshness_gap(
         return cur.fetchone() is not None
 
 
+def _source_watermark_fresh(
+    conn: psycopg.Connection[Any],
+    *,
+    source: str,
+    now: datetime,
+) -> bool:
+    """True when ``source``'s newest filing is recent enough that the source
+    as a whole is being kept current — ``MAX(last_known_filed_at)`` within one
+    cadence interval (+ the shared watermark tolerance) of ``now``.
+
+    Source-LEVEL recency, deliberately NOT the per-subject overdue probe
+    (``_has_data_freshness_gap``): event-driven forms (Form 3/4, 13D/G) leave
+    most subjects perpetually "overdue" (filed once, never again), so an
+    any-subject-overdue test reads stale for a source that is in fact current.
+    The #1511 look-through promotes a never-run job to Current only when the
+    source's freshest filing sits inside its cadence window. Returns False on
+    a source with no rows / no ``last_known_filed_at`` (nothing seeded → not
+    fresh) and on an unknown source (no cadence → cannot assert freshness).
+    """
+    try:
+        cadence = cadence_for(cast(ManifestSource, source))
+    except KeyError:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT MAX(last_known_filed_at) FROM data_freshness_index WHERE source = %(source)s",
+            {"source": source},
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return False
+    max_filed_at: datetime = row[0]
+    return max_filed_at >= now - cadence - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S)
+
+
 def _has_dispatched_queue_age(
     conn: psycopg.Connection[Any],
     *,
@@ -764,6 +804,16 @@ def _build_row(
     # monitor_positions, …); the FE renders that as "no resume cursor".
     watermark = resolve_watermark(conn, process_id=job.name, mechanism="scheduled_job")
 
+    # #1511 / T5 — verdict look-through signal. True when the job polls a
+    # bootstrap-covered freshness source whose newest filing is still within
+    # cadence; ``compute_verdict`` uses it to read a ``pending_first_run`` job
+    # as Current (data seeded by bootstrap) rather than "first run pending".
+    source_watermark_fresh = (
+        freshness_source is not None
+        and freshness_source in BOOTSTRAP_COVERED_FRESHNESS_SOURCES
+        and _source_watermark_fresh(conn, source=freshness_source, now=now)
+    )
+
     can_cancel = (
         active_run is not None and active_run.run_id is not None and process_status == "running"
         # short-runners (heartbeat etc.) are not worth cooperative-cancel;
@@ -802,6 +852,8 @@ def _build_row(
         params_metadata=job.params_metadata,
         # PR4 #1082 — operator-visible description for the ⓘ tooltip.
         description=job.description,
+        # #1511 / T5 — verdict look-through input (see compute_verdict).
+        source_watermark_fresh=source_watermark_fresh,
     )
 
 
