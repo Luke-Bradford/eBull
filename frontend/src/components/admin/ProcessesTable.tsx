@@ -28,7 +28,7 @@ import type {
 import { Modal } from "@/components/ui/Modal";
 
 import { LaneFilter } from "@/components/admin/LaneFilter";
-import { ProcessRow } from "@/components/admin/ProcessRow";
+import { ProcessRow, processRowSignature } from "@/components/admin/ProcessRow";
 import { StaleBanner } from "@/components/admin/StaleBanner";
 import {
   STATUS_SORT_PRIORITY,
@@ -272,12 +272,21 @@ export function ProcessesTable({
                 <ProcessRow
                   key={row.process_id}
                   row={row}
+                  // Content hash computed here (parent render time) so
+                  // React.memo can skip unchanged rows on every poll
+                  // (#1480). Must be a prop, not recomputed in the
+                  // comparator — see ProcessRow `processRowSignature`.
+                  signature={processRowSignature(row)}
                   triggerError={rowErrors[row.process_id]?.trigger}
                   cancelError={rowErrors[row.process_id]?.cancel}
                   busy={busyId === row.process_id}
                   onIterate={handleIterate}
-                  onFullWash={(r) => setFullWashTarget(r)}
-                  onCancel={(r) => setCancelTarget(r)}
+                  // Pass the state setters directly — they are stable
+                  // across renders, so memo's reference compare holds.
+                  // An inline `(r) => setFullWashTarget(r)` would mint a
+                  // fresh fn each render and defeat the memo (#1480).
+                  onFullWash={setFullWashTarget}
+                  onCancel={setCancelTarget}
                 />
               ))}
             </tbody>

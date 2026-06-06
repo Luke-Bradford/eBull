@@ -35,7 +35,7 @@ import {
   makeProcessList,
   makeProcessRow,
 } from "@/components/admin/__fixtures__/processes";
-import { ProcessRow } from "@/components/admin/ProcessRow";
+import { ProcessRow, processRowSignature } from "@/components/admin/ProcessRow";
 import { ProcessesTable } from "@/components/admin/ProcessesTable";
 import { StaleBanner } from "@/components/admin/StaleBanner";
 
@@ -71,6 +71,7 @@ function renderRow(props: Partial<Parameters<typeof ProcessRow>[0]> = {}) {
         <tbody>
           <ProcessRow
             row={row}
+            signature={processRowSignature(row)}
             triggerError={undefined}
             cancelError={undefined}
             busy={false}
