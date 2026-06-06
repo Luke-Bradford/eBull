@@ -36,6 +36,7 @@ from app.workers.scheduler import (
     JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
+    JOB_RETRY_SWEEPER,
     JOB_SEC_13F_FILER_DIRECTORY_SYNC,
     JOB_SEC_DAILY_INDEX_RECONCILE,
     JOB_SEC_MANIFEST_TOMBSTONE_STALE,
@@ -149,6 +150,11 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         # non-exempt job (pauses cleanly during bootstrap). No bootstrap
         # dependency on its own.
         JOB_LIVENESS_WATCHDOG,
+        # #1509 — jobs_retry_sweeper carries no per-job prereq (it is a
+        # maintenance job re-firing failed jobs); gated by the universal
+        # bootstrap gate like any non-exempt job (pauses cleanly during
+        # bootstrap). No bootstrap dependency of its own.
+        JOB_RETRY_SWEEPER,
     }
 )
 

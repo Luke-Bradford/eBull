@@ -166,6 +166,110 @@ def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
 
+# ---------------------------------------------------------------------------
+# Job-level retry/backoff (#1509 / T3 of #1508)
+# ---------------------------------------------------------------------------
+#
+# A transient failure (REMEDIES[category].self_heal == True) schedules a
+# near-term retry on capped exponential backoff; a permanent one
+# (auth/schema-drift/db-constraint/missing-key) leaves next_retry_at NULL and
+# surfaces as Needs-attention immediately. Spec:
+# docs/specs/ops/2026-06-07-job-retry-backoff.md
+_RETRY_MAX_ATTEMPTS: int = 4
+_RETRY_BASE_SECONDS: int = 300  # 5m
+_RETRY_FACTOR: int = 3
+_RETRY_CAP_SECONDS: int = 3600  # 1h
+# RATE_LIMITED gets a longer first delay so a retry never lands back inside a
+# still-held rate window (#1484 caveat).
+_RETRY_BASE_RATE_LIMITED_SECONDS: int = 900  # 15m
+
+
+def _backoff_seconds(attempt: int, category: FailureCategory | None) -> int:
+    """Capped exponential backoff for retry ``attempt`` (1-based)."""
+    from app.services.sync_orchestrator.layer_types import FailureCategory
+
+    base = _RETRY_BASE_RATE_LIMITED_SECONDS if category == FailureCategory.RATE_LIMITED else _RETRY_BASE_SECONDS
+    raw = base * (_RETRY_FACTOR ** (attempt - 1))
+    return min(raw, _RETRY_CAP_SECONDS)
+
+
+def _is_transient(category: FailureCategory | None) -> bool:
+    """True when the failure category is auto-retriable (self-heal).
+
+    Reuses ``REMEDIES`` — the single source of truth for transient-vs-
+    permanent — instead of a parallel list. ``None``/unknown ⇒ permanent
+    (never retry a failure we cannot classify). Uses ``.get`` so an
+    unmapped category cannot ``KeyError``.
+    """
+    if category is None:
+        return False
+    from app.services.sync_orchestrator.layer_types import REMEDIES
+
+    remedy = REMEDIES.get(category)
+    return bool(remedy and remedy.self_heal)
+
+
+def _retry_plan(
+    conn: psycopg.Connection[Any],
+    run_id: int,
+    category: FailureCategory | None,
+    now: datetime,
+) -> tuple[int, datetime | None]:
+    """Compute ``(attempt, next_retry_at)`` for a just-failed run.
+
+    ``attempt`` = this run's position in the current consecutive-failure
+    streak (1 = first natural fire), counted back from this run until the
+    first non-failure terminal row. ``next_retry_at`` is set only when the
+    failure is transient AND ``attempt <= _RETRY_MAX_ATTEMPTS``; otherwise
+    ``None`` (permanent or exhausted → Needs-attention).
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT job_name, started_at FROM job_runs WHERE run_id = %(id)s",
+            {"id": run_id},
+        )
+        this = cur.fetchone()
+    if this is None:
+        return 1, None
+
+    # Prior terminal rows for this job, newest first. 'running' is excluded
+    # (not terminal); success/skipped/cancelled break the streak. LIMIT is
+    # _RETRY_MAX_ATTEMPTS because once the streak would push attempt past the
+    # cap we stop retrying regardless, so deeper history is irrelevant.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status FROM job_runs
+             WHERE job_name = %(job)s
+               AND run_id   <> %(id)s
+               AND status IN ('success', 'failure', 'skipped', 'cancelled')
+               AND (started_at < %(ts)s
+                    OR (started_at = %(ts)s AND run_id < %(id)s))
+             ORDER BY started_at DESC, run_id DESC
+             LIMIT %(cap)s
+            """,
+            {
+                "job": this["job_name"],
+                "id": run_id,
+                "ts": this["started_at"],
+                "cap": _RETRY_MAX_ATTEMPTS,
+            },
+        )
+        prior_statuses = [row[0] for row in cur.fetchall()]
+
+    streak = 0
+    for status in prior_statuses:
+        if status == "failure":
+            streak += 1
+        else:
+            break
+    attempt = streak + 1
+
+    if not _is_transient(category) or attempt > _RETRY_MAX_ATTEMPTS:
+        return attempt, None
+    return attempt, now + timedelta(seconds=_backoff_seconds(attempt, category))
+
+
 def check_layer_staleness(
     conn: psycopg.Connection[Any],
     layer: LayerName,
@@ -332,8 +436,19 @@ def record_job_finish(
     error_category: FailureCategory | None = None,
     now: datetime | None = None,
 ) -> None:
-    """Record the completion of a scheduled job."""
+    """Record the completion of a scheduled job.
+
+    On the failure path (#1509), classifies the failure and — when
+    transient and attempts are not exhausted — stamps ``next_retry_at`` +
+    ``attempt`` so the ``jobs_retry_sweeper`` re-fires it before its next
+    natural cadence slot. A non-failure terminal clears ``next_retry_at``
+    and leaves ``attempt`` at its default.
+    """
     now = now or _utcnow()
+    if status == "failure":
+        attempt, next_retry_at = _retry_plan(conn, run_id, error_category, now)
+    else:
+        attempt, next_retry_at = 1, None
     conn.execute(
         """
         UPDATE job_runs
@@ -341,7 +456,9 @@ def record_job_finish(
             status         = %(status)s,
             row_count      = %(row_count)s,
             error_msg      = %(error_msg)s,
-            error_category = %(error_category)s
+            error_category = %(error_category)s,
+            next_retry_at  = %(next_retry_at)s,
+            attempt        = %(attempt)s
         WHERE run_id = %(run_id)s
         """,
         {
@@ -350,6 +467,8 @@ def record_job_finish(
             "row_count": row_count,
             "error_msg": error_msg,
             "error_category": error_category.value if error_category else None,
+            "next_retry_at": next_retry_at,
+            "attempt": attempt,
             "run_id": run_id,
         },
     )

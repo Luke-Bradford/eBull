@@ -310,6 +310,7 @@ JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_FINANCIAL_FACTS_RETENTION_SWEEP = "financial_facts_retention_sweep"
 JOB_ORPHAN_TEST_DB_REAP = "orphan_test_db_reap"
 JOB_LIVENESS_WATCHDOG = "jobs_liveness_watchdog"
+JOB_RETRY_SWEEPER = "jobs_retry_sweeper"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
@@ -966,6 +967,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # like any non-exempt job (so it pauses cleanly during bootstrap,
         # writing 'skipped' rows). Listed in the bootstrap-gating drift
         # test's NON_GATED_SCHEDULED accordingly.
+    ),
+    ScheduledJob(
+        name=JOB_RETRY_SWEEPER,
+        display_name="Jobs retry sweeper",
+        source="db",
+        description=(
+            "#1509 (T3 of #1508) — re-fires transiently-failed jobs. Every "
+            "5m, scans job_runs for due next_retry_at (set by "
+            "record_job_finish when a failure is transient — "
+            "REMEDIES[category].self_heal — and attempts are not exhausted) "
+            "and re-enqueues each via the audited manual-queue path "
+            "(pending_job_requests + decision_audit). Permanent failures "
+            "(auth/schema-drift/db-constraint/missing-key) carry no "
+            "next_retry_at and are never touched. An in-flight request or a "
+            "running row defers a candidate (no double-dispatch); a newer "
+            "terminal run clears a superseded row. Self-tracked orchestrator "
+            "jobs (sync_runs) are out of scope."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
+        # No per-job prerequisite: gated by the universal bootstrap gate
+        # like any non-exempt job (pauses cleanly during bootstrap). Listed
+        # in the bootstrap-gating drift test's NON_GATED_SCHEDULED.
     ),
     ScheduledJob(
         name=JOB_EXCHANGES_METADATA_REFRESH,
@@ -4281,6 +4304,31 @@ def jobs_liveness_watchdog() -> None:
             len(stalled),
             len(active),
         )
+
+
+def jobs_retry_sweeper() -> None:
+    """#1509 (T3 of #1508) — re-fire transiently-failed jobs that are due.
+
+    Scans ``job_runs`` for due ``next_retry_at`` and re-enqueues each through
+    the audited manual queue. Idempotent: an in-flight request / running row
+    defers a candidate, a superseded row is cleared. See
+    :mod:`app.services.job_retry` for the dispatch contract. Eligibility is
+    bounded to ``SCHEDULED_JOBS`` minus the sync-runs-tracked orchestrator
+    jobs (same exclusion as the liveness watchdog) — those do not flow
+    through ``record_job_finish`` and so never carry a ``next_retry_at``.
+    """
+    from datetime import UTC, datetime
+
+    from app.services.job_retry import sweep_due_retries
+
+    excluded = {JOB_ORCHESTRATOR_FULL_SYNC, JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC}
+    eligible = frozenset(j.name for j in SCHEDULED_JOBS if j.name not in excluded)
+
+    with _tracked_job(JOB_RETRY_SWEEPER) as tracker:
+        now = datetime.now(UTC)
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            refired = sweep_due_retries(conn, eligible_job_names=eligible, now=now)
+        tracker.row_count = len(refired)
 
 
 def sec_manifest_worker_tick() -> None:

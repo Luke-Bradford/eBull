@@ -22,7 +22,7 @@ PR4 wires the actual watermark reset semantics.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple
 from uuid import UUID
 
@@ -417,10 +417,24 @@ def _convert_error(err: ErrorClassSummary) -> ErrorClassSummaryResponse:
 
 
 def _convert_row(row: ProcessRow) -> ProcessRowResponse:
+    # #1509 / T3 — derive the retry inputs at the choke point (the clock lives
+    # here, not in the pure ``compute_verdict``). ``retry_in_flight`` is True
+    # whenever ``next_retry_at`` is set (past OR future): a due-but-not-yet-swept
+    # retry is still scheduled recovery, so the row must not flicker red in the
+    # ≤5m sweeper gap. The "HH:MM" label (UTC) is shown only while the retry is
+    # still in the future; once due, compute_verdict renders "retrying shortly".
+    retry_in_flight = row.next_retry_at is not None
+    retry_at_display = (
+        row.next_retry_at.strftime("%H:%M")
+        if row.next_retry_at is not None and row.next_retry_at > datetime.now(UTC)
+        else ""
+    )
     verdict, self_healing, verdict_reason = compute_verdict(
         status=row.status,
         stale_reasons=row.stale_reasons,
         watermark_is_fresh=row.source_watermark_fresh,
+        retry_in_flight=retry_in_flight,
+        retry_at_display=retry_at_display,
     )
     return ProcessRowResponse(
         process_id=row.process_id,

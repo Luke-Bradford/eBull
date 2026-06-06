@@ -201,3 +201,70 @@ def test_total_and_single_valued_with_fresh_watermark(status: ProcessStatus, rea
     verdict, self_healing, _ = compute_verdict(status=status, stale_reasons=reasons, watermark_is_fresh=True)
     assert verdict in _VALID_VERDICTS
     assert self_healing == (verdict == "self_healing")
+
+
+# --- #1509 / T3 retry/backoff -------------------------------------------
+
+
+def test_failed_with_future_retry_reads_will_retry() -> None:
+    """A transiently-failed row with a future retry reads Self-healing
+    'will retry HH:MM' instead of red attention."""
+    v, sh, reason = compute_verdict(status="failed", stale_reasons=(), retry_in_flight=True, retry_at_display="14:30")
+    assert (v, sh, reason) == ("self_healing", True, "will retry 14:30")
+
+
+def test_failed_with_due_retry_reads_retrying_shortly() -> None:
+    """Retry due (empty display) but sweeper not yet fired → still recovery,
+    no red flicker; reads 'retrying shortly'."""
+    v, sh, reason = compute_verdict(status="failed", stale_reasons=(), retry_in_flight=True, retry_at_display="")
+    assert (v, sh, reason) == ("self_healing", True, "retrying shortly")
+
+
+def test_pending_retry_with_explicit_retry_prefers_hhmm() -> None:
+    """An explicit ``next_retry_at`` backoff label beats the cadence-covered
+    'retry scheduled' fallback."""
+    v, sh, reason = compute_verdict(
+        status="pending_retry", stale_reasons=(), retry_in_flight=True, retry_at_display="09:05"
+    )
+    assert (v, sh, reason) == ("self_healing", True, "will retry 09:05")
+
+
+def test_retry_suppresses_schedule_missed() -> None:
+    """A pending retry IS the fix for a missed schedule — schedule_missed is
+    suppressed so the row reads Self-healing, not attention."""
+    v, sh, _ = compute_verdict(
+        status="failed", stale_reasons=("schedule_missed",), retry_in_flight=True, retry_at_display="14:30"
+    )
+    assert (v, sh) == ("self_healing", True)
+
+
+@pytest.mark.parametrize("wedge", ["queue_stuck", "mid_flight_stuck", "watermark_gap"])
+def test_retry_never_masks_genuine_wedge(wedge: StaleReason) -> None:
+    """Codex ckpt-1 invariant: a retry must NOT paint a genuinely-wedged row
+    self-healing — queue_stuck / mid_flight_stuck / watermark_gap still win."""
+    v, sh, _ = compute_verdict(status="failed", stale_reasons=(wedge,), retry_in_flight=True, retry_at_display="14:30")
+    assert v == "attention"
+    assert sh is False
+
+
+@pytest.mark.parametrize("status", [s for s in _ALL_STATUSES if s not in ("failed", "pending_retry")])
+def test_retry_only_affects_failed_and_pending_retry(status: ProcessStatus) -> None:
+    """``retry_in_flight`` reclassifies only failed / pending_retry rows; every
+    other status (no stale) maps identically with the flag set.
+
+    (``schedule_missed`` is excluded from this comparison: the flag legitimately
+    suppresses it, which is covered by ``test_retry_suppresses_schedule_missed``.)"""
+    base = compute_verdict(status=status, stale_reasons=())
+    with_retry = compute_verdict(status=status, stale_reasons=(), retry_in_flight=True, retry_at_display="14:30")
+    assert base == with_retry
+
+
+@pytest.mark.parametrize("status", _ALL_STATUSES)
+@pytest.mark.parametrize("reasons", _all_reason_subsets())
+def test_total_and_single_valued_with_retry(status: ProcessStatus, reasons: tuple[StaleReason, ...]) -> None:
+    """Totality holds with the retry flag set, too."""
+    verdict, self_healing, _ = compute_verdict(
+        status=status, stale_reasons=reasons, retry_in_flight=True, retry_at_display="14:30"
+    )
+    assert verdict in _VALID_VERDICTS
+    assert self_healing == (verdict == "self_healing")
