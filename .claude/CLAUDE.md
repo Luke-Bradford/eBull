@@ -192,34 +192,50 @@ Run these before every push:
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
-uv run pytest
+uv run pytest -m "not db"        # fast tier: pure-logic, no Postgres (~25s)
+uv run pytest tests/smoke        # app boots against the dev DB
 ```
 
-All four must pass.
-
-A repo pre-push hook at `.githooks/pre-push` enforces all four gates
-plus the chokepoint-lint scripts automatically. Wire once per clone:
+A repo pre-push hook at `.githooks/pre-push` enforces all of these plus
+the chokepoint-lint scripts automatically. Wire once per clone:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-The hook runs pytest too — testmon-scoped normally, full suite on a
-brand-new branch (no upstream) or when a broad-trigger path changes.
-CI does NOT run pytest (removed 2026-05-05); the local hook is the
-pytest gate. Bypass with `--no-verify` only for genuine emergencies —
-e.g. dev Postgres stuck in WAL recovery blocks the pytest stage while
-the diff is lint-clean and Codex-green (precedent: #1387). The hook
-exists to stop the push-fail-fix-repush cycle that re-spends
-Anthropic credits on the review bot.
+### Test tiering (operator decision 2026-06-07)
 
-`uv run pytest` includes `tests/smoke/test_app_boots.py`, which drives
-the FastAPI lifespan through `TestClient` against the real dev DB.
-This is the gate that catches lifespan-only failures (bad SQL in
+The push gate runs ONLY the **fast tier** (`-m "not db"`) + the smoke
+test. The `db` marker is auto-applied at collection
+(`tests/conftest.py::pytest_collection_modifyitems`) to any test that
+pulls a real-DB fixture or whose module touches `psycopg.connect` /
+the test-DB URL / `run_migrations` / `TestClient`.
+
+The **DB-backed integration tier** (`-m db`, ~half the suite) is OFF the
+per-push path — it was the multi-minute, xdist-flaky, routinely
+`--no-verify`'d cost that paid no rent on every push. Run it
+deliberately when you change DB/SQL/ingest/schema code:
+
+```bash
+docker compose --profile test up -d postgres-test   # once per session
+uv run pytest -m db                                  # full integration tier
+```
+
+CI does NOT run pytest (removed 2026-05-05). `--no-verify` is for
+genuine emergencies only (precedent: #1387).
+
+**Writing tests going forward — lean.** Default to pure-logic tests
+(no DB): extract the decision into a pure function and table-test it
+(see prevention-log entry on "prefer pure policy over real DBs"). Add
+DB-backed tests sparingly — ONE integration test per genuinely-new SQL
+mechanism, not a file per code path. Lean on the dev-verify step
+(exercise the real endpoint/job on dev) for operator-visible behaviour
+rather than a thick integration suite. The smoke test
+(`tests/smoke/test_app_boots.py`) drives the FastAPI lifespan against
+the real dev DB and catches lifespan-only failures (bad SQL in
 `master_key.bootstrap`, broken imports under `app/main.py`, migration
-state mismatches) which unit tests with mocked cursors will silently
-miss. If the smoke test fails, the running server is broken — fix the
-root cause, do not skip it.
+state mismatches) that mocked-cursor unit tests silently miss — if it
+fails, the running server is broken; fix the root cause, do not skip it.
 
 If the PR touches `frontend/`, also run:
 

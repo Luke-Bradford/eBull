@@ -8,21 +8,20 @@
 # costing 13-20 min and stacking with bot-review iterations
 # (PR + follow-up = 30-60 min wall-clock).
 #
-# Pytest scoping (#903): pytest-testmon tracks per-test coverage in
-# `.testmondata` and re-runs only tests whose touched code paths
-# changed since the last green run. testmon does not support
-# pytest-xdist, so the scoped path runs single-process (`-n0`); the
-# scoped set is small enough that parallelism overhead would dominate.
+# Pytest tiering (operator decision 2026-06-07): the gate runs only the
+# FAST tier — pure-logic tests that need no Postgres (`-m "not db"`,
+# ~25s under xdist). The DB-backed integration tier (~half the suite,
+# xdist-flaky, needs the 5433 test cluster) was the multi-minute cost
+# that was routinely bypassed with `--no-verify` — it paid no rent on
+# every push. It now runs on demand / pre-merge (`uv run pytest -m db`),
+# not here. The `db` marker is auto-applied at collection
+# (tests/conftest.py). Testmon scoping was removed with it — the fast
+# tier is cheap enough to always run in full. Plus the smoke test (app
+# boots against the dev DB), the one DB-touching test worth gating.
 #
-# Broad-trigger fallback: testmon's import graph cannot see SQL
-# migrations or fixture-data changes, and conftest / pyproject /
-# dependency changes can affect every test indirectly. When the diff
-# touches any broad-trigger path we run the full suite under the
-# default xdist config.
-#
-# This shifts the pytest cost to push-time on the developer's box,
-# where it runs with warm caches + per-PR scope filtering and the
-# operator can iterate without burning shared CI minutes.
+# This keeps the push gate fast + deterministic (no DB ⇒ no xdist DB
+# flake ⇒ no reflexive --no-verify), shifting the heavy integration
+# cost to when DB/SQL code actually changes.
 #
 # Wire once per clone:
 #   git config core.hooksPath .githooks
@@ -247,93 +246,34 @@ bash scripts/check_anthropic_timeout.sh
 echo "==> Pre-push gate: pre-push <-> ci.yml lint parity"
 bash scripts/check_ci_mirrors_prepush.sh
 
-# Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
-# (no upstream yet, e.g. brand-new branch), assume worst-case: run the
-# full suite under xdist. The first push of a brand-new branch usually
-# only diffs trivially against the remote anyway.
-if changed_files="$(git diff --name-only '@{u}..HEAD' 2>/dev/null)"; then
-  :
-else
-  echo "==> Pre-push gate: no upstream yet, will run full xdist suite"
-  changed_files=""
-fi
+# Pytest — FAST TIER ONLY (operator decision 2026-06-07).
+#
+# The gate runs the pure-logic tests that need no Postgres (`-m "not db"`,
+# ~3.1k tests, ~25s under xdist). The DB-backed integration tier (~half the
+# suite, xdist-flaky, needs the 5433 test cluster) is OFF the per-push critical
+# path — it was the multi-minute, routinely-`--no-verify`'d cost that paid no
+# rent on every push. Run it deliberately when you change DB/SQL/ingest code:
+#
+#   docker compose --profile test up -d postgres-test   # once
+#   uv run pytest -m db                                  # full integration tier
+#
+# The `db` marker is auto-applied at collection (tests/conftest.py:
+# pytest_collection_modifyitems) to any test pulling a real-DB fixture or whose
+# module touches psycopg.connect / the test-DB URL / run_migrations / TestClient.
+# No testmon, no run-mode branching, no cluster startup here — the fast tier is
+# cheap enough to always run in full, and never touches a DB so it can't flake
+# on xdist DB isolation.
+echo "==> Pre-push gate: fast tests (pure-logic, no DB)"
+uv run pytest -m "not db" --tb=short -q
 
-# Three paths:
-#   prime  — .testmondata missing. Run all tests with --testmon
-#            single-process. testmon's first-run behavior naturally
-#            collects every test and writes the coverage db.
-#            (--testmon-noselect's cold-cache path crashes on Windows
-#            inside testmon's db reset due to a file-handle race;
-#            --testmon avoids that.) One-off cost per clone.
-#   broad  — diff touches paths whose effects testmon can't detect via
-#            its Python coverage graph alone (SQL migrations, fixture
-#            data) or that influence test selection itself (conftest,
-#            pyproject, uv.lock, this hook, pytest.ini). Run the full
-#            suite under default xdist for speed; testmon db is left
-#            untouched. testmon's per-file fsha index will reselect
-#            tests for any changed .py file on the next scoped run, so
-#            cross-path correctness is preserved.
-#   scoped — default. `--testmon -n0` scopes to changed code paths.
-run_mode="scoped"
-if [[ ! -f .testmondata ]]; then
-  run_mode="prime"
-  echo "==> Pre-push gate: .testmondata not found; priming full suite (single-process)"
-elif [[ -z "${changed_files}" ]]; then
-  run_mode="broad"
-else
-  while IFS= read -r f; do
-    case "$f" in
-      sql/*.sql|sql/**/*.sql|\
-      tests/conftest.py|tests/**/conftest.py|tests/fixtures/*|tests/fixtures/**/*|\
-      pyproject.toml|uv.lock|\
-      .githooks/pre-push|\
-      pytest.ini)
-        run_mode="broad"
-        echo "==> Pre-push gate: broad-trigger path changed (${f}); will run full xdist suite"
-        break
-        ;;
-    esac
-  done <<< "${changed_files}"
-fi
-
-# C1 (#1447): the pytest suite runs on the dedicated 'postgres-test' cluster
-# (port 5433, disk volume pgdata_test) — NOT the dev 'ebull' cluster — so a
-# leaked/abandoned test DB can never wedge ebull's crash recovery (RCA
-# 2026-06-03). Ensure it's up before pytest. Profile-gated, so a normal
-# `docker compose up` never starts it. Skipped when EBULL_TEST_DATABASE_URL is
-# set (CI / custom cluster — caller owns provisioning there).
-if [[ -z "${EBULL_TEST_DATABASE_URL:-}" ]]; then
-  echo "==> Pre-push gate: ensuring 'postgres-test' cluster (5433) is up"
-  if ! docker compose --profile test up -d postgres-test >/dev/null 2>&1; then
-    echo "ERROR: could not start the postgres-test cluster."
-    echo "       docker compose --profile test up -d postgres-test"
-    exit 1
-  fi
-  _pt_ready=""
-  for _i in $(seq 1 30); do
-    if docker exec ebull-postgres-test pg_isready -U postgres >/dev/null 2>&1; then _pt_ready=1; break; fi
-    sleep 1
-  done
-  if [[ -z "${_pt_ready}" ]]; then
-    echo "ERROR: postgres-test cluster did not become ready within 30s."
-    exit 1
-  fi
-fi
-
-case "${run_mode}" in
-  prime)
-    # testmon is incompatible with pytest-xdist, so -n0 is forced.
-    uv run pytest --testmon -n0 --tb=short -q
-    ;;
-  broad)
-    echo "==> Pre-push gate: pytest (full suite — we own this, not CI)"
-    uv run pytest --tb=short -q
-    ;;
-  scoped)
-    echo "==> Pre-push gate: pytest --testmon (scoped, single-process; xdist incompatible)"
-    uv run pytest --testmon -n0 --tb=short -q
-    ;;
-esac
+# The smoke test is the ONE DB-touching test worth gating on every push: it
+# drives the FastAPI lifespan against the dev DB, catching lifespan-only
+# failures (bad bootstrap SQL, broken imports under app/main.py, migration
+# drift) that mocked-cursor unit tests silently miss. Runs against the running
+# dev stack (ebull cluster); if the stack is down the gate fails loudly, which
+# is correct — a broken server should not ship.
+echo "==> Pre-push gate: smoke (app boots against dev DB)"
+uv run pytest tests/smoke --tb=short -q
 
 # Frontend dark-mode class hygiene (#708). Skipped if frontend/ is
 # absent (e.g. backend-only worktrees) or if `pnpm` is not on PATH —
