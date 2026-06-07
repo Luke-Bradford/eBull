@@ -4,7 +4,26 @@ import {
   formatHeartbeatAge,
   formatRate,
   formatRelativeTime,
+  formatTime,
 } from "@/lib/format";
+
+describe("formatTime", () => {
+  it("renders HH:MM (24h) for a Date", () => {
+    // 14:32 UTC — assert the minutes part survives regardless of viewer TZ.
+    expect(formatTime(new Date("2026-06-07T14:32:00Z"))).toMatch(/\d{2}:32/);
+  });
+
+  it("accepts an ISO string", () => {
+    expect(formatTime("2026-06-07T09:05:00Z")).toMatch(/\d{2}:05/);
+  });
+
+  it("renders em-dash for null / undefined / empty / invalid", () => {
+    expect(formatTime(null)).toBe("—");
+    expect(formatTime(undefined)).toBe("—");
+    expect(formatTime("")).toBe("—");
+    expect(formatTime("not-a-date")).toBe("—");
+  });
+});
 
 describe("formatRelativeTime", () => {
   const NOW = new Date("2026-04-21T12:00:00Z");

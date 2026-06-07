@@ -80,6 +80,20 @@ export function formatDateTime(iso: string | null | undefined): string {
   return DATE.format(d);
 }
 
+const TIME = new Intl.DateTimeFormat("en-GB", {
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+/** Time-only (HH:MM, en-GB 24h) for "checked HH:MM"-style freshness labels
+ *  (#1513). Accepts a Date (client poll-completion time) or an ISO string. */
+export function formatTime(value: Date | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return TIME.format(d);
+}
+
 /** Format a YYYY-MM-DD date-only value (pydantic `date` serialisation).
  *  Unlike formatDateTime, does NOT render hours/minutes. */
 export function formatDate(iso: string | null | undefined): string {

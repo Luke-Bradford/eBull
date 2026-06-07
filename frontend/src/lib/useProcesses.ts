@@ -37,7 +37,12 @@ export const POLL_INTERVAL_IDLE_MS = 60_000;
 export const SLOW_LINK_THRESHOLD_MS = 2_000;
 export const SLOW_LINK_BACKOFF = 3;
 
-export type UseProcessesResult = AsyncState<ProcessListResponse>;
+export interface UseProcessesResult extends AsyncState<ProcessListResponse> {
+  /** Client-side completion time of the most recent successful fetch —
+   *  the honest "checked HH:MM" freshness anchor for the Processes header
+   *  (#1513). `null` until the first successful poll. */
+  readonly checkedAt: Date | null;
+}
 
 function isDocumentHidden(): boolean {
   return typeof document !== "undefined" && document.hidden;
@@ -58,11 +63,17 @@ export function useProcesses(): UseProcessesResult {
   // flag, so a slow stale request finishing after a fast newer one
   // cannot back off the cadence on obsolete timing (Codex ckpt-2).
   const fetchSeqRef = useRef(0);
+  const [checkedAt, setCheckedAt] = useState<Date | null>(null);
   const measuredFetch = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
     const startedAt = performance.now();
     try {
-      return await fetchProcesses();
+      const result = await fetchProcesses();
+      // Stamp freshness only for the most-recently-STARTED request so a
+      // slow stale fetch landing after a newer one cannot back-date the
+      // "checked" label (same seq guard as the slow-link flag below).
+      if (seq === fetchSeqRef.current) setCheckedAt(new Date());
+      return result;
     } finally {
       if (seq === fetchSeqRef.current) {
         setSlowLink(performance.now() - startedAt > SLOW_LINK_THRESHOLD_MS);
@@ -109,5 +120,5 @@ export function useProcesses(): UseProcessesResult {
     return () => window.clearInterval(id);
   }, [interval, visible]);
 
-  return state;
+  return { ...state, checkedAt };
 }
