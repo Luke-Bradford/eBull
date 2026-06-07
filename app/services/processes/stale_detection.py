@@ -88,8 +88,10 @@ def compute(
             job has never run (``pending_first_run`` already covers
             that surface) or when the mechanism has no schedule. The
             rule fires when this timestamp is more than
-            ``SCHEDULE_MISS_TOLERANCE_S`` in the past — i.e., we should
-            have fired again by now and didn't. Computed from
+            ``max(cadence_period_s, SCHEDULE_MISS_FLOOR_S)`` in the past
+            (C1, #1508) — i.e., a whole cadence cycle has elapsed past
+            the slot we should have fired in and we still didn't.
+            Computed from
             ``compute_next_run(cadence, latest_terminal.started_at)``
             in the scheduled adapter; pure-future ``next_fire_at``
             values would never be reachable so the rule could never

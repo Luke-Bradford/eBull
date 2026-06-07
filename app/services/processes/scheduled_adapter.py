@@ -796,11 +796,16 @@ def _build_row(
     # cheap.
     now = datetime.now(UTC)
     # ``expected_fire_at`` is the first cadence-occurrence after the
-    # latest terminal run's ``started_at``. When that timestamp is in
-    # the past (now > expected + tolerance), the schedule was missed.
+    # latest terminal run's anchor. When it falls more than one full
+    # cadence in the past (now > expected + max(cadence, floor)), the
+    # schedule was missed (C1, #1508; see compute_stale_reasons'
+    # cadence_period_s arg below). ``expected_fire_at`` is already the
+    # next slot (anchor + ~1 cadence); Rule 1 then waits another full
+    # cadence, so schedule_missed surfaces ~2 cadences after the last
+    # successful run — deliberate de-noise, errs green.
     # Codex pre-push BLOCKING: ``next_fire_at`` is the strictly-future
     # next fire from compute_next_run(cadence, now), so it could never
-    # satisfy ``< now - tolerance`` and the rule was unreachable.
+    # satisfy ``< now - threshold`` and the rule was unreachable.
     expected_fire_at: datetime | None = None
     if terminal_row is not None and terminal_row.get("started_at") is not None:
         # C1 (#1508): anchor on the LATER of started_at / finished_at so a

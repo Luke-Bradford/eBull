@@ -170,8 +170,8 @@ def test_ingest_sweep_never_schedule_misses() -> None:
 # cycle fires, and the 300s floor protects fast (every-5-min) jobs.
 
 
-def _c1_base(**kw):  # type: ignore[no-untyped-def]
-    args = dict(
+def _c1_base(**kw: object) -> dict[str, object]:
+    args: dict[str, object] = dict(
         mechanism="scheduled_job",
         status="ok",
         expected_fire_at=None,
