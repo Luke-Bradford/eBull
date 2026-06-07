@@ -298,14 +298,20 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
 # work fires every cadence. For these jobs the adapter resolves the
 # terminal row from ``sync_runs`` (keyed by scope) instead.
 #
-# Currently ONLY ``orchestrator_high_frequency_sync`` is genuinely
-# telemetry-frozen (it writes ``sync_runs`` scope='high_frequency'
-# ``complete`` every 5m). The Layer-1/2/3 standalone crons write
-# ``job_runs`` again after a clean restart, so they are deliberately NOT
-# re-homed here (per the #1474 2026-06-04 triage). Add a job_name here
-# only when it is confirmed to record solely in ``sync_runs``.
+# Both orchestrator wrapper jobs are telemetry-frozen: each runs a
+# ``SyncScope`` and records solely in ``sync_runs`` (scope='high_frequency'
+# every 5m; scope='full' on the daily DAG). The Layer-1/2/3 standalone
+# crons write ``job_runs`` again after a clean restart, so they are
+# deliberately NOT re-homed here (per the #1474 2026-06-04 triage). Add a
+# job_name here only when it is confirmed to record solely in ``sync_runs``.
 _ORCHESTRATOR_SYNC_SCOPE: Final[dict[str, str]] = {
     "orchestrator_high_frequency_sync": "high_frequency",
+    # ``orchestrator_full_sync`` runs ``SyncScope.full()``, which writes a
+    # ``sync_runs`` row with ``scope = scope.kind = 'full'`` (see
+    # ``executor._insert_sync_run``). Like the HF sync it records solely in
+    # ``sync_runs`` (no ``job_runs`` terminal), so resolve its last-run /
+    # ``schedule_missed`` from ``sync_runs`` too (#1508 C5).
+    "orchestrator_full_sync": "full",
 }
 
 # ``sync_runs.status`` → the ``job_runs`` terminal vocabulary that
