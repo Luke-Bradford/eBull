@@ -179,11 +179,61 @@ could lie GREEN (stale `job_runs` success) or false-RED. Add
 overdue (C1) is honest, exactly like high-frequency. Both orchestrator jobs then
 go overdue → RED when their sync genuinely stops.
 
+### C7 — page scope: ONLY steady-state jobs that keep the system current (operator requirement, 2026-06-07)
+
+The page today renders the UNION of three adapters — 42 rows = 1 `bootstrap`
+mechanism + 6 `ingest_sweep` + 35 `scheduled_job`, and ~9 of the scheduled_jobs
+are first-install/backfill/bulk jobs (`*_bootstrap`, `*_backfill`,
+`*_bulk_refresh`) that are NOT steady-state. The operator's question is narrow:
+**"what jobs must be running to keep this system up to date?"** Everything else
+is noise on this page.
+
+Scope rule:
+- **SHOW (steady-state):** recurring jobs whose purpose is keeping data current —
+  the orchestrator syncs, the freshness `ingest_sweep`s (form3/4/8k/def14a/13f/nport),
+  `monitor_positions`, `execute_approved_orders`, the daily maintenance sweeps
+  (retention / orphan-reap / tombstone-stale), the SEC discovery pipeline
+  (`sec_manifest_worker` / `sec_per_cik_poll` / `sec_atom_fast_lane` /
+  `sec_daily_index_reconcile` / directory syncs), `finra_*_refresh`,
+  `ownership_observations_sync`, `cusip_extid_sweep`, `fundamentals_sync`,
+  `exchanges_metadata_refresh` / `etoro_lookups_refresh`, the infra jobs
+  (`jobs_liveness_watchdog` / `jobs_retry_sweeper`).
+- **HIDE from the steady-state view (bootstrap/backfill — belong to bootstrap):**
+  the `mechanism=='bootstrap'` row(s) AND scheduled_jobs whose role is
+  first-install / one-shot / manual safety-net: `sec_business_summary_bootstrap`,
+  `sec_def14a_bootstrap`, `sec_insider_transactions_backfill`,
+  `ownership_observations_backfill`, `cusip_universe_backfill`, and the
+  `*_bulk_refresh` trio (`sec_submissions_bulk_refresh`,
+  `sec_companyfacts_bulk_refresh`, `sec_quarterly_datasets_bulk_refresh`) — IF
+  per-job confirmation (read each docstring/cadence) agrees they are not the
+  steady-state keeper for their source.
+
+Mechanism (explicit, not name-pattern matching — names drift):
+- Add `ScheduledJob.role: Literal["steady_state", "bootstrap", "backfill"]`
+  (default `"steady_state"`). Tag the ~8 above as `bootstrap`/`backfill`. The
+  classification lives in the registry, reviewable in code, pinned by a test.
+- The Processes page default view = `mechanism in ('scheduled_job','ingest_sweep')
+  AND role == 'steady_state'`. The `bootstrap` mechanism + `role != steady_state`
+  jobs move into a **separate collapsed "Bootstrap & backfill" section** (same
+  page, clearly labelled "run at install / manual — not part of staying current")
+  so they are discoverable but never noise. (A dedicated bootstrap page is the v2
+  option; the collapsed section is the KISS v1.)
+- **Per-job confirmation is a binding implementation step:** read each candidate's
+  docstring + cadence before tagging; a job that genuinely keeps its source
+  current on a recurring cadence stays `steady_state` even if its name contains
+  "bulk"/"refresh". Record the final classification in the PR.
+
+Invariant: a steady-state job must never be hidden (that would hide a real "needs
+attention"). When unsure, default to `steady_state` (show it). Pin the
+classification with a registry test so a future job lands in the right bucket.
+
 ## Explicitly NOT changing
 - `queue_stuck` / `mid_flight_stuck` detection (genuine wedges — stay RED).
 - The retry/backoff (#1509) and liveness-watchdog (#1510) mechanisms.
 - `compute_verdict`'s precedence invariant (wedge never masked).
 - The History / logs drill-down.
+- Bootstrap stages still render — on the bootstrap surface / collapsed section,
+  not deleted. "For bootstrap only" means scoped, not removed.
 
 ### C6 — never-run bound (concrete; Codex ckpt-1 High #4)
 
@@ -248,6 +298,8 @@ forever. Bound it concretely:
   source genuinely behind reads red via C2.
 
 ## Definition of done
-Operator sees a page where green means green and red means act; no contradictory
-rows; a dead engine / silently-behind source / stalled long-cadence job still
-turns red; past errors remain in the drill-down.
+Operator sees a page of ONLY the steady-state jobs that keep the system current
+(C7 — bootstrap/backfill in a collapsed section, not noise) where green means
+green and red means act; no contradictory rows; a dead engine / ingest-erroring
+source / stalled long-cadence job still turns red; past errors remain in the
+drill-down.

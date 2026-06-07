@@ -701,7 +701,80 @@ git commit -m "feat(#1508): global red banner when jobs engine is down (C4)"
 
 ---
 
-## Task 9: Full gate + dev-verify
+## Task 9: C7 — page scope (steady-state only; bootstrap/backfill to a collapsed section)
+
+**Files:**
+- Modify: `app/workers/scheduler.py` (`ScheduledJob` dataclass — add `role`; tag the bootstrap/backfill jobs)
+- Modify: `app/services/processes/__init__.py` (`ProcessRow` — carry `role`) + `scheduled_adapter.py` (pass `job.role` through)
+- Modify: `app/api/processes.py` or the FE — partition rows into steady-state vs bootstrap/backfill
+- Modify: `frontend/src/components/admin/ProcessesTable.tsx` — render a collapsed "Bootstrap & backfill" section
+- Test: `tests/test_job_registry.py` (classification pinned); FE unit (partition)
+
+- [ ] **Step 1: Per-job classification (binding investigation)**
+
+Read the docstring + cadence of each candidate and decide `steady_state` vs
+`bootstrap`/`backfill`. Default to `steady_state` when unsure (an over-shown job
+is safe; a hidden steady-state job is a BUG). Starting list to CONFIRM as
+non-steady-state: `sec_business_summary_bootstrap`, `sec_def14a_bootstrap`
+(bootstrap drains), `sec_insider_transactions_backfill`,
+`ownership_observations_backfill`, `cusip_universe_backfill` (backfills), and the
+`*_bulk_refresh` trio — BUT verify each `*_bulk_refresh` is not in fact the
+recurring steady-state keeper for its source before tagging it. Record the final
+list.
+
+- [ ] **Step 2: Add `role` to `ScheduledJob` + write failing registry test**
+
+```python
+# tests/test_job_registry.py (add)
+from app.workers.scheduler import SCHEDULED_JOBS
+def test_bootstrap_backfill_jobs_are_tagged_not_steady_state():
+    by_name = {j.name: j for j in SCHEDULED_JOBS}
+    for n in ("sec_business_summary_bootstrap", "sec_def14a_bootstrap",
+              "sec_insider_transactions_backfill", "ownership_observations_backfill",
+              "cusip_universe_backfill"):
+        assert by_name[n].role in ("bootstrap", "backfill"), n
+def test_orchestrator_and_sweeps_stay_steady_state():
+    by_name = {j.name: j for j in SCHEDULED_JOBS}
+    for n in ("orchestrator_full_sync", "monitor_positions", "fundamentals_sync"):
+        assert by_name[n].role == "steady_state", n
+```
+
+Run: `uv run pytest tests/test_job_registry.py -k role -v` → FAIL (no `role`).
+
+- [ ] **Step 3: Implement `role`**
+
+Add to the `ScheduledJob` dataclass (`app/workers/scheduler.py:~113` region):
+`role: Literal["steady_state", "bootstrap", "backfill"] = "steady_state"`. Tag the
+confirmed jobs from Step 1 with `role="bootstrap"` / `role="backfill"`.
+
+Run: `uv run pytest tests/test_job_registry.py -k role -v` → PASS.
+
+- [ ] **Step 4: Thread `role` through `ProcessRow` and partition**
+
+Add `role: str = "steady_state"` to `ProcessRow`; set it in `scheduled_adapter.py`
+(`role=job.role`) and to `"bootstrap"` for `bootstrap_adapter` rows /
+`"steady_state"` for `ingest_sweep` rows. In the FE (`ProcessesTable.tsx`),
+partition: steady-state rows in the main view; `role != "steady_state"` OR
+`mechanism == "bootstrap"` rows in a collapsed **"Bootstrap & backfill — run at
+install / manual"** disclosure section (reuse the existing collapse pattern from
+#1513). The clean-bill header + two-colour logic (C3) apply to the steady-state
+set only.
+
+- [ ] **Step 5: FE unit test the partition + run gates**
+
+Assert a `bootstrap`/`backfill` row is NOT in the main steady-state list and IS in
+the collapsed section. Run: `pnpm --dir frontend test:unit && pnpm --dir frontend typecheck && uv run pytest -m "not db" -q`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add app/workers/scheduler.py app/services/processes/ app/api/processes.py frontend/src/components/admin/ tests/test_job_registry.py
+git commit -m "feat(#1530): page scope — steady-state jobs only; bootstrap/backfill collapsed (C7)"
+```
+
+---
+
+## Task 10: Full gate + dev-verify
 
 - [ ] **Step 1: Backend gate**
 
@@ -740,6 +813,6 @@ Confirm: (1) `orchestrator_high_frequency_sync` / `monitor_positions` no longer 
 
 ## Self-Review
 
-- **Spec coverage:** C1 → Task 1; C2 → Task 2; C3 → Task 7; C4 → Task 8; C5 → Task 3; C6 → Task 4; operator-cancel edge → Task 5; invariant → Task 6; dev-verify/DoD → Task 9. All spec sections mapped.
+- **Spec coverage:** C1 → Task 1; C2 → Task 2; C3 → Task 7; C4 → Task 8; C5 → Task 3; C6 → Task 4; operator-cancel edge → Task 5; invariant → Task 6; C7 page-scope → Task 9; dev-verify/DoD → Task 10. All spec sections mapped.
 - **Placeholders:** the two genuine unknowns (C2 `new_filings_since` semantics, C4 header data source, plus the `Cadence` period accessor) are explicit *investigation steps* (Task 2 Step 0, Task 8 Step 1, Task 1 Step 5) that must resolve before their code lands — not hand-waves in code steps.
 - **Type consistency:** new `compute_verdict` kwargs (`never_started`, `cancel_was_operator_initiated`) and new `ProcessRow` fields (`never_started`, `cancel_was_operator_initiated`) are defined in Tasks 4/5 and consumed via `_convert_row`; `_source_watermark_behind(conn, *, source)` signature is consistent across Task 2; `cadence_period_s` added in Task 1 and used nowhere else.
