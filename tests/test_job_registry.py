@@ -721,3 +721,40 @@ class TestSecManifestLaneExtraction:
                 f"{producer} shares lane {worker_lane!r} with sec_manifest_worker — "
                 "the #1478 starvation extraction has regressed"
             )
+
+
+# ---------------------------------------------------------------------------
+# C7 (#1530) — page-scope role: steady_state vs bootstrap vs backfill
+# ---------------------------------------------------------------------------
+#
+# The Processes page shows ONLY steady_state jobs by default. Bootstrap /
+# backfill jobs (one-time install drains + historical catch-up) move to a
+# collapsed section. Rule: default ``steady_state`` when unsure — an over-
+# shown job is safe; a HIDDEN steady-state keeper is a BUG (the page would
+# read green while a real keeper is dead). Only the jobs confirmed below
+# (by docstring + cadence in app/workers/scheduler.py) are non-steady-state.
+
+# Jobs whose docstrings describe a one-time install drain (auto-firing
+# weekly only as a safety net).
+_BOOTSTRAP_JOBS = ("sec_business_summary_bootstrap", "sec_def14a_bootstrap")
+# Jobs whose docstrings describe a historical-tail catch-up.
+_BACKFILL_JOBS = ("sec_insider_transactions_backfill", "ownership_observations_backfill")
+
+
+def test_bootstrap_backfill_jobs_are_tagged_not_steady_state() -> None:
+    by_name = {j.name: j for j in SCHEDULED_JOBS}
+    for n in (*_BOOTSTRAP_JOBS, *_BACKFILL_JOBS):
+        assert by_name[n].role in ("bootstrap", "backfill"), n
+
+
+def test_orchestrator_and_sweeps_stay_steady_state() -> None:
+    by_name = {j.name: j for j in SCHEDULED_JOBS}
+    for n in ("orchestrator_full_sync", "monitor_positions", "sec_manifest_worker"):
+        assert by_name[n].role == "steady_state", n
+
+
+def test_every_job_role_is_valid() -> None:
+    """No job carries an unrecognised role literal (default is steady_state,
+    so an untagged keeper stays visible — never silently hidden)."""
+    for j in SCHEDULED_JOBS:
+        assert j.role in ("steady_state", "bootstrap", "backfill"), j.name

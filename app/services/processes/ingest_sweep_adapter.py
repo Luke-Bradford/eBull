@@ -625,6 +625,10 @@ def _build_row(
             f"this row aggregates its progress over time. Iterate / "
             f"full-wash from the {spec.underlying_job} row instead."
         ),
+        # C7 (#1530) — ingest sweeps keep their source current, so they
+        # stay in the default steady-state view (explicit, not relying on
+        # the dataclass default).
+        role="steady_state",
     )
 
 

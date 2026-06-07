@@ -190,6 +190,11 @@ class ProcessRowResponse(BaseModel):
     # entry has no description; the FE hides the icon on empty rather
     # than showing a blank popover.
     description: str = ""
+    # C7 (#1530) — page-scope classification: ``steady_state`` keepers
+    # render in the default Processes view; ``bootstrap`` / ``backfill``
+    # rows move to the collapsed "Bootstrap & backfill" section. Defaults
+    # to ``steady_state`` so an untagged row stays visible.
+    role: str = "steady_state"
 
 
 class ProcessListResponse(BaseModel):
@@ -472,6 +477,9 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         verdict_reason=verdict_reason,
         params_metadata=list(row.params_metadata),
         description=row.description,
+        # C7 (#1530) — wire the page-scope role through so the FE can
+        # partition steady-state keepers from bootstrap / backfill rows.
+        role=row.role,
     )
 
 

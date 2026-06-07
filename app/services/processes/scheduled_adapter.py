@@ -989,6 +989,9 @@ def _build_row(
         # Task 5 (#1508) — operator-traceable cancel reads benign Current;
         # system/crash cancel stays attention "last run cancelled".
         cancel_was_operator_initiated=cancel_was_operator_initiated,
+        # C7 (#1530) — page-scope role straight from the registry entry so
+        # the FE can partition steady-state keepers from bootstrap / backfill.
+        role=job.role,
     )
 
 

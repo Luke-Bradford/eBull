@@ -240,6 +240,17 @@ class ProcessRow:
     # system/crash cancel stays attention "last run cancelled". Bootstrap +
     # ingest_sweep adapters keep the default.
     cancel_was_operator_initiated: bool = False
+    # C7 (#1530) — page-scope classification: ``steady_state`` (recurring
+    # keeper that holds a source / data current), ``bootstrap`` (one-time
+    # install drain), or ``backfill`` (historical catch-up). Unlike the
+    # verdict-input fields above, this is a WIRE field: ``_convert_row``
+    # maps it onto ``ProcessRowResponse`` so the FE can move bootstrap /
+    # backfill rows into a collapsed section and default the page to
+    # steady-state keepers only. scheduled_adapter copies it from the
+    # underlying ``ScheduledJob.role``; bootstrap_adapter sets
+    # ``"bootstrap"``; ingest_sweep_adapter keeps the default
+    # ``"steady_state"`` (sweeps keep their source current).
+    role: str = "steady_state"
 
 
 @dataclass(frozen=True, slots=True)
