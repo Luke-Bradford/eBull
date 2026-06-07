@@ -386,9 +386,10 @@ function isCollapsible(verdict: ProcessRowResponse["health_verdict"]): boolean {
   return verdict === "current" || verdict === "self_healing";
 }
 
-/** Disclosure label for the collapsed non-actionable rows (#1513), e.g.
- *  "12 current · 3 self-healing". `working` rows count as "current" for the
- *  summary (both are non-actionable in-progress/fresh states). */
+/** Disclosure label for the collapsed rows (#1513), e.g.
+ *  "12 current · 3 self-healing". Only `current` and `self_healing` are
+ *  collapsible (see isCollapsible); `current` here is the count of collapsed
+ *  `current`-verdict rows. */
 function collapsedLabel(current: number, selfHealing: number): string {
   const parts: string[] = [];
   if (current > 0) parts.push(`${current} current`);
