@@ -76,6 +76,7 @@ def compute_verdict(
     retry_in_flight: bool = False,
     retry_at_display: str = "",
     liveness_kick_in_flight: bool = False,
+    never_started: bool = False,
 ) -> tuple[HealthVerdict, bool, str]:
     """Collapse ``status`` + ``stale_reasons`` into one verdict.
 
@@ -171,6 +172,14 @@ def compute_verdict(
     if status == "cancelled":
         return ("attention", False, "last run cancelled")
     if status == "pending_first_run":
+        # C6 (#1508): zero lifetime rows AND now overdue past its first
+        # expected fire (persisted first-seen + one cadence + grace, computed
+        # by the adapter) — broken-from-day-one, not merely awaiting its first
+        # natural slot. This outranks the watermark look-through below: a fresh
+        # SOURCE watermark says the data is current, but THIS job has produced
+        # nothing since it was first seen, so it must read attention.
+        if never_started:
+            return ("attention", False, "never started")
         # Look-through (#1511 / T5): a never-run steady-state poll whose
         # SEC source bootstrap already seeded — and which is still fresh
         # (``watermark_is_fresh``, computed by the adapter as covered-source

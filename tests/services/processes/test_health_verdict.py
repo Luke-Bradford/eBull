@@ -325,3 +325,60 @@ def test_total_and_single_valued_with_liveness_kick(status: ProcessStatus, reaso
     verdict, self_healing, _ = compute_verdict(status=status, stale_reasons=reasons, liveness_kick_in_flight=True)
     assert verdict in _VALID_VERDICTS
     assert self_healing == (verdict == "self_healing")
+
+
+# ---------------------------------------------------------------------------
+# C6 (#1508) — never-started bound on a persisted first-seen anchor.
+# A scheduled job with zero lifetime rows that is now overdue past its first
+# expected fire is broken-from-day-one (attention "never started"), not
+# forever-green "first run pending".
+# ---------------------------------------------------------------------------
+
+
+def test_never_started_past_grace_is_attention() -> None:
+    """Overdue past first expected fire with zero rows reads attention."""
+    v, sh, reason = compute_verdict(status="pending_first_run", stale_reasons=(), never_started=True)
+    assert v == "attention"
+    assert sh is False
+    assert reason == "never started"
+
+
+def test_pending_first_run_within_grace_stays_working() -> None:
+    """Within grace (``never_started=False``) keeps the shipped 'first run
+    pending' behaviour — ``watermark_is_fresh=False`` so it does not fall into
+    the look-through 'current' branch."""
+    v, sh, reason = compute_verdict(
+        status="pending_first_run", stale_reasons=(), never_started=False, watermark_is_fresh=False
+    )
+    assert v == "working"
+    assert sh is False
+    assert reason == "first run pending"
+
+
+def test_never_started_outranks_fresh_watermark() -> None:
+    """A genuinely broken-from-day-one job (never_started) reads attention even
+    if its source watermark happens to look fresh — never_started is the
+    stronger signal that this specific job has produced nothing."""
+    v, _, reason = compute_verdict(
+        status="pending_first_run", stale_reasons=(), never_started=True, watermark_is_fresh=True
+    )
+    assert v == "attention"
+    assert reason == "never started"
+
+
+@pytest.mark.parametrize("status", [s for s in _ALL_STATUSES if s != "pending_first_run"])
+def test_never_started_only_affects_pending_first_run(status: ProcessStatus) -> None:
+    """Only ``pending_first_run`` consumes ``never_started`` — every other
+    status maps identically with the flag set or unset."""
+    base = compute_verdict(status=status, stale_reasons=())
+    with_flag = compute_verdict(status=status, stale_reasons=(), never_started=True)
+    assert base == with_flag
+
+
+@pytest.mark.parametrize("status", _ALL_STATUSES)
+@pytest.mark.parametrize("reasons", _all_reason_subsets())
+def test_total_and_single_valued_with_never_started(status: ProcessStatus, reasons: tuple[StaleReason, ...]) -> None:
+    """Totality holds with the never-started flag set, too."""
+    verdict, self_healing, _ = compute_verdict(status=status, stale_reasons=reasons, never_started=True)
+    assert verdict in _VALID_VERDICTS
+    assert self_healing == (verdict == "self_healing")

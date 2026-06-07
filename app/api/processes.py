@@ -439,6 +439,11 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         # row as Self-healing "re-enqueued, recovering" (a genuine wedge still
         # outranks). Set by scheduled_adapter; other adapters leave it False.
         liveness_kick_in_flight=row.liveness_kick_in_flight,
+        # #1508 / C6 — a never-run scheduled job now overdue past its first
+        # expected fire reads attention "never started" instead of forever-green
+        # "first run pending". Set by scheduled_adapter; other adapters leave it
+        # False.
+        never_started=row.never_started,
     )
     return ProcessRowResponse(
         process_id=row.process_id,

@@ -49,6 +49,7 @@ from app.services.processes.bootstrap_coverage import (
 )
 from app.services.processes.stale_detection import (
     QUEUE_STUCK_THRESHOLD_S,
+    SCHEDULE_MISS_FLOOR_S,
     WATERMARK_GAP_TOLERANCE_S,
 )
 from app.services.processes.stale_detection import (
@@ -504,6 +505,20 @@ def _source_watermark_fresh(
     return max_filed_at >= now - cadence - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S)
 
 
+def _job_first_seen(conn: psycopg.Connection[Any], *, job_name: str) -> datetime | None:
+    """Persisted first-seen anchor for ``job_name`` (#1508 C6).
+
+    ``job_first_seen`` is written once per process start by
+    ``JobRuntime.start`` (``ON CONFLICT DO NOTHING`` keeps the first-ever
+    boot's timestamp). Returns ``None`` when no row exists yet — a job seen
+    for the first time this very boot cannot be "never started past grace".
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT first_seen FROM job_first_seen WHERE job_name = %(n)s", {"n": job_name})
+        row = cur.fetchone()
+    return row[0] if row is not None else None
+
+
 def _has_dispatched_queue_age(
     conn: psycopg.Connection[Any],
     *,
@@ -851,6 +866,22 @@ def _build_row(
         and _source_watermark_fresh(conn, source=freshness_source, now=now)
     )
 
+    # #1508 / C6 — never-started verdict signal. A job with ZERO lifetime rows
+    # (``terminal_row is None``) that is now overdue past its FIRST expected
+    # fire is broken-from-day-one, not merely awaiting its first natural slot.
+    # The anchor is the PERSISTED ``job_first_seen.first_seen`` (not a volatile
+    # process clock); first_expected = that anchor + one cadence, and we wait a
+    # further full grace (max(cadence, floor)) before declaring it broken — same
+    # de-noise posture as schedule_missed (errs green). A job seen for the first
+    # time this boot has no row yet (None) and reads False.
+    never_started = False
+    if terminal_row is None:
+        first_seen = _job_first_seen(conn, job_name=job.name)
+        if first_seen is not None:
+            first_expected = compute_next_run(job.cadence, first_seen)
+            grace = max(int(cadence_period(job.cadence).total_seconds()), SCHEDULE_MISS_FLOOR_S)
+            never_started = first_expected < now - timedelta(seconds=grace)
+
     # #1510 / T4 — verdict signal: a fresh watchdog re-enqueue is in flight, so
     # ``compute_verdict`` reads this re-enqueued stall as Self-healing rather than
     # the red schedule_missed it would otherwise show (a genuine wedge still
@@ -903,6 +934,9 @@ def _build_row(
         next_retry_at=terminal_row.get("next_retry_at") if terminal_row is not None else None,
         # #1510 / T4 — fresh watchdog re-enqueue in flight (see compute_verdict).
         liveness_kick_in_flight=liveness_kick_in_flight,
+        # #1508 / C6 — never-run job overdue past its first expected fire
+        # (persisted first-seen anchor). Reads attention "never started".
+        never_started=never_started,
     )
 
 

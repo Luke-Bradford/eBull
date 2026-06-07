@@ -224,6 +224,13 @@ class ProcessRow:
     # ``compute_verdict(liveness_kick_in_flight=...)`` so a watchdog-re-enqueued
     # stalled job reads Self-healing "re-enqueued, recovering" instead of red.
     liveness_kick_in_flight: bool = False
+    # #1508 / C6 — True when this scheduled job has ZERO lifetime runs AND is
+    # now overdue past its first expected fire (persisted ``job_first_seen`` +
+    # one cadence + grace), computed by scheduled_adapter. Fed to
+    # ``compute_verdict(never_started=...)`` so a broken-from-day-one job reads
+    # attention "never started" instead of forever-green "first run pending".
+    # Bootstrap + ingest_sweep adapters keep the default — scheduled-job-only.
+    never_started: bool = False
 
 
 @dataclass(frozen=True, slots=True)
