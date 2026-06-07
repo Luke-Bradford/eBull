@@ -19,6 +19,7 @@ import type { ProcessRowResponse } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
 
 import {
+  NEXT_RUN_EXPECTED_TOOLTIP,
   REASON_TOOLTIP,
   VERDICT_VISUAL,
   reasonTooltip,
@@ -219,8 +220,11 @@ function ProcessRowImpl({
           <>
             <div>{row.cadence_human}</div>
             {row.next_fire_at ? (
-              <div className="text-slate-500 dark:text-slate-500">
-                next: {formatDateTime(row.next_fire_at)}
+              <div
+                className="text-slate-500 dark:text-slate-500"
+                title={NEXT_RUN_EXPECTED_TOOLTIP}
+              >
+                next (expected): {formatDateTime(row.next_fire_at)}
               </div>
             ) : null}
           </>

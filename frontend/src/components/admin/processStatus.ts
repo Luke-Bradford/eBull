@@ -185,3 +185,17 @@ export const VERDICT_SORT_PRIORITY: Record<HealthVerdict, number> = {
   working: 2,
   current: 3,
 };
+
+/**
+ * #1514 — honest framing for the displayed next-fire time. It is computed
+ * from the declared cadence (`compute_next_run`), NOT read from the live
+ * scheduler: since #719 the scheduler runs in a separate process the API
+ * does not query, so this is the *expected* next slot, not a confirmation
+ * it will fire. A scheduler that has actually stopped firing surfaces as
+ * "needs attention" via the liveness stall detection (#1510), so the
+ * "expected" label plus the verdict together keep the page honest.
+ */
+export const NEXT_RUN_EXPECTED_TOOLTIP =
+  "Expected next fire, computed from the declared cadence — not a live " +
+  "scheduler confirmation (the scheduler runs in a separate process). " +
+  "A job that has actually stopped firing is flagged as needs-attention.";

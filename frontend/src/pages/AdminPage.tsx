@@ -33,6 +33,7 @@ import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import { ProcessesTable } from "@/components/admin/ProcessesTable";
+import { NEXT_RUN_EXPECTED_TOOLTIP } from "@/components/admin/processStatus";
 import {
   SectionError,
   SectionSkeleton,
@@ -362,7 +363,9 @@ function JobsTable({
           <tr>
             <th className="py-2 pr-4">Job</th>
             <th className="py-2 pr-4">Cadence</th>
-            <th className="py-2 pr-4">Next run (declared)</th>
+            <th className="py-2 pr-4" title={NEXT_RUN_EXPECTED_TOOLTIP}>
+              Next run (expected)
+            </th>
             <th className="py-2 pr-4">Last result</th>
             <th className="py-2 pr-4">Last finished</th>
             <th className="py-2 pr-4 text-right">Action</th>
@@ -379,7 +382,10 @@ function JobsTable({
                   <div className="text-xs text-slate-500">{job.description}</div>
                 </td>
                 <td className="py-2 pr-4 text-xs text-slate-600">{job.cadence}</td>
-                <td className="py-2 pr-4 text-xs text-slate-600">
+                <td
+                  className="py-2 pr-4 text-xs text-slate-600"
+                  title={NEXT_RUN_EXPECTED_TOOLTIP}
+                >
                   {formatDateTime(job.next_run_time)}
                 </td>
                 <td className="py-2 pr-4 text-xs">
