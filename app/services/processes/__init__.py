@@ -210,6 +210,12 @@ class ProcessRow:
     # reads Current instead of "first run pending". Bootstrap + ingest_sweep
     # adapters keep the default — the look-through is scheduled-job-only.
     source_watermark_fresh: bool = False
+    # #1509 / T3 — ``job_runs.next_retry_at`` of the latest terminal run,
+    # set by scheduled_adapter when the last failure scheduled a backoff
+    # retry. ``_convert_row`` derives ``retry_in_flight`` + an "HH:MM" label
+    # from it for ``compute_verdict`` so a transiently-failed row reads
+    # Self-healing "will retry HH:MM" instead of red. None = no retry pending.
+    next_retry_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -73,6 +73,8 @@ def compute_verdict(
     status: ProcessStatus,
     stale_reasons: tuple[StaleReason, ...],
     watermark_is_fresh: bool = False,
+    retry_in_flight: bool = False,
+    retry_at_display: str = "",
 ) -> tuple[HealthVerdict, bool, str]:
     """Collapse ``status`` + ``stale_reasons`` into one verdict.
 
@@ -94,6 +96,15 @@ def compute_verdict(
     # that fired.
     actionable: list[StaleReason] = [r for r in _REASON_ORDER if r in stale_reasons]
 
+    # T3 (#1509): a scheduled retry IS the fix for a missed schedule, so an
+    # in-flight retry suppresses ONLY ``schedule_missed``. Genuine wedges
+    # (``queue_stuck`` / ``mid_flight_stuck`` / ``watermark_gap``) still
+    # outrank — a stuck queue means the retry itself may be wedged, so the row
+    # stays attention rather than being painted self-healing (preserves the
+    # ckpt-1 invariant: an actionable wedge is never masked).
+    if retry_in_flight:
+        actionable = [r for r in actionable if r != "schedule_missed"]
+
     # 1. Kill switch — global, deliberate, outranks everything (incl. a
     #    stale reason that may still compute on a halted job).
     if status == "disabled":
@@ -114,7 +125,16 @@ def compute_verdict(
     # 3-9. Status-only (no actionable stale).
     if status == "running":
         return ("working", False, "")
+    # T3 (#1509): a failed/pending-retry row with a scheduled near-term retry
+    # (``next_retry_at`` set — past OR future) is self-healing. ``retry_at_display``
+    # is "HH:MM" when the retry is still in the future, "" when it is due but the
+    # ≤5m sweeper has not yet fired (still scheduled recovery — do not flicker red).
+    if retry_in_flight and status in ("failed", "pending_retry"):
+        reason = f"will retry {retry_at_display}" if retry_at_display else "retrying shortly"
+        return ("self_healing", True, reason)
     if status == "pending_retry":
+        # Cadence-covered fallback: next natural fire reattempts the failed
+        # scope, but no explicit ``next_retry_at`` backoff is in flight.
         return ("self_healing", True, "retry scheduled")
     if status == "failed":
         return ("attention", False, "last run failed")

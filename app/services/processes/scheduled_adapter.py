@@ -278,7 +278,7 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
             """
             SELECT run_id, started_at, finished_at, status, row_count,
                    error_msg, error_classes, rows_skipped_by_reason,
-                   rows_errored, cancelled_at
+                   rows_errored, cancelled_at, next_retry_at
               FROM job_runs
              WHERE job_name = %(name)s
                AND status   IN ('success', 'failure', 'skipped', 'cancelled')
@@ -854,6 +854,10 @@ def _build_row(
         description=job.description,
         # #1511 / T5 — verdict look-through input (see compute_verdict).
         source_watermark_fresh=source_watermark_fresh,
+        # #1509 / T3 — backoff retry timestamp from the latest terminal run
+        # (``.get`` so the sync_runs-shaped row, which has no such column,
+        # yields None — those jobs never schedule a retry anyway).
+        next_retry_at=terminal_row.get("next_retry_at") if terminal_row is not None else None,
     )
 
 

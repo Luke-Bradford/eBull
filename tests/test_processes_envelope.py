@@ -59,10 +59,11 @@ def test_process_row_carries_all_envelope_fields() -> None:
     """The handler converts ProcessRow → ProcessRowResponse field-for-field;
     a missing field on the dataclass would silently lose data on the wire.
 
-    ``source_watermark_fresh`` (#1511) is the one intentional exception: an
-    internal verdict INPUT consumed by ``compute_verdict`` at ``_convert_row``,
-    not mapped onto the wire response (the FE receives ``health_verdict``,
-    derived from it). Pinned here so a future field still trips the guard."""
+    ``source_watermark_fresh`` (#1511) and ``next_retry_at`` (#1509) are the
+    intentional exceptions: internal verdict INPUTS consumed by
+    ``compute_verdict`` at ``_convert_row``, not mapped onto the wire response
+    (the FE receives ``health_verdict`` / ``verdict_reason``, derived from
+    them). Pinned here so a future field still trips the guard."""
     row = _make_row()
     expected = {
         "process_id",
@@ -84,6 +85,7 @@ def test_process_row_carries_all_envelope_fields() -> None:
         "params_metadata",
         "description",
         "source_watermark_fresh",
+        "next_retry_at",
     }
     assert set(row.__slots__) == expected
 
