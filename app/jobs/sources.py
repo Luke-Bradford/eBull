@@ -73,6 +73,9 @@ Lane = Literal[
     "db_ownership_funds",
     "db_liveness",
     "db_retry",
+    "db_positions",
+    "db_cusip",
+    "db_ownership_obs",
     "bootstrap",
     "finra",
     "openfigi",
@@ -107,8 +110,11 @@ the rate — it does not.
 * ``db`` — DB-bound stages NOT owned by a finer family lane — Phase E
   derivations (``fundamentals_sync``, ``ownership_observations_backfill``)
   + scheduler catch-all (``orchestrator_full_sync``,
-  ``orchestrator_high_frequency_sync``, ``retry_deferred``,
-  ``monitor_positions``, ``ownership_observations_sync``).
+  ``orchestrator_high_frequency_sync``, ``retry_deferred``). The
+  daily/hourly ``monitor_positions`` / ``ownership_observations_sync`` /
+  ``cusip_extid_sweep`` were extracted to their own lanes in #1527 (see
+  below); ``ownership_observations_backfill`` stays here (S24 bootstrap
+  stage — moving it would force a CHECK migration).
 
 The next five are bootstrap Phase C bulk-ingest family lanes
 (#1141 / Task E of audit #1136). Each owns a disjoint write
@@ -148,8 +154,43 @@ as the #1478 ``sec_manifest`` split):
   same starvation between the 15-min watchdog and the 5-min sweeper at
   the :00/:15/:30/:45 ticks they co-fire. Scheduled-only, so NOT added
   to the ``bootstrap_stages.lane`` CHECK (like ``sec_manifest`` /
-  ``finra`` / ``bootstrap``). See #1527 for the daily/hourly db jobs
-  that collide on the same grid but may need true ingest serialisation.
+  ``finra`` / ``bootstrap``).
+
+The next three are steady-state db jobs extracted from the catch-all
+``db`` lane (#1527 — the daily/hourly continuation of #1526). Each fires
+on a 5-minute-aligned slot and so co-fired ``orchestrator_high_frequency_sync``
+(every_5min, ``db``) and lost the ``job_source:db`` cross-thread lane race
+every collision — a once-daily job skips a FULL day per collision. Write-target
+disjointness was verified before extraction (a lane is a job-overlap bucket,
+not a rate limiter): none of the three writes a table the orchestrator's
+portfolio_sync / fx_rates ingest writes, so none needs to serialise against
+it. Each owns a single-job lane (NOT one shared ``db_steady`` lane — the
+#1526 lesson: a shared lane re-creates the starvation between its members
+when one overruns). Scheduled-only, so NOT added to the
+``bootstrap_stages.lane`` CHECK (matches ``db_liveness`` / ``db_retry``).
+
+* ``db_positions`` — ``monitor_positions`` (hourly @ :15) only. Reads
+  ``positions`` (MVCC-safe vs the orchestrator's concurrent portfolio
+  write) and writes only ``position_alerts`` via ``persist_position_alerts``.
+* ``db_cusip`` — ``cusip_extid_sweep`` (daily @ :50) only. Writes
+  ``unresolved_13f_cusips`` (resolve flag) + ``institutional_holdings``
+  (13F rewash). The 13F ingest writers already run on ``sec_rate`` /
+  ``db_ownership_inst`` (never ``db``), so extraction introduces no NEW
+  race — the sweep already ran concurrently with them.
+* ``db_ownership_obs`` — ``ownership_observations_sync`` (daily @ :30)
+  only — the all-7-category ``ownership_*_current`` repair sweep.
+  ``ownership_*_current`` has other writers (the live ingesters + bulk
+  paths), but they run on ``db_ownership_*`` / ``sec_rate`` lanes —
+  already off ``db`` — so the sweep was NEVER lane-serialised against
+  them, and extraction introduces no new race. The only writer the
+  sweep shared the ``db`` lane with is ``ownership_observations_backfill``
+  (S24 bootstrap stage + weekly Sun 03:00), which DELIBERATELY stays on
+  ``db``: it is a ``bootstrap_stages.lane`` entry (moving it would force
+  a CHECK migration). Both serialise the only shared mutation — the
+  ``refresh_*_current`` DELETE-then-INSERT — per-instrument via
+  ``pg_advisory_xact_lock`` (the lane is not the guard), and their
+  schedules are staggered (backfill 03:00, sweep 03:30) so they never
+  co-fire in practice.
 
 The final lane is bootstrap-only:
 
