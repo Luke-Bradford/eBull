@@ -21,6 +21,7 @@ Spec: docs/superpowers/specs/2026-05-18-finra-bimonthly-short-interest.md.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -37,6 +38,7 @@ from app.services.finra_short_interest_ingest import (
 
 _PRISTINE = Path("tests/fixtures/finra/shrt20260430_sample.csv")
 _DEFECTS = Path("tests/fixtures/finra/shrt20260430_defects.csv")
+_OVERFLOW = Path("tests/fixtures/finra/shrt20260430_overflow.csv")
 
 
 # ----------------------------------------------------------------------
@@ -242,6 +244,63 @@ def test_ingest_skips_defect_rows(
     assert stats.skipped_no_instrument_match == 1
     # blank-symbol + truncated + malformed-int all bucket as invalid.
     assert stats.skipped_invalid_row == 3
+
+
+# ----------------------------------------------------------------------
+# 5 — Wide ratio columns (#1516): days_to_cover / change_percent >= 10^6
+#     persist rather than aborting the whole file. Regression for the
+#     NUMERIC(10,4) overflow widened to NUMERIC(20,4) in sql/184.
+# ----------------------------------------------------------------------
+
+
+def test_ingest_persists_ratio_values_over_one_million(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A FINRA row with days_to_cover=1234567.89 and change_percent=9876543.21
+    (both >= 10^6, both valid FINRA edge-instrument values) must upsert. Before
+    sql/184 these overflowed NUMERIC(10,4) and aborted the whole settlement
+    file (#1516)."""
+    _seed_instrument(ebull_test_conn, instrument_id=1001, symbol="AAPL")
+    resolver = build_preloaded_symbol_resolver(ebull_test_conn)
+    raw = _OVERFLOW.read_bytes()
+    ingest_run_id = uuid4()
+
+    with ebull_test_conn.transaction():
+        stats = ingest_settlement_file(
+            ebull_test_conn,
+            date(2026, 4, 30),
+            raw,
+            resolver,
+            ingest_run_id,
+        )
+
+    assert stats.rows_parsed == 1
+    assert stats.rows_resolved == 1
+    assert stats.rows_upserted == 1
+    assert stats.skipped_invalid_row == 0
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT days_to_cover, change_percent
+            FROM finra_short_interest_observations
+            WHERE instrument_id = %s AND settlement_date = %s
+            """,
+            (1001, date(2026, 4, 30)),
+        )
+        obs = cur.fetchone()
+        assert obs is not None
+        assert obs[0] == Decimal("1234567.8900")
+        assert obs[1] == Decimal("9876543.2100")
+
+        cur.execute(
+            "SELECT days_to_cover, change_percent FROM finra_short_interest_current WHERE instrument_id = %s",
+            (1001,),
+        )
+        current = cur.fetchone()
+        assert current is not None
+        assert current[0] == Decimal("1234567.8900")
+        assert current[1] == Decimal("9876543.2100")
 
 
 # ----------------------------------------------------------------------
