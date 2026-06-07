@@ -62,7 +62,7 @@ _REASON_ORDER: Final[tuple[StaleReason, ...]] = (
 
 _REASON_LABEL: Final[dict[StaleReason, str]] = {
     "schedule_missed": "schedule missed",
-    "watermark_gap": "source has fresh data",
+    "watermark_gap": "ingest failing",
     "queue_stuck": "queue stuck",
     "mid_flight_stuck": "no progress",
 }

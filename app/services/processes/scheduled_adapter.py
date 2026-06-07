@@ -440,36 +440,25 @@ def _has_inflight_liveness_kick(conn: psycopg.Connection[Any], *, job_name: str,
         return bool(row[0]) if row is not None else False
 
 
-def _has_data_freshness_gap(
-    conn: psycopg.Connection[Any],
-    *,
-    source: str,
-    deadline: datetime,
-) -> bool:
-    """True when at least one ``data_freshness_index`` row for ``source``
-    has ``expected_next_at IS NOT NULL`` AND ``expected_next_at <
-    deadline``.
+def _source_watermark_behind(conn: psycopg.Connection[Any], *, source: str) -> bool:
+    """True when ``source``'s ingest is FAILING — at least one subject in
+    ``state='error'`` (C2 / #1508). A POSITIVE, source-level "we tried to keep
+    this source current and failed" signal.
 
-    Operator-amendment §A1.2 watermark_gap probe (PR8 / #1083). NULL
-    ``expected_next_at`` rows are excluded — a filer with no historical
-    filed_at has nothing to predict, so a NULL must NOT fire the gap
-    rule (Codex pre-impl review WARNING).
-
-    The query uses LIMIT 1 — adapters only need the boolean signal,
-    not the count, and the partial index on
-    ``(expected_next_at, source)`` (sql/120:115) makes the probe cheap.
+    Deliberately NOT ``not _source_watermark_fresh`` (false-REDs quiet sources)
+    and NOT the per-subject ``expected_next_at`` timing probe / ``state=
+    'expected_filing_overdue'`` (event-form jitter — an issuer simply not filing
+    is not an ingest problem). The state machine sets ``state='error'`` only from
+    a failed poll/ingest. LIMIT 1, source-level.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT 1
-              FROM data_freshness_index
-             WHERE source = %(source)s
-               AND expected_next_at IS NOT NULL
-               AND expected_next_at < %(deadline)s
+            SELECT 1 FROM data_freshness_index
+             WHERE source = %(source)s AND state = 'error'
              LIMIT 1
             """,
-            {"source": source, "deadline": deadline},
+            {"source": source},
         )
         return cur.fetchone() is not None
 
@@ -484,10 +473,10 @@ def _source_watermark_fresh(
     as a whole is being kept current — ``MAX(last_known_filed_at)`` within one
     cadence interval (+ the shared watermark tolerance) of ``now``.
 
-    Source-LEVEL recency, deliberately NOT the per-subject overdue probe
-    (``_has_data_freshness_gap``): event-driven forms (Form 3/4, 13D/G) leave
-    most subjects perpetually "overdue" (filed once, never again), so an
-    any-subject-overdue test reads stale for a source that is in fact current.
+    Source-LEVEL recency, deliberately NOT a per-subject ``expected_next_at``
+    overdue probe: event-driven forms (Form 3/4, 13D/G) leave most subjects
+    perpetually "overdue" (filed once, never again), so an any-subject-overdue
+    test reads stale for a source that is in fact current.
     The #1511 look-through promotes a never-run job to Current only when the
     source's freshest filing sits inside its cadence window. Returns False on
     a source with no rows / no ``last_known_filed_at`` (nothing seeded → not
@@ -821,11 +810,7 @@ def _build_row(
     has_data_freshness_gap = (
         freshness_source is not None
         and process_status != "running"
-        and _has_data_freshness_gap(
-            conn,
-            source=freshness_source,
-            deadline=now - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S),
-        )
+        and _source_watermark_behind(conn, source=freshness_source)
     )
     has_dispatched_queue_age = _has_dispatched_queue_age(
         conn,
