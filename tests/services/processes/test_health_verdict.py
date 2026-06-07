@@ -382,3 +382,24 @@ def test_total_and_single_valued_with_never_started(status: ProcessStatus, reaso
     verdict, self_healing, _ = compute_verdict(status=status, stale_reasons=reasons, never_started=True)
     assert verdict in _VALID_VERDICTS
     assert self_healing == (verdict == "self_healing")
+
+
+# --- Operator-cancel look-through (#1508 / Task 5) -----------------------
+
+
+def test_operator_cancel_is_benign_green() -> None:
+    """A deliberate operator cancel reads Current (green) until the next fire."""
+    v, _, _ = compute_verdict(status="cancelled", stale_reasons=(), cancel_was_operator_initiated=True)
+    assert v == "current"
+
+
+def test_system_cancel_stays_attention() -> None:
+    """A cancel NOT traceable to an operator request (system/crash) stays red."""
+    v, _, reason = compute_verdict(status="cancelled", stale_reasons=(), cancel_was_operator_initiated=False)
+    assert v == "attention" and reason == "last run cancelled"
+
+
+def test_operator_cancel_never_masks_actionable_stale() -> None:
+    """A benign operator cancel must NOT hide a genuine wedge (ckpt-1 invariant)."""
+    v, _, _ = compute_verdict(status="cancelled", stale_reasons=("queue_stuck",), cancel_was_operator_initiated=True)
+    assert v == "attention"

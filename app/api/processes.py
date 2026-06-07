@@ -444,6 +444,11 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         # "first run pending". Set by scheduled_adapter; other adapters leave it
         # False.
         never_started=row.never_started,
+        # Task 5 (#1508) — an operator-traceable cancel reads benign Current;
+        # a system/crash cancel stays attention "last run cancelled". Set by
+        # scheduled_adapter via the process_stop_requests join; other adapters
+        # leave it False.
+        cancel_was_operator_initiated=row.cancel_was_operator_initiated,
     )
     return ProcessRowResponse(
         process_id=row.process_id,

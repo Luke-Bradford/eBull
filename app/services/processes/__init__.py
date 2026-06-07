@@ -231,6 +231,15 @@ class ProcessRow:
     # attention "never started" instead of forever-green "first run pending".
     # Bootstrap + ingest_sweep adapters keep the default — scheduled-job-only.
     never_started: bool = False
+    # #1508 / Task 5 — True when the latest terminal run was ``cancelled`` AND
+    # that cancel is traceable to a deliberate operator stop request (a
+    # ``process_stop_requests`` row pinning the terminal run's kind + id),
+    # computed by scheduled_adapter ONLY when status is ``cancelled``. Fed to
+    # ``compute_verdict(cancel_was_operator_initiated=...)`` so an operator-
+    # cancelled job reads benign Current (green) until its next fire, while a
+    # system/crash cancel stays attention "last run cancelled". Bootstrap +
+    # ingest_sweep adapters keep the default.
+    cancel_was_operator_initiated: bool = False
 
 
 @dataclass(frozen=True, slots=True)

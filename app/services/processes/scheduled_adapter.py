@@ -289,7 +289,15 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
             """,
             {"name": job_name},
         )
-        return cur.fetchone()
+        row = cur.fetchone()
+    if row is None:
+        return None
+    # Task 5 (#1508): tag the terminal-row KIND so the operator-cancel probe
+    # (``_cancel_was_operator_initiated``) matches the right ``target_run_kind``
+    # in ``process_stop_requests``. A ``job_runs`` terminal is kind ``job_run``,
+    # keyed on ``run_id``.
+    row["terminal_kind"] = "job_run"
+    return row
 
 
 # #1474 Part 2 — orchestrator-driven jobs record completions in
@@ -363,6 +371,9 @@ def _read_latest_terminal_sync_run(conn: psycopg.Connection[Any], *, scope: str)
         "rows_skipped_by_reason": None,
         "rows_errored": None,
         "cancelled_at": row["finished_at"] if job_status == "cancelled" else None,
+        # Task 5 (#1508): orchestrator/sync_runs terminal — kind ``sync_run``,
+        # keyed on the original ``sync_run_id`` (surfaced as ``run_id`` above).
+        "terminal_kind": "sync_run",
     }
 
 
@@ -397,6 +408,26 @@ def _resolve_terminal_row(conn: psycopg.Connection[Any], *, job_name: str) -> di
     if scope is not None:
         return _read_latest_terminal_sync_run(conn, scope=scope)
     return _read_latest_terminal_run(conn, job_name=job_name)
+
+
+def _cancel_was_operator_initiated(conn: psycopg.Connection[Any], *, run_kind: str, run_id: int) -> bool:
+    """True if the terminal run was cancelled by a deliberate operator stop.
+
+    Task 5 (#1508): a ``cancelled`` terminal is benign ONLY when its
+    cancel is traceable to an operator ``process_stop_requests`` row
+    (sql/135) pinning the EXACT ``(target_run_kind, target_run_id)`` of
+    the run. A system/crash cancel leaves no such row → stays attention.
+    The presence of the row is the operator-intent signal regardless of
+    its ``completed_at`` (the stop handler always inserts on operator
+    action; boot-recovery later stamps ``completed_at`` on abandoned
+    rows but never deletes them, so historical traceability is preserved).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM process_stop_requests WHERE target_run_kind = %(k)s AND target_run_id = %(id)s LIMIT 1",
+            {"k": run_kind, "id": run_id},
+        )
+        return cur.fetchone() is not None
 
 
 def _has_inflight_manual_request(conn: psycopg.Connection[Any], *, job_name: str) -> bool:
@@ -705,7 +736,13 @@ def _build_last_run(terminal_row: dict[str, Any]) -> ProcessRunSummary:
         rows_skipped_by_reason={k: int(v) for k, v in skips.items()},
         rows_errored=int(terminal_row.get("rows_errored") or 0),
         status=summary_status,
-        cancelled_by_operator_id=None,  # PR4 wires the join on process_stop_requests
+        # History-tab operator UUID — distinct from the Task 5 (#1508) verdict
+        # boolean ``cancel_was_operator_initiated`` (computed in ``_build_row``
+        # via ``_cancel_was_operator_initiated``). Resolving the actual
+        # ``process_stop_requests.requested_by_operator_id`` here needs ``conn``
+        # threaded into ``_build_last_run`` across all three adapters; left
+        # unresolved (None) as out-of-scope for the two-state verdict work.
+        cancelled_by_operator_id=None,
     )
 
 
@@ -882,6 +919,18 @@ def _build_row(
             grace = max(int(cadence_period(job.cadence).total_seconds()), SCHEDULE_MISS_FLOOR_S)
             never_started = first_expected < now - timedelta(seconds=grace)
 
+    # Task 5 (#1508) — operator-cancel look-through. Only probe when the row
+    # actually resolved to ``cancelled`` (cheap LIMIT 1, but pointless otherwise).
+    # The terminal row carries its KIND (``job_run`` / ``sync_run``) so the probe
+    # matches the right ``process_stop_requests.target_run_kind`` on the run id.
+    cancel_was_operator_initiated = False
+    if process_status == "cancelled" and terminal_row is not None:
+        cancel_was_operator_initiated = _cancel_was_operator_initiated(
+            conn,
+            run_kind=terminal_row["terminal_kind"],
+            run_id=int(terminal_row["run_id"]),
+        )
+
     # #1510 / T4 — verdict signal: a fresh watchdog re-enqueue is in flight, so
     # ``compute_verdict`` reads this re-enqueued stall as Self-healing rather than
     # the red schedule_missed it would otherwise show (a genuine wedge still
@@ -937,6 +986,9 @@ def _build_row(
         # #1508 / C6 — never-run job overdue past its first expected fire
         # (persisted first-seen anchor). Reads attention "never started".
         never_started=never_started,
+        # Task 5 (#1508) — operator-traceable cancel reads benign Current;
+        # system/crash cancel stays attention "last run cancelled".
+        cancel_was_operator_initiated=cancel_was_operator_initiated,
     )
 
 

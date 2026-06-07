@@ -77,6 +77,7 @@ def compute_verdict(
     retry_at_display: str = "",
     liveness_kick_in_flight: bool = False,
     never_started: bool = False,
+    cancel_was_operator_initiated: bool = False,
 ) -> tuple[HealthVerdict, bool, str]:
     """Collapse ``status`` + ``stale_reasons`` into one verdict.
 
@@ -170,6 +171,14 @@ def compute_verdict(
     if status == "failed":
         return ("attention", False, "last run failed")
     if status == "cancelled":
+        # Task 5 (#1508): a cancel traceable to a deliberate operator stop
+        # request (process_stop_requests join, resolved by the adapter) is
+        # benign — reads Current (green) until the next natural fire. A cancel
+        # NOT traceable to an operator request (system/crash) stays attention
+        # "last run cancelled". Placed AFTER the actionable-stale block above,
+        # so a benign cancel never masks a genuine wedge (ckpt-1 invariant).
+        if cancel_was_operator_initiated:
+            return ("current", False, "")
         return ("attention", False, "last run cancelled")
     if status == "pending_first_run":
         # C6 (#1508): zero lifetime rows AND now overdue past its first
