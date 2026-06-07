@@ -23,7 +23,8 @@
 - `app/services/processes/health_verdict.py` — MODIFY: `pending_first_run` + `never_started` → attention "never started"; operator-cancel `cancelled` → benign.
 - `app/api/processes.py` — MODIFY: pass the two new fields through `_convert_row` into `compute_verdict`.
 - `sql/NNN_job_first_seen.sql` — CREATE: persisted per-job first-seen anchor for C6.
-- `app/workers/scheduler.py` (or jobs bootstrap) — MODIFY: upsert `job_first_seen` on registry load.
+- `app/jobs/runtime.py` (`JobRuntime.start()` startup connection) — MODIFY: upsert `job_first_seen` per `SCHEDULED_JOBS` entry once per process start (scheduler.py has no DB conn).
+- `app/services/processes/health_verdict.py` — also: `_REASON_LABEL["watermark_gap"]` "source has fresh data" → "ingest failing" (C2).
 
 **Frontend (PR-B):**
 - `frontend/src/components/admin/processStatus.ts` — MODIFY: `VERDICT_VISUAL` two-colour; `VERDICT_SORT_PRIORITY` working→current group.
@@ -91,7 +92,12 @@ In `stale_detection.py`, add near `SCHEDULE_MISS_TOLERANCE_S`:
 SCHEDULE_MISS_FLOOR_S: Final[int] = 300
 ```
 
-Change the `compute()` signature to add `cadence_period_s: int` (after `expected_fire_at`), and replace Rule 1:
+Add `cadence_period_s: int = 0` to the `compute()` signature (after
+`expected_fire_at`). **Default 0 so the two non-scheduled callers
+(`bootstrap_adapter.py:390`, `ingest_sweep_adapter.py:583`) need NO change** —
+Rule 1's `mechanism == "scheduled_job"` gate already skips them, so the value is
+never read for those mechanisms. Only `scheduled_adapter.py` passes a real value.
+Replace Rule 1:
 
 ```python
     # Rule 1: schedule_missed — overdue by more than a full cadence cycle
@@ -132,7 +138,13 @@ In `scheduled_adapter.py`, replace the `expected_fire_at` block (lines 803-805) 
         expected_fire_at = compute_next_run(job.cadence, anchor)
 ```
 
-Add `cadence_period_s=int(job.cadence.period.total_seconds())` to the `compute_stale_reasons(...)` call. (Confirm the cadence period accessor: grep `class Cadence` in `app/workers/scheduler.py`; if the interval is exposed differently, e.g. `job.cadence.interval_seconds`, use that. Add a one-line step to confirm before writing.)
+Add `cadence_period_s=int(cadence_period(job.cadence).total_seconds())` to the
+`compute_stale_reasons(...)` call, importing the existing helper:
+`from app.services.job_liveness import cadence_period` (defined at
+`app/services/job_liveness.py:81`, returns a `timedelta`). `Cadence` has NO
+`.period` attribute — it exposes `kind` / `interval_minutes` etc.
+(`app/workers/scheduler.py:113`), so `cadence_period()` is the canonical
+cadence→duration converter; reuse it (do not hand-roll).
 
 - [ ] **Step 6: Update existing stale-detection callers/tests for the new required arg, run fast tier**
 
@@ -154,9 +166,17 @@ git commit -m "feat(#1508): schedule_missed fires only when overdue by a full ca
 - Modify: `app/services/processes/scheduled_adapter.py` (add `_source_watermark_behind`; replace the `has_data_freshness_gap` input at lines 807-815)
 - Test: `tests/test_scheduled_adapter_watermark.py` (db-tier — needs `data_freshness_index` rows)
 
-- [ ] **Step 0: Confirm `new_filings_since` semantics**
+- [ ] **Step 0: Predicate confirmed (Codex plan-review)**
 
-Read the writer of `data_freshness_index.new_filings_since` (grep `new_filings_since` across `app/`). Confirm it is "count of upstream filings known-but-not-yet-ingested for this subject" and is reset to 0 after ingest. If it instead means "filings seen in the last poll" (not necessarily un-ingested), fall back to comparing `last_known_filed_at` (upstream) against the ingested watermark column the writer uses. Record the confirmed column in the test.
+`new_filings_since` is NOT a behind-signal: `data_freshness.py:363` sets
+`state='current'` *with* `new_filings_since>0` right after a successful ingest.
+`state='expected_filing_overdue'` is a per-subject timing PREDICTION (event-form
+jitter). The correct signal is **`state='error'`** — set only from a failed
+poll/ingest (`data_freshness.py:367,388`): "we tried to keep the source current
+and failed." Valid `subject_type` values: `issuer`, `institutional_filer`,
+`blockholder_filer`, `fund_series`, `finra_universe`
+(`sql/120_data_freshness_index.sql:41`). Valid `source` values include
+`sec_form4` (`sql/120:` CHECK).
 
 - [ ] **Step 1: Write failing db-tier test**
 
@@ -167,25 +187,29 @@ from app.services.processes.scheduled_adapter import _source_watermark_behind
 
 pytestmark = pytest.mark.db
 
-def test_source_behind_when_uningested_filings_exist(ebull_test_conn):
+def test_source_behind_when_ingest_is_erroring(ebull_test_conn):
     conn = ebull_test_conn
     conn.execute(
-        "INSERT INTO data_freshness_index (subject_type, subject_id, source, new_filings_since) "
-        "VALUES ('cik','0000320193','sec_form4', 3)"
+        "INSERT INTO data_freshness_index (subject_type, subject_id, source, state, last_polled_outcome) "
+        "VALUES ('issuer','0000320193','sec_form4','error','error')"
     )
     assert _source_watermark_behind(conn, source="sec_form4") is True
 
-def test_source_not_behind_when_all_ingested(ebull_test_conn):
+def test_source_not_behind_when_all_current(ebull_test_conn):
     conn = ebull_test_conn
     conn.execute(
-        "INSERT INTO data_freshness_index (subject_type, subject_id, source, new_filings_since) "
-        "VALUES ('cik','0000320193','sec_form4', 0)"
+        "INSERT INTO data_freshness_index (subject_type, subject_id, source, state, last_polled_outcome) "
+        "VALUES ('issuer','0000320193','sec_form4','current','current')"
     )
     assert _source_watermark_behind(conn, source="sec_form4") is False
 
 def test_quiet_source_with_no_rows_is_not_behind(ebull_test_conn):
     assert _source_watermark_behind(ebull_test_conn, source="sec_form4") is False
 ```
+
+(If `subject_id` / other columns are NOT NULL without a default, add the minimal
+required columns — check `sql/120_data_freshness_index.sql` for NOT NULLs before
+running; the CHECK-valid values above are pinned.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -198,25 +222,31 @@ Add to `scheduled_adapter.py` next to `_source_watermark_fresh`:
 
 ```python
 def _source_watermark_behind(conn: psycopg.Connection[Any], *, source: str) -> bool:
-    """True when ``source`` has at least one subject with upstream filings we
-    have NOT yet ingested (``new_filings_since > 0``) — a POSITIVE,
-    source-level "we are behind" signal (C2 / #1508).
+    """True when ``source``'s ingest is FAILING — at least one subject in
+    ``state='error'`` (C2 / #1508). A POSITIVE, source-level "we tried to keep
+    this source current and failed" signal.
 
-    Distinct from ``not _source_watermark_fresh`` (which is false for quiet
-    sources / fresh installs and would false-RED them) and from the old
-    per-subject ``_has_data_freshness_gap`` (event-form jitter). LIMIT 1.
+    Deliberately NOT ``not _source_watermark_fresh`` (false-REDs quiet sources)
+    and NOT the per-subject ``expected_next_at`` timing probe / ``state=
+    'expected_filing_overdue'`` (event-form jitter — an issuer simply not filing
+    is not an ingest problem). The state machine sets ``state='error'`` only from
+    ``outcome='error'`` (``data_freshness.py:367,388``). LIMIT 1, source-level.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT 1 FROM data_freshness_index
-             WHERE source = %(source)s AND new_filings_since > 0
+             WHERE source = %(source)s AND state = 'error'
              LIMIT 1
             """,
             {"source": source},
         )
         return cur.fetchone() is not None
 ```
+
+The `watermark_gap` verdict reason becomes **"ingest failing"** — update
+`_REASON_LABEL["watermark_gap"]` in `health_verdict.py:65` (NOT stale_detection.py)
+from "source has fresh data" to "ingest failing" (the honest cause).
 
 - [ ] **Step 4: Wire it as the `watermark_gap` input (replace `_has_data_freshness_gap`)**
 
@@ -361,32 +391,57 @@ Expected: PASS.
 
 Add `never_started: bool = False` to `ProcessRow` (`app/services/processes/__init__.py`). In `app/api/processes.py::_convert_row`, pass `never_started=row.never_started` into `compute_verdict(...)`.
 
-- [ ] **Step 7: Compute `never_started` in the adapter + upsert first-seen**
+- [ ] **Step 7: Upsert first-seen at jobs-process startup (runtime.py)**
 
-In the jobs-process startup that iterates `SCHEDULED_JOBS`, upsert once:
+`app/workers/scheduler.py` has no DB connection (Codex plan-review). The
+jobs-process startup with a live connection is `app/jobs/runtime.py`
+(`JobRuntime.start()` at line 1008; it already opens
+`with psycopg.connect(self._database_url, autocommit=True) as conn:` at
+1114/1154). Add, in that startup connection block, a loop over `SCHEDULED_JOBS`:
 
 ```python
-conn.execute(
-    "INSERT INTO job_first_seen (job_name) VALUES (%(n)s) ON CONFLICT (job_name) DO NOTHING",
-    {"n": job.name},
-)
+from app.workers.scheduler import SCHEDULED_JOBS  # if not already imported
+for _job in SCHEDULED_JOBS:
+    conn.execute(
+        "INSERT INTO job_first_seen (job_name) VALUES (%(n)s) ON CONFLICT (job_name) DO NOTHING",
+        {"n": _job.name},
+    )
 ```
 
-In `scheduled_adapter.py` `build_row`, after `terminal_row` is resolved:
+(Confirm the exact start-up block at `runtime.py:1114` vs `:1154` — pick the one
+that runs once per process start, not per-fire. The smoke test exercises
+lifespan, so a bad SQL here fails `tests/smoke`.)
+
+- [ ] **Step 8: Compute `never_started` in the adapter**
+
+In `scheduled_adapter.py`, add the explicit imports at the top:
+`from app.services.job_liveness import cadence_period` and
+`from app.services.processes.stale_detection import SCHEDULE_MISS_FLOOR_S`.
+Add the helper next to the other LIMIT-1 probes:
+
+```python
+def _job_first_seen(conn: psycopg.Connection[Any], *, job_name: str) -> datetime | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT first_seen FROM job_first_seen WHERE job_name = %(n)s", {"n": job_name})
+        row = cur.fetchone()
+    return row[0] if row is not None else None
+```
+
+In `build_row`, after `terminal_row` is resolved:
 
 ```python
     never_started = False
     if terminal_row is None:  # lifetime-zero
-        first_seen = _job_first_seen(conn, job_name=job.name)  # SELECT first_seen ... LIMIT 1
+        first_seen = _job_first_seen(conn, job_name=job.name)
         if first_seen is not None:
             first_expected = compute_next_run(job.cadence, first_seen)
-            grace = max(int(job.cadence.period.total_seconds()), SCHEDULE_MISS_FLOOR_S)
+            grace = max(int(cadence_period(job.cadence).total_seconds()), SCHEDULE_MISS_FLOOR_S)
             never_started = first_expected < now - timedelta(seconds=grace)
 ```
 
 Pass `never_started=never_started` into the `ProcessRow(...)` constructor.
 
-- [ ] **Step 8: Write + run a db-tier test for the anchor, then fast tier**
+- [ ] **Step 9: Write + run a db-tier test for the anchor, then fast tier**
 
 ```python
 # tests/test_job_first_seen.py
@@ -399,10 +454,10 @@ pytestmark = pytest.mark.db
 Run: `uv run pytest tests/test_job_first_seen.py -v && uv run pytest -m "not db" -q`
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add sql/NNN_job_first_seen.sql app/services/processes/ app/api/processes.py app/workers/scheduler.py tests/test_health_verdict.py tests/test_job_first_seen.py
+git add sql/NNN_job_first_seen.sql app/services/processes/ app/api/processes.py app/jobs/runtime.py tests/test_health_verdict.py tests/test_job_first_seen.py
 git commit -m "feat(#1508): never-started verdict on persisted first-seen anchor (C6)"
 ```
 
@@ -452,7 +507,36 @@ Expected: PASS.
 
 - [ ] **Step 5: Wire the join in the adapter + thread through**
 
-Add `cancel_was_operator_initiated: bool = False` to `ProcessRow`. In the adapter, when `terminal_row["cancelled_at"]` is set, probe `process_stop_requests` for a matching row (operator-initiated) and set the flag. Pass through `_convert_row` into `compute_verdict`.
+Add `cancel_was_operator_initiated: bool = False` to `ProcessRow`.
+
+The join is by `target_run_kind` + `target_run_id`, NOT `cancelled_at` (Codex
+plan-review). `process_stop_requests` (`sql/135_process_stop_requests.sql:64-66`)
+has `target_run_kind IN ('bootstrap_run','job_run','sync_run')` + `target_run_id
+BIGINT`. So the terminal row must carry its KIND: a `job_runs`-resolved terminal
+is `job_run` keyed on `run_id`; a `_read_latest_terminal_sync_run`-resolved
+terminal (orchestrator) is `sync_run` keyed on `sync_run_id`. Add a
+`"terminal_kind"` field to BOTH terminal-row dicts — set `"job_run"` in
+`_read_latest_terminal_run` and `"sync_run"` in `_read_latest_terminal_sync_run`
+(the dict at `scheduled_adapter.py:347-358`).
+
+Then, when `terminal_row["cancelled_at"]` is set, probe:
+
+```python
+def _cancel_was_operator_initiated(conn, *, run_kind: str, run_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM process_stop_requests "
+            "WHERE target_run_kind = %(k)s AND target_run_id = %(id)s LIMIT 1",
+            {"k": run_kind, "id": run_id},
+        )
+        return cur.fetchone() is not None
+```
+
+Call it only when `process_status == "cancelled"` using
+`terminal_row["terminal_kind"]` + `terminal_row["run_id"]`. Pass
+`cancel_was_operator_initiated` through `ProcessRow` → `_convert_row` →
+`compute_verdict`. (This also retires the `cancelled_by_operator_id=None  # PR4
+wires the join` placeholder at `scheduled_adapter.py:697`.)
 
 - [ ] **Step 6: Run fast tier**
 
@@ -561,16 +645,27 @@ git commit -m "feat(#1508): collapse Processes page to two colours (C3)"
 ## Task 8: C4 — global red banner when the jobs engine is down
 
 **Files:**
-- Modify: the Processes header (`StaleBanner` — grep `StaleBanner` under `frontend/src/components/admin/`) + its data source
-- Possibly modify: `app/api/system.py:281` (`_derive_overall_status`) to fold `jobs_process.state == "down"`, OR have the header read `/system/jobs.jobs_process.state`
-- Test: FE unit on the banner + a backend test if `_derive_overall_status` changes
+- Modify: `frontend/src/hooks/useProcesses.ts` (the page data hook — grep to confirm path) OR the parent page component (grep `StaleBanner` to find what renders it + where `/system/processes` is fetched)
+- Modify: `frontend/src/components/admin/ProcessesTable.tsx` / `StaleBanner` — accept + render `engineDown`
+- Recommended backend: `app/api/system.py:281` (`_derive_overall_status`) fold `jobs_process.state == "down"` so the existing status surface carries the fact
+- Test: FE unit on the banner + backend test on `_derive_overall_status`
 
-- [ ] **Step 1: Decide the wiring (investigation)**
+- [ ] **Step 1: Map the data path (investigation — name the files)**
 
-Confirm what the Processes header already fetches. `jobs_process.state` (`healthy`/`degraded`/`down`) lives on `/system/jobs` (`JobsListResponse:213`), and `_build_jobs_process_health` returns `down` when the heartbeat table is empty (jobs process not running). Choose the minimal path:
-- (a) If the header already consumes `/system/status`, fold `jobs_process.state == "down" → overall_status="down"` in `_derive_overall_status` (line 281) and surface it; OR
-- (b) have the header fetch `/system/jobs` `jobs_process.state` directly.
-Record the choice in the commit message.
+`jobs_process.state` (`healthy`/`degraded`/`down`) lives on `/system/jobs`
+(`JobsListResponse:213`); `_build_jobs_process_health` returns `down` when the
+heartbeat table is empty (jobs process not running). Grep `StaleBanner` and
+`useProcesses` under `frontend/src/` to find (1) the hook/component that fetches
+`/system/processes`, and (2) where `StaleBanner` is rendered. Record the exact
+files. Choose the minimal wiring and write it down:
+- (a) **Recommended:** fold `jobs_process.state == "down" → overall_status="down"`
+  into `_derive_overall_status` (`app/api/system.py:281`, which today ignores
+  heartbeat), and have the page read `overall_status` (one field) — if the page
+  already consumes `/system/status`; OR
+- (b) add a sibling fetch of `/system/jobs` `jobs_process.state` in the page hook
+  and thread a boolean down to `StaleBanner`.
+Pin the decision + the exact prop path (page hook → ProcessesTable → StaleBanner)
+in this step before writing Steps 2-4.
 
 - [ ] **Step 2: Write the failing FE test for the banner**
 

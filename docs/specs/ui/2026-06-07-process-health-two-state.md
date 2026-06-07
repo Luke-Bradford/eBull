@@ -101,26 +101,32 @@ returns `False` for no-rows / unknown-cadence / quiet source / fresh install.
 `not source_watermark_fresh` is therefore NOT proof we're behind and would
 false-RED quiet sources. Do **not** invert it.
 
-Instead `watermark_gap` (RED) requires a **positive** predicate:
-`source_watermark_behind` = *the upstream source's known-latest filing is newer
-than our ingested-latest by more than `WATERMARK_GAP_TOLERANCE_S`, computed at
-SOURCE level (MAX over subjects)*. This is a real "external source advanced past
-our watermark" signal — distinct from both the per-subject
-`has_data_freshness_gap` (today's event-form-jittery probe, which this replaces)
-and from `source_watermark_fresh` (a source can be neither clearly-fresh nor
-clearly-behind → neither signal fires → the row falls back to run status).
+**The signal is `data_freshness_index.state = 'error'`, source-level** (Codex
+plan-review correction — `new_filings_since` is wrong: `data_freshness.py:363`
+sets `state='current'` *with* `new_filings_since>0` right after a successful
+ingest, so it is not a behind-signal; and `state='expected_filing_overdue'` is a
+per-subject timing PREDICTION that fires routinely for event-driven forms when an
+issuer simply doesn't file — that is the jitter we are removing). The state
+machine sets `state='error'` only from a failed poll/ingest
+(`data_freshness.py:367,388`), i.e. "we tried to keep this source current and
+failed" — genuinely behind, actionable, and impossible to confuse with an issuer
+choosing not to file.
 
-`source_watermark_fresh` stays exactly as #1511 uses it (GREEN promotion of
-`pending_first_run`). The two predicates are independent, not negations.
+`source_watermark_behind(source)` = `EXISTS (data_freshness_index WHERE source=X
+AND state='error')` (LIMIT 1, source-level — any erroring subject means the
+source's ingest is failing). Verdict reason: **"ingest failing"** (not "source
+has new data" — the honest cause). This replaces the per-subject
+`has_data_freshness_gap` (`expected_next_at < now`) timing probe entirely.
 
-**`source_watermark_behind` is REQUIRED for v1** (no fallback — Codex re-review
-round 3 flagged that a fallback contradicts the succeeds-doing-nothing backstop,
-the dev-verify, and the DoD, all of which depend on source-behind → RED). It is a
-cheap per-source `LIMIT 1`-shaped probe in the same family as the existing
-`_source_watermark_fresh` / `has_data_freshness_gap` probes, so the "too heavy"
-concern does not apply. v1 must NOT paint RED from `not source_watermark_fresh`
-(false-REDs quiet sources), and the per-subject `has_data_freshness_gap` probe
-is replaced by `source_watermark_behind` (kills the event-form jitter).
+`source_watermark_fresh` (#1511) stays exactly as-is (GREEN promotion of
+`pending_first_run`) — independent of this, not its negation. v1 must NOT paint
+RED from `not source_watermark_fresh` (false-REDs quiet sources).
+
+**Known residual (documented):** a job that polls successfully but silently
+ingests nothing — without ever setting `state='error'` — is not caught by C2; it
+relies on C1 overdue + the watchdog. A true upstream-vs-ingested diff would catch
+it but the freshness index tracks our own polling view, not an independent
+upstream truth, so it cannot be computed cheaply here. Tracked as a follow-up.
 
 ### C3 — collapse to two colours at the display layer (concrete FE changes)
 `frontend/src/components/admin/processStatus.ts` + `ProcessesTable.tsx` +
@@ -202,10 +208,12 @@ forever. Bound it concretely:
 
 ## Edge cases (from validation)
 
-- **Succeeds-doing-nothing** (empty queue / gated skip / scope bug): C2's
-  source-level `source_watermark_behind` is the backstop — if the upstream source
-  is genuinely ahead of our ingested watermark it goes RED even though runs
-  "succeed". (operator-UX BLOCKING-1)
+- **Succeeds-doing-nothing because ingest is ERRORING**: C2's
+  `source_watermark_behind` (`state='error'`) is the backstop — a source whose
+  poll/ingest is failing goes RED even while the job_runs row reads "success".
+  (operator-UX BLOCKING-1.) The narrower "polls fine but silently drops
+  everything, no error" case is the documented C2 residual (relies on C1 +
+  watchdog).
 - **Operator-initiated cancel** (made concrete — Codex re-review #3): today
   `compute_verdict` maps `cancelled` → `attention` forever (`health_verdict.py:171`).
   Wire it: adapter sets `cancel_was_operator_initiated` by matching the terminal
@@ -224,9 +232,10 @@ forever. Bound it concretely:
   `schedule_missed`; skipped-full-cycle → `schedule_missed`; `finished_at`-anchor
   (a long run that finishes after a nominal slot does NOT immediately read overdue);
   FLOOR protects every-5-min.
-- **C2** pure tests: `source_watermark_behind` true (upstream ahead) →
-  `watermark_gap`; quiet source / no rows / fresh install → NO `watermark_gap`
-  (the false-RED Codex flagged); `source_watermark_fresh` GREEN promotion unchanged.
+- **C2** db tests: a `state='error'` row for the source → `source_watermark_behind`
+  true → `watermark_gap` → red "ingest failing"; all-`current` source / no rows /
+  fresh install → NO `watermark_gap` (the false-RED Codex flagged);
+  `source_watermark_fresh` GREEN promotion unchanged.
 - **Invariant (explicit — Codex ckpt-1 Medium #7):** `retry_in_flight` and
   `liveness_kick_in_flight` each suppress ONLY `schedule_missed` and NEVER
   `watermark_gap` / `queue_stuck` / `mid_flight_stuck` — a wedge co-present with a
