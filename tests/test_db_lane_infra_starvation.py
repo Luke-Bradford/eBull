@@ -17,11 +17,15 @@ acquire property itself is already proven by
 from __future__ import annotations
 
 from app.jobs.sources import get_job_name_to_source, source_for
+from app.workers.scheduler import JOB_LIVENESS_WATCHDOG, JOB_RETRY_SWEEPER
 
-# (job_name, expected own lane). Pinned so a future re-merge updates in lockstep.
+# (job_name, expected own lane). Job names via the scheduler constants so a
+# rename cannot silently pass against a stale literal (review NITPICK PR #1528);
+# the lane values are the canonical ``Lane`` literals. Pinned so a future
+# re-merge updates in lockstep.
 _INFRA_LANES: tuple[tuple[str, str], ...] = (
-    ("jobs_liveness_watchdog", "db_liveness"),
-    ("jobs_retry_sweeper", "db_retry"),
+    (JOB_LIVENESS_WATCHDOG, "db_liveness"),
+    (JOB_RETRY_SWEEPER, "db_retry"),
 )
 
 
