@@ -121,14 +121,17 @@ export function ProcessesTable({
     return [...rows].sort(compareRows);
   }, [baseRows, selectedLane]);
 
-  // #1513 — collapse the quiet rows by default. Pinned (always visible):
-  // `attention` (operator must act) AND `working` (a live run — the 5s
-  // poll exists to watch it, and it exposes Cancel, so it must not hide).
-  // Collapsed behind one inline disclosure: `current` (steady, fresh) and
-  // `self_healing` (auto-recovering, no action). compareRows already floats
-  // attention to the top, so the split preserves order within each group.
-  // Disabled in bootstrap-only mode: there the single bootstrap row IS the
-  // primary action surface and must never be tucked behind a disclosure.
+  // #1508 C3 — two-state page. ONLY `attention` pins (the operator must
+  // act). The three calm verdicts — `current` (steady, fresh), `working`
+  // (a live run — system working as designed) and `self_healing`
+  // (auto-recovering) — all fold behind ONE inline disclosure. A live run
+  // does not lose its Cancel affordance: the Cancel button is gated on
+  // `can_cancel` inside ProcessRow, so it is still reachable once the
+  // operator expands the disclosure — it just no longer screams for
+  // attention when nothing is wrong. compareRows floats attention to the
+  // top, so the split preserves order within each group. Disabled in
+  // bootstrap-only mode: there the single bootstrap row IS the primary
+  // action surface and must never be tucked behind a disclosure.
   const pinnedRows = useMemo(
     () =>
       bootstrapOnly
@@ -146,7 +149,11 @@ export function ProcessesTable({
   const collapsedSelfHealing = collapsedRows.filter(
     (r) => r.health_verdict === "self_healing",
   ).length;
-  const collapsedCurrent = collapsedRows.length - collapsedSelfHealing;
+  const collapsedWorking = collapsedRows.filter(
+    (r) => r.health_verdict === "working",
+  ).length;
+  const collapsedCurrent =
+    collapsedRows.length - collapsedSelfHealing - collapsedWorking;
   const [showCollapsed, setShowCollapsed] = useState(false);
   // Reset to the default-collapsed state whenever the lane filter changes,
   // so switching lanes never carries another lane's expanded state over
@@ -345,7 +352,11 @@ export function ProcessesTable({
                       <span aria-hidden="true">
                         {showCollapsed ? "▾ " : "▸ "}
                       </span>
-                      {collapsedLabel(collapsedCurrent, collapsedSelfHealing)}
+                      {collapsedLabel(
+                        collapsedCurrent,
+                        collapsedWorking,
+                        collapsedSelfHealing,
+                      )}
                       {" — "}
                       {showCollapsed ? "hide" : "show"}
                     </button>
@@ -379,31 +390,35 @@ export function ProcessesTable({
   );
 }
 
-/** Verdicts that fold into the #1513 disclosure: steady-fresh `current` and
- *  auto-recovering `self_healing`. `attention` (act) and `working` (a live
- *  run — watch / cancel) stay pinned. */
+/** #1508 C3 — the three calm verdicts fold into the disclosure: steady-fresh
+ *  `current`, in-flight `working`, and auto-recovering `self_healing`. Only
+ *  `attention` (the operator must act) stays pinned. */
 function isCollapsible(verdict: ProcessRowResponse["health_verdict"]): boolean {
-  return verdict === "current" || verdict === "self_healing";
+  return verdict !== "attention";
 }
 
-/** Disclosure label for the collapsed rows (#1513), e.g.
- *  "12 current · 3 self-healing". Only `current` and `self_healing` are
- *  collapsible (see isCollapsible); `current` here is the count of collapsed
- *  `current`-verdict rows. */
-function collapsedLabel(current: number, selfHealing: number): string {
+/** Disclosure label for the collapsed rows (#1508 C3), e.g.
+ *  "12 current · 2 working · 3 self-healing". Each arg is the count of
+ *  collapsed rows of that verdict. */
+function collapsedLabel(
+  current: number,
+  working: number,
+  selfHealing: number,
+): string {
   const parts: string[] = [];
   if (current > 0) parts.push(`${current} current`);
+  if (working > 0) parts.push(`${working} working`);
   if (selfHealing > 0) parts.push(`${selfHealing} self-healing`);
   return parts.join(" · ");
 }
 
 function compareRows(a: ProcessRowResponse, b: ProcessRowResponse): number {
-  // #1512: sort by the single health verdict — attention floats to the
-  // top, then self-healing, working, current. This replaces the prior
-  // status-based priority + synthetic `stale` rank (the two-axis model
-  // is collapsed into one verdict), so an `ok`/`idle` row that goes
-  // overdue (now verdict=attention) surfaces at the top without a
-  // separate stale-tuple consult.
+  // #1508 C3: two-state sort — only `attention` floats to the pinned
+  // region; the three calm verdicts (current/working/self_healing) share
+  // one rank and stay in their original relative order. This collapses the
+  // prior status-based priority + synthetic `stale` rank into one verdict,
+  // so an `ok`/`idle` row that goes overdue (now verdict=attention)
+  // surfaces at the top without a separate stale-tuple consult.
   const sa = VERDICT_SORT_PRIORITY[a.health_verdict] ?? 99;
   const sb = VERDICT_SORT_PRIORITY[b.health_verdict] ?? 99;
   if (sa !== sb) return sa - sb;

@@ -589,21 +589,24 @@ describe("ProcessesTable", () => {
     );
   }
 
-  it("collapses current/self-healing rows but pins attention and working rows", () => {
+  it("#1508 C3: pins only attention; collapses current/working/self-healing", () => {
     renderTableRaw([
       makeProcessRow({ process_id: "att", display_name: "Attn", stale_reasons: ["queue_stuck"] }),
       makeProcessRow({ process_id: "run", display_name: "Runn", status: "running", stale_reasons: [] }),
       makeProcessRow({ process_id: "cur", display_name: "Curr", status: "ok", stale_reasons: [] }),
       makeProcessRow({ process_id: "heal", display_name: "Heal", status: "pending_retry", stale_reasons: [] }),
     ]);
-    // Attention + working (live run, exposes Cancel) stay pinned.
+    // Only attention pins (the operator must act).
     expect(screen.getByRole("link", { name: "Attn" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Runn" })).toBeTruthy();
-    // current + self-healing hide behind the disclosure.
+    // The three calm verdicts all hide behind the disclosure. A live run
+    // ("Runn") keeps its Cancel affordance once expanded — it just no
+    // longer screams when nothing is wrong.
+    expect(screen.queryByRole("link", { name: "Runn" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Curr" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Heal" })).toBeNull();
     const disclosure = screen.getByTestId("collapsed-disclosure");
     expect(disclosure.textContent).toContain("1 current");
+    expect(disclosure.textContent).toContain("1 working");
     expect(disclosure.textContent).toContain("1 self-healing");
   });
 

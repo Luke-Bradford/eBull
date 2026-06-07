@@ -95,20 +95,17 @@ function ProcessRowImpl({
   onFullWash,
   onCancel,
 }: ProcessRowProps) {
-  // Pulse precedence keyed off the single verdict (#1512): self-healing
-  // and attention pulse amber/red (something is recovering or wrong);
-  // working pulses sky (a run is in flight); current is static.
-  // `motion-reduce:animate-none` keeps the colour but stops the
-  // animation for operators with prefers-reduced-motion (PR8 carve-out).
+  // #1508 C3 — two-colour page. Only `attention` wears an alarming
+  // left-border (solid red). `working` and `self_healing` are
+  // no-action-needed states (run in flight / retry scheduled — the system
+  // working as designed) so they fold into the same calm, border-less
+  // treatment as `current` and no longer pulse-as-alarm. The pill label
+  // (VERDICT_VISUAL) still says *why* the row is calm.
   const verdict = row.health_verdict;
   const pulseBorder =
-    verdict === "self_healing"
-      ? "border-l-4 border-l-amber-500 animate-pulse motion-reduce:animate-none"
-      : verdict === "attention"
-        ? "border-l-4 border-l-red-500"
-        : verdict === "working"
-          ? "border-l-4 border-l-sky-500 animate-pulse motion-reduce:animate-none"
-          : "border-l-4 border-l-transparent";
+    verdict === "attention"
+      ? "border-l-4 border-l-red-500"
+      : "border-l-4 border-l-transparent";
 
   const lastRunLabel = row.last_run
     ? `${formatDateTime(row.last_run.finished_at)} · ${formatDuration(row.last_run.duration_seconds)} · ${
