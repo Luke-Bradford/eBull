@@ -409,6 +409,20 @@ describe("ProcessRow", () => {
     expect(container.textContent).toContain("every 5m");
   });
 
+  it("#1514: labels the next-fire time honestly as expected, not live", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({
+        process_id: "daily_cik_refresh",
+        mechanism: "scheduled_job",
+        cadence_human: "every 5m",
+        next_fire_at: "2026-05-10T14:00:00+00:00",
+      }),
+    });
+    // Cadence-derived, not a live scheduler confirmation (#719 / #1514).
+    expect(container.textContent).toContain("next (expected):");
+    expect(container.textContent).not.toContain("next: ");
+  });
+
   // ---------------------------------------------------------------------
   // PR4 #1082 — ⓘ tooltip rendering description
   // ---------------------------------------------------------------------
