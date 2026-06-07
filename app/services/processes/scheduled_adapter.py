@@ -33,6 +33,7 @@ import psycopg
 import psycopg.rows
 
 from app.services.data_freshness import cadence_for
+from app.services.job_liveness import cadence_period
 from app.services.processes import (
     ActiveRunSummary,
     ErrorClassSummary,
@@ -802,7 +803,15 @@ def _build_row(
     # satisfy ``< now - tolerance`` and the rule was unreachable.
     expected_fire_at: datetime | None = None
     if terminal_row is not None and terminal_row.get("started_at") is not None:
-        expected_fire_at = compute_next_run(job.cadence, terminal_row["started_at"])
+        # C1 (#1508): anchor on the LATER of started_at / finished_at so a
+        # run that just completed resets the overdue clock — a long run that
+        # finishes after a nominal slot must not read overdue the instant it
+        # ends.
+        anchor = terminal_row["started_at"]
+        finished = terminal_row.get("finished_at")
+        if finished is not None and finished > anchor:
+            anchor = finished
+        expected_fire_at = compute_next_run(job.cadence, anchor)
     freshness_source = freshness_source_for(job.name)
     has_data_freshness_gap = (
         freshness_source is not None
@@ -828,6 +837,7 @@ def _build_row(
         active_run_started_at=active_run.started_at if active_run is not None else None,
         process_id=job.name,
         now=now,
+        cadence_period_s=int(cadence_period(job.cadence).total_seconds()),
     )
 
     # PR4 watermark — surface the resume cursor on the FE tooltip.
