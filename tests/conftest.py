@@ -292,11 +292,17 @@ _DB_FIXTURE_NAMES: frozenset[str] = frozenset(
         "two_seeded_instrument_ids",
     }
 )
+# Strong real-DB signals only. Bare ``psycopg.connect`` is deliberately NOT
+# here: hundreds of tests import it solely to build a MagicMock connection and
+# never touch Postgres — marking those ``db`` would wrongly exclude fast,
+# deterministic mock tests from the gate. A REAL connection always pairs
+# ``psycopg.connect(`` with ``settings.database_url`` / ``test_database_url``,
+# both already covered below.
 _DB_SOURCE_MARKERS: tuple[str, ...] = (
     "ebull_test_conn",
     "test_database_url",
-    "run_migrations",
-    "psycopg.connect",
+    "run_migrations(",
+    "settings.database_url",
     "TestClient",
 )
 
