@@ -403,3 +403,23 @@ def test_operator_cancel_never_masks_actionable_stale() -> None:
     """A benign operator cancel must NOT hide a genuine wedge (ckpt-1 invariant)."""
     v, _, _ = compute_verdict(status="cancelled", stale_reasons=("queue_stuck",), cancel_was_operator_initiated=True)
     assert v == "attention"
+
+
+# --- Recovery-never-masks-a-wedge invariant (#1508 / Task 6) -------------
+#
+# Pins the #1509/#1510 guarantee: a recovery signal (retry-in-flight or
+# liveness-kick-in-flight) suppresses ONLY ``schedule_missed`` — it must
+# NEVER mask a genuine wedge (``watermark_gap`` / ``queue_stuck`` /
+# ``mid_flight_stuck``). Those three stay attention even when paired with a
+# recovery signal. Regression-proofs ``compute_verdict``'s precedence across
+# the whole #1508 effort.
+
+
+@pytest.mark.parametrize("wedge", ["watermark_gap", "queue_stuck", "mid_flight_stuck"])
+@pytest.mark.parametrize("recover", ["retry_in_flight", "liveness_kick_in_flight"])
+def test_recovery_signal_never_masks_a_wedge(wedge: str, recover: str) -> None:
+    kw = {"status": "failed", "stale_reasons": ("schedule_missed", wedge), recover: True}
+    if recover == "retry_in_flight":
+        kw["retry_at_display"] = "21:20"
+    verdict, _, _ = compute_verdict(**kw)  # type: ignore[arg-type]
+    assert verdict == "attention", f"{recover} masked {wedge}"
