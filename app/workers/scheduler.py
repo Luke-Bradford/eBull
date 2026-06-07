@@ -662,7 +662,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_MONITOR_POSITIONS,
         display_name="Monitor open positions",
-        source="db",
+        # Own single-job lane (#1527). Hourly @ :15 is a 5-min-aligned slot,
+        # so on the catch-all ``db`` lane this lost the ``job_source:db`` race
+        # to orchestrator_high_frequency_sync (every_5min, ``db``) and skipped.
+        # Reads ``positions`` (MVCC-safe vs the orchestrator's portfolio write)
+        # and writes only ``position_alerts`` — disjoint, so ``db_positions``
+        # runs concurrently with orchestrator ingest.
+        source="db_positions",
         description="Check open positions for SL/TP breaches and thesis breaks.",
         cadence=Cadence.hourly(minute=15),
         prerequisite=_has_open_positions,
@@ -800,7 +806,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_SYNC,
         display_name="Ownership repair sweep",
-        source="db",
+        # Own single-job lane (#1527). Daily @ :30 is a 5-min-aligned slot, so
+        # on the catch-all ``db`` lane it lost the ``job_source:db`` race to
+        # orchestrator_high_frequency_sync (every_5min) and skipped a full day
+        # per collision. Refreshes ``ownership_*_current``. That table's other
+        # writers (live ingesters + bulk paths) run on ``db_ownership_*`` /
+        # ``sec_rate`` — already off ``db`` — so the sweep was never lane-
+        # serialised against them; extraction adds no new race. The only
+        # writer it shared the ``db`` lane with is
+        # ``ownership_observations_backfill`` (kept on ``db`` — an S24
+        # bootstrap stage), and both already serialise the only shared write
+        # (``refresh_*_current`` DELETE-then-INSERT) per-instrument via
+        # pg_advisory_xact_lock (schedules staggered too: backfill Sun 03:00,
+        # this sweep 03:30). So ``db_ownership_obs`` is safe.
+        source="db_ownership_obs",
         description=(
             "Self-healing repair sweep for ownership_*_current (#892). "
             "Live ingesters now write observations + refresh _current "
@@ -845,7 +864,15 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_CUSIP_EXTID_SWEEP,
         display_name="CUSIP rewash sweep",
-        source="db",
+        # Own single-job lane (#1527). Daily @ :50 is a 5-min-aligned slot, so
+        # on the catch-all ``db`` lane it lost the ``job_source:db`` race to
+        # orchestrator_high_frequency_sync (every_5min) and skipped a full day
+        # per collision (consistent with it not truly running since 2026-06-03).
+        # Writes ``unresolved_13f_cusips`` + ``institutional_holdings``; the 13F
+        # ingest writers run on ``sec_rate`` / ``db_ownership_inst`` (never
+        # ``db``), so ``db_cusip`` introduces no new race — the sweep already
+        # ran concurrently with them.
+        source="db_cusip",
         description=(
             "Sweep ``unresolved_13f_cusips`` for rows whose CUSIP "
             "already has a matching ``external_identifiers`` row, mark "

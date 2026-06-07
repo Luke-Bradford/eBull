@@ -68,6 +68,15 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # re-starve each other. See app/jobs/sources.py::Lane.
         "db_liveness",
         "db_retry",
+        # #1527 — daily/hourly continuation of #1526. monitor_positions,
+        # cusip_extid_sweep, ownership_observations_sync each fire on a
+        # 5-min-aligned slot and lost the ``job_source:db`` race to
+        # orchestrator_high_frequency_sync (skipping a full day per collision).
+        # Write-target-disjoint from the orchestrator's portfolio/fx ingest, so
+        # each owns a single-job lane. See app/jobs/sources.py::Lane.
+        "db_positions",
+        "db_cusip",
+        "db_ownership_obs",
     }
 )
 
