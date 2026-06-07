@@ -19,6 +19,7 @@ Three responsibilities:
 
 from __future__ import annotations
 
+import functools
 import os
 import pathlib
 import shutil
@@ -268,6 +269,62 @@ def _set_basetemp(config: pytest.Config) -> pathlib.Path:
     return base
 
 
+# ---------------------------------------------------------------------------
+# DB-backed test auto-classification (test-gate fast tier)
+# ---------------------------------------------------------------------------
+#
+# The pre-push gate runs only the fast tier (`-m "not db"`): pure-logic tests
+# that need no Postgres. DB-backed integration tests are the slow, xdist-flaky
+# majority (~280 files) and move OFF the per-push critical path — run them with
+# `uv run pytest -m db` on demand / pre-merge. Rather than hand-annotate every
+# file, classify at collection: a test is DB-backed if it pulls a real-DB
+# fixture OR its module source references a real-DB entrypoint (raw
+# psycopg.connect, the test-DB URL, run_migrations, or a TestClient lifespan
+# that drives the dev DB).
+_DB_FIXTURE_NAMES: frozenset[str] = frozenset(
+    {
+        "ebull_test_conn",
+        "ebull_test_db",
+        "db_conn",
+        "test_pool",
+        "test_conn",
+        "seeded_instrument_id",
+        "two_seeded_instrument_ids",
+    }
+)
+# Strong real-DB signals only. Bare ``psycopg.connect`` is deliberately NOT
+# here: hundreds of tests import it solely to build a MagicMock connection and
+# never touch Postgres — marking those ``db`` would wrongly exclude fast,
+# deterministic mock tests from the gate. A REAL connection always pairs
+# ``psycopg.connect(`` with ``settings.database_url`` / ``test_database_url``,
+# both already covered below.
+_DB_SOURCE_MARKERS: tuple[str, ...] = (
+    "ebull_test_conn",
+    "test_database_url",
+    "run_migrations(",
+    "settings.database_url",
+    "TestClient",
+)
+
+
+@functools.cache
+def _module_source_touches_db(path: str) -> bool:
+    try:
+        source = pathlib.Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(marker in source for marker in _DB_SOURCE_MARKERS)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Auto-apply the ``db`` marker so the fast gate can deselect DB tests."""
+    for item in items:
+        if _DB_FIXTURE_NAMES & set(getattr(item, "fixturenames", ())):
+            item.add_marker("db")
+        elif _module_source_touches_db(str(item.path)):
+            item.add_marker("db")
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Build the test-DB template + set basetemp.
 
@@ -280,6 +337,14 @@ def pytest_configure(config: pytest.Config) -> None:
     unavailable. We still log a warning via ``test_db_available``
     when a worker actually tries to use it.
     """
+    # Registered in every process (controller + workers) so `-m db` /
+    # `-m "not db"` selection is honoured regardless of run mode.
+    config.addinivalue_line(
+        "markers",
+        "db: test needs a real Postgres connection (auto-applied at collection). "
+        "Excluded from the fast pre-push gate; run the integration tier with `-m db`.",
+    )
+
     if _is_xdist_worker(config):
         return
 
