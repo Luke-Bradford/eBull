@@ -4269,16 +4269,23 @@ def jobs_liveness_watchdog() -> None:
     from datetime import UTC, datetime
 
     from app.services.job_liveness import evaluate_liveness
+    from app.services.job_liveness_act import act_on_stalled_jobs
 
     # Self-tracked jobs write ``sync_runs`` not ``job_runs`` — excluding
     # them avoids a permanent false-stall (Codex ckpt-1).
     excluded = {JOB_ORCHESTRATOR_FULL_SYNC, JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC}
-    jobs = [(j.name, j.cadence) for j in SCHEDULED_JOBS if j.name not in excluded]
+    eligible = {j.name: j.cadence for j in SCHEDULED_JOBS if j.name not in excluded}
+    jobs = list(eligible.items())
 
     with _tracked_job(JOB_LIVENESS_WATCHDOG) as tracker:
         now = datetime.now(UTC)
         with psycopg.connect(settings.database_url, autocommit=True) as conn:
             stalled, active = evaluate_liveness(conn, jobs, now)
+            # T4 (#1510): act — re-enqueue each stalled job once via the audited
+            # manual queue (bounded by in-tx stall recheck + in-flight dedup +
+            # cooldown). Same autocommit conn so each candidate tx is a real
+            # BEGIN/COMMIT.
+            act_on_stalled_jobs(conn, stalled=stalled, eligible=eligible, now=now)
         tracker.row_count = len(stalled)
         for job in stalled:
             logger.warning(

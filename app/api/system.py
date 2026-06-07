@@ -243,12 +243,14 @@ def _derive_overall_status(
     layers: list[LayerHealth],
     jobs: list[JobHealth],
     kill_switch_active: bool,
+    stalled_job_names: set[str] | None = None,
 ) -> OverallStatus:
     """Worst-of(components).
 
     - kill switch active   → "down"  (system is intentionally halted)
     - any layer "error"    → "down"  (infra fault)
     - any job "failure"    → "down"
+    - any job stalled (silently stopped firing) → "degraded"  (#1510 / T4)
     - any layer "stale"/"empty" → "degraded"
     - any job currently "running" → "degraded"
     - otherwise → "ok"
@@ -260,6 +262,15 @@ def _derive_overall_status(
     can see exactly what is missing. A fresh deploy will still report
     "degraded" via the empty data layers, which is the more meaningful
     signal anyway.
+
+    A *stall* is different from "no runs ever": the job HAS fired before but has
+    recorded zero rows over K cadence cycles, so its latest terminal is an OLD
+    ``success`` and ``last_status='success'`` would otherwise keep the headline
+    ``ok`` while the job silently stopped (#1510). It is ``degraded`` not ``down``
+    — recoverable, and the watchdog may already be re-enqueuing it.
+    ``stalled_job_names`` is computed by the caller via ``find_stalled_jobs`` over
+    the SAME orchestrator-excluded registry the watchdog uses (self-tracked
+    orchestrator jobs write ``sync_runs`` not ``job_runs`` and would false-stall).
     """
     if kill_switch_active:
         return "down"
@@ -267,11 +278,33 @@ def _derive_overall_status(
         return "down"
     if any(job.last_status == "failure" for job in jobs):
         return "down"
+    if stalled_job_names:
+        return "degraded"
     if any(layer.status in ("stale", "empty") for layer in layers):
         return "degraded"
     if any(job.last_status == "running" for job in jobs):
         return "degraded"
     return "ok"
+
+
+def _stalled_job_names(conn: psycopg.Connection[object], now: datetime) -> set[str]:
+    """Names of scheduled jobs that have silently stopped firing (#1510 / T4).
+
+    Best-effort: any failure (DB hiccup mid-build) returns an empty set so the
+    stall signal degrades gracefully rather than 503-ing ``/system/status`` — the
+    headline degradation is a nice-to-have, not load-bearing for the page. Uses
+    the SAME orchestrator exclusion as the watchdog: ``orchestrator_*`` jobs write
+    ``sync_runs`` not ``job_runs`` and would otherwise false-stall.
+    """
+    try:
+        from app.services.job_liveness import find_stalled_jobs
+
+        excluded = {JOB_ORCHESTRATOR_FULL_SYNC, JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC}
+        jobs = [(j.name, j.cadence) for j in SCHEDULED_JOBS if j.name not in excluded]
+        return {s.job_name for s in find_stalled_jobs(conn, jobs, now)}
+    except Exception:
+        logger.warning("get_system_status: stall probe failed; headline stall signal omitted", exc_info=True)
+        return set()
 
 
 def _utcnow() -> datetime:
@@ -398,7 +431,14 @@ def get_system_status(
         logger.exception("get_system_status: failed to build report")
         raise HTTPException(status_code=503, detail="system status unavailable") from exc
 
-    overall = _derive_overall_status(layers, jobs, bool(ks["is_active"]))
+    # #1510 / T4 — surface a silently-stopped job in the headline. Best-effort:
+    # a stall-probe failure must NOT 503 the whole status page, so it is scoped
+    # to its own guard and defaults to "no stall". Same orchestrator exclusion as
+    # the watchdog (self-tracked sync jobs write sync_runs not job_runs and would
+    # false-stall).
+    stalled_job_names = _stalled_job_names(conn, now)
+
+    overall = _derive_overall_status(layers, jobs, bool(ks["is_active"]), stalled_job_names)
 
     return SystemStatusResponse(
         checked_at=now,
