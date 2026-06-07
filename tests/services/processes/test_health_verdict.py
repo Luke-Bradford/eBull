@@ -268,3 +268,60 @@ def test_total_and_single_valued_with_retry(status: ProcessStatus, reasons: tupl
     )
     assert verdict in _VALID_VERDICTS
     assert self_healing == (verdict == "self_healing")
+
+
+# ----------------------------------------------------------------------
+# #1510 / T4 — liveness_kick_in_flight (watchdog re-enqueue look-through)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["ok", "idle", "pending_first_run"])
+def test_liveness_kick_on_stalled_reads_self_healing(status: ProcessStatus) -> None:
+    """A stalled job (overdue ``ok``/``idle``/``pending_first_run`` +
+    schedule_missed) that the watchdog has re-enqueued reads Self-healing —
+    crucially even though a kick does NOT flip the adapter status to running."""
+    v, sh, reason = compute_verdict(status=status, stale_reasons=("schedule_missed",), liveness_kick_in_flight=True)
+    assert v == "self_healing"
+    assert sh is True
+    assert reason == "re-enqueued, recovering"
+
+
+def test_liveness_kick_suppresses_schedule_missed() -> None:
+    """The kick IS the fix for a missed schedule — it suppresses that reason."""
+    v, _, _ = compute_verdict(status="ok", stale_reasons=("schedule_missed",), liveness_kick_in_flight=True)
+    assert v == "self_healing"
+
+
+@pytest.mark.parametrize("wedge", ["queue_stuck", "mid_flight_stuck", "watermark_gap"])
+def test_liveness_kick_never_masks_genuine_wedge(wedge: StaleReason) -> None:
+    """Codex ckpt-1 invariant: a kick must NOT paint a genuinely-wedged row
+    self-healing — a kick into a stuck queue does not un-stick it."""
+    v, sh, _ = compute_verdict(status="running", stale_reasons=(wedge,), liveness_kick_in_flight=True)
+    assert v == "attention"
+    assert sh is False
+
+
+def test_liveness_kick_on_recovered_row_reads_honest_status() -> None:
+    """Codex ckpt-2: a kick request can linger pending/claimed after a natural
+    fire already cleared the stall (no schedule_missed). The recovered row must
+    read its honest status (current), NOT be repainted 're-enqueued, recovering'."""
+    v, sh, reason = compute_verdict(status="ok", stale_reasons=(), liveness_kick_in_flight=True)
+    assert v == "current"
+    assert sh is False
+    assert reason == ""
+
+
+def test_disabled_outranks_liveness_kick() -> None:
+    """Kill switch still wins over an in-flight kick."""
+    v, sh, reason = compute_verdict(status="disabled", stale_reasons=("schedule_missed",), liveness_kick_in_flight=True)
+    assert v == "attention"
+    assert reason == "kill switch active"
+
+
+@pytest.mark.parametrize("status", _ALL_STATUSES)
+@pytest.mark.parametrize("reasons", _all_reason_subsets())
+def test_total_and_single_valued_with_liveness_kick(status: ProcessStatus, reasons: tuple[StaleReason, ...]) -> None:
+    """Totality holds with the liveness-kick flag set, too."""
+    verdict, self_healing, _ = compute_verdict(status=status, stale_reasons=reasons, liveness_kick_in_flight=True)
+    assert verdict in _VALID_VERDICTS
+    assert self_healing == (verdict == "self_healing")

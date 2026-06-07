@@ -216,6 +216,14 @@ class ProcessRow:
     # from it for ``compute_verdict`` so a transiently-failed row reads
     # Self-healing "will retry HH:MM" instead of red. None = no retry pending.
     next_retry_at: datetime | None = None
+    # #1510 / T4 — True when a FRESH ``manual_job`` re-enqueue placed by the
+    # liveness watchdog (``requested_by='system:liveness_kick'``) is in flight
+    # for this job. Set by scheduled_adapter via a dedicated EXISTS probe
+    # bounded to ``requested_at >= now - 30m`` (a kick aged past that window is
+    # itself wedged and must not keep painting the row green). Fed to
+    # ``compute_verdict(liveness_kick_in_flight=...)`` so a watchdog-re-enqueued
+    # stalled job reads Self-healing "re-enqueued, recovering" instead of red.
+    liveness_kick_in_flight: bool = False
 
 
 @dataclass(frozen=True, slots=True)

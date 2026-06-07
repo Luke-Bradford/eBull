@@ -408,6 +408,37 @@ def _has_inflight_manual_request(conn: psycopg.Connection[Any], *, job_name: str
         return cur.fetchone() is not None
 
 
+# #1510 / T4 — a liveness-kick request older than this is itself wedged (queue
+# not draining / scheduler dead) and must NOT keep painting the row self-healing;
+# past the window the probe returns False and the row falls back to its honest
+# schedule_missed / queue_stuck → attention surface. 30 min = 2× the 15-min
+# watchdog interval. Process-wide death stays owned by supervisor/heartbeat (#719).
+_LIVENESS_KICK_FRESH_WINDOW = timedelta(minutes=30)
+
+
+def _has_inflight_liveness_kick(conn: psycopg.Connection[Any], *, job_name: str, now: datetime) -> bool:
+    """True if a FRESH watchdog re-enqueue (``requested_by='system:liveness_kick'``)
+    is live for this job. Dedicated EXISTS probe — not an unordered LIMIT 1 read of
+    the requester (Codex ckpt-1 #4: multiple live manual requests can coexist)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pending_job_requests
+                 WHERE request_kind = 'manual_job'
+                   AND job_name     = %(name)s
+                   AND requested_by = 'system:liveness_kick'
+                   AND status       IN ('pending', 'claimed', 'dispatched')
+                   AND requested_at >= %(fresh_floor)s
+            )
+            """,
+            {"name": job_name, "fresh_floor": now - _LIVENESS_KICK_FRESH_WINDOW},
+        )
+        row = cur.fetchone()
+        return bool(row[0]) if row is not None else False
+
+
 def _has_data_freshness_gap(
     conn: psycopg.Connection[Any],
     *,
@@ -814,6 +845,12 @@ def _build_row(
         and _source_watermark_fresh(conn, source=freshness_source, now=now)
     )
 
+    # #1510 / T4 — verdict signal: a fresh watchdog re-enqueue is in flight, so
+    # ``compute_verdict`` reads this re-enqueued stall as Self-healing rather than
+    # the red schedule_missed it would otherwise show (a genuine wedge still
+    # outranks). Probe is cheap (single EXISTS) and bounded to the 30-min window.
+    liveness_kick_in_flight = _has_inflight_liveness_kick(conn, job_name=job.name, now=now)
+
     can_cancel = (
         active_run is not None and active_run.run_id is not None and process_status == "running"
         # short-runners (heartbeat etc.) are not worth cooperative-cancel;
@@ -858,6 +895,8 @@ def _build_row(
         # (``.get`` so the sync_runs-shaped row, which has no such column,
         # yields None — those jobs never schedule a retry anyway).
         next_retry_at=terminal_row.get("next_retry_at") if terminal_row is not None else None,
+        # #1510 / T4 — fresh watchdog re-enqueue in flight (see compute_verdict).
+        liveness_kick_in_flight=liveness_kick_in_flight,
     )
 
 

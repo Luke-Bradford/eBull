@@ -435,6 +435,10 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         watermark_is_fresh=row.source_watermark_fresh,
         retry_in_flight=retry_in_flight,
         retry_at_display=retry_at_display,
+        # #1510 / T4 — a fresh liveness-watchdog re-enqueue reads the stalled
+        # row as Self-healing "re-enqueued, recovering" (a genuine wedge still
+        # outranks). Set by scheduled_adapter; other adapters leave it False.
+        liveness_kick_in_flight=row.liveness_kick_in_flight,
     )
     return ProcessRowResponse(
         process_id=row.process_id,

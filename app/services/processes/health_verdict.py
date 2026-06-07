@@ -25,16 +25,16 @@ queue_stuck`` would render blue "working" while a worker is wedged, and
 dispatched request is stuck — re-introducing the masking the verdict
 exists to kill.
 
-**v1 scope:** T5's watermark look-through is wired here (the
-``watermark_is_fresh`` input promotes a ``pending_first_run`` job on a
-bootstrap-covered, still-fresh source to Current — #1511). T3
-(retry/``next_retry_at``) and T4 (watchdog re-enqueue) are not yet
-landed, so the only ``self_healing`` source remains the existing
-``pending_retry`` status. An overdue row with no recovery mechanism
-reads **attention** — honest, because it currently IS stuck. When T3/T4
-land they extend this function (add ``next_retry_at`` / liveness inputs)
-to reclassify *covered* overdue rows from ``attention`` to
-``self_healing`` with a "will retry HH:MM" reason.
+**Scope:** all three recovery look-throughs are now wired —
+``watermark_is_fresh`` promotes a bootstrap-covered, still-fresh
+``pending_first_run`` job to Current (#1511 / T5); ``retry_in_flight`` +
+``retry_at_display`` read a transiently-failed row as Self-healing
+"will retry HH:MM" (#1509 / T3); and ``liveness_kick_in_flight`` reads a
+watchdog-re-enqueued *stalled* job as Self-healing "re-enqueued,
+recovering" (#1510 / T4). An overdue row with NO recovery mechanism in
+flight still reads **attention** — honest, because it currently IS stuck.
+In every case a genuine wedge (``queue_stuck`` / ``mid_flight_stuck`` /
+``watermark_gap``) outranks the recovery signal and stays attention.
 """
 
 from __future__ import annotations
@@ -75,6 +75,7 @@ def compute_verdict(
     watermark_is_fresh: bool = False,
     retry_in_flight: bool = False,
     retry_at_display: str = "",
+    liveness_kick_in_flight: bool = False,
 ) -> tuple[HealthVerdict, bool, str]:
     """Collapse ``status`` + ``stale_reasons`` into one verdict.
 
@@ -105,6 +106,23 @@ def compute_verdict(
     if retry_in_flight:
         actionable = [r for r in actionable if r != "schedule_missed"]
 
+    # T4 (#1510): a liveness-watchdog re-enqueue IS the fix for a job that
+    # silently stopped firing (the ``schedule_missed`` it surfaces as), so an
+    # in-flight kick suppresses ONLY ``schedule_missed`` — exactly like a retry.
+    # Genuine wedges (``queue_stuck`` / ``mid_flight_stuck`` / ``watermark_gap``)
+    # are NOT dropped, so the actionable block below still returns attention for
+    # them (ckpt-1 invariant: an actionable wedge is never masked — a kick into a
+    # stuck queue does not make the queue un-stuck).
+    #
+    # ``kick_is_recovering`` gates the self_healing branch below on the stall
+    # ACTUALLY being present (Codex ckpt-2): a kick request can linger
+    # ``pending``/``claimed`` after a natural fire already cleared the stall, and
+    # a recovered row (no ``schedule_missed``) must read its honest status, not be
+    # repainted "re-enqueued, recovering".
+    kick_is_recovering = liveness_kick_in_flight and "schedule_missed" in stale_reasons
+    if liveness_kick_in_flight:
+        actionable = [r for r in actionable if r != "schedule_missed"]
+
     # 1. Kill switch — global, deliberate, outranks everything (incl. a
     #    stale reason that may still compute on a halted job).
     if status == "disabled":
@@ -121,6 +139,18 @@ def compute_verdict(
         else:
             reason = _REASON_LABEL[actionable[0]]
         return ("attention", False, reason)
+
+    # T4 (#1510): a fresh liveness-watchdog re-enqueue is in flight FOR A ROW THAT
+    # IS STILL STALLED (``schedule_missed`` present — see ``kick_is_recovering``)
+    # and no genuine wedge outranks it (the actionable block above already
+    # returned for ``queue_stuck`` / ``mid_flight_stuck`` / ``watermark_gap``).
+    # The system detected the silent stall and is auto-recovering it —
+    # Self-healing, no operator action. Placed before the status-only branches
+    # because a kick does NOT flip the adapter status to ``running`` unless the
+    # last terminal was a failure (scheduled_adapter:211), so a stalled ``ok`` /
+    # ``idle`` row would otherwise fall through to Current and hide the recovery.
+    if kick_is_recovering:
+        return ("self_healing", True, "re-enqueued, recovering")
 
     # 3-9. Status-only (no actionable stale).
     if status == "running":

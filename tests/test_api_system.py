@@ -360,6 +360,35 @@ class TestSystemStatus:
         assert resp.status_code == 200
         assert resp.json()["overall_status"] == "degraded"
 
+    def test_stalled_job_degrades_overall(self) -> None:
+        """#1510 / T4: a silently-stopped job (its latest terminal is an OLD
+        success, so last_status='success' alone would keep the headline ``ok``)
+        degrades ``overall_status``. The stall set is computed by
+        ``_stalled_job_names``; patch it so the unit test stays DB-free."""
+        _override_conn(_mock_conn())
+
+        with (
+            patch("app.api.system.check_all_layers", return_value=_all_ok_layers()),
+            patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ),
+            patch("app.api.system._stalled_job_names", return_value={"daily_news_refresh"}),
+            patch(
+                "app.api.system.get_kill_switch_status",
+                return_value={
+                    "is_active": False,
+                    "activated_at": None,
+                    "activated_by": None,
+                    "reason": None,
+                },
+            ),
+        ):
+            resp = client.get("/system/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["overall_status"] == "degraded"
+
     def test_jobs_boot_error_null_when_no_breadcrumb(self) -> None:
         """Stream A PR-A T1.8 (#1233): /system/status surfaces NULL
         ``jobs_boot_error`` when bootstrap_state row has neither column
@@ -679,3 +708,46 @@ class TestJobLiveness:
         assert resp.status_code == 503
         assert resp.json()["detail"] == "job liveness unavailable"
         assert secret_marker not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# #1510 / T4 — _derive_overall_status stall precedence (pure)
+# ---------------------------------------------------------------------------
+
+
+def test_derive_overall_status_stall_is_degraded() -> None:
+    from app.api.system import _derive_overall_status
+
+    layers = [_ok_layer("market_data")]
+    jobs = [_success_job_health("x")]
+    assert _derive_overall_status(layers, jobs, False, {"daily_news_refresh"}) == "degraded"
+
+
+def test_derive_overall_status_no_stall_stays_ok() -> None:
+    from app.api.system import _derive_overall_status
+
+    layers = [_ok_layer("market_data")]
+    jobs = [_success_job_health("x")]
+    assert _derive_overall_status(layers, jobs, False, set()) == "ok"
+    # Default arg (None) is also "no stall".
+    assert _derive_overall_status(layers, jobs, False) == "ok"
+
+
+def test_derive_overall_status_failure_outranks_stall() -> None:
+    """A genuine failure is ``down`` and must win over a (degraded) stall."""
+    from app.api.system import _derive_overall_status
+
+    failed = JobHealth(
+        job_name="x",
+        last_status="failure",
+        last_started_at=_NOW,
+        last_finished_at=_NOW,
+        detail="x: failed",
+    )
+    assert _derive_overall_status([_ok_layer("m")], [failed], False, {"y"}) == "down"
+
+
+def test_derive_overall_status_killswitch_outranks_stall() -> None:
+    from app.api.system import _derive_overall_status
+
+    assert _derive_overall_status([_ok_layer("m")], [_success_job_health("x")], True, {"y"}) == "down"
