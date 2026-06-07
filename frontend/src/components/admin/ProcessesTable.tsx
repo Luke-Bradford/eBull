@@ -16,7 +16,7 @@
  * failed" (loading-error-empty-states.md rule).
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError } from "@/api/client";
 import { cancelProcess, triggerProcess } from "@/api/processes";
@@ -52,6 +52,10 @@ export interface ProcessesTableProps {
     | "complete"
     | "partial_error"
     | null;
+  // #1513 — client-side completion time of the last successful poll,
+  // rendered as the header's "checked HH:MM" freshness anchor. Optional;
+  // omitted (null) before the first poll lands.
+  readonly checkedAt?: Date | null;
 }
 
 interface RowErrorState {
@@ -63,6 +67,7 @@ export function ProcessesTable({
   snapshot,
   onMutationSuccess,
   bootstrapStatus = null,
+  checkedAt = null,
 }: ProcessesTableProps) {
   const [selectedLane, setSelectedLane] = useState<ProcessLane | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -115,6 +120,40 @@ export function ProcessesTable({
         : baseRows.filter((r) => r.lane === selectedLane);
     return [...rows].sort(compareRows);
   }, [baseRows, selectedLane]);
+
+  // #1513 — collapse the quiet rows by default. Pinned (always visible):
+  // `attention` (operator must act) AND `working` (a live run — the 5s
+  // poll exists to watch it, and it exposes Cancel, so it must not hide).
+  // Collapsed behind one inline disclosure: `current` (steady, fresh) and
+  // `self_healing` (auto-recovering, no action). compareRows already floats
+  // attention to the top, so the split preserves order within each group.
+  // Disabled in bootstrap-only mode: there the single bootstrap row IS the
+  // primary action surface and must never be tucked behind a disclosure.
+  const pinnedRows = useMemo(
+    () =>
+      bootstrapOnly
+        ? visibleRows
+        : visibleRows.filter((r) => !isCollapsible(r.health_verdict)),
+    [visibleRows, bootstrapOnly],
+  );
+  const collapsedRows = useMemo(
+    () =>
+      bootstrapOnly
+        ? []
+        : visibleRows.filter((r) => isCollapsible(r.health_verdict)),
+    [visibleRows, bootstrapOnly],
+  );
+  const collapsedSelfHealing = collapsedRows.filter(
+    (r) => r.health_verdict === "self_healing",
+  ).length;
+  const collapsedCurrent = collapsedRows.length - collapsedSelfHealing;
+  const [showCollapsed, setShowCollapsed] = useState(false);
+  // Reset to the default-collapsed state whenever the lane filter changes,
+  // so switching lanes never carries another lane's expanded state over
+  // (Codex ckpt-2) — each lane re-collapses its own quiet rows.
+  useEffect(() => {
+    setShowCollapsed(false);
+  }, [selectedLane]);
 
   const setRowError = useCallback(
     (processId: string, patch: RowErrorState) => {
@@ -201,6 +240,24 @@ export function ProcessesTable({
     [clearRowError, onMutationSuccess, setRowError],
   );
 
+  // Shared row renderer so the attention group and the (collapsible)
+  // non-actionable group emit identical ProcessRow markup. The signature
+  // prop keeps React.memo skipping unchanged rows on every poll (#1480).
+  const renderRow = (row: ProcessRowResponse) => (
+    <ProcessRow
+      key={row.process_id}
+      row={row}
+      signature={processRowSignature(row)}
+      triggerError={rowErrors[row.process_id]?.trigger}
+      cancelError={rowErrors[row.process_id]?.cancel}
+      busy={busyId === row.process_id}
+      onIterate={handleIterate}
+      // Stable setters passed directly so memo's reference compare holds.
+      onFullWash={setFullWashTarget}
+      onCancel={setCancelTarget}
+    />
+  );
+
   return (
     <div className="space-y-3">
       {/* In bootstrap-only mode the lane chips would offer one option
@@ -245,7 +302,7 @@ export function ProcessesTable({
         </div>
       )}
 
-      <StaleBanner rows={baseRows} />
+      <StaleBanner rows={baseRows} checkedAt={checkedAt} />
 
       {snapshot.partial ? (
         <div
@@ -275,27 +332,27 @@ export function ProcessesTable({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {visibleRows.map((row) => (
-                <ProcessRow
-                  key={row.process_id}
-                  row={row}
-                  // Content hash computed here (parent render time) so
-                  // React.memo can skip unchanged rows on every poll
-                  // (#1480). Must be a prop, not recomputed in the
-                  // comparator — see ProcessRow `processRowSignature`.
-                  signature={processRowSignature(row)}
-                  triggerError={rowErrors[row.process_id]?.trigger}
-                  cancelError={rowErrors[row.process_id]?.cancel}
-                  busy={busyId === row.process_id}
-                  onIterate={handleIterate}
-                  // Pass the state setters directly — they are stable
-                  // across renders, so memo's reference compare holds.
-                  // An inline `(r) => setFullWashTarget(r)` would mint a
-                  // fresh fn each render and defeat the memo (#1480).
-                  onFullWash={setFullWashTarget}
-                  onCancel={setCancelTarget}
-                />
-              ))}
+              {pinnedRows.map(renderRow)}
+              {collapsedRows.length > 0 ? (
+                <tr data-testid="collapsed-disclosure">
+                  <td colSpan={6} className="px-2 py-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowCollapsed((v) => !v)}
+                      aria-expanded={showCollapsed}
+                      className="text-xs text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                    >
+                      <span aria-hidden="true">
+                        {showCollapsed ? "▾ " : "▸ "}
+                      </span>
+                      {collapsedLabel(collapsedCurrent, collapsedSelfHealing)}
+                      {" — "}
+                      {showCollapsed ? "hide" : "show"}
+                    </button>
+                  </td>
+                </tr>
+              ) : null}
+              {showCollapsed ? collapsedRows.map(renderRow) : null}
             </tbody>
           </table>
         </div>
@@ -320,6 +377,24 @@ export function ProcessesTable({
       ) : null}
     </div>
   );
+}
+
+/** Verdicts that fold into the #1513 disclosure: steady-fresh `current` and
+ *  auto-recovering `self_healing`. `attention` (act) and `working` (a live
+ *  run — watch / cancel) stay pinned. */
+function isCollapsible(verdict: ProcessRowResponse["health_verdict"]): boolean {
+  return verdict === "current" || verdict === "self_healing";
+}
+
+/** Disclosure label for the collapsed rows (#1513), e.g.
+ *  "12 current · 3 self-healing". Only `current` and `self_healing` are
+ *  collapsible (see isCollapsible); `current` here is the count of collapsed
+ *  `current`-verdict rows. */
+function collapsedLabel(current: number, selfHealing: number): string {
+  const parts: string[] = [];
+  if (current > 0) parts.push(`${current} current`);
+  if (selfHealing > 0) parts.push(`${selfHealing} self-healing`);
+  return parts.join(" · ");
 }
 
 function compareRows(a: ProcessRowResponse, b: ProcessRowResponse): number {

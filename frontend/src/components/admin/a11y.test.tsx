@@ -53,7 +53,7 @@ const AXE_OPTIONS = {
 } as const;
 
 function renderTable(rows = [makeProcessRow()], partial = false) {
-  return render(
+  const result = render(
     <MemoryRouter>
       <ProcessesTable
         snapshot={makeProcessList(rows, partial)}
@@ -61,6 +61,13 @@ function renderTable(rows = [makeProcessRow()], partial = false) {
       />
     </MemoryRouter>,
   );
+  // #1513 — expand the steady-state collapse so row actions (Full-wash /
+  // Cancel) are reachable for the modal a11y checks.
+  const toggle = screen
+    .queryByTestId("collapsed-disclosure")
+    ?.querySelector("button");
+  if (toggle) fireEvent.click(toggle);
+  return result;
 }
 
 function renderRow(props: Partial<Parameters<typeof ProcessRow>[0]> = {}) {

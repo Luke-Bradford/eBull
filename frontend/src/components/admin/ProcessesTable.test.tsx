@@ -34,7 +34,7 @@ function renderTable(
   partial = false,
   onMutationSuccess = vi.fn(),
 ) {
-  return render(
+  const result = render(
     <MemoryRouter>
       <ProcessesTable
         snapshot={makeProcessList(rows, partial)}
@@ -42,6 +42,14 @@ function renderTable(
       />
     </MemoryRouter>,
   );
+  // #1513 — non-actionable rows collapse by default. Expand so the
+  // existing row-level assertions (actions, sort, filter) see every row;
+  // the default-collapsed behaviour has dedicated tests below.
+  const toggle = screen
+    .queryByTestId("collapsed-disclosure")
+    ?.querySelector("button");
+  if (toggle) fireEvent.click(toggle);
+  return result;
 }
 
 describe("ProcessesTable", () => {
@@ -71,7 +79,15 @@ describe("ProcessesTable", () => {
   it("filters by selected lane", () => {
     renderTable([
       makeProcessRow({ process_id: "x", lane: "sec", display_name: "X_sec" }),
-      makeProcessRow({ process_id: "y", lane: "ownership", display_name: "Y_own" }),
+      // Pinned verdict (attention) so the row stays visible after the lane
+      // switch re-collapses the default-quiet rows (#1513) — this test is
+      // about lane filtering, not the collapse.
+      makeProcessRow({
+        process_id: "y",
+        lane: "ownership",
+        display_name: "Y_own",
+        stale_reasons: ["queue_stuck"],
+      }),
     ]);
     fireEvent.click(screen.getByRole("button", { name: /^Ownership/ }));
     expect(screen.queryByRole("link", { name: "X_sec" })).toBeNull();
@@ -201,17 +217,18 @@ describe("ProcessesTable", () => {
   });
 
   // ---------------------------------------------------------------------
-  // PR8 (#1083) — stale banner integration. Banner unit-behaviour lives
-  // in StaleBanner.test.tsx; here we just confirm the table mounts it
-  // when at least one row is stale and hides it otherwise.
+  // #1513 — clean-bill health header integration. Header unit-behaviour
+  // lives in StaleBanner.test.tsx; here we just confirm the table mounts it
+  // with the positive all-clear when healthy and the summary otherwise.
   // ---------------------------------------------------------------------
 
-  it("does NOT render stale banner when all rows have empty stale_reasons", () => {
+  it("renders the all-clear header when all rows are healthy", () => {
     renderTable([makeProcessRow({ stale_reasons: [] })]);
-    expect(screen.queryByTestId("stale-banner")).toBeNull();
+    const header = screen.getByTestId("health-header");
+    expect(header.textContent).toContain("All systems current");
   });
 
-  it("renders stale banner when at least one row has stale_reasons", () => {
+  it("renders the attention summary header when at least one row needs attention", () => {
     renderTable([
       makeProcessRow({ process_id: "a", stale_reasons: [] }),
       makeProcessRow({
@@ -219,7 +236,9 @@ describe("ProcessesTable", () => {
         stale_reasons: ["watermark_gap"],
       }),
     ]);
-    expect(screen.getByTestId("stale-banner")).toBeTruthy();
+    expect(screen.getByTestId("health-header").textContent).toContain(
+      "need attention",
+    );
   });
 
   it("sorts stale rows above non-stale ok rows (status='ok' + stale_reasons populated)", () => {
@@ -340,7 +359,7 @@ describe("ProcessesTable", () => {
       | "partial_error"
       | null,
   ) {
-    return render(
+    const result = render(
       <MemoryRouter>
         <ProcessesTable
           snapshot={makeProcessList(rows, false)}
@@ -349,6 +368,13 @@ describe("ProcessesTable", () => {
         />
       </MemoryRouter>,
     );
+    // #1513 — expand the steady-state collapse so non-attention rows are
+    // assertable (no-op in bootstrap-only mode, where collapse is disabled).
+    const toggle = screen
+      .queryByTestId("collapsed-disclosure")
+      ?.querySelector("button");
+    if (toggle) fireEvent.click(toggle);
+    return result;
   }
 
   it("hides non-bootstrap rows + lane filter when bootstrap is partial_error", () => {
@@ -543,5 +569,62 @@ describe("ProcessesTable", () => {
       screen.getByRole("link", { name: "First-install bootstrap" }),
     ).toBeTruthy();
     expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
+  });
+
+  // ---------------------------------------------------------------------
+  // #1513 — non-actionable rows collapse by default behind an inline
+  // disclosure; needs-attention rows are always visible.
+  // ---------------------------------------------------------------------
+
+  // Raw render (the shared renderTable auto-expands; here we want the
+  // default-collapsed state).
+  function renderTableRaw(rows: ReturnType<typeof makeProcessRow>[]) {
+    return render(
+      <MemoryRouter>
+        <ProcessesTable
+          snapshot={makeProcessList(rows, false)}
+          onMutationSuccess={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it("collapses current/self-healing rows but pins attention and working rows", () => {
+    renderTableRaw([
+      makeProcessRow({ process_id: "att", display_name: "Attn", stale_reasons: ["queue_stuck"] }),
+      makeProcessRow({ process_id: "run", display_name: "Runn", status: "running", stale_reasons: [] }),
+      makeProcessRow({ process_id: "cur", display_name: "Curr", status: "ok", stale_reasons: [] }),
+      makeProcessRow({ process_id: "heal", display_name: "Heal", status: "pending_retry", stale_reasons: [] }),
+    ]);
+    // Attention + working (live run, exposes Cancel) stay pinned.
+    expect(screen.getByRole("link", { name: "Attn" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Runn" })).toBeTruthy();
+    // current + self-healing hide behind the disclosure.
+    expect(screen.queryByRole("link", { name: "Curr" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Heal" })).toBeNull();
+    const disclosure = screen.getByTestId("collapsed-disclosure");
+    expect(disclosure.textContent).toContain("1 current");
+    expect(disclosure.textContent).toContain("1 self-healing");
+  });
+
+  it("reveals the collapsed rows when the disclosure is clicked", () => {
+    renderTableRaw([
+      makeProcessRow({ process_id: "cur", display_name: "Curr", status: "ok", stale_reasons: [] }),
+    ]);
+    expect(screen.queryByRole("link", { name: "Curr" })).toBeNull();
+    fireEvent.click(
+      screen.getByTestId("collapsed-disclosure").querySelector("button")!,
+    );
+    expect(screen.getByRole("link", { name: "Curr" })).toBeTruthy();
+  });
+
+  it("renders no disclosure when every row needs attention", () => {
+    renderTableRaw([
+      makeProcessRow({ process_id: "a", display_name: "A", stale_reasons: ["queue_stuck"] }),
+      makeProcessRow({ process_id: "b", display_name: "B", status: "failed", stale_reasons: [] }),
+    ]);
+    expect(screen.queryByTestId("collapsed-disclosure")).toBeNull();
+    expect(screen.getByRole("link", { name: "A" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "B" })).toBeTruthy();
   });
 });

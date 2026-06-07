@@ -227,6 +227,7 @@ export function AdminPage() {
               refetchBootstrap();
             }}
             bootstrapStatus={bootstrap.data?.status ?? null}
+            checkedAt={processes.checkedAt}
           />
         ) : null}
       </CollapsibleSection>
