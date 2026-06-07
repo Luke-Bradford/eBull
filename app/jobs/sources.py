@@ -71,6 +71,8 @@ Lane = Literal[
     "db_ownership_inst",
     "db_ownership_insider",
     "db_ownership_funds",
+    "db_liveness",
+    "db_retry",
     "bootstrap",
     "finra",
     "openfigi",
@@ -125,6 +127,29 @@ PR1c #1064 collapsed everything onto a single ``db`` source.
   writes ``insider_transactions`` + ``form3_holdings_initial``.
 * ``db_ownership_funds`` — ``sec_nport_ingest_from_dataset``;
   writes ``n_port_*`` + ``sec_fund_series``.
+
+The next two are scheduled-only infra lanes, each owning exactly ONE
+job (#1526 — same "extract the loser out of the contended lane" shape
+as the #1478 ``sec_manifest`` split):
+
+* ``db_liveness`` — ``jobs_liveness_watchdog`` (#1507/#1510) only.
+* ``db_retry`` — ``jobs_retry_sweeper`` (#1509) only.
+
+  Both were on the catch-all ``db`` lane and fired on the same 5-min
+  grid as ``orchestrator_high_frequency_sync`` (every_5min, ``db``),
+  which holds ``job_source:db`` re-entrantly through its ingest
+  (~0.6s/run). The cross-thread scheduled fire of these light infra
+  jobs lost the lane race every tick and starved (proven via
+  ``pg_locks`` tick-poll + log correlation, 2026-06-07). They only read
+  ``job_runs`` and write ``decision_audit`` / ``pending_job_requests``
+  (each already guarded by its own ``pg_advisory_xact_lock``), so they
+  are safe to run concurrently with orchestrator ingest. SEPARATE
+  lanes, not one shared ``db_infra`` — a shared lane would re-create the
+  same starvation between the 15-min watchdog and the 5-min sweeper at
+  the :00/:15/:30/:45 ticks they co-fire. Scheduled-only, so NOT added
+  to the ``bootstrap_stages.lane`` CHECK (like ``sec_manifest`` /
+  ``finra`` / ``bootstrap``). See #1527 for the daily/hourly db jobs
+  that collide on the same grid but may need true ingest serialisation.
 
 The final lane is bootstrap-only:
 

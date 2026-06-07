@@ -947,7 +947,14 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_LIVENESS_WATCHDOG,
         display_name="Jobs liveness watchdog",
-        source="db",
+        # Own single-job lane (#1526). On the catch-all ``db`` lane this
+        # 15-min watchdog lost the ``job_source:db`` advisory-lock race to
+        # orchestrator_high_frequency_sync (every_5min, ``db``) at every
+        # :00/:15/:30/:45 tick and never ran on schedule (#1508 self-healing
+        # infra was itself starved). ``db_liveness`` is disjoint, so it runs
+        # concurrently with orchestrator ingest; its per-job
+        # pg_advisory_xact_lock (job_liveness_act) still bounds double-kicks.
+        source="db_liveness",
         description=(
             "#1500 (GAP-D) — per-job stall detector. Every 15m, flags any "
             "scheduled job that has recorded ZERO job_runs rows over K=3 "
@@ -971,7 +978,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_RETRY_SWEEPER,
         display_name="Jobs retry sweeper",
-        source="db",
+        # Own single-job lane (#1526). On the catch-all ``db`` lane this
+        # every_5min sweeper co-fired orchestrator_high_frequency_sync
+        # (every_5min, ``db``) on the SAME grid every tick and lost the lane
+        # race → never ran on schedule. ``db_retry`` is disjoint from
+        # orchestrator ingest; the manual-queue dispatch it issues is itself
+        # idempotent + advisory-locked, so concurrency with ingest is safe.
+        source="db_retry",
         description=(
             "#1509 (T3 of #1508) — re-fires transiently-failed jobs. Every "
             "5m, scans job_runs for due next_retry_at (set by "

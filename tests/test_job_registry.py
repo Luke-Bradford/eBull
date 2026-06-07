@@ -59,6 +59,15 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # Lane disjoint from sec_rate (CDN serves both endpoints with
         # one shared throttle).
         "finra",
+        # #1526 — jobs_liveness_watchdog + jobs_retry_sweeper extracted from the
+        # catch-all ``db`` lane into their own single-job lanes. On ``db`` they
+        # lost the ``job_source:db`` advisory-lock race to
+        # orchestrator_high_frequency_sync every tick and never ran on schedule
+        # (the #1508 self-healing infra was itself starved). Separate lanes (not
+        # one shared infra lane) so the 15-min watchdog and 5-min sweeper do not
+        # re-starve each other. See app/jobs/sources.py::Lane.
+        "db_liveness",
+        "db_retry",
     }
 )
 
