@@ -53,26 +53,32 @@
 -- an inline COMMIT would split them (prevention-log: tx-bound migrations).
 
 DO $$
+DECLARE
+    rec RECORD;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'finra_short_interest_observations'
-          AND column_name = 'days_to_cover'
-          AND numeric_precision = 10
-    ) THEN
-        ALTER TABLE finra_short_interest_observations
-            ALTER COLUMN days_to_cover  TYPE NUMERIC(20, 4),
-            ALTER COLUMN change_percent TYPE NUMERIC(20, 4);
-    END IF;
-
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'finra_short_interest_current'
-          AND column_name = 'days_to_cover'
-          AND numeric_precision = 10
-    ) THEN
-        ALTER TABLE finra_short_interest_current
-            ALTER COLUMN days_to_cover  TYPE NUMERIC(20, 4),
-            ALTER COLUMN change_percent TYPE NUMERIC(20, 4);
-    END IF;
+    -- Guard EACH (table, column) independently so a partial prior state
+    -- (one column already widened, its sibling not) still widens the
+    -- narrow one. The shape check fires per column, never coupling
+    -- change_percent's widening to days_to_cover's precision.
+    FOR rec IN
+        SELECT v.tbl, v.col
+        FROM (VALUES
+            ('finra_short_interest_observations', 'days_to_cover'),
+            ('finra_short_interest_observations', 'change_percent'),
+            ('finra_short_interest_current',      'days_to_cover'),
+            ('finra_short_interest_current',      'change_percent')
+        ) AS v(tbl, col)
+    LOOP
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = rec.tbl
+              AND column_name = rec.col
+              AND numeric_precision = 10
+        ) THEN
+            EXECUTE format(
+                'ALTER TABLE %I ALTER COLUMN %I TYPE NUMERIC(20, 4)',
+                rec.tbl, rec.col
+            );
+        END IF;
+    END LOOP;
 END$$;
