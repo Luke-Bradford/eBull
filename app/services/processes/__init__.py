@@ -38,6 +38,15 @@ ProcessLane = Literal[
 
 ProcessMechanism = Literal["bootstrap", "scheduled_job", "ingest_sweep"]
 
+# C7 (#1530) — page-scope classification of a process row. Mirrors the
+# ``ScheduledJob.role`` literal in ``app/workers/scheduler.py`` (kept
+# inline there to avoid a scheduler→processes-service import). ``Literal``-
+# typed on both the source dataclass (``ProcessRow.role``) and the wire
+# carrier (``ProcessRowResponse.role``) so pyright type-guards the role at
+# the API boundary, consistent with ``ProcessLane`` / ``ProcessMechanism`` /
+# ``ProcessStatus``.
+ProcessRole = Literal["steady_state", "bootstrap", "backfill"]
+
 ProcessStatus = Literal[
     "idle",
     "pending_first_run",
@@ -250,7 +259,7 @@ class ProcessRow:
     # underlying ``ScheduledJob.role``; bootstrap_adapter sets
     # ``"bootstrap"``; ingest_sweep_adapter keeps the default
     # ``"steady_state"`` (sweeps keep their source current).
-    role: str = "steady_state"
+    role: ProcessRole = "steady_state"
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +282,7 @@ __all__ = [
     "HealthVerdict",
     "ProcessLane",
     "ProcessMechanism",
+    "ProcessRole",
     "ProcessRow",
     "ProcessRunSummary",
     "ProcessSnapshot",

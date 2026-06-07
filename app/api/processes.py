@@ -65,6 +65,7 @@ from app.services.processes import (
     HealthVerdict,
     ProcessLane,
     ProcessMechanism,
+    ProcessRole,
     ProcessRow,
     ProcessRunSummary,
     ProcessSnapshot,
@@ -194,7 +195,7 @@ class ProcessRowResponse(BaseModel):
     # render in the default Processes view; ``bootstrap`` / ``backfill``
     # rows move to the collapsed "Bootstrap & backfill" section. Defaults
     # to ``steady_state`` so an untagged row stays visible.
-    role: str = "steady_state"
+    role: ProcessRole = "steady_state"
 
 
 class ProcessListResponse(BaseModel):
