@@ -252,7 +252,15 @@ def _dev_profile_connection_demand() -> int:
     regardless of which process is booting. The peer term is bounded and
     documented, so counting it always over-estimates rather than failing
     one process for capacity the other is not currently using.
+
+    #1542 — the ``sec_rate`` lane is now an in-process semaphore (no per-job
+    JobLock connection). Up to ``SEC_LANE_MAX_CONCURRENCY`` sec_rate job
+    BODIES run concurrently, each holding ONE raw body connection. Charge all
+    N explicitly: before #1542 only one job ran at a time (its body conn
+    absorbed by the reserve); now N>1 sec bodies are first-class demand.
     """
+    from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
+
     return (
         DB_POOL_MAX_SIZE
         + AUDIT_POOL_MAX_SIZE
@@ -262,6 +270,7 @@ def _dev_profile_connection_demand() -> int:
         + JOBS_FIXED_LONGLIVED_CONNS
         + JOBS_STEADY_STATE_EXEC_CONNS
         + ORCHESTRATOR_GATE_CHECK_CONN
+        + SEC_LANE_MAX_CONCURRENCY
     )
 
 
