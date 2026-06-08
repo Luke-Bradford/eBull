@@ -80,6 +80,7 @@ from types import TracebackType
 
 import psycopg
 
+from app.jobs import sec_lane_gate
 from app.jobs.sources import Lane, source_for
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,9 @@ class JobLock:
         # path (unlock + close + contextvar reset).
         self._reentrant: bool = False
         self._held_token: Token[frozenset[Lane]] | None = None
+        # #1542 — set when this acquire took the in-process sec_rate gate
+        # (the sec_rate lane no longer opens a Postgres advisory connection).
+        self._sec_lane_held: bool = False
 
     @classmethod
     def test_only_per_name(cls, database_url: str, job_name: str) -> JobLock:
@@ -289,6 +293,7 @@ class JobLock:
         instance._conn = None
         instance._reentrant = False
         instance._held_token = None
+        instance._sec_lane_held = False
         return instance
 
     def __enter__(self) -> JobLock:
@@ -304,6 +309,17 @@ class JobLock:
         held = _HELD_SOURCES.get()
         if self._source is not None and self._source in held:
             self._reentrant = True
+            return self
+        # #1542 — sec_rate is an in-process gate, NOT a pg-advisory lock.
+        # Up to SEC_LANE_MAX_CONCURRENCY jobs run concurrently; a full gate (or a
+        # same-name overlap) raises JobAlreadyRunning, which the #1538 retry
+        # wrapper rides out for scheduled fires. No psycopg connection is opened.
+        if self._source == "sec_rate":
+            if not sec_lane_gate.SEC_LANE_GATE.try_acquire(self._job_name):
+                raise JobAlreadyRunning(self._job_name)
+            self._sec_lane_held = True
+            new_held: frozenset[Lane] = held | frozenset[Lane]({self._source})
+            self._held_token = _HELD_SOURCES.set(new_held)
             return self
         # autocommit=True so we do NOT hold an implicit transaction
         # open for the entire job duration (PR #131 round 1 review
@@ -358,6 +374,11 @@ class JobLock:
                 _HELD_SOURCES.reset(self._held_token)
             finally:
                 self._held_token = None
+        # #1542 — sec_rate gate release (no connection was opened).
+        if self._sec_lane_held:
+            self._sec_lane_held = False
+            sec_lane_gate.SEC_LANE_GATE.release(self._job_name)
+            return
         conn = self._conn
         self._conn = None
         if conn is None:
