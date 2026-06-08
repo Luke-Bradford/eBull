@@ -102,6 +102,13 @@ export interface SystemStatusResponse {
   jobs: JobHealthResponse[];
   kill_switch: KillSwitchStateResponse;
   credential_health: CredentialHealthSummary;
+  // True when the scheduler/worker process is not running (#1508 / C4 —
+  // heartbeat table empty/all-stale, i.e. `jobs_process.state == "down"`).
+  // When true the Processes page raises a hard-red "Jobs engine not running"
+  // banner above the per-row clean-bill/attention summary, because every
+  // per-row verdict is stale once the engine stops. Distinct from
+  // `overall_status === "down"`, which also fires for kill-switch / layer error.
+  engine_down: boolean;
 }
 
 export interface JobOverviewResponse {

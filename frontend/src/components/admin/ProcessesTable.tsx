@@ -56,6 +56,11 @@ export interface ProcessesTableProps {
   // rendered as the header's "checked HH:MM" freshness anchor. Optional;
   // omitted (null) before the first poll lands.
   readonly checkedAt?: Date | null;
+  // #1508 / C4 — the scheduler/worker process is not running
+  // (`/system/status` `engine_down`). Threaded straight to the StaleBanner,
+  // which raises a hard-red "Jobs engine not running" banner that wins over
+  // every per-row verdict (nothing is updating, so the per-row summary lies).
+  readonly engineDown?: boolean;
 }
 
 interface RowErrorState {
@@ -68,6 +73,7 @@ export function ProcessesTable({
   onMutationSuccess,
   bootstrapStatus = null,
   checkedAt = null,
+  engineDown = false,
 }: ProcessesTableProps) {
   const [selectedLane, setSelectedLane] = useState<ProcessLane | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -309,7 +315,11 @@ export function ProcessesTable({
         </div>
       )}
 
-      <StaleBanner rows={baseRows} checkedAt={checkedAt} />
+      <StaleBanner
+        rows={baseRows}
+        checkedAt={checkedAt}
+        engineDown={engineDown}
+      />
 
       {snapshot.partial ? (
         <div

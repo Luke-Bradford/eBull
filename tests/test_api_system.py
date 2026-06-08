@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api.auth import require_session_or_service_token
@@ -131,6 +132,17 @@ client = TestClient(app)
 
 
 class TestSystemStatus:
+    @pytest.fixture(autouse=True)
+    def _engine_up(self) -> Iterator[None]:
+        """These mocked-conn tests exercise the layer/job/kill-switch
+        derivation; the jobs-process heartbeat probe (#1508 / C4) is a
+        separate axis. The MagicMock conn has no heartbeat rows, which the
+        probe would read as "engine down" and force every case to ``down``.
+        Default the probe to engine-up so each test asserts the axis it
+        targets; the engine-down path has its own dedicated test below."""
+        with patch("app.api.system._jobs_process_down", return_value=False):
+            yield
+
     def teardown_method(self) -> None:
         _clear_conn_override()
 
@@ -388,6 +400,64 @@ class TestSystemStatus:
 
         assert resp.status_code == 200
         assert resp.json()["overall_status"] == "degraded"
+
+    def test_engine_down_marks_overall_down_and_sets_flag(self) -> None:
+        """#1508 / C4: a dead jobs process (no heartbeat) forces ``down`` and
+        sets the precise ``engine_down`` flag the Processes page banner keys
+        off, even when every other component is clean. Overrides the autouse
+        engine-up patch via a nested patch."""
+        _override_conn(_mock_conn())
+
+        with (
+            patch("app.api.system.check_all_layers", return_value=_all_ok_layers()),
+            patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ),
+            patch("app.api.system._jobs_process_down", return_value=True),
+            patch(
+                "app.api.system.get_kill_switch_status",
+                return_value={
+                    "is_active": False,
+                    "activated_at": None,
+                    "activated_by": None,
+                    "reason": None,
+                },
+            ),
+        ):
+            resp = client.get("/system/status")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["overall_status"] == "down"
+        assert body["engine_down"] is True
+
+    def test_engine_up_leaves_flag_false(self) -> None:
+        """Healthy engine → ``engine_down`` is false and does not force down."""
+        _override_conn(_mock_conn())
+
+        with (
+            patch("app.api.system.check_all_layers", return_value=_all_ok_layers()),
+            patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ),
+            patch(
+                "app.api.system.get_kill_switch_status",
+                return_value={
+                    "is_active": False,
+                    "activated_at": None,
+                    "activated_by": None,
+                    "reason": None,
+                },
+            ),
+        ):
+            resp = client.get("/system/status")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["overall_status"] == "ok"
+        assert body["engine_down"] is False
 
     def test_jobs_boot_error_null_when_no_breadcrumb(self) -> None:
         """Stream A PR-A T1.8 (#1233): /system/status surfaces NULL
@@ -751,3 +821,28 @@ def test_derive_overall_status_killswitch_outranks_stall() -> None:
     from app.api.system import _derive_overall_status
 
     assert _derive_overall_status([_ok_layer("m")], [_success_job_health("x")], True, {"y"}) == "down"
+
+
+# ---------------------------------------------------------------------------
+# #1508 / C4 — jobs engine down (heartbeat absent) marks overall "down"
+# ---------------------------------------------------------------------------
+
+
+def test_derive_overall_status_engine_down_marks_overall_down() -> None:
+    """A dead jobs process (no heartbeat) is ``down`` even when every other
+    component is clean — every per-row verdict is stale once the engine stops."""
+    from app.api.system import _derive_overall_status
+
+    layers = [_ok_layer("market_data")]
+    jobs = [_success_job_health("x")]
+    assert _derive_overall_status(layers, jobs, False, set(), jobs_process_down=True) == "down"
+
+
+def test_derive_overall_status_engine_up_unchanged() -> None:
+    from app.api.system import _derive_overall_status
+
+    layers = [_ok_layer("market_data")]
+    jobs = [_success_job_health("x")]
+    # Engine up + everything clean → ok (default arg also engine-up).
+    assert _derive_overall_status(layers, jobs, False, set(), jobs_process_down=False) == "ok"
+    assert _derive_overall_status(layers, jobs, False, set()) == "ok"

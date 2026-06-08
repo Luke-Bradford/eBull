@@ -229,6 +229,13 @@ export function AdminPage() {
             }}
             bootstrapStatus={bootstrap.data?.status ?? null}
             checkedAt={processes.checkedAt}
+            // #1508 / C4 — fold the dead-engine signal from /system/status
+            // (already fetched above for the credential-health banner) into
+            // the Processes header. When the jobs process is not running every
+            // per-row verdict is stale, so the table raises a hard-red banner.
+            // Fail-open: a pending/errored /system/status read leaves this
+            // false (no false alarm).
+            engineDown={systemStatus.data?.engine_down ?? false}
           />
         ) : null}
       </CollapsibleSection>

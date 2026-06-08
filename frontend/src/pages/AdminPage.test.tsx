@@ -199,6 +199,7 @@ beforeEach(() => {
       last_recovered_at: null,
       last_error: null,
     },
+    engine_down: false,
   });
   mockedProcesses.mockResolvedValue({ rows: [], partial: false });
 });
