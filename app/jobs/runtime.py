@@ -1037,9 +1037,16 @@ class JobRuntime:
         # volatile process-start clock (which would reset the grace window every
         # restart and let long-cadence never-run jobs lie green forever).
         # ``ON CONFLICT DO NOTHING`` keeps the FIRST-ever boot's timestamp.
+        # The whole batch runs in ONE transaction (atomic): a mid-loop crash
+        # rolls back every insert rather than leaving a partial anchor set that
+        # ``ON CONFLICT`` would then freeze across restarts (review #1531
+        # BLOCKING). All anchors therefore share this boot's single ``now()``.
         # Best-effort: a failure here must not abort scheduler startup.
         try:
-            with psycopg.connect(self._database_url, autocommit=True) as conn:
+            with (
+                psycopg.connect(self._database_url, autocommit=True) as conn,
+                conn.transaction(),
+            ):
                 for _job in SCHEDULED_JOBS:
                     conn.execute(
                         "INSERT INTO job_first_seen (job_name) VALUES (%(n)s) ON CONFLICT (job_name) DO NOTHING",
