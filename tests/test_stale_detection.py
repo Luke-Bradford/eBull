@@ -170,11 +170,12 @@ def test_ingest_sweep_never_schedule_misses() -> None:
 # cycle fires, and the 300s floor protects fast (every-5-min) jobs.
 
 
-def _c1_base(**kw: object) -> dict[str, object]:
-    args: dict[str, object] = dict(
+def test_within_one_cycle_is_not_schedule_missed() -> None:
+    # expected fire was 2h ago — well under a daily cycle → NOT missed.
+    assert "schedule_missed" not in compute(
         mechanism="scheduled_job",
         status="ok",
-        expected_fire_at=None,
+        expected_fire_at=NOW - timedelta(hours=2),
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -183,21 +184,37 @@ def _c1_base(**kw: object) -> dict[str, object]:
         now=NOW,
         cadence_period_s=_DAILY_S,
     )
-    args.update(kw)
-    return args
-
-
-def test_within_one_cycle_is_not_schedule_missed() -> None:
-    assert "schedule_missed" not in compute(**_c1_base(expected_fire_at=NOW - timedelta(hours=2)))
 
 
 def test_overdue_by_more_than_a_cycle_is_schedule_missed() -> None:
-    assert "schedule_missed" in compute(**_c1_base(expected_fire_at=NOW - timedelta(hours=25)))
+    # expected fire was 25h ago — past a full daily cycle → missed.
+    assert "schedule_missed" in compute(
+        mechanism="scheduled_job",
+        status="ok",
+        expected_fire_at=NOW - timedelta(hours=25),
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=None,
+        process_id="x",
+        now=NOW,
+        cadence_period_s=_DAILY_S,
+    )
 
 
 def test_floor_protects_every_5min_jobs() -> None:
+    # 5-min cadence, expected 3 min ago — under the 300s FLOOR → not missed.
     assert "schedule_missed" not in compute(
-        **_c1_base(cadence_period_s=300, expected_fire_at=NOW - timedelta(minutes=3))
+        mechanism="scheduled_job",
+        status="ok",
+        expected_fire_at=NOW - timedelta(minutes=3),
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=None,
+        process_id="x",
+        now=NOW,
+        cadence_period_s=300,
     )
 
 
