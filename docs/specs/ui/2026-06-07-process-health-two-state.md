@@ -61,8 +61,11 @@ only when actionable:
   per-job threshold → `running but no progress`.
 - **Queue stuck** (`queue_stuck`) — a dispatched request not picked up →
   `queued, not picked up`.
-- **Source genuinely behind** (`watermark_gap`, source-level) → `source has new
-  data not yet ingested`.
+- **Source ingest failing** (`watermark_gap`, source-level) → `ingest failing`.
+  Positive predicate: at least one `data_freshness_index` row for the source in
+  `state='error'` (a failed poll/ingest). NOT mere `expected_next_at` lag — an
+  event-form source between filings is not behind. Applied identically in
+  `scheduled_adapter` and `ingest_sweep_adapter` (C2).
 - **Jobs engine down** — see global banner below.
 
 There is no amber and no third colour. `self_healing`/`working` fold into the
@@ -117,6 +120,15 @@ AND state='error')` (LIMIT 1, source-level — any erroring subject means the
 source's ingest is failing). Verdict reason: **"ingest failing"** (not "source
 has new data" — the honest cause). This replaces the per-subject
 `has_data_freshness_gap` (`expected_next_at < now`) timing probe entirely.
+
+**Both adapters.** The same `state='error'` predicate drives `watermark_gap` in
+`scheduled_adapter` AND `ingest_sweep_adapter` (Codex ckpt-2 caught the second:
+the global "ingest failing" relabel applies to every `watermark_gap`, so leaving
+`ingest_sweep` on the old `expected_next_at` probe false-RED healthy event-driven
+SEC sweeps — form3/4/8k/def14a, all `state='current'` — as "ingest failing").
+`ingest_sweep` reuses its existing `_has_freshness_errors` helper. On a real
+`state='error'` a sweep reads `status='failed'` AND `watermark_gap`; both are
+honestly red and `compute_verdict` collapses them to one `attention` verdict.
 
 `source_watermark_fresh` (#1511) stays exactly as-is (GREEN promotion of
 `pending_first_run`) — independent of this, not its negation. v1 must NOT paint
