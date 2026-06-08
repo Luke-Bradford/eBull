@@ -33,6 +33,7 @@ import psycopg
 import psycopg.rows
 
 from app.services.data_freshness import cadence_for
+from app.services.job_liveness import cadence_period
 from app.services.processes import (
     ActiveRunSummary,
     ErrorClassSummary,
@@ -48,6 +49,7 @@ from app.services.processes.bootstrap_coverage import (
 )
 from app.services.processes.stale_detection import (
     QUEUE_STUCK_THRESHOLD_S,
+    SCHEDULE_MISS_FLOOR_S,
     WATERMARK_GAP_TOLERANCE_S,
 )
 from app.services.processes.stale_detection import (
@@ -287,7 +289,15 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
             """,
             {"name": job_name},
         )
-        return cur.fetchone()
+        row = cur.fetchone()
+    if row is None:
+        return None
+    # Task 5 (#1508): tag the terminal-row KIND so the operator-cancel probe
+    # (``_cancel_was_operator_initiated``) matches the right ``target_run_kind``
+    # in ``process_stop_requests``. A ``job_runs`` terminal is kind ``job_run``,
+    # keyed on ``run_id``.
+    row["terminal_kind"] = "job_run"
+    return row
 
 
 # #1474 Part 2 — orchestrator-driven jobs record completions in
@@ -297,14 +307,20 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
 # work fires every cadence. For these jobs the adapter resolves the
 # terminal row from ``sync_runs`` (keyed by scope) instead.
 #
-# Currently ONLY ``orchestrator_high_frequency_sync`` is genuinely
-# telemetry-frozen (it writes ``sync_runs`` scope='high_frequency'
-# ``complete`` every 5m). The Layer-1/2/3 standalone crons write
-# ``job_runs`` again after a clean restart, so they are deliberately NOT
-# re-homed here (per the #1474 2026-06-04 triage). Add a job_name here
-# only when it is confirmed to record solely in ``sync_runs``.
+# Both orchestrator wrapper jobs are telemetry-frozen: each runs a
+# ``SyncScope`` and records solely in ``sync_runs`` (scope='high_frequency'
+# every 5m; scope='full' on the daily DAG). The Layer-1/2/3 standalone
+# crons write ``job_runs`` again after a clean restart, so they are
+# deliberately NOT re-homed here (per the #1474 2026-06-04 triage). Add a
+# job_name here only when it is confirmed to record solely in ``sync_runs``.
 _ORCHESTRATOR_SYNC_SCOPE: Final[dict[str, str]] = {
     "orchestrator_high_frequency_sync": "high_frequency",
+    # ``orchestrator_full_sync`` runs ``SyncScope.full()``, which writes a
+    # ``sync_runs`` row with ``scope = scope.kind = 'full'`` (see
+    # ``executor._insert_sync_run``). Like the HF sync it records solely in
+    # ``sync_runs`` (no ``job_runs`` terminal), so resolve its last-run /
+    # ``schedule_missed`` from ``sync_runs`` too (#1508 C5).
+    "orchestrator_full_sync": "full",
 }
 
 # ``sync_runs.status`` → the ``job_runs`` terminal vocabulary that
@@ -355,6 +371,9 @@ def _read_latest_terminal_sync_run(conn: psycopg.Connection[Any], *, scope: str)
         "rows_skipped_by_reason": None,
         "rows_errored": None,
         "cancelled_at": row["finished_at"] if job_status == "cancelled" else None,
+        # Task 5 (#1508): orchestrator/sync_runs terminal — kind ``sync_run``,
+        # keyed on the original ``sync_run_id`` (surfaced as ``run_id`` above).
+        "terminal_kind": "sync_run",
     }
 
 
@@ -389,6 +408,26 @@ def _resolve_terminal_row(conn: psycopg.Connection[Any], *, job_name: str) -> di
     if scope is not None:
         return _read_latest_terminal_sync_run(conn, scope=scope)
     return _read_latest_terminal_run(conn, job_name=job_name)
+
+
+def _cancel_was_operator_initiated(conn: psycopg.Connection[Any], *, run_kind: str, run_id: int) -> bool:
+    """True if the terminal run was cancelled by a deliberate operator stop.
+
+    Task 5 (#1508): a ``cancelled`` terminal is benign ONLY when its
+    cancel is traceable to an operator ``process_stop_requests`` row
+    (sql/135) pinning the EXACT ``(target_run_kind, target_run_id)`` of
+    the run. A system/crash cancel leaves no such row → stays attention.
+    The presence of the row is the operator-intent signal regardless of
+    its ``completed_at`` (the stop handler always inserts on operator
+    action; boot-recovery later stamps ``completed_at`` on abandoned
+    rows but never deletes them, so historical traceability is preserved).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM process_stop_requests WHERE target_run_kind = %(k)s AND target_run_id = %(id)s LIMIT 1",
+            {"k": run_kind, "id": run_id},
+        )
+        return cur.fetchone() is not None
 
 
 def _has_inflight_manual_request(conn: psycopg.Connection[Any], *, job_name: str) -> bool:
@@ -439,36 +478,25 @@ def _has_inflight_liveness_kick(conn: psycopg.Connection[Any], *, job_name: str,
         return bool(row[0]) if row is not None else False
 
 
-def _has_data_freshness_gap(
-    conn: psycopg.Connection[Any],
-    *,
-    source: str,
-    deadline: datetime,
-) -> bool:
-    """True when at least one ``data_freshness_index`` row for ``source``
-    has ``expected_next_at IS NOT NULL`` AND ``expected_next_at <
-    deadline``.
+def _source_watermark_behind(conn: psycopg.Connection[Any], *, source: str) -> bool:
+    """True when ``source``'s ingest is FAILING — at least one subject in
+    ``state='error'`` (C2 / #1508). A POSITIVE, source-level "we tried to keep
+    this source current and failed" signal.
 
-    Operator-amendment §A1.2 watermark_gap probe (PR8 / #1083). NULL
-    ``expected_next_at`` rows are excluded — a filer with no historical
-    filed_at has nothing to predict, so a NULL must NOT fire the gap
-    rule (Codex pre-impl review WARNING).
-
-    The query uses LIMIT 1 — adapters only need the boolean signal,
-    not the count, and the partial index on
-    ``(expected_next_at, source)`` (sql/120:115) makes the probe cheap.
+    Deliberately NOT ``not _source_watermark_fresh`` (false-REDs quiet sources)
+    and NOT the per-subject ``expected_next_at`` timing probe / ``state=
+    'expected_filing_overdue'`` (event-form jitter — an issuer simply not filing
+    is not an ingest problem). The state machine sets ``state='error'`` only from
+    a failed poll/ingest. LIMIT 1, source-level.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT 1
-              FROM data_freshness_index
-             WHERE source = %(source)s
-               AND expected_next_at IS NOT NULL
-               AND expected_next_at < %(deadline)s
+            SELECT 1 FROM data_freshness_index
+             WHERE source = %(source)s AND state = 'error'
              LIMIT 1
             """,
-            {"source": source, "deadline": deadline},
+            {"source": source},
         )
         return cur.fetchone() is not None
 
@@ -483,10 +511,10 @@ def _source_watermark_fresh(
     as a whole is being kept current — ``MAX(last_known_filed_at)`` within one
     cadence interval (+ the shared watermark tolerance) of ``now``.
 
-    Source-LEVEL recency, deliberately NOT the per-subject overdue probe
-    (``_has_data_freshness_gap``): event-driven forms (Form 3/4, 13D/G) leave
-    most subjects perpetually "overdue" (filed once, never again), so an
-    any-subject-overdue test reads stale for a source that is in fact current.
+    Source-LEVEL recency, deliberately NOT a per-subject ``expected_next_at``
+    overdue probe: event-driven forms (Form 3/4, 13D/G) leave most subjects
+    perpetually "overdue" (filed once, never again), so an any-subject-overdue
+    test reads stale for a source that is in fact current.
     The #1511 look-through promotes a never-run job to Current only when the
     source's freshest filing sits inside its cadence window. Returns False on
     a source with no rows / no ``last_known_filed_at`` (nothing seeded → not
@@ -506,6 +534,20 @@ def _source_watermark_fresh(
         return False
     max_filed_at: datetime = row[0]
     return max_filed_at >= now - cadence - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S)
+
+
+def _job_first_seen(conn: psycopg.Connection[Any], *, job_name: str) -> datetime | None:
+    """Persisted first-seen anchor for ``job_name`` (#1508 C6).
+
+    ``job_first_seen`` is written once per process start by
+    ``JobRuntime.start`` (``ON CONFLICT DO NOTHING`` keeps the first-ever
+    boot's timestamp). Returns ``None`` when no row exists yet — a job seen
+    for the first time this very boot cannot be "never started past grace".
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT first_seen FROM job_first_seen WHERE job_name = %(n)s", {"n": job_name})
+        row = cur.fetchone()
+    return row[0] if row is not None else None
 
 
 def _has_dispatched_queue_age(
@@ -694,7 +736,13 @@ def _build_last_run(terminal_row: dict[str, Any]) -> ProcessRunSummary:
         rows_skipped_by_reason={k: int(v) for k, v in skips.items()},
         rows_errored=int(terminal_row.get("rows_errored") or 0),
         status=summary_status,
-        cancelled_by_operator_id=None,  # PR4 wires the join on process_stop_requests
+        # History-tab operator UUID — distinct from the Task 5 (#1508) verdict
+        # boolean ``cancel_was_operator_initiated`` (computed in ``_build_row``
+        # via ``_cancel_was_operator_initiated``). Resolving the actual
+        # ``process_stop_requests.requested_by_operator_id`` here needs ``conn``
+        # threaded into ``_build_last_run`` across all three adapters; left
+        # unresolved (None) as out-of-scope for the two-state verdict work.
+        cancelled_by_operator_id=None,
     )
 
 
@@ -795,23 +843,32 @@ def _build_row(
     # cheap.
     now = datetime.now(UTC)
     # ``expected_fire_at`` is the first cadence-occurrence after the
-    # latest terminal run's ``started_at``. When that timestamp is in
-    # the past (now > expected + tolerance), the schedule was missed.
+    # latest terminal run's anchor. When it falls more than one full
+    # cadence in the past (now > expected + max(cadence, floor)), the
+    # schedule was missed (C1, #1508; see compute_stale_reasons'
+    # cadence_period_s arg below). ``expected_fire_at`` is already the
+    # next slot (anchor + ~1 cadence); Rule 1 then waits another full
+    # cadence, so schedule_missed surfaces ~2 cadences after the last
+    # successful run — deliberate de-noise, errs green.
     # Codex pre-push BLOCKING: ``next_fire_at`` is the strictly-future
     # next fire from compute_next_run(cadence, now), so it could never
-    # satisfy ``< now - tolerance`` and the rule was unreachable.
+    # satisfy ``< now - threshold`` and the rule was unreachable.
     expected_fire_at: datetime | None = None
     if terminal_row is not None and terminal_row.get("started_at") is not None:
-        expected_fire_at = compute_next_run(job.cadence, terminal_row["started_at"])
+        # C1 (#1508): anchor on the LATER of started_at / finished_at so a
+        # run that just completed resets the overdue clock — a long run that
+        # finishes after a nominal slot must not read overdue the instant it
+        # ends.
+        anchor = terminal_row["started_at"]
+        finished = terminal_row.get("finished_at")
+        if finished is not None and finished > anchor:
+            anchor = finished
+        expected_fire_at = compute_next_run(job.cadence, anchor)
     freshness_source = freshness_source_for(job.name)
     has_data_freshness_gap = (
         freshness_source is not None
         and process_status != "running"
-        and _has_data_freshness_gap(
-            conn,
-            source=freshness_source,
-            deadline=now - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S),
-        )
+        and _source_watermark_behind(conn, source=freshness_source)
     )
     has_dispatched_queue_age = _has_dispatched_queue_age(
         conn,
@@ -828,6 +885,7 @@ def _build_row(
         active_run_started_at=active_run.started_at if active_run is not None else None,
         process_id=job.name,
         now=now,
+        cadence_period_s=int(cadence_period(job.cadence).total_seconds()),
     )
 
     # PR4 watermark — surface the resume cursor on the FE tooltip.
@@ -844,6 +902,34 @@ def _build_row(
         and freshness_source in BOOTSTRAP_COVERED_FRESHNESS_SOURCES
         and _source_watermark_fresh(conn, source=freshness_source, now=now)
     )
+
+    # #1508 / C6 — never-started verdict signal. A job with ZERO lifetime rows
+    # (``terminal_row is None``) that is now overdue past its FIRST expected
+    # fire is broken-from-day-one, not merely awaiting its first natural slot.
+    # The anchor is the PERSISTED ``job_first_seen.first_seen`` (not a volatile
+    # process clock); first_expected = that anchor + one cadence, and we wait a
+    # further full grace (max(cadence, floor)) before declaring it broken — same
+    # de-noise posture as schedule_missed (errs green). A job seen for the first
+    # time this boot has no row yet (None) and reads False.
+    never_started = False
+    if terminal_row is None:
+        first_seen = _job_first_seen(conn, job_name=job.name)
+        if first_seen is not None:
+            first_expected = compute_next_run(job.cadence, first_seen)
+            grace = max(int(cadence_period(job.cadence).total_seconds()), SCHEDULE_MISS_FLOOR_S)
+            never_started = first_expected < now - timedelta(seconds=grace)
+
+    # Task 5 (#1508) — operator-cancel look-through. Only probe when the row
+    # actually resolved to ``cancelled`` (cheap LIMIT 1, but pointless otherwise).
+    # The terminal row carries its KIND (``job_run`` / ``sync_run``) so the probe
+    # matches the right ``process_stop_requests.target_run_kind`` on the run id.
+    cancel_was_operator_initiated = False
+    if process_status == "cancelled" and terminal_row is not None:
+        cancel_was_operator_initiated = _cancel_was_operator_initiated(
+            conn,
+            run_kind=terminal_row["terminal_kind"],
+            run_id=int(terminal_row["run_id"]),
+        )
 
     # #1510 / T4 — verdict signal: a fresh watchdog re-enqueue is in flight, so
     # ``compute_verdict`` reads this re-enqueued stall as Self-healing rather than
@@ -897,6 +983,15 @@ def _build_row(
         next_retry_at=terminal_row.get("next_retry_at") if terminal_row is not None else None,
         # #1510 / T4 — fresh watchdog re-enqueue in flight (see compute_verdict).
         liveness_kick_in_flight=liveness_kick_in_flight,
+        # #1508 / C6 — never-run job overdue past its first expected fire
+        # (persisted first-seen anchor). Reads attention "never started".
+        never_started=never_started,
+        # Task 5 (#1508) — operator-traceable cancel reads benign Current;
+        # system/crash cancel stays attention "last run cancelled".
+        cancel_was_operator_initiated=cancel_was_operator_initiated,
+        # C7 (#1530) — page-scope role straight from the registry entry so
+        # the FE can partition steady-state keepers from bootstrap / backfill.
+        role=job.role,
     )
 
 

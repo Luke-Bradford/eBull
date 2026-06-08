@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.services.processes.stale_detection import (
     QUEUE_STUCK_THRESHOLD_S,
+    SCHEDULE_MISS_FLOOR_S,
     SCHEDULE_MISS_TOLERANCE_S,
     WATERMARK_GAP_TOLERANCE_S,
     compute,
@@ -26,6 +27,8 @@ from app.services.processes.stale_thresholds import (
 )
 
 NOW = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC)
+
+_DAILY_S = 86_400
 
 
 def _seconds_ago(n: int) -> datetime:
@@ -76,33 +79,38 @@ def test_running_row_with_fresh_heartbeat_is_not_stale() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schedule_missed_fires_when_next_fire_is_past_tolerance() -> None:
+def test_schedule_missed_fires_when_overdue_by_a_full_cycle() -> None:
+    """C1 (#1508): fires only when overdue by more than a whole cadence
+    cycle — here a daily job overdue by >1 day."""
     reasons = compute(
         mechanism="scheduled_job",
         status="ok",
-        expected_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 10),
+        expected_fire_at=_seconds_ago(_DAILY_S + 60),
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
         active_run_started_at=None,
         process_id="some_job",
         now=NOW,
+        cadence_period_s=_DAILY_S,
     )
     assert reasons == ("schedule_missed",)
 
 
-def test_schedule_missed_does_not_fire_within_tolerance() -> None:
-    """Exact-tolerance boundary: APScheduler jitter should not surface."""
+def test_schedule_missed_does_not_fire_within_one_cycle() -> None:
+    """C1: a single late tick (overdue by less than a cadence cycle)
+    is no longer a miss — only a whole skipped cycle fires."""
     reasons = compute(
         mechanism="scheduled_job",
         status="ok",
-        expected_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S - 1),
+        expected_fire_at=_seconds_ago(_DAILY_S - 1),
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
         active_run_started_at=None,
         process_id="some_job",
         now=NOW,
+        cadence_period_s=_DAILY_S,
     )
     assert "schedule_missed" not in reasons
 
@@ -155,6 +163,63 @@ def test_ingest_sweep_never_schedule_misses() -> None:
         now=NOW,
     )
     assert "schedule_missed" not in reasons
+
+
+# C1 (#1508) — full-cycle threshold + sub-cycle floor. These three pin
+# the behavioural contract: within one cycle is benign, a whole skipped
+# cycle fires, and the 300s floor protects fast (every-5-min) jobs.
+
+
+def test_within_one_cycle_is_not_schedule_missed() -> None:
+    # expected fire was 2h ago — well under a daily cycle → NOT missed.
+    assert "schedule_missed" not in compute(
+        mechanism="scheduled_job",
+        status="ok",
+        expected_fire_at=NOW - timedelta(hours=2),
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=None,
+        process_id="x",
+        now=NOW,
+        cadence_period_s=_DAILY_S,
+    )
+
+
+def test_overdue_by_more_than_a_cycle_is_schedule_missed() -> None:
+    # expected fire was 25h ago — past a full daily cycle → missed.
+    assert "schedule_missed" in compute(
+        mechanism="scheduled_job",
+        status="ok",
+        expected_fire_at=NOW - timedelta(hours=25),
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=None,
+        process_id="x",
+        now=NOW,
+        cadence_period_s=_DAILY_S,
+    )
+
+
+def test_floor_protects_every_5min_jobs() -> None:
+    # 5-min cadence, expected 3 min ago — under the 300s FLOOR → not missed.
+    assert "schedule_missed" not in compute(
+        mechanism="scheduled_job",
+        status="ok",
+        expected_fire_at=NOW - timedelta(minutes=3),
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=None,
+        process_id="x",
+        now=NOW,
+        cadence_period_s=300,
+    )
+
+
+def test_schedule_miss_floor_constant_is_300() -> None:
+    assert SCHEDULE_MISS_FLOOR_S == 300
 
 
 # ---------------------------------------------------------------------------
@@ -393,13 +458,14 @@ def test_multiple_reasons_fire_in_canonical_order() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="ok",  # not running — schedule_missed + watermark_gap can fire
-        expected_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 30),
+        expected_fire_at=_seconds_ago(_DAILY_S + 30),
         has_data_freshness_gap=True,
         has_dispatched_queue_age=True,
         last_progress_at=None,
         active_run_started_at=None,
         process_id="some_job",
         now=NOW,
+        cadence_period_s=_DAILY_S,
     )
     assert reasons == ("schedule_missed", "watermark_gap", "queue_stuck")
 

@@ -38,6 +38,15 @@ ProcessLane = Literal[
 
 ProcessMechanism = Literal["bootstrap", "scheduled_job", "ingest_sweep"]
 
+# C7 (#1530) — page-scope classification of a process row. Mirrors the
+# ``ScheduledJob.role`` literal in ``app/workers/scheduler.py`` (kept
+# inline there to avoid a scheduler→processes-service import). ``Literal``-
+# typed on both the source dataclass (``ProcessRow.role``) and the wire
+# carrier (``ProcessRowResponse.role``) so pyright type-guards the role at
+# the API boundary, consistent with ``ProcessLane`` / ``ProcessMechanism`` /
+# ``ProcessStatus``.
+ProcessRole = Literal["steady_state", "bootstrap", "backfill"]
+
 ProcessStatus = Literal[
     "idle",
     "pending_first_run",
@@ -224,6 +233,33 @@ class ProcessRow:
     # ``compute_verdict(liveness_kick_in_flight=...)`` so a watchdog-re-enqueued
     # stalled job reads Self-healing "re-enqueued, recovering" instead of red.
     liveness_kick_in_flight: bool = False
+    # #1508 / C6 — True when this scheduled job has ZERO lifetime runs AND is
+    # now overdue past its first expected fire (persisted ``job_first_seen`` +
+    # one cadence + grace), computed by scheduled_adapter. Fed to
+    # ``compute_verdict(never_started=...)`` so a broken-from-day-one job reads
+    # attention "never started" instead of forever-green "first run pending".
+    # Bootstrap + ingest_sweep adapters keep the default — scheduled-job-only.
+    never_started: bool = False
+    # #1508 / Task 5 — True when the latest terminal run was ``cancelled`` AND
+    # that cancel is traceable to a deliberate operator stop request (a
+    # ``process_stop_requests`` row pinning the terminal run's kind + id),
+    # computed by scheduled_adapter ONLY when status is ``cancelled``. Fed to
+    # ``compute_verdict(cancel_was_operator_initiated=...)`` so an operator-
+    # cancelled job reads benign Current (green) until its next fire, while a
+    # system/crash cancel stays attention "last run cancelled". Bootstrap +
+    # ingest_sweep adapters keep the default.
+    cancel_was_operator_initiated: bool = False
+    # C7 (#1530) — page-scope classification: ``steady_state`` (recurring
+    # keeper that holds a source / data current), ``bootstrap`` (one-time
+    # install drain), or ``backfill`` (historical catch-up). Unlike the
+    # verdict-input fields above, this is a WIRE field: ``_convert_row``
+    # maps it onto ``ProcessRowResponse`` so the FE can move bootstrap /
+    # backfill rows into a collapsed section and default the page to
+    # steady-state keepers only. scheduled_adapter copies it from the
+    # underlying ``ScheduledJob.role``; bootstrap_adapter sets
+    # ``"bootstrap"``; ingest_sweep_adapter keeps the default
+    # ``"steady_state"`` (sweeps keep their source current).
+    role: ProcessRole = "steady_state"
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +282,7 @@ __all__ = [
     "HealthVerdict",
     "ProcessLane",
     "ProcessMechanism",
+    "ProcessRole",
     "ProcessRow",
     "ProcessRunSummary",
     "ProcessSnapshot",

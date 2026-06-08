@@ -46,7 +46,14 @@ from app.services.processes.stale_thresholds import get_threshold
 
 # Cron miss tolerance — APScheduler fires within a few seconds of the
 # nominal time; 60s absorbs jitter without masking a genuine miss.
+# Retained for back-compat / external reference; the C1 rule below now
+# keys off a full cadence cycle, not this single-tick tolerance.
 SCHEDULE_MISS_TOLERANCE_S: Final[int] = 60
+
+# C1 (#1508 two-state): schedule_missed fires only when overdue by a WHOLE
+# cadence cycle, not a single late tick. FLOOR protects sub-cycle jobs
+# (every-5-min) from flapping when their cadence is shorter than the floor.
+SCHEDULE_MISS_FLOOR_S: Final[int] = 300
 
 # Watermark-gap tolerance — same shape: source's ``expected_next_at``
 # is a prediction, so allow 60s slack before declaring a gap.
@@ -68,6 +75,7 @@ def compute(
     active_run_started_at: datetime | None,
     process_id: str,
     now: datetime,
+    cadence_period_s: int = 0,
 ) -> tuple[StaleReason, ...]:
     """Compose the per-row ``stale_reasons`` tuple.
 
@@ -80,8 +88,10 @@ def compute(
             job has never run (``pending_first_run`` already covers
             that surface) or when the mechanism has no schedule. The
             rule fires when this timestamp is more than
-            ``SCHEDULE_MISS_TOLERANCE_S`` in the past — i.e., we should
-            have fired again by now and didn't. Computed from
+            ``max(cadence_period_s, SCHEDULE_MISS_FLOOR_S)`` in the past
+            (C1, #1508) — i.e., a whole cadence cycle has elapsed past
+            the slot we should have fired in and we still didn't.
+            Computed from
             ``compute_next_run(cadence, latest_terminal.started_at)``
             in the scheduled adapter; pure-future ``next_fire_at``
             values would never be reachable so the rule could never
@@ -105,6 +115,13 @@ def compute(
             override.
         now: Reference time (UTC). Caller passes ``datetime.now(UTC)``;
             tests pin a specific instant.
+        cadence_period_s: The job's cadence period in seconds (C1,
+            #1508). ``schedule_missed`` fires only when
+            ``expected_fire_at`` is overdue by more than
+            ``max(cadence_period_s, SCHEDULE_MISS_FLOOR_S)`` — a whole
+            skipped cycle, not a single late tick. Defaults to ``0`` so
+            the non-scheduled callers (bootstrap / ingest_sweep), which
+            are skipped by the ``mechanism`` gate anyway, need no change.
 
     Returns:
         Ordered tuple of ``StaleReason`` literals. Order is fixed
@@ -114,16 +131,19 @@ def compute(
     """
     reasons: list[StaleReason] = []
 
-    # Rule 1: schedule_missed — scheduled_job only. ``expected_fire_at``
-    # is the first cadence-occurrence after the latest terminal run; if
-    # it's now > tolerance seconds in the past we should have fired
-    # again by now and didn't. Negative when the job is currently
+    # Rule 1: schedule_missed — overdue by more than a full cadence cycle
+    # (C1, #1508). The adapter anchors ``expected_fire_at`` on the
+    # terminal run's ``max(started_at, finished_at)``, so a run that just
+    # finished resets the clock. A single late tick no longer fires; an
+    # entire skipped cycle does. The FLOOR keeps sub-cycle jobs
+    # (every-5-min) from flapping. Negative when the job is currently
     # running (overlap-suppression is intentional, not a miss).
+    overdue_threshold = max(cadence_period_s, SCHEDULE_MISS_FLOOR_S)
     if (
         mechanism == "scheduled_job"
         and status != "running"
         and expected_fire_at is not None
-        and expected_fire_at < now - _seconds(SCHEDULE_MISS_TOLERANCE_S)
+        and expected_fire_at < now - _seconds(overdue_threshold)
     ):
         reasons.append("schedule_missed")
 
@@ -165,6 +185,7 @@ def _seconds(n: int) -> timedelta:
 
 __all__ = [
     "QUEUE_STUCK_THRESHOLD_S",
+    "SCHEDULE_MISS_FLOOR_S",
     "SCHEDULE_MISS_TOLERANCE_S",
     "WATERMARK_GAP_TOLERANCE_S",
     "compute",

@@ -426,6 +426,10 @@ def get_row(conn: psycopg.Connection[Any]) -> ProcessRow | None:
             "resumes from the failed stage; Re-run all wipes + replays from "
             "scratch."
         ),
+        # C7 (#1530) — the first-install bootstrap row is the bootstrap
+        # mechanism itself; it belongs in the collapsed "Bootstrap &
+        # backfill" section, not the default steady-state view.
+        role="bootstrap",
     )
 
 

@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -57,9 +57,6 @@ from app.services.processes import (
     ProcessStatus,
     RunStatus,
     StaleReason,
-)
-from app.services.processes.stale_detection import (
-    WATERMARK_GAP_TOLERANCE_S,
 )
 from app.services.processes.stale_detection import (
     compute as compute_stale_reasons,
@@ -379,37 +376,6 @@ def _coerce_error_rows(
     return tuple(summaries)
 
 
-def _has_data_freshness_gap(
-    conn: psycopg.Connection[Any],
-    *,
-    source: str,
-    deadline: datetime,
-) -> bool:
-    """True when the sweep's freshness source has at least one row whose
-    ``expected_next_at < deadline`` (PR8 §A1.2 watermark_gap).
-
-    NULL ``expected_next_at`` rows are excluded — a filer with no
-    historical filed_at has nothing to predict; the rule must not fire
-    on them (Codex pre-impl review WARNING). Mirrors the scheduled
-    adapter helper of the same name; kept module-local rather than
-    factored to a shared util because the SQL is tiny and duplication
-    is honest.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT 1
-              FROM data_freshness_index
-             WHERE source = %(source)s
-               AND expected_next_at IS NOT NULL
-               AND expected_next_at < %(deadline)s
-             LIMIT 1
-            """,
-            {"source": source, "deadline": deadline},
-        )
-        return cur.fetchone() is not None
-
-
 def _has_freshness_errors(conn: psycopg.Connection[Any], *, source: str) -> bool:
     with conn.cursor() as cur:
         cur.execute(
@@ -571,14 +537,19 @@ def _build_row(
     # mechanism=='ingest_sweep' triggers with 409). Only watermark_gap
     # is reachable; the other rules trivially evaluate to False.
     now = datetime.now(UTC)
+    # C2 (#1508): watermark_gap == source-level "ingest failing" — at
+    # least one ``data_freshness_index`` row in ``state='error'`` for the
+    # source. Mirrors ``scheduled_adapter``. The OLD overdue-timing probe
+    # FALSE-RED healthy event-driven SEC sources (form3/form4/def14a/8k
+    # sit ``state='current'`` between filings with an overdue
+    # ``expected_next_at``); the error-state predicate is the honest
+    # signal. Reuses ``_has_freshness_errors`` (also drives the
+    # ``failed`` status above — both red on a real error is intended,
+    # benign redundancy).
     has_data_freshness_gap = (
         spec.freshness_source is not None
         and status != "running"
-        and _has_data_freshness_gap(
-            conn,
-            source=spec.freshness_source,
-            deadline=now - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S),
-        )
+        and _has_freshness_errors(conn, source=spec.freshness_source)
     )
     stale_reasons: tuple[StaleReason, ...] = compute_stale_reasons(
         mechanism="ingest_sweep",
@@ -625,6 +596,10 @@ def _build_row(
             f"this row aggregates its progress over time. Iterate / "
             f"full-wash from the {spec.underlying_job} row instead."
         ),
+        # C7 (#1530) — ingest sweeps keep their source current, so they
+        # stay in the default steady-state view (explicit, not relying on
+        # the dataclass default).
+        role="steady_state",
     )
 
 

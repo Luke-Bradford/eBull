@@ -82,5 +82,6 @@ export async function fetchSystemStatusMock(): Promise<SystemStatusResponse> {
       last_recovered_at: null,
       last_error: null,
     },
+    engine_down: false,
   };
 }

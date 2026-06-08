@@ -281,6 +281,16 @@ class ScheduledJob:
     # avoid a separate registry-touching pass later. ``None`` falls
     # back to ``name`` at render time.
     display_name: str | None = None
+    # C7 (#1530) — page-scope classification. The Processes page shows
+    # ONLY ``steady_state`` jobs (recurring keepers that hold a source /
+    # data current) by default; ``bootstrap`` (one-time install drains)
+    # and ``backfill`` (historical catch-up) jobs move to a collapsed
+    # "Bootstrap & backfill" section. Default ``steady_state`` so an
+    # untagged keeper is NEVER silently hidden — an over-shown job is
+    # safe, but a hidden steady-state keeper makes the page read green
+    # while a real keeper is dead. Carried onto the wire via ProcessRow
+    # so the FE can partition.
+    role: Literal["steady_state", "bootstrap", "backfill"] = "steady_state"
 
 
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
@@ -757,6 +767,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
         display_name="SEC business-summary bootstrap drain",
+        # C7 (#1530) — one-shot 10-K Item 1 candidate drain (weekly Sunday
+        # fire is a safety net, not steady-state freshness). Layer 1/2/3 +
+        # sec_manifest_worker carry ongoing 10-K freshness.
+        role="bootstrap",
         source="sec_rate",
         description=(
             "One-shot drain of the 10-K Item 1 candidate set (#535). "
@@ -774,6 +788,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL,
         display_name="SEC Form 4 round-robin backfill",
+        # C7 (#1530) — historical-tail catch-up (drains deep Form 4 backlogs
+        # oldest-first). The hourly universe-wide ingester (Layer 1/2/3 +
+        # sec_manifest_worker) is the steady-state keeper for new Form 4s.
+        role="backfill",
         source="sec_rate",
         description=(
             "Round-robin backfill of Form 4 filings for instruments "
@@ -836,6 +854,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
         display_name="Legacy → observations backfill",
+        # C7 (#1530) — one-shot legacy → observations backfill (weekly Sunday
+        # fire is a self-heal safety net; retired once legacy tables drop).
+        # Write-through (#888-#891) + the daily ownership_observations_sync
+        # repair sweep are the steady-state keepers.
+        role="backfill",
         source="db",
         description=(
             "One-shot legacy → ownership_*_observations backfill (#909). "
@@ -896,6 +919,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_SEC_DEF14A_BOOTSTRAP,
         display_name="SEC DEF 14A bootstrap drain",
+        # C7 (#1530) — one-shot DEF 14A candidate drain (weekly Sunday fire
+        # is a safety net for the historical backlog). Layer 1/2/3 +
+        # sec_manifest_worker carry ongoing DEF 14A freshness.
+        role="bootstrap",
         source="sec_rate",
         description=(
             "One-shot drain of the DEF 14A candidate set (#839). "

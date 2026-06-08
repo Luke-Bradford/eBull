@@ -8,10 +8,15 @@ import { StaleBanner } from "@/components/admin/StaleBanner";
 function renderBanner(
   rows: ReturnType<typeof makeProcessRow>[],
   checkedAt?: Date | null,
+  engineDown = false,
 ) {
   return render(
     <MemoryRouter>
-      <StaleBanner rows={rows} checkedAt={checkedAt ?? null} />
+      <StaleBanner
+        rows={rows}
+        checkedAt={checkedAt ?? null}
+        engineDown={engineDown}
+      />
     </MemoryRouter>,
   );
 }
@@ -97,5 +102,47 @@ describe("StaleBanner (#1513 clean-bill header)", () => {
     expect(screen.getByTestId("health-header").textContent).not.toContain(
       "checked",
     );
+  });
+
+  describe("#1508 C4 — engine-down banner", () => {
+    it("renders a hard-red engine-down banner when the jobs engine is down", () => {
+      renderBanner(
+        [makeProcessRow({ status: "ok", stale_reasons: [] })],
+        null,
+        true,
+      );
+      const banner = screen.getByTestId("engine-down-banner");
+      expect(banner.textContent).toMatch(/jobs engine not running/i);
+    });
+
+    it("wins over the all-clear regardless of per-row verdicts", () => {
+      // Every row is current, but the engine is down → the page must NOT
+      // claim all-clear; the engine-down banner replaces it.
+      renderBanner(
+        [
+          makeProcessRow({ status: "ok", stale_reasons: [] }),
+          makeProcessRow({
+            process_id: "b",
+            status: "ok",
+            stale_reasons: [],
+          }),
+        ],
+        null,
+        true,
+      );
+      expect(screen.getByTestId("engine-down-banner")).toBeTruthy();
+      expect(screen.queryByTestId("health-header")).toBeNull();
+      expect(screen.queryByText(/All systems current/)).toBeNull();
+    });
+
+    it("does not render the engine-down banner when the engine is up", () => {
+      renderBanner(
+        [makeProcessRow({ status: "ok", stale_reasons: [] })],
+        null,
+        false,
+      );
+      expect(screen.queryByTestId("engine-down-banner")).toBeNull();
+      expect(screen.getByTestId("health-header")).toBeTruthy();
+    });
   });
 });

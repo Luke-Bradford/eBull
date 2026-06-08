@@ -65,6 +65,7 @@ from app.services.processes import (
     HealthVerdict,
     ProcessLane,
     ProcessMechanism,
+    ProcessRole,
     ProcessRow,
     ProcessRunSummary,
     ProcessSnapshot,
@@ -190,6 +191,11 @@ class ProcessRowResponse(BaseModel):
     # entry has no description; the FE hides the icon on empty rather
     # than showing a blank popover.
     description: str = ""
+    # C7 (#1530) — page-scope classification: ``steady_state`` keepers
+    # render in the default Processes view; ``bootstrap`` / ``backfill``
+    # rows move to the collapsed "Bootstrap & backfill" section. Defaults
+    # to ``steady_state`` so an untagged row stays visible.
+    role: ProcessRole = "steady_state"
 
 
 class ProcessListResponse(BaseModel):
@@ -439,6 +445,16 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         # row as Self-healing "re-enqueued, recovering" (a genuine wedge still
         # outranks). Set by scheduled_adapter; other adapters leave it False.
         liveness_kick_in_flight=row.liveness_kick_in_flight,
+        # #1508 / C6 — a never-run scheduled job now overdue past its first
+        # expected fire reads attention "never started" instead of forever-green
+        # "first run pending". Set by scheduled_adapter; other adapters leave it
+        # False.
+        never_started=row.never_started,
+        # Task 5 (#1508) — an operator-traceable cancel reads benign Current;
+        # a system/crash cancel stays attention "last run cancelled". Set by
+        # scheduled_adapter via the process_stop_requests join; other adapters
+        # leave it False.
+        cancel_was_operator_initiated=row.cancel_was_operator_initiated,
     )
     return ProcessRowResponse(
         process_id=row.process_id,
@@ -462,6 +478,9 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         verdict_reason=verdict_reason,
         params_metadata=list(row.params_metadata),
         description=row.description,
+        # C7 (#1530) — wire the page-scope role through so the FE can
+        # partition steady-state keepers from bootstrap / backfill rows.
+        role=row.role,
     )
 
 

@@ -155,6 +155,14 @@ class SystemStatusResponse(BaseModel):
     # because of a hard-fail boot-guard condition (today: missing
     # operator row). NULL on healthy systems. Wired in Stream A PR-A.
     jobs_boot_error: JobsBootError | None = None
+    # True when the scheduler/worker process is not running at all
+    # (#1508 / C4 — derived from the heartbeat table being empty/all-stale,
+    # i.e. ``jobs_process.state == "down"``). When true, every per-row job
+    # verdict on the Processes page is stale, so the page raises a hard-red
+    # "Jobs engine not running" banner above the per-row summary. This is a
+    # precise signal distinct from ``overall_status == "down"`` (which also
+    # fires for an active kill switch or a layer error).
+    engine_down: bool = False
 
 
 class JobOverviewResponse(BaseModel):
@@ -244,10 +252,15 @@ def _derive_overall_status(
     jobs: list[JobHealth],
     kill_switch_active: bool,
     stalled_job_names: set[str] | None = None,
+    *,
+    jobs_process_down: bool = False,
 ) -> OverallStatus:
     """Worst-of(components).
 
     - kill switch active   → "down"  (system is intentionally halted)
+    - jobs process down    → "down"  (#1508 / C4 — the scheduler/worker engine
+      is not running, so NOTHING is updating; every per-row job verdict is now
+      stale and the Processes page raises a hard-red engine-down banner)
     - any layer "error"    → "down"  (infra fault)
     - any job "failure"    → "down"
     - any job stalled (silently stopped firing) → "degraded"  (#1510 / T4)
@@ -273,6 +286,8 @@ def _derive_overall_status(
     orchestrator jobs write ``sync_runs`` not ``job_runs`` and would false-stall).
     """
     if kill_switch_active:
+        return "down"
+    if jobs_process_down:
         return "down"
     if any(layer.status == "error" for layer in layers):
         return "down"
@@ -438,7 +453,19 @@ def get_system_status(
     # false-stall).
     stalled_job_names = _stalled_job_names(conn, now)
 
-    overall = _derive_overall_status(layers, jobs, bool(ks["is_active"]), stalled_job_names)
+    # #1508 / C4 — fold the jobs-process heartbeat into the headline. A dead
+    # engine (no heartbeat rows / all subsystems stale) means nothing is
+    # updating, so the whole page must read "down" regardless of per-row
+    # verdicts. Best-effort: a probe failure must not 503 the status page.
+    engine_down = _jobs_process_down(conn, now)
+
+    overall = _derive_overall_status(
+        layers,
+        jobs,
+        bool(ks["is_active"]),
+        stalled_job_names,
+        jobs_process_down=engine_down,
+    )
 
     return SystemStatusResponse(
         checked_at=now,
@@ -453,7 +480,27 @@ def get_system_status(
         ),
         credential_health=_build_credential_health_summary(conn),
         jobs_boot_error=jobs_boot_error,
+        engine_down=engine_down,
     )
+
+
+def _jobs_process_down(conn: psycopg.Connection[object], now: datetime) -> bool:
+    """True when the jobs process is not running (#1508 / C4).
+
+    Reuses ``_build_jobs_process_health`` (the same heartbeat aggregation as
+    ``/system/jobs``) so the engine-down signal cannot drift from the jobs
+    page. Best-effort: any failure returns ``False`` so a probe error never
+    503s ``/system/status`` — the headline degradation is a nice-to-have, the
+    per-layer rows already carry the underlying fault.
+    """
+    try:
+        return _build_jobs_process_health(conn, now).state == "down"
+    except Exception:
+        logger.warning(
+            "get_system_status: jobs-process heartbeat probe failed; engine-down signal omitted",
+            exc_info=True,
+        )
+        return False
 
 
 def _read_jobs_boot_error(conn: psycopg.Connection[object]) -> JobsBootError | None:

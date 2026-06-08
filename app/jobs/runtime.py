@@ -1031,6 +1031,29 @@ class JobRuntime:
             registered += 1
         self._scheduler.start()
         self._started = True
+        # #1508 / C6 — persist a per-job first-seen anchor once per process
+        # start. The never-started verdict (scheduled_adapter) measures "overdue
+        # past its first expected fire" from THIS persisted timestamp, not a
+        # volatile process-start clock (which would reset the grace window every
+        # restart and let long-cadence never-run jobs lie green forever).
+        # ``ON CONFLICT DO NOTHING`` keeps the FIRST-ever boot's timestamp.
+        # The whole batch runs in ONE transaction (atomic): a mid-loop crash
+        # rolls back every insert rather than leaving a partial anchor set that
+        # ``ON CONFLICT`` would then freeze across restarts (review #1531
+        # BLOCKING). All anchors therefore share this boot's single ``now()``.
+        # Best-effort: a failure here must not abort scheduler startup.
+        try:
+            with (
+                psycopg.connect(self._database_url, autocommit=True) as conn,
+                conn.transaction(),
+            ):
+                for _job in SCHEDULED_JOBS:
+                    conn.execute(
+                        "INSERT INTO job_first_seen (job_name) VALUES (%(n)s) ON CONFLICT (job_name) DO NOTHING",
+                        {"n": _job.name},
+                    )
+        except Exception:
+            logger.exception("JobRuntime.start: failed to seed job_first_seen anchors")
         logger.info(
             "JobRuntime started: registered=%d wired=%s",
             registered,

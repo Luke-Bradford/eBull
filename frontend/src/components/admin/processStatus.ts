@@ -135,7 +135,11 @@ export function reasonTooltip(err: unknown): string {
  */
 export const STALE_REASON_LABEL: Record<StaleReason, string> = {
   schedule_missed: "schedule missed",
-  watermark_gap: "source has fresh data",
+  // #1508 Task 2 (C2): watermark_gap now means the source's
+  // data-freshness index is in `error` state — i.e. ingest is actually
+  // failing — not "source has fresh data we haven't pulled". Label
+  // matches the backend reason copy.
+  watermark_gap: "ingest failing",
   queue_stuck: "queue stuck",
   mid_flight_stuck: "no progress",
 };
@@ -144,27 +148,43 @@ export const STALE_REASON_LABEL: Record<StaleReason, string> = {
  * Visuals for the single computed health verdict (#1512). The main
  * Processes row renders THIS pill instead of the raw `status` +
  * `stale_reasons` axes, so the operator never sees two cells that
- * disagree. `working` / `self_healing` pulse (something is in motion);
- * `current` / `attention` are static.
+ * disagree.
+ *
+ * #1508 C3 — two-colour fold. The page must read as binary: calm green
+ * (no action) vs alarming red (act). `working` and `self_healing` are
+ * "no action needed" states (a run is in flight / a retry is scheduled
+ * — both are the system working AS DESIGNED), so they share `current`'s
+ * calm emerald tone and DO NOT pulse-as-alarm. Their distinct LABEL text
+ * ("working" / "self-healing") is preserved so the operator still sees
+ * *why* a row is calm, but the colour no longer screams. Only `attention`
+ * wears the alarming red tone.
+ *
+ * The calm-green Tailwind tone is hoisted to a single const so the three
+ * calm verdicts cannot drift apart on a future dark-mode tweak
+ * (single-source-of-truth).
  */
+const CALM_TONE =
+  "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300";
+
 export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
   current: {
     label: "current",
-    toneClass:
-      "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300",
+    toneClass: CALM_TONE,
     pulse: false,
   },
   working: {
+    // Distinct label, but the calm-green tone of `current`: a live run is
+    // the system working as designed — not something to alarm on.
     label: "working",
-    toneClass:
-      "border-sky-300 bg-sky-50 text-sky-800 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200",
-    pulse: true,
+    toneClass: CALM_TONE,
+    pulse: false,
   },
   self_healing: {
+    // Distinct label, calm-green tone: a scheduled retry is auto-recovery,
+    // not an operator action item.
     label: "self-healing",
-    toneClass:
-      "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300",
-    pulse: true,
+    toneClass: CALM_TONE,
+    pulse: false,
   },
   attention: {
     label: "needs attention",
@@ -175,15 +195,17 @@ export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
 };
 
 /**
- * Sort priority: attention first so it floats to the top, then
- * self-healing, working, current last (#1512 — replaces the
- * status-based STATUS_SORT_PRIORITY + synthetic `stale` priority).
+ * Sort priority (#1508 C3): only `attention` pins to the top. The three
+ * calm verdicts (`current` / `working` / `self_healing`) share one rank
+ * so they form a single quiet group that the table can collapse behind
+ * one disclosure. Replaces the prior four-rank ordering (#1512) — the
+ * page is two-state now, not four.
  */
 export const VERDICT_SORT_PRIORITY: Record<HealthVerdict, number> = {
   attention: 0,
+  current: 1,
+  working: 1,
   self_healing: 1,
-  working: 2,
-  current: 3,
 };
 
 /**

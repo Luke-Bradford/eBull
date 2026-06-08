@@ -114,14 +114,15 @@ describe("ProcessRow", () => {
     ).toBe(true);
   });
 
-  it("renders pulsing left border on running rows (motion-reduce respected)", () => {
+  it("#1508 C3: a working (running) row is calm — no alarm border/pulse", () => {
     const { container } = renderRow({
       row: makeProcessRow({ status: "running" }),
     });
     const tr = container.querySelector("tr[data-status='running']") as HTMLElement;
-    expect(tr.className).toContain("animate-pulse");
-    expect(tr.className).toContain("motion-reduce:animate-none");
-    expect(tr.className).toContain("border-l-sky-500");
+    // Two-state page: only `attention` wears an alarming left-border. A
+    // live run is the system working as designed → border-less + no pulse.
+    expect(tr.className).not.toContain("animate-pulse");
+    expect(tr.className).toContain("border-l-transparent");
   });
 
   it("does not pulse on terminal statuses", () => {
@@ -243,22 +244,25 @@ describe("ProcessRow", () => {
     expect(tr.className).toContain("border-l-red-500");
   });
 
-  it("self_healing verdict pulses amber", () => {
+  it("#1508 C3: self_healing verdict is calm — no amber alarm border/pulse", () => {
     const { container } = renderRow({
       row: makeProcessRow({ status: "pending_retry", stale_reasons: [] }),
     });
     const tr = container.querySelector("tr") as HTMLElement;
-    expect(tr.className).toContain("border-l-amber-500");
-    expect(tr.className).toContain("animate-pulse");
+    // A scheduled retry is auto-recovery, not an action item → calm.
+    expect(tr.className).not.toContain("border-l-amber-500");
+    expect(tr.className).not.toContain("animate-pulse");
+    expect(tr.className).toContain("border-l-transparent");
   });
 
-  it("running (not stuck) pulses sky, not amber", () => {
+  it("#1508 C3: a calm verdict never wears the red attention border", () => {
     const { container } = renderRow({
       row: makeProcessRow({ status: "running", stale_reasons: [] }),
     });
     const tr = container.querySelector("tr") as HTMLElement;
-    expect(tr.className).toContain("border-l-sky-500");
+    expect(tr.className).not.toContain("border-l-red-500");
     expect(tr.className).not.toContain("border-l-amber-500");
+    expect(tr.className).toContain("border-l-transparent");
   });
 
   // ---------------------------------------------------------------------

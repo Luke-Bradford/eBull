@@ -325,3 +325,101 @@ def test_total_and_single_valued_with_liveness_kick(status: ProcessStatus, reaso
     verdict, self_healing, _ = compute_verdict(status=status, stale_reasons=reasons, liveness_kick_in_flight=True)
     assert verdict in _VALID_VERDICTS
     assert self_healing == (verdict == "self_healing")
+
+
+# ---------------------------------------------------------------------------
+# C6 (#1508) — never-started bound on a persisted first-seen anchor.
+# A scheduled job with zero lifetime rows that is now overdue past its first
+# expected fire is broken-from-day-one (attention "never started"), not
+# forever-green "first run pending".
+# ---------------------------------------------------------------------------
+
+
+def test_never_started_past_grace_is_attention() -> None:
+    """Overdue past first expected fire with zero rows reads attention."""
+    v, sh, reason = compute_verdict(status="pending_first_run", stale_reasons=(), never_started=True)
+    assert v == "attention"
+    assert sh is False
+    assert reason == "never started"
+
+
+def test_pending_first_run_within_grace_stays_working() -> None:
+    """Within grace (``never_started=False``) keeps the shipped 'first run
+    pending' behaviour — ``watermark_is_fresh=False`` so it does not fall into
+    the look-through 'current' branch."""
+    v, sh, reason = compute_verdict(
+        status="pending_first_run", stale_reasons=(), never_started=False, watermark_is_fresh=False
+    )
+    assert v == "working"
+    assert sh is False
+    assert reason == "first run pending"
+
+
+def test_never_started_outranks_fresh_watermark() -> None:
+    """A genuinely broken-from-day-one job (never_started) reads attention even
+    if its source watermark happens to look fresh — never_started is the
+    stronger signal that this specific job has produced nothing."""
+    v, _, reason = compute_verdict(
+        status="pending_first_run", stale_reasons=(), never_started=True, watermark_is_fresh=True
+    )
+    assert v == "attention"
+    assert reason == "never started"
+
+
+@pytest.mark.parametrize("status", [s for s in _ALL_STATUSES if s != "pending_first_run"])
+def test_never_started_only_affects_pending_first_run(status: ProcessStatus) -> None:
+    """Only ``pending_first_run`` consumes ``never_started`` — every other
+    status maps identically with the flag set or unset."""
+    base = compute_verdict(status=status, stale_reasons=())
+    with_flag = compute_verdict(status=status, stale_reasons=(), never_started=True)
+    assert base == with_flag
+
+
+@pytest.mark.parametrize("status", _ALL_STATUSES)
+@pytest.mark.parametrize("reasons", _all_reason_subsets())
+def test_total_and_single_valued_with_never_started(status: ProcessStatus, reasons: tuple[StaleReason, ...]) -> None:
+    """Totality holds with the never-started flag set, too."""
+    verdict, self_healing, _ = compute_verdict(status=status, stale_reasons=reasons, never_started=True)
+    assert verdict in _VALID_VERDICTS
+    assert self_healing == (verdict == "self_healing")
+
+
+# --- Operator-cancel look-through (#1508 / Task 5) -----------------------
+
+
+def test_operator_cancel_is_benign_green() -> None:
+    """A deliberate operator cancel reads Current (green) until the next fire."""
+    v, _, _ = compute_verdict(status="cancelled", stale_reasons=(), cancel_was_operator_initiated=True)
+    assert v == "current"
+
+
+def test_system_cancel_stays_attention() -> None:
+    """A cancel NOT traceable to an operator request (system/crash) stays red."""
+    v, _, reason = compute_verdict(status="cancelled", stale_reasons=(), cancel_was_operator_initiated=False)
+    assert v == "attention" and reason == "last run cancelled"
+
+
+def test_operator_cancel_never_masks_actionable_stale() -> None:
+    """A benign operator cancel must NOT hide a genuine wedge (ckpt-1 invariant)."""
+    v, _, _ = compute_verdict(status="cancelled", stale_reasons=("queue_stuck",), cancel_was_operator_initiated=True)
+    assert v == "attention"
+
+
+# --- Recovery-never-masks-a-wedge invariant (#1508 / Task 6) -------------
+#
+# Pins the #1509/#1510 guarantee: a recovery signal (retry-in-flight or
+# liveness-kick-in-flight) suppresses ONLY ``schedule_missed`` — it must
+# NEVER mask a genuine wedge (``watermark_gap`` / ``queue_stuck`` /
+# ``mid_flight_stuck``). Those three stay attention even when paired with a
+# recovery signal. Regression-proofs ``compute_verdict``'s precedence across
+# the whole #1508 effort.
+
+
+@pytest.mark.parametrize("wedge", ["watermark_gap", "queue_stuck", "mid_flight_stuck"])
+@pytest.mark.parametrize("recover", ["retry_in_flight", "liveness_kick_in_flight"])
+def test_recovery_signal_never_masks_a_wedge(wedge: str, recover: str) -> None:
+    kw = {"status": "failed", "stale_reasons": ("schedule_missed", wedge), recover: True}
+    if recover == "retry_in_flight":
+        kw["retry_at_display"] = "21:20"
+    verdict, _, _ = compute_verdict(**kw)  # type: ignore[arg-type]
+    assert verdict == "attention", f"{recover} masked {wedge}"

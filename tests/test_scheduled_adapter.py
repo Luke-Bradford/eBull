@@ -432,11 +432,14 @@ def test_stale_reasons_default_empty_on_healthy_row(
     assert row.stale_reasons == ()
 
 
-def test_watermark_gap_surfaces_when_freshness_overdue(
+def test_watermark_gap_surfaces_when_source_ingest_erroring(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """SEC freshness-driven scheduled job with an
-    ``expected_next_at`` past the gap tolerance → ``watermark_gap``."""
+    """C2 (#1508): ``watermark_gap`` is a POSITIVE source-level "ingest
+    failing" signal — at least one ``data_freshness_index`` row for the
+    source in ``state='error'``. A merely-overdue ``expected_next_at`` on a
+    ``state='current'`` row no longer fires (event-form jitter is not an
+    ingest problem)."""
     _ensure_kill_switch_off(ebull_test_conn)
     ebull_test_conn.execute(
         """
@@ -449,10 +452,8 @@ def test_watermark_gap_surfaces_when_freshness_overdue(
     ebull_test_conn.execute(
         """
         INSERT INTO data_freshness_index
-            (subject_type, subject_id, source, state, expected_next_at,
-             instrument_id)
-        VALUES ('issuer', '9100009', 'sec_form4', 'current',
-                now() - interval '10 minutes', 9100009)
+            (subject_type, subject_id, source, state, instrument_id)
+        VALUES ('issuer', '9100009', 'sec_form4', 'error', 9100009)
         """
     )
     ebull_test_conn.commit()

@@ -62,7 +62,7 @@ _REASON_ORDER: Final[tuple[StaleReason, ...]] = (
 
 _REASON_LABEL: Final[dict[StaleReason, str]] = {
     "schedule_missed": "schedule missed",
-    "watermark_gap": "source has fresh data",
+    "watermark_gap": "ingest failing",
     "queue_stuck": "queue stuck",
     "mid_flight_stuck": "no progress",
 }
@@ -76,6 +76,8 @@ def compute_verdict(
     retry_in_flight: bool = False,
     retry_at_display: str = "",
     liveness_kick_in_flight: bool = False,
+    never_started: bool = False,
+    cancel_was_operator_initiated: bool = False,
 ) -> tuple[HealthVerdict, bool, str]:
     """Collapse ``status`` + ``stale_reasons`` into one verdict.
 
@@ -169,8 +171,24 @@ def compute_verdict(
     if status == "failed":
         return ("attention", False, "last run failed")
     if status == "cancelled":
+        # Task 5 (#1508): a cancel traceable to a deliberate operator stop
+        # request (process_stop_requests join, resolved by the adapter) is
+        # benign — reads Current (green) until the next natural fire. A cancel
+        # NOT traceable to an operator request (system/crash) stays attention
+        # "last run cancelled". Placed AFTER the actionable-stale block above,
+        # so a benign cancel never masks a genuine wedge (ckpt-1 invariant).
+        if cancel_was_operator_initiated:
+            return ("current", False, "")
         return ("attention", False, "last run cancelled")
     if status == "pending_first_run":
+        # C6 (#1508): zero lifetime rows AND now overdue past its first
+        # expected fire (persisted first-seen + one cadence + grace, computed
+        # by the adapter) — broken-from-day-one, not merely awaiting its first
+        # natural slot. This outranks the watermark look-through below: a fresh
+        # SOURCE watermark says the data is current, but THIS job has produced
+        # nothing since it was first seen, so it must read attention.
+        if never_started:
+            return ("attention", False, "never started")
         # Look-through (#1511 / T5): a never-run steady-state poll whose
         # SEC source bootstrap already seeded — and which is still fresh
         # (``watermark_is_fresh``, computed by the adapter as covered-source

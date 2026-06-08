@@ -25,9 +25,36 @@ const MAX_NAMED_PROCESSES = 3;
 export interface StaleBannerProps {
   readonly rows: readonly ProcessRowResponse[];
   readonly checkedAt?: Date | null;
+  // True when the scheduler/worker process is not running (#1508 / C4 —
+  // `/system/status` `engine_down`). When set, a hard-red top banner replaces
+  // the per-row clean-bill/attention summary: every per-row verdict is stale
+  // once the engine stops, so the all-clear / attention counts would lie.
+  readonly engineDown?: boolean;
 }
 
-export function StaleBanner({ rows, checkedAt = null }: StaleBannerProps) {
+export function StaleBanner({
+  rows,
+  checkedAt = null,
+  engineDown = false,
+}: StaleBannerProps) {
+  // #1508 / C4 — global "nothing on this page is trustworthy" state. Wins over
+  // every per-row verdict (all-clear, attention, self-healing): when the jobs
+  // engine is dead nothing is updating, so we suppress the per-row summary and
+  // raise a hard-red alert instead. role="alert" (assertive) so the operator is
+  // told immediately rather than on the next polite poll.
+  if (engineDown) {
+    return (
+      <div
+        role="alert"
+        data-testid="engine-down-banner"
+        className="rounded-md border border-red-300 bg-red-100 px-3 py-2 text-xs font-medium text-red-800 dark:border-red-800 dark:bg-red-950/60 dark:text-red-200"
+      >
+        <span aria-hidden="true">⚠ </span>
+        Jobs engine not running — processes are not updating.
+      </div>
+    );
+  }
+
   const attention = rows.filter((r) => r.health_verdict === "attention");
   const selfHealing = rows.filter((r) => r.health_verdict === "self_healing");
   const checkedSuffix =

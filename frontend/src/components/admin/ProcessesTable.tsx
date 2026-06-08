@@ -56,6 +56,11 @@ export interface ProcessesTableProps {
   // rendered as the header's "checked HH:MM" freshness anchor. Optional;
   // omitted (null) before the first poll lands.
   readonly checkedAt?: Date | null;
+  // #1508 / C4 — the scheduler/worker process is not running
+  // (`/system/status` `engine_down`). Threaded straight to the StaleBanner,
+  // which raises a hard-red "Jobs engine not running" banner that wins over
+  // every per-row verdict (nothing is updating, so the per-row summary lies).
+  readonly engineDown?: boolean;
 }
 
 interface RowErrorState {
@@ -63,11 +68,31 @@ interface RowErrorState {
   readonly cancel?: unknown;
 }
 
+// #1530 C7 — single source of truth for the table header. Both the
+// steady-state table and the bootstrap/backfill section table render
+// the same six columns; sharing the ``<thead>`` keeps them from drifting
+// (add/rename a column in one and the other silently diverging).
+function ProcessTableHead() {
+  return (
+    <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+      <tr>
+        <th className="px-2 py-2">Process</th>
+        <th className="px-2 py-2">Lane</th>
+        <th className="px-2 py-2">Status</th>
+        <th className="px-2 py-2">Last run</th>
+        <th className="px-2 py-2">Cadence</th>
+        <th className="px-2 py-2 text-right">Actions</th>
+      </tr>
+    </thead>
+  );
+}
+
 export function ProcessesTable({
   snapshot,
   onMutationSuccess,
   bootstrapStatus = null,
   checkedAt = null,
+  engineDown = false,
 }: ProcessesTableProps) {
   const [selectedLane, setSelectedLane] = useState<ProcessLane | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -90,45 +115,64 @@ export function ProcessesTable({
   const bootstrapOnly =
     bootstrapStatus !== null && bootstrapStatus !== "complete";
 
+  // #1530 C7 — page scope. The main Processes view shows ONLY steady-state
+  // jobs (the ones that keep the system current). Bootstrap / backfill jobs
+  // (`role !== "steady_state"`) and the one-time bootstrap-mechanism row
+  // (`mechanism === "bootstrap"`) belong in a SEPARATE collapsed section, not
+  // the steady-state list. The clean-bill header (StaleBanner), two-colour
+  // collapse (C3) and attention pinning all operate on `steadyStateRows`
+  // ONLY — counts must reflect steady-state. In bootstrap-only mode (fresh
+  // install, bootstrap not yet complete) the single bootstrap row IS the
+  // primary action surface, so the whole table is just that row and the
+  // partition does not apply.
   const baseRows = useMemo(() => {
     if (bootstrapOnly) {
       return snapshot.rows.filter((r) => r.mechanism === "bootstrap");
     }
-    // #1508 — once bootstrap is ``complete`` the first-install row is done
-    // and does not belong in the steady-state ops list (operator: "there
-    // are still bootstrap jobs showing"). Fail-open: when the status fetch
-    // returned null (pending/errored) keep the row rather than hide
-    // information on uncertainty.
-    if (bootstrapStatus === "complete") {
-      return snapshot.rows.filter((r) => r.mechanism !== "bootstrap");
-    }
     return snapshot.rows;
-  }, [snapshot.rows, bootstrapOnly, bootstrapStatus]);
+  }, [snapshot.rows, bootstrapOnly]);
+
+  const isBootstrapOrBackfill = (r: ProcessRowResponse) =>
+    r.role !== "steady_state" || r.mechanism === "bootstrap";
+
+  const steadyStateRows = useMemo(
+    () => (bootstrapOnly ? baseRows : baseRows.filter((r) => !isBootstrapOrBackfill(r))),
+    [baseRows, bootstrapOnly],
+  );
+  // Bootstrap / backfill rows: the non-steady remainder. Hidden entirely in
+  // bootstrap-only mode (the bootstrap row already owns the whole table).
+  const bootstrapBackfillRows = useMemo(
+    () => (bootstrapOnly ? [] : baseRows.filter(isBootstrapOrBackfill)),
+    [baseRows, bootstrapOnly],
+  );
 
   const counts = useMemo(() => {
     const out: Partial<Record<ProcessLane, number>> = {};
-    for (const r of baseRows) {
+    for (const r of steadyStateRows) {
       out[r.lane] = (out[r.lane] ?? 0) + 1;
     }
     return out;
-  }, [baseRows]);
+  }, [steadyStateRows]);
 
   const visibleRows = useMemo(() => {
     const rows =
       selectedLane === null
-        ? baseRows
-        : baseRows.filter((r) => r.lane === selectedLane);
+        ? steadyStateRows
+        : steadyStateRows.filter((r) => r.lane === selectedLane);
     return [...rows].sort(compareRows);
-  }, [baseRows, selectedLane]);
+  }, [steadyStateRows, selectedLane]);
 
-  // #1513 — collapse the quiet rows by default. Pinned (always visible):
-  // `attention` (operator must act) AND `working` (a live run — the 5s
-  // poll exists to watch it, and it exposes Cancel, so it must not hide).
-  // Collapsed behind one inline disclosure: `current` (steady, fresh) and
-  // `self_healing` (auto-recovering, no action). compareRows already floats
-  // attention to the top, so the split preserves order within each group.
-  // Disabled in bootstrap-only mode: there the single bootstrap row IS the
-  // primary action surface and must never be tucked behind a disclosure.
+  // #1508 C3 — two-state page. ONLY `attention` pins (the operator must
+  // act). The three calm verdicts — `current` (steady, fresh), `working`
+  // (a live run — system working as designed) and `self_healing`
+  // (auto-recovering) — all fold behind ONE inline disclosure. A live run
+  // does not lose its Cancel affordance: the Cancel button is gated on
+  // `can_cancel` inside ProcessRow, so it is still reachable once the
+  // operator expands the disclosure — it just no longer screams for
+  // attention when nothing is wrong. compareRows floats attention to the
+  // top, so the split preserves order within each group. Disabled in
+  // bootstrap-only mode: there the single bootstrap row IS the primary
+  // action surface and must never be tucked behind a disclosure.
   const pinnedRows = useMemo(
     () =>
       bootstrapOnly
@@ -146,8 +190,17 @@ export function ProcessesTable({
   const collapsedSelfHealing = collapsedRows.filter(
     (r) => r.health_verdict === "self_healing",
   ).length;
-  const collapsedCurrent = collapsedRows.length - collapsedSelfHealing;
+  const collapsedWorking = collapsedRows.filter(
+    (r) => r.health_verdict === "working",
+  ).length;
+  const collapsedCurrent =
+    collapsedRows.length - collapsedSelfHealing - collapsedWorking;
   const [showCollapsed, setShowCollapsed] = useState(false);
+  // #1530 C7 — the "Bootstrap & backfill" section is a SECOND, distinct
+  // disclosure (separate from the C3 in-view collapse above) and defaults
+  // collapsed. It is unaffected by the lane filter (those rows are not lane
+  // chips), so its open state is NOT reset on lane change.
+  const [showBootstrapBackfill, setShowBootstrapBackfill] = useState(false);
   // Reset to the default-collapsed state whenever the lane filter changes,
   // so switching lanes never carries another lane's expanded state over
   // (Codex ckpt-2) — each lane re-collapses its own quiet rows.
@@ -297,12 +350,20 @@ export function ProcessesTable({
             onSelect={setSelectedLane}
           />
           <div className="text-xs text-slate-500 dark:text-slate-400">
-            {visibleRows.length} of {snapshot.rows.length} processes
+            {visibleRows.length} of {steadyStateRows.length} processes
           </div>
         </div>
       )}
 
-      <StaleBanner rows={baseRows} checkedAt={checkedAt} />
+      {/* #1530 C7 — the clean-bill header counts STEADY-STATE rows only.
+          Bootstrap / backfill rows (run at install / manually) are excluded
+          from the "all systems current" verdict; they live in their own
+          section below. The engine-down banner is global and unaffected. */}
+      <StaleBanner
+        rows={steadyStateRows}
+        checkedAt={checkedAt}
+        engineDown={engineDown}
+      />
 
       {snapshot.partial ? (
         <div
@@ -315,22 +376,20 @@ export function ProcessesTable({
       ) : null}
 
       {visibleRows.length === 0 ? (
-        <p className="text-sm text-slate-500 dark:text-slate-400">
-          No processes match the current lane filter.
-        </p>
+        // #1530 C7 — when no steady-state rows render, only show the empty
+        // hint if there's also no bootstrap/backfill section below (e.g. a
+        // lane filter matched nothing). If the only rows are bootstrap /
+        // backfill (fresh install), the section below carries them — don't
+        // claim "no processes".
+        bootstrapBackfillRows.length === 0 ? (
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            No processes match the current lane filter.
+          </p>
+        ) : null
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
-            <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              <tr>
-                <th className="px-2 py-2">Process</th>
-                <th className="px-2 py-2">Lane</th>
-                <th className="px-2 py-2">Status</th>
-                <th className="px-2 py-2">Last run</th>
-                <th className="px-2 py-2">Cadence</th>
-                <th className="px-2 py-2 text-right">Actions</th>
-              </tr>
-            </thead>
+            <ProcessTableHead />
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {pinnedRows.map(renderRow)}
               {collapsedRows.length > 0 ? (
@@ -345,7 +404,11 @@ export function ProcessesTable({
                       <span aria-hidden="true">
                         {showCollapsed ? "▾ " : "▸ "}
                       </span>
-                      {collapsedLabel(collapsedCurrent, collapsedSelfHealing)}
+                      {collapsedLabel(
+                        collapsedCurrent,
+                        collapsedWorking,
+                        collapsedSelfHealing,
+                      )}
                       {" — "}
                       {showCollapsed ? "hide" : "show"}
                     </button>
@@ -357,6 +420,39 @@ export function ProcessesTable({
           </table>
         </div>
       )}
+
+      {/* #1530 C7 — bootstrap / backfill jobs (run at install or manually)
+          live in their own collapsed section, separate from the C3 in-view
+          collapse above. Rendered only when there are such rows; never an
+          empty disclosure. Defaults collapsed. */}
+      {bootstrapBackfillRows.length > 0 ? (
+        <div data-testid="bootstrap-backfill-section" className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setShowBootstrapBackfill((v) => !v)}
+            aria-expanded={showBootstrapBackfill}
+            className="text-xs text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+          >
+            <span aria-hidden="true">
+              {showBootstrapBackfill ? "▾ " : "▸ "}
+            </span>
+            Bootstrap &amp; backfill — run at install / manual (
+            {bootstrapBackfillRows.length})
+            {" — "}
+            {showBootstrapBackfill ? "hide" : "show"}
+          </button>
+          {showBootstrapBackfill ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <ProcessTableHead />
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {[...bootstrapBackfillRows].sort(compareRows).map(renderRow)}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {fullWashTarget ? (
         <FullWashConfirmDialog
@@ -379,31 +475,35 @@ export function ProcessesTable({
   );
 }
 
-/** Verdicts that fold into the #1513 disclosure: steady-fresh `current` and
- *  auto-recovering `self_healing`. `attention` (act) and `working` (a live
- *  run — watch / cancel) stay pinned. */
+/** #1508 C3 — the three calm verdicts fold into the disclosure: steady-fresh
+ *  `current`, in-flight `working`, and auto-recovering `self_healing`. Only
+ *  `attention` (the operator must act) stays pinned. */
 function isCollapsible(verdict: ProcessRowResponse["health_verdict"]): boolean {
-  return verdict === "current" || verdict === "self_healing";
+  return verdict !== "attention";
 }
 
-/** Disclosure label for the collapsed rows (#1513), e.g.
- *  "12 current · 3 self-healing". Only `current` and `self_healing` are
- *  collapsible (see isCollapsible); `current` here is the count of collapsed
- *  `current`-verdict rows. */
-function collapsedLabel(current: number, selfHealing: number): string {
+/** Disclosure label for the collapsed rows (#1508 C3), e.g.
+ *  "12 current · 2 working · 3 self-healing". Each arg is the count of
+ *  collapsed rows of that verdict. */
+function collapsedLabel(
+  current: number,
+  working: number,
+  selfHealing: number,
+): string {
   const parts: string[] = [];
   if (current > 0) parts.push(`${current} current`);
+  if (working > 0) parts.push(`${working} working`);
   if (selfHealing > 0) parts.push(`${selfHealing} self-healing`);
   return parts.join(" · ");
 }
 
 function compareRows(a: ProcessRowResponse, b: ProcessRowResponse): number {
-  // #1512: sort by the single health verdict — attention floats to the
-  // top, then self-healing, working, current. This replaces the prior
-  // status-based priority + synthetic `stale` rank (the two-axis model
-  // is collapsed into one verdict), so an `ok`/`idle` row that goes
-  // overdue (now verdict=attention) surfaces at the top without a
-  // separate stale-tuple consult.
+  // #1508 C3: two-state sort — only `attention` floats to the pinned
+  // region; the three calm verdicts (current/working/self_healing) share
+  // one rank and stay in their original relative order. This collapses the
+  // prior status-based priority + synthetic `stale` rank into one verdict,
+  // so an `ok`/`idle` row that goes overdue (now verdict=attention)
+  // surfaces at the top without a separate stale-tuple consult.
   const sa = VERDICT_SORT_PRIORITY[a.health_verdict] ?? 99;
   const sb = VERDICT_SORT_PRIORITY[b.health_verdict] ?? 99;
   if (sa !== sb) return sa - sb;
