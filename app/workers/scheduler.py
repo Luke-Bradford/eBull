@@ -744,7 +744,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_SEC_FILING_DOCUMENTS_INGEST,
         display_name="SEC filing-documents manifest ingest",
-        source="sec_rate",
+        # #1540 — own lane: this @:35 producer holds the lane ~96s/tick (sole
+        # writer of filing_documents), far past #1538's ~1.75s retry window, so
+        # on sec_rate it starved the @:35 atom tick. See app/jobs/sources.py.
+        source="sec_filing_docs",
         description=(
             "Parse SEC filing-index JSON (``{accession}-index.json``) "
             "into the filing_documents manifest table (#452). Captures "
@@ -792,7 +795,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # oldest-first). The hourly universe-wide ingester (Layer 1/2/3 +
         # sec_manifest_worker) is the steady-state keeper for new Form 4s.
         role="backfill",
-        source="sec_rate",
+        # #1540 — own lane: this @:45 tail drainer collided with the @:45 atom
+        # tick every hour; #1538's retry can't cover the long holds. Write-safe
+        # concurrently with sec_insider_transactions_ingest (stays on sec_rate)
+        # via per-instrument advisory lock in refresh_insiders_current.
+        source="sec_insider_backfill",
         description=(
             "Round-robin backfill of Form 4 filings for instruments "
             "with deep historical backlogs (#456). Complements the "

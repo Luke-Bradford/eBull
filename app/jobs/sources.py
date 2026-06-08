@@ -65,6 +65,8 @@ Lane = Literal[
     "sec_rate",
     "sec_manifest",
     "sec_per_cik",
+    "sec_filing_docs",
+    "sec_insider_backfill",
     "sec_bulk_download",
     "db",
     "db_filings",
@@ -125,6 +127,30 @@ the rate — it does not.
   ``sec.last_modified.per_cik_poll`` namespace) have no other lane writer.
   Scheduled-only, so NOT added to the ``bootstrap_stages.lane`` CHECK (like
   ``sec_manifest`` / ``db_liveness`` / ``db_retry``).
+* ``sec_filing_docs`` — ``sec_filing_documents_ingest`` only (#1540). The
+  hourly @ :35 producer holds the lane ~96s per tick (it expands every filing's
+  ``{accession}-index.json`` into ``filing_documents`` rows). On the shared
+  ``sec_rate`` lane that 96s hold — far longer than #1538's ~1.75s acquire-retry
+  window — deterministically starves whichever member fires at :35
+  (``sec_atom_fast_lane`` every 5 min). Own lane removes the contention. Write
+  disjointness: it is the SOLE writer of ``filing_documents`` and writes no
+  ``data_freshness_index`` / watermark — no shared-row race with any lanemate;
+  ``max_instances=1`` blocks self-overlap. Scheduled-only → not in the
+  ``bootstrap_stages.lane`` CHECK.
+* ``sec_insider_backfill`` — ``sec_insider_transactions_backfill`` only (#1540).
+  The hourly @ :45 oldest-first Form-4 tail drainer collides with the @ :45
+  ``atom`` tick every hour; when it loses to a slow holder it skips the whole
+  hour (#1538 retry can't cover the long holds). Own lane removes the
+  contention. Write-ordering-safety (it now runs concurrently with its former
+  lanemate ``sec_insider_transactions_ingest``, which stays on ``sec_rate`` and
+  shares its full write set): typed insider tables + ``ownership_insiders_observations``
+  + ``filing_raw_documents`` are row-level ``ON CONFLICT`` idempotent from
+  immutable filings; ``ownership_insiders_current`` + ``ownership_refresh_state``
+  are written only inside ``refresh_insiders_current``, which holds a
+  per-instrument ``pg_advisory_xact_lock`` and captures the watermark pre-MERGE —
+  so that advisory lock (NOT this JobLock lane) serialises same-instrument
+  refreshes and the watermark cannot regress. The lane was not load-bearing for
+  correctness here. Scheduled-only → not in the ``bootstrap_stages.lane`` CHECK.
 * ``sec_bulk_download`` — fixed-URL SEC archive downloads. Disjoint
   from ``sec_rate`` — large fixed downloads, no per-issuer iteration.
 * ``db`` — DB-bound stages NOT owned by a finer family lane — Phase E
