@@ -64,6 +64,7 @@ Lane = Literal[
     "etoro",
     "sec_rate",
     "sec_manifest",
+    "sec_per_cik",
     "sec_bulk_download",
     "db",
     "db_filings",
@@ -95,16 +96,35 @@ the rate — it does not.
 * ``etoro`` — eToro REST budget. ``execute_approved_orders`` +
   ``daily_candle_refresh`` + ``etoro_lookups_refresh`` +
   ``exchanges_metadata_refresh`` serialise.
-* ``sec_rate`` — the SEC discovery/producer jobs (per-CIK + per-accession
-  fetchers). They serialise under one ``JobLock`` to bound job overlap, NOT
-  request rate (the HTTP floor above bounds rate). #1478 extracted the heavy
-  ``sec_manifest_worker`` drainer out of this lane so it stops starving the
-  lighter producers.
+* ``sec_rate`` — the SEC discovery/producer jobs (per-accession fetchers +
+  per-issuer ingest). They serialise under one ``JobLock`` to bound job
+  overlap, NOT request rate (the HTTP floor above bounds rate). #1478
+  extracted the heavy ``sec_manifest_worker`` drainer; #1534 extracted the
+  hourly ``sec_per_cik_poll`` producer (see ``sec_per_cik`` below) — both
+  for the same reason: a member that holds the shared lane (a long drainer,
+  or any member running at the exact ``:00`` slot the hourly poll fires)
+  deterministically starves the others.
 * ``sec_manifest`` — ``sec_manifest_worker`` only (#1478). The manifest drainer
   spends most of its run on DB tombstoning, not SEC calls; keeping it in
   ``sec_rate`` made it hold the producers' lane for 20-37s and starve them
   (7/7 vs 0/7). Its own lane lets it run concurrently with the producers while
   its single-instance self-lock + the shared HTTP floor still hold.
+* ``sec_per_cik`` — ``sec_per_cik_poll`` only (#1534). The hourly @ :00 Layer-3
+  poll shares the ``:00`` slot with every other ``sec_rate`` member that fires
+  on the hour (and, during bootstrap, with the near-constant heavy drainers).
+  Its fire uses a non-blocking ``pg_try_advisory_lock`` — so on contention it
+  does NOT queue, it skips the whole hour. It lost the race for 17h+ on dev
+  (last fire 2026-06-07 18:49) and the #1510 watchdog's re-enqueue kick hit the
+  same locked lane and no-opped. Its own lane removes the contention. Write
+  disjointness (a lane bounds overlap, not rate): its only shared write target
+  is ``sec_filing_manifest`` via ``record_manifest_entry`` (idempotent
+  ``ON CONFLICT`` upsert keyed by accession) — already written concurrently by
+  ``sec_manifest_worker`` from its own lane since #1478, so concurrent manifest
+  discovery is a proven-safe pattern; ``record_poll_outcome`` (per-CIK poll
+  scheduler rows) and ``set_watermark`` (the per_cik-exclusive
+  ``sec.last_modified.per_cik_poll`` namespace) have no other lane writer.
+  Scheduled-only, so NOT added to the ``bootstrap_stages.lane`` CHECK (like
+  ``sec_manifest`` / ``db_liveness`` / ``db_retry``).
 * ``sec_bulk_download`` — fixed-URL SEC archive downloads. Disjoint
   from ``sec_rate`` — large fixed downloads, no per-issuer iteration.
 * ``db`` — DB-bound stages NOT owned by a finer family lane — Phase E

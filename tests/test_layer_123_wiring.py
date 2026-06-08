@@ -83,7 +83,10 @@ class TestLayer123Registry:
         assert job.cadence == Cadence.hourly(minute=0)
         assert job.catch_up_on_boot is False
         assert job.prerequisite is not None
-        assert job.source == "sec_rate"
+        # #1534 — extracted from the over-subscribed sec_rate lane to its own
+        # single-job lane (the hourly @ :00 fire lost the non-blocking
+        # advisory-lock race to sec_rate siblings and skipped the whole hour).
+        assert job.source == "sec_per_cik"
 
     def test_layer4_master_idx_quarterly_sweep_registered(self) -> None:
         """G12 — cross-quarter discovery walker. Weekly Sun 05:15 UTC.

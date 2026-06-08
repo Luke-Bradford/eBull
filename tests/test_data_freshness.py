@@ -357,6 +357,55 @@ class TestRecordPollOutcome:
         # cadence = 30d for form4
         assert row.expected_next_at == datetime(2026, 3, 31, tzinfo=UTC)
 
+    def test_stale_poll_does_not_regress_watermark(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #1534 — sec_per_cik_poll now runs on its own lane, concurrently
+        # with the sec_rate discovery producers (sec_atom_fast_lane /
+        # daily-index) that also write this freshness row. A per-CIK poll
+        # that snapshotted an OLD watermark, fetched, and saw no newer
+        # filing must NOT clobber a newer watermark a concurrent producer
+        # advanced in the meantime. Models: producer advanced to ACC-NEW;
+        # the in-flight poll then writes back its stale ACC-OLD snapshot.
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        record_poll_outcome(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            outcome="new_data",
+            last_known_filing_id="ACC-NEW",
+            last_known_filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+            new_filings_since=1,
+            cik="0000000001",
+            instrument_id=1,
+        )
+        # Stale poll: older snapshot, no new filings seen.
+        record_poll_outcome(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            outcome="current",
+            last_known_filing_id="ACC-OLD",
+            last_known_filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+            new_filings_since=0,
+            cik="0000000001",
+            instrument_id=1,
+        )
+        ebull_test_conn.commit()
+
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
+        assert row is not None
+        # Watermark did NOT regress to the stale snapshot.
+        assert row.last_known_filing_id == "ACC-NEW"
+        assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
+        # expected_next_at stays anchored on the preserved (newer) watermark
+        # 2026-02-01 + 30d form4 cadence — NOT the stale 2026-01-01 anchor,
+        # which would leave the row spuriously too-soon-due.
+        assert row.expected_next_at == datetime(2026, 3, 3, tzinfo=UTC)
+
     def test_error_outcome_sets_error_state(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
