@@ -42,6 +42,7 @@ import contextvars
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -430,6 +431,95 @@ _RECURRING_JOB_ID_PREFIX: Final[str] = "recurring:"
 # running job triggers it too), so the honest label is "an instance is already
 # active"; the operator tells wedge from slow via the running row's age.
 _MAX_INSTANCES_SKIP_REASON: Final[str] = "max_instances_active"
+
+
+# ---------------------------------------------------------------------------
+# Lane-busy retry (#1538)
+# ---------------------------------------------------------------------------
+#
+# ``JobLock`` is ONE advisory lock per lane (``source``), shared by every job on
+# that lane. The acquire is non-blocking, so a scheduled fire that loses the
+# race to a DIFFERENT job on the same lane raised ``JobAlreadyRunning`` and
+# skipped its WHOLE cadence period — e.g. an hourly producer firing at :00 lost
+# to ``sec_atom_fast_lane`` (every 5 min) and read red "schedule missed" with a
+# successful-looking last run, even though nothing was actually wrong. Per-job
+# lane extraction (#1534) fixed that one job at a time; this fixes the mechanism
+# for every lane: retry the ACQUIRE a few times so the loser re-acquires once
+# the peer (typically <1s) releases, and runs the same period.
+_LANE_BUSY_RETRY_BACKOFF: Final[tuple[float, ...]] = (0.25, 0.5, 1.0)  # 3 retries, ~1.75s max
+# Cap concurrent retry-sleepers so the bounded waits can never drain the
+# APScheduler worker pool (executor size 10, misfire_grace_time=1). When all
+# slots are taken a colliding fire skips immediately — exactly the pre-#1538
+# behaviour, never worse.
+_MAX_CONCURRENT_LANE_WAITERS: Final[int] = 3
+_LANE_WAIT_SLOTS: Final[threading.BoundedSemaphore] = threading.BoundedSemaphore(_MAX_CONCURRENT_LANE_WAITERS)
+
+
+def _fire_scheduled_with_lane_retry(
+    database_url: str,
+    job_name: str,
+    run: Callable[[], None],
+    *,
+    backoff: tuple[float, ...] = _LANE_BUSY_RETRY_BACKOFF,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Run a scheduled fire under its source-level ``JobLock``, retrying ONLY a
+    failed lock ACQUIRE on lane contention (#1538).
+
+    On lane-busy the fire re-tries the acquire a few times (``backoff``) so it
+    can run the same cadence period instead of skipping until next cadence.
+
+    Invariants:
+      * Retries ONLY the acquire. ``JobAlreadyRunning`` raised by
+        ``JobLock.__enter__`` (acquire) is retried; the same exception raised
+        from inside ``run`` (the body) is RE-RAISED, never replayed — the body
+        may have partially executed. The ``acquired`` flag distinguishes them.
+      * A module-level ``BoundedSemaphore`` caps concurrent waiters; with no
+        free slot the fire skips immediately (== pre-#1538 behaviour), so retry
+        sleeps cannot starve the scheduler pool.
+      * Worst case (lane held longer than the retry window, or no slot free) is
+        the old skip exactly — no new failure mode.
+
+    Returns normally on a lane-contention skip (after logging). Propagates
+    ``JobAlreadyRunning`` ONLY when ``run`` itself raised it (body-origin), plus
+    any exception ``run`` raises — the caller's existing handlers own those.
+    """
+    slot_held = False
+    try:
+        for attempt in range(len(backoff) + 1):
+            acquired = False
+            try:
+                with JobLock(database_url, job_name):
+                    acquired = True
+                    run()
+                return  # ran this period
+            except JobAlreadyRunning:
+                if acquired:
+                    # Raised from the body, not the acquire — not a lane skip.
+                    raise
+                if attempt == 0:
+                    if not _LANE_WAIT_SLOTS.acquire(blocking=False):
+                        logger.info(
+                            "scheduled fire of %r skipped: its lane is busy and all %d "
+                            "lane-retry slots are in use; will fire next cadence",
+                            job_name,
+                            _MAX_CONCURRENT_LANE_WAITERS,
+                        )
+                        return
+                    slot_held = True
+                if attempt < len(backoff):
+                    sleep(backoff[attempt])
+                    continue
+                logger.info(
+                    "scheduled fire of %r skipped: its lane stayed busy through the "
+                    "~%.2fs retry window; will fire next cadence",
+                    job_name,
+                    sum(backoff),
+                )
+                return
+    finally:
+        if slot_held:
+            _LANE_WAIT_SLOTS.release()
 
 
 # ---------------------------------------------------------------------------
@@ -1766,28 +1856,34 @@ class JobRuntime:
                         exc_info=True,
                     )
 
+            # #1071 — admin control hub PR3: route through the lock+fence
+            # prelude. Scheduled fires never bypass the fence (they are not the
+            # full-wash holder), so the default ``bypass_fence_check=False``
+            # applies. Self-tracked invokers opt out of the prelude.
+            def _run_scheduled_body() -> None:
+                if job_name in _PRELUDE_OPT_OUT_JOBS:
+                    # Set both contextvars so the opt-out invoker's
+                    # ``_tracked_job`` (if any) reuses the snapshot.
+                    snap_token = _params_snapshot_var.set(params)
+                    try:
+                        invoker(params)
+                    finally:
+                        _params_snapshot_var.reset(snap_token)
+                else:
+                    run_with_prelude(database_url, job_name, invoker, params=params)
+
             try:
-                with JobLock(database_url, job_name):
-                    # #1071 — admin control hub PR3: route through the
-                    # lock+fence prelude. Scheduled fires never bypass the
-                    # fence (they are not the full-wash holder), so the
-                    # default ``bypass_fence_check=False`` applies.
-                    # Self-tracked invokers opt out of the prelude.
-                    if job_name in _PRELUDE_OPT_OUT_JOBS:
-                        # Set both contextvars so the opt-out invoker's
-                        # ``_tracked_job`` (if any) reuses the snapshot.
-                        snap_token = _params_snapshot_var.set(params)
-                        try:
-                            invoker(params)
-                        finally:
-                            _params_snapshot_var.reset(snap_token)
-                    else:
-                        run_with_prelude(database_url, job_name, invoker, params=params)
+                # #1538 — retry the source-level lane acquire on transient
+                # cross-job contention so a fire that loses the shared-lane race
+                # runs the SAME period instead of skipping the whole cadence.
+                _fire_scheduled_with_lane_retry(database_url, job_name, _run_scheduled_body)
             except JobAlreadyRunning:
+                # The helper retries the ACQUIRE, so this is reached ONLY when
+                # the body raised it — the same job is already running in this
+                # process (a manual trigger or an overrunning prior fire).
                 logger.info(
-                    "scheduled fire of %r skipped: another instance is "
-                    "already running (lock held by manual trigger or "
-                    "earlier overrunning fire)",
+                    "scheduled fire of %r skipped: the same job is already "
+                    "running in this process; will fire next cadence",
                     job_name,
                 )
             except OrchestratorFenceHeld as exc:
