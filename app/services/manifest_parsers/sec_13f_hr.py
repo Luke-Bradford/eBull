@@ -199,7 +199,7 @@ def _parse_13f_hr(
                     filer_cik=filer_cik,
                     accession_number=accession,
                     period_of_report=None,
-                    status="failed",
+                    status="tombstoned",
                     error="archive index.json fetch failed",
                 )
         except Exception as exc:  # noqa: BLE001
@@ -218,7 +218,12 @@ def _parse_13f_hr(
     if primary_name is None or infotable_name is None:
         # Index found but missing one of the two required attachments.
         # Deterministic — re-fetching the same index yields the same
-        # gap. Tombstone with audit-log entry.
+        # gap (pre-2013 13Fs predate the 2013 infotable-XML mandate).
+        # Tombstone with audit-log entry. The ingest-log row is written
+        # 'tombstoned' (not 'failed') to MIRROR the ParseOutcome below,
+        # so the ingest_sweep_adapter does not red sec_13f_sweep on a
+        # non-actionable permanent skip (#1532). This is the dominant
+        # log-failure class (~55k pre-2013 accessions).
         log_error = f"archive index missing files (primary={primary_name!r}, infotable={infotable_name!r})"
         try:
             with conn.transaction():
@@ -227,7 +232,7 @@ def _parse_13f_hr(
                     filer_cik=filer_cik,
                     accession_number=accession,
                     period_of_report=None,
-                    status="failed",
+                    status="tombstoned",
                     error=log_error,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -265,7 +270,7 @@ def _parse_13f_hr(
                     filer_cik=filer_cik,
                     accession_number=accession,
                     period_of_report=None,
-                    status="failed",
+                    status="tombstoned",
                     error="primary_doc.xml fetch failed",
                 )
         except Exception as exc:  # noqa: BLE001
@@ -348,7 +353,7 @@ def _parse_13f_hr(
                     filer_cik=filer_cik,
                     accession_number=accession,
                     period_of_report=info.period_of_report,
-                    status="failed",
+                    status="tombstoned",
                     error="retention floor",
                 )
         except Exception as exc:  # noqa: BLE001
@@ -384,7 +389,7 @@ def _parse_13f_hr(
                     filer_cik=filer_cik,
                     accession_number=accession,
                     period_of_report=info.period_of_report,
-                    status="failed",
+                    status="tombstoned",
                     error="infotable.xml fetch failed",
                 )
         except Exception as exc:  # noqa: BLE001
@@ -551,8 +556,14 @@ def _parse_13f_hr(
         )
         if is_transient_upsert_error(exc):
             return _failed_outcome(format_upsert_error(exc), raw_status="stored")
-        # Deterministic — write ingest-log 'failed' in a fresh
-        # savepoint then tombstone the manifest.
+        # Deterministic — tombstone the manifest (re-fetch won't fix a
+        # constraint / programming defect) BUT keep the ingest-log row
+        # 'failed', NOT 'tombstoned'. Unlike the pre-2013 archive-missing
+        # skip (expected, non-actionable), an upsert defect is an
+        # actionable code/data bug — the operator must still see it via
+        # the sweep's last-run breadcrumb (#1532, Codex ckpt-2 HIGH).
+        # This deliberate manifest=tombstoned / log=failed divergence
+        # surfaces the defect without re-fetch-storming.
         try:
             with conn.transaction():
                 _record_ingest_attempt(

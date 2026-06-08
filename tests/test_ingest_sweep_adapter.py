@@ -142,6 +142,23 @@ def _insert_n_port_log(
     )
 
 
+def _insert_13f_log(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession: str,
+    status: str,
+    error: str | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings_ingest_log (
+            accession_number, filer_cik, status, holdings_inserted, holdings_skipped, error
+        ) VALUES (%s, '0001234567', %s, 0, 0, %s)
+        """,
+        (accession, status, error),
+    )
+
+
 def test_sweep_registry_has_six_canonical_sweeps(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     """Pin the v1 sweep registry shape — adding/removing sweeps is a deliberate change."""
     ids = ingest_sweep_adapter.sweep_process_ids()
@@ -263,6 +280,67 @@ def test_nport_sweep_reads_log_errors_first(
     assert row.status == "failed"
     # log dominates — first error_class is the log's
     assert any("NPortMissingSeriesError" in e.error_class for e in row.last_n_errors)
+
+
+def test_tombstoned_rows_do_not_red_13f_sweep(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#1532 — tombstoned manifest + log rows are deterministic permanent
+    skips (pre-2013 13Fs with no infotable XML), NOT operator action items.
+    A sweep whose ONLY non-success rows are tombstoned must read 'ok'
+    ("red = actionable", #1530), and its last-run summary must read
+    'skipped' rather than 'failure'."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_test_state(ebull_test_conn)
+    _insert_manifest_row(
+        ebull_test_conn,
+        accession_number="0001085146-09-000001",
+        cik="0000894300",
+        source="sec_13f_hr",
+        form="13F-HR",
+        ingest_status="tombstoned",
+        error="archive index missing files (primary=None, infotable=None)",
+        instrument_id=None,
+    )
+    _insert_13f_log(
+        ebull_test_conn,
+        accession="0001085146-09-000001",
+        status="tombstoned",
+        error="archive index missing files (primary=None, infotable=None)",
+    )
+    ebull_test_conn.commit()
+
+    row = ingest_sweep_adapter.get_row(ebull_test_conn, process_id="sec_13f_sweep")
+    assert row is not None
+    assert row.status == "ok"
+    assert row.last_n_errors == ()
+    assert row.last_run is not None
+    assert row.last_run.status == "skipped"
+
+
+def test_failed_manifest_row_still_reds_13f_sweep(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#1532 guard — a genuinely actionable (retryable) manifest failure,
+    e.g. a transient fetch timeout, MUST still red the sweep. The
+    tombstone exclusion is status-scoped, not a blanket 13F mute."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_test_state(ebull_test_conn)
+    _insert_manifest_row(
+        ebull_test_conn,
+        accession_number="0001085146-09-001941",
+        cik="0000894300",
+        source="sec_13f_hr",
+        form="13F-HR",
+        ingest_status="failed",
+        error="fetch error: The read operation timed out",
+        instrument_id=None,
+    )
+    ebull_test_conn.commit()
+
+    row = ingest_sweep_adapter.get_row(ebull_test_conn, process_id="sec_13f_sweep")
+    assert row is not None
+    assert row.status == "failed"
 
 
 def test_ok_sweep_when_no_failures_and_no_running(

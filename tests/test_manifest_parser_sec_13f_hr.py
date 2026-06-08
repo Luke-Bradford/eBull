@@ -320,7 +320,9 @@ def test_index_404_tombstones_with_log(
             (accession,),
         )
         log = cur.fetchone()
-    assert log is not None and log[0] == "failed"
+    # #1532 — index.json 404 is a deterministic permanent skip; the log
+    # row mirrors the tombstoned ParseOutcome so the sweep stays green.
+    assert log is not None and log[0] == "tombstoned"
 
 
 def test_index_missing_primary_doc_tombstones(
@@ -328,7 +330,7 @@ def test_index_missing_primary_doc_tombstones(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Index found but primary_doc.xml entry absent — deterministic
-    gap; tombstone the manifest + log 'failed'."""
+    gap; tombstone the manifest + log 'tombstoned' (#1532)."""
     accession = "0001067983-25-000004"
     filer_cik = "0001067983"
     _seed_pending_13f_hr(ebull_test_conn, accession=accession, filer_cik=filer_cik)
@@ -501,6 +503,10 @@ def test_deterministic_upsert_exception_tombstones_with_log(
         )
         log = cur.fetchone()
     assert log is not None
+    # #1532 — a deterministic UPSERT defect (constraint / programming
+    # bug) tombstones the manifest (re-fetch won't fix it) but stays
+    # log 'failed': it is an actionable code/data bug the operator must
+    # still see, unlike the expected pre-2013 archive-missing skip.
     assert log[0] == "failed"
     assert log[1] is not None and "RuntimeError" in log[1]
 
@@ -858,7 +864,9 @@ def test_pre_cap_period_tombstones_before_infotable_fetch(
         )
         log = cur.fetchone()
     assert log is not None
-    assert log[0] == "failed"
+    # #1532 — retention-floor is a deterministic permanent skip; the log
+    # row mirrors the tombstoned ParseOutcome.
+    assert log[0] == "tombstoned"
     assert log[1] == date_cls(2020, 3, 31)
     assert log[2] == "retention floor"
 

@@ -545,6 +545,47 @@ class TestIngestFiler13F:
             assert row is not None
             assert row[0] == 0
 
+    def test_archive_missing_attachments_tombstones_accession(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Index found but missing primary_doc / infotable — deterministic
+        (pre-2013 13Fs predate the 2013 infotable-XML mandate). Re-fetching
+        yields the same gap forever, so the accession is TOMBSTONED, not
+        'failed' (#1532). A tombstone is a permanent skip, not an operator
+        action item: the ingest-log row reads 'tombstoned' so the
+        sec_13f_sweep stays green, and it does NOT count as accessions_failed.
+        """
+        conn = _setup
+        cik_int = 1067983
+        accession = "0001067983-25-000001"
+        archive_base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession.replace('-', '')}/"
+        payloads: dict[str, str | None] = {
+            "https://data.sec.gov/submissions/CIK0001067983.json": _submissions_json(
+                accessions=[(accession, "13F-HR", "2025-02-14", "2024-12-31")]
+            ),
+            # Index present but neither attachment resolvable — empty
+            # primary_doc makes parse_archive_index return primary=None.
+            archive_base + "index.json": _archive_index_json(primary_doc="", infotable=""),
+        }
+        fetcher = _InMemoryFetcher(payloads)
+        summary = ingest_filer_13f(conn, fetcher, filer_cik="0001067983")
+        conn.commit()
+        assert summary.accessions_seen == 1
+        assert summary.accessions_ingested == 0
+        # Deterministic permanent skip — NOT a failure.
+        assert summary.accessions_failed == 0
+        assert summary.first_error is None
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, error FROM institutional_holdings_ingest_log WHERE accession_number = %s",
+                (accession,),
+            )
+            log = cur.fetchone()
+        assert log is not None
+        assert log[0] == "tombstoned"
+        assert log[1] is not None and "archive index missing files" in log[1]
+
     def test_partial_unique_index_blocks_duplicate_equity_row(
         self,
         _setup: psycopg.Connection[tuple],
