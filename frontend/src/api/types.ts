@@ -1173,6 +1173,15 @@ export type ProcessLane =
 
 export type ProcessMechanism = "bootstrap" | "scheduled_job" | "ingest_sweep";
 
+/**
+ * #1530 C7 — page-scope role. Mirrors backend
+ * `app/services/processes/__init__.py::ProcessRole`. The Processes page
+ * shows only `steady_state` jobs (the ones that keep the system current)
+ * in its main view; `bootstrap` / `backfill` rows (run at install or
+ * manually) fold into a separate collapsed "Bootstrap & backfill" section.
+ */
+export type ProcessRole = "steady_state" | "bootstrap" | "backfill";
+
 export type ProcessStatus =
   | "idle"
   | "pending_first_run"
@@ -1260,6 +1269,10 @@ export interface ProcessRowResponse {
   display_name: string;
   lane: ProcessLane;
   mechanism: ProcessMechanism;
+  // #1530 C7 — page-scope role (steady_state | bootstrap | backfill).
+  // The main Processes view shows only steady_state rows; bootstrap /
+  // backfill rows fold into the collapsed "Bootstrap & backfill" section.
+  role: ProcessRole;
   status: ProcessStatus;
   last_run: ProcessRunSummaryResponse | null;
   active_run: ActiveRunSummaryResponse | null;

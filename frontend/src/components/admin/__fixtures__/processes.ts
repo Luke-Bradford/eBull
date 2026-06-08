@@ -108,6 +108,7 @@ export function makeProcessRow(
     display_name: "Insider Form 4 ingest",
     lane,
     mechanism: "scheduled_job",
+    role: "steady_state",
     status,
     last_run: {
       run_id: nextRunId++,

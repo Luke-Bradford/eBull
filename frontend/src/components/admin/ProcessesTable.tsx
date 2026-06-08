@@ -96,36 +96,52 @@ export function ProcessesTable({
   const bootstrapOnly =
     bootstrapStatus !== null && bootstrapStatus !== "complete";
 
+  // #1530 C7 — page scope. The main Processes view shows ONLY steady-state
+  // jobs (the ones that keep the system current). Bootstrap / backfill jobs
+  // (`role !== "steady_state"`) and the one-time bootstrap-mechanism row
+  // (`mechanism === "bootstrap"`) belong in a SEPARATE collapsed section, not
+  // the steady-state list. The clean-bill header (StaleBanner), two-colour
+  // collapse (C3) and attention pinning all operate on `steadyStateRows`
+  // ONLY — counts must reflect steady-state. In bootstrap-only mode (fresh
+  // install, bootstrap not yet complete) the single bootstrap row IS the
+  // primary action surface, so the whole table is just that row and the
+  // partition does not apply.
   const baseRows = useMemo(() => {
     if (bootstrapOnly) {
       return snapshot.rows.filter((r) => r.mechanism === "bootstrap");
     }
-    // #1508 — once bootstrap is ``complete`` the first-install row is done
-    // and does not belong in the steady-state ops list (operator: "there
-    // are still bootstrap jobs showing"). Fail-open: when the status fetch
-    // returned null (pending/errored) keep the row rather than hide
-    // information on uncertainty.
-    if (bootstrapStatus === "complete") {
-      return snapshot.rows.filter((r) => r.mechanism !== "bootstrap");
-    }
     return snapshot.rows;
-  }, [snapshot.rows, bootstrapOnly, bootstrapStatus]);
+  }, [snapshot.rows, bootstrapOnly]);
+
+  const isBootstrapOrBackfill = (r: ProcessRowResponse) =>
+    r.role !== "steady_state" || r.mechanism === "bootstrap";
+
+  const steadyStateRows = useMemo(
+    () => (bootstrapOnly ? baseRows : baseRows.filter((r) => !isBootstrapOrBackfill(r))),
+    [baseRows, bootstrapOnly],
+  );
+  // Bootstrap / backfill rows: the non-steady remainder. Hidden entirely in
+  // bootstrap-only mode (the bootstrap row already owns the whole table).
+  const bootstrapBackfillRows = useMemo(
+    () => (bootstrapOnly ? [] : baseRows.filter(isBootstrapOrBackfill)),
+    [baseRows, bootstrapOnly],
+  );
 
   const counts = useMemo(() => {
     const out: Partial<Record<ProcessLane, number>> = {};
-    for (const r of baseRows) {
+    for (const r of steadyStateRows) {
       out[r.lane] = (out[r.lane] ?? 0) + 1;
     }
     return out;
-  }, [baseRows]);
+  }, [steadyStateRows]);
 
   const visibleRows = useMemo(() => {
     const rows =
       selectedLane === null
-        ? baseRows
-        : baseRows.filter((r) => r.lane === selectedLane);
+        ? steadyStateRows
+        : steadyStateRows.filter((r) => r.lane === selectedLane);
     return [...rows].sort(compareRows);
-  }, [baseRows, selectedLane]);
+  }, [steadyStateRows, selectedLane]);
 
   // #1508 C3 — two-state page. ONLY `attention` pins (the operator must
   // act). The three calm verdicts — `current` (steady, fresh), `working`
@@ -161,6 +177,11 @@ export function ProcessesTable({
   const collapsedCurrent =
     collapsedRows.length - collapsedSelfHealing - collapsedWorking;
   const [showCollapsed, setShowCollapsed] = useState(false);
+  // #1530 C7 — the "Bootstrap & backfill" section is a SECOND, distinct
+  // disclosure (separate from the C3 in-view collapse above) and defaults
+  // collapsed. It is unaffected by the lane filter (those rows are not lane
+  // chips), so its open state is NOT reset on lane change.
+  const [showBootstrapBackfill, setShowBootstrapBackfill] = useState(false);
   // Reset to the default-collapsed state whenever the lane filter changes,
   // so switching lanes never carries another lane's expanded state over
   // (Codex ckpt-2) — each lane re-collapses its own quiet rows.
@@ -310,13 +331,17 @@ export function ProcessesTable({
             onSelect={setSelectedLane}
           />
           <div className="text-xs text-slate-500 dark:text-slate-400">
-            {visibleRows.length} of {snapshot.rows.length} processes
+            {visibleRows.length} of {steadyStateRows.length} processes
           </div>
         </div>
       )}
 
+      {/* #1530 C7 — the clean-bill header counts STEADY-STATE rows only.
+          Bootstrap / backfill rows (run at install / manually) are excluded
+          from the "all systems current" verdict; they live in their own
+          section below. The engine-down banner is global and unaffected. */}
       <StaleBanner
-        rows={baseRows}
+        rows={steadyStateRows}
         checkedAt={checkedAt}
         engineDown={engineDown}
       />
@@ -332,9 +357,16 @@ export function ProcessesTable({
       ) : null}
 
       {visibleRows.length === 0 ? (
-        <p className="text-sm text-slate-500 dark:text-slate-400">
-          No processes match the current lane filter.
-        </p>
+        // #1530 C7 — when no steady-state rows render, only show the empty
+        // hint if there's also no bootstrap/backfill section below (e.g. a
+        // lane filter matched nothing). If the only rows are bootstrap /
+        // backfill (fresh install), the section below carries them — don't
+        // claim "no processes".
+        bootstrapBackfillRows.length === 0 ? (
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            No processes match the current lane filter.
+          </p>
+        ) : null
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
@@ -378,6 +410,48 @@ export function ProcessesTable({
           </table>
         </div>
       )}
+
+      {/* #1530 C7 — bootstrap / backfill jobs (run at install or manually)
+          live in their own collapsed section, separate from the C3 in-view
+          collapse above. Rendered only when there are such rows; never an
+          empty disclosure. Defaults collapsed. */}
+      {bootstrapBackfillRows.length > 0 ? (
+        <div data-testid="bootstrap-backfill-section" className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setShowBootstrapBackfill((v) => !v)}
+            aria-expanded={showBootstrapBackfill}
+            className="text-xs text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+          >
+            <span aria-hidden="true">
+              {showBootstrapBackfill ? "▾ " : "▸ "}
+            </span>
+            Bootstrap &amp; backfill — run at install / manual (
+            {bootstrapBackfillRows.length})
+            {" — "}
+            {showBootstrapBackfill ? "hide" : "show"}
+          </button>
+          {showBootstrapBackfill ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  <tr>
+                    <th className="px-2 py-2">Process</th>
+                    <th className="px-2 py-2">Lane</th>
+                    <th className="px-2 py-2">Status</th>
+                    <th className="px-2 py-2">Last run</th>
+                    <th className="px-2 py-2">Cadence</th>
+                    <th className="px-2 py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {[...bootstrapBackfillRows].sort(compareRows).map(renderRow)}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {fullWashTarget ? (
         <FullWashConfirmDialog

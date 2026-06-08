@@ -459,7 +459,10 @@ describe("ProcessesTable", () => {
 
   it("keeps the bootstrap row when status is unknown (fail-open)", () => {
     // null = bootstrap-status fetch pending/errored: don't hide information
-    // on uncertainty — render the full table including the bootstrap row.
+    // on uncertainty — render the full table. #1530 C7: the bootstrap-
+    // mechanism row no longer sits in the steady-state main view; it folds
+    // into the separate "Bootstrap & backfill" section (still rendered, not
+    // hidden), while the steady-state job stays in the main list.
     renderTableWithStatus(
       [
         makeProcessRow({
@@ -475,10 +478,18 @@ describe("ProcessesTable", () => {
       ],
       null,
     );
+    // Steady-state row: in the main view.
+    expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
+    // Bootstrap row: NOT in the main view — present under the
+    // Bootstrap & backfill section once expanded.
+    expect(
+      screen.queryByRole("link", { name: "First-install bootstrap" }),
+    ).toBeNull();
+    const section = screen.getByTestId("bootstrap-backfill-section");
+    fireEvent.click(section.querySelector("button")!);
     expect(
       screen.getByRole("link", { name: "First-install bootstrap" }),
     ).toBeTruthy();
-    expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
   });
 
   it("bootstrap full-wash modal uses 'Re-run all' heading + replay copy", async () => {
@@ -550,6 +561,9 @@ describe("ProcessesTable", () => {
   });
 
   it("fail-open: renders all rows when bootstrapStatus is null (fetch pending/errored)", () => {
+    // #1530 C7: fail-open still renders every row, but the bootstrap-
+    // mechanism row now lives in the Bootstrap & backfill section, not the
+    // steady-state main view. Nothing is hidden — just re-homed.
     renderTableWithStatus(
       [
         makeProcessRow({
@@ -565,10 +579,15 @@ describe("ProcessesTable", () => {
       ],
       null,
     );
+    expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
+    expect(
+      screen.queryByRole("link", { name: "First-install bootstrap" }),
+    ).toBeNull();
+    const section = screen.getByTestId("bootstrap-backfill-section");
+    fireEvent.click(section.querySelector("button")!);
     expect(
       screen.getByRole("link", { name: "First-install bootstrap" }),
     ).toBeTruthy();
-    expect(screen.getByRole("link", { name: "CIK refresh" })).toBeTruthy();
   });
 
   // ---------------------------------------------------------------------
@@ -629,5 +648,63 @@ describe("ProcessesTable", () => {
     expect(screen.queryByTestId("collapsed-disclosure")).toBeNull();
     expect(screen.getByRole("link", { name: "A" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "B" })).toBeTruthy();
+  });
+
+  // ---------------------------------------------------------------------
+  // #1530 C7 — page scope. The main view shows ONLY steady-state jobs;
+  // bootstrap / backfill rows fold into a separate collapsed
+  // "Bootstrap & backfill" section.
+  // ---------------------------------------------------------------------
+
+  it("partitions bootstrap and backfill rows out of the steady-state view into the collapsed section", () => {
+    renderTableRaw([
+      makeProcessRow({
+        process_id: "steady",
+        display_name: "Steady",
+        role: "steady_state",
+        status: "ok",
+        stale_reasons: [],
+      }),
+      makeProcessRow({
+        process_id: "boot",
+        display_name: "Booti",
+        role: "bootstrap",
+        status: "ok",
+        stale_reasons: [],
+      }),
+      makeProcessRow({
+        process_id: "back",
+        display_name: "Backi",
+        role: "backfill",
+        status: "ok",
+        stale_reasons: [],
+      }),
+    ]);
+
+    // The steady-state row is in the main view (current → folds into the
+    // C3 in-view disclosure, but is reachable by expanding it).
+    fireEvent.click(
+      screen.getByTestId("collapsed-disclosure").querySelector("button")!,
+    );
+    expect(screen.getByRole("link", { name: "Steady" })).toBeTruthy();
+
+    // Bootstrap / backfill rows are NOT in the main steady-state list.
+    expect(screen.queryByRole("link", { name: "Booti" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Backi" })).toBeNull();
+
+    // They ARE present under the separate "Bootstrap & backfill"
+    // disclosure once it is expanded.
+    const section = screen.getByTestId("bootstrap-backfill-section");
+    expect(section.textContent).toMatch(/Bootstrap & backfill/i);
+    fireEvent.click(section.querySelector("button")!);
+    expect(screen.getByRole("link", { name: "Booti" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Backi" })).toBeTruthy();
+  });
+
+  it("renders no Bootstrap & backfill section when every row is steady-state", () => {
+    renderTableRaw([
+      makeProcessRow({ process_id: "s", display_name: "S", role: "steady_state" }),
+    ]);
+    expect(screen.queryByTestId("bootstrap-backfill-section")).toBeNull();
   });
 });
