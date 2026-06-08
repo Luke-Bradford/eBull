@@ -68,6 +68,25 @@ interface RowErrorState {
   readonly cancel?: unknown;
 }
 
+// #1530 C7 — single source of truth for the table header. Both the
+// steady-state table and the bootstrap/backfill section table render
+// the same six columns; sharing the ``<thead>`` keeps them from drifting
+// (add/rename a column in one and the other silently diverging).
+function ProcessTableHead() {
+  return (
+    <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+      <tr>
+        <th className="px-2 py-2">Process</th>
+        <th className="px-2 py-2">Lane</th>
+        <th className="px-2 py-2">Status</th>
+        <th className="px-2 py-2">Last run</th>
+        <th className="px-2 py-2">Cadence</th>
+        <th className="px-2 py-2 text-right">Actions</th>
+      </tr>
+    </thead>
+  );
+}
+
 export function ProcessesTable({
   snapshot,
   onMutationSuccess,
@@ -370,16 +389,7 @@ export function ProcessesTable({
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
-            <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              <tr>
-                <th className="px-2 py-2">Process</th>
-                <th className="px-2 py-2">Lane</th>
-                <th className="px-2 py-2">Status</th>
-                <th className="px-2 py-2">Last run</th>
-                <th className="px-2 py-2">Cadence</th>
-                <th className="px-2 py-2 text-right">Actions</th>
-              </tr>
-            </thead>
+            <ProcessTableHead />
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {pinnedRows.map(renderRow)}
               {collapsedRows.length > 0 ? (
@@ -434,16 +444,7 @@ export function ProcessesTable({
           {showBootstrapBackfill ? (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                  <tr>
-                    <th className="px-2 py-2">Process</th>
-                    <th className="px-2 py-2">Lane</th>
-                    <th className="px-2 py-2">Status</th>
-                    <th className="px-2 py-2">Last run</th>
-                    <th className="px-2 py-2">Cadence</th>
-                    <th className="px-2 py-2 text-right">Actions</th>
-                  </tr>
-                </thead>
+                <ProcessTableHead />
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {[...bootstrapBackfillRows].sort(compareRows).map(renderRow)}
                 </tbody>
