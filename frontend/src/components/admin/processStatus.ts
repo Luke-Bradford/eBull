@@ -158,28 +158,32 @@ export const STALE_REASON_LABEL: Record<StaleReason, string> = {
  * ("working" / "self-healing") is preserved so the operator still sees
  * *why* a row is calm, but the colour no longer screams. Only `attention`
  * wears the alarming red tone.
+ *
+ * The calm-green Tailwind tone is hoisted to a single const so the three
+ * calm verdicts cannot drift apart on a future dark-mode tweak
+ * (single-source-of-truth).
  */
+const CALM_TONE =
+  "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300";
+
 export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
   current: {
     label: "current",
-    toneClass:
-      "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300",
+    toneClass: CALM_TONE,
     pulse: false,
   },
   working: {
     // Distinct label, but the calm-green tone of `current`: a live run is
     // the system working as designed — not something to alarm on.
     label: "working",
-    toneClass:
-      "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300",
+    toneClass: CALM_TONE,
     pulse: false,
   },
   self_healing: {
     // Distinct label, calm-green tone: a scheduled retry is auto-recovery,
     // not an operator action item.
     label: "self-healing",
-    toneClass:
-      "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300",
+    toneClass: CALM_TONE,
     pulse: false,
   },
   attention: {
