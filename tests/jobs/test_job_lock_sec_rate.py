@@ -53,5 +53,34 @@ def test_same_sec_job_name_from_another_thread_raises():
 def test_release_frees_the_slot():
     with JobLock("postgresql://unused", "sec_atom_fast_lane"):
         pass
-    with JobLock("postgresql://unused", "sec_atom_fast_lane"):
+    # white-box: the gate released both the slot and the name on exit.
+    assert not sec_lane_gate.SEC_LANE_GATE._held
+    with JobLock("postgresql://unused", "sec_atom_fast_lane"):  # name free again
         pass
+
+
+def test_two_different_sec_rate_jobs_hold_slots_concurrently():
+    # The dissolved lane no longer serialises DIFFERENT sec_rate job_names.
+    # Two THREADS (each its own _HELD_SOURCES contextvar) — a same-context
+    # nested acquire would hit the #1184 re-entrancy bypass and never reach the
+    # gate, so concurrency MUST be proven cross-thread.
+    a_in = threading.Event()
+    b_in = threading.Event()
+    release = threading.Event()
+
+    def run(job_name, entered):
+        with JobLock("postgresql://unused", job_name):
+            entered.set()
+            assert release.wait(timeout=5)
+
+    ta = threading.Thread(target=run, args=("sec_job_a", a_in))
+    tb = threading.Thread(target=run, args=("sec_job_b", b_in))
+    ta.start()
+    tb.start()
+    try:
+        assert a_in.wait(timeout=5)
+        assert b_in.wait(timeout=5)  # both inside at once → gate is >1-wide on distinct names
+    finally:
+        release.set()
+        ta.join(timeout=5)
+        tb.join(timeout=5)

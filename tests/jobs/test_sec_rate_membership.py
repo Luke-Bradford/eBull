@@ -10,8 +10,8 @@ import app.main  # noqa: F401
 from app.jobs.sources import get_job_name_to_source
 
 # db-tier: builds the full registry (imports scheduler + bootstrap_orchestrator).
-# The auto-marker does NOT mark this module (its source has no psycopg.connect /
-# TestClient), so mark it explicitly.
+# Marked db explicitly so the heavy ``app.main`` import (needed to resolve the
+# registry cold-import cycle) stays off the fast push gate.
 pytestmark = pytest.mark.db
 
 # Generated 2026-06-08 via: source_for over the full registry (spec §3d).
@@ -47,4 +47,10 @@ EXPECTED_SEC_RATE_MEMBERS = frozenset(
 
 def test_sec_rate_membership_is_frozen():
     resolved = {j for j, s in get_job_name_to_source().items() if s == "sec_rate"}
-    assert resolved == EXPECTED_SEC_RATE_MEMBERS
+    assert resolved == EXPECTED_SEC_RATE_MEMBERS, (
+        f"sec_rate membership changed.\n"
+        f"  added:   {resolved - EXPECTED_SEC_RATE_MEMBERS}\n"
+        f"  removed: {EXPECTED_SEC_RATE_MEMBERS - resolved}\n"
+        "Update EXPECTED_SEC_RATE_MEMBERS and run the write-safety audit "
+        "(spec section 3a) before adding a new sec_rate member."
+    )

@@ -100,35 +100,6 @@ def _assert_cross_thread_serialises(outer_job: str, inner_job: str) -> None:
 class TestJobLockSourceLevel:
     """Source-level lock contention vs cross-source parallelism."""
 
-    def test_same_source_serialises_cross_thread(self) -> None:
-        """Two ``db``-source jobs (orchestrator_full_sync + retry_deferred_recommendations)
-        cross-thread MUST still serialise via the real Postgres advisory lock.
-
-        Note (#1542): the pre-existing pair on this test was
-        ``sec_form3_ingest + sec_8k_events_ingest`` (both source=sec_rate). The
-        sec_rate lane is dissolved into an in-process N-wide SEC gate, so
-        same-source DIFFERENT job_names now run concurrently up to
-        ``SEC_LANE_MAX_CONCURRENCY`` — covered by
-        ``test_sec_rate_lane_different_jobs_now_run_concurrently`` below and by
-        ``tests/jobs/test_job_lock_sec_rate.py``. Cross-source semantics for the
-        remaining pg-advisory lanes (db / etoro / sec_manifest) are unchanged
-        and this test still asserts them via the db lane.
-        """
-        _assert_cross_thread_serialises("orchestrator_full_sync", "retry_deferred_recommendations")
-
-    def test_sec_rate_lane_different_jobs_now_run_concurrently(self) -> None:
-        """#1542 — two DIFFERENT ``sec_rate`` job_names run concurrently in the
-        same call context (no need to cross-thread: the in-process gate is N-wide
-        and gates on job_name, not source). Pre-#1542 the inner acquire would
-        have raised ``JobAlreadyRunning`` via the 1-wide pg-advisory lane lock.
-
-        Same-job_name cross-thread serialisation is covered in
-        ``tests/jobs/test_job_lock_sec_rate.py::test_same_sec_job_name_from_another_thread_raises``.
-        """
-        with JobLock(settings.database_url, "sec_form3_ingest"):
-            with JobLock(settings.database_url, "sec_8k_events_ingest"):
-                pass
-
     def test_cross_source_runs_concurrently(self) -> None:
         """orchestrator_full_sync (db) + execute_approved_orders (etoro)
         are different sources and both must acquire successfully."""
