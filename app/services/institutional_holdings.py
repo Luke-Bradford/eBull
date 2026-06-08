@@ -218,6 +218,14 @@ class _AccessionOutcome:
       * ``'failed'`` — fetch / parse failure that prevents writing
         a canonical row. The accession is logged so re-runs skip
         it; the operator can clear the log row to force a retry.
+      * ``'tombstoned'`` — deterministically unparseable; re-fetching
+        yields the same gap forever (e.g. pre-2013 13Fs that predate
+        the 2013 infotable-XML mandate, where the archive index has no
+        primary_doc / infotable attachment). Logged as a permanent
+        skip so the operator-visible sweep stays green (#1532) — it is
+        NOT an action item. Mirrors the ``tombstoned`` ParseOutcome the
+        manifest-worker path returns for the same condition
+        (``app/services/manifest_parsers/sec_13f_hr.py``).
     """
 
     status: str
@@ -1060,6 +1068,12 @@ def ingest_filer_13f(
         )
         if outcome.ingested:
             summary.accessions_ingested += 1
+        elif outcome.status == "tombstoned":
+            # Deterministic permanent skip (#1532) — not a failure. Don't
+            # inflate accessions_failed / first_error (which surface in
+            # data_ingestion_runs as operator-facing failure signal); the
+            # tombstoned ingest-log row is the audit trail.
+            pass
         else:
             summary.accessions_failed += 1
             if outcome.error and summary.first_error is None:
@@ -1377,8 +1391,18 @@ def _ingest_single_accession(
             primary_name,
             infotable_name,
         )
+        # Deterministic permanent skip: the archive index has no
+        # primary_doc / infotable attachment, so re-fetching yields the
+        # same gap forever (pre-2013 13Fs predate the 2013 infotable-XML
+        # mandate). Tombstone — not ``failed`` — so the sweep does not red
+        # on a non-actionable condition (#1532). Mirrors the manifest
+        # path's ``tombstoned`` ParseOutcome for the same branch
+        # (``sec_13f_hr.py``). A well-formed modern 13F always carries
+        # both attachments, so this branch is structurally pre-2013-only;
+        # genuinely transient fetch 404s land in the ``failed`` branches
+        # above and stay retryable.
         return _AccessionOutcome(
-            status="failed",
+            status="tombstoned",
             holdings_inserted=0,
             holdings_skipped_no_cusip=0,
             error=(f"archive index missing files (primary={primary_name!r}, infotable={infotable_name!r})"),

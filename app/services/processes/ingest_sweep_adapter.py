@@ -315,6 +315,14 @@ def _log_error_summaries(
     ``(accession_number PK, filer_cik, status, error, fetched_at)``
     so the query is uniform. Identifier-injection guard: ``log_table``
     is selected from the static ``_SWEEPS`` registry, not user input.
+
+    #1532: ``status = 'failed'`` deliberately EXCLUDES ``'tombstoned'``
+    rows. A tombstone is a deterministic permanent skip (e.g. pre-2013
+    13Fs with no infotable XML) — not an operator action item — so it
+    must not red the sweep ("red = actionable", #1530). The write paths
+    (``institutional_holdings.py`` / ``manifest_parsers/sec_13f_hr.py``)
+    label those rows ``'tombstoned'``; the equality filter here drops
+    them with no extra predicate needed.
     """
     if log_table not in {"institutional_holdings_ingest_log", "n_port_ingest_log"}:
         # Defence-in-depth: refuse anything not in the allow-list.
@@ -386,6 +394,11 @@ def _has_freshness_errors(conn: psycopg.Connection[Any], *, source: str) -> bool
 
 
 def _has_manifest_failures(conn: psycopg.Connection[Any], *, source: str) -> bool:
+    # ``ingest_status='failed'`` is the actionable-failure predicate.
+    # ``'tombstoned'`` rows (deterministic permanent skips — pre-2013
+    # 13Fs, retention-floor, etc.) are intentionally NOT counted: they
+    # are not operator action items, so they must not red the sweep
+    # ("red = actionable", #1530 / #1532).
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -438,6 +451,10 @@ _LOG_STATUS_TO_RUN: dict[str, RunStatus] = {
     "success": "success",
     "partial": "partial",
     "failed": "failure",
+    # #1532 — a tombstoned accession is a deterministic permanent skip,
+    # not a failure. Map to 'skipped' so a last-run summary whose newest
+    # log row is a tombstone reads honestly (and never as 'failure').
+    "tombstoned": "skipped",
 }
 
 
