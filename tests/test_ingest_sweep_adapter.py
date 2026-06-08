@@ -416,12 +416,41 @@ def _insert_freshness_with_expected_next_at(
     )
 
 
-def test_sweep_watermark_gap_fires_when_freshness_overdue(
+def test_sweep_watermark_gap_fires_when_source_ingest_erroring(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """A freshness-driven sweep with at least one
-    ``data_freshness_index`` row in ``expected_next_at`` past the gap
-    tolerance surfaces ``watermark_gap``."""
+    """C2 (#1508): sweep ``watermark_gap`` is a POSITIVE source-level
+    "ingest failing" signal — at least one ``data_freshness_index`` row
+    for the source in ``state='error'`` — mirroring the scheduled
+    adapter. It must NOT fire on a merely-overdue ``expected_next_at``
+    of a ``state='current'`` row (event-form jitter, see the negative
+    case below)."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_test_state(ebull_test_conn)
+    instrument_id = _seed_instrument(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO data_freshness_index
+            (subject_type, subject_id, source, state, instrument_id)
+        VALUES ('issuer', %s, 'sec_form3', 'error', %s)
+        """,
+        (str(instrument_id), instrument_id),
+    )
+    ebull_test_conn.commit()
+
+    row = ingest_sweep_adapter.get_row(ebull_test_conn, process_id="sec_form3_sweep")
+    assert row is not None
+    assert "watermark_gap" in row.stale_reasons
+
+
+def test_sweep_watermark_gap_silent_when_current_but_overdue(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """C2 (#1508) false-red kill: a ``state='current'`` row with an
+    overdue ``expected_next_at`` (event-driven SEC form between filings)
+    must NOT produce ``watermark_gap`` — the source is healthy, ingest
+    is not failing. This is the bug Codex caught: the old overdue-timing
+    probe FALSE-RED healthy form3/form4/def14a/8k sources."""
     _ensure_kill_switch_off(ebull_test_conn)
     _wipe_test_state(ebull_test_conn)
     instrument_id = _seed_instrument(ebull_test_conn)
@@ -437,7 +466,7 @@ def test_sweep_watermark_gap_fires_when_freshness_overdue(
 
     row = ingest_sweep_adapter.get_row(ebull_test_conn, process_id="sec_form3_sweep")
     assert row is not None
-    assert "watermark_gap" in row.stale_reasons
+    assert "watermark_gap" not in row.stale_reasons
 
 
 def test_sweep_never_schedule_misses_or_queue_stucks(
@@ -472,17 +501,17 @@ def test_sweep_running_suppresses_watermark_gap(
 ) -> None:
     """When the underlying scheduled job is in flight the sweep is
     ``running``; watermark_gap is suppressed because we ARE the
-    catch-up."""
+    catch-up — even with a live ``state='error'`` source row."""
     _ensure_kill_switch_off(ebull_test_conn)
     _wipe_test_state(ebull_test_conn)
     instrument_id = _seed_instrument(ebull_test_conn)
-    _insert_freshness_with_expected_next_at(
-        ebull_test_conn,
-        subject_id=str(instrument_id),
-        source="sec_form3",
-        state="current",
-        expected_next_at_offset_minutes=-30,
-        instrument_id=instrument_id,
+    ebull_test_conn.execute(
+        """
+        INSERT INTO data_freshness_index
+            (subject_type, subject_id, source, state, instrument_id)
+        VALUES ('issuer', %s, 'sec_form3', 'error', %s)
+        """,
+        (str(instrument_id), instrument_id),
     )
     ebull_test_conn.execute(
         """
