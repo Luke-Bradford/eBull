@@ -44,6 +44,13 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # is a job-overlap bucket, not a rate gate (the HTTP throttle bounds
         # the 10 req/s budget); see app/jobs/sources.py::Lane.
         "sec_manifest",
+        # #1534 — sec_per_cik_poll extracted from sec_rate into its own
+        # single-job lane. The hourly @ :00 producer lost the non-blocking
+        # advisory-lock race to whichever sec_rate sibling held the lane at
+        # :00 and skipped the whole hour (starved 17h+ on dev; the #1510
+        # watchdog kick hit the same lock and no-opped). Same shape as the
+        # #1478 sec_manifest split. See app/jobs/sources.py::Lane.
+        "sec_per_cik",
         "sec_bulk_download",
         "db",
         # #1141 — Phase C bulk-ingest family sources. Bootstrap-only
@@ -720,6 +727,36 @@ class TestSecManifestLaneExtraction:
             assert source_for(producer) != worker_lane, (
                 f"{producer} shares lane {worker_lane!r} with sec_manifest_worker — "
                 "the #1478 starvation extraction has regressed"
+            )
+
+
+class TestSecPerCikLaneExtraction:
+    """#1534 — ``sec_per_cik_poll`` lives in its OWN lane, distinct from the
+    ``sec_rate`` siblings that starved its hourly @ :00 fire (non-blocking
+    advisory-lock race → skipped the whole hour, 17h+ on dev; the #1510
+    watchdog kick hit the same lock and no-opped). DB-free always-on gate,
+    same rationale as ``TestSecManifestLaneExtraction``.
+    """
+
+    def test_sec_per_cik_poll_has_own_lane(self) -> None:
+        assert source_for("sec_per_cik_poll") == "sec_per_cik"
+
+    def test_sec_per_cik_lane_differs_from_every_sec_rate_sibling(self) -> None:
+        """The whole point: the hourly poll no longer shares a lane with the
+        ``sec_rate`` members that hold the lane at :00. If a future change
+        re-collapses it onto ``sec_rate``, this re-breaks."""
+        poll_lane = source_for("sec_per_cik_poll")
+        assert poll_lane != "sec_rate"
+        for sibling in (
+            "sec_atom_fast_lane",
+            "sec_daily_index_reconcile",
+            "sec_filing_documents_ingest",
+            "sec_form3_ingest",
+            "sec_insider_transactions_backfill",
+        ):
+            assert source_for(sibling) != poll_lane, (
+                f"{sibling} shares lane {poll_lane!r} with sec_per_cik_poll — "
+                "the #1534 starvation extraction has regressed"
             )
 
 

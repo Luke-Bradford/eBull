@@ -1335,7 +1335,16 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_SEC_PER_CIK_POLL,
         display_name="SEC per-CIK poll (Layer 3)",
-        source="sec_rate",
+        # #1534 — own single-job lane. On ``sec_rate`` (shared by 25 jobs)
+        # the hourly @ :00 fire lost the non-blocking advisory-lock race to
+        # whichever sibling held the lane at :00 and skipped the whole hour
+        # (starved 17h+ on dev; the #1510 watchdog kick hit the same lock and
+        # no-opped). The SEC 10 req/s cap is the HTTP floor, not the lane, so
+        # extraction is rate-safe. Disjointness: its only shared write target
+        # (``sec_filing_manifest`` via idempotent ON CONFLICT upsert) is already
+        # written concurrently by ``sec_manifest_worker`` from its own lane
+        # since #1478. See app/jobs/sources.py ``sec_per_cik`` docstring.
+        source="sec_per_cik",
         description=(
             "#1155 — Layer 3 of the #863-#873 freshness redesign. "
             "Hourly per-CIK reconcile reads data_freshness_index for "

@@ -429,19 +429,48 @@ def record_poll_outcome(
                 instrument_id = COALESCE(
                     EXCLUDED.instrument_id, data_freshness_index.instrument_id
                 ),
-                last_known_filing_id = COALESCE(
-                    EXCLUDED.last_known_filing_id, data_freshness_index.last_known_filing_id
-                ),
-                last_known_filed_at = COALESCE(
-                    EXCLUDED.last_known_filed_at, data_freshness_index.last_known_filed_at
-                ),
+                -- #1534 — monotonic watermark guard (mirrors the discovery
+                -- seed path above). Before per_cik_poll got its own lane it
+                -- serialised with the other sec_rate discovery producers
+                -- (sec_atom_fast_lane / daily-index), so its read-snapshot →
+                -- fetch → write-back could not race their freshness writes.
+                -- Now that it runs concurrently, a poll that saw no newer
+                -- filing must NOT regress a watermark a concurrent producer
+                -- just advanced: gate last_known_filing_id + last_known_filed_at
+                -- on filed_at so a stale snapshot leaves the newer value
+                -- intact. expected_next_at deliberately stays EXCLUDED (the
+                -- poll owns its own re-poll cadence — line ~394 — and must
+                -- advance even on a no-new-data poll, unlike the seed path).
+                last_known_filing_id = CASE
+                    WHEN data_freshness_index.last_known_filed_at IS NULL
+                      OR EXCLUDED.last_known_filed_at > data_freshness_index.last_known_filed_at
+                    THEN EXCLUDED.last_known_filing_id
+                    ELSE data_freshness_index.last_known_filing_id
+                END,
+                last_known_filed_at = CASE
+                    WHEN data_freshness_index.last_known_filed_at IS NULL
+                      OR EXCLUDED.last_known_filed_at > data_freshness_index.last_known_filed_at
+                    THEN EXCLUDED.last_known_filed_at
+                    ELSE data_freshness_index.last_known_filed_at
+                END,
                 last_polled_at = EXCLUDED.last_polled_at,
                 last_polled_outcome = EXCLUDED.last_polled_outcome,
                 new_filings_since = data_freshness_index.new_filings_since
                     + EXCLUDED.new_filings_since,
-                expected_next_at = COALESCE(
-                    EXCLUDED.expected_next_at, data_freshness_index.expected_next_at
-                ),
+                -- #1534 — tie expected_next_at to the winning watermark so a
+                -- STRICTLY-stale poll cannot leave the row too-soon-due while
+                -- a newer watermark is preserved above. Uses ``>=`` (not the
+                -- watermark's strict ``>``) on purpose: the common no-new-data
+                -- re-poll arrives with EXCLUDED.filed_at == existing and MUST
+                -- still advance its own next-poll cadence (line ~394) — only a
+                -- strictly-older incoming filed_at keeps the existing value.
+                expected_next_at = CASE
+                    WHEN data_freshness_index.last_known_filed_at IS NULL
+                      OR EXCLUDED.last_known_filed_at IS NULL
+                      OR EXCLUDED.last_known_filed_at >= data_freshness_index.last_known_filed_at
+                    THEN EXCLUDED.expected_next_at
+                    ELSE data_freshness_index.expected_next_at
+                END,
                 next_recheck_at = EXCLUDED.next_recheck_at,
                 state = EXCLUDED.state,
                 state_reason = EXCLUDED.state_reason
