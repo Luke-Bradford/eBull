@@ -51,6 +51,17 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # watchdog kick hit the same lock and no-opped). Same shape as the
         # #1478 sec_manifest split. See app/jobs/sources.py::Lane.
         "sec_per_cik",
+        # #1540 — sec_filing_documents_ingest (@:35, ~96s/tick sole writer of
+        # filing_documents) + sec_insider_transactions_backfill (@:45 tail
+        # drainer) extracted from sec_rate into their own single-job lanes.
+        # #1538's ~1.75s acquire-retry can't cover sec_rate's long holds
+        # (filing 96s, atom up to 10s), so on contention they skipped a whole
+        # cadence. Both write-ordering-safe concurrently with their former
+        # lanemates (filing_docs: sole-writer/no-watermark; insider_backfill:
+        # per-instrument advisory lock in refresh_insiders_current).
+        # See app/jobs/sources.py::Lane.
+        "sec_filing_docs",
+        "sec_insider_backfill",
         "sec_bulk_download",
         "db",
         # #1141 — Phase C bulk-ingest family sources. Bootstrap-only
@@ -758,6 +769,51 @@ class TestSecPerCikLaneExtraction:
                 f"{sibling} shares lane {poll_lane!r} with sec_per_cik_poll — "
                 "the #1534 starvation extraction has regressed"
             )
+
+
+class TestLongHoldSecRateLaneExtraction:
+    """#1540 — the two long-hold scheduled ``sec_rate`` producers live in their
+    OWN single-job lanes. ``sec_filing_documents_ingest`` (@:35) holds the lane
+    ~96s/tick and ``sec_insider_transactions_backfill`` (@:45) collides with the
+    @:45 ``atom`` tick every hour; #1538's ~1.75s acquire-retry can't cover the
+    long holds, so on ``sec_rate`` they skipped whole cadences. Same shape as
+    #1478 / #1534.
+    """
+
+    def test_filing_documents_has_own_lane(self) -> None:
+        assert source_for("sec_filing_documents_ingest") == "sec_filing_docs"
+
+    def test_insider_backfill_has_own_lane(self) -> None:
+        assert source_for("sec_insider_transactions_backfill") == "sec_insider_backfill"
+
+    def test_extracted_lanes_are_single_job(self) -> None:
+        """Each new lane holds exactly one job across the FULL registry — the
+        whole point of the split is that these heavy holders no longer share a
+        lock with anything. Asserting against ``get_job_name_to_source()``
+        (scheduled ∪ bootstrap ∪ manual) — not just ``SCHEDULED_JOBS`` — so a
+        future bootstrap-stage / ``MANUAL_TRIGGER_JOB_SOURCES`` entry that
+        re-homed another job onto either lane would fail here (Codex #1540
+        ckpt-2)."""
+        from collections import Counter
+
+        mapping = get_job_name_to_source()
+        lane_to_jobs: dict[str, list[str]] = {}
+        for job_name, lane in mapping.items():
+            lane_to_jobs.setdefault(lane, []).append(job_name)
+        lane_counts = Counter(mapping.values())
+
+        assert lane_counts["sec_filing_docs"] == 1, lane_to_jobs.get("sec_filing_docs")
+        assert lane_counts["sec_insider_backfill"] == 1, lane_to_jobs.get("sec_insider_backfill")
+        assert lane_to_jobs["sec_filing_docs"] == ["sec_filing_documents_ingest"]
+        assert lane_to_jobs["sec_insider_backfill"] == ["sec_insider_transactions_backfill"]
+
+    def test_extracted_lanes_differ_from_sec_rate(self) -> None:
+        """If a future change re-collapses either onto ``sec_rate``, this
+        re-breaks the #1540 extraction."""
+        assert source_for("sec_filing_documents_ingest") != "sec_rate"
+        assert source_for("sec_insider_transactions_backfill") != "sec_rate"
+        # ... and the two do not collapse onto each other.
+        assert source_for("sec_filing_documents_ingest") != source_for("sec_insider_transactions_backfill")
 
 
 # ---------------------------------------------------------------------------
