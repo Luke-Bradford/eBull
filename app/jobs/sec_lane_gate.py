@@ -72,6 +72,16 @@ class SecLaneGate:
             self._held.discard(job_name)
             self._slots.release()
 
+    def is_held(self, job_name: str) -> bool:
+        """True if ``job_name`` currently holds a slot in THIS process.
+
+        Liveness signal for the bootstrap orphan reaper (#1542): sec_rate jobs
+        hold no Postgres advisory lock, so the reaper (which runs in the jobs
+        process) checks the in-process held set instead of ``pg_locks``.
+        """
+        with self._guard:
+            return job_name in self._held
+
 
 SEC_LANE_GATE: SecLaneGate = SecLaneGate(SEC_LANE_MAX_CONCURRENCY)
 """Process-wide singleton used by ``JobLock`` for every ``sec_rate`` job."""

@@ -42,3 +42,13 @@ def test_release_of_never_acquired_name_raises_without_touching_slots():
     # the bad release must NOT have loosened the semaphore: one acquire fills it.
     assert gate.try_acquire("a") is True
     assert gate.try_acquire("b") is False
+
+
+def test_is_held_tracks_acquire_release():
+    gate = SecLaneGate(2)
+    assert gate.is_held("a") is False
+    assert gate.try_acquire("a") is True
+    assert gate.is_held("a") is True
+    assert gate.is_held("b") is False
+    gate.release("a")
+    assert gate.is_held("a") is False

@@ -2671,10 +2671,14 @@ def reap_orphaned_running_stages(
 
     1. ``bootstrap_stages.status = 'running'``.
     2. ``started_at < NOW() - INTERVAL '5 minutes'`` (grace window).
-    3. The corresponding ``JobLock`` advisory lock is NOT held in any
-       Postgres session — probed read-only via ``pg_locks``.
+    3. The job is provably not running:
+       - For ``source == 'sec_rate'`` (#1542): ``SecLaneGate.is_held(job_name)``
+         returns False. sec_rate jobs hold no Postgres advisory lock; the
+         in-process gate is authoritative (reaper runs in the jobs process).
+       - For all other sources: the corresponding ``JobLock`` advisory lock is
+         NOT held in any Postgres session — probed read-only via ``pg_locks``.
 
-    Lock key = ``hashtext('job_source:' || source)::int`` where
+    Lock key (non-sec_rate) = ``hashtext('job_source:' || source)::int`` where
     ``source = app.jobs.sources.source_for(job_name)``. Bytes-for-bytes
     match with ``JobLock``'s acquisition SQL (``app/jobs/locks.py:224``).
 
@@ -2691,9 +2695,12 @@ def reap_orphaned_running_stages(
         logs a warning and leaves the row alone. The reaper must never
         reset a stage whose lock semantics it cannot prove.
     """
-    # Lazy import: app.jobs.sources -> app.services.bootstrap_orchestrator
+    # Lazy imports: app.jobs.sources -> app.services.bootstrap_orchestrator
     # at module load via the JOB_NAME_TO_SOURCE construction. Importing
     # back here at top-of-module would close the cycle.
+    # app.jobs.sec_lane_gate is threading-only (no psycopg) — function-local
+    # matches the existing lazy pattern and avoids a top-level import cycle.
+    from app.jobs import sec_lane_gate
     from app.jobs.sources import source_for
 
     candidate_rows = conn.execute(
@@ -2722,50 +2729,60 @@ def reap_orphaned_running_stages(
             )
             continue
 
-        lock_key = _hashtext_int(conn, f"job_source:{source}")
-        # ``pg_locks`` splits the bigint advisory-lock key into two
-        # uint32 halves: ``classid`` (high 32 bits) and ``objid`` (low
-        # 32 bits). For a *positive* int4 key like 1_447_707_902 the
-        # widening to int8 leaves the high half all-zero so
-        # ``classid=0``; for a *negative* int4 key like -685_386_401
-        # the sign-extension fills the high half with 1s so
-        # ``classid=4_294_967_295`` (= ``0xFFFFFFFF``). Probing only
-        # ``classid=0`` would miss every negative-hashtext key (e.g.
-        # ``job_source:finra``) and silently fail to detect the held
-        # lock — the reaper would then reset a stage whose worker IS
-        # alive. The arithmetic split is done PG-side via ``::bigint``
-        # so the byte shape is identical to the kernel split.
-        # ``objsubid=1`` is session-scope (PG sets ``=2`` for
-        # transaction-scoped advisory locks; the JobLock path uses
-        # the session form).
-        #
-        # ``database = (current_database OID)`` scopes the probe to
-        # locks held in THIS database only (Codex 2 medium). The same
-        # advisory key in a sibling DB on the same Postgres cluster
-        # (e.g. dev + ebull_test running on localhost:5432 with their
-        # own bootstrap processes) would otherwise spuriously satisfy
-        # the probe and suppress a legitimate reset in this DB.
-        # ``pg_locks.database`` is OID; ``current_database()`` returns
-        # name → join via ``pg_database`` rather than rely on a
-        # hardcoded OID literal.
-        held_row = conn.execute(
-            """
-            SELECT 1
-              FROM pg_locks
-             WHERE locktype = 'advisory'
-               AND objsubid = 1
-               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
-               AND classid  = ((%(lock_key)s::bigint >> 32) & 4294967295)::oid
-               AND objid    = (%(lock_key)s::bigint & 4294967295)::oid
-            """,
-            {"lock_key": lock_key},
-        ).fetchone()
-        if held_row is not None:
-            # Worker (or some other session) still holds the lock; the
-            # stage may actually be running. Skip reset; operator can
-            # force-cancel via the existing Re-run failed UX if the
-            # worker is hung-but-alive.
-            continue
+        if source == "sec_rate":
+            # #1542 — sec_rate jobs hold NO Postgres advisory lock (in-process
+            # SecLaneGate). Its held-name set is the liveness signal. Valid
+            # because the reaper runs in the jobs process where the gate lives.
+            # A stage left ``running`` by a CRASHED prior process is absent from
+            # this fresh process's gate -> reaped; a stage live in THIS process
+            # is present -> skipped.
+            if sec_lane_gate.SEC_LANE_GATE.is_held(job_name):
+                continue
+        else:
+            lock_key = _hashtext_int(conn, f"job_source:{source}")
+            # ``pg_locks`` splits the bigint advisory-lock key into two
+            # uint32 halves: ``classid`` (high 32 bits) and ``objid`` (low
+            # 32 bits). For a *positive* int4 key like 1_447_707_902 the
+            # widening to int8 leaves the high half all-zero so
+            # ``classid=0``; for a *negative* int4 key like -685_386_401
+            # the sign-extension fills the high half with 1s so
+            # ``classid=4_294_967_295`` (= ``0xFFFFFFFF``). Probing only
+            # ``classid=0`` would miss every negative-hashtext key (e.g.
+            # ``job_source:finra``) and silently fail to detect the held
+            # lock — the reaper would then reset a stage whose worker IS
+            # alive. The arithmetic split is done PG-side via ``::bigint``
+            # so the byte shape is identical to the kernel split.
+            # ``objsubid=1`` is session-scope (PG sets ``=2`` for
+            # transaction-scoped advisory locks; the JobLock path uses
+            # the session form).
+            #
+            # ``database = (current_database OID)`` scopes the probe to
+            # locks held in THIS database only (Codex 2 medium). The same
+            # advisory key in a sibling DB on the same Postgres cluster
+            # (e.g. dev + ebull_test running on localhost:5432 with their
+            # own bootstrap processes) would otherwise spuriously satisfy
+            # the probe and suppress a legitimate reset in this DB.
+            # ``pg_locks.database`` is OID; ``current_database()`` returns
+            # name → join via ``pg_database`` rather than rely on a
+            # hardcoded OID literal.
+            held_row = conn.execute(
+                """
+                SELECT 1
+                  FROM pg_locks
+                 WHERE locktype = 'advisory'
+                   AND objsubid = 1
+                   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                   AND classid  = ((%(lock_key)s::bigint >> 32) & 4294967295)::oid
+                   AND objid    = (%(lock_key)s::bigint & 4294967295)::oid
+                """,
+                {"lock_key": lock_key},
+            ).fetchone()
+            if held_row is not None:
+                # Worker (or some other session) still holds the lock; the
+                # stage may actually be running. Skip reset; operator can
+                # force-cancel via the existing Re-run failed UX if the
+                # worker is hung-but-alive.
+                continue
 
         result = conn.execute(
             """

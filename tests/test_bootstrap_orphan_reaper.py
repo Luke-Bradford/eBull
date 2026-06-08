@@ -488,3 +488,85 @@ def test_reaper_detects_held_lock_for_negative_hashtext_source(
 
     assert reset == 0, "reaper should detect the negative-hashtext lock as held"
     assert _status_of(ebull_test_conn, run_id=run_id, stage_key="finra_stuck_stage") == "running"
+
+
+# ---------------------------------------------------------------------------
+# sec_rate in-process gate path (#1542)
+# ---------------------------------------------------------------------------
+
+
+def test_reaper_resets_sec_rate_stage_not_in_gate(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sec_rate stage absent from the in-process gate IS reset.
+
+    After a jobs-process crash, a new process starts with an empty
+    SecLaneGate. A ``running`` bootstrap stage that was being driven by
+    the crashed process has no gate entry -> worker provably dead ->
+    reaper must reset it.
+    """
+    from app.jobs.sec_lane_gate import reset_for_tests
+
+    reset_for_tests()  # ensure gate is clean for this test
+
+    _reset_state(ebull_test_conn)
+    _register_synthetic_jobs(monkeypatch, {"sec_rate_orphan_job": "sec_rate"})
+
+    run_id = _make_test_run(ebull_test_conn, stages=[("sec_rate_orphan_stage", "sec_rate_orphan_job")])
+    _seed_stage(
+        ebull_test_conn,
+        run_id=run_id,
+        stage_key="sec_rate_orphan_stage",
+        status="running",
+        started_minutes_ago=10,
+    )
+
+    reset = reap_orphaned_running_stages(ebull_test_conn, run_id=run_id)
+    ebull_test_conn.commit()
+
+    assert reset == 1
+    assert _status_of(ebull_test_conn, run_id=run_id, stage_key="sec_rate_orphan_stage") == "pending"
+
+
+def test_reaper_skips_sec_rate_stage_held_in_gate(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sec_rate stage present in the in-process gate is NOT reset.
+
+    The gate entry means the job is actively running in THIS process;
+    the reaper must leave it alone.
+
+    Access the singleton via the MODULE attribute (``sec_lane_gate.SEC_LANE_GATE``)
+    after ``reset_for_tests()``, NOT via a name imported before the reset — the
+    import would capture the old object and ``try_acquire`` / ``is_held`` would
+    operate on different instances.
+    """
+    from app.jobs import sec_lane_gate as slg
+
+    slg.reset_for_tests()
+    # Access via module attribute so try_acquire, is_held (in the reaper), and
+    # release all operate on the same post-reset instance.
+    assert slg.SEC_LANE_GATE.try_acquire("sec_rate_live_job") is True
+
+    _reset_state(ebull_test_conn)
+    _register_synthetic_jobs(monkeypatch, {"sec_rate_live_job": "sec_rate"})
+
+    run_id = _make_test_run(ebull_test_conn, stages=[("sec_rate_live_stage", "sec_rate_live_job")])
+    _seed_stage(
+        ebull_test_conn,
+        run_id=run_id,
+        stage_key="sec_rate_live_stage",
+        status="running",
+        started_minutes_ago=10,
+    )
+
+    try:
+        reset = reap_orphaned_running_stages(ebull_test_conn, run_id=run_id)
+        ebull_test_conn.commit()
+    finally:
+        slg.SEC_LANE_GATE.release("sec_rate_live_job")
+
+    assert reset == 0
+    assert _status_of(ebull_test_conn, run_id=run_id, stage_key="sec_rate_live_stage") == "running"
