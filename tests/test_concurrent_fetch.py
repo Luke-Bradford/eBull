@@ -123,6 +123,7 @@ class TestConcurrencyAchievesActualThroughput:
         rc._min_interval = 0.02  # 20 ms floor
         rc._last_request_at = [0.0]
         rc._throttle_lock = threading.Lock()
+        rc._gate = None  # #1484: no cross-process gate -> exercise the in-process floor
 
         # Simulated work: each worker stamps then sleeps 100ms
         # (the "HTTP RTT") OUTSIDE the lock, exactly like the real
@@ -173,6 +174,7 @@ class TestRateLimitSafetyUnderConcurrency:
         rc._min_interval = 0.02  # 20 ms floor — easy to detect violation
         rc._last_request_at = clock
         rc._throttle_lock = lock
+        rc._gate = None  # #1484: no cross-process gate -> exercise the in-process floor
 
         stamps: list[float] = []
         stamps_lock = threading.Lock()
