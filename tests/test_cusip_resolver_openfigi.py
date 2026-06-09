@@ -428,7 +428,7 @@ class TestSweepSelection:
 
 
 # ---------------------------------------------------------------------------
-# Coverage floor — _load_cusip_map + compute_cusip_coverage widening
+# Coverage floor — load_bulk_cusip_map + compute_cusip_coverage widening
 # ---------------------------------------------------------------------------
 
 

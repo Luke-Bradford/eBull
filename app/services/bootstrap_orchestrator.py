@@ -2934,8 +2934,9 @@ def run_bootstrap_orchestrator() -> None:
 # lifted into params-aware ``JobInvoker`` bodies in
 # ``app/workers/scheduler.py`` (``filings_history_seed``,
 # ``sec_first_install_drain``, extended ``sec_13f_quarterly_sweep``).
-# Bootstrap stages 14, 15, 21 dispatch the promoted bodies via
-# ``StageSpec.params``; the deleted JOB_* constants are gone too,
+# (#1413 later dropped the filings_history_seed / 13F-sweep stages from
+# the bootstrap graph; S16 ``sec_first_install_drain`` is the surviving
+# params-carrying stage.) The deleted JOB_* constants are gone too,
 # so any straggling reference fails fast on import.
 
 

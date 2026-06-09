@@ -1412,7 +1412,7 @@ def _tombstone_bulk_rows_for_cusip(
     (different filer × period). A successful OpenFIGI resolution
     means the CUSIP→instrument_id mapping is now in
     ``external_identifiers``; the next bulk ingest pass will load
-    the mapping via ``_load_cusip_map`` and write into typed tables
+    the mapping via ``load_bulk_cusip_map`` and write into typed tables
     directly, so the unresolved rows have served their purpose.
 
     Scoped to ``source IS NOT NULL`` so the legacy partition is

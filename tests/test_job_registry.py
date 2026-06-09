@@ -135,26 +135,19 @@ class TestStageSpecParamsField:
             assert hasattr(stage, "params"), f"stage {stage.stage_key} missing params"
 
     def test_only_bootstrap_lifted_stages_have_params(self) -> None:
-        """PR1c populated stages 14, 15, 21 (the bespoke-wrapper lift targets);
-        every other stage stays with the empty default until a future
-        ParamMetadata expansion lands."""
-        # PR1c #1064 — lifted bespoke wrappers. The job registry audit
-        # §4 enumerates these three; any addition must update the audit
-        # and this assertion in lockstep.
+        """PR1c populated the bespoke-wrapper lift targets; every other
+        stage stays with the empty default until a future ParamMetadata
+        expansion lands."""
+        # PR1c #1064 — lifted bespoke wrappers; any addition must update
+        # the job registry audit §4 and this assertion in lockstep.
+        # #1437 — trimmed to the surviving stage: #1413 dropped
+        # ``filings_history_seed`` / ``sec_13f_recent_sweep`` /
+        # ``sec_n_port_ingest`` from the bootstrap graph (their entries
+        # here were dead — the loop below only checks stages present in
+        # ``_BOOTSTRAP_STAGE_SPECS``), and the dispatch-time dynamic
+        # param sentinels they carried were removed outright.
         lifted_stage_keys = {
-            "filings_history_seed",
             "sec_first_install_drain",
-            "sec_13f_recent_sweep",
-            # PR8 #1233 §4.12 — sec_n_csr_bootstrap_drain previously
-            # carried ``horizon_days=730`` params; the param was
-            # removed when N_CSR_RETENTION_DAYS became the single
-            # source of truth, so the stage now dispatches with
-            # ``params={}`` and is intentionally absent from this set.
-            # PR7 #1233 §4.6 — sec_n_port_ingest dispatches with
-            # ``min_last_seen_filed_at`` resolved at dispatch time to
-            # ``today - 380d`` (UTC midnight). Mirror of the #1010
-            # cohort bound on stage 21's sec_13f_recent_sweep.
-            "sec_n_port_ingest",
         }
         for stage in _BOOTSTRAP_STAGE_SPECS:
             if stage.stage_key in lifted_stage_keys:
