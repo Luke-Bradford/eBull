@@ -263,6 +263,7 @@ class SecFilingsProvider(FilingsProvider):
         # ingest jobs each spawning their own SecFilingsProvider
         # could collectively burst past the SEC fair-use limit.
         from app.providers.sec_rate_gate_holder import get_sec_rate_gate
+        from app.providers.sec_throttle_metrics import incr_sec_429
 
         _gate = get_sec_rate_gate()
         self._http = ResilientClient(
@@ -271,6 +272,7 @@ class SecFilingsProvider(FilingsProvider):
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
             shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
             gate=_gate,
+            on_429=incr_sec_429,
         )
         self._http_tickers = ResilientClient(
             self._tickers_client,
@@ -278,6 +280,7 @@ class SecFilingsProvider(FilingsProvider):
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
             shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
             gate=_gate,
+            on_429=incr_sec_429,
         )
 
     def __enter__(self) -> SecFilingsProvider:

@@ -607,6 +607,7 @@ class SecFundamentalsProvider(FundamentalsProvider):
         # Process-wide shared rate-limit clock (#537) — see
         # ``app.providers.implementations.sec_edgar._PROCESS_RATE_LIMIT_CLOCK``.
         from app.providers.sec_rate_gate_holder import get_sec_rate_gate
+        from app.providers.sec_throttle_metrics import incr_sec_429
 
         _gate = get_sec_rate_gate()
         self._http = ResilientClient(
@@ -615,6 +616,7 @@ class SecFundamentalsProvider(FundamentalsProvider):
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
             shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
             gate=_gate,
+            on_429=incr_sec_429,
         )
         # symbol → CIK cache, populated by caller before bulk refresh
         self._cik_cache: dict[str, str] = {}

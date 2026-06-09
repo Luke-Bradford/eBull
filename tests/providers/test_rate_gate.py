@@ -63,3 +63,24 @@ def test_resilient_client_delegates_to_gate():
     rc = ResilientClient(client, gate=StubGate())
     rc.get("https://example.test/x")
     assert calls["n"] == 1
+
+
+def test_on_429_callback_fires_only_when_wired():
+    import httpx
+    from app.providers.resilient_client import ResilientClient
+    from app.providers import sec_throttle_metrics as m
+
+    before = m.sec_throttle_429_total()
+
+    def make_client(on_429):
+        seq = iter([httpx.Response(429, headers={"retry-after": "0.01"}), httpx.Response(200, text="ok")])
+        return ResilientClient(
+            httpx.Client(transport=httpx.MockTransport(lambda req: next(seq))),
+            max_retries=1, backoff_schedule=(0.0,), on_429=on_429,
+        )
+
+    make_client(m.incr_sec_429).get("https://example.test/x")   # SEC-wired
+    assert m.sec_throttle_429_total() == before + 1
+
+    make_client(None).get("https://example.test/y")             # non-SEC, no callback
+    assert m.sec_throttle_429_total() == before + 1             # unchanged
