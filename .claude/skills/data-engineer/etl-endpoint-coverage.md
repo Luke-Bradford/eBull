@@ -20,7 +20,7 @@ For any endpoint to be "covered" we need ALL of:
 | 2 | **Standard refresh** — steady-state job | `SCHEDULED_JOBS` + `_INVOKERS` | `app/workers/scheduler.py:492` / `app/jobs/runtime.py:_INVOKERS` |
 | 3 | **Freshness index** — per-(subject, source) cadence + last_known_*  | `_CADENCE` + `data_freshness_index` table | `app/services/data_freshness.py:69-102` + `sql/120` |
 | 4 | **Watermark + retry** — `next_retry_at`, `last_known_filing_id` | `sec_filing_manifest` + `data_freshness_index` | `app/services/sec_manifest.py` + `sql/118`, `sql/120` |
-| 5 | **Rate-limit pool** — shared per-IP budget | per-host clock + lock | `app/providers/implementations/sec_edgar.py:55-80` (SEC 10 req/s) |
+| 5 | **Rate-limit pool** — shared per-IP budget | cross-process `sec_rate_gate` GCRA gate (#1484); per-process `_PROCESS_RATE_LIMIT_CLOCK` is test/fallback only | `app/providers/postgres_rate_gate.py` + `app/providers/sec_rate_gate_holder.py`; floor in `sec_edgar.py:55-80` (SEC 10 req/s) |
 | (6) | **Manifest parser** — typed-table materialisation | `manifest_parsers` registry | `app/services/manifest_parsers/__init__.py:register_all_parsers()` |
 
 A "stranded" entry has rows in (4) but no resolver in (2) — manifest grows, never drains. A "dead-coded" entry has (1) + (6) but no (2) — bootstrap fills, steady-state never refreshes. See [§3](#3-discovery-layer-wiring) for the live example.
@@ -160,7 +160,7 @@ These endpoints don't have a `ManifestSource` because they're not per-filing dis
 
 | Pool | Budget | Code | Consumers |
 |---|---|---|---|
-| `sec_rate` | 10 req/s shared per-IP (SEC fair-use ceiling) | `app/providers/implementations/sec_edgar.py:55-80` — `_MIN_REQUEST_INTERVAL_S = 0.11` + `_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK` | Every `data.sec.gov` + `www.sec.gov` consumer via `ResilientClient`; `SecFilingsProvider`, `SecFundamentalsProvider`, all manifest parsers' `requires_raw_payload=True` fetchers |
+| `sec_rate` | 10 req/s shared per-IP (SEC fair-use ceiling) | **cross-process** via `sec_rate_gate` GCRA gate (#1484, `app/providers/postgres_rate_gate.py`, floor `SEC_MIN_REQUEST_INTERVAL_S = 0.11`); `_PROCESS_RATE_LIMIT_CLOCK`/`_LOCK` in `sec_edgar.py:55-80` is now per-process test/fallback only | Every SEC consumer via the injected gate — sync `ResilientClient` (`SecFilingsProvider`, `SecFundamentalsProvider`, manifest parsers' `requires_raw_payload=True` fetchers), async `_AsyncRateLimiter`/`PipelinedSecFetcher`, bulk refresh/download |
 | `sec_bulk_download` | Bandwidth-probe-bounded (slow-connection bypass switches to legacy path) | `app/services/sec_bulk_download.py:863` | Stage 7 bulk-zip download only |
 | `etoro` | eToro's per-account REST quota (broker-side enforced) | `app/providers/implementations/etoro_broker.py:124,129` `ResilientClient` | Quotes, candles, orders, positions |
 | `db` | Postgres pool, `max_concurrency=5` for Phase C ingesters | `app/db/pool.py::open_pool` + stage spec `max_concurrency` | Stages 8-12 DB ingesters; ownership_observations_backfill; fundamentals_sync |
