@@ -46,6 +46,7 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.api.bootstrap import BootstrapApiStatus, LaneApi, StageApiStatus
 from app.db import get_conn
+from app.providers.sec_throttle_metrics import sec_throttle_429_total as _sec_throttle_429_total
 from app.services.bootstrap_state import (
     compute_retryable_view,
     read_run_with_stages,
@@ -801,6 +802,7 @@ class PostgresHealthResponse(BaseModel):
     listener_duplicate_detected: bool | None
     metric_errors: list[str]
     collected_at: datetime
+    sec_throttle_429_total: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1018,4 +1020,5 @@ def get_postgres_health() -> PostgresHealthResponse:
         listener_duplicate_detected=snapshot.listener_duplicate_detected,
         metric_errors=snapshot.metric_errors,
         collected_at=snapshot.collected_at,
+        sec_throttle_429_total=_sec_throttle_429_total(),
     )

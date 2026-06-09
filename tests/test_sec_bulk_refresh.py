@@ -650,46 +650,52 @@ class TestBootstrapFence:
 
 class TestRateLimitAcquisition:
     @pytest.mark.asyncio
-    async def test_refresh_acquires_from_shared_clock(self, tmp_path: Path) -> None:
-        """The refresh must acquire from the shared process rate-limit
-        clock — this proves it counts against SEC's per-IP budget the
-        same way every other SEC consumer does.
+    async def test_refresh_acquires_from_gate(self, tmp_path: Path) -> None:
+        """The refresh must acquire from the shared SEC rate gate (#1484).
 
-        We assert by snapshotting the clock before + after a single
-        no-op fire: the clock must have advanced.
+        After the async/bulk paths were migrated to route through the gate
+        (rather than the old shared process clock), we verify by installing a
+        SpyGate via the holder and asserting acquire_async was called at least
+        once during the refresh fire.
         """
-        from app.providers.implementations.sec_edgar import (
-            _PROCESS_RATE_LIMIT_CLOCK,
-            _PROCESS_RATE_LIMIT_LOCK,
-        )
+        from app.providers import sec_rate_gate_holder as holder
+        from app.providers.rate_gate import InProcessFloorGate
 
-        # Reset clock to zero so we can detect any advance.
-        with _PROCESS_RATE_LIMIT_LOCK:
-            _PROCESS_RATE_LIMIT_CLOCK[0] = 0.0
+        class SpyGate(InProcessFloorGate):
+            def __init__(self) -> None:
+                super().__init__(floor=0.0)
+                self.async_calls = 0
 
-        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
-        body = _zip_bytes()
-        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
-        etag = '"shared-clock-test"'
+            async def acquire_async(self) -> None:
+                self.async_calls += 1
+                await super().acquire_async()
 
-        # Seed local sidecar so the HEAD path is a no-op (single acquire).
-        archive_path = tmp_path / _SUBMISSIONS_NAME
-        archive_path.write_bytes(body)
-        _atomic_write_text(_etag_sidecar_path(archive_path), etag)
+        holder._reset_sec_rate_gate_for_tests()
+        spy = SpyGate()
+        holder.set_sec_rate_gate(spy)
+        try:
+            url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+            body = _zip_bytes()
+            archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+            etag = '"gate-spy-test"'
 
-        handler = _make_handler(archive_url=url, archive_body=body, etag=etag)
-        async with _patched_make_client(httpx.MockTransport(handler)):
-            result = await _refresh_one_async(
-                archive=archive,
-                target_dir=tmp_path,
-                user_agent="ebull/test (admin@example.com)",
-            )
+            # Seed local sidecar so the HEAD path is a no-op (single acquire).
+            archive_path = tmp_path / _SUBMISSIONS_NAME
+            archive_path.write_bytes(body)
+            _atomic_write_text(_etag_sidecar_path(archive_path), etag)
 
-        assert result.skipped_reason is None
-        # The shared clock advanced on the HEAD acquire.
-        with _PROCESS_RATE_LIMIT_LOCK:
-            advanced = _PROCESS_RATE_LIMIT_CLOCK[0]
-        assert advanced > 0.0, "Rate limiter did NOT acquire from the shared clock during HEAD"
+            handler = _make_handler(archive_url=url, archive_body=body, etag=etag)
+            async with _patched_make_client(httpx.MockTransport(handler)):
+                result = await _refresh_one_async(
+                    archive=archive,
+                    target_dir=tmp_path,
+                    user_agent="ebull/test (admin@example.com)",
+                )
+
+            assert result.skipped_reason is None
+            assert spy.async_calls > 0, "bulk refresh did not acquire from the SEC gate"
+        finally:
+            holder._reset_sec_rate_gate_for_tests()
 
 
 # ---------------------------------------------------------------------------

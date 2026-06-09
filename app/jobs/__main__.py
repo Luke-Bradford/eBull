@@ -893,6 +893,16 @@ def serve(stop_event: threading.Event | None = None) -> int:
     logger.info("jobs entrypoint: starting (boot_id=%s)", boot_id)
 
     pool = open_pool("jobs_pool", min_size=1, max_size=JOBS_POOL_MAX_SIZE)
+
+    # #1484: install the cross-process SEC rate gate, backed by the jobs
+    # pool, BEFORE any SEC provider is constructed in this process.
+    from app.providers.postgres_rate_gate import PostgresFloorGate
+    from app.providers.rate_gate import SEC_MIN_REQUEST_INTERVAL_S
+    from app.providers.sec_rate_gate_holder import set_sec_rate_gate
+
+    set_sec_rate_gate(PostgresFloorGate(pool, budget="sec", floor_s=SEC_MIN_REQUEST_INTERVAL_S))
+    logger.info("SEC cross-process rate gate installed (jobs process).")
+
     fence_conn = _acquire_singleton_fence(settings.database_url)
     logger.info("jobs entrypoint: singleton fence acquired")
     # #1290: fence-liveness infrastructure. The lock + stop-event are

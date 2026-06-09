@@ -28,15 +28,16 @@ import threading
 import time
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import httpx
 
 from app.providers.implementations.sec_edgar import (
-    _PROCESS_RATE_LIMIT_CLOCK,
-    _PROCESS_RATE_LIMIT_LOCK,
     SubmissionsPageResult,
 )
+
+if TYPE_CHECKING:
+    from app.providers.rate_gate import RateGate
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +117,20 @@ class _AsyncRateLimiter:
         self,
         target_rps: float,
         *,
+        gate: RateGate | None = None,
         shared_clock: list[float] | None = None,
         shared_lock: threading.Lock | None = None,
     ) -> None:
         if target_rps <= 0:
             raise ValueError("target_rps must be > 0")
+        # #1484: default to the process-global cross-process gate. An explicit
+        # shared_clock (tests) keeps the legacy in-process floor for isolation;
+        # target_rps is advisory on the gate path (the gate's floor governs).
+        if gate is None and shared_clock is None:
+            from app.providers.sec_rate_gate_holder import get_sec_rate_gate
+
+            gate = get_sec_rate_gate()
+        self._gate = gate
         self._min_interval = 1.0 / target_rps
         self._clock = shared_clock if shared_clock is not None else [0.0]
         self._lock = shared_lock if shared_lock is not None else threading.Lock()
@@ -128,10 +138,11 @@ class _AsyncRateLimiter:
     async def acquire(self) -> None:
         """Block until the rate limiter authorises one request.
 
-        Stores the same semantics as the synchronous
-        ``ResilientClient._throttle_and_stamp``
-        (``app/providers/resilient_client.py:135``):
-        ``self._clock[0]`` is the LAST-REQUEST TIMESTAMP, and the
+        When a gate is present (#1484), delegates entirely to
+        ``gate.acquire_async()`` — the gate's own floor governs.
+
+        Otherwise uses the legacy in-process two-phase floor:
+        ``self._clock[0]`` is the LAST-REQUEST TIMESTAMP and the
         floor is ``last + min_interval``. Mixed sync + async traffic
         on the same shared clock therefore observes a single coherent
         floor — Codex pre-push round 2.
@@ -142,6 +153,9 @@ class _AsyncRateLimiter:
         (2) release the lock and ``await asyncio.sleep`` outside it
         so other coroutines on the same event loop can still queue.
         """
+        if self._gate is not None:
+            await self._gate.acquire_async()
+            return
         with self._lock:
             now = time.monotonic()
             elapsed = now - self._clock[0]
@@ -191,8 +205,8 @@ class PipelinedSecFetcher:
         self._sem = asyncio.Semaphore(concurrency)
         self._rate_limiter = _AsyncRateLimiter(
             target_rps,
-            shared_clock=shared_clock if shared_clock is not None else _PROCESS_RATE_LIMIT_CLOCK,
-            shared_lock=shared_lock if shared_lock is not None else _PROCESS_RATE_LIMIT_LOCK,
+            shared_clock=shared_clock,  # None -> _AsyncRateLimiter uses the cross-process gate
+            shared_lock=shared_lock,
         )
 
     async def fetch_one(self, task: FetchTask) -> FetchResult:

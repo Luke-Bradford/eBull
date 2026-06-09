@@ -21,8 +21,14 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from typing import TYPE_CHECKING
 
 import httpx
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from app.providers.rate_gate import RateGate
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +70,8 @@ class ResilientClient:
         backoff_schedule: tuple[float, ...] = _DEFAULT_BACKOFF,
         shared_last_request: list[float] | None = None,
         shared_throttle_lock: threading.Lock | None = None,
+        gate: RateGate | None = None,
+        on_429: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
         self._min_interval = min_request_interval_s
@@ -86,6 +94,13 @@ class ResilientClient:
         self._throttle_lock: threading.Lock = (
             shared_throttle_lock if shared_throttle_lock is not None else threading.Lock()
         )
+        # #1484: when a RateGate is injected, the throttle delegates to it
+        # (cross-process gate) and the legacy shared-clock path is bypassed.
+        self._gate = gate
+        # #1484 §4.4: optional SEC-scoped 429 counter callback.  Only SEC
+        # providers wire this — ResilientClient itself has no knowledge of
+        # the counter (it's a generic class shared by non-SEC providers).
+        self._on_429 = on_429
 
     # ------------------------------------------------------------------
     # Public API — mirrors httpx.Client.get / .post
@@ -128,6 +143,9 @@ class ResilientClient:
         across N concurrent callers — at most one thread is firing
         a request per ``min_request_interval_s``.
         """
+        if self._gate is not None:
+            self._gate.acquire()
+            return
         if self._min_interval <= 0:
             with self._throttle_lock:
                 self._last_request_at[0] = time.monotonic()
@@ -168,6 +186,8 @@ class ResilientClient:
 
             if response.status_code == 429 or response.status_code in _RETRYABLE_5XX:
                 last_response = response
+                if response.status_code == 429 and self._on_429 is not None:
+                    self._on_429()
                 if attempt >= self._max_retries:
                     # Final attempt — raise unconditionally and exit.
                     response.raise_for_status()

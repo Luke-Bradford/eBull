@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.providers.filings import FilingEvent, FilingNotFound, FilingSearchResult, FilingsProvider
+from app.providers.rate_gate import SEC_MIN_REQUEST_INTERVAL_S
 from app.providers.resilient_client import ResilientClient
 
 _ET = ZoneInfo("America/New_York")
@@ -53,7 +54,8 @@ BASE_URL = "https://data.sec.gov"
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
 # SEC rate-limit: 10 req/s. We use a conservative inter-request floor.
-_MIN_REQUEST_INTERVAL_S = 0.11
+# Single source of truth lives in app.providers.rate_gate (#1484).
+_MIN_REQUEST_INTERVAL_S = SEC_MIN_REQUEST_INTERVAL_S  # back-compat alias (existing imports)
 
 # Process-wide shared timestamp for the SEC rate limiter (#537).
 # Every ``SecFilingsProvider`` and ``SecFundamentalsProvider``
@@ -260,17 +262,25 @@ class SecFilingsProvider(FilingsProvider):
         # provider instance had its own list[float], so concurrent
         # ingest jobs each spawning their own SecFilingsProvider
         # could collectively burst past the SEC fair-use limit.
+        from app.providers.sec_rate_gate_holder import get_sec_rate_gate
+        from app.providers.sec_throttle_metrics import incr_sec_429
+
+        _gate = get_sec_rate_gate()
         self._http = ResilientClient(
             self._client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
             shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
+            gate=_gate,
+            on_429=incr_sec_429,
         )
         self._http_tickers = ResilientClient(
             self._tickers_client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
             shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
+            gate=_gate,
+            on_429=incr_sec_429,
         )
 
     def __enter__(self) -> SecFilingsProvider:

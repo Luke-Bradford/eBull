@@ -305,18 +305,11 @@ async def _refresh_one_async(
     archive_path = target_dir / archive.name
     local_etag = _read_local_etag(archive_path)
 
-    # Lazy import to avoid pulling sec_edgar (heavy) at module load.
-    from app.providers.implementations.sec_edgar import (
-        _PROCESS_RATE_LIMIT_CLOCK,
-        _PROCESS_RATE_LIMIT_LOCK,
-    )
     from app.services.sec_pipelined_fetcher import _AsyncRateLimiter
 
-    rate_limiter = _AsyncRateLimiter(
-        target_rps=7.0,
-        shared_clock=_PROCESS_RATE_LIMIT_CLOCK,
-        shared_lock=_PROCESS_RATE_LIMIT_LOCK,
-    )
+    # #1484: no shared_clock -> _AsyncRateLimiter defaults to the cross-process
+    # gate. The old per-process 7 rps self-limit is subsumed by the global gate.
+    rate_limiter = _AsyncRateLimiter(target_rps=7.0)
 
     async with _make_client(user_agent) as client:
         # HEAD probe ------------------------------------------------------

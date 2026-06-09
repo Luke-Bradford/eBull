@@ -252,6 +252,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Connection pool opened (min=1, max=%d).", DB_POOL_MAX_SIZE)
     app.state.db_pool = pool
 
+    # #1484: install the cross-process SEC rate gate, backed by the request
+    # pool, BEFORE any SEC provider is constructed in this process.
+    from app.providers.postgres_rate_gate import PostgresFloorGate
+    from app.providers.rate_gate import SEC_MIN_REQUEST_INTERVAL_S
+    from app.providers.sec_rate_gate_holder import set_sec_rate_gate
+
+    set_sec_rate_gate(PostgresFloorGate(pool, budget="sec", floor_s=SEC_MIN_REQUEST_INTERVAL_S))
+    logger.info("SEC cross-process rate gate installed (API process).")
+
     # #111: dedicated small pool for durable credential-access audit
     # writes. Using the request pool risks losing audit rows under
     # saturation (the request handler holds one slot for the read,

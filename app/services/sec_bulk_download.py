@@ -1314,23 +1314,13 @@ async def download_bulk_archives(
             archives=[],
         )
 
-    # Acquire a shared SEC rate clock that coordinates with sec_edgar's
-    # synchronous ResilientClient AND the pipelined fetcher's async
-    # limiter — without this, A3's HEAD/GET requests don't count
-    # against the per-IP 7 req/s budget and a future orchestrator
-    # change running A3 concurrently with another SEC stage could
-    # exceed SEC's 10 req/s limit. (#1042)
-    from app.providers.implementations.sec_edgar import (
-        _PROCESS_RATE_LIMIT_CLOCK,
-        _PROCESS_RATE_LIMIT_LOCK,
-    )
+    # Acquire the cross-process gate so A3's HEAD/GET requests count
+    # against the per-IP budget shared with sec_edgar and the pipelined
+    # fetcher (#1042, #1484). no shared_clock -> _AsyncRateLimiter defaults
+    # to the process-global gate.
     from app.services.sec_pipelined_fetcher import _AsyncRateLimiter
 
-    rate_limiter = _AsyncRateLimiter(
-        target_rps=7.0,
-        shared_clock=_PROCESS_RATE_LIMIT_CLOCK,
-        shared_lock=_PROCESS_RATE_LIMIT_LOCK,
-    )
+    rate_limiter = _AsyncRateLimiter(target_rps=7.0)
 
     async with _make_client(user_agent) as client:
         # ETag-keyed reuse pre-flight (PR-5b): for each archive,

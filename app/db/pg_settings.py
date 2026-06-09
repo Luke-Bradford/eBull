@@ -267,6 +267,14 @@ def _dev_profile_connection_demand() -> int:
     BODIES run concurrently, each holding ONE raw body connection. Charge all
     N explicitly: before #1542 only one job ran at a time (its body conn
     absorbed by the reserve); now N>1 sec bodies are first-class demand.
+
+    #1484 — the SEC rate gate (PostgresFloorGate) borrows ONE pooled conn per
+    acquire for ~1 ms under a process-local lock, then releases before
+    sleeping. Sync and async acquires share the SAME threading.Lock inside
+    _reserve_sync (the async path runs it via run_in_executor), so at most ONE
+    gate conn is held per process at a time (<=2 across API+jobs). This is
+    transient pool usage, not steady-state demand: it does not raise any pool
+    max, so the returned total is unchanged, well within the reserve.
     """
     from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
 

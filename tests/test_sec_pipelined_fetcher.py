@@ -36,7 +36,11 @@ def _isolated_budget() -> tuple[list[float], threading.Lock]:
 class TestAsyncRateLimiter:
     @pytest.mark.asyncio
     async def test_first_acquire_is_immediate(self) -> None:
-        rl = _AsyncRateLimiter(target_rps=10)
+        # Explicit shared_clock -> legacy in-process target_rps floor, NOT the
+        # #1484 cross-process gate (which would impose its own 0.11s floor and
+        # make this assertion test the gate instead of target_rps).
+        clock, lock = _isolated_budget()
+        rl = _AsyncRateLimiter(target_rps=10, shared_clock=clock, shared_lock=lock)
         started = time.monotonic()
         await rl.acquire()
         elapsed = time.monotonic() - started
@@ -44,7 +48,10 @@ class TestAsyncRateLimiter:
 
     @pytest.mark.asyncio
     async def test_back_to_back_acquires_observe_min_interval(self) -> None:
-        rl = _AsyncRateLimiter(target_rps=10)  # 100 ms floor
+        # Explicit shared_clock pins the legacy 100 ms (target_rps=10) floor so
+        # this tests target_rps, not the #1484 gate default.
+        clock, lock = _isolated_budget()
+        rl = _AsyncRateLimiter(target_rps=10, shared_clock=clock, shared_lock=lock)  # 100 ms floor
         started = time.monotonic()
         await rl.acquire()
         await rl.acquire()
