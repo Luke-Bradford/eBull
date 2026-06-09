@@ -42,6 +42,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import ssl
 import threading
 import uuid
 from collections.abc import Callable
@@ -779,6 +780,13 @@ class EtoroWebSocketSubscriber:
                 await self._connect_and_listen()
             except asyncio.CancelledError:
                 raise
+            except ssl.SSLError:
+                # SSLError is an OSError subclass but signals TLS/cert
+                # config trouble, not idle churn — keep the traceback.
+                logger.warning(
+                    "EtoroWebSocketSubscriber: connection error — backoff then reconnect",
+                    exc_info=True,
+                )
             except (ConnectionClosed, OSError, TimeoutError) as exc:
                 # Expected churn (#1548): idle WS reaped by an LB, TCP
                 # reset, auth-envelope timeout. Handled by reconnect —

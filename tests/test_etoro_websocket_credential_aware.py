@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -283,21 +284,34 @@ class TestRunLoopErrorLogging:
         assert records[0].levelno == logging.INFO
         assert records[0].exc_info is None
 
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ValueError("boom"),
+            # SSLError is an OSError subclass but means TLS/cert config
+            # trouble, not idle churn — must keep the traceback (Codex
+            # checkpoint-2 finding on #1548).
+            ssl.SSLError(1, "certificate verify failed"),
+        ],
+        ids=["value_error", "ssl_error"],
+    )
     async def test_unexpected_error_keeps_warning_with_traceback(
-        self, fake_pool: Any, caplog: pytest.LogCaptureFixture
+        self, fake_pool: Any, caplog: pytest.LogCaptureFixture, exc: BaseException
     ) -> None:
-        """A genuine bug (e.g. ValueError in frame handling) still dumps
-        the full traceback at WARNING."""
+        """A genuine bug (frame-handling ValueError, TLS failure) still
+        dumps the full traceback at WARNING."""
         sub = _make_subscriber(fake_pool=fake_pool)
         with caplog.at_level(logging.INFO, logger="app.services.etoro_websocket"):
-            await _drive_run_once(sub, ValueError("boom"))
+            await _drive_run_once(sub, exc)
 
         records = [r for r in caplog.records if "connection error" in r.message]
         assert len(records) == 1
         rec = records[0]
         assert rec.levelno == logging.WARNING
         assert rec.exc_info is not None
-        assert rec.exc_info[0] is ValueError
+        assert rec.exc_info[0] is type(exc)
+        # And no calm INFO line was emitted for it.
+        assert not [r for r in caplog.records if "connection closed" in r.message]
 
     async def test_cancelled_error_propagates(self, fake_pool: Any) -> None:
         """CancelledError must NOT be swallowed by either catch arm."""
