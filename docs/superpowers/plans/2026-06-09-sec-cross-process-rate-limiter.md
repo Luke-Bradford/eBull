@@ -157,6 +157,13 @@ import threading
 import time
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
+# Canonical SEC inter-request floor (9.09 req/s). Defined HERE in the DB-free
+# module so both `sec_edgar` and `sec_rate_gate_holder` import it from a leaf
+# with no provider/holder dependency (Codex ckpt-1 MED: avoids the
+# holder<->sec_edgar import cycle). `sec_edgar` re-exports it as the legacy
+# `_MIN_REQUEST_INTERVAL_S` name.
+SEC_MIN_REQUEST_INTERVAL_S: float = 0.11
+
 
 def compute_wait(*, now: float, next_free_at: float, floor: float) -> float:
     """Seconds to wait before firing: ``max(0, next_free_at - now)``.
@@ -226,11 +233,23 @@ Expected: PASS (4 tests).
 Run: `uv run ruff check app/providers/rate_gate.py tests/providers/test_rate_gate.py && uv run pyright app/providers/rate_gate.py`
 Expected: no errors.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Re-point `_MIN_REQUEST_INTERVAL_S` in `sec_edgar.py` to the new canonical constant**
+
+In `app/providers/implementations/sec_edgar.py` change line 56 from `_MIN_REQUEST_INTERVAL_S = 0.11` to a re-export so there is one source of truth and no holder↔provider cycle:
+
+```python
+from app.providers.rate_gate import SEC_MIN_REQUEST_INTERVAL_S
+_MIN_REQUEST_INTERVAL_S = SEC_MIN_REQUEST_INTERVAL_S  # back-compat alias (existing imports)
+```
+
+Run: `uv run python -c "from app.providers.implementations.sec_edgar import _MIN_REQUEST_INTERVAL_S; print(_MIN_REQUEST_INTERVAL_S)"`
+Expected: `0.11`.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add app/providers/rate_gate.py tests/providers/test_rate_gate.py
-git commit -m "feat(#1484): RateGate protocol + InProcessFloorGate + compute_wait"
+git add app/providers/rate_gate.py tests/providers/test_rate_gate.py app/providers/implementations/sec_edgar.py
+git commit -m "feat(#1484): RateGate protocol + InProcessFloorGate + compute_wait; canonical SEC floor constant"
 ```
 
 ---
@@ -248,16 +267,35 @@ git commit -m "feat(#1484): RateGate protocol + InProcessFloorGate + compute_wai
 import threading
 import time
 import pytest
+from psycopg_pool import ConnectionPool
 from app.providers.postgres_rate_gate import PostgresFloorGate
+from tests.fixtures.ebull_test_db import test_database_url, test_db_available
 
 pytestmark = pytest.mark.db
 
 
-def test_two_threads_share_floor(db_pool):
-    # db_pool: existing test fixture yielding a psycopg_pool ConnectionPool
-    # against the test DB with a seeded sec_rate_gate('sec') row.
+@pytest.fixture
+def sec_gate_pool():
+    # No shared `db_pool` fixture exists (repo DB tests use `ebull_test_conn`,
+    # a single conn). This gate test needs CONCURRENT conns, so open a small
+    # pool against the worker test DB and ensure the seed row exists.
+    if not test_db_available():
+        pytest.skip("ebull_test DB unavailable")
+    pool = ConnectionPool(test_database_url(), min_size=2, max_size=4, open=True)
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO sec_rate_gate (budget) VALUES ('sec') ON CONFLICT (budget) DO NOTHING"
+        )
+        conn.commit()
+    try:
+        yield pool
+    finally:
+        pool.close()
+
+
+def test_two_threads_share_floor(sec_gate_pool):
     floor = 0.05
-    gate = PostgresFloorGate(db_pool, budget="sec", floor_s=floor)
+    gate = PostgresFloorGate(sec_gate_pool, budget="sec", floor_s=floor)
     fire_times: list[float] = []
     lock = threading.Lock()
 
@@ -319,9 +357,14 @@ import logging
 import threading
 from typing import Any
 
-from app.providers.rate_gate import InProcessFloorGate
+from app.providers.rate_gate import InProcessFloorGate, SEC_MIN_REQUEST_INTERVAL_S
 
 logger = logging.getLogger(__name__)
+
+# Spec §3e: ONE process-global in-process fallback shared by every
+# PostgresFloorGate instance (not one per instance), so a DB outage degrades
+# to a single per-process floor — never fragmented per gate.
+_PROCESS_FALLBACK_GATE = InProcessFloorGate(floor=SEC_MIN_REQUEST_INTERVAL_S)
 
 # Single CTE statement: capture clock_timestamp() once (volatile), reuse it
 # for both the advance and the returned wait (§3a; Codex ckpt-1 MED).
@@ -343,10 +386,9 @@ class PostgresFloorGate:
         self._budget = budget
         self._floor = floor_s
         self._lock = threading.Lock()
-        # Shared process-global fallback (§3e): one in-process floor for all
-        # SEC paths in this process, so a DB outage degrades to per-process
-        # pacing — never unthrottled, never fragmented per gate instance.
-        self._fallback = InProcessFloorGate(floor=floor_s)
+        # §3e fallback is the process-global singleton above (shared by every
+        # PostgresFloorGate instance), NOT a per-instance gate.
+        self._fallback = _PROCESS_FALLBACK_GATE
 
     def _reserve_sync(self) -> float:
         """Borrow a conn, run the GCRA UPDATE, release; return wait seconds.
@@ -457,10 +499,9 @@ single-process) so tests / CLI / pool-less callers work without wiring.
 
 from __future__ import annotations
 
-from app.providers.implementations.sec_edgar import _MIN_REQUEST_INTERVAL_S
-from app.providers.rate_gate import InProcessFloorGate, RateGate
+from app.providers.rate_gate import SEC_MIN_REQUEST_INTERVAL_S, InProcessFloorGate, RateGate
 
-_sec_rate_gate: RateGate = InProcessFloorGate(floor=_MIN_REQUEST_INTERVAL_S)
+_sec_rate_gate: RateGate = InProcessFloorGate(floor=SEC_MIN_REQUEST_INTERVAL_S)
 
 
 def get_sec_rate_gate() -> RateGate:
@@ -474,10 +515,10 @@ def set_sec_rate_gate(gate: RateGate) -> None:
 
 def _reset_sec_rate_gate_for_tests() -> None:
     global _sec_rate_gate
-    _sec_rate_gate = InProcessFloorGate(floor=_MIN_REQUEST_INTERVAL_S)
+    _sec_rate_gate = InProcessFloorGate(floor=SEC_MIN_REQUEST_INTERVAL_S)
 ```
 
-> Note: importing `_MIN_REQUEST_INTERVAL_S` from `sec_edgar` is a constant value-import (fine — it never changes). Only the *gate* must be getter-accessed.
+> Note: the holder imports only from the DB-free leaf `rate_gate.py` (constant + protocol), NEVER from `sec_edgar` — so there is no holder↔provider import cycle (Codex ckpt-1 MED). Only the *gate* is getter-accessed.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -660,6 +701,23 @@ And in `acquire`, delegate first:
 
 Add the TYPE_CHECKING import for `RateGate`.
 
+- [ ] **Step 1b: Edit `PipelinedSecFetcher.__init__` + the wrapper constructors (CRITICAL — Codex ckpt-1)**
+
+`PipelinedSecFetcher.__init__` (lines 170-196) currently builds `_AsyncRateLimiter(target_rps, shared_clock=shared_clock if shared_clock is not None else _PROCESS_RATE_LIMIT_CLOCK, shared_lock=...)` — it **always** passes a non-None clock, so the Step-1 gate default is never reached. Change it to forward `shared_clock`/`shared_lock` **as-is** (default `None`) so `_AsyncRateLimiter` falls through to the gate:
+
+```python
+        self._rate_limiter = _AsyncRateLimiter(
+            target_rps,
+            shared_clock=shared_clock,   # None -> _AsyncRateLimiter uses the cross-process gate
+            shared_lock=shared_lock,
+        )
+```
+
+Remove the now-unused `_PROCESS_RATE_LIMIT_CLOCK` / `_PROCESS_RATE_LIMIT_LOCK` import at line 36 if nothing else references it. Then check the two wrapper builders (`prefetch_document_texts` ~line 278 and the async fetch wrapper ~line 403): confirm neither passes `shared_clock=_PROCESS_RATE_LIMIT_CLOCK` explicitly — if they do, drop it so they inherit the gate default.
+
+Run: `grep -n "shared_clock\|_PROCESS_RATE_LIMIT_CLOCK" app/services/sec_pipelined_fetcher.py`
+Expected: no construction site forces the process clock; only the `_AsyncRateLimiter`/`PipelinedSecFetcher` signatures retain the optional param (for test isolation).
+
 - [ ] **Step 2: Edit `sec_bulk_refresh.py`** — drop the clock-pair plumbing
 
 Replace the lazy clock import + `_AsyncRateLimiter(target_rps=7.0, shared_clock=..., shared_lock=...)` (lines 308-320) with:
@@ -681,10 +739,40 @@ Replace the lazy clock import + `_AsyncRateLimiter(target_rps=7.0, shared_clock=
     rate_limiter = _AsyncRateLimiter(target_rps=7.0)
 ```
 
-- [ ] **Step 4: Run the existing pipelined-fetcher tests (must still pass via explicit-clock isolation path)**
+- [ ] **Step 4: Rewrite the tests that assert the OLD per-process clock advances (Codex ckpt-1 HIGH — broader than bulk_refresh)**
 
-Run: `uv run pytest tests/ -k "pipelined or rate_limiter or bulk_refresh or bulk_download" -v -m "not db"`
-Expected: PASS (tests that pass an explicit `shared_clock` keep the in-process path; others delegate to the default gate, which in tests is the in-process default).
+Four tests assert `_PROCESS_RATE_LIMIT_CLOCK` advances through a SEC path that now routes to the gate; they will break:
+- `tests/test_sec_bulk_refresh.py:653` (`test_refresh_acquires_from_shared_clock`)
+- `tests/test_sec_fundamentals_companyconcept.py`
+- `tests/test_sec_fundamentals_frames.py`
+- `tests/test_sec_rate_limit_clock.py`
+
+For each, triage:
+- If the test's intent is "the SEC path is rate-limited", rewrite it to install a **spy gate** and assert it was called — e.g.:
+
+```python
+from app.providers import sec_rate_gate_holder as holder
+from app.providers.rate_gate import InProcessFloorGate
+
+class SpyGate(InProcessFloorGate):
+    def __init__(self): super().__init__(floor=0.0); self.sync = 0; self.asy = 0
+    def acquire(self): self.sync += 1; super().acquire()
+    async def acquire_async(self): self.asy += 1; await super().acquire_async()
+
+def test_sec_path_uses_gate():
+    holder._reset_sec_rate_gate_for_tests()
+    spy = SpyGate(); holder.set_sec_rate_gate(spy)
+    try:
+        ...  # drive the SEC path (bulk refresh HEAD / fundamentals fetch)
+        assert spy.sync + spy.asy > 0
+    finally:
+        holder._reset_sec_rate_gate_for_tests()
+```
+
+- If the test specifically exercises the **legacy in-process clock primitive** in isolation (`test_sec_rate_limit_clock.py` constructs `ResilientClient(..., shared_last_request=...)` WITHOUT a gate), it still passes unchanged — verify and leave it.
+
+Run: `uv run pytest tests/ -k "pipelined or rate_limiter or bulk_refresh or bulk_download or rate_limit_clock or companyconcept or frames" -v -m "not db"`
+Expected: PASS — rewritten tests assert gate delegation; the legacy-primitive test (if any) still passes its in-process path.
 
 - [ ] **Step 5: Lint + typecheck + commit**
 
@@ -736,11 +824,16 @@ In the `_dev_profile_connection_demand` docstring (lines 255-272), append a para
 
 ```python
     #1484 — the SEC rate gate (PostgresFloorGate) borrows ONE pooled conn per
-    acquire for ~1 ms under a process-local lock (<=1 gate conn/process), then
-    releases before sleeping. This is transient pool usage, not steady-state
-    demand: it does not raise any pool max, so the returned total is
-    unchanged. Worst-case concurrent transient is <=1/process (<=2 across
-    API+jobs), well within the reserve.
+    acquire for ~1 ms under a process-local lock, then releases before
+    sleeping. Sync and async acquires share the SAME threading.Lock inside
+    _reserve_sync (the async path runs it via run_in_executor), so at most ONE
+    gate conn is held per process at a time — TIGHTER than spec §3d's
+    conservative <=2/process (which assumed a separate asyncio.Lock). The
+    single-lock design supersedes that: <=1/process (<=2 across API+jobs).
+    This is transient pool usage, not steady-state demand: it does not raise
+    any pool max, so the returned total is unchanged, well within the reserve.
+    (Many concurrent async acquires park as blocked executor threads on the
+    lock; harmless — the critical section is a sub-ms UPDATE.)
 ```
 
 - [ ] **Step 4: Boot both processes against dev to confirm wiring (smoke)**
@@ -759,77 +852,96 @@ git commit -m "feat(#1484): wire PostgresFloorGate at API + jobs composition roo
 
 ---
 
-## Task 9: 429 / UA-throttle counter + health surface (§4.4)
+## Task 9: SEC-scoped 429 / UA-throttle counter + health surface (§4.4)
+
+> **Codex ckpt-1 HIGH:** the counter must count **only SEC** 429s. `ResilientClient` is generic (FINRA/CH/eToro/openfigi also use it), so a module-global counter in `resilient_client.py` would pollute the SEC signal. Use an injected `on_429` callback that only the SEC providers pass.
 
 **Files:**
-- Modify: `app/providers/resilient_client.py:184-197` (the retry-warning block)
-- Modify: the SEC health surface (locate at implementation: `grep -rn "postgres-health\|/system/" app/api | head`); add a `sec_throttle_429_total` field sourced from a process counter.
-- Test: `tests/providers/test_rate_gate.py` (append a counter-increment assertion)
+- Create: `app/providers/sec_throttle_metrics.py` (SEC-scoped counter — focused, no provider coupling)
+- Modify: `app/providers/resilient_client.py` (`__init__` + the 429 branch) — optional `on_429` callback
+- Modify: `app/providers/implementations/sec_edgar.py` + `sec_fundamentals.py` — pass `on_429=incr_sec_429` to the SEC `ResilientClient`s (alongside the `gate=` added in Task 6)
+- Modify: the system-health response builder (`grep -rn "postgres-health" app/api`)
+- Test: `tests/providers/test_rate_gate.py` (append)
 
-- [ ] **Step 1: Add a module-level counter to `resilient_client.py`**
-
-```python
-import itertools
-_SEC_429_COUNTER = itertools.count()
-def sec_throttle_429_count() -> int:
-    # next() on a fresh count() starts at 0; expose the consumed total.
-    return next(_SEC_429_COUNTER) - _consumed  # see Step 2 note
-```
-
-> Implementation note: use a simple `threading.Lock`-guarded int instead of `itertools.count` for a readable total:
+- [ ] **Step 1: Create the SEC-scoped counter module**
 
 ```python
+# app/providers/sec_throttle_metrics.py
+"""Process counter of SEC 429 / UA-throttle responses (#1484 §4.4).
+
+SEC-scoped on purpose: ResilientClient is shared by non-SEC providers, so
+only the SEC clients wire incr_sec_429 as their on_429 callback.
+"""
+from __future__ import annotations
 import threading
-_sec_429_lock = threading.Lock()
+
+_lock = threading.Lock()
 _sec_429_total = 0
 
-def _incr_sec_429() -> None:
+
+def incr_sec_429() -> None:
     global _sec_429_total
-    with _sec_429_lock:
+    with _lock:
         _sec_429_total += 1
 
+
 def sec_throttle_429_total() -> int:
-    with _sec_429_lock:
+    with _lock:
         return _sec_429_total
 ```
 
-- [ ] **Step 2: Increment on a 429 in the retry block**
+- [ ] **Step 2: Add the `on_429` callback to `ResilientClient`**
 
-In `_request`, inside the `if response.status_code == 429 or ... in _RETRYABLE_5XX:` branch, guard on 429 specifically:
+In `__init__`, add `on_429: "Callable[[], None] | None" = None` and store `self._on_429 = on_429`. In `_request`, inside the retryable branch, fire it only on a 429:
 
 ```python
-                if response.status_code == 429:
-                    _incr_sec_429()
+                if response.status_code == 429 and self._on_429 is not None:
+                    self._on_429()
 ```
 
-- [ ] **Step 3: Append the test**
+(Import `Callable` from `collections.abc` under TYPE_CHECKING if not already imported.)
+
+- [ ] **Step 3: Append the test (SEC client increments; non-SEC client does NOT)**
 
 ```python
 # tests/providers/test_rate_gate.py (append)
-def test_429_increments_counter():
+def test_on_429_callback_fires_only_when_wired():
     import httpx
-    from app.providers import resilient_client as rc_mod
-    from app.providers.resilient_client import ResilientClient, sec_throttle_429_total
+    from app.providers.resilient_client import ResilientClient
+    from app.providers import sec_throttle_metrics as m
 
-    before = sec_throttle_429_total()
-    seq = iter([httpx.Response(429, headers={"retry-after": "0.1"}), httpx.Response(200, text="ok")])
-    transport = httpx.MockTransport(lambda req: next(seq))
-    rc = ResilientClient(httpx.Client(transport=transport), max_retries=1, backoff_schedule=(0.0,))
-    rc.get("https://example.test/x")
-    assert sec_throttle_429_total() == before + 1
+    before = m.sec_throttle_429_total()
+
+    def make_client(on_429):
+        seq = iter([httpx.Response(429, headers={"retry-after": "0.01"}), httpx.Response(200, text="ok")])
+        return ResilientClient(
+            httpx.Client(transport=httpx.MockTransport(lambda req: next(seq))),
+            max_retries=1, backoff_schedule=(0.0,), on_429=on_429,
+        )
+
+    make_client(m.incr_sec_429).get("https://example.test/x")   # SEC-wired
+    assert m.sec_throttle_429_total() == before + 1
+
+    make_client(None).get("https://example.test/y")             # non-SEC, no callback
+    assert m.sec_throttle_429_total() == before + 1             # unchanged
 ```
 
-- [ ] **Step 4: Surface the counter on the health endpoint**
+- [ ] **Step 4: Wire `on_429=incr_sec_429` into the SEC providers**
 
-Locate the system-health response builder (`grep -rn "postgres-health" app/api`). Add `sec_throttle_429_total` to its payload, importing `sec_throttle_429_total` from `resilient_client`. (Exact file/field naming follows the existing health-payload pattern — mirror a sibling counter field.)
+In `sec_edgar.py` (both `ResilientClient(...)` builds) and `sec_fundamentals.py`, add `on_429=incr_sec_429` (lazy `from app.providers.sec_throttle_metrics import incr_sec_429`) next to the `gate=` arg added in Task 6.
 
-- [ ] **Step 5: Run + lint + commit**
+- [ ] **Step 5: Surface the counter on the health endpoint**
+
+Locate the system-health response builder (`grep -rn "postgres-health" app/api`). Add a `sec_throttle_429_total` field to its payload, importing `sec_throttle_429_total` from `app.providers.sec_throttle_metrics`. Mirror an existing sibling counter field's naming/placement.
+
+- [ ] **Step 6: Run + lint + commit**
 
 ```bash
 uv run pytest tests/providers/test_rate_gate.py -v
-uv run ruff check app/providers/resilient_client.py && uv run pyright app/providers/resilient_client.py
-git add app/providers/resilient_client.py tests/providers/test_rate_gate.py app/api
-git commit -m "feat(#1484): SEC 429 counter + health surface for throttle visibility"
+uv run ruff check app/providers/sec_throttle_metrics.py app/providers/resilient_client.py app/providers/implementations/sec_edgar.py app/providers/implementations/sec_fundamentals.py
+uv run pyright app/providers/sec_throttle_metrics.py app/providers/resilient_client.py
+git add app/providers/sec_throttle_metrics.py app/providers/resilient_client.py app/providers/implementations/sec_edgar.py app/providers/implementations/sec_fundamentals.py tests/providers/test_rate_gate.py app/api
+git commit -m "feat(#1484): SEC-scoped 429 counter (injected on_429) + health surface"
 ```
 
 ---
