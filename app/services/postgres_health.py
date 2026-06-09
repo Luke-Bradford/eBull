@@ -328,10 +328,14 @@ def _q_default_partition_rows(conn: psycopg.Connection[tuple]) -> int:
 
 
 def _q_default_partition_junk_rows(conn: psycopg.Connection[tuple]) -> int:
-    # #1221 — count only rows the parser-side guard
-    # (`_classify_period_rejection`, #1218) would have rejected:
-    # out-of-window dates or start > end. Anything else in DEFAULT is a
-    # legitimate forward-projected row past the partition ceiling.
+    # #1221 — count only rows the #1218 data-shape sanity guard
+    # (`_classify_period_rejection`'s window + ordering legs) would have
+    # rejected: out-of-window dates or start > end. The classifier's
+    # retention-cutoff leg is DELIBERATELY not mirrored: retention
+    # rejections are in-window historical dates that route to real
+    # partitions, never to DEFAULT — and they are policy, not junk.
+    # Anything else in DEFAULT is a legitimate forward-projected row
+    # past the partition ceiling.
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM financial_facts_raw_default "

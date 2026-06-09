@@ -168,7 +168,9 @@ def test_default_partition_junk_probe_discriminates_legit_forward_rows() -> None
             assert low.financial_facts_raw_default_breached_warn is True
         finally:
             conn.execute("DELETE FROM financial_facts_raw WHERE accession_number = %s", (marker,))
-            conn.execute("DELETE FROM instruments WHERE instrument_id = 9902210")
+            # symbol guard: never delete a pre-existing instrument if the
+            # hardcoded id is somehow taken on a shared DB.
+            conn.execute("DELETE FROM instruments WHERE instrument_id = 9902210 AND symbol = 'ZZJUNK'")
 
 
 @pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
