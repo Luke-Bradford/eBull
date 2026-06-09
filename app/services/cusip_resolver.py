@@ -225,6 +225,49 @@ class _Match:
 BulkCusipSource = Literal["bulk_13f_dataset", "bulk_nport_dataset"]
 
 
+def load_bulk_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    """Preload all CUSIP → instrument_id mappings (SEC + OpenFIGI) into a dict.
+
+    Shared by the 13F and N-PORT bulk dataset ingesters (#1437 — was
+    duplicated lock-step in both modules). INFOTABLE rows can number in
+    the millions per archive; doing one indexed DB query per row is the
+    dominant cost of the bulk ingest. Loading the entire map once at the
+    top of ``ingest_*_dataset_archive`` collapses millions of round
+    trips into one SELECT. CUSIP universe is bounded (~13k SEC Form 13F
+    securities list rows + ~1500 universe instruments + OpenFIGI
+    promotions), so the dict fits comfortably in memory.
+
+    Provider widening (#1233 PR-1b): the WHERE filter reads
+    ``provider IN ('sec', 'openfigi')`` so post-bulk-sweep OpenFIGI
+    promotions become visible to the next bulk ingest pass without
+    a schema-level UNION view. The SEC-curated mappings remain
+    authoritative — ``ORDER BY is_primary DESC, external_identifier_id ASC``
+    means a SEC ``is_primary=TRUE`` row wins over an OpenFIGI
+    ``is_primary=FALSE`` row when both exist for the same CUSIP
+    (the OpenFIGI sweep deliberately writes ``is_primary=FALSE``;
+    see ``_promote_openfigi_mapping``). The CUSIP-uniqueness constraint
+    (``uq_external_identifiers_provider_value`` on
+    ``(provider, identifier_type, identifier_value)``) means at most
+    one row per (provider, cusip), so the dedup happens at the row
+    level — ``setdefault`` keeps the first-seen mapping per CUSIP
+    after the ORDER BY.
+    """
+    out: dict[str, int] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT identifier_value, instrument_id
+            FROM external_identifiers
+            WHERE provider IN ('sec', 'openfigi') AND identifier_type = 'cusip'
+            ORDER BY is_primary DESC, external_identifier_id ASC
+            """,
+        )
+        for row in cur.fetchall():
+            cusip, instrument_id = row
+            out.setdefault(str(cusip).strip().upper(), int(instrument_id))
+    return out
+
+
 def record_unresolved_cusip_from_bulk(
     conn: psycopg.Connection[Any],
     *,
@@ -1369,7 +1412,7 @@ def _tombstone_bulk_rows_for_cusip(
     (different filer × period). A successful OpenFIGI resolution
     means the CUSIP→instrument_id mapping is now in
     ``external_identifiers``; the next bulk ingest pass will load
-    the mapping via ``_load_cusip_map`` and write into typed tables
+    the mapping via ``load_bulk_cusip_map`` and write into typed tables
     directly, so the unresolved rows have served their purpose.
 
     Scoped to ``source IS NOT NULL`` so the legacy partition is

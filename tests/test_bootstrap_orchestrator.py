@@ -917,30 +917,11 @@ def test_submissions_processed_provided_by_s8_on_success_and_skip() -> None:
 
 
 # ---------------------------------------------------------------------------
-# #1233 extended lock-contention cap-gates — same pattern as PR-1292
-# for the other bulk/legacy pairs flagged by the 2026-05-23 audit.
+# #1233 extended lock-contention cap-gates — PR-1292 pattern. #1437: the
+# three ``*_dataset_processed`` ordering caps were removed (their legacy
+# consumers were dropped by #1413), so only ``submissions_processed``
+# remains; its provider/skip invariants are pinned below.
 # ---------------------------------------------------------------------------
-
-
-def test_dataset_processed_caps_provided_by_bulk_ingesters_on_success_and_skip() -> None:
-    """Companion invariant to the requires-side tests. Each new
-    ordering cap is advertised by its bulk ingester on BOTH success
-    AND skip — the skip entry preserves cascade-skip parity (S7
-    skipped → S10/S11 cascade-skipped → legacy chain still gets the
-    ordering cap satisfied so it does not deadlock).
-    """
-    from app.services.bootstrap_orchestrator import (
-        _STAGE_PROVIDES,
-        _STAGE_PROVIDES_ON_SKIP,
-    )
-
-    assert "insider_dataset_processed" in _STAGE_PROVIDES["sec_insider_ingest_from_dataset"]
-    assert "insider_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_insider_ingest_from_dataset"]
-    assert "institutional_dataset_processed" in _STAGE_PROVIDES["sec_13f_ingest_from_dataset"]
-    assert "institutional_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_13f_ingest_from_dataset"]
-    # #1340 — NPORT family: S12 bulk provides on success + skip.
-    assert "nport_dataset_processed" in _STAGE_PROVIDES["sec_nport_ingest_from_dataset"]
-    assert "nport_dataset_processed" in _STAGE_PROVIDES_ON_SKIP["sec_nport_ingest_from_dataset"]
 
 
 def test_ordering_only_caps_disjoint_from_strict_gate_caps() -> None:
@@ -960,9 +941,6 @@ def test_ordering_only_caps_disjoint_from_strict_gate_caps() -> None:
     assert _ORDERING_ONLY_CAPS == frozenset(
         {
             "submissions_processed",
-            "insider_dataset_processed",
-            "institutional_dataset_processed",
-            "nport_dataset_processed",
         }
     ), (
         "_ORDERING_ONLY_CAPS membership changed without updating the test. "
@@ -982,38 +960,32 @@ def test_ordering_only_caps_disjoint_from_strict_gate_caps() -> None:
 def test_ordering_caps_satisfied_on_terminal_failure_but_content_caps_are_not() -> None:
     """Codex 2 LOW on #1233 cap-gates: prove the terminal-failure
     escape hatch in ``_satisfied_capabilities`` works as documented.
-    An ordering cap (``insider_dataset_processed``) advertised by
-    ``sec_insider_ingest_from_dataset`` (S11) MUST be satisfied
-    whenever S11 reaches blocked / error / cancelled. The adjacent
-    content cap (``insider_inputs_seeded``) advertised by the same
-    stage MUST NOT — content caps stay dead on terminal failure so
-    downstream content consumers correctly block.
+    The ordering cap (``submissions_processed``) MUST be satisfied
+    whenever its provider reaches blocked / error / cancelled; content
+    caps advertised by terminal-failed stages MUST NOT — they stay dead
+    so downstream content consumers correctly block.
 
-    Tests the exact bug pattern Codex caught on
-    ``test_partial_bulk_failure_legacy_recovers`` regression: ordering
-    cap must flow through to legacy chain, content cap must not.
+    (#1437 — the ``*_dataset_processed`` legs were removed with the
+    caps; the content-cap-stays-dead half is preserved on the bulk
+    ingesters below.)
     """
     from app.services.bootstrap_orchestrator import _satisfied_capabilities
 
+    # Content caps stay dead on terminal failure of the bulk ingesters.
     for terminal_status in ("blocked", "error", "cancelled"):
         caps = _satisfied_capabilities(
-            statuses={"sec_insider_ingest_from_dataset": terminal_status},
-            rows_processed={"sec_insider_ingest_from_dataset": None},
-        )
-        assert "insider_dataset_processed" in caps, (
-            f"ordering cap missing on status={terminal_status!r} — legacy recovery chain would falsely block"
+            statuses={
+                "sec_insider_ingest_from_dataset": terminal_status,
+                "sec_13f_ingest_from_dataset": terminal_status,
+            },
+            rows_processed={
+                "sec_insider_ingest_from_dataset": None,
+                "sec_13f_ingest_from_dataset": None,
+            },
         )
         assert "insider_inputs_seeded" not in caps, (
             f"content cap leaked on status={terminal_status!r} — downstream consumer would falsely proceed"
         )
-
-    # Same shape for institutional pair.
-    for terminal_status in ("blocked", "error", "cancelled"):
-        caps = _satisfied_capabilities(
-            statuses={"sec_13f_ingest_from_dataset": terminal_status},
-            rows_processed={"sec_13f_ingest_from_dataset": None},
-        )
-        assert "institutional_dataset_processed" in caps
         assert "institutional_inputs_seeded" not in caps
 
     # Bot WARNING on PR #1299: ``submissions_processed`` is also a

@@ -4,10 +4,10 @@ Three behaviour groups:
 
 1. **Deletion** — the three deleted symbols are gone from
    ``app.services.bootstrap_orchestrator``.
-2. **StageSpec.params** — bootstrap stages 14, 15, 21 carry the
-   exact params dict the deleted wrappers used to hardcode in their
-   bodies. ``_resolve_dynamic_params`` materialises the dispatch-time
-   13F cutoff sentinel.
+2. **StageSpec.params** — surviving bootstrap stages carry the exact
+   params dict the deleted wrappers used to hardcode in their bodies.
+   (#1437 — the ``_resolve_dynamic_params`` sentinel machinery and its
+   tests were removed: no current stage spec sets a dynamic param.)
 3. **Promoted invoker contract** — ``filings_history_seed``,
    ``sec_first_install_drain``, ``sec_13f_quarterly_sweep`` accept the
    widened ``Mapping[str, Any]`` and honour the operator-tunable
@@ -16,17 +16,12 @@ Three behaviour groups:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import pytest
 
-from app.services.bootstrap_orchestrator import (
-    _BOOTSTRAP_13F_RECENCY_DAYS,
-    _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF,
-    _resolve_dynamic_params,
-    get_bootstrap_stage_specs,
-)
+from app.services.bootstrap_orchestrator import get_bootstrap_stage_specs
 
 # ---------------------------------------------------------------------------
 # 1. Deletion regression — wrappers + JOB_BOOTSTRAP_* constants gone.
@@ -91,56 +86,6 @@ class TestStageSpecParams:
             "use_bulk_zip": True,
             "follow_pagination": False,
         }
-
-
-class TestResolveDynamicParams:
-    """``_resolve_dynamic_params`` materialises the dispatch-time 13F cutoff."""
-
-    def test_sentinel_resolves_to_today_minus_recency_days(self) -> None:
-        out = _resolve_dynamic_params(
-            {"min_period_of_report": _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF, "source_label": "x"}
-        )
-        assert out["min_period_of_report"] == date.today() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS)
-        # Pass-through of non-sentinel keys.
-        assert out["source_label"] == "x"
-
-    def test_concrete_date_passes_through(self) -> None:
-        fixed = date(2024, 1, 1)
-        out = _resolve_dynamic_params({"min_period_of_report": fixed})
-        assert out["min_period_of_report"] == fixed
-
-    def test_no_min_period_pass_through(self) -> None:
-        out = _resolve_dynamic_params({"days_back": 365})
-        assert out == {"days_back": 365}
-
-    def test_min_last_13f_hr_at_sentinel_resolves_to_utc_midnight(self) -> None:
-        """#1010 — HR-recency cutoff materialises as UTC start-of-day
-        ``today() - 380d``. Exact equality pins the invariant against
-        future time-of-day regressions (Codex 1b)."""
-        from datetime import UTC, datetime, time
-
-        from app.services.bootstrap_orchestrator import (
-            _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF,
-        )
-
-        out = _resolve_dynamic_params({"min_last_13f_hr_at": _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF})
-        # Mirror the resolver: UTC date, not local ``date.today()``.
-        # On a non-UTC dev host around the midnight boundary the two
-        # can differ by one day (Codex 2 MEDIUM).
-        expected = datetime.combine(
-            datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS),
-            time(0, 0),
-            tzinfo=UTC,
-        )
-        assert out["min_last_13f_hr_at"] == expected
-
-    def test_min_last_13f_hr_at_concrete_value_passes_through(self) -> None:
-        """Concrete datetime ≠ sentinel → returned unchanged."""
-        from datetime import UTC, datetime
-
-        fixed = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
-        out = _resolve_dynamic_params({"min_last_13f_hr_at": fixed})
-        assert out["min_last_13f_hr_at"] == fixed
 
 
 # ---------------------------------------------------------------------------

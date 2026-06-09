@@ -1,9 +1,12 @@
 """First-install bootstrap orchestrator.
 
-Runs the 26-stage end-to-end first-install backfill described in
+Runs the end-to-end first-install backfill described in
 ``docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md``
-(supersedes the original 17-stage shape in
+(supersedes the original shape in
 ``docs/superpowers/specs/2026-05-07-first-install-bootstrap.md``).
+The stage list is ``_BOOTSTRAP_STAGE_SPECS`` below — the count has
+drifted with every redesign (26 → 21 as of #1413), so it is not
+restated here.
 
 Phases (S-numbers match the runbook stage list):
 
@@ -53,7 +56,7 @@ import json
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -125,23 +128,6 @@ JOB_CUSIP_RESOLVER_POST_BULK_SWEEP = "cusip_resolver_post_bulk_sweep"
 # run to ``partial_error`` (the universal gate stays closed). See
 # ``app/services/bootstrap_validation.py``.
 JOB_BOOTSTRAP_VALIDATION = "bootstrap_validation"
-# PR1c #1064 — bootstrap-bounded 13F sweep recency cut-off. Used to
-# live as a constant inside the deleted ``bootstrap_sec_13f_recent_sweep_job``
-# wrapper. 4 quarters (~380 days) = current + 3 prior periods, matches
-# the rolling ownership-card window. Older 13Fs add no value to
-# current-quarter ranking and pre-2013 ones don't have machine-readable
-# holdings (#1008).
-_BOOTSTRAP_13F_QUARTERS_BACK = 4
-_BOOTSTRAP_13F_RECENCY_DAYS = _BOOTSTRAP_13F_QUARTERS_BACK * 95
-
-# PR7 #1233 §4.6 — N-PORT cohort recency window. Aliases to the 13F
-# 380d window today (#1010 precedent) but lives in its own constant
-# so a future 13F-only tuning of ``_BOOTSTRAP_13F_RECENCY_DAYS``
-# doesn't silently drift the N-PORT cohort cutoff. Bot review on PR
-# #1243 WARNING — keep the two namespaced even when their numerical
-# value is identical.
-_BOOTSTRAP_NPORT_RECENCY_DAYS = _BOOTSTRAP_13F_RECENCY_DAYS
-
 # PR1c #1064 — filings_history_seed bootstrap default form-type
 # allow-list. Imported once at module load so the StageSpec.params
 # dict is plain data; the underlying constant lives in the canonical
@@ -151,70 +137,6 @@ _BOOTSTRAP_NPORT_RECENCY_DAYS = _BOOTSTRAP_13F_RECENCY_DAYS
 from app.services.filings import SEC_INGEST_KEEP_FORMS  # noqa: E402
 
 _FILINGS_HISTORY_KEEP_FORMS_TUPLE: tuple[str, ...] = tuple(sorted(SEC_INGEST_KEEP_FORMS))
-
-
-# Sentinel for params values that depend on dispatch-time state
-# (e.g. ``date.today()``). Module-load evaluation would freeze the
-# value into ``_BOOTSTRAP_STAGE_SPECS`` for the lifetime of the jobs
-# process; a long-lived process would dispatch stage 22 with a stale
-# cutoff. ``_resolve_dynamic_params`` materialises the absolute value
-# at dispatch time. The sentinel string is namespaced so it never
-# collides with a legitimate operator value.
-_PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF = "<dynamic:bootstrap_13f_cutoff>"
-# #1010 — sibling sentinel for the HR-recency cohort cutoff on stage
-# 22. Filters ``institutional_filers.last_13f_hr_at >= cutoff`` so the
-# sweep iterates only currently-active HR filers.
-_PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF = "<dynamic:bootstrap_13f_hr_cutoff>"
-# #1233 PR7 (mirror of #1010 for N-PORT) — recency cohort cutoff for
-# stage 23 sec_n_port_ingest. Filters
-# ``sec_nport_filer_directory.last_seen_filed_at >= cutoff`` so the
-# bootstrap sweep iterates only currently-active fund-trust filers.
-# Daily / Admin / manual paths dispatch with empty params → full
-# cohort (#1010 precedent — safety-net for re-emerging filers).
-_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF = "<dynamic:bootstrap_nport_cutoff>"
-
-
-def _resolve_dynamic_params(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Materialise dispatch-time dynamic values in a stage params dict.
-
-    Today the dynamic values are the bootstrap-13F recency cutoffs
-    (one for ``min_period_of_report``, one for ``min_last_13f_hr_at``).
-    The helper is structured for forward extensibility (additional
-    sentinels can be added without touching call sites).
-
-    The dispatcher calls this immediately before invoking the
-    underlying ``JobInvoker`` so the absolute value is what flows
-    into ``job_runs.params_snapshot`` and the invoker body.
-    """
-    resolved: dict[str, Any] = dict(params)
-    if resolved.get("min_period_of_report") == _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF:
-        resolved["min_period_of_report"] = date.today() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS)
-    if resolved.get("min_last_13f_hr_at") == _PARAM_DYNAMIC_BOOTSTRAP_13F_HR_CUTOFF:
-        # UTC start-of-day so the boundary is inclusive against
-        # ``form.idx`` dates which are stored at midnight UTC. Two
-        # subtle pitfalls avoided here:
-        #   (1) using the full timestamp (no ``.date()`` truncation)
-        #       would drift the cutoff during the day and exclude
-        #       filings whose form.idx date is exactly ``today() -
-        #       380d`` (Codex 1a B-3); (2) ``date.today()`` returns
-        #       *local* time — on a non-UTC dev host around the
-        #       local/UTC date boundary it would shift the cutoff by
-        #       ±1 day and silently exclude an exact-boundary UTC
-        #       filer (Codex 2 MEDIUM). Take the UTC date explicitly.
-        cutoff_date = datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_13F_RECENCY_DAYS)
-        resolved["min_last_13f_hr_at"] = datetime.combine(cutoff_date, time(0, 0), tzinfo=UTC)
-    if resolved.get("min_last_seen_filed_at") == _PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF:
-        # PR7 #1233 §4.6 — mirror of the 13F HR-cutoff resolution.
-        # UTC start-of-day so the boundary is inclusive against
-        # ``sec_nport_filer_directory.last_seen_filed_at`` (stored at
-        # midnight UTC by ``sec_nport_filer_directory_sync``). The
-        # 380d window aliases the 13F figure today but lives behind
-        # the dedicated ``_BOOTSTRAP_NPORT_RECENCY_DAYS`` constant so
-        # a future 13F-only tuning doesn't silently drift the N-PORT
-        # cohort cutoff (PR #1243 bot review WARNING).
-        nport_cutoff_date = datetime.now(tz=UTC).date() - timedelta(days=_BOOTSTRAP_NPORT_RECENCY_DAYS)
-        resolved["min_last_seen_filed_at"] = datetime.combine(nport_cutoff_date, time(0, 0), tzinfo=UTC)
-    return resolved
 
 
 def _spec(
@@ -364,40 +286,14 @@ Capability = Literal[
     # skipped → S8 cascade-skipped) still flows into S15 as the
     # legacy chain owner of ``filing_events_seeded``.
     "submissions_processed",
-    # #1233 — extension of the PR-1292 cap-ordering pattern to the
-    # other bulk/legacy pairs flagged by the 2026-05-23 lock-contention
-    # audit. Same shape:
-    #
-    #   * ``insider_dataset_processed`` — S11 sec_insider_ingest_from_dataset
-    #     and S19 sec_insider_transactions_backfill + S20 sec_form3_ingest
-    #     all write ``ownership_insiders_observations``. Without an
-    #     ordering cap, PR-2 ``as_completed`` parallelism would let the
-    #     bulk path and the legacy backfills run concurrently against
-    #     overlapping (instrument_id, holder, observed_at) rows —
-    #     identical row-lock storm shape as the S8↔S15 case PR-1292
-    #     fixed.
-    #
-    #   * ``institutional_dataset_processed`` — S10 sec_13f_ingest_from_dataset
-    #     and S22 sec_13f_recent_sweep both write
-    #     ``ownership_institutions_observations``. Same pattern;
-    #     largest write fanout of any audited pair (institutional 13F
-    #     rows during a full bootstrap can total tens of millions).
-    #
-    #   * ``nport_dataset_processed`` (#1340) — S12 sec_nport_ingest_from_dataset
-    #     and S23 sec_n_port_ingest both write ``ownership_funds_observations``.
-    #     They run on different lanes (db vs sec_rate) so PR-2 ``as_completed``
-    #     parallelism would let them write concurrently. Same row-lock shape;
-    #     ALSO required for correctness — S23 reads the ``n_port_ingest_log``
-    #     rows S12 seeds (#1340) to skip bulk-loaded accessions, so S23 must
-    #     run after S12 commits.
-    #
-    # All caps are PROVIDED on SUCCESS by their respective bulk
-    # ingester and ON SKIP for cascade-skip parity. Required by the
-    # legacy stages downstream so they serialise after the bulk
-    # ingester terminalises.
-    "insider_dataset_processed",
-    "institutional_dataset_processed",
-    "nport_dataset_processed",
+    # #1437 — the ``insider_dataset_processed`` / ``institutional_dataset_processed``
+    # / ``nport_dataset_processed`` ordering caps (#1233's extension of the
+    # PR-1292 pattern to the other bulk/legacy pairs) were removed: the
+    # legacy per-CIK stages that consumed them (S19/S20/S22/S23) were
+    # dropped by #1413, leaving the caps provided-but-unconsumed. If a
+    # legacy stage that writes ``ownership_*_observations`` ever returns
+    # to the bootstrap graph, reintroduce an ordering cap from the bulk
+    # ingester (see the PR-1292 ``submissions_processed`` shape above).
     # #1419 (P4) — S24 ``ownership_observations_backfill`` refreshed the
     # ``ownership_*_current`` tables the rollup reads. Provided ONLY by S24
     # (terminal db-lane stage that otherwise advertised nothing), required by
@@ -445,25 +341,17 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
     "sec_submissions_ingest": ("filing_events_seeded", "submissions_processed"),
     "sec_companyfacts_ingest": ("fundamentals_raw_seeded",),
     # Bulk ownership ingester covers both insider transactions + Form 3.
-    # #1233 lock-contention cap-gates: bulk ingesters advertise an
-    # ordering cap on top of their content caps. Required by S19/S20
-    # (insider) and S22 (institutional) so the legacy backfills wait
-    # for the bulk path to terminalise. See ``insider_dataset_processed``
-    # / ``institutional_dataset_processed`` docstrings.
     # #1413 — bulk insider dataset ingest writes ownership_insiders_observations
     # for BOTH Form 4 transactions AND Form 3 initial-holdings (NONDERIV_HOLDING
     # path), so it carries the insider content cap directly. ``form3_inputs_seeded``
     # removed entirely (the legacy per-CIK S20 that owned it is dropped; S24 no
     # longer requires a form3-specific gate — bulk S11 covers form3 observations).
-    "sec_insider_ingest_from_dataset": (
-        "insider_inputs_seeded",
-        "insider_dataset_processed",
-    ),
-    "sec_13f_ingest_from_dataset": (
-        "institutional_inputs_seeded",
-        "institutional_dataset_processed",
-    ),
-    "sec_nport_ingest_from_dataset": ("nport_inputs_seeded", "nport_dataset_processed"),
+    # #1437 — the ``*_dataset_processed`` ordering caps these three used to
+    # advertise on top of the content caps were removed (consumers dropped
+    # by #1413; see the Capability Literal comment).
+    "sec_insider_ingest_from_dataset": ("insider_inputs_seeded",),
+    "sec_13f_ingest_from_dataset": ("institutional_inputs_seeded",),
+    "sec_nport_ingest_from_dataset": ("nport_inputs_seeded",),
     # #1413 — S14 sec_submissions_files_walk + S15 filings_history_seed
     # dropped; ``filing_events_seeded`` re-homed to S8 (success) + S16.
     # S16 sec_first_install_drain seeds filing_events from bulk. Step 2.3
@@ -505,21 +393,9 @@ _STAGE_PROVIDES_ON_SKIP: Final[dict[str, tuple[Capability, ...]]] = {
     # as success" — the cap is purely an ordering constraint on S15,
     # not a content-validity signal.
     "sec_submissions_ingest": ("submissions_processed",),
-    # #1233 lock-contention cap-gates: same cascade-skip parity as
-    # ``sec_submissions_ingest``. If S7 sec_bulk_download is skipped
-    # on slow-connection fallback (#1041), S10/S11 cascade-skip too —
-    # but the ordering cap still flows so the legacy ingesters
-    # proceed without waiting on a bulk run that will never happen.
-    # The cap is purely an ordering constraint; the cap-on-skip does
-    # NOT masquerade as "content was ingested", same as the existing
-    # ``submissions_processed`` cascade-skip entry.
-    "sec_insider_ingest_from_dataset": ("insider_dataset_processed",),
-    "sec_13f_ingest_from_dataset": ("institutional_dataset_processed",),
-    # #1340 — S12 NPORT bulk ingester. Cascade-skip parity: if S7 is
-    # skipped on slow-connection fallback, S12 cascade-skips but the
-    # ordering cap still flows so S23 proceeds (it falls back to the
-    # full HTTP enumeration path with an empty n_port_ingest_log).
-    "sec_nport_ingest_from_dataset": ("nport_dataset_processed",),
+    # #1437 — the ``*_dataset_processed`` cascade-skip parity entries for
+    # S10/S11/S12 were removed with the caps themselves (consumers dropped
+    # by #1413).
 }
 
 
@@ -606,12 +482,11 @@ _STRICT_CAP_PROVIDER_EXCLUSIONS: Final[dict[Capability, frozenset[str]]] = {}
 # etc.) deliberately stay non-ordering: they must observe actual
 # content writes to be satisfied. Ordering caps only need the
 # upstream stage to be done.
+# (#1437 — the three ``*_dataset_processed`` ordering caps were removed
+# from this set with the caps themselves.)
 _ORDERING_ONLY_CAPS: Final[frozenset[Capability]] = frozenset(
     {
         "submissions_processed",
-        "insider_dataset_processed",
-        "institutional_dataset_processed",
-        "nport_dataset_processed",
     }
 )
 
@@ -672,9 +547,8 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     # ``filing_events_seeded`` (the ``submissions_secondary_pages_walked``
     # requirement is dropped: S16 no longer provides it, and recent
     # deep-history bodies are lazy-on-view per #1343). The
-    # ``*_dataset_processed`` ordering caps now have no consumers (the legacy
-    # stages that required them are gone) — they remain provided-but-
-    # unconsumed (harmless; cleanup later).
+    # ``*_dataset_processed`` ordering caps lost their consumers here and
+    # were removed end-to-end by #1437.
     "sec_business_summary_bootstrap": CapRequirement(all_of=("filing_events_seeded",)),
     "sec_8k_events_ingest": CapRequirement(all_of=("filing_events_seeded",)),
     # #1174 — dedicated MF directory refresh (bounded mf.json fetch).
@@ -1179,8 +1053,10 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # in <10 min on a fast connection; the C-stages below ingest
     # locally with no rate-budget cost.
     _spec("sec_bulk_download", 7, "sec_bulk_download", JOB_SEC_BULK_DOWNLOAD),
-    # Phase C — DB-bound bulk ingesters (#1020). Parallel within db
-    # lane (max_concurrency=5).
+    # Phase C — DB-bound bulk ingesters (#1020). Parallel CROSS-lane:
+    # ``_STAGE_LANE_OVERRIDES`` re-homes each onto its own per-family
+    # lane (#1141), bounded by ``_HEAVY_INGEST_MAX_CONCURRENCY`` = 2
+    # (#1426 memory guard).
     _spec("sec_submissions_ingest", 8, "db", JOB_SEC_SUBMISSIONS_INGEST),
     _spec("sec_companyfacts_ingest", 9, "db", JOB_SEC_COMPANYFACTS_INGEST),
     _spec("sec_13f_ingest_from_dataset", 10, "db", JOB_SEC_13F_INGEST_FROM_DATASET),
@@ -1193,7 +1069,7 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # joins on the resolved CUSIP map. The sweep promotes each
     # OpenFIGI-resolved CUSIP into ``external_identifiers`` with
     # provider='openfigi', then leaves the unresolved row in place
-    # (a subsequent ``_load_cusip_map`` read picks the new mapping up
+    # (a subsequent ``load_bulk_cusip_map`` read picks the new mapping up
     # via the WHERE provider IN ('sec', 'openfigi') filter).
     #
     # Lane=``openfigi`` so it is disjoint from every SEC budget — the
@@ -1273,8 +1149,8 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # The operator-visible ownership rollup renders from the bulk
     # observation tables; the legacy per-CIK sweeps remain as steady-state
     # scheduled jobs (post-complete) for the recency-window delta + the
-    # legacy ``institutional_holdings`` table. The dynamic recency sentinels
-    # (_PARAM_DYNAMIC_BOOTSTRAP_*) are now unused by the bootstrap path.
+    # legacy ``institutional_holdings`` table. (#1437 — the dynamic recency
+    # sentinel machinery the dropped stages used was removed outright.)
     _spec("ownership_observations_backfill", 24, "db", "ownership_observations_backfill"),
     # Stream A PR-C2 T1.2 (#1233): S25 dispatches the bootstrap-only
     # ``fundamentals_sync_bootstrap`` invoker (NOT the steady-state
@@ -2247,19 +2123,19 @@ def _phase_batched_dispatch(
                 if not _heavy_ingest_admits(heavy_in_flight_keys, stage.stage_key):
                     continue  # heavy-ingest at cap; leave pending
 
-                # PR1c #1064: resolve dispatch-time dynamic values
-                # (e.g. _PARAM_DYNAMIC_BOOTSTRAP_13F_CUTOFF →
-                # ``today() - 380d``) and validate via the canonical
-                # registry validator with allow_internal_keys=True
-                # so audit-only keys (``source_label``) pass through.
-                # Validation failure is a programmer error in the
-                # stage spec — fail-fast, dispatch surfaces it as a
-                # stage error.
-                resolved = _resolve_dynamic_params(stage.params)
+                # PR1c #1064: validate via the canonical registry
+                # validator with allow_internal_keys=True so audit-only
+                # keys (``source_label``) pass through. Validation
+                # failure is a programmer error in the stage spec —
+                # fail-fast, dispatch surfaces it as a stage error.
+                # (#1437 — the dispatch-time dynamic-sentinel resolution
+                # step that used to precede this was removed: the per-CIK
+                # stages that carried ``<dynamic:...>`` params were
+                # dropped by #1413 and no current spec sets one.)
                 try:
                     validated_params = validate_job_params(
                         stage.job_name,
-                        resolved,
+                        dict(stage.params),
                         allow_internal_keys=True,
                     )
                 except ParamValidationError as exc:
@@ -3058,8 +2934,9 @@ def run_bootstrap_orchestrator() -> None:
 # lifted into params-aware ``JobInvoker`` bodies in
 # ``app/workers/scheduler.py`` (``filings_history_seed``,
 # ``sec_first_install_drain``, extended ``sec_13f_quarterly_sweep``).
-# Bootstrap stages 14, 15, 21 dispatch the promoted bodies via
-# ``StageSpec.params``; the deleted JOB_* constants are gone too,
+# (#1413 later dropped the filings_history_seed / 13F-sweep stages from
+# the bootstrap graph; S16 ``sec_first_install_drain`` is the surviving
+# params-carrying stage.) The deleted JOB_* constants are gone too,
 # so any straggling reference fails fast on import.
 
 
