@@ -49,6 +49,7 @@ import psycopg
 import psycopg.rows
 
 from app.services import raw_filings
+from app.services.institutional_holdings import acquire_13f_accession_write_lock
 from app.services.raw_filings import DocumentKind, RawFilingDocument
 
 logger = logging.getLogger(__name__)
@@ -1028,6 +1029,9 @@ def _apply_13f_infotable(
         return False
 
     # All CUSIPs resolved — safe to replace-then-insert.
+    # #1542 Task A — same per-accession lock as live ingest; serialises this
+    # DELETE+INSERT against a concurrent _ingest_single_accession holdings write.
+    acquire_13f_accession_write_lock(conn, raw_doc.accession_number)
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM institutional_holdings WHERE accession_number = %s",

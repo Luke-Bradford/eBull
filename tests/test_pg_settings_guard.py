@@ -34,6 +34,7 @@ from app.db.pool import (
     DB_POOL_MAX_SIZE,
     JOBS_POOL_MAX_SIZE,
 )
+from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
 
 
 def _fake_conn_returning(value: int) -> MagicMock:
@@ -144,7 +145,9 @@ def test_breached_message_includes_actionable_alter(
 
 # Expected dev-profile demand, derived from the same source constants the
 # guard sums (not a hardcoded 23) so a deliberate pool-size change updates
-# the expectation through the constants, never silently.
+# the expectation through the constants, never silently. SEC_LANE_MAX_CONCURRENCY
+# added in #1542 — N concurrent sec_rate job bodies now charged explicitly
+# (the lane no longer holds a JobLock advisory conn).
 _EXPECTED_DEMAND = (
     DB_POOL_MAX_SIZE
     + AUDIT_POOL_MAX_SIZE
@@ -154,6 +157,7 @@ _EXPECTED_DEMAND = (
     + JOBS_FIXED_LONGLIVED_CONNS
     + JOBS_STEADY_STATE_EXEC_CONNS
     + ORCHESTRATOR_GATE_CHECK_CONN
+    + SEC_LANE_MAX_CONCURRENCY
     + CONNECTION_BUDGET_RESERVE
 )
 

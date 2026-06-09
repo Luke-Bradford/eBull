@@ -100,16 +100,6 @@ def _assert_cross_thread_serialises(outer_job: str, inner_job: str) -> None:
 class TestJobLockSourceLevel:
     """Source-level lock contention vs cross-source parallelism."""
 
-    def test_same_source_serialises_cross_thread(self) -> None:
-        """sec_form3_ingest + sec_8k_events_ingest share source=sec_rate.
-
-        Cross-thread acquires MUST still serialise via the real
-        Postgres advisory lock. Same-context re-entrancy is the
-        intentional post-#1184 behaviour, covered by
-        ``tests/test_job_lock_reentrancy.py``.
-        """
-        _assert_cross_thread_serialises("sec_form3_ingest", "sec_8k_events_ingest")
-
     def test_cross_source_runs_concurrently(self) -> None:
         """orchestrator_full_sync (db) + execute_approved_orders (etoro)
         are different sources and both must acquire successfully."""

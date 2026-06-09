@@ -71,6 +71,7 @@ from app.services.institutional_holdings import (
     _resolve_cusip_to_instrument_id,
     _upsert_filer,
     _upsert_holding,
+    acquire_13f_accession_write_lock,
     parse_archive_index,
     thirteen_f_within_retention,
 )
@@ -473,6 +474,15 @@ def _parse_13f_hr(
 
     try:
         with conn.transaction():
+            # #1542 — third writer of this accession's institutional_holdings rows
+            # (alongside live ingest and rewash). Acquire the per-accession advisory
+            # lock FIRST (inside the transaction, after all SEC fetches) so the
+            # DELETE+INSERT rewash cannot race this upsert. Lock order: per-accession
+            # (ingest_13f_accession key space) THEN per-instrument
+            # (refresh_institutions_current, acquired inside refresh_institutions_current
+            # below) — matches the other two paths; no deadlock risk.
+            acquire_13f_accession_write_lock(conn, accession)
+
             filer_id = _upsert_filer(conn, info)
 
             # Dedupe by (instrument_id, exposure) to match the DB unique

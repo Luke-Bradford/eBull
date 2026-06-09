@@ -167,3 +167,36 @@ So using `cur.rowcount` as a batch insert/affected total after `executemany` is 
 - It does NOT hold for `executemany(..., returning=True)` — that path iterates result sets differently.
 
 Origin: PR #1468 (#1302) review WARNING claimed the FIGI counter "will be at most 1"; rebutted by empirical probe + the pinned regression test.
+
+## Cleanup-path ordering: clear ownership flags AFTER the released-side operation
+
+Release the resource FIRST, then clear the "I own it" flag. NOT in a `try/finally` that fires on raise either — `finally` would still clear the flag if release blew up, masking the very leak signal the flag is supposed to surface.
+
+```python
+# Wrong — clears the flag before the operation that depends on it. If
+# release raises, the flag is already False — caller / diagnostics can't
+# tell we still held the resource.
+if self._held:
+    self._held = False
+    resource.release(key)
+    return
+
+# Wrong — finally clears even on raise. Same suppression as above.
+if self._held:
+    try:
+        resource.release(key)
+    finally:
+        self._held = False
+    return
+
+# Correct — release first; clear only on success. If release raises, the
+# exception propagates AND _held stays True so the leak is visible.
+if self._held:
+    resource.release(key)
+    self._held = False
+    return
+```
+
+Origin: PR #1543 (#1542) review WARNING on `app/jobs/locks.py::JobLock.__exit__` sec_rate release block.
+
+Applies to any cleanup path with an ownership/held flag: `__exit__`, `close()`, manual teardown helpers. The principle is the same as never resetting `committed = True` before `conn.commit()` returns.

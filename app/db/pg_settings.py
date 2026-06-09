@@ -161,15 +161,24 @@ EXPECTED, not observed: #1472's RCA saw ``credential_health`` LISTEN ×3
 topology so it never blesses that bug."""
 
 JOBS_STEADY_STATE_EXEC_CONNS: Final[int] = 1
-"""The jobs process almost always has ≥1 scheduled job executing
-(orchestrator high-frequency sync every 5 min, manifest worker, SEC
-lanes), and each running job holds one ``JobLock`` advisory-lock
+"""Models the ONE always-running NON-sec_rate job's ``JobLock`` advisory-lock
+connection.  The jobs process almost always has ≥1 non-sec_rate scheduled
+job executing (``orchestrator_high_frequency_sync`` every 5 min being the
+canonical example), and each such job holds one ``JobLock`` advisory-lock
 connection for its whole body (``app/jobs/locks.py`` ``JobLock.__enter__``
-opens it, ``__exit__`` closes it). This is per-execution, not
-process-lifetime — so it is NOT a ``JOBS_FIXED_LONGLIVED_CONNS`` member —
-but ≥1 is live at steady state (the RCA idle snapshot caught exactly 1),
-so the budget counts one. Concurrent execution beyond 1 is part of the
-cadence-boundary burst that PR2/PR4 bound, NOT PR1 (Codex ckpt-2)."""
+opens it, ``__exit__`` closes it).
+
+``sec_rate`` jobs are NOT counted here — after #1542 they route through the
+in-process ``SecLaneGate`` and open **zero** ``JobLock`` connections.  Their
+concurrent bodies are charged separately via ``SEC_LANE_MAX_CONCURRENCY``
+(``app/jobs/sec_lane_gate.py``), so the two terms are additive and
+non-overlapping (no double-count).
+
+This term is per-execution, not process-lifetime — it is NOT a
+``JOBS_FIXED_LONGLIVED_CONNS`` member — but ≥1 is live at steady state
+(the RCA idle snapshot caught exactly 1), so the budget counts one.
+Concurrent execution beyond 1 is part of the cadence-boundary burst that
+PR2/PR4 bound, NOT PR1 (Codex ckpt-2)."""
 
 ORCHESTRATOR_GATE_CHECK_CONN: Final[int] = 1
 """The sync orchestrator's ``_run_layers_loop`` holds ONE run-scoped
@@ -252,7 +261,15 @@ def _dev_profile_connection_demand() -> int:
     regardless of which process is booting. The peer term is bounded and
     documented, so counting it always over-estimates rather than failing
     one process for capacity the other is not currently using.
+
+    #1542 — the ``sec_rate`` lane is now an in-process semaphore (no per-job
+    JobLock connection). Up to ``SEC_LANE_MAX_CONCURRENCY`` sec_rate job
+    BODIES run concurrently, each holding ONE raw body connection. Charge all
+    N explicitly: before #1542 only one job ran at a time (its body conn
+    absorbed by the reserve); now N>1 sec bodies are first-class demand.
     """
+    from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
+
     return (
         DB_POOL_MAX_SIZE
         + AUDIT_POOL_MAX_SIZE
@@ -262,6 +279,7 @@ def _dev_profile_connection_demand() -> int:
         + JOBS_FIXED_LONGLIVED_CONNS
         + JOBS_STEADY_STATE_EXEC_CONNS
         + ORCHESTRATOR_GATE_CHECK_CONN
+        + SEC_LANE_MAX_CONCURRENCY
     )
 
 

@@ -885,6 +885,29 @@ def _record_13f_observations_for_filing(
         )
 
 
+def acquire_13f_accession_write_lock(conn: psycopg.Connection[Any], accession_number: str) -> None:
+    """Serialise concurrent writers of ONE 13F accession's ``institutional_holdings``
+    rows (#1542 Task A).
+
+    Live ingest (``_ingest_single_accession`` -> ``_upsert_holding``, ON CONFLICT
+    DO NOTHING) and the CUSIP rewash (``rewash_filings._apply_13f_infotable``,
+    DELETE+INSERT) can both target the same accession in the operator-retry
+    window (ingest-log row deleted to force re-ingest, ``unresolved_13f_cusips``
+    row left) - and already run concurrently cross-lane (``cusip_extid_sweep`` on
+    ``db_cusip``). This advisory lock makes the two mutations mutually exclusive
+    per accession.
+
+    Transaction-scoped: auto-releases on COMMIT/ROLLBACK. MUST be called inside
+    the same (non-autocommit) transaction as the ``institutional_holdings``
+    write, AFTER any SEC fetches, so the lock is never held across network I/O.
+    Key derivation MUST match the rewash call site exactly.
+    """
+    conn.execute(
+        "SELECT pg_advisory_xact_lock((hashtextextended('ingest_13f_accession', 0) # hashtextextended(%s, 0)))",
+        (accession_number,),
+    )
+
+
 def _upsert_holding(
     conn: psycopg.Connection[tuple],
     *,
@@ -1557,6 +1580,12 @@ def _ingest_single_accession(
         # datetime would drift to the server's local zone on
         # write.
         filed_at = ref.filed_at or datetime(period.year, period.month, period.day, tzinfo=UTC)
+
+    # #1542 Task A — serialise this accession's holdings write against a
+    # concurrent CUSIP-rewash DELETE+INSERT. Acquired here (after all SEC
+    # fetches, inside the holdings-write transaction) so the lock is held only
+    # across the institutional_holdings mutation, not the network fetches.
+    acquire_13f_accession_write_lock(conn, ref.accession_number)
 
     # Codex review (#889): dedupe by (instrument_id, exposure) to match
     # the DB unique-key collapse behavior. ``_upsert_holding`` does
