@@ -19,12 +19,16 @@ state-machine and gate logic in isolation.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import ssl
 from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from psycopg_pool import ConnectionPool
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from app.services.credential_health import CredentialHealth
 from app.services.credential_health_cache import CredentialHealthCache
@@ -221,3 +225,96 @@ class TestCounterReset:
         sub = _make_subscriber(fake_pool=fake_pool)
         sub._consecutive_auth_failures = 3
         assert sub._consecutive_auth_failures == 3
+
+
+# ---------------------------------------------------------------------------
+# _run loop error logging (#1548) — expected disconnects are calm INFO,
+# unexpected errors keep the WARNING + traceback
+# ---------------------------------------------------------------------------
+
+
+async def _drive_run_once(sub: EtoroWebSocketSubscriber, exc: BaseException) -> None:
+    """Run one _run iteration: _connect_and_listen raises `exc`, then the
+    stop event is already set so the backoff wait exits immediately."""
+
+    async def fake_connect() -> None:
+        sub._stop_event.set()
+        raise exc
+
+    with patch.object(sub, "_connect_and_listen", side_effect=fake_connect):
+        await sub._run()
+
+
+class TestRunLoopErrorLogging:
+    async def test_expected_close_logs_single_info_line_no_traceback(
+        self, fake_pool: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """ConnectionClosedError (idle WS reaped, no close frame) is an
+        EXPECTED event — one INFO line, no traceback (#1548)."""
+        sub = _make_subscriber(fake_pool=fake_pool)
+        with caplog.at_level(logging.INFO, logger="app.services.etoro_websocket"):
+            await _drive_run_once(sub, ConnectionClosedError(None, None))
+
+        records = [r for r in caplog.records if "connection closed" in r.message]
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.levelno == logging.INFO
+        assert rec.exc_info is None
+        # Operator sees the concrete type without needing a traceback.
+        assert "ConnectionClosedError" in rec.getMessage()
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConnectionClosedOK(None, None),
+            OSError("connection reset by peer"),
+            TimeoutError("auth envelope timeout"),
+        ],
+        ids=["closed_ok", "os_error", "timeout"],
+    )
+    async def test_other_expected_errors_log_info(
+        self, fake_pool: Any, caplog: pytest.LogCaptureFixture, exc: BaseException
+    ) -> None:
+        sub = _make_subscriber(fake_pool=fake_pool)
+        with caplog.at_level(logging.INFO, logger="app.services.etoro_websocket"):
+            await _drive_run_once(sub, exc)
+
+        records = [r for r in caplog.records if "connection closed" in r.message]
+        assert len(records) == 1
+        assert records[0].levelno == logging.INFO
+        assert records[0].exc_info is None
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ValueError("boom"),
+            # SSLError is an OSError subclass but means TLS/cert config
+            # trouble, not idle churn — must keep the traceback (Codex
+            # checkpoint-2 finding on #1548).
+            ssl.SSLError(1, "certificate verify failed"),
+        ],
+        ids=["value_error", "ssl_error"],
+    )
+    async def test_unexpected_error_keeps_warning_with_traceback(
+        self, fake_pool: Any, caplog: pytest.LogCaptureFixture, exc: BaseException
+    ) -> None:
+        """A genuine bug (frame-handling ValueError, TLS failure) still
+        dumps the full traceback at WARNING."""
+        sub = _make_subscriber(fake_pool=fake_pool)
+        with caplog.at_level(logging.INFO, logger="app.services.etoro_websocket"):
+            await _drive_run_once(sub, exc)
+
+        records = [r for r in caplog.records if "connection error" in r.message]
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.levelno == logging.WARNING
+        assert rec.exc_info is not None
+        assert rec.exc_info[0] is type(exc)
+        # And no calm INFO line was emitted for it.
+        assert not [r for r in caplog.records if "connection closed" in r.message]
+
+    async def test_cancelled_error_propagates(self, fake_pool: Any) -> None:
+        """CancelledError must NOT be swallowed by either catch arm."""
+        sub = _make_subscriber(fake_pool=fake_pool)
+        with pytest.raises(asyncio.CancelledError):
+            await _drive_run_once(sub, asyncio.CancelledError())
