@@ -7,7 +7,14 @@ both firing on the hour) collectively bursted past the SEC fair-use
 10 req/s limit even though each individual provider stayed under.
 
 Post-#537 every provider in this Python process funnels through
-``_PROCESS_RATE_LIMIT_CLOCK`` so the global budget is respected.
+``_PROCESS_RATE_LIMIT_CLOCK``.
+
+Post-#1484 the in-process clock is the **fallback** path: every provider
+also injects the cross-process ``sec_rate_gate`` ``RateGate`` (asserted
+below), which is the primary per-IP authority. The shared-clock identity
+still matters because the gate falls back to a per-process in-process floor
+when its DB is unreachable. Gate DELEGATION (the primary path) is covered by
+``tests/providers/test_rate_gate.py``.
 """
 
 from __future__ import annotations
@@ -30,6 +37,11 @@ def test_filings_provider_instances_share_process_clock() -> None:
         assert p1._http_tickers._last_request_at is _PROCESS_RATE_LIMIT_CLOCK
         assert p2._http._last_request_at is _PROCESS_RATE_LIMIT_CLOCK
         assert p2._http_tickers._last_request_at is _PROCESS_RATE_LIMIT_CLOCK
+        # #1484: the cross-process gate is the PRIMARY authority (the shared
+        # clock above is now only the DB-unreachable fallback). Confirm every
+        # SEC client also carries the injected gate.
+        assert p1._http._gate is not None
+        assert p1._http_tickers._gate is not None
     finally:
         p1.__exit__(None, None, None)
         p2.__exit__(None, None, None)
@@ -47,6 +59,9 @@ def test_fundamentals_provider_shares_process_clock_with_filings_provider() -> N
         assert fundamentals._http._last_request_at is _PROCESS_RATE_LIMIT_CLOCK
         # And critically: both reference the same object.
         assert filings._http._last_request_at is fundamentals._http._last_request_at
+        # #1484: both also carry the injected cross-process gate (primary).
+        assert filings._http._gate is not None
+        assert fundamentals._http._gate is not None
     finally:
         filings.__exit__(None, None, None)
         fundamentals.__exit__(None, None, None)
