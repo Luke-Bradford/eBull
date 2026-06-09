@@ -87,6 +87,22 @@ def test_count_at_least_bounded_and_accurate_shortfall(ebull_test_conn: psycopg.
     assert bv._count_at_least(conn, "_vt_count", 1) == (False, 0)
 
 
+def test_count_at_least_with_predicate(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#1462 — the predicate-aware count must floor only the rows matching
+    ``where``, not COUNT(*)."""
+    conn = ebull_test_conn
+    conn.execute("CREATE TEMP TABLE _vt_pred (x int, is_tradable boolean)")
+    conn.execute("INSERT INTO _vt_pred VALUES (1, TRUE), (2, TRUE), (3, FALSE)")
+
+    # Predicate count: 2 tradable rows of 3 total.
+    assert bv._count_at_least(conn, "_vt_pred", 2, where="is_tradable = TRUE") == (True, 2)
+    # Floor above the predicate count fails even though COUNT(*)=3 >= 3 —
+    # the exact degraded-universe shape #1462 exists to catch.
+    assert bv._count_at_least(conn, "_vt_pred", 3, where="is_tradable = TRUE") == (False, 2)
+    # No predicate keeps the old COUNT(*) behaviour.
+    assert bv._count_at_least(conn, "_vt_pred", 3) == (True, 3)
+
+
 # ---------------------------------------------------------------------------
 # _check_row_floors
 # ---------------------------------------------------------------------------
@@ -112,10 +128,48 @@ def test_row_floors_are_calibrated_not_placeholders() -> None:
         "ownership_institutions_current",
         "ownership_funds_current",
     }, sorted(bv._ROW_FLOORS)
-    # instruments stays OUT (correct floor needs a tradable-aware count,
-    # #1462); the deferred treasury / blockholders / def14a slices stay OUT
-    # too — both enforced by the exact-set assertion above.
+    # instruments stays OUT of the COUNT(*) floors (sync_universe marks
+    # delisted rows is_tradable=FALSE, so COUNT(*) never shrinks); it is
+    # floored tradable-aware via _PREDICATE_FLOORS instead (#1462). The
+    # deferred treasury / blockholders / def14a slices stay OUT of both —
+    # enforced by the exact-set assertions.
     assert "instruments" not in bv._ROW_FLOORS
+    assert set(bv._PREDICATE_FLOORS) == {"instruments"}, sorted(bv._PREDICATE_FLOORS)
+    floor, where = bv._PREDICATE_FLOORS["instruments"]
+    # ~50% of the 2026-06-04 dev baseline (12,530 tradable), same margin
+    # policy as _ROW_FLOORS — calibrated, not a non-empty sentinel.
+    assert floor == 6_000
+    assert where == "is_tradable = TRUE"
+
+
+def test_check_row_floors_catches_degraded_universe_shape(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1462 — total rows >= floor but tradable rows < floor must FAIL.
+    This is exactly the partial-eToro-sync shape COUNT(*) cannot see."""
+    conn = ebull_test_conn
+    conn.execute("CREATE TEMP TABLE _vt_uni (x int, is_tradable boolean)")
+    conn.execute("INSERT INTO _vt_uni VALUES (1, TRUE), (2, FALSE), (3, FALSE)")
+    monkeypatch.setattr(bv, "_ROW_FLOORS", {})
+    monkeypatch.setattr(bv, "_PREDICATE_FLOORS", {"_vt_uni": (2, "is_tradable = TRUE")})
+
+    with pytest.raises(BootstrapValidationError) as exc_info:
+        bv._check_row_floors(conn)
+    assert exc_info.value.check_id == "row_floor"
+    assert "_vt_uni" in str(exc_info.value)
+    assert "is_tradable = TRUE" in str(exc_info.value)
+
+
+def test_check_row_floors_predicate_floor_passes_when_met(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    conn.execute("CREATE TEMP TABLE _vt_uni2 (x int, is_tradable boolean)")
+    conn.execute("INSERT INTO _vt_uni2 VALUES (1, TRUE), (2, TRUE), (3, FALSE)")
+    monkeypatch.setattr(bv, "_ROW_FLOORS", {})
+    monkeypatch.setattr(bv, "_PREDICATE_FLOORS", {"_vt_uni2": (2, "is_tradable = TRUE")})
+
+    bv._check_row_floors(conn)  # no raise
 
 
 def test_check_row_floors_raises_when_table_empty(
@@ -138,6 +192,7 @@ def test_check_row_floors_passes_when_floor_met(
     conn.execute("CREATE TEMP TABLE _vt_floor (x int)")
     conn.execute("INSERT INTO _vt_floor VALUES (1)")
     monkeypatch.setattr(bv, "_ROW_FLOORS", {"_vt_floor": 1})
+    monkeypatch.setattr(bv, "_PREDICATE_FLOORS", {})
 
     bv._check_row_floors(conn)  # no raise
 
