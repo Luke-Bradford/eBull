@@ -54,7 +54,7 @@ def test_two_threads_share_floor(sec_gate_pool):
     assert sum(gaps) >= floor * (len(fire_times) - 1) * 0.8
 
 
-def test_fallback_on_db_error(monkeypatch):
+def test_fallback_on_db_error():
     # A pool whose .connection() raises -> gate must fall back to the
     # in-process floor (no exception, request still paced).
     class BoomPool:
