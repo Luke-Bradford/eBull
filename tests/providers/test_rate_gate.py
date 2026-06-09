@@ -1,0 +1,48 @@
+# tests/providers/test_rate_gate.py
+import asyncio
+
+import pytest
+
+from app.providers.rate_gate import InProcessFloorGate, compute_wait
+
+
+def test_compute_wait_idle_returns_zero():
+    assert compute_wait(now=100.0, next_free_at=99.0, floor=0.11) == 0.0
+
+
+def test_compute_wait_backlogged_returns_remaining():
+    assert compute_wait(now=100.0, next_free_at=100.05, floor=0.11) == pytest.approx(0.05)
+
+
+def test_inprocess_floor_spaces_sync_calls():
+    clock = [0.0]
+    sleeps: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        clock[0] += s
+
+    gate = InProcessFloorGate(floor=0.11, _monotonic=lambda: clock[0], _sleep=fake_sleep)
+    gate.acquire()
+    gate.acquire()
+    assert sleeps[0] == 0.0
+    assert sleeps[1] == pytest.approx(0.11, abs=1e-9)
+
+
+def test_inprocess_floor_async_shares_clock_with_sync():
+    clock = [0.0]
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        clock[0] += s
+
+    gate = InProcessFloorGate(
+        floor=0.11,
+        _monotonic=lambda: clock[0],
+        _sleep=lambda s: clock.__setitem__(0, clock[0] + s),
+        _async_sleep=fake_sleep,
+    )
+    gate.acquire()
+    asyncio.run(gate.acquire_async())
+    assert sleeps[-1] == pytest.approx(0.11, abs=1e-9)
