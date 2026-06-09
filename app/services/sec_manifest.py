@@ -45,10 +45,11 @@ during the migration window.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import psycopg
 import psycopg.rows
@@ -141,6 +142,16 @@ ManifestSubjectType = Literal[
     "fund_series",
     "finra_universe",
 ]
+
+# Format guards for SEC-sourced manifest rows (#1460, deferred from
+# #1433 item 3). Scoped to ``source.startswith("sec_")`` because FINRA
+# sources write synthetic identifiers (cik="FINRA_SI",
+# accession="FINRA_SI_20260430" / "FINRA_REGSHO_CNMS_*") that a
+# blanket SEC regex would reject in production. Mirrors the sql/134
+# ownership-table CHECKs; verified-clean baseline 2026-06-04: all
+# 2,339,524 dev manifest rows across 12 sec_* sources conform.
+_MANIFEST_CIK_RE: Final = re.compile(r"^[0-9]{10}$")
+_MANIFEST_ACCESSION_RE: Final = re.compile(r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$")
 
 IngestStatus = Literal["pending", "fetched", "parsed", "tombstoned", "failed", "deferred"]
 RawStatus = Literal["absent", "stored", "compacted"]
@@ -263,6 +274,21 @@ def record_manifest_entry(
         raise ValueError(f"record_manifest_entry: cik is required (accession={accession_number})")
     if not subject_id or not subject_id.strip():
         raise ValueError(f"record_manifest_entry: subject_id is required (accession={accession_number})")
+    if source.startswith("sec_"):
+        # Format guard (#1460): accession is matched RAW because the
+        # INSERT binds it verbatim as the PK (the anchored regex rejects
+        # surrounding whitespace); cik is matched stripped because the
+        # INSERT binds ``cik.strip()``.
+        if not _MANIFEST_ACCESSION_RE.fullmatch(accession_number):
+            raise ValueError(
+                f"record_manifest_entry: malformed SEC accession number {accession_number!r}"
+                f" for source={source!r} (expected NNNNNNNNNN-NN-NNNNNN)"
+            )
+        if not _MANIFEST_CIK_RE.fullmatch(cik.strip()):
+            raise ValueError(
+                f"record_manifest_entry: malformed SEC cik {cik!r} for source={source!r}"
+                f" (expected 10 digits; accession={accession_number})"
+            )
 
     with conn.cursor() as cur:
         cur.execute(

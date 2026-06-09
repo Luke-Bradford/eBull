@@ -266,7 +266,7 @@ class TestRecordManifestEntry:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
         record_manifest_entry(
             ebull_test_conn,
-            "ACC-1",
+            "0000000001-26-100001",
             cik="0000000001",
             form="4",
             source="sec_form4",
@@ -275,14 +275,14 @@ class TestRecordManifestEntry:
             instrument_id=1,
             filed_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
-        transition_status(ebull_test_conn, "ACC-1", ingest_status="parsed", parser_version="v2")
+        transition_status(ebull_test_conn, "0000000001-26-100001", ingest_status="parsed", parser_version="v2")
         ebull_test_conn.commit()
 
         # A second discovery (Atom feed re-emits) should NOT downgrade
         # the state from ``parsed`` back to ``pending``.
         record_manifest_entry(
             ebull_test_conn,
-            "ACC-1",
+            "0000000001-26-100001",
             cik="0000000001",
             form="4",
             source="sec_form4",
@@ -293,7 +293,7 @@ class TestRecordManifestEntry:
         )
         ebull_test_conn.commit()
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-100001")
         assert row is not None
         assert row.ingest_status == "parsed"
         assert row.parser_version == "v2"
@@ -323,7 +323,7 @@ class TestRecordManifestEntry:
         with pytest.raises(ValueError, match="must have instrument_id=None"):
             record_manifest_entry(
                 ebull_test_conn,
-                "BAD",
+                "0001364742-26-000001",
                 cik="0001364742",
                 form="13F-HR",
                 source="sec_13f_hr",
@@ -332,6 +332,107 @@ class TestRecordManifestEntry:
                 instrument_id=1,
                 filed_at=datetime(2026, 2, 14, tzinfo=UTC),
             )
+
+
+class TestSecFormatGuard:
+    """#1460 — SEC-source-scoped cik/accession format guard. FINRA
+    sources write synthetic identifiers and must stay exempt."""
+
+    @pytest.mark.parametrize(
+        "accession",
+        [
+            "ACC-1",  # legacy placeholder shape
+            "0000320193-26-1",  # truncated sequence
+            "0000320193 26 000001",  # wrong separators
+            " 0000320193-26-000001",  # leading whitespace (PK binds raw)
+            "0000320193-26-000001 ",  # trailing whitespace
+            "000032019A-26-000001",  # non-digit
+        ],
+    )
+    def test_rejects_malformed_accession_on_sec_source(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        accession: str,
+    ) -> None:
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        with pytest.raises(ValueError, match="malformed SEC accession"):
+            record_manifest_entry(
+                ebull_test_conn,
+                accession,
+                cik="0000000001",
+                form="4",
+                source="sec_form4",
+                subject_type="issuer",
+                subject_id="1",
+                instrument_id=1,
+                filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+    @pytest.mark.parametrize("cik", ["320193", "FINRA_SI", "00003201930", "000032019A"])
+    def test_rejects_malformed_cik_on_sec_source(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        cik: str,
+    ) -> None:
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        with pytest.raises(ValueError, match="malformed SEC cik"):
+            record_manifest_entry(
+                ebull_test_conn,
+                "0000000001-26-000001",
+                cik=cik,
+                form="4",
+                source="sec_form4",
+                subject_type="issuer",
+                subject_id="1",
+                instrument_id=1,
+                filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+    def test_accepts_whitespace_padded_cik_on_sec_source(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """cik is matched against .strip() because the INSERT binds
+        cik.strip() — padded input is legitimate."""
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        record_manifest_entry(
+            ebull_test_conn,
+            "0000000001-26-000001",
+            cik=" 0000000001 ",
+            form="4",
+            source="sec_form4",
+            subject_type="issuer",
+            subject_id="1",
+            instrument_id=1,
+            filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        ebull_test_conn.commit()
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
+        assert row is not None
+        assert row.cik == "0000000001"
+
+    def test_finra_synthetic_identifiers_stay_accepted(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """FINRA sources write synthetic cik/accession values that the
+        SEC regexes would reject — the guard must not fire for them
+        (production shape: app/services/finra_short_interest_ingest.py)."""
+        record_manifest_entry(
+            ebull_test_conn,
+            "FINRA_SI_20260430",
+            cik="FINRA_SI",
+            form="FINRA_SI",
+            source="finra_short_interest",
+            subject_type="finra_universe",
+            subject_id="FINRA_SI",
+            instrument_id=None,
+            filed_at=datetime(2026, 4, 30, tzinfo=UTC),
+        )
+        ebull_test_conn.commit()
+        row = get_manifest_row(ebull_test_conn, "FINRA_SI_20260430")
+        assert row is not None
+        assert row.source == "finra_short_interest"
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +445,7 @@ class TestTransitionStatus:
         _seed_instrument(conn, iid=1, symbol="X", cik="0000000001")
         record_manifest_entry(
             conn,
-            "ACC-1",
+            "0000000001-26-100001",
             cik="0000000001",
             form="4",
             source="sec_form4",
@@ -353,7 +454,7 @@ class TestTransitionStatus:
             instrument_id=1,
             filed_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
-        return "ACC-1"
+        return "0000000001-26-100001"
 
     def test_pending_to_fetched_to_parsed(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
         accession = self._seed(ebull_test_conn)
@@ -553,7 +654,7 @@ class TestIterators:
         for i in range(n):
             record_manifest_entry(
                 conn,
-                f"ACC-{i:03d}",
+                f"0000000001-26-{i:06d}",
                 cik="0000000001",
                 form="4",
                 source=source,
@@ -569,11 +670,11 @@ class TestIterators:
     ) -> None:
         self._seed_n(ebull_test_conn, 3)
         # Mark one as parsed
-        transition_status(ebull_test_conn, "ACC-001", ingest_status="fetched", raw_status="stored")
-        transition_status(ebull_test_conn, "ACC-001", ingest_status="parsed")
+        transition_status(ebull_test_conn, "0000000001-26-000001", ingest_status="fetched", raw_status="stored")
+        transition_status(ebull_test_conn, "0000000001-26-000001", ingest_status="parsed")
         rows = list(iter_pending(ebull_test_conn, source="sec_form4", limit=10))
         accessions = {r.accession_number for r in rows}
-        assert accessions == {"ACC-000", "ACC-002"}
+        assert accessions == {"0000000001-26-000000", "0000000001-26-000002"}
 
     def test_iter_pending_orders_by_filed_at_asc(
         self,
@@ -581,7 +682,7 @@ class TestIterators:
     ) -> None:
         self._seed_n(ebull_test_conn, 4)
         rows = list(iter_pending(ebull_test_conn, source="sec_form4", limit=4))
-        assert [r.accession_number for r in rows] == ["ACC-000", "ACC-001", "ACC-002", "ACC-003"]
+        assert [r.accession_number for r in rows] == [f"0000000001-26-{i:06d}" for i in range(4)]
 
     def test_iter_pending_filters_source(
         self,
@@ -590,7 +691,7 @@ class TestIterators:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
         record_manifest_entry(
             ebull_test_conn,
-            "ACC-FORM4",
+            "0000000001-26-000044",
             cik="0000000001",
             form="4",
             source="sec_form4",
@@ -601,7 +702,7 @@ class TestIterators:
         )
         record_manifest_entry(
             ebull_test_conn,
-            "ACC-DEF14A",
+            "0000320193-26-000140",
             cik="0000000001",
             form="DEF 14A",
             source="sec_def14a",
@@ -612,8 +713,8 @@ class TestIterators:
         )
         form4_rows = list(iter_pending(ebull_test_conn, source="sec_form4", limit=10))
         def14a_rows = list(iter_pending(ebull_test_conn, source="sec_def14a", limit=10))
-        assert {r.accession_number for r in form4_rows} == {"ACC-FORM4"}
-        assert {r.accession_number for r in def14a_rows} == {"ACC-DEF14A"}
+        assert {r.accession_number for r in form4_rows} == {"0000000001-26-000044"}
+        assert {r.accession_number for r in def14a_rows} == {"0000320193-26-000140"}
 
     def test_iter_retryable_excludes_future_retry(
         self,
@@ -623,7 +724,7 @@ class TestIterators:
         # one failed, retry in past = eligible
         transition_status(
             ebull_test_conn,
-            "ACC-000",
+            "0000000001-26-000000",
             ingest_status="failed",
             error="x",
             next_retry_at=datetime(2024, 1, 1, tzinfo=UTC),
@@ -631,22 +732,24 @@ class TestIterators:
         # one failed, retry in future = NOT eligible
         transition_status(
             ebull_test_conn,
-            "ACC-001",
+            "0000000001-26-000001",
             ingest_status="failed",
             error="x",
             next_retry_at=datetime(2099, 1, 1, tzinfo=UTC),
         )
         rows = list(iter_retryable(ebull_test_conn, source="sec_form4", limit=10))
-        assert {r.accession_number for r in rows} == {"ACC-000"}
+        assert {r.accession_number for r in rows} == {"0000000001-26-000000"}
 
     def test_iter_retryable_includes_null_retry(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         self._seed_n(ebull_test_conn, 1)
-        transition_status(ebull_test_conn, "ACC-000", ingest_status="failed", error="x", next_retry_at=None)
+        transition_status(
+            ebull_test_conn, "0000000001-26-000000", ingest_status="failed", error="x", next_retry_at=None
+        )
         rows = list(iter_retryable(ebull_test_conn, source="sec_form4", limit=10))
-        assert {r.accession_number for r in rows} == {"ACC-000"}
+        assert {r.accession_number for r in rows} == {"0000000001-26-000000"}
 
 
 # ---------------------------------------------------------------------------
@@ -1057,7 +1160,7 @@ class TestBackfillFromTombstones:
             cur.execute(
                 """
                 INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status, fetched_at)
-                VALUES ('ACC-DEF', '0000320193', 'success', NOW())
+                VALUES ('0000320193-26-000150', '0000320193', 'success', NOW())
                 """
             )
         ebull_test_conn.commit()
@@ -1068,7 +1171,7 @@ class TestBackfillFromTombstones:
         ebull_test_conn.commit()
         assert n == 1
 
-        row = get_manifest_row(ebull_test_conn, "ACC-DEF")
+        row = get_manifest_row(ebull_test_conn, "0000320193-26-000150")
         assert row is not None
         assert row.source == "sec_def14a"
         assert row.subject_type == "issuer"
@@ -1084,7 +1187,7 @@ class TestBackfillFromTombstones:
             cur.execute(
                 """
                 INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status, error, fetched_at)
-                VALUES ('ACC-PARTIAL', '0000000001', 'partial', 'no table', NOW())
+                VALUES ('0000320193-26-000077', '0000000001', 'partial', 'no table', NOW())
                 """
             )
         ebull_test_conn.commit()
@@ -1094,7 +1197,7 @@ class TestBackfillFromTombstones:
         backfill_def14a(ebull_test_conn, dry_run=False)
         ebull_test_conn.commit()
 
-        row = get_manifest_row(ebull_test_conn, "ACC-PARTIAL")
+        row = get_manifest_row(ebull_test_conn, "0000320193-26-000077")
         assert row is not None
         assert row.ingest_status == "tombstoned"
         assert row.error == "no table"
@@ -1110,7 +1213,7 @@ class TestBackfillFromTombstones:
                 INSERT INTO institutional_holdings_ingest_log (
                     accession_number, filer_cik, period_of_report, status, fetched_at
                 )
-                VALUES ('ACC-13F', '0001364742', '2026-03-31', 'success', NOW())
+                VALUES ('0001364742-26-000013', '0001364742', '2026-03-31', 'success', NOW())
                 """
             )
         ebull_test_conn.commit()
@@ -1121,7 +1224,7 @@ class TestBackfillFromTombstones:
         ebull_test_conn.commit()
         assert n == 1
 
-        row = get_manifest_row(ebull_test_conn, "ACC-13F")
+        row = get_manifest_row(ebull_test_conn, "0001364742-26-000013")
         assert row is not None
         assert row.subject_type == "institutional_filer"
         assert row.instrument_id is None
@@ -1140,11 +1243,11 @@ class TestBackfillFromTombstones:
                     accession_number, instrument_id, document_type,
                     issuer_cik, primary_document_url, fetched_at, parser_version, is_tombstone
                 ) VALUES (
-                    'ACC-FORM4-1', 1701, '4',
+                    '0000000001-26-000041', 1701, '4',
                     '0000320193', 'https://sec.gov/...', NOW(), 2, FALSE
                 ),
                 (
-                    'ACC-FORM4-2', 1701, '4',
+                    '0000000001-26-000042', 1701, '4',
                     '0000320193', NULL, NOW(), 2, TRUE
                 )
                 """
@@ -1157,12 +1260,12 @@ class TestBackfillFromTombstones:
         ebull_test_conn.commit()
         assert n == 2
 
-        parsed_row = get_manifest_row(ebull_test_conn, "ACC-FORM4-1")
+        parsed_row = get_manifest_row(ebull_test_conn, "0000000001-26-000041")
         assert parsed_row is not None
         assert parsed_row.ingest_status == "parsed"
         assert parsed_row.source == "sec_form4"
 
-        tomb_row = get_manifest_row(ebull_test_conn, "ACC-FORM4-2")
+        tomb_row = get_manifest_row(ebull_test_conn, "0000000001-26-000042")
         assert tomb_row is not None
         assert tomb_row.ingest_status == "tombstoned"
 
@@ -1175,7 +1278,7 @@ class TestBackfillFromTombstones:
             cur.execute(
                 """
                 INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status, fetched_at)
-                VALUES ('ACC-DRY', '0000320193', 'success', NOW())
+                VALUES ('0000000001-26-000099', '0000320193', 'success', NOW())
                 """
             )
         ebull_test_conn.commit()
@@ -1187,5 +1290,5 @@ class TestBackfillFromTombstones:
         ebull_test_conn.rollback()
         assert n == 1  # counted
 
-        row = get_manifest_row(ebull_test_conn, "ACC-DRY")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000099")
         assert row is None  # no actual write
