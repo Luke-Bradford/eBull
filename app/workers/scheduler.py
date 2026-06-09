@@ -318,6 +318,11 @@ JOB_SEED_COST_MODELS = "seed_cost_models"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_FINANCIAL_FACTS_RETENTION_SWEEP = "financial_facts_retention_sweep"
+# #1013 — one-shot retroactive cleanup of skip-tier filing_events rows.
+# Manual-trigger-only (NOT in SCHEDULED_JOBS): a one-shot delete must
+# never auto-fire. Source-lock binding in MANUAL_TRIGGER_JOB_SOURCES,
+# params (none) in MANUAL_TRIGGER_JOB_METADATA.
+JOB_FILING_EVENTS_SKIP_TIER_CLEANUP = "filing_events_skip_tier_cleanup"
 JOB_ORPHAN_TEST_DB_REAP = "orphan_test_db_reap"
 JOB_LIVENESS_WATCHDOG = "jobs_liveness_watchdog"
 JOB_RETRY_SWEEPER = "jobs_retry_sweeper"
@@ -4287,6 +4292,29 @@ def raw_data_retention_sweep() -> None:
             total_deleted,
             total_bytes,
             dry_run,
+        )
+
+
+def filing_events_skip_tier_cleanup() -> None:
+    """One-shot retroactive delete of skip-tier ``filing_events`` rows
+    (#1013 — #1011 PR2). Manual-trigger-only.
+
+    Thin scheduler-side wrapper around
+    :func:`app.services.filing_events_cleanup.cleanup_skip_tier_filing_events`.
+    The service owns transaction shape (autocommit conn + per-batch
+    ``with conn.transaction()``); this wrapper only adds job-runs
+    telemetry. Idempotent: a drained DB deletes 0 rows on a re-run.
+    """
+    from app.services.filing_events_cleanup import cleanup_skip_tier_filing_events
+
+    with _tracked_job(JOB_FILING_EVENTS_SKIP_TIER_CLEANUP) as tracker:
+        summary = cleanup_skip_tier_filing_events()
+        tracker.row_count = summary.total_deleted
+        logger.info(
+            "filing_events_skip_tier_cleanup complete: deleted=%d batches=%d by_form_type=%s",
+            summary.total_deleted,
+            summary.batches,
+            dict(sorted(summary.by_form_type.items(), key=lambda kv: kv[1], reverse=True)),
         )
 
 

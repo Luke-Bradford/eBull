@@ -465,6 +465,13 @@ class TestProductionInvokerRegistry:
             # MANUAL_TRIGGER_JOB_METADATA; source-lock in
             # MANUAL_TRIGGER_JOB_SOURCES.
             "sec_rebuild",
+            # #1013 — one-shot retroactive skip-tier filing_events cleanup.
+            # Registered in _INVOKERS so POST
+            # /jobs/filing_events_skip_tier_cleanup/run works; intentionally
+            # NOT in SCHEDULED_JOBS (a one-shot delete must never auto-fire).
+            # Zero params (empty MANUAL_TRIGGER_JOB_METADATA entry);
+            # source-lock "db" in MANUAL_TRIGGER_JOB_SOURCES.
+            "filing_events_skip_tier_cleanup",
             # #819 — canonical-instrument redirect populate. Idempotent
             # one-shot the operator triggers after a universe sync
             # introduces new .RTH-style variants. Registered in
