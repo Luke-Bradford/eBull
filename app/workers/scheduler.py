@@ -6076,12 +6076,13 @@ def sec_n_port_ingest(params: Mapping[str, Any]) -> None:
     PR7 #1233 §4.6 — params-aware (mirror of #1064 PR1c lift for
     ``sec_13f_quarterly_sweep``). Accepts:
 
-      * ``min_last_seen_filed_at`` — bootstrap stage 22 passes
-        ``today - 380d`` (UTC midnight) via the
-        ``_PARAM_DYNAMIC_BOOTSTRAP_NPORT_CUTOFF`` sentinel; daily /
-        Admin "Run now" / manual sweep paths pass an empty dict, which
-        resolves to ``None`` here → full cohort (safety-net for
-        previously-inactive trusts re-emerging — #1010 precedent).
+      * ``min_last_seen_filed_at`` — optional recency cutoff. The
+        bootstrap stage that used to pass ``today - 380d`` via a
+        dispatch-time sentinel was dropped by #1413 (and the sentinel
+        machinery removed by #1437); daily / Admin "Run now" / manual
+        sweep paths pass an empty dict, which resolves to ``None``
+        here → full cohort (safety-net for previously-inactive trusts
+        re-emerging — #1010 precedent).
       * ``use_bulk_zip`` (bool, bootstrap-only via JOB_INTERNAL_KEYS) —
         route the PRIMARY per-CIK ``submissions/CIK<10>.json`` reads
         (the S23 enumeration long-pole) through the local

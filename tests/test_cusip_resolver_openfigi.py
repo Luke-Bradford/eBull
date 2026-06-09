@@ -478,11 +478,11 @@ class TestProviderWidening:
         assert coverage.cohort >= 1
 
     def test_load_cusip_map_reads_openfigi_rows(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """The 13F + N-PORT ingest preload (``_load_cusip_map``) must
-        return OpenFIGI promotions. Without this, the post-sweep bulk
-        re-ingest pass would still record the same CUSIP as unresolved."""
-        from app.services.sec_13f_dataset_ingest import _load_cusip_map as load_13f
-        from app.services.sec_nport_dataset_ingest import _load_cusip_map as load_nport
+        """The 13F + N-PORT ingest preload (``load_bulk_cusip_map``,
+        shared since #1437) must return OpenFIGI promotions. Without
+        this, the post-sweep bulk re-ingest pass would still record the
+        same CUSIP as unresolved."""
+        from app.services.cusip_resolver import load_bulk_cusip_map
 
         _seed_instrument(ebull_test_conn, instrument_id=70200, symbol="LMAP", company_name="Load Map Inc")
         cusip = "LMAPCUSIP"
@@ -500,11 +500,7 @@ class TestProviderWidening:
             )
         ebull_test_conn.commit()
 
-        m13f = load_13f(ebull_test_conn)
-        mnport = load_nport(ebull_test_conn)
-
-        assert m13f.get(cusip) == 70200
-        assert mnport.get(cusip) == 70200
+        assert load_bulk_cusip_map(ebull_test_conn).get(cusip) == 70200
 
 
 # ---------------------------------------------------------------------------

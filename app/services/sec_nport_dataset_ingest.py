@@ -50,6 +50,7 @@ from app.services.cusip_resolver import (
     delete_resolved_bulk_markers,
     flush_unresolved_cusips_bulk,
     in_window_bulk_markers_exist,
+    load_bulk_cusip_map,
     reconcile_survived_markers,
 )
 from app.services.n_port_ingest import n_port_retention_cutoff
@@ -168,31 +169,6 @@ def _parse_decimal(value: str | None) -> Decimal | None:
     except (InvalidOperation, ValueError) as _exc:
         del _exc
         return None
-
-
-def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
-    """Preload all CUSIP → instrument_id mappings (SEC + OpenFIGI).
-
-    See ``sec_13f_dataset_ingest._load_cusip_map`` for rationale and
-    the provider-widening note (#1233 PR-1b) — same pattern duplicated
-    here to keep ingester modules independent. The two readers MUST
-    stay in lock-step: a future curated mapping that only one sees
-    silently mis-aligns row counts between 13F and N-PORT.
-    """
-    out: dict[str, int] = {}
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT identifier_value, instrument_id
-            FROM external_identifiers
-            WHERE provider IN ('sec', 'openfigi') AND identifier_type = 'cusip'
-            ORDER BY is_primary DESC, external_identifier_id ASC
-            """,
-        )
-        for row in cur.fetchall():
-            cusip, instrument_id = row
-            out.setdefault(str(cusip).strip().upper(), int(instrument_id))
-    return out
 
 
 def _open_tsv(zf: zipfile.ZipFile, *candidate_names: str) -> list[dict[str, str]]:
@@ -502,7 +478,7 @@ def ingest_nport_dataset_archive(
     if ingest_run_id is None:
         ingest_run_id = uuid4()
     result = NPortIngestResult()
-    cusip_map = _load_cusip_map(conn)
+    cusip_map = load_bulk_cusip_map(conn)
 
     # #1233 PR-1a — buffer of (cusip, filer_cik, period_end) triples
     # for every unresolved-CUSIP holding. Mirrors the 13F path.
