@@ -90,14 +90,12 @@ class BootstrapValidationError(RuntimeError):
 #   ownership_institutions_current    1,151,745 →    575,000
 #   ownership_funds_current             695,750 →    340,000
 #
-# ``instruments`` is deliberately NOT floored here (#1462): the generic
-# ``_check_row_floors`` does ``COUNT(*)``, but ``sync_universe`` marks delisted
-# instruments ``is_tradable = FALSE`` rather than deleting them, so the total
-# row count never shrinks after one good sync — a later partial eToro response
-# leaves ``COUNT(*) >= floor`` and the degraded-universe shape goes undetected.
-# A correct instruments floor needs a ``WHERE is_tradable = TRUE`` count (or a
-# run-local provider-return count), which is a check-mechanism change, not a
-# value tweak — tracked in #1462.
+# ``instruments`` is floored TRADABLE-AWARE via ``_PREDICATE_FLOORS`` (#1462),
+# not here: ``sync_universe`` marks delisted instruments ``is_tradable = FALSE``
+# rather than deleting them, so ``COUNT(*)`` never shrinks after one good sync —
+# a later partial eToro response would leave ``COUNT(*) >= floor`` and the
+# degraded-universe shape undetected. ``COUNT(*) WHERE is_tradable = TRUE``
+# shrinks with the live universe and catches it.
 #
 # Scope rules (which tables are SAFE to hard-floor):
 #  * The three observation tables + filing_events + financial_facts_raw are
@@ -123,6 +121,17 @@ _ROW_FLOORS: Final[dict[str, int]] = {
     "ownership_insiders_current": 30_000,
     "ownership_institutions_current": 575_000,
     "ownership_funds_current": 340_000,
+}
+
+# Predicate-scoped floors (#1462): {table: (floor, where)}. Same calibration
+# policy as _ROW_FLOORS (~50% of the clean-run baseline, raise-never-lower).
+# The ``where`` text is a TRUSTED literal from this dict — same trust posture
+# as the table names — rendered verbatim into the bounded-count subquery.
+#
+# Measured baseline → floor (2026-06-04 dev):
+#   instruments WHERE is_tradable = TRUE   12,530 → 6,000
+_PREDICATE_FLOORS: Final[dict[str, tuple[int, str]]] = {
+    "instruments": (6_000, "is_tradable = TRUE"),
 }
 
 # --- Check 2: panel render -------------------------------------------------
@@ -203,9 +212,19 @@ def _check_row_floors(conn: psycopg.Connection[Any]) -> None:
                 f"row-count floor breach: {table} has {got} row(s), want >= {floor}",
             )
         logger.info("bootstrap_validation: row floor OK — %s >= %d", table, floor)
+    for table, (floor, where) in _PREDICATE_FLOORS.items():
+        met, got = _count_at_least(conn, table, floor, where=where)
+        if not met:
+            raise BootstrapValidationError(
+                "row_floor",
+                f"row-count floor breach: {table} has {got} row(s) WHERE {where}, want >= {floor}",
+            )
+        logger.info("bootstrap_validation: row floor OK — %s WHERE %s >= %d", table, where, floor)
 
 
-def _count_at_least(conn: psycopg.Connection[Any], table: str, floor: int) -> tuple[bool, int]:
+def _count_at_least(
+    conn: psycopg.Connection[Any], table: str, floor: int, *, where: str | None = None
+) -> tuple[bool, int]:
     """Return ``(met, bounded_count)`` for ``table`` against ``floor``.
 
     Uses a LIMIT-bounded subquery so the scan stops at ``floor`` rows — a >0
@@ -213,10 +232,16 @@ def _count_at_least(conn: psycopg.Connection[Any], table: str, floor: int) -> tu
     mechanism still answers "are there >= floor rows?" exactly for any calibrated
     floor. ``bounded_count == min(floor, total)``, so on a FAILURE
     (``total < floor``) it equals the true total — the error message reports the
-    real shortfall. ``table`` comes only from the trusted ``_ROW_FLOORS`` keys;
-    rendered via ``sql.Identifier`` (never string-interpolated) regardless.
+    real shortfall. ``table`` comes only from the trusted ``_ROW_FLOORS`` /
+    ``_PREDICATE_FLOORS`` keys; rendered via ``sql.Identifier`` (never
+    string-interpolated) regardless. ``where`` (#1462) is likewise a trusted
+    literal from ``_PREDICATE_FLOORS`` values only — never caller-supplied
+    free text.
     """
-    query = sql.SQL("SELECT count(*) FROM (SELECT 1 FROM {} LIMIT %(lim)s) AS _bounded").format(sql.Identifier(table))
+    where_clause = sql.SQL("") if where is None else sql.SQL(" WHERE {}").format(sql.SQL(where))  # type: ignore[arg-type]
+    query = sql.SQL("SELECT count(*) FROM (SELECT 1 FROM {}{} LIMIT %(lim)s) AS _bounded").format(
+        sql.Identifier(table), where_clause
+    )
     with conn.cursor() as cur:
         cur.execute(query, {"lim": floor})
         row = cur.fetchone()
