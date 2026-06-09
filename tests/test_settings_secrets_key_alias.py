@@ -8,7 +8,9 @@ in #1406). The ``AliasChoices`` fix honours the documented name while keeping
 the legacy bare name working.
 
 ``_env_file=None`` disables the repo ``.env`` so its (possibly-present, empty)
-``EBULL_SECRETS_KEY=`` cannot mask the env var under test.
+``EBULL_SECRETS_KEY=`` cannot mask the env var under test. It is a runtime
+``BaseSettings`` init param not present in the generated typed signature, hence
+the ``type: ignore[call-arg]``.
 """
 
 from __future__ import annotations
@@ -19,16 +21,19 @@ from app.config import Settings
 def test_secrets_key_honours_documented_ebull_name(monkeypatch) -> None:
     monkeypatch.delenv("SECRETS_KEY", raising=False)
     monkeypatch.setenv("EBULL_SECRETS_KEY", "via-documented-name")
-    assert Settings(_env_file=None).secrets_key == "via-documented-name"
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.secrets_key == "via-documented-name"
 
 
 def test_secrets_key_legacy_bare_name_still_works(monkeypatch) -> None:
     monkeypatch.delenv("EBULL_SECRETS_KEY", raising=False)
     monkeypatch.setenv("SECRETS_KEY", "via-legacy-name")
-    assert Settings(_env_file=None).secrets_key == "via-legacy-name"
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.secrets_key == "via-legacy-name"
 
 
 def test_secrets_key_defaults_none_when_unset(monkeypatch) -> None:
     monkeypatch.delenv("EBULL_SECRETS_KEY", raising=False)
     monkeypatch.delenv("SECRETS_KEY", raising=False)
-    assert Settings(_env_file=None).secrets_key is None
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.secrets_key is None
