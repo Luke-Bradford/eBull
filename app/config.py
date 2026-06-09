@@ -1,6 +1,6 @@
 import os
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Minimum service-token length. 32 chars of base64/hex is ~192 bits of
@@ -153,7 +153,21 @@ class Settings(BaseSettings):
     #
     # Generate with:
     #     python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
-    secrets_key: str | None = None
+    # #1406 — the docs, .env.example, and master_key/secrets_crypto
+    # docstrings all name this **EBULL_SECRETS_KEY**, but ``Settings`` has no
+    # ``env_prefix`` so without an alias the field would only read the bare
+    # ``SECRETS_KEY`` and silently drop a documented ``EBULL_SECRETS_KEY``.
+    # AliasChoices honours the documented name AND keeps the legacy bare name
+    # working (back-compat). Currently the value is empty everywhere, so this
+    # changes nothing at runtime; it only un-breaks the documented variable.
+    # NOTE (ADR-0003 §9): if an operator later sets a REAL key while
+    # ciphertext already exists under the file-derived key, env-key mode
+    # activates and the server fail-loud refuses to start until the documented
+    # key-rotation flow is followed.
+    secrets_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EBULL_SECRETS_KEY", "SECRETS_KEY"),
+    )
 
     # --- Local secret bootstrap data dir (issue #114 / ADR-0003) --------
     # Directory holding the persisted root secret file. When unset we

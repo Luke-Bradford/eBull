@@ -279,8 +279,8 @@ class TestLayerInitializationBlocks:
                 cur.execute(
                     """
                     INSERT INTO instruments
-                        (instrument_id, symbol, company_name, is_tradable, currency, instrument_type)
-                    VALUES (1, 'AAPL', 'Apple Inc.', TRUE, 'USD', 'stock')
+                        (instrument_id, symbol, company_name, is_tradable, currency)
+                    VALUES (1, 'AAPL', 'Apple Inc.', TRUE, 'USD')
                     """
                 )
             conn.commit()

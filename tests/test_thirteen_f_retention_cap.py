@@ -458,10 +458,10 @@ def _seed_instrument_and_cusip(
     conn.execute(
         """
         INSERT INTO instruments (
-            instrument_id, symbol, company_name, instrument_type,
+            instrument_id, symbol, company_name,
             currency, is_tradable, country
         ) VALUES (
-            %(iid)s, %(sym)s, %(name)s, 'STOCK', 'USD', TRUE, 'US'
+            %(iid)s, %(sym)s, %(name)s, 'USD', TRUE, 'US'
         )
         ON CONFLICT (instrument_id) DO NOTHING
         """,

@@ -349,7 +349,6 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
         industry=None,  # secondary lookup deferred
         country=None,  # not available in instruments endpoint
         is_tradable=True,  # only tradable instruments are returned by the API
-        instrument_type=_str_or_none(item.get("instrumentTypeName")),
         instrument_type_id=_int_or_none(item.get("instrumentTypeID")),
     )
 
