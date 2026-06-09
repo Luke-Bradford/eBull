@@ -67,6 +67,7 @@ def test_autocommit_isolates_failed_probe_under_real_db(
     #   5. last_checkpoint     (after wal_dir — load-bearing guard)
     #   6. autovacuum_top10    (after wal_dir — load-bearing guard)
     #   7. default_partition_rows (after wal_dir — load-bearing guard)
+    #   8. default_partition_junk_rows (after wal_dir — load-bearing guard)
     assert snapshot.wal_since_checkpoint_bytes is not None, (
         "post-wal_dir probe failed — autocommit=True missing from "
         "psycopg.connect(...) leaves the conn in ABORTED state after "
@@ -75,6 +76,7 @@ def test_autocommit_isolates_failed_probe_under_real_db(
     assert snapshot.last_checkpoint_at is not None
     assert snapshot.autovacuum_top10 is not None
     assert snapshot.financial_facts_raw_default_rows is not None
+    assert snapshot.financial_facts_raw_default_junk_rows is not None
 
 
 @pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
@@ -92,18 +94,81 @@ def test_safe_wrapper_catches_non_psycopg_exceptions(
     def _bad_probe(_conn: psycopg.Connection[tuple]) -> int:
         raise AssertionError("synthetic: probe internal assertion failed")
 
-    monkeypatch.setattr(postgres_health, "_q_default_partition_rows", _bad_probe)
+    # #1221: the breach flag keys on the JUNK probe, so that is the one
+    # whose failure must null the flag (fail-unknown, not fail-False).
+    monkeypatch.setattr(postgres_health, "_q_default_partition_junk_rows", _bad_probe)
 
     snapshot = collect_postgres_health(database_url=test_database_url())
 
-    assert snapshot.financial_facts_raw_default_rows is None
+    assert snapshot.financial_facts_raw_default_junk_rows is None
     assert snapshot.financial_facts_raw_default_breached_warn is None
-    assert any(e.startswith("default_partition_rows:") for e in snapshot.metric_errors), (
-        f"expected default_partition_rows entry in metric_errors, got {snapshot.metric_errors}"
+    assert any(e.startswith("default_partition_junk_rows:") for e in snapshot.metric_errors), (
+        f"expected default_partition_junk_rows entry in metric_errors, got {snapshot.metric_errors}"
     )
+    # The raw informational count is an independent probe — unaffected.
+    assert snapshot.financial_facts_raw_default_rows is not None
     # Every other metric unaffected.
     assert snapshot.db_size_bytes is not None
     assert snapshot.last_checkpoint_at is not None
+
+
+@pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
+def test_default_partition_junk_probe_discriminates_legit_forward_rows() -> None:
+    """#1221 — the breach flag keys on parser-junk rows only.
+
+    Seeds the DEFAULT partition with one legitimate forward-projected
+    row (period_end 2045 — past the 2040 ceiling, inside the parser
+    window) and three junk rows (pre-1900, post-2100, start > end).
+    Delta-based assertions (prevention log: never exact-equality on
+    DB-global counters).
+    """
+    url = test_database_url()
+    baseline = collect_postgres_health(database_url=url)
+    assert baseline.financial_facts_raw_default_rows is not None
+    assert baseline.financial_facts_raw_default_junk_rows is not None
+
+    marker = "9999999999-21-001221"  # accession marker for teardown
+    with psycopg.connect(url, autocommit=True) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+                "VALUES (9902210, 'ZZJUNK', 'Junk Probe Test', 'USD', TRUE)"
+            )
+            for start, end in (
+                (None, "2045-01-01"),  # legit forward-projected (NOT junk)
+                (None, "1850-12-31"),  # junk: pre-window
+                (None, "2105-01-01"),  # junk: post-window
+                ("2046-01-01", "2045-06-30"),  # junk: start > end
+            ):
+                conn.execute(
+                    "INSERT INTO financial_facts_raw "
+                    "  (instrument_id, concept, unit, period_start, period_end, "
+                    "   val, accession_number, form_type, filed_date) "
+                    "VALUES (9902210, 'TestConcept', 'USD', %s, %s, 1, %s, '10-K', '2026-01-01')",
+                    (start, end, marker),
+                )
+
+            snap = collect_postgres_health(database_url=url)
+            assert snap.financial_facts_raw_default_rows is not None
+            assert snap.financial_facts_raw_default_junk_rows is not None
+            assert snap.financial_facts_raw_default_rows - baseline.financial_facts_raw_default_rows == 4
+            assert (snap.financial_facts_raw_default_junk_rows - baseline.financial_facts_raw_default_junk_rows) == 3
+
+            # Breach keys on junk: threshold between junk and raw counts
+            # → no breach despite raw count exceeding it.
+            mid = collect_postgres_health(
+                database_url=url,
+                default_partition_warn_rows=baseline.financial_facts_raw_default_junk_rows + 3,
+            )
+            assert mid.financial_facts_raw_default_breached_warn is False
+            low = collect_postgres_health(
+                database_url=url,
+                default_partition_warn_rows=baseline.financial_facts_raw_default_junk_rows + 2,
+            )
+            assert low.financial_facts_raw_default_breached_warn is True
+        finally:
+            conn.execute("DELETE FROM financial_facts_raw WHERE accession_number = %s", (marker,))
+            conn.execute("DELETE FROM instruments WHERE instrument_id = 9902210")
 
 
 @pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")

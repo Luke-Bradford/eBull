@@ -14,12 +14,15 @@ live readout for:
   signal.
 - Autovacuum top-10 by `n_dead_tup` (Phase 3's partition + retention
   motivation).
-- `financial_facts_raw_default` row count against the 5000-row alarm
-  (Phase 3 §4.1.1 — parser-junk growth detector).
+- `financial_facts_raw_default` row count (informational) plus a
+  parser-junk row count against the 5000-row alarm (Phase 3 §4.1.1;
+  #1221 — the breach flag keys on the junk count so legitimate
+  forward-projected XBRL schedule rows past the partition ceiling
+  never false-positive the alarm).
 
 Service-no-commit invariant + autocommit-conn contract: the service
-opens its OWN connection with `autocommit=True` so each of the seven
-metric queries runs in its own implicit tx. Without autocommit, a
+opens its OWN connection with `autocommit=True` so each metric query
+runs in its own implicit tx. Without autocommit, a
 single SQL error (e.g. `pg_monitor` role required for `pg_ls_waldir`
 on a non-superuser DB) puts the entire tx in `ABORTED` state and
 every subsequent query fails with `current transaction is aborted`.
@@ -33,7 +36,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import psycopg
 
@@ -57,6 +60,16 @@ DB_SIZE_WARN_BYTES: int = 10 * 1024 * 1024 * 1024  # 10 GB
 # normal checkpoint pressure.
 WAL_WARN_BYTES: int = 4 * 1024 * 1024 * 1024  # 4 GB
 DEFAULT_PARTITION_WARN_ROWS: int = 5000
+
+# #1221 — sanity window mirrored from the parser-side guard
+# (`app/providers/implementations/sec_fundamentals.py::_PERIOD_MIN/_PERIOD_MAX`,
+# #1218). Duplicated here rather than imported so this service never
+# pulls the provider module; the
+# `tests/test_postgres_health_junk_window.py::test_junk_window_matches_parser_guard`
+# test asserts the two stay aligned (same pattern as DB_SIZE_WARN_BYTES
+# vs the pre-push hook above).
+FACTS_PERIOD_MIN: date = date(1900, 1, 1)
+FACTS_PERIOD_MAX: date = date(2100, 1, 1)
 
 
 # ── Data shapes ──────────────────────────────────────────────────
@@ -107,6 +120,13 @@ class PostgresHealthSnapshot:
     last_checkpoint_at: datetime | None
     autovacuum_top10: list[AutovacuumTableLag] | None
     financial_facts_raw_default_rows: int | None
+    # #1221 — rows in DEFAULT matching the parser-rejection predicate
+    # (out-of-window period_end/period_start, or start > end). Post-#1218
+    # the parser blocks these at ingest, so this stays 0 unless the
+    # guard regresses. The breach flag keys on THIS count, not the raw
+    # row count — legitimate forward-projected schedule rows past the
+    # 2040 partition ceiling (sql/175) sit in DEFAULT without alarming.
+    financial_facts_raw_default_junk_rows: int | None
     financial_facts_raw_default_warn_threshold: int
     financial_facts_raw_default_breached_warn: bool | None
     # #1472 PR3 — per-application_name count of eBull LISTEN connections,
@@ -296,11 +316,33 @@ def _q_listener_connections(conn: psycopg.Connection[tuple]) -> list[ListenerCon
 
 
 def _q_default_partition_rows(conn: psycopg.Connection[tuple]) -> int:
-    # Full seq scan on the DEFAULT partition. Current size ~1055 rows
-    # post-Phase-3; scan stays cheap until the 5000-row alarm fires,
-    # at which point the operator has bigger problems than scan cost.
+    # Full seq scan on the DEFAULT partition. Sits at 0 on dev
+    # post-#1314 cleanup; scan stays cheap until the 5000-row alarm
+    # fires, at which point the operator has bigger problems than scan
+    # cost.
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM financial_facts_raw_default")
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _q_default_partition_junk_rows(conn: psycopg.Connection[tuple]) -> int:
+    # #1221 — count only rows the parser-side guard
+    # (`_classify_period_rejection`, #1218) would have rejected:
+    # out-of-window dates or start > end. Anything else in DEFAULT is a
+    # legitimate forward-projected row past the partition ceiling.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM financial_facts_raw_default "
+            " WHERE period_end < %(pmin)s "
+            "    OR period_end >= %(pmax)s "
+            "    OR (period_start IS NOT NULL "
+            "        AND (period_start < %(pmin)s "
+            "             OR period_start >= %(pmax)s "
+            "             OR period_start > period_end))",
+            {"pmin": FACTS_PERIOD_MIN, "pmax": FACTS_PERIOD_MAX},
+        )
         row = cur.fetchone()
     assert row is not None
     return int(row[0])
@@ -318,9 +360,9 @@ def collect_postgres_health(
 ) -> PostgresHealthSnapshot:
     """Collect every PG health metric into one snapshot.
 
-    Opens its own `psycopg.connect(url, autocommit=True)` so each of
-    the seven metric queries runs in its own implicit tx — a SQL
-    error on one metric never aborts the others.
+    Opens its own `psycopg.connect(url, autocommit=True)` so each
+    metric query runs in its own implicit tx — a SQL error on one
+    metric never aborts the others.
 
     Thresholds are injectable for tests (above-threshold assertions
     on a small test DB need a low threshold). Production callers pass
@@ -345,6 +387,7 @@ def collect_postgres_health(
     last_ckpt: datetime | None = None
     top10: list[AutovacuumTableLag] | None = None
     default_rows: int | None = None
+    default_junk_rows: int | None = None
     listener_conns: list[ListenerConnectionCount] | None = None
 
     with psycopg.connect(url, autocommit=True) as conn:
@@ -366,11 +409,16 @@ def collect_postgres_health(
         last_ckpt = _safe(conn, "last_checkpoint", _q_last_checkpoint, errors)
         top10 = _safe(conn, "autovacuum_top10", _q_autovacuum_top10, errors)
         default_rows = _safe(conn, "default_partition_rows", _q_default_partition_rows, errors)
+        default_junk_rows = _safe(conn, "default_partition_junk_rows", _q_default_partition_junk_rows, errors)
         listener_conns = _safe(conn, "listener_connections", _q_listener_connections, errors)
 
     db_size_breached: bool | None = None if db_size_bytes is None else db_size_bytes > db_size_warn_threshold_bytes
     wal_breached: bool | None = None if wal_dir_bytes is None else wal_dir_bytes > wal_warn_threshold_bytes
-    default_breached: bool | None = None if default_rows is None else default_rows > default_partition_warn_rows
+    # #1221 — breach keys on the parser-junk count, not the raw row
+    # count; raw count stays informational.
+    default_breached: bool | None = (
+        None if default_junk_rows is None else default_junk_rows > default_partition_warn_rows
+    )
     leaked_count: int | None = None if leaked_names is None else len(leaked_names)
     listener_dup: bool | None = None if listener_conns is None else any(lc.count > 1 for lc in listener_conns)
 
@@ -391,6 +439,7 @@ def collect_postgres_health(
         last_checkpoint_at=last_ckpt,
         autovacuum_top10=top10,
         financial_facts_raw_default_rows=default_rows,
+        financial_facts_raw_default_junk_rows=default_junk_rows,
         financial_facts_raw_default_warn_threshold=default_partition_warn_rows,
         financial_facts_raw_default_breached_warn=default_breached,
         listener_connections=listener_conns,

@@ -796,6 +796,8 @@ class PostgresHealthResponse(BaseModel):
     last_checkpoint_at: datetime | None
     autovacuum_top10: list[AutovacuumTableLagSchema] | None
     financial_facts_raw_default_rows: int | None
+    # #1221 — parser-junk rows only; the breach flag keys on this count.
+    financial_facts_raw_default_junk_rows: int | None
     financial_facts_raw_default_warn_threshold: int
     financial_facts_raw_default_breached_warn: bool | None
     listener_connections: list[ListenerConnectionCountSchema] | None
@@ -1007,6 +1009,7 @@ def get_postgres_health() -> PostgresHealthResponse:
             ]
         ),
         financial_facts_raw_default_rows=snapshot.financial_facts_raw_default_rows,
+        financial_facts_raw_default_junk_rows=(snapshot.financial_facts_raw_default_junk_rows),
         financial_facts_raw_default_warn_threshold=(snapshot.financial_facts_raw_default_warn_threshold),
         financial_facts_raw_default_breached_warn=(snapshot.financial_facts_raw_default_breached_warn),
         listener_connections=(

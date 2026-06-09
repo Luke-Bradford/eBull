@@ -69,6 +69,7 @@ def _snapshot(**overrides: object) -> PostgresHealthSnapshot:
             )
         ],
         "financial_facts_raw_default_rows": 1055,
+        "financial_facts_raw_default_junk_rows": 0,
         "financial_facts_raw_default_warn_threshold": 5000,
         "financial_facts_raw_default_breached_warn": False,
         "listener_connections": [
@@ -109,6 +110,7 @@ def test_endpoint_returns_200_with_all_fields() -> None:
         "last_checkpoint_at",
         "autovacuum_top10",
         "financial_facts_raw_default_rows",
+        "financial_facts_raw_default_junk_rows",
         "financial_facts_raw_default_warn_threshold",
         "financial_facts_raw_default_breached_warn",
         "listener_connections",
@@ -142,16 +144,21 @@ def test_db_size_breach_flag_above_threshold() -> None:
 
 
 def test_default_partition_warn_flag_above_threshold() -> None:
+    # #1221 — breach keys on the junk count; raw count can sit high
+    # (legit forward-projected rows) without flipping the flag.
     with patch(
         "app.services.postgres_health.collect_postgres_health",
         return_value=_snapshot(
             financial_facts_raw_default_rows=10_000,
+            financial_facts_raw_default_junk_rows=6_000,
             financial_facts_raw_default_breached_warn=True,
         ),
     ):
         resp = client.get("/system/postgres-health")
     assert resp.status_code == 200
-    assert resp.json()["financial_facts_raw_default_breached_warn"] is True
+    body = resp.json()
+    assert body["financial_facts_raw_default_breached_warn"] is True
+    assert body["financial_facts_raw_default_junk_rows"] == 6_000
 
 
 def test_wal_breach_flag_keys_on_dir_not_since_checkpoint() -> None:
