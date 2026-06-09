@@ -97,26 +97,9 @@ class TestNormaliseInstrument:
         assert record.sector is None
         assert record.industry is None
         assert record.country is None
-        assert record.instrument_type is None
-
-    def test_instrument_type_captured(self) -> None:
-        """instrumentTypeName flows through so the universe upsert
-        can persist eToro's classification (Stock / Crypto / ETF / …)
-        for the cross-validation against exchanges.asset_class
-        added in migration 068."""
-        record = _normalise_instrument(FIXTURE_INSTRUMENT)
-        assert record is not None
-        assert record.instrument_type == "Stock"
-
-    def test_instrument_type_empty_string_normalises_to_none(self) -> None:
-        """Empty strings from eToro are treated as missing — the
-        downstream upsert distinguishes 'unknown' from '' so a
-        blank value would create a useless distinct row in
-        ``instruments.instrument_type``."""
-        item = {**FIXTURE_INSTRUMENT, "instrumentTypeName": ""}
-        record = _normalise_instrument(item)
-        assert record is not None
-        assert record.instrument_type is None
+        # #1464 dropped the instrument_type column + dataclass field (always
+        # NULL — eToro's instruments endpoint never returns instrumentTypeName;
+        # the type is captured as instrument_type_id instead).
 
     def test_internal_instrument_skipped(self) -> None:
         assert _normalise_instrument(FIXTURE_INSTRUMENT_INTERNAL) is None
@@ -196,7 +179,8 @@ class TestSyncSummary:
 
 
 # ---------------------------------------------------------------------------
-# sync_universe — instrument_type COALESCE contract (#503 PR 4)
+# sync_universe — instrument_type_id COALESCE contract (#503 PR 4; the
+# companion instrument_type TEXT column was dropped in #1464)
 # ---------------------------------------------------------------------------
 
 
@@ -204,7 +188,6 @@ def _make_record(
     *,
     provider_id: str,
     symbol: str,
-    instrument_type: str | None,
     instrument_type_id: int | None = None,
 ) -> InstrumentRecord:
     return InstrumentRecord(
@@ -217,20 +200,8 @@ def _make_record(
         industry=None,
         country=None,
         is_tradable=True,
-        instrument_type=instrument_type,
         instrument_type_id=instrument_type_id,
     )
-
-
-def _read_instrument_type(conn: psycopg.Connection[tuple], instrument_id: int) -> str | None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT instrument_type FROM instruments WHERE instrument_id = %s",
-            (instrument_id,),
-        )
-        row = cur.fetchone()
-    assert row is not None
-    return row[0]
 
 
 def _read_instrument_type_id(conn: psycopg.Connection[tuple], instrument_id: int) -> int | None:
@@ -246,57 +217,11 @@ def _read_instrument_type_id(conn: psycopg.Connection[tuple], instrument_id: int
 
 @pytest.mark.integration
 class TestUniverseInstrumentTypeUpsert:
-    """Pins the COALESCE behaviour of the ``sync_universe`` upsert
-    against a real DB. The Codex round-1 WARNING fix: a refresh that
-    omits ``instrument_type`` for an existing row must NOT overwrite
-    the previously-known value with NULL."""
-
-    def test_initial_insert_persists_instrument_type(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        provider = MagicMock()
-        provider.get_tradable_instruments.return_value = [
-            _make_record(provider_id="950001", symbol="ZZZ1", instrument_type="Stock"),
-        ]
-        sync_universe(provider, ebull_test_conn)
-        ebull_test_conn.commit()
-        assert _read_instrument_type(ebull_test_conn, 950001) == "Stock"
-
-    def test_subsequent_null_does_not_clobber(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """First sync writes 'Stock'; a follow-up sync that omits
-        ``instrument_type`` must leave 'Stock' in place."""
-        provider = MagicMock()
-        provider.get_tradable_instruments.return_value = [
-            _make_record(provider_id="950002", symbol="ZZZ2", instrument_type="Crypto"),
-        ]
-        sync_universe(provider, ebull_test_conn)
-        ebull_test_conn.commit()
-        assert _read_instrument_type(ebull_test_conn, 950002) == "Crypto"
-
-        # Second refresh — no instrument_type from provider.
-        provider.get_tradable_instruments.return_value = [
-            _make_record(provider_id="950002", symbol="ZZZ2", instrument_type=None),
-        ]
-        sync_universe(provider, ebull_test_conn)
-        ebull_test_conn.commit()
-
-        assert _read_instrument_type(ebull_test_conn, 950002) == "Crypto"
-
-    def test_subsequent_value_change_overwrites(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """eToro reclassifying ``Stock`` → ``ETF`` must propagate.
-        COALESCE only protects against NULL — a real change still wins."""
-        provider = MagicMock()
-        provider.get_tradable_instruments.return_value = [
-            _make_record(provider_id="950003", symbol="ZZZ3", instrument_type="Stock"),
-        ]
-        sync_universe(provider, ebull_test_conn)
-        ebull_test_conn.commit()
-
-        provider.get_tradable_instruments.return_value = [
-            _make_record(provider_id="950003", symbol="ZZZ3", instrument_type="ETF"),
-        ]
-        sync_universe(provider, ebull_test_conn)
-        ebull_test_conn.commit()
-
-        assert _read_instrument_type(ebull_test_conn, 950003) == "ETF"
+    """Pins the COALESCE behaviour of the ``sync_universe`` upsert against a
+    real DB: a refresh that omits ``instrument_type_id`` for an existing row
+    must NOT overwrite the previously-known value with NULL. (#1464 dropped the
+    companion ``instrument_type`` TEXT column — always NULL — so only the
+    ``instrument_type_id`` COALESCE remains.)"""
 
     def test_initial_insert_persists_instrument_type_id(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """instrument_type_id ships alongside the text label so the
@@ -306,7 +231,6 @@ class TestUniverseInstrumentTypeUpsert:
             _make_record(
                 provider_id="950010",
                 symbol="ZZZ10",
-                instrument_type="Stocks",
                 instrument_type_id=5,
             ),
         ]
@@ -315,15 +239,13 @@ class TestUniverseInstrumentTypeUpsert:
         assert _read_instrument_type_id(ebull_test_conn, 950010) == 5
 
     def test_subsequent_null_id_does_not_clobber(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """COALESCE protects instrument_type_id the same way it
-        protects instrument_type — a transient response without
-        instrumentTypeID must NOT erase a previously-known value."""
+        """COALESCE protects instrument_type_id — a transient response
+        without instrumentTypeID must NOT erase a previously-known value."""
         provider = MagicMock()
         provider.get_tradable_instruments.return_value = [
             _make_record(
                 provider_id="950011",
                 symbol="ZZZ11",
-                instrument_type="Crypto",
                 instrument_type_id=10,
             ),
         ]
@@ -335,7 +257,6 @@ class TestUniverseInstrumentTypeUpsert:
             _make_record(
                 provider_id="950011",
                 symbol="ZZZ11",
-                instrument_type=None,
                 instrument_type_id=None,
             ),
         ]
@@ -351,7 +272,6 @@ class TestUniverseInstrumentTypeUpsert:
             _make_record(
                 provider_id="950012",
                 symbol="ZZZ12",
-                instrument_type="Stocks",
                 instrument_type_id=5,
             ),
         ]
@@ -362,7 +282,6 @@ class TestUniverseInstrumentTypeUpsert:
             _make_record(
                 provider_id="950012",
                 symbol="ZZZ12",
-                instrument_type="ETF",
                 instrument_type_id=6,
             ),
         ]
@@ -415,7 +334,6 @@ def _make_record_with_exchange(
         industry=None,
         country=None,  # provider does not supply country (#1233 §6.1)
         is_tradable=True,
-        instrument_type=None,
         instrument_type_id=None,
     )
 

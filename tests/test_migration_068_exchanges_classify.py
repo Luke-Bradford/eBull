@@ -156,22 +156,22 @@ def _cleanup(conn: psycopg.Connection[tuple], ids: list[str]) -> None:
     conn.commit()
 
 
-def test_instrument_type_column_exists(ebull_test_conn) -> None:  # noqa: F811
-    """Schema-level pin: the column the universe upsert writes to
-    must exist with TEXT type, and the lookup index for operator
-    audit queries must be present."""
+def test_instrument_type_column_dropped(ebull_test_conn) -> None:  # noqa: F811
+    """Schema-level pin (post-#1464): sql/068 added ``instruments.instrument_type``
+    + ``idx_instruments_instrument_type`` for a cross-validation that never ran
+    (the column was always NULL — the eToro instruments endpoint returns
+    ``instrumentTypeID``, not ``instrumentTypeName``). sql/188 (#1464) DROPPED
+    both. Confirm they are absent so the dead column cannot silently return."""
     with ebull_test_conn.cursor() as cur:
         cur.execute(
             """
-            SELECT data_type
+            SELECT 1
               FROM information_schema.columns
              WHERE table_name = 'instruments'
                AND column_name = 'instrument_type'
             """,
         )
-        row = cur.fetchone()
-    assert row is not None, "instruments.instrument_type column missing"
-    assert row[0] == "text"
+        assert cur.fetchone() is None, "instruments.instrument_type should be dropped (sql/188 #1464)"
 
     with ebull_test_conn.cursor() as cur:
         cur.execute(
@@ -182,7 +182,7 @@ def test_instrument_type_column_exists(ebull_test_conn) -> None:  # noqa: F811
                AND indexname = 'idx_instruments_instrument_type'
             """,
         )
-        assert cur.fetchone() is not None, "idx_instruments_instrument_type index missing"
+        assert cur.fetchone() is None, "idx_instruments_instrument_type should be dropped (sql/188 #1464)"
 
 
 def test_classifier_uk_suffix(ebull_test_conn) -> None:  # noqa: F811

@@ -89,7 +89,7 @@ def sync_universe(
                 """
                 INSERT INTO instruments (
                     instrument_id, symbol, company_name, exchange, currency,
-                    sector, industry, country, is_tradable, instrument_type,
+                    sector, industry, country, is_tradable,
                     instrument_type_id,
                     first_seen_at, last_seen_at
                 )
@@ -99,7 +99,7 @@ def sync_universe(
                     %(sector)s, %(industry)s,
                     (SELECT country FROM exchanges WHERE exchange_id = %(exchange)s),
                     %(is_tradable)s,
-                    %(instrument_type)s, %(instrument_type_id)s, NOW(), NOW()
+                    %(instrument_type_id)s, NOW(), NOW()
                 )
                 ON CONFLICT (instrument_id) DO UPDATE SET
                     symbol             = EXCLUDED.symbol,
@@ -138,13 +138,13 @@ def sync_universe(
                         ELSE instruments.country
                     END,
                     is_tradable        = EXCLUDED.is_tradable,
-                    -- COALESCE preserves a previously-known type when a
-                    -- transient eToro response omits ``instrumentTypeName``
-                    -- / ``instrumentTypeID``. Otherwise a single empty-
-                    -- field response would erase the cross-validation
-                    -- signal we need against ``exchanges.asset_class``
-                    -- (#503 PR 4).
-                    instrument_type    = COALESCE(EXCLUDED.instrument_type, instruments.instrument_type),
+                    -- COALESCE preserves a previously-known id when a
+                    -- transient eToro response omits ``instrumentTypeID``,
+                    -- rather than wiping it to NULL. (#1464 dropped the
+                    -- companion ``instrument_type`` TEXT column — it was
+                    -- always NULL because the instruments endpoint never
+                    -- returns ``instrumentTypeName``; the label is derivable
+                    -- via ``instrument_type_id -> etoro_instrument_types``.)
                     instrument_type_id = COALESCE(EXCLUDED.instrument_type_id, instruments.instrument_type_id),
                     last_seen_at       = NOW()
                 WHERE (
@@ -164,8 +164,6 @@ def sync_universe(
                     instruments.industry           IS DISTINCT FROM EXCLUDED.industry           OR
                     instruments.country            IS DISTINCT FROM EXCLUDED.country            OR
                     instruments.is_tradable        IS DISTINCT FROM EXCLUDED.is_tradable        OR
-                    (EXCLUDED.instrument_type IS NOT NULL AND
-                     instruments.instrument_type IS DISTINCT FROM EXCLUDED.instrument_type)     OR
                     (EXCLUDED.instrument_type_id IS NOT NULL AND
                      instruments.instrument_type_id IS DISTINCT FROM EXCLUDED.instrument_type_id)
                 )
@@ -178,7 +176,6 @@ def sync_universe(
                     "sector": rec.sector,
                     "industry": rec.industry,
                     "is_tradable": rec.is_tradable,
-                    "instrument_type": rec.instrument_type,
                     "instrument_type_id": rec.instrument_type_id,
                 },
             )

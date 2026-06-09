@@ -25,11 +25,6 @@ class InstrumentRecord:
     industry: str | None
     country: str | None
     is_tradable: bool
-    # eToro instrumentTypeName ("Stock", "Crypto", "ETF", "Index",
-    # "Currency", "Commodity", …). Cross-validated against
-    # exchanges.asset_class downstream — a stock-typed instrument on a
-    # crypto-classified exchange is a data-integrity flag (#503 PR 4).
-    instrument_type: str | None = None
     # eToro instrumentTypeID — the numeric foreign key into
     # ``etoro_instrument_types`` so the frontend can render the
     # description label by joining on a stable id rather than a
