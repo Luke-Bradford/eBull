@@ -50,7 +50,10 @@ clicks are more likely to tip a given second over 10.
 
 Replace the per-PROCESS SEC clock with a **cross-process shared rate gate** so all SEC HTTP requests — from
 every process, thread, and any future #479 worker — draw from **one** global ≤9 req/s budget. Correctness
-property: at no instant does the IP exceed the SEC 10 req/s ceiling, regardless of process count.
+property: the global **reservation rate** is bounded to ≤1/floor (≤9 req/s) across all processes, so the
+sustained IP rate stays under the SEC 10 req/s ceiling regardless of process count. Wire-emission timing can
+deviate from the reservation by sub-floor scheduling jitter — see §3g for why that is acceptable (SEC
+enforces on sustained rate, and we hold a margin under the hard cap).
 
 Constraints:
 - **Preserve provider DB-purity.** The SEC providers are pure HTTP clients
@@ -92,8 +95,9 @@ RETURNING EXTRACT(EPOCH FROM (g.next_free_at - make_interval(secs => :floor_s) -
   start) because the value must reflect wall-time at statement execution.
 - **Zero-row `RETURNING`** (the `'sec'` row somehow missing) is treated as a **gate failure** → §3e
   fallback (never silently un-throttle).
-- Strict floor (burst tolerance τ = 0) reproduces today's behaviour exactly. GCRA generalizes to a burst
-  allowance trivially (`next_free_at - now ≤ τ`) but YAGNI — keep τ = 0.
+- Burst tolerance τ = 0 reproduces today's **reservation** spacing; it bounds the global reservation rate,
+  not the exact wire-emission instants (§3g). GCRA generalizes to a burst allowance trivially
+  (`next_free_at - now ≤ τ`) but YAGNI — keep τ = 0.
 
 This is the "Postgres advisory-lock token bucket" the in-code comment and `[[project-sec-rate-lane-wrong-model]]`
 predicted, in its minimal correct form (a single timestamp, no capacity/refill pair to tune).
@@ -188,6 +192,33 @@ All three already centralize on the injected clock pair, so all three switch to 
 is why §4.1 defines **both** a sync `acquire()` and an async `acquire_async()` on the gate (the async paths
 must not block the event loop during the post-UPDATE sleep — Codex ckpt-1 MED).
 
+### 3g. Reservation rate vs wire emission — the honest guarantee (Codex ckpt-1 R2 HIGH)
+
+The gate reserves slots under the row lock, then sleeps **outside** any global lock before firing. So it
+strictly bounds the **reservation rate** (≤1/floor globally), but a caller whose post-reservation sleep is
+delayed by scheduling jitter (GC pause, event-loop stall, OS preempt) can fire after a later-reserved slot —
+i.e. **wire emissions are reservation-ordered, not strictly emission-ordered**, and two emissions can
+occasionally land closer than `floor`. This is **accepted**, for three grounded reasons:
+
+1. **Not a regression.** The async `_AsyncRateLimiter` **already** reserves-then-sleeps-outside-the-lock
+   ([sec_pipelined_fetcher.py:145-153](../../../app/services/sec_pipelined_fetcher.py#L145)); the design
+   merely makes the sync path uniform with it. The sync `ResilientClient` today sleeps *under* its lock, but
+   porting that to the DB would mean **holding the gate connection for the whole ≤0.11 s sleep** — at 9 req/s
+   sustained that pins a connection ~continuously and **breaks the #1472 budget** (§3d). The conn-budget
+   constraint is the reason the sleep is outside the lock.
+2. **SEC enforces on sustained rate, not instantaneous windows.** Per `sec-edgar.md` §4: ">10 r/s **for
+   several minutes** → rate-limit page." A rare jitter-induced sub-floor pair does not trip a sustained-rate
+   limiter; the *reservation* rate (what the gate bounds strictly) is the sustained rate.
+3. **Margin under the hard cap.** The floor targets 9.09 req/s against a 10 req/s hard limit, and SEC's own
+   "comfortable" sustained band is 5–7 r/s. Sub-floor jitter on the order of single-digit ms (typical CPython
+   GC / scheduler) cannot push the *sustained* rate past 10.
+
+If steady-state telemetry (§4.4 counter) ever shows 429s attributable to emission clustering, the cheap
+hardening is a **per-process fire-lock** held across the sleep (a threading/asyncio primitive — **no** DB
+conn), which orders intra-process emissions at zero connection cost; cross-process residual is bounded by the
+API's sporadic single requests. Deferred (YAGNI) until evidence warrants. The spec claims are written as
+"reservation rate" throughout, not "strict instantaneous floor."
+
 ## 4. Design
 
 ### 4.1 `RateGate` protocol (sync + async) + two implementations
@@ -277,10 +308,13 @@ surface; not a new alerting subsystem.
 - 429/throttle counter + health surface (§4.4).
 - Tests (§7); this spec; skill fix (below); memory + prevention-log if a lesson surfaces.
 
-**Skill correction (skill-ownership rule — same PR).** `sec-edgar.md` §4 currently states the in-process
-`_PROCESS_RATE_LIMIT_CLOCK` enforces 10 r/s "across every ingest job" — that is **per-process only**. Correct
-it to: the per-process clock bounds a single process; #1484 adds the cross-process `sec_rate_gate` GCRA gate
-that makes the budget truly global per-IP.
+**Skill correction (skill-ownership rule — same PR).** Two skill docs currently teach the in-process
+`_PROCESS_RATE_LIMIT_CLOCK` as the global per-IP limiter — both are **per-process only** and must be
+corrected to: the per-process clock bounds a single process; #1484 adds the cross-process `sec_rate_gate`
+GCRA gate that makes the **reservation rate** truly global per-IP (§3g):
+- `.claude/skills/data-sources/sec-edgar.md` §4 ("across every ingest job").
+- `.claude/skills/data-engineer/etl-endpoint-coverage.md` lines 23 + 163 ("shared per-IP budget" /
+  "10 req/s shared per-IP") (Codex ckpt-1 R2 LOW).
 
 **Does NOT change:** the SEC providers stay pure HTTP clients (DB lives in the injected gate); the ~50
 `SecFilingsProvider(...)` call sites are **untouched** (§3b); FINRA / Companies House / eToro / openfigi keep
@@ -347,8 +381,10 @@ No data migration; one additive table. Land → run `sql/187` → restart **both
 
 - Migrating FINRA / Companies House / eToro / openfigi to the shared gate — lower-volume, separate per-IP
   budgets; file follow-ups if their cross-process overlap is ever shown to matter.
-- A burst allowance (GCRA τ > 0) — strict floor matches today; trivially added later if steady-state shows
-  the floor is too coarse.
+- A burst allowance (GCRA τ > 0) — τ = 0 matches today's reservation spacing; trivially added later if
+  steady-state shows the floor is too coarse.
+- A per-process fire-lock for strict intra-process emission ordering — deferred (§3g); add only if the §4.4
+  counter shows emission-clustering 429s.
 - Distributed/multi-host coordination beyond one Postgres — the gate row already covers "regardless of
   machines" as long as all processes share the one DB (they do).
 - #479 itself (multi-worker subscriber) — this spec only ensures the gate is topology-proof for when it lands.
@@ -383,3 +419,12 @@ No data migration; one additive table. Land → run `sql/187` → restart **both
   shared by all SEC paths; zero-row `RETURNING` treated as a gate failure → fallback.
 - **MED (async blocks the loop):** §4.1 — `acquire_async()` runs the sub-ms UPDATE in an executor and
   `await asyncio.sleep`s the wait; never `time.sleep` on the event loop.
+
+**Round 2 (re-review of the folded spec):** the six above confirmed materially resolved; the CTE post-SET
+`RETURNING` and the sync/async-lock conn bound confirmed correct. Two new:
+- **HIGH (reservation vs emission overclaim):** §3g added — the gate bounds the global *reservation* rate;
+  wire emissions are reservation-ordered (sleep is outside the lock for conn-budget reasons), accepted
+  because SEC enforces on sustained rate and we hold margin. Claims reworded from "strict instantaneous
+  floor" to "reservation rate" in §2/§3a/§9. Optional per-process fire-lock noted as deferred hardening.
+- **LOW (second stale skill doc):** §5 skill-correction now also covers
+  `data-engineer/etl-endpoint-coverage.md`.
