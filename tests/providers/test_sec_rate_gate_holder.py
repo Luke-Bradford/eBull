@@ -20,6 +20,7 @@ def test_getter_reflects_swap_for_late_importer():
     # still sees a gate set AFTER it imported.
     holder._reset_sec_rate_gate_for_tests()
     from app.providers import sec_rate_gate_holder as late_import
+
     swapped = InProcessFloorGate(floor=0.9)
     holder.set_sec_rate_gate(swapped)
     assert late_import.get_sec_rate_gate() is swapped

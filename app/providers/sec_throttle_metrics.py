@@ -3,6 +3,7 @@
 SEC-scoped on purpose: ResilientClient is shared by non-SEC providers, so
 only the SEC clients wire incr_sec_429 as their on_429 callback.
 """
+
 from __future__ import annotations
 
 import threading
