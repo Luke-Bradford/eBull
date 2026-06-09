@@ -374,10 +374,15 @@ class JobLock:
                 _HELD_SOURCES.reset(self._held_token)
             finally:
                 self._held_token = None
-        # #1542 — sec_rate gate release (no connection was opened).
+        # #1542 — sec_rate gate release (no connection was opened). Release
+        # FIRST, then clear the ownership flag (NOT in a finally) so a
+        # release-raising bug leaves the flag True — the exception propagates
+        # AND the held-state stays visible for diagnostics. Clearing the flag
+        # before (or in a finally around) the release would suppress that
+        # signal — the exact failure mode #1543 review flagged.
         if self._sec_lane_held:
-            self._sec_lane_held = False
             sec_lane_gate.SEC_LANE_GATE.release(self._job_name)
+            self._sec_lane_held = False
             return
         conn = self._conn
         self._conn = None
