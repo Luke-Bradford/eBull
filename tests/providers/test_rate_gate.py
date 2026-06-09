@@ -46,3 +46,20 @@ def test_inprocess_floor_async_shares_clock_with_sync():
     gate.acquire()
     asyncio.run(gate.acquire_async())
     assert sleeps[-1] == pytest.approx(0.11, abs=1e-9)
+
+
+def test_resilient_client_delegates_to_gate():
+    import httpx
+    from app.providers.resilient_client import ResilientClient
+
+    calls = {"n": 0}
+
+    class StubGate:
+        def acquire(self): calls["n"] += 1
+        async def acquire_async(self): ...
+
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, text="ok"))
+    client = httpx.Client(transport=transport)
+    rc = ResilientClient(client, gate=StubGate())
+    rc.get("https://example.test/x")
+    assert calls["n"] == 1
