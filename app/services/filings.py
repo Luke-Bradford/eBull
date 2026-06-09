@@ -182,6 +182,18 @@ SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
         "SCHEDULE 13G/A",
         "SCHEDULE 13D",
         "SCHEDULE 13D/A",
+        # Legacy short-form 13D/G names. SEC renamed SC 13D/G -> SCHEDULE
+        # 13D/G on 2024-12-19 (BOM rule); pre-rename filings carry the
+        # short form. The blockholder parser accepts BOTH conventions
+        # (``app/services/blockholders.py`` ``_SUBMISSIONS_INDEX_FORMS``),
+        # so the keep-set MUST too — otherwise the #1013 skip-tier cleanup
+        # would delete ~131k actively-parsed legacy 13D/G filing_events
+        # rows. Regression-pinned by tests/test_filing_allow_list.py
+        # (keep-set superset of the blockholder accepted-form set).
+        "SC 13D",
+        "SC 13D/A",
+        "SC 13G",
+        "SC 13G/A",
     }
 )
 

@@ -831,6 +831,20 @@ Every job in `SCHEDULED_JOBS` declares a `prerequisite: PrerequisiteFn | None`. 
 7. **Test invariants.** Every job needs a registry-shape test (`tests/test_job_registry.py`) covering source non-NULL + params_metadata validates + prerequisite is callable.
 8. **Queue/audit terminal-state correctness.** When the prelude (source lock acquisition, prereq check, `bootstrap_state` gate, fence-held opt-out) skips the body without invoking the underlying job, the corresponding `pending_job_requests` row MUST transition to `rejected` (not `completed`) with a structured `error_msg`. `mark_request_completed` after a skipped body produces an audit row that says "ran successfully" when the job never ran. PREVENTION-log-grade hazard — see PR #1072 BLOCKING and PR #1078 (orchestrator opt-out fence). The skipped/rejected vs completed distinction is the operator's only signal that a manual trigger didn't actually do what they asked. Grep `mark_request_completed` and verify each call site has the matching `mark_request_rejected` for the prelude-skip path.
 
+#### Manual-trigger-only one-shot jobs (the `sec_rebuild` shape)
+
+A job that must NEVER auto-fire (one-shot retroactive cleanup / migration / triage) is **not** a `ScheduledJob` — it has no cadence. Register it as the manual-only "triangle", mirroring `sec_rebuild` (#1155) and `filing_events_skip_tier_cleanup` (#1013):
+
+1. `_INVOKERS[JOB_X] = ...` in `app/jobs/runtime.py` (so `POST /jobs/X/run` works + it lands in `VALID_JOB_NAMES`).
+2. `MANUAL_TRIGGER_JOB_SOURCES[X] = "<lane>"` in `app/jobs/sources.py` — REQUIRED or `JobLock` `source_for(...)` KeyErrors at dispatch (the registry is built from `SCHEDULED_JOBS` + `_BOOTSTRAP_STAGE_SPECS` only).
+3. `MANUAL_TRIGGER_JOB_METADATA[X] = (...)` in `app/services/processes/param_metadata.py` — the operator params; `()` if none (an explicit empty tuple documents zero-param-by-design vs the silent bootstrap-only fallback).
+
+Bootstrap-gating comes from the universal `check_bootstrap_state_gate` on the manual-queue dispatch path (no per-job `prerequisite`, that field lives on `ScheduledJob`). Tests: `tests/test_layer_123_wiring.py` covers the triangle; `tests/test_jobs_runtime.py::test_every_invoker_is_scheduled_or_on_demand` requires the new name in its `expected_on_demand` set (an invoker not in `SCHEDULED_JOBS` must be deliberately listed there).
+
+### Allow-list / form-type sets a DELETE keys on — couple to the producer
+
+When an allow-list / category set (e.g. `SEC_INGEST_KEEP_FORMS` in `app/services/filings.py`) governs a **destructive** path — a `DELETE`, `NOT IN`, exclusion, or downgrade — it MUST cover every naming convention the ingest/parser path *accepts*, or the un-enumerated-but-real rows are actively destroyed rather than merely skipped. #1013: the keep-set listed only long-form `SCHEDULE 13D/G` but the blockholder parser also accepts legacy short-form `SC 13D/G` (EDGAR renamed them 2024-12-19); a literal `NOT IN keep-set` sweep would have deleted ~131k actively-parsed rows. The durable guard is a pure-logic **superset test coupling the set to each producing parser's accepted-value constant** (`tests/test_filings_form_allowlist.py::test_keep_set_covers_blockholder_accepted_forms`), NOT a hand-maintained re-list. For a one-shot destructive run, also record an empirical preflight (candidate keys ∩ parser-owned tables = ∅) in the PR. Full lesson in `docs/review-prevention-log.md`.
+
 ### 6.5.8 Bootstrap manifest-reset prelude (#1233 PR-5a)
 
 `run_bootstrap_orchestrator` runs a one-shot `reset_manifest_for_run` prelude AFTER the `running` snapshot validation and BEFORE the dispatcher loop. It UPDATEs `sec_filing_manifest`:

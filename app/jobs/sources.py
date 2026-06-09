@@ -340,6 +340,12 @@ class JobSourceRegistryError(RuntimeError):
 #    ``docs/superpowers/specs/2026-05-17-orchestrator-inner-lock-removal.md``).
 
 MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
+    # filing_events_skip_tier_cleanup — one-shot retroactive delete
+    # (#1013). Pure DB operation (no SEC HTTP) → ``db`` lane, matching
+    # the other retention sweeps (financial_facts / raw_data). Companion
+    # params in MANUAL_TRIGGER_JOB_METADATA (empty); invoker in
+    # app/jobs/runtime.py::_INVOKERS.
+    "filing_events_skip_tier_cleanup": "db",
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.

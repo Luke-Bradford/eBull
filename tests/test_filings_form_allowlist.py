@@ -65,9 +65,46 @@ def test_active_parser_forms_are_in_parse_and_raw() -> None:
         "SCHEDULE 13G/A",
         "SCHEDULE 13D",
         "SCHEDULE 13D/A",
+        # Legacy short-form 13D/G names (#1013). The blockholder parser
+        # accepts both conventions; pre-2024-12-19 EDGAR emits these.
+        "SC 13D",
+        "SC 13D/A",
+        "SC 13G",
+        "SC 13G/A",
     }
     missing = must_parse - SEC_PARSE_AND_RAW
     assert missing == set(), f"forms missing from SEC_PARSE_AND_RAW (parsers will starve): {sorted(missing)}"
+
+
+def test_keep_set_covers_blockholder_accepted_forms() -> None:
+    """#1013 regression guard — the keep-set MUST be a superset of every
+    form name the blockholder parser accepts.
+
+    The #1013 skip-tier cleanup deletes ``filing_events`` rows whose
+    ``filing_type`` is not in ``SEC_INGEST_KEEP_FORMS``. The original
+    keep-set listed only the long-form ``SCHEDULE 13D/G`` names, but the
+    blockholder ingest (``_SUBMISSIONS_INDEX_FORMS``) also consumes the
+    legacy short-form ``SC 13D/G`` names (EDGAR renamed SC -> SCHEDULE on
+    2024-12-19). A literal NOT-IN-keep-set sweep would have deleted ~131k
+    actively-parsed legacy 13D/G rows. Coupling the assertion to the
+    parser's own accepted-form set means: if the parser learns a new form
+    name, this test fails until the keep-set covers it too — the keep-set
+    can never silently drop below what a parser consumes.
+    """
+    from app.services.blockholders import _SUBMISSIONS_INDEX_FORMS
+
+    missing = _SUBMISSIONS_INDEX_FORMS - SEC_INGEST_KEEP_FORMS
+    assert missing == set(), (
+        f"blockholder-accepted forms missing from SEC_INGEST_KEEP_FORMS "
+        f"(skip-tier cleanup would delete actively-parsed rows): {sorted(missing)}"
+    )
+
+
+def test_legacy_13dg_aliases_in_parse_and_raw() -> None:
+    """Explicit pin for the four short-form 13D/G aliases added in #1013."""
+    aliases = {"SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A"}
+    missing = aliases - SEC_PARSE_AND_RAW
+    assert missing == set(), f"legacy 13D/G aliases missing from SEC_PARSE_AND_RAW: {sorted(missing)}"
 
 
 def test_metadata_only_forms_have_no_parser_today() -> None:

@@ -365,6 +365,10 @@ _INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_VALIDATION] = _adapt_zero_arg(
     _bootstrap_validation.run_bootstrap_validation
 )
 _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking, no _adapt_zero_arg
+# #1013 — one-shot skip-tier filing_events cleanup. Manual-trigger-only
+# (not in SCHEDULED_JOBS); zero-param. Source-lock in
+# MANUAL_TRIGGER_JOB_SOURCES; empty params in MANUAL_TRIGGER_JOB_METADATA.
+_INVOKERS[_scheduler.JOB_FILING_EVENTS_SKIP_TIER_CLEANUP] = _adapt_zero_arg(_scheduler.filing_events_skip_tier_cleanup)
 # G6/#915 — FINRA bimonthly short interest (daily 12:00 UTC). Zero-param
 # manual surface; extended-window backfill via REPL runbook.
 _INVOKERS[_scheduler.JOB_FINRA_SHORT_INTEREST_REFRESH] = _adapt_zero_arg(_scheduler.finra_short_interest_refresh)

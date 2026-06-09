@@ -224,6 +224,13 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
 # triangle.
 
 MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
+    # filing_events_skip_tier_cleanup — one-shot retroactive delete
+    # (#1013). No operator-tunable params: ``batch_size`` is an
+    # implementation knob (§6.5.7 item 2), kept internal. The explicit
+    # empty tuple documents zero-param-by-design (vs the bootstrap-only
+    # fallback, which would also yield empty) and completes the
+    # manual-only triangle (source + metadata + invoker).
+    "filing_events_skip_tier_cleanup": (),
     # sec_13f_quarterly_sweep — post-#1155 retirement of the weekly
     # scheduled row; bootstrap stage 21 still dispatches it via
     # _INVOKERS, and the sweep-adapter / Admin Run-now paths surface

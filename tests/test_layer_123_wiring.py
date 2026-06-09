@@ -30,6 +30,7 @@ from app.services.processes.param_metadata import (
     validate_job_params,
 )
 from app.workers.scheduler import (
+    JOB_FILING_EVENTS_SKIP_TIER_CLEANUP,
     JOB_FINRA_REGSHO_DAILY_REFRESH,
     JOB_FINRA_SHORT_INTEREST_REFRESH,
     JOB_SEC_ATOM_FAST_LANE,
@@ -164,6 +165,43 @@ class TestSecRebuildRegistry:
         """Round 4 finding — manual-trigger jobs need source-lock coverage
         or JobLock acquisition KeyErrors at dispatch."""
         assert source_for(JOB_SEC_REBUILD) == "sec_rate"
+
+
+class TestFilingEventsSkipTierCleanupRegistry:
+    """#1013 — one-shot skip-tier cleanup is manual-trigger-only:
+    registered via the sibling side-tables, NOT in SCHEDULED_JOBS (a
+    one-shot delete must never auto-fire)."""
+
+    def test_in_valid_job_names(self) -> None:
+        assert JOB_FILING_EVENTS_SKIP_TIER_CLEANUP in VALID_JOB_NAMES
+
+    def test_not_in_scheduled_jobs(self) -> None:
+        assert _job_by_name(JOB_FILING_EVENTS_SKIP_TIER_CLEANUP) is None
+
+    def test_in_manual_trigger_metadata_with_no_params(self) -> None:
+        assert JOB_FILING_EVENTS_SKIP_TIER_CLEANUP in MANUAL_TRIGGER_JOB_METADATA
+        assert MANUAL_TRIGGER_JOB_METADATA[JOB_FILING_EVENTS_SKIP_TIER_CLEANUP] == ()
+
+    def test_in_manual_trigger_sources(self) -> None:
+        assert MANUAL_TRIGGER_JOB_SOURCES[JOB_FILING_EVENTS_SKIP_TIER_CLEANUP] == "db"
+
+    def test_source_for_resolves(self) -> None:
+        assert source_for(JOB_FILING_EVENTS_SKIP_TIER_CLEANUP) == "db"
+
+    def test_zero_param_validation_contract(self) -> None:
+        """POST /jobs/filing_events_skip_tier_cleanup/run takes no params:
+        an empty body validates; any supplied key is rejected."""
+        metadata = _lookup_metadata(JOB_FILING_EVENTS_SKIP_TIER_CLEANUP)
+        assert metadata == ()
+        # Empty params accepted.
+        validate_job_params(JOB_FILING_EVENTS_SKIP_TIER_CLEANUP, {}, allow_internal_keys=False)
+        # Unknown key rejected (no operator-tunable surface).
+        with pytest.raises(ParamValidationError):
+            validate_job_params(
+                JOB_FILING_EVENTS_SKIP_TIER_CLEANUP,
+                {"batch_size": 100},
+                allow_internal_keys=False,
+            )
 
 
 class TestLookupMetadataFallback:
