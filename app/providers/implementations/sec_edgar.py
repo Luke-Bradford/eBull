@@ -262,17 +262,22 @@ class SecFilingsProvider(FilingsProvider):
         # provider instance had its own list[float], so concurrent
         # ingest jobs each spawning their own SecFilingsProvider
         # could collectively burst past the SEC fair-use limit.
+        from app.providers.sec_rate_gate_holder import get_sec_rate_gate
+
+        _gate = get_sec_rate_gate()
         self._http = ResilientClient(
             self._client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
             shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
+            gate=_gate,
         )
         self._http_tickers = ResilientClient(
             self._tickers_client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
             shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
+            gate=_gate,
         )
 
     def __enter__(self) -> SecFilingsProvider:
