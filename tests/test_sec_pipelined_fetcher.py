@@ -574,3 +574,62 @@ class TestCachedSubmissionsPageFetcher:
         assert calls == [("page", "ims")]
         assert wrapped.cache_misses == 1
         assert wrapped.cache_hits == 0
+
+
+# ---------------------------------------------------------------------------
+# SEC 429 counter (#1545) — async paths must increment sec_throttle_429_total
+# ---------------------------------------------------------------------------
+
+
+class TestSec429Counter:
+    """fetch_one is the chokepoint: every pipelined SEC request flows
+    through it, so one increment there covers prefetch_document_texts
+    AND prefetch_submissions_pages_conditional.
+
+    Delta-based assertions per the prevention log — the counter is
+    process-global, never assert exact totals."""
+
+    async def test_fetch_one_429_increments_counter(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        clock, lock = _isolated_budget()
+        transport = httpx.MockTransport(lambda r: httpx.Response(429))
+        async with httpx.AsyncClient(transport=transport) as client:
+            fetcher = PipelinedSecFetcher(
+                client=client, target_rps=1000, concurrency=1, shared_clock=clock, shared_lock=lock
+            )
+            before = sec_throttle_429_total()
+            result = await fetcher.fetch_one(FetchTask(key="k", url="https://example.test/doc", headers={}))
+        assert result.response is not None
+        assert result.response.status_code == 429
+        assert sec_throttle_429_total() - before == 1
+
+    async def test_fetch_one_200_does_not_increment(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        clock, lock = _isolated_budget()
+        transport = httpx.MockTransport(lambda r: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as client:
+            fetcher = PipelinedSecFetcher(
+                client=client, target_rps=1000, concurrency=1, shared_clock=clock, shared_lock=lock
+            )
+            before = sec_throttle_429_total()
+            await fetcher.fetch_one(FetchTask(key="k", url="https://example.test/doc", headers={}))
+        assert sec_throttle_429_total() - before == 0
+
+    async def test_fetch_one_transport_error_does_not_increment(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        clock, lock = _isolated_budget()
+
+        def boom(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as client:
+            fetcher = PipelinedSecFetcher(
+                client=client, target_rps=1000, concurrency=1, shared_clock=clock, shared_lock=lock
+            )
+            before = sec_throttle_429_total()
+            result = await fetcher.fetch_one(FetchTask(key="k", url="https://example.test/doc", headers={}))
+        assert result.error is not None
+        assert sec_throttle_429_total() - before == 0

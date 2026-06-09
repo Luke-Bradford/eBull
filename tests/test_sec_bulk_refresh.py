@@ -859,3 +859,72 @@ class TestSchedulerRegistration:
         # All entries should be real archives.
         for name in qtr:
             assert _archive_for_name(name) is not None
+
+
+# ---------------------------------------------------------------------------
+# SEC 429 counter (#1545) — async refresh paths increment sec_throttle_429_total
+# ---------------------------------------------------------------------------
+
+
+class TestSec429Counter:
+    """Delta-based assertions per the prevention log — the counter is
+    process-global, never assert exact totals."""
+
+    @pytest.mark.asyncio
+    async def test_head_429_increments_counter(self, tmp_path: Path) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        handler = _make_handler(archive_url=url, archive_body=_zip_bytes(), etag='"unused"', head_status=429)
+
+        before = sec_throttle_429_total()
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+        assert result.skipped_reason == "head_status_429"
+        assert sec_throttle_429_total() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_get_429_increments_counter(self, tmp_path: Path) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+
+        # Old archive present; new ETag advertised so the GET fires; GET 429s.
+        archive_path = tmp_path / _SUBMISSIONS_NAME
+        archive_path.write_bytes(_zip_bytes(payload=b'{"old": true}'))
+        _atomic_write_text(_etag_sidecar_path(archive_path), '"old-etag"')
+
+        handler = _make_handler(archive_url=url, archive_body=_zip_bytes(), etag='"new-etag"', get_status=429)
+
+        before = sec_throttle_429_total()
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+        assert result.skipped_reason == "get_status_429"
+        assert sec_throttle_429_total() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_head_503_does_not_increment(self, tmp_path: Path) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        handler = _make_handler(archive_url=url, archive_body=_zip_bytes(), etag='"unused"', head_status=503)
+
+        before = sec_throttle_429_total()
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+        assert sec_throttle_429_total() - before == 0

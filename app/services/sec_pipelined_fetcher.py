@@ -35,6 +35,7 @@ import httpx
 from app.providers.implementations.sec_edgar import (
     SubmissionsPageResult,
 )
+from app.providers.sec_throttle_metrics import incr_sec_429
 
 if TYPE_CHECKING:
     from app.providers.rate_gate import RateGate
@@ -216,6 +217,10 @@ class PipelinedSecFetcher:
             await self._rate_limiter.acquire()
             try:
                 response = await self._client.get(task.url, headers=task.headers)
+                if response.status_code == 429:
+                    # Chokepoint for every pipelined SEC request (#1545):
+                    # one increment here covers all fetch_many callers.
+                    incr_sec_429()
                 return FetchResult(key=task.key, response=response)
             except (httpx.HTTPError, OSError) as exc:
                 return FetchResult(key=task.key, response=None, error=str(exc))

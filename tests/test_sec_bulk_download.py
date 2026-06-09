@@ -609,3 +609,112 @@ class TestDownloadBulkArchives:
         assert all(r.error is None for r in result.archives)
         assert (tmp_path / "archive_a.zip").exists()
         assert (tmp_path / "archive_b.zip").exists()
+
+
+# ---------------------------------------------------------------------------
+# SEC 429 counter (#1545) — async download paths increment sec_throttle_429_total
+# ---------------------------------------------------------------------------
+
+
+class TestSec429Counter:
+    """One test per 429-detection site. Delta-based assertions per the
+    prevention log — the counter is process-global, never assert
+    exact totals."""
+
+    @pytest.mark.asyncio
+    async def test_preflight_head_etag_429_increments(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+        from app.services.sec_bulk_download import _head_etag
+
+        transport = httpx.MockTransport(lambda r: httpx.Response(429))
+        before = sec_throttle_429_total()
+        async with httpx.AsyncClient(transport=transport) as client:
+            etag = await _head_etag(client, "https://example.test/archive.zip")
+        assert etag is None
+        assert sec_throttle_429_total() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_bandwidth_probe_429_increments(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        transport = httpx.MockTransport(lambda r: httpx.Response(429))
+        before = sec_throttle_429_total()
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(RuntimeError):
+                await measure_bandwidth_mbps(client, probe_url="https://example.test/probe.zip")
+        assert sec_throttle_429_total() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_head_size_and_type_429_increments(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+        from app.services.sec_bulk_download import _head_size_and_type
+
+        transport = httpx.MockTransport(lambda r: httpx.Response(429))
+        before = sec_throttle_429_total()
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(RuntimeError):
+                await _head_size_and_type(client, "https://example.test/archive.zip")
+        assert sec_throttle_429_total() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_download_stream_429_increments(self, tmp_path: Path) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        body = _build_zip_bytes()
+        url = "https://example.test/archive.zip"
+        archive = BulkArchive(name="archive.zip", url=url)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "HEAD":
+                return httpx.Response(
+                    200,
+                    headers={
+                        "content-length": str(len(body)),
+                        "content-type": "application/zip",
+                    },
+                )
+            return httpx.Response(429)
+
+        before = sec_throttle_429_total()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await _download_one(client, archive, tmp_path)
+        assert result.error is not None and "429" in result.error
+        assert sec_throttle_429_total() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_download_resume_fresh_stream_429_increments(self, tmp_path: Path) -> None:
+        """Resume path: Range GET answered with 200-but-then-429 on the
+        fresh retry — the fresh stream's 429 must count too."""
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        body = _build_zip_bytes()
+        url = "https://example.test/archive.zip"
+        archive = BulkArchive(name="archive.zip", url=url)
+
+        # Pre-seed a partial so the resume branch fires.
+        (tmp_path / "archive.zip.partial").write_bytes(body[: len(body) // 2])
+
+        get_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal get_count
+            if request.method == "HEAD":
+                return httpx.Response(
+                    200,
+                    headers={
+                        "content-length": str(len(body)),
+                        "content-type": "application/zip",
+                    },
+                )
+            get_count += 1
+            # First GET (Range) ignored with a 200-shaped non-206 → fresh
+            # retry; fresh GET answers 429.
+            if get_count == 1:
+                return httpx.Response(200, content=b"")
+            return httpx.Response(429)
+
+        before = sec_throttle_429_total()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await _download_one(client, archive, tmp_path)
+        assert result.error is not None
+        assert sec_throttle_429_total() - before == 1
