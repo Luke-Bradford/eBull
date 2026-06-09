@@ -188,7 +188,7 @@ class TestSeedFromManifest:
         archive_filed_at = (now - timedelta(days=5)).replace(microsecond=0)
         self._seed_manifest_row(
             ebull_test_conn,
-            accession="ACC-650",
+            accession="0000000001-26-000650",
             subject_type="issuer",
             subject_id="1701",
             source="sec_form4",
@@ -217,7 +217,7 @@ class TestSeedFromManifest:
         # for (issuer, 1701, sec_form4) with newest filed_at.
         self._seed_manifest_row(
             ebull_test_conn,
-            accession="ACC-1",
+            accession="0000000001-26-000001",
             subject_type="issuer",
             subject_id="1701",
             source="sec_form4",
@@ -227,7 +227,7 @@ class TestSeedFromManifest:
         )
         self._seed_manifest_row(
             ebull_test_conn,
-            accession="ACC-2",
+            accession="0000000001-26-000002",
             subject_type="issuer",
             subject_id="1701",
             source="sec_form4",
@@ -243,7 +243,7 @@ class TestSeedFromManifest:
 
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1701", source="sec_form4")
         assert row is not None
-        assert row.last_known_filing_id == "ACC-2"
+        assert row.last_known_filing_id == "0000000001-26-000002"
         assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
         # Cadence = 30d for form4
         assert row.expected_next_at == datetime(2026, 3, 3, tzinfo=UTC)
@@ -257,7 +257,7 @@ class TestSeedFromManifest:
         # issuer scope
         self._seed_manifest_row(
             ebull_test_conn,
-            accession="ACC-ISSUER",
+            accession="0000320193-26-000010",
             subject_type="issuer",
             subject_id="1",
             source="sec_form4",
@@ -268,7 +268,7 @@ class TestSeedFromManifest:
         # institutional_filer scope (no instrument_id)
         self._seed_manifest_row(
             ebull_test_conn,
-            accession="ACC-INST",
+            accession="0001364742-26-000011",
             subject_type="institutional_filer",
             subject_id="0001364742",
             source="sec_13f_hr",
@@ -302,7 +302,7 @@ class TestSeedFromManifest:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
         self._seed_manifest_row(
             ebull_test_conn,
-            accession="ACC-1",
+            accession="0000000001-26-000001",
             subject_type="issuer",
             subject_id="1",
             source="sec_form4",
@@ -340,7 +340,7 @@ class TestRecordPollOutcome:
             subject_id="1",
             source="sec_form4",
             outcome="new_data",
-            last_known_filing_id="ACC-NEW",
+            last_known_filing_id="0000000001-26-000999",
             last_known_filed_at=datetime(2026, 3, 1, tzinfo=UTC),
             new_filings_since=2,
             cik="0000000001",
@@ -350,7 +350,7 @@ class TestRecordPollOutcome:
 
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
         assert row is not None
-        assert row.last_known_filing_id == "ACC-NEW"
+        assert row.last_known_filing_id == "0000000001-26-000999"
         assert row.last_polled_outcome == "new_data"
         assert row.state == "current"
         assert row.new_filings_since == 2
@@ -366,8 +366,8 @@ class TestRecordPollOutcome:
         # daily-index) that also write this freshness row. A per-CIK poll
         # that snapshotted an OLD watermark, fetched, and saw no newer
         # filing must NOT clobber a newer watermark a concurrent producer
-        # advanced in the meantime. Models: producer advanced to ACC-NEW;
-        # the in-flight poll then writes back its stale ACC-OLD snapshot.
+        # advanced in the meantime. Models: producer advanced to the newer
+        # accession; the in-flight poll then writes back its stale snapshot.
         _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
         record_poll_outcome(
             ebull_test_conn,
@@ -375,7 +375,7 @@ class TestRecordPollOutcome:
             subject_id="1",
             source="sec_form4",
             outcome="new_data",
-            last_known_filing_id="ACC-NEW",
+            last_known_filing_id="0000000001-26-000999",
             last_known_filed_at=datetime(2026, 2, 1, tzinfo=UTC),
             new_filings_since=1,
             cik="0000000001",
@@ -388,7 +388,7 @@ class TestRecordPollOutcome:
             subject_id="1",
             source="sec_form4",
             outcome="current",
-            last_known_filing_id="ACC-OLD",
+            last_known_filing_id="0000000001-25-000111",
             last_known_filed_at=datetime(2026, 1, 1, tzinfo=UTC),
             new_filings_since=0,
             cik="0000000001",
@@ -399,7 +399,7 @@ class TestRecordPollOutcome:
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
         assert row is not None
         # Watermark did NOT regress to the stale snapshot.
-        assert row.last_known_filing_id == "ACC-NEW"
+        assert row.last_known_filing_id == "0000000001-26-000999"
         assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
         # expected_next_at stays anchored on the preserved (newer) watermark
         # 2026-02-01 + 30d form4 cadence — NOT the stale 2026-01-01 anchor,
@@ -582,14 +582,14 @@ class TestSeedFreshnessForManifestRow:
             source="sec_form4",
             cik="0000000001",
             instrument_id=1,
-            accession_number="ACC-1",
+            accession_number="0000000001-26-000001",
             filed_at=datetime(2026, 2, 1, tzinfo=UTC),
         )
         ebull_test_conn.commit()
 
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
         assert row is not None
-        assert row.last_known_filing_id == "ACC-1"
+        assert row.last_known_filing_id == "0000000001-26-000001"
         assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
         assert row.state == "current"
         # Cadence = 30d for sec_form4
@@ -607,7 +607,7 @@ class TestSeedFreshnessForManifestRow:
             source="sec_form4",
             cik="0000000001",
             instrument_id=1,
-            accession_number="ACC-OLD",
+            accession_number="0000000001-25-000111",
             filed_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
         seed_freshness_for_manifest_row(
@@ -617,14 +617,14 @@ class TestSeedFreshnessForManifestRow:
             source="sec_form4",
             cik="0000000001",
             instrument_id=1,
-            accession_number="ACC-NEW",
+            accession_number="0000000001-26-000999",
             filed_at=datetime(2026, 2, 1, tzinfo=UTC),
         )
         ebull_test_conn.commit()
 
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
         assert row is not None
-        assert row.last_known_filing_id == "ACC-NEW"
+        assert row.last_known_filing_id == "0000000001-26-000999"
         assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
 
     def test_older_row_does_not_clobber_watermark(
@@ -642,7 +642,7 @@ class TestSeedFreshnessForManifestRow:
             source="sec_form4",
             cik="0000000001",
             instrument_id=1,
-            accession_number="ACC-NEW",
+            accession_number="0000000001-26-000999",
             filed_at=datetime(2026, 2, 1, tzinfo=UTC),
         )
         seed_freshness_for_manifest_row(
@@ -652,7 +652,7 @@ class TestSeedFreshnessForManifestRow:
             source="sec_form4",
             cik="0000000001",
             instrument_id=1,
-            accession_number="ACC-OLD",
+            accession_number="0000000001-25-000111",
             filed_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
         ebull_test_conn.commit()
@@ -660,7 +660,7 @@ class TestSeedFreshnessForManifestRow:
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
         assert row is not None
         # Watermark stayed on the newer accession.
-        assert row.last_known_filing_id == "ACC-NEW"
+        assert row.last_known_filing_id == "0000000001-26-000999"
         assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
 
     def test_re_discovery_does_not_clobber_poll_error_state(
@@ -680,7 +680,7 @@ class TestSeedFreshnessForManifestRow:
             source="sec_form4",
             cik="0000000001",
             instrument_id=1,
-            accession_number="ACC-1",
+            accession_number="0000000001-26-000001",
             filed_at=datetime(2026, 2, 1, tzinfo=UTC),
         )
         # Simulate a poll error overwriting state to 'error'.
@@ -705,7 +705,7 @@ class TestSeedFreshnessForManifestRow:
             source="sec_form4",
             cik="0000000001",
             instrument_id=1,
-            accession_number="ACC-1",
+            accession_number="0000000001-26-000001",
             filed_at=datetime(2026, 2, 1, tzinfo=UTC),
         )
         ebull_test_conn.commit()
@@ -760,7 +760,7 @@ class TestSeedFreshnessForManifestRow:
             source="sec_form4",
             cik="0000000001",
             instrument_id=1,
-            accession_number="ACC-1",
+            accession_number="0000000001-26-000001",
             filed_at=datetime(2026, 2, 1, tzinfo=UTC),
         )
         ebull_test_conn.commit()
@@ -768,7 +768,7 @@ class TestSeedFreshnessForManifestRow:
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
         assert row is not None
         assert row.state == "current"
-        assert row.last_known_filing_id == "ACC-1"
+        assert row.last_known_filing_id == "0000000001-26-000001"
 
     def test_record_manifest_entry_seeds_inline(
         self,
@@ -780,7 +780,7 @@ class TestSeedFreshnessForManifestRow:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
         record_manifest_entry(
             ebull_test_conn,
-            "ACC-1",
+            "0000000001-26-000001",
             cik="0000000001",
             form="4",
             source="sec_form4",
@@ -793,5 +793,5 @@ class TestSeedFreshnessForManifestRow:
 
         row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
         assert row is not None
-        assert row.last_known_filing_id == "ACC-1"
+        assert row.last_known_filing_id == "0000000001-26-000001"
         assert row.state == "current"

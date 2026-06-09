@@ -72,7 +72,7 @@ class TestParserRegistry:
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
         # No parser registered
         stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
@@ -83,7 +83,7 @@ class TestParserRegistry:
         # #940: per-source breakdown exposes which sources lack parsers.
         assert stats.skipped_no_parser_by_source == {"sec_form4": 1}
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "pending"  # untouched
 
@@ -100,9 +100,9 @@ class TestParserRegistry:
         # per-tick skip surface. The skipped-no-parser WARNING still
         # fires from the per-source rebuild path (#940 unchanged) —
         # see ``test_unregistered_source_skips_row`` above.
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
-        _seed_pending(ebull_test_conn, accession="ACC-2", source="sec_form4")
-        _seed_pending(ebull_test_conn, accession="ACC-3", source="sec_def14a")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000002", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000003", source="sec_def14a")
         ebull_test_conn.commit()
 
         stats = run_manifest_worker(ebull_test_conn, source=None, max_rows=10)
@@ -116,7 +116,7 @@ class TestParserRegistry:
 
         # Rows remain pending — operator must register parsers or use
         # the per-source rebuild path to drain them.
-        for accession in ("ACC-1", "ACC-2", "ACC-3"):
+        for accession in ("0000000001-26-000001", "0000000001-26-000002", "0000000001-26-000003"):
             row = get_manifest_row(ebull_test_conn, accession)
             assert row is not None
             assert row.ingest_status == "pending"
@@ -129,7 +129,7 @@ class TestParserRegistry:
         # When every source has a parser, the warning is not emitted —
         # operators should only see the message when something is
         # actually dropped.
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         def parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -149,7 +149,7 @@ class TestParserRegistry:
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         def fake_parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -162,7 +162,7 @@ class TestParserRegistry:
         assert stats.parsed == 1
         assert stats.skipped_no_parser == 0
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "parsed"
         assert row.parser_version == "v1"
@@ -172,7 +172,7 @@ class TestParserRegistry:
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         def crashing_parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -185,7 +185,7 @@ class TestParserRegistry:
         ebull_test_conn.commit()
         assert stats.failed == 1
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "failed"
         assert row.error is not None
@@ -198,7 +198,7 @@ class TestParserRegistry:
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         custom_retry = datetime(2026, 6, 1, tzinfo=UTC)
@@ -210,7 +210,7 @@ class TestParserRegistry:
         run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
         ebull_test_conn.commit()
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "failed"
         assert row.next_retry_at == custom_retry
@@ -224,7 +224,7 @@ class TestParserRegistry:
         # ``parsed`` while ``raw_status='absent'``. The worker
         # converts the outcome to a ``failed`` transition with a
         # descriptive error so the row remains auditable + retryable.
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         def parser_drops_raw(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -239,7 +239,7 @@ class TestParserRegistry:
         assert stats.failed == 1
         assert stats.raw_payload_violations == 1
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "failed"
         assert row.error is not None
@@ -252,7 +252,7 @@ class TestParserRegistry:
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         # Same flag, valid raw_status -> normal parsed transition.
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         def parser_persists_raw(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -265,7 +265,7 @@ class TestParserRegistry:
         assert stats.parsed == 1
         assert stats.raw_payload_violations == 0
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "parsed"
         assert row.raw_status == "stored"
@@ -284,7 +284,7 @@ class TestParserRegistry:
         # row.raw_status``), not just the outcome.
         from app.services.sec_manifest import transition_status
 
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         # Pre-stamp ``raw_status='stored'`` while keeping
         # ``ingest_status='pending'`` so the worker picks the row up
         # via ``iter_pending`` AND finds existing raw evidence. Models
@@ -292,7 +292,7 @@ class TestParserRegistry:
         # pending for re-parse, parser doesn't restamp raw.
         transition_status(
             ebull_test_conn,
-            "ACC-1",
+            "0000000001-26-000001",
             ingest_status="pending",
             raw_status="stored",
         )
@@ -309,7 +309,7 @@ class TestParserRegistry:
         assert stats.failed == 0
         assert stats.raw_payload_violations == 0
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "parsed"
         assert row.raw_status == "stored"  # preserved across the parsed transition
@@ -322,7 +322,7 @@ class TestParserRegistry:
         # written, then compacted into the per-quarter archive). The
         # invariant is "evidence on disk somewhere", not "literally
         # ``stored``".
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         def parser_compacts_raw(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -343,7 +343,7 @@ class TestParserRegistry:
         # compatibility: synthesised / non-payload parsers can mark
         # rows ``parsed`` without a raw body. Used for sources where
         # the manifest row IS the truth (e.g. heartbeat-style entries).
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         def synthesised_parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -357,7 +357,7 @@ class TestParserRegistry:
         assert stats.failed == 0
         assert stats.raw_payload_violations == 0
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "parsed"
         assert row.raw_status == "absent"
@@ -366,7 +366,7 @@ class TestParserRegistry:
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         ebull_test_conn.commit()
 
         def tombstoning_parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -376,7 +376,7 @@ class TestParserRegistry:
         run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
         ebull_test_conn.commit()
 
-        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        row = get_manifest_row(ebull_test_conn, "0000000001-26-000001")
         assert row is not None
         assert row.ingest_status == "tombstoned"
         assert row.error == "not on file"
@@ -388,8 +388,8 @@ class TestSourceFilter:
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        _seed_pending(ebull_test_conn, accession="ACC-FORM4", source="sec_form4")
-        _seed_pending(ebull_test_conn, accession="ACC-DEF14A", source="sec_def14a")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000044", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000320193-26-000140", source="sec_def14a")
         ebull_test_conn.commit()
 
         def parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -403,8 +403,8 @@ class TestSourceFilter:
         ebull_test_conn.commit()
         assert stats.parsed == 1
 
-        form4_row = get_manifest_row(ebull_test_conn, "ACC-FORM4")
-        def14a_row = get_manifest_row(ebull_test_conn, "ACC-DEF14A")
+        form4_row = get_manifest_row(ebull_test_conn, "0000000001-26-000044")
+        def14a_row = get_manifest_row(ebull_test_conn, "0000320193-26-000140")
         assert form4_row is not None
         assert def14a_row is not None
         assert form4_row.ingest_status == "parsed"
@@ -414,8 +414,8 @@ class TestSourceFilter:
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        _seed_pending(ebull_test_conn, accession="ACC-FORM4", source="sec_form4")
-        _seed_pending(ebull_test_conn, accession="ACC-DEF14A", source="sec_def14a")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000044", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000320193-26-000140", source="sec_def14a")
         ebull_test_conn.commit()
 
         def parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
@@ -436,11 +436,11 @@ class TestRetryablePath:
     ) -> None:
         from app.services.sec_manifest import transition_status
 
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         # Manually mark failed with retry in past
         transition_status(
             ebull_test_conn,
-            "ACC-1",
+            "0000000001-26-000001",
             ingest_status="failed",
             error="x",
             next_retry_at=datetime(2024, 1, 1, tzinfo=UTC),
@@ -461,10 +461,10 @@ class TestRetryablePath:
     ) -> None:
         from app.services.sec_manifest import transition_status
 
-        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="0000000001-26-000001", source="sec_form4")
         transition_status(
             ebull_test_conn,
-            "ACC-1",
+            "0000000001-26-000001",
             ingest_status="failed",
             error="x",
             next_retry_at=datetime(2099, 1, 1, tzinfo=UTC),
@@ -585,7 +585,9 @@ def _seed_pending_n(
     _seed_instrument(conn, iid=iid, symbol=f"SYM{iid}")
     accessions: list[str] = []
     for i in range(n):
-        accession = f"{source}-{base_filed_at:%Y%m%d}-{i:05d}"
+        # Realistic SEC accession shape (#1460 format guard): the
+        # caller-supplied per-source cik keeps cross-source rows distinct.
+        accession = f"{cik}-{base_filed_at:%y}-{i:06d}"
         record_manifest_entry(
             conn,
             accession,
