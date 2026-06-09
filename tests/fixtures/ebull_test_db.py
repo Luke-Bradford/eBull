@@ -531,11 +531,17 @@ def _apply_migrations(target_url: str, *, stop_after: str | None = None) -> None
 
     with psycopg.connect(target_url) as bootstrap:
         with psycopg.ClientCursor(bootstrap) as cur:
+            # Mirror app/db/migrations.CREATE_TRACKING_TABLE (#1333 —
+            # content_sha256 drift guard) so per-worker DBs exercise the
+            # normal hashed-applied state, not the legacy-NULL backfill
+            # path.
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations ("
                 "filename TEXT PRIMARY KEY, "
-                "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+                "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "content_sha256 TEXT)"
             )
+            cur.execute("ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS content_sha256 TEXT")
         bootstrap.commit()
 
     with psycopg.connect(target_url) as reader:
@@ -546,7 +552,7 @@ def _apply_migrations(target_url: str, *, stop_after: str | None = None) -> None
     # Imported here (not at module top) so this fixture can be loaded
     # by tooling that doesn't have the full ``app`` package on the path
     # yet — keeps the test-helper import surface narrow.
-    from app.db.migrations import _split_autocommit_statements, _wants_autocommit
+    from app.db.migrations import _content_sha256, _split_autocommit_statements, _wants_autocommit
 
     for path in files:
         if path.name in done:
@@ -565,8 +571,8 @@ def _apply_migrations(target_url: str, *, stop_after: str | None = None) -> None
                     else:
                         cur.execute(sql_text)  # type: ignore[call-overload]
                     cur.execute(  # type: ignore[call-overload]
-                        "INSERT INTO schema_migrations (filename) VALUES (%s)",
-                        (path.name,),
+                        "INSERT INTO schema_migrations (filename, content_sha256) VALUES (%s, %s)",
+                        (path.name, _content_sha256(path)),
                     )
                 if not autocommit:
                     conn.commit()

@@ -111,6 +111,10 @@ Without this, the caller believes the mutation succeeded while the row is unchan
 | `dict_row` added to one cursor | all cursor calls in the file |
 | Missing `rowcount` after UPDATE | every `conn.execute("UPDATE` in the file |
 
+## Never edit an applied migration — bump to a new NNN+1 file
+
+The runner records each applied file's SHA-256 in `schema_migrations.content_sha256` (#1333) and **raises at boot** if an applied file's content changed. Editing `sql/NNN_*.sql` after any DB recorded it (dev included — drafts applied during PR development count) is therefore a boot-breaker, not a silent no-op. All follow-up changes go into a new `NNN+1` file. If you knowingly replayed an edited file manually (idempotent), reset its hash: `UPDATE schema_migrations SET content_sha256 = NULL WHERE filename = '<file>'` — never DELETE the row. Full RCA in `docs/review-prevention-log.md` ("Migration content drift").
+
 ## Constraints live in two places — grep both
 
 The `CREATE TABLE` statement is **not** authoritative for CHECK / FK / UNIQUE constraints. Subsequent migrations land additional constraints via `ALTER TABLE ... ADD CONSTRAINT`. Before writing any code (seeder, fixture, parser, ingester) that emits or accepts values for a column, grep both:
