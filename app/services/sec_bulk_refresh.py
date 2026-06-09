@@ -102,6 +102,7 @@ import httpx
 import psycopg
 
 from app.config import settings
+from app.providers.sec_throttle_metrics import incr_sec_429
 from app.security.master_key import resolve_data_dir
 from app.services.sec_bulk_download import (
     BulkArchive,
@@ -325,6 +326,8 @@ async def _refresh_one_async(
                 skipped_reason=f"head_transport_error: {type(exc).__name__}",
             )
 
+        if head.status_code == 429:
+            incr_sec_429()
         if head.status_code in _TRANSIENT_HTTP_STATUSES:
             logger.warning(
                 "sec_bulk_refresh HEAD got %d for %s — skipping (will retry next fire)",
@@ -471,6 +474,8 @@ async def _refresh_one_async(
         get_etag: str | None = None
         try:
             async with client.stream("GET", archive.url) as response:
+                if response.status_code == 429:
+                    incr_sec_429()
                 if response.status_code in _TRANSIENT_HTTP_STATUSES:
                     logger.warning(
                         "sec_bulk_refresh GET got %d for %s — skipping (local file untouched)",

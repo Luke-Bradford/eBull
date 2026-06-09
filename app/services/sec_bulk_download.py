@@ -50,6 +50,7 @@ from typing import Any, Final, Literal
 
 import httpx
 
+from app.providers.sec_throttle_metrics import incr_sec_429
 from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
 
 logger = logging.getLogger(__name__)
@@ -435,6 +436,8 @@ async def _head_etag(
     if rate_limiter is not None:
         await rate_limiter.acquire()
     response = await client.head(url)
+    if response.status_code == 429:
+        incr_sec_429()
     if response.status_code != 200:
         logger.info(
             "preflight HEAD non-200 for %s: status=%d — will re-download",
@@ -711,6 +714,8 @@ async def measure_bandwidth_mbps(
     started = time.monotonic()
     response = await client.get(probe_url, headers=headers)
     elapsed = time.monotonic() - started
+    if response.status_code == 429:
+        incr_sec_429()
     if response.status_code not in (200, 206):
         raise RuntimeError(f"bandwidth probe failed: status={response.status_code} url={probe_url}")
     bytes_read = len(response.content)
@@ -775,6 +780,8 @@ async def _head_size_and_type(
     if rate_limiter is not None:
         await rate_limiter.acquire()
     response = await client.head(url)
+    if response.status_code == 429:
+        incr_sec_429()
     if response.status_code != 200:
         raise RuntimeError(f"HEAD failed: status={response.status_code} url={url}")
     length = response.headers.get("content-length")
@@ -1010,6 +1017,8 @@ async def _download_one(
         if rate_limiter is not None:
             await rate_limiter.acquire()
         async with client.stream("GET", archive.url, headers=headers) as response:
+            if response.status_code == 429:
+                incr_sec_429()
             if resume_from and response.status_code != 206:
                 # Server ignored Range; restart from zero.
                 await response.aclose()
@@ -1019,6 +1028,8 @@ async def _download_one(
                 if rate_limiter is not None:
                     await rate_limiter.acquire()
                 async with client.stream("GET", archive.url) as fresh:
+                    if fresh.status_code == 429:
+                        incr_sec_429()
                     if fresh.status_code != 200:
                         return ArchiveDownloadResult(
                             name=archive.name,
