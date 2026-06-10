@@ -151,15 +151,20 @@ else
 
   # D2. Form 4 branch — three required pins inside the WHERE clause:
   #     - the Form 4 document-type predicate (Form 3 split out)
-  #     - the LEFT-JOIN NULL-guard on fe.filing_date
-  #     - the cutoff predicate on fe.filing_date
+  #     - the NULL-guard on the resolved SEC filing date
+  #     - the cutoff predicate on the resolved SEC filing date
+  # #899 updated the pinned literal: the gate resolves the date
+  # manifest-first — COALESCE((m.filed_at AT TIME ZONE 'UTC')::date,
+  # fe.filing_date) — so a manifest-only accession is provable instead
+  # of wrongly excluded. The #1247 invariant (Form 4 branch gates on
+  # %(form4_cutoff)s; neither-source rows fail closed) is unchanged.
   d2_doctype=$(count_literal "$FILE_SYNC_INSIDERS" "f.document_type IN ('4','4/A')")
-  d2_param=$(count_literal "$FILE_SYNC_INSIDERS" "fe.filing_date >= %(form4_cutoff)s")
+  d2_param=$(count_literal "$FILE_SYNC_INSIDERS" "COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form4_cutoff)s")
   if (( d2_doctype < 1 )); then
     fail "$FILE_SYNC_INSIDERS: missing \"f.document_type IN ('4','4/A')\" branch — #1247 splits Form 4 into its own retention-gated branch."
   fi
   if (( d2_param < 1 )); then
-    fail "$FILE_SYNC_INSIDERS: missing \"fe.filing_date >= %(form4_cutoff)s\" predicate — #1247 requires the Form 4 branch to gate on the cutoff param."
+    fail "$FILE_SYNC_INSIDERS: missing \"COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form4_cutoff)s\" predicate — #1247 requires the Form 4 branch to gate on the cutoff param (resolved manifest-first per #899)."
   fi
 
   # D3. Form 3 stays in the unconditional branch — must NOT be wrapped

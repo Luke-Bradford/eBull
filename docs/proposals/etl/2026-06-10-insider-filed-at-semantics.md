@@ -1,6 +1,26 @@
 # Insider observations `filed_at` semantics (#899)
 
-Status: plan for review.
+Status: as-built (implemented 2026-06-10; verification record in the PR).
+
+## As-built deltas + Codex ckpt-2 fixes
+
+- Chokepoint design: `lookup_sec_filed_at` (manifest → filing_events) runs INSIDE
+  `upsert_filing` / `upsert_form_3_filing` when the new `filed_at` param is None —
+  legacy ingest + rewash inherit the fix with zero call-site changes; manifest
+  parsers pass `row.filed_at` explicitly.
+- Codex ckpt-2 bug 1: sync retention gates resolve manifest-first —
+  `COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date)`; manifest-only
+  accessions were wrongly excluded by the fe-only gate. Lint pins updated in
+  `check_form4_retention.sh` + `check_form5_retention.sh` (invariant unchanged).
+- Codex ckpt-2 bug 2: every DATE→timestamptz cast pinned UTC
+  (`::timestamp AT TIME ZONE 'UTC'`, sql/148 precedent); tests tightened to exact
+  UTC-midnight equality.
+- Dev: sql/191 applied + replayed post-fix (hash reset per sql-correctness escape);
+  matched-cohort residual 0 at replay; 2,696 rows unmatched (event-date fallback
+  cohort, honest); `_current` recomputed for 4,548 instruments, 0 failures.
+- Live jobs proc writes event-dated rows until restarted onto this code → operator
+  mop-up after merge: restart jobs proc, then re-run the sql/191 UPDATE body once
+  (idempotent).
 
 ## Problem (verified 2026-06-10)
 
