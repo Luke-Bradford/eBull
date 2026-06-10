@@ -299,7 +299,7 @@ fi
 # || true on every docker exec so set -euo pipefail (top of file)
 # cannot kill the whole hook if psql is briefly unavailable — same
 # best-effort posture as the orphan-sweep cleanup.
-DB_SIZE_WARN_BYTES=10737418240  # 10 GB
+DB_SIZE_WARN_BYTES=32212254720  # 30 GB — rebased #1556; mirror of app/services/postgres_health.py
 if command -v docker >/dev/null 2>&1; then
   db_size=$(docker exec ebull-postgres psql -U postgres -d ebull -tAc \
     "SELECT pg_database_size('ebull')" 2>/dev/null | tr -d ' ' || true)
@@ -312,7 +312,7 @@ if command -v docker >/dev/null 2>&1; then
     pretty=$(docker exec ebull-postgres psql -U postgres -d ebull -tAc \
       "SELECT pg_size_pretty(pg_database_size('ebull'))" 2>/dev/null \
       | tr -d ' ' || true)
-    echo '==> WARN: dev DB ebull size = '"${pretty}"' (> 10 GB).'
+    echo '==> WARN: dev DB ebull size = '"${pretty}"' (> 30 GB).'
     echo '==> WARN: investigate via GET /system/postgres-health.'
     echo '==> WARN: non-blocking; push continues.'
   fi
