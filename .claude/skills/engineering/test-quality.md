@@ -82,6 +82,16 @@ patch("app.services.thesis._utcnow")
 
 **SQL text-dispatch mocks** that match on substrings must document branch priority. INSERT branches must come before SELECT branches because a scalar subquery inside VALUES contains `SELECT ... FROM table` as a substring. Add a comment noting what structural SQL defects this matching approach cannot catch.
 
+**Frontend `vi.spyOn` needs per-test restore when assertions read call history.** Since vitest 4, `vi.spyOn` on an already-spied method returns the SAME spy, so `mock.calls` accumulates across tests in a file (vitest 2 effectively gave each test a fresh view). Any file where tests assert `spy.mock.calls[0]`, `not.toHaveBeenCalled()`, or `toHaveBeenCalledTimes(n)` on a module-level spy target must register
+
+```ts
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+```
+
+at module scope. Symptom of the gap: the assertion sees the PREVIOUS test's call as `calls[0]` and fails (or worse, passes) depending on test order. Found in the #1417 vitest 2→4 upgrade: `FilingsPane.test.tsx` + `EightKListPage.test.tsx` were order-dependent and only green because vitest 2's spy semantics masked it.
+
 ## Time-dependent code
 
 Any function calling `_utcnow()` — directly or transitively — must have it patched in tests. If unsure whether a function calls it transitively, read the call chain. An unpatched `_utcnow()` makes the test non-deterministic.
