@@ -1101,6 +1101,37 @@ def _parse_one_holding(
 # ---------------------------------------------------------------------
 
 
+def lookup_sec_filed_at(conn: psycopg.Connection[Any], accession_number: str) -> datetime | None:
+    """Resolve an accession's TRUE SEC filing timestamp (#899).
+
+    Priority: ``sec_filing_manifest.filed_at`` (canonical, #1233) →
+    ``filing_events.filing_date`` (legacy cohort with no manifest row) →
+    ``None`` (caller falls back to its event-date derivation, logged).
+    ``filing_events`` can carry one row per share-class sibling for the
+    same accession; the filing_date is identical across them, the ORDER
+    BY just pins determinism."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT filed_at FROM sec_filing_manifest WHERE accession_number = %s",
+            (accession_number,),
+        )
+        row = cur.fetchone()
+        if row is not None and row[0] is not None:
+            return row[0]
+        cur.execute(
+            """
+            SELECT filing_date::timestamp AT TIME ZONE 'UTC'
+            FROM filing_events
+            WHERE provider = 'sec' AND provider_filing_id = %s
+            ORDER BY filing_date DESC
+            LIMIT 1
+            """,
+            (accession_number,),
+        )
+        row = cur.fetchone()
+        return row[0] if row is not None else None
+
+
 def upsert_filing(
     conn: psycopg.Connection[Any],
     *,
@@ -1109,6 +1140,7 @@ def upsert_filing(
     primary_document_url: str,
     parsed: ParsedFiling,
     is_rewash: bool = False,
+    filed_at: datetime | None = None,
 ) -> None:
     """Insert/refresh the filing header + filer dim + footnote bodies +
     transaction rows for one accession.
@@ -1124,7 +1156,17 @@ def upsert_filing(
     original ``fetched_at`` (re-parsing a stored body isn't a fresh
     SEC fetch and shouldn't claim to be — operator audit / recency
     logic using ``fetched_at`` would otherwise read every re-walked
-    filing as "fetched today")."""
+    filing as "fetched today").
+
+    ``filed_at`` (#899): the SEC filing timestamp stamped onto the
+    observation write-through. Manifest-driven callers pass
+    ``row.filed_at``; when ``None`` (legacy per-CIK ingester, rewash)
+    it is resolved at this chokepoint via :func:`lookup_sec_filed_at`
+    so every caller gets true-filing-time semantics without per-site
+    changes. Final fallback (no manifest row, no filing_event) is the
+    historical ``txn_date @ midnight UTC``, logged."""
+    if filed_at is None:
+        filed_at = lookup_sec_filed_at(conn, accession_number)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1369,6 +1411,7 @@ def upsert_filing(
             accession_number=accession_number,
             primary_document_url=primary_document_url,
             parsed=parsed,
+            filed_at=filed_at,
         )
         refresh_insiders_current(conn, instrument_id=sibling_iid)
 
@@ -1380,6 +1423,7 @@ def _record_form4_observations_for_filing(
     accession_number: str,
     primary_document_url: str,
     parsed: ParsedFiling,
+    filed_at: datetime | None = None,
 ) -> None:
     """Derive one ``ownership_insiders_observations`` row per
     ``(filer_cik, direct_indirect)`` from the parsed transactions and
@@ -1421,6 +1465,16 @@ def _record_form4_observations_for_filing(
     if not latest:
         return
 
+    # #899 — filed_at carries the SEC filing timestamp. The trade date
+    # is preserved as period_end (the observation natural key). Fallback
+    # to the historical txn_date derivation only when no manifest /
+    # filing_events timestamp exists for the accession.
+    if filed_at is None:
+        logger.info(
+            "form4 observations: no SEC filed_at for accession=%s; falling back to txn_date",
+            accession_number,
+        )
+
     run_id = uuid4()
     for (filer_cik, direct_indirect), txn in latest.items():
         if txn.txn_date is None or txn.post_transaction_shares is None:
@@ -1442,7 +1496,9 @@ def _record_form4_observations_for_filing(
             source_accession=accession_number,
             source_field=None,
             source_url=primary_document_url or None,
-            filed_at=datetime.combine(txn.txn_date, datetime.min.time(), tzinfo=UTC),
+            filed_at=filed_at
+            if filed_at is not None
+            else datetime.combine(txn.txn_date, datetime.min.time(), tzinfo=UTC),
             period_start=None,
             period_end=txn.txn_date,
             ingest_run_id=run_id,

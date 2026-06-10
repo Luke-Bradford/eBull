@@ -280,7 +280,8 @@ def _parse_form4(
     # upsert_filing handles siblings fan-out + observation
     # write-through + refresh_insiders_current internally. Single
     # savepoint covers every child write so a mid-batch failure rolls
-    # back atomically across share-class siblings.
+    # back atomically across share-class siblings. filed_at from the
+    # manifest row = SEC filing timestamp for observations (#899).
     try:
         with conn.transaction():
             upsert_filing(
@@ -289,6 +290,7 @@ def _parse_form4(
                 accession_number=accession,
                 primary_document_url=canonical_url,
                 parsed=parsed,
+                filed_at=filed_at,
             )
     except Exception as exc:  # noqa: BLE001
         # PR #1131: transient-vs-deterministic discrimination on the
@@ -361,6 +363,9 @@ def _parse_form3(
     accession = row.accession_number
     instrument_id = row.instrument_id
     url = row.primary_document_url
+    # SEC filing timestamp from the manifest row — threaded into the
+    # observation write-through (#899).
+    filed_at = row.filed_at
 
     if instrument_id is None:
         logger.warning(
@@ -489,6 +494,8 @@ def _parse_form3(
                 accession_number=accession,
                 primary_document_url=canonical_url,
                 parsed=parsed,
+                # SEC filing timestamp from the manifest row (#899).
+                filed_at=filed_at,
             )
     except Exception as exc:  # noqa: BLE001
         # PR #1131: transient (OperationalError) → 1h retry; deterministic
@@ -722,6 +729,8 @@ def _parse_form5(
                 accession_number=accession,
                 primary_document_url=canonical_url,
                 parsed=parsed,
+                # SEC filing timestamp from the manifest row (#899).
+                filed_at=filed_at,
             )
     except Exception as exc:  # noqa: BLE001
         # PR #1131 discrimination: transient ``OperationalError`` →

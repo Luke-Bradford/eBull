@@ -202,18 +202,24 @@ def sync_insiders(
     if since is not None:
         where += " AND it.txn_date >= %(since)s"
         params["since"] = since
+    # Retention gates resolve the SEC filing date manifest-first
+    # (#899 Codex ckpt-2): a manifest-only accession (no filing_events
+    # row) is provably in/out of retention via m.filed_at — gating on
+    # fe.filing_date alone wrongly excluded it. Rows with NEITHER
+    # source stay excluded (fail-closed for unattributed legacy rows,
+    # #1247).
     where += (
         " AND ("
         "  f.document_type IN ('3','3/A')"
         "  OR ("
         "    f.document_type IN ('4','4/A')"
-        "    AND fe.filing_date IS NOT NULL"
-        "    AND fe.filing_date >= %(form4_cutoff)s"
+        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) IS NOT NULL"
+        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form4_cutoff)s"
         "  )"
         "  OR ("
         "    f.document_type IN ('5','5/A')"
-        "    AND fe.filing_date IS NOT NULL"
-        "    AND fe.filing_date >= %(form5_cutoff)s"
+        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) IS NOT NULL"
+        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form5_cutoff)s"
         "  )"
         ")"
     )
@@ -234,13 +240,16 @@ def sync_insiders(
                 it.instrument_id, it.accession_number,
                 it.filer_cik, it.filer_name, it.direct_indirect,
                 it.txn_date, it.post_transaction_shares,
-                f.primary_document_url
+                f.primary_document_url,
+                COALESCE(m.filed_at, fe.filing_date::timestamp AT TIME ZONE 'UTC') AS sec_filed_at
             FROM insider_transactions it
             JOIN insider_filings f USING (accession_number)
             LEFT JOIN filing_events fe
               ON fe.provider_filing_id = it.accession_number
              AND fe.provider = 'sec'
              AND fe.instrument_id = it.instrument_id
+            LEFT JOIN sec_filing_manifest m
+              ON m.accession_number = it.accession_number
             {where}
             ORDER BY it.accession_number, it.filer_cik, it.filer_name, it.direct_indirect,
                      it.txn_date DESC NULLS LAST, it.txn_row_num DESC
@@ -272,7 +281,11 @@ def sync_insiders(
                 source_accession=str(row["accession_number"]),
                 source_field=None,
                 source_url=str(row["primary_document_url"]) if row["primary_document_url"] else None,
-                filed_at=datetime.combine(row["txn_date"], datetime.min.time(), tzinfo=UTC),
+                # #899 — SEC filing timestamp (manifest → filing_events);
+                # txn_date fallback only for rows with neither.
+                filed_at=row["sec_filed_at"]
+                if row["sec_filed_at"] is not None
+                else datetime.combine(row["txn_date"], datetime.min.time(), tzinfo=UTC),
                 period_start=None,
                 period_end=row["txn_date"],
                 ingest_run_id=run_id,
@@ -296,9 +309,16 @@ def sync_insiders(
             SELECT iih.instrument_id, iih.accession_number,
                    iih.filer_cik, iih.filer_name,
                    iih.shares, iih.as_of_date, iih.direct_indirect,
-                   f.primary_document_url
+                   f.primary_document_url,
+                   COALESCE(m.filed_at, fe.filing_date::timestamp AT TIME ZONE 'UTC') AS sec_filed_at
             FROM insider_initial_holdings iih
             JOIN insider_filings f USING (accession_number)
+            LEFT JOIN filing_events fe
+              ON fe.provider_filing_id = iih.accession_number
+             AND fe.provider = 'sec'
+             AND fe.instrument_id = iih.instrument_id
+            LEFT JOIN sec_filing_manifest m
+              ON m.accession_number = iih.accession_number
             {where}
             {limit_sql}
             """,
@@ -328,7 +348,11 @@ def sync_insiders(
                 source_accession=str(row["accession_number"]),
                 source_field=None,
                 source_url=str(row["primary_document_url"]) if row["primary_document_url"] else None,
-                filed_at=datetime.combine(row["as_of_date"], datetime.min.time(), tzinfo=UTC),
+                # #899 — SEC filing timestamp (manifest → filing_events);
+                # as_of_date fallback only for rows with neither.
+                filed_at=row["sec_filed_at"]
+                if row["sec_filed_at"] is not None
+                else datetime.combine(row["as_of_date"], datetime.min.time(), tzinfo=UTC),
                 period_start=None,
                 period_end=row["as_of_date"],
                 ingest_run_id=run_id,

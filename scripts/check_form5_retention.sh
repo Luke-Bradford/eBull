@@ -158,7 +158,9 @@ else
   sync_cutoff_calls=$(count_regex "$FILE_SYNC" "form5_retention_cutoff\(")
   left_join_count=$(count_literal "$FILE_SYNC" "LEFT JOIN filing_events fe")
   form5_doctype_count=$(count_literal "$FILE_SYNC" "f.document_type IN ('5','5/A')")
-  cutoff_predicate_count=$(count_literal "$FILE_SYNC" "fe.filing_date >= %(form5_cutoff)s")
+  # #899 — gate resolves the SEC filing date manifest-first (same pin
+  # update as check_form4_retention.sh invariant D2).
+  cutoff_predicate_count=$(count_literal "$FILE_SYNC" "COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form5_cutoff)s")
 
   if (( sync_cutoff_calls < 1 )); then
     fail "$FILE_SYNC: missing form5_retention_cutoff(...) call inside sync_insiders. PR10b sync chokepoint."
@@ -170,7 +172,7 @@ else
     fail "$FILE_SYNC: missing \"f.document_type IN ('5','5/A')\" literal in sync_insiders Form 5 branch."
   fi
   if (( cutoff_predicate_count < 1 )); then
-    fail "$FILE_SYNC: missing 'fe.filing_date >= %(form5_cutoff)s' literal in sync_insiders Form 5 branch."
+    fail "$FILE_SYNC: missing 'COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form5_cutoff)s' literal in sync_insiders Form 5 branch (resolved manifest-first per #899)."
   fi
 fi
 
