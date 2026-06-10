@@ -21,7 +21,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -425,6 +425,40 @@ class TestIngestInsiderTransactions:
             refs = tx[6]  # already parsed from JSONB
             assert isinstance(refs, list)
             assert any(r.get("footnote_id") == "F1" and r.get("field") == "transactionShares" for r in refs)
+
+    def test_observation_filed_at_uses_filing_events_lookup(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#899 — legacy ingest (no manifest row) resolves the SEC filing
+        timestamp through lookup_sec_filed_at's filing_events fallback;
+        the observation must NOT carry the transaction date. The trade
+        date is preserved as period_end (natural key)."""
+        iid = _seed_instrument(ebull_test_conn)
+        accession = "0000000001-24-000899"
+        txn_day = date.today() - timedelta(days=10)
+        filing_day = date.today() - timedelta(days=7)
+        url = "https://www.sec.gov/Archives/form4-899.xml"
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession=accession,
+            url=url,
+            filing_date=filing_day.isoformat(),
+        )
+        fetcher = _StubFetcher({url: _FORM_4_RICH_BUY.replace("2024-06-15", txn_day.isoformat())})
+
+        result = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        assert result.filings_parsed == 1
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT filed_at, period_end FROM ownership_insiders_observations "
+                "WHERE source = 'form4' AND source_document_id = %s",
+                (accession,),
+            )
+            rows = cur.fetchall()
+        assert rows, "observation write-through row expected"
+        for filed_at_val, period_end in rows:
+            assert filed_at_val.date() == filing_day
+            assert period_end == txn_day
 
     def test_joint_filing_splits_filers_by_cik(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)

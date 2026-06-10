@@ -74,6 +74,9 @@ _FAKE_FORM_4_XML = dedent("""<?xml version="1.0"?>
         <transactionPricePerShare><value>185.42</value></transactionPricePerShare>
         <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
       </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>10250</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
       <ownershipNature>
         <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
       </ownershipNature>
@@ -274,6 +277,16 @@ def test_form4_happy_path(
         r = cur.fetchone()
     assert r is not None and r[0] > 0
 
+    # #899 — observation write-through stamps the manifest row's SEC
+    # filing timestamp, not the transaction date.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT filed_at FROM ownership_insiders_observations "
+            "WHERE source = 'form4' AND source_document_id = '0000320193-26-000010'"
+        )
+        obs = cur.fetchall()
+    assert [o[0] for o in obs] == [datetime(2026, 5, 11, tzinfo=UTC)]
+
 
 def test_form3_happy_path(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
@@ -327,6 +340,16 @@ def test_form3_happy_path(
             "WHERE accession_number = '0000320193-26-000020' AND document_kind = 'form3_xml'"
         )
         assert cur.fetchone() is not None
+
+    # #899 — Form 3 observation write-through stamps the manifest row's
+    # SEC filing timestamp, not the as-of date.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT filed_at FROM ownership_insiders_observations "
+            "WHERE source = 'form3' AND source_document_id = '0000320193-26-000020'"
+        )
+        obs = cur.fetchall()
+    assert [o[0] for o in obs] == [datetime(2026, 5, 11, tzinfo=UTC)]
 
 
 def test_form4_empty_fetch_tombstones(

@@ -47,6 +47,7 @@ from app.services.insider_transactions import (
     ParsedForm3,
     ParsedHolding,
     _canonical_form_4_url,
+    lookup_sec_filed_at,
     parse_form_3_xml,
 )
 from app.services.ownership_observations import (
@@ -86,6 +87,7 @@ def upsert_form_3_filing(
     primary_document_url: str,
     parsed: ParsedForm3,
     is_rewash: bool = False,
+    filed_at: datetime | None = None,
 ) -> None:
     """Insert / refresh the Form 3 filing header + filer dim + footnote
     bodies + holding rows for one accession.
@@ -99,7 +101,15 @@ def upsert_form_3_filing(
     ``is_rewash``: when True, the conflict branch preserves the
     original ``fetched_at`` (re-parsing a stored body isn't a fresh
     SEC fetch). Same flag pattern as Form 4 (PR #818).
+
+    ``filed_at`` (#899): SEC filing timestamp for the observation
+    write-through. Manifest callers pass ``row.filed_at``; ``None``
+    resolves at this chokepoint via ``lookup_sec_filed_at`` (same
+    pattern as ``upsert_filing``); final fallback is the historical
+    as-of derivation, logged.
     """
+    if filed_at is None:
+        filed_at = lookup_sec_filed_at(conn, accession_number)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -341,6 +351,7 @@ def upsert_form_3_filing(
             accession_number=accession_number,
             primary_document_url=primary_document_url,
             parsed=parsed,
+            filed_at=filed_at,
         )
         refresh_insiders_current(conn, instrument_id=sibling_iid)
 
@@ -352,6 +363,7 @@ def _record_form3_observations_for_filing(
     accession_number: str,
     primary_document_url: str,
     parsed: ParsedForm3,
+    filed_at: datetime | None = None,
 ) -> None:
     """Derive one ``ownership_insiders_observations`` row per
     ``(filer_cik, direct_indirect)`` from the parsed Form 3 holdings.
@@ -395,6 +407,15 @@ def _record_form3_observations_for_filing(
     if not latest:
         return
 
+    # #899 — filed_at carries the SEC filing timestamp; the as-of date
+    # is preserved as period_end. Fallback to the historical as-of
+    # derivation only when no manifest / filing_events timestamp exists.
+    if filed_at is None:
+        logger.info(
+            "form3 observations: no SEC filed_at for accession=%s; falling back to as_of",
+            accession_number,
+        )
+
     run_id = uuid4()
     for (filer_cik, direct_indirect), holding in latest.items():
         shares = holding.shares
@@ -415,7 +436,7 @@ def _record_form3_observations_for_filing(
             source_accession=accession_number,
             source_field=None,
             source_url=primary_document_url or None,
-            filed_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
+            filed_at=filed_at if filed_at is not None else datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
             period_start=None,
             period_end=as_of,
             ingest_run_id=run_id,
