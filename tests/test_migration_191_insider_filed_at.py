@@ -121,7 +121,9 @@ def test_migration_191_backfills_filed_at_from_manifest_then_filing_events(
     conn.commit()
 
     assert _obs_filed_at(conn, f"{_ACC_MANIFEST}:NDT:1") == _MANIFEST_FILED
-    # filing_events arm: DATE cast to timestamptz at the cluster TZ —
-    # compare the date portion to stay TZ-agnostic.
-    assert _obs_filed_at(conn, _ACC_EVENTS).date() == _EVENTS_FILED
+    # filing_events arm: DATE pinned to UTC midnight by the migration's
+    # `::timestamp AT TIME ZONE 'UTC'` (session-TZ-independent).
+    assert _obs_filed_at(conn, _ACC_EVENTS) == datetime(
+        _EVENTS_FILED.year, _EVENTS_FILED.month, _EVENTS_FILED.day, tzinfo=UTC
+    )
     assert _obs_filed_at(conn, _ACC_ORPHAN) == _WRONG_FILED  # untouched

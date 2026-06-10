@@ -1120,7 +1120,7 @@ def lookup_sec_filed_at(conn: psycopg.Connection[Any], accession_number: str) ->
             return row[0]
         cur.execute(
             """
-            SELECT filing_date::timestamptz
+            SELECT filing_date::timestamp AT TIME ZONE 'UTC'
             FROM filing_events
             WHERE provider = 'sec' AND provider_filing_id = %s
             ORDER BY filing_date DESC

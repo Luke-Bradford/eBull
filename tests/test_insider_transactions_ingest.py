@@ -21,7 +21,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -456,8 +456,11 @@ class TestIngestInsiderTransactions:
             )
             rows = cur.fetchall()
         assert rows, "observation write-through row expected"
+        # lookup_sec_filed_at pins the DATE to UTC midnight via
+        # `::timestamp AT TIME ZONE 'UTC'` — exact-equality is safe.
+        expected_filed_at = datetime(filing_day.year, filing_day.month, filing_day.day, tzinfo=UTC)
         for filed_at_val, period_end in rows:
-            assert filed_at_val.date() == filing_day
+            assert filed_at_val == expected_filed_at
             assert period_end == txn_day
 
     def test_joint_filing_splits_filers_by_cik(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:

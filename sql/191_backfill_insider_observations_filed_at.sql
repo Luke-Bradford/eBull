@@ -37,7 +37,10 @@ FROM (
     SELECT m.accession_number, m.filed_at AS sec_filed_at
     FROM sec_filing_manifest m
     UNION ALL
-    SELECT fe.provider_filing_id, MAX(fe.filing_date)::timestamptz
+    -- DATE -> timestamptz pinned to UTC (sql/148 precedent): a bare
+    -- ::timestamptz cast is session-timezone dependent and can shift
+    -- the UTC calendar date.
+    SELECT fe.provider_filing_id, MAX(fe.filing_date)::timestamp AT TIME ZONE 'UTC'
     FROM filing_events fe
     WHERE fe.provider = 'sec'
       AND NOT EXISTS (
