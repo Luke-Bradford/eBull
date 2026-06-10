@@ -978,14 +978,24 @@ def _apply_13f_infotable(
     # the existing rows were silently destroyed with no replacement
     # and no path to repair (return False prevented the bump but
     # the typed table was already empty).
-    resolved: list[tuple[int, Any]] = []  # (instrument_id, holding)
+    # #954 — mirror the first-ingest dedupe (``resolved_by_key`` in
+    # ``institutional_holdings._ingest_single_accession``): collapse
+    # duplicate XML rows by (instrument_id, exposure) keeping the FIRST,
+    # matching the typed table's ON CONFLICT DO NOTHING collapse on
+    # (accession, instrument, COALESCE(is_put_call, 'EQUITY')). Without
+    # this, the observations UPSERT (ON CONFLICT DO UPDATE) keeps the
+    # LAST duplicate while the typed table keeps the first — the two
+    # layers diverge on shares/value for the same holding.
+    resolved_by_key: dict[tuple[int, str], tuple[int, Any]] = {}
     skipped_no_cusip = 0
     for holding in holdings:
         instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
         if instrument_id is None:
             skipped_no_cusip += 1
             continue
-        resolved.append((instrument_id, holding))
+        exposure_key = holding.put_call if holding.put_call in ("PUT", "CALL") else "EQUITY"
+        resolved_by_key.setdefault((instrument_id, exposure_key), (instrument_id, holding))
+    resolved: list[tuple[int, Any]] = list(resolved_by_key.values())  # (instrument_id, holding)
 
     # ANY unresolved CUSIP defers the rewash — neither full replace
     # nor partial replace is safe:
@@ -1044,6 +1054,31 @@ def _apply_13f_infotable(
             (raw_doc.accession_number,),
         )
 
+    # #953 — mirror the typed-table DELETE on the observations layer.
+    # A parser fix that drops/changes a CUSIP would otherwise leave the
+    # dropped instrument's observation row live (known_to IS NULL) with
+    # stale shares, and its ownership_institutions_current never
+    # re-MERGEd. RETURNING captures the prior instrument set in the
+    # same statement (no SELECT-then-DELETE race) so dropped
+    # instruments get refreshed below — the MERGE's NOT MATCHED BY
+    # SOURCE arm removes their stale _current row. DELETE rather than
+    # known_to-tombstone: record_institution_observation's ON CONFLICT
+    # DO UPDATE never clears known_to, so a tombstoned row re-asserted
+    # by a later rewash would stay invisible to the _current MERGE
+    # (WHERE known_to IS NULL) forever. Same tx + same accession lock
+    # as the typed-table replace — no visibility gap. '13f' matches the
+    # source literal _record_13f_observations_for_filing writes.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM ownership_institutions_observations
+            WHERE source = '13f' AND source_document_id = %s
+            RETURNING instrument_id
+            """,
+            (raw_doc.accession_number,),
+        )
+        prior_instrument_ids = {int(r[0]) for r in cur.fetchall()}
+
     inserted = 0
     for instrument_id, holding in resolved:
         _upsert_holding(
@@ -1059,15 +1094,15 @@ def _apply_13f_infotable(
 
     # Write-through to observations + refresh ownership_institutions_current
     # so the rollup (#905 read-path cutover) reflects the recovered
-    # holdings on the same transaction. Mirrors the first-ingest path
-    # in app/services/institutional_holdings.py:1260-1274. Without this,
+    # holdings on the same transaction. Mirrors the first-ingest
+    # write-through in ``_ingest_single_accession``. Without this,
     # ``cusip_resolver.sweep_resolvable_unresolved_cusips`` would happily
     # log "rewashed accession=..." while leaving every ownership rollup
     # query showing zero institutional shares (#945).
-    if resolved:
-        from app.services.institutional_holdings import _record_13f_observations_for_filing
-        from app.services.ownership_observations import refresh_institutions_current
+    from app.services.institutional_holdings import _record_13f_observations_for_filing
+    from app.services.ownership_observations import refresh_institutions_current
 
+    if resolved:
         # ``filed_at`` from the SELECT above is a tuple-row Decimal/None
         # type (psycopg returned timestamptz) — record_institution_observation
         # expects a datetime. The first-ingest path threads the same
@@ -1081,8 +1116,15 @@ def _apply_13f_infotable(
             filed_at=filed_at,
             resolved_holdings=resolved,
         )
-        for unique_instrument_id in {iid for iid, _ in resolved}:
-            refresh_institutions_current(conn, instrument_id=unique_instrument_id)
+    # #953 — refresh over the UNION of prior + new instruments, not just
+    # new: an instrument the re-parse dropped needs its _current row
+    # re-MERGEd (to nothing) now that its observation rows are deleted.
+    # Outside the ``if resolved`` guard deliberately — resolved is
+    # provably non-empty here today (empty parse and unresolved-CUSIP
+    # paths return earlier), but if a refactor ever changes that, the
+    # deleted prior observations must still propagate to _current.
+    for unique_instrument_id in prior_instrument_ids | {iid for iid, _ in resolved}:
+        refresh_institutions_current(conn, instrument_id=unique_instrument_id)
 
     # Log full success.
     with conn.cursor() as cur:

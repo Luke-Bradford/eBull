@@ -18,13 +18,20 @@ Pins the contract:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
+from uuid import uuid4
 
 import psycopg
 import pytest
 
+from app.providers.implementations.sec_13f import ThirteenFHolding
 from app.services import raw_filings, rewash_filings
+from app.services.ownership_observations import (
+    record_institution_observation,
+    refresh_institutions_current,
+)
 from app.services.raw_filings import RawFilingDocument
 from app.services.rewash_filings import (
     ParserSpec,
@@ -1541,6 +1548,222 @@ def test_13f_infotable_apply_replaces_holdings_with_re_resolved_instrument(
         )
         rows = cur.fetchall()
     assert [r[0] for r in rows] == [new_iid]
+
+
+def _mk_13f_holding(
+    *, cusip: str, shares: str, value: str, put_call: Literal["PUT", "CALL"] | None = None
+) -> ThirteenFHolding:
+    return ThirteenFHolding(
+        cusip=cusip,
+        name_of_issuer="Issuer",
+        title_of_class="COM",
+        value_usd=Decimal(value),
+        shares_or_principal=Decimal(shares),
+        shares_or_principal_type="SH",
+        put_call=put_call,
+        investment_discretion=None,
+        voting_sole=Decimal(shares),
+        voting_shared=Decimal("0"),
+        voting_none=Decimal("0"),
+    )
+
+
+def _seed_13f_typed_row(conn: psycopg.Connection[tuple], *, accession: str, instrument_id: int) -> int:
+    """Seed filer cik 0000111000 + one typed holding; returns filer_id."""
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES ('0000111000', 'Test') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM institutional_filers WHERE cik = '0000111000'")
+        row = cur.fetchone()
+    assert row is not None
+    filer_id = int(row[0])
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings (
+            filer_id, instrument_id, accession_number, period_of_report,
+            shares, market_value_usd, voting_authority, filed_at
+        ) VALUES (%s, %s, %s, '2025-09-30', 100, 1000, 'SOLE', '2025-11-01')
+        """,
+        (filer_id, instrument_id, accession),
+    )
+    return filer_id
+
+
+def test_13f_infotable_rewash_dedupes_duplicate_xml_rows(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """#954 — duplicate XML rows for the same (instrument, exposure_kind)
+    must collapse keep-FIRST in BOTH the typed table and the observations
+    table. Pre-fix the typed table kept the first (ON CONFLICT DO NOTHING)
+    while the observations UPSERT kept the last — layers diverged."""
+    conn = ebull_test_conn
+    iid = 950_090
+    accession = "0001234567-26-000954"
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (%s, 'DUP13F', 'Dup', '4', 'USD', TRUE) ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (iid,),
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary)
+        VALUES (%s, 'sec', 'cusip', 'DUP13FCSP', FALSE)
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
+        """,
+        (iid,),
+    )
+    _seed_13f_typed_row(conn, accession=accession, instrument_id=iid)
+    _seed_raw(conn, accession=accession, kind="infotable_13f", parser_version="13f-infotable-v0")
+    conn.commit()
+
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: [
+            _mk_13f_holding(cusip="DUP13FCSP", shares="100", value="1000"),
+            _mk_13f_holding(cusip="DUP13FCSP", shares="999", value="9990"),
+        ],
+    )
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = run_rewash(conn, document_kind="infotable_13f")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT shares FROM institutional_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        typed = cur.fetchall()
+        cur.execute(
+            "SELECT shares FROM ownership_institutions_observations WHERE source = '13f' AND source_document_id = %s",
+            (accession,),
+        )
+        obs = cur.fetchall()
+    # Exactly one row per layer, both carrying the FIRST duplicate's shares.
+    assert [r[0] for r in typed] == [Decimal("100")]
+    assert [r[0] for r in obs] == [Decimal("100")]
+
+
+def test_13f_infotable_rewash_clears_stale_observations_for_dropped_instrument(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """#953 — a rewash whose re-parse drops instrument A must delete A's
+    accession-scoped observation rows (including period-drifted ones the
+    UPSERT identity would never touch) and re-MERGE A's _current to empty,
+    while instrument B lands in both layers."""
+    conn = ebull_test_conn
+    old_iid = 950_091
+    new_iid = 950_092
+    accession = "0001234567-26-000953"
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (%s, 'OLDOBS', 'Old', '4', 'USD', TRUE), (%s, 'NEWOBS', 'New', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (old_iid, new_iid),
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary)
+        VALUES (%s, 'sec', 'cusip', 'OLDOBSCSP', FALSE), (%s, 'sec', 'cusip', 'NEWOBSCSP', FALSE)
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
+        """,
+        (old_iid, new_iid),
+    )
+    _seed_13f_typed_row(conn, accession=accession, instrument_id=old_iid)
+    _seed_raw(conn, accession=accession, kind="infotable_13f", parser_version="13f-infotable-v0")
+    # Observation rows under A for this accession: the current-period row
+    # the first ingest would have written, plus a period-drifted row whose
+    # conflict identity (period_end differs) the re-record UPSERT can never
+    # reach — only the accession-scoped DELETE clears it.
+    for period_end in (date(2025, 9, 30), date(2025, 6, 30)):
+        record_institution_observation(
+            conn,
+            instrument_id=old_iid,
+            filer_cik="0000111000",
+            filer_name="Test",
+            filer_type=None,
+            ownership_nature="economic",
+            source="13f",
+            source_document_id=accession,
+            source_accession=accession,
+            source_field=None,
+            source_url=None,
+            filed_at=datetime(2025, 11, 1, tzinfo=UTC),
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=uuid4(),
+            shares=Decimal("100"),
+            market_value_usd=Decimal("1000"),
+            voting_authority="SOLE",
+            exposure_kind="EQUITY",
+        )
+    refresh_institutions_current(conn, instrument_id=old_iid)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM ownership_institutions_current WHERE instrument_id = %s",
+            (old_iid,),
+        )
+        row = cur.fetchone()
+    assert row is not None and int(row[0]) >= 1  # stale state seeded
+
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: [_mk_13f_holding(cusip="NEWOBSCSP", shares="200", value="2000")],
+    )
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = run_rewash(conn, document_kind="infotable_13f")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id, shares FROM ownership_institutions_observations "
+            "WHERE source = '13f' AND source_document_id = %s",
+            (accession,),
+        )
+        obs = cur.fetchall()
+        cur.execute(
+            "SELECT COUNT(*) FROM ownership_institutions_current WHERE instrument_id = %s",
+            (old_iid,),
+        )
+        old_current = cur.fetchone()
+        cur.execute(
+            "SELECT shares FROM ownership_institutions_current WHERE instrument_id = %s",
+            (new_iid,),
+        )
+        new_current = cur.fetchall()
+    # A's rows (both period_ends) swept; only B remains for the accession.
+    assert [(r[0], r[1]) for r in obs] == [(new_iid, Decimal("200"))]
+    assert old_current is not None and int(old_current[0]) == 0  # MERGE delete arm fired
+    assert [r[0] for r in new_current] == [Decimal("200")]
 
 
 def test_13f_infotable_apply_returns_false_when_cusip_unresolved(
