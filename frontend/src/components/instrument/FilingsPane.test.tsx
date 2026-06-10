@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -37,6 +37,13 @@ function makeSummary(opts: {
     },
   } as never;
 }
+
+// vitest 4 reuses the existing spy when `vi.spyOn` targets an already-spied
+// method, so call history accumulates across tests unless restored. The
+// `spy.mock.calls[0]` inspection below requires per-test isolation.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("FilingsPane", () => {
   it("calls fetchFilings with the SIGNIFICANT_FILING_TYPES CSV and ROW_LIMIT 6 for sec_edgar provider", () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { EightKListPage } from "@/pages/EightKListPage";
@@ -94,6 +94,14 @@ function renderPage() {
     </MemoryRouter>,
   );
 }
+
+// vitest 4 reuses the existing spy when `vi.spyOn` targets an already-spied
+// method, so call history accumulates across tests unless restored. The
+// `not.toHaveBeenCalled()` / `toHaveBeenCalledTimes(n)` assertions below
+// require per-test isolation.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("EightKListPage", () => {
   it("auto-selects first row on page open and respects filter changes", async () => {
