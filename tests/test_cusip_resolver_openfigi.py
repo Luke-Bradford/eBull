@@ -82,6 +82,7 @@ class FakeOpenFigiResolver:
 
 
 _PERIOD_END = date(2026, 3, 31)
+_CUTOFF = date(2024, 6, 30)  # #1349 writer-side retention floor (below _PERIOD_END)
 
 
 def _seed_instrument(
@@ -249,6 +250,7 @@ class TestSweepHappyPath:
                 filer_cik="0001234567",
                 period_end=_PERIOD_END,
                 source="bulk_13f_dataset",
+                cutoff=_CUTOFF,
             )
         ebull_test_conn.commit()
         assert _count_pending_bulk(ebull_test_conn) == 5
@@ -299,6 +301,7 @@ class TestSweepHappyPath:
             filer_cik="0001111111",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
 
@@ -337,6 +340,7 @@ class TestSweepHappyPath:
             filer_cik="0001111111",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
 
@@ -414,6 +418,7 @@ class TestSweepSelection:
             filer_cik="0001111111",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
 
@@ -718,6 +723,7 @@ def test_sweep_is_idempotent(
         filer_cik="0009999999",
         period_end=_PERIOD_END,
         source="bulk_13f_dataset",
+        cutoff=_CUTOFF,
     )
     ebull_test_conn.commit()
 
