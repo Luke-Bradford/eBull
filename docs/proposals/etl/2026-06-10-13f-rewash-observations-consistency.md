@@ -76,6 +76,22 @@ ruff / pyright / fast tier / smoke + `pytest -m db` (DB/SQL change) + targeted
 `pytest tests/test_rewash_filings.py`. Codex ckpt-2 pre-push with financial-plumbing /
 data-engineer / data-scientist / adversarial lenses (pre-pr-fresh-agent-review).
 
-Dev-verify: no schema change, no backfill needed (latent bug — current dev data has no
-divergence by construction; verify with a divergence probe query: accessions where obs
-rows exist without matching typed rows). Record probe result in PR.
+Dev-verify: no schema change, no backfill needed. Divergence probe ran 2026-06-10
+(dev DB): 2,856,833 obs rows / 24,734 accessions exist with NO typed rows — ALL
+classified `accession_absent_from_typed` (bulk dataset path `sec_13f_dataset_ingest.py`
+writes observations only, by design — #807 bulk-first). Instrument-level drift
+(`accession_in_typed_diff_instruments`, the #953 damage class): **zero rows** — bug
+confirmed latent, nothing to repair.
+
+Codex ckpt-2 (2026-06-10): no correctness bugs in diff. Pre-existing touched-path gap
+(rewash + legacy ingest lack PRN filter + pre-2023 VALUE ×1000 that the manifest parser
+applies) → DEFERRED #1566, including the post-#953 interplay (rewash re-record can
+re-insert PRN rows bulk seeding excluded).
+
+Cross-source (2026-06-10, SEC EDGAR direct): Vanguard Q4-2025 AAPL — dev obs
+1,279,051,701 shares traces EXACTLY to the SOLE-discretion infotable row in accession
+0000102909-26-000031 (data path validated). But the filing carries 7 AAPL rows
+(sub-manager splits) summing 1,426,283,914 — the settled keep-first dedupe drops the
+other 6 (10.3% undercount on AAPL's largest holder). Filed #1567 (systematic, affects
+all multi-sub-manager filers, all ingest paths). #954 deliberately preserves keep-first
+for layer consistency; the semantic fix is #1567's.
