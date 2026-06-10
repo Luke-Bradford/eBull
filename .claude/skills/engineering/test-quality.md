@@ -108,6 +108,22 @@ assert rec.rationale == "No action trigger met; score=0.600 rank=2"
 assert rec.rationale == _hold_rationale(score_row, quote_is_fallback=False)
 ```
 
+## Scope the deliberate DB-tier run to the diff — NEVER bare `pytest -m db` locally
+
+Bare full-suite `uv run pytest -m db` on the dev Mac has wedged twice (2026-06-09:
+froze at startup, zero workers; 2026-06-10: ran 2h02m to 98% then froze with all
+xdist workers dead — a moving progress bar does not mean it will finish). Even when
+it moves, ~4,300 db tests × 1-3s fixture overhead ≈ an hour+ of wall-clock for
+milliseconds of test logic; suite-shape fix tracked in #1568.
+
+Operator decision: never block a small PR on the full tier. The "run the DB tier
+deliberately" rule is satisfied by running the test files for the touched modules +
+immediate neighbours (e.g. a 2-file rewash change → 4 files / 105 tests / ~60s).
+For broad surface (migrations touching many tables, conftest/fixture changes,
+schema-wide refactors) run the tier in file-scoped batches, not bare `-m db`. A run
+with 0% CPU and no `gw*` workers is wedged: `kill -9` it, then reap leaked test DBs
+with `uv run python -m tests.fixtures.cleanup_test_dbs`.
+
 ## DB write + return value consistency
 
 If a function both writes to the DB and returns a result object, there must be a test verifying the returned object matches what was written. Silent divergence between in-memory and persisted state is a real bug class.
