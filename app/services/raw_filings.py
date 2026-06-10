@@ -84,11 +84,29 @@ DocumentKind = Literal[
 class RawFilingDocument:
     accession_number: str
     document_kind: DocumentKind
-    payload: str
-    byte_count: int
+    # ``payload`` / ``byte_count`` are None on swept rows (#1014): the
+    # retention sweep nulls the bytes after recording payload_sha256;
+    # byte_count is GENERATED from octet_length(payload) so it follows.
+    payload: str | None
+    byte_count: int | None
     parser_version: str | None
     fetched_at: datetime
     source_url: str | None
+
+    def require_payload(self) -> str:
+        """Return the payload, raising if this row has been swept.
+
+        Rewash apply-fns call this instead of touching ``payload``
+        directly — callers that can tolerate a swept row must check
+        ``payload is None`` BEFORE handing the doc over. Explicit
+        raise (not assert): production invariant."""
+        if self.payload is None:
+            raise RuntimeError(
+                f"raw payload for accession={self.accession_number} "
+                f"kind={self.document_kind} was swept "
+                f"(payload_swept_at set); re-fetch via rehydrate before re-parsing"
+            )
+        return self.payload
 
 
 def store_raw(
@@ -122,7 +140,13 @@ def store_raw(
             payload = EXCLUDED.payload,
             parser_version = EXCLUDED.parser_version,
             source_url = EXCLUDED.source_url,
-            fetched_at = NOW()
+            fetched_at = NOW(),
+            -- #1014: a fresh body invalidates sweep state. The stored
+            -- hash belongs to the bytes that were destroyed; letting it
+            -- linger would fail a future verify against a legitimately
+            -- re-stored (possibly amended) body.
+            payload_sha256 = NULL,
+            payload_swept_at = NULL
         """,
         (accession_number, document_kind, payload, parser_version, source_url),
     )
@@ -150,13 +174,21 @@ def read_raw(
         row = cur.fetchone()
     if row is None:
         return None
+    return _row_to_document(row)
+
+
+def _row_to_document(row: dict[str, Any]) -> RawFilingDocument:
+    """Map a dict_row to the dataclass. ``payload`` / ``byte_count``
+    are NULL on swept rows (#1014) — must map to ``None``, never
+    ``str(None)`` == the literal string ``"None"`` (prevention-log
+    §str(row[N]) coerces SQL NULL)."""
     return RawFilingDocument(
-        accession_number=str(row["accession_number"]),  # type: ignore[arg-type]
-        document_kind=row["document_kind"],  # type: ignore[arg-type]
-        payload=str(row["payload"]),  # type: ignore[arg-type]
-        byte_count=int(row["byte_count"]),  # type: ignore[arg-type]
+        accession_number=str(row["accession_number"]),
+        document_kind=row["document_kind"],
+        payload=(str(row["payload"]) if row.get("payload") is not None else None),
+        byte_count=(int(row["byte_count"]) if row.get("byte_count") is not None else None),
         parser_version=(str(row["parser_version"]) if row.get("parser_version") is not None else None),
-        fetched_at=row["fetched_at"],  # type: ignore[arg-type]
+        fetched_at=row["fetched_at"],
         source_url=(str(row["source_url"]) if row.get("source_url") is not None else None),
     )
 
@@ -202,15 +234,7 @@ def iter_raw(
         cur.itersize = batch_size
         cur.execute(sql, params)  # type: ignore[arg-type]  # f-string composed from closed enum
         for row in cur:
-            yield RawFilingDocument(
-                accession_number=str(row["accession_number"]),  # type: ignore[arg-type]
-                document_kind=row["document_kind"],  # type: ignore[arg-type]
-                payload=str(row["payload"]),  # type: ignore[arg-type]
-                byte_count=int(row["byte_count"]),  # type: ignore[arg-type]
-                parser_version=(str(row["parser_version"]) if row.get("parser_version") is not None else None),
-                fetched_at=row["fetched_at"],  # type: ignore[arg-type]
-                source_url=(str(row["source_url"]) if row.get("source_url") is not None else None),
-            )
+            yield _row_to_document(row)
 
 
 @dataclass(frozen=True)

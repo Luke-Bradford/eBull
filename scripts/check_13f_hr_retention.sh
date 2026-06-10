@@ -32,7 +32,7 @@
 #     ``thirteen_f_within_retention(`` exactly 1 call AND its line
 #     number MUST sit between the rescue-fallback SQL anchor
 #     (``JOIN institutional_filers f ON f.cik = log.filer_cik``) and
-#     the parser call ``parse_infotable(raw_doc.payload)``.
+#     the parser call ``parse_infotable(raw_doc.require_payload())``.
 #  G. ``ownership_observations_sync.sync_institutions`` SQL predicate.
 #     ``thirteen_f_retention_cutoff(`` ≥ 1 call AND SQL fragment
 #     ``ih.period_of_report >= %(retention_cutoff)s`` ≥ 1.
@@ -291,12 +291,12 @@ else
   else
     cap_line=$(first_line_in_function "$FILE_REWASH" "_apply_13f_infotable" "thirteen_f_within_retention(" || true)
     anchor_line=$(first_line_in_function "$FILE_REWASH" "_apply_13f_infotable" "JOIN institutional_filers f ON f.cik = log.filer_cik" || true)
-    parse_line=$(first_line_in_function "$FILE_REWASH" "_apply_13f_infotable" "parse_infotable(raw_doc.payload)" || true)
+    parse_line=$(first_line_in_function "$FILE_REWASH" "_apply_13f_infotable" "parse_infotable(raw_doc.require_payload())" || true)
 
     if [[ -z "$anchor_line" || "$anchor_line" == "0" ]]; then
       fail "$FILE_REWASH: _apply_13f_infotable missing rescue-fallback 'JOIN institutional_filers f ON f.cik = log.filer_cik' anchor."
     elif [[ -z "$parse_line" || "$parse_line" == "0" ]]; then
-      fail "$FILE_REWASH: _apply_13f_infotable missing 'parse_infotable(raw_doc.payload)' anchor."
+      fail "$FILE_REWASH: _apply_13f_infotable missing 'parse_infotable(raw_doc.require_payload())' anchor."
     elif (( cap_line <= anchor_line )); then
       fail "$FILE_REWASH:$cap_line: thirteen_f_within_retention(...) appears at/before the rescue SQL anchor at line $anchor_line — happy-path branch must NOT be capped."
     elif (( cap_line >= parse_line )); then

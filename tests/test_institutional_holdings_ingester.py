@@ -384,7 +384,7 @@ class TestIngestFiler13F:
             document_kind="primary_doc",
         )
         assert primary is not None
-        assert "BERKSHIRE" in primary.payload.upper() or "<edgarSubmission" in primary.payload
+        assert "BERKSHIRE" in primary.require_payload().upper() or "<edgarSubmission" in primary.require_payload()
         assert primary.parser_version == "13f-primary-v1"
         assert primary.source_url is not None
         assert primary.source_url.endswith("primary_doc.xml")
@@ -395,7 +395,7 @@ class TestIngestFiler13F:
             document_kind="infotable_13f",
         )
         assert infotable is not None
-        assert "037833100" in infotable.payload  # the seeded CUSIP
+        assert "037833100" in infotable.require_payload()  # the seeded CUSIP
         assert infotable.parser_version == "13f-infotable-v1"
         assert infotable.source_url is not None
         assert infotable.source_url.endswith("infotable.xml")

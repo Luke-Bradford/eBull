@@ -231,6 +231,26 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # fallback, which would also yield empty) and completes the
     # manual-only triangle (source + metadata + invoker).
     "filing_events_skip_tier_cleanup": (),
+    # raw_payload_retention_sweep — #1014 payload-null sweep.
+    # ``batch_size`` stays internal (implementation knob, same call as
+    # #1013); ``dry_run`` is operator-facing and DEFAULTS TRUE so a
+    # casual trigger destroys nothing — the operator reads the dry-run
+    # figures, then re-triggers with dry_run=false.
+    "raw_payload_retention_sweep": (
+        ParamMetadata(
+            name="dry_run",
+            label="Dry run",
+            help_text=(
+                "If true (default), report eligible row count + byte "
+                "total only — zero writes. Set false to actually null "
+                "the payloads (SHA-256 is recorded per row first; "
+                "re-fetch from EDGAR verifies against it)."
+            ),
+            field_type="bool",
+            default=True,
+            advanced_group=False,
+        ),
+    ),
     # sec_13f_quarterly_sweep — post-#1155 retirement of the weekly
     # scheduled row; bootstrap stage 21 still dispatches it via
     # _INVOKERS, and the sweep-adapter / Admin Run-now paths surface

@@ -79,6 +79,7 @@ Lane = Literal[
     "db_positions",
     "db_cusip",
     "db_ownership_obs",
+    "db_raw_sweep",
     "bootstrap",
     "finra",
     "openfigi",
@@ -223,6 +224,15 @@ when one overruns). Scheduled-only, so NOT added to the
   (13F rewash). The 13F ingest writers already run on ``sec_rate`` /
   ``db_ownership_inst`` (never ``db``), so extraction introduces no NEW
   race — the sweep already ran concurrently with them.
+* ``db_raw_sweep`` — ``raw_payload_retention_sweep`` (#1014,
+  manual-only) only. A full sweep nulls ~12k multi-MB payloads in
+  bounded batches and holds its lane for minutes; on the catch-all
+  ``db`` lane it would starve ``orchestrator_high_frequency_sync``
+  (every-5-min, same lane) — the #1526/#1527 starvation class.
+  Write-safety: sole writer of ``payload_sha256``/``payload_swept_at``;
+  the raw-row UPDATE re-checks ``payload IS NOT NULL`` under its row
+  lock, so concurrent ``store_raw`` upserts (sec_rate / sec_manifest
+  lanes) compose to one of the two legal terminal states either way.
 * ``db_ownership_obs`` — ``ownership_observations_sync`` (daily @ :30)
   only — the all-7-category ``ownership_*_current`` repair sweep.
   ``ownership_*_current`` has other writers (the live ingesters + bulk
@@ -346,6 +356,13 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # params in MANUAL_TRIGGER_JOB_METADATA (empty); invoker in
     # app/jobs/runtime.py::_INVOKERS.
     "filing_events_skip_tier_cleanup": "db",
+    # raw_payload_retention_sweep — #1014 payload-null sweep. Pure DB
+    # operation but LONG-running (minutes over ~12k rows) → own lane,
+    # NOT the catch-all ``db`` (would starve the every-5-min
+    # orchestrator_high_frequency_sync; #1526/#1527 class). Params
+    # (dry_run) in MANUAL_TRIGGER_JOB_METADATA; invoker in
+    # app/jobs/runtime.py::_INVOKERS.
+    "raw_payload_retention_sweep": "db_raw_sweep",
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.

@@ -180,7 +180,7 @@ class TestRichHappyPath:
             document_kind="form3_xml",
         )
         assert doc is not None
-        assert "<ownershipDocument>" in doc.payload
+        assert "<ownershipDocument>" in doc.require_payload()
         assert doc.parser_version == "form3-v1"
         assert doc.source_url == url
 

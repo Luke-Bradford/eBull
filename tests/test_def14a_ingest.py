@@ -359,7 +359,7 @@ class TestIngestDef14a:
         assert doc is not None
         assert doc.parser_version == "def14a-v1"
         assert doc.source_url == url
-        assert len(doc.payload) > 0
+        assert len(doc.require_payload()) > 0
 
     def test_re_ingest_promotes_via_upsert_not_insert(
         self,
