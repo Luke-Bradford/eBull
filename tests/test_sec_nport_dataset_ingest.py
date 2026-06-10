@@ -220,100 +220,24 @@ class TestIngestNPortDatasetArchive:
         # pre-1900 alike — is routed to rows_skipped_bad_data, not retention.
         assert result.rows_skipped_bad_data >= 1
 
-    def test_resolved_cusip_deletes_bulk_marker(
-        self,
-        ebull_test_conn: psycopg.Connection[tuple],
-        tmp_path: Path,
-    ) -> None:
-        """#1399 end-to-end: a bulk marker an earlier run recorded for a
-        now-resolved CUSIP is inline-deleted when the observation
-        materialises. Proves the N-PORT reconcile wiring — the marker's
-        ``filer_cik`` and the staged ``fund_filer_cik`` carry the same
-        zfilled reg CIK, and ``period_end_early`` equals the staged
-        ``period_end`` — so the delete is NOT silently inert (review bot
-        REQUEST CHANGES on PR #1403)."""
-        # CUSIP resolves to an instrument → the holding materialises.
-        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
-
-        # An earlier run (CUSIP then unmapped) left this bulk marker.
-        # filer_cik is the 10-digit zfill of REGISTRANT CIK "1234567".
-        with ebull_test_conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO unresolved_13f_cusips (cusip, source, filer_cik, period_end) "
-                "VALUES (%s, 'bulk_nport_dataset', %s, %s)",
-                ("037833100", "0001234567", "2025-09-30"),
-            )
-        ebull_test_conn.commit()
-
-        archive_bytes = _build_dataset_zip(
-            submissions=[
-                {
-                    "ACCESSION_NUMBER": "0001234567-25-000001",
-                    "FILING_DATE": "2025-11-30",
-                    "SUB_TYPE": "NPORT-P",
-                    "REPORT_DATE": "2025-09-30",
-                },
-            ],
-            registrants=[
-                {"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1234567", "REGISTRANT_NAME": "Big Fund Trust"},
-            ],
-            fund_info=[
-                {
-                    "ACCESSION_NUMBER": "0001234567-25-000001",
-                    "SERIES_ID": "S000004310",
-                    "SERIES_NAME": "Big Fund Equity Series",
-                },
-            ],
-            holdings=[
-                {
-                    "ACCESSION_NUMBER": "0001234567-25-000001",
-                    "HOLDING_ID": "1",
-                    "ISSUER_CUSIP": "037833100",
-                    "BALANCE": "500000",
-                    "UNIT": "NS",
-                    "CURRENCY_CODE": "USD",
-                    "CURRENCY_VALUE": "75000000",
-                    "PAYOFF_PROFILE": "Long",
-                    "ASSET_CAT": "EC",
-                },
-            ],
-        )
-        archive_path = tmp_path / "nport.zip"
-        archive_path.write_bytes(archive_bytes)
-
-        result = ingest_nport_dataset_archive(
-            conn=ebull_test_conn,
-            archive_path=archive_path,
-            ingest_run_id=uuid4(),
-        )
-        ebull_test_conn.commit()
-
-        # Observation landed AND the redundant marker was deleted.
-        assert result.rows_written == 1
-        assert result.resolved_markers_deleted == 1
-        with ebull_test_conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM unresolved_13f_cusips WHERE source = 'bulk_nport_dataset' AND cusip = '037833100'"
-            )
-            remaining = cur.fetchone()
-            assert remaining is not None and remaining[0] == 0
-
     def test_marker_kept_when_cusip_stays_unresolved(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
         tmp_path: Path,
     ) -> None:
-        """Counter-case: if the CUSIP never resolves (no instrument), the
-        holding is skipped, no observation materialises, and the marker
-        survives — the delete fires only for genuinely-resolved CUSIPs."""
-        # Seed a DIFFERENT instrument so the preflight gate sees an
-        # in-window marker but THIS holding's CUSIP stays unmapped.
+        """If the CUSIP never resolves (no instrument), the holding is
+        skipped, no observation materialises, and the pending marker
+        survives the ingest — the re-sighting upserts the SAME
+        per-(cusip, source) row (#1349), never deletes it (ingest-time
+        marker deletion was removed with the #1399 machinery)."""
+        # Seed a DIFFERENT instrument; THIS holding's CUSIP stays unmapped.
         _seed_universe_with_cusip(ebull_test_conn, symbol="MSFT", cusip="594918104")
         with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO unresolved_13f_cusips (cusip, source, filer_cik, period_end) "
-                "VALUES (%s, 'bulk_nport_dataset', %s, %s)",
-                ("000000001", "0001234567", "2025-09-30"),
+                "INSERT INTO unresolved_13f_cusips "
+                "(cusip, source, observation_count, first_period_end, last_period_end) "
+                "VALUES (%s, 'bulk_nport_dataset', 1, %s, %s)",
+                ("000000001", "2025-09-30", "2025-09-30"),
             )
         ebull_test_conn.commit()
 
@@ -359,14 +283,17 @@ class TestIngestNPortDatasetArchive:
             ingest_run_id=uuid4(),
         )
         ebull_test_conn.commit()
+        assert result.rows_written == 0  # holding skipped — CUSIP unmapped
 
-        assert result.resolved_markers_deleted == 0
         with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM unresolved_13f_cusips WHERE source = 'bulk_nport_dataset' AND cusip = '000000001'"
+                "SELECT count(*), MAX(observation_count) FROM unresolved_13f_cusips "
+                "WHERE source = 'bulk_nport_dataset' AND cusip = '000000001'"
             )
             remaining = cur.fetchone()
+            # Still ONE row; the in-archive re-sighting bumped the count.
             assert remaining is not None and remaining[0] == 1
+            assert remaining[1] == 2
 
     def test_bulk_seeds_n_port_ingest_log(
         self,

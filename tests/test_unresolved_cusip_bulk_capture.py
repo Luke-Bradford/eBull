@@ -1,18 +1,19 @@
-"""#1233 PR-1a — bulk-path unresolved-CUSIP capture.
+"""#1233 PR-1a / #1349 — bulk-path unresolved-CUSIP capture.
 
-Verifies:
+Verifies (post-#1349 per-(cusip, source) grain, sql/189):
 
-* Migration ``sql/164`` applies cleanly to ``ebull_test_template``
+* Migration ``sql/189`` applies cleanly to ``ebull_test_template``
   (verified implicitly — the per-worker DB is built from the
   template, so a broken migration would prevent ``ebull_test_conn``
-  from connecting). Re-application is idempotent (explicit test).
-* ``record_unresolved_cusip_from_bulk`` writes one row per
-  ``(cusip, filer_cik, period_end, source)`` tuple. Re-call with
-  same tuple is no-op (partial UNIQUE on ``..._bulk_idx``).
-* Different ``(filer_cik, period_end, source)`` for the same
-  CUSIP create separate rows.
-* Bulk 13F ingest fixture lands one row per unresolved CUSIP.
-* Bulk N-PORT ingest fixture lands one row per unresolved CUSIP.
+  from connecting). Schema shape asserted explicitly.
+* ``record_unresolved_cusip_from_bulk`` upserts ONE row per
+  ``(cusip, source)``. Repeat sightings bump ``observation_count``
+  (best-effort heuristic) and widen the
+  ``first_period_end``/``last_period_end`` range monotonically.
+* The writer-side retention gate drops sightings with
+  ``period_end < cutoff`` (spec §4).
+* Bulk 13F / N-PORT ingest fixtures land one row per unresolved
+  CUSIP.
 * Legacy ``_record_unresolved_cusip`` still works (writes with
   ``source=NULL``) and shares the table without colliding with
   bulk rows.
@@ -61,6 +62,12 @@ __all__ = ["ebull_test_conn"]
 # for the next ~24 months without churn.
 _PERIOD_END = date(2026, 3, 31)
 _FILED_AT = "2026-05-15"  # post-2023-01-03 dollars cutover
+
+# Writer-side retention floor passed to the bulk writers (#1349 spec §4).
+# Sits safely below every in-window period the fixtures use, and above
+# the deliberately-stale period in the retention-gate tests.
+_CUTOFF = date(2024, 6, 30)
+_STALE_PERIOD = date(2020, 3, 31)  # < _CUTOFF → writer gate drops it
 
 
 # ---------------------------------------------------------------------------
@@ -143,14 +150,14 @@ def _build_nport_zip(
 
 @pytest.mark.integration
 @pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
-class TestMigration164:
+class TestMigrationSchema:
     def test_partial_unique_indexes_present(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
-        """Both partial UNIQUE indexes from sql/164 exist on the
-        worker's private DB (built from ``ebull_test_template`` which
-        has all migrations applied)."""
+        """Both partial UNIQUE indexes (recreated by sql/189) exist on
+        the worker's private DB (built from ``ebull_test_template``
+        which has all migrations applied)."""
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
@@ -187,51 +194,24 @@ class TestMigration164:
             )
             assert cur.fetchone() is None
 
-    def test_migration_is_idempotent(
+    def test_per_cusip_grain_columns(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
-        """Re-running ``sql/164`` against an already-migrated DB is a
-        no-op (no errors, schema unchanged). Guards against operator
-        re-application via ``psql -f`` or partial migration recovery.
+        """sql/189 shape: ``first_period_end``/``last_period_end``
+        present, per-(filer, period) columns GONE, legacy columns
+        nullable (bulk rows leave issuer name / accession empty).
+
+        No re-run idempotency test for sql/189: the table swap reads
+        the dropped ``period_end`` column from the pre-189 shape, so a
+        replay against a migrated DB is structurally impossible — the
+        runner's ``schema_migrations`` + content-sha guard (#1333) is
+        the re-application protection.
         """
-        sql_path = Path(__file__).resolve().parents[1] / "sql" / "164_unresolved_13f_cusips_bulk_columns.sql"
-        sql_text = sql_path.read_text(encoding="utf-8")
-        with psycopg.ClientCursor(ebull_test_conn) as cur:
-            # ClientCursor uses the simple query protocol — matches
-            # what app/db/migrations.py uses, so this proves the
-            # exact code path the runner would take.
-            cur.execute(sql_text)  # type: ignore[call-overload]
-        ebull_test_conn.commit()
-
-        # Schema is unchanged: same two partial UNIQUE indexes + same
-        # nullable columns + same source CHECK + no PK.
-        with ebull_test_conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT indexname FROM pg_indexes
-                WHERE tablename = 'unresolved_13f_cusips'
-                  AND indexname LIKE 'unresolved_13f_cusips_%_idx'
-                ORDER BY indexname
-                """,
-            )
-            indexes = [r[0] for r in cur.fetchall()]
-        assert indexes == [
-            "unresolved_13f_cusips_bulk_idx",
-            "unresolved_13f_cusips_legacy_idx",
-        ]
-
-    def test_bulk_columns_present_and_nullable(
-        self,
-        ebull_test_conn: psycopg.Connection[tuple],
-    ) -> None:
-        """The three new columns exist with the expected types and
-        every legacy column that used to be NOT NULL is now nullable
-        (so the bulk path can leave issuer name / accession empty)."""
         expected = {
-            "filer_cik": ("text", "YES"),
-            "period_end": ("date", "YES"),
             "source": ("text", "YES"),
+            "first_period_end": ("date", "YES"),
+            "last_period_end": ("date", "YES"),
             "name_of_issuer": ("text", "YES"),
             "last_accession_number": ("text", "YES"),
         }
@@ -241,13 +221,13 @@ class TestMigration164:
                 SELECT column_name, data_type, is_nullable
                 FROM information_schema.columns
                 WHERE table_name = 'unresolved_13f_cusips'
-                  AND column_name = ANY(%s)
-                ORDER BY column_name
                 """,
-                (list(expected.keys()),),
             )
-            actual = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
-        assert actual == expected
+            all_cols = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+        assert {k: v for k, v in all_cols.items() if k in expected} == expected
+        # #1349 — the fine-grain columns must be gone.
+        assert "filer_cik" not in all_cols
+        assert "period_end" not in all_cols
 
 
 # ---------------------------------------------------------------------------
@@ -268,13 +248,15 @@ class TestRecordUnresolvedCusipFromBulk:
             filer_cik="0001234567",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT cusip, filer_cik, period_end, source,
+                SELECT cusip, source, observation_count,
+                       first_period_end, last_period_end,
                        name_of_issuer, last_accession_number
                 FROM unresolved_13f_cusips
                 WHERE cusip = %s
@@ -285,70 +267,47 @@ class TestRecordUnresolvedCusipFromBulk:
         assert len(rows) == 1
         row = rows[0]
         assert row[0] == "00BULK0001"
-        assert row[1] == "0001234567"
-        assert row[2] == _PERIOD_END
-        assert row[3] == "bulk_13f_dataset"
+        assert row[1] == "bulk_13f_dataset"
+        assert row[2] == 1
+        assert row[3] == _PERIOD_END
+        assert row[4] == _PERIOD_END
         # Bulk path leaves issuer name + accession blank; OpenFIGI
         # sweep (PR-1b) fills name_of_issuer.
-        assert row[4] is None
         assert row[5] is None
+        assert row[6] is None
 
-    def test_duplicate_tuple_is_no_op(
+    def test_repeat_sightings_bump_count_not_rows(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
-        for _ in range(3):
+        """#1349 — same cusip, ANY (filer, period) combination: still
+        ONE row; observation_count accumulates; period range widens."""
+        for filer, period in (
+            ("0001234567", _PERIOD_END),
+            ("0009999999", _PERIOD_END),  # different filer
+            ("0001234567", date(2025, 12, 31)),  # different period
+        ):
             record_unresolved_cusip_from_bulk(
                 ebull_test_conn,
                 cusip="00BULK0002",
-                filer_cik="0001234567",
-                period_end=_PERIOD_END,
+                filer_cik=filer,
+                period_end=period,
                 source="bulk_13f_dataset",
+                cutoff=_CUTOFF,
             )
         ebull_test_conn.commit()
-        assert _count_bulk_rows(ebull_test_conn) == 1
 
-    def test_different_filer_cik_creates_separate_row(
-        self,
-        ebull_test_conn: psycopg.Connection[tuple],
-    ) -> None:
-        record_unresolved_cusip_from_bulk(
-            ebull_test_conn,
-            cusip="00BULK0003",
-            filer_cik="0001234567",
-            period_end=_PERIOD_END,
-            source="bulk_13f_dataset",
-        )
-        record_unresolved_cusip_from_bulk(
-            ebull_test_conn,
-            cusip="00BULK0003",
-            filer_cik="0009999999",
-            period_end=_PERIOD_END,
-            source="bulk_13f_dataset",
-        )
-        ebull_test_conn.commit()
-        assert _count_bulk_rows(ebull_test_conn) == 2
-
-    def test_different_period_end_creates_separate_row(
-        self,
-        ebull_test_conn: psycopg.Connection[tuple],
-    ) -> None:
-        record_unresolved_cusip_from_bulk(
-            ebull_test_conn,
-            cusip="00BULK0004",
-            filer_cik="0001234567",
-            period_end=_PERIOD_END,
-            source="bulk_13f_dataset",
-        )
-        record_unresolved_cusip_from_bulk(
-            ebull_test_conn,
-            cusip="00BULK0004",
-            filer_cik="0001234567",
-            period_end=date(2025, 12, 31),
-            source="bulk_13f_dataset",
-        )
-        ebull_test_conn.commit()
-        assert _count_bulk_rows(ebull_test_conn) == 2
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT observation_count, first_period_end, last_period_end
+                FROM unresolved_13f_cusips
+                WHERE cusip = '00BULK0002'
+                """,
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0] == (3, date(2025, 12, 31), _PERIOD_END)
 
     def test_different_source_creates_separate_row(
         self,
@@ -360,6 +319,7 @@ class TestRecordUnresolvedCusipFromBulk:
             filer_cik="0001234567",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         record_unresolved_cusip_from_bulk(
             ebull_test_conn,
@@ -367,9 +327,28 @@ class TestRecordUnresolvedCusipFromBulk:
             filer_cik="0001234567",
             period_end=_PERIOD_END,
             source="bulk_nport_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
         assert _count_bulk_rows(ebull_test_conn) == 2
+
+    def test_out_of_retention_sighting_is_dropped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Writer-side retention gate (#1349 spec §4): a sighting with
+        ``period_end < cutoff`` never reaches the table."""
+        before = _count_bulk_rows(ebull_test_conn)
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="00BULK0006",
+            filer_cik="0001234567",
+            period_end=_STALE_PERIOD,
+            source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
+        )
+        ebull_test_conn.commit()
+        assert _count_bulk_rows(ebull_test_conn) == before
 
 
 # ---------------------------------------------------------------------------
@@ -386,8 +365,8 @@ class TestFlushUnresolvedCusipsBulk:
     buffer via a per-row INSERT + SAVEPOINT loop. Post-#1295 they
     call :func:`flush_unresolved_cusips_bulk`, which streams the
     whole buffer into a TEMP staging table via ``COPY`` then drains
-    via ``INSERT...SELECT...ON CONFLICT DO NOTHING``. Idempotency
-    and dedup semantics must match the per-row writer exactly.
+    via an aggregated ``INSERT...SELECT...ON CONFLICT DO UPDATE``
+    onto the per-(cusip, source) grain (#1349, sql/189).
     """
 
     def test_empty_buffer_returns_zero(
@@ -399,12 +378,13 @@ class TestFlushUnresolvedCusipsBulk:
             ebull_test_conn,
             [],
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
         assert written == 0
         assert _count_bulk_rows(ebull_test_conn) == before
 
-    def test_multi_row_buffer_inserts_all_distinct_tuples(
+    def test_multi_row_buffer_inserts_one_row_per_cusip(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
@@ -418,15 +398,21 @@ class TestFlushUnresolvedCusipsBulk:
             ebull_test_conn,
             buffer,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
         assert written == 3
         assert _count_bulk_rows(ebull_test_conn) == before + 3
 
-    def test_reflush_same_buffer_is_idempotent(
+    def test_reflush_same_buffer_keeps_row_identity(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
+        """Row identity stays stable under re-flush. NOTE (#1349):
+        the return now counts groups touched (inserted OR updated) —
+        a re-flush returns the group count, not 0 — and
+        ``observation_count`` accumulates (best-effort heuristic,
+        spec §4 conscious tradeoff)."""
         buffer = [
             ("00FLUSH010", "0001111111", _PERIOD_END),
             ("00FLUSH011", "0001111111", _PERIOD_END),
@@ -435,30 +421,35 @@ class TestFlushUnresolvedCusipsBulk:
             ebull_test_conn,
             buffer,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         second = flush_unresolved_cusips_bulk(
             ebull_test_conn,
             buffer,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
         assert first == 2
-        assert second == 0
+        assert second == 2  # groups updated, not newly inserted
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT COUNT(*) FROM unresolved_13f_cusips
+                SELECT COUNT(*), SUM(observation_count)
+                FROM unresolved_13f_cusips
                 WHERE cusip IN ('00FLUSH010', '00FLUSH011')
                 """
             )
             row = cur.fetchone()
         assert row is not None
-        assert int(row[0]) == 2
+        assert (int(row[0]), int(row[1])) == (2, 4)
 
-    def test_same_cusip_different_filer_or_period_creates_separate_rows(
+    def test_same_cusip_aggregates_to_one_row(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
+        """#1349 — different (filer, period) sightings of one cusip
+        collapse to ONE row with the count + period range."""
         cusip = "00FLUSH020"
         buffer = [
             (cusip, "0001111111", _PERIOD_END),
@@ -469,25 +460,60 @@ class TestFlushUnresolvedCusipsBulk:
             ebull_test_conn,
             buffer,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
-        assert written == 3
+        assert written == 1
         with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) FROM unresolved_13f_cusips WHERE cusip = %s",
+                """
+                SELECT observation_count, first_period_end, last_period_end
+                FROM unresolved_13f_cusips WHERE cusip = %s
+                """,
                 (cusip,),
             )
-            row = cur.fetchone()
-        assert row is not None
-        assert int(row[0]) == 3
+            rows = cur.fetchall()
+        assert rows == [(3, date(2025, 12, 31), _PERIOD_END)]
+
+    def test_out_of_retention_rows_filtered_at_writer(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Writer-side retention gate (#1349 spec §4): the 13F walk
+        buffers markers BEFORE its retention gate, so the flush must
+        drop stale periods. A cusip with ONLY stale sightings gets no
+        row; a mixed-period cusip keeps only the in-window range."""
+        buffer = [
+            ("00FLUSH050", "0001111111", _STALE_PERIOD),  # stale-only → no row
+            ("00FLUSH051", "0001111111", _STALE_PERIOD),  # mixed → in-window only
+            ("00FLUSH051", "0001111111", _PERIOD_END),
+        ]
+        written = flush_unresolved_cusips_bulk(
+            ebull_test_conn,
+            buffer,
+            source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
+        )
+        ebull_test_conn.commit()
+        assert written == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cusip, observation_count, first_period_end, last_period_end
+                FROM unresolved_13f_cusips
+                WHERE cusip IN ('00FLUSH050', '00FLUSH051')
+                """
+            )
+            rows = cur.fetchall()
+        assert rows == [("00FLUSH051", 1, _PERIOD_END, _PERIOD_END)]
 
     def test_whitespace_and_case_normalisation(
         self,
         ebull_test_conn: psycopg.Connection[tuple],
     ) -> None:
-        """Helper strips + upper-cases CUSIP and strips filer_cik so
-        downstream lookups (e.g. by the OpenFIGI sweep) match the
-        canonical form regardless of caller hygiene."""
+        """Helper strips + upper-cases CUSIP so downstream lookups
+        (e.g. by the OpenFIGI sweep) match the canonical form
+        regardless of caller hygiene."""
         buffer = [
             ("  00flush030  ", "  0003333333  ", _PERIOD_END),
         ]
@@ -495,20 +521,21 @@ class TestFlushUnresolvedCusipsBulk:
             ebull_test_conn,
             buffer,
             source="bulk_nport_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
         assert written == 1
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT cusip, filer_cik, source
+                SELECT cusip, source
                 FROM unresolved_13f_cusips
                 WHERE cusip = '00FLUSH030'
                 """
             )
             rows = cur.fetchall()
         assert len(rows) == 1
-        assert rows[0] == ("00FLUSH030", "0003333333", "bulk_nport_dataset")
+        assert rows[0] == ("00FLUSH030", "bulk_nport_dataset")
 
     def test_helper_failure_isolated_by_wrapper_savepoint(
         self,
@@ -541,6 +568,7 @@ class TestFlushUnresolvedCusipsBulk:
             ebull_test_conn,
             buffer=[("00FLUSH900", "0009000000", _PERIOD_END)],
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
             result=result,
         )
 
@@ -585,6 +613,7 @@ class TestFlushUnresolvedCusipsBulk:
             ebull_test_conn,
             buffer,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
         assert written == 1
@@ -659,6 +688,7 @@ class TestLegacyWriterCoexistence:
             filer_cik="0001234567",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         record_unresolved_cusip_from_bulk(
             ebull_test_conn,
@@ -666,6 +696,7 @@ class TestLegacyWriterCoexistence:
             filer_cik="0009999999",
             period_end=_PERIOD_END,
             source="bulk_nport_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
 
@@ -750,7 +781,8 @@ class TestBulk13FIngestUnresolvedCapture:
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT cusip, filer_cik, period_end, source
+                SELECT cusip, observation_count, first_period_end,
+                       last_period_end, source
                 FROM unresolved_13f_cusips
                 WHERE source = 'bulk_13f_dataset'
                 ORDER BY cusip
@@ -759,10 +791,12 @@ class TestBulk13FIngestUnresolvedCapture:
             rows = cur.fetchall()
         assert len(rows) == 5
         assert [r[0] for r in rows] == sorted(unresolved_cusips)
-        # Same filer + period for every row (single-submission fixture).
-        assert all(r[1] == "0001234567" for r in rows)
+        # One sighting each, period range collapsed to the single
+        # cover period (single-submission fixture).
+        assert all(r[1] == 1 for r in rows)
         assert all(r[2] == _PERIOD_END for r in rows)
-        assert all(r[3] == "bulk_13f_dataset" for r in rows)
+        assert all(r[3] == _PERIOD_END for r in rows)
+        assert all(r[4] == "bulk_13f_dataset" for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +882,8 @@ class TestBulkNPortIngestUnresolvedCapture:
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT cusip, filer_cik, period_end, source
+                SELECT cusip, observation_count, first_period_end,
+                       last_period_end, source
                 FROM unresolved_13f_cusips
                 WHERE source = 'bulk_nport_dataset'
                 ORDER BY cusip
@@ -857,9 +892,10 @@ class TestBulkNPortIngestUnresolvedCapture:
             rows = cur.fetchall()
         assert len(rows) == 5
         assert [r[0] for r in rows] == sorted(unresolved_cusips)
-        assert all(r[1] == "0007654321" for r in rows)
+        assert all(r[1] == 1 for r in rows)
         assert all(r[2] == _PERIOD_END for r in rows)
-        assert all(r[3] == "bulk_nport_dataset" for r in rows)
+        assert all(r[3] == _PERIOD_END for r in rows)
+        assert all(r[4] == "bulk_nport_dataset" for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1040,6 +1076,7 @@ class TestLegacyResolverIgnoresBulkRows:
             filer_cik="0001234567",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
 
@@ -1087,6 +1124,7 @@ class TestLegacyResolverIgnoresBulkRows:
             filer_cik="0001234567",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
 
@@ -1130,6 +1168,7 @@ class TestLegacyResolverIgnoresBulkRows:
             filer_cik="0001234567",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         ebull_test_conn.commit()
 
@@ -1176,6 +1215,7 @@ class TestLegacyResolverIgnoresBulkRows:
             filer_cik="0001234567",
             period_end=_PERIOD_END,
             source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
         )
         # Legacy row for the same CUSIP.
         _record_unresolved_cusip(

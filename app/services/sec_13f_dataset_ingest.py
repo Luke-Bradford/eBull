@@ -54,11 +54,8 @@ from uuid import UUID, uuid4
 import psycopg
 
 from app.services.cusip_resolver import (
-    delete_resolved_bulk_markers,
     flush_unresolved_cusips_bulk,
-    in_window_bulk_markers_exist,
     load_bulk_cusip_map,
-    reconcile_survived_markers,
 )
 from app.services.institutional_holdings import thirteen_f_retention_cutoff
 from app.services.ownership_observations import period_end_within_bounds
@@ -87,7 +84,6 @@ class Form13FIngestResult:
     rows_skipped_bad_data: int = 0
     rows_skipped_retention: int = 0  # PR6 #1233 §4.5
     parse_errors: int = 0
-    resolved_markers_deleted: int = 0  # #1399 — inline-deleted bulk markers
     figi_identifiers_seen: int = 0  # #1302 — distinct FIGIs collected this archive
     figi_identifiers_written: int = 0  # #1302 — newly inserted external_identifiers rows
     touched_instrument_ids: set[int] = field(default_factory=set)
@@ -450,6 +446,7 @@ def _flush_unresolved_buffer(
     *,
     buffer: list[tuple[str, str, date]],
     source: Literal["bulk_13f_dataset", "bulk_nport_dataset"],
+    cutoff: date,
     result: Form13FIngestResult,
 ) -> None:
     """Drain accumulated unresolved CUSIPs via the PR-1295 COPY helper.
@@ -481,42 +478,12 @@ def _flush_unresolved_buffer(
         return
     try:
         with conn.transaction():
-            flush_unresolved_cusips_bulk(conn, buffer, source=source)
+            flush_unresolved_cusips_bulk(conn, buffer, source=source, cutoff=cutoff)
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "13F ingest: flush_unresolved_cusips_bulk failed (chunk=%d, source=%s): %s",
             len(buffer),
             source,
-            exc,
-        )
-        result.parse_errors += 1
-
-
-def _delete_resolved_markers(
-    conn: psycopg.Connection[Any],
-    markers: set[tuple[str, str, date]],
-    *,
-    result: Form13FIngestResult,
-) -> None:
-    """Delete bulk markers a prior run recorded for CUSIPs resolved this run.
-
-    Mirror of :func:`_flush_unresolved_buffer`'s failure isolation: one
-    savepoint (``with conn.transaction():``) so a raise inside the
-    delete rolls back to the savepoint without poisoning the outer
-    archive tx. A delete failure is non-fatal — a redundant marker is
-    harmless (retention purge / a later run reclaims it). Records the
-    deleted count only on a clean commit (#1399).
-    """
-    if not markers:
-        return
-    try:
-        with conn.transaction():
-            deleted = delete_resolved_bulk_markers(conn, markers, source="bulk_13f_dataset")
-        result.resolved_markers_deleted += deleted
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "13F ingest: delete_resolved_bulk_markers failed (markers=%d): %s",
-            len(markers),
             exc,
         )
         result.parse_errors += 1
@@ -586,22 +553,6 @@ def ingest_13f_dataset_archive(
         cur.execute(_CREATE_STG_SQL)
 
     unresolved_buffer: list[tuple[str, str, date]] = []
-
-    # #1399 — collect (cusip, filer, period) for CUSIPs that resolve
-    # this run so their now-redundant bulk markers (written by an
-    # earlier run when the CUSIP was unmapped) can be inline-deleted
-    # post-stream. SET, not list: many holding rows share one tuple
-    # (multiple exposure_kind / fund series) — dedup bounds memory to
-    # distinct positions and kills duplicate-temp churn (Codex). Gated:
-    # only collect when an in-window bulk marker actually exists, so
-    # most steady-state runs add zero overhead.
-    collect_resolved = in_window_bulk_markers_exist(conn, "bulk_13f_dataset", retention_cutoff)
-    # (cusip, filer_cik, period_end, instrument_id). instrument_id is
-    # carried so the post-drain reconcile can confirm the observation
-    # actually survived the ``ON_ERROR ignore`` COPY into _stg_13f
-    # before the marker is deleted (Codex ckpt-2 HIGH — a wire-skipped
-    # row must not delete a marker for an obs that never landed).
-    materialised_markers: set[tuple[str, str, date, int]] = set()
 
     # #1302 — distinct FIGI -> instrument mappings collected across the
     # archive; batch-upserted into external_identifiers after the drain.
@@ -773,13 +724,6 @@ def ingest_13f_dataset_archive(
                 copy_attempted += 1
                 result.touched_instrument_ids.add(instrument_id)
 
-                # #1399 — same (cusip, filer_cik, period_end) expressions
-                # the unresolved buffer uses above (:604); grain matches
-                # the bulk marker by construction. instrument_id carried
-                # for the post-drain survival reconcile.
-                if collect_resolved:
-                    materialised_markers.add((cusip, filer_cik, period_end, instrument_id))
-
     # Flush accumulated unresolved CUSIPs after the COPY context
     # closes (a COPY context exclusively owns the cursor so we cannot
     # interleave normal statements; flushing post-stream is the
@@ -790,6 +734,7 @@ def ingest_13f_dataset_archive(
             conn,
             buffer=unresolved_buffer,
             source="bulk_13f_dataset",
+            cutoff=retention_cutoff,
             result=result,
         )
         unresolved_buffer.clear()
@@ -829,22 +774,10 @@ def ingest_13f_dataset_archive(
     # #1302 — persist the archive's distinct FIGI -> instrument mappings.
     # Same per-archive transaction as the drain, so it commits/rolls back
     # atomically with the holdings.
+    #
+    # #1349 — the #1399 inline marker-delete that used to follow here is
+    # gone: with per-(cusip, source) marker grain, mapped-CUSIP hygiene
+    # is owned by ``sweep_bulk_cusips_resolved_via_extid`` in the
+    # cadenced ``cusip_resolver_post_bulk_sweep`` job.
     _persist_figi_external_identifiers(conn, figi_to_instrument, result=result)
-
-    # #1399 — delete bulk markers a prior run recorded for CUSIPs that
-    # resolved this run. Reconcile against _stg_13f FIRST: only the
-    # rows that survived the ``ON_ERROR ignore`` COPY are present there,
-    # so a wire-skipped holding cannot delete a marker for an obs that
-    # never materialised (Codex ckpt-2 HIGH). Match on the obs grain
-    # (instrument_id, filer_cik, period_end); delete on the marker grain
-    # (cusip, filer_cik, period_end). Savepoint-isolated; same tx as the
-    # drain so the delete and the obs writes commit/rollback together.
-    if materialised_markers:
-        with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT instrument_id, filer_cik, period_end FROM _stg_13f")
-            survived = {(r[0], r[1], r[2]) for r in cur.fetchall()}
-        to_delete = reconcile_survived_markers(materialised_markers, survived)
-        if to_delete:
-            _delete_resolved_markers(conn, to_delete, result=result)
-        materialised_markers.clear()
     return result
