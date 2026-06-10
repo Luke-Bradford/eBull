@@ -3,8 +3,8 @@
 Surfaces the five operator signals that Phases 1-3 of #1208 lacked a
 live readout for:
 
-- `pg_database_size('ebull')` against a 10 GB warn threshold (matches
-  the pre-push hook gate at `.githooks/pre-push`).
+- `pg_database_size('ebull')` against a 30 GB warn threshold (matches
+  the pre-push hook gate at `.githooks/pre-push`; rebased by #1556).
 - Leaked `ebull_test_*` DB count + names (Phase 2 enforced zero leaks
   but had no operator surface).
 - WAL: `wal_dir_bytes` (size of pg_wal/ on disk) against a 4 GB
@@ -51,8 +51,17 @@ logger = logging.getLogger(__name__)
 # DB_SIZE_WARN_BYTES is also pinned in `.githooks/pre-push`. The
 # `tests/test_pre_push_hook_bloat_warn.py::test_pre_push_hook_threshold_matches_db_size_warn`
 # test asserts the two stay aligned by parsing the hook file.
+#
+# Rebased 10 GB -> 30 GB (#1556, 2026-06-10): the 10 GB value predates
+# the bulk-first SEC redesign and had been permanently breached by
+# genuine live data (always-red alarm = operator noise, same failure
+# class as #1221). Measured genuine baseline after the #1349 cusips
+# grain collapse + the #1014 primary_doc payload sweep + VACUUM FULL:
+# 15 GB (2026-06-10). 30 GB = 2x headroom over the swept baseline; the
+# alarm now means "something is growing unexpectedly", not "the DB
+# contains data".
 
-DB_SIZE_WARN_BYTES: int = 10 * 1024 * 1024 * 1024  # 10 GB
+DB_SIZE_WARN_BYTES: int = 30 * 1024 * 1024 * 1024  # 30 GB
 # 4 GB absolute pg_wal disk-bloat alarm. Effective max_wal_size is 1 GB
 # (docker-compose `command:` flag, #1410), so steady-state pg_wal sits
 # well below this even during bootstrap write bursts; crossing 4 GB
