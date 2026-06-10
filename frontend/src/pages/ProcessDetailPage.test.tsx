@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -522,9 +522,9 @@ function makeTimelinePayload(): BootstrapTimelineResponse {
   };
 }
 
-function renderBootstrap() {
+function renderBootstrap(path = "/admin/processes/bootstrap") {
   return render(
-    <MemoryRouter initialEntries={["/admin/processes/bootstrap"]}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="admin/processes/:id" element={<ProcessDetailPage />} />
       </Routes>
@@ -568,6 +568,40 @@ describe("ProcessDetailPage — Timeline tab (bootstrap)", () => {
       expect(screen.getByRole("tab", { name: "Timeline" })).toBeTruthy(),
     );
     // Fetch is gated on (tab === "timeline") AND bootstrap id.
+    expect(mockedTimeline).not.toHaveBeenCalled();
+  });
+
+  // #1267 — the bootstrap nudge banner deep-links here with ?tab=timeline.
+  it("preselects the Timeline tab and fetches /timeline when deep-linked via ?tab=timeline", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    mockedTimeline.mockResolvedValueOnce(makeTimelinePayload());
+    renderBootstrap("/admin/processes/bootstrap?tab=timeline");
+    // No tab click — the deep link alone must open Timeline.
+    await waitFor(() => expect(mockedTimeline).toHaveBeenCalledWith("bootstrap"));
+    expect(await screen.findByText("Universe Sync")).toBeTruthy();
+  });
+
+  // #1267 — an unknown ?tab= value must fall back to overview, and a
+  // timeline deep link on a NON-bootstrap process must reset via the
+  // existing per-process guard (restricted endpoint never called).
+  it("falls back to Overview for unknown ?tab= and for ?tab=timeline on a non-bootstrap process", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({ process_id: "sec_form4_ingest", display_name: "Form 4 ingest" }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAt("/admin/processes/sec_form4_ingest?tab=bogus");
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Overview" })).toBeTruthy(),
+    );
+    expect(mockedTimeline).not.toHaveBeenCalled();
+    cleanup();
+    renderAt("/admin/processes/sec_form4_ingest?tab=timeline");
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Overview" })).toBeTruthy(),
+    );
     expect(mockedTimeline).not.toHaveBeenCalled();
   });
 
