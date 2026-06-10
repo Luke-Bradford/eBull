@@ -323,6 +323,10 @@ JOB_FINANCIAL_FACTS_RETENTION_SWEEP = "financial_facts_retention_sweep"
 # never auto-fire. Source-lock binding in MANUAL_TRIGGER_JOB_SOURCES,
 # params (none) in MANUAL_TRIGGER_JOB_METADATA.
 JOB_FILING_EVENTS_SKIP_TIER_CLEANUP = "filing_events_skip_tier_cleanup"
+# #1014 — raw-payload retention sweep (manual-trigger-only triangle,
+# same shape as filing_events_skip_tier_cleanup). dry_run param in
+# MANUAL_TRIGGER_JOB_METADATA; own lane in MANUAL_TRIGGER_JOB_SOURCES.
+JOB_RAW_PAYLOAD_RETENTION_SWEEP = "raw_payload_retention_sweep"
 JOB_ORPHAN_TEST_DB_REAP = "orphan_test_db_reap"
 JOB_LIVENESS_WATCHDOG = "jobs_liveness_watchdog"
 JOB_RETRY_SWEEPER = "jobs_retry_sweeper"
@@ -4315,6 +4319,39 @@ def filing_events_skip_tier_cleanup() -> None:
             summary.total_deleted,
             summary.batches,
             dict(sorted(summary.by_form_type.items(), key=lambda kv: kv[1], reverse=True)),
+        )
+
+
+def raw_payload_retention_sweep(params: Mapping[str, Any]) -> None:
+    """Null parsed 10-K / 8-K ``primary_doc`` payloads after recording
+    SHA-256 (#1014). Manual-trigger-only.
+
+    Thin scheduler-side wrapper around
+    :func:`app.services.raw_payload_retention.sweep_raw_payloads`. The
+    service owns transaction shape (autocommit conn + per-batch
+    ``with conn.transaction()``); this wrapper only adds job-runs
+    telemetry. Idempotent: a drained DB sweeps 0 rows.
+
+    Honoured params (declared in ``MANUAL_TRIGGER_JOB_METADATA``):
+
+    * ``dry_run`` (bool, default TRUE) — count + byte-total only, zero
+      writes. Deliberate safety default for a destructive job: the
+      operator reads the dry-run figures, then re-triggers with
+      ``dry_run=false`` (mirrors the raw_data_retention_sweep posture).
+    """
+    from app.services.raw_payload_retention import sweep_raw_payloads
+
+    dry_run = bool(params.get("dry_run", True))
+    with _tracked_job(JOB_RAW_PAYLOAD_RETENTION_SWEEP) as tracker:
+        summary = sweep_raw_payloads(dry_run=dry_run)
+        tracker.row_count = summary.rows_swept
+        logger.info(
+            "raw_payload_retention_sweep complete: rows_swept=%d batches=%d bytes_reclaimed=%d by_source=%s dry_run=%s",
+            summary.rows_swept,
+            summary.batches,
+            summary.bytes_reclaimed,
+            dict(sorted(summary.by_source.items(), key=lambda kv: kv[1], reverse=True)),
+            summary.dry_run,
         )
 
 

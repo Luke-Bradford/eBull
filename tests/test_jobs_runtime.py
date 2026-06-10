@@ -472,6 +472,13 @@ class TestProductionInvokerRegistry:
             # Zero params (empty MANUAL_TRIGGER_JOB_METADATA entry);
             # source-lock "db" in MANUAL_TRIGGER_JOB_SOURCES.
             "filing_events_skip_tier_cleanup",
+            # #1014 — raw-payload retention sweep. Registered in _INVOKERS
+            # so POST /jobs/raw_payload_retention_sweep/run works;
+            # intentionally NOT in SCHEDULED_JOBS (a payload-destroying
+            # sweep must never auto-fire). dry_run param (default TRUE)
+            # in MANUAL_TRIGGER_JOB_METADATA; source-lock "db_raw_sweep"
+            # in MANUAL_TRIGGER_JOB_SOURCES.
+            "raw_payload_retention_sweep",
             # #819 — canonical-instrument redirect populate. Idempotent
             # one-shot the operator triggers after a universe sync
             # introduces new .RTH-style variants. Registered in

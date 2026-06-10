@@ -175,10 +175,14 @@ def run_rewash(
             accession_number=accession,
             document_kind=document_kind,
         )
-        if raw_doc is None:
+        if raw_doc is None or raw_doc.payload is None:
             # Row vanished between cohort scan and read (rare but
-            # possible if a parallel process truncated). Treat as
-            # skipped; the next sweep will see the new state.
+            # possible if a parallel process truncated), OR the
+            # payload was swept by the #1014 retention sweep
+            # (unreachable for registered kinds today — the sweep
+            # only targets kinds with no rewash parser, pinned by
+            # tests/test_raw_payload_retention.py — but cheap
+            # belt-and-braces). Treat as skipped.
             skipped += 1
             continue
 
@@ -307,7 +311,8 @@ def _apply_form4(
         return False
     instrument_id, primary_document_url = row
 
-    parsed = parse_form_4_xml(raw_doc.payload)
+    body = raw_doc.require_payload()
+    parsed = parse_form_4_xml(body)
     if parsed is None:
         # Parser regression — the previous parser presumably
         # produced a typed-table row for this body, but the current
@@ -317,7 +322,7 @@ def _apply_form4(
         # in the failure counter. A parser regression is a real
         # failure that must surface in ``rows_failed``.
         raise RewashParseError(
-            f"parse_form_4_xml returned None for accession={raw_doc.accession_number} body_size={len(raw_doc.payload)}"
+            f"parse_form_4_xml returned None for accession={raw_doc.accession_number} body_size={len(body)}"
         )
 
     upsert_filing(
@@ -378,10 +383,11 @@ def _apply_form3(
         return False
     instrument_id, primary_document_url = row
 
-    parsed = parse_form_3_xml(raw_doc.payload)
+    body = raw_doc.require_payload()
+    parsed = parse_form_3_xml(body)
     if parsed is None:
         raise RewashParseError(
-            f"parse_form_3_xml returned None for accession={raw_doc.accession_number} body_size={len(raw_doc.payload)}"
+            f"parse_form_3_xml returned None for accession={raw_doc.accession_number} body_size={len(body)}"
         )
 
     upsert_form_3_filing(
@@ -495,7 +501,7 @@ def _apply_def14a(
     issuer_cik, instrument_id = row
 
     try:
-        parsed = parse_beneficial_ownership_table(raw_doc.payload)
+        parsed = parse_beneficial_ownership_table(raw_doc.require_payload())
     except Exception as exc:
         raise RewashParseError(
             f"parse_beneficial_ownership_table failed for accession={raw_doc.accession_number}: {exc}"
@@ -703,9 +709,9 @@ def _apply_blockholders(
     # CHECK-constrained to {'sec_13d','sec_13g'} per sql/118.
     try:
         if manifest_source == "sec_13g":
-            parsed_dict = Schedule13G.parse_xml(raw_doc.payload)
+            parsed_dict = Schedule13G.parse_xml(raw_doc.require_payload())
         else:
-            parsed_dict = Schedule13D.parse_xml(raw_doc.payload)
+            parsed_dict = Schedule13D.parse_xml(raw_doc.require_payload())
         # Adapter requires the manifest form label (SC 13D / SC 13G /
         # /A variants — dual-spelled per the post-PR1251 form-name
         # normalisation in _SUBMISSION_TYPE_FOR_FORM) for the closed
@@ -924,7 +930,7 @@ def _apply_13f_infotable(
         return False
 
     try:
-        holdings = parse_infotable(raw_doc.payload)
+        holdings = parse_infotable(raw_doc.require_payload())
     except Exception as exc:
         raise RewashParseError(f"parse_infotable failed for accession={raw_doc.accession_number}: {exc}") from exc
 
@@ -1156,7 +1162,9 @@ def _rewash_13f_accession(
         accession_number=accession_number,
         document_kind="infotable_13f",
     )
-    if raw_doc is None:
+    if raw_doc is None or raw_doc.payload is None:
+        # Absent row OR swept payload (#1014) — same caller contract:
+        # "rewash deferred, body not on hand".
         return False
 
     return spec.apply_fn(conn, raw_doc)

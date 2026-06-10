@@ -369,6 +369,11 @@ _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking,
 # (not in SCHEDULED_JOBS); zero-param. Source-lock in
 # MANUAL_TRIGGER_JOB_SOURCES; empty params in MANUAL_TRIGGER_JOB_METADATA.
 _INVOKERS[_scheduler.JOB_FILING_EVENTS_SKIP_TIER_CLEANUP] = _adapt_zero_arg(_scheduler.filing_events_skip_tier_cleanup)
+# #1014 — raw-payload retention sweep. Manual-trigger-only triangle;
+# params-taking (dry_run, default true) — no _adapt_zero_arg. Source-lock
+# db_raw_sweep in MANUAL_TRIGGER_JOB_SOURCES; params in
+# MANUAL_TRIGGER_JOB_METADATA.
+_INVOKERS[_scheduler.JOB_RAW_PAYLOAD_RETENTION_SWEEP] = _scheduler.raw_payload_retention_sweep
 # G6/#915 — FINRA bimonthly short interest (daily 12:00 UTC). Zero-param
 # manual surface; extended-window backfill via REPL runbook.
 _INVOKERS[_scheduler.JOB_FINRA_SHORT_INTEREST_REFRESH] = _adapt_zero_arg(_scheduler.finra_short_interest_refresh)

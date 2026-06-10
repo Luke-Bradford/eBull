@@ -236,8 +236,8 @@ def test_iter_raw_concurrent_calls_use_unique_cursor_names(
     # the prior static-name implementation.
     a1 = next(iter_a)
     b1 = next(iter_b)
-    assert a1.payload.startswith("<doc-")
-    assert b1.payload.startswith("<doc-")
+    assert a1.require_payload().startswith("<doc-")
+    assert b1.require_payload().startswith("<doc-")
     # Drain both so the server-side cursors close cleanly.
     list(iter_a)
     list(iter_b)

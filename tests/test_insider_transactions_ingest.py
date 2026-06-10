@@ -327,7 +327,7 @@ class TestIngestInsiderTransactions:
             document_kind="form4_xml",
         )
         assert doc is not None
-        assert "<ownershipDocument>" in doc.payload
+        assert "<ownershipDocument>" in doc.require_payload()
         assert doc.parser_version == "form4-v1"
         assert doc.source_url == "https://www.sec.gov/Archives/form4-raw.xml"
 
