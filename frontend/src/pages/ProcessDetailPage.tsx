@@ -1027,6 +1027,19 @@ const STAGE_STATUS_TONE: Record<string, string> = {
     "border-slate-400 bg-slate-100 text-slate-700 dark:border-slate-600 dark:bg-slate-800/60 dark:text-slate-300 italic",
 };
 
+// #1266 — `last_error` doubles as the skip/cancel REASON for deliberate
+// non-error terminal states (`mark_stage_skipped` / `mark_stage_cancelled`
+// write their reason into the same column). Red text on an intended
+// bypass (e.g. the slow-connection fallback) reads as a failure to the
+// operator, so the detail line tones by stage status: neutral for
+// deliberate skips/cancels, amber for blocked (upstream failure forced
+// the skip — matches its badge), red only for genuine errors.
+const STAGE_DETAIL_TONE: Record<string, string> = {
+  skipped: "text-slate-500 dark:text-slate-400",
+  cancelled: "text-slate-500 dark:text-slate-400",
+  blocked: "text-amber-700 dark:text-amber-300",
+};
+
 const ARCHIVE_TONE: Record<string, string> = {
   // Archive squares mirror their stage's status by default; once we have
   // a per-archive status surface (see #1064 follow-up) the tone can
@@ -1352,8 +1365,12 @@ function TimelineStageRow({
           ) : null}
           {stage.last_error ? (
             <div
-              className="mt-1 truncate text-xs text-red-700 dark:text-red-300"
+              className={`mt-1 truncate text-xs ${
+                STAGE_DETAIL_TONE[stage.status] ??
+                "text-red-700 dark:text-red-300"
+              }`}
               title={stage.last_error}
+              data-testid="stage-detail-text"
             >
               {stage.last_error}
             </div>
