@@ -47,11 +47,8 @@ from uuid import UUID, uuid4
 import psycopg
 
 from app.services.cusip_resolver import (
-    delete_resolved_bulk_markers,
     flush_unresolved_cusips_bulk,
-    in_window_bulk_markers_exist,
     load_bulk_cusip_map,
-    reconcile_survived_markers,
 )
 from app.services.n_port_ingest import n_port_retention_cutoff
 from app.services.ownership_observations import period_end_within_bounds, upsert_sec_fund_series
@@ -89,7 +86,6 @@ class NPortIngestResult:
     # #1340 — distinct accessions seeded into n_port_ingest_log so the per-CIK
     # HTTP sweep (S23) skips bulk-loaded filings.
     ingest_log_rows_seeded: int = 0
-    resolved_markers_deleted: int = 0  # #1399 — inline-deleted bulk markers
     touched_instrument_ids: set[int] = field(default_factory=set)
 
 
@@ -216,14 +212,18 @@ def _flush_unresolved_buffer(
     buffer: list[tuple[str, str, date]],
     *,
     source: Literal["bulk_13f_dataset", "bulk_nport_dataset"],
+    cutoff: date,
     result: NPortIngestResult,
 ) -> None:
     """Drain ``buffer`` into ``unresolved_13f_cusips`` via the PR-1295
     COPY helper :func:`cusip_resolver.flush_unresolved_cusips_bulk`.
 
     Pre-#1295: per-row INSERT + SAVEPOINT loop. Post-#1295: one COPY
-    + INSERT...SELECT...ON CONFLICT pass. Same idempotency on the
-    bulk partial UNIQUE INDEX (sql/164).
+    + aggregated INSERT...SELECT...ON CONFLICT pass onto the
+    per-(cusip, source) bulk partial UNIQUE INDEX (sql/189, #1349).
+    ``cutoff`` is the per-source retention floor passed through to the
+    helper's writer-side gate (a no-op here — the N-PORT walk gates
+    retention before buffering).
 
     Failure isolation: ONE savepoint (``with conn.transaction():``)
     wraps the helper call so a raise inside the helper rolls back
@@ -242,42 +242,12 @@ def _flush_unresolved_buffer(
         return
     try:
         with conn.transaction():
-            flush_unresolved_cusips_bulk(conn, buffer, source=source)
+            flush_unresolved_cusips_bulk(conn, buffer, source=source, cutoff=cutoff)
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "nport ingest: flush_unresolved_cusips_bulk failed (chunk=%d, source=%s): %s",
             len(buffer),
             source,
-            exc,
-        )
-        result.parse_errors += 1
-
-
-def _delete_resolved_markers(
-    conn: psycopg.Connection[Any],
-    markers: set[tuple[str, str, date]],
-    *,
-    result: NPortIngestResult,
-) -> None:
-    """Delete bulk markers a prior run recorded for CUSIPs resolved this run.
-
-    Mirror of :func:`_flush_unresolved_buffer`'s failure isolation: one
-    savepoint so a raise inside the delete rolls back to the savepoint
-    and the outer archive tx survives. A delete failure is non-fatal —
-    a redundant marker is harmless (retention purge / a later run
-    reclaims it). Records the deleted count only on a clean commit
-    (#1399).
-    """
-    if not markers:
-        return
-    try:
-        with conn.transaction():
-            deleted = delete_resolved_bulk_markers(conn, markers, source="bulk_nport_dataset")
-        result.resolved_markers_deleted += deleted
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "nport ingest: delete_resolved_bulk_markers failed (markers=%d): %s",
-            len(markers),
             exc,
         )
         result.parse_errors += 1
@@ -494,18 +464,6 @@ def ingest_nport_dataset_archive(
     # only lose empty-CUSIP rows stay eligible to seed.)
     unresolved_accns: set[str] = set()
 
-    # #1399 — (cusip, filer_cik, period_end_early) for CUSIPs resolved
-    # this run, so their now-redundant bulk markers (from an earlier run
-    # when the CUSIP was unmapped) can be inline-deleted post-stream.
-    # SET (not list): many holdings share one tuple (multiple fund
-    # series under one registrant) — dedup bounds memory + kills temp
-    # churn. Gated by ``collect_resolved`` (computed below, once
-    # retention_cutoff is known). 4th element instrument_id is carried
-    # for the post-drain survival reconcile (Codex ckpt-2 HIGH — a
-    # wire-skipped row must not delete a marker for an obs that never
-    # landed in _stg_nport).
-    materialised_markers: set[tuple[str, str, date, int]] = set()
-
     # PR-3: CREATE TEMP TABLE before opening the COPY context.
     with conn.cursor() as cur:
         cur.execute(_CREATE_STG_SQL)
@@ -534,11 +492,6 @@ def ingest_nport_dataset_archive(
         # ``rows_skipped_retention`` counter is unconfounded with
         # filter / unresolved-CUSIP buckets. Codex 1a WARN 3.
         retention_cutoff = n_port_retention_cutoff()
-
-        # #1399 — only collect now-resolved markers if an in-window bulk
-        # marker exists; most steady-state runs short-circuit (zero
-        # overhead) once PR1 has drained the backlog.
-        collect_resolved = in_window_bulk_markers_exist(conn, "bulk_nport_dataset", retention_cutoff)
 
         # PR-3: series upsert deferred to post-COPY. Legacy semantic
         # preserved by buffering ``(accn, series_id, name, filer,
@@ -750,14 +703,6 @@ def ingest_nport_dataset_archive(
                 copy_attempted += 1
                 result.touched_instrument_ids.add(instrument_id)
 
-                # #1399 — use period_end_early (the SAME expression the
-                # unresolved buffer keys on at :620-623), NOT the obs
-                # period_end, so the grain matches the bulk marker
-                # exactly and any early-vs-final period difference cannot
-                # strand a marker.
-                if collect_resolved and period_end_early is not None:
-                    materialised_markers.add((cusip, filer_cik, period_end_early, instrument_id))
-
     # Drain staging into the partitioned observations table FIRST,
     # before the series upsert + unresolved-CUSIP flushes. Rationale:
     # the staging drain is the observation write-through; a series
@@ -828,34 +773,15 @@ def ingest_nport_dataset_archive(
             conn,
             unresolved_buffer,
             source="bulk_nport_dataset",
+            cutoff=retention_cutoff,
             result=result,
         )
         unresolved_buffer.clear()
 
-    # #1399 — delete bulk markers a prior run recorded for CUSIPs that
-    # resolved this run. Reconcile against _stg_nport FIRST: only rows
-    # that survived the ``ON_ERROR ignore`` COPY are present, so a
-    # wire-skipped holding cannot delete a marker for an obs that never
-    # materialised (Codex ckpt-2 HIGH). Match on the obs grain
-    # (instrument_id, fund_filer_cik, period_end); delete on the marker
-    # grain (cusip, filer_cik, period_end_early). period_end_early ==
-    # the staged period_end (same REPORT_DATE/REPORT_ENDING_PERIOD
-    # parse), so the join is exact. Savepoint-isolated; same tx as the
-    # drain so the delete and obs writes commit/rollback together.
-    if materialised_markers:
-        with conn.cursor() as cur:
-            # _stg_nport.fund_filer_cik is populated from the SAME
-            # ``filer_cik`` variable (zfilled reg CIK) that keyed the
-            # marker set above — the column name differs but the value
-            # is identical, so the reconcile join is exact. Pinned by
-            # tests/test_sec_nport_dataset_ingest.py::
-            # test_resolved_cusip_deletes_bulk_marker (#1399, review bot).
-            cur.execute("SELECT DISTINCT instrument_id, fund_filer_cik, period_end FROM _stg_nport")
-            survived = {(r[0], r[1], r[2]) for r in cur.fetchall()}
-        to_delete = reconcile_survived_markers(materialised_markers, survived)
-        if to_delete:
-            _delete_resolved_markers(conn, to_delete, result=result)
-        materialised_markers.clear()
+    # #1349 — the #1399 inline marker-delete that used to follow here is
+    # gone: with per-(cusip, source) marker grain, mapped-CUSIP hygiene
+    # is owned by ``sweep_bulk_cusips_resolved_via_extid`` in the
+    # cadenced ``cusip_resolver_post_bulk_sweep`` job.
     return result
 
 

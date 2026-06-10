@@ -5503,6 +5503,17 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
             OpenFigiResolver.from_env() as resolver,
             psycopg.connect(settings.database_url) as conn,
         ):
+            # #1349 — tombstone bulk rows whose CUSIP got mapped by ANY
+            # route (SEC curated backfill, fuzzy resolver, prior OpenFIGI
+            # pass) since the last sweep. Replaces the #1399 inline
+            # delete; runs BEFORE the OpenFIGI sweep so freshly-mapped
+            # cusips never burn rate-limit budget. Cheap by construction
+            # (per-(cusip, source) grain, ~55k rows).
+            from app.services.cusip_resolver import sweep_bulk_cusips_resolved_via_extid
+
+            extid_tombstoned = sweep_bulk_cusips_resolved_via_extid(conn)
+            conn.commit()
+
             report = sweep_unresolved_cusips_via_openfigi(conn, resolver=resolver)
             conn.commit()
 
@@ -5527,19 +5538,14 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
                     )
             conn.commit()
 
-            # #1349 PR1 — drain bulk unresolved rows for periods outside
-            # the per-source retention floor. They are markers for
-            # periods no pipeline will re-materialise (the bulk ingest
-            # rejects period_end < cutoff at its retention gate), so they
-            # are pure dead weight. Period-based purge is the only
-            # grain-safe predicate (spec §2a). Bounded ctid passes,
-            # committed per pass so a large backlog drains without one
-            # giant txn. _MAX_PURGE_PASSES is the termination guarantee:
-            # the per-invocation matching set is finite, and even if a
-            # concurrent old-archive 13F ingest records fresh < cutoff
-            # markers (it captures the marker before its retention gate),
-            # the cap bounds total passes — the next cadenced run drains
-            # any residue.
+            # #1349 — age out bulk rows whose latest sighting
+            # (last_period_end) fell behind the per-source retention
+            # floor. Such a CUSIP will never be re-recorded (writers
+            # gate on the same cutoff) nor materialised, so the row —
+            # pending or tombstoned — is dead weight. Single plain
+            # DELETE per source: per-(cusip, source) grain bounds the
+            # table at ~55k rows, so the pre-grain-change ctid-batched
+            # multi-pass drain is gone.
             from app.services.cusip_resolver import (
                 BulkCusipSource,
                 purge_unresolved_bulk_rows_outside_retention,
@@ -5547,21 +5553,16 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
             from app.services.institutional_holdings import thirteen_f_retention_cutoff
             from app.services.n_port_ingest import n_port_retention_cutoff
 
-            _MAX_PURGE_PASSES: Final = 1000
             purged_total = 0
             purge_specs: tuple[tuple[BulkCusipSource, date], ...] = (
                 ("bulk_13f_dataset", thirteen_f_retention_cutoff()),
                 ("bulk_nport_dataset", n_port_retention_cutoff()),
             )
             for purge_source, purge_cutoff in purge_specs:
-                for _ in range(_MAX_PURGE_PASSES):
-                    deleted = purge_unresolved_bulk_rows_outside_retention(
-                        conn, source=purge_source, cutoff=purge_cutoff
-                    )
-                    conn.commit()
-                    purged_total += deleted
-                    if deleted == 0:
-                        break
+                purged_total += purge_unresolved_bulk_rows_outside_retention(
+                    conn, source=purge_source, cutoff=purge_cutoff
+                )
+                conn.commit()
 
         tracker.row_count = report.promoted
         logger.info(
@@ -5581,7 +5582,9 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
             coverage.ratio >= coverage_floor,
         )
         logger.info(
-            "cusip_resolver_post_bulk_sweep: purged %d out-of-retention bulk unresolved rows (#1349)",
+            "cusip_resolver_post_bulk_sweep: extid-tombstoned %d mapped bulk rows, "
+            "purged %d out-of-retention bulk rows (#1349)",
+            extid_tombstoned,
             purged_total,
         )
 

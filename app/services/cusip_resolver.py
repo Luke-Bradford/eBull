@@ -275,8 +275,9 @@ def record_unresolved_cusip_from_bulk(
     filer_cik: str,
     period_end: date,
     source: BulkCusipSource,
+    cutoff: date,
 ) -> None:
-    """Bulk-path unresolved-CUSIP write. Idempotent.
+    """Bulk-path unresolved-CUSIP write. Per-(cusip, source) grain (#1349).
 
     Distinct from the legacy :func:`_record_unresolved_cusip`
     (``app/services/institutional_holdings.py``) which requires
@@ -287,44 +288,57 @@ def record_unresolved_cusip_from_bulk(
     by the PR-1b OpenFIGI sweep which writes back the ``name`` field
     OpenFIGI returns).
 
-    Idempotent on the partial UNIQUE INDEX
-    ``unresolved_13f_cusips_bulk_idx`` (sql/164). A second call with
-    the same ``(cusip, filer_cik, period_end, source)`` tuple is a
-    no-op. A call with a different ``(filer_cik, period_end, source)``
-    for the same CUSIP inserts a new row — the bulk path records
-    *every* (cusip × filer × period) observation so the sweep can
-    rewash the right accessions once the CUSIP resolves.
+    One row per ``(cusip, source)`` on the partial UNIQUE INDEX
+    ``unresolved_13f_cusips_bulk_idx`` (sql/189). A repeat sighting
+    bumps ``observation_count`` (best-effort volume heuristic — a
+    replay of the same archive inflates it; consumers are the
+    pending-index ordering and operator inspect only) and widens the
+    ``first_period_end``/``last_period_end`` range monotonically.
+    ``filer_cik`` is accepted for caller-shape parity but not
+    persisted — the per-filer dimension was dropped with the grain.
+
+    ``cutoff`` is the per-source retention floor
+    (``thirteen_f_retention_cutoff()`` / ``n_port_retention_cutoff()``):
+    a sighting with ``period_end < cutoff`` is skipped because no
+    pipeline will ever materialise that period, keeping the table
+    in-window by construction (spec §4).
 
     The caller is responsible for committing the transaction.
 
     Note: this single-row writer is retained for back-compat (tests
     + ad-hoc callers). The bulk ingest paths (13F dataset, NPORT
     dataset) batch-flush via :func:`flush_unresolved_cusips_bulk`
-    instead — #1233 PR for #1295 — which is ~200× faster on large
-    unresolved sets by replacing per-row INSERT + SAVEPOINT with a
-    single COPY + INSERT...SELECT...ON CONFLICT.
+    instead — #1233 PR for #1295.
     """
+    del filer_cik  # shape parity only — per-filer grain dropped (#1349)
+    if period_end < cutoff:
+        return
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO unresolved_13f_cusips (
                 cusip, name_of_issuer, last_accession_number,
-                filer_cik, period_end, source
+                source, observation_count,
+                first_period_end, last_period_end
             )
             VALUES (
                 %(cusip)s, NULL, NULL,
-                %(filer_cik)s, %(period_end)s, %(source)s
+                %(source)s, 1,
+                %(period_end)s, %(period_end)s
             )
-            ON CONFLICT (
-                cusip,
-                COALESCE(filer_cik, ''),
-                COALESCE(period_end, '0001-01-01'::date),
-                COALESCE(source, '')
-            ) WHERE source IS NOT NULL DO NOTHING
+            ON CONFLICT (cusip, source) WHERE source IS NOT NULL
+            DO UPDATE SET
+                observation_count = unresolved_13f_cusips.observation_count + 1,
+                first_period_end  = LEAST(
+                    unresolved_13f_cusips.first_period_end,
+                    EXCLUDED.first_period_end),
+                last_period_end   = GREATEST(
+                    unresolved_13f_cusips.last_period_end,
+                    EXCLUDED.last_period_end),
+                last_observed_at  = NOW()
             """,
             {
                 "cusip": cusip.strip().upper(),
-                "filer_cik": filer_cik.strip(),
                 "period_end": period_end,
                 "source": source,
             },
@@ -342,25 +356,41 @@ def flush_unresolved_cusips_bulk(
     buffer: Iterable[tuple[str, str, date]],
     *,
     source: BulkCusipSource,
+    cutoff: date,
 ) -> int:
     """Drain accumulated ``(cusip, filer_cik, period_end)`` triples
-    into ``unresolved_13f_cusips`` in one COPY + INSERT...SELECT
-    pass. Idempotent on the same partial UNIQUE INDEX as
-    :func:`record_unresolved_cusip_from_bulk`.
+    into per-(cusip, source) ``unresolved_13f_cusips`` rows in one
+    COPY + aggregated INSERT...SELECT pass (#1349 grain).
 
-    Returns the number of rows successfully written (post ON CONFLICT
-    de-dup). A second flush of the same triples returns 0.
+    Returns the number of distinct ``(cusip, source)`` groups touched
+    (inserted OR updated). NOTE (#1349): pre-grain-change this
+    returned newly-inserted rows and a duplicate re-flush returned 0;
+    the ON CONFLICT DO UPDATE shape counts updates too, so a re-flush
+    of the same archive returns the group count. Neither ingester
+    consumes the return value on its hot path.
+
+    ``observation_count`` accumulates the per-group staged row count —
+    a best-effort volume heuristic (a replay of the same archive
+    inflates it; consumers are the pending-index ordering and operator
+    inspect only). ``first_period_end``/``last_period_end`` are
+    LEAST/GREATEST-maintained and stay exact.
+
+    ``cutoff`` is the per-source retention floor
+    (``thirteen_f_retention_cutoff()`` / ``n_port_retention_cutoff()``).
+    Staged rows with ``period_end < cutoff`` are excluded: the 13F
+    ingester buffers unresolved markers BEFORE its retention gate, so
+    an old-archive replay would otherwise re-insert rows for periods
+    no pipeline will ever materialise (spec §4; Codex ckpt-1 H). The
+    N-PORT ingester gates first, so the filter is a no-op there.
 
     Performance: pre-PR-1295 used per-row INSERT + SAVEPOINT (~1000
     rows/s ceiling on a 2M-row archive). The COPY + INSERT...SELECT
     shape mirrors PR-3 (#1283) and lifts the ceiling to ~30k-50k
-    rows/s — empirically saves 15-30 min Phase C wall-clock on a
-    full bootstrap with a large unresolved backlog. The flush is
-    called ONCE per archive, after the main ``cur.copy()`` for the
-    observations table has closed, so the cursor is free for
-    sequential statements again. Single-pass iteration — buffer is
-    streamed directly into COPY without materialising a normalised
-    copy (memory parity with the caller's existing list).
+    rows/s. The flush is called ONCE per archive, after the main
+    ``cur.copy()`` for the observations table has closed, so the
+    cursor is free for sequential statements again. Single-pass
+    iteration — buffer is streamed directly into COPY without
+    materialising a normalised copy.
 
     Safety: ``source`` is a ``Literal`` constrained by the CHECK
     constraint on ``unresolved_13f_cusips.source``. ``cusip`` is
@@ -420,175 +450,83 @@ def flush_unresolved_cusips_bulk(
         if staged == 0:
             return 0
 
-        # Drain staging into the target via INSERT...SELECT...ON
-        # CONFLICT. The partial UNIQUE INDEX
-        # ``unresolved_13f_cusips_bulk_idx`` enforces the dedup; the
-        # explicit ``WHERE source IS NOT NULL`` disambiguates from
-        # the legacy partial UNIQUE INDEX
-        # ``unresolved_13f_cusips_legacy_idx`` on ``(cusip) WHERE
-        # source IS NULL`` (sql/164).
+        # Drain staging into the target via an aggregated
+        # INSERT...SELECT...ON CONFLICT (one row per (cusip, source),
+        # #1349). The partial UNIQUE INDEX
+        # ``unresolved_13f_cusips_bulk_idx`` (sql/189) enforces the
+        # dedup; the explicit ``WHERE source IS NOT NULL`` attaches the
+        # partial-index predicate for ON CONFLICT inference (#1102
+        # settled decision) and disambiguates from the legacy index.
         cur.execute(
             """
             INSERT INTO unresolved_13f_cusips (
-                cusip, name_of_issuer, last_accession_number,
-                filer_cik, period_end, source
+                cusip, source, observation_count,
+                first_period_end, last_period_end
             )
             SELECT
-                cusip, NULL, NULL,
-                filer_cik, period_end, source
+                cusip, source, COUNT(*),
+                MIN(period_end), MAX(period_end)
             FROM _stg_unresolved_cusips_bulk
-            ON CONFLICT (
-                cusip,
-                COALESCE(filer_cik, ''),
-                COALESCE(period_end, '0001-01-01'::date),
-                COALESCE(source, '')
-            ) WHERE source IS NOT NULL DO NOTHING
-            """
-        )
-        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-
-
-# Internal — staging-table column list for the resolved-marker delete.
-# Order pinned because the ``cur.copy(...)`` write binds by position.
-_RESOLVED_STG_COLS: Final = ("cusip", "filer_cik", "period_end")
-
-
-def in_window_bulk_markers_exist(
-    conn: psycopg.Connection[Any],
-    source: BulkCusipSource,
-    cutoff: date,
-) -> bool:
-    """Preflight gate for :func:`delete_resolved_bulk_markers` (#1399).
-
-    True iff any bulk marker for ``source`` has ``period_end >= cutoff``.
-    A resolved observation is always in-window (the ingest materialise
-    gate rejects out-of-retention rows), so a marker the ingest could
-    delete sits at ``period_end >= cutoff``. When none exist the
-    ingester skips collection entirely — no set growth, no temp table,
-    no DELETE. Post-PR1 (#1398 retention purge) the in-window marker set
-    is small and shrinking, so most steady-state runs short-circuit
-    here, keeping the inline delete from building an archive-scale temp
-    that matches ~0 rows (Codex ckpt-1 efficiency gate).
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM unresolved_13f_cusips "
-            "WHERE source = %(source)s AND period_end >= %(cutoff)s)",
-            {"source": source, "cutoff": cutoff},
-        )
-        row = cur.fetchone()
-    return bool(row and row[0])
-
-
-def reconcile_survived_markers(
-    markers: Iterable[tuple[str, str, date, int]],
-    survived_obs_keys: set[tuple[int, str, date]],
-) -> set[tuple[str, str, date]]:
-    """Keep only markers whose observation survived the COPY into staging.
-
-    The bulk ingesters collect ``(cusip, filer_cik, period_end,
-    instrument_id)`` for every CUSIP that resolves during the archive
-    walk — appended right after ``copy.write_row``, BEFORE the
-    ``ON_ERROR ignore`` COPY confirms the row coerced into the staging
-    table. A wire-skipped holding therefore never reaches staging, so
-    deleting its marker would drop a hint for an observation that never
-    materialised (#1399, Codex ckpt-2 HIGH).
-
-    This filters the collected set against ``survived_obs_keys`` — the
-    DISTINCT ``(instrument_id, filer_cik, period_end)`` obs grain read
-    back from the per-archive staging table AFTER the drain. A marker is
-    deletable iff a row for its obs grain actually landed. Returns the
-    marker-grain ``(cusip, filer_cik, period_end)`` set to delete.
-    """
-    return {
-        (cusip, filer_cik, period_end)
-        for (cusip, filer_cik, period_end, instrument_id) in markers
-        if (instrument_id, filer_cik, period_end) in survived_obs_keys
-    }
-
-
-def delete_resolved_bulk_markers(
-    conn: psycopg.Connection[Any],
-    buffer: Iterable[tuple[str, str, date]],
-    *,
-    source: BulkCusipSource,
-) -> int:
-    """Delete ``unresolved_13f_cusips`` bulk markers a later run resolved.
-
-    When a bulk ingest materialises an observation for a ``(cusip,
-    filer_cik, period_end)`` that an EARLIER run recorded as unresolved
-    (the CUSIP was unmapped then, is mapped now), the marker row is
-    redundant — the observation now exists. Drains the buffered
-    now-resolved triples into a TEMP staging table and deletes the EXACT
-    matching bulk rows in one ``DELETE ... USING`` pass.
-
-    Precise grain (spec §2a): the match is the full bulk-marker key
-    ``(source, cusip, filer_cik, period_end)`` with the same COALESCE
-    sentinels as ``unresolved_13f_cusips_bulk_idx`` (sql/164) so the
-    planner uses that index and no coarser observation row can
-    false-positive a delete. ``source`` is always non-null for bulk
-    markers (the index is partial ``WHERE source IS NOT NULL``), so the
-    literal equality is exact — no COALESCE needed on it.
-
-    Malformed triples (empty cusip/filer or NULL period) are filtered in
-    the COPY pass, mirroring :func:`flush_unresolved_cusips_bulk`; both
-    callers only buffer fully-populated triples so this is belt-and-
-    braces.
-
-    Transaction safety: like :func:`flush_unresolved_cusips_bulk`, this
-    helper does NOT own a savepoint — a raise leaves the caller's tx in
-    ``InFailedSqlTransaction``. Callers MUST wrap in
-    ``with conn.transaction():`` for failure isolation. A delete failure
-    is non-fatal: a redundant marker is harmless (the retention purge or
-    a later run reclaims it) — markers are a hint, not source of truth.
-
-    Returns the number of rows deleted.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TEMP TABLE IF NOT EXISTS _stg_resolved_markers (
-                cusip       TEXT NOT NULL,
-                filer_cik   TEXT,
-                period_end  DATE
-            ) ON COMMIT DROP
-            """
-        )
-        # Clear any rows left by a prior invocation in the same tx
-        # (tests, or a multi-archive caller reusing the connection).
-        cur.execute("TRUNCATE _stg_resolved_markers")
-
-        copy_sql = (
-            "COPY _stg_resolved_markers ("
-            + ", ".join(_RESOLVED_STG_COLS)
-            + ") FROM STDIN WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)"
-        )
-        staged = 0
-        with cur.copy(copy_sql) as copy:
-            for cusip, filer_cik, period_end in buffer:
-                if not cusip or not filer_cik or period_end is None:
-                    continue
-                copy.write_row((cusip.strip().upper(), filer_cik.strip(), period_end))
-                staged += 1
-        if staged == 0:
-            return 0
-
-        # ``source`` equality is exact (bulk markers are always
-        # non-null source). COALESCE on filer_cik/period_end mirrors the
-        # bulk partial UNIQUE INDEX expression so the planner can use it.
-        cur.execute(
-            """
-            DELETE FROM unresolved_13f_cusips u
-             USING _stg_resolved_markers s
-             WHERE u.source = %(source)s
-               AND u.cusip = s.cusip
-               AND COALESCE(u.filer_cik, '') = COALESCE(s.filer_cik, '')
-               AND COALESCE(u.period_end, '0001-01-01'::date)
-                   = COALESCE(s.period_end, '0001-01-01'::date)
+            WHERE period_end >= %(cutoff)s
+            GROUP BY cusip, source
+            ON CONFLICT (cusip, source) WHERE source IS NOT NULL
+            DO UPDATE SET
+                observation_count = unresolved_13f_cusips.observation_count
+                                    + EXCLUDED.observation_count,
+                first_period_end  = LEAST(
+                    unresolved_13f_cusips.first_period_end,
+                    EXCLUDED.first_period_end),
+                last_period_end   = GREATEST(
+                    unresolved_13f_cusips.last_period_end,
+                    EXCLUDED.last_period_end),
+                last_observed_at  = NOW()
             """,
-            {"source": source},
+            {"cutoff": cutoff},
         )
         return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+
+def sweep_bulk_cusips_resolved_via_extid(
+    conn: psycopg.Connection[Any],
+) -> int:
+    """Tombstone bulk-partition rows whose CUSIP is now mapped (#1349).
+
+    Bulk analogue of the legacy extid sweep
+    (:func:`sweep_resolvable_unresolved_cusips`): a CUSIP that landed in
+    ``external_identifiers`` by ANY route (SEC curated backfill, fuzzy
+    resolver, OpenFIGI) is no longer pending work — the next bulk ingest
+    pass materialises its observations directly via
+    ``load_bulk_cusip_map``. Marks the per-(cusip, source) row
+    ``resolved_via_extid`` rather than deleting it: the tombstone keeps
+    the drillthrough audit note meaningful ("CUSIP sat unresolved during
+    past ingests; observations may be unmaterialised until re-ingest")
+    until the retention purge ages the row out.
+
+    Replaces the #1399 inline-delete machinery: with per-cusip grain
+    there is no per-observation claim to reconcile against the obs
+    tables, so "mapped ⇒ no longer pending" is safe by construction
+    (spec §2). Cheap — the table is bounded at one row per
+    (cusip, source), ~55k rows.
+
+    Returns the number of rows tombstoned. Caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unresolved_13f_cusips u
+               SET resolution_status = 'resolved_via_extid',
+                   last_observed_at = NOW()
+             WHERE u.source IS NOT NULL
+               AND u.resolution_status IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM external_identifiers ei
+                    WHERE ei.identifier_value = u.cusip
+                      AND ei.identifier_type = 'cusip'
+                      AND ei.provider IN ('sec', 'openfigi')
+               )
+            """,
+        )
+        return int(cur.rowcount)
 
 
 # ---------------------------------------------------------------------------
@@ -1438,43 +1376,33 @@ def purge_unresolved_bulk_rows_outside_retention(
     *,
     source: BulkCusipSource,
     cutoff: date,
-    limit: int = 100_000,
 ) -> int:
-    """Delete up to ``limit`` bulk-partition rows for ``source`` whose
-    ``period_end`` is older than ``cutoff`` (the per-source ingest
-    retention floor). Returns the number of rows deleted (#1349 PR1).
+    """Delete bulk-partition rows for ``source`` whose latest sighting
+    (``last_period_end``) is older than ``cutoff`` (the per-source
+    ingest retention floor). Returns the number of rows deleted.
 
-    Such rows are markers for periods that **no pipeline will ever
-    materialise** — the bulk ingest rejects ``period_end < cutoff`` at
-    its retention gate (`sec_13f_dataset_ingest.py:621`; the N-PORT bulk
-    ingest applies the same floor) — so the observation is permanently
-    unrecoverable and the marker is pure dead weight. This period-based
-    predicate is the ONLY provably-safe cleanup: it does not depend on
-    the coarse ``(cusip, filer_cik, period_end, source)`` bulk-row grain,
-    which cannot prove redundancy against the fine-grained
-    ``ownership_institutions_observations`` /
-    ``ownership_funds_observations`` tables (spec
-    `docs/proposals/etl/1349-unresolved-13f-cusips-bloat.md` §2a).
+    A CUSIP last seen before the retention floor will never be
+    re-recorded (the writers gate on the same cutoff — spec §4) nor
+    materialised (the bulk ingest rejects ``period_end < cutoff`` at
+    its retention gate), so the row — pending or tombstoned — is pure
+    dead weight. An in-window sighting refreshes ``last_period_end``,
+    keeping the row. The table is therefore bounded by the retention
+    window in CUSIP terms.
 
-    **Single bounded pass.** ``ctid``-capped at ``limit`` *physical rows*
-    (not distinct CUSIPs — one high-fanout CUSIP must not blow the cap).
-    Does **not** commit: the caller owns the transaction (matches
-    :func:`sweep_unresolved_cusips_via_openfigi`). The caller loops +
-    commits per pass to drain a large backlog without one giant txn.
+    Single plain DELETE per source: with the per-(cusip, source) grain
+    (#1349, sql/189) the table holds ~55k rows, so the pre-grain-change
+    ctid-batched multi-pass drain is unnecessary. Does **not** commit —
+    the caller owns the transaction (matches
+    :func:`sweep_unresolved_cusips_via_openfigi`).
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             DELETE FROM unresolved_13f_cusips
-             WHERE ctid IN (
-                 SELECT ctid
-                   FROM unresolved_13f_cusips
-                  WHERE source = %(source)s
-                    AND period_end < %(cutoff)s
-                  LIMIT %(limit)s
-             )
+             WHERE source = %(source)s
+               AND last_period_end < %(cutoff)s
             """,
-            {"source": source, "cutoff": cutoff, "limit": limit},
+            {"source": source, "cutoff": cutoff},
         )
         return int(cur.rowcount)
 
@@ -1627,12 +1555,19 @@ def iter_pending_unresolved(
     """Yield unresolved CUSIPs (resolution_status IS NULL) ordered
     by observation count DESC. Used by the operator CLI to inspect
     the resolver backlog before triggering a manual mapping
-    upsert."""
+    upsert.
+
+    ``source`` + ``first_period_end``/``last_period_end`` included
+    (#1349): bulk rows carry NULL ``name_of_issuer`` /
+    ``last_accession_number``, so the source + sighting range is what
+    keeps the inspect output useful for the mixed legacy+bulk set.
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT cusip, name_of_issuer, observation_count,
-                   last_accession_number, first_observed_at, last_observed_at
+                   last_accession_number, first_observed_at, last_observed_at,
+                   source, first_period_end, last_period_end
             FROM unresolved_13f_cusips
             WHERE resolution_status IS NULL
             ORDER BY observation_count DESC, last_observed_at DESC

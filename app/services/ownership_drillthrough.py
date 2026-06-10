@@ -189,7 +189,15 @@ def _institutional_state(conn: psycopg.Connection[Any], instrument_id: int) -> P
     if tomb_row["tombstone_count"]:
         notes.append(f"{tomb_row['tombstone_count']} tombstoned accession(s)")
     if unresolved_row["unresolved_count"]:
-        notes.append(f"{unresolved_row['unresolved_count']} unresolved-CUSIP row(s) (#740 backfill gap)")
+        # #1349 — per-(cusip, source) grain: the count is queue entries
+        # (0-2 per instrument), not per-observation rows, and includes
+        # resolved_via_* tombstones awaiting the retention purge. The
+        # tombstones ARE the signal: the CUSIP sat unresolved during
+        # past ingests, so observations may be unmaterialised until
+        # re-ingest.
+        notes.append(
+            f"{unresolved_row['unresolved_count']} CUSIP queue entr(y/ies) awaiting re-ingest (#740 backfill gap)"
+        )
     if body_row["body_count"] and not holdings["row_count"]:
         notes.append("raw bodies on file but zero typed rows — rewash candidate")
 
