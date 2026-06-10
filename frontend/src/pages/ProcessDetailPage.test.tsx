@@ -627,6 +627,35 @@ describe("ProcessDetailPage — Timeline tab (bootstrap)", () => {
     expect(chip.getAttribute("title")).toContain("fundamentals_raw_seeded");
   });
 
+  // #1266 — a deliberate skip (slow-connection fallback) must render its
+  // reason in neutral slate, not error red; a genuine error stays red.
+  it("tones the detail line neutral for a skipped stage and red for an error stage", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    const payload = makeTimelinePayload();
+    payload.stages[0]!.status = "skipped";
+    payload.stages[0]!.last_error =
+      "skipped: slow-connection fallback (mbps=9.514); fallback manifest written, bulk archives bypassed";
+    payload.stages[1]!.status = "error";
+    payload.stages[1]!.last_error = "TimeoutError: archive fetch timed out";
+    mockedTimeline.mockResolvedValueOnce(payload);
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    const details = await screen.findAllByTestId("stage-detail-text");
+    expect(details.length).toBe(2);
+    const skippedDetail = details.find((d) =>
+      d.textContent?.includes("slow-connection fallback"),
+    )!;
+    const errorDetail = details.find((d) =>
+      d.textContent?.includes("TimeoutError"),
+    )!;
+    expect(skippedDetail.className).toContain("text-slate-500");
+    expect(skippedDetail.className).not.toContain("text-red");
+    expect(errorDetail.className).toContain("text-red-700");
+  });
+
   // #1409 P5 — live signals on a running stage: rate + heartbeat age.
   it("renders rate and heartbeat age on a running stage", async () => {
     mockedDetail.mockResolvedValueOnce(
