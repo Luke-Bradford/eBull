@@ -12,7 +12,10 @@
  *    via sessionStorage; reload re-shows it as long as bootstrap is
  *    still incomplete (we never want "dismiss forever" — the actual
  *    fix path is the admin panel).
- *  * Click "Open admin" → navigates to ``/admin``.
+ *  * Click "Open bootstrap" → deep-links to the bootstrap process detail
+ *    page with the Timeline tab preselected (#1267 — the old "/admin"
+ *    target was a no-op when the operator was already on /admin; the
+ *    detail page is always forward motion).
  */
 
 import { Link } from "react-router-dom";
@@ -92,10 +95,10 @@ export function BootstrapNudgeBanner() {
       <span>{STATUS_COPY[data.status]}</span>
       <div className="flex items-center gap-3">
         <Link
-          to="/admin"
+          to="/admin/processes/bootstrap?tab=timeline"
           className="rounded bg-white/60 dark:bg-slate-900/60 px-2 py-1 text-xs font-medium hover:bg-white dark:hover:bg-slate-900"
         >
-          Open admin
+          Open bootstrap
         </Link>
         <button
           type="button"

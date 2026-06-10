@@ -13,7 +13,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
 import { runJob } from "@/api/jobs";
@@ -58,6 +58,19 @@ import {
 
 type TabKey = "overview" | "history" | "errors" | "dag" | "timeline" | "advanced";
 
+// #1267 — valid `?tab=` deep-link targets. Runtime mirror of TabKey so a
+// link like /admin/processes/bootstrap?tab=timeline can preselect a tab;
+// anything unknown falls back to overview, and the existing per-process
+// guards below still reset tabs the process doesn't own.
+const TAB_KEYS: readonly TabKey[] = [
+  "overview",
+  "history",
+  "errors",
+  "dag",
+  "timeline",
+  "advanced",
+];
+
 const ORCHESTRATOR_FULL_SYNC_ID = "orchestrator_full_sync";
 const BOOTSTRAP_PROCESS_ID = "bootstrap";
 
@@ -92,7 +105,16 @@ const BOOTSTRAP_LANE_ORDER = [
 export function ProcessDetailPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? "";
-  const [tab, setTab] = useState<TabKey>("overview");
+  // #1267 — initial tab honours a `?tab=` deep link (read once at mount;
+  // tab switches stay local state, the URL is not kept in sync).
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState<TabKey>(() => {
+    const requested = searchParams.get("tab");
+    return requested !== null &&
+      (TAB_KEYS as readonly string[]).includes(requested)
+      ? (requested as TabKey)
+      : "overview";
+  });
   const [busy, setBusy] = useState(false);
   const [triggerError, setTriggerError] = useState<unknown>(null);
   const [cancelError, setCancelError] = useState<unknown>(null);
