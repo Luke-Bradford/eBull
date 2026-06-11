@@ -1448,3 +1448,37 @@ def test_dimensional_facts_target_amendment_accession_not_item1_fallback(
     assert _dimensional_rows(ebull_test_conn, plain_acc) == []
     amend_rows = _dimensional_rows(ebull_test_conn, amend_acc)
     assert [(r[0], int(r[2])) for r in amend_rows] == [("t:NorthMember", 600), ("t:SouthMember", 400)]
+
+
+def test_dimensional_facts_survive_item1_tombstone(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §D1 both-directions independence: a plain 10-K whose Item 1
+    defeats the extractor tombstones the NARRATIVE, but the dimensional
+    step (2.5, before the narrative parse) must still have written the
+    segment facts (MSFT FY2025 case from the dev backfill)."""
+    iid = 10100556
+    cik = "0000999991"
+    accession = "0000999991-26-000556"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="ACMG", cik=cik)
+    _seed_pending_10k(ebull_test_conn, accession=accession, instrument_id=iid, cik=cik)
+    ebull_test_conn.commit()
+
+    _patch_dimensional_real(monkeypatch)
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/"
+    _patch_fetch_map(
+        monkeypatch,
+        {
+            # No Item 1 marker on a plain 10-K → narrative tombstone.
+            base + "primary_doc.htm": "<html><body><p>FORM 10-K</p><p>no item one here</p></body></html>",
+            base + "acme_htm.xml": _DIM_INSTANCE_XML,
+        },
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_10k", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.tombstoned == 1
+
+    rows = _dimensional_rows(ebull_test_conn, accession)
+    assert [(r[0], int(r[2])) for r in rows] == [("t:NorthMember", 600), ("t:SouthMember", 400)]

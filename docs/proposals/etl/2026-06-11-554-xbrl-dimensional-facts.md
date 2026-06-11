@@ -58,7 +58,11 @@ Intelligent Cloud $106.27B / More Personal Computing $54.65B ✓.
 source per form is a discovery-plumbing change with no payoff. Segment extraction is a
 second extraction step inside the same parser run, savepointed independently of the
 Item 1 write so a segment-extraction failure does not tombstone the narrative (and
-vice versa). Failure of the XBRL step alone → `status='failed'` (transient) only for
+vice versa). **Ordering (corrected during dev backfill):** the dimensional step runs
+BEFORE the narrative parse (step 2.5, right after store_raw) — the original
+post-narrative placement let an Item-1 tombstone suppress segments, violating the
+both-directions independence (caught live: MSFT FY2025's 10-K defeats the Item 1
+extractor; manifest row tombstones for the narrative, segments must still land). Failure of the XBRL step alone → `status='failed'` (transient) only for
 fetch errors; structurally-absent XBRL (pre-mandate filings, ~pre-2011) → zero rows,
 parsed, no tombstone.
 

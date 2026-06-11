@@ -222,12 +222,15 @@ def _parse_sec_10k(
        in a nested savepoint logs + degrades to blob-only. Deterministic
        upsert error → tombstone with the savepoint rolling back partial
        fan-out state.
-    9. Dimensional XBRL facts (#554): fetch THIS accession's instance
-       (+ lab/def linkbases) through the throttled provider, extract
-       segment/product/geographic facts, delete-then-insert per
-       sibling in a separate savepoint. Degrades to
-       parsed-without-segments on parse/write bugs; transport errors
-       retry the whole row.
+    Dimensional XBRL facts (#554) run as step 2.5 — after store_raw,
+    BEFORE the narrative parse — so an Item-1 tombstone cannot
+    suppress segments (spec §D1 independence in BOTH directions; the
+    MSFT FY2025 dev backfill caught the original post-narrative
+    ordering): fetch THIS accession's instance (+ lab/def linkbases)
+    through the throttled provider, extract, delete-then-insert per
+    sibling in a separate savepoint. Degrades to
+    continue-without-segments on parse/write bugs; transport errors
+    retry the whole row.
     """
     from app.jobs.sec_manifest_worker import ParseOutcome
 
@@ -297,6 +300,62 @@ def _parse_sec_10k(
             accession,
         )
         return _failed_outcome(f"store_raw error: {exc}")
+
+    # 2.5. Dimensional XBRL facts (#554, spec §D1 step 2). Runs BEFORE
+    # the narrative parse so an Item-1 tombstone (e.g. a filer whose
+    # 10-K defeats the Item 1 extractor — MSFT FY2025 in the dev
+    # backfill) cannot suppress segments: the spec invariant is that
+    # narrative and dimensional failures are independent in BOTH
+    # directions. Failure semantics: transport error → failed (whole
+    # row retries; idempotent — Item 1 is filed_at-gate-suppressed,
+    # dimensional write is delete-then-insert; a narrative may become
+    # visible before segments on the retry, intended); structural
+    # no-XBRL → zero rows; parse/write error → WARN +
+    # continue-without-segments (a segment bug must NOT regress the
+    # narrative), transient DB error excepted (→ failed).
+    if filed_at is None:
+        logger.warning(
+            "sec_10k manifest parser: accession=%s has no filed_at; skipping dimensional facts",
+            accession,
+        )
+    else:
+        try:
+            dimensional = _fetch_dimensional_facts(
+                accession=accession,
+                issuer_cik=None if issuer_cik == _CIK_MISSING_SENTINEL else issuer_cik,
+                primary_document_url=url,
+            )
+        except _DimensionalFetchError as exc:
+            return _failed_outcome(str(exc), raw_status="stored")
+        except Exception:  # noqa: BLE001 — degrade: narrative pipeline continues
+            logger.warning(
+                "sec_10k manifest parser: dimensional extraction failed accession=%s (continuing without segments)",
+                accession,
+                exc_info=True,
+            )
+            dimensional = None
+
+        if dimensional is not None:
+            try:
+                with conn.transaction():
+                    for sibling_iid in _resolve_siblings(conn, instrument_id=instrument_id, issuer_cik=issuer_cik):
+                        replace_accession_rows(
+                            conn,
+                            instrument_id=sibling_iid,
+                            source_accession=accession,
+                            form_type=form,
+                            filed_at=filed_at,
+                            parser_version=_PARSER_VERSION_10K,
+                            facts=dimensional,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                if is_transient_upsert_error(exc):
+                    return _failed_outcome(format_upsert_error(exc), raw_status="stored")
+                logger.warning(
+                    "sec_10k manifest parser: dimensional write failed accession=%s (continuing without segments)",
+                    accession,
+                    exc_info=True,
+                )
 
     # 3. Parse Item 1. The bare-call-after-committed-savepoint rule
     # (PR #1126) — wrap the next expression that can raise so an
@@ -486,60 +545,6 @@ def _parse_sec_10k(
             raw_status="stored",
             error=format_upsert_error(exc),
         )
-
-    # 7. Dimensional XBRL facts (#554, spec §D1 step 2). Failure
-    # semantics: transport error → failed (whole row retries,
-    # idempotent — Item 1 is gate-suppressed, dimensional write is
-    # delete-then-insert; the narrative may be visible before segments
-    # land on the retry, intended); structural no-XBRL → parsed, zero
-    # rows; parse/write error → WARN + parsed-without-segments (a
-    # segment bug must NOT regress the narrative), transient DB error
-    # excepted (→ failed).
-    if filed_at is None:
-        logger.warning(
-            "sec_10k manifest parser: accession=%s has no filed_at; skipping dimensional facts",
-            accession,
-        )
-    else:
-        try:
-            dimensional = _fetch_dimensional_facts(
-                accession=accession,
-                issuer_cik=None if issuer_cik == _CIK_MISSING_SENTINEL else issuer_cik,
-                primary_document_url=url,
-            )
-        except _DimensionalFetchError as exc:
-            return _failed_outcome(str(exc), raw_status="stored")
-        except Exception:  # noqa: BLE001 — degrade: narrative already written
-            logger.warning(
-                "sec_10k manifest parser: dimensional extraction failed accession=%s "
-                "(narrative intact; parsed without segments)",
-                accession,
-                exc_info=True,
-            )
-            dimensional = None
-
-        if dimensional is not None:
-            try:
-                with conn.transaction():
-                    for sibling_iid in siblings:
-                        replace_accession_rows(
-                            conn,
-                            instrument_id=sibling_iid,
-                            source_accession=accession,
-                            form_type=form,
-                            filed_at=filed_at,
-                            parser_version=_PARSER_VERSION_10K,
-                            facts=dimensional,
-                        )
-            except Exception as exc:  # noqa: BLE001
-                if is_transient_upsert_error(exc):
-                    return _failed_outcome(format_upsert_error(exc), raw_status="stored")
-                logger.warning(
-                    "sec_10k manifest parser: dimensional write failed accession=%s "
-                    "(narrative intact; parsed without segments)",
-                    accession,
-                    exc_info=True,
-                )
 
     return ParseOutcome(
         status="parsed",
