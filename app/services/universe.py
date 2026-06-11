@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import psycopg
 
 from app.providers.market_data import InstrumentRecord, MarketDataProvider
+from app.services.instrument_history import reconcile_symbol_history
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,21 @@ def sync_universe(
             {"provider_ids": list(provider_ids)},
         )
         deactivated = rows.rowcount
+
+        # #794 Batch 7 — symbol-change ingest. eToro's instrument_id is
+        # stable across renames, so a ticker change (FB → META,
+        # BBBY → X.delisted) lands above as a plain symbol UPDATE; this
+        # reconcile closes the prior instrument_symbol_history chain
+        # link and opens the new one inside the same transaction.
+        history = reconcile_symbol_history(conn)
+        if history.seeded or history.renamed or history.corrected_same_day or history.reverted_same_day:
+            logger.info(
+                "Universe sync: symbol history seeded=%d renamed=%d corrected_same_day=%d reverted_same_day=%d",
+                history.seeded,
+                history.renamed,
+                history.corrected_same_day,
+                history.reverted_same_day,
+            )
 
     # Re-query to get accurate inserted/updated counts.
     # ON CONFLICT DO UPDATE doesn't distinguish insert vs update via rowcount;

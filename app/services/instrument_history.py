@@ -37,6 +37,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 import psycopg
 import psycopg.rows
@@ -194,6 +195,10 @@ def backfill_current_history(conn: psycopg.Connection[tuple]) -> tuple[int, int]
 
 
 def _backfill_cik_history(conn: psycopg.Connection[tuple]) -> int:
+    # NOT EXISTS on the instrument for the same reason as the symbol
+    # twin below: once a chain has a closed row, an ON CONFLICT-guarded
+    # re-insert lands on a different PK and trips the EXCLUDE
+    # no-overlap constraint instead of no-op'ing.
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -208,13 +213,22 @@ def _backfill_cik_history(conn: psycopg.Connection[tuple]) -> int:
             FROM instruments i
             JOIN instrument_sec_profile p ON p.instrument_id = i.instrument_id
             WHERE p.cik IS NOT NULL
-            ON CONFLICT DO NOTHING
+              AND NOT EXISTS (
+                  SELECT 1 FROM instrument_cik_history h
+                  WHERE h.instrument_id = i.instrument_id
+              )
             """,
         )
         return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
 
 
 def _backfill_symbol_history(conn: psycopg.Connection[tuple]) -> int:
+    # NOT EXISTS on the instrument (not ON CONFLICT on the PK): after a
+    # rename the open row is (NEWSYM, today) — an ON CONFLICT-guarded
+    # re-insert of (NEWSYM, first_seen) has a DIFFERENT PK, so it would
+    # reach the EXCLUDE no-overlap constraint and blow up the re-run.
+    # Seeding only instruments with no history at all is the idempotent
+    # form once rename chains exist (#794 Batch 7).
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -228,7 +242,160 @@ def _backfill_symbol_history(conn: psycopg.Connection[tuple]) -> int:
                    'imported'
             FROM instruments i
             WHERE i.symbol IS NOT NULL
-            ON CONFLICT DO NOTHING
+              AND NOT EXISTS (
+                  SELECT 1 FROM instrument_symbol_history h
+                  WHERE h.instrument_id = i.instrument_id
+              )
             """,
         )
         return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+
+
+@dataclass(frozen=True)
+class SymbolReconcileStats:
+    """Outcome of one :func:`reconcile_symbol_history` pass."""
+
+    seeded: int
+    renamed: int
+    corrected_same_day: int
+    reverted_same_day: int = 0
+
+
+def reconcile_symbol_history(conn: psycopg.Connection[Any]) -> SymbolReconcileStats:
+    """Bring ``instrument_symbol_history`` in line with ``instruments.symbol``
+    (#794 Batch 7 — the live symbol-change ingester).
+
+    eToro's instrument_id is stable across ticker changes, so a rename
+    (FB → META) or delist-rename (BBBY → BBBYQ / ``X.delisted``) arrives
+    at ``sync_universe`` as a plain ``symbol`` UPDATE on the existing
+    row. This reconcile runs inside the same sync transaction and is a
+    pure function of current table state, so it also self-heals any
+    drift introduced outside the sync path (manual fixes, older data).
+
+    Four passes, ordered:
+
+    1. **Seed** — instruments with no history rows get one ``imported``
+       current row (delegates to the backfill insert).
+    2. **Same-day revert** — the open row was opened TODAY by an
+       earlier rename and the feed has flipped BACK to the symbol of
+       the row closed today (provider flip-flop / stale response,
+       Codex ckpt-2 HIGH). Updating in place would leave a corrupt
+       "X renamed to X" chain and erase the transient; instead the
+       same-day link is deleted and the closed-today row reopens —
+       fully undoing the flip-flop. Delete and reopen are two
+       statements (same sibling-CTE caveat as pass 4: the partial
+       UNIQUE one-current probe must not race the delete).
+    3. **Same-day correction** — any remaining open row opened TODAY
+       whose symbol differs is updated in place. Closing it would need
+       ``effective_to = effective_from``, which the ordered-ranges
+       CHECK rejects (zero-duration range); a same-day flip is treated
+       as a correction of today's observation, not a new chain link.
+    4. **Rename** — open rows opened before today whose symbol differs
+       are closed at ``CURRENT_DATE`` and a new current row opens at
+       ``CURRENT_DATE``, only for rows the close actually claimed
+       (``RETURNING`` — a concurrent reconcile's loser must not insert
+       from a stale candidate list, Codex ckpt-2 MEDIUM).
+       ``source_event`` is ``delisting`` when the new symbol carries
+       eToro's dead-ticker suffix (``.delisted`` / ``.old``), else
+       ``rebrand``. Close and open are two statements, NOT one
+       data-modifying CTE — sibling CTE effects are not reliably
+       visible to each other's constraint checks, so the EXCLUDE
+       no-overlap probe could non-deterministically see the still-open
+       row.
+
+    Caller owns the transaction (``sync_universe`` wraps the whole
+    sync; tests commit explicitly).
+    """
+    seeded = _backfill_symbol_history(conn)
+
+    # Explicit tuple_row: the caller's connection may carry any row
+    # factory (sync_universe's is unparameterised); the ``int(r[0])``
+    # fetches below must not depend on it (review WARNING, PR #1583).
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        # Pass 2 — same-day revert (flip-flop undo).
+        cur.execute(
+            """
+            DELETE FROM instrument_symbol_history h
+            USING instruments i, instrument_symbol_history closed
+            WHERE i.instrument_id = h.instrument_id
+              AND h.effective_to IS NULL
+              AND h.effective_from = CURRENT_DATE
+              AND h.symbol IS DISTINCT FROM i.symbol
+              AND closed.instrument_id = h.instrument_id
+              AND closed.effective_to = CURRENT_DATE
+              AND closed.symbol = i.symbol
+            RETURNING h.instrument_id
+            """,
+        )
+        reverted_ids = [int(r[0]) for r in cur.fetchall()]
+        if reverted_ids:
+            cur.execute(
+                """
+                UPDATE instrument_symbol_history
+                SET effective_to = NULL
+                WHERE instrument_id = ANY(%s)
+                  AND effective_to = CURRENT_DATE
+                """,
+                (reverted_ids,),
+            )
+
+        # Pass 3 — same-day in-place correction.
+        cur.execute(
+            """
+            UPDATE instrument_symbol_history h
+            SET symbol = i.symbol
+            FROM instruments i
+            WHERE i.instrument_id = h.instrument_id
+              AND h.effective_to IS NULL
+              AND h.effective_from = CURRENT_DATE
+              AND h.symbol IS DISTINCT FROM i.symbol
+            """,
+        )
+        corrected = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+        # Pass 4 — rename: close, then open only what the close claimed.
+        cur.execute(
+            """
+            UPDATE instrument_symbol_history h
+            SET effective_to = CURRENT_DATE
+            FROM instruments i
+            WHERE i.instrument_id = h.instrument_id
+              AND h.effective_to IS NULL
+              AND h.effective_from < CURRENT_DATE
+              AND h.symbol IS DISTINCT FROM i.symbol
+            RETURNING h.instrument_id
+            """,
+        )
+        closed_ids = [int(r[0]) for r in cur.fetchall()]
+        if not closed_ids:
+            return SymbolReconcileStats(
+                seeded=seeded,
+                renamed=0,
+                corrected_same_day=corrected,
+                reverted_same_day=len(reverted_ids),
+            )
+
+        cur.execute(
+            r"""
+            INSERT INTO instrument_symbol_history (
+                instrument_id, symbol, effective_from, effective_to, source_event
+            )
+            SELECT i.instrument_id,
+                   i.symbol,
+                   CURRENT_DATE,
+                   NULL,
+                   CASE WHEN i.symbol ~* '\.(delisted|old)$'
+                        THEN 'delisting' ELSE 'rebrand' END
+            FROM instruments i
+            WHERE i.instrument_id = ANY(%s)
+            """,
+            (closed_ids,),
+        )
+        renamed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    return SymbolReconcileStats(
+        seeded=seeded,
+        renamed=renamed,
+        corrected_same_day=corrected,
+        reverted_same_day=len(reverted_ids),
+    )

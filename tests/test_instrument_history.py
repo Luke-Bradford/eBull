@@ -225,3 +225,196 @@ class TestBackfill:
 
         assert instrument_history.instrument_id_for_historical_cik(conn, "0000099003") == 794_022
         assert instrument_history.instrument_id_for_historical_cik(conn, "0000099999") is None
+
+
+class TestReconcileSymbolHistory:
+    """#794 Batch 7 — the live symbol-change ingester."""
+
+    def _seed_with_history(
+        self,
+        conn: psycopg.Connection[tuple],
+        *,
+        iid: int,
+        symbol: str,
+        opened_days_ago: int,
+    ) -> None:
+        """Instrument + an open history row opened ``opened_days_ago``."""
+        _seed_instrument(conn, iid=iid, symbol=symbol)
+        conn.execute(
+            """
+            INSERT INTO instrument_symbol_history (
+                instrument_id, symbol, effective_from, effective_to, source_event
+            ) VALUES (%s, %s, CURRENT_DATE - %s, NULL, 'imported')
+            """,
+            (iid, symbol, opened_days_ago),
+        )
+
+    def _chain(self, conn: psycopg.Connection[tuple], iid: int) -> list[tuple]:
+        return conn.execute(
+            """
+            SELECT symbol, effective_from, effective_to, source_event
+            FROM instrument_symbol_history
+            WHERE instrument_id = %s
+            ORDER BY effective_from
+            """,
+            (iid,),
+        ).fetchall()
+
+    def test_rename_closes_prior_and_opens_new(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        self._seed_with_history(conn, iid=794001, symbol="FB", opened_days_ago=30)
+        conn.execute("UPDATE instruments SET symbol = 'META' WHERE instrument_id = 794001")
+
+        stats = instrument_history.reconcile_symbol_history(conn)
+        conn.commit()
+
+        assert stats.renamed == 1
+        chain = self._chain(conn, 794001)
+        assert len(chain) == 2
+        assert chain[0][0] == "FB"
+        assert chain[0][2] == date.today()  # closed at rename date
+        assert chain[1][0] == "META"
+        assert chain[1][2] is None  # current
+        assert chain[1][3] == "rebrand"
+
+    def test_delisted_suffix_classified_as_delisting(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        self._seed_with_history(conn, iid=794002, symbol="BBBY", opened_days_ago=30)
+        conn.execute("UPDATE instruments SET symbol = 'BBBY.delisted' WHERE instrument_id = 794002")
+
+        stats = instrument_history.reconcile_symbol_history(conn)
+        conn.commit()
+
+        assert stats.renamed == 1
+        chain = self._chain(conn, 794002)
+        assert chain[-1][0] == "BBBY.delisted"
+        assert chain[-1][3] == "delisting"
+
+    def test_same_day_flip_updates_in_place(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """A flip on the open row's own effective_from day cannot close
+        it (zero-duration range fails the ordered-ranges CHECK) — it is
+        corrected in place instead."""
+        conn = ebull_test_conn
+        self._seed_with_history(conn, iid=794003, symbol="TYPO", opened_days_ago=0)
+        conn.execute("UPDATE instruments SET symbol = 'FIXED' WHERE instrument_id = 794003")
+
+        stats = instrument_history.reconcile_symbol_history(conn)
+        conn.commit()
+
+        assert stats.corrected_same_day == 1
+        assert stats.renamed == 0
+        chain = self._chain(conn, 794003)
+        assert len(chain) == 1
+        assert chain[0][0] == "FIXED"
+        assert chain[0][2] is None
+
+    def test_reconcile_is_idempotent(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        self._seed_with_history(conn, iid=794004, symbol="FB", opened_days_ago=30)
+        conn.execute("UPDATE instruments SET symbol = 'META' WHERE instrument_id = 794004")
+
+        instrument_history.reconcile_symbol_history(conn)
+        second = instrument_history.reconcile_symbol_history(conn)
+        conn.commit()
+
+        assert second.renamed == 0
+        assert second.corrected_same_day == 0
+        assert len(self._chain(conn, 794004)) == 2
+
+    def test_seed_pass_covers_history_less_instrument(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794005, symbol="NEW")
+
+        stats = instrument_history.reconcile_symbol_history(conn)
+        conn.commit()
+
+        assert stats.seeded >= 1
+        chain = self._chain(conn, 794005)
+        assert len(chain) == 1
+        assert chain[0][0] == "NEW"
+        assert chain[0][3] == "imported"
+
+    def test_backfill_rerun_after_rename_does_not_violate_exclude(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Regression: the old ON CONFLICT DO NOTHING backfill re-insert
+        landed on a different PK after a rename and tripped the EXCLUDE
+        no-overlap constraint. NOT EXISTS skips chained instruments."""
+        conn = ebull_test_conn
+        self._seed_with_history(conn, iid=794006, symbol="FB", opened_days_ago=30)
+        conn.execute("UPDATE instruments SET symbol = 'META' WHERE instrument_id = 794006")
+        instrument_history.reconcile_symbol_history(conn)
+
+        cik_rows, sym_rows = instrument_history.backfill_current_history(conn)
+        conn.commit()
+
+        chain = self._chain(conn, 794006)
+        assert len(chain) == 2  # backfill added nothing to the chained instrument
+
+    def test_reused_symbol_chains_stay_separate(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#794 AC4 — a symbol abandoned by one instrument and later
+        assigned to another must produce two unlinked chains."""
+        conn = ebull_test_conn
+        self._seed_with_history(conn, iid=794007, symbol="DEAD", opened_days_ago=30)
+        conn.execute("UPDATE instruments SET symbol = 'ALIVE' WHERE instrument_id = 794007")
+        instrument_history.reconcile_symbol_history(conn)
+        # New issuer picks up the abandoned ticker.
+        _seed_instrument(conn, iid=794008, symbol="DEAD")
+        instrument_history.reconcile_symbol_history(conn)
+        conn.commit()
+
+        a = self._chain(conn, 794007)
+        b = self._chain(conn, 794008)
+        assert [r[0] for r in a] == ["DEAD", "ALIVE"]
+        assert [r[0] for r in b] == ["DEAD"]
+        # The two DEAD rows are keyed to different instruments — no join.
+        owners = conn.execute(
+            "SELECT DISTINCT instrument_id FROM instrument_symbol_history "
+            "WHERE symbol = 'DEAD' AND instrument_id IN (794007, 794008)"
+        ).fetchall()
+        assert len(owners) == 2
+
+    def test_same_day_flip_flop_reverts_cleanly(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Codex ckpt-2 HIGH — rename FB→META then a later same-day sync
+        observing FB again must fully undo the flip-flop (delete the
+        same-day META link, reopen the FB row), NOT leave a corrupt
+        'FB renamed to FB' chain."""
+        conn = ebull_test_conn
+        self._seed_with_history(conn, iid=794009, symbol="FB", opened_days_ago=30)
+        conn.execute("UPDATE instruments SET symbol = 'META' WHERE instrument_id = 794009")
+        instrument_history.reconcile_symbol_history(conn)
+        # Provider flip-flops back the same day.
+        conn.execute("UPDATE instruments SET symbol = 'FB' WHERE instrument_id = 794009")
+
+        stats = instrument_history.reconcile_symbol_history(conn)
+        conn.commit()
+
+        assert stats.reverted_same_day == 1
+        assert stats.renamed == 0
+        assert stats.corrected_same_day == 0
+        chain = self._chain(conn, 794009)
+        assert len(chain) == 1  # META transient erased entirely
+        assert chain[0][0] == "FB"
+        assert chain[0][2] is None  # FB reopened as current
