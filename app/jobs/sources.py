@@ -356,6 +356,16 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # params in MANUAL_TRIGGER_JOB_METADATA (empty); invoker in
     # app/jobs/runtime.py::_INVOKERS.
     "filing_events_skip_tier_cleanup": "db",
+    # populate_canonical_redirects — #819 .RTH operational-duplicate
+    # redirect binder. Operator triggers after a universe sync
+    # introduces new ``.RTH``-style variants. Pure DB operation
+    # (instruments self-join + UPDATE, no HTTP), short-running →
+    # ``db`` lane. Invoker landed with #819 but this registry entry
+    # was missed, so every manual trigger was rejected at
+    # ``source_for()`` (found 2026-06-11, S6 audit: 561/561 RTH rows
+    # unbound, zero job_runs ever). Companion params in
+    # MANUAL_TRIGGER_JOB_METADATA (empty).
+    "populate_canonical_redirects": "db",
     # raw_payload_retention_sweep — #1014 payload-null sweep. Pure DB
     # operation but LONG-running (minutes over ~12k rows) → own lane,
     # NOT the catch-all ``db`` (would starve the every-5-min
