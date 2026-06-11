@@ -517,6 +517,13 @@ def upsert_cik_mapping(
                 # ``asset_class='us_equity'`` cohort filter keeps the
                 # crypto siblings out of this loop entirely (#475).
                 cik = mapping.get(symbol_upper[: -len(".US")])
+            if not cik and "." in symbol_upper:
+                # #1102 — share-class separators differ: eToro uses a
+                # dot (BRK.B, BF.A), SEC's ticker files use a dash
+                # (BRK-B, BF-A). Operational-variant suffixes (.RTH,
+                # .OLD, .CVR, ...) translate to dashed strings SEC
+                # never lists, so they miss here and stay skips.
+                cik = mapping.get(symbol_upper.replace(".", "-"))
             if not cik:
                 logger.debug("CIK mapping: no CIK found for symbol %s", symbol)
                 continue

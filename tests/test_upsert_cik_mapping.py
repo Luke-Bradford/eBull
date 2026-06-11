@@ -280,3 +280,46 @@ def test_non_dot_us_suffix_is_not_stripped(ebull_test_conn: psycopg.Connection[t
 
     assert upserted == 0
     assert _primary_cik(conn, 1) is None
+
+
+def test_share_class_dot_falls_back_to_dash(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#1102 — eToro writes share classes with a dot (BRK.B), SEC's
+    ticker files with a dash (BRK-B). The dashed fallback must bind."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="BRK.B")
+
+    upserted = upsert_cik_mapping(conn, {"BRK-B": "0001067983"}, [("BRK.B", "1")])
+
+    assert upserted == 1
+    assert _primary_cik(conn, 1) == "0001067983"
+
+
+def test_share_class_exact_match_wins_over_dash(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """If SEC ever lists a literal dotted ticker, the exact match must
+    win — the dash translation is a fallback, never a rewrite."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="BRK.B")
+
+    upserted = upsert_cik_mapping(
+        conn,
+        {"BRK.B": "0009999999", "BRK-B": "0001067983"},
+        [("BRK.B", "1")],
+    )
+
+    assert upserted == 1
+    assert _primary_cik(conn, 1) == "0009999999"
+
+
+def test_variant_suffix_dash_translation_stays_a_skip(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Operational variants (AAPL.RTH → AAPL-RTH) translate to dashed
+    strings SEC never lists — the fallback must not bind them to the
+    base ticker's CIK."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="DOW.OLD")
+
+    upserted = upsert_cik_mapping(conn, {"DOW": "0001751788"}, [("DOW.OLD", "1")])
+
+    assert upserted == 0
+    assert _primary_cik(conn, 1) is None
