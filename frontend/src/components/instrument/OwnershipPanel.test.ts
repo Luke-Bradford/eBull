@@ -14,9 +14,9 @@
  *   * Per-category totals + holder lists round-trip from the rollup
  *     into the SunburstInputs shape with no double-counting.
  *
- * The banner state machine + oversubscription warning are tested
- * against the response shape directly (they are simple enum-keyed
- * renders) — see the per-state assertions below.
+ * Banner rendering (per-state glyph / variant / copy) is covered in
+ * ``OwnershipCoverageBanner.test.tsx`` since the #923 extraction —
+ * this file only exercises the rollup→SunburstInputs transform.
  */
 
 import { describe, expect, it } from "vitest";
