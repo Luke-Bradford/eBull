@@ -77,14 +77,21 @@ export function OwnershipHistoryChart({
   outstanding,
 }: OwnershipHistoryChartProps): JSX.Element {
   const theme = useChartTheme();
-  const [window, setWindow] = useState<HistoryWindow>("3Y");
+  const [historyWindow, setHistoryWindow] = useState<HistoryWindow>("3Y");
 
   const mode = useMemo(
     () => resolveHistoryMode(categoryFilter, filerFilter),
     [categoryFilter, filerFilter],
   );
   const modeSig = historyModeSignature(mode);
-  const fromDate = windowFromDate(window, new Date());
+  // Memoized so the date string is computed once per window change,
+  // not per render (review WARNING on PR #1586; the value is a
+  // primitive so deps were already value-stable, but the memo makes
+  // the stability explicit instead of incidental).
+  const fromDate = useMemo(
+    () => windowFromDate(historyWindow, new Date()),
+    [historyWindow],
+  );
 
   const state = useAsync<HistoryFetchResult>(
     useCallback(async () => {
@@ -143,9 +150,9 @@ export function OwnershipHistoryChart({
             <button
               key={w}
               type="button"
-              onClick={() => setWindow(w)}
+              onClick={() => setHistoryWindow(w)}
               className={`rounded border px-2 py-0.5 text-xs ${
-                w === window
+                w === historyWindow
                   ? "border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500 dark:bg-blue-900/30 dark:text-blue-300"
                   : "border-slate-300 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
               }`}

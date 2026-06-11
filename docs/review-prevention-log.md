@@ -1745,3 +1745,8 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `reconcile_symbol_history(conn)  # type: ignore[arg-type]` silenced a `Connection[tuple]` vs unparameterised-connection mismatch. With a dict_row caller, the function's `int(r[0])` fetches would KeyError at runtime — the ignore traded a compile-time error for a latent runtime one.
 - Prevention: never `type: ignore[arg-type]` a psycopg Connection argument. Either the function genuinely depends on the row shape — then open its own cursor with an explicit `row_factory=psycopg.rows.tuple_row` (or `dict_row`) and widen the signature to `Connection[Any]` — or it only uses `rowcount`/`execute`, in which case `Connection[Any]` alone is honest.
 - Enforced in: `.claude/skills/engineering/python-hygiene.md` (psycopg typing section)
+
+### `new Date()` / `Date.now()` computed in a render body and fed into async-hook dep arrays
+
+- PR #1586 review WARNING: `windowFromDate(window, new Date())` evaluated every render, result in `useAsync` deps. Benign THERE only because the helper returns a date STRING (value-stable within a day) — the same pattern returning a `Date` object or epoch ms refetches on every parent re-render.
+- Rule: any `new Date()` / `Date.now()` whose result reaches a `useAsync` / `useEffect` / `useCallback` dep array must be wrapped in `useMemo` keyed on the inputs that should drive recomputation. Stability must be explicit, not incidental to a string return type.
