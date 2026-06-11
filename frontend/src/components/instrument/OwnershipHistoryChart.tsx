@@ -210,22 +210,30 @@ function HistoryBody({
   }
 
   const { rows, lines } = buildHistoryRows(state.data.lines);
+  // The partial-failure note must survive the empty branch — an empty
+  // surviving series + a hidden failure would read as a clean empty
+  // dataset (Codex ckpt-2 S3).
+  const failedNote =
+    state.data.failed.length > 0 ? (
+      <p className="mb-2 text-xs text-amber-700 dark:text-amber-400">
+        {state.data.failed.join(", ")} failed to load — showing the rest.
+      </p>
+    ) : null;
   if (rows.length === 0) {
     return (
-      <EmptyState
-        title="No history yet"
-        description="Ownership history appears after the 13F / XBRL backfill drains for this instrument."
-      />
+      <div>
+        {failedNote}
+        <EmptyState
+          title="No history yet"
+          description="Ownership history appears after the 13F / XBRL backfill drains for this instrument."
+        />
+      </div>
     );
   }
 
   return (
     <div>
-      {state.data.failed.length > 0 && (
-        <p className="mb-2 text-xs text-amber-700 dark:text-amber-400">
-          {state.data.failed.join(", ")} failed to load — showing the rest.
-        </p>
-      )}
+      {failedNote}
       <div style={{ width: "100%", height: 280 }}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={[...rows]} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>

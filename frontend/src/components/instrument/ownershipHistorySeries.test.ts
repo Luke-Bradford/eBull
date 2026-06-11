@@ -123,6 +123,26 @@ describe("resolveHistoryMode", () => {
       reason: "no_cik",
     });
   });
+
+  it("treats unknown/typo categories as no selection, never institutions (Codex ckpt-2 S2)", () => {
+    expect(resolveHistoryMode("garbage", "0000102909")).toEqual({
+      kind: "aggregate",
+      categories: ["institutions", "treasury"],
+    });
+    expect(resolveHistoryMode("garbage", null)).toEqual({
+      kind: "aggregate",
+      categories: ["institutions", "treasury"],
+    });
+    // def14a is event-driven AND name-keyed — never drillable.
+    expect(resolveHistoryMode("def14a", "0000102909")).toEqual({
+      kind: "unsupported",
+      reason: "event_driven",
+    });
+    expect(resolveHistoryMode("def14a", null)).toEqual({
+      kind: "unsupported",
+      reason: "event_driven",
+    });
+  });
 });
 
 describe("linesByNature", () => {

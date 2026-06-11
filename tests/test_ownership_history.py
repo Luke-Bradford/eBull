@@ -21,6 +21,7 @@ from app.services.ownership_history import (
     iter_categories,
 )
 from app.services.ownership_observations import (
+    OwnershipNature,
     record_blockholder_observation,
     record_def14a_observation,
     record_insider_observation,
@@ -496,7 +497,7 @@ class TestInstitutionsAggregate:
         accession: str,
         filed_at: datetime,
         shares: Decimal,
-        nature: str = "economic",
+        nature: OwnershipNature = "economic",
     ) -> None:
         record_institution_observation(
             conn,
@@ -531,29 +532,39 @@ class TestInstitutionsAggregate:
         q = date(2026, 3, 31)
         # Filer A: original then amendment (later filed_at wins).
         self._seed_13f(
-            conn, iid=843_600, filer_cik="0000000001", q_end=q,
-            doc_id="A-orig", accession="0001234599-26-000001",
+            conn,
+            iid=843_600,
+            filer_cik="0000000001",
+            q_end=q,
+            doc_id="A-orig",
+            accession="0001234599-26-000001",
             filed_at=datetime(2026, 5, 1, tzinfo=UTC),
             shares=Decimal("1000000"),
         )
         self._seed_13f(
-            conn, iid=843_600, filer_cik="0000000001", q_end=q,
-            doc_id="A-amend", accession="0001234599-26-000002",
+            conn,
+            iid=843_600,
+            filer_cik="0000000001",
+            q_end=q,
+            doc_id="A-amend",
+            accession="0001234599-26-000002",
             filed_at=datetime(2026, 5, 20, tzinfo=UTC),
             shares=Decimal("1200000"),
         )
         # Filer B: single filing.
         self._seed_13f(
-            conn, iid=843_600, filer_cik="0000000002", q_end=q,
-            doc_id="B-orig", accession="0001234599-26-000003",
+            conn,
+            iid=843_600,
+            filer_cik="0000000002",
+            q_end=q,
+            doc_id="B-orig",
+            accession="0001234599-26-000003",
             filed_at=datetime(2026, 5, 2, tzinfo=UTC),
             shares=Decimal("500000"),
         )
         conn.commit()
 
-        points = get_ownership_category_totals(
-            conn, instrument_id=843_600, category="institutions"
-        )
+        points = get_ownership_category_totals(conn, instrument_id=843_600, category="institutions")
         assert len(points) == 1
         p = points[0]
         # Amendment replaced the original: 1.2M + 0.5M, NOT 1M + 1.2M + 0.5M.
@@ -577,22 +588,29 @@ class TestInstitutionsAggregate:
         conn.commit()
         q = date(2026, 3, 31)
         self._seed_13f(
-            conn, iid=843_601, filer_cik="0000000003", q_end=q,
-            doc_id="C-econ", accession="0001234599-26-000004",
+            conn,
+            iid=843_601,
+            filer_cik="0000000003",
+            q_end=q,
+            doc_id="C-econ",
+            accession="0001234599-26-000004",
             filed_at=datetime(2026, 5, 1, tzinfo=UTC),
             shares=Decimal("100"),
         )
         self._seed_13f(
-            conn, iid=843_601, filer_cik="0000000003", q_end=q,
-            doc_id="C-voting", accession="0001234599-26-000005",
+            conn,
+            iid=843_601,
+            filer_cik="0000000003",
+            q_end=q,
+            doc_id="C-voting",
+            accession="0001234599-26-000005",
             filed_at=datetime(2026, 5, 1, tzinfo=UTC),
-            shares=Decimal("999"), nature="voting",
+            shares=Decimal("999"),
+            nature="voting",
         )
         conn.commit()
 
-        points = get_ownership_category_totals(
-            conn, instrument_id=843_601, category="institutions"
-        )
+        points = get_ownership_category_totals(conn, instrument_id=843_601, category="institutions")
         assert len(points) == 1
         assert points[0].shares == Decimal("100")
 
@@ -603,9 +621,7 @@ class TestInstitutionsAggregate:
         from app.services.ownership_history import get_ownership_category_totals
 
         with pytest.raises(ValueError, match="no honest aggregate"):
-            get_ownership_category_totals(
-                ebull_test_conn, instrument_id=843_600, category="insiders"
-            )
+            get_ownership_category_totals(ebull_test_conn, instrument_id=843_600, category="insiders")
 
     def test_treasury_aggregate_keeps_issuer_provenance(
         self,
@@ -634,9 +650,7 @@ class TestInstitutionsAggregate:
         )
         conn.commit()
 
-        points = get_ownership_category_totals(
-            conn, instrument_id=843_602, category="treasury"
-        )
+        points = get_ownership_category_totals(conn, instrument_id=843_602, category="treasury")
         assert len(points) == 1
         assert points[0].source == "xbrl_dei"
         assert points[0].source_accession == "0000000000-26-000001"

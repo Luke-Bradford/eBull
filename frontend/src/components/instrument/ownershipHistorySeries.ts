@@ -70,30 +70,51 @@ export type HistoryMode =
  * categories). ``etfs`` drills through ``institutions`` — ETF leaves
  * are 13F filers in the same observations table.
  */
+const _EVENT_DRIVEN_CATEGORIES = new Set(["insiders", "blockholders", "def14a"]);
+
+/** Filer-scoped categories the chart can drill: chart category →
+ *  endpoint category. ``etfs`` drills through ``institutions`` (ETF
+ *  leaves are 13F filers in the same table). ``def14a`` is absent on
+ *  purpose — its endpoint holder_id is a holder NAME key, and every
+ *  FE def14a row carries a ``name:`` fallback key anyway. */
+const _DRILLABLE: Record<string, OwnershipHistoryCategory> = {
+  institutions: "institutions",
+  etfs: "institutions",
+  insiders: "insiders",
+  blockholders: "blockholders",
+};
+
 export function resolveHistoryMode(
   categoryFilter: string | null,
   filerFilter: string | null,
 ): HistoryMode {
-  if (filerFilter === null || categoryFilter === null) {
-    if (categoryFilter === null) return { kind: "aggregate", categories: ["institutions", "treasury"] };
-    if (categoryFilter === "institutions") return { kind: "aggregate", categories: ["institutions"] };
-    if (categoryFilter === "treasury") return { kind: "aggregate", categories: ["treasury"] };
-    if (categoryFilter === "etfs") return { kind: "unsupported", reason: "etfs" };
+  // Unknown / typo categories are treated as NO selection — falling
+  // through to a plausible-but-wrong institutions chart would
+  // mislead (Codex ckpt-2 S2).
+  const known =
+    categoryFilter !== null &&
+    (categoryFilter in _DRILLABLE ||
+      categoryFilter === "treasury" ||
+      _EVENT_DRIVEN_CATEGORIES.has(categoryFilter));
+  const category = known ? categoryFilter : null;
+
+  if (filerFilter === null || category === null) {
+    if (category === null) return { kind: "aggregate", categories: ["institutions", "treasury"] };
+    if (category === "institutions") return { kind: "aggregate", categories: ["institutions"] };
+    if (category === "treasury") return { kind: "aggregate", categories: ["treasury"] };
+    if (category === "etfs") return { kind: "unsupported", reason: "etfs" };
     return { kind: "unsupported", reason: "event_driven" };
   }
   // Treasury is issuer-level — a filer selection cannot re-scope it.
-  if (categoryFilter === "treasury") return { kind: "aggregate", categories: ["treasury"] };
+  if (category === "treasury") return { kind: "aggregate", categories: ["treasury"] };
+  const endpoint_category = _DRILLABLE[category];
+  if (endpoint_category === undefined) {
+    // def14a: drillable neither by CIK nor (in the FE) by name.
+    return { kind: "unsupported", reason: "event_driven" };
+  }
   const holder_id = holderIdFromFilerKey(filerFilter);
   if (holder_id === null) return { kind: "unsupported", reason: "no_cik" };
-  const category: OwnershipHistoryCategory =
-    categoryFilter === "etfs"
-      ? "institutions"
-      : categoryFilter === "insiders"
-        ? "insiders"
-        : categoryFilter === "blockholders"
-          ? "blockholders"
-          : "institutions";
-  return { kind: "holder", category, holder_id };
+  return { kind: "holder", category: endpoint_category, holder_id };
 }
 
 /** Stable signature for useAsync deps — modes are plain objects. */

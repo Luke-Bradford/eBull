@@ -437,15 +437,11 @@ def get_ownership_category_totals(
     (#922). Only ``AGGREGATE_CATEGORIES`` are supported — see the
     constant's docstring for the cadence rationale."""
     if category == "institutions":
-        return _institutions_aggregate_history(
-            conn, instrument_id=instrument_id, from_date=from_date, to_date=to_date
-        )
+        return _institutions_aggregate_history(conn, instrument_id=instrument_id, from_date=from_date, to_date=to_date)
     if category == "treasury":
         # Treasury is issuer-level: the aggregate IS the existing
         # series, XBRL source/accession provenance untouched.
-        return _treasury_history(
-            conn, instrument_id=instrument_id, from_date=from_date, to_date=to_date
-        )
+        return _treasury_history(conn, instrument_id=instrument_id, from_date=from_date, to_date=to_date)
     raise ValueError(
         f"category {category!r} has no honest aggregate series "
         "(event-driven filings need carry-forward semantics; use per-holder)"

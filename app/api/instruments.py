@@ -4295,7 +4295,10 @@ def get_instrument_ownership_history(
     if category not in ("insiders", "blockholders", "institutions", "treasury", "def14a"):
         raise HTTPException(status_code=400, detail=f"unknown category {category!r}")
     if aggregate:
-        if holder_id is not None and holder_id.strip():
+        # ANY supplied holder_id (including blank) conflicts — a blank
+        # value slipping through would echo holder_id="" in the
+        # response and mask caller bugs (Codex ckpt-2 S3).
+        if holder_id is not None:
             raise HTTPException(
                 status_code=400,
                 detail="aggregate=true and holder_id are mutually exclusive",
@@ -4317,11 +4320,7 @@ def get_instrument_ownership_history(
     # would mislead the chart consumer. Treasury is issuer-level so
     # holder_id is ignored there.
     holder_scoped = ("insiders", "blockholders", "institutions", "def14a")
-    if (
-        not aggregate
-        and category in holder_scoped
-        and (holder_id is None or not holder_id.strip())
-    ):
+    if not aggregate and category in holder_scoped and (holder_id is None or not holder_id.strip()):
         raise HTTPException(
             status_code=400,
             detail=f"holder_id is required for category {category!r}",
