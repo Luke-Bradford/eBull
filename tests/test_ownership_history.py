@@ -21,6 +21,7 @@ from app.services.ownership_history import (
     iter_categories,
 )
 from app.services.ownership_observations import (
+    OwnershipNature,
     record_blockholder_observation,
     record_def14a_observation,
     record_insider_observation,
@@ -473,3 +474,184 @@ class TestUnknownCategory:
     def test_iter_categories_covers_every_path(self) -> None:
         cats = list(iter_categories())
         assert set(cats) == {"insiders", "blockholders", "institutions", "treasury", "def14a"}
+
+
+# ---------------------------------------------------------------------------
+# Aggregate mode (#922)
+# ---------------------------------------------------------------------------
+
+
+class TestInstitutionsAggregate:
+    """Category-total series (#922). The load-bearing invariant is
+    dedup-BEFORE-sum: an amendment (second accession, same filer ×
+    quarter) must replace, not add."""
+
+    def _seed_13f(
+        self,
+        conn: psycopg.Connection[tuple],
+        *,
+        iid: int,
+        filer_cik: str,
+        q_end: date,
+        doc_id: str,
+        accession: str,
+        filed_at: datetime,
+        shares: Decimal,
+        nature: OwnershipNature = "economic",
+    ) -> None:
+        record_institution_observation(
+            conn,
+            instrument_id=iid,
+            filer_cik=filer_cik,
+            filer_name=f"Filer {filer_cik}",
+            filer_type="INV",
+            ownership_nature=nature,
+            source="13f",
+            source_document_id=doc_id,
+            source_accession=accession,
+            source_field=None,
+            source_url=None,
+            filed_at=filed_at,
+            period_start=None,
+            period_end=q_end,
+            ingest_run_id=uuid4(),
+            shares=shares,
+            market_value_usd=None,
+            voting_authority="SOLE",
+        )
+
+    def test_amendment_dedups_before_sum(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.ownership_history import get_ownership_category_totals
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=843_600, symbol="AGGTEST")
+        conn.commit()
+        q = date(2026, 3, 31)
+        # Filer A: original then amendment (later filed_at wins).
+        self._seed_13f(
+            conn,
+            iid=843_600,
+            filer_cik="0000000001",
+            q_end=q,
+            doc_id="A-orig",
+            accession="0001234599-26-000001",
+            filed_at=datetime(2026, 5, 1, tzinfo=UTC),
+            shares=Decimal("1000000"),
+        )
+        self._seed_13f(
+            conn,
+            iid=843_600,
+            filer_cik="0000000001",
+            q_end=q,
+            doc_id="A-amend",
+            accession="0001234599-26-000002",
+            filed_at=datetime(2026, 5, 20, tzinfo=UTC),
+            shares=Decimal("1200000"),
+        )
+        # Filer B: single filing.
+        self._seed_13f(
+            conn,
+            iid=843_600,
+            filer_cik="0000000002",
+            q_end=q,
+            doc_id="B-orig",
+            accession="0001234599-26-000003",
+            filed_at=datetime(2026, 5, 2, tzinfo=UTC),
+            shares=Decimal("500000"),
+        )
+        conn.commit()
+
+        points = get_ownership_category_totals(conn, instrument_id=843_600, category="institutions")
+        assert len(points) == 1
+        p = points[0]
+        # Amendment replaced the original: 1.2M + 0.5M, NOT 1M + 1.2M + 0.5M.
+        assert p.shares == Decimal("1700000")
+        assert p.holder_count == 2
+        assert p.ownership_nature == "economic"
+        assert p.source == "13f"
+        # An aggregate has no single accession.
+        assert p.source_accession is None
+
+    def test_non_economic_nature_excluded_not_summed(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """A hypothetical second nature must be EXCLUDED (filtered),
+        never silently folded into the "economic" total (spec D2)."""
+        from app.services.ownership_history import get_ownership_category_totals
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=843_601, symbol="NATTEST")
+        conn.commit()
+        q = date(2026, 3, 31)
+        self._seed_13f(
+            conn,
+            iid=843_601,
+            filer_cik="0000000003",
+            q_end=q,
+            doc_id="C-econ",
+            accession="0001234599-26-000004",
+            filed_at=datetime(2026, 5, 1, tzinfo=UTC),
+            shares=Decimal("100"),
+        )
+        self._seed_13f(
+            conn,
+            iid=843_601,
+            filer_cik="0000000003",
+            q_end=q,
+            doc_id="C-voting",
+            accession="0001234599-26-000005",
+            filed_at=datetime(2026, 5, 1, tzinfo=UTC),
+            shares=Decimal("999"),
+            nature="voting",
+        )
+        conn.commit()
+
+        points = get_ownership_category_totals(conn, instrument_id=843_601, category="institutions")
+        assert len(points) == 1
+        assert points[0].shares == Decimal("100")
+
+    def test_event_driven_category_raises(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.ownership_history import get_ownership_category_totals
+
+        with pytest.raises(ValueError, match="no honest aggregate"):
+            get_ownership_category_totals(ebull_test_conn, instrument_id=843_600, category="insiders")
+
+    def test_treasury_aggregate_keeps_issuer_provenance(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Treasury aggregate IS the existing issuer series — XBRL
+        source/accession untouched, holder_count None (spec D3)."""
+        from app.services.ownership_history import get_ownership_category_totals
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=843_602, symbol="TRAGG")
+        conn.commit()
+        record_treasury_observation(
+            conn,
+            instrument_id=843_602,
+            source="xbrl_dei",
+            source_document_id="T-1",
+            source_accession="0000000000-26-000001",
+            source_field="TreasuryStockShares",
+            source_url=None,
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+            period_start=None,
+            period_end=date(2025, 12, 31),
+            ingest_run_id=uuid4(),
+            treasury_shares=Decimal("250000"),
+        )
+        conn.commit()
+
+        points = get_ownership_category_totals(conn, instrument_id=843_602, category="treasury")
+        assert len(points) == 1
+        assert points[0].source == "xbrl_dei"
+        assert points[0].source_accession == "0000000000-26-000001"
+        assert points[0].holder_count is None

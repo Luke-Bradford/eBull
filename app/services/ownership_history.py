@@ -60,6 +60,9 @@ class OwnershipHistoryPoint:
     source: str
     source_accession: str | None
     filed_at: Any
+    # Filers contributing to an aggregate bucket (#922). ``None`` on
+    # per-holder series and on issuer-level treasury points.
+    holder_count: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +345,107 @@ def _def14a_history(
             )
             for row in cur.fetchall()
         ]
+
+
+def _institutions_aggregate_history(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> list[OwnershipHistoryPoint]:
+    """Per-quarter category total across ALL 13F filers (#922).
+
+    Dedup-before-sum: the inner ``DISTINCT ON (period_end, filer_cik)``
+    picks one winner per filer per quarter (``filed_at DESC,
+    source_document_id ASC`` — same winner rule as the per-holder
+    reader) so amendments cannot double-count. ``ownership_nature``
+    is FILTERED to ``'economic'`` (the only nature 13F rows carry
+    today, verified on dev 2026-06-11) rather than summed across —
+    if other natures ever land they are excluded, not silently
+    mislabelled into an "economic" total.
+
+    NOT comparable 1:1 with the rollup pie's institutions slice: the
+    pie reads the ``*_current`` tables through cross-source survivor
+    logic + an ETF filer_type split. This series is raw-13F-by-quarter
+    (spec D2)."""
+    where_extra = ""
+    params: dict[str, Any] = {"iid": instrument_id}
+    if from_date is not None:
+        where_extra += " AND period_end >= %(from_date)s"
+        params["from_date"] = from_date
+    if to_date is not None:
+        where_extra += " AND period_end <= %(to_date)s"
+        params["to_date"] = to_date
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT period_end,
+                   SUM(shares) AS shares,
+                   COUNT(DISTINCT filer_cik) AS holder_count,
+                   MAX(filed_at) AS filed_at
+            FROM (
+                SELECT DISTINCT ON (period_end, filer_cik)
+                    period_end, filer_cik, shares, filed_at
+                FROM ownership_institutions_observations
+                WHERE instrument_id = %(iid)s
+                  AND known_to IS NULL
+                  AND shares IS NOT NULL
+                  AND exposure_kind = 'EQUITY'
+                  AND ownership_nature = 'economic'
+                  {where_extra}
+                ORDER BY period_end, filer_cik, filed_at DESC, source_document_id ASC
+            ) winners
+            GROUP BY period_end
+            ORDER BY period_end
+            """,
+            params,
+        )
+        return [
+            OwnershipHistoryPoint(
+                period_end=row["period_end"],
+                ownership_nature="economic",
+                shares=row["shares"],
+                source="13f",
+                # An aggregate has no single accession.
+                source_accession=None,
+                filed_at=row["filed_at"],
+                holder_count=int(row["holder_count"]),  # type: ignore[arg-type]
+            )
+            for row in cur.fetchall()
+        ]
+
+
+#: Categories whose aggregate-by-period series is honest (#922).
+#: 13F is quarterly by construction; treasury is issuer-level.
+#: Event-driven categories (insiders / blockholders / def14a) need
+#: carry-forward-latest-per-holder semantics to aggregate honestly —
+#: out of scope, per-holder drill only.
+AGGREGATE_CATEGORIES: tuple[HistoryCategory, ...] = ("institutions", "treasury")
+
+
+def get_ownership_category_totals(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    category: HistoryCategory,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> list[OwnershipHistoryPoint]:
+    """Aggregate (holder-less) history for one instrument × category
+    (#922). Only ``AGGREGATE_CATEGORIES`` are supported — see the
+    constant's docstring for the cadence rationale."""
+    if category == "institutions":
+        return _institutions_aggregate_history(conn, instrument_id=instrument_id, from_date=from_date, to_date=to_date)
+    if category == "treasury":
+        # Treasury is issuer-level: the aggregate IS the existing
+        # series, XBRL source/accession provenance untouched.
+        return _treasury_history(conn, instrument_id=instrument_id, from_date=from_date, to_date=to_date)
+    raise ValueError(
+        f"category {category!r} has no honest aggregate series "
+        "(event-driven filings need carry-forward semantics; use per-holder)"
+    )
 
 
 # ---------------------------------------------------------------------------

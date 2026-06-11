@@ -40,6 +40,7 @@ import {
   isBaselineHoldingRow,
   isInsiderHoldingRow,
 } from "@/components/instrument/ownershipInsiders";
+import { OwnershipHistoryChart } from "@/components/instrument/OwnershipHistoryChart";
 import {
   OwnershipLegend,
   OwnershipSunburst,
@@ -550,6 +551,21 @@ function OwnershipBody({
           highlightFiler={filerFilter}
           highlightRef={filerRowRef}
           onClearHighlight={onClearFiler}
+        />
+      </div>
+      {/* History pane (#922) — trend companion to the pie. Reads the
+          same ?category=/?filer= selection the pie + table use. */}
+      <div className="col-span-12">
+        <OwnershipHistoryChart
+          symbol={symbol}
+          categoryFilter={categoryFilter}
+          filerFilter={filerFilter}
+          filerLabel={
+            filerFilter !== null
+              ? (allRows.find((r) => r.key === filerFilter)?.label ?? null)
+              : null
+          }
+          outstanding={outstanding}
         />
       </div>
     </div>
