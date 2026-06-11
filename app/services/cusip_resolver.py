@@ -517,7 +517,18 @@ def sweep_bulk_cusips_resolved_via_extid(
                SET resolution_status = 'resolved_via_extid',
                    last_observed_at = NOW()
              WHERE u.source IS NOT NULL
-               AND u.resolution_status IS NULL
+               AND (
+                   u.resolution_status IS NULL
+                   -- #740 — a CUSIP negatively tombstoned by the
+                   -- OpenFIGI sweep that LATER lands a mapping by
+                   -- another route (SEC-list backfill, fuzzy resolver,
+                   -- manual runbook upsert — all provider='sec') must
+                   -- read resolved, not stay frozen on a stale
+                   -- negative.
+                   OR u.resolution_status IN (
+                       'openfigi_unknown', 'openfigi_no_instrument'
+                   )
+               )
                AND EXISTS (
                    SELECT 1 FROM external_identifiers ei
                     WHERE ei.identifier_value = u.cusip
@@ -1175,14 +1186,25 @@ def sweep_resolvable_unresolved_cusips(
 # ---------------------------------------------------------------------------
 
 
+# Terminal negative statuses written by the OpenFIGI sweep (#740,
+# sql/192). NULL strictly means "not yet decided" — transient
+# transport/429 failures keep rows NULL so the next pass retries.
+STATUS_OPENFIGI_UNKNOWN: Final = "openfigi_unknown"
+STATUS_OPENFIGI_NO_INSTRUMENT: Final = "openfigi_no_instrument"
+OPENFIGI_NEGATIVE_STATUSES: Final[tuple[str, str]] = (
+    STATUS_OPENFIGI_UNKNOWN,
+    STATUS_OPENFIGI_NO_INSTRUMENT,
+)
+
+
 @dataclass(frozen=True)
 class OpenFigiSweepReport:
     """Per-run rollup for :func:`sweep_unresolved_cusips_via_openfigi`.
 
-    Counter semantics:
+    Counter semantics (summed across all passes of a drain run):
 
       * ``candidates_seen`` — distinct bulk-source CUSIPs selected for
-        OpenFIGI lookup this pass (post-deduplication, post-LIMIT).
+        OpenFIGI lookup (post-deduplication, post-LIMIT, all passes).
       * ``resolved`` — entries OpenFIGI returned with a US-primary
         common-stock ticker.
       * ``promoted`` — resolutions that matched an existing
@@ -1190,16 +1212,19 @@ class OpenFigiSweepReport:
         ``external_identifiers (provider='openfigi', identifier_type='cusip')``
         row. ON CONFLICT DO NOTHING means an already-existing row is
         counted as a non-promotion (audit trail says the mapping was
-        already there — likely from a prior sweep).
-      * ``no_instrument_match`` — OpenFIGI returned a US ticker but
-        no row in ``instruments`` matches (case-insensitive). Common
-        for newly-listed names not yet seeded in the universe — the
-        row stays pending until either OpenFIGI returns a different
-        ticker (unlikely) or the operator manually seeds.
-      * ``unresolved_by_openfigi`` — OpenFIGI returned warning / error /
-        no-US-row for these CUSIPs. Row stays pending.
+        already there — likely from a prior sweep). The bulk rows are
+        tombstoned ``resolved_via_openfigi`` either way.
+      * ``no_instrument_match`` — OpenFIGI returned a US ticker but the
+        normalised ticker has no unique ``instruments`` match. The
+        rows are tombstoned ``openfigi_no_instrument`` (terminal in v1;
+        spec §7 documents the manual reset escape hatch).
+      * ``unresolved_by_openfigi`` — the resolver call succeeded but
+        OpenFIGI returned warning / no-US-row for these CUSIPs. The
+        rows are tombstoned ``openfigi_unknown`` (terminal in v1).
       * ``api_errors`` — number of CUSIPs we failed to lookup due to
-        transport / 429-saturation errors. Row stays pending.
+        transport / 429-saturation errors. Rows stay pending (NULL) —
+        the failure is transient, not a verdict.
+      * ``passes`` — number of selection passes executed this run.
     """
 
     candidates_seen: int
@@ -1208,6 +1233,7 @@ class OpenFigiSweepReport:
     no_instrument_match: int
     unresolved_by_openfigi: int
     api_errors: int
+    passes: int = 1
 
 
 def _select_unresolved_bulk_cusips(
@@ -1251,6 +1277,22 @@ def _select_unresolved_bulk_cusips(
             {"limit": limit},
         )
         return [str(row[0]).strip().upper() for row in cur.fetchall()]
+
+
+def _normalise_openfigi_ticker(ticker: str) -> str:
+    """Map OpenFIGI's share-class ticker convention onto ours.
+
+    OpenFIGI returns slash-delimited share classes — empirically probed
+    2026-06-11 (keyed): CUSIP ``084670702`` → ticker ``BRK/B`` — while
+    ``instruments.symbol`` uses the dot convention (``BRK.B``). Replace
+    ``/`` with ``.`` ONLY; space normalisation is deliberately omitted
+    until empirically needed (Codex ckpt-1 #2 — ``ABC WS``-style
+    warrant tickers must NOT be coerced into lookalike symbols; the
+    resolver's ``securityType='Common Stock'`` filter keeps those out
+    of this path anyway, and an unmatched ticker terminates as
+    ``openfigi_no_instrument``).
+    """
+    return ticker.replace("/", ".")
 
 
 def _find_instrument_by_ticker(
@@ -1342,7 +1384,11 @@ def _tombstone_bulk_rows_for_cusip(
     conn: psycopg.Connection[tuple],
     *,
     cusip: str,
-    status: Literal["resolved_via_openfigi"],
+    status: Literal[
+        "resolved_via_openfigi",
+        "openfigi_unknown",
+        "openfigi_no_instrument",
+    ],
 ) -> int:
     """Mark every bulk-source row for ``cusip`` with the given status.
 
@@ -1351,7 +1397,19 @@ def _tombstone_bulk_rows_for_cusip(
     means the CUSIP→instrument_id mapping is now in
     ``external_identifiers``; the next bulk ingest pass will load
     the mapping via ``load_bulk_cusip_map`` and write into typed tables
-    directly, so the unresolved rows have served their purpose.
+    directly, so the unresolved rows have served their purpose. The
+    two negative statuses (#740, sql/192) are terminal verdicts that
+    advance the sweep's selection cursor past hopeless candidates.
+
+    Replaceable set = NULL plus the two OpenFIGI negative statuses
+    (spec §4.5 / Codex ckpt-1 #4): on a later promotion, a sibling
+    ``(cusip, source)`` row negatively marked in an earlier pass must
+    flip to ``resolved_via_openfigi`` rather than survive stale until
+    the next extid sweep. Negative-over-negative overwrites are
+    harmless (both terminal — latest sweep verdict wins). Legacy fuzzy
+    statuses (``unresolvable`` / ``ambiguous`` / ``conflict`` /
+    ``manual_review``) and the two ``resolved_*`` tombstones are never
+    replaced here.
 
     Scoped to ``source IS NOT NULL`` so the legacy partition is
     untouched. Returns rowcount.
@@ -1364,9 +1422,17 @@ def _tombstone_bulk_rows_for_cusip(
                    last_observed_at = NOW()
              WHERE cusip = %(cusip)s
                AND source IS NOT NULL
-               AND resolution_status IS NULL
+               AND (
+                   resolution_status IS NULL
+                   OR resolution_status = ANY(%(replaceable)s)
+               )
+               AND resolution_status IS DISTINCT FROM %(status)s
             """,
-            {"cusip": cusip, "status": status},
+            {
+                "cusip": cusip,
+                "status": status,
+                "replaceable": list(OPENFIGI_NEGATIVE_STATUSES),
+            },
         )
         return int(cur.rowcount)
 
@@ -1407,50 +1473,14 @@ def purge_unresolved_bulk_rows_outside_retention(
         return int(cur.rowcount)
 
 
-def sweep_unresolved_cusips_via_openfigi(
+def _sweep_pass(
     conn: psycopg.Connection[tuple],
     *,
     resolver: OpenFigiResolverProtocol,
-    limit: int = 1000,
+    limit: int,
 ) -> OpenFigiSweepReport:
-    """Resolve bulk-source unresolved CUSIPs via the OpenFIGI v3 API.
-
-    Pipeline:
-
-      1. Select up to ``limit`` distinct bulk-source CUSIPs whose
-         ``resolution_status IS NULL`` and that do NOT already have
-         an ``external_identifiers`` row (sec or openfigi).
-      2. Batch-call ``resolver.resolve_cusips`` (the per-instance
-         rate limiter handles OpenFIGI's tier budget).
-      3. For each resolution, match the returned US-primary ticker
-         against ``instruments.symbol`` (case-insensitive exact).
-      4. On match: write ``external_identifiers (provider='openfigi',
-         identifier_type='cusip', is_primary=FALSE)``, then tombstone
-         every bulk row for that CUSIP with
-         ``resolution_status='resolved_via_openfigi'``.
-      5. On no-ticker / no-instrument-match: leave the row pending —
-         next sweep retries (idempotent — the row stays in
-         ``resolution_status IS NULL``).
-
-    Idempotent. A second run on the same backlog re-issues the same
-    OpenFIGI lookups for any rows still pending, which is wasteful
-    but not incorrect; the ``LIMIT`` cap bounds the per-pass cost.
-
-    The caller is responsible for the transaction boundary. The sweep
-    issues per-row UPDATEs in the outer conn — no per-cusip savepoint
-    is needed because a single failed match cannot poison the others
-    (each row's promote + tombstone is its own SQL statement, and
-    psycopg in non-autocommit mode auto-aborts on error which the
-    caller's transaction wrapper handles).
-
-    Surfacing ``OpenFigiTransportError`` / ``OpenFigiRateLimited``:
-    if the resolver raises mid-batch, the partially-completed batch's
-    successful resolutions ARE already committed-or-pending; the
-    remaining CUSIPs in the failed batch + every subsequent batch
-    increment ``api_errors``. The outer caller (S13 invoker) records
-    ``coverage_floor_met=FALSE`` if coverage drops below 0.80, which
-    correctly reflects the partial-outage state.
-    """
+    """One selection pass of the OpenFIGI sweep. See the public
+    :func:`sweep_unresolved_cusips_via_openfigi` for the contract."""
     cusips = _select_unresolved_bulk_cusips(conn, limit=limit)
     if not cusips:
         return OpenFigiSweepReport(
@@ -1465,11 +1495,12 @@ def sweep_unresolved_cusips_via_openfigi(
     resolved_count = 0
     promoted_count = 0
     no_instrument = 0
+    unresolved_by_openfigi = 0
     api_errors = 0
 
     # Drive the OpenFIGI call inside a try/except so a transport-level
     # failure surfaces as an error count rather than aborting the
-    # outer transaction. The caller's S13 invoker turns this into a
+    # outer transaction. The caller's invoker turns this into a
     # ``coverage_floor_met=FALSE`` outcome; no exception propagates.
     try:
         mappings = resolver.resolve_cusips(cusips)
@@ -1487,21 +1518,35 @@ def sweep_unresolved_cusips_via_openfigi(
     for cusip in cusips:
         mapping = mappings.get(cusip)
         if mapping is None:
-            # api_errors already counted above (whole-batch failure)
-            # OR resolver returned warning/error/no-US-row for this
-            # CUSIP.
             if api_errors == 0:
-                # Normal "no resolution" path — the resolver succeeded
-                # but OpenFIGI doesn't know the CUSIP.
-                pass
+                # The resolver call SUCCEEDED but OpenFIGI has no
+                # US-primary common-stock mapping for this CUSIP —
+                # a terminal verdict (#740): tombstone so the next
+                # pass's selection advances past it. On whole-batch
+                # api_errors the rows stay NULL (transient, retried).
+                unresolved_by_openfigi += 1
+                _tombstone_bulk_rows_for_cusip(
+                    conn,
+                    cusip=cusip,
+                    status=STATUS_OPENFIGI_UNKNOWN,
+                )
             continue
         resolved_count += 1
-        instrument_id = _find_instrument_by_ticker(conn, ticker=mapping.ticker)
+        ticker = _normalise_openfigi_ticker(mapping.ticker)
+        instrument_id = _find_instrument_by_ticker(conn, ticker=ticker)
         if instrument_id is None:
+            # Terminal verdict (#740): the security is not in (or is
+            # ambiguous within) the eToro universe. Spec §7 documents
+            # the manual reset escape hatch for universe expansions.
             no_instrument += 1
+            _tombstone_bulk_rows_for_cusip(
+                conn,
+                cusip=cusip,
+                status=STATUS_OPENFIGI_NO_INSTRUMENT,
+            )
             logger.info(
                 "openfigi sweep: ticker %s for cusip %s has no unique instrument match",
-                mapping.ticker,
+                ticker,
                 cusip,
             )
             continue
@@ -1525,12 +1570,10 @@ def sweep_unresolved_cusips_via_openfigi(
             logger.info(
                 "openfigi sweep: promoted cusip=%s ticker=%s instrument_id=%d (%d bulk rows tombstoned)",
                 cusip,
-                mapping.ticker,
+                ticker,
                 instrument_id,
                 tombstoned,
             )
-
-    unresolved_by_openfigi = len(cusips) - resolved_count - api_errors if api_errors < len(cusips) else 0
 
     return OpenFigiSweepReport(
         candidates_seen=len(cusips),
@@ -1540,6 +1583,73 @@ def sweep_unresolved_cusips_via_openfigi(
         unresolved_by_openfigi=unresolved_by_openfigi,
         api_errors=api_errors,
     )
+
+
+def sweep_unresolved_cusips_via_openfigi(
+    conn: psycopg.Connection[tuple],
+    *,
+    resolver: OpenFigiResolverProtocol,
+    limit: int = 1000,
+    max_passes: int = 1,
+) -> OpenFigiSweepReport:
+    """Resolve bulk-source unresolved CUSIPs via the OpenFIGI v3 API.
+
+    Per pass:
+
+      1. Select up to ``limit`` distinct bulk-source CUSIPs whose
+         ``resolution_status IS NULL`` and that do NOT already have
+         an ``external_identifiers`` row (sec or openfigi).
+      2. Batch-call ``resolver.resolve_cusips`` (the per-instance
+         rate limiter handles OpenFIGI's tier budget).
+      3. For each resolution, normalise the returned US-primary ticker
+         (``BRK/B`` → ``BRK.B``) and match against
+         ``instruments.symbol`` (case-insensitive exact).
+      4. On match: write ``external_identifiers (provider='openfigi',
+         identifier_type='cusip', is_primary=FALSE)``, then tombstone
+         every bulk row for that CUSIP with
+         ``resolution_status='resolved_via_openfigi'``.
+      5. On no-mapping / no-instrument-match with a SUCCESSFUL resolver
+         call: tombstone ``openfigi_unknown`` /
+         ``openfigi_no_instrument`` (#740, terminal in v1) so the
+         selection cursor advances. Transport/429 failures leave rows
+         NULL — transient, retried next pass/run.
+
+    Every selected candidate therefore reaches a terminal status or
+    promotes (except under ``api_errors``), so repeated passes walk the
+    whole backlog instead of re-scanning the alphabet head — the #740
+    defect where 54k CUSIPs sat behind a 1000-row window that never
+    moved. ``max_passes`` bounds a drain run; the loop exits early on
+    an empty selection or any ``api_errors`` (no point hammering a
+    failing API).
+
+    Idempotent. The caller is responsible for the transaction boundary
+    — a mid-drain crash rolls back the whole run; re-running re-does
+    the work (bounded by the tier budget per pass). The sweep issues
+    per-row UPDATEs in the outer conn — no per-cusip savepoint is
+    needed because a single failed match cannot poison the others.
+    """
+    totals = {
+        "candidates_seen": 0,
+        "resolved": 0,
+        "promoted": 0,
+        "no_instrument_match": 0,
+        "unresolved_by_openfigi": 0,
+        "api_errors": 0,
+    }
+    passes = 0
+    for _ in range(max(1, max_passes)):
+        report = _sweep_pass(conn, resolver=resolver, limit=limit)
+        passes += 1
+        totals["candidates_seen"] += report.candidates_seen
+        totals["resolved"] += report.resolved
+        totals["promoted"] += report.promoted
+        totals["no_instrument_match"] += report.no_instrument_match
+        totals["unresolved_by_openfigi"] += report.unresolved_by_openfigi
+        totals["api_errors"] += report.api_errors
+        if report.candidates_seen == 0 or report.api_errors > 0:
+            break
+
+    return OpenFigiSweepReport(passes=passes, **totals)
 
 
 # ---------------------------------------------------------------------------

@@ -86,6 +86,12 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # re-starve each other. See app/jobs/sources.py::Lane.
         "db_liveness",
         "db_retry",
+        # #740 — cusip_resolver_post_bulk_sweep gains a weekly cadence
+        # (Sun 06:00 UTC) on its dedicated single-job ``openfigi`` lane
+        # (sql/165); the bootstrap S13 stage keeps dispatching the same
+        # invoker on the same lane, so the dual registration passes the
+        # source-registry conflict check.
+        "openfigi",
         # #1527 — daily/hourly continuation of #1526. monitor_positions,
         # cusip_extid_sweep, ownership_observations_sync each fire on a
         # 5-min-aligned slot and lost the ``job_source:db`` race to
