@@ -194,6 +194,10 @@ def backfill_current_history(conn: psycopg.Connection[tuple]) -> tuple[int, int]
 
 
 def _backfill_cik_history(conn: psycopg.Connection[tuple]) -> int:
+    # NOT EXISTS on the instrument for the same reason as the symbol
+    # twin below: once a chain has a closed row, an ON CONFLICT-guarded
+    # re-insert lands on a different PK and trips the EXCLUDE
+    # no-overlap constraint instead of no-op'ing.
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -208,13 +212,22 @@ def _backfill_cik_history(conn: psycopg.Connection[tuple]) -> int:
             FROM instruments i
             JOIN instrument_sec_profile p ON p.instrument_id = i.instrument_id
             WHERE p.cik IS NOT NULL
-            ON CONFLICT DO NOTHING
+              AND NOT EXISTS (
+                  SELECT 1 FROM instrument_cik_history h
+                  WHERE h.instrument_id = i.instrument_id
+              )
             """,
         )
         return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
 
 
 def _backfill_symbol_history(conn: psycopg.Connection[tuple]) -> int:
+    # NOT EXISTS on the instrument (not ON CONFLICT on the PK): after a
+    # rename the open row is (NEWSYM, today) — an ON CONFLICT-guarded
+    # re-insert of (NEWSYM, first_seen) has a DIFFERENT PK, so it would
+    # reach the EXCLUDE no-overlap constraint and blow up the re-run.
+    # Seeding only instruments with no history at all is the idempotent
+    # form once rename chains exist (#794 Batch 7).
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -228,7 +241,112 @@ def _backfill_symbol_history(conn: psycopg.Connection[tuple]) -> int:
                    'imported'
             FROM instruments i
             WHERE i.symbol IS NOT NULL
-            ON CONFLICT DO NOTHING
+              AND NOT EXISTS (
+                  SELECT 1 FROM instrument_symbol_history h
+                  WHERE h.instrument_id = i.instrument_id
+              )
             """,
         )
         return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+
+
+@dataclass(frozen=True)
+class SymbolReconcileStats:
+    """Outcome of one :func:`reconcile_symbol_history` pass."""
+
+    seeded: int
+    renamed: int
+    corrected_same_day: int
+
+
+def reconcile_symbol_history(conn: psycopg.Connection[tuple]) -> SymbolReconcileStats:
+    """Bring ``instrument_symbol_history`` in line with ``instruments.symbol``
+    (#794 Batch 7 — the live symbol-change ingester).
+
+    eToro's instrument_id is stable across ticker changes, so a rename
+    (FB → META) or delist-rename (BBBY → BBBYQ / ``X.delisted``) arrives
+    at ``sync_universe`` as a plain ``symbol`` UPDATE on the existing
+    row. This reconcile runs inside the same sync transaction and is a
+    pure function of current table state, so it also self-heals any
+    drift introduced outside the sync path (manual fixes, older data).
+
+    Three passes, ordered:
+
+    1. **Seed** — instruments with no history rows get one ``imported``
+       current row (delegates to the backfill insert).
+    2. **Same-day correction** — an open row opened TODAY whose symbol
+       already differs is updated in place. Closing it would need
+       ``effective_to = effective_from``, which the ordered-ranges
+       CHECK rejects (zero-duration range); a same-day flip is treated
+       as a correction of today's observation, not a new chain link.
+    3. **Rename** — open rows opened before today whose symbol differs
+       are closed at ``CURRENT_DATE`` and a new current row opens at
+       ``CURRENT_DATE``. ``source_event`` is ``delisting`` when the new
+       symbol carries eToro's dead-ticker suffix (``.delisted`` /
+       ``.old``), else ``rebrand``. Close and open are two statements,
+       NOT one data-modifying CTE — sibling CTE effects are not
+       reliably visible to each other's constraint checks, so the
+       EXCLUDE no-overlap probe could non-deterministically see the
+       still-open row.
+
+    Caller owns the transaction (``sync_universe`` wraps the whole
+    sync; tests commit explicitly).
+    """
+    seeded = _backfill_symbol_history(conn)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE instrument_symbol_history h
+            SET symbol = i.symbol
+            FROM instruments i
+            WHERE i.instrument_id = h.instrument_id
+              AND h.effective_to IS NULL
+              AND h.effective_from = CURRENT_DATE
+              AND h.symbol IS DISTINCT FROM i.symbol
+            """,
+        )
+        corrected = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+        cur.execute(
+            """
+            SELECT h.instrument_id
+            FROM instrument_symbol_history h
+            JOIN instruments i ON i.instrument_id = h.instrument_id
+            WHERE h.effective_to IS NULL
+              AND h.effective_from < CURRENT_DATE
+              AND h.symbol IS DISTINCT FROM i.symbol
+            """,
+        )
+        changed_ids = [int(r[0]) for r in cur.fetchall()]
+        if not changed_ids:
+            return SymbolReconcileStats(seeded=seeded, renamed=0, corrected_same_day=corrected)
+
+        cur.execute(
+            """
+            UPDATE instrument_symbol_history
+            SET effective_to = CURRENT_DATE
+            WHERE instrument_id = ANY(%s)
+              AND effective_to IS NULL
+            """,
+            (changed_ids,),
+        )
+        cur.execute(
+            r"""
+            INSERT INTO instrument_symbol_history (
+                instrument_id, symbol, effective_from, effective_to, source_event
+            )
+            SELECT i.instrument_id,
+                   i.symbol,
+                   CURRENT_DATE,
+                   NULL,
+                   CASE WHEN i.symbol ~* '\.(delisted|old)$'
+                        THEN 'delisting' ELSE 'rebrand' END
+            FROM instruments i
+            WHERE i.instrument_id = ANY(%s)
+            """,
+            (changed_ids,),
+        )
+        renamed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    return SymbolReconcileStats(seeded=seeded, renamed=renamed, corrected_same_day=corrected)
