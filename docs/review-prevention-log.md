@@ -1737,3 +1737,11 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: vitest 4 returns the SAME spy when `vi.spyOn` re-targets an already-spied method, so call history accumulates across tests in a file. Under vitest 2 the suite was green only because spy semantics masked the missing isolation — the tests were latently order-dependent. Repo-wide config keeps `clearMocks`/`restoreMocks` OFF, so isolation is each file's job.
 - Prevention: any test file asserting on spy call history (`mock.calls[...]`, `not.toHaveBeenCalled()`, `toHaveBeenCalledTimes(n)`) for a `vi.spyOn` target must register a module-scope `afterEach(() => { vi.restoreAllMocks(); })`. Grep on adding such assertions: `grep -L "restoreAllMocks" $(grep -rl "mock.calls\|toHaveBeenCalledTimes\|not.toHaveBeenCalled" frontend/src --include="*.test.tsx")`.
 - Enforced in: this prevention log; `.claude/skills/engineering/test-quality.md` (Mock discipline § frontend `vi.spyOn`); `frontend/src/components/instrument/FilingsPane.test.tsx`, `frontend/src/pages/EightKListPage.test.tsx`.
+
+---
+
+### `type: ignore[arg-type]` masking a psycopg Connection row-factory mismatch
+- First seen in: PR #1583
+- Symptom: `reconcile_symbol_history(conn)  # type: ignore[arg-type]` silenced a `Connection[tuple]` vs unparameterised-connection mismatch. With a dict_row caller, the function's `int(r[0])` fetches would KeyError at runtime — the ignore traded a compile-time error for a latent runtime one.
+- Prevention: never `type: ignore[arg-type]` a psycopg Connection argument. Either the function genuinely depends on the row shape — then open its own cursor with an explicit `row_factory=psycopg.rows.tuple_row` (or `dict_row`) and widen the signature to `Connection[Any]` — or it only uses `rowcount`/`execute`, in which case `Connection[Any]` alone is honest.
+- Enforced in: `.claude/skills/engineering/python-hygiene.md` (psycopg typing section)

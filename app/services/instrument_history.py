@@ -37,6 +37,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 import psycopg
 import psycopg.rows
@@ -260,7 +261,7 @@ class SymbolReconcileStats:
     reverted_same_day: int = 0
 
 
-def reconcile_symbol_history(conn: psycopg.Connection[tuple]) -> SymbolReconcileStats:
+def reconcile_symbol_history(conn: psycopg.Connection[Any]) -> SymbolReconcileStats:
     """Bring ``instrument_symbol_history`` in line with ``instruments.symbol``
     (#794 Batch 7 — the live symbol-change ingester).
 
@@ -307,7 +308,10 @@ def reconcile_symbol_history(conn: psycopg.Connection[tuple]) -> SymbolReconcile
     """
     seeded = _backfill_symbol_history(conn)
 
-    with conn.cursor() as cur:
+    # Explicit tuple_row: the caller's connection may carry any row
+    # factory (sync_universe's is unparameterised); the ``int(r[0])``
+    # fetches below must not depend on it (review WARNING, PR #1583).
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
         # Pass 2 — same-day revert (flip-flop undo).
         cur.execute(
             """

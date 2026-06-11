@@ -199,7 +199,7 @@ def sync_universe(
         # BBBY → X.delisted) lands above as a plain symbol UPDATE; this
         # reconcile closes the prior instrument_symbol_history chain
         # link and opens the new one inside the same transaction.
-        history = reconcile_symbol_history(conn)  # type: ignore[arg-type]
+        history = reconcile_symbol_history(conn)
         if history.seeded or history.renamed or history.corrected_same_day or history.reverted_same_day:
             logger.info(
                 "Universe sync: symbol history seeded=%d renamed=%d corrected_same_day=%d reverted_same_day=%d",

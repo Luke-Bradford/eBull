@@ -200,3 +200,16 @@ if self._held:
 Origin: PR #1543 (#1542) review WARNING on `app/jobs/locks.py::JobLock.__exit__` sec_rate release block.
 
 Applies to any cleanup path with an ownership/held flag: `__exit__`, `close()`, manual teardown helpers. The principle is the same as never resetting `committed = True` before `conn.commit()` returns.
+
+## psycopg Connection typing — never `type: ignore[arg-type]` the conn
+
+A `Connection[tuple]` vs `Connection[Any]`/unparameterised mismatch at a
+call site is a real signal: the callee's fetches assume a row shape the
+caller's row factory may not deliver (`int(r[0])` KeyErrors under
+dict_row). Silencing it with `# type: ignore[arg-type]` converts a
+compile-time error into a latent runtime one (PR #1583 review WARNING).
+
+Rule: widen the callee to `Connection[Any]`, and if it reads row values
+(not just `rowcount`), open its own cursor with an explicit
+`row_factory=psycopg.rows.tuple_row` / `dict_row` so the row shape is
+locally guaranteed.
