@@ -11,15 +11,23 @@ missing a primary SEC CIK in ``external_identifiers``. Useful when:
   * Diagnosing why an instrument's chart / ownership / fundamentals
     render empty: no CIK = no SEC filings ingest.
 
-The audit splits unmapped instruments into two buckets so the
+The audit splits unmapped instruments into three buckets so the
 operator can ignore the noise and focus on real gaps:
 
+  * ``fund_series_covered`` — instrument holds a primary ``(sec,
+    class_id)`` row whose class_id is known to
+    ``cik_refresh_mf_directory``. ETF/fund identity flows through
+    series/class by design (#1577 — trust CIK is deliberately never
+    stamped on instruments), so the missing CIK row is not a gap.
+    The directory join is load-bearing: a stale/orphaned class_id
+    must NOT hide a real CIK gap.
   * ``suffix_variants`` — symbol contains ``.`` (e.g. ``AAPL.RTH``,
     ``ABT.US``, ``ACLX.CVR``). These are operational duplicates;
     once #819 lands the canonical-redirect mechanism, they should
     NOT have their own CIK row — the canonical row carries it.
-  * ``other`` — everything else. ETFs, funds, merger CVRs, and any
-    genuine gap. Operator must triage one by one.
+  * ``other`` — everything else. Funds without class bindings,
+    merger CVRs, and any genuine gap. Operator must triage one by
+    one.
 
 Share-class exception (#1102): a dotted symbol ending in a single
 uppercase class letter (``BRK.B``, ``CWEN.A`` — ``\\.[A-Z]$``) is a
@@ -54,6 +62,20 @@ logger = logging.getLogger(__name__)
 # three queries below.
 _SUFFIX_VARIANT_SQL = r"(i.symbol LIKE '%%.%%' AND i.symbol !~ '\.[A-Z]$')"
 
+# True when the instrument's fund identity flows through the
+# series/class mechanism (#1577): a PRIMARY (sec, class_id) row whose
+# class_id the mf directory still knows. Both predicates are
+# load-bearing (Codex spec review): a demoted class_id or one SEC has
+# dropped from the directory must not hide a real CIK gap.
+_FUND_SERIES_COVERED_SQL = """EXISTS (
+  SELECT 1 FROM external_identifiers cl
+  JOIN cik_refresh_mf_directory mf ON mf.class_id = cl.identifier_value
+  WHERE cl.instrument_id = i.instrument_id
+    AND cl.provider = 'sec'
+    AND cl.identifier_type = 'class_id'
+    AND cl.is_primary = TRUE
+)"""
+
 
 @dataclass(frozen=True)
 class CikGapRow:
@@ -62,7 +84,7 @@ class CikGapRow:
     instrument_id: int
     symbol: str
     company_name: str | None
-    category: str  # "suffix_variant" | "other"
+    category: str  # "fund_series_covered" | "suffix_variant" | "other"
 
 
 @dataclass(frozen=True)
@@ -72,6 +94,7 @@ class CikCoverageGapReport:
     cohort_total: int
     mapped: int
     unmapped: int
+    unmapped_fund_series_covered: int
     unmapped_suffix_variants: int
     unmapped_other: int
     sample: list[CikGapRow]  # capped at sample_limit
@@ -132,8 +155,11 @@ def compute_cik_gap_report(
         cur.execute(
             f"""
             SELECT
-              COUNT(*) FILTER (WHERE {_SUFFIX_VARIANT_SQL}) AS suffix_variants,
-              COUNT(*) FILTER (WHERE NOT {_SUFFIX_VARIANT_SQL}) AS other
+              COUNT(*) FILTER (WHERE {_FUND_SERIES_COVERED_SQL}) AS fund_series_covered,
+              COUNT(*) FILTER (WHERE NOT {_FUND_SERIES_COVERED_SQL}
+                               AND {_SUFFIX_VARIANT_SQL}) AS suffix_variants,
+              COUNT(*) FILTER (WHERE NOT {_FUND_SERIES_COVERED_SQL}
+                               AND NOT {_SUFFIX_VARIANT_SQL}) AS other
               FROM instruments i
               JOIN exchanges e ON e.exchange_id = i.exchange
               LEFT JOIN external_identifiers ei
@@ -148,20 +174,24 @@ def compute_cik_gap_report(
         )
         row = cur.fetchone()
         if row is None:
+            unmapped_fund_series_covered = 0
             unmapped_suffix_variants = 0
             unmapped_other = 0
         else:
-            unmapped_suffix_variants = int(row[0] or 0)
-            unmapped_other = int(row[1] or 0)
-        unmapped = unmapped_suffix_variants + unmapped_other
+            unmapped_fund_series_covered = int(row[0] or 0)
+            unmapped_suffix_variants = int(row[1] or 0)
+            unmapped_other = int(row[2] or 0)
+        unmapped = unmapped_fund_series_covered + unmapped_suffix_variants + unmapped_other
 
-        # Sample: prioritise "other" rows over suffix variants so the
+        # Sample: prioritise "other" rows, then suffix variants, then
+        # fund_series_covered (by-design, least interesting) so the
         # operator sees the genuinely interesting gaps first. Cap at
         # sample_limit to keep the JSON response bounded.
         cur.execute(
             f"""
             SELECT i.instrument_id, i.symbol, i.company_name,
-                   CASE WHEN {_SUFFIX_VARIANT_SQL} THEN 'suffix_variant'
+                   CASE WHEN {_FUND_SERIES_COVERED_SQL} THEN 'fund_series_covered'
+                        WHEN {_SUFFIX_VARIANT_SQL} THEN 'suffix_variant'
                         ELSE 'other' END AS category
               FROM instruments i
               JOIN exchanges e ON e.exchange_id = i.exchange
@@ -173,7 +203,9 @@ def compute_cik_gap_report(
              WHERE i.is_tradable = TRUE
                AND e.asset_class = 'us_equity'
                AND ei.identifier_value IS NULL
-             ORDER BY CASE WHEN {_SUFFIX_VARIANT_SQL} THEN 1 ELSE 0 END,
+             ORDER BY CASE WHEN {_FUND_SERIES_COVERED_SQL} THEN 2
+                           WHEN {_SUFFIX_VARIANT_SQL} THEN 1
+                           ELSE 0 END,
                       i.symbol
              LIMIT %s
             """,
@@ -190,10 +222,12 @@ def compute_cik_gap_report(
         ]
 
     logger.info(
-        "cik_coverage_audit: cohort=%d mapped=%d unmapped=%d (suffix_variants=%d other=%d) sample=%d",
+        "cik_coverage_audit: cohort=%d mapped=%d unmapped=%d "
+        "(fund_series_covered=%d suffix_variants=%d other=%d) sample=%d",
         cohort_total,
         mapped,
         unmapped,
+        unmapped_fund_series_covered,
         unmapped_suffix_variants,
         unmapped_other,
         len(sample),
@@ -202,6 +236,7 @@ def compute_cik_gap_report(
         cohort_total=cohort_total,
         mapped=mapped,
         unmapped=unmapped,
+        unmapped_fund_series_covered=unmapped_fund_series_covered,
         unmapped_suffix_variants=unmapped_suffix_variants,
         unmapped_other=unmapped_other,
         sample=sample,

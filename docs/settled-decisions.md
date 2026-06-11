@@ -654,6 +654,43 @@ so `assert_archive_belongs_to_run` still gates Phase C on current
 
 ---
 
+## ETF identity = series/class; trust CIK never stamped (#1577, settled 2026-06-11)
+
+ETF/mutual-fund instruments do NOT get a `(sec, cik)` row in
+`external_identifiers` — their SEC tickers live in
+`company_tickers_mf.json` keyed to the **trust** CIK (iShares Trust
+`0001100663` alone covers ~300 of our ETFs), and stamping that
+through the #1102 shared-CIK mechanism would explode parse-time
+sibling fan-out ×300 and mis-route subject resolution (single-winner
+`default_subject_resolver`). The #1102 indexes were sized for ~10
+share-class siblings.
+
+Instead, ETF identity flows through the **series/class mechanism**:
+`(sec, class_id)` rows in `external_identifiers` +
+`cik_refresh_mf_directory` (sql/149), which stores `trust_cik` per
+class row for any consumer that needs it. N-CSR proves the pattern:
+it walks trust CIKs from the directory and resolves
+class_id → instrument before any instrument write. N-PORT keys
+holdings by `fund_series_id`. The instrument-level CIK gap for ETFs
+is **by-design** — `cik_coverage_audit` buckets them
+`fund_series_covered` (primary class_id + directory join, both
+load-bearing) so they don't pollute the actionable gap list.
+
+Caveat: `cik_refresh_mf_directory` has observed-ever semantics —
+future trust-CIK consumers must apply a freshness predicate
+(`last_seen`).
+
+**Tripwire for the entities layer (#1102 Option B):** file it when a
+trust-CIK-keyed consumer cannot resolve to series/class before
+instrument writes (the N-CSR pattern stops fitting), or when a
+durable entity-level trust page/join is needed. Trust-level content
+per se is NOT the tripwire. No half-step through non-primary
+trust-CIK rows.
+
+**Spec:** `docs/proposals/etl/2026-06-11-etf-trust-cik-design.md`.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

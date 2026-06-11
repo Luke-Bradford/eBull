@@ -93,17 +93,20 @@ class CikGapRowResponse(BaseModel):
     instrument_id: int
     symbol: str
     company_name: str | None
-    category: str  # "suffix_variant" | "other"
+    category: str  # "fund_series_covered" | "suffix_variant" | "other"
 
 
 class CikCoverageGapResponse(BaseModel):
     """Aggregate counters + capped sample for the CIK gap report.
 
     Cohort is the us_equity tradable producer cohort (matches
-    ``daily_cik_refresh``'s scope). ``unmapped_suffix_variants``
-    rows are operational-duplicate variants (``.RTH``, ``.US`` etc)
-    that legitimately lack their own CIK row; ``unmapped_other`` is
-    the real gap signal — typically ETFs, funds, merger CVRs, or
+    ``daily_cik_refresh``'s scope). ``unmapped_fund_series_covered``
+    rows are ETFs/funds whose identity flows through the series/class
+    mechanism by design (#1577 — trust CIK never stamped on
+    instruments); ``unmapped_suffix_variants`` rows are
+    operational-duplicate variants (``.RTH``, ``.US`` etc) that
+    legitimately lack their own CIK row; ``unmapped_other`` is the
+    real gap signal — funds without class bindings, merger CVRs, or
     a genuine missing mapping.
     """
 
@@ -111,6 +114,7 @@ class CikCoverageGapResponse(BaseModel):
     cohort_total: int
     mapped: int
     unmapped: int
+    unmapped_fund_series_covered: int
     unmapped_suffix_variants: int
     unmapped_other: int
     sample: list[CikGapRowResponse]
@@ -277,12 +281,14 @@ def get_cik_gap(
     so the ``mapped`` + ``unmapped`` split correlates with the
     bridge's hit / miss rate. Unmapped rows are bucketed:
 
+    * ``fund_series_covered`` — ETF/fund identity flows through
+      series/class by design (#1577); the missing CIK is not a gap.
     * ``suffix_variants`` — symbol contains ``.`` (operational
       duplicates like ``AAPL.RTH``). Pre-#819 these would render
       empty pages; post-#819 the canonical-redirect mechanism
       ensures they don't need their own CIK.
-    * ``other`` — ETFs, funds, merger CVRs, and any genuine gap
-      worth operator triage.
+    * ``other`` — funds without class bindings, merger CVRs, and
+      any genuine gap worth operator triage.
 
     See ``docs/wiki/runbooks/runbook-diagnosing-missing-cik.md`` for
     the runbook that interprets this report.
@@ -295,6 +301,7 @@ def get_cik_gap(
         cohort_total=report.cohort_total,
         mapped=report.mapped,
         unmapped=report.unmapped,
+        unmapped_fund_series_covered=report.unmapped_fund_series_covered,
         unmapped_suffix_variants=report.unmapped_suffix_variants,
         unmapped_other=report.unmapped_other,
         sample=[
