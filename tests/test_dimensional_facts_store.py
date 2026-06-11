@@ -161,3 +161,31 @@ def test_reader_winner_per_metric_annual_filter_and_writer_replace(
     assert result3.sources["revenue"] == "ACC-AMEND"
     by_member3 = {r["member_qname"]: r for r in result3.rows}
     assert by_member3["t:NorthMember"]["revenue"] == Decimal("615")
+
+    # Review-bot WARNING (PR #1588): a subtotal row in the WINNING
+    # accession with a LATER period_end must not anchor the target
+    # period — every CTE stage carries the same eligibility filters.
+    replace_accession_rows(
+        conn,
+        instrument_id=_IID,
+        source_accession="ACC-AMEND",
+        form_type="10-K/A",
+        filed_at=datetime(2026, 3, 1, tzinfo=UTC),
+        parser_version="10k-v3",
+        facts=[
+            _fact("revenue", "t:NorthMember", "615"),
+            _fact(
+                "revenue",
+                "t:TotalMember",
+                "1300",
+                start=date(2026, 1, 1),
+                end=date(2026, 12, 31),
+                is_subtotal=True,
+            ),
+        ],
+    )
+    conn.commit()
+    result4 = read_segments(conn, instrument_id=_IID, axis="business_segment")
+    assert result4.period_end == date(2025, 12, 31)
+    by_member4 = {r["member_qname"]: r for r in result4.rows}
+    assert by_member4["t:NorthMember"]["revenue"] == Decimal("615")

@@ -111,6 +111,12 @@ Without this, the caller believes the mutation succeeded while the row is unchan
 | `dict_row` added to one cursor | all cursor calls in the file |
 | Missing `rowcount` after UPDATE | every `conn.execute("UPDATE` in the file |
 
+## Chained-CTE filter consistency
+
+When a query selects an anchor in one CTE (a winner accession, a target period, a max watermark) and joins it in a later stage, every stage must apply the SAME eligibility filters. A filter present in the final join but absent from the anchor CTE lets the anchor land on a row the join then excludes — the query silently returns zero rows despite eligible data.
+
+Self-check: for each CTE that computes a `MAX(...)`/`ORDER BY ... LIMIT 1` anchor, diff its WHERE clause against the final SELECT's — any predicate present in one and not the other needs a reason in a comment. Origin: PR #1588 review WARNING (`target` CTE missing `NOT is_subtotal` carried by winner + main query).
+
 ## Never edit an applied migration — bump to a new NNN+1 file
 
 The runner records each applied file's SHA-256 in `schema_migrations.content_sha256` (#1333) and **raises at boot** if an applied file's content changed. Editing `sql/NNN_*.sql` after any DB recorded it (dev included — drafts applied during PR development count) is therefore a boot-breaker, not a silent no-op. All follow-up changes go into a new `NNN+1` file. If you knowingly replayed an edited file manually (idempotent), reset its hash: `UPDATE schema_migrations SET content_sha256 = NULL WHERE filename = '<file>'` — never DELETE the row. Full RCA in `docs/review-prevention-log.md` ("Migration content drift").

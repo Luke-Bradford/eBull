@@ -131,12 +131,17 @@ WITH winner AS (
      LIMIT 1
 ),
 target AS (
+    -- Same eligibility filters as winner + main query: a CTE chain
+    -- whose stages disagree on filters can anchor on a row the final
+    -- join then excludes, returning zero rows despite eligible data
+    -- (review-bot WARNING on PR #1588).
     SELECT MAX(f.period_end) AS period_end
       FROM instrument_dimensional_facts f
       JOIN winner w ON w.source_accession = f.source_accession
      WHERE f.instrument_id = %(instrument_id)s
        AND f.axis = %(axis)s
        AND f.metric = %(metric)s
+       AND NOT f.is_subtotal
        AND {_ANNUAL_DURATION_SQL}
 )
 SELECT f.member_qname, f.member_label, f.val,
