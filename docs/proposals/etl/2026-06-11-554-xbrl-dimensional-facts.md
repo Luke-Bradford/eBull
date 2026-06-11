@@ -72,20 +72,28 @@ edgartools' `filing.xbrl()` issues its own HTTP (instance + linkbases) outside
 hard-stop for new paths. Instead:
 
 1. Fetch the filing `index.json` (already-throttled wrapper).
-2. Locate the extracted instance with deterministic priority (Codex ckpt-1 MED):
-   (a) the `EX-101.INS` exhibit entry if present (standalone-instance era,
-   pre-2019-ish); (b) else files whose name case-insensitively ends `_htm.xml`
-   (inline era) — if several, prefer the one whose stem matches the primary
-   document's stem, else lexicographically-first + WARN with provenance.
-   Neither present → no-XBRL skip path. Each branch gets a table-test.
-3. Locate the label linkbase `*_lab.xml` for member labels; absent → prettified member
-   localname fallback.
-4. Parse with lxml, reusing the `n_csr_extractor.py` machinery shape:
-   `_context_dimensions` (context → `{axis: member}`), wildcard-namespace matching,
-   `(concept, axis)` routing.
+2. Locate the extracted instance with deterministic priority (Codex ckpt-1 MED;
+   detection rules CORRECTED after live verification — `index.json` carries NO
+   SEC exhibit-type labels, its `type` field is a content-type icon, so the
+   original EX-101.INS plan is impossible from the listing): (a) files ending
+   `_htm.xml` (inline era) — several → prefer primary-document stem match, else
+   largest-size + WARN; (b) else standalone-era `.xml` files that are not
+   linkbases (`_cal/_def/_lab/_pre/_ref`), not `R<n>.xml`/`FilingSummary.xml`,
+   not index files — same tie-break. Neither → no-XBRL skip. Each branch
+   table-tested.
+3. Locate label (`*_lab.xml`) + definition (`*_def.xml`) linkbases; when a filer
+   ships no standalone linkbases (Workiva-style — verified on MSFT FY2025), fall
+   back to the filing `.xsd`, which embeds labelLink/definitionLink in its
+   annotation; the parsers match by localname so the xsd is a drop-in source.
+   Labels absent entirely → prettified member localname fallback.
+4. Parse with lxml via the shared `xbrl_instance` helpers (extracted from
+   `n_csr_extractor.py`): `context_dimensions` (context → `{axis: member}`),
+   wildcard-namespace matching, `(concept, axis)` routing. Hardened parser
+   (entity resolution / DTD / network off) for all SEC-fetched XML.
 
-Cost: 2–3 throttled fetches per accession (index + instance + lab). Backfill of ~25k
-10-K accessions ≈ 50–75k fetches ≈ <2.5h at the shared 10 req/s floor.
+Cost: 3–4 throttled fetches per accession (index + instance + lab + def, the
+latter two sometimes one xsd). Backfill of ~25k 10-K accessions ≈ ≤100k fetches
+≈ <3h at the shared 10 req/s floor.
 
 ### D3 — axes and metrics ingested
 
@@ -121,6 +129,22 @@ internally consistent). Operating income = `us-gaap:OperatingIncomeLoss`; assets
 Duplicate-fact arbitration (Codex ckpt-1 MED): when the instance repeats the same
 (concept, context, unit), keep the most precise (`decimals`, with `INF` highest);
 equal precision with differing values → drop that member + WARN with provenance.
+
+**Subtotal members (added after live verification — the issue/spec originally
+missed this):** member sets are NOT flat. AAPL's product axis carries
+`us-gaap:ProductMember` ($307.0B) as the parent subtotal of iPhone/Mac/iPad/
+Wearables; summing returned rows would double-count (723B vs 416B). Rows carry
+`is_subtotal`, marked by TWO detectors: (a) definition-linkbase domain-member
+nesting (filers who nest; both AAPL linkbases are FLAT, so insufficient alone);
+(b) value-overage — revenue on product/geographic axes only, where ASC 606
+disaggregation reconciles to the consolidated (dimensionless) revenue fact in
+the same instance: `sum(members) − consolidated` is exactly the subtotal mass;
+the smallest member subset (≤3) summing exactly to it is marked; ambiguity or
+no-match marks nothing + WARNs. business_segment is excluded from (b) — its sum
+legitimately differs from consolidated (unallocated corporate items filtered via
+ConsolidationItemsAxis). Verified: AAPL Product; MSFT Product + Service,Other
+(xsd-embedded linkbases); JPM 'Total International' (= EMEA+APAC+LatAm exactly).
+Readers exclude subtotals; leaf sums reconcile (AAPL 416.161B on both axes).
 
 Financials-sector caveat: banks (JPM) may emit none of the revenue aliases on these
 axes → endpoint returns empty state, acceptable v1, recorded in smoke results.
