@@ -507,16 +507,28 @@ def upsert_cik_mapping(
     with conn.transaction():
         for symbol, instrument_id in instrument_symbols:
             symbol_upper = symbol.upper()
+            # Fallback chain: exact → .US strip → dot→dash on the
+            # stripped base. Exact match always wins.
+            base = symbol_upper[: -len(".US")] if symbol_upper.endswith(".US") else symbol_upper
             cik = mapping.get(symbol_upper)
-            if not cik and symbol_upper.endswith(".US"):
+            if not cik and base != symbol_upper:
                 # #813 — eToro suffixes some US listings ``.US`` to
                 # disambiguate from same-ticker crypto rows (M.US =
                 # Macy's, M = crypto). SEC's ticker files carry the
                 # bare ticker, so PETS.US / BTG.US etc. never matched.
-                # Exact match wins when both exist; the caller's
-                # ``asset_class='us_equity'`` cohort filter keeps the
-                # crypto siblings out of this loop entirely (#475).
-                cik = mapping.get(symbol_upper[: -len(".US")])
+                # The caller's ``asset_class='us_equity'`` cohort filter
+                # keeps the crypto siblings out of this loop entirely
+                # (#475).
+                cik = mapping.get(base)
+            if not cik and "." in base:
+                # #1102 — share-class separators differ: eToro uses a
+                # dot (BRK.B, BF.A), SEC's ticker files use a dash
+                # (BRK-B, BF-A). Translating the .US-stripped base also
+                # covers a hypothetical BRK.B.US → BRK-B. Operational
+                # variant suffixes (.RTH, .OLD, .CVR, ...) translate to
+                # dashed strings SEC never lists, so they miss here and
+                # stay skips.
+                cik = mapping.get(base.replace(".", "-"))
             if not cik:
                 logger.debug("CIK mapping: no CIK found for symbol %s", symbol)
                 continue

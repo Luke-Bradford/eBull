@@ -437,12 +437,15 @@ below for the operational-duplicate redirect semantics.
 - **PR-A:** sql/143 migration + filings.py upsert + ON CONFLICT predicate
   sweep across ~25 production + test sites + `tests/test_upsert_cik_mapping.py`
   flips.
-- **PR-B (deferred):** fan-out CIK→instrument multimap in
-  `sec_companyfacts_ingest.py`, `sec_submissions_ingest.py`,
+- **PR-B (landed 65660911, PR #1118):** fan-out CIK→instrument multimap
+  in `sec_companyfacts_ingest.py`, `sec_submissions_ingest.py`,
   `sec_insider_dataset_ingest.py` so share-class siblings BOTH receive
-  bulk-ingest data. Until PR-B lands, only one of two siblings has
-  fundamentals / submissions / insider data — but the binding is stable
-  rather than flapping (strict improvement).
+  bulk-ingest data. Per-filing manifest parsers fan out via
+  `app/services/manifest_parsers/_siblings.py::resolve_siblings` /
+  `app/services/sec_identity.py::siblings_for_issuer_cik` (PR #1152
+  onward). Data ingested BEFORE PR-B stays single-sibling until a
+  scoped `sec_rebuild` re-ingest — re-run it when a sibling shows
+  missing per-source data despite a bound CIK.
 
 **Spec:** `docs/proposals/etl/share-class-cik-uniqueness.md`.
 

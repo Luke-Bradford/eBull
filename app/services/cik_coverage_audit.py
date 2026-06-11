@@ -18,10 +18,17 @@ operator can ignore the noise and focus on real gaps:
     ``ABT.US``, ``ACLX.CVR``). These are operational duplicates;
     once #819 lands the canonical-redirect mechanism, they should
     NOT have their own CIK row — the canonical row carries it.
-    Legitimate share-class siblings like ``BRK.B`` DO have CIK rows
-    (post-#1102) so they don't show here.
   * ``other`` — everything else. ETFs, funds, merger CVRs, and any
     genuine gap. Operator must triage one by one.
+
+Share-class exception (#1102): a dotted symbol ending in a single
+uppercase class letter (``BRK.B``, ``CWEN.A`` — ``\\.[A-Z]$``) is a
+distinct security expected to carry its own CIK, not an operational
+variant. Those bucket as ``other`` so a residual miss (SEC's ticker
+file lacking the dashed form) stays operator-visible instead of
+hiding in the ignorable bucket. Multi-letter class suffixes
+(``AXIA.PC``) are rare enough that they stay in ``suffix_variants``
+— triage via the sample list if coverage stalls.
 
 The bridge itself (ticker → CIK via SEC's ``company_tickers.json``)
 already ships in ``daily_cik_refresh`` (#475); this audit surface is
@@ -39,6 +46,13 @@ from typing import Any
 import psycopg
 
 logger = logging.getLogger(__name__)
+
+# True for dotted symbols that are operational variants (AAPL.RTH,
+# DOW.OLD) — false for bare tickers and for share-class dots
+# (BRK.B, CWEN.A: ``\.[A-Z]$``), which are expected CIK-bearing
+# securities post-#1102. Static SQL fragment, single source for the
+# three queries below.
+_SUFFIX_VARIANT_SQL = r"(i.symbol LIKE '%%.%%' AND i.symbol !~ '\.[A-Z]$')"
 
 
 @dataclass(frozen=True)
@@ -116,10 +130,10 @@ def compute_cik_gap_report(
         # streaming the full unmapped set just to bucket them. The
         # sample query below caps payload size.
         cur.execute(
-            """
+            f"""
             SELECT
-              COUNT(*) FILTER (WHERE i.symbol LIKE '%%.%%') AS suffix_variants,
-              COUNT(*) FILTER (WHERE i.symbol NOT LIKE '%%.%%') AS other
+              COUNT(*) FILTER (WHERE {_SUFFIX_VARIANT_SQL}) AS suffix_variants,
+              COUNT(*) FILTER (WHERE NOT {_SUFFIX_VARIANT_SQL}) AS other
               FROM instruments i
               JOIN exchanges e ON e.exchange_id = i.exchange
               LEFT JOIN external_identifiers ei
@@ -145,9 +159,9 @@ def compute_cik_gap_report(
         # operator sees the genuinely interesting gaps first. Cap at
         # sample_limit to keep the JSON response bounded.
         cur.execute(
-            """
+            f"""
             SELECT i.instrument_id, i.symbol, i.company_name,
-                   CASE WHEN i.symbol LIKE '%%.%%' THEN 'suffix_variant'
+                   CASE WHEN {_SUFFIX_VARIANT_SQL} THEN 'suffix_variant'
                         ELSE 'other' END AS category
               FROM instruments i
               JOIN exchanges e ON e.exchange_id = i.exchange
@@ -159,7 +173,7 @@ def compute_cik_gap_report(
              WHERE i.is_tradable = TRUE
                AND e.asset_class = 'us_equity'
                AND ei.identifier_value IS NULL
-             ORDER BY CASE WHEN i.symbol LIKE '%%.%%' THEN 1 ELSE 0 END,
+             ORDER BY CASE WHEN {_SUFFIX_VARIANT_SQL} THEN 1 ELSE 0 END,
                       i.symbol
              LIMIT %s
             """,
