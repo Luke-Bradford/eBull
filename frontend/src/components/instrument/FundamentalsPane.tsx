@@ -55,6 +55,7 @@ import { fetchInstrumentFinancials } from "@/api/instruments";
 import type { InstrumentFinancialRow, InstrumentSummary } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
+import { formatBigNumber } from "@/lib/format";
 import { lightTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 import { useChartTheme } from "@/lib/useChartTheme";
@@ -149,17 +150,6 @@ function lastNonNullIndex(points: ReadonlyArray<CellPoint>): number {
     if (points[i]!.value !== null) return i;
   }
   return -1;
-}
-
-function formatBigNumber(n: number | null): string {
-  if (n === null) return "—";
-  const abs = Math.abs(n);
-  const sign = n < 0 ? "-" : "";
-  if (abs >= 1e12) return `${sign}${(abs / 1e12).toFixed(2)}T`;
-  if (abs >= 1e9) return `${sign}${(abs / 1e9).toFixed(2)}B`;
-  if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(2)}M`;
-  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(2)}K`;
-  return n.toFixed(0);
 }
 
 function formatPeriodTick(period_end: string): string {

@@ -1330,9 +1330,7 @@ def _patch_dimensional_real(monkeypatch, *, instance_name: str = "acme_htm.xml")
     monkeypatch.setattr(
         sec_edgar.SecFilingsProvider,
         "fetch_filing_index",
-        lambda self, accession, issuer_cik=None: {
-            "directory": {"item": [{"name": instance_name, "size": "100"}]}
-        },
+        lambda self, accession, issuer_cik=None: {"directory": {"item": [{"name": instance_name, "size": "100"}]}},
     )
 
 

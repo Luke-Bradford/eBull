@@ -51,14 +51,20 @@ def _context(cid: str, dims: dict[str, str], *, start: str | None, end: str | No
     )
 
 
-def _fact(concept: str, cid: str, value: str, *, decimals: str | None = "-6", unit: str = "usd", nil: bool = False) -> str:
+def _fact(
+    concept: str, cid: str, value: str, *, decimals: str | None = "-6", unit: str = "usd", nil: bool = False
+) -> str:
     dec = f' decimals="{decimals}"' if decimals is not None else ""
     nil_attr = ' xsi:nil="true"' if nil else ""
     return f'<{concept} contextRef="{cid}" unitRef="{unit}"{dec}{nil_attr}>{value}</{concept}>'
 
 
 def _instance(*parts: str) -> bytes:
-    units = '<unit id="usd"><measure>iso4217:USD</measure></unit><unit id="ratio"><divide><unitNumerator><measure>iso4217:USD</measure></unitNumerator><unitDenominator><measure>shares</measure></unitDenominator></divide></unit>'
+    units = (
+        '<unit id="usd"><measure>iso4217:USD</measure></unit>'
+        '<unit id="ratio"><divide><unitNumerator><measure>iso4217:USD</measure></unitNumerator>'
+        "<unitDenominator><measure>shares</measure></unitDenominator></divide></unit>"
+    )
     return f"<xbrl {_NS}>{units}{''.join(parts)}</xbrl>".encode()
 
 

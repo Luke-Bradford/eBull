@@ -73,6 +73,20 @@ export function formatNumber(value: number | null | undefined, fractionDigits = 
   });
 }
 
+/** Abbreviated large magnitudes for financial-statement values:
+ *  `416161000000 → "416.16B"`. Canonical home of the helper that
+ *  previously lived privately in FundamentalsPane (#554). */
+export function formatBigNumber(n: number | null): string {
+  if (n === null) return "—";
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "-" : "";
+  if (abs >= 1e12) return `${sign}${(abs / 1e12).toFixed(2)}T`;
+  if (abs >= 1e9) return `${sign}${(abs / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(2)}K`;
+  return n.toFixed(0);
+}
+
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
