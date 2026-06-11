@@ -13,8 +13,9 @@
  * are asserted directly.
  */
 
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { type ReactElement, cloneElement } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { lightTheme } from "@/lib/chartTheme";
 
@@ -25,8 +26,35 @@ import {
   RESIDUAL_LABEL,
   buildSunburstChartData,
   buildSunburstRings,
+  focusedSectorDatum,
+  openWedgeSource,
   residualTooltipText,
 } from "./OwnershipSunburst";
+
+// jsdom gives ResponsiveContainer a zero-size box, so the real
+// component renders no sectors. Recharts computes sector geometry
+// mathematically (no layout engine needed) — pinning a fixed size on
+// the child chart makes real sector paths render in jsdom, which the
+// keyboard test below needs (#921, Codex ckpt-1: a hand-built DOM
+// skeleton alone could pass while real Recharts markup breaks).
+vi.mock("recharts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("recharts")>();
+  return {
+    ...actual,
+    ResponsiveContainer: ({ children }: { children: ReactElement }) =>
+      cloneElement(children, { width: 360, height: 360 }),
+  };
+});
+
+// vitest 4 reuses spy instances across tests in a file — restore
+// per-test or window.open call history leaks (prevention-log:
+// "Frontend spy call-history leaks across tests").
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+const EDGAR_URL =
+  "https://www.sec.gov/Archives/edgar/data/102909/000010290926000123-index.html";
 
 /** 1B outstanding; institutions report 600M with one 400M named
  *  filer → 200M within-category gap; 400M residual. */
@@ -39,6 +67,7 @@ function baseInputs(overrides: Partial<SunburstInputs> = {}): SunburstInputs {
         label: "Vanguard Group",
         shares: 400_000_000,
         category: "institutions",
+        source_url: EDGAR_URL,
       },
     ],
     institutions_total: 600_000_000,
@@ -91,6 +120,18 @@ describe("buildSunburstChartData", () => {
 
     const known = middleData.find((d) => d.id === "cat-institutions");
     expect(known).toMatchObject({ is_gap: false, is_residual: false });
+  });
+
+  it("threads source_url onto the leaf wedge's click target (#921)", () => {
+    const rings = buildSunburstRings(baseInputs());
+    const { outerData } = buildSunburstChartData(rings!, lightTheme);
+    const leaf = outerData.find((d) => d.id === "leaf-institutions-0000102909");
+    expect(leaf?.target).toEqual({
+      kind: "leaf",
+      category_key: "institutions",
+      leaf_key: "0000102909",
+      source_url: EDGAR_URL,
+    });
   });
 
   it("emits no residual datums when categories cover the denominator", () => {
@@ -155,5 +196,167 @@ describe("OwnershipLegend residual row", () => {
     );
     render(<OwnershipLegend rings={rings!} />);
     expect(screen.queryByText(RESIDUAL_LABEL)).toBeNull();
+  });
+});
+
+describe("openWedgeSource (#921)", () => {
+  it("opens a leaf's sec.gov URL in a new tab, severs opener, returns true", () => {
+    // Not the ``noopener`` feature string: per spec that makes
+    // window.open return null even on SUCCESS, which would fire the
+    // caller's in-app fallback after every successful open (double
+    // action — Codex ckpt-2 High). Opener is severed on the handle.
+    const handle = { opener: "sentinel" } as unknown as Window;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(handle);
+    const opened = openWedgeSource({
+      kind: "leaf",
+      category_key: "institutions",
+      leaf_key: "0000102909",
+      source_url: EDGAR_URL,
+    });
+    expect(opened).toBe(true);
+    expect(openSpy).toHaveBeenCalledExactlyOnceWith(EDGAR_URL, "_blank");
+    expect(handle.opener).toBeNull();
+  });
+
+  it("returns false when the popup is blocked (window.open → null)", () => {
+    vi.spyOn(window, "open").mockReturnValue(null);
+    expect(
+      openWedgeSource({
+        kind: "leaf",
+        category_key: "institutions",
+        leaf_key: "x",
+        source_url: EDGAR_URL,
+      }),
+    ).toBe(false);
+  });
+
+  it("fails closed on null, non-sec.gov, category, and center targets", () => {
+    const openSpy = vi
+      .spyOn(window, "open")
+      .mockReturnValue({ opener: null } as unknown as Window);
+    expect(
+      openWedgeSource({
+        kind: "leaf",
+        category_key: "etfs",
+        leaf_key: "x",
+        source_url: null,
+      }),
+    ).toBe(false);
+    expect(
+      openWedgeSource({
+        kind: "leaf",
+        category_key: "etfs",
+        leaf_key: "x",
+        source_url: "https://evil.example/sec.gov/index.html",
+      }),
+    ).toBe(false);
+    expect(
+      openWedgeSource({ kind: "category", category_key: "institutions" }),
+    ).toBe(false);
+    expect(openWedgeSource({ kind: "center" })).toBe(false);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("focusedSectorDatum (#921)", () => {
+  const rings = buildSunburstRings(baseInputs())!;
+  const { middleData, outerData } = buildSunburstChartData(rings, lightTheme);
+
+  function sectorPath(ring: string, idx: string): Element {
+    const root = document.createElement("div");
+    root.innerHTML = `<g class="recharts-pie-sector"><path data-ring="${ring}" data-idx="${idx}"></path></g>`;
+    return root.querySelector("path")!;
+  }
+
+  it("resolves middle and outer sectors by data attributes", () => {
+    expect(focusedSectorDatum(sectorPath("middle", "0"), middleData, outerData)).toBe(
+      middleData[0],
+    );
+    expect(focusedSectorDatum(sectorPath("outer", "1"), middleData, outerData)).toBe(
+      outerData[1],
+    );
+  });
+
+  it("returns null for non-sectors, unknown rings, and bad indices", () => {
+    expect(focusedSectorDatum(null, middleData, outerData)).toBeNull();
+    expect(
+      focusedSectorDatum(document.createElement("div"), middleData, outerData),
+    ).toBeNull();
+    expect(focusedSectorDatum(sectorPath("inner", "0"), middleData, outerData)).toBeNull();
+    expect(focusedSectorDatum(sectorPath("middle", ""), middleData, outerData)).toBeNull();
+    expect(
+      focusedSectorDatum(sectorPath("outer", "999"), middleData, outerData),
+    ).toBeNull();
+  });
+});
+
+describe("keyboard Enter on a real rendered sector (#921)", () => {
+  it("fires the wedge action end-to-end: Enter → leaf target → window.open", () => {
+    const openSpy = vi
+      .spyOn(window, "open")
+      .mockReturnValue({ opener: null } as unknown as Window);
+    const { container } = render(
+      <OwnershipSunburst
+        inputs={baseInputs()}
+        onWedgeClick={(target) => {
+          openWedgeSource(target);
+        }}
+      />,
+    );
+    // Real Recharts markup (fixed-size ResponsiveContainer mock):
+    // outer ring idx 0 = Vanguard, the only named leaf.
+    const path = container.querySelector('path[data-ring="outer"][data-idx="0"]');
+    expect(path).not.toBeNull();
+    fireEvent.keyDown(path!, { key: "Enter" });
+    expect(openSpy).toHaveBeenCalledExactlyOnceWith(EDGAR_URL, "_blank");
+  });
+
+  it("recharts' own Arrow navigation focuses a sector that Enter then activates", () => {
+    // Drives the REAL focus chain (Codex ckpt-2 Low): focus the outer
+    // pie root, ArrowLeft via recharts' native onkeydown handler
+    // moves DOM focus onto a sector <g>, then Enter on it activates
+    // the wedge. Proves the wrapper handler composes with recharts'
+    // focus management, not just with hand-picked event targets.
+    const handler = vi.fn();
+    const { container } = render(
+      <OwnershipSunburst inputs={baseInputs()} onWedgeClick={handler} />,
+    );
+    const outerLeafPath = container.querySelector(
+      'path[data-ring="outer"][data-idx="0"]',
+    );
+    // The outer pie root = the .recharts-pie ancestor of an outer cell.
+    const outerPieRoot = outerLeafPath!.closest(".recharts-pie");
+    expect(outerPieRoot).not.toBeNull();
+    // Recharts pre-increments its focus index from 0, so the outer
+    // ring's three sectors (leaf, within-category gap, residual)
+    // focus in order 1 → 2 → 0; three presses wrap to the leaf.
+    // Subsequent presses fire on the focused sector — keydown
+    // bubbles to the pie root where recharts attaches its handler,
+    // exactly as in a browser.
+    fireEvent.keyDown(outerPieRoot!, { key: "ArrowLeft" });
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    const focused = document.activeElement;
+    expect(focused?.classList.contains("recharts-pie-sector")).toBe(true);
+    fireEvent.keyDown(focused!, { key: "Enter" });
+    expect(handler).toHaveBeenCalledExactlyOnceWith({
+      kind: "leaf",
+      category_key: "institutions",
+      leaf_key: "0000102909",
+      source_url: EDGAR_URL,
+    });
+  });
+
+  it("ignores Enter on gap sectors and non-Enter keys", () => {
+    const handler = vi.fn();
+    const { container } = render(
+      <OwnershipSunburst inputs={baseInputs()} onWedgeClick={handler} />,
+    );
+    const gap = container.querySelector('path[data-residual="true"]');
+    expect(gap).not.toBeNull();
+    fireEvent.keyDown(gap!, { key: "Enter" });
+    const known = container.querySelector('path[data-ring="outer"][data-idx="0"]');
+    fireEvent.keyDown(known!, { key: "a" });
+    expect(handler).not.toHaveBeenCalled();
   });
 });

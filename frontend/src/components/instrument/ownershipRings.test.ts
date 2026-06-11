@@ -306,3 +306,42 @@ describe("buildSunburstRings — outer-ring threshold grouping", () => {
     expect(other?.shares).toBe(8_000);
   });
 });
+
+describe("buildSunburstRings — source_url threading (#921)", () => {
+  it("carries holder source_url onto its leaf; aggregates get null", () => {
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      total_shares: 1_000_000,
+      institutions_total: 58_000,
+      treasury_shares: 25_000,
+      holders: [
+        {
+          ...holder("alice", 50_000, "institutions"),
+          source_url:
+            "https://www.sec.gov/Archives/edgar/data/1/000000000126000001-index.html",
+        },
+        // Sub-threshold → folds into the "Other" tail.
+        { ...holder("bob", 8_000, "institutions"), source_url: "https://www.sec.gov/x" },
+      ],
+    });
+    const inst = r!.categories.find((c) => c.key === "institutions")!;
+    expect(inst.leaves.find((l) => l.key === "alice")!.source_url).toBe(
+      "https://www.sec.gov/Archives/edgar/data/1/000000000126000001-index.html",
+    );
+    // An aggregate has no single source filing.
+    expect(inst.leaves.find((l) => l.is_other)!.source_url).toBeNull();
+    const treasury = r!.categories.find((c) => c.key === "treasury")!;
+    expect(treasury.leaves[0]!.source_url).toBeNull();
+  });
+
+  it("defaults to null when the holder feed carries no URL (L2 builders)", () => {
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      total_shares: 1_000_000,
+      institutions_total: 50_000,
+      holders: [holder("alice", 50_000, "institutions")],
+    });
+    const inst = r!.categories.find((c) => c.key === "institutions")!;
+    expect(inst.leaves.find((l) => l.key === "alice")!.source_url).toBeNull();
+  });
+});

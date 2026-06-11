@@ -69,6 +69,13 @@ export interface SunburstHolder {
     | "insiders"
     | "treasury"
     | "blockholders";
+  /** SEC archive index URL for the holder's winning accession (#921).
+   *  Optional so pre-existing call sites (the L2 page's per-endpoint
+   *  holder builders, whose payloads carry no URL today) compile
+   *  unchanged — absent/null means the wedge click falls back to the
+   *  in-app drill. The rollup-fed L1 panel supplies
+   *  ``winning_edgar_url``. */
+  readonly source_url?: string | null;
 }
 
 export interface SunburstInputs {
@@ -132,6 +139,10 @@ export interface SunburstLeaf {
   readonly shares: number;
   /** True for the aggregated tail wedge from threshold grouping. */
   readonly is_other: boolean;
+  /** Click-through target — SEC archive index URL for the holder's
+   *  winning accession (#921). ``null`` for aggregates ("Other" tail,
+   *  treasury) and holders whose feed carries no URL. */
+  readonly source_url: string | null;
   readonly tail_meta?: SunburstTailMeta;
 }
 
@@ -295,6 +306,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
           label: "Treasury",
           shares: input.treasury_shares,
           is_other: false,
+          source_url: null,
         },
       ],
       within_category_gap: 0,
@@ -358,6 +370,7 @@ function buildCategoryFromTotal(
         label: h.label,
         shares: h.shares,
         is_other: false,
+        source_url: h.source_url ?? null,
       });
     } else {
       tail.push(h);
@@ -373,6 +386,8 @@ function buildCategoryFromTotal(
       label: `Other ${CATEGORY_LABEL[key].toLowerCase()}`,
       shares: aggregate_shares,
       is_other: true,
+      // An aggregate has no single source filing to click through to.
+      source_url: null,
       tail_meta: {
         count: tail.length,
         aggregate_shares,
