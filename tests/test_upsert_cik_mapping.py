@@ -310,6 +310,19 @@ def test_share_class_exact_match_wins_over_dash(ebull_test_conn: psycopg.Connect
     assert _primary_cik(conn, 1) == "0009999999"
 
 
+def test_share_class_dot_us_chains_to_dash(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """Hypothetical BRK.B.US — the dash translation applies to the
+    .US-stripped base, so the chain reaches BRK-B. Also pins that the
+    nonsense BRK-B-US form is never probed (mapping omits it)."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="BRK.B.US")
+
+    upserted = upsert_cik_mapping(conn, {"BRK-B": "0001067983"}, [("BRK.B.US", "1")])
+
+    assert upserted == 1
+    assert _primary_cik(conn, 1) == "0001067983"
+
+
 def test_variant_suffix_dash_translation_stays_a_skip(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

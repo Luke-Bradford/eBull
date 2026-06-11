@@ -174,3 +174,28 @@ def test_sample_limit_caps_payload(
 
     assert report.unmapped == 7  # AAPL.RTH + AAXJ + 5 EXTRA.RTH
     assert len(report.sample) == 2
+
+
+def test_share_class_dot_buckets_as_other(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """#1102 — an unmapped single-letter share class (CWEN.A) is an
+    expected CIK-bearing security, not an operational variant. It must
+    bucket as ``other`` so the miss stays operator-visible."""
+    conn = ebull_test_conn
+    _seed_universe(conn)
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (90671020, 'CWEN.A', 'Clearway Energy A', 'audit_us', 'USD', TRUE)
+        """,
+    )
+    conn.commit()
+
+    report = compute_cik_gap_report(conn, sample_limit=10)
+
+    assert report.unmapped_suffix_variants == 1  # AAPL.RTH only
+    assert report.unmapped_other == 2  # AAXJ + CWEN.A
+    by_symbol = {r.symbol: r.category for r in report.sample}
+    assert by_symbol["CWEN.A"] == "other"
+    assert by_symbol["AAPL.RTH"] == "suffix_variant"
