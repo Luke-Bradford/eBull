@@ -338,3 +338,44 @@ describe("rollupToSunburstInputs — def14a_unmatched fold (Codex review fix)", 
     expect(inputs!.insiders_total).toBeNull();
   });
 });
+
+describe("rollupToSunburstInputs — source_url threading (#921)", () => {
+  it("maps winning_edgar_url onto the holder's source_url", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({
+        shares_outstanding: "1000000000",
+        slices: [
+          {
+            category: "institutions",
+            label: "Institutions",
+            total_shares: "120000000",
+            pct_outstanding: "0.12",
+            filer_count: 1,
+            dominant_source: "13f",
+            holders: [
+              {
+                filer_cik: "0001000010",
+                filer_name: "BlackRock",
+                shares: "120000000",
+                pct_outstanding: "0.12",
+                winning_source: "13f",
+                winning_accession: "13F-010",
+                winning_edgar_url:
+                  "https://www.sec.gov/Archives/edgar/data/1000010/000100001026000010-index.html",
+                as_of_date: "2025-12-31",
+                filer_type: "INV",
+                dropped_sources: [],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(inputs!.holders).toHaveLength(1);
+    expect(inputs!.holders[0]).toMatchObject({
+      key: "0001000010",
+      source_url:
+        "https://www.sec.gov/Archives/edgar/data/1000010/000100001026000010-index.html",
+    });
+  });
+});

@@ -47,6 +47,7 @@ import { HistoricalSymbolCallout } from "@/components/instrument/HistoricalSymbo
 import {
   OwnershipLegend,
   OwnershipSunburst,
+  openWedgeSource,
 } from "@/components/instrument/OwnershipSunburst";
 import type { WedgeClick } from "@/components/instrument/OwnershipSunburst";
 import { Pane } from "@/components/instrument/Pane";
@@ -76,6 +77,12 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
   const navigate = useNavigate();
   const handleWedgeClick = useCallback(
     (target: WedgeClick) => {
+      // #921 split model (operator decision 2026-06-11): a per-filer
+      // leaf wedge with a known source filing opens SEC EDGAR in a
+      // new tab; everything else (categories, center, URL-less
+      // leaves, popup-blocked opens) falls through to the in-app L2
+      // drill below.
+      if (openWedgeSource(target)) return;
       const params = new URLSearchParams();
       if (target.kind === "category") params.set("category", target.category_key);
       if (target.kind === "leaf") {
@@ -165,7 +172,13 @@ export function rollupToSunburstInputs(
       const shares = parseShareCount(h.shares);
       if (shares === null || shares <= 0) continue;
       const key = h.filer_cik ?? `name:${h.filer_name}`;
-      out.push({ key, label: h.filer_name, shares, category: target });
+      out.push({
+        key,
+        label: h.filer_name,
+        shares,
+        category: target,
+        source_url: h.winning_edgar_url,
+      });
     }
     return out;
   };

@@ -30,7 +30,7 @@
  * ``<Pie>`` components at increasing ``innerRadius`` / ``outerRadius``.
  */
 
-import { useId, useMemo } from "react";
+import { type KeyboardEvent, useId, useMemo } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
 import { formatPct, formatShares } from "@/components/instrument/ownershipMetrics";
@@ -62,7 +62,30 @@ export type WedgeClick =
       readonly kind: "leaf";
       readonly category_key: CategoryKey;
       readonly leaf_key: string;
+      /** SEC archive index URL for the holder's winning accession
+       *  (#921). ``null`` = no click-through target (aggregated
+       *  "Other" tail, treasury, feeds without URLs) — consumers
+       *  fall back to the in-app drill. */
+      readonly source_url: string | null;
     };
+
+/** Fail-closed host guard for wedge click-through (#921). The backend
+ *  builds these URLs from accession numbers, but a corrupted payload
+ *  should degrade to the in-app drill, not open an arbitrary URL. */
+const _EDGAR_URL_PREFIX = "https://www.sec.gov/";
+
+/**
+ * Open the SEC source filing for a leaf wedge in a new tab (#921).
+ * Returns ``true`` only when the tab actually opened — callers fall
+ * back to their in-app navigate/drill on ``false`` (no URL, non-SEC
+ * URL, category/center wedge, or popup-blocked ``window.open`` →
+ * ``null``), so a wedge click is never swallowed.
+ */
+export function openWedgeSource(target: WedgeClick): boolean {
+  if (target.kind !== "leaf" || target.source_url === null) return false;
+  if (!target.source_url.startsWith(_EDGAR_URL_PREFIX)) return false;
+  return window.open(target.source_url, "_blank", "noopener,noreferrer") !== null;
+}
 
 /** Index into ``ChartTheme.accent`` for each category's color. */
 export const CATEGORY_FILL_INDEX: Record<CategoryKey, number> = {
@@ -250,6 +273,23 @@ export function OwnershipSunburst({
     onWedgeClick?.(datum.target);
   };
 
+  // Keyboard activation (#921). Recharts' own keyboard layer makes the
+  // pie root Tab-reachable and moves focus across sectors on
+  // ArrowLeft/Right, but has NO Enter handling (verified in
+  // node_modules Pie.js). Keydown bubbles from the focused sector
+  // <g> to this wrapper; ``e.target`` is the focused sector.
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key !== "Enter") return;
+    const datum = focusedSectorDatum(
+      e.target instanceof Element ? e.target : null,
+      middleData,
+      outerData,
+    );
+    if (datum === null) return;
+    e.preventDefault();
+    handleClick(datum);
+  };
+
   const wedgeStroke = theme.gridLine;
 
   // ``middleData`` and ``outerData`` are always non-empty when
@@ -262,8 +302,11 @@ export function OwnershipSunburst({
     <div
       className="ownership-sunburst relative"
       style={{ width: size, height: size }}
-      role="img"
+      // ``group``, not ``img`` (#921): an atomic image role would hide
+      // the keyboard-interactive sectors from assistive tech.
+      role="group"
       aria-label={`Ownership breakdown: ${formatShares(denom)} total shares.`}
+      onKeyDown={handleKeyDown}
     >
       <style>{SUNBURST_STYLES}</style>
       {/* Hatch paint-server for the residual wedges (#920). Recharts
@@ -297,6 +340,10 @@ export function OwnershipSunburst({
             stroke={wedgeStroke}
             isAnimationActive={false}
             onClick={() => onWedgeClick?.({ kind: "center" })}
+            // Decorative band — its click ("show L2 view") duplicates
+            // page-level navigation, so it stays out of the Tab order
+            // (#921, Codex ckpt-1). Keyboard stops = middle + outer.
+            rootTabIndex={-1}
           >
             <Cell fill={theme.borderColor} fillOpacity={0.6} stroke={wedgeStroke} />
           </Pie>
@@ -309,13 +356,16 @@ export function OwnershipSunburst({
             isAnimationActive={false}
             onClick={(_, idx) => handleClick(middleData[idx])}
           >
-            {middleData.map((d) => (
+            {middleData.map((d, i) => (
               <Cell
                 key={d.id}
                 fill={d.is_residual ? `url(#${patternId})` : d.fill}
                 stroke={d.is_gap ? "transparent" : wedgeStroke}
                 data-known={d.is_gap ? "false" : "true"}
                 data-residual={d.is_residual ? "true" : "false"}
+                data-ring="middle"
+                data-idx={i}
+                aria-label={cellAriaLabel(d)}
               />
             ))}
           </Pie>
@@ -328,13 +378,16 @@ export function OwnershipSunburst({
             isAnimationActive={false}
             onClick={(_, idx) => handleClick(outerData[idx])}
           >
-            {outerData.map((d) => (
+            {outerData.map((d, i) => (
               <Cell
                 key={d.id}
                 fill={d.is_residual ? `url(#${patternId})` : d.fill}
                 stroke={d.is_gap ? "transparent" : wedgeStroke}
                 data-known={d.is_gap ? "false" : "true"}
                 data-residual={d.is_residual ? "true" : "false"}
+                data-ring="outer"
+                data-idx={i}
+                aria-label={cellAriaLabel(d)}
               />
             ))}
           </Pie>
@@ -386,8 +439,46 @@ function toLeafDatum(
     fill: baseFill,
     is_gap: false,
     is_residual: false,
-    target: { kind: "leaf", category_key, leaf_key: leaf.key },
+    target: {
+      kind: "leaf",
+      category_key,
+      leaf_key: leaf.key,
+      source_url: leaf.source_url,
+    },
   };
+}
+
+/**
+ * Resolve a keyboard event's target sector to its chart datum (#921).
+ * Reads the ``data-ring`` / ``data-idx`` attributes stamped on each
+ * Cell path — deliberately NOT positional DOM-order mapping, so a
+ * Recharts render-order change cannot silently remap Enter presses to
+ * the wrong wedge (Codex ckpt-1 High). Returns ``null`` for the inner
+ * decorative ring, labels, or anything that is not a sector.
+ */
+export function focusedSectorDatum(
+  eventTarget: Element | null,
+  middleData: readonly ChartDatum[],
+  outerData: readonly ChartDatum[],
+): ChartDatum | null {
+  if (eventTarget === null) return null;
+  const sector = eventTarget.closest(".recharts-pie-sector");
+  if (sector === null) return null;
+  const path = sector.querySelector("path[data-ring]");
+  if (path === null) return null;
+  const ring = path.getAttribute("data-ring");
+  const idx = Number.parseInt(path.getAttribute("data-idx") ?? "", 10);
+  if (!Number.isInteger(idx) || idx < 0) return null;
+  if (ring === "middle") return middleData[idx] ?? null;
+  if (ring === "outer") return outerData[idx] ?? null;
+  return null;
+}
+
+/** Accessible name for an arrow-focused sector (#921). Recharts
+ *  spreads unknown Cell props onto the sector ``<path>`` (same
+ *  passthrough as the ``data-*`` attributes). */
+function cellAriaLabel(d: ChartDatum): string {
+  return `${d.name}: ${formatShares(d.shares)} shares, ${formatPct(d.pct)} of outstanding`;
 }
 
 function makeGapDatum(

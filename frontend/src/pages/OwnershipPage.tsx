@@ -43,6 +43,7 @@ import {
 import {
   OwnershipLegend,
   OwnershipSunburst,
+  openWedgeSource,
 } from "@/components/instrument/OwnershipSunburst";
 import type { WedgeClick } from "@/components/instrument/OwnershipSunburst";
 import {
@@ -135,6 +136,11 @@ export function OwnershipPage(): JSX.Element {
 
   const handleWedgeClick = useCallback(
     (target: WedgeClick) => {
+      // #921 split model: leaf wedge with a source filing → SEC EDGAR
+      // new tab. The L2 holder builders carry no URLs today, so this
+      // only fires once those feeds thread source_url — until then
+      // every leaf falls through to the in-page drill below.
+      if (openWedgeSource(target)) return;
       const next = new URLSearchParams(searchParams);
       if (target.kind === "category") {
         next.set("category", target.category_key);
