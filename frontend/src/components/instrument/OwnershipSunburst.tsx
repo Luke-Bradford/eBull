@@ -11,20 +11,26 @@
  *   ring 1 (inner)  — single solid band, decorative; denominator
  *                     label sits in the center hole.
  *   ring 2 (middle) — per-category wedges (Institutions / ETFs /
- *                     Insiders / Treasury) plus a transparent wedge
- *                     for the unaccounted residual.
+ *                     Insiders / Treasury) plus a hatched wedge for
+ *                     the ``Public / unattributed`` residual (#920).
  *   ring 3 (outer)  — per-filer / per-officer wedges within each
  *                     category, plus a transparent wedge for any
  *                     within-category gap (filer detail incomplete)
- *                     and a transparent wedge for the same outer
+ *                     and a hatched wedge for the same outer
  *                     residual so ring 3 reaches the same
  *                     circumference as ring 2.
+ *
+ * Residual vs within-category gap (#920): the residual is hatched
+ * (subtle diagonal lines) and hover shows a tooltip, so the operator
+ * SEES the coverage gap instead of reading it as a chart bug. It is
+ * never clickable. Within-category gaps stay fully transparent and
+ * inert — they have no identity to describe.
  *
  * Recharts has no native sunburst primitive — built from three nested
  * ``<Pie>`` components at increasing ``innerRadius`` / ``outerRadius``.
  */
 
-import { useMemo } from "react";
+import { useId, useMemo } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
 import { formatPct, formatShares } from "@/components/instrument/ownershipMetrics";
@@ -76,16 +82,94 @@ export function categoryFill(theme: ChartTheme, key: CategoryKey): string {
   return theme.accent[idx % theme.accent.length] ?? theme.accent[0]!;
 }
 
-interface ChartDatum {
+export interface ChartDatum {
   readonly id: string;
   readonly name: string;
   readonly shares: number;
   readonly pct: number;
   readonly fill: string;
-  /** True for transparent wedges — they are non-interactive and
-   *  the tooltip / hover affordances suppress on them. */
+  /** True for gap wedges (residual + within-category) — they are
+   *  never clickable. */
   readonly is_gap: boolean;
+  /** True only for the ``Public / unattributed`` residual wedges
+   *  (#920) — hatched fill + hover tooltip. Within-category gaps
+   *  stay transparent and inert. */
+  readonly is_residual: boolean;
   readonly target: WedgeClick | null;
+}
+
+/** Display label for the residual wedge — matches the backend
+ *  rollup's ``residual.label`` so chart, legend, and payload agree. */
+export const RESIDUAL_LABEL = "Public / unattributed";
+
+/**
+ * Tooltip copy for the residual wedge (#920). ``pct`` is the fraction
+ * already carried on the chart datum (``shares / effective
+ * denominator``). Says "of outstanding" (the chart's denominator is
+ * shares_outstanding) and "not attributed to" (the residual can
+ * include filers outside our seeded coverage cohort — "not held by
+ * any disclosed filer" would overclaim). Spec D4 / Codex ckpt-1.
+ */
+export function residualTooltipText(shares: number, pct: number): string {
+  return `${RESIDUAL_LABEL}: ${formatPct(pct)} of outstanding — ${formatShares(shares)} shares not attributed to any disclosed filer.`;
+}
+
+export interface SunburstChartData {
+  readonly middleData: ChartDatum[];
+  readonly outerData: ChartDatum[];
+}
+
+/**
+ * Pure chart-datum construction — extracted from the component so the
+ * gap/residual flag placement is unit-testable (jsdom renders a
+ * zero-size ResponsiveContainer, so sector-level DOM assertions are
+ * not viable).
+ */
+export function buildSunburstChartData(
+  rings: SunburstRings,
+  theme: ChartTheme,
+): SunburstChartData {
+  const denom = rings.total_shares;
+  const fillFor = (key: CategoryKey): string => categoryFill(theme, key);
+
+  // Middle ring — per-category wedges + hatched residual.
+  const middleData: ChartDatum[] = rings.categories.map((cat) =>
+    toCategoryDatum(cat, fillFor(cat.key), denom),
+  );
+  if (rings.category_residual > 0) {
+    middleData.push(
+      makeGapDatum("middle-residual", RESIDUAL_LABEL, rings.category_residual, denom, true),
+    );
+  }
+
+  // Outer ring — leaves under each visible category, then the
+  // category's within_category_gap (transparent), then the same
+  // residual so ring 3 closes flush with ring 2.
+  const outerData: ChartDatum[] = [];
+  for (const cat of rings.categories) {
+    const baseFill = fillFor(cat.key);
+    for (const leaf of cat.leaves) {
+      outerData.push(toLeafDatum(leaf, cat.key, baseFill, denom));
+    }
+    if (cat.within_category_gap > 0) {
+      outerData.push(
+        makeGapDatum(
+          `${cat.key}-gap`,
+          `${cat.label} — unresolved filers`,
+          cat.within_category_gap,
+          denom,
+          false,
+        ),
+      );
+    }
+  }
+  if (rings.category_residual > 0) {
+    outerData.push(
+      makeGapDatum("outer-residual", RESIDUAL_LABEL, rings.category_residual, denom, true),
+    );
+  }
+
+  return { middleData, outerData };
 }
 
 /**
@@ -108,8 +192,11 @@ const SUNBURST_STYLES = [
   // tests on the wrapper for any sector whose Cell carries
   // ``data-known='false'`` so transparent gap wedges don't absorb
   // clicks/hover at all (instead of relying on the JS click filter
-  // to no-op them after the fact).
-  ".ownership-sunburst .recharts-pie-sector:has(path[data-known='false']) {",
+  // to no-op them after the fact). Residual wedges (#920) are the
+  // exception: they keep hit-testing ON so the hover tooltip fires,
+  // but get no cursor / hover affordance — informational, never
+  // clickable.
+  ".ownership-sunburst .recharts-pie-sector:has(path[data-known='false'][data-residual='false']) {",
   "  pointer-events: none;",
   "}",
   ".ownership-sunburst .recharts-pie-sector:has(path[data-known='true']) path {",
@@ -137,43 +224,20 @@ export function OwnershipSunburst({
 }: OwnershipSunburstProps): JSX.Element | null {
   const rings = useMemo(() => buildSunburstRings(inputs), [inputs]);
   const theme = useChartTheme();
+  // ``useId`` emits colon-delimited ids (":r1:") that break ``url(#…)``
+  // fragment references in some engines — strip them.
+  const patternId = `residual-hatch-${useId().replace(/:/g, "")}`;
 
   if (rings === null) return null;
 
   const denom = rings.total_shares;
-  const fillFor = (key: CategoryKey): string => categoryFill(theme, key);
-
-  // Middle ring — per-category wedges + transparent residual.
-  const middleData: ChartDatum[] = rings.categories.map((cat) =>
-    toCategoryDatum(cat, fillFor(cat.key), denom),
-  );
-  if (rings.category_residual > 0) {
-    middleData.push(makeGapDatum("middle-residual", "Unaccounted", rings.category_residual, denom));
-  }
-
-  // Outer ring — leaves under each visible category, then the
-  // category's within_category_gap (transparent), then the same
-  // outer residual so ring 3 closes flush with ring 2.
-  const outerData: ChartDatum[] = [];
-  for (const cat of rings.categories) {
-    const baseFill = fillFor(cat.key);
-    for (const leaf of cat.leaves) {
-      outerData.push(toLeafDatum(leaf, cat.key, baseFill, denom));
-    }
-    if (cat.within_category_gap > 0) {
-      outerData.push(
-        makeGapDatum(
-          `${cat.key}-gap`,
-          `${cat.label} — unresolved filers`,
-          cat.within_category_gap,
-          denom,
-        ),
-      );
-    }
-  }
-  if (rings.category_residual > 0) {
-    outerData.push(makeGapDatum("outer-residual", "Unaccounted", rings.category_residual, denom));
-  }
+  const { middleData, outerData } = buildSunburstChartData(rings, theme);
+  // Known coverage derives from the SAME rings the wedges render
+  // from, so label and chart cannot diverge. Under the
+  // oversubscription bump this honestly reads 100% against the
+  // bumped denominator — the panel-level OversubscribedWarning
+  // carries the diagnostic (spec D5).
+  const coveragePct = (denom - rings.category_residual) / denom;
 
   const totalRadius = size / 2;
   const innerInner = totalRadius * 0.25;
@@ -202,6 +266,24 @@ export function OwnershipSunburst({
       aria-label={`Ownership breakdown: ${formatShares(denom)} total shares.`}
     >
       <style>{SUNBURST_STYLES}</style>
+      {/* Hatch paint-server for the residual wedges (#920). Recharts
+          filters unknown children of <PieChart>, so the <defs> lives
+          in a zero-size sibling svg — same-document url(#…) references
+          resolve across SVG elements. slate-400 stroke reads on both
+          light and dark backgrounds. */}
+      <svg aria-hidden focusable="false" width={0} height={0} className="absolute">
+        <defs>
+          <pattern
+            id={patternId}
+            width={6}
+            height={6}
+            patternUnits="userSpaceOnUse"
+            patternTransform="rotate(45)"
+          >
+            <line x1={0} y1={0} x2={0} y2={6} stroke="#94a3b8" strokeOpacity={0.45} strokeWidth={1.2} />
+          </pattern>
+        </defs>
+      </svg>
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Tooltip content={<SunburstTooltip />} />
@@ -230,9 +312,10 @@ export function OwnershipSunburst({
             {middleData.map((d) => (
               <Cell
                 key={d.id}
-                fill={d.fill}
+                fill={d.is_residual ? `url(#${patternId})` : d.fill}
                 stroke={d.is_gap ? "transparent" : wedgeStroke}
                 data-known={d.is_gap ? "false" : "true"}
+                data-residual={d.is_residual ? "true" : "false"}
               />
             ))}
           </Pie>
@@ -248,9 +331,10 @@ export function OwnershipSunburst({
             {outerData.map((d) => (
               <Cell
                 key={d.id}
-                fill={d.fill}
+                fill={d.is_residual ? `url(#${patternId})` : d.fill}
                 stroke={d.is_gap ? "transparent" : wedgeStroke}
                 data-known={d.is_gap ? "false" : "true"}
+                data-residual={d.is_residual ? "true" : "false"}
               />
             ))}
           </Pie>
@@ -262,6 +346,9 @@ export function OwnershipSunburst({
         </span>
         <span className="text-lg font-semibold text-slate-900 dark:text-slate-100">
           {formatShares(denom)}
+        </span>
+        <span className="text-xs text-slate-500 dark:text-slate-400">
+          {formatPct(coveragePct)} known coverage
         </span>
       </div>
     </div>
@@ -280,6 +367,7 @@ function toCategoryDatum(
     pct: denom > 0 ? cat.shares / denom : 0,
     fill: baseFill,
     is_gap: false,
+    is_residual: false,
     target: { kind: "category", category_key: cat.key },
   };
 }
@@ -297,18 +385,29 @@ function toLeafDatum(
     pct: denom > 0 ? leaf.shares / denom : 0,
     fill: baseFill,
     is_gap: false,
+    is_residual: false,
     target: { kind: "leaf", category_key, leaf_key: leaf.key },
   };
 }
 
-function makeGapDatum(id: string, name: string, shares: number, denom: number): ChartDatum {
+function makeGapDatum(
+  id: string,
+  name: string,
+  shares: number,
+  denom: number,
+  is_residual: boolean,
+): ChartDatum {
   return {
     id,
     name,
     shares,
     pct: denom > 0 ? shares / denom : 0,
+    // Residual cells override fill with the hatch paint-server at
+    // render time (the pattern id is per-mount, so it cannot live in
+    // this pure datum).
     fill: "transparent",
     is_gap: true,
+    is_residual,
     target: null,
   };
 }
@@ -325,7 +424,19 @@ interface RechartsTooltipProps {
 function SunburstTooltip(props: RechartsTooltipProps): JSX.Element | null {
   if (!props.active || props.payload === undefined || props.payload.length === 0) return null;
   const datum = props.payload[0]?.payload;
-  if (datum === undefined || datum.is_gap) return null;
+  if (datum === undefined) return null;
+  // Within-category gaps stay suppressed; the residual gets its own
+  // single-line copy (#920).
+  if (datum.is_gap && !datum.is_residual) return null;
+  if (datum.is_residual) {
+    return (
+      <div className="max-w-[18rem] rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
+        <div className="text-slate-700 dark:text-slate-300">
+          {residualTooltipText(datum.shares, datum.pct)}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
       <div className="font-medium text-slate-900 dark:text-slate-100">{datum.name}</div>
@@ -349,7 +460,8 @@ export interface OwnershipLegendProps {
 
 /**
  * Color legend for the sunburst. Renders one row per category that
- * actually rendered, plus an "Unaccounted" row for the residual. Each
+ * actually rendered, plus a "Public / unattributed" row for the
+ * residual (hatched swatch, mirroring the wedge — #920). Each
  * row shows the swatch, label, share count, and % of outstanding so
  * the operator can read the ring at a glance without hovering.
  */
@@ -377,8 +489,8 @@ export function OwnershipLegend({ rings }: OwnershipLegendProps): JSX.Element | 
   }));
   if (rings.category_residual > 0) {
     rows.push({
-      key: "unaccounted",
-      label: "Unaccounted",
+      key: "residual",
+      label: RESIDUAL_LABEL,
       shares: rings.category_residual,
       pct: rings.category_residual / denom,
       swatch_fill: "transparent",
@@ -398,7 +510,15 @@ export function OwnershipLegend({ rings }: OwnershipLegendProps): JSX.Element | 
                 ? "border border-dashed border-slate-400 dark:border-slate-500"
                 : ""
             }`}
-            style={{ backgroundColor: row.swatch_fill }}
+            // The residual swatch mirrors the wedge hatch. An HTML
+            // span cannot reference the SVG paint-server, so the
+            // hatch is a CSS gradient (spec D7). rgba(148,163,184,…)
+            // = slate-400, same token as the wedge pattern stroke.
+            style={{
+              background: row.swatch_outline
+                ? "repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(148, 163, 184, 0.6) 3px, rgba(148, 163, 184, 0.6) 4px)"
+                : row.swatch_fill,
+            }}
           />
           <span className="text-slate-700 dark:text-slate-200">{row.label}</span>
           <span className="font-mono text-slate-500 dark:text-slate-400">
