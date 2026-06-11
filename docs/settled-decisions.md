@@ -691,6 +691,28 @@ trust-CIK rows.
 
 ---
 
+## Ownership coverage banner = 5-state server-driven machine (#840, reaffirmed #923 2026-06-11)
+
+The coverage banner renders the backend's 5-state machine — `no_data` /
+`red` / `unknown_universe` / `amber` / `green`
+(`app/services/ownership_rollup.py::CoverageState`) — with headline,
+body, and color variant all SERVER-owned (`_banner_for_state`) and
+rendered verbatim by `OwnershipCoverageBanner.tsx`. The frontend adds
+only a per-state glyph (disambiguates `no_data` vs `red`, which share
+`variant="error"`).
+
+The Phase-1 6-state vocabulary (`partial_identifier_coverage`,
+`stale_category`, `issuer_does_not_disclose`,
+`complete_source_universe`) that issue #923 cited is **superseded** —
+it was never implemented; #840 shipped this machine instead, and its
+Codex review separately pinned the coverage-vs-concentration split.
+Do not re-litigate from the old spec. Adding a coverage state is a
+backend change first (new spec + ticket), never an FE-only remap.
+
+**Spec:** `docs/specs/ui/2026-06-11-ownership-coverage-banner-v2.md`.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

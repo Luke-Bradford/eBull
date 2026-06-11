@@ -37,13 +37,12 @@ import { useNavigate } from "react-router-dom";
 
 import { fetchOwnershipRollup } from "@/api/ownership";
 import type {
-  OwnershipBannerVariant,
-  OwnershipCoverageState,
   OwnershipRollupResponse,
   OwnershipSliceCategory,
 } from "@/api/ownership";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { HistoricalSymbolCallout } from "@/components/instrument/HistoricalSymbolCallout";
+import { OwnershipCoverageBanner } from "@/components/instrument/OwnershipCoverageBanner";
 import {
   OwnershipLegend,
   OwnershipSunburst,
@@ -230,16 +229,6 @@ export function rollupToSunburstInputs(
   };
 }
 
-const _BANNER_VARIANT_CLASS: Record<OwnershipBannerVariant, string> = {
-  error:
-    "border-red-200 bg-red-50 text-red-900 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-200",
-  warning:
-    "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-200",
-  info: "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200",
-  success:
-    "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-900/20 dark:text-emerald-200",
-};
-
 interface PanelBodyProps {
   readonly rollup: OwnershipRollupResponse;
   readonly onWedgeClick: (target: WedgeClick) => void;
@@ -250,7 +239,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
   if (rollup.banner.state === "no_data" || inputs === null) {
     return (
       <div className="flex flex-col gap-3">
-        <Banner banner={rollup.banner} />
+        <OwnershipCoverageBanner banner={rollup.banner} />
         <HistoricalSymbolCallout
           currentSymbol={rollup.symbol}
           historicalSymbols={rollup.historical_symbols}
@@ -266,7 +255,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
   if (rings === null) {
     return (
       <div className="flex flex-col gap-3">
-        <Banner banner={rollup.banner} />
+        <OwnershipCoverageBanner banner={rollup.banner} />
         <HistoricalSymbolCallout
           currentSymbol={rollup.symbol}
           historicalSymbols={rollup.historical_symbols}
@@ -281,7 +270,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
 
   return (
     <div className="flex flex-col gap-3">
-      <Banner banner={rollup.banner} />
+      <OwnershipCoverageBanner banner={rollup.banner} />
       <HistoricalSymbolCallout
         currentSymbol={rollup.symbol}
         historicalSymbols={rollup.historical_symbols}
@@ -329,35 +318,6 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
           </p>
         </div>
       </div>
-    </div>
-  );
-}
-
-interface BannerProps {
-  readonly banner: OwnershipRollupResponse["banner"];
-}
-
-function Banner({ banner }: BannerProps): JSX.Element | null {
-  if (banner.state === "green") {
-    return (
-      <div
-        className={`rounded-md border px-3 py-2 text-xs ${_BANNER_VARIANT_CLASS.success}`}
-        role="status"
-        data-banner-state={banner.state}
-      >
-        <span className="font-medium">{banner.headline}</span>
-        <span className="ml-1.5">{banner.body}</span>
-      </div>
-    );
-  }
-  return (
-    <div
-      className={`rounded-md border px-3 py-2 text-xs ${_BANNER_VARIANT_CLASS[banner.variant]}`}
-      role="status"
-      data-banner-state={banner.state}
-    >
-      <p className="font-medium">{banner.headline}</p>
-      <p className="mt-0.5">{banner.body}</p>
     </div>
   );
 }
@@ -520,9 +480,3 @@ function FundsMemoOverlay({ slice }: FundsMemoOverlayProps): JSX.Element {
     </div>
   );
 }
-
-// Internal banner-state union exported solely so the test file can
-// drive snapshot fixtures without re-importing from the api module
-// (keeps the test imports tight). Codex caught a similar pattern on
-// #767's freshness chip extraction.
-export type _BannerStateForTest = OwnershipCoverageState;
