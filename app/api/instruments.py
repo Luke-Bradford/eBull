@@ -4225,7 +4225,11 @@ def _rollup_to_response(
 
 
 class OwnershipHistoryPointResponse(BaseModel):
-    """One point on a holder's history series (#840.F)."""
+    """One point on a holder's history series (#840.F).
+
+    ``holder_count`` (#922): filers contributing to an aggregate
+    bucket; ``None`` on per-holder series and issuer-level treasury
+    points."""
 
     period_end: date
     ownership_nature: str
@@ -4233,6 +4237,7 @@ class OwnershipHistoryPointResponse(BaseModel):
     source: str
     source_accession: str | None
     filed_at: datetime | None
+    holder_count: int | None = None
 
 
 class OwnershipHistoryResponse(BaseModel):
@@ -4258,6 +4263,7 @@ def get_instrument_ownership_history(
     symbol: str,
     category: str,
     holder_id: str | None = None,
+    aggregate: bool = False,
     from_date: date | None = None,
     to_date: date | None = None,
     conn: psycopg.Connection[object] = Depends(get_conn),
@@ -4268,6 +4274,13 @@ def get_instrument_ownership_history(
     Operator question this answers: *"how has Vanguard's AAPL
     position shifted over the last 8 quarters?"* — call with
     ``category=institutions, holder_id=0000102909``.
+
+    ``aggregate=true`` (#922) answers the CATEGORY-level question
+    ("how have institutions in total trended?"): per-quarter sums
+    over the per-filer dedup winners. Only ``institutions`` and
+    ``treasury`` aggregate honestly — event-driven categories
+    (insiders / blockholders / def14a) would only count holders who
+    happened to file in each period.
 
     Categories: ``insiders``, ``blockholders``, ``institutions``,
     ``treasury``, ``def14a``. ``holder_id`` semantics depend on
@@ -4281,6 +4294,22 @@ def get_instrument_ownership_history(
         raise HTTPException(status_code=400, detail="symbol is required")
     if category not in ("insiders", "blockholders", "institutions", "treasury", "def14a"):
         raise HTTPException(status_code=400, detail=f"unknown category {category!r}")
+    if aggregate:
+        if holder_id is not None and holder_id.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="aggregate=true and holder_id are mutually exclusive",
+            )
+        if category not in ownership_history.AGGREGATE_CATEGORIES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"category {category!r} has no honest aggregate series: "
+                    "event-driven filings would only count holders who filed "
+                    "in each period (carry-forward not implemented); query "
+                    "per-holder instead"
+                ),
+            )
     # Codex pre-push review for #840.F: holder-scoped categories
     # MUST be called with a holder_id. Without one, DISTINCT ON
     # ``(period_end, ownership_nature)`` returns one arbitrary
@@ -4288,7 +4317,11 @@ def get_instrument_ownership_history(
     # would mislead the chart consumer. Treasury is issuer-level so
     # holder_id is ignored there.
     holder_scoped = ("insiders", "blockholders", "institutions", "def14a")
-    if category in holder_scoped and (holder_id is None or not holder_id.strip()):
+    if (
+        not aggregate
+        and category in holder_scoped
+        and (holder_id is None or not holder_id.strip())
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"holder_id is required for category {category!r}",
@@ -4308,14 +4341,23 @@ def get_instrument_ownership_history(
             inst_row = cur.fetchone()
         if inst_row is None:
             raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
-        points = ownership_history.get_ownership_history(
-            conn,
-            instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
-            category=category,  # type: ignore[arg-type]
-            holder_id=holder_id,
-            from_date=from_date,
-            to_date=to_date,
-        )
+        if aggregate:
+            points = ownership_history.get_ownership_category_totals(
+                conn,
+                instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+                category=category,  # type: ignore[arg-type]
+                from_date=from_date,
+                to_date=to_date,
+            )
+        else:
+            points = ownership_history.get_ownership_history(
+                conn,
+                instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+                category=category,  # type: ignore[arg-type]
+                holder_id=holder_id,
+                from_date=from_date,
+                to_date=to_date,
+            )
     return OwnershipHistoryResponse(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
         instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
@@ -4329,6 +4371,7 @@ def get_instrument_ownership_history(
                 source=p.source,
                 source_accession=p.source_accession,
                 filed_at=p.filed_at,
+                holder_count=p.holder_count,
             )
             for p in points
         ],
