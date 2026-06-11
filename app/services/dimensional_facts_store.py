@@ -116,12 +116,18 @@ _ANNUAL_DURATION_SQL = "(f.period_start IS NULL OR (f.period_end - f.period_star
 
 _METRIC_ROWS_SQL = f"""
 WITH winner AS (
-    SELECT source_accession, filed_at
-      FROM instrument_dimensional_facts
-     WHERE instrument_id = %(instrument_id)s
-       AND axis = %(axis)s
-       AND metric = %(metric)s
-     ORDER BY filed_at DESC, source_accession DESC
+    -- Winner = latest accession HAVING eligible rows (annual-duration,
+    -- non-subtotal). Selecting before filtering would let a 10-K/A
+    -- carrying only quarterly/YTD or only subtotal rows win and blank
+    -- the metric (#554 Codex pre-push finding).
+    SELECT f.source_accession, f.filed_at
+      FROM instrument_dimensional_facts f
+     WHERE f.instrument_id = %(instrument_id)s
+       AND f.axis = %(axis)s
+       AND f.metric = %(metric)s
+       AND NOT f.is_subtotal
+       AND {_ANNUAL_DURATION_SQL}
+     ORDER BY f.filed_at DESC, f.source_accession DESC
      LIMIT 1
 ),
 target AS (

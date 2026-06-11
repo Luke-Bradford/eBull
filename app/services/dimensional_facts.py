@@ -617,22 +617,27 @@ def extract_dimensional_facts(
 
     facts = [fact for _, _, fact in candidates.values()]
 
-    # Subtotal post-pass: a member is a subtotal on its axis when the
-    # definition linkbase says it parents another member that ALSO has
-    # a fact on that axis (e.g. us-gaap:ProductMember over
-    # iPhone/Mac/iPad/Wearables). A hierarchy parent with no reported
-    # children stays a leaf — it is the finest grain the filer gave us.
-    members_by_axis: dict[DimensionalAxis, set[str]] = {}
+    # Subtotal post-pass: a member is a subtotal when the definition
+    # linkbase says it parents another member that ALSO has a fact in
+    # the SAME (axis, metric, period) group (e.g. us-gaap:ProductMember
+    # over iPhone/Mac/iPad/Wearables). Scoping per group — not per axis
+    # — matters (#554 Codex pre-push finding): a 10-K carries 3 FYs of
+    # comparatives, and a parent whose children are reported only for a
+    # PRIOR year is the finest grain the filer gave us for the latest
+    # year; marking it axis-wide would blank the latest-FY rows. A
+    # hierarchy parent with no reported children stays a leaf.
+    members_by_group: dict[tuple[DimensionalAxis, DimensionalMetric, date | None, date], set[str]] = {}
     for f in facts:
-        members_by_axis.setdefault(f.axis, set()).add(_member_fragment(f.member_qname))
+        gkey = (f.axis, f.metric, f.period_start, f.period_end)
+        members_by_group.setdefault(gkey, set()).add(_member_fragment(f.member_qname))
     children_of: dict[str, set[str]] = {}
     for parent, child in member_tree:
         children_of.setdefault(parent, set()).add(child)
-    subtotal_frags: dict[DimensionalAxis, set[str]] = {
-        axis: {m for m in members if children_of.get(m, set()) & members} for axis, members in members_by_axis.items()
-    }
     facts = [
-        replace(f, is_subtotal=True) if _member_fragment(f.member_qname) in subtotal_frags.get(f.axis, set()) else f
+        replace(f, is_subtotal=True)
+        if children_of.get(_member_fragment(f.member_qname), set())
+        & members_by_group[(f.axis, f.metric, f.period_start, f.period_end)]
+        else f
         for f in facts
     ]
 

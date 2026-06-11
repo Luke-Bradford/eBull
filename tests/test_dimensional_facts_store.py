@@ -140,3 +140,24 @@ def test_reader_winner_per_metric_annual_filter_and_writer_replace(
     # with revenue empty — per-metric winners are independent.
     assert by_member2["t:SouthMember"]["revenue"] is None
     assert by_member2["t:SouthMember"]["operating_income"] == Decimal("40")
+
+    # A still-newer accession with ONLY ineligible rows (quarterly
+    # duration + a subtotal) must NOT win the revenue metric — winner
+    # selection filters eligibility first (Codex pre-push finding).
+    replace_accession_rows(
+        conn,
+        instrument_id=_IID,
+        source_accession="ACC-Q-ONLY",
+        form_type="10-K/A",
+        filed_at=datetime(2026, 4, 1, tzinfo=UTC),
+        parser_version="10k-v3",
+        facts=[
+            _fact("revenue", "t:NorthMember", "160", start=date(2025, 10, 1), end=date(2025, 12, 31)),
+            _fact("revenue", "t:TotalMember", "1010", is_subtotal=True),
+        ],
+    )
+    conn.commit()
+    result3 = read_segments(conn, instrument_id=_IID, axis="business_segment")
+    assert result3.sources["revenue"] == "ACC-AMEND"
+    by_member3 = {r["member_qname"]: r for r in result3.rows}
+    assert by_member3["t:NorthMember"]["revenue"] == Decimal("615")

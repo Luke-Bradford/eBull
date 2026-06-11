@@ -53,24 +53,27 @@ def member_localname(member_ref: str | None) -> str | None:
 
 
 def context_dimensions(ctx_el: ET._Element) -> dict[str, str]:
-    """Return ``{axis_qname: member_qname}`` for a context's segment members."""
+    """Return ``{axis_qname: member_qname}`` for a context's explicit
+    dimension members.
+
+    Reads BOTH the ``segment`` and ``scenario`` containers: the EDGAR
+    Filer Manual mandates segment, but valid XBRL may carry dimensions
+    in scenario — treating such a context as dimensionless would both
+    lose the fact and pollute consolidated-anchor arbitration
+    (#554 Codex pre-push finding)."""
     dims: dict[str, str] = {}
-    seg = None
     for child in ctx_el.iter():
         local = ET.QName(child.tag).localname if isinstance(child.tag, str) else None
-        if local == "segment":
-            seg = child
-            break
-    if seg is None:
-        return dims
-    for m in seg:
-        if not isinstance(m.tag, str):
+        if local not in {"segment", "scenario"}:
             continue
-        if ET.QName(m.tag).localname != "explicitMember":
-            continue
-        dim = m.get("dimension", "")
-        if dim:
-            dims[dim] = (m.text or "").strip()
+        for m in child:
+            if not isinstance(m.tag, str):
+                continue
+            if ET.QName(m.tag).localname != "explicitMember":
+                continue
+            dim = m.get("dimension", "")
+            if dim:
+                dims[dim] = (m.text or "").strip()
     return dims
 
 

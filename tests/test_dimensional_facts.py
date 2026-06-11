@@ -395,6 +395,46 @@ def test_subtotal_marked_via_definition_linkbase_nesting() -> None:
     assert by_member == {"us-gaap:ProductMember": True, "acme:WidgetMember": False, "acme:GadgetMember": False}
 
 
+def test_linkbase_subtotal_scoped_per_period_not_per_axis() -> None:
+    # Parent reports FY2025 + FY2024; the child exists only in FY2024.
+    # FY2024 parent is a subtotal; FY2025 parent is the finest grain
+    # the filer gave us and must stay a leaf (Codex pre-push finding).
+    prior = {"start": "2024-01-01", "end": "2024-12-31"}
+    facts = _extract(
+        _context("c1", {_PROD_AXIS: "us-gaap:ProductMember"}, **_FY),
+        _context("c2", {_PROD_AXIS: "us-gaap:ProductMember"}, **prior),
+        _context("c3", {_PROD_AXIS: "acme:WidgetMember"}, **prior),
+        _fact(_REV, "c1", "120"),
+        _fact(_REV, "c2", "100"),
+        _fact(_REV, "c3", "100"),
+        dfn=_def([("us-gaap_ProductMember", "acme_WidgetMember")]),
+    )
+    by_key = {(f.member_qname, f.period_end.year): f.is_subtotal for f in facts}
+    assert by_key == {
+        ("us-gaap:ProductMember", 2025): False,
+        ("us-gaap:ProductMember", 2024): True,
+        ("acme:WidgetMember", 2024): False,
+    }
+
+
+def test_scenario_container_dimensions_are_routed() -> None:
+    # Valid XBRL may carry explicit dimensions under <scenario> rather
+    # than <segment>; treating those contexts as dimensionless would
+    # both drop the fact and pollute the consolidated anchor.
+    scenario_ctx = (
+        '<context id="cs"><entity>'
+        '<identifier scheme="http://www.sec.gov/CIK">0000000001</identifier>'
+        "</entity><period><startDate>2025-01-01</startDate><endDate>2025-12-31</endDate></period>"
+        "<scenario><xbrldi:explicitMember "
+        'dimension="us-gaap:StatementBusinessSegmentsAxis">acme:NorthMember</xbrldi:explicitMember>'
+        "</scenario></context>"
+    )
+    facts = _extract(scenario_ctx, _fact(_REV, "cs", "600"))
+    assert [(f.axis, f.member_qname, f.val) for f in facts] == [
+        ("business_segment", "acme:NorthMember", Decimal("600")),
+    ]
+
+
 def test_subtotal_marked_via_value_overage_when_linkbase_flat() -> None:
     # AAPL shape: flat linkbase, Product = Widget + Gadget, consolidated
     # total present as a dimensionless fact in the same instance.
