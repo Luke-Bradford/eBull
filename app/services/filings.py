@@ -506,7 +506,17 @@ def upsert_cik_mapping(
     upserted = 0
     with conn.transaction():
         for symbol, instrument_id in instrument_symbols:
-            cik = mapping.get(symbol.upper())
+            symbol_upper = symbol.upper()
+            cik = mapping.get(symbol_upper)
+            if not cik and symbol_upper.endswith(".US"):
+                # #813 — eToro suffixes some US listings ``.US`` to
+                # disambiguate from same-ticker crypto rows (M.US =
+                # Macy's, M = crypto). SEC's ticker files carry the
+                # bare ticker, so PETS.US / BTG.US etc. never matched.
+                # Exact match wins when both exist; the caller's
+                # ``asset_class='us_equity'`` cohort filter keeps the
+                # crypto siblings out of this loop entirely (#475).
+                cik = mapping.get(symbol_upper[: -len(".US")])
             if not cik:
                 logger.debug("CIK mapping: no CIK found for symbol %s", symbol)
                 continue
