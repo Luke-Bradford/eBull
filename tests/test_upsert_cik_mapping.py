@@ -238,3 +238,45 @@ def test_symbol_missing_from_mapping_is_skipped(ebull_test_conn: psycopg.Connect
 
     assert upserted == 0
     assert _primary_cik(conn, 1) is None
+
+
+def test_dot_us_suffix_falls_back_to_bare_ticker(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#813 — eToro's ``.US`` stock-vs-crypto disambiguation suffix.
+    SEC's ticker files carry the bare ticker (PETS), so PETS.US must
+    match via the stripped fallback."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="PETS.US")
+
+    upserted = upsert_cik_mapping(conn, {"PETS": "0001040130"}, [("PETS.US", "1")])
+
+    assert upserted == 1
+    assert _primary_cik(conn, 1) == "0001040130"
+
+
+def test_dot_us_exact_match_wins_over_stripped(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """If SEC ever lists a literal ``X.US`` ticker, the exact match
+    must win — the strip is a fallback, never a rewrite."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="PETS.US")
+
+    upserted = upsert_cik_mapping(
+        conn,
+        {"PETS.US": "0009999999", "PETS": "0001040130"},
+        [("PETS.US", "1")],
+    )
+
+    assert upserted == 1
+    assert _primary_cik(conn, 1) == "0009999999"
+
+
+def test_non_dot_us_suffix_is_not_stripped(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """Only the literal ``.US`` suffix participates — ``.RTH`` variants
+    are the canonical-redirect mechanism's territory (#819), and a
+    bare-miss must stay a skip."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="AAPL.RTH")
+
+    upserted = upsert_cik_mapping(conn, {"AAPL": "0000320193"}, [("AAPL.RTH", "1")])
+
+    assert upserted == 0
+    assert _primary_cik(conn, 1) is None
