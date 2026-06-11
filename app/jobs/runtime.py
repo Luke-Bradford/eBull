@@ -417,11 +417,15 @@ _INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _adapt_zero_arg(_files_w
 
 # #819 — canonical-instrument redirect populate. Idempotent one-shot
 # the operator triggers after a universe sync introduces new
-# ``.RTH``-style variants. The job opens its own connection + commits.
+# ``.RTH``-style variants. Registered via the SCHEDULER tracked
+# wrapper, not the bare service function: manual dispatch runs the
+# lock+fence prelude which writes a ``running`` job_runs row that only
+# the invoker's ``_tracked_job`` finalises — the bare service body
+# orphaned that row forever (run 6994, 2026-06-11).
 from app.services import canonical_instrument_redirects as _canonical_redirects  # noqa: E402
 
 _INVOKERS[_canonical_redirects.JOB_POPULATE_CANONICAL_REDIRECTS] = _adapt_zero_arg(
-    _canonical_redirects.populate_canonical_redirects_job
+    _scheduler.populate_canonical_redirects
 )
 
 

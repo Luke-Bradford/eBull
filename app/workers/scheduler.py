@@ -40,6 +40,7 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.anthropic_client import make_anthropic_client
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
+from app.services.canonical_instrument_redirects import JOB_POPULATE_CANONICAL_REDIRECTS
 from app.services.coverage import bootstrap_missing_coverage_rows, review_coverage, seed_coverage
 from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.entry_timing import evaluate_entry_conditions
@@ -4320,6 +4321,29 @@ def filing_events_skip_tier_cleanup() -> None:
             summary.batches,
             dict(sorted(summary.by_form_type.items(), key=lambda kv: kv[1], reverse=True)),
         )
+
+
+def populate_canonical_redirects() -> None:
+    """Bind ``.RTH`` operational-duplicate variants to their canonical
+    base instrument (#819). Manual-trigger-only.
+
+    Thin scheduler-side wrapper around
+    :func:`app.services.canonical_instrument_redirects.populate_canonical_redirects_job`.
+    The service owns the connection + commit; this wrapper only adds
+    job-runs telemetry. Without it the manual-dispatch prelude's
+    ``running`` job_runs row has no finaliser and orphans forever
+    (found 2026-06-11 on the job's first-ever successful trigger:
+    run 6994 stuck ``running`` after the body completed in <1s).
+    ``row_count`` = redirects newly set this run (idempotent re-run
+    reports 0 with the bindings counted as already-correct).
+    """
+    from app.services.canonical_instrument_redirects import (
+        populate_canonical_redirects_job,
+    )
+
+    with _tracked_job(JOB_POPULATE_CANONICAL_REDIRECTS) as tracker:
+        stats = populate_canonical_redirects_job()
+        tracker.row_count = stats.redirects_set
 
 
 def raw_payload_retention_sweep(params: Mapping[str, Any]) -> None:

@@ -272,12 +272,16 @@ def populate_canonical_redirects(
 JOB_POPULATE_CANONICAL_REDIRECTS = "populate_canonical_redirects"
 
 
-def populate_canonical_redirects_job() -> None:
-    """Zero-arg job invoker — opens a connection and runs the populate.
+def populate_canonical_redirects_job() -> RedirectPopulationStats:
+    """Zero-arg job body — opens a connection and runs the populate.
 
-    Registered in ``app/jobs/runtime.py``. The operator triggers it
-    after a universe sync that may have introduced new ``.RTH``-style
-    variants. Idempotent — safe to re-run any time.
+    Dispatched via the ``app/workers/scheduler.py`` tracked wrapper
+    (which owns job-runs telemetry — the manual-dispatch prelude's
+    ``running`` job_runs row is finalised by ``_tracked_job`` there).
+    The operator triggers it after a universe sync that may have
+    introduced new ``.RTH``-style variants. Idempotent — safe to
+    re-run any time. Returns the run stats so the wrapper can stamp
+    ``row_count``.
     """
     from app.config import settings
 
@@ -287,3 +291,4 @@ def populate_canonical_redirects_job() -> None:
         # the job wrapper that owns the connection commits explicitly.
         conn.commit()
         logger.info("populate_canonical_redirects_job: %s", stats)
+    return stats
