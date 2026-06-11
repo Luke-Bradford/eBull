@@ -62,11 +62,23 @@ logger = logging.getLogger(__name__)
 # three queries below.
 _SUFFIX_VARIANT_SQL = r"(i.symbol LIKE '%%.%%' AND i.symbol !~ '\.[A-Z]$')"
 
+# cik_refresh_mf_directory has observed-ever semantics — daily_cik_refresh
+# upserts bump last_seen daily for classes still in company_tickers_mf.json,
+# so a row whose last_seen stops advancing is a class SEC has dropped.
+# 30 days tolerates refresh outages while still catching drops (Codex
+# ckpt-2: without this, a dropped class would hide a real CIK gap in
+# the by-design bucket forever).
+_MF_DIRECTORY_FRESHNESS_DAYS = 30
+
 # True when the instrument's fund identity flows through the
 # series/class mechanism (#1577): a PRIMARY (sec, class_id) row whose
-# class_id the mf directory still knows. Both predicates are
-# load-bearing (Codex spec review): a demoted class_id or one SEC has
-# dropped from the directory must not hide a real CIK gap.
+# class_id the mf directory has seen RECENTLY. All three predicates
+# are load-bearing (Codex spec + ckpt-2 reviews): a demoted class_id,
+# or one SEC has dropped from the directory, must not hide a real
+# CIK gap. Freshness arrives as the ``mf_fresh_days`` query param —
+# parameterising (vs interpolating the constant) keeps the composed
+# query a LiteralString for pyright, per repo convention
+# (def14a_drift.py / coverage.py precedents).
 _FUND_SERIES_COVERED_SQL = """EXISTS (
   SELECT 1 FROM external_identifiers cl
   JOIN cik_refresh_mf_directory mf ON mf.class_id = cl.identifier_value
@@ -74,6 +86,7 @@ _FUND_SERIES_COVERED_SQL = """EXISTS (
     AND cl.provider = 'sec'
     AND cl.identifier_type = 'class_id'
     AND cl.is_primary = TRUE
+    AND mf.last_seen >= NOW() - make_interval(days => %(mf_fresh_days)s)
 )"""
 
 
@@ -171,6 +184,7 @@ def compute_cik_gap_report(
                AND e.asset_class = 'us_equity'
                AND ei.identifier_value IS NULL
             """,
+            {"mf_fresh_days": _MF_DIRECTORY_FRESHNESS_DAYS},
         )
         row = cur.fetchone()
         if row is None:
@@ -207,9 +221,12 @@ def compute_cik_gap_report(
                            WHEN {_SUFFIX_VARIANT_SQL} THEN 1
                            ELSE 0 END,
                       i.symbol
-             LIMIT %s
+             LIMIT %(sample_limit)s
             """,
-            (sample_limit,),
+            {
+                "mf_fresh_days": _MF_DIRECTORY_FRESHNESS_DAYS,
+                "sample_limit": sample_limit,
+            },
         )
         sample = [
             CikGapRow(
