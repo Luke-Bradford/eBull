@@ -459,6 +459,47 @@ export async function fetchInstrumentEmployees(
   }
 }
 
+export type SegmentAxis = "business" | "product" | "geographic";
+
+export interface SegmentRow {
+  member_qname: string;
+  member_label: string;
+  revenue: number | null;
+  operating_income: number | null;
+  assets: number | null;
+  pct_of_total: number | null;
+}
+
+/** Mirrors ``InstrumentSegments`` in app/api/instruments.py (#554). */
+export interface InstrumentSegments {
+  symbol: string;
+  axis: SegmentAxis;
+  period_end: string;
+  filed_at: string;
+  sources: Record<string, string>;
+  total_revenue: number | null;
+  rows: SegmentRow[];
+}
+
+/** Latest-fiscal-year segment / product / geographic revenue breakdown
+ *  from per-filing dimensional XBRL (#554). Returns null on 404
+ *  (non-SEC issuer, pre-mandate 10-K, or no disclosure on the axis);
+ *  rethrows other errors. */
+export async function fetchInstrumentSegments(
+  symbol: string,
+  axis: SegmentAxis,
+): Promise<InstrumentSegments | null> {
+  try {
+    return await apiFetch<InstrumentSegments>(
+      `/instruments/${encodeURIComponent(symbol)}/segments?axis=${axis}`,
+    );
+  } catch (err) {
+    const { ApiError } = await import("@/api/client");
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
 export function fetchInstrumentDetail(
   instrumentId: number,
 ): Promise<InstrumentDetail> {

@@ -137,6 +137,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "cascade_retry_queue",
     "cik_upsert_timing",
     "financial_facts_raw",
+    # #554 — dimensional XBRL facts (segments / product / geographic).
+    "instrument_dimensional_facts",
     "sec_facts_concept_catalog",
     "sec_entity_change_log",
     "data_ingestion_runs",

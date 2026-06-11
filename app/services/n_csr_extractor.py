@@ -54,6 +54,22 @@ from typing import Any
 
 import lxml.etree as ET
 
+from app.services.xbrl_instance import (
+    SAFE_XML_PARSER,
+)
+from app.services.xbrl_instance import (
+    axis_localname as _axis_localname,
+)
+from app.services.xbrl_instance import (
+    context_dimensions as _context_dimensions,
+)
+from app.services.xbrl_instance import (
+    context_period as _context_period,
+)
+from app.services.xbrl_instance import (
+    member_localname as _member_localname,
+)
+
 logger = logging.getLogger(__name__)
 
 # Hard cap on raw_facts serialized size (spec §5 Tier 3).
@@ -186,33 +202,6 @@ class FundMetadataFacts:
     raw_facts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
-def _member_localname(member_ref: str | None) -> str | None:
-    """Strip namespace prefix + ``Member`` suffix from a dimension member ref.
-
-    ``fmr:C000203453Member`` → ``C000203453``
-    ``oef:IndustrySectorOneMember`` → ``IndustrySectorOne``
-    ``OneYearMember`` → ``OneYear``
-    """
-    if not member_ref:
-        return None
-    val = member_ref.strip()
-    if ":" in val:
-        val = val.rsplit(":", 1)[1]
-    if val.endswith("Member"):
-        val = val[: -len("Member")]
-    return val or None
-
-
-def _axis_localname(axis_qname: str | None) -> str | None:
-    """Strip namespace prefix from an axis QName (``oef:ClassAxis`` → ``ClassAxis``)."""
-    if not axis_qname:
-        return None
-    val = axis_qname.strip()
-    if ":" in val:
-        val = val.rsplit(":", 1)[1]
-    return val or None
-
-
 def _to_decimal(text: str | None) -> Decimal | None:
     if text is None:
         return None
@@ -269,48 +258,6 @@ def _strip_html(text: str | None) -> str | None:
         # Decode back, ignoring partial last char.
         plain = encoded.decode("utf-8", errors="ignore") + " [TRUNCATED]"
     return plain
-
-
-def _context_dimensions(ctx_el: ET._Element) -> dict[str, str]:
-    """Return ``{axis_qname: member_qname}`` for a context's segment members."""
-    dims: dict[str, str] = {}
-    # Find xmlns-wildcard segment.
-    seg = None
-    for child in ctx_el.iter():
-        local = ET.QName(child.tag).localname if isinstance(child.tag, str) else None
-        if local == "segment":
-            seg = child
-            break
-    if seg is None:
-        return dims
-    for m in seg:
-        if not isinstance(m.tag, str):
-            continue
-        if ET.QName(m.tag).localname != "explicitMember":
-            continue
-        dim = m.get("dimension", "")
-        if dim:
-            dims[dim] = (m.text or "").strip()
-    return dims
-
-
-def _context_period(ctx_el: ET._Element) -> dict[str, str]:
-    """Return ``{startDate, endDate, instant}`` for a context's period."""
-    period_info: dict[str, str] = {}
-    period_el = None
-    for child in ctx_el:
-        if isinstance(child.tag, str) and ET.QName(child.tag).localname == "period":
-            period_el = child
-            break
-    if period_el is None:
-        return period_info
-    for child in period_el:
-        if not isinstance(child.tag, str):
-            continue
-        local = ET.QName(child.tag).localname
-        if local in {"startDate", "endDate", "instant"}:
-            period_info[local] = (child.text or "").strip()
-    return period_info
 
 
 def _context_entity_cik(ctx_el: ET._Element) -> str | None:
@@ -495,7 +442,8 @@ def extract_fund_metadata_facts(ixbrl_xml: bytes) -> list[FundMetadataFacts]:
         ValueError: on malformed iXBRL (caller maps to ``failed_outcome``).
     """
     try:
-        doc = ET.fromstring(ixbrl_xml)
+        # Hardened parser (#554): SEC-fetched XML, entity resolution off.
+        doc = ET.fromstring(ixbrl_xml, parser=SAFE_XML_PARSER)
     except ET.XMLSyntaxError as exc:  # pragma: no cover — error-path
         raise ValueError(f"iXBRL parse error: {exc}") from exc
 

@@ -72,6 +72,8 @@ from app.services.business_summary import (
     upsert_business_sections,
     upsert_business_summary,
 )
+from app.services.dimensional_facts import discover_xbrl_files, extract_dimensional_facts
+from app.services.dimensional_facts_store import replace_accession_rows
 from app.services.manifest_parsers._classify import (
     format_upsert_error,
     is_transient_upsert_error,
@@ -92,7 +94,9 @@ logger = logging.getLogger(__name__)
 # can rewash without colliding with the other. Mirror the convention
 # in def14a.py (``_PARSER_VERSION_DEF14A``) + insider_345.py
 # (``_PARSER_VERSION_FORM4``).
-_PARSER_VERSION_10K = "10k-v1"
+# v2 (#554): dimensional XBRL step added — bump drives the
+# sec_rebuild backfill across all 10-K accessions.
+_PARSER_VERSION_10K = "10k-v2"
 
 # Explicit 1h backoff. Duplicated from the worker's internal
 # ``_backoff_for(0)`` value — see eight_k.py for the rationale
@@ -129,6 +133,88 @@ def _fetch_html(
         return provider.fetch_document_text(url)
 
 
+class _DimensionalFetchError(Exception):
+    """Transport-level failure in the dimensional-facts step — maps to
+    a ``failed`` outcome so the whole manifest row retries (idempotent:
+    the Item 1 upsert is filed_at-gate-suppressed on the retry and the
+    dimensional write is delete-then-insert)."""
+
+
+def _fetch_dimensional_facts(
+    *,
+    accession: str,
+    issuer_cik: str | None,
+    primary_document_url: str,
+) -> list[Any]:
+    """Fetch + extract dimensional XBRL facts for THIS accession (#554).
+
+    Always targets ``accession``'s own archive — never the Item-1
+    fallback's ``chosen_accession`` (a 10-K/A without Item 1 borrows
+    the prior 10-K's narrative, but its XBRL, when present, is its
+    own; spec §D1).
+
+    Pure I/O + parse; no DB. Returns ``[]`` on the structural no-XBRL
+    path (pre-mandate filings, 404'd index, empty instance). Raises
+    :class:`_DimensionalFetchError` on transport failures and lets
+    parse errors (``ValueError`` etc.) propagate for the caller's
+    degrade-to-parsed handling.
+
+    The instance is parse-and-drop — NOT retained in
+    ``filing_raw_documents`` (raw-payload scope narrowing #470: every
+    extracted field lands in SQL).
+    """
+    # Archive base is built from (cik, accession) — the same shape
+    # filing_documents.py uses — NEVER from the primary URL's directory:
+    # legacy manifest rows carry the full-submission ``.txt`` URL
+    # (``…/data/{cik}/{accn}.txt``), whose dirname is the CIK root, so
+    # every artifact fetch would 404 and the step would silently yield
+    # zero facts (caught live on GME/HD/JPM in the dev backfill).
+    if issuer_cik is None or not issuer_cik.strip().isdigit():
+        logger.warning(
+            "sec_10k manifest parser: accession=%s has no usable issuer cik; skipping dimensional facts",
+            accession,
+        )
+        return []
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(issuer_cik)}/{accession.replace('-', '')}/"
+    primary_basename = primary_document_url.rsplit("/", 1)[-1]
+    # Full-submission .txt names carry no useful stem for discovery
+    # preference; pass None so discovery falls back to its size rules.
+    primary_name = None if primary_basename.lower().endswith(".txt") else primary_basename
+
+    with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+        try:
+            raw_index = provider.fetch_filing_index(accession, issuer_cik=issuer_cik)
+        except Exception as exc:  # noqa: BLE001 — transport; retry via worker backoff
+            raise _DimensionalFetchError(f"dimensional index fetch error: {exc}") from exc
+        if raw_index is None:
+            return []
+
+        refs = discover_xbrl_files(raw_index, primary_document_name=primary_name)
+        if refs is None:
+            return []
+
+        def _fetch(name: str) -> bytes | None:
+            try:
+                text = provider.fetch_document_text(base + name)
+            except Exception as exc:  # noqa: BLE001 — transport; retry via worker backoff
+                raise _DimensionalFetchError(f"dimensional fetch error {name}: {exc}") from exc
+            # SEC EDGAR serves ASCII-clean XML; the provider decodes to
+            # str, so re-encode for lxml (which refuses str inputs that
+            # carry an encoding declaration).
+            return text.encode("utf-8") if text else None
+
+        instance = _fetch(refs.instance_name)
+        if instance is None:
+            return []
+        label = _fetch(refs.label_name) if refs.label_name else None
+        if refs.definition_name == refs.label_name:
+            definition = label  # xsd fallback serves both — one fetch
+        else:
+            definition = _fetch(refs.definition_name) if refs.definition_name else None
+
+    return extract_dimensional_facts(instance, label, definition, accession=accession)
+
+
 def _parse_sec_10k(
     conn: psycopg.Connection[Any],
     row: Any,  # ManifestRow — forward-ref to avoid circular import
@@ -151,6 +237,15 @@ def _parse_sec_10k(
        in a nested savepoint logs + degrades to blob-only. Deterministic
        upsert error → tombstone with the savepoint rolling back partial
        fan-out state.
+    Dimensional XBRL facts (#554) run as step 2.5 — after store_raw,
+    BEFORE the narrative parse — so an Item-1 tombstone cannot
+    suppress segments (spec §D1 independence in BOTH directions; the
+    MSFT FY2025 dev backfill caught the original post-narrative
+    ordering): fetch THIS accession's instance (+ lab/def linkbases)
+    through the throttled provider, extract, delete-then-insert per
+    sibling in a separate savepoint. Degrades to
+    continue-without-segments on parse/write bugs; transport errors
+    retry the whole row.
     """
     from app.jobs.sec_manifest_worker import ParseOutcome
 
@@ -220,6 +315,62 @@ def _parse_sec_10k(
             accession,
         )
         return _failed_outcome(f"store_raw error: {exc}")
+
+    # 2.5. Dimensional XBRL facts (#554, spec §D1 step 2). Runs BEFORE
+    # the narrative parse so an Item-1 tombstone (e.g. a filer whose
+    # 10-K defeats the Item 1 extractor — MSFT FY2025 in the dev
+    # backfill) cannot suppress segments: the spec invariant is that
+    # narrative and dimensional failures are independent in BOTH
+    # directions. Failure semantics: transport error → failed (whole
+    # row retries; idempotent — Item 1 is filed_at-gate-suppressed,
+    # dimensional write is delete-then-insert; a narrative may become
+    # visible before segments on the retry, intended); structural
+    # no-XBRL → zero rows; parse/write error → WARN +
+    # continue-without-segments (a segment bug must NOT regress the
+    # narrative), transient DB error excepted (→ failed).
+    if filed_at is None:
+        logger.warning(
+            "sec_10k manifest parser: accession=%s has no filed_at; skipping dimensional facts",
+            accession,
+        )
+    else:
+        try:
+            dimensional = _fetch_dimensional_facts(
+                accession=accession,
+                issuer_cik=None if issuer_cik == _CIK_MISSING_SENTINEL else issuer_cik,
+                primary_document_url=url,
+            )
+        except _DimensionalFetchError as exc:
+            return _failed_outcome(str(exc), raw_status="stored")
+        except Exception:  # noqa: BLE001 — degrade: narrative pipeline continues
+            logger.warning(
+                "sec_10k manifest parser: dimensional extraction failed accession=%s (continuing without segments)",
+                accession,
+                exc_info=True,
+            )
+            dimensional = None
+
+        if dimensional is not None:
+            try:
+                with conn.transaction():
+                    for sibling_iid in _resolve_siblings(conn, instrument_id=instrument_id, issuer_cik=issuer_cik):
+                        replace_accession_rows(
+                            conn,
+                            instrument_id=sibling_iid,
+                            source_accession=accession,
+                            form_type=form,
+                            filed_at=filed_at,
+                            parser_version=_PARSER_VERSION_10K,
+                            facts=dimensional,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                if is_transient_upsert_error(exc):
+                    return _failed_outcome(format_upsert_error(exc), raw_status="stored")
+                logger.warning(
+                    "sec_10k manifest parser: dimensional write failed accession=%s (continuing without segments)",
+                    accession,
+                    exc_info=True,
+                )
 
     # 3. Parse Item 1. The bare-call-after-committed-savepoint rule
     # (PR #1126) — wrap the next expression that can raise so an

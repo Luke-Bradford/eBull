@@ -162,6 +162,24 @@ def _reset_registry_then_reload():
     register_all_parsers()
 
 
+@pytest.fixture(autouse=True)
+def _stub_dimensional_step(monkeypatch: pytest.MonkeyPatch):
+    """Default the #554 dimensional step to the no-XBRL path.
+
+    Pre-#554 tests patch only ``fetch_document_text``; without this
+    stub the new step's ``fetch_filing_index`` would hit live EDGAR.
+    Dimensional-path tests override with the real implementation +
+    fully patched provider methods.
+    """
+    from app.services.manifest_parsers import sec_10k as sec_10k_module
+
+    monkeypatch.setattr(
+        sec_10k_module,
+        "_fetch_dimensional_facts",
+        lambda **_kwargs: [],
+    )
+
+
 def _patch_fetch(monkeypatch, payload: str | None):
     from app.providers.implementations import sec_edgar
 
@@ -1266,3 +1284,242 @@ def test_parser_registered_via_register_all() -> None:
     assert "sec_10k" not in registered_parser_sources()
     register_all_parsers()
     assert "sec_10k" in registered_parser_sources()
+
+
+# ---------------------------------------------------------------------
+# Dimensional XBRL step (#554)
+# ---------------------------------------------------------------------
+
+# Captured at import time, BEFORE the autouse ``_stub_dimensional_step``
+# fixture patches the module attribute — lets dimensional-path tests
+# restore the real implementation.
+from app.services.manifest_parsers.sec_10k import (  # noqa: E402
+    _fetch_dimensional_facts as _REAL_FETCH_DIMENSIONAL,
+)
+
+_DIM_INSTANCE_XML = (
+    '<xbrl xmlns="http://www.xbrl.org/2003/instance"'
+    ' xmlns:us-gaap="http://fasb.org/us-gaap/2025"'
+    ' xmlns:t="http://t.example/2025"'
+    ' xmlns:xbrldi="http://xbrl.org/2006/xbrldi">'
+    '<unit id="usd"><measure>iso4217:USD</measure></unit>'
+    '<context id="c1"><entity>'
+    '<identifier scheme="http://www.sec.gov/CIK">0000999991</identifier>'
+    '<segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">'
+    "t:NorthMember</xbrldi:explicitMember></segment></entity>"
+    "<period><startDate>2025-01-01</startDate><endDate>2025-12-31</endDate></period></context>"
+    '<context id="c2"><entity>'
+    '<identifier scheme="http://www.sec.gov/CIK">0000999991</identifier>'
+    '<segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">'
+    "t:SouthMember</xbrldi:explicitMember></segment></entity>"
+    "<period><startDate>2025-01-01</startDate><endDate>2025-12-31</endDate></period></context>"
+    '<us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="c1" unitRef="usd"'
+    ' decimals="-6">600</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>'
+    '<us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="c2" unitRef="usd"'
+    ' decimals="-6">400</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>'
+    "</xbrl>"
+)
+
+
+def _patch_dimensional_real(monkeypatch, *, instance_name: str = "acme_htm.xml"):
+    """Restore the real dimensional step + stub ``fetch_filing_index``."""
+    from app.providers.implementations import sec_edgar
+    from app.services.manifest_parsers import sec_10k as sec_10k_module
+
+    monkeypatch.setattr(sec_10k_module, "_fetch_dimensional_facts", _REAL_FETCH_DIMENSIONAL)
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_filing_index",
+        lambda self, accession, issuer_cik=None: {"directory": {"item": [{"name": instance_name, "size": "100"}]}},
+    )
+
+
+def _dimensional_rows(conn, accession):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT member_qname, metric, val, source_accession, parser_version"
+            " FROM instrument_dimensional_facts WHERE source_accession = %s"
+            " ORDER BY member_qname",
+            (accession,),
+        )
+        return cur.fetchall()
+
+
+def test_dimensional_facts_written_on_happy_path(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 9 (#554): instance fetched for THIS accession, facts written."""
+    iid = 10100554
+    cik = "0000999991"
+    accession = "0000999991-26-000554"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="ACMD", cik=cik)
+    _seed_pending_10k(ebull_test_conn, accession=accession, instrument_id=iid, cik=cik)
+    ebull_test_conn.commit()
+
+    _patch_dimensional_real(monkeypatch)
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/"
+    _patch_fetch_map(
+        monkeypatch,
+        {
+            base + "primary_doc.htm": _FAKE_10K_HTML,
+            base + "acme_htm.xml": _DIM_INSTANCE_XML,
+        },
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_10k", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.parsed == 1
+
+    rows = _dimensional_rows(ebull_test_conn, accession)
+    assert [(r[0], r[1], int(r[2])) for r in rows] == [
+        ("t:NorthMember", "revenue", 600),
+        ("t:SouthMember", "revenue", 400),
+    ]
+    assert all(r[4] == "10k-v2" for r in rows)
+
+
+def test_dimensional_facts_target_amendment_accession_not_item1_fallback(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 10-K/A without Item 1 borrows the prior 10-K's NARRATIVE, but
+    its dimensional facts must be written under the AMENDMENT accession
+    (Codex plan-review: never reuse chosen_accession for XBRL)."""
+    iid = 10100555
+    cik = "0000999991"
+    plain_acc = "0000999991-25-000100"
+    amend_acc = "0000999991-26-000200"
+    base_plain = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{plain_acc.replace('-', '')}/"
+    base_amend = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{amend_acc.replace('-', '')}/"
+
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="ACMF", cik=cik)
+    _seed_filing_event(
+        ebull_test_conn,
+        instrument_id=iid,
+        accession=plain_acc,
+        filing_type="10-K",
+        filing_date=datetime(2025, 2, 1, tzinfo=UTC).date(),
+        primary_doc_url=base_plain + "primary_doc.htm",
+    )
+    # The amendment must ALSO exist in filing_events —
+    # _find_prior_plain_10k anchors its "strictly older" comparison on
+    # the amendment's own filing_date row.
+    _seed_filing_event(
+        ebull_test_conn,
+        instrument_id=iid,
+        accession=amend_acc,
+        filing_type="10-K/A",
+        filing_date=datetime(2026, 3, 15, tzinfo=UTC).date(),
+        primary_doc_url=base_amend + "primary_doc.htm",
+    )
+    _seed_pending_10k(
+        ebull_test_conn,
+        accession=amend_acc,
+        instrument_id=iid,
+        cik=cik,
+        form="10-K/A",
+        primary_doc_url=base_amend + "primary_doc.htm",
+    )
+    ebull_test_conn.commit()
+
+    _patch_dimensional_real(monkeypatch)
+    _patch_fetch_map(
+        monkeypatch,
+        {
+            # Amendment has no Item 1 → narrative falls back to the
+            # prior plain 10-K; amendment's own XBRL still parses.
+            base_amend + "primary_doc.htm": _FAKE_10KA_HTML_NO_ITEM_1,
+            base_plain + "primary_doc.htm": _FAKE_10K_HTML,
+            base_amend + "acme_htm.xml": _DIM_INSTANCE_XML,
+            base_plain + "acme_htm.xml": "<not-xbrl/>",
+        },
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_10k", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.parsed == 1
+
+    # Narrative attributed to the fallback plain 10-K…
+    body_row = _read_summary(ebull_test_conn, iid)
+    assert body_row is not None
+    assert body_row[1] == plain_acc
+    # …but dimensional facts live under the amendment's own accession.
+    assert _dimensional_rows(ebull_test_conn, plain_acc) == []
+    amend_rows = _dimensional_rows(ebull_test_conn, amend_acc)
+    assert [(r[0], int(r[2])) for r in amend_rows] == [("t:NorthMember", 600), ("t:SouthMember", 400)]
+
+
+def test_dimensional_facts_survive_item1_tombstone(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §D1 both-directions independence: a plain 10-K whose Item 1
+    defeats the extractor tombstones the NARRATIVE, but the dimensional
+    step (2.5, before the narrative parse) must still have written the
+    segment facts (MSFT FY2025 case from the dev backfill)."""
+    iid = 10100556
+    cik = "0000999991"
+    accession = "0000999991-26-000556"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="ACMG", cik=cik)
+    _seed_pending_10k(ebull_test_conn, accession=accession, instrument_id=iid, cik=cik)
+    ebull_test_conn.commit()
+
+    _patch_dimensional_real(monkeypatch)
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/"
+    _patch_fetch_map(
+        monkeypatch,
+        {
+            # No Item 1 marker on a plain 10-K → narrative tombstone.
+            base + "primary_doc.htm": "<html><body><p>FORM 10-K</p><p>no item one here</p></body></html>",
+            base + "acme_htm.xml": _DIM_INSTANCE_XML,
+        },
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_10k", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.tombstoned == 1
+
+    rows = _dimensional_rows(ebull_test_conn, accession)
+    assert [(r[0], int(r[2])) for r in rows] == [("t:NorthMember", 600), ("t:SouthMember", 400)]
+
+
+def test_dimensional_facts_with_legacy_full_submission_txt_url(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy manifest rows carry the full-submission ``.txt`` URL whose
+    dirname is the CIK root, not the accession folder. The dimensional
+    step must build the archive base from (cik, accession) — deriving
+    it from the primary URL 404'd every artifact and silently yielded
+    zero facts (GME/HD/JPM in the dev backfill)."""
+    iid = 10100557
+    cik = "0000999991"
+    accession = "0000999991-26-000557"
+    txt_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession}.txt"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="ACMH", cik=cik)
+    _seed_pending_10k(
+        ebull_test_conn,
+        accession=accession,
+        instrument_id=iid,
+        cik=cik,
+        primary_doc_url=txt_url,
+    )
+    ebull_test_conn.commit()
+
+    _patch_dimensional_real(monkeypatch)
+    archive_base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/"
+    _patch_fetch_map(
+        monkeypatch,
+        {
+            txt_url: _FAKE_10K_HTML,
+            archive_base + "acme_htm.xml": _DIM_INSTANCE_XML,
+        },
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_10k", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.parsed == 1
+
+    rows = _dimensional_rows(ebull_test_conn, accession)
+    assert [(r[0], int(r[2])) for r in rows] == [("t:NorthMember", 600), ("t:SouthMember", 400)]

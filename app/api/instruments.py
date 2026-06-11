@@ -49,6 +49,8 @@ from app.services.broker_credentials import (
     CredentialNotFound,
     load_credential_for_provider_use,
 )
+from app.services.dimensional_facts import DimensionalAxis
+from app.services.dimensional_facts_store import read_segments
 from app.services.intraday_candles import fetch_intraday_candles
 from app.services.operators import (
     AmbiguousOperatorError,
@@ -1181,6 +1183,123 @@ def get_instrument_employees(
         employees=int(row["val"]),  # type: ignore[arg-type]
         period_end_date=row["period_end"],  # type: ignore[arg-type]
         source_accession=str(row["accession_number"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Segments endpoint (#554 — dimensional XBRL facts)
+# ---------------------------------------------------------------------------
+
+
+# API axis param → storage enum (pinned by test so storage values never
+# leak into the URL surface).
+SEGMENT_AXIS_PARAM_TO_ENUM: dict[str, DimensionalAxis] = {
+    "business": "business_segment",
+    "product": "product_service",
+    "geographic": "geographic",
+}
+
+SegmentAxisParam = Literal["business", "product", "geographic"]
+
+
+class SegmentRowModel(BaseModel):
+    member_qname: str
+    member_label: str
+    revenue: float | None
+    operating_income: float | None
+    assets: float | None
+    # Share of the summed leaf revenue in this response. Leaf rows sum
+    # to the consolidated figure (subtotal members are excluded at the
+    # reader), so this is internally consistent by construction.
+    pct_of_total: float | None
+
+
+class InstrumentSegments(BaseModel):
+    """Latest-fiscal-year dimensional breakdown for one instrument.
+
+    ``sources`` maps metric → winning accession: the reader selects the
+    winning filing per (axis, metric) independently, so a 10-K/A that
+    restates revenue but omits operating income pairs amendment revenue
+    with original-filing operating income (spec §D4/D6).
+    """
+
+    symbol: str
+    axis: SegmentAxisParam
+    period_end: date
+    filed_at: datetime
+    sources: dict[str, str]
+    total_revenue: float | None
+    rows: list[SegmentRowModel]
+
+
+@router.get("/{symbol}/segments", response_model=InstrumentSegments)
+def get_instrument_segments(
+    symbol: str,
+    axis: SegmentAxisParam = "business",
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentSegments:
+    """Latest-FY segment / product / geographic breakdown (#554).
+
+    Returns 404 when no dimensional facts are on file for the axis —
+    non-SEC issuer, the 10-K predates the XBRL mandate, or the filer
+    discloses nothing on the axis (e.g. banks often emit no
+    revenue-alias facts on the product axis).
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+    result = read_segments(
+        conn,  # type: ignore[arg-type] — reader opens its own dict_row cursors
+        instrument_id=instrument_id,
+        axis=SEGMENT_AXIS_PARAM_TO_ENUM[axis],
+    )
+    if not result.rows or result.period_end is None or result.filed_at is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No {axis} breakdown on file for {symbol}",
+        )
+
+    total_revenue = sum(
+        (row["revenue"] for row in result.rows if row["revenue"] is not None),
+        start=Decimal(0),
+    )
+    rows = [
+        SegmentRowModel(
+            member_qname=row["member_qname"],
+            member_label=row["member_label"],
+            revenue=float(row["revenue"]) if row["revenue"] is not None else None,
+            operating_income=float(row["operating_income"]) if row["operating_income"] is not None else None,
+            assets=float(row["assets"]) if row["assets"] is not None else None,
+            pct_of_total=(
+                float(row["revenue"] / total_revenue) if row["revenue"] is not None and total_revenue > 0 else None
+            ),
+        )
+        for row in result.rows
+    ]
+    return InstrumentSegments(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        axis=axis,
+        period_end=result.period_end,
+        filed_at=result.filed_at,
+        sources=dict(result.sources),
+        total_revenue=float(total_revenue) if total_revenue > 0 else None,
+        rows=rows,
     )
 
 

@@ -56,6 +56,7 @@ import { Pane } from "@/components/instrument/Pane";
 import { PriceChart } from "@/components/instrument/PriceChart";
 import { RecentNewsPane } from "@/components/instrument/RecentNewsPane";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
+import { SegmentsPane } from "@/components/instrument/SegmentsPane";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
 import {
   EMPTY_CELL,
@@ -181,6 +182,12 @@ export function DensityGrid({
         ) : null}
         {/* Zone C — Health */}
         {HealthRow}
+        {/* Zone C2 — Revenue & segments (#554). Full-width next to the
+            other fundamentals-adjacent panes; the pane owns its own
+            empty state for issuers with no dimensional XBRL. */}
+        <div className="col-span-12">
+          <SegmentsPane symbol={symbol} />
+        </div>
         {/* When filings did not pair with narrative, render filings
             full-width above the activity row (matches the legacy
             narrative-less layout). */}
@@ -233,6 +240,10 @@ export function DensityGrid({
         ) : null}
         {/* Zone C — Health (fundamentals optional in partial profile) */}
         {HealthRow}
+        {/* Zone C2 — Revenue & segments (#554). */}
+        <div className="col-span-12">
+          <SegmentsPane symbol={symbol} />
+        </div>
         {/* When filings did not pair with narrative, render filings
             full-width above the activity row. */}
         {filingsActive && !filingsPairedWithNarrative ? (
