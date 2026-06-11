@@ -200,12 +200,13 @@ def sync_universe(
         # reconcile closes the prior instrument_symbol_history chain
         # link and opens the new one inside the same transaction.
         history = reconcile_symbol_history(conn)  # type: ignore[arg-type]
-        if history.seeded or history.renamed or history.corrected_same_day:
+        if history.seeded or history.renamed or history.corrected_same_day or history.reverted_same_day:
             logger.info(
-                "Universe sync: symbol history seeded=%d renamed=%d corrected_same_day=%d",
+                "Universe sync: symbol history seeded=%d renamed=%d corrected_same_day=%d reverted_same_day=%d",
                 history.seeded,
                 history.renamed,
                 history.corrected_same_day,
+                history.reverted_same_day,
             )
 
     # Re-query to get accurate inserted/updated counts.

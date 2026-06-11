@@ -392,3 +392,29 @@ class TestReconcileSymbolHistory:
             "WHERE symbol = 'DEAD' AND instrument_id IN (794007, 794008)"
         ).fetchall()
         assert len(owners) == 2
+
+    def test_same_day_flip_flop_reverts_cleanly(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Codex ckpt-2 HIGH — rename FB→META then a later same-day sync
+        observing FB again must fully undo the flip-flop (delete the
+        same-day META link, reopen the FB row), NOT leave a corrupt
+        'FB renamed to FB' chain."""
+        conn = ebull_test_conn
+        self._seed_with_history(conn, iid=794009, symbol="FB", opened_days_ago=30)
+        conn.execute("UPDATE instruments SET symbol = 'META' WHERE instrument_id = 794009")
+        instrument_history.reconcile_symbol_history(conn)
+        # Provider flip-flops back the same day.
+        conn.execute("UPDATE instruments SET symbol = 'FB' WHERE instrument_id = 794009")
+
+        stats = instrument_history.reconcile_symbol_history(conn)
+        conn.commit()
+
+        assert stats.reverted_same_day == 1
+        assert stats.renamed == 0
+        assert stats.corrected_same_day == 0
+        chain = self._chain(conn, 794009)
+        assert len(chain) == 1  # META transient erased entirely
+        assert chain[0][0] == "FB"
+        assert chain[0][2] is None  # FB reopened as current

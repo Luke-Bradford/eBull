@@ -257,6 +257,7 @@ class SymbolReconcileStats:
     seeded: int
     renamed: int
     corrected_same_day: int
+    reverted_same_day: int = 0
 
 
 def reconcile_symbol_history(conn: psycopg.Connection[tuple]) -> SymbolReconcileStats:
@@ -270,24 +271,36 @@ def reconcile_symbol_history(conn: psycopg.Connection[tuple]) -> SymbolReconcile
     pure function of current table state, so it also self-heals any
     drift introduced outside the sync path (manual fixes, older data).
 
-    Three passes, ordered:
+    Four passes, ordered:
 
     1. **Seed** — instruments with no history rows get one ``imported``
        current row (delegates to the backfill insert).
-    2. **Same-day correction** — an open row opened TODAY whose symbol
-       already differs is updated in place. Closing it would need
+    2. **Same-day revert** — the open row was opened TODAY by an
+       earlier rename and the feed has flipped BACK to the symbol of
+       the row closed today (provider flip-flop / stale response,
+       Codex ckpt-2 HIGH). Updating in place would leave a corrupt
+       "X renamed to X" chain and erase the transient; instead the
+       same-day link is deleted and the closed-today row reopens —
+       fully undoing the flip-flop. Delete and reopen are two
+       statements (same sibling-CTE caveat as pass 4: the partial
+       UNIQUE one-current probe must not race the delete).
+    3. **Same-day correction** — any remaining open row opened TODAY
+       whose symbol differs is updated in place. Closing it would need
        ``effective_to = effective_from``, which the ordered-ranges
        CHECK rejects (zero-duration range); a same-day flip is treated
        as a correction of today's observation, not a new chain link.
-    3. **Rename** — open rows opened before today whose symbol differs
+    4. **Rename** — open rows opened before today whose symbol differs
        are closed at ``CURRENT_DATE`` and a new current row opens at
-       ``CURRENT_DATE``. ``source_event`` is ``delisting`` when the new
-       symbol carries eToro's dead-ticker suffix (``.delisted`` /
-       ``.old``), else ``rebrand``. Close and open are two statements,
-       NOT one data-modifying CTE — sibling CTE effects are not
-       reliably visible to each other's constraint checks, so the
-       EXCLUDE no-overlap probe could non-deterministically see the
-       still-open row.
+       ``CURRENT_DATE``, only for rows the close actually claimed
+       (``RETURNING`` — a concurrent reconcile's loser must not insert
+       from a stale candidate list, Codex ckpt-2 MEDIUM).
+       ``source_event`` is ``delisting`` when the new symbol carries
+       eToro's dead-ticker suffix (``.delisted`` / ``.old``), else
+       ``rebrand``. Close and open are two statements, NOT one
+       data-modifying CTE — sibling CTE effects are not reliably
+       visible to each other's constraint checks, so the EXCLUDE
+       no-overlap probe could non-deterministically see the still-open
+       row.
 
     Caller owns the transaction (``sync_universe`` wraps the whole
     sync; tests commit explicitly).
@@ -295,6 +308,34 @@ def reconcile_symbol_history(conn: psycopg.Connection[tuple]) -> SymbolReconcile
     seeded = _backfill_symbol_history(conn)
 
     with conn.cursor() as cur:
+        # Pass 2 — same-day revert (flip-flop undo).
+        cur.execute(
+            """
+            DELETE FROM instrument_symbol_history h
+            USING instruments i, instrument_symbol_history closed
+            WHERE i.instrument_id = h.instrument_id
+              AND h.effective_to IS NULL
+              AND h.effective_from = CURRENT_DATE
+              AND h.symbol IS DISTINCT FROM i.symbol
+              AND closed.instrument_id = h.instrument_id
+              AND closed.effective_to = CURRENT_DATE
+              AND closed.symbol = i.symbol
+            RETURNING h.instrument_id
+            """,
+        )
+        reverted_ids = [int(r[0]) for r in cur.fetchall()]
+        if reverted_ids:
+            cur.execute(
+                """
+                UPDATE instrument_symbol_history
+                SET effective_to = NULL
+                WHERE instrument_id = ANY(%s)
+                  AND effective_to = CURRENT_DATE
+                """,
+                (reverted_ids,),
+            )
+
+        # Pass 3 — same-day in-place correction.
         cur.execute(
             """
             UPDATE instrument_symbol_history h
@@ -308,29 +349,28 @@ def reconcile_symbol_history(conn: psycopg.Connection[tuple]) -> SymbolReconcile
         )
         corrected = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
+        # Pass 4 — rename: close, then open only what the close claimed.
         cur.execute(
             """
-            SELECT h.instrument_id
-            FROM instrument_symbol_history h
-            JOIN instruments i ON i.instrument_id = h.instrument_id
-            WHERE h.effective_to IS NULL
+            UPDATE instrument_symbol_history h
+            SET effective_to = CURRENT_DATE
+            FROM instruments i
+            WHERE i.instrument_id = h.instrument_id
+              AND h.effective_to IS NULL
               AND h.effective_from < CURRENT_DATE
               AND h.symbol IS DISTINCT FROM i.symbol
+            RETURNING h.instrument_id
             """,
         )
-        changed_ids = [int(r[0]) for r in cur.fetchall()]
-        if not changed_ids:
-            return SymbolReconcileStats(seeded=seeded, renamed=0, corrected_same_day=corrected)
+        closed_ids = [int(r[0]) for r in cur.fetchall()]
+        if not closed_ids:
+            return SymbolReconcileStats(
+                seeded=seeded,
+                renamed=0,
+                corrected_same_day=corrected,
+                reverted_same_day=len(reverted_ids),
+            )
 
-        cur.execute(
-            """
-            UPDATE instrument_symbol_history
-            SET effective_to = CURRENT_DATE
-            WHERE instrument_id = ANY(%s)
-              AND effective_to IS NULL
-            """,
-            (changed_ids,),
-        )
         cur.execute(
             r"""
             INSERT INTO instrument_symbol_history (
@@ -345,8 +385,13 @@ def reconcile_symbol_history(conn: psycopg.Connection[tuple]) -> SymbolReconcile
             FROM instruments i
             WHERE i.instrument_id = ANY(%s)
             """,
-            (changed_ids,),
+            (closed_ids,),
         )
         renamed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
-    return SymbolReconcileStats(seeded=seeded, renamed=renamed, corrected_same_day=corrected)
+    return SymbolReconcileStats(
+        seeded=seeded,
+        renamed=renamed,
+        corrected_same_day=corrected,
+        reverted_same_day=len(reverted_ids),
+    )
