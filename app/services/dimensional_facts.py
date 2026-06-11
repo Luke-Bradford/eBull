@@ -32,8 +32,8 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date
-from itertools import combinations
 from decimal import Decimal, InvalidOperation
+from itertools import combinations
 from typing import Literal
 
 import lxml.etree as ET
@@ -427,9 +427,7 @@ def _instance_units(doc: ET._Element) -> dict[str, str]:
             for child in el.iter()
             if isinstance(child.tag, str) and ET.QName(child.tag).localname == "measure"
         ]
-        has_divide = any(
-            isinstance(child.tag, str) and ET.QName(child.tag).localname == "divide" for child in el
-        )
+        has_divide = any(isinstance(child.tag, str) and ET.QName(child.tag).localname == "divide" for child in el)
         if has_divide or len(measures) != 1 or not measures[0]:
             continue
         measure = measures[0]
@@ -631,13 +629,10 @@ def extract_dimensional_facts(
     for parent, child in member_tree:
         children_of.setdefault(parent, set()).add(child)
     subtotal_frags: dict[DimensionalAxis, set[str]] = {
-        axis: {m for m in members if children_of.get(m, set()) & members}
-        for axis, members in members_by_axis.items()
+        axis: {m for m in members if children_of.get(m, set()) & members} for axis, members in members_by_axis.items()
     }
     facts = [
-        replace(f, is_subtotal=True)
-        if _member_fragment(f.member_qname) in subtotal_frags.get(f.axis, set())
-        else f
+        replace(f, is_subtotal=True) if _member_fragment(f.member_qname) in subtotal_frags.get(f.axis, set()) else f
         for f in facts
     ]
 

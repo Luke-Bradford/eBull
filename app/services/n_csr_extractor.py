@@ -56,9 +56,17 @@ import lxml.etree as ET
 
 from app.services.xbrl_instance import (
     SAFE_XML_PARSER,
+)
+from app.services.xbrl_instance import (
     axis_localname as _axis_localname,
+)
+from app.services.xbrl_instance import (
     context_dimensions as _context_dimensions,
+)
+from app.services.xbrl_instance import (
     context_period as _context_period,
+)
+from app.services.xbrl_instance import (
     member_localname as _member_localname,
 )
 
