@@ -231,6 +231,13 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # fallback, which would also yield empty) and completes the
     # manual-only triangle (source + metadata + invoker).
     "filing_events_skip_tier_cleanup": (),
+    # populate_canonical_redirects — #819 .RTH redirect binder. No
+    # operator-tunable params (match rule is fixed by the settled
+    # decision; multi-primary ambiguity is skip-with-warning). Empty
+    # tuple completes the manual-only triangle (source + metadata +
+    # invoker) — the missing sources.py half made the job
+    # untriggerable from #819's merge until 2026-06-11.
+    "populate_canonical_redirects": (),
     # raw_payload_retention_sweep — #1014 payload-null sweep.
     # ``batch_size`` stays internal (implementation knob, same call as
     # #1013); ``dry_run`` is operator-facing and DEFAULTS TRUE so a

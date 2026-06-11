@@ -23,6 +23,9 @@ import pytest
 
 from app.jobs.runtime import VALID_JOB_NAMES
 from app.jobs.sources import MANUAL_TRIGGER_JOB_SOURCES, source_for
+from app.services.canonical_instrument_redirects import (
+    JOB_POPULATE_CANONICAL_REDIRECTS,
+)
 from app.services.processes.param_metadata import (
     MANUAL_TRIGGER_JOB_METADATA,
     ParamValidationError,
@@ -202,6 +205,88 @@ class TestFilingEventsSkipTierCleanupRegistry:
                 {"batch_size": 100},
                 allow_internal_keys=False,
             )
+
+
+class TestPopulateCanonicalRedirectsRegistry:
+    """#819/#813 — the .RTH redirect binder is manual-trigger-only:
+    operator fires it after a universe sync introduces new variants.
+    The sources.py half of the triangle was missed at #819's merge,
+    so every manual trigger was rejected at ``source_for()`` — this
+    class pins the full triangle (invoker + metadata + source)."""
+
+    def test_in_valid_job_names(self) -> None:
+        assert JOB_POPULATE_CANONICAL_REDIRECTS in VALID_JOB_NAMES
+
+    def test_not_in_scheduled_jobs(self) -> None:
+        assert _job_by_name(JOB_POPULATE_CANONICAL_REDIRECTS) is None
+
+    def test_in_manual_trigger_metadata_with_no_params(self) -> None:
+        assert JOB_POPULATE_CANONICAL_REDIRECTS in MANUAL_TRIGGER_JOB_METADATA
+        assert MANUAL_TRIGGER_JOB_METADATA[JOB_POPULATE_CANONICAL_REDIRECTS] == ()
+
+    def test_in_manual_trigger_sources(self) -> None:
+        assert MANUAL_TRIGGER_JOB_SOURCES[JOB_POPULATE_CANONICAL_REDIRECTS] == "db"
+
+    def test_source_for_resolves(self) -> None:
+        assert source_for(JOB_POPULATE_CANONICAL_REDIRECTS) == "db"
+
+    def test_zero_param_validation_contract(self) -> None:
+        """POST /jobs/populate_canonical_redirects/run takes no params:
+        an empty body validates; any supplied key is rejected."""
+        metadata = _lookup_metadata(JOB_POPULATE_CANONICAL_REDIRECTS)
+        assert metadata == ()
+        validate_job_params(JOB_POPULATE_CANONICAL_REDIRECTS, {}, allow_internal_keys=False)
+        with pytest.raises(ParamValidationError):
+            validate_job_params(
+                JOB_POPULATE_CANONICAL_REDIRECTS,
+                {"suffix": ".W"},
+                allow_internal_keys=False,
+            )
+
+
+class TestEveryInvokerJobResolvesASource:
+    """Generic registry-parity invariant (Codex review of the
+    populate_canonical_redirects fix): every job the API will accept
+    (``VALID_JOB_NAMES`` = ``_INVOKERS`` keys) must resolve a lane via
+    ``source_for()``, or manual dispatch dies with a rejected queue row
+    the operator must reconcile. populate_canonical_redirects shipped
+    with only the invoker half and was silently untriggerable for a
+    month — this pins the whole class, not just that one job."""
+
+    # Jobs ALREADY in this broken state on main when the invariant
+    # landed (S6 audit 2026-06-11). Each needs per-job triage — right
+    # lane vs delete-the-invoker-as-dead-code — tracked in #1571.
+    # Adding a NEW name here is never the fix; complete the triangle
+    # instead.
+    _KNOWN_UNRESOLVABLE: frozenset[str] = frozenset(
+        {
+            "attribution_summary",
+            "daily_financial_facts",
+            "daily_tax_reconciliation",
+            "sec_def14a_ingest",
+            "sec_insider_transactions_ingest",
+        }
+    )
+
+    def test_all_valid_job_names_resolve(self) -> None:
+        unresolvable = []
+        for name in sorted(VALID_JOB_NAMES):
+            try:
+                source_for(name)
+            except KeyError:
+                unresolvable.append(name)
+        new_breaks = sorted(set(unresolvable) - self._KNOWN_UNRESOLVABLE)
+        assert new_breaks == [], (
+            f"jobs wired in _INVOKERS but missing from every source registry (untriggerable): {new_breaks}"
+        )
+
+    def test_known_unresolvable_list_shrinks_only(self) -> None:
+        """When a follow-up fixes one of the known-broken jobs, its
+        name must leave _KNOWN_UNRESOLVABLE — a stale entry would let
+        the regression silently reopen."""
+        for name in sorted(self._KNOWN_UNRESOLVABLE):
+            with pytest.raises(KeyError):
+                source_for(name)
 
 
 class TestLookupMetadataFallback:
