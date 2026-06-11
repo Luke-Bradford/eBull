@@ -493,13 +493,10 @@ class TestProductionInvokerRegistry:
             # drain is bootstrap-only (no scheduled cadence).
             "mf_directory_sync",
             "sec_n_csr_bootstrap_drain",
-            # #1233 PR-1b — OpenFIGI CUSIP resolver post-bulk sweep
-            # (Phase D, S13). Bootstrap-only — no scheduled cadence.
-            # The daily / drift-heal path is the existing
-            # ``cusip_extid_sweep`` SCHEDULED_JOB which handles legacy
-            # partition resolution; the OpenFIGI sweep runs only as
-            # part of the bootstrap orchestrator's S13 dispatch.
-            "cusip_resolver_post_bulk_sweep",
+            # #1233 PR-1b / #740 — cusip_resolver_post_bulk_sweep moved
+            # OUT of this on-demand cohort: it now carries a weekly
+            # scheduled cadence (Sun 06:00 UTC, ``openfigi`` lane) in
+            # addition to its bootstrap S13 dispatch.
             # #1233 Stream A PR-C2 (#1397) — bootstrap-only fundamentals
             # derivation entrypoint dispatched by the orchestrator at
             # stage 25 (``db_fundamentals_raw`` lane). Separately-registered

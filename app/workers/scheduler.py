@@ -1126,6 +1126,34 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # (~10s wall-clock).
         catch_up_on_boot=True,
     ),
+    ScheduledJob(
+        name=JOB_CUSIP_RESOLVER_POST_BULK_SWEEP,
+        display_name="OpenFIGI CUSIP resolver sweep",
+        source="openfigi",
+        description=(
+            "Steady-state OpenFIGI drain of bulk-source "
+            "``unresolved_13f_cusips`` (#740, spec docs/specs/etl/"
+            "2026-06-11-openfigi-sweep-negative-status.md). "
+            "CUSIP→ticker via OpenFIGI v3, normalised ticker matched "
+            "against ``instruments.symbol``; promotions land in "
+            "``external_identifiers (provider='openfigi')`` and "
+            "negative verdicts tombstone ``openfigi_unknown`` / "
+            "``openfigi_no_instrument`` so the selection cursor "
+            "advances (pre-#740 the sweep re-scanned the same "
+            "alphabet-head 1000 forever). Also runs the pre-sweep "
+            "extid tombstone, the post-sweep coverage compute, and "
+            "the #1349 retention purge. Cadence: weekly Sunday 06:00 "
+            "UTC — one hour after cusip_universe_backfill (05:00), "
+            "whose SEC-list inserts feed the pre-sweep extid "
+            "tombstone. Dual-registered: bootstrap stage S13 "
+            "dispatches the same invoker; both declare the "
+            "``openfigi`` lane so the source-registry conflict check "
+            "passes. Idempotent — a drained backlog is a no-op run."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=6, minute=0),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
     # `sec_13f_quarterly_sweep` retired from SCHEDULED_JOBS post-#1155:
     # Layer 1/2/3 + sec_manifest_worker + manifest_parsers/sec_13f_hr.py
     # (#1133) carry every 13F-HR write to institutional_holdings.
@@ -5575,7 +5603,14 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
             extid_tombstoned = sweep_bulk_cusips_resolved_via_extid(conn)
             conn.commit()
 
-            report = sweep_unresolved_cusips_via_openfigi(conn, resolver=resolver)
+            # #740 — tier-derived drain budget. Keyed (100 jobs/POST,
+            # 25 req/6s): 60 passes × 1000 cusips = ≤600 POSTs ≈ 2.5
+            # min, covers the whole measured backlog (~55k) in one run.
+            # Unkeyed (10 jobs/POST, 25 req/min): 3 passes = 300 POSTs
+            # ≈ 12 min on the dedicated ``openfigi`` lane; the weekly
+            # cadence drains the rest over subsequent runs.
+            max_passes = 60 if resolver.keyed else 3
+            report = sweep_unresolved_cusips_via_openfigi(conn, resolver=resolver, max_passes=max_passes)
             conn.commit()
 
             # Post-sweep coverage compute + run-scoped writeback. Reads
@@ -5627,9 +5662,10 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
 
         tracker.row_count = report.promoted
         logger.info(
-            "cusip_resolver_post_bulk_sweep: candidates=%d resolved=%d promoted=%d "
+            "cusip_resolver_post_bulk_sweep: passes=%d candidates=%d resolved=%d promoted=%d "
             "no_instrument_match=%d unresolved_by_openfigi=%d api_errors=%d "
             "coverage=%d/%d=%.2f%% floor=%.0f%% met=%s",
+            report.passes,
             report.candidates_seen,
             report.resolved,
             report.promoted,

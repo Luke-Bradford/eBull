@@ -8,9 +8,16 @@ Verifies:
   ``external_identifiers (provider='openfigi', identifier_type='cusip',
   is_primary=FALSE)`` and tombstone every bulk row for that CUSIP with
   ``resolution_status='resolved_via_openfigi'``.
-* OpenFIGI no-result (``warning`` entry) leaves the row pending.
-* Ticker→instrument lookup misses (no row, ambiguous) leave the row
-  pending and increment ``no_instrument_match``.
+* OpenFIGI no-result (``warning`` entry) tombstones the row
+  ``openfigi_unknown`` (#740 — terminal verdict; the selection cursor
+  advances). Transport/429 failures leave rows pending (NULL).
+* Ticker→instrument lookup misses (no row, ambiguous) tombstone the
+  row ``openfigi_no_instrument`` and increment ``no_instrument_match``.
+* OpenFIGI share-class tickers (``BRK/B``) are normalised to the
+  dot convention before the symbol match (#740, probed 2026-06-11).
+* The drain loop (``max_passes``) walks successive selection windows,
+  exits early on empty selection or api_errors, and never leaves a
+  selected row NULL on a successful pass.
 * The legacy partition (``source IS NULL``) is invisible to the sweep.
 * The post-sweep coverage compute reads OpenFIGI promotions (provider
   filter widened).
@@ -286,13 +293,22 @@ class TestSweepHappyPath:
 
         # Resolved bulk rows tombstoned.
         assert _count_resolved_openfigi(ebull_test_conn) == 3
-        # 2 unresolved (JPM, HD) still pending.
-        assert _count_pending_bulk(ebull_test_conn) == 2
+        # #740 — the 2 OpenFIGI-unknown rows (JPM, HD) are now TERMINAL
+        # negatives, not pending: the selection cursor must advance
+        # past them on the next pass.
+        assert _count_pending_bulk(ebull_test_conn) == 0
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT cusip FROM unresolved_13f_cusips WHERE resolution_status = 'openfigi_unknown' ORDER BY cusip",
+            )
+            assert [r[0] for r in cur.fetchall()] == ["TESTHD001", "TESTJPM01"]
 
     def test_resolver_returns_ticker_but_no_instrument_match(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """OpenFIGI returns a ticker but ``instruments.symbol`` doesn't
-        have it (e.g. newly-listed name pre-universe-sync). Row stays
-        pending; no extids row written; no tombstone."""
+        have it (e.g. newly-listed name pre-universe-sync). #740: the
+        row is tombstoned ``openfigi_no_instrument`` (terminal in v1 —
+        manual reset per spec §7 after a universe expansion); no extids
+        row written."""
         # No instrument seeded for ZQXZ.
         cusip = "TESTZQXZ1"
         record_unresolved_cusip_from_bulk(
@@ -318,7 +334,7 @@ class TestSweepHappyPath:
         assert report.no_instrument_match == 1
 
         assert _extids_for_cusip(ebull_test_conn, cusip) == []
-        # Row still pending (not tombstoned).
+        # #740 — terminal negative tombstone; cursor advances past it.
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 "SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = %s",
@@ -326,7 +342,7 @@ class TestSweepHappyPath:
             )
             row = cur.fetchone()
         assert row is not None
-        assert row[0] is None
+        assert row[0] == "openfigi_no_instrument"
 
     def test_resolver_transport_error_yields_api_errors(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Resolver raises mid-call → all CUSIPs counted as api_errors,
@@ -359,6 +375,263 @@ class TestSweepHappyPath:
 # ---------------------------------------------------------------------------
 # Sweep — selection rules
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestSweepNegativeStatusAndDrain:
+    """#740 — negative-status writeback, ticker normalisation, drain
+    loop, and the stale-negative flip paths (sql/192)."""
+
+    def test_share_class_ticker_normalised_and_promoted(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """OpenFIGI ``BRK/B`` (probed 2026-06-11) must match our
+        ``BRK.B`` symbol via the slash→dot normalisation."""
+        _seed_instrument(ebull_test_conn, instrument_id=70010, symbol="BRK.B", company_name="BERKSHIRE B")
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip="TESTBRKB1",
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
+        )
+        ebull_test_conn.commit()
+
+        fake = FakeOpenFigiResolver(
+            responses={
+                "TESTBRKB1": OpenFigiMapping(
+                    ticker="BRK/B", name="BERKSHIRE HATHAWAY INC-CL B", exch_code="US", share_class_figi=None
+                )
+            }
+        )
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake)
+        ebull_test_conn.commit()
+
+        assert report.promoted == 1
+        assert ("openfigi", 70010, False) in _extids_for_cusip(ebull_test_conn, "TESTBRKB1")
+
+    def test_share_class_lookalikes_do_not_promote(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex ckpt-1 #2 — ``BRK/PB`` (preferred) and ``ABC WS``
+        (warrant) style tickers must NOT coerce onto lookalike symbols:
+        normalisation only maps ``/``→``.``, so they miss and terminate
+        as ``openfigi_no_instrument``."""
+        _seed_instrument(ebull_test_conn, instrument_id=70011, symbol="BRK.B", company_name="BERKSHIRE B")
+        _seed_instrument(ebull_test_conn, instrument_id=70012, symbol="ABC", company_name="ABC Inc")
+        for cusip in ("TESTPREF01", "TESTWARR01"):
+            record_unresolved_cusip_from_bulk(
+                ebull_test_conn,
+                cusip=cusip,
+                filer_cik="0001234567",
+                period_end=_PERIOD_END,
+                source="bulk_13f_dataset",
+                cutoff=_CUTOFF,
+            )
+        ebull_test_conn.commit()
+
+        fake = FakeOpenFigiResolver(
+            responses={
+                "TESTPREF01": OpenFigiMapping(
+                    ticker="BRK/PB", name="BERKSHIRE PFD", exch_code="US", share_class_figi=None
+                ),
+                "TESTWARR01": OpenFigiMapping(
+                    ticker="ABC WS", name="ABC WARRANT", exch_code="US", share_class_figi=None
+                ),
+            }
+        )
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake)
+        ebull_test_conn.commit()
+
+        assert report.promoted == 0
+        assert report.no_instrument_match == 2
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT cusip, resolution_status FROM unresolved_13f_cusips"
+                " WHERE cusip IN ('TESTPREF01','TESTWARR01') ORDER BY cusip"
+            )
+            assert cur.fetchall() == [
+                ("TESTPREF01", "openfigi_no_instrument"),
+                ("TESTWARR01", "openfigi_no_instrument"),
+            ]
+
+    def test_drain_loop_walks_backlog_and_counts_passes(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """With negative writeback every pass disposes its window, so
+        ``max_passes=3, limit=1`` over 3 hopeless CUSIPs terminates all
+        three (pre-#740 the same window re-selected forever)."""
+        for cusip in ("TESTLOOPA1", "TESTLOOPB1", "TESTLOOPC1"):
+            record_unresolved_cusip_from_bulk(
+                ebull_test_conn,
+                cusip=cusip,
+                filer_cik="0001234567",
+                period_end=_PERIOD_END,
+                source="bulk_13f_dataset",
+                cutoff=_CUTOFF,
+            )
+        ebull_test_conn.commit()
+
+        fake = FakeOpenFigiResolver(responses={})  # OpenFIGI knows none of them
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake, limit=1, max_passes=3)
+        ebull_test_conn.commit()
+
+        assert report.passes == 3
+        assert report.candidates_seen == 3
+        assert report.unresolved_by_openfigi == 3
+        assert fake.calls == [["TESTLOOPA1"], ["TESTLOOPB1"], ["TESTLOOPC1"]]
+        assert _count_pending_bulk(ebull_test_conn) == 0
+
+    def test_drain_loop_stops_on_api_errors(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A transport failure aborts the drain (no point hammering a
+        failing API); rows stay NULL for the next run."""
+        from app.services.openfigi_resolver import OpenFigiTransportError
+
+        for cusip in ("TESTERRA01", "TESTERRB01"):
+            record_unresolved_cusip_from_bulk(
+                ebull_test_conn,
+                cusip=cusip,
+                filer_cik="0001234567",
+                period_end=_PERIOD_END,
+                source="bulk_13f_dataset",
+                cutoff=_CUTOFF,
+            )
+        ebull_test_conn.commit()
+
+        fake = FakeOpenFigiResolver(raise_on_call=OpenFigiTransportError("dns failure"))
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake, limit=1, max_passes=5)
+        ebull_test_conn.commit()
+
+        assert report.passes == 1
+        assert report.api_errors == 1
+        assert _count_pending_bulk(ebull_test_conn) == 2
+
+    def test_promotion_flips_stale_negative_sibling(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex ckpt-1 #4 — a ``(cusip, source)`` sibling negatively
+        marked in an earlier pass flips to ``resolved_via_openfigi`` at
+        promotion time, not one extid-sweep cycle later."""
+        _seed_instrument(ebull_test_conn, instrument_id=70013, symbol="FLIP", company_name="Flip Inc")
+        cusip = "TESTFLIP01"
+        for source in ("bulk_13f_dataset", "bulk_nport_dataset"):
+            record_unresolved_cusip_from_bulk(
+                ebull_test_conn,
+                cusip=cusip,
+                filer_cik="0001234567",
+                period_end=_PERIOD_END,
+                source=source,  # type: ignore[arg-type]
+                cutoff=_CUTOFF,
+            )
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE unresolved_13f_cusips SET resolution_status = 'openfigi_no_instrument'"
+                " WHERE cusip = %s AND source = 'bulk_nport_dataset'",
+                (cusip,),
+            )
+        ebull_test_conn.commit()
+
+        fake = FakeOpenFigiResolver(
+            responses={cusip: OpenFigiMapping(ticker="FLIP", name="FLIP INC", exch_code="US", share_class_figi=None)}
+        )
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake)
+        ebull_test_conn.commit()
+
+        assert report.promoted == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT source, resolution_status FROM unresolved_13f_cusips WHERE cusip = %s ORDER BY source",
+                (cusip,),
+            )
+            assert cur.fetchall() == [
+                ("bulk_13f_dataset", "resolved_via_openfigi"),
+                ("bulk_nport_dataset", "resolved_via_openfigi"),
+            ]
+
+    def test_extid_sweep_flips_stale_negative(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A CUSIP tombstoned ``openfigi_unknown`` that later lands a
+        mapping by another route (provider='sec') must read
+        ``resolved_via_extid`` after the extid sweep — not stay frozen
+        on the stale negative."""
+        from app.services.cusip_resolver import sweep_bulk_cusips_resolved_via_extid
+
+        _seed_instrument(ebull_test_conn, instrument_id=70014, symbol="LATE", company_name="Late Inc")
+        cusip = "TESTLATE01"
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip=cusip,
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
+        )
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE unresolved_13f_cusips SET resolution_status = 'openfigi_unknown' WHERE cusip = %s",
+                (cusip,),
+            )
+            cur.execute(
+                "INSERT INTO external_identifiers"
+                " (instrument_id, provider, identifier_type, identifier_value, is_primary)"
+                " VALUES (70014, 'sec', 'cusip', %s, FALSE)",
+                (cusip,),
+            )
+        ebull_test_conn.commit()
+
+        flipped = sweep_bulk_cusips_resolved_via_extid(ebull_test_conn)
+        ebull_test_conn.commit()
+
+        assert flipped == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = %s",
+                (cusip,),
+            )
+            assert cur.fetchone() == ("resolved_via_extid",)
+
+    def test_concurrent_extid_row_still_tombstones(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex ckpt-1 #5 — a mapping that appears BETWEEN selection
+        and promotion (rowcount-0 insert) must still tombstone the bulk
+        rows: a successful pass never leaves a selected row NULL."""
+        _seed_instrument(ebull_test_conn, instrument_id=70015, symbol="RACE", company_name="Race Inc")
+        cusip = "TESTRACE01"
+        record_unresolved_cusip_from_bulk(
+            ebull_test_conn,
+            cusip=cusip,
+            filer_cik="0001234567",
+            period_end=_PERIOD_END,
+            source="bulk_13f_dataset",
+            cutoff=_CUTOFF,
+        )
+        ebull_test_conn.commit()
+
+        conn = ebull_test_conn
+
+        class _RacingResolver(FakeOpenFigiResolver):
+            """Writes the extid row DURING the resolver call — after
+            the sweep's selection, before its promote."""
+
+            def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiMapping]:
+                result = super().resolve_cusips(cusips)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO external_identifiers"
+                        " (instrument_id, provider, identifier_type, identifier_value, is_primary)"
+                        " VALUES (70015, 'openfigi', 'cusip', %s, FALSE)",
+                        (cusip,),
+                    )
+                return result
+
+        fake = _RacingResolver(
+            responses={cusip: OpenFigiMapping(ticker="RACE", name="RACE INC", exch_code="US", share_class_figi=None)}
+        )
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake)
+        ebull_test_conn.commit()
+
+        # ON CONFLICT DO NOTHING → not counted as a promotion, but the
+        # bulk row is retired (the mapping is live either way).
+        assert report.promoted == 0
+        assert report.resolved == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = %s",
+                (cusip,),
+            )
+            assert cur.fetchone() == ("resolved_via_openfigi",)
 
 
 @pytest.mark.integration
