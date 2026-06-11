@@ -199,3 +199,120 @@ def test_share_class_dot_buckets_as_other(
     by_symbol = {r.symbol: r.category for r in report.sample}
     assert by_symbol["CWEN.A"] == "other"
     assert by_symbol["AAPL.RTH"] == "suffix_variant"
+
+
+def test_fund_series_covered_buckets_separately(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """#1577 — an unmapped ETF with a primary (sec, class_id) row known
+    to cik_refresh_mf_directory is covered by-design: it buckets as
+    ``fund_series_covered``, not ``other``, and samples last."""
+    conn = ebull_test_conn
+    _seed_universe(conn)
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (90671030, 'IVV', 'iShares Core S&P 500 ETF', 'audit_us', 'USD', TRUE)
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers
+          (instrument_id, provider, identifier_type, identifier_value, is_primary)
+        VALUES (90671030, 'sec', 'class_id', 'C000012345', TRUE)
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO cik_refresh_mf_directory (class_id, series_id, symbol, trust_cik)
+        VALUES ('C000012345', 'S000004310', 'IVV', '0001100663')
+        ON CONFLICT (class_id) DO NOTHING
+        """,
+    )
+    conn.commit()
+
+    report = compute_cik_gap_report(conn, sample_limit=10)
+
+    assert report.unmapped_fund_series_covered == 1  # IVV
+    assert report.unmapped_suffix_variants == 1  # AAPL.RTH
+    assert report.unmapped_other == 1  # AAXJ (no class binding)
+    assert report.unmapped == 3
+    by_symbol = {r.symbol: r.category for r in report.sample}
+    assert by_symbol["IVV"] == "fund_series_covered"
+    assert by_symbol["AAXJ"] == "other"
+    assert report.sample[-1].symbol == "IVV"  # by-design rows sample last
+
+
+def test_stale_class_id_without_directory_row_stays_other(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """The directory join is load-bearing: a class_id SEC no longer
+    lists must NOT hide a real CIK gap in the by-design bucket."""
+    conn = ebull_test_conn
+    _seed_universe(conn)
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (90671031, 'DEADETF', 'Delisted ETF', 'audit_us', 'USD', TRUE)
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers
+          (instrument_id, provider, identifier_type, identifier_value, is_primary)
+        VALUES (90671031, 'sec', 'class_id', 'C000099999', TRUE)
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
+        """,
+    )
+    conn.commit()
+
+    report = compute_cik_gap_report(conn, sample_limit=10)
+
+    assert report.unmapped_fund_series_covered == 0
+    by_symbol = {r.symbol: r.category for r in report.sample}
+    assert by_symbol["DEADETF"] == "other"
+
+
+def test_dropped_directory_class_falls_out_of_covered_bucket(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """cik_refresh_mf_directory is observed-ever; a class whose
+    last_seen stopped advancing (SEC dropped it) must NOT keep the
+    instrument in the by-design bucket."""
+    conn = ebull_test_conn
+    _seed_universe(conn)
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (90671032, 'GONEETF', 'Dropped ETF', 'audit_us', 'USD', TRUE)
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers
+          (instrument_id, provider, identifier_type, identifier_value, is_primary)
+        VALUES (90671032, 'sec', 'class_id', 'C000088888', TRUE)
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO cik_refresh_mf_directory (class_id, series_id, symbol, trust_cik, last_seen)
+        VALUES ('C000088888', 'S000008888', 'GONEETF', '0001100663', NOW() - INTERVAL '60 days')
+        ON CONFLICT (class_id) DO NOTHING
+        """,
+    )
+    conn.commit()
+
+    report = compute_cik_gap_report(conn, sample_limit=10)
+
+    assert report.unmapped_fund_series_covered == 0
+    by_symbol = {r.symbol: r.category for r in report.sample}
+    assert by_symbol["GONEETF"] == "other"
