@@ -78,13 +78,22 @@ const _EDGAR_URL_PREFIX = "https://www.sec.gov/";
  * Open the SEC source filing for a leaf wedge in a new tab (#921).
  * Returns ``true`` only when the tab actually opened — callers fall
  * back to their in-app navigate/drill on ``false`` (no URL, non-SEC
- * URL, category/center wedge, or popup-blocked ``window.open`` →
- * ``null``), so a wedge click is never swallowed.
+ * URL, category/center wedge, or popup-blocked open), so a wedge
+ * click is never swallowed.
+ *
+ * Opener isolation is done by nulling ``opener`` on the returned
+ * handle, NOT via the ``noopener`` feature string: per spec,
+ * ``noopener`` makes ``window.open`` return ``null`` even on
+ * SUCCESS, which would make every successful open also fire the
+ * caller's in-app fallback (double action — Codex ckpt-2 High).
  */
 export function openWedgeSource(target: WedgeClick): boolean {
   if (target.kind !== "leaf" || target.source_url === null) return false;
   if (!target.source_url.startsWith(_EDGAR_URL_PREFIX)) return false;
-  return window.open(target.source_url, "_blank", "noopener,noreferrer") !== null;
+  const opened = window.open(target.source_url, "_blank");
+  if (opened === null) return false; // popup blocked → in-app fallback
+  opened.opener = null;
+  return true;
 }
 
 /** Index into ``ChartTheme.accent`` for each category's color. */

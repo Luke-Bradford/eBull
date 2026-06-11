@@ -200,10 +200,13 @@ describe("OwnershipLegend residual row", () => {
 });
 
 describe("openWedgeSource (#921)", () => {
-  it("opens a leaf's sec.gov URL in a new tab and returns true", () => {
-    const openSpy = vi
-      .spyOn(window, "open")
-      .mockReturnValue({} as Window);
+  it("opens a leaf's sec.gov URL in a new tab, severs opener, returns true", () => {
+    // Not the ``noopener`` feature string: per spec that makes
+    // window.open return null even on SUCCESS, which would fire the
+    // caller's in-app fallback after every successful open (double
+    // action — Codex ckpt-2 High). Opener is severed on the handle.
+    const handle = { opener: "sentinel" } as unknown as Window;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(handle);
     const opened = openWedgeSource({
       kind: "leaf",
       category_key: "institutions",
@@ -211,11 +214,8 @@ describe("openWedgeSource (#921)", () => {
       source_url: EDGAR_URL,
     });
     expect(opened).toBe(true);
-    expect(openSpy).toHaveBeenCalledExactlyOnceWith(
-      EDGAR_URL,
-      "_blank",
-      "noopener,noreferrer",
-    );
+    expect(openSpy).toHaveBeenCalledExactlyOnceWith(EDGAR_URL, "_blank");
+    expect(handle.opener).toBeNull();
   });
 
   it("returns false when the popup is blocked (window.open → null)", () => {
@@ -231,7 +231,9 @@ describe("openWedgeSource (#921)", () => {
   });
 
   it("fails closed on null, non-sec.gov, category, and center targets", () => {
-    const openSpy = vi.spyOn(window, "open").mockReturnValue({} as Window);
+    const openSpy = vi
+      .spyOn(window, "open")
+      .mockReturnValue({ opener: null } as unknown as Window);
     expect(
       openWedgeSource({
         kind: "leaf",
@@ -290,7 +292,9 @@ describe("focusedSectorDatum (#921)", () => {
 
 describe("keyboard Enter on a real rendered sector (#921)", () => {
   it("fires the wedge action end-to-end: Enter → leaf target → window.open", () => {
-    const openSpy = vi.spyOn(window, "open").mockReturnValue({} as Window);
+    const openSpy = vi
+      .spyOn(window, "open")
+      .mockReturnValue({ opener: null } as unknown as Window);
     const { container } = render(
       <OwnershipSunburst
         inputs={baseInputs()}
@@ -304,11 +308,43 @@ describe("keyboard Enter on a real rendered sector (#921)", () => {
     const path = container.querySelector('path[data-ring="outer"][data-idx="0"]');
     expect(path).not.toBeNull();
     fireEvent.keyDown(path!, { key: "Enter" });
-    expect(openSpy).toHaveBeenCalledExactlyOnceWith(
-      EDGAR_URL,
-      "_blank",
-      "noopener,noreferrer",
+    expect(openSpy).toHaveBeenCalledExactlyOnceWith(EDGAR_URL, "_blank");
+  });
+
+  it("recharts' own Arrow navigation focuses a sector that Enter then activates", () => {
+    // Drives the REAL focus chain (Codex ckpt-2 Low): focus the outer
+    // pie root, ArrowLeft via recharts' native onkeydown handler
+    // moves DOM focus onto a sector <g>, then Enter on it activates
+    // the wedge. Proves the wrapper handler composes with recharts'
+    // focus management, not just with hand-picked event targets.
+    const handler = vi.fn();
+    const { container } = render(
+      <OwnershipSunburst inputs={baseInputs()} onWedgeClick={handler} />,
     );
+    const outerLeafPath = container.querySelector(
+      'path[data-ring="outer"][data-idx="0"]',
+    );
+    // The outer pie root = the .recharts-pie ancestor of an outer cell.
+    const outerPieRoot = outerLeafPath!.closest(".recharts-pie");
+    expect(outerPieRoot).not.toBeNull();
+    // Recharts pre-increments its focus index from 0, so the outer
+    // ring's three sectors (leaf, within-category gap, residual)
+    // focus in order 1 → 2 → 0; three presses wrap to the leaf.
+    // Subsequent presses fire on the focused sector — keydown
+    // bubbles to the pie root where recharts attaches its handler,
+    // exactly as in a browser.
+    fireEvent.keyDown(outerPieRoot!, { key: "ArrowLeft" });
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    const focused = document.activeElement;
+    expect(focused?.classList.contains("recharts-pie-sector")).toBe(true);
+    fireEvent.keyDown(focused!, { key: "Enter" });
+    expect(handler).toHaveBeenCalledExactlyOnceWith({
+      kind: "leaf",
+      category_key: "institutions",
+      leaf_key: "0000102909",
+      source_url: EDGAR_URL,
+    });
   });
 
   it("ignores Enter on gap sectors and non-Enter keys", () => {
