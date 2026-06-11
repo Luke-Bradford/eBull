@@ -1482,3 +1482,44 @@ def test_dimensional_facts_survive_item1_tombstone(
 
     rows = _dimensional_rows(ebull_test_conn, accession)
     assert [(r[0], int(r[2])) for r in rows] == [("t:NorthMember", 600), ("t:SouthMember", 400)]
+
+
+def test_dimensional_facts_with_legacy_full_submission_txt_url(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy manifest rows carry the full-submission ``.txt`` URL whose
+    dirname is the CIK root, not the accession folder. The dimensional
+    step must build the archive base from (cik, accession) — deriving
+    it from the primary URL 404'd every artifact and silently yielded
+    zero facts (GME/HD/JPM in the dev backfill)."""
+    iid = 10100557
+    cik = "0000999991"
+    accession = "0000999991-26-000557"
+    txt_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession}.txt"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="ACMH", cik=cik)
+    _seed_pending_10k(
+        ebull_test_conn,
+        accession=accession,
+        instrument_id=iid,
+        cik=cik,
+        primary_doc_url=txt_url,
+    )
+    ebull_test_conn.commit()
+
+    _patch_dimensional_real(monkeypatch)
+    archive_base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/"
+    _patch_fetch_map(
+        monkeypatch,
+        {
+            txt_url: _FAKE_10K_HTML,
+            archive_base + "acme_htm.xml": _DIM_INSTANCE_XML,
+        },
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_10k", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.parsed == 1
+
+    rows = _dimensional_rows(ebull_test_conn, accession)
+    assert [(r[0], int(r[2])) for r in rows] == [("t:NorthMember", 600), ("t:SouthMember", 400)]

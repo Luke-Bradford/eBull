@@ -163,8 +163,23 @@ def _fetch_dimensional_facts(
     ``filing_raw_documents`` (raw-payload scope narrowing #470: every
     extracted field lands in SQL).
     """
-    base = primary_document_url.rsplit("/", 1)[0] + "/"
-    primary_name = primary_document_url.rsplit("/", 1)[-1]
+    # Archive base is built from (cik, accession) — the same shape
+    # filing_documents.py uses — NEVER from the primary URL's directory:
+    # legacy manifest rows carry the full-submission ``.txt`` URL
+    # (``…/data/{cik}/{accn}.txt``), whose dirname is the CIK root, so
+    # every artifact fetch would 404 and the step would silently yield
+    # zero facts (caught live on GME/HD/JPM in the dev backfill).
+    if issuer_cik is None or not issuer_cik.strip().isdigit():
+        logger.warning(
+            "sec_10k manifest parser: accession=%s has no usable issuer cik; skipping dimensional facts",
+            accession,
+        )
+        return []
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(issuer_cik)}/{accession.replace('-', '')}/"
+    primary_basename = primary_document_url.rsplit("/", 1)[-1]
+    # Full-submission .txt names carry no useful stem for discovery
+    # preference; pass None so discovery falls back to its size rules.
+    primary_name = None if primary_basename.lower().endswith(".txt") else primary_basename
 
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
         try:

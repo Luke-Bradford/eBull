@@ -30,13 +30,32 @@ def main() -> None:
     register_all_parsers()
     totals = {"parsed": 0, "tombstoned": 0, "failed": 0, "skipped": 0}
     chunks = 0
+    consecutive_failures = 0
     started = time.monotonic()
     with psycopg.connect(settings.database_url, application_name="drain-554-sec10k") as conn:
         while True:
             rows = list(iter_pending(conn, source="sec_10k", limit=50))
             if not rows:
                 break
-            stats = _dispatch_rows(conn, rows, now=datetime.now(tz=UTC))
+            try:
+                stats = _dispatch_rows(conn, rows, now=datetime.now(tz=UTC))
+            except Exception:
+                # The jobs-proc manifest worker races this drain for the
+                # same oldest-pending rows; a row it already parsed makes
+                # transition_status raise illegal 'parsed'->'parsed'.
+                # Roll back the chunk (idempotent redo) and re-read.
+                conn.rollback()
+                consecutive_failures += 1
+                logger.warning(
+                    "chunk dispatch failed (%d consecutive); re-reading",
+                    consecutive_failures,
+                    exc_info=True,
+                )
+                if consecutive_failures >= 5:
+                    raise
+                time.sleep(5)
+                continue
+            consecutive_failures = 0
             conn.commit()
             chunks += 1
             totals["parsed"] += stats.parsed
