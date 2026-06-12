@@ -769,6 +769,12 @@ def _compute_contributors(
     - When `prior is None` (first snapshot, or backfilled historical
       snapshots with no `positions` key), both lists are empty so the
       UI gracefully degrades.
+    - Known limit (Codex ckpt-2): a position opened AND fully closed
+      within one period has no snapshot row on either side, so it
+      cannot appear per-instrument here (its realised P&L still lands
+      in the cover's aggregate `realized_delta`). Likewise a
+      same-period open+trim shows its unrealised delta only. Exact
+      per-instrument intra-period attribution needs the #1593 ledger.
     """
     if prior is None:
         return {"contributors": [], "drags": []}
@@ -990,6 +996,13 @@ def _external_flows(
     direction (sql/027 CHECK). Only `injection` (+) / `withdrawal` (−)
     are EXTERNAL flows — `tax_provision` / `tax_release` are internal
     earmarks; the cash never leaves the account (spec §3.4).
+
+    Timing caveat (Codex ckpt-2): flows count when RECORDED in
+    `capital_events`; the cash itself reaches valuation via the
+    broker-sync cash ledger. If a recording and its broker sync land
+    on opposite sides of a period boundary, that period's return is
+    under/overstated and the next one symmetrically corrects — the
+    mismatch is visible as a non-zero bridge residual, never silent.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -1169,24 +1182,21 @@ def _cover_and_performance(
 
     # YTD / since-inception: chain-link prior v2 period returns with
     # this period's. Only chains in the SAME display currency count.
-    chain_returns = [
-        c["period_return"]
-        for c in chain
-        if c["period_return"] is not None and c["display_currency"] == valuation.display_currency
+    chained_rows = [
+        c for c in chain if c["period_return"] is not None and c["display_currency"] == valuation.display_currency
     ]
+    chain_returns = [c["period_return"] for c in chained_rows]
     current_returns = [period_return] if period_return is not None else []
     si_return = _chain_link(chain_returns + current_returns)
-    ytd_chain = [
-        c["period_return"]
-        for c in chain
-        if c["period_return"] is not None
-        and c["display_currency"] == valuation.display_currency
-        and c["period_start"].year == period_end.year
-    ]
+    ytd_chain = [c["period_return"] for c in chained_rows if c["period_start"].year == period_end.year]
     ytd_return = _chain_link(ytd_chain + current_returns)
 
-    # Benchmark over the same spans, from closes (cheap, [NOW]).
-    si_start = chain[0]["period_start"] if chain else period_start
+    # Benchmark over the same spans, from closes (cheap, [NOW]). The SI
+    # span starts at the first chain row that SURVIVES the currency
+    # filter — starting at chain[0] regardless would compare a
+    # later-inception portfolio chain against an older benchmark span
+    # (Codex ckpt-2).
+    si_start = chained_rows[0]["period_start"] if chained_rows else period_start
     benchmark_si = _benchmark_closes(conn, si_start, period_end)
     ytd_start = date(period_end.year, 1, 1)
     benchmark_ytd = _benchmark_closes(conn, ytd_start, period_end)
@@ -1438,6 +1448,25 @@ def _risk_section(
 _ROLLING_WINDOWS: dict[str, int | None] = {"1m": 1, "3m": 3, "6m": 6, "1y": 12, "si": None}
 
 
+def _add_month(d: date) -> date:
+    """First-of-next-month for a first-of-month date."""
+    return date(d.year + 1, 1, 1) if d.month == 12 else date(d.year, d.month + 1, 1)
+
+
+def _is_contiguous_monthly(window: list[dict[str, Any]], current_period_start: date) -> bool:
+    """True when the window's monthly periods run back-to-back and the
+    newest one immediately precedes the current period. Count alone is
+    not enough: with gaps (missed/backfilled months), N stale returns
+    would masquerade as an N-month window (Codex ckpt-2)."""
+    expected = current_period_start
+    for row in reversed(window):
+        prev = row["period_start"].replace(day=1)
+        if _add_month(prev) != expected:
+            return False
+        expected = prev
+    return True
+
+
 def _rolling_returns(
     conn: psycopg.Connection[Any],
     chain: list[dict[str, Any]],
@@ -1460,12 +1489,14 @@ def _rolling_returns(
         if current_period_return is not None:
             window_returns = [*window_returns, current_period_return]
         # A window is only honest when it is FULL (or si): chaining 2
-        # months and calling it "6m" overstates history.
+        # months and calling it "6m" overstates history. Fullness is
+        # count AND calendar contiguity — with gaps, N stale returns
+        # would masquerade as an N-month window (Codex ckpt-2).
         portfolio: Decimal | None
         if months is None:
             portfolio = _chain_link(window_returns)
             span_start = window[0]["period_start"] if window else period_start
-        elif len(window_returns) == months:
+        elif len(window_returns) == months and _is_contiguous_monthly(window, period_start):
             portfolio = _chain_link(window_returns)
             span_start = window[0]["period_start"] if window else period_start
         else:

@@ -968,3 +968,43 @@ class TestHoldingsSection:
         assert rows[0]["since_entry_return_pct"] is None
         assert rows[0]["weight_pct"] is None
         assert rows[0]["period_contribution"] is None
+
+
+class TestRollingWindowContiguity:
+    """Count alone must not satisfy a rolling window — calendar gaps
+    would let stale returns masquerade as an N-month window."""
+
+    def test_contiguous_months_pass(self) -> None:
+        from app.services.reporting import _is_contiguous_monthly
+
+        window = [
+            {"period_start": date(2026, 3, 1)},
+            {"period_start": date(2026, 4, 1)},
+        ]
+        assert _is_contiguous_monthly(window, date(2026, 5, 1)) is True
+
+    def test_gap_before_current_fails(self) -> None:
+        from app.services.reporting import _is_contiguous_monthly
+
+        window = [{"period_start": date(2026, 2, 1)}]
+        assert _is_contiguous_monthly(window, date(2026, 5, 1)) is False
+
+    def test_gap_inside_window_fails(self) -> None:
+        from app.services.reporting import _is_contiguous_monthly
+
+        window = [
+            {"period_start": date(2026, 1, 1)},
+            {"period_start": date(2026, 4, 1)},
+        ]
+        assert _is_contiguous_monthly(window, date(2026, 5, 1)) is False
+
+    def test_december_january_wrap(self) -> None:
+        from app.services.reporting import _is_contiguous_monthly
+
+        window = [{"period_start": date(2025, 12, 1)}]
+        assert _is_contiguous_monthly(window, date(2026, 1, 1)) is True
+
+    def test_empty_window_is_trivially_contiguous(self) -> None:
+        from app.services.reporting import _is_contiguous_monthly
+
+        assert _is_contiguous_monthly([], date(2026, 5, 1)) is True
