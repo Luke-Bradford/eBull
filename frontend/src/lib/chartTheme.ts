@@ -9,6 +9,7 @@
  *   - lightweight-charts options in `PriceChart`, `ChartWorkspaceCanvas`,
  *     and `InsiderPriceMarkers`
  *   - recharts components in fundamentals / dividends / insider drill pages
+ *   - lightweight-charts options in `PortfolioValueChart` (dashboard)
  *   - `Sparkline` (default stroke remains `currentColor` so callers retain
  *     Tailwind `text-*`-driven coloring)
  *
@@ -76,6 +77,14 @@ export interface ChartTheme {
 
   /** Primary normalized line in compare mode. */
   readonly primaryLine: string;
+
+  /**
+   * Translucent fills under an `accent[1]`-coloured area line
+   * (dashboard portfolio-value chart; reusable by any single-series
+   * area chart that wants the blue identity).
+   */
+  readonly areaTopAlpha: string;
+  readonly areaBottomAlpha: string;
 }
 
 export const lightTheme: ChartTheme = {
@@ -123,6 +132,9 @@ export const lightTheme: ChartTheme = {
   channelLow: "#ef4444",
 
   primaryLine: "#1e293b", // slate-800
+
+  areaTopAlpha: "rgba(59,130,246,0.25)", // blue-500 (matches accent[1])
+  areaBottomAlpha: "rgba(59,130,246,0.02)",
 };
 
 /**
@@ -163,4 +175,7 @@ export const darkTheme: ChartTheme = {
   channelLow: lightTheme.channelLow,
 
   primaryLine: "#f1f5f9", // slate-100 — keeps reading-order weight in dark
+
+  areaTopAlpha: lightTheme.areaTopAlpha,
+  areaBottomAlpha: lightTheme.areaBottomAlpha,
 };

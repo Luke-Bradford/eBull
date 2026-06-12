@@ -547,6 +547,17 @@ export interface ValueHistoryPoint {
   value: number;
 }
 
+// Buy/sell chart marker (#1594). source="position_open" = broker-synced
+// open back-dated at today's units; SELL only ever comes from fills
+// (broker-side sells unrecorded until the #1593 ledger).
+export interface ValueHistoryEvent {
+  date: string; // YYYY-MM-DD
+  symbol: string;
+  side: "BUY" | "SELL";
+  units: number;
+  source: "fill" | "position_open";
+}
+
 export interface ValueHistoryResponse {
   display_currency: string;
   range: ValueHistoryRange;
@@ -554,6 +565,7 @@ export interface ValueHistoryResponse {
   fx_mode: string; // "live" in v1 — flags whether historical FX was used
   fx_skipped: number; // rows dropped due to missing live FX pair
   points: ValueHistoryPoint[];
+  events: ValueHistoryEvent[];
 }
 
 // /portfolio/instruments/:instrumentId — native currency drill-through

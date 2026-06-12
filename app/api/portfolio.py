@@ -773,6 +773,23 @@ class ValueHistoryPoint(BaseModel):
     value: float
 
 
+class ValueHistoryEvent(BaseModel):
+    """A buy/sell visible on the value-history chart (#1594 markers).
+
+    `source="fill"` rows are exact (our own order path).
+    `source="position_open"` rows are broker-synced position opens —
+    units are TODAY's units back-dated to the open (same approximation
+    as the hybrid units basis). Broker-side sells are unrecorded until
+    the #1593 ledger, so SELL events only ever come from fills.
+    """
+
+    date: date
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    units: float
+    source: Literal["fill", "position_open"]
+
+
 ValueHistoryRange = Literal["1m", "3m", "6m", "1y", "5y", "max"]
 
 
@@ -793,6 +810,8 @@ class ValueHistoryResponse(BaseModel):
     # (instruments × days).
     fx_skipped: int = 0
     points: list[ValueHistoryPoint]
+    # Buy/sell chart markers, ascending by date (#1594).
+    events: list[ValueHistoryEvent] = []
 
 
 @router.get("/value-history", response_model=ValueHistoryResponse)
@@ -808,11 +827,24 @@ def get_value_history(
         plus sum over each currency:
             net_cash_ledger_at_D                       (converted to display ccy)
 
-    Signed units replay the fills ledger by order action (BUY/ADD add,
-    SELL/EXIT subtract). If a position had no `price_daily` close on
-    or before D (e.g. new listing with stale local store), that bar
-    is skipped for that day — conservatively under-states value
-    rather than inventing a zero.
+    units_at_D is a hybrid (#1594 v1, pre-trade-ledger):
+
+    - Instruments with `fills` rows replay the fills ledger by order
+      action (BUY/ADD add, SELL/EXIT subtract) — exact through our own
+      opens AND closes.
+    - Broker-synced holdings carry no fills; each open position
+      contributes its CURRENT units from its `open_date` forward.
+      Known approximations until the #1593 ledger: partial adds/trims
+      before today are backdated to open_date, and closed broker
+      positions drop out of history entirely (the sync never recorded
+      them).
+    - Mirror/copy-portfolio equity is EXCLUDED — there is no history
+      source for it; the dashboard headline includes it, so this
+      series reads below `total_aum` by the live mirror equity.
+
+    If a position had no `price_daily` close on or before D (e.g. new
+    listing with stale local store), that bar is skipped for that day —
+    conservatively under-states value rather than inventing a zero.
 
     FX conversion uses the **live** snapshot only (`live_fx_rates`).
     Historical daily FX is only populated on tax-event dates today, so
@@ -839,7 +871,10 @@ def get_value_history(
                 SELECT COALESCE(
                     LEAST(
                         (SELECT MIN(filled_at::date) FROM fills),
-                        (SELECT MIN(event_time::date) FROM cash_ledger)
+                        (SELECT MIN(event_time::date) FROM cash_ledger),
+                        -- Broker-synced holdings start history at their
+                        -- position open_date (#1594 hybrid basis).
+                        (SELECT MIN(open_date) FROM positions WHERE current_units > 0)
                     ),
                     CURRENT_DATE
                 ) AS start_date
@@ -886,7 +921,7 @@ def get_value_history(
                 JOIN orders o ON o.order_id = f.order_id
                 WHERE o.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
             ),
-            units_per_day AS (
+            fills_units AS (
                 -- Long-only invariant (CLAUDE.md, eBull non-negotiables
                 -- "Long only in v1. No shorting."). We intentionally
                 -- drop zero and negative net-units: zero = fully
@@ -901,6 +936,49 @@ def get_value_history(
                 JOIN fills_signed fs ON fs.fill_date <= d.d
                 GROUP BY d.d, fs.instrument_id
                 HAVING SUM(fs.units) > 0
+            ),
+            fills_open_now AS (
+                -- Instruments whose fills replay nets OPEN units today.
+                -- Only these suppress the position basis below: an
+                -- instrument with old fills that net to zero (closed
+                -- via our order path) and a CURRENT broker-synced
+                -- position row is a broker re-open — the position
+                -- basis must price it or the holding goes invisible
+                -- (Codex ckpt-2 finding). Overlap between a closed
+                -- fills lifecycle and a position whose open_date
+                -- predates the fills close would double-count that
+                -- span; that requires contradictory data and resolves
+                -- properly with the #1593 ledger.
+                SELECT instrument_id
+                FROM fills_signed
+                GROUP BY instrument_id
+                HAVING SUM(units) > 0
+            ),
+            position_units AS (
+                -- Broker-synced holdings have no fills rows: back-fill
+                -- units from each open position's open_date at TODAY's
+                -- units (#1594 hybrid basis; see endpoint docstring for
+                -- the documented approximations). NULL open_date
+                -- contributes from the window start (held since before
+                -- we tracked it) — note these holdings get NO buy
+                -- marker in `events` (an unknowable date pinned to the
+                -- window start would shift with the selected range).
+                SELECT
+                    d.d,
+                    p.instrument_id,
+                    SUM(p.current_units) AS units_at_date
+                FROM dates d
+                JOIN positions p
+                  ON COALESCE(p.open_date, '-infinity'::date) <= d.d
+                WHERE p.current_units > 0
+                  AND p.instrument_id NOT IN (SELECT instrument_id FROM fills_open_now)
+                GROUP BY d.d, p.instrument_id
+                HAVING SUM(p.current_units) > 0
+            ),
+            units_per_day AS (
+                SELECT d, instrument_id, units_at_date FROM fills_units
+                UNION ALL
+                SELECT d, instrument_id, units_at_date FROM position_units
             )
             SELECT
                 u.d AS point_date,
@@ -951,7 +1029,65 @@ def get_value_history(
         )
         cash_rows = cur.fetchall()
 
-    # 3. Aggregate into one value per day in display currency.
+    # 3. Buy/sell events for chart markers (#1594). Mirrors the hybrid
+    #    units basis for positions with KNOWN open dates: fills rows
+    #    are exact events; no-open-fills broker positions contribute
+    #    their open as a BUY. NULL-open holdings price into the curve
+    #    but get no marker (no knowable date to pin it to), and the
+    #    position-basis suppression keys on fills that net OPEN today
+    #    — same rule as `fills_open_now` above.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT f.filled_at::date AS event_date,
+                   i.symbol,
+                   CASE WHEN o.action IN ('BUY', 'ADD') THEN 'BUY' ELSE 'SELL' END AS side,
+                   f.units,
+                   'fill' AS source
+            FROM fills f
+            JOIN orders o ON o.order_id = f.order_id
+            JOIN instruments i ON i.instrument_id = o.instrument_id
+            WHERE o.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
+              AND f.filled_at::date >= %(start)s
+            UNION ALL
+            SELECT p.open_date AS event_date,
+                   i.symbol,
+                   'BUY' AS side,
+                   p.current_units AS units,
+                   'position_open' AS source
+            FROM positions p
+            JOIN instruments i ON i.instrument_id = p.instrument_id
+            WHERE p.current_units > 0
+              AND p.open_date IS NOT NULL
+              AND p.open_date >= %(start)s
+              AND p.instrument_id NOT IN (
+                  SELECT o2.instrument_id
+                  FROM fills f2
+                  JOIN orders o2 ON o2.order_id = f2.order_id
+                  WHERE o2.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
+                  GROUP BY o2.instrument_id
+                  HAVING SUM(
+                      CASE WHEN o2.action IN ('BUY', 'ADD') THEN f2.units ELSE -f2.units END
+                  ) > 0
+              )
+            ORDER BY event_date, symbol
+            """,
+            {"start": start_date},
+        )
+        event_rows = cur.fetchall()
+
+    events = [
+        ValueHistoryEvent(
+            date=row["event_date"],
+            symbol=str(row["symbol"]),
+            side=row["side"],
+            units=float(row["units"]),
+            source=row["source"],
+        )
+        for row in event_rows
+    ]
+
+    # 4. Aggregate into one value per day in display currency.
     # cash_ledger semantics: every INSERT site (orders.py, order_client.py,
     # portfolio_sync.py) writes a *delta* row, never an absolute snapshot.
     # SUM(amount) is therefore the running balance — correct per-call-site
@@ -1041,4 +1177,5 @@ def get_value_history(
         days=effective_days,
         fx_skipped=len(fx_missing_pairs),
         points=points,
+        events=events,
     )

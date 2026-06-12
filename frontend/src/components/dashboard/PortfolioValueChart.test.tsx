@@ -16,9 +16,10 @@ const libState = vi.hoisted(() => ({
 }));
 
 vi.mock("lightweight-charts", () => {
-  const series = { setData: libState.setData };
+  const series = { setData: libState.setData, applyOptions: vi.fn() };
   const chart = {
     addSeries: vi.fn(() => series),
+    applyOptions: vi.fn(),
     priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
     timeScale: vi.fn(() => ({ fitContent: libState.fitContent })),
     subscribeCrosshairMove: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("lightweight-charts", () => {
   };
   return {
     createChart: vi.fn(() => chart),
+    createSeriesMarkers: vi.fn(() => ({ detach: vi.fn(), setMarkers: vi.fn() })),
     AreaSeries: "__area__",
   };
 });
@@ -50,6 +52,7 @@ function resp(
     fx_mode: "live",
     fx_skipped: 0,
     points,
+    events: [],
     ...overrides,
   };
 }

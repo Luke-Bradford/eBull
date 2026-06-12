@@ -17,18 +17,21 @@ import { useSearchParams } from "react-router-dom";
 import {
   AreaSeries,
   createChart,
+  createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
+  type SeriesMarker,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
 
 import { fetchValueHistory } from "@/api/portfolio";
-import type { ValueHistoryPoint, ValueHistoryRange } from "@/api/types";
+import type { ValueHistoryEvent, ValueHistoryPoint, ValueHistoryRange } from "@/api/types";
 import { SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { formatMoney } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
+import { useChartTheme } from "@/lib/useChartTheme";
 
 const RANGES: { id: ValueHistoryRange; label: string }[] = [
   { id: "1m", label: "1M" },
@@ -65,6 +68,7 @@ function dateToTime(date: string): UTCTimestamp | null {
 interface HoverState {
   date: string;
   value: number;
+  trades: ValueHistoryEvent[];
 }
 
 export function PortfolioValueChart(): JSX.Element | null {
@@ -131,7 +135,7 @@ export function PortfolioValueChart(): JSX.Element | null {
               caption would just duplicate. */}
           {data?.fx_mode === "live" && hasMovement && fxSkipped === 0 ? (
             <span className="text-[10px] text-slate-400 dark:text-slate-500">
-              historical converted at today's FX
+              historical converted at today's FX · excludes copy-portfolio equity
             </span>
           ) : null}
           {/* Keep the FX-missing signal even when the chart has
@@ -178,7 +182,7 @@ export function PortfolioValueChart(): JSX.Element | null {
         // guard share the same view of the series. The canvas would
         // still re-filter internally, but passing `points` raw means
         // two different "what counts as a row" rules in the same file.
-        <ValueCanvas points={validPoints} currency={data.display_currency} />
+        <ValueCanvas points={validPoints} events={data.events} currency={data.display_currency} />
       ) : null}
     </div>
   );
@@ -186,43 +190,55 @@ export function PortfolioValueChart(): JSX.Element | null {
 
 function ValueCanvas({
   points,
+  events,
   currency,
 }: {
   points: ValueHistoryPoint[];
+  events: ValueHistoryEvent[];
   currency: string;
 }): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
+  const markersRef = useRef<ReturnType<typeof createSeriesMarkers<Time>> | null>(null);
+  // The crosshair callback reads events through a ref so the run-once
+  // construction effect never closes over a stale array (the
+  // subscription outlives every refetch).
+  const eventsRef = useRef<ValueHistoryEvent[]>(events);
+  eventsRef.current = events;
   const [hover, setHover] = useState<HoverState | null>(null);
+  const theme = useChartTheme();
 
   useEffect(() => {
     const container = containerRef.current;
     if (container === null) return;
 
+    // Theme values here are construction-time only; the applyOptions
+    // effect below re-applies them on light/dark toggle (PriceChart
+    // pattern — recreating the chart would drop pan/zoom).
     const chart = createChart(container, {
       autoSize: true,
       layout: {
-        background: { color: "#ffffff" },
-        textColor: "#64748b",
+        background: { color: theme.bg },
+        textColor: theme.textSecondary,
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: "#f1f5f9" },
-        horzLines: { color: "#f1f5f9" },
+        vertLines: { color: theme.gridLine },
+        horzLines: { color: theme.gridLine },
       },
-      rightPriceScale: { borderColor: "#e2e8f0" },
-      timeScale: { borderColor: "#e2e8f0" },
+      rightPriceScale: { borderColor: theme.borderColor },
+      timeScale: { borderColor: theme.borderColor },
       crosshair: {
-        vertLine: { width: 1, color: "#94a3b8", style: 3 },
-        horzLine: { width: 1, color: "#94a3b8", style: 3 },
+        vertLine: { width: 1, color: theme.crosshair, style: 3 },
+        horzLine: { width: 1, color: theme.crosshair, style: 3 },
       },
     });
 
     const series = chart.addSeries(AreaSeries, {
-      lineColor: "#2563eb",
-      topColor: "rgba(37,99,235,0.25)",
-      bottomColor: "rgba(37,99,235,0.02)",
+      lineColor: theme.accent[1],
+      topColor: theme.areaTopAlpha,
+      bottomColor: theme.areaBottomAlpha,
       lineWidth: 2,
     });
 
@@ -244,15 +260,47 @@ function ValueCanvas({
         return;
       }
       const date = new Date(param.time * 1000).toISOString().slice(0, 10);
-      setHover({ date, value: (pt as { value: number }).value });
+      setHover({
+        date,
+        value: (pt as { value: number }).value,
+        trades: eventsRef.current.filter((e) => e.date === date),
+      });
     });
 
     return () => {
+      markersRef.current?.detach();
+      markersRef.current = null;
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
     };
   }, []);
+
+  // Re-apply theme-driven options on light/dark toggle (PriceChart /
+  // InsiderPriceMarkers pattern — applyOptions, never recreate).
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series) return;
+    chart.applyOptions({
+      layout: { background: { color: theme.bg }, textColor: theme.textSecondary },
+      grid: {
+        vertLines: { color: theme.gridLine },
+        horzLines: { color: theme.gridLine },
+      },
+      rightPriceScale: { borderColor: theme.borderColor },
+      timeScale: { borderColor: theme.borderColor },
+      crosshair: {
+        vertLine: { color: theme.crosshair },
+        horzLine: { color: theme.crosshair },
+      },
+    });
+    series.applyOptions({
+      lineColor: theme.accent[1],
+      topColor: theme.areaTopAlpha,
+      bottomColor: theme.areaBottomAlpha,
+    });
+  }, [theme]);
 
   useEffect(() => {
     const series = seriesRef.current;
@@ -268,14 +316,71 @@ function ValueCanvas({
     chart.timeScale().fitContent();
   }, [points]);
 
+  // Buy/sell bubbles (#1594): one marker per (day, side) — BUY below
+  // the bar in `up` green, SELL above in `down` red. The symbol ×
+  // units detail lives in the hover overlay, not marker text — 60+
+  // position opens as permanent labels would bury the line. detach +
+  // re-attach so marker state never accumulates (InsiderPriceMarkers
+  // pattern).
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    const byDay = new Map<string, { buys: boolean; sells: boolean }>();
+    for (const e of events) {
+      const entry = byDay.get(e.date) ?? { buys: false, sells: false };
+      if (e.side === "BUY") entry.buys = true;
+      else entry.sells = true;
+      byDay.set(e.date, entry);
+    }
+    const markers: SeriesMarker<Time>[] = [];
+    for (const [date, { buys, sells }] of byDay) {
+      const time = dateToTime(date);
+      if (time === null) continue;
+      if (buys) {
+        markers.push({ time: time as Time, position: "belowBar", color: theme.up, shape: "circle", size: 1 });
+      }
+      if (sells) {
+        markers.push({ time: time as Time, position: "aboveBar", color: theme.down, shape: "circle", size: 1 });
+      }
+    }
+    markers.sort((a, b) => (a.time as number) - (b.time as number));
+    markersRef.current?.detach();
+    markersRef.current = createSeriesMarkers(series, markers);
+    // `theme` intentionally NOT in deps: marker colours are theme.up /
+    // theme.down, identical across light and dark (saturated palette).
+  }, [events]);
+
   return (
     <div className="relative mt-2">
       {hover !== null ? (
-        <div className="absolute right-2 top-2 z-10 rounded bg-white/90 px-2 py-1 text-xs tabular-nums shadow-sm">
-          <span className="text-slate-400 dark:text-slate-500">{hover.date}</span>
-          <span className="ml-2 font-medium text-slate-700">
-            {formatMoney(hover.value, currency)}
-          </span>
+        <div className="absolute right-2 top-2 z-10 rounded border border-slate-200 bg-white/90 px-2 py-1 text-xs tabular-nums shadow-sm dark:border-slate-700 dark:bg-slate-900/90">
+          <div>
+            <span className="text-slate-400 dark:text-slate-500">{hover.date}</span>
+            <span className="ml-2 font-medium text-slate-700 dark:text-slate-200">
+              {formatMoney(hover.value, currency)}
+            </span>
+          </div>
+          {hover.trades.length > 0 ? (
+            <ul className="mt-1 space-y-0.5 border-t border-slate-100 pt-1 dark:border-slate-800">
+              {hover.trades.map((t, i) => (
+                <li key={`${t.symbol}-${t.side}-${i}`} className="flex items-baseline gap-1.5">
+                  <span
+                    className={
+                      t.side === "BUY"
+                        ? "font-medium text-emerald-600 dark:text-emerald-400"
+                        : "font-medium text-red-600 dark:text-red-400"
+                    }
+                  >
+                    {t.side}
+                  </span>
+                  <span className="text-slate-700 dark:text-slate-200">{t.symbol}</span>
+                  <span className="text-slate-500 dark:text-slate-400">
+                    {t.units.toLocaleString("en-GB", { maximumFractionDigits: 4 })} units
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
       <div
