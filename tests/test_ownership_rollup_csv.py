@@ -529,6 +529,24 @@ def test_build_csv_supports_post_filter_via_dataclass_replace() -> None:
     assert "Public / unattributed" in csv_filt
 
 
+def test_rollup_csv_slice_filter_folds_def14a_into_insiders() -> None:
+    """``?category=insiders`` keeps the ``def14a_unmatched`` slice.
+
+    The chart and the L2 filer table fold proxy-only DEF 14A holders
+    into the insiders category; the CSV must match the chart 1:1 or
+    a drilled ``?category=insiders&view=raw`` export silently drops
+    rows the table shows (#1589 Codex ckpt-2). Every other filter
+    value stays exact; ``treasury`` keeps no slices.
+    """
+    from app.api.instruments import rollup_csv_slice_filter
+
+    assert rollup_csv_slice_filter("insiders") == frozenset({"insiders", "def14a_unmatched"})
+    assert rollup_csv_slice_filter("def14a_unmatched") == frozenset({"def14a_unmatched"})
+    assert rollup_csv_slice_filter("treasury") == frozenset()
+    for exact in ("blockholders", "institutions", "etfs", "funds"):
+        assert rollup_csv_slice_filter(exact) == frozenset({exact})
+
+
 @pytest.mark.integration
 def test_csv_endpoint_treasury_filter_returns_memo_only(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

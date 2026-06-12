@@ -4555,6 +4555,25 @@ _ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
 _ROLLUP_CSV_CATEGORIES: frozenset[str] = _ROLLUP_CSV_SLICE_CATEGORIES | {"treasury"}
 
 
+def rollup_csv_slice_filter(category: str) -> frozenset[str]:
+    """Slice categories a ``?category=`` CSV filter keeps.
+
+    ``treasury`` keeps no slices (memo + residual rows only).
+    ``insiders`` includes ``def14a_unmatched`` — the chart and the L2
+    filer table both fold proxy-only DEF 14A holders into the insiders
+    category (``rollupToSunburstInputs`` / ``rollupToFilerRows``), and
+    the CSV's contract is to match the chart 1:1; exporting the raw
+    slice alone would drop rows the filtered table visibly shows
+    (#1589 Codex ckpt-2). ``def14a_unmatched`` stays addressable on
+    its own.
+    """
+    if category == "treasury":
+        return frozenset()
+    if category == "insiders":
+        return frozenset({"insiders", "def14a_unmatched"})
+    return frozenset({category})
+
+
 @router.get(
     "/{symbol}/ownership-rollup/export.csv",
     response_class=PlainTextResponse,
@@ -4638,10 +4657,8 @@ def get_instrument_ownership_rollup_csv(
         # caught the prior version 400ing on ``treasury``.
         from dataclasses import replace
 
-        if category == "treasury":
-            filtered_slices: tuple[ownership_rollup.OwnershipSlice, ...] = ()
-        else:
-            filtered_slices = tuple(s for s in rollup.slices if s.category == category)
+        wanted = rollup_csv_slice_filter(category)
+        filtered_slices = tuple(s for s in rollup.slices if s.category in wanted)
         rollup = replace(rollup, slices=filtered_slices)
 
     return PlainTextResponse(

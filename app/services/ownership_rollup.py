@@ -1074,7 +1074,8 @@ def _banner_for_state(
                 f"Coverage estimate not available for "
                 f"{', '.join(unknown_cats) or 'all categories'}. Known "
                 f"filings represent {pct_concentration * 100:.2f}% of float. "
-                f"Treat as best-effort until coverage expansion lands (#790)."
+                f"Treat as best-effort — the filer universe for these "
+                f"categories has not been estimated yet."
             ),
         )
     if state == "amber":
