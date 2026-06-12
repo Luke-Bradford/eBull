@@ -47,10 +47,20 @@ def _seed_portfolio(conn: psycopg.Connection[tuple]) -> None:
     1000 cash. total_aum = 10×110 + 1000 = 2100 (display ccy pinned
     to USD so no FX conversion enters the arithmetic)."""
     conn.execute("UPDATE runtime_config SET display_currency = 'USD' WHERE id = TRUE")
+    # instruments.sector stores eToro's NUMERIC industry id (provider
+    # contract); names live in etoro_stocks_industries (#1598). Seed the
+    # production shape so the fixture exercises the id→name join.
+    conn.execute(
+        """
+        INSERT INTO etoro_stocks_industries (industry_id, name)
+        VALUES (42, 'Technology')
+        ON CONFLICT (industry_id) DO UPDATE SET name = EXCLUDED.name
+        """
+    )
     conn.execute(
         """
         INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, sector, is_tradable)
-        VALUES (789801, 'RPTV2A', 'Report Co', '4', 'USD', 'Technology', TRUE)
+        VALUES (789801, 'RPTV2A', 'Report Co', '4', 'USD', '42', TRUE)
         ON CONFLICT (instrument_id) DO NOTHING
         """
     )

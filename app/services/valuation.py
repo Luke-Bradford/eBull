@@ -78,7 +78,8 @@ class HoldingValuation:
     instrument_id: int
     symbol: str
     company_name: str
-    sector: str | None
+    sector: str | None  # eToro numeric industry id, as text (provider contract)
+    sector_name: str | None  # resolved via etoro_stocks_industries; None if unmapped
     native_currency: str
     open_date: date | None
     source: PositionSource  # positions.source is NOT NULL + CHECK-constrained
@@ -115,12 +116,14 @@ class PortfolioValuation:
 
 _POSITIONS_SQL = """
     SELECT p.instrument_id, i.symbol, i.company_name, i.currency, i.sector,
+           esi.name AS sector_name,
            p.open_date, p.avg_cost, p.current_units, p.cost_basis,
            p.source, p.updated_at,
            q.last, q.bid, q.ask,
            pd.close AS daily_close
     FROM positions p
     JOIN instruments i USING (instrument_id)
+    LEFT JOIN etoro_stocks_industries esi ON esi.industry_id::text = i.sector
     LEFT JOIN quotes q USING (instrument_id)
     LEFT JOIN LATERAL (
         SELECT close
@@ -210,6 +213,7 @@ def _holding_from_row(
         symbol=row["symbol"],
         company_name=row["company_name"],
         sector=row.get("sector"),
+        sector_name=row.get("sector_name"),
         native_currency=native_currency,
         open_date=row["open_date"],
         source=row["source"],

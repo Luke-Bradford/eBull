@@ -1282,7 +1282,10 @@ def _holdings_section(
                 "instrument_id": h.instrument_id,
                 "symbol": h.symbol,
                 "company_name": h.company_name,
-                "sector": h.sector,
+                # Resolved name, not the raw numeric industry id (#1598).
+                # None when the instrument has no sector or the id is
+                # unmapped — the FE renders its nil treatment.
+                "sector": h.sector_name,
                 "units": _dec_f(h.current_units),
                 "price": _dec_f(h.current_price),
                 "market_value": _dec_f(h.market_value),
@@ -1405,7 +1408,17 @@ def _risk_section(
 
     sector_weights: dict[str, Decimal] = {}
     for h in valuation.holdings:
-        sector = h.sector or "Unknown"
+        # instruments.sector stores eToro's numeric industry id; the name
+        # is resolved in the valuation query via etoro_stocks_industries
+        # (#1598). An id with no catalogue row folds into "Unknown" — warn
+        # so catalogue drift surfaces before it skews the exposure table.
+        if h.sector is not None and h.sector_name is None:
+            logger.warning(
+                "sector id %s on %s has no etoro_stocks_industries row; grouped as Unknown",
+                h.sector,
+                h.symbol,
+            )
+        sector = h.sector_name or "Unknown"
         sector_weights[sector] = sector_weights.get(sector, Decimal(0)) + Decimal(str(h.market_value))
     sector_exposure = (
         {s: _dec_q(w / total_aum) for s, w in sorted(sector_weights.items(), key=lambda kv: kv[1], reverse=True)}

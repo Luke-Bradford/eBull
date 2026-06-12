@@ -25,7 +25,7 @@ FIXTURE_INSTRUMENT = {
     "symbolFull": "AAPL",
     "instrumentDisplayName": "Apple Inc.",
     "exchangeID": 10,
-    "stocksIndustryId": 42,
+    "stocksIndustryID": 42,
     "priceSource": "Nasdaq",
     "isInternalInstrument": False,
     "instrumentTypeName": "Stock",
@@ -45,7 +45,7 @@ FIXTURE_API_RESPONSE = {
             "symbolFull": "MSFT",
             "instrumentDisplayName": "Microsoft Corporation",
             "exchangeID": 10,
-            "stocksIndustryId": 42,
+            "stocksIndustryID": 42,
             "priceSource": "Nasdaq",
             "isInternalInstrument": False,
         },
@@ -68,6 +68,13 @@ class TestNormaliseInstrument:
         assert record.exchange == "10"
         assert record.sector == "42"
         assert record.is_tradable is True
+
+    def test_sector_zero_sentinel_maps_to_none(self) -> None:
+        """eToro sends stocksIndustryID = 0 for FX/commodities (no
+        industry). 0 must map to None, not the string "0" (#1598)."""
+        record = _normalise_instrument({**FIXTURE_INSTRUMENT, "stocksIndustryID": 0})
+        assert record is not None
+        assert record.sector is None
 
     def test_currency_is_none_from_normaliser(self) -> None:
         """currency is None from the normaliser — the eToro instruments
