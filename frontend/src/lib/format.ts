@@ -65,6 +65,20 @@ export function formatPct(fraction: number | null | undefined): string {
   return PCT.format(fraction);
 }
 
+const PCT_UNSIGNED = new Intl.NumberFormat("en-GB", {
+  style: "percent",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/** Unsigned fraction percent (0.5238 → "52.38%") for weights / exposure
+ *  shares, where formatPct's exceptZero sign would misread ("+52.38%"
+ *  weight). Returns are signed (formatPct); compositions are not. */
+export function formatUnsignedPct(fraction: number | null | undefined): string {
+  if (fraction === null || fraction === undefined) return "—";
+  return PCT_UNSIGNED.format(fraction);
+}
+
 export function formatNumber(value: number | null | undefined, fractionDigits = 4): string {
   if (value === null || value === undefined) return "—";
   return value.toLocaleString("en-GB", {

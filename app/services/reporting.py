@@ -1666,6 +1666,10 @@ def generate_monthly_report(
     """
     pnl = _pnl_snapshot(conn)
     position_pnl = _position_pnl_breakdown(conn, period_start, period_end)
+    # Spec §4.6: Period activity is W+M — the monthly statement carries
+    # the month's own-platform trades too (#1592 child-2 Codex finding;
+    # the original child-3 slice emitted these weekly-only).
+    positions_opened, positions_closed = _positions_opened_closed(conn, period_start, period_end)
     win_rate_data = _win_rate_and_holding(conn, period_start, period_end)
     best_trade, worst_trade = _best_worst_trade(conn, period_start, period_end)
     attribution_summary = _period_attribution(conn, period_start, period_end)
@@ -1752,4 +1756,6 @@ def generate_monthly_report(
         "tax_provision": tax_provision,
         "positions": positions_now,
         "period_contribution": period_contribution,
+        "positions_opened": positions_opened,
+        "positions_closed": positions_closed,
     }
