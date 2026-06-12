@@ -1,4 +1,8 @@
-"""Tests for portfolio valuation hierarchy: quote → daily_close → cost_basis."""
+"""Tests for portfolio valuation hierarchy: quote → daily_close → cost_basis.
+
+The mark-resolution logic moved from `app.api.portfolio._parse_position`
+to `app.services.valuation._holding_from_row` with #1596 (shared
+valuation helper) — same hierarchy, same field names."""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.api.portfolio import _parse_position
+from app.services.valuation import _holding_from_row
 
 
 def _row(
@@ -48,7 +52,7 @@ class TestValuationHierarchy:
         """When quote.last exists, use it regardless of daily_close."""
         row = _row(current_units=10.0, cost_basis=1500.0, last=160.0, daily_close=155.0)
         rates: dict[tuple[str, str], Decimal] = {}
-        pos = _parse_position(row, "USD", rates)
+        pos = _holding_from_row(row, "USD", rates)
 
         assert pos.valuation_source == "quote"
         assert pos.current_price == 160.0
@@ -59,7 +63,7 @@ class TestValuationHierarchy:
         """When no quote but daily_close exists, use daily_close."""
         row = _row(current_units=10.0, cost_basis=1500.0, last=None, daily_close=155.0)
         rates: dict[tuple[str, str], Decimal] = {}
-        pos = _parse_position(row, "USD", rates)
+        pos = _holding_from_row(row, "USD", rates)
 
         assert pos.valuation_source == "daily_close"
         assert pos.current_price == 155.0
@@ -70,7 +74,7 @@ class TestValuationHierarchy:
         """When neither quote nor daily_close exists, fall back to cost_basis."""
         row = _row(current_units=10.0, cost_basis=1500.0, last=None, daily_close=None)
         rates: dict[tuple[str, str], Decimal] = {}
-        pos = _parse_position(row, "USD", rates)
+        pos = _holding_from_row(row, "USD", rates)
 
         assert pos.valuation_source == "cost_basis"
         assert pos.current_price is None
@@ -81,7 +85,7 @@ class TestValuationHierarchy:
         """Daily close values are converted to display currency."""
         row = _row(currency="USD", current_units=10.0, cost_basis=1500.0, daily_close=155.0)
         rates = {("USD", "GBP"): Decimal("0.78")}
-        pos = _parse_position(row, "GBP", rates)
+        pos = _holding_from_row(row, "GBP", rates)
 
         assert pos.valuation_source == "daily_close"
         # current_price = 155 * 0.78 = 120.9
@@ -100,7 +104,7 @@ class TestValuationHierarchy:
         """
         row = _row(current_units=100.0, cost_basis=500.0, last=0.0, daily_close=5.0)
         rates: dict[tuple[str, str], Decimal] = {}
-        pos = _parse_position(row, "USD", rates)
+        pos = _holding_from_row(row, "USD", rates)
 
         assert pos.valuation_source == "daily_close"
         assert pos.market_value == 500.0  # 100 * 5.0, NOT 0
@@ -111,7 +115,7 @@ class TestValuationHierarchy:
         row["bid"] = 697.16
         row["ask"] = 697.22
         rates: dict[tuple[str, str], Decimal] = {}
-        pos = _parse_position(row, "USD", rates)
+        pos = _holding_from_row(row, "USD", rates)
 
         assert pos.valuation_source == "quote"
         assert pos.market_value == pytest.approx(6971.9)  # 10 * 697.19 mid

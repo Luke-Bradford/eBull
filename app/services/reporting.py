@@ -23,15 +23,32 @@ import psycopg.rows
 from psycopg.types.json import Jsonb
 
 from app.services.budget import FxRateUnavailable, compute_budget_state
+from app.services.fx import FxRateNotFound, convert
+from app.services.valuation import PortfolioValuation, compute_portfolio_valuation
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Type aliases
+# Type aliases / constants
 # ---------------------------------------------------------------------------
 
 WeeklyReport = dict[str, Any]
 MonthlyReport = dict[str, Any]
+
+# Snapshot schema version (#1596, spec docs/proposals/ui/2026-06-12-report-ia.md).
+# v1 snapshots have no `schema_version` key; the FE branches on it.
+SCHEMA_VERSION = 2
+
+# Benchmark resolved BY SYMBOL at generation time (spec §7 — no hardcoded
+# instrument_id; dev-data availability is not a repo invariant). Builder
+# constant in v1, not operator config.
+BENCHMARK_SYMBOL = "SPX500"
+BENCHMARK_LABEL = "S&P 500 (price index)"
+
+# Volatility / drawdown need a minimum observation count or they print
+# noise (spec §4.9): below this the risk section reports
+# insufficient_history instead of figures.
+_MIN_RISK_OBSERVATIONS = 6
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,6 +58,42 @@ MonthlyReport = dict[str, Any]
 def _dec(v: Decimal | None) -> str | None:
     """Decimal → str for JSON serialisation, preserving None."""
     return str(v) if v is not None else None
+
+
+_MONEY_Q = Decimal("0.000001")
+
+
+def _dec_f(v: float | None) -> str | None:
+    """float → Decimal-string (6 dp, matching NUMERIC(18,6)), None-safe.
+
+    Valuation figures arrive as floats (market-data pipeline); quantizing
+    keeps float repr noise (0.30000000000000004) out of the snapshot.
+    """
+    if v is None:
+        return None
+    return str(Decimal(str(v)).quantize(_MONEY_Q))
+
+
+def _parse_dec(v: Any) -> Decimal | None:
+    """Lenient str/number → Decimal for reading values back out of a
+    prior snapshot's JSON. None / unparseable → None."""
+    if v is None:
+        return None
+    try:
+        return Decimal(str(v))
+    except ArithmeticError:
+        return None
+
+
+def _dec_q(v: Decimal | None) -> str | None:
+    """Decimal → 6-dp string for v2 snapshot figures, None-safe.
+
+    Division/sqrt produce 28-significant-digit Decimals and
+    float-derived Decimals carry repr noise — one quantum at the
+    serialisation boundary keeps the stored JSON canonical."""
+    if v is None:
+        return None
+    return str(v.quantize(_MONEY_Q))
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +192,7 @@ def _positions_opened_closed(
                        tr.rationale,
                        f.price,
                        f.units,
+                       f.fees,
                        f.filled_at
                 FROM fills f
                 JOIN orders o USING (order_id)
@@ -161,6 +215,7 @@ def _positions_opened_closed(
                 "rationale": r["rationale"],
                 "price": _dec(r["price"]),
                 "units": _dec(r["units"]),
+                "fees": _dec(r["fees"]),
                 "filled_at": r["filled_at"].isoformat() if r["filled_at"] is not None else None,
             }
             for r in raw
@@ -319,6 +374,9 @@ def _win_rate_and_holding(
             "losers": 0,
             "win_rate_pct": None,
             "avg_holding_days": None,
+            "avg_win_pct": None,
+            "avg_loss_pct": None,
+            "payoff_ratio": None,
         }
 
     winners = sum(1 for r in rows if r["gross_return_pct"] is not None and r["gross_return_pct"] > 0)
@@ -326,12 +384,24 @@ def _win_rate_and_holding(
     win_rate = f"{100 * winners / total:.2f}"
     hold_days_vals = [float(r["hold_days"]) for r in rows if r["hold_days"] is not None]
     avg_holding = sum(hold_days_vals) / len(hold_days_vals) if hold_days_vals else None
+    # Payoff ratio (avg win % / |avg loss %|) — win rate alone is the
+    # classic misleading stat (90% win rate + one −50% loser = losing
+    # book). Spec §4.9.
+    returns: list[Decimal] = [r["gross_return_pct"] for r in rows if r["gross_return_pct"] is not None]
+    win_returns = [r for r in returns if r > 0]
+    loss_returns = [r for r in returns if r < 0]
+    avg_win: Decimal | None = sum(win_returns, Decimal(0)) / len(win_returns) if win_returns else None
+    avg_loss: Decimal | None = sum(loss_returns, Decimal(0)) / len(loss_returns) if loss_returns else None
+    payoff = (avg_win / abs(avg_loss)) if avg_win is not None and avg_loss is not None and avg_loss != 0 else None
     return {
         "total_closed": total,
         "winners": winners,
         "losers": losers,
         "win_rate_pct": win_rate,
         "avg_holding_days": avg_holding,
+        "avg_win_pct": _dec(avg_win),
+        "avg_loss_pct": _dec(avg_loss),
+        "payoff_ratio": _dec(payoff),
     }
 
 
@@ -388,7 +458,10 @@ def _period_attribution(
             SELECT COUNT(*) AS positions_attributed,
                    AVG(gross_return_pct)   AS avg_gross,
                    AVG(market_return_pct)  AS avg_market,
-                   AVG(model_alpha_pct)    AS avg_alpha
+                   AVG(sector_return_pct)  AS avg_sector,
+                   AVG(model_alpha_pct)    AS avg_alpha,
+                   AVG(timing_alpha_pct)   AS avg_timing,
+                   AVG(cost_drag_pct)      AS avg_cost_drag
             FROM return_attribution
             WHERE hold_end >= %(start)s
               AND hold_end <= %(end)s
@@ -402,13 +475,27 @@ def _period_attribution(
             "positions_attributed": 0,
             "avg_gross_return_pct": None,
             "avg_market_return_pct": None,
+            "avg_sector_return_pct": None,
             "avg_model_alpha_pct": None,
+            "avg_timing_alpha_pct": None,
+            "avg_cost_drag_pct": None,
+            "weighting": "equal",
         }
     return {
         "positions_attributed": row["positions_attributed"],
         "avg_gross_return_pct": _dec(row["avg_gross"]),
         "avg_market_return_pct": _dec(row["avg_market"]),
+        # Full decomposition (spec §4.10): gross = market + sector +
+        # model alpha + timing alpha − cost drag. timing/cost-drag were
+        # stored in return_attribution all along but silently dropped
+        # here — cost drag is the figure that teaches why churn loses.
+        "avg_sector_return_pct": _dec(row["avg_sector"]),
         "avg_model_alpha_pct": _dec(row["avg_alpha"]),
+        "avg_timing_alpha_pct": _dec(row["avg_timing"]),
+        "avg_cost_drag_pct": _dec(row["avg_cost_drag"]),
+        # Equal-weighted across closed trades — a $50 close weighs the
+        # same as a $5,000 one. Labelled so the FE can say it.
+        "weighting": "equal",
     }
 
 
@@ -562,7 +649,9 @@ def _positions_snapshot(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
                    i.symbol,
                    i.company_name,
                    p.unrealized_pnl,
-                   p.cost_basis
+                   p.cost_basis,
+                   p.realized_pnl,
+                   p.current_units
             FROM positions p
             JOIN instruments i USING (instrument_id)
             WHERE p.current_units > 0
@@ -577,9 +666,34 @@ def _positions_snapshot(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
             "company_name": r["company_name"],
             "unrealized_pnl": _dec(r["unrealized_pnl"]),
             "cost_basis": _dec(r["cost_basis"]),
+            # realized_pnl + current_units added by #1596 so the NEXT
+            # snapshot can fold realised deltas into period
+            # contribution (spec §4.4). Additive — v1 readers ignore.
+            "realized_pnl": _dec(r["realized_pnl"]),
+            "current_units": _dec(r["current_units"]),
         }
         for r in rows
     ]
+
+
+def _realized_by_instrument(conn: psycopg.Connection[Any]) -> dict[int, dict[str, Any]]:
+    """Lifetime realised P&L per instrument across ALL positions rows,
+    including fully-closed ones (current_units = 0). Used to fold
+    realised deltas into period contribution — a position closed
+    mid-period vanishes from the open-positions snapshot but its
+    realised P&L still moved this period (#1596, spec §4.4)."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT p.instrument_id, i.symbol, p.realized_pnl
+            FROM positions p
+            JOIN instruments i USING (instrument_id)
+            """
+        )
+        rows = cur.fetchall()
+    return {
+        r["instrument_id"]: {"symbol": r["symbol"], "realized_pnl": r["realized_pnl"] or Decimal("0")} for r in rows
+    }
 
 
 def _load_prior_snapshot(
@@ -628,39 +742,74 @@ def _compute_contributors(
     prior: list[dict[str, Any]] | None,
     *,
     top_n: int = 5,
+    realized_now: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Diff per-instrument unrealised P&L between two position snapshots.
+    """Diff per-instrument period P&L between two position snapshots.
 
     Returns `{contributors: [...top_n gainers...], drags: [...top_n losers...]}`
     where each row is `{instrument_id, symbol, pnl_delta, pnl_pct}`.
 
-    - `pnl_delta` = current unrealized_pnl - prior unrealized_pnl (Decimal → str).
+    - `pnl_delta` = (current unrealized_pnl − prior unrealized_pnl)
+      PLUS, when `realized_now` is supplied and the prior row carries a
+      `realized_pnl` key (v2 snapshots, #1596 spec §4.4), the realised
+      delta (current lifetime realised − prior lifetime realised). The
+      pre-#1596 unrealised-only diff made a position closed mid-period
+      vanish and a trim read as a phantom loss.
+    - Closed positions (in `prior`, absent from `current`): with
+      `realized_now`, the close itself contributes
+      `(realised delta − prior unrealised)` — the open P&L converts to
+      realised and the net move lands in the chart. Without
+      `realized_now` (legacy callers/tests), closed positions are
+      skipped as before.
     - `pnl_pct`   = pnl_delta / prior_cost_basis (None if no prior row or
       prior cost_basis is zero — avoids div/0 and the misleading "∞%"
       for a brand-new position).
     - New positions (in `current`, absent from `prior`) surface with
       their full unrealized_pnl as the delta and `pnl_pct = null`.
-    - Closed positions (in `prior`, absent from `current`) are NOT
-      reported here — their contribution lives in the realised-P&L
-      aggregate, which the existing `pnl` section already covers.
     - When `prior is None` (first snapshot, or backfilled historical
       snapshots with no `positions` key), both lists are empty so the
       UI gracefully degrades.
+    - Known limit (Codex ckpt-2): a position opened AND fully closed
+      within one period has no snapshot row on either side, so it
+      cannot appear per-instrument here (its realised P&L still lands
+      in the cover's aggregate `realized_delta`). Likewise a
+      same-period open+trim shows its unrealised delta only. Exact
+      per-instrument intra-period attribution needs the #1593 ledger.
     """
     if prior is None:
         return {"contributors": [], "drags": []}
 
     prior_by_id = {p["instrument_id"]: p for p in prior}
+
+    def _realized_delta(iid: int, prior_row: dict[str, Any] | None) -> Decimal:
+        """Realised P&L movement this period; 0 unless both sides know it."""
+        if realized_now is None or prior_row is None:
+            return Decimal("0")
+        prior_realized = _parse_dec(prior_row.get("realized_pnl"))
+        if prior_realized is None:  # v1 prior snapshot — no realised baseline
+            return Decimal("0")
+        now_row = realized_now.get(iid)
+        if now_row is None:
+            # positions rows persist after close (current_units = 0) and
+            # are never deleted, so a prior-snapshot instrument always
+            # has a realized_now entry; this guard covers test doubles /
+            # hypothetical row deletion, where 0 (no realised movement)
+            # is the conservative answer (PR #1597 review nitpick).
+            return Decimal("0")
+        return Decimal(now_row["realized_pnl"]) - prior_realized
+
     # Keep the raw Decimal delta alongside the serialised string so
     # sort + filter never round-trip through `Decimal(str)` re-parsing
     # (Codex slice-4 round-2 note).
     entries: list[tuple[Decimal, dict[str, Any]]] = []
+    seen_current: set[int] = set()
     for curr in current:
         iid = curr["instrument_id"]
+        seen_current.add(iid)
         prior_row = prior_by_id.get(iid)
         curr_pnl = Decimal(curr["unrealized_pnl"] or "0")
         prior_pnl = Decimal(prior_row["unrealized_pnl"] or "0") if prior_row is not None else Decimal("0")
-        delta = curr_pnl - prior_pnl
+        delta = curr_pnl - prior_pnl + _realized_delta(iid, prior_row)
         if delta == 0:
             continue
         prior_cost = Decimal(prior_row["cost_basis"] or "0") if prior_row is not None else Decimal("0")
@@ -676,6 +825,33 @@ def _compute_contributors(
                 },
             )
         )
+
+    # Positions closed during the period: prior row exists, no current
+    # row. Net contribution = realised movement − the unrealised P&L
+    # that was on the books at period start (it converted to realised).
+    if realized_now is not None:
+        for iid, prior_row in prior_by_id.items():
+            if iid in seen_current:
+                continue
+            if _parse_dec(prior_row.get("realized_pnl")) is None:
+                continue  # v1 prior snapshot — no realised baseline
+            prior_pnl = Decimal(prior_row["unrealized_pnl"] or "0")
+            delta = _realized_delta(iid, prior_row) - prior_pnl
+            if delta == 0:
+                continue
+            prior_cost = Decimal(prior_row["cost_basis"] or "0")
+            closed_pct: Decimal | None = delta / prior_cost if prior_cost > 0 else None
+            entries.append(
+                (
+                    delta,
+                    {
+                        "instrument_id": iid,
+                        "symbol": prior_row["symbol"],
+                        "pnl_delta": _dec(delta),
+                        "pnl_pct": _dec(closed_pct),
+                    },
+                )
+            )
 
     # Contributors: positive deltas, descending (biggest gainer first).
     # Drags: negative deltas, ascending (most-negative first). Both
@@ -744,6 +920,638 @@ def load_report_snapshots(
 
 
 # ---------------------------------------------------------------------------
+# v2 sections (#1596 — spec docs/proposals/ui/2026-06-12-report-ia.md)
+# ---------------------------------------------------------------------------
+
+
+def _benchmark_closes(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> dict[str, Any]:
+    """Benchmark closes around the period, resolved BY SYMBOL.
+
+    Baseline = latest close STRICTLY BEFORE period_start (the value the
+    period grew from); end = latest close at-or-before period_end.
+    Returns nulls when the benchmark instrument or its closes are
+    missing (spec §7: dev-data availability is not a repo invariant) —
+    the FE renders portfolio-only with a notice.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id FROM instruments
+            WHERE UPPER(symbol) = %(sym)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"sym": BENCHMARK_SYMBOL},
+        )
+        inst = cur.fetchone()
+    if inst is None:
+        return {
+            "symbol": BENCHMARK_SYMBOL,
+            "label": BENCHMARK_LABEL,
+            "close_start": None,
+            "close_end": None,
+            "return_pct": None,
+        }
+
+    def _close(on_or_before: date, *, strict_before: bool) -> Decimal | None:
+        op = "<" if strict_before else "<="
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                f"""
+                SELECT close FROM price_daily
+                WHERE instrument_id = %(iid)s
+                  AND close IS NOT NULL
+                  AND price_date {op} %(day)s
+                ORDER BY price_date DESC
+                LIMIT 1
+                """,  # noqa: S608 — `op` is a literal chosen above, not user input
+                {"iid": inst["instrument_id"], "day": on_or_before},
+            )
+            row = cur.fetchone()
+        return row["close"] if row else None
+
+    close_start = _close(period_start, strict_before=True)
+    close_end = _close(period_end, strict_before=False)
+    return_pct: Decimal | None = None
+    if close_start is not None and close_end is not None and close_start > 0:
+        return_pct = close_end / close_start - 1
+    return {
+        "symbol": BENCHMARK_SYMBOL,
+        "label": BENCHMARK_LABEL,
+        "close_start": _dec(close_start),
+        "close_end": _dec(close_end),
+        "return_pct": _dec_q(return_pct),
+    }
+
+
+def _external_flows(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+    display_currency: str,
+    rates: dict[tuple[str, str], Decimal],
+) -> list[tuple[date, Decimal]]:
+    """External capital flows in the period, signed, display currency.
+
+    `capital_events.amount` is always positive; `event_type` carries
+    direction (sql/027 CHECK). Only `injection` (+) / `withdrawal` (−)
+    are EXTERNAL flows — `tax_provision` / `tax_release` are internal
+    earmarks; the cash never leaves the account (spec §3.4).
+
+    Timing caveat (Codex ckpt-2): flows count when RECORDED in
+    `capital_events`; the cash itself reaches valuation via the
+    broker-sync cash ledger. If a recording and its broker sync land
+    on opposite sides of a period boundary, that period's return is
+    under/overstated and the next one symmetrically corrects — the
+    mismatch is visible as a non-zero bridge residual, never silent.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT event_time::date AS flow_date, event_type, amount, currency
+            FROM capital_events
+            WHERE event_type IN ('injection', 'withdrawal')
+              AND event_time >= %(start)s
+              AND event_time < %(end)s::date + 1
+            ORDER BY event_time
+            """,
+            {"start": period_start, "end": period_end},
+        )
+        rows = cur.fetchall()
+
+    flows: list[tuple[date, Decimal]] = []
+    for r in rows:
+        amount: Decimal = r["amount"]
+        ccy = str(r["currency"] or "USD")
+        if ccy != display_currency:
+            try:
+                amount = convert(amount, ccy, display_currency, rates)
+            except FxRateNotFound:
+                logger.warning(
+                    "capital_events flow %s→%s rate missing; flow used in native currency",
+                    ccy,
+                    display_currency,
+                )
+        signed = amount if r["event_type"] == "injection" else -amount
+        flows.append((r["flow_date"], signed))
+    return flows
+
+
+def _modified_dietz(
+    v_start: Decimal | None,
+    v_end: Decimal,
+    flows: list[tuple[date, Decimal]],
+    period_start: date,
+    period_end: date,
+) -> Decimal | None:
+    """Flow-adjusted period return (spec §3.4).
+
+    `(V_end − V_start − ΣF) / (V_start + Σ(F × w))` with F signed
+    (injection +, withdrawal −) and w = fraction of the period
+    remaining after the flow lands. Degenerates to the simple ratio in
+    flow-free periods. None when there is no opening value or the
+    denominator is non-positive (e.g. account funded entirely
+    mid-period — a return number would be meaningless).
+    """
+    if v_start is None:
+        return None
+    period_len = (period_end - period_start).days + 1
+    if period_len <= 0:
+        return None
+    flow_sum = sum((f for _, f in flows), Decimal(0))
+    weighted = Decimal(0)
+    for flow_date, f in flows:
+        remaining = (period_end - flow_date).days + 1
+        w = Decimal(max(0, min(remaining, period_len))) / Decimal(period_len)
+        weighted += f * w
+    denominator = v_start + weighted
+    if denominator <= 0:
+        return None
+    return (v_end - v_start - flow_sum) / denominator
+
+
+def _chain_link(returns: list[Decimal]) -> Decimal | None:
+    """Geometric chain of period returns: Π(1+r) − 1. None on empty."""
+    if not returns:
+        return None
+    acc = Decimal(1)
+    for r in returns:
+        acc *= Decimal(1) + r
+    return acc - 1
+
+
+def _prior_v2_chain(
+    conn: psycopg.Connection[Any],
+    *,
+    report_type: str,
+    period_start: date,
+) -> list[dict[str, Any]]:
+    """Ordered (oldest→newest) prior v2 snapshots' chained figures.
+
+    One row per prior snapshot with `schema_version >= 2`:
+    `{period_start, period_return (Decimal|None), display_currency}`.
+    Feeds YTD / since-inception chaining and the risk section's
+    return series. v1 snapshots carry no return — excluded.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT period_start,
+                   snapshot_json -> 'cover' ->> 'period_return' AS period_return,
+                   snapshot_json -> 'cover' ->> 'display_currency' AS display_currency
+            FROM report_snapshots
+            WHERE report_type = %(report_type)s
+              AND period_start < %(period_start)s
+              AND (snapshot_json ->> 'schema_version')::int >= 2
+            ORDER BY period_start ASC
+            """,
+            {"report_type": report_type, "period_start": period_start},
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "period_start": r["period_start"],
+            "period_return": _parse_dec(r["period_return"]),
+            "display_currency": r["display_currency"],
+        }
+        for r in rows
+    ]
+
+
+def _cover_and_performance(
+    conn: psycopg.Connection[Any],
+    *,
+    valuation: PortfolioValuation,
+    prior: dict[str, Any] | None,
+    chain: list[dict[str, Any]],
+    period_start: date,
+    period_end: date,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Account-summary cover + the single-period performance point.
+
+    Closing value comes from the SHARED valuation helper — the same
+    code path as the dashboard headline (spec §3.3), so the two cannot
+    drift. Opening value = prior v2 snapshot's closing value; None on
+    the first v2 snapshot (or after a display-currency change, where
+    mixing bases would be dishonest) → period_return null, FE labels
+    "(since inception)".
+    """
+    closing = Decimal(str(valuation.total_aum))
+    opening: Decimal | None = None
+    prior_cover = prior.get("cover") if isinstance(prior, dict) else None
+    if isinstance(prior_cover, dict):
+        if prior_cover.get("display_currency") == valuation.display_currency:
+            opening = _parse_dec(prior_cover.get("closing_value"))
+        else:
+            logger.warning(
+                "prior snapshot display currency %s != current %s; period return suppressed",
+                prior_cover.get("display_currency"),
+                valuation.display_currency,
+            )
+
+    flows = _external_flows(conn, period_start, period_end, valuation.display_currency, valuation.rates)
+    net_flows = sum((f for _, f in flows), Decimal(0))
+    period_return = _modified_dietz(opening, closing, flows, period_start, period_end)
+    benchmark = _benchmark_closes(conn, period_start, period_end)
+    benchmark_return = _parse_dec(benchmark["return_pct"])
+    excess = period_return - benchmark_return if period_return is not None and benchmark_return is not None else None
+
+    # Lifetime P&L aggregates → period deltas vs the prior snapshot's
+    # stored aggregates (`pnl` key — present on v1 priors too).
+    pnl_now = _pnl_snapshot(conn)
+    realized_now = _parse_dec(pnl_now["realized_pnl"]) or Decimal(0)
+    unrealized_now = _parse_dec(pnl_now["unrealized_pnl"]) or Decimal(0)
+    realized_delta: Decimal | None = None
+    unrealized_delta: Decimal | None = None
+    prior_pnl = prior.get("pnl") if isinstance(prior, dict) else None
+    if isinstance(prior_pnl, dict):
+        prior_realized = _parse_dec(prior_pnl.get("realized_pnl"))
+        prior_unrealized = _parse_dec(prior_pnl.get("unrealized_pnl"))
+        if prior_realized is not None:
+            realized_delta = realized_now - prior_realized
+        if prior_unrealized is not None:
+            unrealized_delta = unrealized_now - prior_unrealized
+
+    # Value bridge (spec §4.1): opening + external flows + realised +
+    # change in unrealised + residual = closing. The residual absorbs
+    # everything the ledger can't itemise yet — broker_sync deltas
+    # (dividends, fees, sync corrections) and valuation-basis drift.
+    # Honest line, labelled "Broker adjustments (unitemised)".
+    residual: Decimal | None = None
+    if opening is not None and realized_delta is not None and unrealized_delta is not None:
+        residual = closing - opening - net_flows - realized_delta - unrealized_delta
+
+    # YTD / since-inception: chain-link prior v2 period returns with
+    # this period's. Only chains in the SAME display currency count.
+    chained_rows = [
+        c for c in chain if c["period_return"] is not None and c["display_currency"] == valuation.display_currency
+    ]
+    chain_returns = [c["period_return"] for c in chained_rows]
+    current_returns = [period_return] if period_return is not None else []
+    si_return = _chain_link(chain_returns + current_returns)
+    ytd_chain = [c["period_return"] for c in chained_rows if c["period_start"].year == period_end.year]
+    ytd_return = _chain_link(ytd_chain + current_returns)
+
+    # Benchmark over the same spans, from closes (cheap, [NOW]). The SI
+    # span starts at the first chain row that SURVIVES the currency
+    # filter — starting at chain[0] regardless would compare a
+    # later-inception portfolio chain against an older benchmark span
+    # (Codex ckpt-2).
+    si_start = chained_rows[0]["period_start"] if chained_rows else period_start
+    benchmark_si = _benchmark_closes(conn, si_start, period_end)
+    ytd_start = date(period_end.year, 1, 1)
+    benchmark_ytd = _benchmark_closes(conn, ytd_start, period_end)
+
+    cover = {
+        "display_currency": valuation.display_currency,
+        "closing_value": _dec_q(closing),
+        "opening_value": _dec_q(opening),
+        "cash": _dec_f(valuation.cash_balance),
+        "mirror_equity": _dec_f(valuation.mirror_equity),
+        "period_return": _dec_q(period_return),
+        "benchmark_return": benchmark["return_pct"],
+        "excess_return": _dec_q(excess),
+        "ytd_return": _dec_q(ytd_return),
+        "si_return": _dec_q(si_return),
+        "benchmark_ytd_return": benchmark_ytd["return_pct"],
+        "benchmark_si_return": benchmark_si["return_pct"],
+        "realized_delta": _dec_q(realized_delta),
+        "unrealized_delta": _dec_q(unrealized_delta),
+        "bridge": {
+            "opening_value": _dec_q(opening),
+            "net_external_flows": _dec_q(net_flows),
+            "realized_delta": _dec_q(realized_delta),
+            "unrealized_delta": _dec_q(unrealized_delta),
+            "broker_adjustments_residual": _dec_q(residual),
+            "closing_value": _dec_q(closing),
+        },
+        "return_method": "modified_dietz_v1",
+    }
+    performance = {
+        "portfolio_value": _dec_q(closing),
+        "period_return": _dec_q(period_return),
+        "benchmark": benchmark,
+        "fx_mode": "generation_date",
+        "method": "modified_dietz_v1",
+        "observations": len(chain_returns) + len(current_returns),
+    }
+    return cover, performance
+
+
+def _holdings_section(
+    valuation: PortfolioValuation,
+    prior_positions: list[dict[str, Any]] | None,
+    realized_now: dict[int, dict[str, Any]],
+    opening_value: Decimal | None,
+) -> list[dict[str, Any]]:
+    """Holdings-at-generation table rows (spec §4.5).
+
+    Weight is vs total_aum (the whole account, cash + mirrors
+    included). Period contribution folds realised + unrealised deltas
+    vs the prior snapshot's per-instrument rows; bps vs opening value.
+    """
+    prior_by_id = {p["instrument_id"]: p for p in prior_positions or []}
+    total_aum = Decimal(str(valuation.total_aum))
+    rows: list[dict[str, Any]] = []
+    for h in valuation.holdings:
+        mv = Decimal(str(h.market_value))
+        cost = Decimal(str(h.cost_basis))
+        weight = mv / total_aum if total_aum > 0 else None
+        since_entry = (mv - cost) / cost if cost > 0 else None
+
+        contribution: Decimal | None = None
+        contribution_bps: Decimal | None = None
+        prior_row = prior_by_id.get(h.instrument_id)
+        if prior_row is not None:
+            prior_unreal = _parse_dec(prior_row.get("unrealized_pnl")) or Decimal(0)
+            delta = Decimal(str(h.unrealized_pnl)) - prior_unreal
+            prior_real = _parse_dec(prior_row.get("realized_pnl"))
+            now_real = realized_now.get(h.instrument_id)
+            if prior_real is not None and now_real is not None:
+                delta += Decimal(now_real["realized_pnl"]) - prior_real
+            contribution = delta
+            if opening_value is not None and opening_value > 0:
+                contribution_bps = delta / opening_value * 10000
+
+        rows.append(
+            {
+                "instrument_id": h.instrument_id,
+                "symbol": h.symbol,
+                "company_name": h.company_name,
+                "sector": h.sector,
+                "units": _dec_f(h.current_units),
+                "price": _dec_f(h.current_price),
+                "market_value": _dec_f(h.market_value),
+                "cost_basis": _dec_f(h.cost_basis),
+                "weight_pct": _dec_q(weight),
+                "since_entry_return_pct": _dec_q(since_entry),
+                "unrealized_pnl": _dec_f(h.unrealized_pnl),
+                "period_contribution": _dec_q(contribution),
+                "period_contribution_bps": _dec_q(contribution_bps),
+                "valuation_source": h.valuation_source,
+            }
+        )
+    # `market_value` is `_dec_f` over a non-optional float — never None.
+    rows.sort(key=lambda r: Decimal(r["market_value"]), reverse=True)
+    return rows
+
+
+def _income_section(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> dict[str, Any]:
+    """Estimated dividend income: declarations with ex-date in the
+    period × CURRENT units (period-end proxy — spec §4.7 names the
+    approximation; exact units-at-ex-date needs the #1593 ledger).
+    Estimates only — not confirmed received."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT de.instrument_id,
+                   i.symbol,
+                   de.ex_date,
+                   de.pay_date,
+                   de.dps_declared,
+                   de.currency,
+                   p.current_units
+            FROM dividend_events de
+            JOIN instruments i USING (instrument_id)
+            JOIN positions p USING (instrument_id)
+            WHERE p.current_units > 0
+              AND de.ex_date >= %(start)s
+              AND de.ex_date <= %(end)s
+              AND de.dps_declared IS NOT NULL
+            ORDER BY de.ex_date, i.symbol
+            """,
+            {"start": period_start, "end": period_end},
+        )
+        rows = cur.fetchall()
+
+    items: list[dict[str, Any]] = []
+    totals_by_ccy: dict[str, Decimal] = {}
+    for r in rows:
+        amount = r["dps_declared"] * r["current_units"]
+        ccy = str(r["currency"] or "USD")
+        totals_by_ccy[ccy] = totals_by_ccy.get(ccy, Decimal(0)) + amount
+        items.append(
+            {
+                "instrument_id": r["instrument_id"],
+                "symbol": r["symbol"],
+                "ex_date": r["ex_date"].isoformat() if r["ex_date"] is not None else None,
+                "pay_date": r["pay_date"].isoformat() if r["pay_date"] is not None else None,
+                "dps_declared": _dec(r["dps_declared"]),
+                "currency": ccy,
+                "units": _dec(r["current_units"]),
+                "estimated_amount": _dec(amount),
+            }
+        )
+    return {
+        "items": items,
+        "estimated_totals": {ccy: _dec(total) for ccy, total in sorted(totals_by_ccy.items())},
+        "basis": "declared_dps_x_current_units",
+    }
+
+
+def _costs_section(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> dict[str, Any]:
+    """Own-platform fees in the period. Broker-side fees are invisible
+    until #1593 (they arrive folded into broker_sync cash deltas)."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS fill_count,
+                   COALESCE(SUM(f.fees), 0) AS fees_total
+            FROM fills f
+            WHERE f.filled_at >= %(start)s
+              AND f.filled_at < %(end)s::date + 1
+            """,
+            {"start": period_start, "end": period_end},
+        )
+        row = cur.fetchone()
+    fill_count = row["fill_count"] if row else 0
+    fees_total: Decimal = row["fees_total"] if row else Decimal(0)
+    return {
+        "fees_total": _dec(fees_total),
+        "fill_count": fill_count,
+        "scope": "own_platform_orders_only",
+    }
+
+
+def _risk_section(
+    valuation: PortfolioValuation,
+    chain: list[dict[str, Any]],
+    current_period_return: Decimal | None,
+    *,
+    observation_label: str,
+) -> dict[str, Any]:
+    """Concentration + sector exposure (point-in-time, always
+    computable) and volatility / max drawdown over the FULL snapshot
+    return history — never the single period (spec §4.9: n≤13 windows
+    whipsaw). Below `_MIN_RISK_OBSERVATIONS` the series stats render
+    as insufficient history. Explicitly NO Sharpe/Sortino/IR — not
+    honestly computable before #1593 daily series."""
+    total_aum = Decimal(str(valuation.total_aum))
+    mvs = sorted((Decimal(str(h.market_value)) for h in valuation.holdings), reverse=True)
+    top5 = sum(mvs[:5], Decimal(0))
+    concentration_top5 = top5 / total_aum if total_aum > 0 else None
+
+    sector_weights: dict[str, Decimal] = {}
+    for h in valuation.holdings:
+        sector = h.sector or "Unknown"
+        sector_weights[sector] = sector_weights.get(sector, Decimal(0)) + Decimal(str(h.market_value))
+    sector_exposure = (
+        {s: _dec_q(w / total_aum) for s, w in sorted(sector_weights.items(), key=lambda kv: kv[1], reverse=True)}
+        if total_aum > 0
+        else {}
+    )
+
+    returns = [
+        c["period_return"]
+        for c in chain
+        if c["period_return"] is not None and c["display_currency"] == valuation.display_currency
+    ]
+    if current_period_return is not None:
+        returns = [*returns, current_period_return]
+
+    n = len(returns)
+    volatility: Decimal | None = None
+    max_drawdown: Decimal | None = None
+    if n >= _MIN_RISK_OBSERVATIONS:
+        mean = sum(returns, Decimal(0)) / n
+        variance = sum(((r - mean) ** 2 for r in returns), Decimal(0)) / (n - 1)
+        volatility = variance.sqrt()
+        # Max drawdown on the chained return index.
+        index = Decimal(1)
+        peak = Decimal(1)
+        worst = Decimal(0)
+        for r in returns:
+            index *= Decimal(1) + r
+            peak = max(peak, index)
+            drawdown = index / peak - 1
+            worst = min(worst, drawdown)
+        max_drawdown = worst
+
+    return {
+        "holding_count": len(valuation.holdings),
+        "concentration_top5_pct": _dec_q(concentration_top5),
+        "sector_exposure": sector_exposure,
+        "volatility": _dec_q(volatility),
+        "max_drawdown": _dec_q(max_drawdown),
+        "observations": n,
+        "observation_label": observation_label,
+        "insufficient_history": n < _MIN_RISK_OBSERVATIONS,
+    }
+
+
+_ROLLING_WINDOWS: dict[str, int | None] = {"1m": 1, "3m": 3, "6m": 6, "1y": 12, "si": None}
+
+
+def _add_month(d: date) -> date:
+    """First-of-next-month for a first-of-month date."""
+    return date(d.year + 1, 1, 1) if d.month == 12 else date(d.year, d.month + 1, 1)
+
+
+def _is_contiguous_monthly(window: list[dict[str, Any]], current_period_start: date) -> bool:
+    """True when the window's monthly periods run back-to-back and the
+    newest one immediately precedes the current period. Count alone is
+    not enough: with gaps (missed/backfilled months), N stale returns
+    would masquerade as an N-month window (Codex ckpt-2)."""
+    expected = current_period_start
+    for row in reversed(window):
+        prev = row["period_start"].replace(day=1)
+        if _add_month(prev) != expected:
+            return False
+        expected = prev
+    return True
+
+
+def _rolling_returns(
+    conn: psycopg.Connection[Any],
+    chain: list[dict[str, Any]],
+    current_period_return: Decimal | None,
+    display_currency: str,
+    period_start: date,
+    period_end: date,
+) -> dict[str, Any]:
+    """Rolling-returns table (monthly statement, spec §4.3): portfolio
+    chained over the last N monthly periods vs benchmark over the same
+    span. Portfolio cells null until snapshot depth exists."""
+    chained = [c for c in chain if c["period_return"] is not None and c["display_currency"] == display_currency]
+    out: dict[str, Any] = {}
+    for label, months in _ROLLING_WINDOWS.items():
+        if months is None:
+            window = chained
+        else:
+            window = chained[-(months - 1) :] if months > 1 else []
+        window_returns = [c["period_return"] for c in window]
+        if current_period_return is not None:
+            window_returns = [*window_returns, current_period_return]
+        # A window is only honest when it is FULL (or si): chaining 2
+        # months and calling it "6m" overstates history. Fullness is
+        # count AND calendar contiguity — with gaps, N stale returns
+        # would masquerade as an N-month window (Codex ckpt-2).
+        portfolio: Decimal | None
+        if months is None:
+            portfolio = _chain_link(window_returns)
+            span_start = window[0]["period_start"] if window else period_start
+        elif len(window_returns) == months and _is_contiguous_monthly(window, period_start):
+            portfolio = _chain_link(window_returns)
+            span_start = window[0]["period_start"] if window else period_start
+        else:
+            portfolio = None
+            span_start = None
+        benchmark: Decimal | None = None
+        if span_start is not None:
+            benchmark = _parse_dec(_benchmark_closes(conn, span_start, period_end)["return_pct"])
+        excess = portfolio - benchmark if portfolio is not None and benchmark is not None else None
+        out[label] = {
+            "portfolio": _dec_q(portfolio),
+            "benchmark": _dec_q(benchmark),
+            "excess": _dec_q(excess),
+        }
+    return out
+
+
+def _thesis_summary(thesis_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate hit/miss/not-evaluable buckets over the per-trade
+    thesis_accuracy rows (spec §4.10 — hit rates without a
+    not-yet-evaluable bucket are unfalsifiable). Hit = exit at or
+    above the base target."""
+    evaluated = [r for r in thesis_rows if r.get("target_hit") is not None]
+    not_evaluable = len(thesis_rows) - len(evaluated)
+    hits = [r for r in evaluated if r["target_hit"] in ("bull", "base")]
+    misses = [r for r in evaluated if r["target_hit"] not in ("bull", "base")]
+
+    def _rate(stance: str) -> dict[str, Any]:
+        stance_rows = [r for r in evaluated if r.get("stance") == stance]
+        stance_hits = sum(1 for r in stance_rows if r["target_hit"] in ("bull", "base"))
+        n = len(stance_rows)
+        return {
+            "n": n,
+            "hits": stance_hits,
+            "hit_rate_pct": f"{100 * stance_hits / n:.2f}" if n > 0 else None,
+        }
+
+    return {
+        "total": len(thesis_rows),
+        "evaluated": len(evaluated),
+        "hits": len(hits),
+        "misses": len(misses),
+        "not_evaluable": not_evaluable,
+        "buy": _rate("buy"),
+        "avoid": _rate("avoid"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main entry points
 # ---------------------------------------------------------------------------
 
@@ -779,13 +1587,37 @@ def generate_weekly_report(
     # here would treat every current holding as a brand-new
     # contributor. Codex slice-4 finding.
     prior_positions = prior.get("positions") if isinstance(prior, dict) and "positions" in prior else None
-    period_contribution = _compute_contributors(positions_now, prior_positions)
+    realized_now = _realized_by_instrument(conn)
+    period_contribution = _compute_contributors(positions_now, prior_positions, realized_now=realized_now)
+
+    # v2 sections (#1596) — shared valuation = same code path as the
+    # dashboard headline (spec §3.3).
+    valuation = compute_portfolio_valuation(conn)
+    chain = _prior_v2_chain(conn, report_type="weekly", period_start=period_start)
+    cover, performance = _cover_and_performance(
+        conn,
+        valuation=valuation,
+        prior=prior,
+        chain=chain,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    holdings = _holdings_section(
+        valuation,
+        prior_positions,
+        realized_now,
+        _parse_dec(cover["opening_value"]),
+    )
 
     return {
+        "schema_version": SCHEMA_VERSION,
         "report_type": "weekly",
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "generated_at": datetime.now(tz=UTC).isoformat(),
+        "cover": cover,
+        "performance": performance,
+        "holdings": holdings,
         "pnl": pnl,
         "top_performers": top_performers,
         "bottom_performers": bottom_performers,
@@ -827,6 +1659,10 @@ def generate_monthly_report(
     thesis_accuracy = _thesis_accuracy(conn, period_start, period_end)
     tax_provision = _tax_provision_snapshot(conn)
     positions_now = _positions_snapshot(conn)
+    # Rank movers were weekly-only pre-#1596 (committee finding: the
+    # monthly model-review section cited a key the monthly builder
+    # never wrote).
+    score_changes = _score_changes(conn, period_start, period_end)
     prior = _load_prior_snapshot(conn, report_type="monthly", period_start=period_start)
     # When `prior` is absent OR lacks the `positions` key (pre-feature
     # snapshots from before Slice 4), pass `None` so
@@ -834,17 +1670,68 @@ def generate_monthly_report(
     # here would treat every current holding as a brand-new
     # contributor. Codex slice-4 finding.
     prior_positions = prior.get("positions") if isinstance(prior, dict) and "positions" in prior else None
-    period_contribution = _compute_contributors(positions_now, prior_positions)
+    realized_now = _realized_by_instrument(conn)
+    period_contribution = _compute_contributors(positions_now, prior_positions, realized_now=realized_now)
+
+    # v2 sections (#1596) — shared valuation = same code path as the
+    # dashboard headline (spec §3.3).
+    valuation = compute_portfolio_valuation(conn)
+    chain = _prior_v2_chain(conn, report_type="monthly", period_start=period_start)
+    cover, performance = _cover_and_performance(
+        conn,
+        valuation=valuation,
+        prior=prior,
+        chain=chain,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    holdings = _holdings_section(
+        valuation,
+        prior_positions,
+        realized_now,
+        _parse_dec(cover["opening_value"]),
+    )
+    current_period_return = _parse_dec(cover["period_return"])
+    risk = _risk_section(
+        valuation,
+        chain,
+        current_period_return,
+        observation_label="since inception, monthly observations",
+    )
+    rolling_returns = _rolling_returns(
+        conn,
+        chain,
+        current_period_return,
+        valuation.display_currency,
+        period_start,
+        period_end,
+    )
+    income = _income_section(conn, period_start, period_end)
+    costs = _costs_section(conn, period_start, period_end)
+    thesis_summary = _thesis_summary(thesis_accuracy)
 
     return {
+        "schema_version": SCHEMA_VERSION,
         "report_type": "monthly",
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "generated_at": datetime.now(tz=UTC).isoformat(),
+        "cover": cover,
+        "performance": performance,
+        "holdings": holdings,
+        "rolling_returns": rolling_returns,
+        "income": income,
+        "costs": costs,
+        "risk": risk,
+        "thesis_summary": thesis_summary,
+        "score_changes": score_changes,
         "pnl": pnl,
         "position_pnl": position_pnl,
         "win_rate": win_rate_data["win_rate_pct"],
         "avg_holding_days": win_rate_data["avg_holding_days"],
+        # Full closed-trade review incl. payoff ratio (spec §4.9) —
+        # `win_rate`/`avg_holding_days` stay as legacy top-level keys.
+        "trade_stats": win_rate_data,
         "best_trade": best_trade,
         "worst_trade": worst_trade,
         "attribution_summary": attribution_summary,
