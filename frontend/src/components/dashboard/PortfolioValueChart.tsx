@@ -363,8 +363,16 @@ function ValueCanvas({
   // never sit between the cursor and the chart, so hover stays stable
   // (the previous corner-pinned card also read as disconnected from
   // the hovered point; operator feedback 2026-06-13).
+  // TIP_W is the max-w cap, not the rendered width — short cards flip
+  // a little early near the right edge, which errs on the visible
+  // side (measuring the rendered width would cost a layout read per
+  // mousemove for a cosmetic gain).
   const TIP_W = 200;
   const TIP_OFFSET = 14;
+  // Must match the container's h-[220px] below.
+  const CONTAINER_H = 220;
+  // Tallest card: date row + 4 trade lines.
+  const TIP_H_MAX = 110;
   const containerWidth = containerRef.current?.clientWidth ?? 0;
   const tipLeft =
     hover !== null
@@ -372,9 +380,8 @@ function ValueCanvas({
         ? hover.x - TIP_OFFSET - TIP_W
         : hover.x + TIP_OFFSET
       : 0;
-  // 220 = the container's h-[220px]; 110 ≈ tallest card (date row +
-  // 4 trade lines) so a marker-day tooltip never clips the bottom.
-  const tipTop = hover !== null ? Math.max(4, Math.min(hover.y - 12, 220 - 110)) : 0;
+  const tipTop =
+    hover !== null ? Math.max(4, Math.min(hover.y - 12, CONTAINER_H - TIP_H_MAX)) : 0;
 
   return (
     <div className="relative mt-2">
