@@ -19,9 +19,10 @@
  *   * ``no_data`` — XBRL ``shares_outstanding`` not on file. Red
  *     banner with a "trigger fundamentals sync" CTA copy.
  *   * ``unknown_universe`` — outstanding present but per-category
- *     universe estimates aren't yet seeded (Tier 0 default until
- *     #790 lands per-instrument 13F filer counts). Yellow banner
- *     with explicit "estimate not available" copy.
+ *     universe estimates aren't yet seeded (Tier 0 default; #790
+ *     closed no-code, estimates seed per-instrument as 13F filer
+ *     counts land). Yellow banner with explicit "estimate not
+ *     available" copy.
  *   * ``red`` / ``amber`` / ``green`` — universe coverage thresholds.
  *     Red ranks worst, then ``unknown_universe``, then amber, then
  *     green; the worst-of fold across the four tracked categories

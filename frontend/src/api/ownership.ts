@@ -14,9 +14,10 @@
  *
  *   * ``no_data`` — XBRL ``shares_outstanding`` not on file.
  *   * ``unknown_universe`` — outstanding present but per-category
- *     universe estimates are NULL (Tier 0 default until #790).
- *   * ``red`` / ``amber`` / ``green`` — only after #790 seeds
- *     per-category estimates.
+ *     universe estimates are NULL (Tier 0 default; #790 closed
+ *     no-code).
+ *   * ``red`` / ``amber`` / ``green`` — only once per-category
+ *     estimates are seeded.
  *
  * Concentration (sum of slices / outstanding) ships as a separate
  * info chip — Codex review of the v2 spec caught the prior banner
