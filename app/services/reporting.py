@@ -790,6 +790,11 @@ def _compute_contributors(
             return Decimal("0")
         now_row = realized_now.get(iid)
         if now_row is None:
+            # positions rows persist after close (current_units = 0) and
+            # are never deleted, so a prior-snapshot instrument always
+            # has a realized_now entry; this guard covers test doubles /
+            # hypothetical row deletion, where 0 (no realised movement)
+            # is the conservative answer (PR #1597 review nitpick).
             return Decimal("0")
         return Decimal(now_row["realized_pnl"]) - prior_realized
 
@@ -1290,7 +1295,8 @@ def _holdings_section(
                 "valuation_source": h.valuation_source,
             }
         )
-    rows.sort(key=lambda r: Decimal(r["market_value"] or "0"), reverse=True)
+    # `market_value` is `_dec_f` over a non-optional float — never None.
+    rows.sort(key=lambda r: Decimal(r["market_value"]), reverse=True)
     return rows
 
 

@@ -137,3 +137,20 @@ Worked example (Codex 2 catch, 2026-05-27 PR phase-0-new-b-c-bundle):
 * A seeder that grepped only the CREATE TABLE saw "NOT NULL TEXT" and emitted `SYN00000000` → COPY aborted on first row.
 
 The lesson lives in `feedback_grep_alter_constraints` (memory) and `docs/review-prevention-log.md`.
+
+## Inclusive day-upper-bounds on timestamp columns: `< %(end)s::date + 1`
+
+For "rows up to and including day X" against a TIMESTAMPTZ column, the
+repo convention is the half-open form:
+
+```sql
+WHERE ts_col >= %(start)s
+  AND ts_col <  %(end)s::date + 1
+```
+
+Do NOT "simplify" to `ts_col <= %(end)s::date` — comparing a timestamp
+to a date coerces the date to midnight, silently dropping every
+intraday row on the last day. (PR #1597 review suggested exactly that
+rewrite; it would have excluded the whole final day of each report
+period.) `reporting.py` uses the half-open form at every period-bounded
+query — keep new queries consistent with it.
