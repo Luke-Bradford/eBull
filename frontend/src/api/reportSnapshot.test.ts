@@ -35,7 +35,73 @@ const weekly: WeeklySnapshotV2 = {
   report_type: "weekly",
 };
 
+/**
+ * Exact top-level key inventories. The `...fixture` spreads above are
+ * assignability-only (spreads bypass excess-property checks), so a
+ * backend field the interfaces don't model would slip through — these
+ * literal key sets close that hole (Codex ckpt-2 P3): an added,
+ * renamed, or dropped builder key fails HERE, forcing the interface
+ * update in the same diff. The backend db test pins fixture == builder
+ * keys, so the chain is builder == fixture == this list == interface.
+ */
+const WEEKLY_KEYS = [
+  "bottom_performers",
+  "budget",
+  "cover",
+  "generated_at",
+  "holdings",
+  "performance",
+  "period_contribution",
+  "period_end",
+  "period_start",
+  "pnl",
+  "positions",
+  "positions_closed",
+  "positions_opened",
+  "report_type",
+  "schema_version",
+  "score_changes",
+  "top_performers",
+  "upcoming_earnings",
+].sort();
+
+const MONTHLY_KEYS = [
+  "attribution_summary",
+  "avg_holding_days",
+  "best_trade",
+  "costs",
+  "cover",
+  "generated_at",
+  "holdings",
+  "income",
+  "performance",
+  "period_contribution",
+  "period_end",
+  "period_start",
+  "pnl",
+  "position_pnl",
+  "positions",
+  "positions_closed",
+  "positions_opened",
+  "report_type",
+  "risk",
+  "rolling_returns",
+  "schema_version",
+  "score_changes",
+  "tax_provision",
+  "thesis_accuracy",
+  "thesis_summary",
+  "trade_stats",
+  "win_rate",
+  "worst_trade",
+].sort();
+
 describe("SnapshotV2 fixtures", () => {
+  it("fixture top-level key sets mirror the modelled interfaces exactly", () => {
+    expect(Object.keys(weeklyFixture).sort()).toEqual(WEEKLY_KEYS);
+    expect(Object.keys(monthlyFixture).sort()).toEqual(MONTHLY_KEYS);
+  });
+
   it("backend-emitted monthly fixture satisfies MonthlySnapshotV2", () => {
     expect(monthly.schema_version).toBe(2);
     expect(monthly.cover.closing_value).toBeTypeOf("string");

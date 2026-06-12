@@ -133,13 +133,22 @@ function StatementV2({
             currency={currency}
             marker={notes.marker}
           />
+        ) : monthly !== null &&
+          monthly.positions_opened !== undefined &&
+          monthly.positions_closed !== undefined ? (
+          <ActivitySection
+            opened={monthly.positions_opened}
+            closed={monthly.positions_closed}
+            currency={currency}
+            marker={notes.marker}
+          />
         ) : (
-          // Monthly v2 snapshots do not carry activity keys (the #1596
-          // contract emits them weekly-only) — missing-key treatment
-          // per §4, not a nil line that would falsely claim "no trades".
+          // Monthly v2 snapshots generated before the builder gained
+          // activity keys lack them — missing-key treatment per §4,
+          // not a nil line that would falsely claim "no trades".
           <EmptyState
             title="Not included in this snapshot"
-            description="The monthly snapshot contract does not carry period activity yet — see the weekly statements for own-platform trades."
+            description="This snapshot predates monthly period activity — regenerate it via Admin → Jobs → monthly_report."
           />
         )}
       </Section>
@@ -154,7 +163,7 @@ function StatementV2({
               <ChargesSection
                 costs={monthly.costs}
                 currency={currency}
-                fxUnavailable={false}
+                fxUnavailable={monthly.costs.fx_unavailable === true}
                 marker={notes.marker}
               />
             </Section>

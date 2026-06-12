@@ -138,6 +138,10 @@ export interface CostsV2 {
   fees_total: string;
   fill_count: number;
   scope: string;
+  /** Spec §4.8 degraded-state flag — not emitted by the current
+   *  builder (fees are summed without FX conversion), but the badge
+   *  must light up the day the backend stamps it. */
+  fx_unavailable?: boolean;
 }
 
 export interface RiskV2 {
@@ -277,6 +281,12 @@ export interface MonthlySnapshotV2 extends SnapshotV2Base {
   attribution_summary: AttributionSummaryV2;
   best_trade: TradeReviewRowV2 | null;
   worst_trade: TradeReviewRowV2 | null;
+  /** §4.6 Period activity is W+M. OPTIONAL because v2 monthly
+   *  snapshots generated before the monthly builder gained these keys
+   *  (#1592 child-2 Codex P1) legitimately lack them — the FE renders
+   *  the missing-key EmptyState for those until regeneration. */
+  positions_opened?: ActivityRowV2[];
+  positions_closed?: ActivityRowV2[];
   /** Legacy top-level duplicates of trade_stats fields. */
   win_rate: string | null;
   avg_holding_days: number | null;

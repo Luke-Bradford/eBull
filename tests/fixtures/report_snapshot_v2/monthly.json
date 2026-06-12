@@ -41,7 +41,7 @@
     "unrealized_delta": null,
     "ytd_return": null
   },
-  "generated_at": "2026-06-12T14:36:07.046550+00:00",
+  "generated_at": "2026-06-12T15:15:46.731524+00:00",
   "holdings": [
     {
       "company_name": "Report Co",
@@ -103,6 +103,8 @@
       "unrealized_pnl": "100.000000"
     }
   ],
+  "positions_closed": [],
+  "positions_opened": [],
   "report_type": "monthly",
   "risk": {
     "concentration_top5_pct": "0.523810",

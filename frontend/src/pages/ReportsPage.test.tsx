@@ -114,7 +114,18 @@ describe("ReportsPage — v2 monthly statement", () => {
     expect(screen.getByText(/No closed trades during this period/)).toBeInTheDocument();
   });
 
-  it("monthly activity (missing key in the v2 contract) gets the EmptyState treatment", async () => {
+  it("monthly activity renders the nil line (keys present, §4.6 W+M)", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("No transactions during this period.")).toBeInTheDocument();
+    });
+  });
+
+  it("pre-activity-contract monthly snapshots get the missing-key EmptyState", async () => {
+    const old = { ...(monthlyFixture as Record<string, unknown>) };
+    delete old["positions_opened"];
+    delete old["positions_closed"];
+    mockedMonthly.mockResolvedValue([row(old)]);
     renderPage();
     await waitFor(() => {
       expect(screen.getByText("Not included in this snapshot")).toBeInTheDocument();
