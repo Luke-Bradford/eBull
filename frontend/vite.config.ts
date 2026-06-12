@@ -8,6 +8,12 @@ import path from "node:path";
 // through. Frontend code therefore always calls /api/<router>/...
 export default defineConfig({
   plugins: [react()],
+  // es2022: esbuild >=0.28 (pinned via pnpm.overrides for the
+  // GHSA on esbuild <0.28.1) removed down-transforms to vite 6's
+  // legacy default targets (chrome87/safari14/es2020). eBull is a
+  // single-operator dashboard on a current browser — raising the
+  // build target is free; lowering it back requires esbuild <0.28.
+  build: { target: "es2022" },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
