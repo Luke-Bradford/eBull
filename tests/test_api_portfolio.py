@@ -122,14 +122,20 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
 
 
 def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
-    # The endpoint runs five DB queries in order:
+    # Callers supply results in the legacy logical order:
     #   1. positions  2. cash  3. broker_positions  4. mirror_breakdowns
     #   5. mirror underlying instrument_ids (#502 PR follow-up)
     # Existing callers supply [positions, cash] only — pad with empty
     # broker_positions, mirror_breakdowns, and mirror-underlying results.
+    #
+    # Since #1596 the EXECUTION order differs: compute_portfolio_valuation
+    # runs positions, cash, then mirror_breakdowns (inside the shared
+    # valuation helper), and the endpoint's broker query runs after.
+    # Remap so call sites keep the legacy convention.
     padded = list(cursor_results)
     while len(padded) < 5:
         padded.append([])
+    padded = [padded[0], padded[1], padded[3], padded[2], padded[4]]
     conn = _mock_conn(padded)
 
     def _override() -> Iterator[MagicMock]:
@@ -174,11 +180,11 @@ class TestGetPortfolio:
     def setup_method(self) -> None:
         # Patch FX/config service functions so existing tests (all USD) pass unchanged.
         self._patch_config = patch(
-            "app.api.portfolio.get_runtime_config",
+            "app.services.valuation.get_runtime_config",
             return_value=_DEFAULT_CONFIG,
         )
         self._patch_fx_meta = patch(
-            "app.api.portfolio.load_live_fx_rates_with_metadata",
+            "app.services.valuation.load_live_fx_rates_with_metadata",
             return_value={},
         )
         self._patch_config.start()
@@ -459,11 +465,11 @@ class TestPortfolioFxConversion:
             reason="test",
         )
         self._patch_config = patch(
-            "app.api.portfolio.get_runtime_config",
+            "app.services.valuation.get_runtime_config",
             return_value=gbp_config,
         )
         self._patch_fx_meta = patch(
-            "app.api.portfolio.load_live_fx_rates_with_metadata",
+            "app.services.valuation.load_live_fx_rates_with_metadata",
             return_value={
                 ("USD", "GBP"): {
                     "rate": Decimal("0.78"),
@@ -654,11 +660,11 @@ class TestPortfolioMirrors:
 
     def setup_method(self) -> None:
         self._patch_config = patch(
-            "app.api.portfolio.get_runtime_config",
+            "app.services.valuation.get_runtime_config",
             return_value=_DEFAULT_CONFIG,
         )
         self._patch_fx_meta = patch(
-            "app.api.portfolio.load_live_fx_rates_with_metadata",
+            "app.services.valuation.load_live_fx_rates_with_metadata",
             return_value={},
         )
         self._patch_config.start()

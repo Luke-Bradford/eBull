@@ -92,6 +92,35 @@ from app.services.reporting import generate_weekly_report  # noqa: E402
 _REPORTING = "app.services.reporting"
 
 
+def _fake_valuation() -> Any:
+    """Minimal PortfolioValuation for builder tests — the heavy
+    market-data/FX path is exercised separately; builder tests patch
+    `compute_portfolio_valuation` at the boundary (#1596)."""
+    from app.services.valuation import PortfolioValuation
+
+    return PortfolioValuation(
+        display_currency="USD",
+        holdings=(),
+        total_market=0.0,
+        cash_balance=10000.0,
+        mirror_equity=0.0,
+        total_aum=10000.0,
+        raw_rows=(),
+        rates={},
+        rates_meta={},
+        mirror_breakdowns=(),
+    )
+
+
+_NULL_BENCHMARK = {
+    "symbol": "SPX500",
+    "label": "S&P 500 (price index)",
+    "close_start": None,
+    "close_end": None,
+    "return_pct": None,
+}
+
+
 class TestGenerateWeeklyReport:
     def test_returns_weekly_report_structure(self) -> None:
         """Weekly report should contain all expected sections."""
@@ -102,7 +131,11 @@ class TestGenerateWeeklyReport:
         cursor.fetchall.return_value = []
         cursor.fetchone.return_value = {"realized": Decimal("0"), "unrealized": Decimal("0")}
 
-        with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
+        with (
+            patch(f"{_REPORTING}.compute_budget_state") as mock_budget,
+            patch(f"{_REPORTING}.compute_portfolio_valuation", return_value=_fake_valuation()),
+            patch(f"{_REPORTING}._benchmark_closes", return_value=dict(_NULL_BENCHMARK)),
+        ):
             mock_budget.return_value = MagicMock(
                 cash_balance=Decimal("10000"),
                 deployed_capital=Decimal("5000"),
@@ -118,6 +151,7 @@ class TestGenerateWeeklyReport:
         assert report["report_type"] == "weekly"
         assert report["period_start"] == "2026-04-06"
         assert report["period_end"] == "2026-04-12"
+        assert report["schema_version"] == 2
         assert "pnl" in report
         assert report["pnl"]["note"] == "current-state snapshot, not period delta"
         assert "top_performers" in report
@@ -127,6 +161,15 @@ class TestGenerateWeeklyReport:
         assert "upcoming_earnings" in report
         assert "score_changes" in report
         assert "budget" in report
+        # v2 sections (#1596)
+        assert report["cover"]["closing_value"] == "10000.000000"
+        assert report["cover"]["display_currency"] == "USD"
+        # First v2 snapshot: no prior → no opening value → no return.
+        assert report["cover"]["opening_value"] is None
+        assert report["cover"]["period_return"] is None
+        assert report["performance"]["portfolio_value"] == "10000.000000"
+        assert report["performance"]["fx_mode"] == "generation_date"
+        assert report["holdings"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -150,10 +193,19 @@ class TestGenerateMonthlyReport:
             "positions_attributed": 0,
             "avg_gross": None,
             "avg_market": None,
+            "avg_sector": None,
             "avg_alpha": None,
+            "avg_timing": None,
+            "avg_cost_drag": None,
+            "fill_count": 0,
+            "fees_total": Decimal("0"),
         }
 
-        with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
+        with (
+            patch(f"{_REPORTING}.compute_budget_state") as mock_budget,
+            patch(f"{_REPORTING}.compute_portfolio_valuation", return_value=_fake_valuation()),
+            patch(f"{_REPORTING}._benchmark_closes", return_value=dict(_NULL_BENCHMARK)),
+        ):
             mock_budget.return_value = MagicMock(
                 cash_balance=Decimal("10000"),
                 deployed_capital=Decimal("5000"),
@@ -171,6 +223,7 @@ class TestGenerateMonthlyReport:
         assert report["report_type"] == "monthly"
         assert report["period_start"] == "2026-03-01"
         assert report["period_end"] == "2026-03-31"
+        assert report["schema_version"] == 2
         assert "position_pnl" in report
         assert "win_rate" in report
         assert "avg_holding_days" in report
@@ -179,6 +232,19 @@ class TestGenerateMonthlyReport:
         assert "attribution_summary" in report
         assert "thesis_accuracy" in report
         assert "tax_provision" in report
+        # v2 sections (#1596)
+        assert "cover" in report
+        assert "performance" in report
+        assert "holdings" in report
+        assert "rolling_returns" in report
+        assert set(report["rolling_returns"].keys()) == {"1m", "3m", "6m", "1y", "si"}
+        assert report["income"]["items"] == []
+        assert report["costs"]["fill_count"] == 0
+        assert report["risk"]["insufficient_history"] is True
+        assert report["thesis_summary"]["total"] == 0
+        # score_changes was weekly-only pre-#1596 (committee finding).
+        assert "score_changes" in report
+        assert report["trade_stats"]["payoff_ratio"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +452,11 @@ class TestJsonSerializability:
         cursor.fetchall.return_value = []
         cursor.fetchone.return_value = {"realized": Decimal("0"), "unrealized": Decimal("0")}
 
-        with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
+        with (
+            patch(f"{_REPORTING}.compute_budget_state") as mock_budget,
+            patch(f"{_REPORTING}.compute_portfolio_valuation", return_value=_fake_valuation()),
+            patch(f"{_REPORTING}._benchmark_closes", return_value=dict(_NULL_BENCHMARK)),
+        ):
             mock_budget.return_value = MagicMock(
                 cash_balance=Decimal("10000"),
                 deployed_capital=Decimal("5000"),
@@ -417,10 +487,19 @@ class TestJsonSerializability:
             "positions_attributed": 0,
             "avg_gross": None,
             "avg_market": None,
+            "avg_sector": None,
             "avg_alpha": None,
+            "avg_timing": None,
+            "avg_cost_drag": None,
+            "fill_count": 0,
+            "fees_total": Decimal("0"),
         }
 
-        with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
+        with (
+            patch(f"{_REPORTING}.compute_budget_state") as mock_budget,
+            patch(f"{_REPORTING}.compute_portfolio_valuation", return_value=_fake_valuation()),
+            patch(f"{_REPORTING}._benchmark_closes", return_value=dict(_NULL_BENCHMARK)),
+        ):
             mock_budget.return_value = MagicMock(
                 cash_balance=Decimal("10000"),
                 deployed_capital=Decimal("5000"),
@@ -593,3 +672,299 @@ class TestComputeContributors:
         assert [r["symbol"] for r in result["contributors"]] == ["S10", "S8", "S6"]
         # Drags sorted ascending by delta — most-negative first.
         assert [r["symbol"] for r in result["drags"]] == ["S9", "S7", "S5"]
+
+
+# ---------------------------------------------------------------------------
+# v2 sections (#1596 — spec docs/proposals/ui/2026-06-12-report-ia.md)
+# ---------------------------------------------------------------------------
+
+from app.services.reporting import (  # noqa: E402
+    _chain_link,
+    _holdings_section,
+    _modified_dietz,
+    _risk_section,
+    _thesis_summary,
+)
+from app.services.valuation import HoldingValuation, PortfolioValuation  # noqa: E402
+
+
+def _holding(
+    *,
+    instrument_id: int = 1,
+    symbol: str = "AAPL",
+    sector: str | None = "Technology",
+    cost_basis: float = 1000.0,
+    market_value: float = 1100.0,
+    units: float = 10.0,
+) -> HoldingValuation:
+    return HoldingValuation(
+        instrument_id=instrument_id,
+        symbol=symbol,
+        company_name=f"{symbol} Inc",
+        sector=sector,
+        native_currency="USD",
+        open_date=date(2026, 1, 5),
+        source="ebull",
+        updated_at=datetime(2026, 6, 1, tzinfo=UTC),
+        avg_cost=cost_basis / units if units else None,
+        current_units=units,
+        cost_basis=cost_basis,
+        current_price=market_value / units if units else None,
+        market_value=market_value,
+        unrealized_pnl=market_value - cost_basis,
+        valuation_source="quote",
+    )
+
+
+def _valuation_with(holdings: tuple[HoldingValuation, ...], *, cash: float = 500.0) -> PortfolioValuation:
+    total_market = sum(h.market_value for h in holdings)
+    return PortfolioValuation(
+        display_currency="USD",
+        holdings=holdings,
+        total_market=total_market,
+        cash_balance=cash,
+        mirror_equity=0.0,
+        total_aum=total_market + cash,
+        raw_rows=(),
+        rates={},
+        rates_meta={},
+        mirror_breakdowns=(),
+    )
+
+
+class TestModifiedDietz:
+    """Flow-adjusted period return (spec §3.4). The business boundary:
+    a deposit must NEVER print as performance."""
+
+    START = date(2026, 6, 1)
+    END = date(2026, 6, 30)
+
+    def test_no_flows_degenerates_to_simple_ratio(self) -> None:
+        r = _modified_dietz(Decimal("1000"), Decimal("1100"), [], self.START, self.END)
+        assert r == Decimal("0.1")
+
+    def test_deposit_is_not_performance(self) -> None:
+        """1000 → 2000 purely via a 1000 injection = 0% return, not 100%."""
+        flows = [(date(2026, 6, 1), Decimal("1000"))]
+        r = _modified_dietz(Decimal("1000"), Decimal("2000"), flows, self.START, self.END)
+        assert r == Decimal("0")
+
+    def test_withdrawal_is_not_a_loss(self) -> None:
+        """1000 → 500 purely via a 500 withdrawal = 0% return, not −50%."""
+        flows = [(date(2026, 6, 30), Decimal("-500"))]
+        r = _modified_dietz(Decimal("1000"), Decimal("500"), flows, self.START, self.END)
+        assert r == Decimal("0")
+
+    def test_mid_period_flow_is_time_weighted(self) -> None:
+        """A flow landing mid-period only counts for the remaining
+        fraction of the period in the denominator."""
+        # 30-day June: flow on the 16th → 15 days remain → w = 0.5.
+        flows = [(date(2026, 6, 16), Decimal("1000"))]
+        r = _modified_dietz(Decimal("1000"), Decimal("2100"), flows, self.START, self.END)
+        # (2100 − 1000 − 1000) / (1000 + 1000×0.5) = 100 / 1500
+        assert r == Decimal("100") / Decimal("1500")
+
+    def test_none_opening_value_returns_none(self) -> None:
+        assert _modified_dietz(None, Decimal("1000"), [], self.START, self.END) is None
+
+    def test_non_positive_denominator_returns_none(self) -> None:
+        """Account funded entirely mid-period: opening 0 → denominator
+        can be ≤ 0 → a return figure would be meaningless."""
+        flows = [(date(2026, 6, 30), Decimal("-2000"))]
+        r = _modified_dietz(Decimal("0"), Decimal("100"), flows, self.START, self.END)
+        assert r is None
+
+
+class TestChainLink:
+    def test_empty_returns_none(self) -> None:
+        assert _chain_link([]) is None
+
+    def test_single_return_round_trips(self) -> None:
+        assert _chain_link([Decimal("0.1")]) == Decimal("0.1")
+
+    def test_geometric_not_additive(self) -> None:
+        # (1.1 × 0.9) − 1 = −0.01, NOT 0.
+        r = _chain_link([Decimal("0.1"), Decimal("-0.1")])
+        assert r == Decimal("-0.01")
+
+
+class TestThesisSummary:
+    def test_empty_rows(self) -> None:
+        s = _thesis_summary([])
+        assert s["total"] == 0
+        assert s["buy"]["hit_rate_pct"] is None
+
+    def test_buckets_and_not_evaluable(self) -> None:
+        rows = [
+            {"stance": "buy", "target_hit": "bull"},
+            {"stance": "buy", "target_hit": "base"},
+            {"stance": "buy", "target_hit": "between_bear_and_base"},
+            {"stance": "buy", "target_hit": None},  # not yet evaluable
+            {"stance": "avoid", "target_hit": "bear"},
+        ]
+        s = _thesis_summary(rows)
+        assert s["total"] == 5
+        assert s["evaluated"] == 4
+        assert s["not_evaluable"] == 1
+        assert s["hits"] == 2
+        assert s["misses"] == 2
+        assert s["buy"] == {"n": 3, "hits": 2, "hit_rate_pct": "66.67"}
+        assert s["avoid"]["n"] == 1
+
+
+class TestRiskSection:
+    def test_insufficient_history_below_min_observations(self) -> None:
+        val = _valuation_with((_holding(),))
+        risk = _risk_section(val, [], Decimal("0.05"), observation_label="test")
+        assert risk["insufficient_history"] is True
+        assert risk["volatility"] is None
+        assert risk["max_drawdown"] is None
+        assert risk["observations"] == 1
+
+    def test_concentration_and_sector_always_computable(self) -> None:
+        holdings = (
+            _holding(instrument_id=1, symbol="AAPL", market_value=600.0, sector="Technology"),
+            _holding(instrument_id=2, symbol="JPM", market_value=300.0, sector="Financials"),
+            _holding(instrument_id=3, symbol="XOM", market_value=100.0, sector=None),
+        )
+        val = _valuation_with(holdings, cash=0.0)
+        risk = _risk_section(val, [], None, observation_label="test")
+        assert risk["holding_count"] == 3
+        # 3 holdings → top-5 = everything = 100%.
+        assert Decimal(risk["concentration_top5_pct"]) == Decimal("1")
+        assert Decimal(risk["sector_exposure"]["Technology"]) == Decimal("0.6")
+        assert "Unknown" in risk["sector_exposure"]
+
+    def test_drawdown_and_volatility_over_full_chain(self) -> None:
+        chain = [
+            {"period_start": date(2026, 1, 1), "period_return": Decimal(v), "display_currency": "USD"}
+            for v in ("0.10", "-0.20", "0.05", "0.05", "0.05")
+        ]
+        val = _valuation_with((_holding(),))
+        risk = _risk_section(val, chain, Decimal("0.05"), observation_label="test")
+        assert risk["observations"] == 6
+        assert risk["insufficient_history"] is False
+        # Max drawdown: peak after +10% = 1.1, trough after −20% = 0.88
+        # → 0.88/1.1 − 1 = −0.2.
+        assert Decimal(risk["max_drawdown"]) == Decimal("-0.2")
+        assert risk["volatility"] is not None
+
+    def test_chain_rows_in_other_display_currency_excluded(self) -> None:
+        chain = [
+            {"period_start": date(2026, 1, 1), "period_return": Decimal("0.1"), "display_currency": "GBP"}
+            for _ in range(10)
+        ]
+        val = _valuation_with((_holding(),))
+        risk = _risk_section(val, chain, None, observation_label="test")
+        assert risk["observations"] == 0
+        assert risk["insufficient_history"] is True
+
+
+class TestComputeContributorsRealizedFold:
+    """#1596 spec §4.4: realised deltas fold into period contribution.
+    Pre-#1596 the chart was unrealised-open-only — a position closed
+    mid-period vanished; a trim read as a phantom loss."""
+
+    def test_trim_with_realised_gain_is_not_a_phantom_drag(self) -> None:
+        """Sell half at a profit: unrealised drops 50, realised rises 60
+        → net +10 contributor, not a −50 drag."""
+        prior = [
+            {
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "unrealized_pnl": "100",
+                "cost_basis": "1000",
+                "realized_pnl": "0",
+            }
+        ]
+        current = [
+            {
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "unrealized_pnl": "50",
+                "cost_basis": "500",
+                "realized_pnl": "60",
+            }
+        ]
+        realized_now = {1: {"symbol": "AAPL", "realized_pnl": Decimal("60")}}
+        result = _compute_contributors(current, prior, realized_now=realized_now)
+        assert len(result["contributors"]) == 1
+        assert result["contributors"][0]["pnl_delta"] == "10"
+        assert result["drags"] == []
+
+    def test_position_closed_in_period_still_contributes(self) -> None:
+        """Closed position: prior unrealised 100 converts to realised
+        120 → net +20 contributor despite being absent from current."""
+        prior = [
+            {
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "unrealized_pnl": "100",
+                "cost_basis": "1000",
+                "realized_pnl": "0",
+            }
+        ]
+        realized_now = {1: {"symbol": "AAPL", "realized_pnl": Decimal("120")}}
+        result = _compute_contributors([], prior, realized_now=realized_now)
+        assert len(result["contributors"]) == 1
+        assert result["contributors"][0]["symbol"] == "AAPL"
+        assert result["contributors"][0]["pnl_delta"] == "20"
+
+    def test_v1_prior_without_realized_keeps_legacy_behavior(self) -> None:
+        """Prior snapshot rows without `realized_pnl` (v1) must not
+        invent realised deltas — unrealised-only diff, closed
+        positions skipped."""
+        prior = [
+            {"instrument_id": 1, "symbol": "AAPL", "unrealized_pnl": "100", "cost_basis": "1000"},
+            {"instrument_id": 2, "symbol": "MSFT", "unrealized_pnl": "50", "cost_basis": "500"},
+        ]
+        current = [
+            {"instrument_id": 1, "symbol": "AAPL", "unrealized_pnl": "150", "cost_basis": "1000"},
+        ]
+        realized_now = {
+            1: {"symbol": "AAPL", "realized_pnl": Decimal("999")},
+            2: {"symbol": "MSFT", "realized_pnl": Decimal("999")},
+        }
+        result = _compute_contributors(current, prior, realized_now=realized_now)
+        assert len(result["contributors"]) == 1
+        assert result["contributors"][0]["pnl_delta"] == "50"
+        # MSFT closed but prior row is v1 (no realised baseline) → skipped.
+        assert result["drags"] == []
+
+
+class TestHoldingsSection:
+    def test_weights_since_entry_and_contribution(self) -> None:
+        holdings = (
+            _holding(instrument_id=1, symbol="AAPL", cost_basis=800.0, market_value=900.0),
+            _holding(instrument_id=2, symbol="JPM", cost_basis=100.0, market_value=100.0),
+        )
+        val = _valuation_with(holdings, cash=0.0)
+        prior_positions = [
+            {
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "unrealized_pnl": "60",
+                "cost_basis": "800",
+                "realized_pnl": "0",
+            }
+        ]
+        realized_now = {1: {"symbol": "AAPL", "realized_pnl": Decimal("0")}}
+        rows = _holdings_section(val, prior_positions, realized_now, Decimal("1000"))
+        assert [r["symbol"] for r in rows] == ["AAPL", "JPM"]
+        aapl = rows[0]
+        assert aapl["weight_pct"] == "0.900000"
+        assert aapl["since_entry_return_pct"] == "0.125000"
+        # Unrealised now 100 vs prior 60 → +40 period contribution.
+        assert aapl["period_contribution"] == "40.000000"
+        # 40 / 1000 opening value = 400 bps.
+        assert aapl["period_contribution_bps"] == "400.000000"
+        # New position this period: no prior row → null contribution.
+        assert rows[1]["period_contribution"] is None
+
+    def test_no_prior_and_zero_cost_are_null_safe(self) -> None:
+        holdings = (_holding(cost_basis=0.0, market_value=0.0, units=0.0),)
+        val = _valuation_with(holdings, cash=0.0)
+        rows = _holdings_section(val, None, {}, None)
+        assert rows[0]["since_entry_return_pct"] is None
+        assert rows[0]["weight_pct"] is None
+        assert rows[0]["period_contribution"] is None

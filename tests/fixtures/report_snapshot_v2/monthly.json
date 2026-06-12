@@ -1,0 +1,183 @@
+{
+  "attribution_summary": {
+    "avg_cost_drag_pct": null,
+    "avg_gross_return_pct": null,
+    "avg_market_return_pct": null,
+    "avg_model_alpha_pct": null,
+    "avg_sector_return_pct": null,
+    "avg_timing_alpha_pct": null,
+    "positions_attributed": 0,
+    "weighting": "equal"
+  },
+  "avg_holding_days": null,
+  "best_trade": null,
+  "costs": {
+    "fees_total": "0",
+    "fill_count": 0,
+    "scope": "own_platform_orders_only"
+  },
+  "cover": {
+    "benchmark_return": null,
+    "benchmark_si_return": null,
+    "benchmark_ytd_return": null,
+    "bridge": {
+      "broker_adjustments_residual": null,
+      "closing_value": "2100.000000",
+      "net_external_flows": "0.000000",
+      "opening_value": null,
+      "realized_delta": null,
+      "unrealized_delta": null
+    },
+    "cash": "1000.000000",
+    "closing_value": "2100.000000",
+    "display_currency": "USD",
+    "excess_return": null,
+    "mirror_equity": "0.000000",
+    "opening_value": null,
+    "period_return": null,
+    "realized_delta": null,
+    "return_method": "modified_dietz_v1",
+    "si_return": null,
+    "unrealized_delta": null,
+    "ytd_return": null
+  },
+  "generated_at": "2026-06-12T10:49:45.667501+00:00",
+  "holdings": [
+    {
+      "company_name": "Report Co",
+      "cost_basis": "1000.000000",
+      "instrument_id": 789801,
+      "market_value": "1100.000000",
+      "period_contribution": null,
+      "period_contribution_bps": null,
+      "price": "110.000000",
+      "sector": "Technology",
+      "since_entry_return_pct": "0.100000",
+      "symbol": "RPTV2A",
+      "units": "10.000000",
+      "unrealized_pnl": "100.000000",
+      "valuation_source": "quote",
+      "weight_pct": "0.523810"
+    }
+  ],
+  "income": {
+    "basis": "declared_dps_x_current_units",
+    "estimated_totals": {},
+    "items": []
+  },
+  "performance": {
+    "benchmark": {
+      "close_end": null,
+      "close_start": null,
+      "label": "S&P 500 (price index)",
+      "return_pct": null,
+      "symbol": "SPX500"
+    },
+    "fx_mode": "generation_date",
+    "method": "modified_dietz_v1",
+    "observations": 0,
+    "period_return": null,
+    "portfolio_value": "2100.000000"
+  },
+  "period_contribution": {
+    "contributors": [],
+    "drags": []
+  },
+  "period_end": "2026-05-31",
+  "period_start": "2026-05-01",
+  "pnl": {
+    "note": "current-state snapshot, not period delta",
+    "realized_pnl": "0.000000",
+    "total_pnl": "100.000000",
+    "unrealized_pnl": "100.000000"
+  },
+  "position_pnl": [],
+  "positions": [
+    {
+      "company_name": "Report Co",
+      "cost_basis": "1000.000000",
+      "current_units": "10.000000",
+      "instrument_id": 789801,
+      "realized_pnl": "0.000000",
+      "symbol": "RPTV2A",
+      "unrealized_pnl": "100.000000"
+    }
+  ],
+  "report_type": "monthly",
+  "risk": {
+    "concentration_top5_pct": "0.523810",
+    "holding_count": 1,
+    "insufficient_history": true,
+    "max_drawdown": null,
+    "observation_label": "since inception, monthly observations",
+    "observations": 0,
+    "sector_exposure": {
+      "Technology": "0.523810"
+    },
+    "volatility": null
+  },
+  "rolling_returns": {
+    "1m": {
+      "benchmark": null,
+      "excess": null,
+      "portfolio": null
+    },
+    "1y": {
+      "benchmark": null,
+      "excess": null,
+      "portfolio": null
+    },
+    "3m": {
+      "benchmark": null,
+      "excess": null,
+      "portfolio": null
+    },
+    "6m": {
+      "benchmark": null,
+      "excess": null,
+      "portfolio": null
+    },
+    "si": {
+      "benchmark": null,
+      "excess": null,
+      "portfolio": null
+    }
+  },
+  "schema_version": 2,
+  "score_changes": [],
+  "tax_provision": {
+    "estimated_tax_gbp": "0",
+    "estimated_tax_usd": "0",
+    "tax_year": "2026/27"
+  },
+  "thesis_accuracy": [],
+  "thesis_summary": {
+    "avoid": {
+      "hit_rate_pct": null,
+      "hits": 0,
+      "n": 0
+    },
+    "buy": {
+      "hit_rate_pct": null,
+      "hits": 0,
+      "n": 0
+    },
+    "evaluated": 0,
+    "hits": 0,
+    "misses": 0,
+    "not_evaluable": 0,
+    "total": 0
+  },
+  "trade_stats": {
+    "avg_holding_days": null,
+    "avg_loss_pct": null,
+    "avg_win_pct": null,
+    "losers": 0,
+    "payoff_ratio": null,
+    "total_closed": 0,
+    "win_rate_pct": null,
+    "winners": 0
+  },
+  "win_rate": null,
+  "worst_trade": null
+}

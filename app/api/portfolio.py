@@ -38,8 +38,8 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.domain.positions import PositionSource
 from app.services.fx import FxRateNotFound, convert, load_live_fx_rates_with_metadata
-from app.services.portfolio import load_mirror_breakdowns
 from app.services.runtime_config import get_runtime_config
+from app.services.valuation import HoldingValuation, compute_portfolio_valuation
 
 logger = logging.getLogger(__name__)
 
@@ -190,75 +190,27 @@ def _convert_value(
         return value
 
 
-def _parse_position(
-    row: dict[str, object],
-    display_currency: str,
-    rates: dict[tuple[str, str], Decimal],
-) -> PositionItem:
-    cost_basis = float(row["cost_basis"])  # type: ignore[arg-type]
-    current_units = float(row["current_units"])  # type: ignore[arg-type]
-    native_currency: str = str(row.get("currency") or "USD")  # fallback for un-enriched
+def _position_item(h: HoldingValuation) -> PositionItem:
+    """API shape for one valued holding.
 
-    # Mark-to-market hierarchy: live quote (last>0 → bid/ask mid) →
-    # price_daily.close → cost_basis. A non-positive last/close is not a
-    # valid mark (#1428). valuation_source tells the dashboard which tier
-    # produced the value.
-    quote_price = resolve_quote_price(
-        parse_optional_float(row, "last"),
-        parse_optional_float(row, "bid"),
-        parse_optional_float(row, "ask"),
-    )
-    daily_close = parse_optional_float(row, "daily_close")
-
-    if quote_price is not None:
-        current_price: float | None = quote_price
-        market_value = current_units * quote_price
-        unrealized_pnl = market_value - cost_basis
-        valuation_source = "quote"
-    elif daily_close is not None and daily_close > 0:
-        current_price = daily_close
-        market_value = current_units * daily_close
-        unrealized_pnl = market_value - cost_basis
-        valuation_source = "daily_close"
-    else:
-        current_price = None
-        market_value = cost_basis
-        unrealized_pnl = 0.0
-        valuation_source = "cost_basis"
-
-    # Convert all monetary values to display currency in a single block
-    # so they either all convert or all stay in native currency.
-    avg_cost = parse_optional_float(row, "avg_cost")
-    if native_currency != display_currency:
-        try:
-            market_value = float(convert(Decimal(str(market_value)), native_currency, display_currency, rates))
-            cost_basis = float(convert(Decimal(str(cost_basis)), native_currency, display_currency, rates))
-            unrealized_pnl = float(convert(Decimal(str(unrealized_pnl)), native_currency, display_currency, rates))
-            if current_price is not None:
-                current_price = float(convert(Decimal(str(current_price)), native_currency, display_currency, rates))
-            if avg_cost is not None:
-                avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
-        except FxRateNotFound:
-            logger.warning(
-                "FX rate %s→%s not found; skipping conversion for position",
-                native_currency,
-                display_currency,
-            )
-
+    All marking + FX math lives in
+    `app.services.valuation.compute_portfolio_valuation` (#1596) — this
+    is a pure field mapping.
+    """
     return PositionItem(
-        instrument_id=row["instrument_id"],  # type: ignore[arg-type]
-        symbol=row["symbol"],  # type: ignore[arg-type]
-        company_name=row["company_name"],  # type: ignore[arg-type]
-        open_date=row["open_date"],  # type: ignore[arg-type]
-        avg_cost=avg_cost,
-        current_price=current_price,
-        current_units=current_units,
-        cost_basis=cost_basis,
-        market_value=market_value,
-        unrealized_pnl=unrealized_pnl,
-        valuation_source=valuation_source,
-        source=row["source"],  # type: ignore[arg-type]
-        updated_at=row["updated_at"],  # type: ignore[arg-type]
+        instrument_id=h.instrument_id,
+        symbol=h.symbol,
+        company_name=h.company_name,
+        open_date=h.open_date,
+        avg_cost=h.avg_cost,
+        current_price=h.current_price,
+        current_units=h.current_units,
+        cost_basis=h.cost_basis,
+        market_value=h.market_value,
+        unrealized_pnl=h.unrealized_pnl,
+        valuation_source=h.valuation_source,
+        source=h.source,
+        updated_at=h.updated_at,
     )
 
 
@@ -334,55 +286,15 @@ def get_portfolio(
     If cash_balance is unknown (empty cash_ledger), AUM uses positions only
     and cash_balance is null. mirror_equity is always a float (default 0.0).
     """
-    # -- Load display currency and FX rates ----------------------------------
-    config = get_runtime_config(conn)
-    display_currency = config.display_currency
-    rates_meta = load_live_fx_rates_with_metadata(conn)
-    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
-
-    # -- Positions query ---------------------------------------------------
-    # quotes is 1:1 keyed by instrument_id (PRIMARY KEY) — LEFT JOIN is fan-out-safe.
-    # Zero-unit positions are excluded: fully liquidated positions should not
-    # appear in the portfolio view or inflate AUM.
-    # i.currency: the instrument's native currency for FX conversion.
-    # LEFT JOIN quotes (1:1 by PK) and latest price_daily (DISTINCT ON
-    # avoids fan-out — one row per instrument, most recent date).
-    positions_sql = """
-        SELECT p.instrument_id, i.symbol, i.company_name, i.currency,
-               p.open_date, p.avg_cost, p.current_units, p.cost_basis,
-               p.source, p.updated_at,
-               q.last, q.bid, q.ask,
-               pd.close AS daily_close
-        FROM positions p
-        JOIN instruments i USING (instrument_id)
-        LEFT JOIN quotes q USING (instrument_id)
-        LEFT JOIN LATERAL (
-            SELECT close
-            FROM price_daily
-            WHERE instrument_id = p.instrument_id
-              AND close IS NOT NULL
-            ORDER BY price_date DESC
-            LIMIT 1
-        ) pd ON true
-        WHERE p.current_units > 0
-        ORDER BY p.cost_basis DESC, p.instrument_id ASC
-    """
-
-    # -- Cash query --------------------------------------------------------
-    # SUM on empty table returns NULL (one row, NULL value) — not zero rows.
-    cash_sql = "SELECT SUM(amount) AS cash_balance FROM cash_ledger"
-
-    # Use separate cursors for logically independent queries to avoid
-    # relying on psycopg v3 cursor reuse semantics after fetchall().
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(positions_sql)
-        pos_rows = cur.fetchall()
-
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(cash_sql)
-        cash_row = cur.fetchone()
-        # SUM() always returns exactly one row; the value is None when the table is empty.
-        raw_cash = cash_row["cash_balance"] if cash_row else None  # type: ignore[index]
+    # -- Shared valuation (#1596) -------------------------------------------
+    # Positions mark-to-market, cash, mirror equity, and total_aum all come
+    # from compute_portfolio_valuation — the same helper the report
+    # builders use, so the report cover and this headline cannot drift.
+    val = compute_portfolio_valuation(conn)
+    display_currency = val.display_currency
+    rates = val.rates
+    rates_meta = val.rates_meta
+    pos_rows = list(val.raw_rows)
 
     # -- Broker positions (individual trades per instrument) ----------------
     broker_sql = """
@@ -489,24 +401,17 @@ def get_portfolio(
             )
         )
 
-    positions = [_parse_position(r, display_currency, rates) for r in pos_rows]
+    positions = [_position_item(h) for h in val.holdings]
 
     # Attach individual trades to their parent position.
     for pos in positions:
         pos.trades = trades_by_instrument.get(pos.instrument_id, [])
 
-    cash_balance = float(raw_cash) if raw_cash is not None else None  # type: ignore[arg-type]
+    cash_balance = val.cash_balance
 
-    # Convert cash_balance — always USD for eToro.
-    if cash_balance is not None:
-        cash_balance = _convert_value(cash_balance, "USD", display_currency, rates)
-
-    # AUM: sum of position market_values + cash (if known) + mirror_equity.
-    total_market = sum(p.market_value for p in positions)
-
-    # Per-mirror breakdowns — derive total mirror_equity from these so we
-    # load mirror data once instead of running two separate queries.
-    mirror_breakdowns = load_mirror_breakdowns(conn)
+    # Per-mirror breakdowns — loaded once inside the valuation helper;
+    # the per-mirror display rows still convert each figure here.
+    mirror_breakdowns = val.mirror_breakdowns
     raw_mirror_equity = sum(mb.mirror_equity_usd for mb in mirror_breakdowns)
 
     # Convert each mirror's monetary values from USD to display currency.
@@ -525,17 +430,15 @@ def get_portfolio(
             )
         )
 
-    # Convert total mirror_equity — always USD for eToro.
-    mirror_equity = _convert_value(raw_mirror_equity, "USD", display_currency, rates)
-
-    total_aum = total_market + (cash_balance if cash_balance is not None else 0.0) + mirror_equity
+    mirror_equity = val.mirror_equity
+    total_aum = val.total_aum
 
     # Re-sort by market_value DESC (computed value, not a DB column) with stable tiebreak.
     positions.sort(key=lambda p: (-p.market_value, p.instrument_id))
 
     # Build fx_rates_used from source currencies actually consumed.
     fx_rates_used = _build_fx_rates_used(
-        pos_rows, raw_cash is not None, raw_mirror_equity, display_currency, rates_meta
+        pos_rows, cash_balance is not None, raw_mirror_equity, display_currency, rates_meta
     )
 
     # Union of every instrument_id the page should subscribe to live

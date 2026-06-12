@@ -1,0 +1,104 @@
+{
+  "bottom_performers": [],
+  "budget": {
+    "available_for_deployment": "900.0000000000",
+    "cash_balance": "1000.000000",
+    "deployed_capital": "1000.000000",
+    "estimated_tax_usd": "0"
+  },
+  "cover": {
+    "benchmark_return": null,
+    "benchmark_si_return": null,
+    "benchmark_ytd_return": null,
+    "bridge": {
+      "broker_adjustments_residual": null,
+      "closing_value": "2100.000000",
+      "net_external_flows": "0.000000",
+      "opening_value": null,
+      "realized_delta": null,
+      "unrealized_delta": null
+    },
+    "cash": "1000.000000",
+    "closing_value": "2100.000000",
+    "display_currency": "USD",
+    "excess_return": null,
+    "mirror_equity": "0.000000",
+    "opening_value": null,
+    "period_return": null,
+    "realized_delta": null,
+    "return_method": "modified_dietz_v1",
+    "si_return": null,
+    "unrealized_delta": null,
+    "ytd_return": null
+  },
+  "generated_at": "2026-06-12T10:49:45.644780+00:00",
+  "holdings": [
+    {
+      "company_name": "Report Co",
+      "cost_basis": "1000.000000",
+      "instrument_id": 789801,
+      "market_value": "1100.000000",
+      "period_contribution": null,
+      "period_contribution_bps": null,
+      "price": "110.000000",
+      "sector": "Technology",
+      "since_entry_return_pct": "0.100000",
+      "symbol": "RPTV2A",
+      "units": "10.000000",
+      "unrealized_pnl": "100.000000",
+      "valuation_source": "quote",
+      "weight_pct": "0.523810"
+    }
+  ],
+  "performance": {
+    "benchmark": {
+      "close_end": null,
+      "close_start": null,
+      "label": "S&P 500 (price index)",
+      "return_pct": null,
+      "symbol": "SPX500"
+    },
+    "fx_mode": "generation_date",
+    "method": "modified_dietz_v1",
+    "observations": 0,
+    "period_return": null,
+    "portfolio_value": "2100.000000"
+  },
+  "period_contribution": {
+    "contributors": [],
+    "drags": []
+  },
+  "period_end": "2026-05-31",
+  "period_start": "2026-05-25",
+  "pnl": {
+    "note": "current-state snapshot, not period delta",
+    "realized_pnl": "0.000000",
+    "total_pnl": "100.000000",
+    "unrealized_pnl": "100.000000"
+  },
+  "positions": [
+    {
+      "company_name": "Report Co",
+      "cost_basis": "1000.000000",
+      "current_units": "10.000000",
+      "instrument_id": 789801,
+      "realized_pnl": "0.000000",
+      "symbol": "RPTV2A",
+      "unrealized_pnl": "100.000000"
+    }
+  ],
+  "positions_closed": [],
+  "positions_opened": [],
+  "report_type": "weekly",
+  "schema_version": 2,
+  "score_changes": [],
+  "top_performers": [
+    {
+      "company_name": "Report Co",
+      "instrument_id": 789801,
+      "symbol": "RPTV2A",
+      "unrealized_pnl": "100.000000"
+    }
+  ],
+  "upcoming_earnings": []
+}
