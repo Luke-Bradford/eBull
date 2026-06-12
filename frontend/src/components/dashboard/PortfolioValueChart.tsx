@@ -69,6 +69,11 @@ interface HoverState {
   date: string;
   value: number;
   trades: ValueHistoryEvent[];
+  /** Crosshair px coordinates relative to the chart container — the
+   *  tooltip follows the cursor (a corner-pinned overlay reads as
+   *  disconnected from the hovered point). */
+  x: number;
+  y: number;
 }
 
 export function PortfolioValueChart(): JSX.Element | null {
@@ -250,7 +255,7 @@ function ValueCanvas({
 
     chart.subscribeCrosshairMove((param) => {
       const sp = seriesRef.current;
-      if (!param.time || !sp || typeof param.time !== "number") {
+      if (!param.time || !sp || typeof param.time !== "number" || !param.point) {
         setHover(null);
         return;
       }
@@ -264,6 +269,8 @@ function ValueCanvas({
         date,
         value: (pt as { value: number }).value,
         trades: eventsRef.current.filter((e) => e.date === date),
+        x: param.point.x,
+        y: param.point.y,
       });
     });
 
@@ -350,10 +357,40 @@ function ValueCanvas({
     // theme.down, identical across light and dark (saturated palette).
   }, [events]);
 
+  // Tooltip placement: offset right of the crosshair, flipped left
+  // when it would clip the container edge, vertically clamped.
+  // pointer-events-none keeps the tooltip out of hit-testing — it can
+  // never sit between the cursor and the chart, so hover stays stable
+  // (the previous corner-pinned card also read as disconnected from
+  // the hovered point; operator feedback 2026-06-13).
+  // TIP_W is the max-w cap, not the rendered width — short cards flip
+  // a little early near the right edge, which errs on the visible
+  // side (measuring the rendered width would cost a layout read per
+  // mousemove for a cosmetic gain).
+  const TIP_W = 200;
+  const TIP_OFFSET = 14;
+  // Must match the container's h-[220px] below.
+  const CONTAINER_H = 220;
+  // Tallest card: date row + 4 trade lines.
+  const TIP_H_MAX = 110;
+  const containerWidth = containerRef.current?.clientWidth ?? 0;
+  const tipLeft =
+    hover !== null
+      ? hover.x + TIP_OFFSET + TIP_W > containerWidth && hover.x - TIP_OFFSET - TIP_W > 0
+        ? hover.x - TIP_OFFSET - TIP_W
+        : hover.x + TIP_OFFSET
+      : 0;
+  const tipTop =
+    hover !== null ? Math.max(4, Math.min(hover.y - 12, CONTAINER_H - TIP_H_MAX)) : 0;
+
   return (
     <div className="relative mt-2">
       {hover !== null ? (
-        <div className="absolute right-2 top-2 z-10 rounded border border-slate-200 bg-white/90 px-2 py-1 text-xs tabular-nums shadow-sm dark:border-slate-700 dark:bg-slate-900/90">
+        <div
+          className="pointer-events-none absolute z-10 w-max max-w-[200px] rounded border border-slate-200 bg-white/95 px-2 py-1 text-xs tabular-nums shadow-sm dark:border-slate-700 dark:bg-slate-900/95"
+          style={{ left: tipLeft, top: tipTop }}
+          data-testid="value-chart-tooltip"
+        >
           <div>
             <span className="text-slate-400 dark:text-slate-500">{hover.date}</span>
             <span className="ml-2 font-medium text-slate-700 dark:text-slate-200">
