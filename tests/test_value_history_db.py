@@ -23,6 +23,19 @@ import psycopg
 from app.api.portfolio import get_value_history
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 
+
+def _db_today(conn: psycopg.Connection[tuple]) -> date:
+    """The endpoint's date series ends at Postgres CURRENT_DATE — anchor
+    the fixtures on the DB clock, not date.today(). Around midnight the
+    two disagree (local BST vs cluster UTC) and `by_date[today]` keys
+    miss (prevention log: datetime.now vs DB now() in freshness
+    windows)."""
+    cur = conn.execute("SELECT CURRENT_DATE")
+    row = cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
 _IID_BROKER = 789901  # broker-synced: position row, NO fills
 _IID_FILLS = 789902  # ebull-path: fills + position row (must not double-count)
 
@@ -82,13 +95,26 @@ def _seed(conn: psycopg.Connection[tuple], today: date) -> None:
 
 
 def _cleanup(conn: psycopg.Connection[tuple]) -> None:
+    """Remove every seeded row + restore mutated singletons. positions
+    is in the worker truncate list but fills/orders/instruments rows
+    and the runtime_config mutation would otherwise leak into
+    colocated tests (#1602; Codex ckpt-2 finding)."""
     conn.rollback()
-    conn.execute("DELETE FROM fills WHERE order_id = 889901")
-    conn.execute("DELETE FROM orders WHERE order_id = 889901")
+    conn.execute("DELETE FROM fills WHERE order_id IN (889901, 889902, 889903)")
+    conn.execute("DELETE FROM orders WHERE order_id IN (889901, 889902, 889903)")
     conn.execute(
         "DELETE FROM price_daily WHERE instrument_id IN (%(a)s, %(b)s)",
         {"a": _IID_BROKER, "b": _IID_FILLS},
     )
+    conn.execute(
+        "DELETE FROM positions WHERE instrument_id IN (%(a)s, %(b)s)",
+        {"a": _IID_BROKER, "b": _IID_FILLS},
+    )
+    conn.execute(
+        "DELETE FROM instruments WHERE instrument_id IN (%(a)s, %(b)s)",
+        {"a": _IID_BROKER, "b": _IID_FILLS},
+    )
+    conn.execute("UPDATE runtime_config SET display_currency = 'GBP' WHERE id = TRUE")
     conn.commit()
 
 
@@ -96,7 +122,7 @@ def test_hybrid_units_basis_prices_broker_positions_and_avoids_double_count(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
     conn = ebull_test_conn
-    today = date.today()
+    today = _db_today(conn)
     _seed(conn, today)
     try:
         resp = get_value_history(range="1m", conn=conn)
@@ -127,5 +153,53 @@ def test_hybrid_units_basis_prices_broker_positions_and_avoids_double_count(
         assert ("VHDB1", "BUY", 10.0, "position_open") in events
         assert ("VHDB2", "BUY", 5.0, "fill") in events
         assert len([e for e in events if e[0] == "VHDB2"]) == 1
+    finally:
+        _cleanup(conn)
+
+
+def test_broker_reopen_after_closed_fills_lifecycle_stays_priced(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """An instrument with OLD fills that net to zero (bought + fully
+    closed via our order path) and a CURRENT broker-synced position is
+    a broker re-open: the position basis must price it. An
+    any-fills-ever suppression rule made the holding invisible (Codex
+    ckpt-2 finding)."""
+    conn = ebull_test_conn
+    today = _db_today(conn)
+    _seed(conn, today)
+    try:
+        # Closed fills lifecycle on the BROKER instrument: BUY 3 then
+        # EXIT 3, both before the current position's open_date.
+        conn.execute(
+            """
+            INSERT INTO orders (order_id, instrument_id, action, order_type, requested_units, status, created_at)
+            VALUES (889902, %(a)s, 'BUY', 'market', 3, 'filled', %(t1)s),
+                   (889903, %(a)s, 'EXIT', 'market', 3, 'filled', %(t2)s)
+            ON CONFLICT (order_id) DO NOTHING
+            """,
+            {"a": _IID_BROKER, "t1": today - timedelta(days=30), "t2": today - timedelta(days=20)},
+        )
+        conn.execute(
+            """
+            INSERT INTO fills (order_id, units, price, gross_amount, fees, filled_at)
+            VALUES (889902, 3, 90, 270, 0, %(t1)s),
+                   (889903, 3, 95, 285, 0, %(t2)s)
+            """,
+            {"t1": today - timedelta(days=30), "t2": today - timedelta(days=20)},
+        )
+        conn.commit()
+
+        resp = get_value_history(range="3m", conn=conn)
+        by_date = {p.date: p.value for p in resp.points}
+
+        # Today still prices the re-opened broker position: 10×120 +
+        # fills instrument 5×50 = 1450. Suppressed-position bug would
+        # read 250.
+        assert by_date[today] == 1450.0
+
+        # The re-open keeps its BUY marker too.
+        events = [(e.symbol, e.side, e.source) for e in resp.events]
+        assert ("VHDB1", "BUY", "position_open") in events
     finally:
         _cleanup(conn)

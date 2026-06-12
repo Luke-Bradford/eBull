@@ -937,15 +937,32 @@ def get_value_history(
                 GROUP BY d.d, fs.instrument_id
                 HAVING SUM(fs.units) > 0
             ),
+            fills_open_now AS (
+                -- Instruments whose fills replay nets OPEN units today.
+                -- Only these suppress the position basis below: an
+                -- instrument with old fills that net to zero (closed
+                -- via our order path) and a CURRENT broker-synced
+                -- position row is a broker re-open — the position
+                -- basis must price it or the holding goes invisible
+                -- (Codex ckpt-2 finding). Overlap between a closed
+                -- fills lifecycle and a position whose open_date
+                -- predates the fills close would double-count that
+                -- span; that requires contradictory data and resolves
+                -- properly with the #1593 ledger.
+                SELECT instrument_id
+                FROM fills_signed
+                GROUP BY instrument_id
+                HAVING SUM(units) > 0
+            ),
             position_units AS (
                 -- Broker-synced holdings have no fills rows: back-fill
                 -- units from each open position's open_date at TODAY's
                 -- units (#1594 hybrid basis; see endpoint docstring for
-                -- the documented approximations). Instruments with any
-                -- fills are excluded here — the fills replay above is
-                -- their exact source, and double-counting would
-                -- inflate NAV. NULL open_date contributes from the
-                -- window start (held since before we tracked it).
+                -- the documented approximations). NULL open_date
+                -- contributes from the window start (held since before
+                -- we tracked it) — note these holdings get NO buy
+                -- marker in `events` (an unknowable date pinned to the
+                -- window start would shift with the selected range).
                 SELECT
                     d.d,
                     p.instrument_id,
@@ -954,11 +971,7 @@ def get_value_history(
                 JOIN positions p
                   ON COALESCE(p.open_date, '-infinity'::date) <= d.d
                 WHERE p.current_units > 0
-                  AND NOT EXISTS (
-                      SELECT 1 FROM fills f2
-                      JOIN orders o2 ON o2.order_id = f2.order_id
-                      WHERE o2.instrument_id = p.instrument_id
-                  )
+                  AND p.instrument_id NOT IN (SELECT instrument_id FROM fills_open_now)
                 GROUP BY d.d, p.instrument_id
                 HAVING SUM(p.current_units) > 0
             ),
@@ -1017,9 +1030,12 @@ def get_value_history(
         cash_rows = cur.fetchall()
 
     # 3. Buy/sell events for chart markers (#1594). Mirrors the hybrid
-    #    units basis exactly: fills rows are exact events; no-fills
-    #    broker positions contribute their open as a BUY so every step
-    #    in the curve has a marker explaining it.
+    #    units basis for positions with KNOWN open dates: fills rows
+    #    are exact events; no-open-fills broker positions contribute
+    #    their open as a BUY. NULL-open holdings price into the curve
+    #    but get no marker (no knowable date to pin it to), and the
+    #    position-basis suppression keys on fills that net OPEN today
+    #    — same rule as `fills_open_now` above.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -1044,10 +1060,15 @@ def get_value_history(
             WHERE p.current_units > 0
               AND p.open_date IS NOT NULL
               AND p.open_date >= %(start)s
-              AND NOT EXISTS (
-                  SELECT 1 FROM fills f2
+              AND p.instrument_id NOT IN (
+                  SELECT o2.instrument_id
+                  FROM fills f2
                   JOIN orders o2 ON o2.order_id = f2.order_id
-                  WHERE o2.instrument_id = p.instrument_id
+                  WHERE o2.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
+                  GROUP BY o2.instrument_id
+                  HAVING SUM(
+                      CASE WHEN o2.action IN ('BUY', 'ADD') THEN f2.units ELSE -f2.units END
+                  ) > 0
               )
             ORDER BY event_date, symbol
             """,
