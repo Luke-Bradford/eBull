@@ -131,7 +131,7 @@ export function PortfolioValueChart(): JSX.Element | null {
               caption would just duplicate. */}
           {data?.fx_mode === "live" && hasMovement && fxSkipped === 0 ? (
             <span className="text-[10px] text-slate-400 dark:text-slate-500">
-              historical converted at today's FX
+              historical converted at today's FX · excludes copy-portfolio equity
             </span>
           ) : null}
           {/* Keep the FX-missing signal even when the chart has

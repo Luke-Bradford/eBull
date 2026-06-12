@@ -808,11 +808,24 @@ def get_value_history(
         plus sum over each currency:
             net_cash_ledger_at_D                       (converted to display ccy)
 
-    Signed units replay the fills ledger by order action (BUY/ADD add,
-    SELL/EXIT subtract). If a position had no `price_daily` close on
-    or before D (e.g. new listing with stale local store), that bar
-    is skipped for that day — conservatively under-states value
-    rather than inventing a zero.
+    units_at_D is a hybrid (#1594 v1, pre-trade-ledger):
+
+    - Instruments with `fills` rows replay the fills ledger by order
+      action (BUY/ADD add, SELL/EXIT subtract) — exact through our own
+      opens AND closes.
+    - Broker-synced holdings carry no fills; each open position
+      contributes its CURRENT units from its `open_date` forward.
+      Known approximations until the #1593 ledger: partial adds/trims
+      before today are backdated to open_date, and closed broker
+      positions drop out of history entirely (the sync never recorded
+      them).
+    - Mirror/copy-portfolio equity is EXCLUDED — there is no history
+      source for it; the dashboard headline includes it, so this
+      series reads below `total_aum` by the live mirror equity.
+
+    If a position had no `price_daily` close on or before D (e.g. new
+    listing with stale local store), that bar is skipped for that day —
+    conservatively under-states value rather than inventing a zero.
 
     FX conversion uses the **live** snapshot only (`live_fx_rates`).
     Historical daily FX is only populated on tax-event dates today, so
@@ -839,7 +852,10 @@ def get_value_history(
                 SELECT COALESCE(
                     LEAST(
                         (SELECT MIN(filled_at::date) FROM fills),
-                        (SELECT MIN(event_time::date) FROM cash_ledger)
+                        (SELECT MIN(event_time::date) FROM cash_ledger),
+                        -- Broker-synced holdings start history at their
+                        -- position open_date (#1594 hybrid basis).
+                        (SELECT MIN(open_date) FROM positions WHERE current_units > 0)
                     ),
                     CURRENT_DATE
                 ) AS start_date
@@ -886,7 +902,7 @@ def get_value_history(
                 JOIN orders o ON o.order_id = f.order_id
                 WHERE o.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
             ),
-            units_per_day AS (
+            fills_units AS (
                 -- Long-only invariant (CLAUDE.md, eBull non-negotiables
                 -- "Long only in v1. No shorting."). We intentionally
                 -- drop zero and negative net-units: zero = fully
@@ -901,6 +917,36 @@ def get_value_history(
                 JOIN fills_signed fs ON fs.fill_date <= d.d
                 GROUP BY d.d, fs.instrument_id
                 HAVING SUM(fs.units) > 0
+            ),
+            position_units AS (
+                -- Broker-synced holdings have no fills rows: back-fill
+                -- units from each open position's open_date at TODAY's
+                -- units (#1594 hybrid basis; see endpoint docstring for
+                -- the documented approximations). Instruments with any
+                -- fills are excluded here — the fills replay above is
+                -- their exact source, and double-counting would
+                -- inflate NAV. NULL open_date contributes from the
+                -- window start (held since before we tracked it).
+                SELECT
+                    d.d,
+                    p.instrument_id,
+                    SUM(p.current_units) AS units_at_date
+                FROM dates d
+                JOIN positions p
+                  ON COALESCE(p.open_date, '-infinity'::date) <= d.d
+                WHERE p.current_units > 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM fills f2
+                      JOIN orders o2 ON o2.order_id = f2.order_id
+                      WHERE o2.instrument_id = p.instrument_id
+                  )
+                GROUP BY d.d, p.instrument_id
+                HAVING SUM(p.current_units) > 0
+            ),
+            units_per_day AS (
+                SELECT d, instrument_id, units_at_date FROM fills_units
+                UNION ALL
+                SELECT d, instrument_id, units_at_date FROM position_units
             )
             SELECT
                 u.d AS point_date,
