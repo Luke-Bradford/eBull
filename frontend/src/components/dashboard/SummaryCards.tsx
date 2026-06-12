@@ -2,6 +2,7 @@ import type { BudgetStateResponse, PortfolioResponse } from "@/api/types";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatPct, pnlPct } from "@/lib/format";
 import { SectionSkeleton } from "@/components/dashboard/Section";
+import { StatTile } from "@/components/dashboard/StatTile";
 
 /**
  * Four top-level cards: Total AUM, Cash, Unrealized P&L, Available for
@@ -59,13 +60,13 @@ export function SummaryCards({
 
   return (
     <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
-      <Card label="Total AUM" value={formatMoney(data.total_aum, currency)} />
-      <Card
+      <StatTile label="Total AUM" value={formatMoney(data.total_aum, currency)} />
+      <StatTile
         label="Cash balance"
         value={formatMoney(data.cash_balance, currency)}
         hint={data.cash_balance === null ? "unknown" : undefined}
       />
-      <Card
+      <StatTile
         label="Unrealized P&L"
         value={formatMoney(totalPnl, currency)}
         hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
@@ -88,7 +89,7 @@ function DeploymentCard({
   if (budget === null) {
     // Distinguish "still loading" (skeleton) from "failed" (dash + hint).
     if (budgetError) {
-      return <Card label="Available for deployment" value="—" hint="Budget unavailable" />;
+      return <StatTile label="Available for deployment" value="—" hint="Budget unavailable" />;
     }
     return (
       <div className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
@@ -113,41 +114,11 @@ function DeploymentCard({
       : "positive";
 
   return (
-    <Card
+    <StatTile
       label="Available for deployment"
       value={isNull ? "—" : formatMoney(available, currency)}
       hint={isNull ? "Cash unknown" : isLow ? "Low deployment capital" : undefined}
       tone={tone}
     />
-  );
-}
-
-function Card({
-  label,
-  value,
-  hint,
-  tone,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  tone?: "positive" | "negative";
-}) {
-  const toneClass =
-    tone === "positive"
-      ? "text-emerald-600 dark:text-emerald-400"
-      : tone === "negative"
-        ? "text-rose-600 dark:text-rose-400"
-        : "text-slate-900 dark:text-slate-100";
-  return (
-    <div className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
-        {label}
-      </div>
-      <div className={`mt-1 text-2xl font-semibold tabular-nums ${toneClass}`}>
-        {value}
-      </div>
-      {hint ? <div className="mt-1 text-xs tabular-nums text-slate-500">{hint}</div> : null}
-    </div>
   );
 }
