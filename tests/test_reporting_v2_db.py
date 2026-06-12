@@ -215,6 +215,12 @@ def test_v2_fixture_is_backend_emitted(ebull_test_conn: psycopg.Connection[tuple
         (_FIXTURE_DIR / "weekly.json").write_text(json.dumps(weekly, indent=2, sort_keys=True) + "\n")
         (_FIXTURE_DIR / "monthly.json").write_text(json.dumps(monthly, indent=2, sort_keys=True) + "\n")
 
+    # The id→name join must actually resolve (#1598): a broken
+    # etoro_stocks_industries lookup would silently emit sector=None /
+    # group everything as "Unknown" while the key-structure checks pass.
+    assert monthly["holdings"][0]["sector"] == "Technology"
+    assert "Technology" in monthly["risk"]["sector_exposure"]
+
     for name, generated in (("weekly", weekly), ("monthly", monthly)):
         fixture = json.loads((_FIXTURE_DIR / f"{name}.json").read_text())
         assert set(fixture.keys()) == set(generated.keys()), name
