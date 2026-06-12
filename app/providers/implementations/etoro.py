@@ -345,7 +345,9 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
         # universe.py derives it from the operator-curated exchanges.currency
         # via the exchange join (same as country) — sql/159, #1431.
         currency=None,
-        sector=_str_or_none(item.get("stocksIndustryId")),
+        # Key is capital-ID like every sibling (instrumentID, exchangeID);
+        # 0 is eToro's FX/commodity "no industry" sentinel → None (#1598).
+        sector=_str_or_none(_int_or_none(item.get("stocksIndustryID"))),
         industry=None,  # secondary lookup deferred
         country=None,  # not available in instruments endpoint
         is_tradable=True,  # only tradable instruments are returned by the API

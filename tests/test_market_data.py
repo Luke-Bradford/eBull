@@ -47,7 +47,7 @@ FIXTURE_INSTRUMENT = {
     "symbolFull": "AAPL",
     "instrumentDisplayName": "Apple",
     "exchangeID": 10,
-    "stocksIndustryId": 42,
+    "stocksIndustryID": 42,
     "priceSource": "Nasdaq",
     "isInternalInstrument": False,
 }

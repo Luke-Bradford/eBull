@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -692,7 +693,8 @@ def _holding(
     *,
     instrument_id: int = 1,
     symbol: str = "AAPL",
-    sector: str | None = "Technology",
+    sector: str | None = "42",
+    sector_name: str | None = "Technology",
     cost_basis: float = 1000.0,
     market_value: float = 1100.0,
     units: float = 10.0,
@@ -702,6 +704,7 @@ def _holding(
         symbol=symbol,
         company_name=f"{symbol} Inc",
         sector=sector,
+        sector_name=sector_name,
         native_currency="USD",
         open_date=date(2026, 1, 5),
         source="ebull",
@@ -823,9 +826,9 @@ class TestRiskSection:
 
     def test_concentration_and_sector_always_computable(self) -> None:
         holdings = (
-            _holding(instrument_id=1, symbol="AAPL", market_value=600.0, sector="Technology"),
-            _holding(instrument_id=2, symbol="JPM", market_value=300.0, sector="Financials"),
-            _holding(instrument_id=3, symbol="XOM", market_value=100.0, sector=None),
+            _holding(instrument_id=1, symbol="AAPL", market_value=600.0, sector_name="Technology"),
+            _holding(instrument_id=2, symbol="JPM", market_value=300.0, sector_name="Financials"),
+            _holding(instrument_id=3, symbol="XOM", market_value=100.0, sector=None, sector_name=None),
         )
         val = _valuation_with(holdings, cash=0.0)
         risk = _risk_section(val, [], None, observation_label="test")
@@ -834,6 +837,16 @@ class TestRiskSection:
         assert Decimal(risk["concentration_top5_pct"]) == Decimal("1")
         assert Decimal(risk["sector_exposure"]["Technology"]) == Decimal("0.6")
         assert "Unknown" in risk["sector_exposure"]
+
+    def test_unmapped_sector_id_groups_unknown_and_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A populated sector id with no etoro_stocks_industries row folds
+        into "Unknown" and warns (catalogue drift must surface, #1598)."""
+        holdings = (_holding(sector="99", sector_name=None),)
+        val = _valuation_with(holdings, cash=0.0)
+        with caplog.at_level(logging.WARNING, logger="app.services.reporting"):
+            risk = _risk_section(val, [], None, observation_label="test")
+        assert Decimal(risk["sector_exposure"]["Unknown"]) == Decimal("1")
+        assert any("no etoro_stocks_industries row" in r.getMessage() for r in caplog.records)
 
     def test_drawdown_and_volatility_over_full_chain(self) -> None:
         chain = [
