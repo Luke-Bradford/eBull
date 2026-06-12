@@ -118,5 +118,14 @@ def test_hybrid_units_basis_prices_broker_positions_and_avoids_double_count(
 
         # No points before the broker open_date (no cash seeded).
         assert (today - timedelta(days=5)) not in by_date
+
+        # Marker events mirror the units basis (#1594): the broker
+        # open surfaces as a position_open BUY, the fill as a fill
+        # BUY — and the fills instrument must NOT also emit a
+        # position_open event.
+        events = [(e.symbol, e.side, e.units, e.source) for e in resp.events]
+        assert ("VHDB1", "BUY", 10.0, "position_open") in events
+        assert ("VHDB2", "BUY", 5.0, "fill") in events
+        assert len([e for e in events if e[0] == "VHDB2"]) == 1
     finally:
         _cleanup(conn)

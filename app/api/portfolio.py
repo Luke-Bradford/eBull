@@ -773,6 +773,23 @@ class ValueHistoryPoint(BaseModel):
     value: float
 
 
+class ValueHistoryEvent(BaseModel):
+    """A buy/sell visible on the value-history chart (#1594 markers).
+
+    `source="fill"` rows are exact (our own order path).
+    `source="position_open"` rows are broker-synced position opens —
+    units are TODAY's units back-dated to the open (same approximation
+    as the hybrid units basis). Broker-side sells are unrecorded until
+    the #1593 ledger, so SELL events only ever come from fills.
+    """
+
+    date: date
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    units: float
+    source: Literal["fill", "position_open"]
+
+
 ValueHistoryRange = Literal["1m", "3m", "6m", "1y", "5y", "max"]
 
 
@@ -793,6 +810,8 @@ class ValueHistoryResponse(BaseModel):
     # (instruments × days).
     fx_skipped: int = 0
     points: list[ValueHistoryPoint]
+    # Buy/sell chart markers, ascending by date (#1594).
+    events: list[ValueHistoryEvent] = []
 
 
 @router.get("/value-history", response_model=ValueHistoryResponse)
@@ -997,7 +1016,57 @@ def get_value_history(
         )
         cash_rows = cur.fetchall()
 
-    # 3. Aggregate into one value per day in display currency.
+    # 3. Buy/sell events for chart markers (#1594). Mirrors the hybrid
+    #    units basis exactly: fills rows are exact events; no-fills
+    #    broker positions contribute their open as a BUY so every step
+    #    in the curve has a marker explaining it.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT f.filled_at::date AS event_date,
+                   i.symbol,
+                   CASE WHEN o.action IN ('BUY', 'ADD') THEN 'BUY' ELSE 'SELL' END AS side,
+                   f.units,
+                   'fill' AS source
+            FROM fills f
+            JOIN orders o ON o.order_id = f.order_id
+            JOIN instruments i ON i.instrument_id = o.instrument_id
+            WHERE o.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
+              AND f.filled_at::date >= %(start)s
+            UNION ALL
+            SELECT p.open_date AS event_date,
+                   i.symbol,
+                   'BUY' AS side,
+                   p.current_units AS units,
+                   'position_open' AS source
+            FROM positions p
+            JOIN instruments i ON i.instrument_id = p.instrument_id
+            WHERE p.current_units > 0
+              AND p.open_date IS NOT NULL
+              AND p.open_date >= %(start)s
+              AND NOT EXISTS (
+                  SELECT 1 FROM fills f2
+                  JOIN orders o2 ON o2.order_id = f2.order_id
+                  WHERE o2.instrument_id = p.instrument_id
+              )
+            ORDER BY event_date, symbol
+            """,
+            {"start": start_date},
+        )
+        event_rows = cur.fetchall()
+
+    events = [
+        ValueHistoryEvent(
+            date=row["event_date"],
+            symbol=str(row["symbol"]),
+            side=row["side"],
+            units=float(row["units"]),
+            source=row["source"],
+        )
+        for row in event_rows
+    ]
+
+    # 4. Aggregate into one value per day in display currency.
     # cash_ledger semantics: every INSERT site (orders.py, order_client.py,
     # portfolio_sync.py) writes a *delta* row, never an absolute snapshot.
     # SUM(amount) is therefore the running balance — correct per-call-site
@@ -1087,4 +1156,5 @@ def get_value_history(
         days=effective_days,
         fx_skipped=len(fx_missing_pairs),
         points=points,
+        events=events,
     )

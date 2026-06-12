@@ -28,13 +28,15 @@ def _make_conn(
 ) -> MagicMock:
     """Conn with one cursor per `conn.cursor()` call.
 
-    The value-history endpoint opens three cursors in sequence:
+    The value-history endpoint opens four cursors in sequence:
         1. start-date resolution (`cur.fetchone()` returns a dict
            with `start_date`)
         2. positions query (`cur.fetchall()` returns position rows)
         3. cash query (`cur.fetchall()` returns cash rows)
+        4. events query (`cur.fetchall()` returns buy/sell marker rows;
+           defaults to [] when the caller passes only two lists)
 
-    `fetchall_per_cursor` holds rows for cursors 2 and 3; the first
+    `fetchall_per_cursor` holds rows for cursors 2+; the first
     cursor's fetchone uses `start_date_row` or a sane default that
     predates every fixture in this file."""
     start_row = start_date_row or _DEFAULT_START
@@ -48,7 +50,7 @@ def _make_conn(
         if cursor_idx[0] == 0:
             cur.fetchone.return_value = start_row
         else:
-            cur.fetchall.return_value = next(fetchalls)
+            cur.fetchall.return_value = next(fetchalls, [])
         cursor_idx[0] += 1
         return cur
 
