@@ -68,6 +68,30 @@ A bare "No data" is a dead end. Every empty state should either:
 
 Operator dashboards exist to drive action; an empty state is the most expensive piece of screen real estate to waste.
 
+## Multi-surface states share one copy source
+
+A server-driven state (`no_data`, `error`, an empty array) is usually rendered on more than one surface — the L1 panel **and** the L2 page, sometimes plus a CSV/export. When you change what that state means or how its empty-state should read, **grep every surface that branches on it** before claiming done:
+
+```bash
+grep -rn 'banner.state === "no_data"' frontend/src
+grep -rn "<the hardcoded copy string>" frontend/src
+```
+
+Fixing one and assuming the rest follow leaves the page contradicting the panel (honest banner above, stale copy below). This bit #1581 twice in one review session — ckpt-1 caught the panel, ckpt-2 caught the page.
+
+Route the per-state copy through ONE shared helper, returning `string | null` so each surface keeps its own default while sharing the new branch:
+
+```ts
+// shared (e.g. ownershipMetrics.ts)
+export function staleCopy(state, asOf): string | null {
+  return state === "no_data" && asOf !== null ? "<stale copy>" : null;
+}
+// each surface
+description={staleCopy(state, asOf) ?? "<that surface's own absent copy>"}
+```
+
+Duplicating the literal in two files drifts; the shared helper is the single source of truth. "No FE change" is a claim about **absence** — it requires grepping every consumer of the changed state, not reasoning from one component.
+
 ## Top-of-page error banner has one job
 
 It fires **only when every async source on the page has failed**. Anything narrower is a per-section inline error. See `async-data-loading.md` → "Top-of-page banner is reserved for 'all sources failed'".
