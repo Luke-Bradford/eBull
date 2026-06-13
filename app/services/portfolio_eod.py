@@ -234,7 +234,11 @@ def _read_cash(conn: psycopg.Connection[Any], snapshot_date: date) -> list[tuple
             """
             SELECT currency, SUM(amount) AS balance
             FROM cash_ledger
-            WHERE event_time::date <= %(d)s
+            -- Interpret the instant in UTC before truncating to a date, so the
+            -- as-of-date boundary is independent of the session timezone (a
+            -- non-UTC session would otherwise bleed a late-UTC deposit into the
+            -- wrong day). snapshot_date is itself a UTC trading-day (price_date).
+            WHERE (event_time AT TIME ZONE 'UTC')::date <= %(d)s
             GROUP BY currency
             """,
             {"d": snapshot_date},

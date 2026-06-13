@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS portfolio_eod_position_snapshots (
     units             NUMERIC(20, 8) NOT NULL,
     close_price       NUMERIC(20, 8),             -- native-ccy close used (NULL if none on/before date)
     native_currency   TEXT,
-    value_display     NUMERIC(20, 4),             -- close*units in display ccy (NULL if skipped)
+    value_display     NUMERIC(20, 4),             -- MTM equity in display ccy (NULL if skipped)
     price_status      TEXT NOT NULL DEFAULT 'priced'
                       CHECK (price_status IN ('priced', 'no_price', 'no_fx')),
     PRIMARY KEY (snapshot_date, position_id)
