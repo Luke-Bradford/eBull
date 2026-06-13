@@ -15,6 +15,7 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
+import { ActivitySection } from "@/components/portfolio/ActivitySection";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 import type {
@@ -58,6 +59,7 @@ export function PortfolioPage() {
   const currency = useDisplayCurrency();
   const navigate = useNavigate();
 
+  const [tab, setTab] = useState<"positions" | "activity">("positions");
   const [search, setSearch] = useState("");
   const [focusedIdx, setFocusedIdx] = useState<number>(0);
   const [page, setPage] = useState<number>(1);
@@ -169,6 +171,10 @@ export function PortfolioPage() {
     }
 
     function onKey(e: KeyboardEvent) {
+      // Positions-tab shortcuts only. On the Activity tab the table is
+      // unmounted but `pageRowsRef` still holds the last positions page,
+      // so an un-gated Enter would drill into a hidden row (Codex #1593).
+      if (tab !== "positions") return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (addFor !== null || closeFor !== null) return;
 
@@ -219,7 +225,7 @@ export function PortfolioPage() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [addFor, closeFor, drillInto]);
+  }, [tab, addFor, closeFor, drillInto]);
 
   return (
     <div className="space-y-4 pt-6">
@@ -227,7 +233,36 @@ export function PortfolioPage() {
         <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Portfolio</h1>
       </div>
 
-      {portfolio.error !== null ? (
+      <div role="tablist" className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
+        {(
+          [
+            { key: "positions", label: "Positions" },
+            { key: "activity", label: "Activity" },
+          ] as const
+        ).map((t) => {
+          const active = tab === t.key;
+          return (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setTab(t.key)}
+              className={`-mb-px rounded-t border border-b-0 px-3 py-1 text-sm font-medium ${
+                active
+                  ? "border-slate-300 bg-white text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  : "border-transparent bg-transparent text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-800/40"
+              }`}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {tab === "activity" ? (
+        <ActivitySection />
+      ) : portfolio.error !== null ? (
         <SectionError onRetry={portfolio.refetch} />
       ) : portfolio.loading || portfolio.data === null ? (
         <SectionSkeleton rows={8} />

@@ -26,14 +26,20 @@ import type {
 vi.mock("@/api/portfolio", () => ({
   fetchPortfolio: vi.fn(),
   fetchInstrumentPositions: vi.fn(),
+  fetchActivity: vi.fn(),
 }));
 vi.mock("@/api/orders", () => ({ placeOrder: vi.fn(), closePosition: vi.fn() }));
 
 import { TestConfigProvider } from "@/lib/ConfigContext";
-import { fetchPortfolio, fetchInstrumentPositions } from "@/api/portfolio";
+import {
+  fetchPortfolio,
+  fetchInstrumentPositions,
+  fetchActivity,
+} from "@/api/portfolio";
 
 const mockedFetchPortfolio = vi.mocked(fetchPortfolio);
 const mockedFetchInstrumentPositions = vi.mocked(fetchInstrumentPositions);
+const mockedFetchActivity = vi.mocked(fetchActivity);
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -369,6 +375,26 @@ describe("PortfolioPage — keyboard", () => {
     await screen.findByTestId("position-row-1");
 
     await user.keyboard("{Control>}{Enter}{/Control}");
+    expect(screen.getByTestId("location").textContent).toBe("/portfolio");
+  });
+
+  it("Activity tab suppresses positions shortcuts — Enter does not drill a hidden row", async () => {
+    // pageRowsRef still holds the positions page after the table
+    // unmounts, so an un-gated Enter on the Activity tab would navigate
+    // into a hidden row. Regression guard for the Codex #1593 finding.
+    mockedFetchActivity.mockResolvedValue({
+      events: [],
+      total: 0,
+      include_mirrors: false,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId("position-row-1"); // positions loaded → ref populated
+
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    await screen.findByText(/No trade activity yet/); // ActivitySection mounted
+
+    await user.keyboard("{Enter}"); // would drill row 0 (AAA) without the tab gate
     expect(screen.getByTestId("location").textContent).toBe("/portfolio");
   });
 });
