@@ -42,7 +42,7 @@ import psycopg
 import psycopg.rows
 
 from app.config import settings
-from app.services.raw_filings import DocumentKind
+from app.services.raw_filings import SWEPT_DOCUMENT_KINDS, DocumentKind
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +50,12 @@ DEFAULT_BATCH_SIZE = 100
 """Bounds per-tx detoast cost (10-K avg ~3.5 MB -> ~350 MB worst-case
 detoast per batch for the server-side hash) and the WAL burst."""
 
-# The document kinds the sweep may destroy payloads for. MUST stay
-# disjoint from the rewash registry (structural test) — a registered
-# rewash parser reads stored bodies, which a sweep would null.
-SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset({"primary_doc"})
+# ``SWEPT_DOCUMENT_KINDS`` is canonical in ``raw_filings`` (#1615) — the
+# same set ``store_raw`` born-compacts at ingest, so this retroactive
+# sweep and the source-side born-compaction can never diverge. Re-export
+# kept so existing importers (and the retention-classification test)
+# resolve it here too.
+__all__ = ["SWEPT_DOCUMENT_KINDS", "sweep_raw_payloads", "rehydrate_raw_document"]
 
 # Manifest sources whose parsed accessions are sweep-eligible. Keyed on
 # ``sec_filing_manifest.source`` (CHECK-constrained enum, collapses

@@ -177,18 +177,24 @@ def test_happy_path_parses_and_stores_raw(
     assert row8k[1] == "8-K"
     assert row8k[2] is False
 
-    # filing_raw_documents has the body so a future re-wash can reparse.
+    # filing_raw_documents has a BORN-COMPACTED primary_doc row (#1615):
+    # 8-K primary_doc is write-only, so the row carries sha + swept_at +
+    # source_url (rehydratable) but the bytes are never stored.
     with ebull_test_conn.cursor() as cur:
         cur.execute(
             """
-            SELECT byte_count FROM filing_raw_documents
+            SELECT payload, byte_count, payload_sha256, payload_swept_at, source_url
+            FROM filing_raw_documents
             WHERE accession_number = '0000320193-26-000001'
               AND document_kind = 'primary_doc'
             """
         )
         raw = cur.fetchone()
     assert raw is not None
-    assert raw[0] > 0
+    payload, byte_count, sha, swept_at, source_url = raw
+    assert payload is None and byte_count is None
+    assert sha is not None and len(sha) == 64 and swept_at is not None
+    assert source_url
 
 
 def test_empty_fetch_tombstones(

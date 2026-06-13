@@ -7,6 +7,8 @@ CHECK constraint.
 
 from __future__ import annotations
 
+import hashlib
+
 import psycopg
 import pytest
 
@@ -135,6 +137,95 @@ def test_empty_payload_rejected_at_helper(
             document_kind="form4_xml",
             payload="",
         )
+
+
+_SAMPLE_PRIMARY_DOC = "<edgarSubmission><headerData>primary doc body</headerData></edgarSubmission>"
+_PRIMARY_URL = "https://www.sec.gov/Archives/edgar/data/1/000/primary_doc.html"
+
+
+def test_store_primary_doc_is_born_compacted(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """#1615 — write-only kinds (primary_doc) are stored BORN-COMPACTED:
+    payload NULL + recorded sha + swept_at, the bytes never persisted.
+    The row still exists (#938 raw-before-parsed invariant) and is
+    rehydratable from source_url. The recorded hash is byte-identical to
+    the Python rehydrate verifier."""
+    conn = ebull_test_conn
+    accession = "0001767470-26-001615"
+    raw_filings.store_raw(
+        conn,
+        accession_number=accession,
+        document_kind="primary_doc",
+        payload=_SAMPLE_PRIMARY_DOC,
+        parser_version="primary-v1",
+        source_url=_PRIMARY_URL,
+    )
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT payload, byte_count, payload_sha256, payload_swept_at, source_url, parser_version "
+            "FROM filing_raw_documents WHERE accession_number = %s AND document_kind = 'primary_doc'",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    payload, byte_count, sha, swept_at, source_url, parser_version = row
+    assert payload is None and byte_count is None
+    assert swept_at is not None
+    assert sha == hashlib.sha256(_SAMPLE_PRIMARY_DOC.encode("utf-8")).hexdigest()
+    assert source_url == _PRIMARY_URL
+    assert parser_version == "primary-v1"
+    # read_raw surfaces it as a swept row — require_payload fails loud.
+    doc = raw_filings.read_raw(conn, accession_number=accession, document_kind="primary_doc")
+    assert doc is not None and doc.payload is None and doc.byte_count is None
+    with pytest.raises(RuntimeError, match="swept"):
+        doc.require_payload()
+
+
+def test_store_primary_doc_requires_source_url(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """A born-compacted row's only recovery path is source_url, so a
+    write-only kind stored without one is rejected at the helper —
+    never persist an unrecoverable payload-less row."""
+    conn = ebull_test_conn
+    with pytest.raises(ValueError, match="source_url is required"):
+        raw_filings.store_raw(
+            conn,
+            accession_number="0001767470-26-001616",
+            document_kind="primary_doc",
+            payload=_SAMPLE_PRIMARY_DOC,
+        )
+
+
+def test_store_primary_doc_idempotent_stays_compacted(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Re-storing an amended primary_doc keeps it born-compacted (the
+    bytes are never resurrected), one row, sha refreshed to the new body."""
+    conn = ebull_test_conn
+    accession = "0001767470-26-001617"
+    amended = "<v2>amended</v2>"
+    raw_filings.store_raw(
+        conn, accession_number=accession, document_kind="primary_doc", payload="<v1/>", source_url=_PRIMARY_URL
+    )
+    conn.commit()
+    raw_filings.store_raw(
+        conn, accession_number=accession, document_kind="primary_doc", payload=amended, source_url=_PRIMARY_URL
+    )
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), bool_and(payload IS NULL), max(payload_sha256) "
+            "FROM filing_raw_documents WHERE accession_number = %s AND document_kind = 'primary_doc'",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    n, all_null, sha = row
+    assert n == 1 and all_null is True
+    assert sha == hashlib.sha256(amended.encode("utf-8")).hexdigest()
 
 
 def test_iter_raw_filters_by_kind_and_parser_version(

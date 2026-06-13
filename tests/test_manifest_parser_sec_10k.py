@@ -259,14 +259,22 @@ def test_happy_path_parses_and_stores_raw(
     assert body_row[1] == "0000999991-26-000001"
     assert body_row[2] is not None  # filed_at populated
 
-    # Raw stored under primary_doc.
+    # Raw evidence row stored under primary_doc — BORN-COMPACTED (#1615):
+    # a write-only kind, so the payload bytes are never persisted. The row
+    # exists with a recorded sha + swept_at + source_url (rehydratable),
+    # payload + byte_count NULL.
     with ebull_test_conn.cursor() as cur:
         cur.execute(
-            "SELECT byte_count FROM filing_raw_documents "
+            "SELECT payload, byte_count, payload_sha256, payload_swept_at, source_url "
+            "FROM filing_raw_documents "
             "WHERE accession_number = '0000999991-26-000001' AND document_kind = 'primary_doc'"
         )
         raw = cur.fetchone()
-    assert raw is not None and raw[0] > 0
+    assert raw is not None
+    payload, byte_count, sha, swept_at, source_url = raw
+    assert payload is None and byte_count is None
+    assert sha is not None and len(sha) == 64 and swept_at is not None
+    assert source_url  # mandatory recovery path for born-compacted rows
 
 
 def test_happy_path_fans_out_to_share_class_siblings(
