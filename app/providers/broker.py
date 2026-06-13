@@ -142,6 +142,38 @@ class BrokerPortfolio:
     mirrors: Sequence[BrokerMirror] = ()
 
 
+@dataclass(frozen=True)
+class BrokerClosedTrade:
+    """One closed-position slice from the broker's trade history.
+
+    eToro returns one row per closed slice carrying BOTH legs
+    (open + close). Partial closes reduce the same positionId, so a
+    position may appear in several rows (#1593 spec §4).
+
+    Money fields (net_profit, fees, investment, initial_investment)
+    are in the account currency (USD). Rates are in the instrument's
+    native currency.
+    """
+
+    position_id: int
+    instrument_id: int
+    is_buy: bool
+    units: Decimal
+    open_rate: Decimal | None
+    open_timestamp: datetime
+    close_rate: Decimal | None
+    close_timestamp: datetime
+    net_profit: Decimal | None
+    fees: Decimal | None
+    investment: Decimal | None
+    initial_investment: Decimal | None
+    leverage: int
+    order_id: int | None
+    social_trade_id: int | None
+    parent_position_id: int | None
+    raw_payload: dict[str, Any]
+
+
 class BrokerProvider(ABC):
     """
     Interface for broker operations.
@@ -194,3 +226,13 @@ class BrokerProvider(ABC):
 
         Returns all open positions and available cash.
         """
+
+    def get_trade_history(self, min_date: datetime, page_size: int = 200) -> Sequence[BrokerClosedTrade]:
+        """
+        Fetch closed-trade history rows with close timestamp >= min_date.
+
+        Non-abstract with a NotImplementedError default so existing test
+        fakes that implement only the abstract surface keep working;
+        the eToro implementation overrides it.
+        """
+        raise NotImplementedError

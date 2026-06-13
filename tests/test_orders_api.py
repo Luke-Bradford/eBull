@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
@@ -108,6 +109,15 @@ def _fallback_conn() -> Iterator[MagicMock]:
 app.dependency_overrides.setdefault(get_conn, _fallback_conn)
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _stub_post_trade_enqueue() -> Iterator[MagicMock]:
+    """#1593: enqueue_post_trade_sync consumes a cursor result the
+    sequenced mock conns here don't budget for. Patched at point of
+    use; the enqueue contract is asserted in TestPostTradeEnqueue."""
+    with patch("app.api.orders.enqueue_post_trade_sync") as stub:
+        yield stub
 
 
 # ---------------------------------------------------------------------------
@@ -547,3 +557,45 @@ class TestClosePosition:
         resp = client.post("/portfolio/positions/500/close")
         assert resp.status_code == 409
         assert "positions row" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# TestPostTradeEnqueue (#1593)
+# ---------------------------------------------------------------------------
+
+
+class TestPostTradeEnqueue:
+    """A filled manual order queues an immediate daily_portfolio_sync."""
+
+    def setup_method(self) -> None:
+        self._patch_config = patch(
+            "app.api.orders.get_runtime_config",
+            return_value=_DEFAULT_CONFIG,
+        )
+        self._patch_config.start()
+
+    def teardown_method(self) -> None:
+        self._patch_config.stop()
+        _cleanup()
+
+    def test_filled_buy_enqueues_portfolio_sync(self, _stub_post_trade_enqueue: MagicMock) -> None:
+        order_row = [{"order_id": 42}]
+        fill_row = [{"fill_id": 7}]
+        _with_conn([_KILL_SWITCH_OFF, _QUOTE_ROW, order_row, fill_row])
+
+        resp = client.post(
+            "/portfolio/orders",
+            json={"instrument_id": 1, "action": "BUY", "amount": 300},
+        )
+        assert resp.status_code == 200
+        _stub_post_trade_enqueue.assert_called_once()
+        assert _stub_post_trade_enqueue.call_args.kwargs["requested_by"] == "orders_api"
+
+    def test_kill_switch_block_does_not_enqueue(self, _stub_post_trade_enqueue: MagicMock) -> None:
+        _with_conn([_KILL_SWITCH_ON])
+        resp = client.post(
+            "/portfolio/orders",
+            json={"instrument_id": 1, "action": "BUY", "amount": 100},
+        )
+        assert resp.status_code == 403
+        _stub_post_trade_enqueue.assert_not_called()
