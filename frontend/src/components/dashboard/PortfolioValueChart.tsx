@@ -121,6 +121,14 @@ export function PortfolioValueChart(): JSX.Element | null {
   const hasMovement =
     hasData && validPoints.some((p) => p.value !== validPoints[0]!.value);
   const fxSkipped = data?.fx_skipped ?? 0;
+  // ISO date strings compare lexicographically — true when the series
+  // reaches before cash_ledger started recording (#1594 §1.G2).
+  const cashLimited =
+    hasMovement &&
+    validPoints !== null &&
+    validPoints.length > 0 &&
+    data?.cash_tracking_since != null &&
+    validPoints[0]!.date < data.cash_tracking_since;
 
   if (error !== null) return null;
   if (!effectivelyLoading && !hasMovement && fxSkipped === 0) return null;
@@ -138,9 +146,20 @@ export function PortfolioValueChart(): JSX.Element | null {
               When both conditions match we keep the badge only,
               since it already implies the live-FX context and the
               caption would just duplicate. */}
-          {data?.fx_mode === "live" && hasMovement && fxSkipped === 0 ? (
+          {data?.fx_mode === "historical" && hasMovement && fxSkipped === 0 ? (
             <span className="text-[10px] text-slate-400 dark:text-slate-500">
-              historical converted at today's FX · excludes copy-portfolio equity
+              historical FX from ECB daily rates · excludes copy-portfolio equity
+            </span>
+          ) : null}
+          {/* Cash side is incomplete before cash_ledger started recording —
+              flag it so the closed-trade era doesn't read as if cash was
+              fully tracked (#1594 §1.G2). */}
+          {cashLimited ? (
+            <span
+              className="text-[10px] text-slate-400 dark:text-slate-500"
+              data-testid="value-cash-limited-note"
+            >
+              cash history limited before {data?.cash_tracking_since}
             </span>
           ) : null}
           {/* Keep the FX-missing signal even when the chart has
