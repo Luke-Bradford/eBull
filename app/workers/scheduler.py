@@ -1558,30 +1558,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
-    ScheduledJob(
-        name=JOB_SEC_MANIFEST_TOMBSTONE_STALE,
-        display_name="Manifest stale-failed sweep",
-        source="db",
-        description=(
-            "#1131 backfill: scan sec_filing_manifest for rows stuck in "
-            "ingest_status='failed' with a pre-#1131-shape "
-            "'upsert error:...' message older than 24h, promote them to "
-            "'tombstoned'. Skips post-#1131 transient-shape rows "
-            "(OperationalError / SerializationFailure / DeadlockDetected) "
-            "so genuine retries are not masked. Stops the legacy retry "
-            "loop where deterministic constraint violations refetched the "
-            "same dead XML from SEC every hour. Cadence: daily 05:30 UTC; "
-            "self-deactivates once the backlog drains (zero candidates = "
-            "no-op). Operator can also trigger via "
-            "POST /jobs/sec_manifest_tombstone_stale/run."
-        ),
-        cadence=Cadence.daily(hour=5, minute=30),
-        catch_up_on_boot=False,
-    ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are
     # not registered with APScheduler and do not participate in
-    # catch-up.  Currently on-demand: daily_tax_reconciliation.
+    # catch-up.  Currently on-demand:
+    #   * daily_tax_reconciliation
+    #   * sec_manifest_tombstone_stale (#1614) — the #1131 stale-failed-
+    #     upsert backfill.  Drained: zero candidates, rows_tombstoned=0 on
+    #     every run, and the source bug (#1131 split transient vs
+    #     deterministic) means the candidate shape cannot recur, so the
+    #     job self-deactivates by design.  Retired from the daily 05:30
+    #     cadence because each zero-candidate no-op lost the db-lane
+    #     tick-race against its siblings (#1526/#1527/#1534 class) and
+    #     surfaced a false-red "schedule missed" verdict on the admin
+    #     Processes page.  Kept manual-trigger-only via
+    #     POST /jobs/sec_manifest_tombstone_stale/run for the (unlikely)
+    #     resurfacing of a pre-#1131 row; source-lock ("db") in
+    #     app/jobs/sources.py::MANUAL_TRIGGER_JOB_SOURCES + zero-param
+    #     metadata in param_metadata.py::MANUAL_TRIGGER_JOB_METADATA
+    #     complete the manual-only triangle.
 ]
 
 

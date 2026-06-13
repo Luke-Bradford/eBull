@@ -39,7 +39,6 @@ from app.workers.scheduler import (
     JOB_RETRY_SWEEPER,
     JOB_SEC_13F_FILER_DIRECTORY_SYNC,
     JOB_SEC_DAILY_INDEX_RECONCILE,
-    JOB_SEC_MANIFEST_TOMBSTONE_STALE,
     JOB_SEC_MANIFEST_WORKER,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
@@ -127,12 +126,14 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         #     would re-enable the crash-loop it exists to prevent.
         #   * sec_manifest_worker — self-gates internally; safe to run during
         #     bootstrap (it drains the manifest the bootstrap seeds).
-        #   * sec_daily_index_reconcile / sec_manifest_tombstone_stale —
-        #     idempotent maintenance, no-op on an empty DB (#1155).
+        #   * sec_daily_index_reconcile — idempotent maintenance, no-op on
+        #     an empty DB (#1155).
+        #   (sec_manifest_tombstone_stale lived here until #1614 retired it
+        #   from SCHEDULED_JOBS to manual-trigger-only — no longer a
+        #   scheduled job, so it cannot appear in this scheduled-job set.)
         JOB_ORPHAN_TEST_DB_REAP,
         JOB_SEC_MANIFEST_WORKER,
         JOB_SEC_DAILY_INDEX_RECONCILE,
-        JOB_SEC_MANIFEST_TOMBSTONE_STALE,
         # #1504 — ncen_classifier_yearly carries NO per-job
         # _bootstrap_complete prereq by design: it is gated by the
         # UNIVERSAL bootstrap gate (#1181), which runs check_bootstrap_state_gate

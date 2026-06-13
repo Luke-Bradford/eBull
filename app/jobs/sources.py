@@ -366,6 +366,20 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # unbound, zero job_runs ever). Companion params in
     # MANUAL_TRIGGER_JOB_METADATA (empty).
     "populate_canonical_redirects": "db",
+    # sec_manifest_tombstone_stale — #1614. The #1131 stale-failed-upsert
+    # backfill, retired from SCHEDULED_JOBS (was daily 05:30) to
+    # manual-only: it is drained (zero candidates; rows_tombstoned=0 on
+    # every run; the #1131 source fix means the candidate shape cannot
+    # recur), and each zero-candidate no-op lost the db-lane tick-race
+    # vs its siblings (#1526/#1527/#1534 class), surfacing a false-red
+    # "schedule missed" verdict on the admin Processes page. Kept in
+    # _INVOKERS so an operator can still drain a resurfaced pre-#1131 row
+    # via POST /jobs/sec_manifest_tombstone_stale/run. Pure DB scan +
+    # UPDATE, short-running → catch-all ``db`` lane (its prior
+    # ScheduledJob.source). Without this entry ``source_for()`` KeyErrors
+    # and every manual trigger is rejected at JobLock acquisition (the
+    # #1413 / populate_canonical_redirects trap).
+    "sec_manifest_tombstone_stale": "db",
     # raw_payload_retention_sweep — #1014 payload-null sweep. Pure DB
     # operation but LONG-running (minutes over ~12k rows) → own lane,
     # NOT the catch-all ``db`` (would starve the every-5-min
