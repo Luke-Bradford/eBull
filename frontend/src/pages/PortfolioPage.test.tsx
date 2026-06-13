@@ -27,6 +27,9 @@ vi.mock("@/api/portfolio", () => ({
   fetchPortfolio: vi.fn(),
   fetchInstrumentPositions: vi.fn(),
   fetchActivity: vi.fn(),
+  // PortfolioPage now mounts PortfolioValueChart (#1594); reject so the
+  // chart silent-hides and these tests stay focused on the positions grid.
+  fetchValueHistory: vi.fn(() => Promise.reject(new Error("noop"))),
 }));
 vi.mock("@/api/orders", () => ({ placeOrder: vi.fn(), closePosition: vi.fn() }));
 

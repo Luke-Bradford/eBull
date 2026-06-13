@@ -49,8 +49,9 @@ function resp(
     display_currency: "GBP",
     range: "1y",
     days: 365,
-    fx_mode: "live",
+    fx_mode: "historical",
     fx_skipped: 0,
+    cash_tracking_since: null,
     points,
     events: [],
     ...overrides,
@@ -72,7 +73,7 @@ describe("PortfolioValueChart", () => {
     { date: "2026-04-19", value: 1100 },
   ];
 
-  it("renders all six range buttons + an fx_mode caption on live", async () => {
+  it("renders all six range buttons + the historical-FX caption", async () => {
     mocked.mockResolvedValue(resp(movingPoints));
     render(
       <MemoryRouter>
@@ -86,8 +87,50 @@ describe("PortfolioValueChart", () => {
       expect(screen.getByTestId(`value-range-${r}`)).toBeInTheDocument();
     }
     expect(
-      screen.getByText(/historical converted at today's FX/i),
+      screen.getByText(/historical FX from ECB daily rates/i),
     ).toBeInTheDocument();
+  });
+
+  it("flags limited cash history when the series predates cash tracking", async () => {
+    mocked.mockResolvedValue(
+      resp(
+        [
+          { date: "2025-08-12", value: 1000 },
+          { date: "2026-04-19", value: 1100 },
+        ],
+        { cash_tracking_since: "2026-06-03" },
+      ),
+    );
+    render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("value-cash-limited-note")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/cash history limited before 2026-06-03/i)).toBeInTheDocument();
+  });
+
+  it("no cash-limited note when the series starts after cash tracking", async () => {
+    mocked.mockResolvedValue(
+      resp(
+        [
+          { date: "2026-06-10", value: 1000 },
+          { date: "2026-06-11", value: 1100 },
+        ],
+        { cash_tracking_since: "2026-06-03" },
+      ),
+    );
+    render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("value-range-1y")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("value-cash-limited-note")).not.toBeInTheDocument();
   });
 
   it("clicking a range refetches with the new range", async () => {
@@ -179,13 +222,13 @@ describe("PortfolioValueChart", () => {
     // Badge replaces the fx_mode caption — no duplicate FX-context
     // messaging in the header line.
     expect(
-      screen.queryByText(/historical converted at today's FX/i),
+      screen.queryByText(/historical FX from ECB daily rates/i),
     ).not.toBeInTheDocument();
   });
 
   it("suppresses the fx_mode caption when showing the FX-missing empty state", async () => {
     // No conversion actually happened (all dropped) → the
-    // 'historical converted at today's FX' caption is misleading.
+    // 'historical FX from ECB daily rates' caption is misleading.
     mocked.mockResolvedValue(resp([], { fx_skipped: 2 }));
     render(
       <MemoryRouter>
@@ -196,7 +239,7 @@ describe("PortfolioValueChart", () => {
       expect(screen.getByText(/FX rates missing/i)).toBeInTheDocument();
     });
     expect(
-      screen.queryByText(/historical converted at today's FX/i),
+      screen.queryByText(/historical FX from ECB daily rates/i),
     ).not.toBeInTheDocument();
   });
 

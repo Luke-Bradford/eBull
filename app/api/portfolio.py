@@ -22,9 +22,10 @@ AUM = SUM(market_value across all positions) + cash_balance + mirror_equity.
 
 from __future__ import annotations
 
+import bisect
 import logging
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -36,8 +37,16 @@ from pydantic import BaseModel
 from app.api._helpers import parse_optional_float, resolve_quote_price
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
+from app.db.snapshot import snapshot_read
 from app.domain.positions import PositionSource
 from app.services.fx import FxRateNotFound, convert, load_live_fx_rates_with_metadata
+from app.services.portfolio_value_history import (
+    carry_forward_rate_map,
+    native_cost_basis,
+    overlay_persisted,
+    position_equity,
+    reconstruct_units_at_day,
+)
 from app.services.runtime_config import get_runtime_config
 from app.services.valuation import HoldingValuation, compute_portfolio_valuation
 
@@ -776,18 +785,16 @@ class ValueHistoryPoint(BaseModel):
 class ValueHistoryEvent(BaseModel):
     """A buy/sell visible on the value-history chart (#1594 markers).
 
-    `source="fill"` rows are exact (our own order path).
-    `source="position_open"` rows are broker-synced position opens —
-    units are TODAY's units back-dated to the open (same approximation
-    as the hybrid units basis). Broker-side sells are unrecorded until
-    the #1593 ledger, so SELL events only ever come from fills.
+    Sourced from the ``trade_events`` ledger (#1593): an ``open`` event is
+    a BUY, a ``close`` event is a SELL. Single basis with the value line —
+    both come from the ledger, so markers and the curve never disagree.
     """
 
     date: date
     symbol: str
     side: Literal["BUY", "SELL"]
     units: float
-    source: Literal["fill", "position_open"]
+    source: Literal["open", "close"]
 
 
 ValueHistoryRange = Literal["1m", "3m", "6m", "1y", "5y", "max"]
@@ -797,18 +804,20 @@ class ValueHistoryResponse(BaseModel):
     display_currency: str
     range: ValueHistoryRange
     days: int
-    # Today's FX rates applied to every historical date. A multi-
-    # currency portfolio's past values are therefore approximate — a
-    # proper historical-FX series lives in `fx_rates` (tax ledger)
-    # but only covers dates with tax events. Callers that care about
-    # historical-FX accuracy should treat this chart as directional,
-    # not forensic.
-    fx_mode: str = "live"
-    # Distinct FX pairs we had to drop because the live snapshot didn't
-    # have them. Lets the FE distinguish "truly no history" from
+    # "historical" (#1594 PR-B): each day is converted at that day's ECB
+    # rate from `fx_rates_daily` (carry-forward over weekends), not today's
+    # snapshot. ("live" was the pre-PR-B approximation.)
+    fx_mode: str = "historical"
+    # Distinct FX pairs we had to drop because no dated rate existed on or
+    # before that day. Lets the FE distinguish "truly no history" from
     # "all-skipped due to missing FX", without inflating the count by
     # (instruments × days).
     fx_skipped: int = 0
+    # Earliest date `cash_ledger` has any row — before this the cash side of
+    # the series is incomplete (a data-availability limit, not a PR-B bug;
+    # spec §1.G2). NULL when the ledger is empty. The FE captions ranges
+    # that reach before it so the pre-tracking era reads honestly.
+    cash_tracking_since: date | None = None
     points: list[ValueHistoryPoint]
     # Buy/sell chart markers, ascending by date (#1594).
     events: list[ValueHistoryEvent] = []
@@ -819,363 +828,315 @@ def get_value_history(
     range: ValueHistoryRange = "1y",  # noqa: A002 — URL param
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> ValueHistoryResponse:
-    """Daily portfolio total value (positions + cash) over a rolling window.
+    """Daily portfolio value (open-position MTM + tracked cash) over a window.
 
-    Value at day D is reconstructed as:
-        sum over each instrument:
-            signed_units_at_D * close_at_D_or_prior   (converted to display ccy)
-        plus sum over each currency:
-            net_cash_ledger_at_D                       (converted to display ccy)
+    Rebuilt from the ``trade_events`` ledger (#1593 / #1594 PR-B), not the
+    pre-ledger hybrid that dropped closed positions and applied today's FX
+    to history. For each day D:
 
-    units_at_D is a hybrid (#1594 v1, pre-trade-ledger):
+    - every position open on D contributes mark-to-market equity in native
+      ccy ``amount_at_D + units_at_D*(close_at_D - open_rate)`` where
+      ``units_at_D = open.units - Σ close.units(≤D)`` and
+      ``amount_at_D = open.investment_usd * units_at_D/open.units``. This is
+      the SAME formula the EOD snapshot persists, so a recomputed day and a
+      persisted day never step at the boundary (spec §1.A). A fully-closed
+      position leaves the series on its close date.
+    - cash = ``cash_ledger`` SUM per currency, cumulative to D.
+    - every native/cash value is converted at D's ECB rate from
+      ``fx_rates_daily`` (carry-forward over weekends), NOT today's snapshot.
 
-    - Instruments with `fills` rows replay the fills ledger by order
-      action (BUY/ADD add, SELL/EXIT subtract) — exact through our own
-      opens AND closes.
-    - Broker-synced holdings carry no fills; each open position
-      contributes its CURRENT units from its `open_date` forward.
-      Known approximations until the #1593 ledger: partial adds/trims
-      before today are backdated to open_date, and closed broker
-      positions drop out of history entirely (the sync never recorded
-      them).
-    - Mirror/copy-portfolio equity is EXCLUDED — there is no history
-      source for it; the dashboard headline includes it, so this
-      series reads below `total_aum` by the live mirror equity.
+    Days with a persisted ``portfolio_eod_snapshots`` row (matching display
+    ccy) read that row's total instead of the recompute — authoritative and
+    auditable; the recompute is the always-present floor (spec §1.B).
 
-    If a position had no `price_daily` close on or before D (e.g. new
-    listing with stale local store), that bar is skipped for that day —
-    conservatively under-states value rather than inventing a zero.
-
-    FX conversion uses the **live** snapshot only (`live_fx_rates`).
-    Historical daily FX is only populated on tax-event dates today, so
-    reusing it would leave coverage gaps worse than the current
-    approximation. Flagged via `fx_mode` in the response.
+    Skips, never invents: an open with no priceable close on/before D, a
+    missing FX pair, or an open missing price/investment under-states that
+    day rather than zeroing it. Mirror/copy-portfolio equity is excluded (no
+    ledger basis). Cash before ``cash_tracking_since`` is incomplete — a
+    ``cash_ledger`` data limit, surfaced not hidden (spec §1.G2).
     """
-    days = _VALUE_HISTORY_RANGES[range]
+    days_window = _VALUE_HISTORY_RANGES[range]
 
-    runtime = get_runtime_config(conn)
-    display_currency = runtime.display_currency
-    rates_meta = load_live_fx_rates_with_metadata(conn)
-    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
+    with snapshot_read(conn):
+        # display_currency MUST be read inside the same snapshot as the
+        # positions/FX/overlay queries that consume it — otherwise a
+        # mid-request currency change reads at a different snapshot and the
+        # persisted-snapshot overlay filter mismatches the data (review WARNING).
+        display_currency = get_runtime_config(conn).display_currency
 
-    # Resolve the start date in Python so both ledger queries below
-    # use the same literal, not duplicated CTEs — a prior iteration
-    # had `max` diverge from `5y` because the bound was computed in
-    # two places. For range=max, pull the earliest ledger row; fall
-    # back to CURRENT_DATE so an empty ledger produces a single-point
-    # series rather than failing.
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        if days is None:
+        # Window start. For `max`, the earliest ledger activity; else today-N.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            if days_window is None:
+                cur.execute(
+                    """
+                    SELECT COALESCE(
+                        LEAST(
+                            (SELECT MIN(executed_at::date) FROM trade_events),
+                            (SELECT MIN(event_time::date) FROM cash_ledger)
+                        ),
+                        CURRENT_DATE
+                    ) AS start_date, CURRENT_DATE AS today
+                    """
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT (CURRENT_DATE - make_interval(days => %(days)s::int))::date
+                               AS start_date,
+                           CURRENT_DATE AS today
+                    """,
+                    {"days": days_window},
+                )
+            row = cur.fetchone()
+            start_date: date = row["start_date"] if row else date.today()
+            today: date = row["today"] if row else date.today()
+
+        # Open events (one per position). Exclude mirrors and rows we cannot
+        # mark to market: a usable open price is STRICTLY > 0 (spec §1.A
+        # guard; prevention-log L112 — a non-null 0 must not price).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
-                SELECT COALESCE(
-                    LEAST(
-                        (SELECT MIN(filled_at::date) FROM fills),
-                        (SELECT MIN(event_time::date) FROM cash_ledger),
-                        -- Broker-synced holdings start history at their
-                        -- position open_date (#1594 hybrid basis).
-                        (SELECT MIN(open_date) FROM positions WHERE current_units > 0)
-                    ),
-                    CURRENT_DATE
-                ) AS start_date
+                SELECT te.position_id, te.instrument_id, te.etoro_instrument_id,
+                       te.units, te.price, te.investment_usd,
+                       te.executed_at::date AS open_date,
+                       i.currency AS native_ccy, i.symbol
+                FROM trade_events te
+                JOIN instruments i ON i.instrument_id = te.instrument_id
+                WHERE te.event_kind = 'open'
+                  AND COALESCE(te.social_trade_id, 0) = 0
+                  AND te.price > 0
                 """
             )
-        else:
-            cur.execute(
-                "SELECT (CURRENT_DATE - make_interval(days => %(days)s::int))::date AS start_date",
-                {"days": days},
-            )
-        # A SELECT without FROM always returns exactly one row in
-        # Postgres; the `or` fallback keeps a driver-level anomaly
-        # from raising an AssertionError in a live request path.
-        row = cur.fetchone()
-        start_date: date = row["start_date"] if row else date.today()
+            open_rows = cur.fetchall()
 
-    # 1. Pull signed position-value points per (date, instrument).
-    #    Uses a correlated subquery for close-at-or-before so the query
-    #    is self-contained — no separate price lookup loop in Python.
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            WITH dates AS (
-                SELECT generate_series(
-                    %(start)s::date,
-                    CURRENT_DATE,
-                    '1 day'::interval
-                )::date AS d
-            ),
-            fills_signed AS (
-                -- Explicit whitelist rather than default-to-negative so
-                -- a future action code (e.g. a corporate-action type)
-                -- can't silently flip the NAV sign. Unknown actions
-                -- fall through to NULL and are dropped by the SUM.
-                SELECT
-                    f.filled_at::date AS fill_date,
-                    o.instrument_id,
-                    CASE
-                        WHEN o.action IN ('BUY', 'ADD') THEN f.units
-                        WHEN o.action IN ('SELL', 'EXIT') THEN -f.units
-                        ELSE NULL
-                    END AS units
-                FROM fills f
-                JOIN orders o ON o.order_id = f.order_id
-                WHERE o.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
-            ),
-            fills_units AS (
-                -- Long-only invariant (CLAUDE.md, eBull non-negotiables
-                -- "Long only in v1. No shorting."). We intentionally
-                -- drop zero and negative net-units: zero = fully
-                -- closed (contributes nothing), negative = should
-                -- not exist in this product and is treated as
-                -- corrupt data rather than silently priced.
-                SELECT
-                    d.d,
-                    fs.instrument_id,
-                    SUM(fs.units) AS units_at_date
-                FROM dates d
-                JOIN fills_signed fs ON fs.fill_date <= d.d
-                GROUP BY d.d, fs.instrument_id
-                HAVING SUM(fs.units) > 0
-            ),
-            fills_open_now AS (
-                -- Instruments whose fills replay nets OPEN units today.
-                -- Only these suppress the position basis below: an
-                -- instrument with old fills that net to zero (closed
-                -- via our order path) and a CURRENT broker-synced
-                -- position row is a broker re-open — the position
-                -- basis must price it or the holding goes invisible
-                -- (Codex ckpt-2 finding). Overlap between a closed
-                -- fills lifecycle and a position whose open_date
-                -- predates the fills close would double-count that
-                -- span; that requires contradictory data and resolves
-                -- properly with the #1593 ledger.
-                SELECT instrument_id
-                FROM fills_signed
-                GROUP BY instrument_id
-                HAVING SUM(units) > 0
-            ),
-            position_units AS (
-                -- Broker-synced holdings have no fills rows: back-fill
-                -- units from each open position's open_date at TODAY's
-                -- units (#1594 hybrid basis; see endpoint docstring for
-                -- the documented approximations). NULL open_date
-                -- contributes from the window start (held since before
-                -- we tracked it) — note these holdings get NO buy
-                -- marker in `events` (an unknowable date pinned to the
-                -- window start would shift with the selected range).
-                SELECT
-                    d.d,
-                    p.instrument_id,
-                    SUM(p.current_units) AS units_at_date
-                FROM dates d
-                JOIN positions p
-                  ON COALESCE(p.open_date, '-infinity'::date) <= d.d
-                WHERE p.current_units > 0
-                  AND p.instrument_id NOT IN (SELECT instrument_id FROM fills_open_now)
-                GROUP BY d.d, p.instrument_id
-                HAVING SUM(p.current_units) > 0
-            ),
-            units_per_day AS (
-                SELECT d, instrument_id, units_at_date FROM fills_units
-                UNION ALL
-                SELECT d, instrument_id, units_at_date FROM position_units
+        # Close events for those positions (partial closes = multiple rows).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT te.position_id, te.executed_at::date AS close_date,
+                       te.units, i.symbol, te.etoro_instrument_id
+                FROM trade_events te
+                JOIN instruments i ON i.instrument_id = te.instrument_id
+                WHERE te.event_kind = 'close'
+                  AND COALESCE(te.social_trade_id, 0) = 0
+                """
             )
-            SELECT
-                u.d AS point_date,
-                u.instrument_id,
-                i.currency AS native_currency,
-                u.units_at_date,
+            close_rows = cur.fetchall()
+
+        # Daily closes for the held instruments (carry-forward in Python).
+        instrument_ids = sorted({int(r["instrument_id"]) for r in open_rows})
+        price_series: dict[int, list[tuple[date, Decimal]]] = defaultdict(list)
+        if instrument_ids:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT instrument_id, price_date, close
+                    FROM price_daily
+                    WHERE instrument_id = ANY(%(ids)s)
+                      AND close > 0
+                      AND price_date <= %(today)s
+                    ORDER BY instrument_id, price_date
+                    """,
+                    {"ids": instrument_ids, "today": today},
+                )
+                for r in cur.fetchall():
+                    price_series[int(r["instrument_id"])].append((r["price_date"], Decimal(str(r["close"]))))
+
+        # Cash ledger deltas (cumulative computed in Python over the day loop).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT (event_time AT TIME ZONE 'UTC')::date AS event_date,
+                       currency, amount
+                FROM cash_ledger
+                WHERE currency IS NOT NULL
+                ORDER BY event_time
+                """
+            )
+            cash_delta_rows = cur.fetchall()
+            cur.execute("SELECT MIN((event_time AT TIME ZONE 'UTC')::date) AS since FROM cash_ledger")
+            since_row = cur.fetchone()
+            cash_tracking_since: date | None = since_row["since"] if since_row else None
+
+        # Whole-history FX up to today — the seed row before start_date is
+        # required for carry-forward (spec §1.C / Codex M1).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT rate_date, base_currency, quote_currency, rate
+                FROM fx_rates_daily
+                WHERE rate_date <= %(today)s
+                ORDER BY base_currency, quote_currency, rate_date
+                """,
+                {"today": today},
+            )
+            fx_rows = [
                 (
-                    SELECT close FROM price_daily
-                    WHERE instrument_id = u.instrument_id
-                      AND price_date <= u.d
-                      AND close IS NOT NULL
-                    ORDER BY price_date DESC
-                    LIMIT 1
-                ) AS close_at_date
-            FROM units_per_day u
-            JOIN instruments i USING (instrument_id)
-            """,
-            {"start": start_date},
-        )
-        position_rows = cur.fetchall()
+                    r["rate_date"],
+                    str(r["base_currency"]),
+                    str(r["quote_currency"]),
+                    Decimal(str(r["rate"])),
+                )
+                for r in cur.fetchall()
+            ]
 
-    # 2. Pull daily cumulative cash balance per currency.
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            WITH dates AS (
-                SELECT generate_series(
-                    %(start)s::date,
-                    CURRENT_DATE,
-                    '1 day'::interval
-                )::date AS d
+        # Persisted snapshots within the window (authoritative overlay).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT snapshot_date, total_value, display_currency
+                FROM portfolio_eod_snapshots
+                WHERE snapshot_date >= %(start)s
+                ORDER BY snapshot_date
+                """,
+                {"start": start_date},
             )
-            SELECT
-                d.d AS point_date,
-                cl.currency,
-                SUM(cl.amount) AS balance
-            FROM dates d
-            JOIN cash_ledger cl ON cl.event_time::date <= d.d
-            -- Filter NULL-currency rows at the SQL level so they
-            -- don't collapse into a single (date, NULL) group that
-            -- undercounts the data-quality signal. The Python loop
-            -- keeps a defence-in-depth guard in case this filter
-            -- ever gets dropped.
-            WHERE cl.currency IS NOT NULL
-            GROUP BY d.d, cl.currency
-            """,
-            {"start": start_date},
-        )
-        cash_rows = cur.fetchall()
+            snapshot_rows = cur.fetchall()
 
-    # 3. Buy/sell events for chart markers (#1594). Mirrors the hybrid
-    #    units basis for positions with KNOWN open dates: fills rows
-    #    are exact events; no-open-fills broker positions contribute
-    #    their open as a BUY. NULL-open holdings price into the curve
-    #    but get no marker (no knowable date to pin it to), and the
-    #    position-basis suppression keys on fills that net OPEN today
-    #    — same rule as `fills_open_now` above.
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT f.filled_at::date AS event_date,
-                   i.symbol,
-                   CASE WHEN o.action IN ('BUY', 'ADD') THEN 'BUY' ELSE 'SELL' END AS side,
-                   f.units,
-                   'fill' AS source
-            FROM fills f
-            JOIN orders o ON o.order_id = f.order_id
-            JOIN instruments i ON i.instrument_id = o.instrument_id
-            WHERE o.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
-              AND f.filled_at::date >= %(start)s
-            UNION ALL
-            SELECT p.open_date AS event_date,
-                   i.symbol,
-                   'BUY' AS side,
-                   p.current_units AS units,
-                   'position_open' AS source
-            FROM positions p
-            JOIN instruments i ON i.instrument_id = p.instrument_id
-            WHERE p.current_units > 0
-              AND p.open_date IS NOT NULL
-              AND p.open_date >= %(start)s
-              AND p.instrument_id NOT IN (
-                  SELECT o2.instrument_id
-                  FROM fills f2
-                  JOIN orders o2 ON o2.order_id = f2.order_id
-                  WHERE o2.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
-                  GROUP BY o2.instrument_id
-                  HAVING SUM(
-                      CASE WHEN o2.action IN ('BUY', 'ADD') THEN f2.units ELSE -f2.units END
-                  ) > 0
-              )
-            ORDER BY event_date, symbol
-            """,
-            {"start": start_date},
-        )
-        event_rows = cur.fetchall()
+    # ---- assemble the series (pure logic, no DB) ----
+    days: list[date] = []
+    cursor_day = start_date
+    while cursor_day <= today:
+        days.append(cursor_day)
+        cursor_day += timedelta(days=1)
 
-    events = [
-        ValueHistoryEvent(
-            date=row["event_date"],
-            symbol=str(row["symbol"]),
-            side=row["side"],
-            units=float(row["units"]),
-            source=row["source"],
-        )
-        for row in event_rows
-    ]
+    closes_by_position: dict[int, list[tuple[date, Decimal]]] = defaultdict(list)
+    for r in close_rows:
+        closes_by_position[int(r["position_id"])].append((r["close_date"], Decimal(str(r["units"]))))
 
-    # 4. Aggregate into one value per day in display currency.
-    # cash_ledger semantics: every INSERT site (orders.py, order_client.py,
-    # portfolio_sync.py) writes a *delta* row, never an absolute snapshot.
-    # SUM(amount) is therefore the running balance — correct per-call-site
-    # invariant, not a coincidence of the test fixtures.
-    per_day: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
-    # Track missing FX as a set of (from, to) pairs so the operator-
-    # facing count reflects distinct gaps, not N * days of duplicates.
+    # Carry-forward FX over the window days AND every open date — the native
+    # cost basis converts each position's investment at its OPEN-day rate,
+    # which for a fixed range can predate the window start.
+    open_dates = {r["open_date"] for r in open_rows}
+    fx_days = sorted(set(days) | open_dates)
+    fx_by_day = carry_forward_rate_map(fx_rows, fx_days)
+
+    def close_on_or_before(iid: int, day: date) -> Decimal | None:
+        series = price_series.get(iid)
+        if not series:
+            return None
+        # Rightmost price_date <= day. The +inf sentinel makes bisect place
+        # the key after every same-date row (close < inf), so idx-1 is the
+        # last row with price_date <= day.
+        idx = bisect.bisect_right(series, (day, Decimal("Infinity"))) - 1
+        if idx < 0:
+            return None
+        return series[idx][1]
+
+    per_day: dict[date, Decimal] = {day: Decimal("0") for day in days}
     fx_missing_pairs: set[tuple[str, str]] = set()
 
-    for row in position_rows:
-        close_raw = row["close_at_date"]
-        if close_raw is None:
-            continue  # no close on or before this date → skip, not zero
-        # psycopg3 returns NUMERIC as Decimal in practice, but wrap
-        # defensively so we never mix Decimal with a float if a driver
-        # or column-type change ever slips in.
-        close = Decimal(str(close_raw))
-        units = Decimal(str(row["units_at_date"]))
-        raw_ccy = row["native_currency"]
-        if raw_ccy is None:
-            # Instrument missing a currency is a data-quality bug, not
-            # a display-currency position. Log and skip so we don't
-            # silently attribute foreign value to display-ccy NAV.
-            logger.warning(
-                "value-history: instrument_id=%s has NULL currency; skipping on %s",
-                row["instrument_id"],
-                row["point_date"],
-            )
-            continue
-        native_ccy = str(raw_ccy)
-        value_native = close * units
-        if native_ccy != display_currency:
-            try:
-                value_native = convert(value_native, native_ccy, display_currency, rates)
-            except FxRateNotFound:
-                fx_missing_pairs.add((native_ccy, display_currency))
-                logger.warning(
-                    "value-history: FX %s→%s missing; skipping instrument_id=%s on %s",
-                    native_ccy,
-                    display_currency,
-                    row["instrument_id"],
-                    row["point_date"],
-                )
+    for r in open_rows:
+        iid = int(r["instrument_id"])
+        position_id = int(r["position_id"])
+        open_date: date = r["open_date"]
+        open_units = Decimal(str(r["units"]))
+        open_rate = Decimal(str(r["price"]))
+        investment = Decimal(str(r["investment_usd"])) if r["investment_usd"] is not None else None
+        native_ccy = str(r["native_ccy"]) if r["native_ccy"] is not None else None
+        closes = closes_by_position.get(position_id, [])
+        # Per-unit native cost basis once per position — leverage- and
+        # currency-correct (investment_usd → native at the open-day FX). The
+        # MTM amount term below is units_at_day * cost_per_unit, mirroring the
+        # EOD snapshot's amount + units*(close - open_rate) (Codex ckpt-2 P2).
+        cost_per_unit = native_cost_basis(investment, open_units, native_ccy, open_rate, fx_by_day[open_date])
+
+        for day in days:
+            if day < open_date:
                 continue
-        per_day[row["point_date"]] += value_native
+            units_at_day = reconstruct_units_at_day(open_units, closes, day)
+            if units_at_day <= 0:
+                continue  # fully closed → leaves the series
+            close = close_on_or_before(iid, day)
+            if close is None:
+                continue  # no priceable close on/before D → skip, not zero
+            amount_at_day = units_at_day * cost_per_unit
+            value_native = position_equity(amount_at_day, units_at_day, open_rate, close)
+            if native_ccy is None:
+                continue  # cannot convert without a native currency
+            if native_ccy != display_currency:
+                try:
+                    value_native = convert(value_native, native_ccy, display_currency, fx_by_day[day])
+                except FxRateNotFound:
+                    fx_missing_pairs.add((native_ccy, display_currency))
+                    continue
+            per_day[day] += value_native
 
-    for row in cash_rows:
-        balance = Decimal(str(row["balance"]))
-        raw_ccy = row["currency"]
-        if raw_ccy is None:
-            # Mirrors the positions-loop guard: cash without a currency
-            # is a data-quality bug, not a display-currency balance.
-            logger.warning(
-                "value-history: cash_ledger row has NULL currency on %s; skipping",
-                row["point_date"],
-            )
-            continue
-        native_ccy = str(raw_ccy)
-        if native_ccy != display_currency:
-            try:
-                balance = convert(balance, native_ccy, display_currency, rates)
-            except FxRateNotFound:
-                fx_missing_pairs.add((native_ccy, display_currency))
-                logger.warning(
-                    "value-history: FX %s→%s missing for cash on %s",
-                    native_ccy,
-                    display_currency,
-                    row["point_date"],
-                )
+    # Cash: cumulative balance per currency, converted at each day's rate.
+    cash_by_currency: dict[str, list[tuple[date, Decimal]]] = defaultdict(list)
+    for r in cash_delta_rows:
+        cash_by_currency[str(r["currency"])].append((r["event_date"], Decimal(str(r["amount"]))))
+    for ccy, deltas in cash_by_currency.items():
+        idx = 0
+        running = Decimal("0")
+        for day in days:
+            while idx < len(deltas) and deltas[idx][0] <= day:
+                running += deltas[idx][1]
+                idx += 1
+            if running == 0:
                 continue
-        per_day[row["point_date"]] += balance
+            balance = running
+            if ccy != display_currency:
+                try:
+                    balance = convert(running, ccy, display_currency, fx_by_day[day])
+                except FxRateNotFound:
+                    fx_missing_pairs.add((ccy, display_currency))
+                    continue
+            per_day[day] += balance
 
-    points = [ValueHistoryPoint(date=d, value=float(v)) for d, v in sorted(per_day.items())]
+    # Overlay persisted snapshots (authoritative on the days they cover).
+    snapshots = [
+        (r["snapshot_date"], Decimal(str(r["total_value"])), str(r["display_currency"])) for r in snapshot_rows
+    ]
+    per_day = overlay_persisted(per_day, snapshots, display_currency)
 
-    # For `max` the actual lookback depends on the earliest ledger
-    # row, not the input bucket — surface the effective span so the
-    # operator / charting code can label the axis correctly without
-    # needing to subtract the first point's date client-side.
-    if days is None:
+    points = [ValueHistoryPoint(date=day, value=float(per_day[day])) for day in days if per_day[day] != 0]
+
+    # Buy/sell markers from the same ledger as the line (open=BUY, close=SELL).
+    # Close markers are gated to positions whose OPEN was priceable (in
+    # open_rows) so a marker never appears without its line basis — a real row
+    # with a NULL/sentinel open price is excluded from both (Codex ckpt-2 P2).
+    priced_positions = {int(r["position_id"]) for r in open_rows}
+    events: list[ValueHistoryEvent] = []
+    for r in open_rows:
+        if r["open_date"] >= start_date:
+            symbol = str(r["symbol"]) if r["symbol"] else f"#{int(r['etoro_instrument_id'])}"
+            events.append(
+                ValueHistoryEvent(
+                    date=r["open_date"],
+                    symbol=symbol,
+                    side="BUY",
+                    units=float(r["units"]),
+                    source="open",
+                )
+            )
+    for r in close_rows:
+        if r["close_date"] >= start_date and int(r["position_id"]) in priced_positions:
+            symbol = str(r["symbol"]) if r["symbol"] else f"#{int(r['etoro_instrument_id'])}"
+            events.append(
+                ValueHistoryEvent(
+                    date=r["close_date"],
+                    symbol=symbol,
+                    side="SELL",
+                    units=float(r["units"]),
+                    source="close",
+                )
+            )
+    events.sort(key=lambda e: (e.date, e.symbol))
+
+    # For `max` the effective span is the populated series, not the bucket.
+    if days_window is None:
         effective_days = (points[-1].date - points[0].date).days if len(points) >= 2 else 0
     else:
-        effective_days = days
+        effective_days = days_window
 
     return ValueHistoryResponse(
         display_currency=display_currency,
         range=range,
         days=effective_days,
         fx_skipped=len(fx_missing_pairs),
+        cash_tracking_since=cash_tracking_since,
         points=points,
         events=events,
     )

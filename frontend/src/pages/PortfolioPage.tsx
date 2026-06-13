@@ -16,6 +16,7 @@ import { EmptyState } from "@/components/states/EmptyState";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { ActivitySection } from "@/components/portfolio/ActivitySection";
+import { PortfolioValueChart } from "@/components/dashboard/PortfolioValueChart";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 import type {
@@ -232,6 +233,10 @@ export function PortfolioPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Portfolio</h1>
       </div>
+
+      {/* Value-over-time chart above the tabs (#1594) — same component +
+          ?value= URL key as the dashboard, so the range choice carries. */}
+      <PortfolioValueChart />
 
       <div role="tablist" className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
         {(

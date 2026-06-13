@@ -547,23 +547,26 @@ export interface ValueHistoryPoint {
   value: number;
 }
 
-// Buy/sell chart marker (#1594). source="position_open" = broker-synced
-// open back-dated at today's units; SELL only ever comes from fills
-// (broker-side sells unrecorded until the #1593 ledger).
+// Buy/sell chart marker (#1594). Sourced from the trade_events ledger:
+// an open event is a BUY, a close event is a SELL — same basis as the
+// value line, so markers and the curve never disagree.
 export interface ValueHistoryEvent {
   date: string; // YYYY-MM-DD
   symbol: string;
   side: "BUY" | "SELL";
   units: number;
-  source: "fill" | "position_open";
+  source: "open" | "close";
 }
 
 export interface ValueHistoryResponse {
   display_currency: string;
   range: ValueHistoryRange;
   days: number;
-  fx_mode: string; // "live" in v1 — flags whether historical FX was used
-  fx_skipped: number; // rows dropped due to missing live FX pair
+  fx_mode: string; // "historical" (#1594 PR-B) — per-day ECB FX from fx_rates_daily
+  fx_skipped: number; // distinct FX pairs dropped (no dated rate on/before a day)
+  // Earliest date cash_ledger has a row; before it the cash side is
+  // incomplete (a data limit, not a bug). null when the ledger is empty.
+  cash_tracking_since: string | null;
   points: ValueHistoryPoint[];
   events: ValueHistoryEvent[];
 }

@@ -1776,3 +1776,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `BrokerProvider.get_trade_history` ships a non-abstract default that raises `NotImplementedError` (kept non-abstract so existing test fakes don't break). The degrade-gracefully wrapper `fetch_trade_history_safely` caught `httpx` errors + parse errors but not `NotImplementedError` — a future provider without an override would escape the wrapper and fail the whole position sync, the exact outcome the wrapper exists to prevent.
 - Prevention: when an interface method's default implementation raises (NotImplementedError or otherwise), every "this call is allowed to fail" wrapper around it must include that exception class in its catch set, with a loud log naming the provider class. Self-review prompt: for each `except (...)` wrapper around a provider/interface call, read the BASE class implementation — if it can raise something the wrapper misses, add it.
 - Enforced in: `app/services/trade_events.py::fetch_trade_history_safely` (`except NotImplementedError` branch) + the parametrized error-posture table in `tests/test_trade_events.py`.
+
+---
+
+### `get_runtime_config` (and any config read) must share the snapshot of the queries that consume it
+
+- First seen in: PR #1622 (#1594 PR-B review WARNING).
+- Symptom: `get_value_history` called `get_runtime_config(conn)` to read `display_currency` BEFORE the `with snapshot_read(conn):` block. `snapshot_read` commits the pending implicit transaction on entry, so the config read landed at an earlier snapshot than the positions / FX / persisted-overlay queries. A mid-request `display_currency` change would read the new currency for the queries but the old one for the overlay filter (or vice-versa), mismatching the `portfolio_eod_snapshots` display-ccy gate against data read at a different snapshot.
+- Prevention: any value that parameterises a multi-statement read (display currency, feature flags, thresholds from `runtime_config`) MUST be read INSIDE the same `snapshot_read` block as the queries that consume it — never before it. `snapshot_read`'s entry-commit means a pre-block read is a *different* snapshot. Self-review prompt: grep `get_runtime_config(` / other config reads in any handler that uses `snapshot_read`; confirm the read is inside the block, not above it.
+- Enforced in: this prevention log; `app/api/portfolio.py::get_value_history` (config read moved inside `snapshot_read`).
