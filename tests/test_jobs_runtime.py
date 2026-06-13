@@ -513,6 +513,15 @@ class TestProductionInvokerRegistry:
             # filing-metadata-scoped bootstrap dispatch and the unscoped
             # weekly cron coexist. No cadence → on-demand/bootstrap-only.
             "sec_master_idx_gap_close",
+            # #1614 — sec_manifest_tombstone_stale retired from
+            # SCHEDULED_JOBS to manual-only. The drained #1131 backfill
+            # (zero candidates; rows_tombstoned=0 every run; #1131 source
+            # fix means the shape cannot recur) lost the db-lane tick-race
+            # as a scheduled no-op and read false-red "schedule missed".
+            # Stays in _INVOKERS for operator drain of a resurfaced
+            # pre-#1131 row; source-lock "db" + empty param metadata
+            # complete the manual-only triangle.
+            "sec_manifest_tombstone_stale",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "

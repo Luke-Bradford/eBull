@@ -238,6 +238,13 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # invoker) — the missing sources.py half made the job
     # untriggerable from #819's merge until 2026-06-11.
     "populate_canonical_redirects": (),
+    # sec_manifest_tombstone_stale — #1614. The drained #1131
+    # stale-failed-upsert backfill, retired from SCHEDULED_JOBS to
+    # manual-only. No operator-tunable params (it scans + promotes
+    # pre-#1131 rows by a fixed rule). The explicit empty tuple completes
+    # the manual-only triangle (source + metadata + invoker) and documents
+    # zero-param-by-design (vs the bootstrap-only fallback, also empty).
+    "sec_manifest_tombstone_stale": (),
     # raw_payload_retention_sweep — #1014 payload-null sweep.
     # ``batch_size`` stays internal (implementation knob, same call as
     # #1013); ``dry_run`` is operator-facing and DEFAULTS TRUE so a

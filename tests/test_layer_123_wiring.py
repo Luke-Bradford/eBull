@@ -38,6 +38,7 @@ from app.workers.scheduler import (
     JOB_FINRA_SHORT_INTEREST_REFRESH,
     JOB_SEC_ATOM_FAST_LANE,
     JOB_SEC_DAILY_INDEX_RECONCILE,
+    JOB_SEC_MANIFEST_TOMBSTONE_STALE,
     JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP,
     JOB_SEC_PER_CIK_POLL,
     JOB_SEC_REBUILD,
@@ -240,6 +241,49 @@ class TestPopulateCanonicalRedirectsRegistry:
             validate_job_params(
                 JOB_POPULATE_CANONICAL_REDIRECTS,
                 {"suffix": ".W"},
+                allow_internal_keys=False,
+            )
+
+
+class TestSecManifestTombstoneStaleRegistry:
+    """#1614 — the #1131 stale-failed-upsert backfill is drained (zero
+    candidates; rows_tombstoned=0 every run; the #1131 source fix means the
+    candidate shape cannot recur) and self-deactivates by design. Retired
+    from SCHEDULED_JOBS to manual-trigger-only because each zero-candidate
+    no-op lost the db-lane tick-race and surfaced a false-red "schedule
+    missed" verdict on the admin Processes page. Kept in _INVOKERS so an
+    operator can still drain a resurfaced pre-#1131 row. Pins the full
+    triangle (invoker + metadata + source) so the manual path resolves
+    JobLock — the #1413 / populate_canonical_redirects trap. (NOT modelled
+    on daily_tax_reconciliation, which is missing its MANUAL_TRIGGER source
+    entry and is itself a latent KeyError-on-trigger bug.)"""
+
+    def test_in_valid_job_names(self) -> None:
+        assert JOB_SEC_MANIFEST_TOMBSTONE_STALE in VALID_JOB_NAMES
+
+    def test_not_in_scheduled_jobs(self) -> None:
+        assert _job_by_name(JOB_SEC_MANIFEST_TOMBSTONE_STALE) is None
+
+    def test_in_manual_trigger_metadata_with_no_params(self) -> None:
+        assert JOB_SEC_MANIFEST_TOMBSTONE_STALE in MANUAL_TRIGGER_JOB_METADATA
+        assert MANUAL_TRIGGER_JOB_METADATA[JOB_SEC_MANIFEST_TOMBSTONE_STALE] == ()
+
+    def test_in_manual_trigger_sources(self) -> None:
+        assert MANUAL_TRIGGER_JOB_SOURCES[JOB_SEC_MANIFEST_TOMBSTONE_STALE] == "db"
+
+    def test_source_for_resolves(self) -> None:
+        assert source_for(JOB_SEC_MANIFEST_TOMBSTONE_STALE) == "db"
+
+    def test_zero_param_validation_contract(self) -> None:
+        """POST /jobs/sec_manifest_tombstone_stale/run takes no params:
+        an empty body validates; any supplied key is rejected."""
+        metadata = _lookup_metadata(JOB_SEC_MANIFEST_TOMBSTONE_STALE)
+        assert metadata == ()
+        validate_job_params(JOB_SEC_MANIFEST_TOMBSTONE_STALE, {}, allow_internal_keys=False)
+        with pytest.raises(ParamValidationError):
+            validate_job_params(
+                JOB_SEC_MANIFEST_TOMBSTONE_STALE,
+                {"max_age_hours": 24},
                 allow_internal_keys=False,
             )
 
