@@ -1759,3 +1759,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: the ownership chart + L2 filer table fold `def14a_unmatched` into the `insiders` category (`rollupToSunburstInputs` / `rollupToFilerRows`), but the CSV export endpoint filtered `?category=insiders` by exact slice match — a drilled `?category=insiders&view=raw` export silently dropped DEF 14A rows the filtered table visibly showed. The fold lived in the FE transform; the backend consumer keyed on the raw category never learned about it.
 - Prevention: when a surface folds category A into category B for display, grep every consumer keyed on category (`?category=` filters, CSV/export endpoints, deep-link params, history filters) and apply the same fold — or route them all through one shared fold function. Self-review prompt: for each new `SLICE_TO_*` / fold map, list the category-keyed entry points (`grep -rn "category" app/api frontend/src/api` scoped to the feature) and confirm each either folds identically or is exact-by-design with a comment.
 - Enforced in: this prevention log; `app/api/instruments.py::rollup_csv_slice_filter` (pure helper + table test in `tests/test_ownership_rollup_csv.py`).
+
+---
+
+### Non-abstract ABC default methods that raise must be caught by every safety wrapper around the call
+
+- First seen in: PR #1610 (#1593 review round 3 WARNING).
+- Symptom: `BrokerProvider.get_trade_history` ships a non-abstract default that raises `NotImplementedError` (kept non-abstract so existing test fakes don't break). The degrade-gracefully wrapper `fetch_trade_history_safely` caught `httpx` errors + parse errors but not `NotImplementedError` — a future provider without an override would escape the wrapper and fail the whole position sync, the exact outcome the wrapper exists to prevent.
+- Prevention: when an interface method's default implementation raises (NotImplementedError or otherwise), every "this call is allowed to fail" wrapper around it must include that exception class in its catch set, with a loud log naming the provider class. Self-review prompt: for each `except (...)` wrapper around a provider/interface call, read the BASE class implementation — if it can raise something the wrapper misses, add it.
+- Enforced in: `app/services/trade_events.py::fetch_trade_history_safely` (`except NotImplementedError` branch) + the parametrized error-posture table in `tests/test_trade_events.py`.

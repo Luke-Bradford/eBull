@@ -497,6 +497,17 @@ def fetch_trade_history_safely(
             exc_info=True,
         )
         return None
+    except NotImplementedError:
+        # BrokerProvider ships a non-abstract default that raises — a
+        # provider without an override must degrade to history-skip,
+        # never break the position sync (review round-3 WARNING).
+        logger.error(
+            "broker provider %s does not implement get_trade_history — "
+            "positions still sync, ledger gets no history from this provider",
+            type(broker).__name__,
+            exc_info=True,
+        )
+        return None
 
 
 def record_trade_events(

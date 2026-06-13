@@ -240,6 +240,7 @@ class TestFetchTradeHistorySafely:
             _http_status_error(500),
             httpx.ConnectError("network down"),
             TradeHistoryParseError("bad row"),
+            NotImplementedError(),  # provider without an override (ABC default)
         ],
     )
     def test_failures_return_none_so_positions_still_sync(self, exc: Exception) -> None:
