@@ -9,6 +9,9 @@ __pycache__/
 .testmondata-*
 dist/
 build/
+# pnpm content-addressable store — regenerated at repo root by pnpm runs;
+# machine-local, never check in (leaked once, cleaned up in e92658d8).
+.pnpm-store/
 .DS_Store
 .claude/settings.local.json
 data/
