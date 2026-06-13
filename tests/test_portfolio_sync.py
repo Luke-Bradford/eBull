@@ -285,7 +285,10 @@ class TestEmptyBrokerGuard:
 
         # Zero writes must have occurred. Stronger than "no zero-out
         # updates" — catches any write attempted before the raise.
-        assert conn.execute.call_args_list == []
+        # The only allowed conn.execute before the guard is the
+        # read-only pg_advisory_xact_lock serializer (#1593).
+        non_lock_calls = [c for c in conn.execute.call_args_list if "pg_advisory_xact_lock" not in str(c.args[0])]
+        assert non_lock_calls == []
 
     def test_empty_broker_with_empty_local_does_not_raise(self) -> None:
         """Boundary: fully empty on both sides is a valid no-op."""
@@ -698,7 +701,9 @@ def _is_broker_positions_upsert(sql_arg: Any) -> bool:
     if not isinstance(sql_arg, str):
         return False
     normalised = re.sub(r"\s+", " ", sql_arg)
-    return "INSERT INTO broker_positions" in normalised
+    # "(" excludes the broker_positions_closed archive INSERT (#1593),
+    # which contains "INSERT INTO broker_positions" as a substring.
+    return "INSERT INTO broker_positions (" in normalised
 
 
 def _is_broker_positions_delete(sql_arg: Any) -> bool:
@@ -769,8 +774,12 @@ class TestUpsertBrokerPositions:
 
         assert upserted == 0
         assert deleted == 0
-        # No UPSERT should have been issued
-        assert conn.execute.call_args_list == []
+        # No UPSERT issued — the only conn.execute is the archive copy
+        # (#1593), which mirrors the DELETE's empty exclusion list.
+        assert len(conn.execute.call_args_list) == 1
+        archive_sql = conn.execute.call_args_list[0].args[0]
+        assert "INSERT INTO broker_positions_closed" in archive_sql
+        assert not _is_broker_positions_upsert(archive_sql)
         # DELETE was still issued (via cursor) with empty exclusion list
         assert mock_cursor.execute.call_count == 1
         sql = mock_cursor.execute.call_args.args[0]

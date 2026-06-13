@@ -46,6 +46,7 @@ cost-recording fallback path (between steps 6 and 7).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -111,6 +112,15 @@ def _patch_runtime_config(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.services.order_client.get_runtime_config",
         lambda _conn: _RUNTIME_DEMO,
     )
+
+
+@pytest.fixture(autouse=True)
+def _stub_post_trade_enqueue() -> Iterator[MagicMock]:
+    """#1593: enqueue_post_trade_sync opens its own cursor, which would
+    exhaust the sequenced mock conns here. Patched at point of use;
+    the enqueue contract is asserted in TestPostTradeEnqueue."""
+    with patch("app.services.order_client.enqueue_post_trade_sync") as stub:
+        yield stub
 
 
 def _make_cursor(rows: list[dict[str, Any]]) -> MagicMock:
@@ -835,6 +845,43 @@ class TestExecuteOrderDemoMode:
 # ---------------------------------------------------------------------------
 # TestExecuteOrderLiveMode
 # ---------------------------------------------------------------------------
+
+
+class TestPostTradeEnqueue:
+    """#1593: a persisted fill queues an immediate daily_portfolio_sync
+    so the broker-observed trade lands in trade_events within seconds."""
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_filled_demo_buy_enqueues_portfolio_sync(
+        self, _mock_now: MagicMock, _stub_post_trade_enqueue: MagicMock
+    ) -> None:
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
+            _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+            _fill_returning_cursor(fill_id=3),
+        ]
+        result = execute_order(_make_conn(cursors), recommendation_id=42, decision_id=10)
+        assert result.outcome == "filled"
+        _stub_post_trade_enqueue.assert_called_once()
+        assert _stub_post_trade_enqueue.call_args.kwargs["requested_by"] == "execute_order"
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_failed_order_does_not_enqueue(self, _mock_now: MagicMock, _stub_post_trade_enqueue: MagicMock) -> None:
+        # Demo EXIT with no quote fails closed: no fill → no enqueue.
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            _make_cursor([]),  # no quote
+            _order_returning_cursor(order_id=11),
+        ]
+        result = execute_order(_make_conn(cursors), recommendation_id=42, decision_id=10)
+        assert result.outcome == "failed"
+        _stub_post_trade_enqueue.assert_not_called()
 
 
 class TestExecuteOrderLiveMode:

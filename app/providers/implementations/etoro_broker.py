@@ -14,7 +14,7 @@ from __future__ import annotations
 import decimal
 import logging
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
 from typing import Any
@@ -23,6 +23,7 @@ import httpx
 
 from app.config import settings
 from app.providers.broker import (
+    BrokerClosedTrade,
     BrokerMirror,
     BrokerMirrorPosition,
     BrokerOrderResult,
@@ -72,6 +73,15 @@ class PortfolioParseError(Exception):
 
     See spec §2.2.1 for the hierarchy rationale and §2.3.3 for the
     strict-raise sync contract that depends on it.
+    """
+
+
+class TradeHistoryParseError(Exception):
+    """Raised when a trade-history row cannot be parsed safely.
+
+    Same design as PortfolioParseError: directly subclasses Exception
+    so it is never swallowed by the incidental-exception handlers
+    inside the parse loop.
     """
 
 
@@ -427,6 +437,57 @@ class EtoroBrokerProvider(BrokerProvider):
             mirrors=tuple(_parse_mirrors_payload(raw_mirrors)),
         )
 
+    def get_trade_history(self, min_date: datetime, page_size: int = 200) -> Sequence[BrokerClosedTrade]:
+        """Fetch all closed-trade rows with closeTimestamp >= min_date.
+
+        The endpoint filters on the CLOSE timestamp (empirically probed,
+        #1593 spec §0) and paginates offset-style; we loop while pages
+        come back full, collecting everything before returning so the
+        service layer can group slices per position.
+
+        Env segment placement differs from the other info endpoints:
+        /api/v1/trading/info/trade/demo/history (demo) vs
+        /api/v1/trading/info/trade/history (real).
+
+        Raises on HTTP or network errors (caller should handle).
+        """
+        env_segment = "/demo" if self._env == "demo" else ""
+        path = f"/api/v1/trading/info/trade{env_segment}/history"
+
+        trades: list[BrokerClosedTrade] = []
+        page = 1
+        while True:
+            response = self._http_read.get(
+                path,
+                params={
+                    "minDate": min_date.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "page": str(page),
+                    "pageSize": str(page_size),
+                },
+                headers=self._request_headers(),
+            )
+            response.raise_for_status()
+            try:
+                rows = response.json()
+            except ValueError as exc:  # 200 with a non-JSON body
+                raise TradeHistoryParseError(f"trade history page {page}: response body is not JSON: {exc}") from exc
+            if not isinstance(rows, list):
+                raise TradeHistoryParseError(
+                    f"trade history page {page}: expected a JSON array, got {type(rows).__name__}"
+                )
+            for idx, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    raise TradeHistoryParseError(f"trade history page {page} row {idx}: expected an object")
+                try:
+                    trades.append(_parse_closed_trade(row))
+                except (KeyError, ValueError, TypeError, decimal.DecimalException) as exc:
+                    raise TradeHistoryParseError(
+                        f"trade history page {page} row {idx} (position {row.get('positionId')}): {exc}"
+                    ) from exc
+            if len(rows) < page_size:
+                return trades
+            page += 1
+
 
 # ------------------------------------------------------------------
 # Normalisers — pure functions, no I/O
@@ -517,6 +578,51 @@ def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:
         leverage=int(payload.get("leverage", 1)),
         is_tsl_enabled=bool(payload.get("isTslEnabled", False)),
         total_fees=Decimal(str(payload.get("totalFees", 0))),
+    )
+
+
+def _parse_closed_trade(payload: dict[str, Any]) -> BrokerClosedTrade:
+    """Parse one trade-history row into BrokerClosedTrade.
+
+    Pure normaliser — no I/O, no instance state. Required fields
+    (positionId, instrumentId, units, openTimestamp, closeTimestamp)
+    raise KeyError on absence; numerics go through Decimal(str(value)).
+    Optional ids: eToro uses 0 as the "none" sentinel for
+    socialTradeId / parentPositionId / orderId — preserved as-is here
+    (the service layer decides sentinel semantics; raw_payload keeps
+    the evidence either way).
+    """
+
+    def _opt_decimal(key: str) -> Decimal | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return Decimal(str(value))
+
+    def _opt_int(key: str) -> int | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return int(value)
+
+    return BrokerClosedTrade(
+        position_id=int(payload["positionId"]),
+        instrument_id=int(payload["instrumentId"]),
+        is_buy=bool(payload.get("isBuy", True)),
+        units=Decimal(str(payload["units"])),
+        open_rate=_opt_decimal("openRate"),
+        open_timestamp=_parse_iso_datetime(payload["openTimestamp"]),
+        close_rate=_opt_decimal("closeRate"),
+        close_timestamp=_parse_iso_datetime(payload["closeTimestamp"]),
+        net_profit=_opt_decimal("netProfit"),
+        fees=_opt_decimal("fees"),
+        investment=_opt_decimal("investment"),
+        initial_investment=_opt_decimal("initialInvestment"),
+        leverage=int(payload.get("leverage", 1)),
+        order_id=_opt_int("orderId"),
+        social_trade_id=_opt_int("socialTradeId"),
+        parent_position_id=_opt_int("parentPositionId"),
+        raw_payload=payload,
     )
 
 

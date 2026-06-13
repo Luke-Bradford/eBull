@@ -35,6 +35,7 @@ from app.providers.broker import BrokerOrderResult
 from app.services.ops_monitor import get_kill_switch_status
 from app.services.quote_marks import positive_decimal_or_none
 from app.services.runtime_config import get_runtime_config
+from app.services.trade_events import enqueue_post_trade_sync
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +478,12 @@ def _persist_order_and_fill(
                 "ev": Jsonb({"order_id": order_id, "raw_payload": broker_result.raw_payload}),
             },
         )
+
+        # 7. Filled trade → queue an immediate portfolio sync so the
+        # broker-observed event lands in trade_events within seconds
+        # (#1593). Same transaction: NOTIFY fires only at commit.
+        if passed:
+            enqueue_post_trade_sync(conn, requested_by="orders_api")
 
     return order_id
 

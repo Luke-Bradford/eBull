@@ -81,6 +81,7 @@ from app.services.sync_orchestrator.progress import report_progress
 from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
+from app.services.trade_events import compute_history_min_date, fetch_trade_history_safely
 from app.services.universe import sync_universe
 from app.services.watermarks import get_watermark, set_watermark
 
@@ -2892,15 +2893,23 @@ def daily_portfolio_sync() -> None:
 
     api_key, user_key = creds
     with _tracked_job(JOB_DAILY_PORTFOLIO_SYNC) as tracker:
+        # Watermark read on its own short-lived conn BEFORE the provider
+        # session — no DB conn held across HTTP (#1593 spec PR-1 plan).
+        with psycopg.connect(settings.database_url) as wm_conn:
+            history_min_date = compute_history_min_date(wm_conn)
+
         with EtoroBrokerProvider(
             api_key=api_key,
             user_key=user_key,
             env=settings.etoro_env,
         ) as broker:
             portfolio = broker.get_portfolio()
+            # None on fetch failure — positions still sync; the
+            # unmoved watermark re-covers the window next tick.
+            trade_history = fetch_trade_history_safely(broker, history_min_date)
 
         with psycopg.connect(settings.database_url) as conn:
-            result = sync_portfolio(conn, portfolio)
+            result = sync_portfolio(conn, portfolio, trade_history=trade_history)
 
             # Auto-promote held instruments to Tier 1 so market data,
             # FX rates, and downstream jobs fire for them. Without this,

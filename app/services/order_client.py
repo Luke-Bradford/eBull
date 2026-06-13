@@ -36,6 +36,7 @@ from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
 from app.services.quote_marks import positive_decimal_or_none
 from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import get_runtime_config
+from app.services.trade_events import enqueue_post_trade_sync
 from app.services.transaction_cost import (
     estimate_cost,
     get_transaction_cost_config,
@@ -1140,6 +1141,12 @@ def execute_order(
             raw_payload=broker_result.raw_payload,
             now=now,
         )
+
+        # Filled trade → queue an immediate portfolio sync so the
+        # broker-observed event lands in trade_events within seconds
+        # (#1593). Same transaction: NOTIFY fires only at commit.
+        if fill_id is not None:
+            enqueue_post_trade_sync(conn, requested_by="execute_order")
 
     # --- Build explanation ---
     if order_status == "filled" and fill_id is not None:

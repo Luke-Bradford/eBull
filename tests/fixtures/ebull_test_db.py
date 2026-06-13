@@ -150,6 +150,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "coverage",
     "position_alerts",
     "watchlist",
+    # #1593 — trade ledger + closed-position archive (FK → instruments).
+    "trade_events",
+    "broker_positions_closed",
     "broker_positions",
     "positions",
     "quotes",

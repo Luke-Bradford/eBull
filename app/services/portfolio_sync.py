@@ -35,15 +35,22 @@ import psycopg.rows
 import psycopg.types.json
 
 from app.providers.broker import (
+    BrokerClosedTrade,
     BrokerMirror,
     BrokerPortfolio,
     BrokerPosition,
 )
+from app.services.trade_events import record_trade_events
 
 logger = logging.getLogger(__name__)
 
 # Cash deltas smaller than this are considered rounding noise.
 _CASH_SYNC_TOLERANCE = Decimal("0.01")
+
+# Advisory-lock key serializing sync_portfolio across its two callers
+# (scheduler job + WS reconcile). ASCII "eBull_PS" as int64, same
+# convention as JOBS_PROCESS_LOCK_KEY in app/jobs/locks.py.
+_SYNC_PORTFOLIO_XACT_LOCK_KEY = 0x6562756C6C5F5053
 
 
 @dataclass
@@ -221,6 +228,33 @@ def _upsert_broker_positions(
     # `!= ALL('{}'::bigint[])` predicate matches all rows, which is
     # the correct behaviour: if the broker reports nothing, nothing
     # should remain in broker_positions.
+    # Archive real-id rows before the sweep (#1593 spec §1.4): evidence
+    # copy of the last-seen broker state for externally-closed positions.
+    # Synthetic negative ids (#227) are handoff artefacts, not closes —
+    # excluded by the position_id >= 0 filter.
+    conn.execute(
+        """
+        INSERT INTO broker_positions_closed
+            (position_id, instrument_id, is_buy, units, initial_units,
+             amount, initial_amount_in_dollars, open_rate,
+             open_conversion_rate, open_date_time, stop_loss_rate,
+             take_profit_rate, is_no_stop_loss, is_no_take_profit,
+             leverage, is_tsl_enabled, total_fees, source, raw_payload,
+             updated_at, closed_detected_at)
+        SELECT position_id, instrument_id, is_buy, units, initial_units,
+               amount, initial_amount_in_dollars, open_rate,
+               open_conversion_rate, open_date_time, stop_loss_rate,
+               take_profit_rate, is_no_stop_loss, is_no_take_profit,
+               leverage, is_tsl_enabled, total_fees, source, raw_payload,
+               updated_at, %(now)s
+        FROM broker_positions
+        WHERE position_id >= 0
+          AND position_id != ALL(%(ids)s::bigint[])
+        ON CONFLICT (position_id, closed_detected_at) DO NOTHING
+        """,
+        {"ids": broker_position_ids, "now": now},
+    )
+
     deleted = 0
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -522,14 +556,30 @@ def sync_portfolio(
     conn: psycopg.Connection[Any],
     portfolio: BrokerPortfolio,
     now: datetime | None = None,
+    trade_history: Sequence[BrokerClosedTrade] | None = None,
 ) -> PortfolioSyncResult:
     """Reconcile local state against a broker portfolio snapshot.
 
     Must be called inside a transaction (autocommit=False, the default).
     The caller is responsible for committing.
+
+    ``trade_history``: closed-trade rows the caller fetched alongside the
+    portfolio (same provider session). When provided, close events are
+    ingested into the ``trade_events`` ledger; open events are ingested
+    from the portfolio payload on every call regardless (idempotent).
+    Pass None when the history fetch failed — positions still sync and
+    the next run's watermark re-covers the gap (#1593 spec §7).
     """
     if now is None:
         now = datetime.now(UTC)
+
+    # Serialize concurrent reconciles (scheduler tick + WS reconcile
+    # runner). Without this, two callers holding portfolio snapshots
+    # taken at different instants can interleave the archive/DELETE
+    # sweep against each other's upserts — archiving a live position as
+    # "closed externally" on stale evidence (#1593 Codex ckpt-2 HIGH).
+    # Transaction-scoped: released at the caller's commit/rollback.
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", [_SYNC_PORTFOLIO_XACT_LOCK_KEY])
 
     updated = 0
     opened_externally = 0
@@ -690,6 +740,13 @@ def sync_portfolio(
         portfolio.positions,
         now,
     )
+
+    # Trade-events ledger (#1593): opens from the payload (idempotent
+    # re-emit, DO NOTHING dedupes), closes from the supplied history
+    # rows. Pure DB writes — all HTTP happened in the caller's provider
+    # session before this transaction.
+    ledger_counters = record_trade_events(conn, portfolio.positions, trade_history)
+    logger.info("trade_events ingest: %s", ledger_counters.log_line())
 
     for row in local_rows:
         iid = row["instrument_id"]
