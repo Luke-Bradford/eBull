@@ -29,7 +29,7 @@
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS trade_events (
-    event_id            BIGSERIAL PRIMARY KEY,
+    event_id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     position_id         BIGINT NOT NULL CHECK (position_id >= 0),
     etoro_instrument_id BIGINT NOT NULL,
     instrument_id       BIGINT REFERENCES instruments(instrument_id),
