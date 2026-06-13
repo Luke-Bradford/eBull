@@ -33,6 +33,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, time
 from zoneinfo import ZoneInfo
 
+from app.providers.implementations.sec_calendar import is_us_federal_holiday
 from app.providers.implementations.sec_submissions import FilingIndexRow
 from app.services.sec_manifest import is_amendment_form, map_form_to_source
 
@@ -164,15 +165,23 @@ def read_daily_index(
         # files that do not yet exist. Tolerated classes — mirroring
         # ``SecFilingsProvider.fetch_master_index`` in sec_edgar.py:
         #   1. Weekend (Sat/Sun) — SEC never publishes weekend indexes.
-        #   2. Current-day before the ~22:00-ET publish cutoff.
-        #   3. Future-dated (lookback windows straddling midnight TZ).
-        # Anything else (past weekday, or current weekday after the
-        # cutoff) raises — that's SEC refusing us (UA/rate-limit/WAF).
-        # US federal holidays also yield 403 but are not enumerated;
-        # the next business-day reconcile catches what they miss.
+        #   2. US federal holiday — EDGAR publishes only on federal
+        #      business days (Columbus/Veterans Day 403 too). See
+        #      ``sec_calendar``. Without this the reconcile false-fails
+        #      the day after every holiday (#1612).
+        #   3. Current-day before the ~22:00-ET publish cutoff.
+        #   4. Future-dated (lookback windows straddling midnight TZ).
+        # Anything else (past business weekday, or current weekday after
+        # the cutoff) raises — that's SEC refusing us (UA/rate-limit/WAF).
         if when.weekday() >= 5:  # 5=Sat, 6=Sun
             logger.info(
                 "daily-index 403 on %s treated as weekend (no publish)",
+                when.isoformat(),
+            )
+            return
+        if is_us_federal_holiday(when):
+            logger.info(
+                "daily-index 403 on %s treated as federal holiday (no publish)",
                 when.isoformat(),
             )
             return
