@@ -105,14 +105,32 @@ def ensure_fx_history(
     if floor > until:
         return 0
 
+    # Coverage must be assessed PER (base, quote), not per base: if USD/GBP
+    # spans the range but USD/EUR is absent (a prior targets=['GBP'] load, or a
+    # newly-added target), a base-only MIN/MAX would report the span covered and
+    # never backfill EUR. Use the intersection across all targets — a quote with
+    # no rows forces a full fetch; otherwise the commonly-covered span is the
+    # latest per-quote start .. earliest per-quote end. Frankfurter returns all
+    # targets per call, so re-fetching an already-covered quote is one harmless
+    # ON CONFLICT DO NOTHING round-trip.
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT MIN(rate_date), MAX(rate_date) FROM fx_rates_daily WHERE base_currency = %s",
-            (base,),
+            """
+            SELECT quote_currency, MIN(rate_date), MAX(rate_date)
+            FROM fx_rates_daily
+            WHERE base_currency = %s AND quote_currency = ANY(%s)
+            GROUP BY quote_currency
+            """,
+            (base, quote_targets),
         )
-        row = cur.fetchone()
-    min_existing: date | None = row[0] if row else None
-    max_existing: date | None = row[1] if row else None
+        coverage = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    if len(coverage) < len(quote_targets):
+        # At least one target quote has no rows at all → fetch the whole span.
+        min_existing: date | None = None
+        max_existing: date | None = None
+    else:
+        min_existing = max(lo for lo, _ in coverage.values())
+        max_existing = min(hi for _, hi in coverage.values())
 
     written = 0
     for start, end in fetch_ranges(min_existing, max_existing, floor, until):

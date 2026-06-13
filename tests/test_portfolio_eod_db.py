@@ -154,6 +154,41 @@ def test_ensure_fx_history_reports_rows_written(
     assert rewritten == 0
 
 
+def test_ensure_fx_history_backfills_a_missing_quote(
+    ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """A target quote absent for a span must be backfilled even if another is present.
+
+    Pins Codex ckpt-3 MEDIUM: coverage is per (base, quote), not per base. GBP
+    already covers the span; EUR has zero rows → the gap detection must NOT
+    treat the span as covered and skip EUR.
+    """
+    conn = ebull_test_conn
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO fx_rates_daily (rate_date, base_currency, quote_currency, rate) VALUES (%s,%s,%s,%s)",
+            [
+                (date(2025, 1, 1), "USD", "GBP", Decimal("0.80")),
+                (date(2025, 1, 2), "USD", "GBP", Decimal("0.81")),
+            ],
+        )
+    stub = {
+        date(2025, 1, 1): {("USD", "GBP"): Decimal("0.80"), ("USD", "EUR"): Decimal("0.90")},
+        date(2025, 1, 2): {("USD", "GBP"): Decimal("0.81"), ("USD", "EUR"): Decimal("0.91")},
+    }
+    monkeypatch.setattr(fx_history, "fetch_timeseries_rates", lambda *a, **k: stub)
+
+    written = ensure_fx_history(conn, until=date(2025, 1, 2), targets=["EUR", "GBP"], since=date(2025, 1, 1))
+    conn.commit()
+    # GBP rows conflict (DO NOTHING); the 2 EUR rows are newly written.
+    assert written == 2
+    eur = conn.execute(
+        "SELECT COUNT(*) FROM fx_rates_daily WHERE base_currency='USD' AND quote_currency='EUR'"
+    ).fetchone()
+    assert eur is not None and eur[0] == 2
+
+
 def test_read_cash_sums_as_of_date(ebull_test_conn: psycopg.Connection[Any]) -> None:  # noqa: F811
     conn = ebull_test_conn
     with conn.cursor() as cur:
