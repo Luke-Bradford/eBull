@@ -359,14 +359,16 @@ class TestIngestFiler13F:
         assert rows[0]["market_value_usd"] == Decimal("69900000")
         assert rows[0]["voting_authority"] == "SOLE"
 
-    def test_raw_payload_persisted_for_primary_doc_and_infotable(
+    def test_raw_evidence_persisted_for_primary_doc_and_infotable(
         self,
         _setup: psycopg.Connection[tuple],
     ) -> None:
-        """13F ingester must persist BOTH the primary_doc.xml and
-        the infotable.xml bodies to ``filing_raw_documents`` before
-        parsing — operator audit 2026-05-03 + PR #808 contract.
-        Re-wash workflows depend on these rows."""
+        """13F ingester must persist a raw-evidence row for BOTH the
+        primary_doc.xml and the infotable.xml — operator audit 2026-05-03
+        + PR #808 contract. Since #1615 primary_doc is a write-only kind:
+        its row is BORN-COMPACTED (payload NULL + sha + source_url,
+        rehydratable) — the bytes are never stored. infotable_13f is a
+        re-wash kind and keeps its body."""
         from app.services import raw_filings
 
         conn = _setup
@@ -384,7 +386,10 @@ class TestIngestFiler13F:
             document_kind="primary_doc",
         )
         assert primary is not None
-        assert "BERKSHIRE" in primary.require_payload().upper() or "<edgarSubmission" in primary.require_payload()
+        # Born-compacted: no bytes, but a verifiable hash + recovery URL.
+        assert primary.payload is None and primary.byte_count is None
+        with pytest.raises(RuntimeError, match="swept"):
+            primary.require_payload()
         assert primary.parser_version == "13f-primary-v1"
         assert primary.source_url is not None
         assert primary.source_url.endswith("primary_doc.xml")

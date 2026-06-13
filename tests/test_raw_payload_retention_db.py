@@ -251,25 +251,30 @@ def test_rehydrate_and_store_raw_interleavings_over_a_swept_row(
     assert _manifest_raw_status(conn, accession="swp-r") == "stored"
 
     # Re-sweep the restored row, then store_raw over it (amended
-    # fetch): terminal state must be the live shape with BOTH sweep
-    # columns cleared — a stale hash must never linger against new
-    # bytes (prevention §ON CONFLICT covers all columns).
+    # fetch, e.g. a manifest rebuild). Since #1615 store_raw BORN-COMPACTS
+    # primary_doc (a write-only kind): the bytes are never resurrected —
+    # the new body is hashed server-side and the payload stays NULL.
+    # source_url is mandatory for the rehydratable row.
     summary = sweep_raw_payloads(database_url=test_database_url(), dry_run=False)
     assert summary.rows_swept == 1
     conn.commit()
+    amended = "<html>amended body</html>"
     store_raw(
         conn,
         accession_number="swp-r",
         document_kind="primary_doc",
-        payload="<html>amended body</html>",
+        payload=amended,
+        source_url="https://www.sec.gov/Archives/edgar/data/1/primary_doc.html",
     )
     conn.commit()
-    payload, sha, swept_at, _ = _raw_row(conn, accession="swp-r", kind="primary_doc")
-    assert payload == "<html>amended body</html>"
-    assert sha is None and swept_at is None
-    # Manifest stays 'compacted' until a parser outcome writes
-    # 'stored' — and the 'compacted'-eligible predicate means the row
-    # re-sweeps cleanly:
+    payload, sha, swept_at, byte_count = _raw_row(conn, accession="swp-r", kind="primary_doc")
+    # Born-compacted, NOT resurrected: payload stays NULL, sha = the new
+    # body's hash, swept_at set (chk_swept_rows_carry_hash holds).
+    assert payload is None and byte_count is None
+    assert sha == hashlib.sha256(amended.encode("utf-8")).hexdigest()
+    assert swept_at is not None
     assert _manifest_raw_status(conn, accession="swp-r") == "compacted"
+    # The row now has payload NULL, so the backstop sweep skips it
+    # (nothing left to reclaim).
     final = sweep_raw_payloads(database_url=test_database_url(), dry_run=False)
-    assert final.rows_swept == 1
+    assert final.rows_swept == 0

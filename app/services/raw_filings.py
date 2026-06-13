@@ -77,6 +77,16 @@ DocumentKind = Literal[
 # accession number — they belong in their own per-CIK store, not in
 # this per-filing table. Claude PR 808 review (BLOCKING) caught the
 # prior overload that smuggled CIKs into the accession_number column.
+
+# Kinds whose payload is WRITE-ONLY — no rewash parser reads them and
+# the manifest rebuild re-fetches from EDGAR unconditionally (sql/190).
+# ``store_raw`` persists these **born-compacted** (#1615): payload NULL +
+# payload_sha256 + payload_swept_at, the same state the #1014 sweep
+# produces, so ~22 GB of primary_doc bytes are never stored. MUST stay
+# disjoint from the rewash registry (a rewash parser reads stored bodies,
+# which a born-compacted row lacks). Canonical here (single source of
+# truth); ``raw_payload_retention`` imports it.
+SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset({"primary_doc"})
 # Future PR adds a sibling ``cik_raw_documents`` table for those.
 
 
@@ -125,11 +135,58 @@ def store_raw(
     ``parser_version`` + ``source_url``. The new body is treated as
     authoritative — re-fetches from SEC are exactly when
     overwriting is correct (the document may have been amended).
+
+    ``SWEPT_DOCUMENT_KINDS`` (write-only kinds) are stored
+    **born-compacted** (#1615): the ``payload`` is hashed server-side
+    and the column is written ``NULL`` so the bytes are never persisted.
+    Such a row is identical to a #1014-swept row (payload NULL +
+    payload_sha256 + payload_swept_at) and is rehydratable from
+    ``source_url`` — which is therefore REQUIRED for these kinds.
     """
     if not accession_number:
         raise ValueError("accession_number is required")
     if not payload:
-        raise ValueError("payload is required (empty payload would defeat re-wash)")
+        raise ValueError("payload is required (empty payload would defeat re-wash / leave no hash)")
+
+    if document_kind in SWEPT_DOCUMENT_KINDS:
+        # Born-compacted: hash the bytes server-side (byte-identical to the
+        # #1014 sweep + the rehydrate verifier, sql/190), store NULL
+        # payload. source_url is the ONLY recovery path for a payload-less
+        # row, so it is mandatory — the guard below makes EXCLUDED.source_url
+        # non-NULL on every conflict, so it can never regress to NULL.
+        if not source_url:
+            raise ValueError(
+                f"source_url is required for write-only kind {document_kind!r} "
+                "(born-compacted rows are rehydrated from source_url)"
+            )
+        conn.execute(
+            """
+            INSERT INTO filing_raw_documents (
+                accession_number, document_kind, payload, payload_sha256,
+                payload_swept_at, parser_version, source_url, fetched_at
+            ) VALUES (
+                %(acc)s, %(kind)s, NULL,
+                encode(sha256(convert_to(%(payload)s, 'UTF8')), 'hex'),
+                NOW(), %(pv)s, %(url)s, NOW()
+            )
+            ON CONFLICT (accession_number, document_kind) DO UPDATE SET
+                payload = NULL,
+                payload_sha256 = encode(sha256(convert_to(%(payload)s, 'UTF8')), 'hex'),
+                payload_swept_at = NOW(),
+                parser_version = EXCLUDED.parser_version,
+                source_url = EXCLUDED.source_url,
+                fetched_at = NOW()
+            """,
+            {
+                "acc": accession_number,
+                "kind": document_kind,
+                "payload": payload,
+                "pv": parser_version,
+                "url": source_url,
+            },
+        )
+        return
+
     conn.execute(
         """
         INSERT INTO filing_raw_documents (
