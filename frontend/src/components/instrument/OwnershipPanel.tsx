@@ -54,6 +54,7 @@ import { Pane } from "@/components/instrument/Pane";
 import {
   formatPct,
   formatShares,
+  ownershipStaleDenominatorCopy,
   parseShareCount,
 } from "@/components/instrument/ownershipMetrics";
 import type {
@@ -247,7 +248,13 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
         />
         <EmptyState
           title="No ownership data"
-          description="XBRL shares-outstanding not yet on file for this instrument. Trigger a fundamentals sync, or wait for the next scheduled run."
+          description={
+            ownershipStaleDenominatorCopy(
+              rollup.banner.state,
+              rollup.shares_outstanding_as_of,
+            ) ??
+            "XBRL shares-outstanding not yet on file for this instrument. Trigger a fundamentals sync, or wait for the next scheduled run."
+          }
         />
       </div>
     );

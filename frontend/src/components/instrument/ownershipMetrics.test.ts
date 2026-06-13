@@ -5,6 +5,7 @@ import {
   computeOwnership,
   formatPct,
   formatShares,
+  ownershipStaleDenominatorCopy,
   parseShareCount,
 } from "./ownershipMetrics";
 
@@ -294,5 +295,27 @@ describe("formatPct + formatShares", () => {
   it("formatShares renders null and NaN as em-dash", () => {
     expect(formatShares(null)).toBe("—");
     expect(formatShares(Number.NaN)).toBe("—");
+  });
+});
+
+describe("ownershipStaleDenominatorCopy (#1581)", () => {
+  it("returns the stale-denominator copy when no_data carries an as_of", () => {
+    const copy = ownershipStaleDenominatorCopy("no_data", "2011-04-29");
+    expect(copy).not.toBeNull();
+    expect(copy).toContain("too stale");
+    // Cause-agnostic: must not claim multi-class, must not push a sync (futile
+    // for the dual-class trap — re-fetches the same ancient row).
+    expect(copy!.toLowerCase()).not.toContain("multi-class");
+    expect(copy!.toLowerCase()).not.toContain("trigger a fundamentals sync");
+  });
+
+  it("returns null (use the surface's own absent copy) when as_of is null", () => {
+    expect(ownershipStaleDenominatorCopy("no_data", null)).toBeNull();
+  });
+
+  it("returns null outside no_data even when an as_of is present", () => {
+    // The empty branch also fires when inputs/rings are null on a non-no_data
+    // payload; the as_of must not be mistaken for a staleness signal then.
+    expect(ownershipStaleDenominatorCopy("green", "2011-04-29")).toBeNull();
   });
 });

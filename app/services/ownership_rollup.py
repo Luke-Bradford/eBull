@@ -36,7 +36,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import psycopg
 import psycopg.rows
@@ -66,6 +66,13 @@ CoverageState = Literal["no_data", "red", "unknown_universe", "amber", "green"]
 # additively would double-count). Future ESOP / DRS / short-interest
 # overlays land here too (#961, etc.).
 DenominatorBasis = Literal["pie_wedge", "institution_subset"]
+
+# Why an ``OwnershipRollup.no_data`` payload carries no usable denominator.
+# ``absent`` — no shares-outstanding row on file at all.
+# ``stale_denominator`` — a row exists but its ``as_of`` is too old to use
+#   (the #1581 dual-class dimension-only trap, or an ingest-coverage gap);
+#   percentages would be nonsense against it, so we suppress them.
+NoDataReason = Literal["absent", "stale_denominator"]
 
 
 @dataclass(frozen=True)
@@ -210,18 +217,33 @@ class OwnershipRollup:
         symbol: str,
         instrument_id: int,
         historical_symbols: tuple[SymbolHistoryEntry, ...] = (),
+        *,
+        reason: NoDataReason = "absent",
+        stale_as_of: date | None = None,
     ) -> OwnershipRollup:
-        """Empty payload for the ``no_data`` state (no XBRL outstanding
-        on file). 200 OK with the red banner, not 503 — that way the
-        frontend renders a uniform empty state and a sync-trigger
-        CTA rather than crashing on a non-2xx response.
+        """Empty payload for the ``no_data`` state. 200 OK with the error
+        banner, not 503 — the frontend renders a uniform empty state
+        rather than crashing on a non-2xx response.
+
+        Two reasons share this path, distinguished only by server-owned
+        copy (the coverage state stays ``no_data`` either way, so the
+        #840/#923 5-state machine is unchanged):
+
+        * ``absent`` — no shares-outstanding row on file. Generic banner
+          tells the operator to trigger a fundamentals sync.
+        * ``stale_denominator`` — a row exists but its ``as_of`` is too
+          old to use (#1581). Honest banner names the date; the stale
+          ``as_of`` is RETAINED in ``shares_outstanding_as_of`` as the FE
+          discriminator (``absent`` keeps it null). ``stale_as_of`` is
+          required for this reason — it is the only provenance that
+          survives once the denominator is nulled.
 
         ``historical_symbols`` is threaded through so the BBBY-style
         callout still renders on instruments missing
-        ``shares_outstanding`` — that case is exactly when the
-        operator wants the "filings before symbol change still belong
-        here" hint. Codex pre-push review (Batch 7 of #788) caught
-        the prior version dropping the chain on this path."""
+        ``shares_outstanding`` — that case is exactly when the operator
+        wants the "filings before symbol change still belong here" hint.
+        Codex pre-push review (Batch 7 of #788) caught the prior version
+        dropping the chain on this path."""
         residual = ResidualBlock(
             shares=Decimal(0),
             pct_outstanding=Decimal(0),
@@ -230,12 +252,21 @@ class OwnershipRollup:
             oversubscribed=False,
         )
         coverage = CoverageReport(state="no_data", categories={})
-        banner = _banner_for_state("no_data", coverage, Decimal(0))
+        if reason == "stale_denominator":
+            if stale_as_of is None:
+                raise ValueError("no_data(reason='stale_denominator') requires stale_as_of")
+            banner = _stale_denominator_banner(stale_as_of)
+            info_chip = "Shares-outstanding figure on file is too stale to use as a denominator."
+            as_of_out: date | None = stale_as_of
+        else:
+            banner = _banner_for_state("no_data", coverage, Decimal(0))
+            info_chip = "No shares-outstanding figure on file."
+            as_of_out = None
         return cls(
             symbol=symbol,
             instrument_id=instrument_id,
             shares_outstanding=None,
-            shares_outstanding_as_of=None,
+            shares_outstanding_as_of=as_of_out,
             shares_outstanding_source=SharesOutstandingSource(None, None, None, None),
             treasury_shares=None,
             treasury_as_of=None,
@@ -243,7 +274,7 @@ class OwnershipRollup:
             residual=residual,
             concentration=ConcentrationInfo(
                 pct_outstanding_known=Decimal(0),
-                info_chip="No shares-outstanding figure on file.",
+                info_chip=info_chip,
             ),
             coverage=coverage,
             banner=banner,
@@ -1136,6 +1167,76 @@ def _worst_named_category(coverage: CoverageReport) -> _WorstNamed:
 # ---------------------------------------------------------------------------
 
 
+_STALE_DENOMINATOR_MAX_AGE_DAYS: Final[int] = 548
+"""~18 months. A covered issuer's cover-page share count refreshes every
+10-Q / 10-K, so 18 months clears even an annual-only filer's
+between-filings gap and never false-positives on a normally-ingested
+instrument (panel AAPL/GOOG/GME/MSFT/JPM/HD are all < 80 days). A
+denominator older than this means we are missing recent filings
+(ingest-coverage gap) OR the issuer reports per-share-class counts only
+and the newest un-dimensioned row is ancient (the #1581 dual-class trap —
+BRK.B's is 2011) — both render nonsense percentages, so honest no_data
+wins. Self-healing: a fresh row (< this) restores rendering. Tunable;
+fleet blast radius recorded in the PR."""
+
+
+def _denominator_too_stale(as_of: date | None, today: date) -> bool:
+    """Pure staleness policy for the shares-outstanding denominator (#1581).
+
+    ``as_of is None`` → ``False``: denominator absence is the caller's
+    separate ``outstanding is None or <= 0`` short-circuit, not this
+    guard. A future ``as_of`` (``today - as_of < 0``) is treated as
+    not-stale — corrupt-future-``period_end`` handling is out of scope
+    here, but pinned by a test so it cannot silently start bypassing the
+    guard."""
+    if as_of is None:
+        return False
+    return (today - as_of).days > _STALE_DENOMINATOR_MAX_AGE_DAYS
+
+
+def _snapshot_today(conn: psycopg.Connection[Any]) -> date:
+    """Transaction-stable "today" for the staleness clock.
+
+    ``get_ownership_rollup`` runs inside a REPEATABLE READ snapshot
+    (``snapshot_read``). A wall-clock ``datetime.now()`` would let two reads
+    over the same snapshot disagree at the exact staleness boundary across a
+    UTC-midnight rollover. ``CURRENT_TIMESTAMP`` is ``transaction_timestamp()``
+    — fixed for the life of the transaction — so the verdict is consistent
+    within the snapshot. ``AT TIME ZONE 'UTC'`` pins it to the UTC calendar
+    date, matching the prior ``datetime.now(tz=UTC)`` semantics and the naive
+    ``period_end`` dates we compare against."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date")
+        row = cur.fetchone()
+    assert row is not None  # SELECT of a constant always returns one row
+    return row[0]
+
+
+def _stale_denominator_banner(as_of: date) -> BannerCopy:
+    """Honest ``no_data`` banner when a shares-outstanding row exists but
+    is too old to use as a denominator (#1581).
+
+    Cause-agnostic by design: the stale row may be the dual-class
+    dimension-only trap (BRK.B's newest un-dimensioned count is 2011) OR
+    an ingest-coverage gap — both produce nonsense percentages, so the
+    copy states only what we know (the figure is stale), never why.
+    Unlike the generic ``absent`` copy it does NOT tell the operator to
+    trigger a fundamentals sync (which re-fetches the same ancient row for
+    the dual-class case). State stays ``no_data``; only the copy differs."""
+    as_of_txt = f"{as_of.day} {as_of:%b %Y}"  # en-GB short month, e.g. "29 Apr 2011"
+    return BannerCopy(
+        state="no_data",
+        variant="error",
+        headline="Cannot compute ownership",
+        body=(
+            f"Latest shares-outstanding on file ({as_of_txt}) is too stale to use as a "
+            "denominator, so ownership percentages are suppressed rather than computed "
+            "against an outdated share count. The breakdown returns once a current figure "
+            "is on file."
+        ),
+    )
+
+
 def _read_shares_outstanding(
     conn: psycopg.Connection[Any], instrument_id: int
 ) -> tuple[Decimal | None, date | None, SharesOutstandingSource]:
@@ -1248,6 +1349,18 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
             symbol=symbol,
             instrument_id=instrument_id,
             historical_symbols=historical_symbols,
+        )
+    # A denominator many years stale produces nonsense percentages — a
+    # single 13F holding renders >100% of "outstanding" (BRK.B: 124% off a
+    # 2011 count). Suppress to honest no_data rather than compute against
+    # it. See _denominator_too_stale / #1581.
+    if _denominator_too_stale(outstanding_as_of, _snapshot_today(conn)):
+        return OwnershipRollup.no_data(
+            symbol=symbol,
+            instrument_id=instrument_id,
+            historical_symbols=historical_symbols,
+            reason="stale_denominator",
+            stale_as_of=outstanding_as_of,
         )
     treasury, treasury_as_of = _read_treasury_from_current(conn, instrument_id)
     sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)

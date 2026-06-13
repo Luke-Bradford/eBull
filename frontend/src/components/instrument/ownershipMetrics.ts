@@ -25,6 +25,8 @@
  * returns NUMERICs as strings); :func:`parseShareCount` normalises.
  */
 
+import type { OwnershipCoverageState } from "@/api/ownership";
+
 export interface OwnershipSliceInput {
   /** Sum of long-equity shares for this slice. ``null`` = no data. */
   readonly shares: number | null;
@@ -197,4 +199,32 @@ export function formatPct(pct: number | null): string {
 export function formatShares(shares: number | null): string {
   if (shares === null || !Number.isFinite(shares)) return "—";
   return shares.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+/**
+ * Stale-denominator empty-state copy (#1581), or ``null`` when the no_data
+ * state is the ordinary "absent" case.
+ *
+ * A no_data payload that still carries a ``shares_outstanding_as_of`` is the
+ * stale-denominator case: a shares-outstanding figure IS on file but too old
+ * to use as a denominator, so ownership percentages are suppressed. ``absent``
+ * payloads null the as_of. Returning ``null`` lets each surface keep its own
+ * absent-case copy while sharing one source of truth for the stale copy.
+ *
+ * Cause-agnostic by design — the stale figure may be the dual-class
+ * dimension-only trap (BRK.B's newest un-dimensioned count is 2011) OR an
+ * ingest-coverage gap, so it states only what we know (the figure is stale),
+ * never why, and does NOT tell the operator to trigger a sync (futile for the
+ * dual-class case — it re-fetches the same ancient row). The server-owned
+ * coverage banner carries the dated detail.
+ */
+export function ownershipStaleDenominatorCopy(
+  bannerState: OwnershipCoverageState,
+  sharesOutstandingAsOf: string | null,
+): string | null {
+  const isStaleDenominator =
+    bannerState === "no_data" && sharesOutstandingAsOf !== null;
+  return isStaleDenominator
+    ? "Shares-outstanding figure on file is too stale to use as a denominator — ownership percentages are suppressed until a current figure is ingested (next SEC filing or fundamentals refresh)."
+    : null;
 }
