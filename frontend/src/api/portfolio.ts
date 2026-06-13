@@ -1,5 +1,6 @@
 import { apiFetch } from "@/api/client";
 import type {
+  ActivityResponse,
   InstrumentPositionDetail,
   PortfolioResponse,
   RollingPnlResponse,
@@ -25,4 +26,9 @@ export function fetchValueHistory(
   return apiFetch<ValueHistoryResponse>(
     `/portfolio/value-history?range=${encodeURIComponent(range)}`,
   );
+}
+
+export function fetchActivity(includeMirrors: boolean): Promise<ActivityResponse> {
+  const params = new URLSearchParams({ include_mirrors: String(includeMirrors) });
+  return apiFetch<ActivityResponse>(`/portfolio/activity?${params}`);
 }

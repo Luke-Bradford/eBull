@@ -568,6 +568,33 @@ export interface ValueHistoryResponse {
   events: ValueHistoryEvent[];
 }
 
+// /portfolio/activity — broker-observed trade ledger (#1593 PR-2).
+// fees_usd / realized_pnl_usd are USD account-currency; price is in the
+// instrument's NATIVE currency. symbol null = instrument absent from the
+// current universe (deep history) — render `#${etoro_instrument_id}`.
+export interface ActivityEventItem {
+  event_id: number;
+  position_id: number;
+  event_kind: "open" | "close";
+  side: "buy" | "sell";
+  symbol: string | null;
+  etoro_instrument_id: number;
+  units: number;
+  price: number | null;
+  executed_at: string;
+  fees_usd: number | null;
+  realized_pnl_usd: number | null;
+  holding_period_days: number | null; // closes only; fractional days
+  source: "etoro_sync" | "etoro_history";
+  is_mirror: boolean;
+}
+
+export interface ActivityResponse {
+  events: ActivityEventItem[];
+  total: number; // rows matching the filter; events capped at `limit`
+  include_mirrors: boolean;
+}
+
 // /portfolio/instruments/:instrumentId — native currency drill-through
 export interface NativeTradeItem {
   position_id: number;

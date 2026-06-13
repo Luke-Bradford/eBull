@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.api._helpers import parse_optional_float, resolve_quote_price
@@ -1179,3 +1179,114 @@ def get_value_history(
         points=points,
         events=events,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /portfolio/activity — broker-observed trade ledger (#1593 PR-2)
+# ---------------------------------------------------------------------------
+
+
+class ActivityEventItem(BaseModel):
+    """One trade_events row, render-ready.
+
+    Money fields (fees_usd, realized_pnl_usd) are USD account-currency;
+    price is in the instrument's native currency. ``symbol`` is None
+    when the instrument is absent from the current universe (deep
+    history) — the FE falls back to ``#<etoro_instrument_id>``.
+    """
+
+    event_id: int
+    position_id: int
+    event_kind: Literal["open", "close"]
+    side: Literal["buy", "sell"]
+    symbol: str | None
+    etoro_instrument_id: int
+    units: float
+    price: float | None
+    executed_at: datetime
+    fees_usd: float | None
+    realized_pnl_usd: float | None
+    # Close events only: days between this position's open event and
+    # the close (fractional). None for opens or when no open is on file.
+    holding_period_days: float | None
+    source: Literal["etoro_sync", "etoro_history"]
+    is_mirror: bool
+
+
+class ActivityResponse(BaseModel):
+    events: list[ActivityEventItem]
+    # Total rows matching the filter (events is capped at `limit`).
+    total: int
+    include_mirrors: bool
+
+
+@router.get("/activity", response_model=ActivityResponse)
+def get_activity(
+    limit: int = Query(default=100, ge=1, le=500),
+    include_mirrors: bool = False,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ActivityResponse:
+    """Trade ledger feed, newest first.
+
+    Mirror-originated rows (``social_trade_id != 0``) are excluded by
+    default, consistent with the value-history chart's own-portfolio
+    basis; ``include_mirrors=true`` widens the filter.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        total_row = cur.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM trade_events
+            WHERE %(include_mirrors)s OR COALESCE(social_trade_id, 0) = 0
+            """,
+            {"include_mirrors": include_mirrors},
+        ).fetchone()
+        total = int(total_row["total"]) if total_row else 0
+
+        rows = cur.execute(
+            """
+            SELECT te.event_id, te.position_id, te.event_kind, te.side,
+                   te.units, te.price, te.executed_at, te.fees_usd,
+                   te.realized_pnl_usd, te.source, te.etoro_instrument_id,
+                   te.social_trade_id, i.symbol,
+                   CASE
+                       WHEN te.event_kind = 'close' AND o.opened_at IS NOT NULL
+                       THEN GREATEST(
+                           0,
+                           EXTRACT(EPOCH FROM te.executed_at - o.opened_at) / 86400.0
+                       )
+                   END AS holding_period_days
+            FROM trade_events te
+            LEFT JOIN instruments i ON i.instrument_id = te.instrument_id
+            LEFT JOIN (
+                SELECT position_id, executed_at AS opened_at
+                FROM trade_events
+                WHERE event_kind = 'open'
+            ) o ON o.position_id = te.position_id AND te.event_kind = 'close'
+            WHERE %(include_mirrors)s OR COALESCE(te.social_trade_id, 0) = 0
+            ORDER BY te.executed_at DESC, te.event_id DESC
+            LIMIT %(limit)s
+            """,
+            {"include_mirrors": include_mirrors, "limit": limit},
+        ).fetchall()
+
+    events = [
+        ActivityEventItem(
+            event_id=row["event_id"],
+            position_id=row["position_id"],
+            event_kind=row["event_kind"],
+            side=row["side"],
+            symbol=row["symbol"],
+            etoro_instrument_id=row["etoro_instrument_id"],
+            units=float(row["units"]),
+            price=parse_optional_float(row, "price"),
+            executed_at=row["executed_at"],
+            fees_usd=parse_optional_float(row, "fees_usd"),
+            realized_pnl_usd=parse_optional_float(row, "realized_pnl_usd"),
+            holding_period_days=parse_optional_float(row, "holding_period_days"),
+            source=row["source"],
+            is_mirror=bool(row["social_trade_id"]),
+        )
+        for row in rows
+    ]
+    return ActivityResponse(events=events, total=total, include_mirrors=include_mirrors)
