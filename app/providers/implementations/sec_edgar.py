@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.providers.filings import FilingEvent, FilingNotFound, FilingSearchResult, FilingsProvider
+from app.providers.implementations.sec_calendar import is_us_federal_holiday
 from app.providers.rate_gate import SEC_MIN_REQUEST_INTERVAL_S
 from app.providers.resilient_client import ResilientClient
 
@@ -658,18 +659,19 @@ class SecFilingsProvider(FilingsProvider):
         to persist in the watermark row.
 
         SEC's Archives host serves 403 (not 404) for files that do not
-        yet exist. Two tolerated 403 classes:
+        yet exist. Three tolerated 403 classes:
           1. Weekend (Sat/Sun) target_date — SEC never publishes on
              weekends, and observed behaviour shows 403 rather than 404.
-          2. Not-yet-published — current-day before the ~22:00-ET
+          2. US federal holiday target_date — EDGAR publishes only on
+             federal business days (Columbus + Veterans Day 403 too,
+             though NYSE is open). See ``sec_calendar``. A past-weekday
+             holiday 403 is otherwise mistaken for a block and wedges
+             the per-day watermark indefinitely (#1612).
+          3. Not-yet-published — current-day before the ~22:00-ET
              publish cutoff, or future-dated.
-        Any other 403 (past weekday, or current weekday after the
-        publish cutoff) raises — that's SEC refusing us
+        Any other 403 (past business weekday, or current weekday after
+        the publish cutoff) raises — that's SEC refusing us
         (UA/rate-limit/etc.), not awaiting publication.
-
-        US federal holidays also yield 403/404 on SEC side but are not
-        enumerated here — a same-day retry on the next business day
-        catches them via the per-day watermark path.
 
         Rate-limited alongside the other SEC clients via the shared
         timestamp list, so a burst of N calls respects the 10 rps cap.
@@ -697,6 +699,12 @@ class SecFilingsProvider(FilingsProvider):
             if target_date.weekday() >= 5:  # 5=Sat, 6=Sun
                 logger.info(
                     "SEC master-index: 403 on %s treated as weekend (no publish)",
+                    target_date.isoformat(),
+                )
+                return None
+            if is_us_federal_holiday(target_date):
+                logger.info(
+                    "SEC master-index: 403 on %s treated as federal holiday (no publish)",
                     target_date.isoformat(),
                 )
                 return None

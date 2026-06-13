@@ -213,3 +213,34 @@ def test_fetch_returns_none_on_403_for_weekend(monkeypatch: pytest.MonkeyPatch) 
     # 2026-04-18 is Saturday, 2026-04-19 is Sunday.
     assert provider.fetch_master_index(date(2026, 4, 18), if_modified_since=None) is None
     assert provider.fetch_master_index(date(2026, 4, 19), if_modified_since=None) is None
+
+
+@pytest.mark.parametrize(
+    ("holiday", "label"),
+    [
+        (date(2026, 5, 25), "Memorial Day (Mon)"),
+        (date(2025, 6, 19), "Juneteenth (Thu)"),
+        (date(2025, 10, 13), "Columbus Day (Mon, NYSE-open)"),
+        (date(2025, 11, 11), "Veterans Day (Tue, NYSE-open)"),
+        (date(2026, 7, 3), "Independence Day observed (Fri; Jul 4 is Sat)"),
+    ],
+)
+def test_fetch_returns_none_on_403_for_federal_holiday(
+    monkeypatch: pytest.MonkeyPatch,
+    holiday: date,
+    label: str,
+) -> None:
+    # EDGAR publishes only on federal business days; a past-weekday
+    # holiday 403 is "no file", not a block, and must NOT raise — else
+    # the 30-day fundamentals lookback wedges on it forever (#1612).
+    # now is pinned well after the holiday + past the publish cutoff so
+    # neither the weekend nor not-yet-published branch could explain it.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    provider = SecFilingsProvider(user_agent="test test@example.com")
+    _rewire_tickers_transport(provider, httpx.MockTransport(handler))
+
+    _pin_now_et(monkeypatch, "2026-12-15T23:00:00")
+
+    assert provider.fetch_master_index(holiday, if_modified_since=None) is None, label

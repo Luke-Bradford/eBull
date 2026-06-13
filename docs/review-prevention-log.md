@@ -540,6 +540,14 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Source-absence gates over a date-keyed window must tolerate holidays, not just weekends — a missed past date wedges the watermark forever
+- First seen in: #1612 (2026-06-13). `fundamentals_sync` phase 1 failed on every run since ≥06-11.
+- Symptom: SEC EDGAR's Archives host returns **403 (not 404)** for a daily-index file that does not exist. `fetch_master_index` tolerated 403 only for weekends + the not-yet-published current day; a **past-weekday federal holiday** (Memorial Day, in the 30-day `plan_refresh` lookback) fell through to `raise_for_status()`. Because the per-day watermark only advances on success, the holiday date was re-requested every run and wedged phase 1 indefinitely; each upcoming holiday re-wedges it. The docstring even *admitted* the gap ("holidays … not enumerated here — a same-day retry on the next business day catches them") — a false assumption: nothing advances past the failed date. The identical bug sat dormant in the sibling `sec_daily_index.read_daily_index` (would false-fail `sec_daily_index_reconcile` the day after every holiday).
+- Prevention: When a gate decides "this external source legitimately has no data for date D" over a window that includes past dates, enumerate **all** non-publishing day classes for that source, not just weekends. For SEC EDGAR daily-index the correct calendar is **US federal** (not NYSE — empirically Columbus + Veterans Day, NYSE-open but federally closed, both 403). Put the calendar in one shared helper (`app/providers/implementations/sec_calendar.py::is_us_federal_holiday`) so every 403 site agrees. A 403/absence on a past **business** weekday must still raise (genuine block — UA/rate-limit/WAF). Test matrix must include: a holiday → tolerated, an observed-shifted holiday (e.g. Jul 4 on a Sat → observed Fri), and a past business weekday → still raises. Self-review prompt: "if this source goes silent on a calendar date that isn't a weekend, does my window advance past it, or retry it forever?"
+- Enforced in: `app/providers/implementations/sec_calendar.py`; `tests/test_sec_calendar.py`; `tests/test_sec_provider_master_index.py::test_fetch_returns_none_on_403_for_federal_holiday` + `test_fetch_raises_on_403_for_past_weekday`; `tests/test_sec_submissions_provider.py::TestReadDailyIndex403Holiday`; this prevention log.
+
+---
+
 ### Persist error response body before swallowing HTTP exceptions in providers
 - First seen in: #171
 - Symptom: `get_quotes()` caught `httpx.HTTPStatusError` on a 500 response but skipped the chunk without persisting the error response body. The 500 body (which may contain diagnostic info from the upstream API) was silently discarded, violating the raw-payload persistence rule.

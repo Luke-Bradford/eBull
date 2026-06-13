@@ -380,27 +380,54 @@ class TestReadDailyIndex403:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # 2026-05-25 is Monday; freeze ET clock at 12:00, before the
-        # 22:00-ET publish cutoff — current-day 403 is "not yet published".
-        _pin_now_et(monkeypatch, "2026-05-25T12:00:00")
-        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 5, 25)))
+        # 2026-06-01 is a (non-holiday) Monday; freeze ET clock at 12:00,
+        # before the 22:00-ET publish cutoff — current-day 403 is "not
+        # yet published". (05-25 is Memorial Day, now intercepted by the
+        # holiday branch — see TestReadDailyIndex403Holiday — so it no
+        # longer exercises the cutoff path.)
+        _pin_now_et(monkeypatch, "2026-06-01T12:00:00")
+        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 6, 1)))
         assert rows == []
 
     def test_403_on_weekday_after_publish_cutoff_raises(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # 23:00 ET on a weekday is past the 22:00 publish cutoff. A 403
-        # at that point is SEC actively refusing us (UA/rate-limit/WAF)
-        # — must surface, not silently swallow.
-        _pin_now_et(monkeypatch, "2026-05-25T23:00:00")
+        # 23:00 ET on a (non-holiday) weekday is past the 22:00 publish
+        # cutoff. A 403 at that point is SEC actively refusing us
+        # (UA/rate-limit/WAF) — must surface, not silently swallow.
+        _pin_now_et(monkeypatch, "2026-06-01T23:00:00")
         with pytest.raises(RuntimeError, match="status=403"):
-            list(read_daily_index(_fake_get(403, b""), date(2026, 5, 25)))
+            list(read_daily_index(_fake_get(403, b""), date(2026, 6, 1)))
 
     def test_403_on_future_date_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Future-dated 403 tolerated symmetrically with the master-index
         # provider — callers may iterate a lookback window whose
         # endpoints straddle midnight across timezones.
-        _pin_now_et(monkeypatch, "2026-05-25T12:00:00")
-        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 5, 26)))
+        _pin_now_et(monkeypatch, "2026-05-26T12:00:00")
+        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 5, 27)))
+        assert rows == []
+
+
+class TestReadDailyIndex403Holiday:
+    """403 on a past-weekday US federal holiday is tolerated (#1612).
+
+    EDGAR publishes a daily index only on federal business days, so a
+    holiday 403 is "no file", not a block. Without this branch
+    ``sec_daily_index_reconcile`` (reads yesterday) false-fails the day
+    after every federal holiday.
+    """
+
+    def test_403_on_memorial_day_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 2026-05-25 Memorial Day (Mon). Pin now to the *next* business
+        # day past the publish cutoff so neither the weekend nor the
+        # not-yet-published branch could explain the empty result.
+        _pin_now_et(monkeypatch, "2026-05-26T23:00:00")
+        rows = list(read_daily_index(_fake_get(403, b""), date(2026, 5, 25)))
+        assert rows == []
+
+    def test_403_on_columbus_day_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 2025-10-13 Columbus Day — NYSE open, federally closed → 403.
+        _pin_now_et(monkeypatch, "2025-10-14T23:00:00")
+        rows = list(read_daily_index(_fake_get(403, b""), date(2025, 10, 13)))
         assert rows == []
