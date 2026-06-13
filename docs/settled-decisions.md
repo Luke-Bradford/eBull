@@ -721,6 +721,33 @@ backend change first (new spec + ticket), never an FE-only remap.
 
 ---
 
+## Own EOD NAV-snapshot table (#1594, settled 2026-06-13)
+
+eBull persists its own daily portfolio-equity snapshot (`portfolio_eod_snapshots`
++ `portfolio_eod_position_snapshots`, sql/196) plus a dated FX table
+(`fx_rates_daily`). This **reverses the earlier informal "no NAV snapshot table"
+posture** (#393, ~2026-04-21): operator-approved via the 2026-06-12 reporting
+roadmap, and forced by empirics — eToro's `/api/v1/balances/history` returns
+`403 InsufficientPermissions` on the demo key (#1593 step 1), so an external
+equity-history source is unavailable.
+
+Rules:
+- Snapshot is **forward-only capture**, not reconstruction: the daily job records
+  current `broker_positions × price_daily.close` + `cash_ledger` SUM in display
+  currency, stamped to the latest closed session (`MAX(price_daily.price_date)`,
+  data-anchored — NOT wall-clock). Idempotent (`ON CONFLICT (snapshot_date)`).
+- Per-day FX lives in `fx_rates_daily` (USD-base ECB rows from Frankfurter
+  time-series), **distinct from the tax `fx_rates` table** (sql/013) — dropping
+  ECB rows into the tax table would silently change the safety-critical
+  USD tax-disposal path (`tax_ledger._load_fx_rate`). Mirrors the live
+  `live_fx_rates` USD-base convention so `fx.convert` (direct+inverse only) has
+  parity.
+- Own `db_eod_snapshot` JobLock lane (write-disjoint; #1527 starvation class).
+
+**Spec:** `docs/proposals/etl/2026-06-13-portfolio-value-v2-fx-eod.md` (PR-A).
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

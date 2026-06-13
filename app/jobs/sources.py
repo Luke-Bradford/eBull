@@ -77,6 +77,7 @@ Lane = Literal[
     "db_liveness",
     "db_retry",
     "db_positions",
+    "db_eod_snapshot",
     "db_cusip",
     "db_ownership_obs",
     "db_raw_sweep",
@@ -387,6 +388,13 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # (dry_run) in MANUAL_TRIGGER_JOB_METADATA; invoker in
     # app/jobs/runtime.py::_INVOKERS.
     "raw_payload_retention_sweep": "db_raw_sweep",
+    # fx_history_backfill — #1594 operator re-run of the full Frankfurter
+    # historical FX backfill into fx_rates_daily. Same lane as the
+    # portfolio_eod_snapshot scheduled job (db_eod_snapshot) so the two
+    # fx_rates_daily writers serialise (spec §8/H2). One batched HTTP call +
+    # idempotent upsert; invoker in app/jobs/runtime.py::_INVOKERS, empty
+    # params in MANUAL_TRIGGER_JOB_METADATA.
+    "fx_history_backfill": "db_eod_snapshot",
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.

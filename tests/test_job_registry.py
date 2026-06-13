@@ -99,6 +99,12 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # Write-target-disjoint from the orchestrator's portfolio/fx ingest, so
         # each owns a single-job lane. See app/jobs/sources.py::Lane.
         "db_positions",
+        # #1594 — portfolio_eod_snapshot single-job lane (also the manual
+        # fx_history_backfill source so the two fx_rates_daily writers
+        # serialise). Daily cadence would lose the db-lane race to
+        # orchestrator_high_frequency_sync; writes only fx_rates_daily +
+        # portfolio_eod_snapshots (write-disjoint). See sources.py::Lane.
+        "db_eod_snapshot",
         "db_cusip",
         "db_ownership_obs",
     }

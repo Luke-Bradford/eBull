@@ -310,6 +310,11 @@ JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
 JOB_FX_RATES_REFRESH = "fx_rates_refresh"
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
+JOB_PORTFOLIO_EOD_SNAPSHOT = "portfolio_eod_snapshot"
+# Manual-trigger-only (triangle, like sec_rebuild): full-range Frankfurter
+# historical FX backfill into fx_rates_daily. Not in SCHEDULED_JOBS — the
+# eod-snapshot job self-backfills on first run; this is the operator re-run.
+JOB_FX_HISTORY_BACKFILL = "fx_history_backfill"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 # JOB_WEEKLY_COVERAGE_AUDIT + JOB_WEEKLY_COVERAGE_REVIEW retired in Chunk 2 of
@@ -693,6 +698,24 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         description="Check open positions for SL/TP breaches and thesis breaks.",
         cadence=Cadence.hourly(minute=15),
         prerequisite=_has_open_positions,
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_PORTFOLIO_EOD_SNAPSHOT,
+        display_name="Portfolio EOD snapshot",
+        # Own single-job lane (#1594; #1527 class). Daily at any minute
+        # collides with orchestrator_high_frequency_sync (every_5min, ``db``)
+        # on the non-blocking advisory lock → would skip. Writes ONLY
+        # fx_rates_daily + portfolio_eod_snapshots(+_position_snapshots) — no
+        # other job writes these, and reads (broker_positions / cash_ledger /
+        # price_daily) are MVCC-safe vs the orchestrator's portfolio write, so
+        # db_eod_snapshot runs concurrently with ingest with no write race.
+        source="db_eod_snapshot",
+        description="Persist daily portfolio equity (value, cash, per-position) + dated FX.",
+        # 22:30 UTC — after US market close (~21:00 UTC) so today's price_daily
+        # closes are in. snapshot_date is data-anchored, not this fire time.
+        cadence=Cadence.daily(hour=22, minute=30),
+        prerequisite=_bootstrap_complete,
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3953,6 +3976,47 @@ def fx_rates_refresh() -> None:
         tracker.row_count = fx_rows_written
 
     logger.info("fx_rates_refresh complete: fx_pairs=%d", fx_rows_written)
+
+
+def portfolio_eod_snapshot_job() -> None:
+    """Persist the portfolio's end-of-day equity for the latest closed session.
+
+    Forward-only capture (#1594 PR-A): records positions × EOD close + cash in
+    display currency, stamped to ``MAX(price_daily.price_date)`` (data-anchored,
+    idempotent). Ensures dated FX (``fx_rates_daily``) exists up to that date
+    first — bulk on first run, gap-fill thereafter. ON CONFLICT overwrites a
+    same-day re-run. Own ``db_eod_snapshot`` lane (write-disjoint).
+    """
+    from app.services.portfolio_eod import compute_and_store_eod_snapshot
+
+    with _tracked_job(JOB_PORTFOLIO_EOD_SNAPSHOT) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            equity = compute_and_store_eod_snapshot(conn)
+        tracker.row_count = equity.positions_priced
+
+
+def fx_history_backfill_job() -> None:
+    """Operator re-run of the full Frankfurter historical FX backfill (#1594).
+
+    Manual-trigger-only (triangle). Fetches USD→{GBP,EUR} from the earliest
+    ledger activity → today into ``fx_rates_daily``. Idempotent
+    (``ON CONFLICT DO NOTHING``; ECB rates immutable per date). The scheduled
+    eod-snapshot job already self-backfills on first run — this is the explicit
+    re-fetch path (e.g. after older trades are backfilled).
+    """
+    from app.services.fx_history import ensure_fx_history
+
+    with _tracked_job(JOB_FX_HISTORY_BACKFILL) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT CURRENT_DATE")
+                row = cur.fetchone()
+            # SELECT without FROM always yields one row in Postgres; the
+            # guard keeps a driver anomaly from raising on a live path.
+            today = row[0] if row else date.today()
+            written = ensure_fx_history(conn, until=today)
+            conn.commit()
+        tracker.row_count = written
 
 
 def exchanges_metadata_refresh() -> None:
