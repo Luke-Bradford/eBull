@@ -1451,6 +1451,31 @@ Every metric is nullable + every breach flag is nullable; a failed probe (e.g. `
 
 When adding a new storage discipline rule (retention, sweep, partition retrofit), wire its operator-visible signal into this endpoint AND into `.githooks/pre-push` if it's a push-time concern. The two surfaces share a single threshold constant (`DB_SIZE_WARN_BYTES` is the working example) so an operator never sees one surface clean while the other is breached.
 
+### 13.F Raw-payload retention classification — every `DocumentKind` is bucketed (#1617)
+
+The operator rule: **a stored raw filing payload is kept only if it is re-read OR housekept-and-negligible.** Made concrete as a three-bucket partition over `raw_filings.DocumentKind`, with each member in exactly one bucket:
+
+| Bucket | Canonical home | Meaning | Payload on disk? |
+|---|---|---|---|
+| **REWASH** | `rewash_filings.registered_specs()` keys | a rewash parser reads the stored body | yes (full) |
+| **SWEPT** | `raw_filings.SWEPT_DOCUMENT_KINDS` | born-compacted at source (#1615) — payload NULL + `payload_sha256` + `payload_swept_at`, rehydratable from `source_url` | no (hash only) |
+| **KEPT_NEGLIGIBLE** | `raw_filings.KEPT_NEGLIGIBLE_DOCUMENT_KINDS` (kind → justification) | small, write-only, no payload reader; kept uncompacted with an explicit reason | yes (small) |
+
+The partition is CI-enforced by `tests/test_raw_payload_retention.py::test_every_document_kind_is_classified` + `::test_retention_buckets_are_pairwise_disjoint`. A new write-only kind fails CI until deliberately bucketed.
+
+**The careful part when bucketing a new kind — grep the payload readers FIRST.** "Re-read" means the *payload bytes* are read back, not the row. The existence-only `COUNT(DISTINCT accession_number)` diagnostics in `ownership_drillthrough.py` / `app/api/instruments.py` are satisfied by the row alone — they do NOT make a kind REWASH (a born-compacted or kept row still has the row). At #1617 this distinction is what kept `form5_xml` out of REWASH: it appears in `ownership_drillthrough.py:350` but only in a `COUNT(*)`. The grep:
+
+```bash
+# payload readers: read_raw / iter_raw call sites carrying the kind
+grep -rn "read_raw(\|iter_raw(" app/ --include="*.py"
+# every textual reference to the kind (writers + diagnostics + readers)
+grep -rn "\"<kind>\"\|'<kind>'" app/ --include="*.py"
+```
+
+Only the `read_raw` / `iter_raw` payload paths (driven by `registered_specs`) count as re-reads. If the only references are writers + `COUNT(*)` diagnostics, the kind is write-only → SWEPT (if large enough to bother compacting) or KEPT_NEGLIGIBLE (if small, with a justification).
+
+**Promotion rule:** registering a rewash parser for a kind currently in `KEPT_NEGLIGIBLE_DOCUMENT_KINDS` (e.g. the planned Form 5 parser hinted at `insider_345.py:563-565`) MUST remove it from that map in the same change — the pairwise-disjoint test fails if it lands in two buckets. Settled decision: `docs/settled-decisions.md` "Raw-payload retention (#1617)".
+
 ## 14. Postgres crash-recovery fsync tax — diagnosis runbook (#1444, 2026-06-02)
 
 **Symptom:** dev PG stuck in `the database system is in recovery mode` for tens of minutes to HOURS, rejecting every connection. Blocks bootstrap, live verification, DB-backed tests.

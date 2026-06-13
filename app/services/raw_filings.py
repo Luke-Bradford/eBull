@@ -89,6 +89,39 @@ DocumentKind = Literal[
 SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset({"primary_doc"})
 # Future PR adds a sibling ``cik_raw_documents`` table for those.
 
+# Write-only kinds we deliberately KEEP uncompacted because they are
+# small enough that born-compaction (#1615) would buy nothing, yet they
+# are NOT re-read by any rewash parser either. The operator retention
+# rule (#1617, settled-decisions "Raw-payload retention"): a raw-store
+# path is legitimate only if its payload is (a) re-read — REWASH, in
+# ``rewash_filings.registered_specs()`` — OR (b) housekept-and-negligible
+# — SWEPT, ``SWEPT_DOCUMENT_KINDS`` — OR (c) kept-and-negligible with an
+# explicit justification, this map. Every ``DocumentKind`` MUST land in
+# exactly one of those three buckets; a new unclassified kind fails the
+# partition test in ``tests/test_raw_payload_retention.py``. The
+# justification per kind was grep-verified at #1617: each was confirmed
+# to have NO payload reader (the existence-only ``COUNT(*)`` diagnostics
+# in ``ownership_drillthrough`` / ``instruments`` are satisfied by the
+# row, not the bytes).
+KEPT_NEGLIGIBLE_DOCUMENT_KINDS: dict[DocumentKind, str] = {
+    # Parsed in-memory at ingest; ownership_drillthrough COUNT(*)s the row
+    # but never reads the body. ~11 MB (dev). Retained for a planned Form 5
+    # rewash parser (insider_345.py:563-565) — promote to REWASH when that
+    # spec is registered; the partition test forces the move (it would
+    # otherwise be in two buckets).
+    "form5_xml": "write-only ~11MB; held for a future Form 5 rewash parser",
+    # Parsed in-memory at ingest; rewash re-fetches from EDGAR rather than
+    # re-reading the stored body (n_port_ingest.py:82). ~6 MB (dev).
+    "nport_xml": "write-only ~6MB; rewash re-fetches from EDGAR, no payload reader",
+    # Parsed in-memory at ingest; the bimonthly job re-fetches fresh from
+    # FINRA each cadence (finra_short_interest_refresh.py), never from the
+    # store. Part of ~92 MB FINRA raw (dev).
+    "finra_short_interest_csv": "write-only; steady-state re-fetches from FINRA, no payload reader",
+    # Parsed in-memory at ingest; the daily job re-fetches fresh from FINRA
+    # (finra_regsho_daily_refresh.py), never from the store.
+    "finra_regsho_daily_txt": "write-only; steady-state re-fetches from FINRA, no payload reader",
+}
+
 
 @dataclass(frozen=True)
 class RawFilingDocument:

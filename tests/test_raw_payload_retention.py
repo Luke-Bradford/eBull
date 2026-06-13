@@ -19,7 +19,11 @@ from typing import Any, get_args
 import pytest
 
 from app.services import rewash_filings
-from app.services.raw_filings import DocumentKind, _row_to_document
+from app.services.raw_filings import (
+    KEPT_NEGLIGIBLE_DOCUMENT_KINDS,
+    DocumentKind,
+    _row_to_document,
+)
 from app.services.raw_payload_retention import (
     SWEPT_DOCUMENT_KINDS,
     SWEPT_MANIFEST_SOURCES,
@@ -57,6 +61,48 @@ def test_swept_sources_are_the_approved_drop_list() -> None:
     the new source's payload consumers must be audited first (see the
     def14a_body exclusion rationale in the spec)."""
     assert SWEPT_MANIFEST_SOURCES == frozenset({"sec_10k", "sec_8k"})
+
+
+def test_kept_negligible_kinds_are_valid_document_kinds() -> None:
+    assert set(KEPT_NEGLIGIBLE_DOCUMENT_KINDS) <= set(get_args(DocumentKind))
+
+
+def test_kept_negligible_entries_carry_a_justification() -> None:
+    """The bucket is an explicit allow-list, not a dumping ground —
+    each kept-but-not-swept-not-rewashed kind records WHY it is kept
+    (the operator rule's 'negligible-kept justification')."""
+    for kind, reason in KEPT_NEGLIGIBLE_DOCUMENT_KINDS.items():
+        assert reason.strip(), f"{kind} has no retention justification"
+
+
+def test_retention_buckets_are_pairwise_disjoint() -> None:
+    """A kind in two buckets is a contradiction: e.g. a kind both
+    re-read (REWASH) and born-compacted (SWEPT) would lose the bytes a
+    parser needs. Registering a ``form5_xml`` rewash parser, say, must
+    REMOVE it from KEPT_NEGLIGIBLE in the same change — this test fails
+    loud if it lands in both."""
+    rewash = set(rewash_filings.registered_specs())
+    swept = set(SWEPT_DOCUMENT_KINDS)
+    kept = set(KEPT_NEGLIGIBLE_DOCUMENT_KINDS)
+    assert rewash.isdisjoint(swept), rewash & swept
+    assert rewash.isdisjoint(kept), rewash & kept
+    assert swept.isdisjoint(kept), swept & kept
+
+
+def test_every_document_kind_is_classified() -> None:
+    """The durable #1617 guard: every ``raw_filings.DocumentKind`` MUST
+    be classified into exactly one retention bucket — re-read (REWASH,
+    ``registered_specs``), housekept (SWEPT, ``SWEPT_DOCUMENT_KINDS``),
+    or kept-and-negligible (``KEPT_NEGLIGIBLE_DOCUMENT_KINDS``). A new
+    write-only kind that silently bloats the table fails CI here until an
+    operator deliberately buckets it — grep its payload readers first."""
+    all_kinds = set(get_args(DocumentKind))
+    classified = (
+        set(rewash_filings.registered_specs()) | set(SWEPT_DOCUMENT_KINDS) | set(KEPT_NEGLIGIBLE_DOCUMENT_KINDS)
+    )
+    assert classified == all_kinds, (
+        f"unclassified DocumentKind(s): {all_kinds - classified}; unknown classified kind(s): {classified - all_kinds}"
+    )
 
 
 def test_batch_size_must_be_positive() -> None:
