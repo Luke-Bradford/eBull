@@ -16,7 +16,8 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.services.fx_history import load_fx_rates_for_date
+from app.services import fx_history
+from app.services.fx_history import ensure_fx_history, load_fx_rates_for_date
 from app.services.portfolio_eod import (
     EodEquity,
     PositionResult,
@@ -118,6 +119,39 @@ def test_load_fx_rates_for_date_carry_forward(ebull_test_conn: psycopg.Connectio
     rates2, used2 = load_fx_rates_for_date(conn, date(2025, 6, 7))
     assert rates2[("USD", "GBP")] == Decimal("0.70")
     assert used2 == date(2025, 6, 6)
+
+
+def test_ensure_fx_history_reports_rows_written(
+    ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """ensure_fx_history returns the true count of newly-inserted rows.
+
+    Pins the review-round-2 rebuttal: cur.rowcount after executemany +
+    ON CONFLICT DO NOTHING IS the affected-row sum in psycopg3 (NOT -1), so
+    the count is the honest "rows written" — non-zero on first load, zero on
+    an idempotent re-run (len(rows) would wrongly report non-zero on re-run).
+    Frankfurter HTTP is stubbed; only the DB write path is exercised.
+    """
+    conn = ebull_test_conn
+    stub = {
+        date(2025, 1, 1): {("USD", "GBP"): Decimal("0.80")},
+        date(2025, 1, 2): {("USD", "GBP"): Decimal("0.81")},
+        date(2025, 1, 3): {("USD", "GBP"): Decimal("0.82")},
+    }
+    monkeypatch.setattr(fx_history, "fetch_timeseries_rates", lambda *a, **k: stub)
+
+    written = ensure_fx_history(conn, until=date(2025, 1, 3), targets=["GBP"], since=date(2025, 1, 1))
+    conn.commit()
+    assert written == 3  # rowcount reflects the 3 inserts, not 0 and not -1
+
+    count = conn.execute("SELECT COUNT(*) FROM fx_rates_daily WHERE base_currency = 'USD'").fetchone()
+    assert count is not None and count[0] == 3
+
+    # Idempotent re-run: all 3 conflict → 0 newly written (len(rows) would say 3).
+    rewritten = ensure_fx_history(conn, until=date(2025, 1, 3), targets=["GBP"], since=date(2025, 1, 1))
+    conn.commit()
+    assert rewritten == 0
 
 
 def test_read_cash_sums_as_of_date(ebull_test_conn: psycopg.Connection[Any]) -> None:  # noqa: F811
