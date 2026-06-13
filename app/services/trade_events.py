@@ -507,7 +507,10 @@ def record_trade_events(
     """Single entry point used by sync_portfolio."""
     counters = TradeEventCounters()
     opens = open_events_from_positions(positions, counters)
-    if trade_history:
+    # None = fetch failed (skip history ingest); [] = fetch succeeded
+    # with no rows. Identical output today, but the distinction is the
+    # §7 contract — keep it explicit.
+    if trade_history is not None:
         merged = merge_events(opens, events_from_history(trade_history, counters))
     else:
         merged = opens
