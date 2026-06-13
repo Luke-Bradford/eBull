@@ -107,12 +107,14 @@ def _side(kind: EventKind, is_buy: bool) -> EventSide:
     return "sell" if is_buy else "buy"
 
 
-def _positive_or_none(value: Decimal | None, counters: TradeEventCounters) -> Decimal | None:
-    """Sentinel guard: a non-positive rate is NOT a valid mark (prevention log)."""
-    if value is None:
-        return None
-    if value <= 0:
-        counters.null_price += 1
+def _positive_or_none(value: Decimal | None) -> Decimal | None:
+    """Sentinel guard: a non-positive rate is NOT a valid mark (prevention log).
+
+    Pure mapping — the ``null_price`` counter is incremented at INGEST
+    time for rows that actually land, so merge-dropped duplicates never
+    inflate it (Codex ckpt-2 MED).
+    """
+    if value is None or value <= 0:
         return None
     return value
 
@@ -155,7 +157,7 @@ def open_events_from_positions(
                 event_kind="open",
                 side=_side("open", bp.is_buy),
                 units=units,
-                price=_positive_or_none(bp.open_price, counters),
+                price=_positive_or_none(bp.open_price),
                 executed_at=bp.open_date_time,
                 source="etoro_sync",
                 raw_payload=bp.raw_payload,
@@ -199,7 +201,7 @@ def events_from_history(
                     event_kind="open",
                     side=_side("open", earliest.is_buy),
                     units=total_units,
-                    price=_positive_or_none(earliest.open_rate, counters),
+                    price=_positive_or_none(earliest.open_rate),
                     executed_at=earliest.open_timestamp,
                     source="etoro_history",
                     raw_payload=earliest.raw_payload,
@@ -221,7 +223,7 @@ def events_from_history(
                     event_kind="close",
                     side=_side("close", t.is_buy),
                     units=t.units,
-                    price=_positive_or_none(t.close_rate, counters),
+                    price=_positive_or_none(t.close_rate),
                     executed_at=t.close_timestamp,
                     source="etoro_history",
                     raw_payload=t.raw_payload,
@@ -352,6 +354,11 @@ def ingest_trade_events(
         result = conn.execute(sql, params)
         if result.rowcount == 1:
             counters.inserted += 1
+            if event.price is None:
+                # Landed with NULL price (absent or sentinel rate) —
+                # counted here, not at transform time, so merge-dropped
+                # duplicates never inflate the figure (spec §15).
+                counters.null_price += 1
             touched_positions.add(event.position_id)
             continue
         # Conflict: expected duplicate unless the stored row disagrees

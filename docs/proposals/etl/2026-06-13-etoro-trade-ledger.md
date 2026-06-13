@@ -181,7 +181,7 @@ No retry-storm risk: nothing re-fires faster than the sync cadence.
 
 ## §8 Multi-writer sink registry
 
-`trade_events` is a NEW sink with ONE writer function (`sync_portfolio`, history rows supplied via its new optional parameter — §1.3), reached from two call sites (scheduled `daily_portfolio_sync`, WS `_default_reconcile_runner` — §0; both updated in PR-1 to fetch and pass history). Concurrency safety: conflict keys = the two partial unique indexes (§4); conflict action = `ON CONFLICT DO NOTHING` (atomic, first observation wins). Disagreement detection (same key, different figures) is a post-insert advisory SELECT + WARNING — logging only, race-tolerant by construction.
+`trade_events` is a NEW sink with ONE writer function (`sync_portfolio`, history rows supplied via its new optional parameter — §1.3), reached from two call sites (scheduled `daily_portfolio_sync`, WS `_default_reconcile_runner` — §0; both updated in PR-1 to fetch and pass history). Concurrency safety: `sync_portfolio` takes `pg_advisory_xact_lock` at entry so concurrent reconciles serialize — without it, two callers holding snapshots from different instants could interleave the archive/DELETE sweep against each other's upserts and archive a live position on stale evidence (Codex ckpt-2 HIGH). Ledger conflict keys = the two partial unique indexes (§4); conflict action = `ON CONFLICT DO NOTHING` (atomic, first observation wins). Disagreement detection (same key, different figures) is a post-insert advisory SELECT + WARNING — logging only.
 
 `broker_positions_closed`: one writer (the archive step inside `_upsert_broker_positions`' delete sweep), filtered `position_id >= 0` (§1.4).
 

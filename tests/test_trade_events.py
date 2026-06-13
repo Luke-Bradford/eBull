@@ -144,11 +144,13 @@ class TestOpenEventsFromPositions:
         assert counters.skipped_other == 1
         assert "no openDateTime" in counters.skip_reasons[0]
 
-    def test_sentinel_open_price_lands_as_none_and_counted(self) -> None:
+    def test_sentinel_open_price_lands_as_none(self) -> None:
+        # null_price is counted at INGEST time (landed rows only), so the
+        # transform just maps the sentinel to None — see test_trade_events_db.
         counters = TradeEventCounters()
         events = open_events_from_positions([_broker_position(open_price=Decimal("0"))], counters)
         assert events[0].price is None
-        assert counters.null_price == 1
+        assert counters.null_price == 0
 
     def test_fees_not_stamped_on_open_events(self) -> None:
         counters = TradeEventCounters()

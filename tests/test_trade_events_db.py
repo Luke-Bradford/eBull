@@ -108,5 +108,17 @@ def test_reingest_is_idempotent_and_anomaly_is_loud(
         ).fetchone()
     assert row is not None and row[0] is None and row[1] == 999999991
 
+    # null_price counts LANDED rows only (ingest-time, spec §15): a
+    # sentinel close rate lands as NULL price and is counted once.
+    sentinel = [replace(_trade(900003, "2", close_at), close_rate=Decimal("0"))]
+    fifth = ingest_trade_events(conn, events_from_history(sentinel, TradeEventCounters()), TradeEventCounters())
+    assert fifth.inserted == 2
+    assert fifth.null_price == 1  # close landed NULL; the open kept its valid rate
+    with conn.cursor() as cur:
+        row = cur.execute(
+            "SELECT price FROM trade_events WHERE position_id = 900003 AND event_kind = 'close'"
+        ).fetchone()
+    assert row is not None and row[0] is None
+
     # Watermark derives from the ingested closes.
     assert compute_history_min_date(conn) == close_at - timedelta(days=7)

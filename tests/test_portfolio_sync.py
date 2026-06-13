@@ -285,7 +285,10 @@ class TestEmptyBrokerGuard:
 
         # Zero writes must have occurred. Stronger than "no zero-out
         # updates" — catches any write attempted before the raise.
-        assert conn.execute.call_args_list == []
+        # The only allowed conn.execute before the guard is the
+        # read-only pg_advisory_xact_lock serializer (#1593).
+        non_lock_calls = [c for c in conn.execute.call_args_list if "pg_advisory_xact_lock" not in str(c.args[0])]
+        assert non_lock_calls == []
 
     def test_empty_broker_with_empty_local_does_not_raise(self) -> None:
         """Boundary: fully empty on both sides is a valid no-op."""

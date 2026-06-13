@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 # Cash deltas smaller than this are considered rounding noise.
 _CASH_SYNC_TOLERANCE = Decimal("0.01")
 
+# Advisory-lock key serializing sync_portfolio across its two callers
+# (scheduler job + WS reconcile). ASCII "eBull_PS" as int64, same
+# convention as JOBS_PROCESS_LOCK_KEY in app/jobs/locks.py.
+_SYNC_PORTFOLIO_XACT_LOCK_KEY = 0x6562756C6C5F5053
+
 
 @dataclass
 class PortfolioSyncResult:
@@ -567,6 +572,14 @@ def sync_portfolio(
     """
     if now is None:
         now = datetime.now(UTC)
+
+    # Serialize concurrent reconciles (scheduler tick + WS reconcile
+    # runner). Without this, two callers holding portfolio snapshots
+    # taken at different instants can interleave the archive/DELETE
+    # sweep against each other's upserts — archiving a live position as
+    # "closed externally" on stale evidence (#1593 Codex ckpt-2 HIGH).
+    # Transaction-scoped: released at the caller's commit/rollback.
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", [_SYNC_PORTFOLIO_XACT_LOCK_KEY])
 
     updated = 0
     opened_externally = 0

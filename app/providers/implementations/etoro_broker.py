@@ -467,7 +467,10 @@ class EtoroBrokerProvider(BrokerProvider):
                 headers=self._request_headers(),
             )
             response.raise_for_status()
-            rows = response.json()
+            try:
+                rows = response.json()
+            except ValueError as exc:  # 200 with a non-JSON body
+                raise TradeHistoryParseError(f"trade history page {page}: response body is not JSON: {exc}") from exc
             if not isinstance(rows, list):
                 raise TradeHistoryParseError(
                     f"trade history page {page}: expected a JSON array, got {type(rows).__name__}"
