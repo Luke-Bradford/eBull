@@ -105,6 +105,14 @@ Before designing or coding for an issue:
 - it does not mean fetch time
 - when combining TTM + balance-sheet values, use the balance-sheet period end as the canonical snapshot date in v1
 
+### Raw-payload retention (#1617, settled 2026-06-13)
+- A stored raw filing payload (`filing_raw_documents.payload`) is legitimate only if its retention is justified by exactly one of three classes:
+  - **re-read** — a rewash parser reads the stored body. Registered in `rewash_filings.registered_specs()`.
+  - **housekept-and-negligible** — born-compacted at source (payload NULL + `payload_sha256` + `payload_swept_at`, rehydratable from `source_url`). Listed in `raw_filings.SWEPT_DOCUMENT_KINDS` (#1615).
+  - **kept-and-negligible** — small, write-only, no payload reader; kept uncompacted with an explicit justification. Listed in `raw_filings.KEPT_NEGLIGIBLE_DOCUMENT_KINDS` (kind → reason).
+- Every `raw_filings.DocumentKind` member MUST fall into exactly one class. The partition is CI-enforced by `tests/test_raw_payload_retention.py::test_every_document_kind_is_classified` — a new write-only kind fails CI until an operator deliberately buckets it (grep its payload readers first; existence-only `COUNT(*)` diagnostics do not count as a re-read).
+- Adding a rewash parser for a kind currently in `KEPT_NEGLIGIBLE_DOCUMENT_KINDS` (e.g. a future Form 5 parser) MUST remove it from that map in the same change — the pairwise-disjoint test fails if it lands in two classes.
+
 ---
 
 ## News and sentiment
