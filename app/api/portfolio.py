@@ -857,10 +857,13 @@ def get_value_history(
     """
     days_window = _VALUE_HISTORY_RANGES[range]
 
-    runtime = get_runtime_config(conn)
-    display_currency = runtime.display_currency
-
     with snapshot_read(conn):
+        # display_currency MUST be read inside the same snapshot as the
+        # positions/FX/overlay queries that consume it — otherwise a
+        # mid-request currency change reads at a different snapshot and the
+        # persisted-snapshot overlay filter mismatches the data (review WARNING).
+        display_currency = get_runtime_config(conn).display_currency
+
         # Window start. For `max`, the earliest ledger activity; else today-N.
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             if days_window is None:
