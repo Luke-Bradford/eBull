@@ -154,6 +154,12 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "trade_events",
     "broker_positions_closed",
     "broker_positions",
+    # #1594 — EOD equity snapshots (child → parent; parent → instruments).
+    "portfolio_eod_position_snapshots",
+    "portfolio_eod_snapshots",
+    # #1594 — dated FX (standalone, no FK). Listed so DB tests inserting FX
+    # rows don't leak across tests (Codex ckpt-3).
+    "fx_rates_daily",
     "positions",
     "quotes",
     "instruments",

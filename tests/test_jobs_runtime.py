@@ -479,6 +479,14 @@ class TestProductionInvokerRegistry:
             # in MANUAL_TRIGGER_JOB_METADATA; source-lock "db_raw_sweep"
             # in MANUAL_TRIGGER_JOB_SOURCES.
             "raw_payload_retention_sweep",
+            # #1594 — fx_history_backfill. Operator re-run of the full
+            # Frankfurter historical FX backfill into fx_rates_daily.
+            # Registered in _INVOKERS for "Run now"; NOT in SCHEDULED_JOBS
+            # (the portfolio_eod_snapshot scheduled job self-backfills on
+            # first run). Empty MANUAL_TRIGGER_JOB_METADATA; source-lock
+            # "db_eod_snapshot" (shared with the snapshot job so the two
+            # fx_rates_daily writers serialise).
+            "fx_history_backfill",
             # #819 — canonical-instrument redirect populate. Idempotent
             # one-shot the operator triggers after a universe sync
             # introduces new .RTH-style variants. Registered in

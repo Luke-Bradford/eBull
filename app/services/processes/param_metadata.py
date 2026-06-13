@@ -224,6 +224,12 @@ JOB_INTERNAL_KEYS: dict[str, frozenset[str]] = {
 # triangle.
 
 MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
+    # fx_history_backfill — #1594 operator re-run of the full Frankfurter
+    # historical FX backfill into fx_rates_daily. No operator-tunable params
+    # (range derived from ledger floor → today; base/targets fixed to the
+    # supported display currencies). Empty tuple completes the manual-only
+    # triangle (source + metadata + invoker).
+    "fx_history_backfill": (),
     # filing_events_skip_tier_cleanup — one-shot retroactive delete
     # (#1013). No operator-tunable params: ``batch_size`` is an
     # implementation knob (§6.5.7 item 2), kept internal. The explicit

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
 import httpx
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.frankfurter.dev"
 _TIMEOUT_S = 15.0
+# Historical time-series can span ~years; give it more headroom than the
+# single-day latest fetch (Frankfurter returns one row per ECB publishing
+# day, so a multi-year range is a few hundred rows — still one HTTP call).
+_TIMESERIES_TIMEOUT_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,67 @@ def fetch_latest_rates(
                 logger.warning("Failed to parse Frankfurter rate %s→%s: %s", base, ccy, value)
 
     return result, ecb_date
+
+
+def fetch_timeseries_rates(
+    base: str,
+    targets: list[str],
+    start: date,
+    end: date,
+) -> dict[date, dict[tuple[str, str], Decimal]]:
+    """Fetch historical ECB rates for base → each target over [start, end].
+
+    Returns a mapping ``rate_date -> {(base, target): rate}``. Frankfurter
+    emits one entry per ECB publishing day — weekends and ECB holidays are
+    omitted from the response (callers carry-forward at read time, they are
+    NOT errors). Past ECB rates are immutable, so no conditional-GET path:
+    the caller's ``ON CONFLICT DO NOTHING`` makes re-fetch idempotent.
+
+    Frankfurter API: ``GET /v1/{start}..{end}?base=USD&symbols=GBP,EUR``
+    → ``{"base","start_date","end_date","rates":{ "YYYY-MM-DD": {ccy: rate} }}``.
+    Shape verified empirically 2026-06-13.
+
+    Rate semantics: 1 unit of ``base`` = ``rate`` units of ``target``.
+
+    Raises on network/HTTP errors — caller should handle and leave the gap
+    for the next run.
+    """
+    if not targets or start > end:
+        return {}
+
+    symbols = ",".join(targets)
+    path = f"/v1/{start.isoformat()}..{end.isoformat()}"
+    with httpx.Client(timeout=_TIMESERIES_TIMEOUT_S) as client:
+        response = client.get(
+            f"{_BASE_URL}{path}",
+            params={"base": base, "symbols": symbols},
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    raw_dates: dict[str, object] = data.get("rates", {})
+    result: dict[date, dict[tuple[str, str], Decimal]] = {}
+    for date_str, per_day in raw_dates.items():
+        if not isinstance(per_day, dict):
+            logger.warning("Frankfurter timeseries: bad day payload for %s: %r", date_str, per_day)
+            continue
+        try:
+            rate_date = date.fromisoformat(date_str)
+        except ValueError:
+            logger.warning("Frankfurter timeseries: unparseable date %r", date_str)
+            continue
+        day_rates: dict[tuple[str, str], Decimal] = {}
+        for ccy, value in per_day.items():
+            if value is None:
+                continue
+            try:
+                day_rates[(base, ccy)] = Decimal(str(value))
+            except Exception:
+                logger.warning("Frankfurter timeseries: bad rate %s→%s on %s: %s", base, ccy, date_str, value)
+        if day_rates:
+            result[rate_date] = day_rates
+
+    return result
 
 
 def fetch_latest_rates_conditional(
