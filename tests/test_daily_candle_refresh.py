@@ -186,8 +186,6 @@ class TestDailyCandleRefreshT3Bootstrap:
 
     def test_daily_candle_refresh_includes_benchmark_before_t3(self) -> None:
         """Benchmark instruments appear in the refresh list before T3 rows."""
-        from app.workers.scheduler import BENCHMARK_SYMBOLS
-
         benchmark = [(3000, "SPY")]
         t3 = [(900, "AAA")]
         mock_conn = _make_mock_conn([], t3, held_rows=[], benchmark_rows=benchmark)
