@@ -294,6 +294,22 @@ def refresh_monthly_reports(
     )
 
 
+def refresh_risk_metrics(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import risk_metrics_refresh
+
+    return _wrap_single(
+        job_name="risk_metrics_refresh",
+        layer_name="risk_metrics",
+        legacy_fn=risk_metrics_refresh,
+        progress=progress,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Composite adapters (spec §2.3.1)
 # ---------------------------------------------------------------------------

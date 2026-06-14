@@ -530,6 +530,14 @@ class TestProductionInvokerRegistry:
             # pre-#1131 row; source-lock "db" + empty param metadata
             # complete the manual-only triangle.
             "sec_manifest_tombstone_stale",
+            # #591 PR-B — risk_metrics_refresh. Orchestrator-driven (DAG
+            # layer "risk_metrics") + manual-trigger-only. Stays in
+            # _INVOKERS for the orchestrator adapter inner-JobLock + Admin
+            # "Run now"; intentionally NOT in SCHEDULED_JOBS (the layer
+            # cadence/freshness gate the DAG walk — a scheduled row would
+            # double-fire). Source-lock "risk_metrics" + empty param
+            # metadata complete the manual-only triangle.
+            "risk_metrics_refresh",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "

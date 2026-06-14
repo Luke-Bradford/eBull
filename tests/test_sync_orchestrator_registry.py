@@ -7,10 +7,11 @@ from app.services.sync_orchestrator.registry import JOB_TO_LAYERS, LAYERS
 
 
 class TestLayerRegistry:
-    def test_all_10_layers_present(self) -> None:
+    def test_all_layers_present(self) -> None:
         # news + thesis retired in Phase 1.2 of the 2026-04-19 research-tool
         # refocus; both are now on-demand (POST /instruments/{symbol}/thesis)
-        # instead of scheduled orchestrator layers.
+        # instead of scheduled orchestrator layers. risk_metrics added in
+        # #591 PR-B (orchestrator-driven, depends on candles).
         expected = {
             "universe",
             "candles",
@@ -20,6 +21,7 @@ class TestLayerRegistry:
             "portfolio_sync",
             "fx_rates",
             "cost_models",
+            "risk_metrics",
             "weekly_reports",
             "monthly_reports",
         }
@@ -31,6 +33,7 @@ class TestLayerRegistry:
         non_blocking = {
             "portfolio_sync",
             "fx_rates",
+            "risk_metrics",
             "weekly_reports",
             "monthly_reports",
         }
