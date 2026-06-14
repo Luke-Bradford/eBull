@@ -622,7 +622,7 @@ def _apply_blockholders(
     from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 
     from app.services.blockholders import (
-        _resolve_cusip_to_instrument_id,
+        _resolve_issuer_to_instrument_id,
         _upsert_filer,
         _upsert_filing_row,
         blockholders_within_retention,
@@ -708,10 +708,11 @@ def _apply_blockholders(
     # silent default. The sec_filing_manifest.source column is
     # CHECK-constrained to {'sec_13d','sec_13g'} per sql/118.
     try:
+        primary_xml = raw_doc.require_payload()
         if manifest_source == "sec_13g":
-            parsed_dict = Schedule13G.parse_xml(raw_doc.require_payload())
+            parsed_dict = Schedule13G.parse_xml(primary_xml)
         else:
-            parsed_dict = Schedule13D.parse_xml(raw_doc.require_payload())
+            parsed_dict = Schedule13D.parse_xml(primary_xml)
         # Adapter requires the manifest form label (SC 13D / SC 13G /
         # /A variants — dual-spelled per the post-PR1251 form-name
         # normalisation in _SUBMISSION_TYPE_FOR_FORM) for the closed
@@ -726,6 +727,7 @@ def _apply_blockholders(
             source=source_for_adapter,
             manifest_form=form_for_adapter,
             manifest_filer_cik=manifest_filer_cik,
+            raw_xml=primary_xml,
         )
     except Exception as exc:
         raise RewashParseError(
@@ -752,7 +754,7 @@ def _apply_blockholders(
     # different issuer_cusip produces an internally-inconsistent
     # row that silently joins to the wrong instrument. Codex
     # pre-push review caught the prior reuse-of-stale-value bug.
-    instrument_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
+    instrument_id = _resolve_issuer_to_instrument_id(conn, cusip=filing.issuer_cusip, cik=filing.issuer_cik)
 
     # Resolve canonical filer name + filer_id (preserved across
     # re-wash via ON CONFLICT (cik) DO UPDATE in _upsert_filer).

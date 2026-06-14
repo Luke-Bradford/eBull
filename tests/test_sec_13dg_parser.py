@@ -264,10 +264,30 @@ def test_parse_13d_no_reporters_raises() -> None:
         parse_primary_doc(_13d_xml(reporters_xml=""))
 
 
-def test_parse_13d_missing_issuer_cusip_raises() -> None:
+def test_parse_13d_missing_issuer_cusip_does_not_raise() -> None:
+    # #1628: the issuer CUSIP is no longer required — an absent one
+    # leaves ``issuer_cusip`` empty and resolution falls back to the
+    # single-class CIK path. (Previously a missing <issuerCUSIP> raised
+    # ValueError, which — combined with the stale-tag read — tombstoned
+    # every modern filing.)
     xml = _13d_xml().replace("<issuerCUSIP>518439104</issuerCUSIP>", "")
-    with pytest.raises(ValueError, match="<issuerCUSIP>"):
-        parse_primary_doc(xml)
+    parsed = parse_primary_doc(xml)
+    assert parsed.issuer_cusip == ""
+    assert parsed.issuer_cik  # CIK is still required + present
+
+
+def test_parse_13d_reads_unified_mandate_cusip_tag() -> None:
+    # #1628: the post-2024-12-18 mandate XML nests the CUSIP as
+    # <issuerCusips><issuerCusipNumber>; the stale flat <issuerCUSIP>
+    # read (edgartools + the legacy in-house extractor) returned empty.
+    # The shared extractor reads the nested tag first, so a modern
+    # filing resolves a real CUSIP.
+    xml = _13d_xml().replace(
+        "<issuerCUSIP>518439104</issuerCUSIP>",
+        "<issuerCusips><issuerCusipNumber>518439104</issuerCusipNumber></issuerCusips>",
+    )
+    parsed = parse_primary_doc(xml)
+    assert parsed.issuer_cusip == "518439104"
 
 
 def test_parse_13d_missing_reporter_name_raises() -> None:

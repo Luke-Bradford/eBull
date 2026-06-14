@@ -181,6 +181,26 @@ class BlockholderFiling:
     reporting_persons: list[BlockholderReportingPerson]
 
 
+@dataclass(frozen=True)
+class IssuerIdentity:
+    """Issuer identity read from a 13D/G ``primary_doc.xml`` (#1628).
+
+    Read from the post-2024-12-18 unified mandate-schema tags
+    (``<issuerCik>`` + ``<issuerCusips>/<issuerCusipNumber>``) — the
+    single source of truth for the modern shape. edgartools 5.30.2 and
+    the legacy in-house extractors read the stale flat ``<issuerCUSIP>``
+    element and so return an empty CUSIP for every modern filing, which
+    silently broke CUSIP→instrument resolution (blockholders never
+    populated). Each field is normalised; ``None`` when absent or
+    malformed.
+    """
+
+    cik: str | None
+    cusip: str | None
+    name: str | None
+    class_title: str | None
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -228,6 +248,69 @@ def _child_text(parent: ET.Element | None, name: str) -> str | None:
             if text:
                 return text
     return None
+
+
+def _normalise_cusip(raw: str | None) -> str | None:
+    """``strip().upper()``; return None unless exactly 9 alphanumeric
+    chars. CUSIP (and foreign CINS, which lead with a letter) are 9
+    alphanumeric characters — anything else is malformed and would only
+    poison the resolution lookup / logs, so it maps to None (#1628,
+    Codex ckpt-1)."""
+    if raw is None:
+        return None
+    cusip = raw.strip().upper()
+    return cusip if (len(cusip) == 9 and cusip.isalnum()) else None
+
+
+def _issuer_identity_from_root(root: ET.Element) -> IssuerIdentity:
+    """Extract :class:`IssuerIdentity` from a parsed primary_doc root.
+
+    Reads the unified mandate-schema tags first
+    (``issuerCik`` + ``issuerCusips/issuerCusipNumber``) with the legacy
+    flat tags (``issuerCIK`` / ``issuerCusip`` / ``issuerCUSIP``) as
+    fall-throughs so a pre-unified fixture still resolves. CIK is
+    zero-padded to 10 digits (None if non-numeric); CUSIP is normalised
+    via :func:`_normalise_cusip`.
+    """
+    issuer_info = _find_descendant(root, "issuerInfo")
+    cik_raw = _child_text(issuer_info, "issuerCik") or _child_text(issuer_info, "issuerCIK")
+    cusip_raw = (
+        _child_text(issuer_info, "issuerCusipNumber")  # unified schema (nested)
+        or _child_text(issuer_info, "issuerCusip")  # legacy 13G flat
+        or _child_text(issuer_info, "issuerCUSIP")  # legacy 13D flat
+    )
+    name = _child_text(issuer_info, "issuerName")
+    cover = _find_descendant(root, "coverPageHeader")
+    class_title = _child_text(cover, "securitiesClassTitle")
+
+    cik: str | None = None
+    if cik_raw is not None:
+        cik_stripped = cik_raw.strip()
+        if cik_stripped.isdigit():
+            cik = cik_stripped.zfill(10)
+
+    return IssuerIdentity(
+        cik=cik,
+        cusip=_normalise_cusip(cusip_raw),
+        name=name,
+        class_title=class_title,
+    )
+
+
+def extract_issuer_identity_from_primary_doc(xml: str) -> IssuerIdentity:
+    """Parse ``xml`` and extract the issuer identity (#1628).
+
+    Single source of truth for the modern 13D/G issuer block, used by
+    the edgartools adapter (manifest + rewash drains) to backfill the
+    CUSIP edgartools fails to read. Never raises on a missing tag or an
+    unparseable (e.g. pre-mandate HTML) body — returns all-None so the
+    caller falls back to its other source / leaves the field empty.
+    """
+    try:
+        root = ET.fromstring(xml)  # noqa: S314 — SEC EDGAR is the trusted source for 13D/G XML.
+    except ET.ParseError:
+        return IssuerIdentity(cik=None, cusip=None, name=None, class_title=None)
+    return _issuer_identity_from_root(root)
 
 
 def _decimal_or_none(text: str | None) -> Decimal | None:
@@ -329,20 +412,19 @@ def _extract_13d(root: ET.Element) -> tuple[str, str, str, str | None, date | No
     Returns ``(issuer_cik, issuer_cusip, issuer_name,
     securities_class_title, date_of_event, reporting_persons)``.
     """
-    issuer_info = _find_descendant(root, "issuerInfo")
-    issuer_cik_text = _child_text(issuer_info, "issuerCIK")
-    issuer_cusip = _child_text(issuer_info, "issuerCUSIP")
-    issuer_name = _child_text(issuer_info, "issuerName")
-
-    if issuer_cik_text is None:
-        raise ValueError("13D primary_doc.xml is missing <issuerCIK>")
-    if issuer_cusip is None:
-        raise ValueError("13D primary_doc.xml is missing <issuerCUSIP>")
-    if issuer_name is None:
+    # #1628: issuer identity via the shared correct-tag extractor (the
+    # unified mandate schema nests the CUSIP as
+    # <issuerCusips>/<issuerCusipNumber>; the old flat <issuerCUSIP>
+    # read returned None and raised here, breaking the legacy path too).
+    # CUSIP is no longer required — an absent/odd one is left empty and
+    # resolution falls back to the single-class CIK path.
+    ident = _issuer_identity_from_root(root)
+    if ident.cik is None:
+        raise ValueError("13D primary_doc.xml is missing a valid <issuerCik>")
+    if ident.name is None:
         raise ValueError("13D primary_doc.xml is missing <issuerName>")
 
     cover = _find_descendant(root, "coverPageHeader")
-    securities_class_title = _child_text(cover, "securitiesClassTitle")
     date_of_event = _parse_date_loose(_child_text(cover, "dateOfEvent"))
 
     reporters_root = _find_descendant(root, "reportingPersons")
@@ -355,10 +437,10 @@ def _extract_13d(root: ET.Element) -> tuple[str, str, str, str | None, date | No
     reporters = [_parse_13d_reporting_person(n) for n in reporter_nodes]
 
     return (
-        _zero_pad_cik(issuer_cik_text),
-        issuer_cusip,
-        issuer_name,
-        securities_class_title,
+        ident.cik,
+        ident.cusip or "",
+        ident.name,
+        ident.class_title,
         date_of_event,
         reporters,
     )
@@ -415,20 +497,16 @@ def _parse_13g_reporting_person(node: ET.Element) -> BlockholderReportingPerson:
 
 def _extract_13g(root: ET.Element) -> tuple[str, str, str, str | None, date | None, list[BlockholderReportingPerson]]:
     """Extract the 13G-shaped subset of cover-page + reporter data."""
-    issuer_info = _find_descendant(root, "issuerInfo")
-    issuer_cik_text = _child_text(issuer_info, "issuerCik") or _child_text(issuer_info, "issuerCIK")
-    issuer_cusip = _child_text(issuer_info, "issuerCusip") or _child_text(issuer_info, "issuerCUSIP")
-    issuer_name = _child_text(issuer_info, "issuerName")
-
-    if issuer_cik_text is None:
-        raise ValueError("13G primary_doc.xml is missing <issuerCik>")
-    if issuer_cusip is None:
-        raise ValueError("13G primary_doc.xml is missing <issuerCusip>")
-    if issuer_name is None:
+    # #1628: issuer identity via the shared correct-tag extractor (see
+    # _extract_13d). CUSIP no longer required — resolution falls back to
+    # the single-class CIK path when it is absent.
+    ident = _issuer_identity_from_root(root)
+    if ident.cik is None:
+        raise ValueError("13G primary_doc.xml is missing a valid <issuerCik>")
+    if ident.name is None:
         raise ValueError("13G primary_doc.xml is missing <issuerName>")
 
     cover = _find_descendant(root, "coverPageHeader")
-    securities_class_title = _child_text(cover, "securitiesClassTitle")
     date_of_event = _parse_date_loose(_child_text(cover, "eventDateRequiresFilingThisStatement"))
 
     reporter_nodes = _find_descendants(root, "coverPageHeaderReportingPersonDetails")
@@ -438,10 +516,10 @@ def _extract_13g(root: ET.Element) -> tuple[str, str, str, str | None, date | No
     reporters = [_parse_13g_reporting_person(n) for n in reporter_nodes]
 
     return (
-        _zero_pad_cik(issuer_cik_text),
-        issuer_cusip,
-        issuer_name,
-        securities_class_title,
+        ident.cik,
+        ident.cusip or "",
+        ident.name,
+        ident.class_title,
         date_of_event,
         reporters,
     )

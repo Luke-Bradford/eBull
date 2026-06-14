@@ -49,6 +49,7 @@ from app.providers.implementations.sec_13dg import (
     BlockholderReportingPerson,
     Status,
     SubmissionType,
+    extract_issuer_identity_from_primary_doc,
 )
 from app.services.blockholders import _zero_pad_cik
 
@@ -138,6 +139,7 @@ def build_filing_from_edgartools_dict(
     source: Literal["sec_13d", "sec_13g"],
     manifest_form: str,
     manifest_filer_cik: str,
+    raw_xml: str | None = None,
 ) -> BlockholderFiling:
     """Convert an edgartools ``parse_xml`` dict into a repo-internal
     ``BlockholderFiling``.
@@ -212,12 +214,25 @@ def build_filing_from_edgartools_dict(
             )
         )
 
+    # edgartools 5.30.2 reads the stale flat ``<issuerCUSIP>`` tag, so it
+    # returns an empty issuer CUSIP for every modern (post-2024-12-18)
+    # 13D/G — which silently broke CUSIP→instrument resolution and left
+    # blockholders empty (#1628). Backfill the issuer identity from the
+    # unified mandate schema (``<issuerCusips>/<issuerCusipNumber>`` +
+    # ``<issuerCik>``) via the canonical extractor when the raw body is
+    # available. Prefer the helper; fall back to edgartools' value when
+    # the helper returns None (e.g. a pre-mandate/odd shape) so a valid
+    # parsed identity is never nulled out (Codex ckpt-1).
+    helper = extract_issuer_identity_from_primary_doc(raw_xml) if raw_xml else None
+    issuer_cik = (helper.cik if helper and helper.cik else None) or issuer_info.cik
+    issuer_cusip = (helper.cusip if helper and helper.cusip else None) or security_info.cusip
+
     return BlockholderFiling(
         submission_type=submission_type,
         status=status,
         primary_filer_cik=_zero_pad_cik(manifest_filer_cik),
-        issuer_cik=issuer_info.cik,
-        issuer_cusip=security_info.cusip,
+        issuer_cik=issuer_cik,
+        issuer_cusip=issuer_cusip,
         issuer_name=issuer_info.name,
         securities_class_title=security_info.title or None,
         date_of_event=date_of_event,
