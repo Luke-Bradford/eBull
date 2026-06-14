@@ -168,6 +168,18 @@ def _valid_close(value: object) -> Decimal | None:
     return d
 
 
+def _count_invalid_closes(closes: Sequence[PricePoint]) -> int:
+    """Count raw rows whose close is invalid (None / non-finite / ≤ 0).
+
+    A single invalid close breaks the return chain (no gap-spanning return) and
+    therefore costs up to two returns (the one into it and the one out of it).
+    The caller uses this count to distinguish *invalid-driven* shortfalls
+    (``invalid_price_chain``) from genuinely-short clean history
+    (``insufficient_history`` / ``partial_window``).
+    """
+    return sum(1 for _, raw in closes if _valid_close(raw) is None)
+
+
 def simple_returns(closes: Sequence[PricePoint]) -> list[ReturnPoint]:
     """Simple returns between *consecutive surviving* closes.
 
@@ -543,14 +555,38 @@ def excess_cagr(
 # ---------------------------------------------------------------------------
 
 
-def vol_beta_status(n_returns: int) -> RiskStatus:
-    """``ok`` when ≥ MIN_RETURNS_VOL_BETA returns, else ``insufficient_history``."""
-    return "ok" if n_returns >= MIN_RETURNS_VOL_BETA else "insufficient_history"
+def vol_beta_status(n_returns: int, invalids_dropped: int = 0) -> RiskStatus:
+    """Status for vol/beta given valid-return count and invalids dropped upstream.
+
+    Trigger rule:
+      - ``n_returns >= MIN_RETURNS_VOL_BETA`` → ``ok`` (a single chain break with
+        enough valid returns remaining is fine, even if some invalids were
+        dropped earlier).
+      - ``n_returns < MIN_RETURNS_VOL_BETA`` AND ``invalids_dropped > 0`` →
+        ``invalid_price_chain`` (invalids contributed to the shortfall).
+      - ``n_returns < MIN_RETURNS_VOL_BETA`` AND no invalids → genuinely-short
+        clean history → ``insufficient_history``.
+    """
+    if n_returns >= MIN_RETURNS_VOL_BETA:
+        return "ok"
+    if invalids_dropped > 0:
+        return "invalid_price_chain"
+    return "insufficient_history"
 
 
-def annualized_status(n_returns: int) -> RiskStatus:
-    """``ok`` when ≥ MIN_RETURNS_ANNUALIZED returns, else ``partial_window``."""
-    return "ok" if n_returns >= MIN_RETURNS_ANNUALIZED else "partial_window"
+def annualized_status(n_returns: int, invalids_dropped: int = 0) -> RiskStatus:
+    """Status for annualized metrics given valid-return count and invalids dropped.
+
+    Trigger rule (mirrors :func:`vol_beta_status` against ``MIN_RETURNS_ANNUALIZED``):
+      - ``n_returns >= MIN_RETURNS_ANNUALIZED`` → ``ok``.
+      - below threshold AND ``invalids_dropped > 0`` → ``invalid_price_chain``.
+      - below threshold AND no invalids → ``partial_window``.
+    """
+    if n_returns >= MIN_RETURNS_ANNUALIZED:
+        return "ok"
+    if invalids_dropped > 0:
+        return "invalid_price_chain"
+    return "partial_window"
 
 
 def beta_status(
@@ -585,21 +621,24 @@ def compute_instrument_risk(
     inst_rets = simple_returns(inst_closes)
     inst_ret_vals = [r for _, r in inst_rets]
     n_returns = len(inst_ret_vals)
+    # Invalid closes break the return chain; track how many were dropped so a
+    # sub-threshold metric can report invalid_price_chain (vs short-but-clean).
+    invalids_dropped = _count_invalid_closes(inst_closes)
 
     vol = annualized_vol(inst_ret_vals)
-    vol_st = vol_beta_status(n_returns)
+    vol_st = vol_beta_status(n_returns, invalids_dropped)
 
     inst_cagr = cagr(inst_closes)
-    cagr_st = annualized_status(n_returns)
+    cagr_st = annualized_status(n_returns, invalids_dropped)
 
     dd = drawdown(inst_closes)
 
     calmar_val: Decimal | None = None
-    calmar_st: RiskStatus = "ok"
     if inst_cagr is not None and dd.max_drawdown is not None:
         calmar_val = calmar(inst_cagr, dd.max_drawdown)
-    if n_returns < MIN_RETURNS_ANNUALIZED:
-        calmar_st = "partial_window"
+    # Calmar shares the annualized min-obs threshold → reuse annualized_status so
+    # invalid-driven shortfalls surface as invalid_price_chain there too.
+    calmar_st = annualized_status(n_returns, invalids_dropped)
 
     dist = distribution(inst_ret_vals) if inst_ret_vals else None
 

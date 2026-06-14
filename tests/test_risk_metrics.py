@@ -436,6 +436,70 @@ def test_vol_beta_boundary_60_vs_59_and_midgap():  # case 27
 
 
 # ===========================================================================
+# Group 13 — invalid_price_chain status (invalids caused the shortfall)
+# ===========================================================================
+
+
+def test_count_invalid_closes():
+    # 5 rows, two invalid (nan and 0); rest valid.
+    closes = _closes([100.0, float("nan"), 110.0, 0, 121.0])
+    assert rm._count_invalid_closes(closes) == 2
+    # None entries also count as invalid
+    assert rm._count_invalid_closes([(date(2024, 1, 1), None), (date(2024, 1, 2), 100.0)]) == 1
+    # all-clean => 0
+    assert rm._count_invalid_closes(_closes([100.0, 101.0, 102.0])) == 0
+
+
+def test_status_helpers_invalid_price_chain_trigger():
+    # below min-obs AND invalids dropped => invalid_price_chain
+    assert rm.vol_beta_status(59, invalids_dropped=3) == "invalid_price_chain"
+    assert rm.annualized_status(251, invalids_dropped=5) == "invalid_price_chain"
+    # below min-obs but NO invalids => genuine short history
+    assert rm.vol_beta_status(59, invalids_dropped=0) == "insufficient_history"
+    assert rm.annualized_status(251, invalids_dropped=0) == "partial_window"
+    # meets min-obs even with invalids dropped earlier => ok (single break is fine)
+    assert rm.vol_beta_status(60, invalids_dropped=10) == "ok"
+    assert rm.annualized_status(252, invalids_dropped=10) == "ok"
+    # default invalids_dropped=0 preserves the old single-arg call shape
+    assert rm.vol_beta_status(60) == "ok"
+    assert rm.annualized_status(252) == "ok"
+
+
+def test_compute_invalid_price_chain_drops_vol_below_threshold():  # case (a)
+    # 70 dated rows; sprinkle enough invalids that valid returns < 60.
+    # Each invalid close breaks the chain and costs 2 returns (in + out).
+    vals = [100.0 + k for k in range(70)]
+    # 6 invalids at spaced positions => removes ~12 returns from the clean 69.
+    for idx in (10, 20, 30, 40, 50, 60):
+        vals[idx] = float("nan")
+    closes = _closes(vals)
+    rets = rm.simple_returns(closes)
+    assert len(rets) < rm.MIN_RETURNS_VOL_BETA  # invalids drove it under threshold
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.vol_status == "invalid_price_chain"
+
+
+def test_compute_single_invalid_with_enough_remaining_is_ok():  # case (b)
+    # 70 dated rows, one mid-chain invalid. Even with the 2-return cost,
+    # >= 60 valid returns remain => vol_status stays ok despite an invalid present.
+    vals = [100.0 + k for k in range(70)]
+    vals[35] = float("nan")
+    closes = _closes(vals)
+    rets = rm.simple_returns(closes)
+    assert len(rets) >= rm.MIN_RETURNS_VOL_BETA
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.vol_status == "ok"
+
+
+def test_compute_short_clean_series_is_insufficient_history():  # case (c)
+    # genuinely-short clean series (< 60 returns, no invalids) => insufficient_history.
+    closes = _closes([100.0 + k for k in range(40)])  # 39 returns, all valid
+    assert rm._count_invalid_closes(closes) == 0
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.vol_status == "insufficient_history"
+
+
+# ===========================================================================
 # Group 11 — float island doesn't leak
 # ===========================================================================
 
