@@ -15,6 +15,7 @@ function category(
     institutions: "Institutions",
     etfs: "ETFs",
     insiders: "Insiders",
+    def14a: "DEF 14A",
     treasury: "Treasury",
     blockholders: "Blockholders",
   };

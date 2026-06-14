@@ -74,6 +74,7 @@ function baseInputs(overrides: Partial<SunburstInputs> = {}): SunburstInputs {
     etfs_total: null,
     insiders_total: null,
     blockholders_total: null,
+    def14a_total: null,
     treasury_shares: null,
     ...overrides,
   };

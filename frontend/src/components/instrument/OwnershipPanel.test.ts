@@ -254,14 +254,15 @@ describe("rollupToSunburstInputs — empty / no-data cases", () => {
   });
 });
 
-describe("rollupToSunburstInputs — def14a_unmatched fold (Codex review fix)", () => {
+describe("rollupToSunburstInputs — def14a_unmatched is its own wedge (#1627)", () => {
   /**
-   * Codex pre-push review (Batch 1 of #788) caught this: the prior
-   * version dropped ``def14a_unmatched`` slices from the chart
-   * entirely. Folding into the insiders bucket keeps the chart
-   * totals reconciled with the slice table.
+   * #1627 un-folds ``def14a_unmatched`` from the insiders wedge. It
+   * carries ``denominator_basis=pie_wedge`` (additive, already in the
+   * server residual), and on large caps the unmatched proxy 5%+ holders
+   * dwarf the real insiders, so folding mislabelled the majority of the
+   * insiders wedge. It now renders as its own ``def14a`` category.
    */
-  it("folds def14a_unmatched holders into the insiders bucket", () => {
+  it("surfaces def14a_unmatched as its own category, not folded into insiders", () => {
     const inputs = rollupToSunburstInputs(
       _baseRollup({
         shares_outstanding: "100000000",
@@ -298,7 +299,7 @@ describe("rollupToSunburstInputs — def14a_unmatched fold (Codex review fix)", 
             holders: [
               {
                 filer_cik: null,
-                filer_name: "Officer B (proxy-only)",
+                filer_name: "Big Proxy Holder",
                 shares: "500000",
                 pct_outstanding: "0.005",
                 winning_source: "def14a",
@@ -314,28 +315,95 @@ describe("rollupToSunburstInputs — def14a_unmatched fold (Codex review fix)", 
       }),
     );
     expect(inputs).not.toBeNull();
-    // Combined insiders total = 1M + 500k.
-    expect(inputs!.insiders_total).toBe(1_500_000);
-    // Both holders surface in the holders list under the insiders
-    // category.
-    const insiderHolders = inputs!.holders.filter((h) => h.category === "insiders");
-    expect(insiderHolders).toHaveLength(2);
-    expect(insiderHolders.map((h) => h.label).sort()).toEqual([
+    // Insiders is ONLY insiders now — no def14a fold.
+    expect(inputs!.insiders_total).toBe(1_000_000);
+    expect(inputs!.insiders_as_of).toBe("2026-01-01");
+    // def14a is its own category total + as_of.
+    expect(inputs!.def14a_total).toBe(500_000);
+    expect(inputs!.def14a_as_of).toBe("2026-03-01");
+    // Each holder surfaces under its own chart category.
+    expect(inputs!.holders.filter((h) => h.category === "insiders").map((h) => h.label)).toEqual([
       "Officer A",
-      "Officer B (proxy-only)",
     ]);
-    // Combined as_of takes the latest of the two.
-    expect(inputs!.insiders_as_of).toBe("2026-03-01");
+    expect(inputs!.holders.filter((h) => h.category === "def14a").map((h) => h.label)).toEqual([
+      "Big Proxy Holder",
+    ]);
   });
 
-  it("returns null insiders_total when both insiders and def14a_unmatched are absent", () => {
+  it("returns null insiders_total AND def14a_total when both slices are absent", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({ shares_outstanding: "100000000", slices: [] }),
+    );
+    expect(inputs!.insiders_total).toBeNull();
+    expect(inputs!.def14a_total).toBeNull();
+  });
+});
+
+describe("rollupToSunburstInputs — funds overlay is non-additive (#1627)", () => {
+  /**
+   * funds is the only ``institution_subset`` slice. Its shares are
+   * fund-level N-PORT detail already inside the 13F-HR institutional
+   * aggregate, so it must NEVER enter the chart — additive accounting
+   * would double-count and visibly oversubscribe the pie. Here funds
+   * (80M) is larger than institutions (30M), so a leak would be obvious.
+   */
+  it("never flattens funds holders into the chart or any category total", () => {
     const inputs = rollupToSunburstInputs(
       _baseRollup({
         shares_outstanding: "100000000",
-        slices: [],
+        slices: [
+          {
+            category: "institutions",
+            label: "Institutions",
+            total_shares: "30000000",
+            pct_outstanding: "0.3",
+            filer_count: 1,
+            dominant_source: "13f",
+            holders: [
+              {
+                filer_cik: "0001000010",
+                filer_name: "BlackRock",
+                shares: "30000000",
+                pct_outstanding: "0.3",
+                winning_source: "13f",
+                winning_accession: "13F-010",
+                winning_edgar_url: null,
+                as_of_date: "2025-12-31",
+                filer_type: "INV",
+                dropped_sources: [],
+              },
+            ],
+          },
+          {
+            category: "funds",
+            label: "Mutual funds (N-PORT)",
+            total_shares: "80000000",
+            pct_outstanding: "0.8",
+            filer_count: 1,
+            dominant_source: "nport",
+            denominator_basis: "institution_subset",
+            holders: [
+              {
+                filer_cik: "0000036405",
+                filer_name: "Big Fund",
+                shares: "80000000",
+                pct_outstanding: "0.8",
+                winning_source: "nport",
+                winning_accession: "NPORT-1",
+                winning_edgar_url: null,
+                as_of_date: "2026-03-31",
+                filer_type: null,
+                dropped_sources: [],
+              },
+            ],
+          },
+        ],
       }),
     );
-    expect(inputs!.insiders_total).toBeNull();
+    expect(inputs).not.toBeNull();
+    expect(inputs!.holders.some((h) => h.label === "Big Fund")).toBe(false);
+    expect(inputs!.holders).toHaveLength(1);
+    expect(inputs!.institutions_total).toBe(30_000_000);
   });
 });
 

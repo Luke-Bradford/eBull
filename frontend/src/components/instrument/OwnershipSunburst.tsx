@@ -101,6 +101,9 @@ export const CATEGORY_FILL_INDEX: Record<CategoryKey, number> = {
   institutions: 0, // cyan-500
   etfs: 1, // blue-500
   insiders: 2, // purple-500
+  def14a: 5, // lime-500 — DEF 14A proxy-only holders (#1627); the last
+  //                       free accent so the un-folded wedge reads as
+  //                       its own category, distinct from insiders.
   treasury: 3, // amber-500
   blockholders: 4, // rose-500 — distinct from the other four; activist
   //                            holds usually warrant a high-contrast

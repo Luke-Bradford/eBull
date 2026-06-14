@@ -14,7 +14,7 @@
  *
  * Operator-side controls:
  *
- *   * ``?category=institutions|etfs|insiders|blockholders|treasury``
+ *   * ``?category=institutions|etfs|insiders|def14a|blockholders|treasury``
  *     — filter the table to that category. Set by L1 / L2
  *     middle-ring clicks.
  *   * ``?filer=<cik|name-fallback>`` — scroll to + highlight a
@@ -76,15 +76,16 @@ const CATEGORY_LABELS: Record<CategoryKey, string> = {
   institutions: "Institutions",
   etfs: "ETFs",
   insiders: "Insiders",
+  def14a: "DEF 14A",
   treasury: "Treasury",
   blockholders: "Blockholders",
 };
 
 /** Rollup slice category → chart/table category. ``def14a_unmatched``
- *  folds into insiders (same fold as ``rollupToSunburstInputs`` so
- *  the table rows match the wedges 1:1); ``funds`` is a non-additive
- *  N-PORT memo overlay (#919) and is excluded from the filer table
- *  entirely. */
+ *  is its own ``def14a`` category (#1627 — un-folded from insiders so
+ *  the L2 filer rows match the un-folded wedges 1:1); ``funds`` is a
+ *  non-additive N-PORT memo overlay (#919) and is excluded from the
+ *  filer table entirely. */
 const SLICE_TO_TABLE_CATEGORY: Record<
   OwnershipSliceCategory,
   CategoryKey | null
@@ -93,7 +94,7 @@ const SLICE_TO_TABLE_CATEGORY: Record<
   etfs: "etfs",
   insiders: "insiders",
   blockholders: "blockholders",
-  def14a_unmatched: "insiders",
+  def14a_unmatched: "def14a",
   funds: null,
 };
 
@@ -218,7 +219,7 @@ function OwnershipBody({
 }: OwnershipBodyProps): JSX.Element {
   // Same mapping the L1 panel uses — single source of truth for the
   // rollup → rings transform (denominator = shares_outstanding only;
-  // treasury additive on top; def14a_unmatched folded into insiders).
+  // treasury additive on top; def14a_unmatched is its own wedge #1627).
   const inputs = useMemo(() => rollupToSunburstInputs(rollup), [rollup]);
   const rings = useMemo(
     () => (inputs === null ? null : buildSunburstRings(inputs)),
@@ -268,10 +269,17 @@ function OwnershipBody({
     // exports only that slice. Codex pre-push review (Chain 2.8
     // follow-up) caught the regression when the filter wasn't
     // forwarded.
+    // The chart category key in ``?category=`` matches the backend's
+    // CSV slice-filter param for every category EXCEPT ``def14a``,
+    // whose backend slice category is ``def14a_unmatched`` (#1627). Map
+    // it so a drilled DEF 14A export hits the right slice instead of
+    // 400ing on an unknown category.
+    const exportCategory =
+      categoryFilter === "def14a" ? "def14a_unmatched" : categoryFilter;
     const exportPath = `/api/instruments/${encodeURIComponent(symbol)}/ownership-rollup/export.csv`;
     const exportHref =
-      categoryFilter !== null
-        ? `${exportPath}?category=${encodeURIComponent(categoryFilter)}`
+      exportCategory !== null
+        ? `${exportPath}?category=${encodeURIComponent(exportCategory)}`
         : exportPath;
     return (
       <div className="space-y-3">
@@ -374,7 +382,11 @@ function OwnershipBody({
             filerFilter={filerFilter}
             filerLabel={
               filerFilter !== null
-                ? (allRows.find((r) => r.key === filerFilter)?.label ?? null)
+                ? (allRows.find(
+                    (r) =>
+                      r.key === filerFilter &&
+                      (categoryFilter === null || r.category === categoryFilter),
+                  )?.label ?? null)
                 : null
             }
             outstanding={outstanding}
@@ -537,6 +549,7 @@ const _CATEGORY_ORDER: readonly CategoryKey[] = [
   "etfs",
   "blockholders",
   "insiders",
+  "def14a",
   "treasury",
 ];
 

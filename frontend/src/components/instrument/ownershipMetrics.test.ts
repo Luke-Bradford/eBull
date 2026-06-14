@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import type { OwnershipHolder } from "@/api/ownership";
+
 import {
   aggregateInsiderHoldings,
   computeOwnership,
@@ -7,7 +9,62 @@ import {
   formatShares,
   ownershipStaleDenominatorCopy,
   parseShareCount,
+  topHoldersByShares,
 } from "./ownershipMetrics";
+
+describe("topHoldersByShares (#1627 funds overlay)", () => {
+  function _h(name: string, shares: string, cik: string | null = null): OwnershipHolder {
+    return {
+      filer_cik: cik,
+      filer_name: name,
+      shares,
+      pct_outstanding: "0.01",
+      winning_source: "nport",
+      winning_accession: "0000000000-26-000001",
+      winning_edgar_url: null,
+      as_of_date: "2026-03-31",
+      filer_type: null,
+      dropped_sources: [],
+    };
+  }
+
+  it("returns the top n by shares, largest-first, with the remainder count", () => {
+    const { shown, remaining } = topHoldersByShares(
+      [_h("Small", "100"), _h("Biggest", "900"), _h("Middle", "500")],
+      2,
+    );
+    expect(shown.map((h) => h.filer_name)).toEqual(["Biggest", "Middle"]);
+    expect(remaining).toBe(1);
+  });
+
+  it("drops null / zero / unparseable share counts before ranking", () => {
+    const { shown, remaining } = topHoldersByShares(
+      [_h("Good", "300"), _h("Zero", "0"), _h("Bad", "not-a-number")],
+      8,
+    );
+    expect(shown.map((h) => h.filer_name)).toEqual(["Good"]);
+    expect(remaining).toBe(0);
+  });
+
+  it("returns remaining 0 when n covers every positive holder", () => {
+    const { shown, remaining } = topHoldersByShares([_h("A", "10"), _h("B", "20")], 8);
+    expect(shown).toHaveLength(2);
+    expect(remaining).toBe(0);
+  });
+
+  it("does not mutate the input array", () => {
+    const holders = [_h("A", "10"), _h("B", "20")];
+    const before = holders.map((h) => h.filer_name);
+    topHoldersByShares(holders, 1);
+    expect(holders.map((h) => h.filer_name)).toEqual(before);
+  });
+
+  it("handles an empty array", () => {
+    const { shown, remaining } = topHoldersByShares([], 8);
+    expect(shown).toHaveLength(0);
+    expect(remaining).toBe(0);
+  });
+});
 
 describe("parseShareCount", () => {
   it("returns null for null / undefined / blank", () => {
