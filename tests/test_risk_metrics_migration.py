@@ -33,7 +33,9 @@ def test_both_tables_exist(ebull_test_conn: psycopg.Connection[tuple]) -> None: 
             "SELECT to_regclass('instrument_risk_metrics_observations'), "
             "       to_regclass('instrument_risk_metrics_current')"
         )
-        obs, cur_tbl = cur.fetchone()
+        row = cur.fetchone()
+    assert row is not None
+    obs, cur_tbl = row
     assert obs is not None
     assert cur_tbl is not None
 
@@ -69,12 +71,16 @@ def test_current_quarter_row_routes_to_leaf_not_default(
     conn.commit()
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM instrument_risk_metrics_observations_default")
-        default_count = cur.fetchone()[0]
+        default_row = cur.fetchone()
+        assert default_row is not None
+        default_count = default_row[0]
         cur.execute(
             "SELECT COUNT(*) FROM instrument_risk_metrics_observations WHERE instrument_id = %s",
             (_IID,),
         )
-        total = cur.fetchone()[0]
+        total_row = cur.fetchone()
+        assert total_row is not None
+        total = total_row[0]
     assert default_count == 0  # routed to a quarterly leaf
     assert total == 1
 
