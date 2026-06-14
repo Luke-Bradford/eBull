@@ -4889,25 +4889,30 @@ def get_instrument_risk_metrics(
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT instrument_id, symbol FROM instruments
-            WHERE UPPER(symbol) = %(s)s
-            ORDER BY is_primary_listing DESC, instrument_id ASC
-            LIMIT 1
-            """,
-            {"s": symbol_clean},
-        )
-        inst_row = cur.fetchone()
-
-    if inst_row is None:
-        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
-
-    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
-    out_symbol = str(inst_row["symbol"])  # type: ignore[arg-type]
-
+    # All reads — symbol→id resolution, current rows, benchmark lookup, and the
+    # price series — run inside ONE snapshot so a concurrent universe /
+    # primary-listing change cannot mix two committed views (Codex ckpt-2 LOW;
+    # snapshot_read commits the pending txn on entry, so a pre-block lookup would
+    # be a different snapshot — prevention-log §snapshot_read).
     with snapshot_read(conn):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, symbol FROM instruments
+                WHERE UPPER(symbol) = %(s)s
+                ORDER BY is_primary_listing DESC, instrument_id ASC
+                LIMIT 1
+                """,
+                {"s": symbol_clean},
+            )
+            inst_row = cur.fetchone()
+
+        if inst_row is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+        instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+        out_symbol = str(inst_row["symbol"])  # type: ignore[arg-type]
+
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
