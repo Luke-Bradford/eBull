@@ -10,6 +10,7 @@ const DEFAULT_INPUT: SunburstInputs = {
   etfs_total: null,
   insiders_total: null,
   blockholders_total: null,
+  def14a_total: null,
   treasury_shares: null,
 };
 
@@ -97,6 +98,22 @@ describe("buildSunburstRings — category sizing", () => {
     expect(treasury.shares).toBe(50_000_000);
     expect(treasury.leaves).toHaveLength(1);
     expect(treasury.within_category_gap).toBe(0);
+  });
+
+  it("renders def14a as its own category with every holder surfaced (#1627 bypass)", () => {
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      def14a_total: 100_000_000,
+      holders: [
+        holder("vanguard-proxy", 60_000_000, "def14a"),
+        holder("blackrock-proxy", 40_000_000, "def14a"),
+      ],
+    });
+    const d = r!.categories.find((c) => c.key === "def14a")!;
+    expect(d.shares).toBe(100_000_000);
+    // bypass=true → every 5%+ proxy holder is its own leaf, no "Other".
+    expect(d.leaves).toHaveLength(2);
+    expect(d.leaves.every((l) => !l.is_other)).toBe(true);
   });
 });
 

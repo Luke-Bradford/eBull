@@ -4558,19 +4558,18 @@ _ROLLUP_CSV_CATEGORIES: frozenset[str] = _ROLLUP_CSV_SLICE_CATEGORIES | {"treasu
 def rollup_csv_slice_filter(category: str) -> frozenset[str]:
     """Slice categories a ``?category=`` CSV filter keeps.
 
-    ``treasury`` keeps no slices (memo + residual rows only).
-    ``insiders`` includes ``def14a_unmatched`` — the chart and the L2
-    filer table both fold proxy-only DEF 14A holders into the insiders
-    category (``rollupToSunburstInputs`` / ``rollupToFilerRows``), and
-    the CSV's contract is to match the chart 1:1; exporting the raw
-    slice alone would drop rows the filtered table visibly shows
-    (#1589 Codex ckpt-2). ``def14a_unmatched`` stays addressable on
-    its own.
+    ``treasury`` keeps no slices (memo + residual rows only). Every
+    other category maps to its own slice — including
+    ``def14a_unmatched``, which is its own wedge + L2 filer category
+    since #1627 (un-folded from insiders). The CSV must match the
+    un-folded chart/table 1:1: ``?category=insiders&view=raw`` now
+    carries insiders only, and ``?category=def14a_unmatched`` carries
+    the proxy-only holders. (Pre-#1627 the chart/table folded DEF 14A
+    into insiders and this filter mirrored that fold — prevention-log
+    #1767; un-folding one surface requires un-folding all three.)
     """
     if category == "treasury":
         return frozenset()
-    if category == "insiders":
-        return frozenset({"insiders", "def14a_unmatched"})
     return frozenset({category})
 
 

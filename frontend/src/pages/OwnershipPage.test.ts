@@ -145,12 +145,12 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     });
   });
 
-  it("folds def14a_unmatched into the insiders category", () => {
+  it("maps def14a_unmatched to its own def14a category (#1627 un-fold)", () => {
     const rollup = _baseRollup({
       slices: [
         _slice({
           category: "def14a_unmatched",
-          label: "Named officers (DEF 14A)",
+          label: "Proxy-only (DEF 14A)",
           holders: [
             _holder({
               filer_cik: null,
@@ -164,8 +164,43 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     });
     const rows = rollupToFilerRows(rollup);
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.category).toBe("insiders");
-    expect(rows[0]!.category_label).toBe("Insiders");
+    expect(rows[0]!.category).toBe("def14a");
+    expect(rows[0]!.category_label).toBe("DEF 14A");
+  });
+
+  it("keeps a same-name holder in insiders and def14a as two distinct rows (#1627)", () => {
+    // A CIK-null ``name:`` key can collide across categories. The rows
+    // must stay separate (category + key) so the L2 filer-label lookup
+    // can be scoped by category to resolve the right one.
+    const rollup = _baseRollup({
+      slices: [
+        _slice({
+          category: "insiders",
+          holders: [
+            _holder({
+              filer_cik: null,
+              filer_name: "PAT SMITH",
+              shares: "100",
+              winning_source: "form4",
+            }),
+          ],
+        }),
+        _slice({
+          category: "def14a_unmatched",
+          holders: [
+            _holder({
+              filer_cik: null,
+              filer_name: "PAT SMITH",
+              shares: "200",
+              winning_source: "def14a",
+            }),
+          ],
+        }),
+      ],
+    });
+    const rows = rollupToFilerRows(rollup).filter((r) => r.key === "name:PAT SMITH");
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((r) => r.category))).toEqual(new Set(["insiders", "def14a"]));
   });
 
   it("excludes the funds memo slice (N-PORT, non-additive)", () => {
@@ -238,6 +273,35 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     });
     const rows = rollupToFilerRows(rollup);
     expect(rows.map((r) => r.key)).toEqual(["4", "3", "2", "1", "treasury"]);
+  });
+
+  it("sorts def14a rows after insiders and before treasury (#1627)", () => {
+    // Regression for the Codex ckpt-2 catch: def14a must be in
+    // _CATEGORY_ORDER, else indexOf returns -1 and DEF 14A rows sort
+    // before every known category.
+    const rollup = _baseRollup({
+      treasury_shares: "1000",
+      slices: [
+        _slice({
+          category: "insiders",
+          holders: [_holder({ filer_cik: "ins", shares: "100", winning_source: "form4" })],
+        }),
+        _slice({
+          category: "def14a_unmatched",
+          holders: [_holder({ filer_cik: "d14", shares: "200", winning_source: "def14a" })],
+        }),
+        _slice({
+          category: "institutions",
+          holders: [_holder({ filer_cik: "inst", shares: "300" })],
+        }),
+      ],
+    });
+    expect(rollupToFilerRows(rollup).map((r) => r.category)).toEqual([
+      "institutions",
+      "insiders",
+      "def14a",
+      "treasury",
+    ]);
   });
 });
 

@@ -39,6 +39,7 @@ import { useNavigate } from "react-router-dom";
 import { fetchOwnershipRollup } from "@/api/ownership";
 import type {
   OwnershipRollupResponse,
+  OwnershipSlice,
   OwnershipSliceCategory,
 } from "@/api/ownership";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
@@ -56,6 +57,7 @@ import {
   formatShares,
   ownershipStaleDenominatorCopy,
   parseShareCount,
+  topHoldersByShares,
 } from "@/components/instrument/ownershipMetrics";
 import type {
   SunburstHolder,
@@ -135,13 +137,14 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
  * denominator (treasury-on-top model); per-slice totals come from
  * the deduped rollup; per-filer holders feed the outer ring.
  *
- * ``def14a_unmatched`` rows fold into the ``insiders`` chart category
- * (they are by definition named officers in the proxy with no Form 4
- * filing on record). The slice table keeps them as a separate
- * category for transparency, but the chart treats them as insiders so
- * the sunburst doesn't need a fifth named category and the chart-vs-
- * table totals stay reconciled. Codex pre-push review (Batch 1 of
- * #788) caught the prior version that dropped them from the chart.
+ * ``def14a_unmatched`` is its own wedge (#1627). It carries
+ * ``denominator_basis=pie_wedge`` (additive — already in the server
+ * residual), and on large caps the unmatched proxy 5%+ holders dwarf
+ * the real insiders (AAPL: 2.48B vs 10.3M), so folding them into the
+ * insiders wedge mislabelled the majority of it. ``funds`` is the only
+ * ``institution_subset`` overlay and is deliberately NOT flattened
+ * here — it is a memo (N-PORT detail already inside the 13F-HR
+ * institutional aggregate), never a wedge.
  */
 export function rollupToSunburstInputs(
   rollup: OwnershipRollupResponse,
@@ -186,27 +189,6 @@ export function rollupToSunburstInputs(
 
   const treasury = parseShareCount(rollup.treasury_shares);
 
-  // Insiders bucket folds in def14a_unmatched holders. Both totals
-  // and as_of dates take the max across the two slices so the chart
-  // category sums match the slice table's insiders + def14a_unmatched
-  // rows.
-  const insiders_slice_total = sliceTotal("insiders");
-  const def14a_unmatched_total = sliceTotal("def14a_unmatched");
-  const combined_insiders_total =
-    insiders_slice_total === null && def14a_unmatched_total === null
-      ? null
-      : (insiders_slice_total ?? 0) + (def14a_unmatched_total ?? 0);
-  // Latest as_of across {insiders, def14a_unmatched}. Sort surfaces
-  // the most recent date last; ``at(-1)`` returns it; ``?? null``
-  // handles the both-empty case. Claude PR review (PR 798) round 2
-  // pinned this idiom over nested ternaries — extends cleanly when a
-  // third source enters the fold.
-  const combined_insiders_as_of =
-    [sliceAsOf("insiders"), sliceAsOf("def14a_unmatched")]
-      .filter((d): d is string => d !== null)
-      .sort()
-      .at(-1) ?? null;
-
   return {
     // Canonical denominator: shares_outstanding only. Treasury is
     // additive on top, NOT part of the denominator.
@@ -215,17 +197,22 @@ export function rollupToSunburstInputs(
       ...flattenHolders("institutions", "institutions"),
       ...flattenHolders("etfs", "etfs"),
       ...flattenHolders("insiders", "insiders"),
-      ...flattenHolders("def14a_unmatched", "insiders"),
+      // def14a_unmatched is its own wedge now (#1627), not folded into
+      // insiders. funds is an institution_subset overlay — never a
+      // wedge — so it is deliberately absent from this list.
+      ...flattenHolders("def14a_unmatched", "def14a"),
       ...flattenHolders("blockholders", "blockholders"),
     ],
     institutions_total: sliceTotal("institutions"),
     etfs_total: sliceTotal("etfs"),
-    insiders_total: combined_insiders_total,
+    insiders_total: sliceTotal("insiders"),
+    def14a_total: sliceTotal("def14a_unmatched"),
     blockholders_total: sliceTotal("blockholders"),
     treasury_shares: treasury,
     institutions_as_of: sliceAsOf("institutions"),
     etfs_as_of: sliceAsOf("etfs"),
-    insiders_as_of: combined_insiders_as_of,
+    insiders_as_of: sliceAsOf("insiders"),
+    def14a_as_of: sliceAsOf("def14a_unmatched"),
     treasury_as_of: rollup.treasury_as_of,
     blockholders_as_of: sliceAsOf("blockholders"),
   };
@@ -371,9 +358,14 @@ interface SliceTableProps {
   readonly rollup: OwnershipRollupResponse;
 }
 
-// Pie-wedge categories — render in the main slice table and contribute
-// to the chart. Funds slice (#919) renders separately as a memo overlay
-// so its share counts don't visually compete with the pie totals.
+// Known pie-wedge categories, in render order. Pie-wedge slices
+// (``denominator_basis="pie_wedge"``) sum to ≤ shares_outstanding and
+// feed the chart + server residual; ``institution_subset`` slices
+// (funds) render below as a non-additive memo overlay. The table is
+// driven off ``denominator_basis`` (NOT this list alone) so a future
+// additive category is never silently dropped while the residual still
+// subtracts it — this list only fixes the ORDER of the categories we
+// already know (Codex ckpt-1).
 const _CATEGORY_ORDER_TABLE: readonly OwnershipSliceCategory[] = [
   "insiders",
   "blockholders",
@@ -382,11 +374,26 @@ const _CATEGORY_ORDER_TABLE: readonly OwnershipSliceCategory[] = [
   "def14a_unmatched",
 ];
 
+function _denominatorBasis(slice: OwnershipSlice) {
+  return slice.denominator_basis ?? "pie_wedge";
+}
+
 function SliceTable({ rollup }: SliceTableProps): JSX.Element {
-  const slicesByCategory = new Map(rollup.slices.map((s) => [s.category, s]));
-  const visible = _CATEGORY_ORDER_TABLE.filter((cat) => slicesByCategory.has(cat));
-  const fundsSlice = slicesByCategory.get("funds");
-  if (visible.length === 0 && fundsSlice === undefined) {
+  const pieSlices = rollup.slices.filter((s) => _denominatorBasis(s) === "pie_wedge");
+  const overlaySlices = rollup.slices.filter(
+    (s) => _denominatorBasis(s) === "institution_subset",
+  );
+  // Order the known categories, then append any unknown pie-wedge slice
+  // the FE has no explicit slot for — so a new additive category can't
+  // vanish from the table while the server residual still counts it.
+  const orderedPie: OwnershipSlice[] = [
+    ..._CATEGORY_ORDER_TABLE.map((cat) =>
+      pieSlices.find((s) => s.category === cat),
+    ).filter((s): s is OwnershipSlice => s !== undefined),
+    ...pieSlices.filter((s) => !_CATEGORY_ORDER_TABLE.includes(s.category)),
+  ];
+
+  if (orderedPie.length === 0 && overlaySlices.length === 0) {
     return (
       <p className="text-xs text-slate-500 dark:text-slate-400">
         No filings ingested yet.
@@ -395,95 +402,146 @@ function SliceTable({ rollup }: SliceTableProps): JSX.Element {
   }
   return (
     <>
-      <table className="w-full text-sm">
-        <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-          <tr>
-            <th className="pb-1 text-left">Category</th>
-            <th className="pb-1 text-right">Shares</th>
-            <th className="pb-1 text-right">% of outstanding</th>
-            <th className="pb-1 text-right">Filers</th>
-          </tr>
-        </thead>
-        <tbody>
-          {visible.map((cat) => {
-            const slc = slicesByCategory.get(cat)!;
-            const shares = parseShareCount(slc.total_shares) ?? 0;
-            const pct = parseShareCount(slc.pct_outstanding) ?? 0;
-            return (
-              <tr key={cat} className="border-t border-t-slate-100 dark:border-t-slate-800">
-                <td className="py-1.5 text-slate-700 dark:text-slate-200">
-                  {slc.label}
-                </td>
-                <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
-                  {formatShares(shares)}
-                </td>
-                <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
-                  {formatPct(pct)}
-                </td>
-                <td className="py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">
-                  {slc.filer_count}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      {fundsSlice !== undefined && <FundsMemoOverlay slice={fundsSlice} />}
+      {orderedPie.length > 0 && (
+        <table className="w-full text-sm">
+          <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            <tr>
+              <th className="pb-1 text-left">Category</th>
+              <th className="pb-1 text-right">Shares</th>
+              <th className="pb-1 text-right">% of outstanding</th>
+              <th className="pb-1 text-right">Filers</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orderedPie.map((slc) => {
+              const shares = parseShareCount(slc.total_shares) ?? 0;
+              const pct = parseShareCount(slc.pct_outstanding) ?? 0;
+              return (
+                <tr
+                  key={slc.category}
+                  className="border-t border-t-slate-100 dark:border-t-slate-800"
+                >
+                  <td className="py-1.5 text-slate-700 dark:text-slate-200">
+                    {slc.label}
+                  </td>
+                  <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
+                    {formatShares(shares)}
+                  </td>
+                  <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
+                    {formatPct(pct)}
+                  </td>
+                  <td className="py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">
+                    {slc.filer_count}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {overlaySlices.map((slc) => (
+        <OverlaySection key={slc.category} slice={slc} />
+      ))}
     </>
   );
 }
 
-interface FundsMemoOverlayProps {
-  readonly slice: OwnershipRollupResponse["slices"][number];
+interface OverlaySectionProps {
+  readonly slice: OwnershipSlice;
 }
 
+const _OVERLAY_TOP_N = 8;
+
 /**
- * Memo overlay for the funds slice (#919). N-PORT mutual-fund holdings
- * are fund-level detail INSIDE the 13F-HR institutional aggregate; we
- * render them in a separate panel so the operator can see the per-fund
- * breakdown without the share counts visually adding to the pie totals
- * (additive accounting would double-count). Distinct visual treatment
- * — italic label, muted styling, explicit memo footnote — signals the
- * non-additive semantic.
+ * Memo overlay for an ``institution_subset`` slice — funds today (#919),
+ * with top-N per-holder detail (#1627). These holdings are NON-additive
+ * (fund-level N-PORT detail already counted inside the 13F-HR
+ * institutional aggregate), so they render in a separate, visually
+ * distinct panel and never sum into the pie or residual. Italic memo +
+ * muted styling signal the non-additive semantic. Shows the top
+ * ``_OVERLAY_TOP_N`` holders by shares, a "+N more" line, and the
+ * aggregate total. Overlay selection is basis-driven, so a future
+ * ``institution_subset`` slice surfaces here automatically; only the
+ * funds-specific double-count copy is keyed on the category.
  */
-function FundsMemoOverlay({ slice }: FundsMemoOverlayProps): JSX.Element {
-  const shares = parseShareCount(slice.total_shares) ?? 0;
-  const pct = parseShareCount(slice.pct_outstanding) ?? 0;
+function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
+  const total = parseShareCount(slice.total_shares) ?? 0;
+  const totalPct = parseShareCount(slice.pct_outstanding) ?? 0;
+  const { shown, remaining } = topHoldersByShares(slice.holders, _OVERLAY_TOP_N);
+  const isFunds = slice.category === "funds";
+  const unit = isFunds ? "fund series" : "holders";
   return (
     <div
       className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs dark:border-slate-800 dark:bg-slate-900/40"
-      data-test="funds-memo-overlay"
+      data-test="ownership-overlay"
     >
       <p className="mb-1 italic text-slate-600 dark:text-slate-300">
-        Memo: mutual funds (N-PORT) — fund-level detail of positions
-        already counted in Institutions via 13F-HR. Does not contribute
-        to the pie or residual math.
+        Memo: {slice.label} —{" "}
+        {isFunds
+          ? "fund-level detail of positions already counted in Institutions via 13F-HR. "
+          : "non-additive overlay. "}
+        Does not contribute to the pie or residual math.
       </p>
       <table className="w-full">
         <thead className="text-[0.625rem] uppercase tracking-wide text-slate-500 dark:text-slate-400">
           <tr>
-            <th className="pb-1 text-left">Fund series (N-PORT)</th>
-            <th className="pb-1 text-right">Shares (sum)</th>
+            <th className="pb-1 text-left">
+              {isFunds ? "Fund series (N-PORT)" : "Holder"}
+            </th>
+            <th className="pb-1 text-right">Shares</th>
             <th className="pb-1 text-right">% of outstanding</th>
-            <th className="pb-1 text-right">Series</th>
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td className="py-1 italic text-slate-600 dark:text-slate-300">
-              {slice.label}
+          {shown.map((h) => {
+            const hShares = parseShareCount(h.shares) ?? 0;
+            const hPct = parseShareCount(h.pct_outstanding) ?? 0;
+            return (
+              <tr key={h.filer_cik ?? `name:${h.filer_name}`}>
+                <td className="py-1 text-slate-600 dark:text-slate-300">
+                  {h.winning_edgar_url !== null ? (
+                    <a
+                      className="underline decoration-dotted hover:text-slate-800 dark:hover:text-slate-100"
+                      href={h.winning_edgar_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {h.filer_name}
+                    </a>
+                  ) : (
+                    h.filer_name
+                  )}
+                </td>
+                <td className="py-1 text-right font-mono text-slate-600 dark:text-slate-300">
+                  {formatShares(hShares)}
+                </td>
+                <td className="py-1 text-right font-mono text-slate-700 dark:text-slate-200">
+                  {formatPct(hPct)}
+                </td>
+              </tr>
+            );
+          })}
+          {remaining > 0 && (
+            <tr>
+              <td colSpan={3} className="py-1 italic text-slate-500 dark:text-slate-400">
+                + {formatShares(remaining)} more {unit}
+              </td>
+            </tr>
+          )}
+        </tbody>
+        <tfoot>
+          <tr className="border-t border-t-slate-200 dark:border-t-slate-700">
+            <td className="py-1 font-medium text-slate-700 dark:text-slate-200">
+              Total · {slice.filer_count} {unit}
             </td>
-            <td className="py-1 text-right font-mono text-slate-600 dark:text-slate-300">
-              {formatShares(shares)}
+            <td className="py-1 text-right font-mono font-medium text-slate-700 dark:text-slate-200">
+              {formatShares(total)}
             </td>
-            <td className="py-1 text-right font-mono text-slate-700 dark:text-slate-200">
-              {formatPct(pct)}
-            </td>
-            <td className="py-1 text-right font-mono text-slate-500 dark:text-slate-400">
-              {slice.filer_count}
+            <td className="py-1 text-right font-mono font-medium text-slate-700 dark:text-slate-200">
+              {formatPct(totalPct)}
             </td>
           </tr>
-        </tbody>
+        </tfoot>
       </table>
     </div>
   );

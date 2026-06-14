@@ -67,6 +67,7 @@ export interface SunburstHolder {
     | "institutions"
     | "etfs"
     | "insiders"
+    | "def14a"
     | "treasury"
     | "blockholders";
   /** SEC archive index URL for the holder's winning accession (#921).
@@ -80,8 +81,11 @@ export interface SunburstHolder {
 
 export interface SunburstInputs {
   /** Denominator. Every category + leaf is sized as a proportion of
-   *  this number; the visible arcs sum to ≤100%. Callers typically
-   *  compute this as ``shares_outstanding + (treasury_shares ?? 0)``. */
+   *  this number; the visible arcs sum to ≤100%. This is
+   *  ``shares_outstanding`` ONLY — treasury renders as an additive
+   *  wedge on top, never folded into the denominator (the #789
+   *  ship-blocker that wedged every category down by the treasury
+   *  fraction). */
   readonly total_shares: number;
 
   /** Per-filer detail for institutional / ETF / insider categories.
@@ -102,6 +106,13 @@ export interface SunburstInputs {
    *  count does NOT double-count co-reporters of the same filing).
    *  Null = no 13D/G blocks on file. */
   readonly blockholders_total: number | null;
+
+  /** DEF 14A proxy-statement beneficial holders that did NOT resolve
+   *  to a Form 4 / Form 3 / 13F filer (the ``def14a_unmatched`` slice;
+   *  ``denominator_basis=pie_wedge`` — additive, already in the server
+   *  residual). Surfaced as its own wedge (#1627), no longer folded
+   *  into insiders. Null = none on file. */
+  readonly def14a_total: number | null;
 
   /** Treasury (issuer-held) shares from XBRL. ``null`` = not on
    *  file; treasury wedge does not render. Counted in the
@@ -124,12 +135,16 @@ export interface SunburstInputs {
   /** Blockholders as_of_date — latest filed_at across the included
    *  blocks (the reader endpoint returns this directly). */
   readonly blockholders_as_of?: string | null;
+  /** DEF 14A as_of_date — latest as_of across the unmatched proxy
+   *  holders. Optional, mirrors the other ``_as_of`` fields. */
+  readonly def14a_as_of?: string | null;
 }
 
 export type CategoryKey =
   | "institutions"
   | "etfs"
   | "insiders"
+  | "def14a"
   | "treasury"
   | "blockholders";
 
@@ -214,6 +229,7 @@ const CATEGORY_LABEL: Record<CategoryKey, string> = {
   institutions: "Institutions",
   etfs: "ETFs",
   insiders: "Insiders",
+  def14a: "DEF 14A",
   treasury: "Treasury",
   blockholders: "Blockholders",
 };
@@ -229,6 +245,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
   const inst_holders = input.holders.filter((h) => h.category === "institutions");
   const etf_holders = input.holders.filter((h) => h.category === "etfs");
   const insider_holders = input.holders.filter((h) => h.category === "insiders");
+  const def14a_holders = input.holders.filter((h) => h.category === "def14a");
   const blockholder_holders = input.holders.filter(
     (h) => h.category === "blockholders",
   );
@@ -278,6 +295,18 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
         threshold,
         true, // bypass threshold — every officer surfaces
         input.insiders_as_of ?? null,
+      ),
+    );
+  }
+  if (input.def14a_total !== null && input.def14a_total > 0) {
+    categories.push(
+      buildCategoryFromTotal(
+        "def14a",
+        input.def14a_total,
+        def14a_holders,
+        threshold,
+        true, // bypass threshold — DEF 14A holders are 5%+ beneficial owners; every one surfaces
+        input.def14a_as_of ?? null,
       ),
     );
   }

@@ -42,6 +42,11 @@ export const CADENCE: Record<CategoryKey, CadenceThresholds> = {
   institutions: { aging_days: 135, stale_days: 270 },
   etfs: { aging_days: 135, stale_days: 270 },
   insiders: { aging_days: 30, stale_days: 90 },
+  // DEF 14A proxy statements (#1627) are annual — one per proxy season.
+  // The unmatched 5%+ holder table refreshes once a year, so a figure
+  // ~9 months old is normal; stale only past the ~400-day sec_def14a
+  // freshness horizon. Aging > 270d, stale > 400d.
+  def14a: { aging_days: 270, stale_days: 400 },
   treasury: { aging_days: 100, stale_days: 200 },
   // Blockholders (13D / 13G #766) are event-driven, not periodic —
   // a reporter only re-files when their position changes materially

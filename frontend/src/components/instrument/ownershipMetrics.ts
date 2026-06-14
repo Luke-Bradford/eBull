@@ -25,7 +25,7 @@
  * returns NUMERICs as strings); :func:`parseShareCount` normalises.
  */
 
-import type { OwnershipCoverageState } from "@/api/ownership";
+import type { OwnershipCoverageState, OwnershipHolder } from "@/api/ownership";
 
 export interface OwnershipSliceInput {
   /** Sum of long-equity shares for this slice. ``null`` = no data. */
@@ -199,6 +199,37 @@ export function formatPct(pct: number | null): string {
 export function formatShares(shares: number | null): string {
   if (shares === null || !Number.isFinite(shares)) return "—";
   return shares.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+export interface TopHolders {
+  /** Top ``n`` holders by parsed share count, largest-first. */
+  readonly shown: readonly OwnershipHolder[];
+  /** Count of positive-share holders beyond the top ``n`` (drives the
+   *  "+N more" affordance). Never negative. */
+  readonly remaining: number;
+}
+
+/**
+ * Select the top ``n`` holders by share count for a memo overlay
+ * (#1627 funds overlay). Holders with null / non-positive / unparseable
+ * share counts are dropped first (same skip predicate the chart uses),
+ * then the rest are sorted largest-first. Pure + table-tested — the
+ * overlay renders ``shown`` as rows and ``remaining`` as a "+N more"
+ * line. Does NOT mutate the input array.
+ */
+export function topHoldersByShares(
+  holders: readonly OwnershipHolder[],
+  n: number,
+): TopHolders {
+  const positive = holders.filter((h) => {
+    const shares = parseShareCount(h.shares);
+    return shares !== null && shares > 0;
+  });
+  const sorted = [...positive].sort(
+    (a, b) => (parseShareCount(b.shares) ?? 0) - (parseShareCount(a.shares) ?? 0),
+  );
+  const shown = sorted.slice(0, Math.max(0, n));
+  return { shown, remaining: sorted.length - shown.length };
 }
 
 /**

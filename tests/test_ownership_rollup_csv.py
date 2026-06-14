@@ -529,18 +529,19 @@ def test_build_csv_supports_post_filter_via_dataclass_replace() -> None:
     assert "Public / unattributed" in csv_filt
 
 
-def test_rollup_csv_slice_filter_folds_def14a_into_insiders() -> None:
-    """``?category=insiders`` keeps the ``def14a_unmatched`` slice.
+def test_rollup_csv_slice_filter_def14a_addressable_on_its_own() -> None:
+    """``?category=`` maps each category to its own slice (#1627 un-fold).
 
-    The chart and the L2 filer table fold proxy-only DEF 14A holders
-    into the insiders category; the CSV must match the chart 1:1 or
-    a drilled ``?category=insiders&view=raw`` export silently drops
-    rows the table shows (#1589 Codex ckpt-2). Every other filter
-    value stays exact; ``treasury`` keeps no slices.
+    Pre-#1627 the chart + L2 table folded proxy-only DEF 14A holders into
+    insiders and this filter mirrored that fold. #1627 surfaces
+    ``def14a_unmatched`` as its own wedge + L2 category, so the filter
+    must un-fold too — otherwise a drilled ``?category=insiders&view=raw``
+    export would carry DEF 14A rows the un-folded table no longer shows
+    (prevention-log #1767 in reverse). ``treasury`` keeps no slices.
     """
     from app.api.instruments import rollup_csv_slice_filter
 
-    assert rollup_csv_slice_filter("insiders") == frozenset({"insiders", "def14a_unmatched"})
+    assert rollup_csv_slice_filter("insiders") == frozenset({"insiders"})
     assert rollup_csv_slice_filter("def14a_unmatched") == frozenset({"def14a_unmatched"})
     assert rollup_csv_slice_filter("treasury") == frozenset()
     for exact in ("blockholders", "institutions", "etfs", "funds"):
