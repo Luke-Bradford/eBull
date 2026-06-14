@@ -774,6 +774,11 @@ for _col_name, _tags in TRACKED_CONCEPTS.items():
     for _idx, _tag in enumerate(_tags):
         _TAG_TO_COLUMN[_tag] = (_col_name, _idx)
 
+# DEI cover-page public-float concept (#735). Deliberately NOT in
+# _TAG_TO_COLUMN — it is projected by an FY-only overlay so its
+# cover-page period_end (issuer Q2-end) never lifts the FY anchor (#558).
+_DEI_PUBLIC_FLOAT_CONCEPT = "EntityPublicFloat"
+
 # Financial columns that are flow items (income/CF -- get summed in TTM).
 # Balance sheet items are point-in-time (latest value used in TTM).
 _FLOW_COLUMNS: frozenset[str] = frozenset(
@@ -908,6 +913,11 @@ class PeriodRow:
     shares_authorized: Decimal | None = None
     shares_issued: Decimal | None = None
     retained_earnings: Decimal | None = None
+
+    # DEI cover-page public float (#735). Annual-only — projected by an
+    # FY-only overlay in _derive_periods_from_facts, NEVER via _TAG_TO_COLUMN
+    # (its period_end is the issuer Q2-end, not the FY anchor — see #558).
+    public_float_usd: Decimal | None = None
 
     # Tier 1 + Tier 2 allowlist expansion (#732). Working-capital,
     # liquidity, comprehensive income, intangible amortisation,
@@ -1069,6 +1079,29 @@ def _derive_periods_from_facts(
             setattr(row, col_name, fact.val)
             col_priority[col_name] = priority
 
+        # #735 — DEI public-float overlay (FY only). EntityPublicFloat is a
+        # 10-K cover-page fact stamped (fiscal_year, 'FY') but with
+        # period_end = issuer Q2-end, so it is NOT in ``mapped_facts``
+        # (kept out of _TAG_TO_COLUMN to avoid lifting the FY anchor, #558)
+        # and would be dropped by the ``canonical_facts`` period_end filter.
+        # Pull it from the full ``period_facts`` set instead: current float =
+        # max(period_end) then latest filed_date (guards comparative
+        # re-stamps, #682). Value-only overlay — provenance columns
+        # (source_ref / filed_date / form_type) intentionally stay tied to
+        # the canonical fiscal-period facts; the float fact's accession is
+        # NOT appended to source_ref (that is the raw-upsert key). USD-only
+        # guard so a malformed/future non-USD float never lands in a USD
+        # column.
+        if period_type == "FY":
+            float_facts = [
+                f
+                for f in period_facts
+                if f.concept == _DEI_PUBLIC_FLOAT_CONCEPT and f.unit == "USD" and f.val is not None
+            ]
+            if float_facts:
+                chosen = max(float_facts, key=lambda f: (f.period_end, f.filed_date, f.accession_number))
+                row.public_float_usd = chosen.val
+
         periods.append(row)
 
     # Q4 derivation: if FY exists but Q4 does not, derive Q4 = FY - Q1 - Q2 - Q3
@@ -1167,6 +1200,7 @@ def _upsert_period_raw(
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
             treasury_shares, shares_authorized, shares_issued, retained_earnings,
+            public_float_usd,
             assets_current, liabilities_current, cash_restricted,
             comprehensive_income, intangible_amortization,
             deferred_income_tax, other_nonoperating_income,
@@ -1188,6 +1222,7 @@ def _upsert_period_raw(
             %(operating_cf)s, %(investing_cf)s, %(financing_cf)s, %(capex)s,
             %(dividends_paid)s, %(dps_declared)s, %(buyback_spend)s,
             %(treasury_shares)s, %(shares_authorized)s, %(shares_issued)s, %(retained_earnings)s,
+            %(public_float_usd)s,
             %(assets_current)s, %(liabilities_current)s, %(cash_restricted)s,
             %(comprehensive_income)s, %(intangible_amortization)s,
             %(deferred_income_tax)s, %(other_nonoperating_income)s,
@@ -1237,6 +1272,7 @@ def _upsert_period_raw(
             shares_authorized = EXCLUDED.shares_authorized,
             shares_issued = EXCLUDED.shares_issued,
             retained_earnings = EXCLUDED.retained_earnings,
+            public_float_usd = EXCLUDED.public_float_usd,
             assets_current = EXCLUDED.assets_current,
             liabilities_current = EXCLUDED.liabilities_current,
             cash_restricted = EXCLUDED.cash_restricted,
@@ -1300,6 +1336,7 @@ def _upsert_period_raw(
             "shares_authorized": period.shares_authorized,
             "shares_issued": period.shares_issued,
             "retained_earnings": period.retained_earnings,
+            "public_float_usd": period.public_float_usd,
             "assets_current": period.assets_current,
             "liabilities_current": period.liabilities_current,
             "cash_restricted": period.cash_restricted,
@@ -1466,6 +1503,7 @@ def _canonical_merge_instrument(
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
             treasury_shares, shares_authorized, shares_issued, retained_earnings,
+            public_float_usd,
             assets_current, liabilities_current, cash_restricted,
             comprehensive_income, intangible_amortization,
             deferred_income_tax, other_nonoperating_income,
@@ -1488,6 +1526,7 @@ def _canonical_merge_instrument(
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
             treasury_shares, shares_authorized, shares_issued, retained_earnings,
+            public_float_usd,
             assets_current, liabilities_current, cash_restricted,
             comprehensive_income, intangible_amortization,
             deferred_income_tax, other_nonoperating_income,
@@ -1542,6 +1581,7 @@ def _canonical_merge_instrument(
             shares_authorized = EXCLUDED.shares_authorized,
             shares_issued = EXCLUDED.shares_issued,
             retained_earnings = EXCLUDED.retained_earnings,
+            public_float_usd = EXCLUDED.public_float_usd,
             assets_current = EXCLUDED.assets_current,
             liabilities_current = EXCLUDED.liabilities_current,
             cash_restricted = EXCLUDED.cash_restricted,

@@ -58,6 +58,7 @@ def _seed_raw_with_ownership(
     shares_authorized: Decimal,
     shares_issued: Decimal,
     retained_earnings: Decimal,
+    public_float_usd: Decimal | None = None,
 ) -> None:
     conn.execute(
         """
@@ -65,10 +66,12 @@ def _seed_raw_with_ownership(
             instrument_id, period_end_date, period_type,
             fiscal_year, fiscal_quarter, revenue,
             treasury_shares, shares_authorized, shares_issued, retained_earnings,
+            public_float_usd,
             source, source_ref, reported_currency, filed_date
         ) VALUES (
             %s, %s, 'FY', %s, NULL, 1000,
             %s, %s, %s, %s,
+            %s,
             'sec_edgar', %s, 'USD', %s
         )
         """,
@@ -80,6 +83,7 @@ def _seed_raw_with_ownership(
             shares_authorized,
             shares_issued,
             retained_earnings,
+            public_float_usd,
             source_ref,
             filed_date,
         ),
@@ -94,7 +98,7 @@ def _canonical_ownership_row(
         cur.execute(
             """
             SELECT period_end_date, treasury_shares, shares_authorized,
-                   shares_issued, retained_earnings, source_ref
+                   shares_issued, retained_earnings, public_float_usd, source_ref
             FROM financial_periods
             WHERE instrument_id = %s
             """,
@@ -125,6 +129,7 @@ class TestCanonicalMergeOwnershipColumns:
             shares_authorized=Decimal("5000000000"),
             shares_issued=Decimal("1750000000"),
             retained_earnings=Decimal("180000000000"),
+            public_float_usd=Decimal("3253431000000.00"),  # #735
         )
         conn.commit()
 
@@ -136,6 +141,7 @@ class TestCanonicalMergeOwnershipColumns:
         assert row["shares_authorized"] == Decimal("5000000000")
         assert row["shares_issued"] == Decimal("1750000000")
         assert row["retained_earnings"] == Decimal("180000000000")
+        assert row["public_float_usd"] == Decimal("3253431000000.00")  # #735 projects too
 
     def test_on_conflict_update_path_replaces_ownership_columns(
         self,
