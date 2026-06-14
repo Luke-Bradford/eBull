@@ -290,3 +290,16 @@ class TestDailyCandleRefreshEmptyFetchDisambiguation:
             )
         assert any("no new bars" in r.message for r in caplog.records if r.levelname == "INFO")
         assert not any(r.levelname == "WARNING" and "FAILED" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #591 — benchmark instruments constant
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_symbols_constant_is_the_expected_set() -> None:
+    from app.workers.scheduler import BENCHMARK_SYMBOLS
+
+    assert BENCHMARK_SYMBOLS == frozenset(
+        {"SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+    )

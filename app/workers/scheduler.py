@@ -2030,6 +2030,16 @@ def nightly_universe_sync() -> None:
 # scoring/coverage pipeline.
 _T3_BOOTSTRAP_BATCH_SIZE = 200
 
+# Benchmark instruments (S&P 500 + Nasdaq-100 + 11 GICS sector SPDRs)
+# always candle-refreshed regardless of coverage tier so the risk layer
+# (#591) has a benchmark series for beta/excess. Keyed by symbol
+# (env-agnostic; resolved to ids at runtime). Candle-scope only — NOT
+# promoted into scoring/ranking/thesis universe.
+BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
+    {"SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI",
+     "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+)
+
 # T3 candle bootstrap eligibility query.
 # Module-level constant so the test suite imports the same SQL the
 # scheduler executes — eliminates the drift risk Codex flagged on
