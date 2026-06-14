@@ -46,6 +46,17 @@ If any step's answer disagrees with what your spec assumed, **fix the spec first
 | I10 | Identity resolution: instruments are `BIGINT instrument_id`; filers are `TEXT cik` (10-digit zero-padded). They never collapse | manifest `subject_type` CHECK; observations split by category |
 | I11 | Coverage is telemetry, not a gate: red/amber/green banner state never blocks an endpoint | `_compute_coverage` / `_banner_for_state` (`app/services/ownership_rollup.py:966-1093`); `OwnershipRollup.no_data` returns 200 with empty payload |
 | I12 | eToro broker is sole execution boundary; all order writes go via `app/services/order_client.py` and audit `decision_audit` | settled-decisions Provider strategy; `app/api/orders.py` |
+| I13 | Multi-row source positions (13F sub-manager splits, multi-lot tranches) are SUM-aggregated at EVERY ingest locus, with an identical key + secondary-field (voting) derivation across all paths | `app/services/thirteen_f_normalise.py` (per-filing); `sec_13f_dataset_ingest.py::_INSERT_FROM_STG_SQL` `GROUP BY ... SUM` (bulk); prevention-log "Multi-row source position must be SUM-aggregated at EVERY ingest locus" |
+
+Multi-row source positions: SUM at every locus. A 13F-HR position split across
+sub-manager rows must be summed by every writer — three per-filing Python paths
+(via `normalise_13f_holdings` + `merge_resolved_by_instrument`) AND the bulk COPY
+drain (via `GROUP BY ... SUM`). `DISTINCT ON` / keep-first `setdefault` /
+`ON CONFLICT DO NOTHING` all keep ONE row and silently drop the rest — never use
+them where rows are *components* of one position. Aggregation key must match
+across paths; derived secondary fields (voting authority) are SUM-then-derive
+over their components, by one rule (`dominant_voting_authority`) the bulk SQL CASE
+mirrors. See #1567/#1566.
 
 Hard-rule corollaries:
 - `INSERT INTO instruments` fixtures must supply `is_tradable` (prev-log L615).
