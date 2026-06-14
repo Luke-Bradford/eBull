@@ -1463,3 +1463,96 @@ class TestTier1Tier2AllowlistProjection:
         assert q4.assets_current == Decimal("450000000")
         assert q4.liabilities_current == Decimal("320000000")
         assert q4.additional_paid_in_capital == Decimal("250000000")
+
+
+class TestPublicFloatOverlay735:
+    """#735 — DEI EntityPublicFloat (10-K cover-page, period_end = issuer
+    Q2-end, stamped fiscal_period='FY') is projected onto the FY row via an
+    overlay, WITHOUT lifting the FY anchor (#558) and only on FY rows."""
+
+    def _fy_gaap(self) -> FactRow:
+        # us-gaap FY anchor fact (AAPL FY2025 ends 2025-09-27).
+        return _fact(
+            concept="Revenues",
+            val=Decimal("391035000000"),
+            period_start="2024-09-29",
+            period_end="2025-09-27",
+            frame="CY2025",
+            form_type="10-K",
+            fiscal_year=2025,
+            fiscal_period="FY",
+            accession_number="0000320193-25-000079",
+            filed_date="2025-11-01",
+        )
+
+    def _float(
+        self,
+        *,
+        val: Decimal = Decimal("3253431000000"),
+        period_end: str = "2025-03-28",  # issuer Q2-end, NOT the FY anchor
+        filed_date: str = "2025-11-01",
+        accession_number: str = "0000320193-25-000079",
+        unit: str = "USD",
+    ) -> FactRow:
+        return _fact(
+            concept="EntityPublicFloat",
+            val=val,
+            period_start=None,  # instant
+            period_end=period_end,
+            frame="CY2025Q1I",
+            form_type="10-K",
+            fiscal_year=2025,
+            fiscal_period="FY",
+            accession_number=accession_number,
+            filed_date=filed_date,
+            unit=unit,
+        )
+
+    def test_float_overlaid_on_fy_row_without_lifting_anchor(self) -> None:
+        periods = _derive_periods_from_facts([self._fy_gaap(), self._float()], reported_currency="USD")
+        fy = next(p for p in periods if p.period_type == "FY")
+        assert fy.public_float_usd == Decimal("3253431000000")
+        # Anchor stays the real FY-end, NOT the float's Q2-end (#558).
+        assert fy.period_end_date == date(2025, 9, 27)
+        assert fy.revenue == Decimal("391035000000")
+
+    def test_float_not_applied_to_quarter_rows(self) -> None:
+        q1_gaap = _fact(
+            concept="Revenues",
+            val=Decimal("95000000000"),
+            period_start="2024-09-29",
+            period_end="2024-12-28",
+            frame="CY2024Q4",
+            fiscal_year=2025,
+            fiscal_period="Q1",
+            accession_number="q1",
+            filed_date="2025-02-01",
+        )
+        periods = _derive_periods_from_facts([self._fy_gaap(), self._float(), q1_gaap], reported_currency="USD")
+        fy = next(p for p in periods if p.period_type == "FY")
+        q1 = next(p for p in periods if p.period_type == "Q1")
+        assert fy.public_float_usd == Decimal("3253431000000")
+        assert q1.public_float_usd is None
+
+    def test_float_picks_current_over_comparative(self) -> None:
+        # A comparative-year float re-stamped under the same fy must lose to
+        # the current float (max period_end), and a later amendment wins on
+        # filed_date at equal period_end.
+        comparative = self._float(val=Decimal("2628553000000"), period_end="2024-03-29")
+        current = self._float(val=Decimal("3253431000000"), period_end="2025-03-28", filed_date="2025-11-01")
+        amendment = self._float(
+            val=Decimal("3253431999999"),
+            period_end="2025-03-28",
+            filed_date="2025-12-15",
+            accession_number="0000320193-25-000079-a",
+        )
+        periods = _derive_periods_from_facts(
+            [self._fy_gaap(), comparative, current, amendment], reported_currency="USD"
+        )
+        fy = next(p for p in periods if p.period_type == "FY")
+        assert fy.public_float_usd == Decimal("3253431999999")  # newest period_end, latest filed
+
+    def test_non_usd_float_ignored(self) -> None:
+        periods = _derive_periods_from_facts([self._fy_gaap(), self._float(unit="shares")], reported_currency="USD")
+        fy = next(p for p in periods if p.period_type == "FY")
+        assert fy.public_float_usd is None
