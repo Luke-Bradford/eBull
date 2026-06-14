@@ -57,6 +57,14 @@ from app.services.operators import (
     NoOperatorError,
     sole_operator_id,
 )
+from app.services.risk_metrics import (
+    RISK_METRICS_VERSION,
+    annualized_vol,
+    drawdown_curve,
+    load_close_series,
+    ols_beta,
+    simple_returns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -4666,4 +4674,361 @@ def get_instrument_ownership_rollup_csv(
         headers={
             "Content-Disposition": f'attachment; filename="{symbol_clean}_ownership_rollup.csv"',
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Risk metrics (#591 PR-B, Task B6) — read-through of the persisted two-layer
+# risk-metrics tables plus on-read display series.
+# ---------------------------------------------------------------------------
+
+
+class RiskWindowMetrics(BaseModel):
+    """All persisted risk scalars + per-metric statuses for ONE window.
+
+    Every numeric field is a FRACTION (0.10 == 10%) or dimensionless, and
+    nullable — a thin / invalid history yields NULL plus a flagging status,
+    never a fabricated zero. Statuses pass through verbatim from the persisted
+    columns.
+    """
+
+    window_key: str
+    cagr: Decimal | None
+    excess_cagr_vs_spy: Decimal | None
+    max_drawdown: Decimal | None
+    current_drawdown: Decimal | None
+    vol_annualized: Decimal | None
+    beta: Decimal | None
+    beta_r2: Decimal | None
+    calmar: Decimal | None
+    skew: Decimal | None
+    excess_kurtosis: Decimal | None
+    var_5: Decimal | None
+    worst_day: Decimal | None
+    best_day: Decimal | None
+    trailing_1m: Decimal | None
+    trailing_3m: Decimal | None
+    trailing_6m: Decimal | None
+    trailing_1y: Decimal | None
+    excess_trailing_1m: Decimal | None
+    excess_trailing_3m: Decimal | None
+    excess_trailing_6m: Decimal | None
+    excess_trailing_1y: Decimal | None
+    n_returns: int | None
+    beta_n_obs: int | None
+    window_days: int | None
+    cagr_status: str | None
+    vol_status: str | None
+    beta_status: str | None
+    drawdown_status: str | None
+    distribution_status: str | None
+    calmar_status: str | None
+    trailing_status: str | None
+    excess_cagr_status: str | None
+
+
+class DrawdownPoint(BaseModel):
+    """One point on the running-peak underwater curve (dd ≤ 0)."""
+
+    date: date
+    drawdown: Decimal
+
+
+class RollingVolPoint(BaseModel):
+    """One point on the trailing rolling-volatility line (annualized fraction)."""
+
+    date: date
+    vol: Decimal
+
+
+class HistogramBin(BaseModel):
+    """One bin of the daily-return distribution histogram."""
+
+    lower: Decimal
+    upper: Decimal
+    count: int
+
+
+class BetaScatterPoint(BaseModel):
+    """One date-aligned (SPY return, instrument return) pair for the beta scatter."""
+
+    spy_return: Decimal
+    inst_return: Decimal
+
+
+class RiskSeries(BaseModel):
+    """On-read display series for the risk drill charts.
+
+    Computed at request time from the price series cut at the persisted
+    ``as_of_date`` (NOT persisted) — purely presentational. ``beta`` /
+    ``beta_r2`` here are the FULL-series fit shown alongside the scatter; the
+    per-window betas live on :class:`RiskWindowMetrics`. Beta fields are null and
+    ``beta_scatter`` empty when no benchmark series is available.
+    """
+
+    drawdown_curve: list[DrawdownPoint]
+    rolling_vol: list[RollingVolPoint]
+    return_histogram: list[HistogramBin]
+    beta_scatter: list[BetaScatterPoint]
+    beta: Decimal | None
+    beta_r2: Decimal | None
+
+
+class InstrumentRiskMetrics(BaseModel):
+    """Response shape for GET /instruments/{symbol}/risk-metrics.
+
+    ``windows`` is empty and ``series``/``as_of_date`` null when the instrument
+    has no persisted risk rows (never computed). ``benchmark_symbol`` is null
+    when no benchmark was resolved at compute time.
+    """
+
+    symbol: str
+    as_of_date: date | None
+    benchmark_symbol: str | None
+    metric_version: str
+    windows: list[RiskWindowMetrics]
+    series: RiskSeries | None
+
+
+# Display-series tuning. The rolling-vol window is in RETURNS (≈ trading days).
+_ROLLING_VOL_WINDOW = 30
+_HISTOGRAM_BINS = 30
+# Windows surfaced shortest → full.
+_RISK_WINDOW_ORDER: dict[str, int] = {"1y": 0, "3y": 1, "full": 2}
+
+
+def _rolling_vol_series(
+    inst_returns: list[tuple[date, Decimal]],
+    window: int = _ROLLING_VOL_WINDOW,
+) -> list[RollingVolPoint]:
+    """Trailing annualized-vol line: ``annualized_vol`` over the last ``window`` returns.
+
+    Keyed to the latest return's date in each trailing window. Empty until at
+    least ``window`` returns exist. Reuses the service ``annualized_vol`` so the
+    line and the scalar use identical math.
+    """
+    out: list[RollingVolPoint] = []
+    if len(inst_returns) < window:
+        return out
+    for i in range(window - 1, len(inst_returns)):
+        slice_vals = [r for _, r in inst_returns[i - window + 1 : i + 1]]
+        vol = annualized_vol(slice_vals)
+        if vol is not None:
+            out.append(RollingVolPoint(date=inst_returns[i][0], vol=vol))
+    return out
+
+
+def _return_histogram(
+    inst_returns: list[tuple[date, Decimal]],
+    bins: int = _HISTOGRAM_BINS,
+) -> list[HistogramBin]:
+    """Equal-width histogram of daily returns over [min, max].
+
+    A degenerate (constant) series collapses to a single unit-width bin around
+    the value so the chart still renders. Returns empty when there are no
+    returns.
+    """
+    vals = [r for _, r in inst_returns]
+    if not vals:
+        return []
+    lo = min(vals)
+    hi = max(vals)
+    if hi <= lo:
+        # Constant series — one bin centred on the value.
+        return [HistogramBin(lower=lo - Decimal("0.5"), upper=lo + Decimal("0.5"), count=len(vals))]
+    span = hi - lo
+    width = span / Decimal(bins)
+    counts = [0] * bins
+    for v in vals:
+        idx = int((v - lo) / width)
+        if idx >= bins:
+            idx = bins - 1  # the max value lands in the last bin
+        if idx < 0:
+            idx = 0
+        counts[idx] += 1
+    return [
+        HistogramBin(lower=lo + width * Decimal(i), upper=lo + width * Decimal(i + 1), count=counts[i])
+        for i in range(bins)
+    ]
+
+
+def _beta_scatter(
+    inst_returns: list[tuple[date, Decimal]],
+    spy_returns: list[tuple[date, Decimal]],
+) -> list[BetaScatterPoint]:
+    """Date-aligned (spy, inst) return pairs over the sorted date intersection.
+
+    Mirrors :func:`ols_beta`'s alignment (intersection, never positional-zip).
+    Empty when either side is empty.
+    """
+    inst_map = dict(inst_returns)
+    spy_map = dict(spy_returns)
+    shared = sorted(set(inst_map) & set(spy_map))
+    return [BetaScatterPoint(spy_return=spy_map[d], inst_return=inst_map[d]) for d in shared]
+
+
+@router.get("/{symbol}/risk-metrics", response_model=InstrumentRiskMetrics)
+def get_instrument_risk_metrics(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentRiskMetrics:
+    """Persisted risk metrics + on-read display series for ``symbol``.
+
+    Reads ``instrument_risk_metrics_current`` (latest write-through, one row per
+    window). The honest-status contract is preserved end-to-end: every scalar
+    and its status pass through verbatim — NULLs are never coerced to zero, and
+    a flagging status (insufficient_history / partial_window / benchmark_*) is
+    surfaced as-is.
+
+    404 for an unknown symbol. 200 with empty ``windows`` / null ``as_of_date``
+    / null ``series`` when the instrument exists but has no persisted risk rows
+    (never computed). Otherwise the display series are recomputed at request
+    time from the price series cut at the persisted ``as_of_date``.
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    out_symbol = str(inst_row["symbol"])  # type: ignore[arg-type]
+
+    with snapshot_read(conn):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    window_key, as_of_date, benchmark_instrument_id,
+                    cagr, excess_cagr_vs_spy, max_drawdown, current_drawdown,
+                    vol_annualized, beta, beta_r2, calmar,
+                    skew, excess_kurtosis, var_5, worst_day, best_day,
+                    trailing_1m, trailing_3m, trailing_6m, trailing_1y,
+                    excess_trailing_1m, excess_trailing_3m,
+                    excess_trailing_6m, excess_trailing_1y,
+                    n_returns, beta_n_obs, window_days,
+                    cagr_status, vol_status, beta_status, drawdown_status,
+                    distribution_status, calmar_status, trailing_status,
+                    excess_cagr_status
+                FROM instrument_risk_metrics_current
+                WHERE instrument_id = %(iid)s
+                  AND metric_version = %(ver)s
+                """,
+                {"iid": instrument_id, "ver": RISK_METRICS_VERSION},
+            )
+            risk_rows = cur.fetchall()
+
+        if not risk_rows:
+            # Never computed — honest empty payload, not a 404.
+            return InstrumentRiskMetrics(
+                symbol=out_symbol,
+                as_of_date=None,
+                benchmark_symbol=None,
+                metric_version=RISK_METRICS_VERSION,
+                windows=[],
+                series=None,
+            )
+
+        # All windows share one as_of_date (the rebuild writes them together).
+        as_of_date: date = risk_rows[0]["as_of_date"]  # type: ignore[assignment]
+
+        # Resolve the benchmark symbol from the persisted benchmark_instrument_id.
+        benchmark_symbol: str | None = None
+        bench_id: int | None = None
+        for r in risk_rows:
+            if r["benchmark_instrument_id"] is not None:
+                bench_id = int(r["benchmark_instrument_id"])  # type: ignore[arg-type]
+                break
+        if bench_id is not None:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    "SELECT symbol FROM instruments WHERE instrument_id = %(id)s",
+                    {"id": bench_id},
+                )
+                bench_row = cur.fetchone()
+            if bench_row is not None:
+                benchmark_symbol = str(bench_row["symbol"])  # type: ignore[arg-type]
+
+        # Load the price series cut at the persisted as_of_date for the series.
+        inst_closes = load_close_series(conn, instrument_id, as_of_date)
+        spy_closes = load_close_series(conn, bench_id, as_of_date) if bench_id is not None else []
+
+    windows = [
+        RiskWindowMetrics(
+            window_key=str(r["window_key"]),
+            cagr=r["cagr"],
+            excess_cagr_vs_spy=r["excess_cagr_vs_spy"],
+            max_drawdown=r["max_drawdown"],
+            current_drawdown=r["current_drawdown"],
+            vol_annualized=r["vol_annualized"],
+            beta=r["beta"],
+            beta_r2=r["beta_r2"],
+            calmar=r["calmar"],
+            skew=r["skew"],
+            excess_kurtosis=r["excess_kurtosis"],
+            var_5=r["var_5"],
+            worst_day=r["worst_day"],
+            best_day=r["best_day"],
+            trailing_1m=r["trailing_1m"],
+            trailing_3m=r["trailing_3m"],
+            trailing_6m=r["trailing_6m"],
+            trailing_1y=r["trailing_1y"],
+            excess_trailing_1m=r["excess_trailing_1m"],
+            excess_trailing_3m=r["excess_trailing_3m"],
+            excess_trailing_6m=r["excess_trailing_6m"],
+            excess_trailing_1y=r["excess_trailing_1y"],
+            n_returns=r["n_returns"],
+            beta_n_obs=r["beta_n_obs"],
+            window_days=r["window_days"],
+            cagr_status=r["cagr_status"],
+            vol_status=r["vol_status"],
+            beta_status=r["beta_status"],
+            drawdown_status=r["drawdown_status"],
+            distribution_status=r["distribution_status"],
+            calmar_status=r["calmar_status"],
+            trailing_status=r["trailing_status"],
+            excess_cagr_status=r["excess_cagr_status"],
+        )
+        for r in risk_rows
+    ]
+    windows.sort(key=lambda w: _RISK_WINDOW_ORDER.get(w.window_key, 99))
+
+    # On-read display series over the full series (cut at as_of_date).
+    inst_returns = simple_returns(inst_closes)
+    spy_returns = simple_returns(spy_closes)
+    dd_points = [DrawdownPoint(date=d, drawdown=dd) for d, dd in drawdown_curve(inst_closes)]
+    rolling = _rolling_vol_series(inst_returns)
+    histogram = _return_histogram(inst_returns)
+    scatter = _beta_scatter(inst_returns, spy_returns)
+    fit = ols_beta(inst_returns, spy_returns) if spy_returns else None
+
+    series = RiskSeries(
+        drawdown_curve=dd_points,
+        rolling_vol=rolling,
+        return_histogram=histogram,
+        beta_scatter=scatter,
+        beta=fit.beta if fit is not None else None,
+        beta_r2=fit.r2 if fit is not None else None,
+    )
+
+    return InstrumentRiskMetrics(
+        symbol=out_symbol,
+        as_of_date=as_of_date,
+        benchmark_symbol=benchmark_symbol,
+        metric_version=RISK_METRICS_VERSION,
+        windows=windows,
+        series=series,
     )

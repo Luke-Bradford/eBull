@@ -338,6 +338,34 @@ def drawdown(closes: Sequence[PricePoint]) -> DrawdownResult:
     )
 
 
+def drawdown_curve(closes: Sequence[PricePoint]) -> list[tuple[date, Decimal]]:
+    """Running-peak underwater curve: ``(date, dd)`` for each valid close.
+
+    ``dd[i] = close[i]/peak[i] - 1`` (always ≤ 0), keyed to the close's date,
+    over the SAME valid sub-chain :func:`drawdown` uses (a close survives iff it
+    is finite and > 0). Returns an empty list when there is no valid close.
+
+    This is the display companion to :func:`drawdown`'s scalar summary — the API
+    layer renders this as the underwater chart so it never re-implements the
+    peak/dd math.
+    """
+    valid: list[tuple[date, Decimal]] = []
+    for d, raw in closes:
+        c = _valid_close(raw)
+        if c is not None:
+            valid.append((d, c))
+    if not valid:
+        return []
+
+    peak_close = valid[0][1]
+    out: list[tuple[date, Decimal]] = []
+    for d, c in valid:
+        if c > peak_close:
+            peak_close = c
+        out.append((d, c / peak_close - Decimal(1)))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Calmar
 # ---------------------------------------------------------------------------
