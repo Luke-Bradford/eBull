@@ -62,6 +62,11 @@ CALMAR_DD_EPSILON = Decimal("1e-9")
 
 WINDOW_KEYS: tuple[str, ...] = ("1y", "3y", "full")
 
+# Calendar-day lookback per window. ``full`` has NO lower bound (all closes).
+# A close survives the slice iff its date is within ``lookback`` days of the
+# as_of_date (and ≤ as_of_date, which the loaded series already guarantees).
+WINDOW_LOOKBACK_DAYS: dict[str, int | None] = {"1y": 365, "3y": 1095, "full": None}
+
 # The benchmark for beta / excess metrics. Resolved to an instrument_id at run
 # time (primary-listing tiebreak) the same way the candle-refresh scope does.
 SPY_SYMBOL = "SPY"
@@ -156,6 +161,17 @@ class WindowMetrics:
     excess_cagr_status: RiskStatus
     distribution: DistributionResult | None
     distribution_status: RiskStatus
+    # Trailing-return scalars (calendar-lookback from as_of_date). These are
+    # window-INDEPENDENT — identical across the 1y/3y/full rows — and computed
+    # on the FULL series, NOT the window slice. excess_* are null without SPY.
+    trailing_1m: Decimal | None
+    trailing_3m: Decimal | None
+    trailing_6m: Decimal | None
+    trailing_1y: Decimal | None
+    excess_trailing_1m: Decimal | None
+    excess_trailing_3m: Decimal | None
+    excess_trailing_6m: Decimal | None
+    excess_trailing_1y: Decimal | None
     trailing_status: RiskStatus
 
 
@@ -544,9 +560,14 @@ def _aligned_window(
 def excess_cagr(
     inst_closes: Sequence[PricePoint],
     spy_closes: Sequence[PricePoint],
-    window: str,  # noqa: ARG001 — window kept for caller symmetry / future per-window slicing
+    window: str,  # noqa: ARG001 — label only; the caller pre-slices both series to the window
 ) -> tuple[Decimal | None, RiskStatus]:
     """``cagr(inst over aligned window) - cagr(SPY over aligned window)``.
+
+    Window slicing happens UPSTREAM: :func:`compute_instrument_risk` slices both
+    series to ``window_key`` before calling this, so the inst/spy passed here are
+    already window-bounded and this just intersects their date extents. ``window``
+    is retained as a label for caller symmetry.
 
     ``benchmark_missing`` when SPY is absent; ``benchmark_insufficient_history``
     when the aligned overlap is too short to compute either CAGR.
@@ -683,6 +704,31 @@ def trailing_status(
 
 
 # ---------------------------------------------------------------------------
+# Window slicing
+# ---------------------------------------------------------------------------
+
+
+def _slice_window(
+    closes: Sequence[PricePoint],
+    as_of_date: date,
+    window_key: str,
+) -> list[PricePoint]:
+    """Keep the closes that fall inside the ``window_key`` calendar lookback.
+
+    A row survives iff ``as_of_date - lookback <= date <= as_of_date`` where
+    ``lookback = WINDOW_LOOKBACK_DAYS[window_key]``. ``full`` has no lower bound
+    (every close at/before ``as_of_date`` is kept). The loaded series is already
+    ≤ as_of_date, but the upper bound is enforced here too so a stray future bar
+    cannot leak into a window. Row order is preserved (callers assume ascending).
+    """
+    lookback = WINDOW_LOOKBACK_DAYS[window_key]
+    if lookback is None:
+        return [(d, raw) for d, raw in closes if d <= as_of_date]
+    cutoff = as_of_date - timedelta(days=lookback)
+    return [(d, raw) for d, raw in closes if cutoff <= d <= as_of_date]
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -695,27 +741,41 @@ def compute_instrument_risk(
 ) -> WindowMetrics:
     """Compute all risk metrics for ONE instrument over ONE window.
 
-    Standalone metrics (vol, cagr, drawdown, calmar, distribution) use the
-    instrument's full valid history within the window. Benchmark metrics (beta,
-    excess_cagr) use the aligned-overlap window with SPY.
+    The instrument and SPY series are FIRST sliced to ``window_key``'s calendar
+    lookback (1y / 3y / full) via :func:`_slice_window`. Every standalone metric
+    (vol, cagr, drawdown, calmar, distribution) is then computed on the sliced
+    instrument series, and the benchmark metrics (beta, excess_cagr) on the
+    sliced+aligned overlap with SPY. ``n_returns`` and ``window_days`` reflect
+    the sliced window, so the three windows produce distinct metrics.
+
+    EXCEPTION — trailing returns. ``trailing_*`` / ``excess_trailing_*`` are
+    calendar-lookback from ``as_of_date`` and therefore window-INDEPENDENT; they
+    are computed on the FULL (unsliced) series and are intentionally identical
+    across the 1y/3y/full rows. ``trailing_status`` is likewise the full-series
+    rollup. excess_trailing is null when SPY is absent.
     """
-    inst_rets = simple_returns(inst_closes)
+    # Slice BOTH series to the window first; all window metrics derive from these.
+    inst_w = _slice_window(inst_closes, as_of_date, window_key)
+    spy_w = _slice_window(spy_closes, as_of_date, window_key)
+
+    inst_rets = simple_returns(inst_w)
     inst_ret_vals = [r for _, r in inst_rets]
     n_returns = len(inst_ret_vals)
     # Invalid closes break the return chain; track how many were dropped so a
     # sub-threshold metric can report invalid_price_chain (vs short-but-clean).
-    invalids_dropped = _count_invalid_closes(inst_closes)
+    # Scoped to the window — an invalid bar outside the window is irrelevant here.
+    invalids_dropped = _count_invalid_closes(inst_w)
 
     vol = annualized_vol(inst_ret_vals)
     vol_st = vol_beta_status(n_returns, invalids_dropped)
 
-    inst_cagr = cagr(inst_closes)
+    inst_cagr = cagr(inst_w)
     cagr_st = annualized_status(n_returns, invalids_dropped)
 
-    dd = drawdown(inst_closes)
+    dd = drawdown(inst_w)
     # Drawdown is computed off the VALID close sub-chain (≥ 2 needed). The total
-    # raw rows minus invalids gives the usable chain length.
-    valid_closes = len(inst_closes) - invalids_dropped
+    # windowed rows minus invalids gives the usable chain length.
+    valid_closes = len(inst_w) - invalids_dropped
     dd_st = drawdown_status(valid_closes, invalids_dropped)
 
     calmar_val: Decimal | None = None
@@ -728,14 +788,32 @@ def compute_instrument_risk(
     dist = distribution(inst_ret_vals) if inst_ret_vals else None
     dist_st = distribution_status(n_returns, invalids_dropped)
 
-    trailing_st = trailing_status(inst_closes, as_of_date, invalids_dropped)
-
     spy_present = bool(spy_closes)
-    spy_rets = simple_returns(spy_closes)
+    spy_rets = simple_returns(spy_w)
     beta_res = ols_beta(inst_rets, spy_rets)
     beta_st = beta_status(beta_res.n_obs, spy_present)
 
-    xs_cagr, xs_cagr_st = excess_cagr(inst_closes, spy_closes, window_key)
+    # excess_cagr over the window-sliced aligned overlap. SPY presence is GLOBAL:
+    # if SPY exists overall but has no rows inside this window, the shortfall is
+    # benchmark_insufficient_history (not benchmark_missing). Pass spy_w (already
+    # sliced) but force the missing-vs-insufficient distinction off the global
+    # series so an empty window slice doesn't masquerade as "no benchmark".
+    if not spy_present:
+        xs_cagr, xs_cagr_st = None, "benchmark_missing"
+    else:
+        xs_cagr, xs_cagr_st = excess_cagr(inst_w, spy_w, window_key)
+        if xs_cagr_st == "benchmark_missing":
+            # spy_w empty within the window though SPY exists globally.
+            xs_cagr_st = "benchmark_insufficient_history"
+
+    # Trailing returns are window-INDEPENDENT: computed on the FULL series.
+    trailing: dict[str, Decimal | None] = {}
+    excess_trailing: dict[str, Decimal | None] = {}
+    for key, lookback in TRAILING_LOOKBACK_DAYS.items():
+        trailing[key] = trailing_return(inst_closes, as_of_date, lookback)
+        xs_val, _ = excess_trailing_return(inst_closes, spy_closes, as_of_date, lookback)
+        excess_trailing[key] = xs_val
+    trailing_st = trailing_status(inst_closes, as_of_date, _count_invalid_closes(inst_closes))
 
     return WindowMetrics(
         window_key=window_key,
@@ -757,6 +835,14 @@ def compute_instrument_risk(
         excess_cagr_status=xs_cagr_st,
         distribution=dist,
         distribution_status=dist_st,
+        trailing_1m=trailing["1m"],
+        trailing_3m=trailing["3m"],
+        trailing_6m=trailing["6m"],
+        trailing_1y=trailing["1y"],
+        excess_trailing_1m=excess_trailing["1m"],
+        excess_trailing_3m=excess_trailing["3m"],
+        excess_trailing_6m=excess_trailing["6m"],
+        excess_trailing_1y=excess_trailing["1y"],
         trailing_status=trailing_st,
     )
 
@@ -892,7 +978,7 @@ def _count_valid_closes(closes: Sequence[tuple[date, Decimal | None]]) -> int:
     return sum(1 for _, raw in closes if _valid_close(raw) is not None)
 
 
-def _window_days(closes: Sequence[tuple[date, Decimal | None]]) -> int | None:
+def _window_days(closes: Sequence[PricePoint]) -> int | None:
     """Calendar span (days) of the valid close sub-chain, else None for < 2 valid."""
     valid = [d for d, raw in closes if _valid_close(raw) is not None]
     if len(valid) < 2:
@@ -903,25 +989,24 @@ def _window_days(closes: Sequence[tuple[date, Decimal | None]]) -> int | None:
 def _metrics_row_values(
     metrics: WindowMetrics,
     inst_closes: Sequence[tuple[date, Decimal | None]],
-    spy_closes: Sequence[tuple[date, Decimal | None]],
+    spy_closes: Sequence[tuple[date, Decimal | None]],  # noqa: ARG001 — kept for caller symmetry
     as_of_date: date,
     benchmark_instrument_id: int | None,
 ) -> dict[str, object]:
     """Build the business-column value dict for one (instrument, window) row.
 
-    Trailing returns are absolute-lookback (1m/3m/6m/1y) and computed here from
-    the same as_of_date / close series — they are window-independent but
-    persisted on every window row.
+    Window-DEPENDENT evidence (peak/trough dates, window_days) is recomputed off
+    the SAME window slice the metrics used (``metrics.window_key``), so it stays
+    consistent with the now-sliced vol/cagr/drawdown. Trailing returns are taken
+    directly from the window-INDEPENDENT WindowMetrics scalars (computed on the
+    full series) — they are identical across window rows.
     """
     dist = metrics.distribution
-    # peak/trough dates are not on WindowMetrics; recompute off the same chain.
-    dd = drawdown(inst_closes)
-    trailing: dict[str, Decimal | None] = {}
-    excess_trailing: dict[str, Decimal | None] = {}
-    for key, lookback in TRAILING_LOOKBACK_DAYS.items():
-        trailing[key] = trailing_return(inst_closes, as_of_date, lookback)
-        xs_val, _ = excess_trailing_return(inst_closes, spy_closes, as_of_date, lookback)
-        excess_trailing[key] = xs_val
+    # peak/trough dates are not on WindowMetrics; recompute off the same window
+    # slice the drawdown metric used (NOT the full series — that would make the
+    # peak/trough disagree with the sliced max_drawdown).
+    inst_w = _slice_window(inst_closes, as_of_date, metrics.window_key)
+    dd = drawdown(inst_w)
 
     return {
         "cagr": metrics.cagr,
@@ -939,18 +1024,18 @@ def _metrics_row_values(
         "worst_day": dist.worst_day if dist else None,
         "best_day": dist.best_day if dist else None,
         "calmar": metrics.calmar,
-        "trailing_1m": trailing["1m"],
-        "trailing_3m": trailing["3m"],
-        "trailing_6m": trailing["6m"],
-        "trailing_1y": trailing["1y"],
-        "excess_trailing_1m": excess_trailing["1m"],
-        "excess_trailing_3m": excess_trailing["3m"],
-        "excess_trailing_6m": excess_trailing["6m"],
-        "excess_trailing_1y": excess_trailing["1y"],
+        "trailing_1m": metrics.trailing_1m,
+        "trailing_3m": metrics.trailing_3m,
+        "trailing_6m": metrics.trailing_6m,
+        "trailing_1y": metrics.trailing_1y,
+        "excess_trailing_1m": metrics.excess_trailing_1m,
+        "excess_trailing_3m": metrics.excess_trailing_3m,
+        "excess_trailing_6m": metrics.excess_trailing_6m,
+        "excess_trailing_1y": metrics.excess_trailing_1y,
         "n_returns": metrics.n_returns,
         "beta_n_obs": metrics.beta_n_obs,
         "benchmark_instrument_id": benchmark_instrument_id,
-        "window_days": _window_days(inst_closes),
+        "window_days": _window_days(inst_w),
         "cagr_status": metrics.cagr_status,
         "vol_status": metrics.vol_status,
         "beta_status": metrics.beta_status,

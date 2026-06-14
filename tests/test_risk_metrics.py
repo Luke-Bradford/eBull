@@ -639,3 +639,172 @@ def test_compute_instrument_risk_full_window():
     assert wm.max_drawdown is not None
     assert wm.beta is not None
     assert wm.distribution is not None
+
+
+# ===========================================================================
+# Group 15 — BUG A: window_key actually slices the series
+# ===========================================================================
+
+
+def _three_year_series():
+    """~3y daily series whose LAST 1y has a DIFFERENT mean/vol than the whole.
+
+    First ~2 years: tiny low-vol uptrend. Last ~1 year: large high-vol swings.
+    The 1y sub-window therefore has materially different vol/cagr than 3y/full.
+    """
+    import random
+
+    rng = random.Random(1234)
+    start = date(2021, 1, 1)
+    closes: list = []
+    price = 100.0
+    # 730 days of low-vol drift
+    for i in range(730):
+        price *= 1.0 + rng.uniform(-0.001, 0.0015)
+        closes.append((start + timedelta(days=i), price))
+    # 365 days of high-vol, sharply different regime
+    for i in range(730, 1095):
+        price *= 1.0 + rng.uniform(-0.05, 0.06)
+        closes.append((start + timedelta(days=i), price))
+    return closes
+
+
+def test_slice_window_keeps_only_lookback_span():
+    closes = _three_year_series()
+    as_of = closes[-1][0]
+    full = rm._slice_window(closes, as_of, "full")
+    one_y = rm._slice_window(closes, as_of, "1y")
+    three_y = rm._slice_window(closes, as_of, "3y")
+    # full keeps everything
+    assert len(full) == len(closes)
+    # 1y is a strict subset and shorter than 3y/full
+    assert len(one_y) < len(three_y) <= len(full)
+    # every 1y row is within 365 calendar days of as_of
+    cutoff = as_of - timedelta(days=365)
+    assert all(d >= cutoff for d, _ in one_y)
+    assert all(d <= as_of for d, _ in one_y)
+    # the earliest full row predates the 1y cutoff (proves slicing dropped rows)
+    assert full[0][0] < cutoff
+
+
+def test_window_key_changes_vol_and_cagr():  # BUG A core
+    closes = _three_year_series()
+    spy = _closes([400.0 + 0.2 * k for k in range(len(closes))], start=closes[0][0])
+    as_of = closes[-1][0]
+    wm_1y = rm.compute_instrument_risk(closes, spy, "1y", as_of)
+    wm_3y = rm.compute_instrument_risk(closes, spy, "3y", as_of)
+    wm_full = rm.compute_instrument_risk(closes, spy, "full", as_of)
+
+    # vol of the high-vol last year must differ from the 3y/full blend.
+    assert wm_1y.annualized_vol is not None
+    assert wm_3y.annualized_vol is not None
+    assert wm_full.annualized_vol is not None
+    assert wm_1y.annualized_vol != wm_3y.annualized_vol
+    assert wm_1y.annualized_vol != wm_full.annualized_vol
+    # cagr likewise differs across windows.
+    assert wm_1y.cagr is not None and wm_3y.cagr is not None and wm_full.cagr is not None
+    assert wm_1y.cagr != wm_3y.cagr
+    assert wm_1y.cagr != wm_full.cagr
+    # n_returns reflects the sliced window (1y has far fewer returns than full).
+    assert wm_1y.n_returns < wm_full.n_returns
+
+
+def test_full_window_uses_all_closes():
+    closes = _three_year_series()
+    as_of = closes[-1][0]
+    wm_full = rm.compute_instrument_risk(closes, [], "full", as_of)
+    # full == compute on the whole series directly (no lower bound).
+    all_rets = rm.simple_returns(closes)
+    assert wm_full.n_returns == len(all_rets)
+    assert wm_full.annualized_vol == rm.annualized_vol([r for _, r in all_rets])
+    assert wm_full.cagr == rm.cagr(closes)
+
+
+def test_window_slice_below_min_returns_flags():
+    # A 1y window holding < MIN_RETURNS_VOL_BETA (60) clean returns flags
+    # insufficient_history on vol even when the full series is long.
+    start = date(2021, 1, 1)
+    closes: list = []
+    # 800 daily closes for ~2y of dense history (full window is long)...
+    for i in range(800):
+        closes.append((start + timedelta(days=i), 100.0 + 0.1 * i))
+    # ...then sparse monthly closes for the last year so the 1y slice is thin.
+    last = closes[-1][0]
+    sparse: list = []
+    for k in range(1, 12):
+        sparse.append((last + timedelta(days=30 * k), 200.0 + k))
+    closes = closes + sparse
+    as_of = closes[-1][0]
+    wm_1y = rm.compute_instrument_risk(closes, [], "1y", as_of)
+    wm_full = rm.compute_instrument_risk(closes, [], "full", as_of)
+    assert wm_1y.n_returns < rm.MIN_RETURNS_VOL_BETA
+    assert wm_1y.vol_status == "insufficient_history"
+    # full window has plenty of returns → ok.
+    assert wm_full.n_returns >= rm.MIN_RETURNS_VOL_BETA
+    assert wm_full.vol_status == "ok"
+
+
+def test_excess_cagr_and_beta_reflect_window():
+    closes = _three_year_series()
+    # SPY tracks inst loosely; use a distinct shape so beta differs by window.
+    spy_vals = [400.0 * (1.0 + 0.0005 * k) for k in range(len(closes))]
+    spy = [(d, v) for (d, _), v in zip(closes, spy_vals, strict=True)]
+    as_of = closes[-1][0]
+    wm_1y = rm.compute_instrument_risk(closes, spy, "1y", as_of)
+    wm_full = rm.compute_instrument_risk(closes, spy, "full", as_of)
+    # excess_cagr is window-relative: the high-vol last year vs the blended full.
+    assert wm_1y.excess_cagr is not None and wm_full.excess_cagr is not None
+    assert wm_1y.excess_cagr != wm_full.excess_cagr
+    # beta over the volatile 1y differs from the full-history beta.
+    assert wm_1y.beta is not None and wm_full.beta is not None
+    assert wm_1y.beta != wm_full.beta
+
+
+# ===========================================================================
+# Group 16 — BUG B: trailing-return scalars are emitted on WindowMetrics
+# ===========================================================================
+
+
+def test_trailing_scalars_populated_and_match_helper():
+    base = date(2024, 6, 1)
+    # dense enough that all four lookbacks resolve.
+    closes = [(base - timedelta(days=400 - k), 100.0 + 0.2 * k) for k in range(401)]
+    spy = [(base - timedelta(days=400 - k), 400.0 + 0.1 * k) for k in range(401)]
+    wm = rm.compute_instrument_risk(closes, spy, "1y", base)
+    for key, lookback in rm.TRAILING_LOOKBACK_DAYS.items():
+        expected = rm.trailing_return(closes, base, lookback)
+        got = getattr(wm, f"trailing_{key}")
+        assert got is not None
+        assert got == expected
+        # excess trailing == inst trailing minus spy trailing.
+        xs_expected, _ = rm.excess_trailing_return(closes, spy, base, lookback)
+        xs_got = getattr(wm, f"excess_trailing_{key}")
+        assert xs_got == xs_expected
+
+
+def test_excess_trailing_null_when_no_spy():
+    base = date(2024, 6, 1)
+    closes = [(base - timedelta(days=400 - k), 100.0 + 0.2 * k) for k in range(401)]
+    wm = rm.compute_instrument_risk(closes, [], "full", base)
+    # inst trailing still populated...
+    assert wm.trailing_1m is not None
+    # ...but excess trailing is null with no benchmark.
+    assert wm.excess_trailing_1m is None
+    assert wm.excess_trailing_3m is None
+    assert wm.excess_trailing_6m is None
+    assert wm.excess_trailing_1y is None
+
+
+def test_trailing_scalars_window_independent():
+    # Trailing returns are calendar-lookback from as_of → identical across
+    # 1y / 3y / full window rows (intentional redundancy).
+    closes = _three_year_series()
+    as_of = closes[-1][0]
+    wm_1y = rm.compute_instrument_risk(closes, [], "1y", as_of)
+    wm_3y = rm.compute_instrument_risk(closes, [], "3y", as_of)
+    wm_full = rm.compute_instrument_risk(closes, [], "full", as_of)
+    for key in rm.TRAILING_LOOKBACK_DAYS:
+        v1 = getattr(wm_1y, f"trailing_{key}")
+        v3 = getattr(wm_3y, f"trailing_{key}")
+        vf = getattr(wm_full, f"trailing_{key}")
+        assert v1 == v3 == vf

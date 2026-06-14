@@ -244,6 +244,78 @@ def test_thin_history_persists_flagged_not_absent(ebull_test_conn: psycopg.Conne
     assert cur["calmar_status"] == "partial_window"
 
 
+def test_trailing_columns_non_null_for_long_series(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """(f) BUG B: trailing_* and excess_trailing_* persist non-null for a long
+    series with SPY (the columns previously always wrote NULL)."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, _SPY_ID, "SPY")
+    _seed_instrument(conn, _SUBJECT_ID, "FAKE")
+    _seed_series(conn, _SPY_ID, _clean_series(400, start=400.0, step=0.3))
+    _seed_series(conn, _SUBJECT_ID, _clean_series(400, start=100.0, step=0.5))
+    conn.commit()
+
+    compute_and_store_risk_metrics(conn)
+
+    cur = _current_row(conn, _SUBJECT_ID, "full")
+    assert cur is not None
+    for col in ("trailing_1m", "trailing_3m", "trailing_6m", "trailing_1y"):
+        assert cur[col] is not None, f"{col} should be populated"
+    for col in (
+        "excess_trailing_1m",
+        "excess_trailing_3m",
+        "excess_trailing_6m",
+        "excess_trailing_1y",
+    ):
+        assert cur[col] is not None, f"{col} should be populated (SPY present)"
+
+    # Trailing scalars are window-INDEPENDENT → identical across window rows.
+    one_y = _current_row(conn, _SUBJECT_ID, "1y")
+    assert one_y is not None
+    assert one_y["trailing_1m"] == cur["trailing_1m"]
+    assert one_y["trailing_1y"] == cur["trailing_1y"]
+
+
+def test_window_rows_differ_in_db(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """(g) BUG A: the 1y and full rows in instrument_risk_metrics_current have
+    DIFFERENT vol/cagr (they were identical before the window-slice fix).
+
+    The series has a quiet first ~2 years and a volatile last year so the 1y
+    slice is materially different from the full series.
+    """
+    import random
+
+    conn = ebull_test_conn
+    _seed_instrument(conn, _SPY_ID, "SPY")
+    _seed_instrument(conn, _SUBJECT_ID, "FAKE")
+    _seed_series(conn, _SPY_ID, _clean_series(1100, start=400.0, step=0.1))
+
+    rng = random.Random(99)
+    price = 100.0
+    subject: list[float | None] = []
+    for i in range(1100):
+        if i < 735:
+            price *= 1.0 + rng.uniform(-0.001, 0.0015)  # quiet
+        else:
+            price *= 1.0 + rng.uniform(-0.05, 0.06)  # volatile last ~1y
+        subject.append(price)
+    _seed_series(conn, _SUBJECT_ID, subject)
+    conn.commit()
+
+    compute_and_store_risk_metrics(conn)
+
+    one_y = _current_row(conn, _SUBJECT_ID, "1y")
+    full = _current_row(conn, _SUBJECT_ID, "full")
+    assert one_y is not None and full is not None
+    assert one_y["vol_annualized"] is not None and full["vol_annualized"] is not None
+    assert one_y["vol_annualized"] != full["vol_annualized"]
+    assert one_y["cagr"] is not None and full["cagr"] is not None
+    assert one_y["cagr"] != full["cagr"]
+    # n_returns / window_days evidence reflects the slice too.
+    assert one_y["n_returns"] < full["n_returns"]
+    assert one_y["window_days"] is not None and full["window_days"] is not None
+    assert one_y["window_days"] < full["window_days"]
+
+
 def test_fewer_than_two_valid_closes_no_row(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     """(e) Instrument with < 2 valid closes → no row at all."""
     conn = ebull_test_conn
