@@ -69,7 +69,10 @@ matching chart.
    `current_drawdown_pct`. Chart: underwater area (≤0).
 3. **Annualized volatility (realized)** — sample-std of daily returns ×
    √252; `vol_annualized_pct` over standard windows + rolling series for
-   the chart.
+   the chart. **Name it distinctly** from the scorer's separate TA
+   "volatility regime" term (Bollinger/ATR) — the page/glossary must make
+   clear this realized vol is NOT the figure the score uses (ranking
+   validation).
 4. **Beta vs SPY** — OLS of date-aligned daily returns; `beta`, `r2`,
    `n_obs`; static + rolling (no `alpha` in v1). Chart: scatter + fit
    line.
@@ -145,6 +148,12 @@ Math contracts (carry the rev-1 Codex ckpt-1 findings + rev-2 review):
   across UI/CSV/consumers; Codex rev-2).
 - **Calmar:** `annualized_return / abs(max_drawdown)`; `max_drawdown`
   near 0 → `null` (not ∞).
+- **Min-window guard (quant validation):** annualized figures (CAGR,
+  Calmar) below ~1y of returns are flagged `partial_window`, not shown as
+  a precise number — a thin-history name must not surface a wild
+  annualized value. Skew/excess-kurtosis below ~250 obs return `n_obs`
+  and the FE de-emphasizes them (no precise-looking moment on thin
+  samples).
 - **"full" window:** standalone metrics (drawdown, CAGR, vol, dist) use
   the instrument's full valid history; **benchmark metrics** (beta,
   excess) use the aligned window starting at `max(first valid instrument
@@ -178,6 +187,13 @@ the `full` series, not a separate persisted window (Codex rev-2). This is
 the auditable evidence row thesis/ranking consume; a thesis citing
 "beta 1.3" resolves to `{value, window_key, as_of_date, metric_version,
 status}`.
+
+**Immutability (thesis validation):** rows are append-only per
+`(instrument_id, as_of_date, metric_version, window_key)`; a math change
+bumps `metric_version` (`risk_v2`) rather than mutating in place, so a
+cached thesis citation stays reproducible. **Per-metric status must be
+predicable** — if `quality` is JSONB, key it per metric so a consumer can
+cheaply filter `quality->>'beta_status' = 'ok'` without parsing.
 
 ### Job `risk_metrics_refresh`
 
@@ -234,12 +250,22 @@ per-metric status passthrough.
   headline, underwater area, rolling-vol line, returns histogram, beta
   scatter + fit (β, R²).
 - **Naïve-user layer:** a plain-language verdict chip (Calm / Medium /
-  Bumpy / Wild derived from vol+dd+beta) + one specific sentence;
-  beta/vol rendered as English sentences with comparator gauges; glossary
-  "?" tooltips (focusable, a11y); progressive disclosure — simple default
-  (chip, rebased chart vs "the US market", worst-drop, returns row, beta
-  sentence, dividend yes/no), advanced behind disclosure, raw values in
-  the `?view=raw` tab.
+  Bumpy / Wild derived from vol+dd+beta) + one **driver-specific**
+  sentence that names the dominant reason in plain terms (e.g. "Bumpy —
+  has dropped 35% before and swings ~2× the US market"), not a generic
+  label gloss; beta/vol rendered as English sentences with comparator
+  gauges; glossary "?" tooltips (focusable, a11y); progressive
+  disclosure — simple default (chip, rebased chart vs "the US market",
+  worst-drop, returns row, beta sentence, dividend yes/no), advanced
+  behind disclosure, raw values in the `?view=raw` tab. **The verdict
+  chip is strictly FE-only** — derived for display, never persisted to
+  `instrument_risk_metrics` nor read by thesis/ranking (else it backdoors
+  a risk score the spec defers; PM validation).
+- **Drawdown card framing (naïve validation):** the populated underwater
+  card pairs max-drop with its recovery — uses the computed
+  `max_dd_peak_date` → `max_dd_trough_date` to caption "fell X% from its
+  {date} high, recovered by {date}" so a layperson doesn't read
+  "−52%" as "will lose half my money."
 - Held overlay: cost-line on the rebased chart, unrealized
   drawdown-from-entry (distinct from market max-DD), yield-on-cost — only
   when held.
@@ -271,7 +297,13 @@ PR-A's SPY data.
   contradicts a long thesis; the critic's falsification kit).
 - **Ranking risk-adjustment v2** — a risk-adjusted scoring term
   (Calmar / vol / downside) in `scoring.py`; deliberate model-version
-  change with its own validation. Currently the scorer is risk-blind.
+  change with its own validation. The scorer is *realized-risk-blind*
+  today (it has a TA-based vol-regime term, no realized vol/dd/beta).
+- **Position-vs-portfolio correlation / marginal risk contribution** —
+  the true sizing metric (how much this candidate moves *my* book's
+  risk); needs covariance vs current holdings, out of this single-
+  instrument layer. Standalone beta-vs-SPY is the v1 proxy. (PM
+  validation — filed explicitly.)
 - **Sector classification fix** — curated symbol→GICS→SPDR map to
   re-enable sector-relative beta/overlay.
 - **Total-return series** — dividend-adjusted closes so headline/dd/beta
