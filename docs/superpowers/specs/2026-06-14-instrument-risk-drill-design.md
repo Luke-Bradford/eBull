@@ -48,9 +48,12 @@ naïve-user, ranking-engine — 2026-06-14) reshaped it:
 - **Benchmark-definition mismatch.** `return_attribution.py` "market" =
   equal-weight Tier-1 basket, "sector" = equal-weight peers — NOT
   SPY/SPDR. This page's "vs SPY" is a different benchmark; label so.
-- **Scorer is risk-blind** (`scoring.py` has no vol/dd/beta term;
-  `volatility_30d` + `instrument_profile.beta` ingested but unread). Risk
-  metrics are surfaced as "risk context, not a v1.1 score input."
+- **Scorer has no realized-risk term** (`scoring.py` v1.1 has a 15%
+  *volatility-regime* subcomponent, but it's **TA-based** — Bollinger
+  position + ATR context — not realized vol / drawdown / beta;
+  `volatility_30d` + `instrument_profile.beta` are ingested but unread by
+  the scorer). Risk metrics here are surfaced as "risk context, not a
+  v1.1 score input"; a future risk-adjusted score is a filed follow-up.
 
 ## Committee-converged metric set (the evidence)
 
@@ -67,8 +70,9 @@ matching chart.
 3. **Annualized volatility (realized)** — sample-std of daily returns ×
    √252; `vol_annualized_pct` over standard windows + rolling series for
    the chart.
-4. **Beta vs SPY** — OLS of date-aligned daily returns; `beta`, `alpha`,
-   `r2`, `n_obs`; static + rolling. Chart: scatter + fit line.
+4. **Beta vs SPY** — OLS of date-aligned daily returns; `beta`, `r2`,
+   `n_obs`; static + rolling (no `alpha` in v1). Chart: scatter + fit
+   line.
 5. **Return distribution** — `skew`, `excess_kurtosis`, `worst_day_pct`,
    `best_day_pct`, `var_5pct` (empirical), `n_obs`. Chart: histogram +
    mean/±σ.
@@ -114,55 +118,106 @@ Pure-compute functions over a daily close series, mirroring
 figures, a `RISK_METRICS_VERSION = "risk_v1"` constant (SSOT, no magic
 strings), windows as named constants.
 
-Math contracts (carry the rev-1 Codex ckpt-1 findings):
+Math contracts (carry the rev-1 Codex ckpt-1 findings + rev-2 review):
 
-- **Returns:** simple return between two *consecutive surviving* rows; a
-  close is valid only if finite and `> 0`; an invalid row breaks the
-  chain (no gap-spanning synthetic return). Log returns for the stat
-  estimators (vol/beta/dist), simple for compounding/CAGR display.
-- **Volatility:** sample std (n−1) × √252; emits only with ≥ 2 returns in
-  window.
+- **Return basis: SIMPLE returns throughout v1** (Codex rev-2: a single
+  basis avoids log/simple mismatch between displayed pct moves and the
+  estimators; the daily log-vs-simple difference is negligible). Log
+  returns are a documented future refinement. Return = `close[i]/close
+  [i−1] − 1` between two *consecutive surviving* rows; a close is valid
+  only if finite and `> 0`; an invalid row breaks the chain (no
+  gap-spanning synthetic return).
+- **Trailing returns recomputed here** from the close series with the
+  service's own window/as_of rules — do NOT reuse `price_daily`'s
+  precomputed `return_1m/3m/6m/1y` (latest-row-only, 400-row-fetch
+  semantics that would leak into persisted evidence; Codex rev-2).
+- **Volatility:** sample std (n−1) of daily returns × √252; emits only
+  with ≥ 2 returns in window.
 - **Beta:** OLS on **date-aligned** returns (pair only dates where BOTH
-  series have a return); guards: benchmark-variance 0 → β `null`;
-  total-variance 0 → R² `null`. Reports `n_obs`.
-- **Distribution:** sample (n−1) std; empirical 5% VaR (percentile, not
-  parametric); skew/kurtosis emit `n_obs` (suppress/flag below ~250).
+  series have a return); reports `beta`, `r2`, `n_obs`. Guards:
+  benchmark-variance 0 → β `null`; total-variance 0 → R² `null`.
+  **`alpha` dropped from v1** (Codex rev-2: intercept units undefined
+  without a risk-free rate / annualization convention → unauditable;
+  re-add with the risk-free follow-up).
+- **Distribution:** sample (n−1) std; skew/kurtosis emit `n_obs`
+  (flag below ~250). `var_5pct` = the empirical 5th-percentile of daily
+  simple returns, **signed** (a loss is negative; one fixed convention
+  across UI/CSV/consumers; Codex rev-2).
 - **Calmar:** `annualized_return / abs(max_drawdown)`; `max_drawdown`
   near 0 → `null` (not ∞).
+- **"full" window:** standalone metrics (drawdown, CAGR, vol, dist) use
+  the instrument's full valid history; **benchmark metrics** (beta,
+  excess) use the aligned window starting at `max(first valid instrument
+  return, first valid SPY return)` so the comparison is apples-to-apples
+  (Codex rev-2).
 
 ### Quality flags (per metric)
 
-Each metric carries a status: `ok | insufficient_history |
-benchmark_missing | no_data`. Thresholds in **return space** (vol/beta
-need ≥ 60 return obs ≈ 61 closes; Codex off-by-one). Never substitute a
-fallback zero for unknown (the `return_attribution.py` ZERO-fallback
-anti-pattern must NOT repeat here; honest `no_data` per the #1581
-precedent).
+Each metric carries a status (Codex rev-2 — coarse `benchmark_missing`
+was not enough): `ok | insufficient_history | partial_window |
+benchmark_missing | benchmark_insufficient_history | invalid_price_chain
+| stale`. Thresholds in **return space** (vol/beta need ≥ 60 return obs
+≈ 61 closes; Codex off-by-one). `benchmark_insufficient_history` =
+SPY exists but the *aligned* overlap is too short. `stale` = the
+backing candle snapshot is older than the freshness SLA. Never
+substitute a fallback zero for unknown (the `return_attribution.py`
+ZERO-fallback anti-pattern must NOT repeat here; honest status per the
+#1581 precedent).
 
 ### Persistence `sql/198_instrument_risk_metrics.sql`
 
 Table `instrument_risk_metrics`:
-`(instrument_id, as_of_date, metric_version)` PK; scalar columns
-NUMERIC + a per-metric `*_status` (or one `quality` JSONB), `n_obs`,
-`benchmark_instrument_id`, `window_days`, `computed_at`. Standard windows
-(1y / 3y / full) persisted. This is the auditable evidence row thesis/
-ranking consume; a thesis citing "beta 1.3" resolves to
-`{value, window, as_of, version, status}`.
+PK `(instrument_id, as_of_date, metric_version, window_key)` — `window_key`
+**must** be in the PK (Codex rev-2: otherwise the 1y/3y/full rows
+collide). One row per (instrument, snapshot, version, window). Columns:
+scalar NUMERIC values + a per-metric `*_status` (or one `quality` JSONB),
+`n_obs`, `benchmark_instrument_id`, `window_days`, `computed_at`.
+Persisted `window_key` ∈ {`1y`, `3y`, `full`}. **No 5Y row** — given the
+~4yr data ceiling 5Y ≡ full; the page's 5Y range is a display slice of
+the `full` series, not a separate persisted window (Codex rev-2). This is
+the auditable evidence row thesis/ranking consume; a thesis citing
+"beta 1.3" resolves to `{value, window_key, as_of_date, metric_version,
+status}`.
 
 ### Job `risk_metrics_refresh`
 
-New entry in `SCHEDULED_JOBS`, runs after `daily_candle_refresh`,
-recomputes the covered universe (+ benchmarks) and upserts the table.
-Its own lane (precedent: per-job lanes #1527) to avoid the db-lane
-starvation class. Backfill = one-shot invocation on dev post-merge.
+`daily_candle_refresh` is **orchestrator-driven, not a plain cron**
+(Codex rev-2: it's wrapped as a DAG node in
+`app/services/sync_orchestrator/adapters.py`, mapped to the `candles`
+layer in `registry.py::JOB_TO_LAYERS`, freshness-gated in
+`freshness.py`). So the risk job registers the same way, NOT as a bare
+later cron:
+
+- New `risk_metrics` layer node in `registry.py` with
+  `dependencies=("candles",)` + `requires_layer_initialized=("candles",)`
+  + its own `is_fresh` / `refresh`; `is_blocking=False`. Map
+  `risk_metrics_refresh → ("risk_metrics",)` in `JOB_TO_LAYERS`; adapter
+  in `adapters.py`; invoker in `app/jobs/runtime.py`.
+- **Lane:** add a `risk_metrics` lane to the `Lane` Literal in
+  `app/jobs/sources.py` + `JOB_NAME_TO_SOURCE`, with a starvation
+  regression test (per-job-lane precedent #1527). "Own lane" alone is
+  insufficient — the lane vocabulary + registry coverage must be added
+  (Codex rev-2).
+- **Batch consistency / concurrency (Codex rev-2):** the candles
+  dependency guarantees fresh candles before compute; the job stamps a
+  single `as_of_date` = the consistent candle snapshot
+  (`max(price_date)` it read) for the whole batch, so it never mixes
+  pre-/post-refresh instruments. If candle freshness fails its check the
+  node is skipped (no half-stale batch).
+- Backfill = one-shot invocation on dev post-merge.
 
 ### Endpoint `GET /instruments/{symbol}/risk-metrics`
 
 In `app/api/instruments.py` (alongside `/candles`). Returns the latest
 persisted scalars for the symbol **plus** on-read display series
 (drawdown curve, rolling-vol line, histogram bins, beta-scatter points)
-computed over `range=max` by the **same** service functions — single
-source of math, no TS/Python drift. Honest per-metric status passthrough.
+computed by the **same** service functions — single source of math, no
+TS/Python drift. **Series are cut at the scalars' `as_of_date`** (Codex
+rev-2: computing series over live `range=max` while serving scalars from
+an older snapshot makes chart and table disagree). The response carries
+`as_of_date` so the FE shows the snapshot date honestly; a metric whose
+backing snapshot is older than the SLA passes through `stale`. Honest
+per-metric status passthrough.
 
 ---
 
@@ -197,6 +252,18 @@ source of math, no TS/Python drift. Honest per-metric status passthrough.
 
 ---
 
+## PR ordering / dependency
+
+PR-A → PR-B → PR-C (Codex rev-2: not fully independent). **PR-A lands
+first** with a hard SPY-verification gate (DoD requires SPY candles
+present). **PR-B** is then shippable and is itself robust to a missing
+benchmark — every benchmark metric degrades to
+`benchmark_missing` / `benchmark_insufficient_history` rather than
+failing — so PR-B can merge before the dev backfill fully completes.
+**PR-C** depends on the PR-B endpoint shape. Each PR is independently
+reviewable; the runtime quality of PR-B/PR-C beta/excess depends on
+PR-A's SPY data.
+
 ## Follow-ups (file, do not bundle)
 
 - **Thesis-evidence ingestion** — thesis engine reads
@@ -213,11 +280,15 @@ source of math, no TS/Python drift. Honest per-metric status passthrough.
 ## Testing
 
 - `risk_metrics.py`: pure unit tests — drawdown, vol (< window → flagged,
-  sample-std value), distribution (skew/kurtosis with n_obs, empirical
-  VaR), OLS (β=1 / β=2 / zero-overlap → null / zero-bench-variance →
-  null / R²), Calmar (zero-dd → null), return chain (invalid/≤0 close
-  breaks chain), date-alignment (holiday gap), boundary 60 returns (61
-  closes) ok / 59 flagged.
+  sample-std value), distribution (skew/kurtosis with n_obs, signed
+  empirical `var_5pct`), OLS (β=1 / β=2 / zero-overlap → null /
+  zero-bench-variance → null / R²), Calmar (zero-dd → null), return chain
+  (invalid/≤0 close breaks chain, simple-return basis), date-alignment
+  (holiday gap), full-window benchmark alignment (instrument vs SPY with
+  different start dates), trailing-return recompute (does not read the
+  precomputed columns), boundary 60 returns (61 closes) ok / 59 flagged,
+  status mapping (benchmark_insufficient_history vs benchmark_missing vs
+  stale).
 - Endpoint: one integration test — symbol with data returns scalars +
   series + statuses; insufficient-history symbol returns flagged
   `no_data` not zeros.
