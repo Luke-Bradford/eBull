@@ -2143,11 +2143,11 @@ def daily_candle_refresh() -> None:
             # above so they never consume a LIMIT-bounded bootstrap slot.
             benchmark_rows = conn.execute(
                 """
-                SELECT instrument_id, symbol
+                SELECT DISTINCT ON (symbol) instrument_id, symbol
                 FROM instruments
                 WHERE symbol = ANY(%(symbols)s)
                   AND is_tradable = TRUE
-                ORDER BY symbol, instrument_id
+                ORDER BY symbol, is_primary_listing DESC, instrument_id
                 """,
                 {"symbols": sorted(BENCHMARK_SYMBOLS)},
             ).fetchall()
