@@ -500,6 +500,96 @@ def test_compute_short_clean_series_is_insufficient_history():  # case (c)
 
 
 # ===========================================================================
+# Group 14 — drawdown_status / distribution_status / trailing_status
+# (every persisted status column has a compute-layer source)
+# ===========================================================================
+
+
+def test_drawdown_status_ok_two_valid_closes():
+    # ≥ 2 valid closes => a drawdown is computable => ok.
+    assert rm.drawdown_status(2) == "ok"
+    closes = _closes([100.0, 90.0])
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.drawdown_status == "ok"
+
+
+def test_drawdown_status_insufficient_below_two_closes():
+    # < 2 valid closes, no invalids => insufficient_history.
+    assert rm.drawdown_status(1) == "insufficient_history"
+    closes = _closes([100.0])  # one clean close, no invalids
+    assert rm._count_invalid_closes(closes) == 0
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.drawdown_status == "insufficient_history"
+
+
+def test_drawdown_status_invalid_price_chain():
+    # invalids dropped the usable chain below 2 => invalid_price_chain.
+    assert rm.drawdown_status(1, invalids_dropped=2) == "invalid_price_chain"
+    # one valid close + two invalids => valid chain = 1 (< 2), invalids present.
+    closes = _closes([100.0, float("nan"), 0])
+    assert rm._count_invalid_closes(closes) == 2
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.drawdown_status == "invalid_price_chain"
+
+
+def test_distribution_status_ok_at_min_obs():
+    # >= MIN_OBS_MOMENTS (250) returns => ok.
+    assert rm.distribution_status(rm.MIN_OBS_MOMENTS) == "ok"
+    closes = _closes([100.0 + k for k in range(rm.MIN_OBS_MOMENTS + 1)])  # 250 returns
+    rets = rm.simple_returns(closes)
+    assert len(rets) == rm.MIN_OBS_MOMENTS
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.distribution_status == "ok"
+    assert wm.distribution is not None and wm.distribution.low_sample is False
+
+
+def test_distribution_status_partial_window_low_sample():
+    # 2 <= n < 250 returns => partial_window (mirrors low_sample flag).
+    assert rm.distribution_status(2) == "partial_window"
+    assert rm.distribution_status(rm.MIN_OBS_MOMENTS - 1) == "partial_window"
+    closes = _closes([100.0 + k for k in range(50)])  # 49 returns
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.distribution_status == "partial_window"
+    assert wm.distribution is not None and wm.distribution.low_sample is True
+
+
+def test_distribution_status_insufficient_below_two_returns():
+    # < 2 returns, no invalids => insufficient_history.
+    assert rm.distribution_status(1) == "insufficient_history"
+    closes = _closes([100.0, 110.0])  # exactly 1 return
+    assert rm._count_invalid_closes(closes) == 0
+    wm = rm.compute_instrument_risk(closes, [], "full", closes[-1][0])
+    assert wm.distribution_status == "insufficient_history"
+    # invalid-driven path: < 2 returns AND invalids => invalid_price_chain.
+    assert rm.distribution_status(1, invalids_dropped=3) == "invalid_price_chain"
+
+
+def test_trailing_status_ok_when_shortest_window_computable():
+    base = date(2024, 6, 1)
+    closes = [
+        (base - timedelta(days=40), 100.0),
+        (base, 130.0),
+    ]
+    # a close ≥ 30 calendar days back exists => 1m trailing computable => ok.
+    assert rm.trailing_status(closes, base) == "ok"
+    wm = rm.compute_instrument_risk(closes, [], "full", base)
+    assert wm.trailing_status == "ok"
+
+
+def test_trailing_status_insufficient_when_series_shorter_than_30d():
+    base = date(2024, 6, 1)
+    closes = [
+        (base - timedelta(days=5), 100.0),
+        (base, 110.0),
+    ]
+    # no close ≥ 30 days back => not even 1m computable => insufficient_history.
+    assert rm.trailing_return(closes, base, 30) is None
+    assert rm.trailing_status(closes, base) == "insufficient_history"
+    wm = rm.compute_instrument_risk(closes, [], "full", base)
+    assert wm.trailing_status == "insufficient_history"
+
+
+# ===========================================================================
 # Group 11 — float island doesn't leak
 # ===========================================================================
 

@@ -133,6 +133,7 @@ class WindowMetrics:
     cagr_status: RiskStatus
     max_drawdown: Decimal | None
     current_drawdown: Decimal | None
+    drawdown_status: RiskStatus
     calmar: Decimal | None
     calmar_status: RiskStatus
     beta: Decimal | None
@@ -142,6 +143,8 @@ class WindowMetrics:
     excess_cagr: Decimal | None
     excess_cagr_status: RiskStatus
     distribution: DistributionResult | None
+    distribution_status: RiskStatus
+    trailing_status: RiskStatus
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +604,72 @@ def beta_status(
     return "ok"
 
 
+def drawdown_status(valid_closes: int, invalids_dropped: int = 0) -> RiskStatus:
+    """Status for drawdown given the count of valid closes in the chain.
+
+    A drawdown is computable from ≥ 2 valid closes. It is NOT annualized
+    (never ``partial_window``) and NOT benchmark-relative (never ``benchmark_*``).
+
+    Trigger rule (mirrors :func:`vol_beta_status`'s invalids signal):
+      - ``valid_closes >= 2`` → ``ok``.
+      - below 2 AND ``invalids_dropped > 0`` → ``invalid_price_chain``
+        (invalids dropped the usable chain below 2).
+      - below 2 AND no invalids → ``insufficient_history``.
+    """
+    if valid_closes >= 2:
+        return "ok"
+    if invalids_dropped > 0:
+        return "invalid_price_chain"
+    return "insufficient_history"
+
+
+def distribution_status(n_returns: int, invalids_dropped: int = 0) -> RiskStatus:
+    """Status for the return-distribution moments given the valid-return count.
+
+    The moments (skew / excess kurtosis / var_5) need ≥ 2 returns to exist and
+    ≥ ``MIN_OBS_MOMENTS`` (250) returns to be reliable (the persisted form of
+    :attr:`DistributionResult.low_sample`).
+
+    Trigger rule:
+      - ``n_returns >= MIN_OBS_MOMENTS`` → ``ok``.
+      - ``2 <= n_returns < MIN_OBS_MOMENTS`` → ``partial_window`` (low-sample,
+        unreliable moments).
+      - ``n_returns < 2`` AND ``invalids_dropped > 0`` → ``invalid_price_chain``.
+      - ``n_returns < 2`` AND no invalids → ``insufficient_history``.
+    """
+    if n_returns >= MIN_OBS_MOMENTS:
+        return "ok"
+    if n_returns >= 2:
+        return "partial_window"
+    if invalids_dropped > 0:
+        return "invalid_price_chain"
+    return "insufficient_history"
+
+
+def trailing_status(
+    inst_closes: Sequence[PricePoint],
+    as_of: date,
+    invalids_dropped: int = 0,
+) -> RiskStatus:
+    """Rollup status for trailing returns: is the SHORTEST horizon computable?
+
+    Per-window null trailing values already encode which individual horizons are
+    missing; this status is the rollup over the shortest (1m) window — if not
+    even 1m is computable there is no trailing history at all.
+
+    Trigger rule:
+      - shortest (1m) trailing return computable → ``ok``.
+      - not computable AND ``invalids_dropped > 0`` → ``invalid_price_chain``.
+      - not computable AND no invalids → ``insufficient_history``.
+    """
+    shortest_lookback = TRAILING_LOOKBACK_DAYS["1m"]
+    if trailing_return(inst_closes, as_of, shortest_lookback) is not None:
+        return "ok"
+    if invalids_dropped > 0:
+        return "invalid_price_chain"
+    return "insufficient_history"
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -610,7 +679,7 @@ def compute_instrument_risk(
     inst_closes: Sequence[PricePoint],
     spy_closes: Sequence[PricePoint],
     window_key: str,
-    as_of_date: date,  # noqa: ARG001 — reserved for staleness checks at the persistence layer
+    as_of_date: date,
 ) -> WindowMetrics:
     """Compute all risk metrics for ONE instrument over ONE window.
 
@@ -632,6 +701,10 @@ def compute_instrument_risk(
     cagr_st = annualized_status(n_returns, invalids_dropped)
 
     dd = drawdown(inst_closes)
+    # Drawdown is computed off the VALID close sub-chain (≥ 2 needed). The total
+    # raw rows minus invalids gives the usable chain length.
+    valid_closes = len(inst_closes) - invalids_dropped
+    dd_st = drawdown_status(valid_closes, invalids_dropped)
 
     calmar_val: Decimal | None = None
     if inst_cagr is not None and dd.max_drawdown is not None:
@@ -641,6 +714,9 @@ def compute_instrument_risk(
     calmar_st = annualized_status(n_returns, invalids_dropped)
 
     dist = distribution(inst_ret_vals) if inst_ret_vals else None
+    dist_st = distribution_status(n_returns, invalids_dropped)
+
+    trailing_st = trailing_status(inst_closes, as_of_date, invalids_dropped)
 
     spy_present = bool(spy_closes)
     spy_rets = simple_returns(spy_closes)
@@ -658,6 +734,7 @@ def compute_instrument_risk(
         cagr_status=cagr_st,
         max_drawdown=dd.max_drawdown,
         current_drawdown=dd.current_drawdown,
+        drawdown_status=dd_st,
         calmar=calmar_val,
         calmar_status=calmar_st,
         beta=beta_res.beta,
@@ -667,4 +744,6 @@ def compute_instrument_risk(
         excess_cagr=xs_cagr,
         excess_cagr_status=xs_cagr_st,
         distribution=dist,
+        distribution_status=dist_st,
+        trailing_status=trailing_st,
     )
