@@ -2036,8 +2036,7 @@ _T3_BOOTSTRAP_BATCH_SIZE = 200
 # (env-agnostic; resolved to ids at runtime). Candle-scope only — NOT
 # promoted into scoring/ranking/thesis universe.
 BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
-    {"SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI",
-     "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+    {"SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
 )
 
 # T3 candle bootstrap eligibility query.
@@ -2161,8 +2160,7 @@ def daily_candle_refresh() -> None:
             # inserted and the instrument retries next run.
             t3_rows = conn.execute(
                 _T3_BOOTSTRAP_SELECT,
-                {"limit": _T3_BOOTSTRAP_BATCH_SIZE,
-                 "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)},
+                {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)},
             ).fetchall()
 
             # Dedupe across scopes. A held T1 instrument must not be

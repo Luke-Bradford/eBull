@@ -178,6 +178,7 @@ class TestDailyCandleRefreshT3Bootstrap:
         params = t3_call[0][1]
         assert "LIMIT" in sql_text
         from app.workers.scheduler import BENCHMARK_SYMBOLS
+
         assert params == {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)}
 
     def test_bootstrap_batch_size_is_200(self) -> None:
