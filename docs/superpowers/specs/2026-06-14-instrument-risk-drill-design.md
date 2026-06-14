@@ -1,195 +1,246 @@
-# #591 Risk/Returns drill page — design
+# #591 Risk/returns drill — design (rev 2: backend risk-evidence layer)
 
-Status: approved (operator, 2026-06-14). Parent epic #585. Roadmap R4.
+Status: design. Parent epic #585, roadmap R4. Supersedes rev 1 (FE-only).
 
-## Goal
+## What changed from rev 1 and why
 
-New L2 drill page `/instrument/:symbol/risk` with quant risk/return view:
-drawdown (underwater), rolling annualized volatility, returns histogram,
-beta-vs-SPY scatter. Beta needs a benchmark price series we do not yet
-ingest, so the work splits into two PRs.
+Rev 1 was a frontend-only recharts page computing risk math in client TS.
+A 5-persona domain committee (quant, portfolio-manager, thesis-engine,
+naïve-user, ranking-engine — 2026-06-14) reshaped it:
 
-## Settled inputs (do not re-debate)
+- The two *data consumers* (thesis AI + ranking engine, both Python)
+  cannot consume client-side chart math — they need **structured,
+  versioned, quality-flagged risk scalars**. Operator chose **Option B**:
+  a backend risk-metrics service that the page renders AND the engines
+  can ingest.
+- Verified data constraints cut/changed several rev-1 assumptions
+  (sector-relative views, Sharpe, total-return, indicator history).
 
-- Library/theme/drill-contract locked by #585 spec
-  (`docs/proposals/ui/instrument-charts-quant-redesign.md`): recharts +
-  `frontend/src/lib/chartTheme.ts`, L1 pane / L2 route / L3 `?view=raw`.
-- Operator decisions 2026-06-14: split data→feature PRs; seed
-  benchmark set = SPY + QQQ + 11 GICS sector SPDRs; range picker
-  1Y/3Y/5Y/All; beta vs SPY for all instruments with empty-state
-  fallback.
+## Operator-locked decisions
 
-## Why SPY has 0 bars (root cause)
+- Split delivery; benchmark seed = SPY + QQQ + 11 sector SPDRs (ingest
+  now, future use); ranges 1Y/3Y/5Y/All; beta vs SPY with empty-state.
+- **Architecture B** (2026-06-14): backend risk-metrics service +
+  endpoint; page renders from it; thesis/ranking consumption enabled.
+- **Consumer staging (author interpretation, confirm at review):** build
+  the evidence layer + endpoint + page this round; file thesis-evidence
+  ingestion and ranking risk-adjustment as dedicated follow-ups — a
+  scoring-model change carries its own model-versioning / score-
+  auditability burden (settled decisions) and must not ride a UI round.
 
-`daily_candle_refresh` (`app/workers/scheduler.py` ~L2090) scopes the
-candle universe to: held positions + T1/T2 covered tradable + a slow
-T3 bootstrap batch. SPY (id 3000) is `is_tradable` but `coverage_tier=3`
-and not held → only reachable via the throttled T3 batch → still 0
-`price_daily` rows. Same for the sector SPDRs (tier 3). QQQ is tier 1 so
-it already gets candles.
+## Verified data constraints (grep-confirmed 2026-06-14)
+
+- **TA columns are latest-row-only** (`sql/025` header: only the most
+  recent `price_date` row carries `volatility_30d`/`sma_*`/`macd_*`/etc;
+  history is NULL — AAPL 1006 rows, 3 non-null). ⇒ no indicator *series*;
+  rolling vol is computed from `close` returns. The latest
+  `volatility_30d` is a current-scalar cross-check only.
+- **Sector data unusable for sector-relative work.** `instruments.sector`
+  is an opaque code 1–9 with no GICS/SPDR table; SPY/XLE/XLF/XLK/JPM are
+  all `4`, AAPL `3` but MSFT `8`. ⇒ sector-relative beta/overlay would
+  compare against the wrong ETF → **cut from v1** (follow-up to build a
+  curated symbol→GICS→SPDR map). SPDRs still ingested in PR-A.
+- **No risk-free-rate series** → no honest Sharpe. Risk-adjusted summary
+  = **Calmar** (annualized return ÷ |max drawdown|); never labelled
+  Sharpe.
+- **Total-return not confirmed** (only price `close`). v1 = price return,
+  labelled honestly; dividend-adjusted TR = follow-up.
+- **Benchmark-definition mismatch.** `return_attribution.py` "market" =
+  equal-weight Tier-1 basket, "sector" = equal-weight peers — NOT
+  SPY/SPDR. This page's "vs SPY" is a different benchmark; label so.
+- **Scorer is risk-blind** (`scoring.py` has no vol/dd/beta term;
+  `volatility_30d` + `instrument_profile.beta` ingested but unread). Risk
+  metrics are surfaced as "risk context, not a v1.1 score input."
+
+## Committee-converged metric set (the evidence)
+
+Computed from `price_daily.close` series (instrument + SPY). Each is a
+versioned, windowed, quality-flagged scalar; the page also shows the
+matching chart.
+
+1. **Rebased growth-of-100 vs SPY** (headline) — instrument & SPY indexed
+   to 100 over the window; per-line CAGR. Chart: multi-line, optional log
+   y. Scalar: `cagr`, `excess_cagr_vs_spy`.
+2. **Max drawdown + current drawdown** — running peak on `close`;
+   `max_drawdown_pct`, `max_dd_peak_date`, `max_dd_trough_date`,
+   `current_drawdown_pct`. Chart: underwater area (≤0).
+3. **Annualized volatility (realized)** — sample-std of daily returns ×
+   √252; `vol_annualized_pct` over standard windows + rolling series for
+   the chart.
+4. **Beta vs SPY** — OLS of date-aligned daily returns; `beta`, `alpha`,
+   `r2`, `n_obs`; static + rolling. Chart: scatter + fit line.
+5. **Return distribution** — `skew`, `excess_kurtosis`, `worst_day_pct`,
+   `best_day_pct`, `var_5pct` (empirical), `n_obs`. Chart: histogram +
+   mean/±σ.
+6. **Multi-horizon trailing returns vs SPY** — instrument
+   `return_1m/3m/6m/1y` (precomputed) minus SPY same-window; the excess
+   columns. Chart: grouped bar.
+7. **Calmar (risk-adjusted summary)** — `calmar = annualized_return /
+   abs(max_drawdown)`; the one headline risk-adjusted number.
+
+Omitted (unanimous + #585 mandate): all day-trader TA — `rsi_14`,
+`macd_*`, `stoch_*`, `bb_*`, `atr_14`, fast EMAs. `sma_200` may appear as
+a faint regime line only. Raw values live in the raw/advanced tab.
 
 ---
 
 ## PR-A — benchmark candle ingest (backend, ETL-tier)
 
-### Constant (single source of truth)
+Unchanged from rev 1.
 
-`BENCHMARK_SYMBOLS` — frozenset of symbols, all confirmed present /
-tradable / ETF in the universe:
-
-```
-SPY  QQQ  XLB  XLC  XLE  XLF  XLI  XLK  XLP  XLRE  XLU  XLV  XLY
-```
-
-S&P 500 + Nasdaq-100 + 11 GICS sector SPDRs. Keyed by **symbol**
-(env-agnostic; resolved to `(instrument_id, symbol)` at runtime so a
-symbol absent from a given env is silently skipped, not a hard ref to a
-possibly-divergent id).
-
-### Scope change
-
-`daily_candle_refresh` gains a benchmark sub-query alongside
-held/T1-T2/T3: resolve `BENCHMARK_SYMBOLS` → `(instrument_id, symbol)`
-from `instruments WHERE symbol = ANY(...) AND is_tradable`, fold into the
-existing dedupe set. **Order: held → T1/T2 → benchmark → T3** (benchmarks
-inserted BEFORE the T3 bootstrap batch). Rationale (Codex ckpt-1): the
-dedupe is order-sensitive and `_T3_BOOTSTRAP_SELECT` is `LIMIT`-bounded —
-if benchmarks dedupe AFTER T3, a tier-3 benchmark with no candles would
-consume a scarce T3 bootstrap slot. Inserting benchmarks first means a
-benchmark already covered by held/T1-T2 is skipped, and tier-3
-benchmarks do not steal T3 capacity. Always included regardless of
-coverage tier → ongoing daily freshness. Mirrors the `held_rows`
-"always included" rationale already in the file.
-
-Resolution trusts the seeded universe: the query filters `is_tradable`
-but not asset-class, so it does not guard a hypothetical symbol collision
-(e.g. a non-ETF row sharing `XLC`). Low risk for this fixed symbol set;
-noted so a reviewer need not re-derive it.
-
-### One-shot backfill
-
-After merge, run `refresh_market_data(provider, conn,
-benchmark_instruments, force_backfill=True, skip_quotes=True)` once on
-dev (jobs proc is operator-owned) to pull ~1000 bars (~4 trading years,
-eToro per-request ceiling per #603) for each benchmark. `skip_quotes=True`
-(Codex ckpt-1): scope is candle-ingest only — the default quote
-fetch/upsert would add eToro call weight and contradict the
-candle-only intent. No new endpoint; the steady-state inclusion is the
-shipped code, the backfill is the operator-visible verify step.
-
-### Non-goals / invariants
-
-- No schema change (`price_daily` + ETF instrument rows already exist).
-- Benchmarks are NOT promoted into scoring/ranking/thesis universe —
-  inclusion is candle-ingest scope only.
-- Daily eToro call weight rises by 13 incremental fetches/day
-  (negligible vs ~500-instrument incremental cadence).
-
-### DoD (ETL clauses 8-12)
-
-- Smoke: SPY, QQQ, XLK get bars; AAPL/MSFT unaffected.
-- Cross-source: SPY latest close vs an independent public source.
-- Backfill executed on dev (not "queued").
-- Operator-visible: `GET /instruments/SPY/candles?range=max` returns a
-  populated `rows[]`; record bar count + latest close + commit SHA.
+- `BENCHMARK_SYMBOLS` constant (SSOT): `SPY QQQ XLB XLC XLE XLF XLI XLK
+  XLP XLRE XLU XLV XLY` — all present/tradable/ETF.
+- Fold into `daily_candle_refresh` scope (`app/workers/scheduler.py`,
+  `JOB_DAILY_CANDLE_REFRESH`) **before T3** in the dedupe order
+  (held → T1/T2 → benchmark → T3) so tier-3 benchmarks don't steal T3
+  bootstrap slots. Resolve symbols → `(id, symbol)` via `instruments
+  WHERE symbol = ANY(...) AND is_tradable` (trusts the seeded universe;
+  no asset-class collision guard — noted).
+- One-shot backfill post-merge: `refresh_market_data(provider, conn,
+  benchmark_instruments, force_backfill=True, skip_quotes=True)` on dev.
+- No schema change. DoD: smoke SPY/QQQ/XLK + AAPL/MSFT unaffected;
+  cross-source SPY close; backfill executed; `GET
+  /instruments/SPY/candles?range=max` populated (record bars + close +
+  SHA).
 
 ---
 
-## PR-B — risk drill page (frontend)
+## PR-B — risk-metrics service + endpoint (backend)
 
-### Data flow
+### Service `app/services/risk_metrics.py`
+
+Pure-compute functions over a daily close series, mirroring
+`return_attribution.py` conventions: **Decimal** arithmetic for persisted
+figures, a `RISK_METRICS_VERSION = "risk_v1"` constant (SSOT, no magic
+strings), windows as named constants.
+
+Math contracts (carry the rev-1 Codex ckpt-1 findings):
+
+- **Returns:** simple return between two *consecutive surviving* rows; a
+  close is valid only if finite and `> 0`; an invalid row breaks the
+  chain (no gap-spanning synthetic return). Log returns for the stat
+  estimators (vol/beta/dist), simple for compounding/CAGR display.
+- **Volatility:** sample std (n−1) × √252; emits only with ≥ 2 returns in
+  window.
+- **Beta:** OLS on **date-aligned** returns (pair only dates where BOTH
+  series have a return); guards: benchmark-variance 0 → β `null`;
+  total-variance 0 → R² `null`. Reports `n_obs`.
+- **Distribution:** sample (n−1) std; empirical 5% VaR (percentile, not
+  parametric); skew/kurtosis emit `n_obs` (suppress/flag below ~250).
+- **Calmar:** `annualized_return / abs(max_drawdown)`; `max_drawdown`
+  near 0 → `null` (not ∞).
+
+### Quality flags (per metric)
+
+Each metric carries a status: `ok | insufficient_history |
+benchmark_missing | no_data`. Thresholds in **return space** (vol/beta
+need ≥ 60 return obs ≈ 61 closes; Codex off-by-one). Never substitute a
+fallback zero for unknown (the `return_attribution.py` ZERO-fallback
+anti-pattern must NOT repeat here; honest `no_data` per the #1581
+precedent).
+
+### Persistence `sql/198_instrument_risk_metrics.sql`
+
+Table `instrument_risk_metrics`:
+`(instrument_id, as_of_date, metric_version)` PK; scalar columns
+NUMERIC + a per-metric `*_status` (or one `quality` JSONB), `n_obs`,
+`benchmark_instrument_id`, `window_days`, `computed_at`. Standard windows
+(1y / 3y / full) persisted. This is the auditable evidence row thesis/
+ranking consume; a thesis citing "beta 1.3" resolves to
+`{value, window, as_of, version, status}`.
+
+### Job `risk_metrics_refresh`
+
+New entry in `SCHEDULED_JOBS`, runs after `daily_candle_refresh`,
+recomputes the covered universe (+ benchmarks) and upserts the table.
+Its own lane (precedent: per-job lanes #1527) to avoid the db-lane
+starvation class. Backfill = one-shot invocation on dev post-merge.
+
+### Endpoint `GET /instruments/{symbol}/risk-metrics`
+
+In `app/api/instruments.py` (alongside `/candles`). Returns the latest
+persisted scalars for the symbol **plus** on-read display series
+(drawdown curve, rolling-vol line, histogram bins, beta-scatter points)
+computed over `range=max` by the **same** service functions — single
+source of math, no TS/Python drift. Honest per-metric status passthrough.
+
+---
+
+## PR-C — risk drill page (frontend)
 
 - Route `instrument/:symbol/risk` in `frontend/src/App.tsx` →
-  `RiskPage.tsx` (mirrors `DividendsPage` registration).
-- Single fetch: `fetchInstrumentCandles(symbol, "max")` for the
-  instrument + `fetchInstrumentCandles("SPY", "max")` for beta. `useAsync`
-  per the drill-page pattern; the SPY fetch degrades the beta card only
-  (404 / empty → empty-state, rest of page renders).
-- **Range picker slices client-side.** `CandleRange`
-  (`frontend/src/api/types.ts:369`) has no `3y` member, so fetch `max`
-  once and slice the in-memory series to the selected 1Y/3Y/5Y/All
-  window. No backend candle-endpoint change.
-- `CandleBar.{open,high,low,close,volume}` are `string | null` → math
-  parses to number and null-guards.
+  `RiskPage.tsx` (mirrors `DividendsPage`).
+- Fetches `/instruments/{symbol}/risk-metrics` (+ position endpoint for
+  the held overlay). `useAsync`. **No risk math in TS** — pure render of
+  the endpoint payload; range picker slices the returned `max` series
+  client-side (display only; scalars are window-labelled and
+  authoritative).
+- Charts (`components/risk/riskCharts.tsx`, chartTheme): rebased-vs-SPY
+  headline, underwater area, rolling-vol line, returns histogram, beta
+  scatter + fit (β, R²).
+- **Naïve-user layer:** a plain-language verdict chip (Calm / Medium /
+  Bumpy / Wild derived from vol+dd+beta) + one specific sentence;
+  beta/vol rendered as English sentences with comparator gauges; glossary
+  "?" tooltips (focusable, a11y); progressive disclosure — simple default
+  (chip, rebased chart vs "the US market", worst-drop, returns row, beta
+  sentence, dividend yes/no), advanced behind disclosure, raw values in
+  the `?view=raw` tab.
+- Held overlay: cost-line on the rebased chart, unrealized
+  drawdown-from-entry (distinct from market max-DD), yield-on-cost — only
+  when held.
+- States: per-card `EmptyState` keyed on the metric `status` (e.g.
+  `insufficient_history` → "Not enough history yet"), `SectionSkeleton`,
+  `SectionError`. Benchmark-missing → honest beta/excess empty-state.
+- `?view=raw`: per-day {date, close, daily return, drawdown} table + the
+  raw scalar/flag list + CSV export.
+- Entry link from the PriceChart pane / chart workspace.
 
-### Pure math (`frontend/src/lib/riskMath.ts`, exported, unit-tested)
+---
 
-**Input validation (shared, Codex ckpt-1):** a close is *valid* only if
-finite and `> 0`. `dailyReturns(bars)` consumes the candle rows in
-date order, drops invalid closes, and computes a simple return
-`close[i]/close[i−1] − 1` **only between two consecutive surviving rows**.
-`price_daily` is trading-day-grained so consecutive rows are consecutive
-trading days; a dropped/invalid row breaks the chain (no synthetic
-return spanning the gap). Returns carry the end date.
+## Follow-ups (file, do not bundle)
 
-- `drawdownSeries(closes): {date, drawdownPct}[]` — running peak →
-  `(close/peak − 1) × 100`, ≤ 0. Valid closes only.
-- `rollingAnnualizedVol(returns, window=30): {date, volPct}[]` —
-  **sample** std dev (n−1 denominator) of daily simple returns × √252 ×
-  100, over a trailing `window`-return window; emits a point only once
-  ≥ `window` returns are available (so ≥ window+1 valid closes). `window`
-  ≤ 1 or a window with < 2 returns → no point (n−1 undefined).
-- `returnsHistogram(returns, bins=30): {bins: {binStart, binEnd,
-  count}[], mean, std}` — `std` is sample (n−1), consistent with vol.
-  **Degenerate guard:** `min === max` (constant returns, zero range) →
-  a single bin holding all observations, never a zero-width division.
-  Empty input → empty bins, `mean=std=null`.
-- `olsBeta(assetReturns, benchReturns): {beta, alpha, r2, n} | null` —
-  least squares of asset on benchmark over **date-aligned** returns.
-  Alignment (Codex ckpt-1): pair returns by their end date and keep a
-  point only when BOTH series have that return (i.e. both have closes at
-  `t−1` and `t`); never pair across mismatched intervals. `n` = count of
-  aligned return observations. **Zero-variance guards:** benchmark return
-  variance 0 → β undefined → return `null`; total asset variance 0 → R²
-  denominator 0 → return `null`. Otherwise `r2 ∈ [0,1]`.
-
-All consume aligned daily simple returns derived from valid closes;
-helpers are DB-free and the unit-test surface.
-
-### Charts (`frontend/src/components/risk/riskCharts.tsx`, chartTheme)
-
-1. Underwater area (fills below 0).
-2. Rolling-vol line.
-3. Returns histogram bar (mean + ±σ reference lines).
-4. Beta scatter (asset vs SPY daily returns) + OLS regression line; card
-   shows β and R².
-
-### States
-
-- Per-card empty-state (`EmptyState`): the threshold is in **return
-  space** — vol/beta need ≥ 60 return observations (≈ 61 valid closes;
-  Codex ckpt-1 off-by-one). Beta also empty when the SPY series is
-  unavailable or `olsBeta` returns `null` (zero-variance / too few
-  aligned returns).
-- `SectionSkeleton` while loading, `SectionError` + retry on fetch fail.
-
-### L3 raw (`?view=raw`)
-
-Table of per-day {date, close, daily return, drawdown} + CSV export,
-following the existing drill-page raw-view convention.
-
-### Entry point
-
-Link to `/instrument/:symbol/risk` from the PriceChart pane / chart
-workspace (existing drill-link pattern).
+- **Thesis-evidence ingestion** — thesis engine reads
+  `instrument_risk_metrics` as structured risk evidence (supports/
+  contradicts a long thesis; the critic's falsification kit).
+- **Ranking risk-adjustment v2** — a risk-adjusted scoring term
+  (Calmar / vol / downside) in `scoring.py`; deliberate model-version
+  change with its own validation. Currently the scorer is risk-blind.
+- **Sector classification fix** — curated symbol→GICS→SPDR map to
+  re-enable sector-relative beta/overlay.
+- **Total-return series** — dividend-adjusted closes so headline/dd/beta
+  run on TR not price.
 
 ## Testing
 
-- `riskMath.ts`: pure unit tests — known-series fixtures for drawdown,
-  vol (incl. < window → empty, sample-std value), histogram (normal,
-  `min===max` single-bin, empty), OLS (synthetic β=1 / β=2 / zero-overlap
-  → null / zero-benchmark-variance → null / R² value), `dailyReturns`
-  (invalid/≤0 close breaks the chain, no synthetic gap-spanning return),
-  date-alignment (asset and SPY with a non-overlapping holiday).
-  Boundary: exactly 60 return observations (61 closes) renders; 59
-  (60 closes) is empty.
-- `RiskPage.test.tsx`: renders 4 cards with data; beta empty-state when
-  SPY fetch fails; range slice changes series; `?view=raw` table + CSV.
+- `risk_metrics.py`: pure unit tests — drawdown, vol (< window → flagged,
+  sample-std value), distribution (skew/kurtosis with n_obs, empirical
+  VaR), OLS (β=1 / β=2 / zero-overlap → null / zero-bench-variance →
+  null / R²), Calmar (zero-dd → null), return chain (invalid/≤0 close
+  breaks chain), date-alignment (holiday gap), boundary 60 returns (61
+  closes) ok / 59 flagged.
+- Endpoint: one integration test — symbol with data returns scalars +
+  series + statuses; insufficient-history symbol returns flagged
+  `no_data` not zeros.
+- `RiskPage.test.tsx`: renders cards from a payload; verdict-chip mapping;
+  beta empty-state on `benchmark_missing`; range slice; `?view=raw` + CSV.
+
+## DoD
+
+- PR-A: ETL clauses (smoke / cross-source / backfill executed / live
+  figure / SHA).
+- PR-B: `risk_metrics_refresh` run on dev; `instrument_risk_metrics`
+  populated for the panel (AAPL/GME/MSFT/JPM/HD); cross-source one beta
+  or vol vs a public source; `GET /instruments/AAPL/risk-metrics`
+  returns sane scalars + statuses. Record SHA + figures.
+- PR-C: page renders the panel on dev; empty-states honest for a
+  thin-history symbol; raw tab + CSV verified.
 
 ## Risks
 
 | Risk | Mitigation |
 |------|-----------|
-| 5Y/All overstate coverage (~4yr data today) | Honest empty-state per range; series grows as history deepens. |
-| Beta vs SPY meaningless for non-US / ETFs | Empty-state on insufficient overlap; v1 SPY-only is documented. |
-| Benchmark backfill not run post-merge | DoD requires executed-on-dev + recorded figure before PR-A done. |
+| Scope (3 PRs + table + job) larger than #591-as-filed | Rescope #591 into children; PR-A/B/C independently shippable; consumers filed separately. |
+| 5Y/All overstate coverage (~4yr data) | Honest per-window status; series grows. |
+| TS/Python math drift | Single math source in `risk_metrics.py`; endpoint serves series; FE renders only. |
+| Persisted metric goes stale if candle refresh lags | `as_of_date` surfaced; status reflects staleness; job ordered after candle refresh. |
+| Sector data tempts a sector-relative view | Explicitly cut; documented; follow-up owns it. |
