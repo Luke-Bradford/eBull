@@ -35,9 +35,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 import numpy as np
+import psycopg
+from psycopg import sql
+
+from app.db.snapshot import snapshot_read
+from app.workers.scheduler import BENCHMARK_SYMBOLS
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -56,6 +61,13 @@ MIN_OBS_MOMENTS = 250
 CALMAR_DD_EPSILON = Decimal("1e-9")
 
 WINDOW_KEYS: tuple[str, ...] = ("1y", "3y", "full")
+
+# The benchmark for beta / excess metrics. Resolved to an instrument_id at run
+# time (primary-listing tiebreak) the same way the candle-refresh scope does.
+SPY_SYMBOL = "SPY"
+
+# Chunk size for the batched current-table rebuild (~15k total rows / run).
+_REBUILD_BATCH = 500
 
 RiskStatus = Literal[
     "ok",
@@ -747,3 +759,428 @@ def compute_instrument_risk(
         distribution_status=dist_st,
         trailing_status=trailing_st,
     )
+
+
+# ---------------------------------------------------------------------------
+# DB persist layer (#591 PR-B, Task B3)
+# ---------------------------------------------------------------------------
+#
+# READ phase under snapshot_read (REPEATABLE READ): one consistent snapshot so
+# a concurrent candle refresh / correction cannot let two instruments see
+# different price states. COMPUTE phase in memory (pure). WRITE phase in a
+# separate READ COMMITTED transaction: content-dedup append into the
+# append-only observations log, then a deterministic rebuild of the _current
+# write-through from the winning observation.
+#
+# CRITICAL (prevention-log "Diff-aware writers" variant A): refreshed_at /
+# computed_at are mutate-on-every-call timestamps. They go in the UPDATE SET
+# clause ONLY — NEVER inside the IS DISTINCT FROM tuple (else now() always
+# differs → every MATCHED row re-fires → bloat). The (as_of_date, computed_at)
+# tuple comparison is what advances a fresh / corrected snapshot even when the
+# rounded business values are unchanged.
+
+# Business columns shared by the INSERT, the dedup compare, and the _current
+# upsert IS DISTINCT FROM tuple. Single source of truth — ORDER IS LOAD-BEARING
+# (it drives the param order below and the EXCLUDED tuple). Excludes the keys
+# (instrument_id, as_of_date, metric_version, window_key) and the mutate-on-
+# write timestamps (computed_at, refreshed_at).
+_RISK_BUSINESS_COLS: tuple[str, ...] = (
+    "cagr",
+    "excess_cagr_vs_spy",
+    "max_drawdown",
+    "max_dd_peak_date",
+    "max_dd_trough_date",
+    "current_drawdown",
+    "vol_annualized",
+    "beta",
+    "beta_r2",
+    "skew",
+    "excess_kurtosis",
+    "var_5",
+    "worst_day",
+    "best_day",
+    "calmar",
+    "trailing_1m",
+    "trailing_3m",
+    "trailing_6m",
+    "trailing_1y",
+    "excess_trailing_1m",
+    "excess_trailing_3m",
+    "excess_trailing_6m",
+    "excess_trailing_1y",
+    "n_returns",
+    "beta_n_obs",
+    "benchmark_instrument_id",
+    "window_days",
+    "cagr_status",
+    "vol_status",
+    "beta_status",
+    "drawdown_status",
+    "distribution_status",
+    "calmar_status",
+    "trailing_status",
+    "excess_cagr_status",
+)
+
+
+def load_close_series(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    end_date: date,
+) -> list[tuple[date, Decimal | None]]:
+    """Load ``(price_date, close)`` for an instrument up to and including ``end_date``.
+
+    Closes are returned ASC with NULL closes KEPT in the list — the
+    return-chain / status logic in :func:`compute_instrument_risk` must see the
+    invalid rows (a NULL breaks the chain and feeds the ``invalid_price_chain``
+    signal). Do NOT pre-filter. Non-null closes are coerced ``Decimal(str(...))``.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT price_date, close
+            FROM price_daily
+            WHERE instrument_id = %(iid)s
+              AND price_date <= %(end)s
+            ORDER BY price_date ASC
+            """,
+            {"iid": instrument_id, "end": end_date},
+        )
+        rows = cur.fetchall()
+    out: list[tuple[date, Decimal | None]] = []
+    for price_date, close in rows:
+        out.append((price_date, None if close is None else Decimal(str(close))))
+    return out
+
+
+def _resolve_benchmark_instrument_ids(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    """Resolve the benchmark symbols to instrument_ids (primary-listing tiebreak).
+
+    Mirrors the candle-refresh scope query (``daily_candle_refresh``): tradable
+    rows only, one id per symbol, ``is_primary_listing DESC, instrument_id``.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (symbol) symbol, instrument_id
+            FROM instruments
+            WHERE symbol = ANY(%(symbols)s)
+              AND is_tradable = TRUE
+            ORDER BY symbol, is_primary_listing DESC, instrument_id
+            """,
+            {"symbols": sorted(BENCHMARK_SYMBOLS)},
+        )
+        return {str(symbol): int(iid) for symbol, iid in cur.fetchall()}
+
+
+def _latest_valid_close_date(closes: Sequence[tuple[date, Decimal | None]]) -> date | None:
+    """The date of the latest VALID (finite & > 0) close, else None.
+
+    closes are ASC; the last valid one wins. This — NOT raw MAX(price_date) —
+    is the ``as_of_date`` so a trailing NULL / bad bar does not advance the
+    snapshot date past the last good price.
+    """
+    latest: date | None = None
+    for d, raw in closes:
+        if _valid_close(raw) is not None:
+            latest = d
+    return latest
+
+
+def _count_valid_closes(closes: Sequence[tuple[date, Decimal | None]]) -> int:
+    """Count rows whose close is valid (finite & > 0)."""
+    return sum(1 for _, raw in closes if _valid_close(raw) is not None)
+
+
+def _window_days(closes: Sequence[tuple[date, Decimal | None]]) -> int | None:
+    """Calendar span (days) of the valid close sub-chain, else None for < 2 valid."""
+    valid = [d for d, raw in closes if _valid_close(raw) is not None]
+    if len(valid) < 2:
+        return None
+    return (valid[-1] - valid[0]).days
+
+
+def _metrics_row_values(
+    metrics: WindowMetrics,
+    inst_closes: Sequence[tuple[date, Decimal | None]],
+    spy_closes: Sequence[tuple[date, Decimal | None]],
+    as_of_date: date,
+    benchmark_instrument_id: int | None,
+) -> dict[str, object]:
+    """Build the business-column value dict for one (instrument, window) row.
+
+    Trailing returns are absolute-lookback (1m/3m/6m/1y) and computed here from
+    the same as_of_date / close series — they are window-independent but
+    persisted on every window row.
+    """
+    dist = metrics.distribution
+    # peak/trough dates are not on WindowMetrics; recompute off the same chain.
+    dd = drawdown(inst_closes)
+    trailing: dict[str, Decimal | None] = {}
+    excess_trailing: dict[str, Decimal | None] = {}
+    for key, lookback in TRAILING_LOOKBACK_DAYS.items():
+        trailing[key] = trailing_return(inst_closes, as_of_date, lookback)
+        xs_val, _ = excess_trailing_return(inst_closes, spy_closes, as_of_date, lookback)
+        excess_trailing[key] = xs_val
+
+    return {
+        "cagr": metrics.cagr,
+        "excess_cagr_vs_spy": metrics.excess_cagr,
+        "max_drawdown": metrics.max_drawdown,
+        "max_dd_peak_date": dd.peak_date,
+        "max_dd_trough_date": dd.trough_date,
+        "current_drawdown": metrics.current_drawdown,
+        "vol_annualized": metrics.annualized_vol,
+        "beta": metrics.beta,
+        "beta_r2": metrics.r2,
+        "skew": dist.skew if dist else None,
+        "excess_kurtosis": dist.excess_kurtosis if dist else None,
+        "var_5": dist.var_5 if dist else None,
+        "worst_day": dist.worst_day if dist else None,
+        "best_day": dist.best_day if dist else None,
+        "calmar": metrics.calmar,
+        "trailing_1m": trailing["1m"],
+        "trailing_3m": trailing["3m"],
+        "trailing_6m": trailing["6m"],
+        "trailing_1y": trailing["1y"],
+        "excess_trailing_1m": excess_trailing["1m"],
+        "excess_trailing_3m": excess_trailing["3m"],
+        "excess_trailing_6m": excess_trailing["6m"],
+        "excess_trailing_1y": excess_trailing["1y"],
+        "n_returns": metrics.n_returns,
+        "beta_n_obs": metrics.beta_n_obs,
+        "benchmark_instrument_id": benchmark_instrument_id,
+        "window_days": _window_days(inst_closes),
+        "cagr_status": metrics.cagr_status,
+        "vol_status": metrics.vol_status,
+        "beta_status": metrics.beta_status,
+        "drawdown_status": metrics.drawdown_status,
+        "distribution_status": metrics.distribution_status,
+        "calmar_status": metrics.calmar_status,
+        "trailing_status": metrics.trailing_status,
+        "excess_cagr_status": metrics.excess_cagr_status,
+    }
+
+
+def _coerce_db_value(value: object) -> object:
+    """Coerce a business value to its DB boundary form. Decimal stays Decimal."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, (int, str, date)):
+        return value
+    # Any stray numeric (e.g. float island that slipped through) -> Decimal.
+    return Decimal(str(value))
+
+
+@dataclass(frozen=True)
+class _PendingRow:
+    """One computed (instrument, as_of, window) row awaiting write."""
+
+    instrument_id: int
+    as_of_date: date
+    window_key: str
+    values: dict[str, object]
+
+
+def compute_and_store_risk_metrics(conn: psycopg.Connection[Any]) -> int:
+    """Compute + persist risk metrics for the scoped instrument universe.
+
+    Scope = instruments with >= 2 valid closes (>= 1 return computable) UNION
+    the resolved benchmark instrument_ids. For each, all WINDOW_KEYS are
+    computed against the SPY series and written:
+
+      1. content-dedup APPEND into instrument_risk_metrics_observations
+         (insert a new row only if none exists for the key, or the business
+         columns differ from the latest existing row);
+      2. deterministic REBUILD of instrument_risk_metrics_current from the
+         winning observation (latest as_of_date, then latest computed_at).
+
+    Returns the number of observation rows written this run.
+    """
+    # ---- READ PHASE (REPEATABLE READ snapshot; no writes inside) ----------
+    with snapshot_read(conn):
+        benchmark_ids = _resolve_benchmark_instrument_ids(conn)
+        spy_instrument_id = benchmark_ids.get(SPY_SYMBOL)
+
+        with conn.cursor() as cur:
+            # Instruments with >= 2 valid (finite & > 0) closes. Pre-filter in
+            # SQL on the close-validity predicate so scope is bounded; the
+            # Python validity check is the source of truth but this avoids
+            # loading the whole universe.
+            cur.execute(
+                """
+                SELECT instrument_id
+                FROM price_daily
+                WHERE close IS NOT NULL
+                  AND close > 0
+                GROUP BY instrument_id
+                HAVING COUNT(*) >= 2
+                """
+            )
+            scoped_ids = {int(r[0]) for r in cur.fetchall()}
+        scoped_ids |= set(benchmark_ids.values())
+
+        # End date for every series load: today (UTC date via Postgres).
+        with conn.cursor() as cur:
+            cur.execute("SELECT CURRENT_DATE")
+            current_date_row = cur.fetchone()
+        assert current_date_row is not None
+        current_date: date = current_date_row[0]
+
+        spy_closes: list[tuple[date, Decimal | None]] = (
+            load_close_series(conn, spy_instrument_id, current_date) if spy_instrument_id is not None else []
+        )
+
+        inst_series: dict[int, list[tuple[date, Decimal | None]]] = {}
+        for iid in sorted(scoped_ids):
+            inst_series[iid] = load_close_series(conn, iid, current_date)
+
+    # ---- COMPUTE PHASE (in memory; pure) ----------------------------------
+    pending: list[_PendingRow] = []
+    for iid in sorted(scoped_ids):
+        closes = inst_series.get(iid, [])
+        # A benchmark with thin / no own history can still be in scope via the
+        # UNION; skip it if it cannot produce even one return.
+        if _count_valid_closes(closes) < 2:
+            continue
+        as_of_date = _latest_valid_close_date(closes)
+        if as_of_date is None:
+            continue
+        # Guard: never let a future-dated bar advance the snapshot past today.
+        if as_of_date > current_date:
+            as_of_date = current_date
+        for window_key in WINDOW_KEYS:
+            metrics = compute_instrument_risk(closes, spy_closes, window_key, as_of_date)
+            values = _metrics_row_values(metrics, closes, spy_closes, as_of_date, spy_instrument_id)
+            pending.append(
+                _PendingRow(
+                    instrument_id=iid,
+                    as_of_date=as_of_date,
+                    window_key=window_key,
+                    values=values,
+                )
+            )
+
+    if not pending:
+        return 0
+
+    # ---- WRITE PHASE (separate READ COMMITTED transaction) ----------------
+    written = 0
+    touched_ids: list[int] = sorted({p.instrument_id for p in pending})
+    with conn.transaction():
+        for row in pending:
+            if _append_observation_if_changed(conn, row):
+                written += 1
+        # Rebuild _current for the touched instruments, batched.
+        for start in range(0, len(touched_ids), _REBUILD_BATCH):
+            batch = touched_ids[start : start + _REBUILD_BATCH]
+            _rebuild_current_for_batch(conn, batch)
+    return written
+
+
+def _append_observation_if_changed(conn: psycopg.Connection[Any], row: _PendingRow) -> bool:
+    """Insert a new observation row iff it is new or its business columns differ.
+
+    Reads the latest existing row for (instrument, as_of, version, window) and
+    compares ONLY the business columns (never computed_at). Returns True if a
+    row was inserted.
+    """
+    col_idents = sql.SQL(", ").join(sql.Identifier(c) for c in _RISK_BUSINESS_COLS)
+    select_q = sql.SQL(
+        """
+        SELECT {cols}
+        FROM instrument_risk_metrics_observations
+        WHERE instrument_id = %(iid)s
+          AND as_of_date = %(asof)s
+          AND metric_version = %(ver)s
+          AND window_key = %(win)s
+        ORDER BY computed_at DESC
+        LIMIT 1
+        """
+    ).format(cols=col_idents)
+    key_params: dict[str, object] = {
+        "iid": row.instrument_id,
+        "asof": row.as_of_date,
+        "ver": RISK_METRICS_VERSION,
+        "win": row.window_key,
+    }
+    with conn.cursor() as cur:
+        cur.execute(select_q, key_params)
+        latest = cur.fetchone()
+
+    new_vals = [_coerce_db_value(row.values[c]) for c in _RISK_BUSINESS_COLS]
+    if latest is not None:
+        # Compare business columns. The SELECT returns DB-native types
+        # (Decimal / int / date / str / None) which match the coerced new
+        # values exactly, so equality is a faithful content compare.
+        if list(latest) == new_vals:
+            return False
+
+    placeholders = sql.SQL(", ").join(sql.Placeholder(c) for c in _RISK_BUSINESS_COLS)
+    insert_q = sql.SQL(
+        """
+        INSERT INTO instrument_risk_metrics_observations (
+            instrument_id, as_of_date, metric_version, window_key, {cols}
+        ) VALUES (
+            %(iid)s, %(asof)s, %(ver)s, %(win)s, {vals}
+        )
+        """
+    ).format(cols=col_idents, vals=placeholders)
+    params: dict[str, object] = dict(key_params)
+    for c in _RISK_BUSINESS_COLS:
+        params[c] = _coerce_db_value(row.values[c])
+    with conn.cursor() as cur:
+        cur.execute(insert_q, params)
+    return True
+
+
+def _rebuild_current_for_batch(conn: psycopg.Connection[Any], instrument_ids: Sequence[int]) -> None:
+    """Rebuild instrument_risk_metrics_current from the winning observation.
+
+    DISTINCT ON picks the latest (as_of_date, computed_at) per
+    (instrument, version, window). On conflict the row advances when the
+    winning observation is newer ((as_of_date, computed_at) tuple) OR the
+    business columns differ — refreshed_at / computed_at are SET only, never in
+    the IS DISTINCT FROM tuple (prevention-log MERGE-bloat variant A).
+    """
+    col_idents = sql.SQL(", ").join(sql.Identifier(c) for c in _RISK_BUSINESS_COLS)
+    set_clause = sql.SQL(", ").join(
+        sql.SQL("{c} = EXCLUDED.{c}").format(c=sql.Identifier(c)) for c in _RISK_BUSINESS_COLS
+    )
+    business_lhs = sql.SQL(", ").join(
+        sql.SQL("instrument_risk_metrics_current.{c}").format(c=sql.Identifier(c)) for c in _RISK_BUSINESS_COLS
+    )
+    business_rhs = sql.SQL(", ").join(sql.SQL("EXCLUDED.{c}").format(c=sql.Identifier(c)) for c in _RISK_BUSINESS_COLS)
+    rebuild_q = sql.SQL(
+        """
+        INSERT INTO instrument_risk_metrics_current (
+            instrument_id, metric_version, window_key,
+            {cols}, as_of_date, computed_at, refreshed_at
+        )
+        SELECT DISTINCT ON (instrument_id, metric_version, window_key)
+            instrument_id, metric_version, window_key,
+            {cols}, as_of_date, computed_at, NOW() AS refreshed_at
+        FROM instrument_risk_metrics_observations
+        WHERE instrument_id = ANY(%(ids)s)
+          AND metric_version = %(ver)s
+        ORDER BY instrument_id, metric_version, window_key,
+                 as_of_date DESC, computed_at DESC
+        ON CONFLICT (instrument_id, metric_version, window_key) DO UPDATE SET
+            {set_clause},
+            as_of_date = EXCLUDED.as_of_date,
+            computed_at = EXCLUDED.computed_at,
+            refreshed_at = NOW()
+        WHERE (EXCLUDED.as_of_date, EXCLUDED.computed_at)
+              > (instrument_risk_metrics_current.as_of_date, instrument_risk_metrics_current.computed_at)
+           OR ({business_lhs}) IS DISTINCT FROM ({business_rhs})
+        """
+    ).format(
+        cols=col_idents,
+        set_clause=set_clause,
+        business_lhs=business_lhs,
+        business_rhs=business_rhs,
+    )
+    with conn.cursor() as cur:
+        cur.execute(rebuild_q, {"ids": list(instrument_ids), "ver": RISK_METRICS_VERSION})
