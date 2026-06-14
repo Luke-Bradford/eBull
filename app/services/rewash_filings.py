@@ -860,11 +860,15 @@ def _apply_13f_infotable(
     Returns ``False`` when no existing institutional_holdings row
     is found (re-wash isn't a first-time ingester). Raises
     ``RewashParseError`` on parser failure."""
-    from app.providers.implementations.sec_13f import parse_infotable
+    from app.providers.implementations.sec_13f import ThirteenFHolding, parse_infotable
     from app.services.institutional_holdings import (
         _resolve_cusip_to_instrument_id,
         _upsert_holding,
         thirteen_f_within_retention,
+    )
+    from app.services.thirteen_f_normalise import (
+        merge_resolved_by_instrument,
+        normalise_13f_holdings,
     )
 
     # Resolution priority:
@@ -978,24 +982,28 @@ def _apply_13f_infotable(
     # the existing rows were silently destroyed with no replacement
     # and no path to repair (return False prevented the bump but
     # the typed table was already empty).
-    # #954 — mirror the first-ingest dedupe (``resolved_by_key`` in
-    # ``institutional_holdings._ingest_single_accession``): collapse
-    # duplicate XML rows by (instrument_id, exposure) keeping the FIRST,
-    # matching the typed table's ON CONFLICT DO NOTHING collapse on
-    # (accession, instrument, COALESCE(is_put_call, 'EQUITY')). Without
-    # this, the observations UPSERT (ON CONFLICT DO UPDATE) keeps the
-    # LAST duplicate while the typed table keeps the first — the two
-    # layers diverge on shares/value for the same holding.
-    resolved_by_key: dict[tuple[int, str], tuple[int, Any]] = {}
+    # #1567/#1566 — normalise (PRN drop, bad-quantity drop, pre-2023
+    # VALUE x1000, SUM multi-row sub-manager positions by (cusip,
+    # exposure)) BEFORE resolution. Previously this path kept only the
+    # first row per (instrument, exposure) (#954) and applied neither the
+    # PRN filter nor the VALUE cutover — a rewash of an older accession
+    # could persist bond principal as shares and understate value 1000x.
+    # The post-resolution merge folds the rare two-CUSIPs-one-instrument
+    # case. An all-PRN filing normalises to empty even though parse
+    # returned rows: that is NOT a parser regression (the ``if not
+    # holdings`` guard above fired only on a genuine empty parse) — it
+    # flows through to the DELETE-then-INSERT below, which clears the
+    # accession's prior (mis-stored PRN-as-shares) rows and logs success.
+    normalised = normalise_13f_holdings(holdings, filed_at=filed_at)
     skipped_no_cusip = 0
-    for holding in holdings:
+    pre_merge: list[tuple[int, ThirteenFHolding]] = []
+    for holding in normalised:
         instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
         if instrument_id is None:
             skipped_no_cusip += 1
             continue
-        exposure_key = holding.put_call if holding.put_call in ("PUT", "CALL") else "EQUITY"
-        resolved_by_key.setdefault((instrument_id, exposure_key), (instrument_id, holding))
-    resolved: list[tuple[int, Any]] = list(resolved_by_key.values())  # (instrument_id, holding)
+        pre_merge.append((instrument_id, holding))
+    resolved: list[tuple[int, ThirteenFHolding]] = merge_resolved_by_instrument(pre_merge)
 
     # ANY unresolved CUSIP defers the rewash — neither full replace
     # nor partial replace is safe:

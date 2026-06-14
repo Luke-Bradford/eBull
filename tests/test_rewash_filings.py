@@ -1590,15 +1590,16 @@ def _seed_13f_typed_row(conn: psycopg.Connection[tuple], *, accession: str, inst
     return filer_id
 
 
-def test_13f_infotable_rewash_dedupes_duplicate_xml_rows(
+def test_13f_infotable_rewash_sums_duplicate_xml_rows(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     isolated_registry: None,
 ) -> None:
-    """#954 — duplicate XML rows for the same (instrument, exposure_kind)
-    must collapse keep-FIRST in BOTH the typed table and the observations
-    table. Pre-fix the typed table kept the first (ON CONFLICT DO NOTHING)
-    while the observations UPSERT kept the last — layers diverged."""
+    """#1567 — multiple XML rows for the same (instrument, exposure_kind)
+    are a legitimate sub-manager split and must SUM in BOTH the typed table
+    and the observations table (was keep-first under #954, which
+    undercounted multi-sub-manager filers). Both layers receive the same
+    summed row, so they no longer diverge."""
     conn = ebull_test_conn
     iid = 950_090
     accession = "0001234567-26-000954"
@@ -1653,9 +1654,9 @@ def test_13f_infotable_rewash_dedupes_duplicate_xml_rows(
             (accession,),
         )
         obs = cur.fetchall()
-    # Exactly one row per layer, both carrying the FIRST duplicate's shares.
-    assert [r[0] for r in typed] == [Decimal("100")]
-    assert [r[0] for r in obs] == [Decimal("100")]
+    # Exactly one row per layer, both carrying the SUMMED shares (100 + 999).
+    assert [r[0] for r in typed] == [Decimal("1099")]
+    assert [r[0] for r in obs] == [Decimal("1099")]
 
 
 def test_13f_infotable_rewash_clears_stale_observations_for_dropped_instrument(

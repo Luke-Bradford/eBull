@@ -60,15 +60,14 @@ from app.services.cusip_resolver import (
 from app.services.institutional_holdings import thirteen_f_retention_cutoff
 from app.services.ownership_observations import period_end_within_bounds
 
-logger = logging.getLogger(__name__)
-
-
 # SEC FORM13F_metadata.json column description: "Starting on
 # January 3, 2023, market value is reported rounded to the nearest
 # dollar.  Previously, market value was reported in thousands."
-# Hoisted to module level so the cutover constant isn't re-built
-# on every INFOTABLE row. Codex pre-push NITPICK for #1054.
-_VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
+# Single source of truth lives in thirteen_f_normalise (#1567) so the
+# per-filing paths and this bulk path agree on the cutover date.
+from app.services.thirteen_f_normalise import VALUE_DOLLARS_CUTOVER as _VALUE_DOLLARS_CUTOVER
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -214,34 +213,34 @@ def _map_putcall(raw: str | None) -> Literal["EQUITY", "PUT", "CALL"]:
     return "EQUITY"
 
 
-def _map_voting_authority(row: dict[str, str]) -> str | None:
-    """Pick the highest-priority non-zero voting authority column.
+def _read_voting_components(row: dict[str, str]) -> tuple[Decimal, Decimal, Decimal]:
+    """Read the three raw voting-authority sub-amounts (SOLE / SHARED / NONE).
 
-    Dataset publishes three parallel columns (SOLE / SHARED / NONE);
-    the row's "primary" voting flavour is the first that's non-zero.
+    #1567 — the drain now SUMs these across a filer's multiple INFOTABLE
+    rows for one position, then derives the canonical ``voting_authority``
+    label from the summed components (SQL CASE in ``_INSERT_FROM_STG_SQL``,
+    mirroring :func:`dominant_voting_authority`). Staging the components
+    rather than the pre-derived label keeps the bulk path's derivation
+    identical to the per-filing helper.
 
-    Column-name resilience: the SEC dataset has historically used
-    both ``VOTING_AUTH_<KIND>`` and ``VOTING_AUTHORITY_<KIND>`` in
-    different publication runs; this helper accepts either spelling.
+    Column-name resilience: the SEC dataset has historically used both
+    ``VOTING_AUTH_<KIND>`` and ``VOTING_AUTHORITY_<KIND>`` in different
+    publication runs; this helper accepts either spelling. Missing/blank
+    columns read as 0 so the SUM stays well-defined.
     """
 
-    def _read(*candidates: str) -> Decimal | None:
+    def _read(*candidates: str) -> Decimal:
         for key in candidates:
             value = _parse_decimal(row.get(key))
             if value is not None:
                 return value
-        return None
+        return Decimal(0)
 
-    sole = _read("VOTING_AUTH_SOLE", "VOTING_AUTHORITY_SOLE")
-    shared = _read("VOTING_AUTH_SHARED", "VOTING_AUTHORITY_SHARED")
-    none_v = _read("VOTING_AUTH_NONE", "VOTING_AUTHORITY_NONE")
-    if sole and sole > 0:
-        return "SOLE"
-    if shared and shared > 0:
-        return "SHARED"
-    if none_v and none_v > 0:
-        return "NONE"
-    return None
+    return (
+        _read("VOTING_AUTH_SOLE", "VOTING_AUTHORITY_SOLE"),
+        _read("VOTING_AUTH_SHARED", "VOTING_AUTHORITY_SHARED"),
+        _read("VOTING_AUTH_NONE", "VOTING_AUTHORITY_NONE"),
+    )
 
 
 def _open_tsv(zf: zipfile.ZipFile, name: str) -> list[dict[str, str]]:
@@ -301,7 +300,9 @@ _STG_COPY_COLUMNS = (
     "ingest_run_id",
     "shares",
     "market_value_usd",
-    "voting_authority",
+    "voting_sole",
+    "voting_shared",
+    "voting_none",
     "exposure_kind",
 )
 
@@ -331,7 +332,9 @@ CREATE TEMP TABLE _stg_13f (
     ingest_run_id      UUID,
     shares             NUMERIC(24, 4),
     market_value_usd   NUMERIC(20, 2),
-    voting_authority   TEXT,
+    voting_sole        NUMERIC(24, 4),
+    voting_shared      NUMERIC(24, 4),
+    voting_none        NUMERIC(24, 4),
     exposure_kind      TEXT
 ) ON COMMIT DROP
 """
@@ -342,16 +345,30 @@ CREATE TEMP TABLE _stg_13f (
 # key + UPDATE SET clause copied verbatim from
 # ``ownership_observations.py:record_institution_observation``.
 #
-# DISTINCT ON dedupes the staging rows per conflict key BEFORE the
-# INSERT — without this, two staging rows that share a conflict tuple
-# (e.g. an archive containing an INFOTABLE row + its amendment under
-# the same accession) trigger PG's ``cardinality_violation: ON
-# CONFLICT DO UPDATE command cannot affect row a second time``. The
-# legacy per-row INSERT path serialised the writes so the second one
-# would have UPDATEd the first; the bulk path keeps that "last write
-# wins" semantic by ordering DISTINCT ON by ``ctid DESC`` (the
-# implicit physical row order — COPY appends so ctid grows
-# monotonically, picking the LAST staged row per group).
+# #1567 — GROUP BY + SUM (was DISTINCT ON ... ctid DESC keep-last). A
+# 13F-HR legitimately splits ONE (instrument, exposure) position across
+# multiple INFOTABLE rows by otherManager / discretion; the prior
+# keep-last collapsed them to one row, undercounting every
+# multi-sub-manager filer (Vanguard AAPL: 7 rows summing 1,426,283,914
+# recorded as the single 1,279,051,701 SOLE row, -10.3%). GROUP BY both
+# (a) sums the split rows into the correct total and (b) collapses
+# duplicate conflict tuples to ONE row before the INSERT, so PG's
+# ``cardinality_violation: ON CONFLICT DO UPDATE command cannot affect
+# row a second time`` cannot fire (the role DISTINCT ON used to play).
+# Amendments do NOT double-count: an amendment is a distinct
+# accession_number → a distinct source_document_id → a separate group.
+#
+# Voting: SUM the three raw sub-amounts then derive the canonical label
+# in a CASE that mirrors ``dominant_voting_authority``
+# (app/providers/implementations/sec_13f.py) — all-zero → NULL, SOLE
+# wins ties, then SHARED. The per-filing helper derives the same label
+# from the same summed components; ``tests/test_thirteen_f_normalise.py``
+# pins the parity. COALESCE guards nullable component sums.
+#
+# Constant-per-group columns (filer_name/type, source, source_accession,
+# source_field, source_url, filed_at, period_start, ingest_run_id) are
+# identical within a (filer, accession) group, so max() is a safe
+# deterministic pick.
 _INSERT_FROM_STG_SQL = """
 INSERT INTO ownership_institutions_observations (
     instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
@@ -359,19 +376,28 @@ INSERT INTO ownership_institutions_observations (
     filed_at, period_start, period_end, ingest_run_id,
     shares, market_value_usd, voting_authority, exposure_kind
 )
-SELECT DISTINCT ON (
+SELECT
+    instrument_id, filer_cik, max(filer_name), max(filer_type), ownership_nature,
+    max(source), source_document_id, max(source_accession), max(source_field), max(source_url),
+    max(filed_at), max(period_start), period_end,
+    -- ingest_run_id is constant across a single archive drain; PG has no
+    -- max(uuid), so pick the (identical) value via a text round-trip.
+    max(ingest_run_id::text)::uuid,
+    SUM(shares), SUM(market_value_usd),
+    CASE
+        WHEN COALESCE(SUM(voting_sole), 0) = 0
+         AND COALESCE(SUM(voting_shared), 0) = 0
+         AND COALESCE(SUM(voting_none), 0) = 0 THEN NULL
+        WHEN COALESCE(SUM(voting_sole), 0) >= COALESCE(SUM(voting_shared), 0)
+         AND COALESCE(SUM(voting_sole), 0) >= COALESCE(SUM(voting_none), 0) THEN 'SOLE'
+        WHEN COALESCE(SUM(voting_shared), 0) >= COALESCE(SUM(voting_none), 0) THEN 'SHARED'
+        ELSE 'NONE'
+    END,
+    exposure_kind
+FROM _stg_13f
+GROUP BY
     instrument_id, filer_cik, ownership_nature, period_end,
     source_document_id, exposure_kind
-)
-    instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
-    source, source_document_id, source_accession, source_field, source_url,
-    filed_at, period_start, period_end, ingest_run_id,
-    shares, market_value_usd, voting_authority, exposure_kind
-FROM _stg_13f
-ORDER BY
-    instrument_id, filer_cik, ownership_nature, period_end,
-    source_document_id, exposure_kind,
-    ctid DESC
 ON CONFLICT (
     instrument_id, filer_cik, ownership_nature, period_end,
     source_document_id, exposure_kind
@@ -410,7 +436,9 @@ def _build_copy_row(
     ingest_run_id: UUID,
     shares: Decimal | None,
     market_value_usd: Decimal | None,
-    voting_authority: str | None,
+    voting_sole: Decimal,
+    voting_shared: Decimal,
+    voting_none: Decimal,
     exposure_kind: str,
 ) -> tuple[Any, ...]:
     """Return one staged row in the column order _STG_COPY_COLUMNS expects.
@@ -436,7 +464,9 @@ def _build_copy_row(
         str(ingest_run_id),
         shares,
         market_value_usd,
-        voting_authority,
+        voting_sole,
+        voting_shared,
+        voting_none,
         exposure_kind,
     )
 
@@ -685,7 +715,7 @@ def ingest_13f_dataset_archive(
                 else:
                     market_value_usd = value_raw * Decimal("1000")
 
-                voting_authority = _map_voting_authority(row)
+                voting_sole, voting_shared, voting_none = _read_voting_components(row)
                 exposure_kind = _map_putcall(row.get("PUTCALL"))
 
                 accession_no_dashes = accession.replace("-", "")
@@ -717,7 +747,9 @@ def ingest_13f_dataset_archive(
                         ingest_run_id=ingest_run_id,
                         shares=shares,
                         market_value_usd=market_value_usd,
-                        voting_authority=voting_authority,
+                        voting_sole=voting_sole,
+                        voting_shared=voting_shared,
+                        voting_none=voting_none,
                         exposure_kind=exposure_kind,
                     )
                 )

@@ -47,9 +47,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only ET.ParseError caught; no untrusted parse.
-from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -81,6 +79,10 @@ from app.services.manifest_parsers._classify import (
 )
 from app.services.ownership_observations import refresh_institutions_current
 from app.services.raw_filings import store_raw
+from app.services.thirteen_f_normalise import (
+    merge_resolved_by_instrument,
+    normalise_13f_holdings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,20 +91,6 @@ _FAILED_RETRY_DELAY = timedelta(hours=1)
 # per row; the 13F path actually has two (primary_doc + infotable).
 # Compose them so a rewash that bumps either triggers a re-parse.
 _PARSER_VERSION_13F_HR = f"13f-hr-primary:{_PARSER_VERSION_13F_PRIMARY}+infotable:{_PARSER_VERSION_13F_INFOTABLE}"
-
-# 13F-HR Column 4 (VALUE) unit cutover. SEC EDGAR Release 22.4.1
-# switched VALUE from $thousands to whole $dollars effective
-# 2023-01-03 (see sec-edgar skill §7.1). The bulk dataset path
-# applies this at app/services/sec_13f_dataset_ingest.py:316-322;
-# the per-filing parser at app/providers/implementations/sec_13f.py
-# does NOT (it preserves the raw value), so the service layer must
-# branch on ``filed_at`` — the moment the filer reported — NOT on
-# ``period_of_report``. A 2022Q4 restatement filed in March 2023
-# was entered by the filer in whole dollars under the new regime
-# even though its period_end is pre-cutover; keying on filed_at
-# treats it correctly, while keying on period_of_report would
-# mis-scale by 1,000.
-_VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
 
 
 def _failed_outcome(error: str, raw_status: Any = None) -> Any:
@@ -461,16 +449,13 @@ def _parse_13f_hr(
     )
     inserted = 0
     skipped_no_cusip = 0
-    skipped_non_sh = 0
-
-    # VALUE cutover: pre-2023-01-03 filings report Column 4 in
-    # thousands. The bulk dataset path applies this; the per-filing
-    # parser preserves the raw value, so this adapter applies the
-    # transform before passing to ``_upsert_holding``. Skipped if
-    # filed_at unavailable (defensive — would only happen with a
-    # SEC-supplied filing missing both header and submissions-index
-    # timestamps, which the bulk path also fails closed on).
-    needs_thousands_scaling = filed_at is not None and filed_at.date() < _VALUE_DOLLARS_CUTOVER
+    # #1567/#1566 — PRN drops counted from the pre-normalise input for the
+    # ingest-log line; the shared normaliser performs the actual PRN +
+    # bad-quantity filter, the pre-2023 VALUE x1000 cutover, and the SUM
+    # aggregation of multi-row sub-manager positions (previously this path
+    # kept only the first row per (instrument, exposure), undercounting
+    # multi-sub-manager filers).
+    skipped_non_sh = sum(1 for h in holdings if (h.shares_or_principal_type or "").strip().upper() != "SH")
 
     try:
         with conn.transaction():
@@ -485,26 +470,9 @@ def _parse_13f_hr(
 
             filer_id = _upsert_filer(conn, info)
 
-            # Dedupe by (instrument_id, exposure) to match the DB unique
-            # key collapse — same pattern as the legacy ingester
-            # (institutional_holdings.py:1302).
-            resolved_by_key: dict[tuple[int, str], tuple[int, ThirteenFHolding]] = {}
-            for holding in holdings:
-                # Codex pre-push (#1133): drop PRN (bond principal)
-                # rows so they do not silently land as shares. The
-                # bulk dataset path filters at
-                # sec_13f_dataset_ingest.py:311; per-filing path
-                # historically did NOT, so this is a fix the manifest
-                # adapter inherits. SSHPRNAMTTYPE values are 'SH'
-                # (shares) or 'PRN' (principal-of-bonds, dollars).
-                if holding.shares_or_principal_type != "SH":
-                    skipped_non_sh += 1
-                    continue
-
-                # VALUE cutover transform (see _VALUE_DOLLARS_CUTOVER).
-                if needs_thousands_scaling:
-                    holding = replace(holding, value_usd=holding.value_usd * Decimal("1000"))
-
+            normalised = normalise_13f_holdings(holdings, filed_at=filed_at)
+            resolved: list[tuple[int, ThirteenFHolding]] = []
+            for holding in normalised:
                 instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
                 if instrument_id is None:
                     skipped_no_cusip += 1
@@ -515,6 +483,10 @@ def _parse_13f_hr(
                         accession_number=accession,
                     )
                     continue
+                resolved.append((instrument_id, holding))
+
+            resolved_holdings: list[tuple[int, ThirteenFHolding]] = merge_resolved_by_instrument(resolved)
+            for instrument_id, holding in resolved_holdings:
                 if _upsert_holding(
                     conn,
                     filer_id=filer_id,
@@ -525,10 +497,7 @@ def _parse_13f_hr(
                     holding=holding,
                 ):
                     inserted += 1
-                exposure_key = holding.put_call if holding.put_call in ("PUT", "CALL") else "EQUITY"
-                resolved_by_key.setdefault((instrument_id, exposure_key), (instrument_id, holding))
 
-            resolved_holdings: list[tuple[int, ThirteenFHolding]] = list(resolved_by_key.values())
             if resolved_holdings:
                 _record_13f_observations_for_filing(
                     conn,
