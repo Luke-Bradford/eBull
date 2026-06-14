@@ -71,8 +71,7 @@ def test_current_quarter_row_routes_to_leaf_not_default(
         cur.execute("SELECT COUNT(*) FROM instrument_risk_metrics_observations_default")
         default_count = cur.fetchone()[0]
         cur.execute(
-            "SELECT COUNT(*) FROM instrument_risk_metrics_observations "
-            "WHERE instrument_id = %s",
+            "SELECT COUNT(*) FROM instrument_risk_metrics_observations WHERE instrument_id = %s",
             (_IID,),
         )
         total = cur.fetchone()[0]
