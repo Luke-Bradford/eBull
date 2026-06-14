@@ -311,9 +311,12 @@ def test_window_rows_differ_in_db(ebull_test_conn: psycopg.Connection[tuple]) ->
     assert one_y["cagr"] is not None and full["cagr"] is not None
     assert one_y["cagr"] != full["cagr"]
     # n_returns / window_days evidence reflects the slice too.
-    assert int(one_y["n_returns"]) < int(full["n_returns"])
-    assert one_y["window_days"] is not None and full["window_days"] is not None
-    assert int(one_y["window_days"]) < int(full["window_days"])
+    oy_n, fl_n = one_y["n_returns"], full["n_returns"]
+    oy_wd, fl_wd = one_y["window_days"], full["window_days"]
+    assert isinstance(oy_n, int) and isinstance(fl_n, int)
+    assert isinstance(oy_wd, int) and isinstance(fl_wd, int)
+    assert oy_n < fl_n
+    assert oy_wd < fl_wd
 
 
 def test_fewer_than_two_valid_closes_no_row(ebull_test_conn: psycopg.Connection[tuple]) -> None:
