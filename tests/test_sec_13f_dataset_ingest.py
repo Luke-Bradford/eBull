@@ -15,11 +15,11 @@ from app.services.sec_13f_dataset_ingest import (
     _FIGI_RE,
     Form13FIngestResult,
     _map_putcall,
-    _map_voting_authority,
     _parse_decimal,
     _parse_filing_date,
     _parse_period_end,
     _persist_figi_external_identifiers,
+    _read_voting_components,
     ingest_13f_dataset_archive,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn
@@ -41,11 +41,21 @@ class TestPureHelpers:
         assert _map_putcall("Put") == "PUT"
         assert _map_putcall("CALL") == "CALL"
 
-    def test_map_voting_authority_priority_chain(self) -> None:
-        assert _map_voting_authority({"VOTING_AUTH_SOLE": "100", "VOTING_AUTH_SHARED": "0"}) == "SOLE"
-        assert _map_voting_authority({"VOTING_AUTH_SOLE": "0", "VOTING_AUTH_SHARED": "50"}) == "SHARED"
-        assert _map_voting_authority({"VOTING_AUTH_NONE": "10"}) == "NONE"
-        assert _map_voting_authority({}) is None
+    def test_read_voting_components_returns_raw_amounts(self) -> None:
+        # #1567 — the drain SUMs the raw sub-amounts then derives the label,
+        # so the helper now returns the three components (missing/blank → 0).
+        assert _read_voting_components({"VOTING_AUTH_SOLE": "100", "VOTING_AUTH_SHARED": "0"}) == (
+            Decimal(100),
+            Decimal(0),
+            Decimal(0),
+        )
+        assert _read_voting_components({"VOTING_AUTHORITY_SHARED": "50"}) == (
+            Decimal(0),
+            Decimal(50),
+            Decimal(0),
+        )
+        assert _read_voting_components({"VOTING_AUTH_NONE": "10"}) == (Decimal(0), Decimal(0), Decimal(10))
+        assert _read_voting_components({}) == (Decimal(0), Decimal(0), Decimal(0))
 
     def test_parse_decimal_handles_empty_strings(self) -> None:
         assert _parse_decimal(None) is None
@@ -211,6 +221,54 @@ class TestIngest13FDatasetArchive:
             assert voting == "SOLE"
             assert exposure == "EQUITY"
             assert period.isoformat() == "2025-09-30"
+
+    def test_multi_submanager_rows_summed_and_prn_dropped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        # #1567 — one AAPL position split across 3 sub-manager rows must SUM
+        # to a single observation (was keep-last). #1566 — the PRN row is
+        # bond principal, dropped (not summed into shares).
+        iid = _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        common = {"ACCESSION_NUMBER": "0001234567-25-000002", "CUSIP": "037833100", "PUTCALL": ""}
+        archive_bytes = _build_dataset_zip(
+            submissions=[{"ACCESSION_NUMBER": "0001234567-25-000002", "CIK": "1234567", "FILING_DATE": "2025-11-14"}],
+            coverpages=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000002",
+                    "FILINGMANAGER_NAME": "Split Fund LLC",
+                    "REPORTCALENDARORQUARTER": "2025-09-30",
+                }
+            ],
+            infotable=[
+                {**common, "VALUE": "10", "SSHPRNAMT": "100", "VOTING_AUTH_SOLE": "100"},
+                {**common, "VALUE": "25", "SSHPRNAMT": "250", "VOTING_AUTH_SHARED": "250"},
+                {**common, "VALUE": "1", "SSHPRNAMT": "3", "VOTING_AUTH_NONE": "3"},
+                {**common, "VALUE": "999", "SSHPRNAMT": "999", "SSHPRNAMTTYPE": "PRN"},
+            ],
+        )
+        archive_path = tmp_path / "form13f.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_13f_dataset_archive(conn=ebull_test_conn, archive_path=archive_path, ingest_run_id=uuid4())
+        ebull_test_conn.commit()
+
+        assert result.infotable_seen == 4
+        assert result.rows_skipped_bad_data == 1  # the PRN row
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT shares, market_value_usd, voting_authority "
+                "FROM ownership_institutions_observations WHERE instrument_id = %s",
+                (iid,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1, "sub-manager split rows must collapse to one summed observation"
+        shares, mv, voting = rows[0]
+        assert shares == Decimal("353.0000")  # 100 + 250 + 3 (PRN's 999 excluded)
+        assert mv == Decimal("36.00")  # 10 + 25 + 1
+        assert voting == "SHARED"  # summed sole=100 / shared=250 / none=3 → SHARED dominates
 
     def test_unresolved_cusip_skipped_not_written(
         self,

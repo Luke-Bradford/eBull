@@ -63,6 +63,10 @@ from app.services.ownership_observations import (
     refresh_institutions_current,
     resolve_filer_cik_or_raise,
 )
+from app.services.thirteen_f_normalise import (
+    merge_resolved_by_instrument,
+    normalise_13f_holdings,
+)
 
 # Parser-version tags written alongside the raw bodies. Re-wash
 # workflows compare against these constants and skip rows already
@@ -918,10 +922,10 @@ def _upsert_holding(
     filed_at: datetime,
     holding: ThirteenFHolding,
 ) -> bool:
-    """Idempotent per-row upsert. Returns True on insert, False on
-    re-ingest of the same (accession, instrument, is_put_call)
-    tuple — the partial UNIQUE INDEX from migration 090 backstops
-    re-runs.
+    """Idempotent per-row upsert. Returns True on any write (insert OR
+    corrective update) — ON CONFLICT DO UPDATE (#1567) restamps the
+    summed values on re-ingest, so rowcount is 1 in both cases. The
+    UNIQUE INDEX from migration 090 backstops re-runs.
 
     Voting-authority labelling: derive the dominant authority via
     :func:`dominant_voting_authority`. NULL maps when all three
@@ -929,17 +933,17 @@ def _upsert_holding(
     NULL).
     """
     voting = dominant_voting_authority(holding)
-    # ``ON CONFLICT DO NOTHING`` (no explicit conflict_target)
-    # matches any unique violation, including the partial
-    # expression-based UNIQUE INDEX from migration 090
-    # ``uq_holdings_accession_instrument_putcall`` on
-    # ``(accession_number, instrument_id, COALESCE(is_put_call, 'EQUITY'))``.
-    # An explicit inference clause cannot reference an expression
-    # column without repeating the COALESCE expression verbatim;
-    # using DO NOTHING with no target is the cleanest safe path
-    # here because the synthetic PK on holding_id never collides
-    # (BIGSERIAL) so any conflict that fires is the expression
-    # index by construction.
+    # #1567 — ON CONFLICT DO UPDATE (was DO NOTHING). Re-ingest of an
+    # accession that already holds the pre-fix keep-first row must CORRECT
+    # the typed table to the summed figure, not leave the stale row. The
+    # explicit conflict target repeats the migration 090 expression index
+    # ``uq_holdings_accession_instrument_putcall`` verbatim
+    # ``(accession_number, instrument_id, COALESCE(is_put_call, 'EQUITY'))``
+    # (a non-partial unique index, so the inference is valid). Idempotent:
+    # EXCLUDED carries the same summed values on every re-run — UPDATE is a
+    # no-op write, never additive. The shared normaliser guarantees one row
+    # per (instrument, exposure) so the only conflict that fires is a true
+    # re-ingest of the same accession.
     cur = conn.execute(
         """
         INSERT INTO institutional_holdings (
@@ -949,7 +953,14 @@ def _upsert_holding(
             %(filer_id)s, %(instrument_id)s, %(accession_number)s, %(period_of_report)s,
             %(shares)s, %(market_value_usd)s, %(voting_authority)s, %(is_put_call)s, %(filed_at)s
         )
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (accession_number, instrument_id, (COALESCE(is_put_call, 'EQUITY')))
+        DO UPDATE SET
+            filer_id = EXCLUDED.filer_id,
+            period_of_report = EXCLUDED.period_of_report,
+            shares = EXCLUDED.shares,
+            market_value_usd = EXCLUDED.market_value_usd,
+            voting_authority = EXCLUDED.voting_authority,
+            filed_at = EXCLUDED.filed_at
         """,
         {
             "filer_id": filer_id,
@@ -1587,14 +1598,16 @@ def _ingest_single_accession(
     # across the institutional_holdings mutation, not the network fetches.
     acquire_13f_accession_write_lock(conn, ref.accession_number)
 
-    # Codex review (#889): dedupe by (instrument_id, exposure) to match
-    # the DB unique-key collapse behavior. ``_upsert_holding`` does
-    # ON CONFLICT DO NOTHING on (accession, instrument, COALESCE(is_put_call,
-    # 'EQUITY')); duplicate XML rows after the first are silently dropped
-    # at the DB. Mirror that here so observations record only the first
-    # parsed row per (instrument, exposure) — the row that actually lives
-    # in the typed table.
-    resolved_by_key: dict[tuple[int, str], tuple[int, ThirteenFHolding]] = {}
+    # #1567/#1566 — normalise BEFORE resolution/upsert via the shared
+    # helper: drop PRN (bond-principal) + bad-quantity rows, scale
+    # pre-2023 VALUE x1000, and SUM multi-row sub-manager positions by
+    # (cusip, exposure). Previously this path kept only the first row per
+    # (instrument, exposure) (#889), undercounting every multi-sub-manager
+    # filer by the dropped rows, and applied neither the PRN filter nor
+    # the VALUE cutover (#1566). The post-resolution merge folds the rare
+    # case of two CUSIPs resolving to the same instrument.
+    holdings = normalise_13f_holdings(holdings, filed_at=filed_at)
+    resolved: list[tuple[int, ThirteenFHolding]] = []
     for holding in holdings:
         instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
         if instrument_id is None:
@@ -1612,6 +1625,14 @@ def _ingest_single_accession(
                 accession_number=ref.accession_number,
             )
             continue
+        resolved.append((instrument_id, holding))
+
+    resolved_holdings: list[tuple[int, ThirteenFHolding]] = merge_resolved_by_instrument(resolved)
+    for instrument_id, holding in resolved_holdings:
+        # ``_upsert_holding`` is ON CONFLICT DO UPDATE — re-ingest of an
+        # accession that already holds keep-first rows now corrects the
+        # typed table to the summed figure (rowcount counts the update, so
+        # ``inserted`` stays honest).
         if _upsert_holding(
             conn,
             filer_id=filer_id,
@@ -1622,17 +1643,6 @@ def _ingest_single_accession(
             holding=holding,
         ):
             inserted += 1
-        # Dedupe key matches the DB unique key:
-        # (instrument_id, COALESCE(is_put_call, 'EQUITY')).
-        # Bot review: the ``instrument_id is None`` branch above always
-        # ``continue``s, so by this point instrument_id is non-None.
-        # Assert for static-analysis clarity + belt-and-braces against
-        # a future control-flow refactor that drops the continue.
-        assert instrument_id is not None  # noqa: S101
-        exposure_key = holding.put_call if holding.put_call in ("PUT", "CALL") else "EQUITY"
-        resolved_by_key.setdefault((instrument_id, exposure_key), (instrument_id, holding))
-
-    resolved_holdings: list[tuple[int, ThirteenFHolding]] = list(resolved_by_key.values())
 
     # Write-through observations + refresh _current (#889 / spec
     # §"Eliminate periodic re-scan jobs"). Replaces the legacy nightly
