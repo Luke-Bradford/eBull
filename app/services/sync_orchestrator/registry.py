@@ -21,6 +21,7 @@ from app.services.sync_orchestrator.adapters import (
     refresh_fx_rates,
     refresh_monthly_reports,
     refresh_portfolio_sync,
+    refresh_risk_metrics,
     refresh_scoring_and_recommendations,
     refresh_universe,
     refresh_weekly_reports,
@@ -37,6 +38,7 @@ from app.services.sync_orchestrator.freshness import (
     monthly_reports_is_fresh,
     portfolio_sync_is_fresh,
     recommendations_is_fresh,
+    risk_metrics_is_fresh,
     scoring_is_fresh,
     universe_is_fresh,
     weekly_reports_is_fresh,
@@ -93,6 +95,10 @@ class DataLayer:
 # tests/test_sync_orchestrator_credential_gate.py.
 INIT_CHECKS: dict[str, str] = {
     "universe": "SELECT EXISTS (SELECT 1 FROM instruments WHERE is_tradable = true)",
+    # risk_metrics declares ``requires_layer_initialized=("candles",)`` — the
+    # pre-flight gate raises if a named dep has no INIT_CHECKS entry, so the
+    # candles initialization predicate must exist (#591 / Codex ckpt-1 HIGH).
+    "candles": "SELECT EXISTS (SELECT 1 FROM price_daily)",
 }
 
 
@@ -196,6 +202,23 @@ LAYERS: dict[str, DataLayer] = {
         dependencies=("universe",),
         plain_language_sla="Re-seeded nightly.",
     ),
+    "risk_metrics": DataLayer(
+        name="risk_metrics",
+        display_name="Risk Metrics",
+        # Tier 2 — one below candles (tier 1), which it derives from.
+        tier=2,
+        cadence=Cadence(interval=timedelta(days=7)),
+        is_fresh=risk_metrics_is_fresh,
+        refresh=refresh_risk_metrics,
+        dependencies=("candles",),
+        # Layer-initialization gate: candles must have at least one
+        # price_daily row before risk metrics can compute. Stricter than
+        # the per-tick ``dependencies`` so a fresh install doesn't compute
+        # on an empty price table. INIT_CHECKS["candles"] backs this.
+        requires_layer_initialized=("candles",),
+        is_blocking=False,
+        plain_language_sla="Recomputed weekly from price history.",
+    ),
     "weekly_reports": DataLayer(
         name="weekly_reports",
         display_name="Weekly Performance Report",
@@ -240,6 +263,7 @@ JOB_TO_LAYERS: dict[str, tuple[str, ...]] = {
     "weekly_report": ("weekly_reports",),
     "monthly_report": ("monthly_reports",),
     "fx_rates_refresh": ("fx_rates",),
+    "risk_metrics_refresh": ("risk_metrics",),
     # Outside-DAG (6 entries, empty tuples):
     "execute_approved_orders": (),
     "fundamentals_sync": (),

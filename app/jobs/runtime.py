@@ -103,6 +103,7 @@ from app.workers.scheduler import (
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_RETRY_SWEEPER,
+    JOB_RISK_METRICS_REFRESH,
     JOB_SEC_8K_EVENTS_INGEST,
     JOB_SEC_13F_FILER_DIRECTORY_SYNC,
     JOB_SEC_13F_QUARTERLY_SWEEP,
@@ -154,6 +155,7 @@ from app.workers.scheduler import (
     portfolio_eod_snapshot_job,
     raw_data_retention_sweep,
     retry_deferred_recommendations_job,
+    risk_metrics_refresh,
     sec_8k_events_ingest,
     sec_13f_filer_directory_sync,
     sec_13f_quarterly_sweep,
@@ -240,6 +242,12 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_MONITOR_POSITIONS: _adapt_zero_arg(monitor_positions_job),
     JOB_PORTFOLIO_EOD_SNAPSHOT: _adapt_zero_arg(portfolio_eod_snapshot_job),
     JOB_FX_HISTORY_BACKFILL: _adapt_zero_arg(fx_history_backfill_job),
+    # #591 PR-B — risk-metrics recompute. Orchestrator-driven (DAG layer
+    # "risk_metrics") + manual-trigger-only; NOT in SCHEDULED_JOBS (the
+    # layer cadence/freshness gate the DAG walk — a scheduled row would
+    # double-fire). Source-lock "risk_metrics" in MANUAL_TRIGGER_JOB_SOURCES;
+    # empty params in MANUAL_TRIGGER_JOB_METADATA.
+    JOB_RISK_METRICS_REFRESH: _adapt_zero_arg(risk_metrics_refresh),
     JOB_ATTRIBUTION_SUMMARY: _adapt_zero_arg(attribution_summary_job),
     JOB_SEED_COST_MODELS: _adapt_zero_arg(seed_cost_models),
     JOB_WEEKLY_REPORT: _adapt_zero_arg(weekly_report),

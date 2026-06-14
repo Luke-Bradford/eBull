@@ -230,6 +230,12 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # supported display currencies). Empty tuple completes the manual-only
     # triangle (source + metadata + invoker).
     "fx_history_backfill": (),
+    # risk_metrics_refresh — #591 PR-B weekly risk-metric recompute. No
+    # operator-tunable params (windows + benchmark set are fixed by the
+    # service). Empty tuple completes the manual-only triangle (source +
+    # metadata + invoker) so the manual API validator accepts a zero-param
+    # trigger.
+    "risk_metrics_refresh": (),
     # filing_events_skip_tier_cleanup — one-shot retroactive delete
     # (#1013). No operator-tunable params: ``batch_size`` is an
     # implementation knob (§6.5.7 item 2), kept internal. The explicit

@@ -265,6 +265,13 @@ def cost_models_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     return _fresh_by_audit(conn, "seed_cost_models", timedelta(hours=24))
 
 
+def risk_metrics_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    # Weekly cadence (#591): risk metrics are recomputed from price
+    # history, which only meaningfully shifts on a weekly horizon. A
+    # 7-day audit window matches the layer cadence.
+    return _fresh_by_audit(conn, "risk_metrics_refresh", timedelta(days=7))
+
+
 def weekly_reports_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     return _fresh_by_audit(conn, "weekly_report", timedelta(days=7))
 

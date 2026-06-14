@@ -81,6 +81,7 @@ Lane = Literal[
     "db_cusip",
     "db_ownership_obs",
     "db_raw_sweep",
+    "risk_metrics",
     "bootstrap",
     "finra",
     "openfigi",
@@ -249,6 +250,17 @@ when one overruns). Scheduled-only, so NOT added to the
   schedules are staggered (backfill 03:00, sweep 03:30) so they never
   co-fire in practice.
 
+* ``risk_metrics`` — ``risk_metrics_refresh`` (#591 PR-B) only. The
+  orchestrator-driven weekly risk-metric recompute. DB-only producer (no
+  external host), so the lane is purely a write-overlap bucket, not a
+  rate limiter. Its own lane keeps it write-disjoint: it is the sole
+  writer of the risk-metrics store and reads ``price_daily`` MVCC-safe
+  against any concurrent candle writer. Reachable via the orchestrator
+  adapter inner-JobLock AND the operator manual-trigger path. NOT in
+  SCHEDULED_JOBS (the DAG layer's cadence/freshness gate the run; a
+  scheduled row would double-fire), so NOT added to the
+  ``bootstrap_stages.lane`` CHECK.
+
 The final lane is bootstrap-only:
 
 * ``bootstrap`` — ``bootstrap_orchestrator`` (G14). Deliberately
@@ -395,6 +407,14 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # idempotent upsert; invoker in app/jobs/runtime.py::_INVOKERS, empty
     # params in MANUAL_TRIGGER_JOB_METADATA.
     "fx_history_backfill": "db_eod_snapshot",
+    # risk_metrics_refresh — #591 PR-B weekly risk-metric recompute.
+    # Own write-disjoint lane (sole writer of the risk-metrics store; reads
+    # price_daily MVCC-safe). Orchestrator-driven (DAG layer "risk_metrics")
+    # + manual-trigger-only; NOT in SCHEDULED_JOBS (the layer cadence gates
+    # the DAG walk — a scheduled row would double-fire). Companion empty
+    # params in MANUAL_TRIGGER_JOB_METADATA; invoker in
+    # app/jobs/runtime.py::_INVOKERS.
+    "risk_metrics_refresh": "risk_metrics",
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.

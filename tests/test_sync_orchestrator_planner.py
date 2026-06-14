@@ -93,13 +93,16 @@ class TestBuildExecutionPlanFull:
         _make_conn_with_freshness(set(LAYERS.keys()))
         plan = build_execution_plan(MagicMock(), SyncScope.full())
         assert plan.layers_to_refresh == ()
-        assert len(plan.layers_skipped) == 10
+        # 11 in-DAG layers (risk_metrics added #591 PR-B).
+        assert len(plan.layers_skipped) == 11
 
     def test_all_stale_yields_every_in_dag_layer(self) -> None:
         _make_conn_with_freshness(set())
         plan = build_execution_plan(MagicMock(), SyncScope.full())
-        # 11 in-DAG jobs → 11 LayerPlan entries.
-        assert len(plan.layers_to_refresh) == 9
+        # 11 in-DAG layers, but scoring + recommendations collapse into one
+        # producing job (morning_candidate_review) → 10 LayerPlan entries.
+        # risk_metrics added its own job in #591 PR-B (9 → 10).
+        assert len(plan.layers_to_refresh) == 10
 
     def test_topological_order_roots_first(self) -> None:
         _make_conn_with_freshness(set())

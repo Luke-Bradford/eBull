@@ -315,6 +315,11 @@ JOB_PORTFOLIO_EOD_SNAPSHOT = "portfolio_eod_snapshot"
 # historical FX backfill into fx_rates_daily. Not in SCHEDULED_JOBS — the
 # eod-snapshot job self-backfills on first run; this is the operator re-run.
 JOB_FX_HISTORY_BACKFILL = "fx_history_backfill"
+# Risk metrics (#591 PR-B). Orchestrator-driven (DAG layer "risk_metrics",
+# dependency on candles) + manual-trigger-only — deliberately NOT in
+# SCHEDULED_JOBS (the layer's own weekly cadence + freshness gate the DAG
+# walk; a ScheduledJob row would double-fire alongside the orchestrator).
+JOB_RISK_METRICS_REFRESH = "risk_metrics_refresh"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 # JOB_WEEKLY_COVERAGE_AUDIT + JOB_WEEKLY_COVERAGE_REVIEW retired in Chunk 2 of
@@ -4042,6 +4047,24 @@ def fx_history_backfill_job() -> None:
             written = ensure_fx_history(conn, until=today)
             conn.commit()
         tracker.row_count = written
+
+
+def risk_metrics_refresh() -> None:
+    """Recompute + persist per-instrument risk metrics from price history (#591).
+
+    DB-only producer (no external I/O): reads ``price_daily`` (+ benchmark
+    candles), computes the windowed risk-metric set (CAGR, vol, drawdown,
+    Calmar, beta, …), and write-throughs to the risk-metrics store.
+    Orchestrator-driven via the ``risk_metrics`` DAG layer (weekly cadence,
+    depends on ``candles``) and operator-triggerable via the
+    ``risk_metrics`` manual lane. Mirrors ``portfolio_eod_snapshot_job``'s
+    ``_tracked_job`` + own-connection + ``tracker.row_count`` shape.
+    """
+    from app.services.risk_metrics import compute_and_store_risk_metrics
+
+    with _tracked_job(JOB_RISK_METRICS_REFRESH) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            tracker.row_count = compute_and_store_risk_metrics(conn)
 
 
 def exchanges_metadata_refresh() -> None:

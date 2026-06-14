@@ -22,7 +22,8 @@
 | AUM | Risk + portfolio | positions × quotes × cash_ledger | `/portfolio` |
 | Available for deployment | Risk + portfolio | `budget_config` + computed | `/budget` |
 | Backfill / SEC manifest pending count | Pipeline | `sec_filing_manifest`, `data_freshness_index` | `/system/jobs`, `/system/bootstrap/status` |
-| Beta vs SPY | Market data | (deferred) | — |
+| Beta vs SPY | Risk metrics | `instrument_risk_metrics_current.beta` | `/instruments/{symbol}/risk-metrics` |
+| Risk drill (vol / drawdown / Calmar / VaR / trailing-vs-SPY) | Risk metrics | `instrument_risk_metrics_current` (`risk_v1`) | `/instruments/{symbol}/risk-metrics` |
 | Blockholder ownership % | Ownership | `ownership_blockholders_current` | `/instruments/{symbol}/ownership-rollup` |
 | Bollinger bands (20, 2σ) | Market data | `price_daily.bb_upper / bb_lower` | (TA scoring) |
 | Bootstrap stage final row count | Pipeline | `bootstrap_stages.rows_processed` | `/processes/bootstrap/overview` |
@@ -311,8 +312,21 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Today: `price_daily.volume` per day; live-tick volume not aggregated.
 - Planned: rolling intraday volume against running average.
 
-### VWAP / Realised volatility / Beta vs SPY
-- All **deferred**. eToro candles do not include intraday VWAP. ATR-14 stored at `price_daily.atr_14` (sql/025) consumed by scoring as proxy.
+### VWAP
+- **Deferred.** eToro candles do not include intraday VWAP.
+
+### Risk metrics — risk drill (#591, `risk_v1`)
+- **Definition:** versioned (`metric_version="risk_v1"`), windowed (`window_key ∈ 1y/3y/full`), quality-flagged risk scalars per instrument: CAGR + excess-vs-SPY, max/current drawdown (+ peak/trough dates), annualized realized vol, OLS beta vs SPY (+ r2, n_obs), return distribution (skew, excess-kurtosis, signed empirical var_5, worst/best day), Calmar, trailing 1m/3m/6m/1y (+ excess vs SPY).
+- **Formula / conventions:** see `.claude/skills/market-data/SKILL.md` §"Risk-metrics conventions" (simple-return valid-close chain; vol ×√252; calendar-time CAGR; date-aligned beta; type-7 signed var_5; float island for moments; window slicing).
+- **Source data:** `price_daily.close` chain (instrument + SPY benchmark, ingested by PR-A `daily_candle_refresh`).
+- **Transform:** `app/services/risk_metrics.py::compute_and_store_risk_metrics` (pure compute + persist). Each metric carries a per-metric `*_status` ∈ {ok, insufficient_history, partial_window, benchmark_missing, benchmark_insufficient_history, invalid_price_chain, stale}.
+- **Storage (two-layer):** `instrument_risk_metrics_observations` (append-only, partitioned quarterly by `as_of_date`, PK incl `computed_at` — the audit log; `price_daily` is mutable via ON CONFLICT DO UPDATE so past metrics are NOT reconstructable, hence the immutable observation row) + `instrument_risk_metrics_current` (latest write-through, fast reads) — `sql/198`.
+- **Service / job:** `risk_metrics_refresh` (DB-only) — orchestrator DAG layer `risk_metrics` (`dependencies=("candles",)`, weekly cadence, `is_blocking=False`); also manually triggerable (`risk_metrics` JobLock lane). NOT a standalone cron.
+- **Endpoint:** `GET /instruments/{symbol}/risk-metrics` — persisted scalars + per-metric statuses + on-read display series (drawdown curve, rolling-vol line, return histogram, beta scatter) cut at the persisted `as_of_date`.
+- **Chart:** `RiskPage.tsx` (PR-C, planned).
+- **Cadence:** weekly (annualized ≥1y-window stats move negligibly day-to-day; `as_of_date` surfaced so staleness is honest).
+- **Caveats:** v1 is **price return, not total return** (TR follow-up). **Calmar, NOT Sharpe** (no risk-free-rate series). Realized vol here is **distinct** from the scorer's TA "volatility-regime" term (Bollinger/ATR) — risk context, NOT a v1.1 score input. Sector-relative views cut (no GICS/SPDR crosswalk — follow-up). Thesis/ranking consumption are filed follow-ups (#1632/#1633).
+- **Validation:** cross-source one beta or vol vs a public source (e.g. AAPL ~1y vol/beta); confirm `/instruments/AAPL/risk-metrics` renders sane scalars + statuses after a dev `risk_metrics_refresh`.
 
 ### Total return windows
 - 1d / 1w / 1m: dashboard via `/portfolio/rolling-pnl` ([app/api/portfolio.py:710](../../../app/api/portfolio.py#L710)). Anchor uses each position's `latest_close` `price_date` — never wall-clock — so stale candle doesn't collapse the bucket (Codex #387 phase 2 finding).
