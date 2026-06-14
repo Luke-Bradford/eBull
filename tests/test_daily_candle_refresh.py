@@ -222,6 +222,42 @@ class TestDailyCandleRefreshT3Bootstrap:
         assert 900 in ids
         assert ids.index(3000) < ids.index(900)
 
+    def test_benchmark_also_held_is_deduped(self) -> None:
+        """SPY in both held and benchmark must appear EXACTLY ONCE in the refresh list."""
+        held = [(3000, "SPY")]
+        benchmark = [(3000, "SPY")]
+        t3 = [(900, "AAA")]
+        mock_conn = _make_mock_conn([], t3, held_rows=held, benchmark_rows=benchmark)
+        mock_provider = MagicMock()
+        mock_provider.__enter__ = MagicMock(return_value=mock_provider)
+        mock_provider.__exit__ = MagicMock(return_value=False)
+        mock_tracker = MagicMock()
+        mock_tracker.__enter__ = MagicMock(return_value=mock_tracker)
+        mock_tracker.__exit__ = MagicMock(return_value=False)
+        mock_summary = MagicMock()
+        mock_summary.candle_rows_upserted = 1
+        mock_summary.instruments_refreshed = 2
+        mock_summary.features_computed = 0
+        mock_summary.quotes_updated = 0
+        mock_summary.quotes_skipped = 0
+        mock_summary.spread_flags_set = 0
+        mock_summary.candles_failed = 0
+        mock_summary.candles_skipped = 0
+
+        with (
+            patch(_PATCHES["creds"], return_value=("key", "ukey")),
+            patch(_PATCHES["tracked"], return_value=mock_tracker),
+            patch(_PATCHES["provider_cls"], return_value=mock_provider),
+            patch(_PATCHES["connect"], return_value=mock_conn),
+            patch(_PATCHES["refresh"], return_value=mock_summary) as mock_refresh,
+        ):
+            daily_candle_refresh()
+
+        instruments = mock_refresh.call_args[0][2]
+        ids = [iid for iid, _ in instruments]
+        assert ids.count(3000) == 1
+        assert 900 in ids
+
     def test_t3_select_excludes_benchmark_symbols(self) -> None:
         """_T3_BOOTSTRAP_SELECT must reference %(benchmark_symbols)s."""
         from app.workers.scheduler import _T3_BOOTSTRAP_SELECT
