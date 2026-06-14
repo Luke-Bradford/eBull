@@ -65,8 +65,15 @@ from app.services.ownership_observations import (
     record_blockholder_observation,
     refresh_blockholders_current,
 )
+from app.services.sec_identity import siblings_for_issuer_cik
 
-_PARSER_VERSION_13DG = "13dg-primary-v1"
+# v2 (#1628): issuer CUSIP is now extracted from the unified mandate
+# schema (``<issuerCusips>/<issuerCusipNumber>``) — edgartools 5.30.2 +
+# the legacy extractors read the stale flat ``<issuerCUSIP>`` and
+# returned an empty CUSIP, so CUSIP-only resolution never resolved and
+# blockholders never populated. The bump flips sec_13d/sec_13g manifest
+# rows back to ``pending`` so they re-drain through the fixed extractor.
+_PARSER_VERSION_13DG = "13dg-primary-v2"
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +455,59 @@ def _resolve_cusip_to_instrument_id(
     return int(row[0]) if row is not None else None
 
 
+def _resolve_issuer_to_instrument_id(
+    conn: psycopg.Connection[tuple],
+    *,
+    cusip: str | None,
+    cik: str | None,
+) -> int | None:
+    """Resolve a 13D/G subject company to an instrument_id (#1628).
+
+    CUSIP is the security-precise key — it disambiguates share-class
+    siblings (GOOG/GOOGL share an issuer CIK but not a CUSIP; settled
+    "CIK = entity, CUSIP = security" #1102). CIK is a single-class-only
+    fallback for the coverage gap (we hold more ``(sec, cik)`` mappings
+    than ``(sec, cusip)`` ones). Order:
+
+      1. CUSIP -> ``external_identifiers`` (provider ``sec`` | ``openfigi``,
+         ``sec`` canonical first via the CASE-ordered tiebreak). Precise;
+         safe for multi-class issuers.
+      2. else, if CIK maps to EXACTLY ONE instrument -> that instrument
+         (single-class issuer — safe + broader coverage). A multi-class
+         CIK (or zero siblings, or a malformed CIK) with an unresolved
+         CUSIP stays ``None``: we never guess the share class and never
+         fan out (a 5%+ holder owns ONE class). The caller still writes
+         the ``blockholder_filings`` audit row with ``instrument_id``
+         NULL (status ``partial``).
+    """
+    if cusip:
+        cur = conn.execute(
+            """
+            SELECT instrument_id
+            FROM external_identifiers
+            WHERE provider IN ('sec', 'openfigi')
+              AND identifier_type = 'cusip'
+              AND identifier_value = %(cusip)s
+            ORDER BY CASE provider WHEN 'sec' THEN 0 ELSE 1 END,
+                     is_primary DESC,
+                     external_identifier_id ASC
+            LIMIT 1
+            """,
+            {"cusip": cusip.strip().upper()},
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return int(row[0])
+    if cik:
+        try:
+            siblings = siblings_for_issuer_cik(conn, cik)
+        except ValueError:
+            return None  # malformed CIK — leave unresolved (audit row still written)
+        if len(siblings) == 1:
+            return siblings[0]
+    return None
+
+
 def _upsert_filer(
     conn: psycopg.Connection[tuple],
     *,
@@ -665,7 +725,7 @@ def _ingest_single_accession(
             submission_type=None,
         )
 
-    instrument_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
+    instrument_id = _resolve_issuer_to_instrument_id(conn, cusip=filing.issuer_cusip, cik=filing.issuer_cik)
     skipped_no_cusip = 0 if instrument_id is not None else len(filing.reporting_persons)
 
     # Resolve the *filer's* canonical name. ``filing.issuer_name`` is

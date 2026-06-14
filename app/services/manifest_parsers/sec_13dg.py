@@ -61,7 +61,7 @@ from app.services.blockholders import (
     _archive_file_url,
     _record_13dg_observation_for_filing,
     _record_ingest_attempt,
-    _resolve_cusip_to_instrument_id,
+    _resolve_issuer_to_instrument_id,
     _upsert_filer,
     _upsert_filing_row,
     blockholders_within_retention,
@@ -264,6 +264,7 @@ def _parse_13dg(
             source=row.source,
             manifest_form=row.form,
             manifest_filer_cik=filer_cik,
+            raw_xml=primary_xml,
         )
     except Exception as exc:  # noqa: BLE001 — broad catch + audit-log write
         # Tag the error string by exception class so operators reading
@@ -317,23 +318,22 @@ def _parse_13dg(
     inserted = 0
     try:
         with conn.transaction():
-            # PR11 v8 empirical pivot 2026-05-21: CUSIP-only resolution.
-            # The earlier 5-case CUSIP-vs-hint cross-validation branch
-            # depended on the ``sec_13dg_discovery_issuer_hint`` side
-            # table seeded by the universe-issuer-CIK discovery layer.
-            # Operator smoke against AAPL/GME/MSFT/JPM/HD revealed that
-            # ``efts.sec.gov/LATEST/search-index`` post-2024-12-18 does
-            # NOT index SC 13D/G by SUBJECT CIK, only by FILER CIK —
-            # the hint table would never get populated by the discovery
-            # path, so the cross-validation branches collapse to CASE E
-            # (legacy daily-index path; no hints, CUSIP-only). The hint
-            # table + discovery module + 5-case branch are therefore
-            # all retired (sql/162 drops the table). The legacy daily-
-            # index path remains the discovery mechanism and already
-            # ships 575k SC 13D/G manifest rows in dev DB.
-            instrument_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
+            # Resolve the subject company to an instrument (#1628). CUSIP
+            # is the security-precise key (disambiguates share-class
+            # siblings; settled "CIK = entity, CUSIP = security" #1102),
+            # with a single-class-only CIK fallback for the coverage gap.
+            # Pre-#1628 this was CUSIP-only AND edgartools returned an
+            # empty CUSIP for every modern filing (stale <issuerCUSIP>
+            # tag) → 0 resolutions → blockholders never populated; the
+            # adapter now backfills the CUSIP from the unified mandate
+            # schema. (Discovery stays the legacy daily-index path —
+            # efts.sec.gov does not index SC 13D/G by subject CIK; PR11
+            # v8 2026-05-21.)
+            instrument_id = _resolve_issuer_to_instrument_id(conn, cusip=filing.issuer_cusip, cik=filing.issuer_cik)
             log_error: str | None = (
-                None if instrument_id is not None else f"cusip_unresolved (cusip={filing.issuer_cusip!r})"
+                None
+                if instrument_id is not None
+                else f"issuer_unresolved (cusip={filing.issuer_cusip!r} cik={filing.issuer_cik!r})"
             )
 
             skipped_no_cusip = 0 if instrument_id is not None else len(filing.reporting_persons)
