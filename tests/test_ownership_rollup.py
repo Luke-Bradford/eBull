@@ -1133,6 +1133,42 @@ class TestCoverageBanner:
         for cov in rollup.coverage.categories.values():
             assert cov.state == "unknown_universe"
 
+    def test_state_no_data_when_denominator_stale(self, _setup: psycopg.Connection[tuple]) -> None:
+        """A shares-outstanding row that EXISTS but is many years stale (the
+        #1581 dual-class dimension-only trap — BRK.B's newest un-dimensioned
+        count is 2011) suppresses to ``no_data`` with an honest banner rather
+        than computing nonsense percentages, EVEN when holder slices are
+        present. The stale ``as_of`` is retained as the FE discriminator."""
+        conn = _setup
+        _seed_outstanding(
+            conn,
+            instrument_id=789_030,
+            shares="941481",
+            period_end=date(2011, 4, 29),
+        )
+        # A holder that WOULD render a slice if the denominator were usable —
+        # proves the guard fires before bucketing, not just on empty cohorts.
+        _seed_form4(
+            conn,
+            accession="0001234500-25-000130",
+            instrument_id=789_030,
+            filer_cik="0007777010",
+            filer_name="Stale Holder",
+            txn_date=date(2026, 1, 1),
+            post_transaction_shares="1000000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="BANNER", instrument_id=789_030)
+        assert rollup.banner.state == "no_data"
+        assert rollup.banner.variant == "error"
+        assert rollup.shares_outstanding is None
+        # as_of retained (absent nulls it) so the FE can tell stale from absent.
+        assert rollup.shares_outstanding_as_of == date(2011, 4, 29)
+        assert "29 Apr 2011" in rollup.banner.body
+        assert "too stale" in rollup.banner.body
+        assert rollup.slices == ()
+
 
 # ---------------------------------------------------------------------------
 # Snapshot isolation
