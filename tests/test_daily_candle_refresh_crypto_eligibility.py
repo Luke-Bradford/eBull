@@ -22,12 +22,12 @@ from __future__ import annotations
 import psycopg
 import pytest
 
-from app.workers.scheduler import _T3_BOOTSTRAP_BATCH_SIZE, _T3_BOOTSTRAP_SELECT
+from app.workers.scheduler import _T3_BOOTSTRAP_BATCH_SIZE, _T3_BOOTSTRAP_SELECT, BENCHMARK_SYMBOLS
 
 pytestmark = pytest.mark.integration
 
 
-_QUERY_PARAMS = {"limit": _T3_BOOTSTRAP_BATCH_SIZE}
+_QUERY_PARAMS = {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": []}
 
 
 def _seed_exchange(
@@ -227,4 +227,61 @@ def test_crypto_with_existing_candles_excluded(
             ebull_test_conn,
             exchange_ids=["test_crypto_done"],
             instrument_ids=[950400],
+        )
+
+
+def test_benchmark_excluded_before_limit(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Benchmarks are excluded from the T3 bootstrap BEFORE the LIMIT
+    is applied. A benchmark symbol that would otherwise sort first
+    (alphabetically) must NOT consume a T3 bootstrap slot, leaving
+    room for legitimate non-benchmark candidates.
+
+    Concretely: insert SPY (a BENCHMARK_SYMBOLS member) and a
+    non-benchmark crypto instrument, run the query with limit=1 and
+    benchmark_symbols=["SPY"], and assert the returned row is the
+    non-benchmark candidate, not SPY.
+    """
+    # SPY is a real BENCHMARK_SYMBOLS member; confirm the assumption
+    # holds even if BENCHMARK_SYMBOLS changes — skip rather than fail.
+    if "SPY" not in BENCHMARK_SYMBOLS:
+        pytest.skip("SPY not in BENCHMARK_SYMBOLS — update this test")
+
+    _seed_exchange(ebull_test_conn, exchange_id="test_bench_excl_eq", asset_class="us_equity")
+    _seed_exchange(ebull_test_conn, exchange_id="test_bench_excl_cr", asset_class="crypto")
+
+    # SPY-like row at tier 3, no candles. Symbol "SPY" sorts BEFORE the
+    # non-benchmark candidate alphabetically, so without the exclusion
+    # it would consume the single LIMIT=1 slot.
+    _seed_instrument_t3_no_candles(
+        ebull_test_conn,
+        instrument_id=950501,
+        symbol="SPY",
+        exchange="test_bench_excl_eq",
+    )
+    # Non-benchmark tier-3 crypto candidate.
+    _seed_instrument_t3_no_candles(
+        ebull_test_conn,
+        instrument_id=950502,
+        symbol="ZTESTCOIN",
+        exchange="test_bench_excl_cr",
+    )
+    ebull_test_conn.commit()
+
+    try:
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                _T3_BOOTSTRAP_SELECT,
+                {"limit": 1, "benchmark_symbols": ["SPY"]},
+            )
+            rows = cur.fetchall()
+        returned_symbols = [r[1] for r in rows]
+        assert "SPY" not in returned_symbols, "benchmark must be excluded before LIMIT"
+        assert "ZTESTCOIN" in returned_symbols, "non-benchmark candidate must fill the slot"
+    finally:
+        _cleanup(
+            ebull_test_conn,
+            exchange_ids=["test_bench_excl_eq", "test_bench_excl_cr"],
+            instrument_ids=[950501, 950502],
         )

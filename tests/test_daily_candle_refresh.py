@@ -23,17 +23,21 @@ def _make_mock_conn(
     tier12_rows: list[tuple[int, str]],
     t3_rows: list[tuple[int, str]],
     held_rows: list[tuple[int, str]] | None = None,
+    benchmark_rows: list[tuple[int, str]] | None = None,
 ) -> MagicMock:
-    """Mock connection that returns held_rows / tier12_rows / t3_rows in
-    the order the handler executes them (held → tier12 → t3)."""
+    """Mock connection that returns held_rows / tier12_rows / benchmark_rows /
+    t3_rows in the order the handler executes them
+    (held → tier12 → benchmark → t3)."""
     conn = MagicMock()
     result_held = MagicMock()
     result_held.fetchall.return_value = held_rows or []
     result_12 = MagicMock()
     result_12.fetchall.return_value = tier12_rows
+    result_bm = MagicMock()
+    result_bm.fetchall.return_value = benchmark_rows or []
     result_t3 = MagicMock()
     result_t3.fetchall.return_value = t3_rows
-    conn.execute.side_effect = [result_held, result_12, result_t3]
+    conn.execute.side_effect = [result_held, result_12, result_bm, result_t3]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
     return conn
@@ -167,17 +171,97 @@ class TestDailyCandleRefreshT3Bootstrap:
         ):
             daily_candle_refresh()
 
-        # Third execute call is the T3 query with limit param
-        # (1st=held, 2nd=tier12, 3rd=T3 bootstrap).
-        t3_call = mock_conn.execute.call_args_list[2]
+        # Fourth execute call is the T3 query with limit + benchmark_symbols
+        # (1st=held, 2nd=tier12, 3rd=benchmark, 4th=T3 bootstrap).
+        t3_call = mock_conn.execute.call_args_list[3]
         sql_text = t3_call[0][0]
         params = t3_call[0][1]
         assert "LIMIT" in sql_text
-        assert params == {"limit": _T3_BOOTSTRAP_BATCH_SIZE}
+        from app.workers.scheduler import BENCHMARK_SYMBOLS
+
+        assert params == {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)}
 
     def test_bootstrap_batch_size_is_200(self) -> None:
         """Sanity check the constant value."""
         assert _T3_BOOTSTRAP_BATCH_SIZE == 200
+
+    def test_daily_candle_refresh_includes_benchmark_before_t3(self) -> None:
+        """Benchmark instruments appear in the refresh list before T3 rows."""
+        benchmark = [(3000, "SPY")]
+        t3 = [(900, "AAA")]
+        mock_conn = _make_mock_conn([], t3, held_rows=[], benchmark_rows=benchmark)
+        mock_provider = MagicMock()
+        mock_provider.__enter__ = MagicMock(return_value=mock_provider)
+        mock_provider.__exit__ = MagicMock(return_value=False)
+        mock_tracker = MagicMock()
+        mock_tracker.__enter__ = MagicMock(return_value=mock_tracker)
+        mock_tracker.__exit__ = MagicMock(return_value=False)
+        mock_summary = MagicMock()
+        mock_summary.candle_rows_upserted = 1
+        mock_summary.instruments_refreshed = 2
+        mock_summary.features_computed = 0
+        mock_summary.quotes_updated = 0
+        mock_summary.quotes_skipped = 0
+        mock_summary.spread_flags_set = 0
+        mock_summary.candles_failed = 0
+        mock_summary.candles_skipped = 0
+
+        with (
+            patch(_PATCHES["creds"], return_value=("key", "ukey")),
+            patch(_PATCHES["tracked"], return_value=mock_tracker),
+            patch(_PATCHES["provider_cls"], return_value=mock_provider),
+            patch(_PATCHES["connect"], return_value=mock_conn),
+            patch(_PATCHES["refresh"], return_value=mock_summary) as mock_refresh,
+        ):
+            daily_candle_refresh()
+
+        instruments = mock_refresh.call_args[0][2]
+        ids = [iid for iid, _ in instruments]
+        assert 3000 in ids
+        assert 900 in ids
+        assert ids.index(3000) < ids.index(900)
+
+    def test_benchmark_also_held_is_deduped(self) -> None:
+        """SPY in both held and benchmark must appear EXACTLY ONCE in the refresh list."""
+        held = [(3000, "SPY")]
+        benchmark = [(3000, "SPY")]
+        t3 = [(900, "AAA")]
+        mock_conn = _make_mock_conn([], t3, held_rows=held, benchmark_rows=benchmark)
+        mock_provider = MagicMock()
+        mock_provider.__enter__ = MagicMock(return_value=mock_provider)
+        mock_provider.__exit__ = MagicMock(return_value=False)
+        mock_tracker = MagicMock()
+        mock_tracker.__enter__ = MagicMock(return_value=mock_tracker)
+        mock_tracker.__exit__ = MagicMock(return_value=False)
+        mock_summary = MagicMock()
+        mock_summary.candle_rows_upserted = 1
+        mock_summary.instruments_refreshed = 2
+        mock_summary.features_computed = 0
+        mock_summary.quotes_updated = 0
+        mock_summary.quotes_skipped = 0
+        mock_summary.spread_flags_set = 0
+        mock_summary.candles_failed = 0
+        mock_summary.candles_skipped = 0
+
+        with (
+            patch(_PATCHES["creds"], return_value=("key", "ukey")),
+            patch(_PATCHES["tracked"], return_value=mock_tracker),
+            patch(_PATCHES["provider_cls"], return_value=mock_provider),
+            patch(_PATCHES["connect"], return_value=mock_conn),
+            patch(_PATCHES["refresh"], return_value=mock_summary) as mock_refresh,
+        ):
+            daily_candle_refresh()
+
+        instruments = mock_refresh.call_args[0][2]
+        ids = [iid for iid, _ in instruments]
+        assert ids.count(3000) == 1
+        assert 900 in ids
+
+    def test_t3_select_excludes_benchmark_symbols(self) -> None:
+        """_T3_BOOTSTRAP_SELECT must reference %(benchmark_symbols)s."""
+        from app.workers.scheduler import _T3_BOOTSTRAP_SELECT
+
+        assert "benchmark_symbols" in _T3_BOOTSTRAP_SELECT
 
 
 # ---------------------------------------------------------------------------
@@ -290,3 +374,16 @@ class TestDailyCandleRefreshEmptyFetchDisambiguation:
             )
         assert any("no new bars" in r.message for r in caplog.records if r.levelname == "INFO")
         assert not any(r.levelname == "WARNING" and "FAILED" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #591 — benchmark instruments constant
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_symbols_constant_is_the_expected_set() -> None:
+    from app.workers.scheduler import BENCHMARK_SYMBOLS
+
+    assert BENCHMARK_SYMBOLS == frozenset(
+        {"SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+    )

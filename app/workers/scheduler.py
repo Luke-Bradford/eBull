@@ -2030,6 +2030,15 @@ def nightly_universe_sync() -> None:
 # scoring/coverage pipeline.
 _T3_BOOTSTRAP_BATCH_SIZE = 200
 
+# Benchmark instruments (S&P 500 + Nasdaq-100 + 11 GICS sector SPDRs)
+# always candle-refreshed regardless of coverage tier so the risk layer
+# (#591) has a benchmark series for beta/excess. Keyed by symbol
+# (env-agnostic; resolved to ids at runtime). Candle-scope only — NOT
+# promoted into scoring/ranking/thesis universe.
+BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
+    {"SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+)
+
 # T3 candle bootstrap eligibility query.
 # Module-level constant so the test suite imports the same SQL the
 # scheduler executes — eliminates the drift risk Codex flagged on
@@ -2050,6 +2059,7 @@ JOIN coverage c ON c.instrument_id = i.instrument_id
 LEFT JOIN exchanges e ON e.exchange_id = i.exchange
 WHERE i.is_tradable = TRUE
   AND c.coverage_tier = 3
+  AND i.symbol <> ALL(%(benchmark_symbols)s)
   AND NOT EXISTS (
       SELECT 1 FROM price_daily p
       WHERE p.instrument_id = i.instrument_id
@@ -2128,6 +2138,20 @@ def daily_candle_refresh() -> None:
                 """
             ).fetchall()
 
+            # Benchmark instruments (#591): always included regardless of
+            # coverage tier, like held_rows. Excluded from the T3 SQL
+            # above so they never consume a LIMIT-bounded bootstrap slot.
+            benchmark_rows = conn.execute(
+                """
+                SELECT DISTINCT ON (symbol) instrument_id, symbol
+                FROM instruments
+                WHERE symbol = ANY(%(symbols)s)
+                  AND is_tradable = TRUE
+                ORDER BY symbol, is_primary_listing DESC, instrument_id
+                """,
+                {"symbols": sorted(BENCHMARK_SYMBOLS)},
+            ).fetchall()
+
             # T3: bootstrap batch (see _T3_BOOTSTRAP_SELECT comment).
             # refresh_market_data fetches up to 1000 candles per
             # instrument in a single API call (post-#603), so a
@@ -2136,7 +2160,7 @@ def daily_candle_refresh() -> None:
             # inserted and the instrument retries next run.
             t3_rows = conn.execute(
                 _T3_BOOTSTRAP_SELECT,
-                {"limit": _T3_BOOTSTRAP_BATCH_SIZE},
+                {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)},
             ).fetchall()
 
             # Dedupe across scopes. A held T1 instrument must not be
@@ -2144,7 +2168,7 @@ def daily_candle_refresh() -> None:
             # the symbol tuple from the first scope that introduced it.
             seen: set[int] = set()
             ordered: list[tuple[int, str]] = []
-            for row in held_rows + tier12_rows + t3_rows:
+            for row in held_rows + tier12_rows + benchmark_rows + t3_rows:
                 iid = int(row[0])
                 if iid in seen:
                     continue
@@ -2153,22 +2177,23 @@ def daily_candle_refresh() -> None:
 
             if not ordered:
                 # #1293 — S2 is gated on ``universe_seeded`` (cap requirement),
-                # and the daily job normally has held + T1/T2 + T3 scope, so an
-                # empty refresh set is anomalous (empty universe / coverage not
-                # seeded). Surface as a WARNING, not a silent info, so a
-                # bootstrap S2 that completes with rows=0 because the scope was
-                # empty is distinguishable from a healthy run in the log.
+                # and the daily job normally has held + T1/T2 + benchmark + T3
+                # scope, so an empty refresh set is anomalous (empty universe /
+                # coverage not seeded). Surface as a WARNING, not a silent info,
+                # so a bootstrap S2 that completes with rows=0 because the scope
+                # was empty is distinguishable from a healthy run in the log.
                 logger.warning(
-                    "daily_candle_refresh: refresh scope is EMPTY (0 held + 0 T1/T2 + 0 T3) — "
+                    "daily_candle_refresh: refresh scope is EMPTY (0 held + 0 T1/T2 + 0 benchmark + 0 T3) — "
                     "nothing to fetch; universe/coverage may not be seeded"
                 )
                 tracker.row_count = 0
                 return
 
             logger.info(
-                "daily_candle_refresh: %d held + %d T1/T2 + %d T3 bootstrap = %d unique instruments",
+                "daily_candle_refresh: %d held + %d T1/T2 + %d benchmark + %d T3 bootstrap = %d unique instruments",
                 len(held_rows),
                 len(tier12_rows),
+                len(benchmark_rows),
                 len(t3_rows),
                 len(ordered),
             )
