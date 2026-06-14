@@ -94,50 +94,93 @@ git add app/workers/scheduler.py tests/test_daily_candle_refresh.py
 git commit -m "feat(#591): BENCHMARK_SYMBOLS constant for candle ingest"
 ```
 
-### Task A2: fold benchmark scope into `daily_candle_refresh` (before T3)
+### Task A2: fold benchmark scope into `daily_candle_refresh` + exclude benchmarks from T3 SQL
+
+**Why the SQL exclusion (Codex plan ckpt, BLOCKING):** `_T3_BOOTSTRAP_SELECT`
+applies `LIMIT %(limit)s` in SQL *before* the Python dedupe, and its
+`WHERE` matches `coverage_tier = 3 AND NOT EXISTS price_daily` — which is
+exactly a never-yet-fetched tier-3 benchmark (SPY today). So merely
+reordering the Python dedupe does NOT stop a benchmark from occupying one
+of the 200 T3 slots. The T3 SQL must exclude `BENCHMARK_SYMBOLS`.
 
 **Files:**
-- Modify: `app/workers/scheduler.py` (`daily_candle_refresh`, scope build ~L2108-2152)
-- Test: `tests/test_daily_candle_refresh.py`
+- Modify: `app/workers/scheduler.py` (`_T3_BOOTSTRAP_SELECT` ~L2046, `daily_candle_refresh` scope build ~L2108-2152)
+- Test: `tests/test_daily_candle_refresh.py` (incl. updating the shared `_make_mock_conn` helper)
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Update the shared test helper for the new query**
 
-Mirror the existing scope-construction tests in this file (use the same provider/conn fakes already present there). The assertion: a tier-3 benchmark symbol (SPY) NOT held and NOT in T1/T2 is still in the refresh set, and benchmark rows are deduped before the T3 batch (so they never consume a T3 slot).
+`_make_mock_conn` (~L22-36) currently stubs exactly three `execute`
+results (`held`, `tier12`, `t3`). The benchmark query is inserted between
+tier12 and t3, so add a fourth:
 
 ```python
-def test_daily_candle_refresh_includes_benchmarks_before_t3(monkeypatch):
-    # Arrange: a fake conn whose held/tier12 queries return [], the
-    # benchmark query returns [(3000, "SPY")], and the T3 query returns
-    # _T3_BOOTSTRAP_BATCH_SIZE distinct non-benchmark rows. Capture the
-    # `instruments` list passed to refresh_market_data.
-    captured = {}
-    def fake_refresh(provider, conn, instruments, **kw):
-        captured["instruments"] = instruments
-        return _make_summary()  # reuse this file's summary helper
-    monkeypatch.setattr("app.workers.scheduler.refresh_market_data", fake_refresh)
-    # ... wire fake creds + provider + conn per existing tests ...
-    daily_candle_refresh()
-    ids = [iid for iid, _ in captured["instruments"]]
-    assert 3000 in ids                                  # SPY present despite tier 3
-    assert ids.index(3000) < ids.index(<first T3 id>)   # benchmark precedes T3
+def _make_mock_conn(tier12_rows, t3_rows, held_rows=None, benchmark_rows=None):
+    conn = MagicMock()
+    result_held = MagicMock(); result_held.fetchall.return_value = held_rows or []
+    result_12 = MagicMock();   result_12.fetchall.return_value = tier12_rows
+    result_bm = MagicMock();   result_bm.fetchall.return_value = benchmark_rows or []
+    result_t3 = MagicMock();   result_t3.fetchall.return_value = t3_rows
+    conn.execute.side_effect = [result_held, result_12, result_bm, result_t3]
+    return conn
 ```
 
-(Use this test file's established fixtures/helpers for creds, provider, and the `conn.execute(...).fetchall()` stubbing — match their shape exactly rather than inventing new ones.)
+The existing `test_t3_query_uses_limit_param` inspects
+`call_args_list[2]` (was the T3 call) — bump it to `[3]`, and update its
+param assertion to also expect the benchmark-exclusion param (Step 3):
+`assert params == {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)}`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Write the failing tests**
 
-Run: `uv run pytest tests/test_daily_candle_refresh.py::test_daily_candle_refresh_includes_benchmarks_before_t3 -v`
-Expected: FAIL — SPY absent / ordered after T3.
+Two assertions — benchmark inclusion+ordering, and the T3 SQL exclusion
+(the slot-consumption guard the reorder alone can't prove):
 
-- [ ] **Step 3: Add the benchmark sub-query + reorder the dedupe**
+```python
+def test_daily_candle_refresh_includes_benchmark_before_t3():
+    # held=[], tier12=[], benchmark=[(3000,"SPY")], t3=[(900,"AAA")]
+    mock_conn = _make_mock_conn([], [(900, "AAA")], None, [(3000, "SPY")])
+    # ... wire creds/provider/refresh capture per this file's existing tests ...
+    ids = [iid for iid, _ in captured["instruments"]]
+    assert 3000 in ids
+    assert ids.index(3000) < ids.index(900)   # benchmark precedes T3
 
-In `daily_candle_refresh`, after the `tier12_rows` query and before the `t3_rows` query, add:
+def test_t3_select_excludes_benchmark_symbols():
+    # The T3 SQL must filter out BENCHMARK_SYMBOLS so a tier-3 benchmark
+    # cannot consume a LIMIT-bounded T3 slot.
+    assert "benchmark_symbols" in _T3_BOOTSTRAP_SELECT
+    # and the runtime call passes the param (covered by the updated
+    # test_t3_query_uses_limit_param assertion).
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `uv run pytest tests/test_daily_candle_refresh.py -v`
+Expected: the two new tests FAIL; `test_t3_query_uses_limit_param` FAILS on the index/param change.
+
+- [ ] **Step 4: Implement — benchmark query + T3 SQL exclusion + dedupe order**
+
+(a) In `_T3_BOOTSTRAP_SELECT`, add to the `WHERE` (after the tier filter):
+
+```sql
+  AND i.symbol <> ALL(%(benchmark_symbols)s)
+```
+
+(b) Update the T3 call to pass the param:
+
+```python
+            t3_rows = conn.execute(
+                _T3_BOOTSTRAP_SELECT,
+                {"limit": _T3_BOOTSTRAP_BATCH_SIZE,
+                 "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)},
+            ).fetchall()
+```
+
+(c) After the `tier12_rows` query and before the `t3_rows` query, add the
+benchmark query:
 
 ```python
             # Benchmark instruments (#591): always included regardless of
-            # coverage tier, like held_rows. Placed BEFORE the T3 batch in
-            # the dedupe so a tier-3 benchmark never consumes a scarce T3
-            # bootstrap slot.
+            # coverage tier, like held_rows. Excluded from the T3 SQL
+            # above so they never consume a LIMIT-bounded bootstrap slot.
             benchmark_rows = conn.execute(
                 """
                 SELECT instrument_id, symbol
@@ -150,17 +193,11 @@ In `daily_candle_refresh`, after the `tier12_rows` query and before the `t3_rows
             ).fetchall()
 ```
 
-Then change the dedupe loop source order from
-`held_rows + tier12_rows + t3_rows` to
-`held_rows + tier12_rows + benchmark_rows + t3_rows`, and add
-`benchmark_rows` to the count in the `logger.info(...)` scope summary.
+(d) Change the dedupe loop source from `held_rows + tier12_rows +
+t3_rows` to `held_rows + tier12_rows + benchmark_rows + t3_rows`, and add
+`len(benchmark_rows)` to the `logger.info(...)` scope summary.
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `uv run pytest tests/test_daily_candle_refresh.py::test_daily_candle_refresh_includes_benchmarks_before_t3 -v`
-Expected: PASS.
-
-- [ ] **Step 5: Run the full candle-refresh test module + lint/typecheck**
+- [ ] **Step 5: Run tests + lint/typecheck**
 
 Run:
 ```bash
@@ -168,13 +205,13 @@ uv run pytest tests/test_daily_candle_refresh.py -v
 uv run ruff check app/workers/scheduler.py
 uv run pyright app/workers/scheduler.py
 ```
-Expected: all PASS / no errors.
+Expected: all PASS / no errors (including the updated `test_t3_query_uses_limit_param`).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add app/workers/scheduler.py tests/test_daily_candle_refresh.py
-git commit -m "feat(#591): seed benchmark candles into daily_candle_refresh before T3"
+git commit -m "feat(#591): seed benchmark candles + exclude them from T3 bootstrap SQL"
 ```
 
 ### Task A3: one-shot dev backfill + verification (operator step, ETL DoD)
