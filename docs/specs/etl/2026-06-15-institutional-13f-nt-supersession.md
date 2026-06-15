@@ -329,7 +329,7 @@ once. No `sec_rebuild` (no parser-version bump; pure capture + read).
 |---|---|---|---|
 | 1 | HIGH | `filed_at` predicate wrong for amendments (late NT/A for old quarter kills resumed HR) | **Switched to `period_end` comparison.** Capture the NT's `<periodOfReport>`; predicate `NT.period_end > HR.period_end`. |
 | 2 | HIGH | Daily index has no acceptance datetime (`accepted_at=None`, midnight UTC) | Moot — predicate no longer uses filed time. `period_end` fetched from the NT primary_doc. |
-| 3 | HIGH | Backfill window "~2 quarters" too short (13F retention = 8 quarters) | Floor = `MIN(ownership_institutions_current.filed_at)` / 8-quarter `THIRTEEN_F_HR_RETENTION_QUARTERS`. |
+| 3 | HIGH | Backfill window "~2 quarters" too short (13F retention = 8 quarters) | Floor = 8-quarter `THIRTEEN_F_HR_RETENTION_QUARTERS`. (Ckpt-2 later refined the floor column from `filed_at` to `MIN(period_end)` — see the Capture section.) |
 | 4 | MED | Same-day HR+NT unresolved by date-only capture | Moot under `period_end` axis; strict `>` keeps HR on equal/contradictory period. |
 | 5 | MED | Dropping parent can remove instruments sub-entities don't cover — needs telemetry | Added `suppressed_by_notice` count + `__suppressed_by_13f_nt:` CSV memo; classified as ingest coverage-gap in the audit trail. |
 | 6 | LOW | `ON CONFLICT DO NOTHING` blocks enrichment | Changed to `DO UPDATE` for `period_end` / `form` / `filed_at`. |

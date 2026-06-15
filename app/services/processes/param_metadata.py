@@ -245,9 +245,10 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     "filing_events_skip_tier_cleanup": (),
     # institutional_13f_notice_backfill — one-shot 13F-NT backfill (#1639).
     # No operator-tunable params: the scan floor is derived from
-    # ``MIN(ownership_institutions_current.filed_at)`` (the 8-quarter retention
-    # horizon), not operator-supplied. Explicit empty tuple completes the
-    # manual-only triangle (source + metadata + invoker).
+    # ``MIN(ownership_institutions_current.period_end)`` (NOT filed_at — the
+    # period axis; capped at the 8-quarter retention horizon), not
+    # operator-supplied. Explicit empty tuple completes the manual-only triangle
+    # (source + metadata + invoker).
     "institutional_13f_notice_backfill": (),
     # populate_canonical_redirects — #819 .RTH redirect binder. No
     # operator-tunable params (match rule is fixed by the settled
