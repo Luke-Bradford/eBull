@@ -358,6 +358,8 @@ JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
 JOB_OWNERSHIP_OBSERVATIONS_BACKFILL = "ownership_observations_backfill"
 JOB_SEC_13F_FILER_DIRECTORY_SYNC = "sec_13f_filer_directory_sync"
 JOB_SEC_13F_QUARTERLY_SWEEP = "sec_13f_quarterly_sweep"
+JOB_SEC_13F_NOTICE_SYNC = "sec_13f_notice_sync"
+JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL = "institutional_13f_notice_backfill"
 JOB_SEC_NPORT_FILER_DIRECTORY_SYNC = "sec_nport_filer_directory_sync"
 JOB_SEC_N_PORT_INGEST = "sec_n_port_ingest"
 JOB_NCEN_CLASSIFIER = "ncen_classifier_yearly"
@@ -1405,6 +1407,29 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # §4.2 for the carve-out eligibility contract.
         prerequisite=None,
         exempt_from_universal_bootstrap_gate=True,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_13F_NOTICE_SYNC,
+        display_name="13F-NT supersession capture",
+        source="sec_rate",
+        description=(
+            "#1639 — daily capture of 13F-NT (Notice) filings. A Notice "
+            "declares the filer holds nothing reportable this quarter "
+            "(its book is reported by other managers after a reorg), "
+            "superseding the filer's prior 13F-HR. Reads yesterday's "
+            "daily-index, fetches each Notice's primary_doc.xml for its "
+            "<periodOfReport>, and upserts institutional_filer_13f_notices. "
+            "The ownership rollup excludes a filer's stale HR when an NT "
+            "for a later quarter exists — stops the Vanguard-style ~2x "
+            "institutional double-count across filer reorgs."
+        ),
+        cadence=Cadence.daily(hour=5, minute=30),
+        # Quarterly figure → daily latency is irrelevant, and a boot-time
+        # fetch would compete for the sec_rate budget during startup. Skip
+        # catch-up; the next daily fire suffices, and multi-day gaps are
+        # covered by the manual ``institutional_13f_notice_backfill``.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_SEC_PER_CIK_POLL,
@@ -5863,6 +5888,58 @@ def sec_daily_index_reconcile() -> None:
             stats.skipped_unmapped_form,
             stats.skipped_unknown_subject,
         )
+
+
+def sec_13f_notice_sync() -> None:
+    """``_INVOKERS['sec_13f_notice_sync']`` — daily 13F-NT capture (#1639).
+
+    Reads yesterday's daily-index, filters to 13F-NT / 13F-NT/A, fetches each
+    Notice's primary_doc.xml for its ``<periodOfReport>``, and upserts
+    ``institutional_filer_13f_notices``. The ownership rollup excludes a filer's
+    stale 13F-HR when an NT for a later quarter exists. Natural no-op on an
+    empty index; gated on ``_bootstrap_complete``.
+    """
+    from app.services.sec_13f_notice_sync import sync_13f_notices
+
+    with _tracked_job(JOB_SEC_13F_NOTICE_SYNC) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            result = sync_13f_notices(
+                conn,
+                _make_sec_http_get(sec),  # type: ignore[arg-type]
+                user_agent=settings.sec_user_agent,
+            )
+            conn.commit()
+        tracker.row_count = result.upserted
+        logger.info("sec_13f_notice_sync: %s", result.as_log_dict())
+
+
+def institutional_13f_notice_backfill() -> None:
+    """``_INVOKERS['institutional_13f_notice_backfill']`` — one-shot 13F-NT backfill (#1639).
+
+    Manual-only (the ``sec_rebuild`` triangle). Scans the daily-index from the
+    oldest 13F-HR ``filed_at`` still in ``ownership_institutions_current`` (the
+    8-quarter retention horizon) to yesterday, capturing every Notice in that
+    window. Reuses :func:`sync_13f_notices` per-day so it cannot drift from the
+    steady-state path.
+    """
+    from app.services.sec_13f_notice_sync import backfill_13f_notices
+
+    with _tracked_job(JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            result = backfill_13f_notices(
+                conn,
+                _make_sec_http_get(sec),  # type: ignore[arg-type]
+                user_agent=settings.sec_user_agent,
+            )
+            conn.commit()
+        tracker.row_count = result.upserted
+        logger.info("institutional_13f_notice_backfill: %s", result.as_log_dict())
 
 
 def sec_per_cik_poll() -> None:

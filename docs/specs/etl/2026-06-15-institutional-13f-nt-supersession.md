@@ -196,12 +196,30 @@ the corrected slice total automatically (they read slice outputs, not
 **Suppression telemetry** (Codex MEDIUM #2 — make the residual jump
 explainable): the filter runs *inside* `_collect_canonical_holders_from_current`,
 before `_reconcile_owner_once` (so no double-correction with PR #1640 — Codex
-LOW-2 confirmed). Surface the suppressed set — a companion query lists the
-`_current` institution rows that WERE superseded (filer, shares, the winning NT
-period); the rollup exposes a `suppressed_by_notice` count and `build_rollup_csv`
-emits `__suppressed_by_13f_nt:<filer_cik>__` memo rows (mirroring PR #1640's
-`__dropped:` audit rows). Without this an operator sees the institutions wedge
-shrink and the residual grow with no visible cause.
+LOW-2 confirmed). Surface the suppressed set — a companion query
+(`_read_notice_suppressions`, a lateral join picking the latest superseding NT)
+lists the `_current` institution rows that WERE superseded. Three surfaces:
+
+1. **Structured `corrections_applied[]` JSON** (committee 2026-06-15 rec — the
+   first concrete down-payment on the #1647 machine-trust contract). The rollup
+   carries `corrections_applied: tuple[CorrectionApplied, ...]` and the API
+   exposes it as a first-class array of
+   `{kind: "suppressed_by_13f_nt", filer_cik, filer_name, shares_removed,
+   superseded_period, winning_nt_period, winning_nt_accession}` plus a
+   convenience `suppressed_by_notice` count. This is machine-readable — a
+   decision agent (or the FE) sees *why* the institutions total changed, not
+   just the corrected number. `CorrectionApplied.kind` is a closed vocabulary so
+   the contract extends cleanly when #1645 (13D-group) / #1644 (DEF14A) add
+   their own correction kinds.
+2. **CSV `__suppressed_by_13f_nt:<filer_cik>__` memo rows** (`build_rollup_csv`),
+   mirroring PR #1640's `__dropped:` audit rows — for the human/spreadsheet
+   audit trail. `as_of_date` carries the superseded HR quarter; `filer_type`
+   carries `nt_period=<winning quarter>`.
+3. The FE type mirror (`OwnershipCorrectionApplied` in
+   `frontend/src/api/ownership.ts`) keeps the contract from drifting.
+
+Without this an operator sees the institutions wedge shrink and the residual
+grow with no visible cause.
 
 **Ordering vs PR #1640 / PR #1567** (Codex LOW-2): supersession removes stale
 same-filer 13F candidates from `_current` *before* they enter the candidate
@@ -244,32 +262,41 @@ alongside post-reorg sub-entity quarters."* + data-engineer skill update
 
 ## Test plan
 
-Pure-logic (no DB) — the supersession predicate as a testable function over
-`(filer_cik, period_end)` HR rows + NT rows → surviving HR rows:
+**As-built note:** the supersession predicate landed in SQL (the `NOT EXISTS`
+clause in `_collect_canonical_holders_from_current` + the lateral join in
+`_read_notice_suppressions`), not as a standalone pure function. It is therefore
+tested where it lives — a DB-backed parametrised test over real
+`ownership_institutions_current` + `institutional_filer_13f_notices` rows — which
+exercises every case the original pure-function plan enumerated. Two genuinely
+pure layers (the NT parser, the capture orchestration) keep pure tests.
 
-- `test_nt_later_quarter_supersedes` — NT.period_end > HR.period_end → excluded.
-- `test_nt_older_quarter_kept` — old NT, newer HR (resume) → kept.
-- `test_nt_a_amendment_old_quarter_after_resumed_hr_kept` — the Codex HIGH #1
-  case: NT/A for an old quarter, filed later, does NOT kill the newer HR
-  (period axis, not filed_at).
-- `test_same_quarter_hr_and_nt_keeps_hr` — strict `>` keeps HR on equal period.
-- `test_no_notice_kept` / `test_notice_other_filer_does_not_cross`.
+Pure (no DB) — `tests/test_sec_13f_notice_parser.py`: NT primary_doc parse over
+fixture XML mirroring the real Vanguard NT — `periodOfReport` `MM-DD-YYYY` →
+DATE; picks the header filer CIK, never an `otherManagers` CIK; no-holdings NT
+body parses without the EdgarTools holdings path; missing `cik` / `periodOfReport`
+raise; `13F-NT/A` parses like `13F-NT`.
 
-NT primary_doc parse (pure, fixture XML): `periodOfReport` `MM-DD-YYYY` → DATE;
-no-holdings NT body parses without the EdgarTools holdings path.
+Pure (no DB, fakes) — `tests/test_sec_13f_notice_sync.py`: `read_daily_index`
+monkeypatched + fake `http_get` + fake conn recording upserts. Filters to
+`13F-NT` / `13F-NT/A` (non-NT ignored); fetches each Notice's primary_doc; fetch
+failure (non-200) and parse failure skip + count without writing; multi-day
+window walked; `since > until` raises; primary_doc URL shape pinned.
 
-DB-backed (one integration test, the rollup path):
+DB-backed — `tests/test_ownership_13f_nt_supersession.py` (the rollup path):
 
-- Seed AAPL: parent (stale Q4 HR) + sub-entity (newer Q1 HR) + parent NT
-  (period Q1) → rollup institutions total = sub-entity sum; parent dropped;
-  `suppressed_by_notice = 1`.
-- `13F-NT/A` counts as a notice.
-- CSV export: superseded filer absent from wedges; `__suppressed_by_13f_nt:`
-  memo present; sum invariant holds.
-
-Capture (`sec_13f_notice_sync`, fake `http_get`): NT index line → fetch
-primary_doc → notices row with parsed `period_end`; `ON CONFLICT DO UPDATE`
-idempotent + enriches; non-NT lines ignored; fetch failure skips + logs.
+- Headline: parent (stale Q4 HR) + sub-entity (newer Q1 HR) + parent NT
+  (period Q1) → rollup institutions total = sub-entity only (not 2×); parent
+  dropped; `corrections_applied` carries the structured record; CSV export emits
+  `__suppressed_by_13f_nt:<parent>__`.
+- Parametrised predicate cases: `later_nt` (dropped), `older_nt_resume` (kept),
+  `nt_a_old_quarter` after resumed HR (kept — the Codex HIGH #1 period-axis
+  case), `same_quarter` (kept, strict `>`), `other_filer_nt` (kept — no cross),
+  `no_notice` (kept). Each asserts both the kept/dropped outcome AND the
+  correction count (0 kept / 1 dropped).
+- Registry triangle: `tests/test_layer_123_wiring.py` pins both the scheduled
+  `sec_13f_notice_sync` (in SCHEDULED_JOBS, lane sec_rate, bootstrap-gated) and
+  the manual-only `institutional_13f_notice_backfill` triangle (invoker +
+  metadata + source).
 
 ## Verification / DoD (clauses 8-12)
 

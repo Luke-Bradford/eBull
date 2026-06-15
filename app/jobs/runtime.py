@@ -366,6 +366,8 @@ _INVOKERS[_scheduler.JOB_CUSIP_RESOLVER_POST_BULK_SWEEP] = _scheduler.cusip_reso
 _INVOKERS[_scheduler.JOB_SEC_ATOM_FAST_LANE] = _adapt_zero_arg(_scheduler.sec_atom_fast_lane)
 _INVOKERS[_scheduler.JOB_SEC_DAILY_INDEX_RECONCILE] = _adapt_zero_arg(_scheduler.sec_daily_index_reconcile)
 _INVOKERS[_scheduler.JOB_SEC_PER_CIK_POLL] = _adapt_zero_arg(_scheduler.sec_per_cik_poll)
+# #1639 — daily 13F-NT supersession capture (scheduled, lane sec_rate).
+_INVOKERS[_scheduler.JOB_SEC_13F_NOTICE_SYNC] = _adapt_zero_arg(_scheduler.sec_13f_notice_sync)
 # G12 — Layer-4 cross-quarter discovery (weekly Sun 05:15 UTC).
 _INVOKERS[_scheduler.JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP] = _adapt_zero_arg(_scheduler.sec_master_idx_quarterly_sweep)
 # #1415 — bootstrap S15 recent-window gap-close (filing-metadata scoped).
@@ -383,6 +385,13 @@ _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking,
 # (not in SCHEDULED_JOBS); zero-param. Source-lock in
 # MANUAL_TRIGGER_JOB_SOURCES; empty params in MANUAL_TRIGGER_JOB_METADATA.
 _INVOKERS[_scheduler.JOB_FILING_EVENTS_SKIP_TIER_CLEANUP] = _adapt_zero_arg(_scheduler.filing_events_skip_tier_cleanup)
+# #1639 — one-shot 13F-NT backfill over the 8-quarter retention horizon.
+# Manual-trigger-only (not in SCHEDULED_JOBS); zero-param (computes its own
+# floor). Source-lock sec_rate in MANUAL_TRIGGER_JOB_SOURCES; empty params in
+# MANUAL_TRIGGER_JOB_METADATA.
+_INVOKERS[_scheduler.JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL] = _adapt_zero_arg(
+    _scheduler.institutional_13f_notice_backfill
+)
 # #1014 — raw-payload retention sweep. Manual-trigger-only triangle;
 # params-taking (dry_run, default true) — no _adapt_zero_arg. Source-lock
 # db_raw_sweep in MANUAL_TRIGGER_JOB_SOURCES; params in

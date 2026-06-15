@@ -90,6 +90,29 @@ class DroppedSource:
 
 
 @dataclass(frozen=True)
+class CorrectionApplied:
+    """A machine-readable record of a figure-changing correction applied at
+    rollup-read time. The first kind (#1639) is ``suppressed_by_13f_nt``: a
+    filer's stale 13F-HR was excluded because the filer filed a 13F-NT for a
+    later quarter.
+
+    This is the structured down-payment on the ownership machine-trust contract
+    (#1647): a decision agent (or operator) sees not just the corrected figure
+    but WHY it changed — which filer, how many shares left the institutions
+    slice, the superseded quarter, and the winning Notice quarter. Distinct from
+    :class:`DroppedSource` (which records same-owner dedup losers that are still
+    counted once); a correction here REMOVES shares from the total."""
+
+    kind: str  # "suppressed_by_13f_nt"
+    filer_cik: str
+    filer_name: str
+    shares_removed: Decimal
+    superseded_period: date  # the excluded HR's quarter
+    winning_nt_period: date  # the Notice quarter that superseded it
+    winning_nt_accession: str
+
+
+@dataclass(frozen=True)
 class Holder:
     """A canonical holder after cross-channel dedup. ``winning_source``
     decides which slice this holder lands in (insiders /
@@ -210,6 +233,13 @@ class OwnershipRollup:
     # instrument.
     historical_symbols: tuple[SymbolHistoryEntry, ...]
     computed_at: datetime
+    # Figure-changing corrections applied at read time (#1639 / #1647). Today:
+    # 13F-NT supersessions. Empty when no correction fired. First-class
+    # structured JSON (NOT only the CSV ``__suppressed_by_13f_nt:`` memo) so a
+    # machine consumer can see why the institutions total changed. Last field
+    # with a default so existing constructors (CSV-test fixtures, ``no_data``)
+    # need no change.
+    corrections_applied: tuple[CorrectionApplied, ...] = ()
 
     @classmethod
     def no_data(
@@ -279,6 +309,7 @@ class OwnershipRollup:
             coverage=coverage,
             banner=banner,
             historical_symbols=historical_symbols,
+            corrections_applied=(),
             computed_at=datetime.now(tz=UTC),
         )
 
@@ -462,15 +493,30 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
     # Institutions (13F-HR equity only — PUT / CALL exposures are
     # option overlays, not pie wedges; matches the legacy SQL's
     # ``is_put_call IS NULL`` filter).
+    #
+    # 13F-NT supersession (#1639): exclude a filer's HR when that filer filed a
+    # 13F-NT for a LATER quarter. A Notice declares the filer holds nothing
+    # reportable — its book is reported by other managers (post-reorg sub-entity
+    # CIKs) — so its stale HR is dead. The predicate is on ``period_end`` (NOT
+    # filed_at): an NT/A amending an old quarter can be filed after a resumed HR,
+    # so file-time is the wrong axis. ``period_end`` is NOT NULL on
+    # ``_current``, so the strict ``>`` is always well-defined. The companion
+    # :func:`_read_notice_suppressions` lists exactly the rows this excludes for
+    # the ``corrections_applied`` telemetry.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT filer_cik, filer_name, filer_type, ownership_nature,
-                   source, source_accession, shares, period_end
-            FROM ownership_institutions_current
-            WHERE instrument_id = %s
-              AND shares IS NOT NULL
-              AND exposure_kind = 'EQUITY'
+            SELECT c.filer_cik, c.filer_name, c.filer_type, c.ownership_nature,
+                   c.source, c.source_accession, c.shares, c.period_end
+            FROM ownership_institutions_current c
+            WHERE c.instrument_id = %s
+              AND c.shares IS NOT NULL
+              AND c.exposure_kind = 'EQUITY'
+              AND NOT EXISTS (
+                    SELECT 1 FROM institutional_filer_13f_notices n
+                    WHERE n.filer_cik  = c.filer_cik
+                      AND n.period_end > c.period_end
+              )
             """,
             (instrument_id,),
         )
@@ -491,6 +537,55 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
             )
 
     return rows
+
+
+def _read_notice_suppressions(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[CorrectionApplied, ...]:
+    """List the institution rows EXCLUDED by 13F-NT supersession (#1639), with
+    the winning Notice, for the ``corrections_applied`` telemetry.
+
+    The selection is the exact complement of the rollup institutions query's
+    ``NOT EXISTS`` clause — these are the rows that filter removed. The lateral
+    join picks the LATEST superseding Notice (``ORDER BY period_end DESC`` —
+    never a bare ``LIMIT 1``, per the deterministic-pick rule). Without this an
+    operator would see the institutions wedge shrink and the residual grow with
+    no visible cause."""
+    rows: list[CorrectionApplied] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT c.filer_cik, c.filer_name, c.shares,
+                   c.period_end AS superseded_period,
+                   n.period_end AS winning_nt_period,
+                   n.accession_number AS winning_nt_accession
+            FROM ownership_institutions_current c
+            JOIN LATERAL (
+                SELECT period_end, accession_number
+                FROM institutional_filer_13f_notices nt
+                WHERE nt.filer_cik = c.filer_cik
+                  AND nt.period_end > c.period_end
+                ORDER BY nt.period_end DESC, nt.accession_number DESC
+                LIMIT 1
+            ) n ON TRUE
+            WHERE c.instrument_id = %s
+              AND c.shares IS NOT NULL
+              AND c.exposure_kind = 'EQUITY'
+            ORDER BY c.shares DESC, c.filer_cik
+            """,
+            (instrument_id,),
+        )
+        for row in cur.fetchall():
+            rows.append(
+                CorrectionApplied(
+                    kind="suppressed_by_13f_nt",
+                    filer_cik=str(row["filer_cik"]),
+                    filer_name=str(row["filer_name"]),
+                    shares_removed=Decimal(row["shares"]),
+                    superseded_period=row["superseded_period"],
+                    winning_nt_period=row["winning_nt_period"],
+                    winning_nt_accession=str(row["winning_nt_accession"]),
+                )
+            )
+    return tuple(rows)
 
 
 def _collect_funds_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[Holder]:
@@ -1514,6 +1609,10 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     estimates = _read_universe_estimates(conn, instrument_id)
     coverage = _compute_coverage(slices, estimates)
     banner = _banner_for_state(coverage.state, coverage, concentration.pct_outstanding_known)
+    # 13F-NT supersession telemetry (#1639): the rows the institutions query
+    # excluded, so the shrunk wedge + grown residual are explainable. Read from
+    # the same snapshot as everything else (caller is inside snapshot_read).
+    corrections_applied = _read_notice_suppressions(conn, instrument_id)
     return OwnershipRollup(
         symbol=symbol,
         instrument_id=instrument_id,
@@ -1528,6 +1627,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         coverage=coverage,
         banner=banner,
         historical_symbols=historical_symbols,
+        corrections_applied=corrections_applied,
         computed_at=datetime.now(tz=UTC),
     )
 
@@ -1671,6 +1771,32 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
                         _csv_safe(dropped.edgar_url or ""),
                     ]
                 )
+
+    # 13F-NT supersession audit (#1639): a filer's stale 13F-HR was removed from
+    # the institutions wedge because the filer filed a 13F-NT for a later
+    # quarter — the removed shares flow into the residual. Emit one
+    # ``__suppressed_by_13f_nt:<filer_cik>__`` memo row per correction so the
+    # wedge shrink + residual growth are traceable. Excluded from any
+    # SUM(shares) reconciliation (the sum invariant holds: removed shares land
+    # in the residual). ``as_of_date`` = the superseded HR quarter; ``filer_type``
+    # carries the winning Notice quarter so both quarters are visible.
+    for corr in rollup.corrections_applied:
+        if corr.kind != "suppressed_by_13f_nt":
+            continue
+        writer.writerow(
+            [
+                _csv_safe(corr.filer_cik),
+                _csv_safe(corr.filer_name),
+                f"__suppressed_by_13f_nt:{corr.filer_cik}__",
+                str(corr.shares_removed),
+                "",
+                "13F-NT",
+                _csv_safe(corr.winning_nt_accession),
+                corr.superseded_period.isoformat(),
+                f"nt_period={corr.winning_nt_period.isoformat()}",
+                _csv_safe(edgar_archive_url(corr.winning_nt_accession) or ""),
+            ]
+        )
 
     # Memo-overlay slices land AFTER the residual row. Each row's
     # ``category`` column carries the ``__memo:<original_category>__``

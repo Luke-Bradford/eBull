@@ -487,6 +487,12 @@ class TestProductionInvokerRegistry:
             # "db_eod_snapshot" (shared with the snapshot job so the two
             # fx_rates_daily writers serialise).
             "fx_history_backfill",
+            # #1639 — one-shot 13F-NT backfill over the 8-quarter retention
+            # horizon. Registered in _INVOKERS for "Run now"; NOT in
+            # SCHEDULED_JOBS (the steady-state path is the separate
+            # ``sec_13f_notice_sync`` daily job). Zero params (empty
+            # MANUAL_TRIGGER_JOB_METADATA); source-lock "sec_rate".
+            "institutional_13f_notice_backfill",
             # #819 — canonical-instrument redirect populate. Idempotent
             # one-shot the operator triggers after a universe sync
             # introduces new .RTH-style variants. Registered in
