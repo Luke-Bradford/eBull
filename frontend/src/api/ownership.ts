@@ -96,6 +96,27 @@ export interface OwnershipHolder {
    * one supplied the share count used.
    */
   readonly dropped_sources: readonly OwnershipDroppedSource[];
+  /**
+   * Constituent 13F sub-CIK rows of a collapsed institutional family
+   * (#1644 / #1649) — e.g. the 10 Vanguard sub-entities under one
+   * "The Vanguard Group" row. Display-only breakdown; their shares are
+   * already counted once in this holder's ``shares``. Empty for ordinary
+   * holders.
+   */
+  readonly family_members?: readonly OwnershipFamilyMember[];
+}
+
+/** One constituent row inside a collapsed institutional family
+ *  (#1644 / #1649). Display-only; NOT additive. */
+export interface OwnershipFamilyMember {
+  readonly filer_cik: string | null;
+  readonly filer_name: string;
+  /** Decimal-as-string. */
+  readonly shares: string;
+  readonly source: OwnershipSourceTag;
+  readonly accession_number: string;
+  readonly edgar_url: string | null;
+  readonly as_of_date: string | null;
 }
 
 export interface OwnershipSlice {
@@ -185,18 +206,30 @@ export interface OwnershipSharesOutstandingSource {
  *  institutions total changed, not just the corrected number. ``kind`` is a
  *  closed vocabulary; today only ``suppressed_by_13f_nt`` (a filer's stale
  *  13F-HR removed because the filer filed a 13F-NT for a later quarter). */
+export type OwnershipCorrectionKind =
+  | "suppressed_by_13f_nt"
+  | "def14a_restates_institution"
+  | "institutional_family_collapse";
+
 export interface OwnershipCorrectionApplied {
-  readonly kind: "suppressed_by_13f_nt";
-  readonly filer_cik: string;
+  readonly kind: OwnershipCorrectionKind;
+  /** ``null`` for a proxy-name-only family fold (no CIK). */
+  readonly filer_cik: string | null;
   readonly filer_name: string;
   /** Decimal-as-string — shares removed from the institutions slice (they flow
    *  into the residual). */
   readonly shares_removed: string;
-  /** ISO ``YYYY-MM-DD`` — the superseded 13F-HR quarter. */
-  readonly superseded_period: string;
-  /** ISO ``YYYY-MM-DD`` — the 13F-NT quarter that superseded it. */
-  readonly winning_nt_period: string;
-  readonly winning_nt_accession: string;
+  /** ISO ``YYYY-MM-DD`` — the superseded 13F-HR quarter (NT kind only). */
+  readonly superseded_period: string | null;
+  /** ISO ``YYYY-MM-DD`` — the 13F-NT quarter that superseded it (NT kind only). */
+  readonly winning_nt_period: string | null;
+  readonly winning_nt_accession: string | null;
+  /** Institutional-family fold provenance (#1644 / #1649). */
+  readonly family_id: string | null;
+  readonly source_channel: OwnershipSourceTag | null;
+  readonly winning_source: OwnershipSourceTag | null;
+  readonly winning_accession: string | null;
+  readonly detail: string;
 }
 
 export interface OwnershipRollupResponse {

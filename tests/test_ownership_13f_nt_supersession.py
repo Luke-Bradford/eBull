@@ -187,6 +187,7 @@ def test_later_nt_supersedes_parent_and_emits_correction(
             superseded_period=date(2025, 12, 31),
             winning_nt_period=date(2026, 3, 31),
             winning_nt_accession="0001029090-26-002707",
+            source_channel="13f",  # generic provenance (#1647 contract)
         ),
     )
 

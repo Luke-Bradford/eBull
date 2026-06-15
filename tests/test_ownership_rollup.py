@@ -544,15 +544,18 @@ class TestDedupPriority:
         a 13F (21.8M, ETF). Per #1640 these report the same book through two
         lenses → counted ONCE. Not an insider; has a 13F → bucketed by the 13F
         filer_type (etfs). Lands at MAX (22M, the 13G); the 13F is a
-        ``dropped_source``. No standalone blockholders wedge."""
+        ``dropped_source``. No standalone blockholders wedge.
+
+        Uses a neutral filer (not a curated institutional family, #1644) so this
+        exercises the generic per-CIK owner-once path, not the family collapse."""
         conn = _setup
-        cik = "0000102909"
+        cik = "0000555501"
         _seed_block(
             conn,
             accession="0001234500-25-000103",
             instrument_id=789_001,
             filer_cik=cik,
-            filer_name="VANGUARD GROUP INC",
+            filer_name="EXAMPLE INDEX ETF TRUST",
             submission_type="SCHEDULE 13G/A",
             aggregate_shares="22000000",
             filed_at=datetime(2025, 12, 31, tzinfo=UTC),
@@ -562,7 +565,7 @@ class TestDedupPriority:
             accession="0001234500-25-000104",
             instrument_id=789_001,
             filer_cik=cik,
-            filer_name="VANGUARD GROUP INC",
+            filer_name="EXAMPLE INDEX ETF TRUST",
             filer_type="ETF",
             period_of_report=date(2025, 12, 31),
             shares="21800000",

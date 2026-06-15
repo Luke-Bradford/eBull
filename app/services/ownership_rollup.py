@@ -32,6 +32,7 @@ reconcile.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
@@ -42,10 +43,16 @@ import psycopg
 import psycopg.rows
 
 from app.services.holder_name_resolver import resolve_holder_to_filer
+from app.services.institutional_families import (
+    InstitutionalFamily,
+    resolve_family,
+)
 from app.services.instrument_history import (
     SymbolHistoryEntry,
     historical_symbols_for,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Public dataclasses (mirrored to Pydantic models in the API layer)
@@ -90,6 +97,26 @@ class DroppedSource:
 
 
 @dataclass(frozen=True)
+class FamilyMember:
+    """One constituent row inside a collapsed institutional family
+    (#1644 + #1649). Display-only breakdown for the L2 filer table — a
+    family's individual 13F sub-CIK holdings, carried on the family
+    :class:`Holder` so the operator still sees which entities filed.
+
+    NOT re-summed into residual / concentration: the family Holder's
+    ``shares`` already IS the family figure (the within-channel
+    aggregation), so these members are a breakdown, not additive shares."""
+
+    filer_cik: str | None
+    filer_name: str
+    shares: Decimal
+    source: SourceTag
+    accession_number: str
+    edgar_url: str | None
+    as_of_date: date | None
+
+
+@dataclass(frozen=True)
 class CorrectionApplied:
     """A machine-readable record of a figure-changing correction applied at
     rollup-read time. The first kind (#1639) is ``suppressed_by_13f_nt``: a
@@ -99,17 +126,38 @@ class CorrectionApplied:
     This is the structured down-payment on the ownership machine-trust contract
     (#1647): a decision agent (or operator) sees not just the corrected figure
     but WHY it changed — which filer, how many shares left the institutions
-    slice, the superseded quarter, and the winning Notice quarter. Distinct from
-    :class:`DroppedSource` (which records same-owner dedup losers that are still
-    counted once); a correction here REMOVES shares from the total."""
+    slice, and which channel folded. Distinct from :class:`DroppedSource` (which
+    records same-owner dedup losers that are still counted once); a correction
+    here REMOVES shares from the total.
 
-    kind: str  # "suppressed_by_13f_nt"
-    filer_cik: str
+    Closed ``kind`` vocab:
+      * ``suppressed_by_13f_nt`` (#1639) — a filer's stale 13F-HR removed because
+        the filer filed a 13F-NT for a later quarter. NT-specific fields set.
+      * ``def14a_restates_institution`` (#1644) — a proxy 5%-holder figure folded
+        under a larger 13F family sum (the channel restated, did not add).
+      * ``institutional_family_collapse`` (#1649) — a family's 13F shell figure
+        folded under a larger proxy/13G consolidated figure (gap-fill).
+
+    The NT-specific fields are ``Optional`` for the #1644/#1649 kinds (no NT
+    quarters). The generic ``family_id`` / ``source_channel`` (the folded channel)
+    / ``winning_source`` / ``winning_accession`` / ``detail`` make every kind's
+    provenance non-lossy (Codex spec review F8). ``filer_cik`` is nullable: a
+    proxy-name-only fold has no CIK."""
+
+    kind: str
     filer_name: str
     shares_removed: Decimal
-    superseded_period: date  # the excluded HR's quarter
-    winning_nt_period: date  # the Notice quarter that superseded it
-    winning_nt_accession: str
+    filer_cik: str | None = None
+    # NT-specific (suppressed_by_13f_nt only)
+    superseded_period: date | None = None  # the excluded HR's quarter
+    winning_nt_period: date | None = None  # the Notice quarter that superseded it
+    winning_nt_accession: str | None = None
+    # Generic provenance (all kinds)
+    family_id: str | None = None
+    source_channel: SourceTag | None = None  # the losing/folded channel
+    winning_source: SourceTag | None = None
+    winning_accession: str | None = None
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,6 +176,9 @@ class Holder:
     as_of_date: date | None
     filer_type: str | None  # 13F filer-type tag; None for non-13F survivors
     dropped_sources: tuple[DroppedSource, ...]
+    # Constituent rows of a collapsed institutional family (#1644 + #1649);
+    # display-only breakdown, NOT additive. Empty for ordinary holders.
+    family_members: tuple[FamilyMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -583,6 +634,7 @@ def _read_notice_suppressions(conn: psycopg.Connection[Any], instrument_id: int)
                     superseded_period=row["superseded_period"],
                     winning_nt_period=row["winning_nt_period"],
                     winning_nt_accession=str(row["winning_nt_accession"]),
+                    source_channel="13f",  # the folded channel (#1647 generic provenance)
                 )
             )
     return tuple(rows)
@@ -1047,6 +1099,252 @@ def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Hol
     return by_category
 
 
+# ---------------------------------------------------------------------------
+# Institutional family identity — count each manager family once (#1644 + #1649)
+# See docs/specs/etl/2026-06-15-institutional-family-identity.md
+# ---------------------------------------------------------------------------
+
+# Channel tie-break when two channels report the same family figure: prefer the
+# current 13F-HR, then the 13G/D consolidated, then the proxy (lower = preferred).
+_CHANNEL_TIEBREAK: Final[dict[str, int]] = {"13f": 0, "13g": 1, "def14a": 2}
+
+
+def _value_is_sane(shares: Decimal, outstanding: Decimal) -> bool:
+    """A single beneficial owner cannot hold more than 100% of shares
+    outstanding. Rejects DEF 14A parser-garbage values (#1644: LAMR's
+    48-trillion-share row, GEF director-group rows) before they can win a
+    family MAX or inflate the additive proxy wedge and detonate the rollup.
+
+    Denominator-aware: compares against the same ``shares_outstanding`` the rest
+    of the rollup trusts (post the ``_denominator_too_stale`` gate). The known
+    soft spot is dual-class issuers (a holder's one-class shares can exceed
+    another class's count) — precise per-class denominators are #1646's scope;
+    the 300,000× garbage here is caught by any sane threshold."""
+    return shares <= outstanding
+
+
+def _reconcile_institutional_families(
+    survivors: list[Holder],
+    blockholders: list[Holder],
+    unmatched_def14a: list[_Candidate],
+    outstanding: Decimal,
+) -> tuple[
+    dict[SliceCategory, list[Holder]],
+    list[Holder],
+    list[Holder],
+    list[_Candidate],
+    list[CorrectionApplied],
+]:
+    """Collapse each curated institutional manager family to ONE holder at
+    ``MAX(Σ 13F holdings, max proxy, max 13G/D)``, counted once (#1644 + #1649).
+
+    Runs BEFORE :func:`_reconcile_owner_once` on its raw inputs — the per-(CIK,
+    source) 13F survivors, the 13D/G blockholders, and the unmatched DEF 14A proxy
+    candidates — because owner-once has already MAX-folded each CIK and buried the
+    raw channel figures in ``dropped_sources`` (Codex plan review G1).
+
+    Returns ``(family_by_category, rest_survivors, rest_blockholders,
+    rest_unmatched, corrections)``. The ``rest_*`` flow into the normal pipeline
+    unchanged (zero regression for non-curated holders); ``family_by_category``
+    holders are injected into the corresponding slice category; ``corrections``
+    record each cross-channel fold (the #1647 contract)."""
+    fams: dict[str, InstitutionalFamily] = {}
+    ch_13f: dict[str, list[Holder]] = {}
+    ch_13g: dict[str, list[Holder]] = {}
+    ch_proxy: dict[str, list[_Candidate]] = {}
+
+    # Partition. Only 13F survivors are family-eligible on the survivor side;
+    # Form 4 / Form 3 / matched-DEF14A survivors are persons, never families.
+    rest_survivors: list[Holder] = []
+    for h in survivors:
+        fam = resolve_family(h.filer_cik, h.filer_name) if h.winning_source == "13f" else None
+        if fam is None:
+            rest_survivors.append(h)
+        else:
+            fams[fam.family_id] = fam
+            ch_13f.setdefault(fam.family_id, []).append(h)
+
+    rest_blockholders: list[Holder] = []
+    for h in blockholders:
+        fam = resolve_family(h.filer_cik, h.filer_name)
+        if fam is None:
+            rest_blockholders.append(h)
+        else:
+            fams[fam.family_id] = fam
+            ch_13g.setdefault(fam.family_id, []).append(h)
+
+    rest_unmatched: list[_Candidate] = []
+    for c in unmatched_def14a:
+        fam = resolve_family(c.filer_cik, c.filer_name)
+        if fam is None:
+            # Non-family proxy row stays in the additive wedge — but sanity-reject
+            # parser garbage first (#1644: LAMR Kevin Reilly 48T, GEF groups).
+            if _value_is_sane(c.shares, outstanding):
+                rest_unmatched.append(c)
+            else:
+                logger.warning(
+                    "ownership_rollup: rejected garbage proxy value %s for %r (outstanding=%s)",
+                    c.shares,
+                    c.filer_name,
+                    outstanding,
+                )
+            continue
+        fams[fam.family_id] = fam
+        ch_proxy.setdefault(fam.family_id, []).append(c)
+
+    family_by_category: dict[SliceCategory, list[Holder]] = {}
+    corrections: list[CorrectionApplied] = []
+
+    for fid, fam in fams.items():
+        v13f = [h for h in ch_13f.get(fid, []) if _value_is_sane(h.shares, outstanding)]
+        v13g = [h for h in ch_13g.get(fid, []) if _value_is_sane(h.shares, outstanding)]
+        vproxy = [c for c in ch_proxy.get(fid, []) if _value_is_sane(c.shares, outstanding)]
+        n_rejected = (
+            len(ch_13f.get(fid, []))
+            - len(v13f)
+            + len(ch_13g.get(fid, []))
+            - len(v13g)
+            + len(ch_proxy.get(fid, []))
+            - len(vproxy)
+        )
+        if n_rejected:
+            logger.warning("ownership_rollup: family %s dropped %d garbage-value channel row(s)", fid, n_rejected)
+
+        total_rows = len(v13f) + len(v13g) + len(vproxy)
+        if total_rows == 0:
+            continue
+        # Even a single curated-family row is emitted as a family holder so it
+        # lands in the family BUCKET (institutions) — NOT left to owner-once,
+        # which would classify a lone 13G as blockholders or a lone proxy as the
+        # def14a_unmatched wedge, contradicting the registry bucket (Codex ckpt-2
+        # P1). A single 13F row collapses to itself (one member), same bucket and
+        # shares as before — no math change, just a consistent family label.
+
+        f_13f = sum((h.shares for h in v13f), Decimal(0))
+        f_proxy = max((c.shares for c in vproxy), default=Decimal(0))
+        f_13g = max((h.shares for h in v13g), default=Decimal(0))
+
+        channel_figs: list[tuple[str, Decimal]] = []
+        if v13f:
+            channel_figs.append(("13f", f_13f))
+        if v13g:
+            channel_figs.append(("13g", f_13g))
+        if vproxy:
+            channel_figs.append(("def14a", f_proxy))
+        # MAX figure; deterministic tie-break to the preferred (current) channel.
+        winner_key, family_figure = max(channel_figs, key=lambda kv: (kv[1], -_CHANNEL_TIEBREAK[kv[0]]))
+
+        # The family's 13F sub-CIK rows are the display breakdown regardless of
+        # which channel wins the figure (review bot: the BlackRock/proxy-wins shape
+        # must still surface its sub-books). When 13F wins they sum to the figure;
+        # when a consolidated proxy/13G wins, they are the (folded, smaller) 13F
+        # detail — non-additive either way.
+        members: tuple[FamilyMember, ...] = tuple(
+            FamilyMember(
+                filer_cik=h.filer_cik,
+                filer_name=h.filer_name,
+                shares=h.shares,
+                source=h.winning_source,
+                accession_number=h.winning_accession,
+                edgar_url=h.winning_edgar_url,
+                as_of_date=h.as_of_date,
+            )
+            for h in sorted(v13f, key=lambda h: h.shares, reverse=True)
+        )
+
+        # Winning representative row → accession / edgar / as-of for the family holder.
+        if winner_key == "13f":
+            rep = max(v13f, key=lambda h: h.shares)
+            win_source: SourceTag = "13f"
+            win_acc, win_url, win_cik, filer_type = (
+                rep.winning_accession,
+                rep.winning_edgar_url,
+                rep.filer_cik,
+                rep.filer_type,
+            )
+            # Conservative as-of for an aggregated sum: the OLDEST member quarter
+            # (never max — that overstates freshness). Codex plan review Q5.
+            member_dates = [h.as_of_date for h in v13f if h.as_of_date is not None]
+            as_of = min(member_dates) if member_dates else None
+        elif winner_key == "13g":
+            rep = max(v13g, key=lambda h: h.shares)
+            win_source = rep.winning_source  # "13d" or "13g"
+            win_acc, win_url, win_cik, filer_type, as_of = (
+                rep.winning_accession,
+                rep.winning_edgar_url,
+                rep.filer_cik,
+                None,
+                rep.as_of_date,
+            )
+        else:  # def14a proxy
+            repc = max(vproxy, key=lambda c: c.shares)
+            win_source = "def14a"
+            win_acc, win_url, win_cik, filer_type, as_of = (
+                repc.accession_number,
+                edgar_archive_url(repc.accession_number),
+                None,
+                None,
+                repc.as_of_date,
+            )
+
+        # Folded (losing) channels → one correction each. The 13F channel's detail
+        # lives in ``family_members`` (so a folded 13F is a correction only — no
+        # duplicate dropped_source); the single-figure proxy / 13G channels fold to
+        # a dropped_source as well.
+        dropped: list[DroppedSource] = []
+        # (source, figure, accession, edgar_url, as_of, emit_dropped_source)
+        losers: list[tuple[SourceTag, Decimal, str, str | None, date | None, bool]] = []
+        if winner_key != "13f" and v13f:
+            r = max(v13f, key=lambda h: h.shares)
+            losers.append(("13f", f_13f, r.winning_accession, r.winning_edgar_url, r.as_of_date, False))
+        if winner_key != "13g" and v13g:
+            r = max(v13g, key=lambda h: h.shares)
+            losers.append((r.winning_source, f_13g, r.winning_accession, r.winning_edgar_url, r.as_of_date, True))
+        if winner_key != "def14a" and vproxy:
+            rc = max(vproxy, key=lambda c: c.shares)
+            losers.append(
+                ("def14a", f_proxy, rc.accession_number, edgar_archive_url(rc.accession_number), rc.as_of_date, True)
+            )
+        for src, fig, acc, url, loser_as_of, emit_dropped in losers:
+            if emit_dropped:
+                dropped.append(
+                    DroppedSource(source=src, accession_number=acc, shares=fig, as_of_date=loser_as_of, edgar_url=url)
+                )
+            corrections.append(
+                CorrectionApplied(
+                    kind=("def14a_restates_institution" if src == "def14a" else "institutional_family_collapse"),
+                    filer_name=fam.display_name,
+                    shares_removed=fig,
+                    filer_cik=win_cik,
+                    family_id=fam.family_id,
+                    source_channel=src,
+                    winning_source=win_source,
+                    winning_accession=win_acc,
+                    detail=(
+                        f"{fam.display_name}: {src} {fig} folded under {win_source} {family_figure}"
+                        f" (as_of {loser_as_of} vs {as_of})"
+                    ),
+                )
+            )
+
+        family_holder = Holder(
+            filer_cik=win_cik,
+            filer_name=fam.display_name,
+            shares=family_figure,
+            pct_outstanding=Decimal(0),  # filled by _build_slice once denom known
+            winning_source=win_source,
+            winning_accession=win_acc,
+            winning_edgar_url=win_url,
+            as_of_date=as_of,
+            filer_type=filer_type,
+            dropped_sources=tuple(dropped),
+            family_members=members,
+        )
+        family_by_category.setdefault(fam.bucket, []).append(family_holder)
+
+    return family_by_category, rest_survivors, rest_blockholders, rest_unmatched, corrections
+
+
 def _bucket_into_slices(
     by_category: dict[SliceCategory, list[Holder]],
     unmatched_def14a: list[_Candidate],
@@ -1130,15 +1428,20 @@ def _build_slice(
             as_of_date=h.as_of_date,
             filer_type=h.filer_type,
             dropped_sources=h.dropped_sources,
+            family_members=h.family_members,  # display breakdown of a collapsed family (#1644/#1649)
         )
         for h in holders
     )
+    # Count a collapsed family as its constituent filers (the family_members ARE
+    # the underlying filers), not as one row, so coverage % is not deflated by the
+    # collapse (#1644/#1649). Ordinary holders (no members) count as 1.
+    filer_count = sum(len(h.family_members) or 1 for h in holders)
     return OwnershipSlice(
         category=category,
         label=_SLICE_LABELS[category],
         total_shares=total,
         pct_outstanding=pct_total,
-        filer_count=len(holders),
+        filer_count=filer_count,
         dominant_source=dominant,
         holders=enriched_holders,
         denominator_basis=denominator_basis,
@@ -1597,7 +1900,18 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
 
     survivors = _dedup_by_priority(other_candidates)
     blockholders = _dedup_within_source(block_candidates)
+    # Institutional family identity (#1644 + #1649): collapse each curated manager
+    # family (Vanguard, BlackRock, …) to ONE holder at MAX(Σ13F, proxy, 13G) BEFORE
+    # owner-once, so the consolidated proxy 5%-holder figure neither double-counts
+    # the 13F family sum (Vanguard) nor is dropped when it is the only complete
+    # figure (BlackRock). Non-family holders pass through untouched. Also sanity-
+    # rejects DEF 14A parser-garbage values. See the institutional-family spec.
+    family_by_category, survivors, blockholders, unmatched_def14a, family_corrections = (
+        _reconcile_institutional_families(survivors, blockholders, unmatched_def14a, outstanding)
+    )
     by_category = _reconcile_owner_once(survivors + blockholders)
+    for _cat, _fam_holders in family_by_category.items():
+        by_category.setdefault(_cat, []).extend(_fam_holders)
     slices = _bucket_into_slices(
         by_category,
         unmatched_def14a,
@@ -1612,7 +1926,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # 13F-NT supersession telemetry (#1639): the rows the institutions query
     # excluded, so the shrunk wedge + grown residual are explainable. Read from
     # the same snapshot as everything else (caller is inside snapshot_read).
-    corrections_applied = _read_notice_suppressions(conn, instrument_id)
+    corrections_applied = (*_read_notice_suppressions(conn, instrument_id), *family_corrections)
     return OwnershipRollup(
         symbol=symbol,
         instrument_id=instrument_id,
@@ -1772,6 +2086,30 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
                     ]
                 )
 
+    # Institutional family breakdown (#1644/#1649): a collapsed family
+    # (e.g. "The Vanguard Group") shows ONE pie-wedge row at the family figure;
+    # its constituent 13F sub-CIK holdings are carried as ``family_members``.
+    # Emit them as ``__family_member:<family_winning_source>__`` memo rows so the
+    # CSV keeps the sub-CIK breakdown the L2 table shows. Excluded from any
+    # SUM(shares) reconciliation (the family figure already counts them once).
+    for slc in pie_slices:
+        for holder in slc.holders:
+            for member in holder.family_members:
+                writer.writerow(
+                    [
+                        _csv_safe(member.filer_cik or ""),
+                        _csv_safe(member.filer_name),
+                        f"__family_member:{holder.filer_name}__",
+                        str(member.shares),
+                        "",
+                        member.source,
+                        _csv_safe(member.accession_number),
+                        member.as_of_date.isoformat() if member.as_of_date is not None else "",
+                        "",
+                        _csv_safe(member.edgar_url or ""),
+                    ]
+                )
+
     # 13F-NT supersession audit (#1639): a filer's stale 13F-HR was removed from
     # the institutions wedge because the filer filed a 13F-NT for a later
     # quarter — the removed shares flow into the residual. Emit one
@@ -1781,11 +2119,16 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     # in the residual). ``as_of_date`` = the superseded HR quarter; ``filer_type``
     # carries the winning Notice quarter so both quarters are visible.
     for corr in rollup.corrections_applied:
-        if corr.kind != "suppressed_by_13f_nt":
+        if (
+            corr.kind != "suppressed_by_13f_nt"
+            or corr.superseded_period is None
+            or corr.winning_nt_period is None
+            or corr.winning_nt_accession is None
+        ):
             continue
         writer.writerow(
             [
-                _csv_safe(corr.filer_cik),
+                _csv_safe(corr.filer_cik or ""),
                 _csv_safe(corr.filer_name),
                 f"__suppressed_by_13f_nt:{corr.filer_cik}__",
                 str(corr.shares_removed),
@@ -1795,6 +2138,31 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
                 corr.superseded_period.isoformat(),
                 f"nt_period={corr.winning_nt_period.isoformat()}",
                 _csv_safe(edgar_archive_url(corr.winning_nt_accession) or ""),
+            ]
+        )
+
+    # Institutional family fold audit (#1644/#1649): a manager family's losing
+    # channel (proxy restating the 13F sum, or a 13F shell folded under a larger
+    # consolidated proxy/13G) — emit one ``__family_fold:<source_channel>__`` memo
+    # row per correction so the institutions figure change is traceable. Excluded
+    # from any SUM(shares) reconciliation (the folded shares are restatements; the
+    # family figure counts the owner once). The folded channel ALSO appears as a
+    # ``__dropped:<source>__`` row; this memo adds the family + winning-channel why.
+    for corr in rollup.corrections_applied:
+        if corr.kind not in ("def14a_restates_institution", "institutional_family_collapse"):
+            continue
+        writer.writerow(
+            [
+                _csv_safe(corr.filer_cik or ""),
+                _csv_safe(corr.filer_name),
+                f"__family_fold:{corr.source_channel or 'unknown'}__",
+                str(corr.shares_removed),
+                "",
+                _csv_safe(corr.source_channel or ""),
+                _csv_safe(corr.winning_accession or ""),
+                "",
+                _csv_safe(corr.detail),
+                "",
             ]
         )
 

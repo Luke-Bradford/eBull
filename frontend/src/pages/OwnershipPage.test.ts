@@ -219,6 +219,51 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     expect(rollupToFilerRows(rollup)).toHaveLength(0);
   });
 
+  it("carries a collapsed family's sub-CIK breakdown (#1644/#1649), sorted desc", () => {
+    const rollup = _baseRollup({
+      slices: [
+        _slice({
+          holders: [
+            _holder({
+              filer_name: "The Vanguard Group",
+              shares: "1436449741",
+              family_members: [
+                {
+                  filer_cik: "0002100119",
+                  filer_name: "VANGUARD CAPITAL MANAGEMENT LLC",
+                  shares: "536449741",
+                  source: "13f",
+                  accession_number: "a2",
+                  edgar_url: null,
+                  as_of_date: "2026-03-31",
+                },
+                {
+                  filer_cik: "0000102909",
+                  filer_name: "VANGUARD GROUP INC",
+                  shares: "900000000",
+                  source: "13f",
+                  accession_number: "a1",
+                  edgar_url: null,
+                  as_of_date: "2026-03-31",
+                },
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+    const row = rollupToFilerRows(rollup).find((r) => r.label === "The Vanguard Group")!;
+    expect(row.family_members?.map((m) => m.label)).toEqual([
+      "VANGUARD GROUP INC", // 900M sorted before 536M
+      "VANGUARD CAPITAL MANAGEMENT LLC",
+    ]);
+  });
+
+  it("omits family_members for an ordinary holder", () => {
+    const rollup = _baseRollup({ slices: [_slice()] });
+    expect(rollupToFilerRows(rollup)[0]!.family_members).toBeUndefined();
+  });
+
   it("skips zero / unparseable share counts (same predicate as the chart)", () => {
     const rollup = _baseRollup({
       slices: [
