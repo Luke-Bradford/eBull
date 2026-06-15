@@ -209,6 +209,49 @@ def test_build_csv_row_per_holder_across_slices() -> None:
     assert lines[5].startswith(",Public / unattributed,__residual__,6500000,")
 
 
+def test_build_csv_emits_dropped_source_memo_rows() -> None:
+    """#1640: a deduped owner's losing filings (e.g. Cohen's 13D behind his
+    Form 4) are ``dropped_sources``. They surface as ``__dropped:<source>__``
+    memo rows — excluded from the SUM(shares) reconciliation but visible for
+    audit. The sum invariant (pie-wedge holders + treasury + residual ==
+    outstanding) holds over the non-memo rows."""
+    cohen = _holder(
+        cik="0001767470",
+        name="Cohen Ryan",
+        shares="38347842",
+        pct="0.0855",
+        source="form4",
+        accession="0000111-26-000001",
+        as_of=date(2026, 1, 21),
+        dropped=(
+            DroppedSource(
+                source="13d",  # type: ignore[arg-type]
+                accession_number="0000111-26-000002",
+                shares=Decimal("36847842"),
+                as_of_date=date(2026, 1, 29),
+                edgar_url="https://sec.gov/13d",
+            ),
+        ),
+    )
+    insiders = _slice("insiders", (cohen,))
+    csv = build_rollup_csv(
+        _rollup(slices=(insiders,), treasury=None, residual_shares="410027315"),
+    )
+    lines = csv.splitlines()
+    dropped = [ln for ln in lines if ln.startswith("0001767470,Cohen Ryan,__dropped:13d__,")]
+    assert len(dropped) == 1
+    assert "36847842" in dropped[0]
+    assert "0000111-26-000002" in dropped[0]  # accession provenance
+
+    # Sum invariant: only non-memo pie-wedge rows + residual count.
+    data_rows = [ln.split(",") for ln in lines[1:]]
+    summed = sum(
+        Decimal(r[3]) for r in data_rows if not r[2].startswith("__dropped:") and not r[2].startswith("__memo:")
+    )
+    # 38,347,842 (Cohen once) + 410,027,315 residual == 448,375,157 outstanding.
+    assert summed == Decimal("448375157")
+
+
 def test_build_csv_omits_treasury_row_when_treasury_zero_or_none() -> None:
     """Treasury memo only appears when treasury_shares > 0; matches
     the FE convention where treasury=0 issuers don't get the wedge."""
