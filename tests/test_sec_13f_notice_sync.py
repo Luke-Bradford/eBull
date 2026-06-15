@@ -235,6 +235,29 @@ def test_default_window_is_a_trailing_lookback(monkeypatch: pytest.MonkeyPatch) 
     assert result.window_until == mod._yesterday_utc()
 
 
+def test_day_scan_failure_is_counted_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A daily-index fetch that raises (SEC 5xx) on one day is counted as a
+    day_failure and skipped — it must NOT abort the whole window (Codex ckpt-2
+    round 2: a late-scan failure was rolling back a multi-year backfill)."""
+    d1, d2 = date(2026, 5, 7), date(2026, 5, 8)
+    acc = "0001029090-26-002707"
+
+    def _fake_read(http_get, when, *, user_agent=""):  # noqa: ANN001, ARG001
+        if when == d1:
+            raise RuntimeError("SEC 503")
+        yield _row(cik="0000102909", form="13F-NT", accession=acc)
+
+    monkeypatch.setattr(mod, "read_daily_index", _fake_read)
+    http = _http_map({mod._notice_primary_doc_url("0000102909", acc): (200, _notice_xml("0000102909", "03-31-2026"))})
+    conn: Any = _FakeConn()
+
+    result = mod.sync_13f_notices(conn, http, user_agent=_UA, since=d1, until=d2)
+
+    assert result.day_failures == 1
+    assert result.upserted == 1  # d2 still captured despite d1 raising
+    assert result.days_scanned == 2
+
+
 def test_notice_primary_doc_url_uses_int_cik_and_nodash_accession() -> None:
     url = mod._notice_primary_doc_url("0000102909", "0001029090-26-002707")
     assert url == "https://www.sec.gov/Archives/edgar/data/102909/000102909026002707/primary_doc.xml"

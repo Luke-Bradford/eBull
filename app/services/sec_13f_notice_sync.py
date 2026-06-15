@@ -76,6 +76,7 @@ class NoticeSyncResult:
     """Outcome of one capture run, for the job_runs audit + operator log."""
 
     days_scanned: int = 0
+    day_failures: int = 0  # daily-index days that raised (SEC 5xx etc.); retryable
     notices_seen: int = 0
     already_present: int = 0  # NT index rows already captured (skipped, no re-fetch)
     upserted: int = 0
@@ -88,6 +89,7 @@ class NoticeSyncResult:
     def as_log_dict(self) -> dict[str, Any]:
         return {
             "days_scanned": self.days_scanned,
+            "day_failures": self.day_failures,
             "notices_seen": self.notices_seen,
             "already_present": self.already_present,
             "upserted": self.upserted,
@@ -214,6 +216,39 @@ def _process_day(
         )
 
 
+def _scan_days(
+    conn: psycopg.Connection[Any],
+    http_get: HttpGet,
+    days: Iterator[date],
+    *,
+    user_agent: str,
+    result: NoticeSyncResult,
+    commit_each_day: bool,
+) -> None:
+    """Walk each day's daily-index, capturing Notices. A day whose index fetch
+    raises (non-tolerated SEC failure — 5xx, WAF 403 on a past business day) is
+    logged + counted, NOT fatal: the scan continues and that day is retried on a
+    future run (already-captured Notices are skipped, so re-runs are cheap).
+
+    ``commit_each_day`` (backfill only): commit after each successful day so a
+    late-scan failure on a multi-year backfill keeps every prior day's captures
+    durable, instead of one giant transaction that a single bad day rolls back
+    (Codex ckpt-2 round 2). Steady-state (5-day window) leaves the commit to the
+    caller — one small transaction."""
+    for when in days:
+        result.days_scanned += 1
+        try:
+            _process_day(conn, http_get, when, user_agent=user_agent, result=result)
+        except Exception:  # noqa: BLE001 — one bad day must not abort a long scan.
+            logger.warning("13f-notice: day %s scan failed (retryable next run)", when.isoformat(), exc_info=True)
+            result.day_failures += 1
+            if commit_each_day:
+                conn.rollback()  # drop the failed day's partial work; keep prior committed days
+            continue
+        if commit_each_day:
+            conn.commit()
+
+
 def sync_13f_notices(
     conn: psycopg.Connection[Any],
     http_get: HttpGet,
@@ -236,10 +271,7 @@ def sync_13f_notices(
         raise ValueError(f"sync_13f_notices: since={since} after until={until}")
 
     result = NoticeSyncResult(window_since=since, window_until=until)
-    for when in _iter_dates(since, until):
-        result.days_scanned += 1
-        _process_day(conn, http_get, when, user_agent=user_agent, result=result)
-
+    _scan_days(conn, http_get, _iter_dates(since, until), user_agent=user_agent, result=result, commit_each_day=False)
     logger.info("13f-notice sync complete: %s", result.as_log_dict())
     return result
 
@@ -276,21 +308,28 @@ def backfill_13f_notices(
     Floor = ``MIN(ownership_institutions_current.period_end)`` (see
     :func:`_backfill_floor` for why the period axis, not filed_at), capped at the
     8-quarter retention horizon. Scans every daily-index day from the floor to
-    yesterday; the per-day capture is shared with :func:`sync_13f_notices` so the
-    two paths cannot drift. Manual-only (the ``sec_rebuild`` triangle).
+    yesterday via the shared :func:`_scan_days` (same per-day capture as
+    :func:`sync_13f_notices`, so the two paths cannot drift) — but with
+    ``commit_each_day`` so a multi-year scan is durable across a late-scan SEC
+    failure. Manual-only (the ``sec_rebuild`` triangle).
     """
     floor = _backfill_floor(conn)
     if floor is None:
         logger.info("13f-notice backfill: no institution rows on file — nothing to backfill")
         return NoticeSyncResult()
     # Defensive floor: never scan further back than the retention horizon even
-    # if a stale row's filed_at predates it.
+    # if a stale row's period_end predates it.
     horizon_floor = _yesterday_utc() - timedelta(days=int(THIRTEEN_F_HR_RETENTION_QUARTERS) * 92)
     since = max(floor, horizon_floor)
+    until = _yesterday_utc()
     logger.info(
-        "13f-notice backfill: floor=%s horizon_floor=%s → scanning from %s",
+        "13f-notice backfill: floor=%s horizon_floor=%s → scanning %s..%s",
         floor.isoformat(),
         horizon_floor.isoformat(),
         since.isoformat(),
+        until.isoformat(),
     )
-    return sync_13f_notices(conn, http_get, user_agent=user_agent, since=since)
+    result = NoticeSyncResult(window_since=since, window_until=until)
+    _scan_days(conn, http_get, _iter_dates(since, until), user_agent=user_agent, result=result, commit_each_day=True)
+    logger.info("13f-notice backfill complete: %s", result.as_log_dict())
+    return result
