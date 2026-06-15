@@ -1234,8 +1234,25 @@ def _reconcile_institutional_families(
         # MAX figure; deterministic tie-break to the preferred (current) channel.
         winner_key, family_figure = max(channel_figs, key=lambda kv: (kv[1], -_CHANNEL_TIEBREAK[kv[0]]))
 
-        # Winning representative row → accession / edgar / as-of / family bucket.
-        members: tuple[FamilyMember, ...] = ()
+        # The family's 13F sub-CIK rows are the display breakdown regardless of
+        # which channel wins the figure (review bot: the BlackRock/proxy-wins shape
+        # must still surface its sub-books). When 13F wins they sum to the figure;
+        # when a consolidated proxy/13G wins, they are the (folded, smaller) 13F
+        # detail — non-additive either way.
+        members: tuple[FamilyMember, ...] = tuple(
+            FamilyMember(
+                filer_cik=h.filer_cik,
+                filer_name=h.filer_name,
+                shares=h.shares,
+                source=h.winning_source,
+                accession_number=h.winning_accession,
+                edgar_url=h.winning_edgar_url,
+                as_of_date=h.as_of_date,
+            )
+            for h in sorted(v13f, key=lambda h: h.shares, reverse=True)
+        )
+
+        # Winning representative row → accession / edgar / as-of for the family holder.
         if winner_key == "13f":
             rep = max(v13f, key=lambda h: h.shares)
             win_source: SourceTag = "13f"
@@ -1249,18 +1266,6 @@ def _reconcile_institutional_families(
             # (never max — that overstates freshness). Codex plan review Q5.
             member_dates = [h.as_of_date for h in v13f if h.as_of_date is not None]
             as_of = min(member_dates) if member_dates else None
-            members = tuple(
-                FamilyMember(
-                    filer_cik=h.filer_cik,
-                    filer_name=h.filer_name,
-                    shares=h.shares,
-                    source=h.winning_source,
-                    accession_number=h.winning_accession,
-                    edgar_url=h.winning_edgar_url,
-                    as_of_date=h.as_of_date,
-                )
-                for h in sorted(v13f, key=lambda h: h.shares, reverse=True)
-            )
         elif winner_key == "13g":
             rep = max(v13g, key=lambda h: h.shares)
             win_source = rep.winning_source  # "13d" or "13g"
@@ -1282,24 +1287,29 @@ def _reconcile_institutional_families(
                 repc.as_of_date,
             )
 
-        # Folded (losing) channels → one dropped_source + one correction each.
+        # Folded (losing) channels → one correction each. The 13F channel's detail
+        # lives in ``family_members`` (so a folded 13F is a correction only — no
+        # duplicate dropped_source); the single-figure proxy / 13G channels fold to
+        # a dropped_source as well.
         dropped: list[DroppedSource] = []
-        losers: list[tuple[SourceTag, Decimal, str, str | None, date | None]] = []
+        # (source, figure, accession, edgar_url, as_of, emit_dropped_source)
+        losers: list[tuple[SourceTag, Decimal, str, str | None, date | None, bool]] = []
         if winner_key != "13f" and v13f:
             r = max(v13f, key=lambda h: h.shares)
-            losers.append(("13f", f_13f, r.winning_accession, r.winning_edgar_url, r.as_of_date))
+            losers.append(("13f", f_13f, r.winning_accession, r.winning_edgar_url, r.as_of_date, False))
         if winner_key != "13g" and v13g:
             r = max(v13g, key=lambda h: h.shares)
-            losers.append((r.winning_source, f_13g, r.winning_accession, r.winning_edgar_url, r.as_of_date))
+            losers.append((r.winning_source, f_13g, r.winning_accession, r.winning_edgar_url, r.as_of_date, True))
         if winner_key != "def14a" and vproxy:
             rc = max(vproxy, key=lambda c: c.shares)
             losers.append(
-                ("def14a", f_proxy, rc.accession_number, edgar_archive_url(rc.accession_number), rc.as_of_date)
+                ("def14a", f_proxy, rc.accession_number, edgar_archive_url(rc.accession_number), rc.as_of_date, True)
             )
-        for src, fig, acc, url, loser_as_of in losers:
-            dropped.append(
-                DroppedSource(source=src, accession_number=acc, shares=fig, as_of_date=loser_as_of, edgar_url=url)
-            )
+        for src, fig, acc, url, loser_as_of, emit_dropped in losers:
+            if emit_dropped:
+                dropped.append(
+                    DroppedSource(source=src, accession_number=acc, shares=fig, as_of_date=loser_as_of, edgar_url=url)
+                )
             corrections.append(
                 CorrectionApplied(
                     kind=("def14a_restates_institution" if src == "def14a" else "institutional_family_collapse"),
@@ -2145,7 +2155,7 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
             [
                 _csv_safe(corr.filer_cik or ""),
                 _csv_safe(corr.filer_name),
-                f"__family_fold:{corr.source_channel}__",
+                f"__family_fold:{corr.source_channel or 'unknown'}__",
                 str(corr.shares_removed),
                 "",
                 _csv_safe(corr.source_channel or ""),

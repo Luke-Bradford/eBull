@@ -261,7 +261,7 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
 
   it("omits family_members for an ordinary holder", () => {
     const rollup = _baseRollup({ slices: [_slice()] });
-    expect(rollupToFilerRows(rollup)[0].family_members).toBeUndefined();
+    expect(rollupToFilerRows(rollup)[0]!.family_members).toBeUndefined();
   });
 
   it("skips zero / unparseable share counts (same predicate as the chart)", () => {

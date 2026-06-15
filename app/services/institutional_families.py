@@ -24,6 +24,7 @@ Spec: ``docs/specs/etl/2026-06-15-institutional-family-identity.md``.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -92,7 +93,9 @@ FAMILIES: Final[tuple[InstitutionalFamily, ...]] = (
     # the bare-surname person-collision.
     InstitutionalFamily("charles_schwab", "Charles Schwab", ("charles schwab",), frozenset(), "institutions"),
     InstitutionalFamily("dimensional", "Dimensional Fund Advisors", ("dimensional fund",), frozenset(), "institutions"),
-    InstitutionalFamily("fmr", "FMR LLC (Fidelity)", ("fmr llc", "fmr co"), frozenset(), "institutions"),
+    # "fmr" as a whole word matches "FMR LLC" / "FMR, LLC" / bare "FMR" (the proxy
+    # consolidated forms); word-boundary matching excludes "fmrc …" non-Fidelity.
+    InstitutionalFamily("fmr", "FMR LLC (Fidelity)", ("fmr",), frozenset(), "institutions"),
 )
 
 
@@ -105,6 +108,15 @@ def _family_haystack(name: str) -> str:
     non-breaking spaces and runs of whitespace that
     ``ownership_def14a_current`` names carry."""
     return " ".join(normalise_name(name).replace(".", "").split())
+
+
+def _pattern_matches(pattern: str, haystack: str) -> bool:
+    """Whole-word(s) match — a pattern matches only on word boundaries, so a
+    short token like ``fmr`` matches ``"fmr llc"`` but NOT ``"fmrc holdings"``,
+    and ``schwab`` would not match ``"schwabero"`` (Codex / review bot caught the
+    bare-substring over-match class). Multi-word patterns (``state street``) keep
+    working — the boundary is around the whole phrase."""
+    return re.search(rf"\b{re.escape(pattern)}\b", haystack) is not None
 
 
 def _validate_registry(families: tuple[InstitutionalFamily, ...]) -> None:
@@ -149,7 +161,7 @@ def resolve_family(filer_cik: str | None, filer_name: str) -> InstitutionalFamil
     haystack = _family_haystack(filer_name)
     if not haystack:
         return None
-    matches = [fam for fam in FAMILIES if any(p in haystack for p in fam.name_patterns)]
+    matches = [fam for fam in FAMILIES if any(_pattern_matches(p, haystack) for p in fam.name_patterns)]
     if not matches:
         return None
     if len(matches) > 1:

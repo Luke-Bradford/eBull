@@ -77,7 +77,11 @@ def _proxy(name: str, shares: int, *, row_id: int = 1) -> _Candidate:
         ("J.P. Morgan Securities", "jpmorgan"),
         ("JPMorgan Chase & Co", "jpmorgan"),
         ("FMR LLC", "fmr"),
-        # No false positives:
+        ("FMR, LLC", "fmr"),  # comma form normalises to bare "fmr"
+        ("Entities affiliated with FMR LLC", "fmr"),
+        # No false positives (word-boundary matching):
+        ("FMRC Holdings", None),  # "fmrc" is not the word "fmr"
+        ("Mark D. Schwabero", None),  # "schwabero" is not "charles schwab"
         ("Tim Cook", None),
         ("Fidelity National Financial", None),  # NOT FMR/Fidelity asset manager
         ("", None),
@@ -174,10 +178,31 @@ def test_blackrock_proxy_fills_13f_gap() -> None:
     fh = holders[0]
     assert fh.winning_source == "def14a"
     assert fh.shares == Decimal(1_043_713_019)
-    assert [d.source for d in fh.dropped_sources] == ["13f"]
-    assert fh.dropped_sources[0].shares == Decimal(6_122_822)
+    # The folded 13F detail lives in family_members (the breakdown), NOT a
+    # duplicate dropped_source; the fold is recorded as a correction.
+    assert fh.dropped_sources == ()
+    assert [m.filer_name for m in fh.family_members] == ["BlackRock, Inc."]
     assert corr[0].kind == "institutional_family_collapse"
+    assert corr[0].source_channel == "13f"
     assert corr[0].shares_removed == Decimal(6_122_822)
+
+
+def test_proxy_wins_over_multiple_13f_subciks_keeps_breakdown() -> None:
+    """Proxy wins but the family still surfaces its multiple 13F sub-CIKs as the
+    display breakdown (review bot: don't drop the sub-CIK detail in the gap-fill
+    shape)."""
+    survivors = [
+        _holder("0001364742", "BlackRock Fund Advisors", 300_000_000),
+        _holder("0001086364", "BLACKROCK ADVISORS LLC", 200_000_000),
+    ]
+    proxy = [_proxy("BlackRock, Inc.", 900_000_000)]
+    by_cat, *_ = _reconcile_institutional_families(survivors, [], proxy, OUTSTANDING)
+    fh = by_cat["institutions"][0]
+    assert fh.winning_source == "def14a" and fh.shares == Decimal(900_000_000)
+    assert [m.filer_name for m in fh.family_members] == [
+        "BlackRock Fund Advisors",  # 300M sorted before 200M
+        "BLACKROCK ADVISORS LLC",
+    ]
 
 
 def test_garbage_proxy_value_rejected_before_max() -> None:
