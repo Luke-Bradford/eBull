@@ -4168,7 +4168,12 @@ class _CorrectionAppliedModel(BaseModel):
     carry the generic non-lossy provenance. ``filer_cik`` is null for a
     proxy-name-only fold."""
 
-    kind: Literal["suppressed_by_13f_nt", "def14a_restates_institution", "institutional_family_collapse"]
+    kind: Literal[
+        "suppressed_by_13f_nt",
+        "def14a_restates_institution",
+        "institutional_family_collapse",
+        "blockholder_group_collapse",
+    ]
     filer_cik: str | None
     filer_name: str
     shares_removed: Decimal

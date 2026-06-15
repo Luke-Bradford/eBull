@@ -137,8 +137,13 @@ class CorrectionApplied:
         under a larger 13F family sum (the channel restated, did not add).
       * ``institutional_family_collapse`` (#1649) — a family's 13F shell figure
         folded under a larger proxy/13G consolidated figure (gap-fill).
+      * ``blockholder_group_collapse`` (#1645) — a Rule 13d-5 group's members each
+        reported the same aggregate stake on separate 13D/G accessions; the group is
+        counted once at MAX and the other members are folded. ``source_channel`` ==
+        ``winning_source`` (intra-blockholder-channel collapse); the per-member fold
+        detail is in ``detail`` + the surviving holder's ``dropped_sources``.
 
-    The NT-specific fields are ``Optional`` for the #1644/#1649 kinds (no NT
+    The NT-specific fields are ``Optional`` for the #1644/#1649/#1645 kinds (no NT
     quarters). The generic ``family_id`` / ``source_channel`` (the folded channel)
     / ``winning_source`` / ``winning_accession`` / ``detail`` make every kind's
     provenance non-lossy (Codex spec review F8). ``filer_cik`` is nullable: a
@@ -1345,6 +1350,189 @@ def _reconcile_institutional_families(
     return family_by_category, rest_survivors, rest_blockholders, rest_unmatched, corrections
 
 
+# ---------------------------------------------------------------------------
+# 13D/G group collapse — count a Rule 13d-5 group once (#1645)
+# See docs/specs/etl/2026-06-16-blockholder-13d-group-collapse.md
+# ---------------------------------------------------------------------------
+
+# A Rule 13d-5 group's members each report the IDENTICAL aggregate group stake on
+# separate accessions/CIKs, so they sum N× in the blockholders wedge. The group is
+# inferred from the only signal actually present in modern 13D/G XML: same issuer
+# (the rollup scopes to one) + same period_end + a near-equal, non-round aggregate
+# across distinct non-null CIKs. (The <memberOfGroup> Item-2 checkbox is empirically
+# absent/blank in the source — see spec.) Three guards keep it conservative (it fails
+# toward keeping holders separate):
+#  - roundness: a round-lot shared figure (multiple of _ROUNDNESS_UNIT) is plausible
+#    independent coincidence → never collapses;
+#  - member-count tiered tolerance: a 3+-member cluster uses the loose _GROUP_REL_TOL
+#    band (a 3-way numeric coincidence is negligible; this catches a control group
+#    whose members carry small personal slivers, e.g. TKO 0.064%), but a 2-member
+#    cluster — the coincidence-prone case — demands the tight _GROUP_PAIR_REL_TOL
+#    (every genuine 2-member group on dev is exact or within ~1 share);
+#  - a round seed never anchors a cluster, so it cannot swallow a genuine non-round
+#    sub-group and then dissolve it (Codex ckpt-2 HIGH).
+_GROUP_REL_TOL: Final[Decimal] = Decimal("0.001")  # 0.1% — cluster band + 3+-member collapse gate
+_GROUP_PAIR_REL_TOL: Final[Decimal] = Decimal("0.00001")  # 0.001% — tighter gate for a 2-member cluster
+_ROUNDNESS_UNIT: Final[int] = 100_000  # a shared figure that is a whole multiple is round-lot-coincidence-prone
+
+
+def _is_group_block(shares: Decimal) -> bool:
+    """A shared blockholder figure is 'improbably precise' — group evidence, not
+    round-lot coincidence — when it is NOT a whole multiple of ``_ROUNDNESS_UNIT``.
+
+    700,000 / 1,000,000 / 100,000 are plausible independent round lots (round → keep
+    separate); 7,720,340 / 6,016,847 / 2,724,075 are not (collapse)."""
+    return shares % _ROUNDNESS_UNIT != 0
+
+
+def _is_collapsible_cluster(cluster: list[Holder], seed_shares: Decimal) -> bool:
+    """Distinct-CIK, member-count tiered tolerance (Codex ckpt-2). The tier is keyed
+    on the count of DISTINCT reporter CIKs (a group inference needs distinct-CIK
+    evidence — duplicate-CIK rows are not a Rule 13d-5 group; ``_dedup_within_source``
+    already collapses them upstream, this is the standalone guard). A cluster with ≥3
+    distinct CIKs collapses on the loose band already applied (a 3-way same-period
+    non-round coincidence is negligible; this preserves a control group whose members
+    carry small personal slivers, e.g. TKO). Exactly 2 distinct CIKs — the
+    coincidence-prone case — collapses only when the smallest member is within the
+    tighter ``_GROUP_PAIR_REL_TOL`` of the seed (cluster max); every genuine 2-member
+    group on dev is exact or within ~1 share."""
+    n_distinct = len({h.filer_cik for h in cluster})
+    if n_distinct < 2:
+        return False
+    if n_distinct >= 3:
+        return True
+    return min(h.shares for h in cluster) >= seed_shares - _GROUP_PAIR_REL_TOL * seed_shares
+
+
+def _collapse_blockholder_group(cluster: list[Holder]) -> tuple[Holder, CorrectionApplied]:
+    """Collapse a confirmed group ``cluster`` (≥2 members, sorted shares-descending
+    by the caller) to ONE holder at the rep's shares (the max-share seed, Rule 13d-3
+    total beneficial ownership). Non-rep members are appended to the rep's existing
+    ``dropped_sources`` (the amendment-chain provenance is preserved, never replaced)
+    and folded into one ``blockholder_group_collapse`` correction."""
+    rep = cluster[0]
+    losers = cluster[1:]
+    dropped = list(rep.dropped_sources)
+    for loser in losers:
+        dropped.append(
+            DroppedSource(
+                source=loser.winning_source,
+                accession_number=loser.winning_accession,
+                shares=loser.shares,
+                as_of_date=loser.as_of_date,
+                edgar_url=loser.winning_edgar_url,
+            )
+        )
+    collapsed = replace(rep, dropped_sources=tuple(dropped))
+    shares_removed = sum((loser.shares for loser in losers), Decimal(0))
+    folded = "; ".join(f"{loser.filer_name} {loser.shares}" for loser in losers)
+    correction = CorrectionApplied(
+        kind="blockholder_group_collapse",
+        filer_name=rep.filer_name,
+        shares_removed=shares_removed,
+        filer_cik=rep.filer_cik,
+        source_channel=rep.winning_source,  # intra-channel collapse: winning == folded channel
+        winning_source=rep.winning_source,
+        winning_accession=rep.winning_accession,
+        detail=(
+            f"Rule 13d-5 group: {len(cluster)} members reporting ~{rep.shares} as of "
+            f"{rep.as_of_date}; counted once at MAX under {rep.filer_name}. Folded: {folded}"
+        ),
+    )
+    return collapsed, correction
+
+
+def _reconcile_13d_groups(
+    blockholders: list[Holder],
+    survivor_keys: frozenset[str],
+) -> tuple[list[Holder], list[CorrectionApplied]]:
+    """Collapse each inferred Rule 13d-5 blockholder group to ONE holder at MAX,
+    counted once (#1645). Pure read-path; scoped to the blockholders pie wedge.
+
+    Predicate (see spec): distinct non-null reporter CIKs; same non-null
+    ``period_end``; ``shares > 0``; ``aggregate_amount_owned`` within the
+    member-count tiered tolerance of the cluster max (descending-greedy, max-anchored
+    — never transitively chained; :func:`_is_collapsible_cluster`); the max non-round
+    and never a round seed anchoring the cluster (:func:`_is_group_block`).
+
+    A blockholder whose identity key is in ``survivor_keys`` (a CIK that also files
+    Form 4 / Form 3 / 13F / matched DEF 14A — the non-blockholder candidate set
+    ``_reconcile_owner_once`` reconciles by CIK) is EXCLUDED from clustering and
+    passed through untouched. owner-once already merges that CIK's 13D with its other
+    channels; folding it into a different rep would orphan those rows and re-count the
+    block (Codex ckpt-1 HIGH-3). The cross-channel control-group case (the Form 4
+    explosion on all-insider groups like TKO) is the #1652 follow-up.
+
+    Returns ``(survivors, corrections)``: the post-collapse blockholder list (each
+    group folded to one MAX holder; non-group + excluded rows unchanged) and one
+    ``blockholder_group_collapse`` correction per collapsed group."""
+    survivors: list[Holder] = []
+    by_period: dict[date, list[Holder]] = {}
+    for h in blockholders:
+        # Exclude null-period, non-positive-share, null/empty-CIK, and survivor-
+        # overlapping rows from clustering; they pass through to owner-once exactly as
+        # before. A group inference needs distinct CIK evidence — a null-CIK row gives
+        # none (and reporter_cik is NOT NULL in _current, so this is defence-in-depth).
+        cik = h.filer_cik
+        if (
+            h.as_of_date is None
+            or h.shares <= 0
+            or cik is None
+            or not cik.strip()
+            or _identity_key(cik, h.filer_name) in survivor_keys
+        ):
+            survivors.append(h)
+        else:
+            by_period.setdefault(h.as_of_date, []).append(h)
+
+    corrections: list[CorrectionApplied] = []
+    for rows in by_period.values():
+        if len(rows) < 2:
+            survivors.extend(rows)
+            continue
+        # Descending by shares, deterministic tie-break. Max-anchored greedy: each
+        # unused NON-ROUND row (descending) seeds a cluster and pulls every later row
+        # within the loose band OF THE SEED (the cluster max). A row below the band
+        # seeds its own later cluster — no transitive chaining.
+        rows_desc = sorted(
+            rows,
+            key=lambda h: (h.shares, h.filer_cik or "", h.winning_accession),
+            reverse=True,
+        )
+        used = [False] * len(rows_desc)
+        for i, seed in enumerate(rows_desc):
+            if used[i]:
+                continue
+            used[i] = True
+            # A round seed never anchors: pass it through as a standalone so it cannot
+            # swallow a genuine non-round sub-group and then dissolve it (Codex ckpt-2
+            # HIGH). The next unused non-round row seeds the next cluster.
+            if not _is_group_block(seed.shares):
+                survivors.append(seed)
+                continue
+            floor = seed.shares - _GROUP_REL_TOL * seed.shares
+            cluster = [seed]
+            for j in range(i + 1, len(rows_desc)):
+                if used[j]:
+                    continue
+                if rows_desc[j].shares < floor:
+                    break  # descending — nothing further is within the seed's band
+                # A round member is coincidence-prone too — never group evidence, so it
+                # can't inflate the cluster count past the tight 2-member gate (Codex
+                # ckpt-2). Leave it unused so it is handled as its own standalone.
+                if not _is_group_block(rows_desc[j].shares):
+                    continue
+                used[j] = True
+                cluster.append(rows_desc[j])
+            if len(cluster) >= 2 and _is_collapsible_cluster(cluster, seed.shares):
+                collapsed, correction = _collapse_blockholder_group(cluster)
+                survivors.append(collapsed)
+                corrections.append(correction)
+            else:
+                survivors.extend(cluster)
+    return survivors, corrections
+
+
 def _bucket_into_slices(
     by_category: dict[SliceCategory, list[Holder]],
     unmatched_def14a: list[_Candidate],
@@ -1909,6 +2097,14 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     family_by_category, survivors, blockholders, unmatched_def14a, family_corrections = (
         _reconcile_institutional_families(survivors, blockholders, unmatched_def14a, outstanding)
     )
+    # 13D/G group collapse (#1645): a Rule 13d-5 group's members each report the
+    # identical aggregate stake on separate accessions/CIKs and otherwise sum N× in
+    # the blockholders wedge. Collapse a near-equal, same-period, non-round cluster to
+    # ONE holder at MAX before owner-once. survivor_keys excludes any blockholder CIK
+    # that owner-once will reconcile cross-channel (so its other-channel rows are not
+    # orphaned). The cross-channel Form 4 explosion on all-insider groups is #1652.
+    survivor_keys = frozenset(_identity_key(h.filer_cik, h.filer_name) for h in survivors)
+    blockholders, group_corrections = _reconcile_13d_groups(blockholders, survivor_keys)
     by_category = _reconcile_owner_once(survivors + blockholders)
     for _cat, _fam_holders in family_by_category.items():
         by_category.setdefault(_cat, []).extend(_fam_holders)
@@ -1926,7 +2122,11 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # 13F-NT supersession telemetry (#1639): the rows the institutions query
     # excluded, so the shrunk wedge + grown residual are explainable. Read from
     # the same snapshot as everything else (caller is inside snapshot_read).
-    corrections_applied = (*_read_notice_suppressions(conn, instrument_id), *family_corrections)
+    corrections_applied = (
+        *_read_notice_suppressions(conn, instrument_id),
+        *family_corrections,
+        *group_corrections,
+    )
     return OwnershipRollup(
         symbol=symbol,
         instrument_id=instrument_id,
@@ -2156,6 +2356,30 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
                 _csv_safe(corr.filer_cik or ""),
                 _csv_safe(corr.filer_name),
                 f"__family_fold:{corr.source_channel or 'unknown'}__",
+                str(corr.shares_removed),
+                "",
+                _csv_safe(corr.source_channel or ""),
+                _csv_safe(corr.winning_accession or ""),
+                "",
+                _csv_safe(corr.detail),
+                "",
+            ]
+        )
+
+    # 13D/G group collapse audit (#1645): a Rule 13d-5 group's members each reported
+    # the same aggregate stake; the group is counted once at MAX and the others
+    # folded. Emit one ``__group_collapse:<rep_cik>__`` memo row per correction so the
+    # blockholders shrink is traceable. Excluded from any SUM(shares) reconciliation
+    # (the folded shares were double-counts that were never real). The folded members
+    # ALSO appear as ``__dropped:13d/g__`` rows; this memo adds the group + rep why.
+    for corr in rollup.corrections_applied:
+        if corr.kind != "blockholder_group_collapse":
+            continue
+        writer.writerow(
+            [
+                _csv_safe(corr.filer_cik or ""),
+                _csv_safe(corr.filer_name),
+                f"__group_collapse:{corr.filer_cik or 'unknown'}__",
                 str(corr.shares_removed),
                 "",
                 _csv_safe(corr.source_channel or ""),
