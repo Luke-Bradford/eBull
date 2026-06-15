@@ -130,6 +130,9 @@ def test_resolve_family_ambiguous_match_is_singleton(caplog: pytest.LogCaptureFi
     orig = fam.FAMILIES
     try:
         fam.FAMILIES = families  # type: ignore[misc]
+        # NB: this patches FAMILIES only, NOT the import-time-built fam._CIK_INDEX —
+        # so the CIK fast-path would still see the real registry. Must pass
+        # filer_cik=None to exercise the name-pattern path under the patch.
         assert resolve_family(None, "Alpha Beta Capital") is None
     finally:
         fam.FAMILIES = orig  # type: ignore[misc]
