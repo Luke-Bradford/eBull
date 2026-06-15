@@ -919,7 +919,12 @@ def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Hol
             category = "blockholders"
             figure_src = bene_max_source
 
-        assert figure_src is not None  # every pie-wedge holder is in BENEFICIAL ∪ {13f}
+        if figure_src is None:
+            # Unreachable for known sources (every pie-wedge holder is in
+            # BENEFICIAL ∪ {13f}). Explicit raise, not assert, so a future
+            # SourceTag can't silently None-deref src_rows under ``python -O``
+            # (python-hygiene.md: never assert a production invariant).
+            raise ValueError(f"no figure source for owner group: sources={present!r}")
         keep = list(src_rows[figure_src])
         losing_sources: list[SourceTag] = [s for s in present if s != figure_src]
         if losing_sources:
