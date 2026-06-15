@@ -490,15 +490,23 @@ def sync_blockholders(
     since: date | None = None,
     limit: int | None = None,
 ) -> SyncSummary:
-    """Mirror ``blockholder_filings`` (joined to ``blockholder_filers``
-    for primary cik) into ``ownership_blockholders_observations`` and
-    refresh ``_current``.
+    """Mirror ``blockholder_filings`` into
+    ``ownership_blockholders_observations`` and refresh ``_current``.
 
-    Per #837 lesson + Codex plan review: identity is the PRIMARY filer
-    (filer_id → cik), never the per-row reporter_cik. Joint reporters
-    on the same accession collapse via ``DISTINCT ON (accession_number,
-    filer_id)`` so each accession contributes one observation per
-    primary filer.
+    Identity is the per-row ``reporter_cik`` of the largest-aggregate
+    reporting person (the disclosing person's own CIK), NOT
+    ``blockholder_filers.cik`` — post-#1628 that filer row carries the
+    subject/issuer CIK on the drain path (#1638). Joint reporters on the
+    same accession collapse via ``DISTINCT ON (accession_number)``
+    ordered by aggregate so each accession contributes one observation
+    (#837). Rows whose ``reporter_cik`` is NULL (13G covers omit
+    per-reporter CIKs; the rare multi-party 13D whose largest reporter is
+    CIK-less) are SKIPPED here — the canonical write-through path
+    (``_record_13dg_observation_for_filing``) populates them with the
+    document filer-of-record fallback, which the typed tables cannot
+    reconstruct. This legacy mirror runs only via the manual one-shot
+    ``ownership_observations_backfill``; the daily job is the repair
+    sweep.
 
     PR11 #1233 §3.2 chokepoint C — the 3y retention cap is enforced as
     a SQL predicate on the raw chain's own ``bf.filed_at`` column so
@@ -535,22 +543,32 @@ def sync_blockholders(
         params["lim"] = limit
     limit_sql = "LIMIT %(lim)s" if limit is not None else ""
 
-    # DISTINCT ON keeps one row per (accession, primary filer) — joint
-    # reporter dimension collapses per the SEC convention that joint
-    # filers claim the same beneficial figure on the cover page.
+    # DISTINCT ON keeps the largest-aggregate reporting person per
+    # accession — joint reporters collapse to one observation per the SEC
+    # convention that joint filers claim the same beneficial figure (#837).
+    # Identity is the per-row ``reporter_cik`` (the disclosing person's
+    # own CIK), NOT ``blockholder_filers.cik`` which post-#1628 is the
+    # subject/issuer on the drain path (#1638).
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             f"""
-            SELECT DISTINCT ON (bf.accession_number, bf.filer_id)
+            SELECT DISTINCT ON (bf.accession_number)
                    bf.instrument_id, bf.accession_number,
                    bf.submission_type, bf.status, bf.filed_at,
                    bf.aggregate_amount_owned, bf.percent_of_class,
-                   f.cik, f.name AS filer_name
+                   bf.reporter_cik, bf.reporter_name
             FROM blockholder_filings bf
-            JOIN blockholder_filers f ON f.filer_id = bf.filer_id
             {where}
-            ORDER BY bf.accession_number, bf.filer_id,
-                     bf.aggregate_amount_owned DESC NULLS LAST
+            ORDER BY bf.accession_number,
+                     bf.aggregate_amount_owned DESC NULLS LAST,
+                     -- Deterministic tie-breaker matching the write-through
+                     -- resolver, whose max() returns the FIRST equal-aggregate
+                     -- reporter in XML order. _upsert_filing_row inserts
+                     -- reporters in XML order, so the lowest filing_id is the
+                     -- first XML reporter — both paths pick the same CIK on a
+                     -- tie, so no second observation under a different natural
+                     -- key (Codex ckpt-2).
+                     bf.filing_id ASC
             {limit_sql}
             """,
             params,
@@ -559,9 +577,15 @@ def sync_blockholders(
 
     for row in rows:
         summary.rows_scanned += 1
-        cik = str(row["cik"] or "").strip()
-        if not cik or row["instrument_id"] is None:
-            summary.orphans.append(f"blockholder_filings accession={row['accession_number']} (blank cik or instrument)")
+        reporter_cik = str(row["reporter_cik"] or "").strip()
+        if not reporter_cik or row["instrument_id"] is None:
+            # NULL per-reporter CIK = a 13G cover (or the rare multi-party
+            # 13D whose largest reporter is CIK-less). The typed tables
+            # carry no filer-of-record fallback, so defer to the canonical
+            # write-through populator rather than write a wrong CIK (#1638).
+            summary.orphans.append(
+                f"blockholder_filings accession={row['accession_number']} (no per-reporter cik or instrument)"
+            )
             continue
         # Map submission_type to source tag.
         stype = str(row["submission_type"])
@@ -570,8 +594,8 @@ def sync_blockholders(
             record_blockholder_observation(
                 conn,
                 instrument_id=int(row["instrument_id"]),
-                reporter_cik=cik,
-                reporter_name=str(row["filer_name"]),
+                reporter_cik=reporter_cik,
+                reporter_name=str(row["reporter_name"]),
                 ownership_nature="beneficial",
                 submission_type=stype,
                 status_flag=str(row["status"]) if row["status"] else None,

@@ -46,7 +46,7 @@ from __future__ import annotations
 import json
 import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError; no untrusted input parsed here.
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -73,7 +73,7 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # returned an empty CUSIP, so CUSIP-only resolution never resolved and
 # blockholders never populated. The bump flips sec_13d/sec_13g manifest
 # rows back to ``pending`` so they re-drain through the fixed extractor.
-_PARSER_VERSION_13DG = "13dg-primary-v2"
+_PARSER_VERSION_13DG = "13dg-primary-v3"
 
 logger = logging.getLogger(__name__)
 
@@ -795,7 +795,6 @@ def _ingest_single_accession(
         accession_number=ref.accession_number,
         primary_document_url=primary_url,
         filing=filing,
-        filer_name=filer_name,
         ref=ref,
         run_id=batch_run_id,
     )
@@ -810,6 +809,60 @@ def _ingest_single_accession(
     )
 
 
+@dataclass(frozen=True)
+class BlockholderReporterIdentity:
+    """The single observation-row identity resolved from one 13D/G
+    accession's reporting persons (#1638)."""
+
+    reporter_cik: str
+    reporter_name: str
+    aggregate_amount_owned: Decimal
+    percent_of_class: Decimal | None
+
+
+def resolve_blockholder_reporter_identity(
+    reporting_persons: Sequence[BlockholderReportingPerson],
+    *,
+    document_filer_cik: str | None,
+) -> BlockholderReporterIdentity | None:
+    """Resolve the one observation-row identity for a 13D/G accession.
+
+    Collapses joint filers to ONE observation (#837): the reporting
+    person with the largest ``aggregate_amount_owned``. ``reporter_cik``
+    is that person's own per-reporter CIK when the XML carries it
+    (modern 13D), else the document ``<filerCredentials><cik>`` filer of
+    record (modern 13G omits per-reporter CIK; and the rare multi-party
+    13D whose largest reporter is a natural person with no CIK — the
+    filer of record is the group's stable, joinable identity, never the
+    issuer/subject). NEVER the manifest/subject CIK (#1638).
+
+    Returns ``None`` (skip the observation) when there are no reporting
+    persons, the chosen person has no aggregate (mirrors the write-side
+    ``aggregate_amount_owned IS NOT NULL`` guard), or no joinable CIK is
+    available at all.
+    """
+    if not reporting_persons:
+        return None
+    # Match the legacy DISTINCT ON ... ORDER BY aggregate_amount_owned
+    # DESC NULLS LAST: the tuple sentinel floats NULL aggregates to the
+    # bottom so ``max`` never compares against ``None``.
+    chosen = max(
+        reporting_persons,
+        key=lambda p: (p.aggregate_amount_owned is not None, p.aggregate_amount_owned or Decimal(0)),
+    )
+    if chosen.aggregate_amount_owned is None:
+        return None
+    reporter_cik = (chosen.cik or "").strip() or (document_filer_cik or "").strip()
+    if not reporter_cik:
+        return None
+    return BlockholderReporterIdentity(
+        reporter_cik=reporter_cik,
+        reporter_name=chosen.name,
+        aggregate_amount_owned=chosen.aggregate_amount_owned,
+        percent_of_class=chosen.percent_of_class,
+    )
+
+
 def _record_13dg_observation_for_filing(
     conn: psycopg.Connection[Any],
     *,
@@ -817,51 +870,37 @@ def _record_13dg_observation_for_filing(
     accession_number: str,
     primary_document_url: str,
     filing: BlockholderFiling,
-    filer_name: str,
     ref: AccessionRef,
     run_id: Any,
 ) -> None:
     """Record one ``ownership_blockholders_observations`` row for one
     13D/G accession.
 
-    Mirrors the legacy batch-sync rule in
-    ``ownership_observations_sync.sync_blockholders``:
-
-      - Identity: PRIMARY filer's CIK (``filing.primary_filer_cik``),
-        NEVER the per-row reporter_cik. Joint reporters on the same
-        accession collapse to one observation per the SEC convention
-        that joint filers claim the same beneficial figure on the
-        cover page (#837 lesson).
-      - Picks the reporting_persons row with the highest
-        ``aggregate_amount_owned`` (DESC NULLS LAST) — matches the
-        legacy ``DISTINCT ON (accession, filer_id) ORDER BY ...``.
-      - Source enum: ``'13d'`` for SCHEDULE 13D family, ``'13g'`` for
-        SCHEDULE 13G.
-      - Filter: ``aggregate_amount_owned IS NOT NULL`` AND
-        ``filed_at IS NOT NULL`` — both required by the observation
-        contract.
+    Identity is resolved by :func:`resolve_blockholder_reporter_identity`
+    — the largest-aggregate reporting person, keyed to that person's own
+    per-reporter CIK when present (modern 13D), else the document filer
+    of record (``filing.document_filer_cik``; modern 13G omits the
+    per-reporter CIK). NEVER the manifest/subject CIK (#1638 — the prior
+    ``filing.primary_filer_cik`` became the issuer CIK on the drain path
+    post-#1628). Joint reporters still collapse to one observation per
+    accession (#837). ``filed_at`` is required by the observation
+    contract; a missing aggregate / no joinable CIK skips the row.
     """
-    if not filing.reporting_persons:
-        return
     filed_at = filing.filed_at or ref.filed_at
     if filed_at is None:
         return
-    # Match legacy DISTINCT ON ... ORDER BY aggregate_amount_owned
-    # DESC NULLS LAST. ``key=lambda`` with ``-Decimal`` would crash on
-    # NULL; use a sentinel that floats NULLs to the bottom.
-    chosen = max(
-        filing.reporting_persons,
-        key=lambda p: (p.aggregate_amount_owned is not None, p.aggregate_amount_owned or Decimal(0)),
+    identity = resolve_blockholder_reporter_identity(
+        filing.reporting_persons, document_filer_cik=filing.document_filer_cik
     )
-    if chosen.aggregate_amount_owned is None:
+    if identity is None:
         return
     stype = filing.submission_type
     source = "13d" if stype.startswith("SCHEDULE 13D") else "13g"
     record_blockholder_observation(
         conn,
         instrument_id=instrument_id,
-        reporter_cik=filing.primary_filer_cik,
-        reporter_name=filer_name,
+        reporter_cik=identity.reporter_cik,
+        reporter_name=identity.reporter_name,
         ownership_nature="beneficial",
         submission_type=stype,
         status_flag=filing.status,
@@ -874,8 +913,8 @@ def _record_13dg_observation_for_filing(
         period_start=None,
         period_end=filed_at.date(),
         ingest_run_id=run_id,
-        aggregate_amount_owned=chosen.aggregate_amount_owned,
-        percent_of_class=chosen.percent_of_class,
+        aggregate_amount_owned=identity.aggregate_amount_owned,
+        percent_of_class=identity.percent_of_class,
     )
 
 

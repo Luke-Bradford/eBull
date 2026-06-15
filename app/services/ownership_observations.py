@@ -646,12 +646,14 @@ def record_blockholder_observation(
     """Append one 13D/G blockholder observation. Idempotent on the
     natural key.
 
-    Identity (per #837 lesson): ``reporter_cik`` here is the PRIMARY
-    filer (``blockholder_filers.cik``), NOT the per-row joint
-    reporter. Backfill / write-through MUST resolve the primary
-    filer first; joint reporters on the same accession collapse to
-    one observation row per the SEC convention that joint filers
-    claim the same beneficial ownership."""
+    ``reporter_cik`` is the resolved beneficial-owner identity for the
+    accession (see
+    :func:`app.services.blockholders.resolve_blockholder_reporter_identity`):
+    the largest-aggregate reporting person's own per-reporter CIK, else
+    the document filer of record. NEVER the manifest/subject CIK
+    (#1638). Joint reporters on the same accession still collapse to one
+    observation per the SEC convention that joint filers claim the same
+    beneficial figure (#837)."""
     if reporter_cik is None or not reporter_cik.strip():
         raise ValueError("record_blockholder_observation: reporter_cik is required")
     with conn.cursor() as cur:

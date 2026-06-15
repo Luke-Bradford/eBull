@@ -1126,6 +1126,7 @@ def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
         submission_type="SCHEDULE 13G",
         status="passive",
         primary_filer_cik="0000111000",
+        document_filer_cik="0000111000",
         issuer_cik="0000999000",
         issuer_cusip="NEWCUSP1",  # parser fix
         issuer_name="New Issuer",
@@ -1243,6 +1244,7 @@ def test_blockholders_apply_raises_on_empty_reporting_persons(
         submission_type="SCHEDULE 13G",
         status="passive",
         primary_filer_cik="0000111000",
+        document_filer_cik="0000111000",
         issuer_cik="0000999000",
         issuer_cusip="CSP12345",
         issuer_name="Issuer",

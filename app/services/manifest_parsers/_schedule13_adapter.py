@@ -49,6 +49,7 @@ from app.providers.implementations.sec_13dg import (
     BlockholderReportingPerson,
     Status,
     SubmissionType,
+    extract_filer_cik_from_primary_doc,
     extract_issuer_identity_from_primary_doc,
 )
 from app.services.blockholders import _zero_pad_cik
@@ -227,10 +228,18 @@ def build_filing_from_edgartools_dict(
     issuer_cik = (helper.cik if helper and helper.cik else None) or issuer_info.cik
     issuer_cusip = (helper.cusip if helper and helper.cusip else None) or security_info.cusip
 
+    # edgartools does NOT expose <filerCredentials><cik>; read it from the
+    # raw body so the observation reporter_cik can fall back to the true
+    # filer of record for 13G covers that omit per-reporter CIKs (#1638).
+    # Distinct from primary_filer_cik, which post-#1628 is the manifest
+    # archive-owner (subject/issuer) on this drain path.
+    document_filer_cik = extract_filer_cik_from_primary_doc(raw_xml) if raw_xml else None
+
     return BlockholderFiling(
         submission_type=submission_type,
         status=status,
         primary_filer_cik=_zero_pad_cik(manifest_filer_cik),
+        document_filer_cik=document_filer_cik,
         issuer_cik=issuer_cik,
         issuer_cusip=issuer_cusip,
         issuer_name=issuer_info.name,

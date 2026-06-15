@@ -144,7 +144,17 @@ class BlockholderFiling:
         is what the ``blockholder_filer_seeds`` table keys on. Note
         that this is sometimes the same as the first reporting
         person, sometimes a service company (e.g. a transfer-agent
-        filing on behalf of a family trust).
+        filing on behalf of a family trust). NOTE: on the edgartools
+        manifest-drain path the adapter feeds this the manifest
+        archive-owner CIK (the subject/issuer post-#1628); for the
+        reporter identity used downstream prefer ``document_filer_cik``.
+      * ``document_filer_cik`` — the ``<filerCredentials><cik>`` read
+        directly from the primary_doc.xml: the entity that submitted the
+        filing on EDGAR. Always the document's own filer of record (both
+        the in-house parser and the edgartools adapter source it from the
+        body), so it is the fallback reporter identity for 13G accessions
+        whose cover omits a per-reporter ``<reportingPersonCIK>`` (#1638).
+        ``None`` only when the body is unparseable / pre-mandate.
       * ``issuer_cik`` — the issuing company's CIK. Joins to the
         eBull ``instruments`` table via
         ``instrument_sec_profile.cik``.
@@ -172,6 +182,7 @@ class BlockholderFiling:
     submission_type: SubmissionType
     status: Status
     primary_filer_cik: str
+    document_filer_cik: str | None
     issuer_cik: str
     issuer_cusip: str
     issuer_name: str
@@ -311,6 +322,28 @@ def extract_issuer_identity_from_primary_doc(xml: str) -> IssuerIdentity:
     except ET.ParseError:
         return IssuerIdentity(cik=None, cusip=None, name=None, class_title=None)
     return _issuer_identity_from_root(root)
+
+
+def extract_filer_cik_from_primary_doc(xml: str) -> str | None:
+    """Read ``<filerCredentials><cik>`` (the EDGAR submitter / filer of
+    record) from a 13D/G primary_doc.xml (#1638).
+
+    Used by the edgartools adapter as the observation ``reporter_cik``
+    fallback when a 13G cover omits per-reporter ``<reportingPersonCIK>``
+    — there the filer of record IS the beneficial owner. Never raises:
+    returns ``None`` on a missing tag, a non-numeric CIK, or an
+    unparseable (pre-mandate HTML) body so the caller can fall back."""
+    try:
+        root = ET.fromstring(xml)  # noqa: S314 — SEC EDGAR is the trusted source for 13D/G XML.
+    except ET.ParseError:
+        return None
+    text = _child_text(_find_descendant(root, "filerCredentials"), "cik")
+    if not text or not text.strip():
+        return None
+    try:
+        return _zero_pad_cik(text)
+    except ValueError:
+        return None
 
 
 def _decimal_or_none(text: str | None) -> Decimal | None:
@@ -574,6 +607,9 @@ def parse_primary_doc(xml: str) -> BlockholderFiling:
         submission_type=submission_type,
         status=status,
         primary_filer_cik=primary_filer_cik,
+        # In-house parser: primary_filer_cik IS the document filer of
+        # record, so document_filer_cik mirrors it (#1638).
+        document_filer_cik=primary_filer_cik,
         issuer_cik=issuer_cik,
         issuer_cusip=issuer_cusip,
         issuer_name=issuer_name,

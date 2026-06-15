@@ -98,6 +98,39 @@ def test_adapter_returns_blockholder_filing_for_13d_dict() -> None:
     assert filing.filed_at is None
 
 
+# Minimal primary_doc.xml carrying only <filerCredentials><cik> — the
+# document filer of record the adapter reads for document_filer_cik (#1638).
+_RAW_WITH_FILER_CREDENTIALS = (
+    '<?xml version="1.0"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D">'
+    "<headerData><filerInfo><filer><filerCredentials><cik>0009999999</cik>"
+    "</filerCredentials></filer></filerInfo></headerData></edgarSubmission>"
+)
+
+
+def test_adapter_extracts_document_filer_cik_from_raw_xml() -> None:
+    filing = build_filing_from_edgartools_dict(
+        _parsed_13d(),
+        source="sec_13d",
+        manifest_form="SC 13D",
+        manifest_filer_cik="2093607",
+        raw_xml=_RAW_WITH_FILER_CREDENTIALS,
+    )
+    # document_filer_cik comes from the raw doc's <filerCredentials>, NOT
+    # the manifest CIK (which is the subject/issuer post-#1628).
+    assert filing.document_filer_cik == "0009999999"
+    assert filing.primary_filer_cik == "0002093607"  # still the manifest arg
+
+
+def test_adapter_document_filer_cik_none_when_no_raw_xml() -> None:
+    filing = build_filing_from_edgartools_dict(
+        _parsed_13d(),
+        source="sec_13d",
+        manifest_form="SC 13D",
+        manifest_filer_cik="2093607",
+    )
+    assert filing.document_filer_cik is None
+
+
 def test_adapter_maps_reporting_persons_with_decimal_typing() -> None:
     """Per-reporter mapping preserves Decimal typing on share-power +
     aggregate + percent fields (matches NUMERIC schema)."""

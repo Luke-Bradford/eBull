@@ -30,6 +30,7 @@ import pytest
 
 from app.providers.implementations.sec_13dg import (
     BlockholderFiling,
+    extract_filer_cik_from_primary_doc,
     parse_primary_doc,
 )
 
@@ -199,6 +200,21 @@ def _13g_xml(
 # ---------------------------------------------------------------------------
 # 13D parsing
 # ---------------------------------------------------------------------------
+
+
+def test_extract_filer_cik_from_primary_doc_reads_filer_credentials() -> None:
+    assert extract_filer_cik_from_primary_doc(_13d_xml(primary_filer_cik="2093607")) == "0002093607"
+
+
+def test_extract_filer_cik_returns_none_for_malformed_or_missing() -> None:
+    assert extract_filer_cik_from_primary_doc("<not-xml") is None
+    assert extract_filer_cik_from_primary_doc("<edgarSubmission></edgarSubmission>") is None
+
+
+def test_parse_13d_sets_document_filer_cik_from_filer_credentials() -> None:
+    parsed = parse_primary_doc(_13d_xml())
+    assert parsed.document_filer_cik == "0002093607"
+    assert parsed.document_filer_cik == parsed.primary_filer_cik
 
 
 def test_parse_13d_returns_active_status_and_zero_padded_ciks() -> None:

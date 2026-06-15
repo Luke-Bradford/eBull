@@ -821,7 +821,6 @@ def _apply_blockholders(
             accession_number=raw_doc.accession_number,
             primary_document_url="",
             filing=filing,
-            filer_name=filer_name,
             ref=ref,
             run_id=uuid4(),
         )

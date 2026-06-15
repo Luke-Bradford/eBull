@@ -22,6 +22,7 @@ without touching SEC.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import psycopg
 import pytest
@@ -130,6 +131,75 @@ _FAKE_13G_XML = f"""<?xml version="1.0" encoding="UTF-8"?>
       <signaturePerson>
         <signatureDetails>
           <date>10/15/2025</date>
+        </signatureDetails>
+      </signaturePerson>
+    </signatureInfo>
+  </formData>
+</edgarSubmission>
+"""
+
+
+# GME-shape 13D — the #1638 regression case. The manifest CIK is the
+# ISSUER (post-#1628 issuer-keyed discovery), the filer of record
+# (filerCredentials) is RC Ventures, and the largest-aggregate reporting
+# person (Cohen) carries his OWN distinct CIK. The observation reporter_cik
+# MUST be Cohen's CIK, never the issuer/manifest CIK.
+_GME_SHAPE_13D_XML = f"""<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="{_NS_13D}">
+  <headerData>
+    <submissionType>SCHEDULE 13D</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0001822844</cik>
+        </filerCredentials>
+      </filer>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Class A Common Stock</securitiesClassTitle>
+      <dateOfEvent>01/29/2025</dateOfEvent>
+      <issuerInfo>
+        <issuerCIK>0001326380</issuerCIK>
+        <issuerCUSIP>36467W109</issuerCUSIP>
+        <issuerName>GameStop Corp.</issuerName>
+      </issuerInfo>
+    </coverPageHeader>
+    <reportingPersons>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001767470</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Cohen Ryan</reportingPersonName>
+        <memberOfGroup>b</memberOfGroup>
+        <citizenshipOrOrganization>NY</citizenshipOrOrganization>
+        <soleVotingPower>36847842</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>36847842</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+        <aggregateAmountOwned>36847842</aggregateAmountOwned>
+        <percentOfClass>8.2</percentOfClass>
+        <typeOfReportingPerson>IN</typeOfReportingPerson>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001822844</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>RC Ventures LLC</reportingPersonName>
+        <memberOfGroup>b</memberOfGroup>
+        <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+        <aggregateAmountOwned>0</aggregateAmountOwned>
+        <percentOfClass>0</percentOfClass>
+        <typeOfReportingPerson>OO</typeOfReportingPerson>
+      </reportingPersonInfo>
+    </reportingPersons>
+    <signatureInfo>
+      <signaturePerson>
+        <signatureDetails>
+          <date>01/30/2025</date>
         </signatureDetails>
       </signaturePerson>
     </signatureInfo>
@@ -290,6 +360,98 @@ def test_13g_happy_path(
         cur.execute("SELECT submission_type FROM blockholder_filings WHERE accession_number = '0000950103-25-014355'")
         bf = cur.fetchone()
     assert bf is not None and bf[0] == "SCHEDULE 13G"
+
+
+def test_13d_observation_reporter_cik_is_reporting_person_not_issuer(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1638: with the manifest CIK = the issuer (post-#1628), the
+    observation reporter_cik MUST be the largest-aggregate reporting
+    person's own CIK (Cohen 0001767470), NEVER the issuer/manifest CIK."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    _seed_instrument_with_cusip(ebull_test_conn, iid=8750009, symbol="GME", cusip="36467W109")
+    ebull_test_conn.execute(
+        "INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary) "
+        "VALUES (8750009, 'sec', 'cik', '0001326380', TRUE) ON CONFLICT DO NOTHING"
+    )
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession="0000921895-25-000190",
+        filer_cik="0001326380",  # issuer-keyed manifest (post-#1628)
+        source="sec_13d",
+        form="SC 13D",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _GME_SHAPE_13D_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT reporter_cik, reporter_name, aggregate_amount_owned "
+            "FROM ownership_blockholders_current WHERE instrument_id = 8750009"
+        )
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    reporter_cik, reporter_name, agg = rows[0]
+    assert reporter_cik == "0001767470"  # Cohen's own CIK
+    assert reporter_cik != "0001326380"  # NOT the issuer / manifest CIK
+    assert reporter_name == "Cohen Ryan"
+    assert agg == Decimal("36847842")
+
+
+def test_13g_observation_reporter_cik_falls_back_to_document_filer(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1638: a modern 13G cover omits per-reporter CIK, so the
+    observation reporter_cik falls back to the document filer of record
+    (<filerCredentials> 0002083532), NEVER the issuer/manifest CIK."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    _seed_instrument_with_cusip(ebull_test_conn, iid=8750010, symbol="AURA", cusip="G06973112")
+    ebull_test_conn.execute(
+        "INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary) "
+        "VALUES (8750010, 'sec', 'cik', '0001468642', TRUE) ON CONFLICT DO NOTHING"
+    )
+    _seed_pending_13dg(
+        ebull_test_conn,
+        accession="0000950103-25-014999",
+        filer_cik="0001468642",  # issuer-keyed manifest (post-#1628)
+        source="sec_13g",
+        form="SC 13G",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_13G_XML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13g", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT reporter_cik FROM ownership_blockholders_current WHERE instrument_id = 8750010")
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "0002083532"  # document filer of record
+    assert rows[0][0] != "0001468642"  # NOT the issuer / manifest CIK
 
 
 def test_cusip_unresolved_returns_parsed_with_partial_log(
