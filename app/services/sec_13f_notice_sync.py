@@ -52,6 +52,13 @@ HttpGet = Callable[[str, dict[str, str]], tuple[int, bytes]]
 # deliberately out of the manifest source set); we match the raw form here.
 _NOTICE_FORMS: frozenset[str] = frozenset({"13F-NT", "13F-NT/A"})
 
+# Steady-state scans a trailing window, not just yesterday, so a transient
+# fetch/parse failure on one day is retried by the next few runs (Codex ckpt-2):
+# a failed NT is NOT in the table, so the re-scan re-fetches it; an
+# already-captured NT is skipped (no re-fetch). NTs cluster on the four 45-day
+# deadline days, so most days the window is a near-zero-cost no-op.
+_STEADY_STATE_LOOKBACK_DAYS: int = 5
+
 _UPSERT_SQL = """
     INSERT INTO institutional_filer_13f_notices
         (filer_cik, accession_number, period_end, form, filed_at)
@@ -70,6 +77,7 @@ class NoticeSyncResult:
 
     days_scanned: int = 0
     notices_seen: int = 0
+    already_present: int = 0  # NT index rows already captured (skipped, no re-fetch)
     upserted: int = 0
     fetch_failures: int = 0
     parse_failures: int = 0
@@ -81,6 +89,7 @@ class NoticeSyncResult:
         return {
             "days_scanned": self.days_scanned,
             "notices_seen": self.notices_seen,
+            "already_present": self.already_present,
             "upserted": self.upserted,
             "fetch_failures": self.fetch_failures,
             "parse_failures": self.parse_failures,
@@ -166,6 +175,18 @@ def _capture_notice(
     result.upserted += 1
 
 
+def _already_captured(conn: psycopg.Connection[Any], accession_number: str) -> bool:
+    """Whether this NT accession is already in the notices table — so the
+    trailing-window re-scan re-fetches only NEW or previously-FAILED Notices,
+    never a successfully-captured one."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM institutional_filer_13f_notices WHERE accession_number = %s",
+            (accession_number,),
+        )
+        return cur.fetchone() is not None
+
+
 def _process_day(
     conn: psycopg.Connection[Any],
     http_get: HttpGet,
@@ -178,6 +199,9 @@ def _process_day(
         if row.form not in _NOTICE_FORMS:
             continue
         result.notices_seen += 1
+        if _already_captured(conn, row.accession_number):
+            result.already_present += 1
+            continue
         _capture_notice(
             conn,
             http_get,
@@ -200,11 +224,14 @@ def sync_13f_notices(
 ) -> NoticeSyncResult:
     """Capture 13F-NT filings over ``[since, until]`` (inclusive).
 
-    Default window = yesterday only (the steady-state daily cadence). The
+    Default window = the trailing ``_STEADY_STATE_LOOKBACK_DAYS`` ending
+    yesterday (NOT yesterday-only), so a transient fetch/parse failure on one
+    day is retried by the next few daily runs — already-captured Notices in the
+    window are skipped, so the re-scan only re-fetches the failed/new ones. The
     caller owns the transaction; this function does not commit.
     """
     until = until or _yesterday_utc()
-    since = since or until
+    since = since or (until - timedelta(days=_STEADY_STATE_LOOKBACK_DAYS - 1))
     if since > until:
         raise ValueError(f"sync_13f_notices: since={since} after until={until}")
 
@@ -218,19 +245,24 @@ def sync_13f_notices(
 
 
 def _backfill_floor(conn: psycopg.Connection[Any]) -> date | None:
-    """The oldest 13F-HR ``filed_at`` any ``ownership_institutions_current``
-    row could still carry — the floor of the supersession-relevant window. With
-    the 8-quarter 13F-HR retention horizon, ``MIN(filed_at)`` is ~2 years back.
+    """The oldest *quarter* (``period_end``) any ``ownership_institutions_current``
+    row covers — the floor of the supersession-relevant scan window.
+
+    MUST be `MIN(period_end)`, NOT `MIN(filed_at)` (Codex ckpt-2): a `13F-HR/A`
+    amending an OLD quarter can be filed RECENTLY, so a `filed_at` floor can sit
+    *after* an NT that supersedes that stale amended HR, and the NT would never
+    be captured. The period floor is provably conservative — any NT that could
+    supersede a current HR has `NT.period_end > HR.period_end >= MIN(period_end)`,
+    and an NT is always filed after its own period, so `NT.filed_at > MIN(period_end)`;
+    scanning daily indexes from `MIN(period_end)` therefore captures every
+    relevant NT. `period_end` is NOT NULL on `_current`.
 
     Returns ``None`` when there are no institution rows on file (nothing to
     supersede → nothing to backfill)."""
     with conn.cursor() as cur:
-        cur.execute("SELECT MIN(filed_at) FROM ownership_institutions_current")
+        cur.execute("SELECT MIN(period_end) FROM ownership_institutions_current")
         row = cur.fetchone()
-    floor_ts: datetime | None = row[0] if row else None
-    if floor_ts is None:
-        return None
-    return floor_ts.date()
+    return row[0] if row else None
 
 
 def backfill_13f_notices(
@@ -241,11 +273,11 @@ def backfill_13f_notices(
 ) -> NoticeSyncResult:
     """One-shot backfill over the 8-quarter 13F-HR retention horizon.
 
-    Floor = ``MIN(ownership_institutions_current.filed_at)`` — the oldest HR
-    any ``_current`` row could carry (and therefore the oldest HR an NT could
-    supersede). Scans every daily-index day from the floor to yesterday; the
-    per-day capture is shared with :func:`sync_13f_notices` so the two paths
-    cannot drift. Manual-only (the ``sec_rebuild`` triangle).
+    Floor = ``MIN(ownership_institutions_current.period_end)`` (see
+    :func:`_backfill_floor` for why the period axis, not filed_at), capped at the
+    8-quarter retention horizon. Scans every daily-index day from the floor to
+    yesterday; the per-day capture is shared with :func:`sync_13f_notices` so the
+    two paths cannot drift. Manual-only (the ``sec_rebuild`` triangle).
     """
     floor = _backfill_floor(conn)
     if floor is None:

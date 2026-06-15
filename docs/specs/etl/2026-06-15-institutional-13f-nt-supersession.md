@@ -150,19 +150,29 @@ code without re-driving the full manifest reconcile over old indexes.
 
 Volume is low — most filers file HR, not NT; NT capture is ≈ a few hundred
 fetches per quarter clustered on the four 45-day deadline days, near-zero
-otherwise. A failed fetch skips that NT (logged) and is retried next run —
-self-healing, and under-capture errs toward the *existing* (non-suppressing)
-behaviour, never toward wrongly dropping holdings.
+otherwise. A failed fetch skips that NT (logged) and is retried by the next
+run's trailing window — under-capture errs toward the *existing*
+(non-suppressing) behaviour, never toward wrongly dropping holdings.
 
 - **Steady-state**: `ScheduledJob` daily (lane `sec_rate`, gated
-  `_bootstrap_complete`), `since=None` → yesterday.
-- **Backfill**: same callable over a date range. Floor = the **8-quarter 13F
-  retention horizon** — `MIN(ownership_institutions_current.filed_at)` (the
-  oldest HR any `_current` row could still carry; `THIRTEEN_F_HR_RETENTION_QUARTERS
-  = 8`, `app/services/institutional_holdings.py`), NOT "~2 quarters" (Codex
-  HIGH #3). Registered as a manual-only one-shot (`sec_rebuild` "triangle":
-  `_INVOKERS` + `MANUAL_TRIGGER_JOB_SOURCES` (`sec_rate`) + empty
-  `MANUAL_TRIGGER_JOB_METADATA`): `POST /jobs/institutional_13f_notice_backfill/run`.
+  `_bootstrap_complete`). Default window = a **trailing `_STEADY_STATE_LOOKBACK_DAYS`
+  (5) ending yesterday**, NOT yesterday-only (Codex ckpt-2): a transient
+  fetch/parse failure on a deadline day (when NTs cluster) would otherwise be
+  committed as "success" and never retried, because the next run scans a
+  *different* day. Already-captured Notices in the window are skipped
+  (`_already_captured` existence check) so the re-scan re-fetches only the
+  new/failed ones — near-zero cost on the ~0-NT days, self-healing on failures.
+- **Backfill**: same callable over a date range. Floor =
+  `MIN(ownership_institutions_current.period_end)` — **the period axis, NOT
+  `filed_at`** (Codex ckpt-2): a `13F-HR/A` amending an old quarter can be filed
+  recently, so a `filed_at` floor can sit *after* an NT that supersedes that
+  stale amended HR and miss it. Any relevant NT has
+  `NT.filed_at > NT.period_end > HR.period_end >= MIN(period_end)`, so flooring
+  the daily-index scan at `MIN(period_end)` provably captures it. Capped at the
+  8-quarter retention horizon (`THIRTEEN_F_HR_RETENTION_QUARTERS = 8`).
+  Registered as a manual-only one-shot (`sec_rebuild` "triangle": `_INVOKERS` +
+  `MANUAL_TRIGGER_JOB_SOURCES` (`sec_rate`) + empty `MANUAL_TRIGGER_JOB_METADATA`):
+  `POST /jobs/institutional_13f_notice_backfill/run`.
 
 Rejected — **manifest source** (`sec_13f_nt` in `_FORM_TO_SOURCE` + a parser):
 more idiomatic and gives atom/per-cik steady-state for free, but reverses the
