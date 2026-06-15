@@ -70,6 +70,19 @@ export interface FilerRow {
   /** SEC archive index URL for the winning accession. */
   readonly source_url: string | null;
   readonly as_of_date: string | null;
+  /** Constituent 13F sub-CIK rows when this row is a collapsed
+   *  institutional family (#1644 / #1649). Display-only breakdown —
+   *  already counted once in ``shares``. Empty/absent for ordinary rows. */
+  readonly family_members?: readonly FilerMemberRow[];
+}
+
+/** One sub-CIK breakdown row under a collapsed family (#1644 / #1649). */
+export interface FilerMemberRow {
+  readonly label: string;
+  readonly shares: number;
+  readonly source: OwnershipSourceTag;
+  readonly source_url: string | null;
+  readonly as_of_date: string | null;
 }
 
 const CATEGORY_LABELS: Record<CategoryKey, string> = {
@@ -498,7 +511,29 @@ function FilerTable({
                 onClick={isHighlight ? onClearHighlight : undefined}
                 title={isHighlight ? "Click to clear the per-filer filter" : undefined}
               >
-                <td className="py-1.5 text-slate-700 dark:text-slate-200">{row.label}</td>
+                <td className="py-1.5 text-slate-700 dark:text-slate-200">
+                  {row.family_members && row.family_members.length > 0 ? (
+                    <details>
+                      <summary className="cursor-pointer list-none">
+                        <span className="select-none text-slate-400">▸ </span>
+                        {row.label}
+                        <span className="ml-1 text-xs text-slate-400">
+                          ({row.family_members.length} entities)
+                        </span>
+                      </summary>
+                      <ul className="mt-1 ml-4 space-y-0.5 border-l border-slate-200 pl-3 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                        {row.family_members.map((m) => (
+                          <li key={m.label} className="flex justify-between gap-4">
+                            <span>{m.label}</span>
+                            <span className="font-mono">{formatShares(m.shares)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  ) : (
+                    row.label
+                  )}
+                </td>
                 <td className="py-1.5 text-slate-500 dark:text-slate-400">
                   {row.category_label}
                 </td>
@@ -578,6 +613,20 @@ export function rollupToFilerRows(
     for (const h of slice.holders) {
       const shares = parseShareCount(h.shares);
       if (shares === null || shares <= 0) continue;
+      const members = (h.family_members ?? [])
+        .map((m): FilerMemberRow | null => {
+          const mShares = parseShareCount(m.shares);
+          if (mShares === null || mShares <= 0) return null;
+          return {
+            label: m.filer_name,
+            shares: mShares,
+            source: m.source,
+            source_url: m.edgar_url,
+            as_of_date: m.as_of_date,
+          };
+        })
+        .filter((m): m is FilerMemberRow => m !== null)
+        .sort((a, b) => b.shares - a.shares);
       rows.push({
         key: h.filer_cik ?? `name:${h.filer_name}`,
         label: h.filer_name,
@@ -588,6 +637,7 @@ export function rollupToFilerRows(
         source: h.winning_source,
         source_url: h.winning_edgar_url,
         as_of_date: h.as_of_date,
+        ...(members.length > 0 ? { family_members: members } : {}),
       });
     }
   }

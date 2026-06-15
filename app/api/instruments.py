@@ -4151,20 +4151,49 @@ class _DroppedSourceModel(BaseModel):
 
 
 class _CorrectionAppliedModel(BaseModel):
-    """A figure-changing correction applied at read time (#1639 / #1647).
+    """A figure-changing correction applied at read time (#1639 / #1644 / #1647).
 
     First-class structured JSON so a machine consumer (or operator) sees WHY
-    the institutions total changed, not just the corrected number. ``kind`` is
-    a closed vocabulary; today only ``suppressed_by_13f_nt`` (a filer's stale
-    13F-HR removed because the filer filed a 13F-NT for a later quarter)."""
+    the institutions total changed, not just the corrected number. ``kind`` is a
+    closed vocabulary:
+      * ``suppressed_by_13f_nt`` (#1639) — stale 13F-HR removed (13F-NT for a later
+        quarter). NT-specific fields set.
+      * ``def14a_restates_institution`` (#1644) — proxy 5%-holder figure folded
+        under a larger 13F family sum.
+      * ``institutional_family_collapse`` (#1649) — a 13F shell figure folded under
+        a larger consolidated proxy/13G family figure (gap-fill).
 
-    kind: Literal["suppressed_by_13f_nt"]
-    filer_cik: str
+    The NT-specific fields are null for the #1644/#1649 kinds; ``family_id`` /
+    ``source_channel`` / ``winning_source`` / ``winning_accession`` / ``detail``
+    carry the generic non-lossy provenance. ``filer_cik`` is null for a
+    proxy-name-only fold."""
+
+    kind: Literal["suppressed_by_13f_nt", "def14a_restates_institution", "institutional_family_collapse"]
+    filer_cik: str | None
     filer_name: str
     shares_removed: Decimal
-    superseded_period: date
-    winning_nt_period: date
-    winning_nt_accession: str
+    superseded_period: date | None = None
+    winning_nt_period: date | None = None
+    winning_nt_accession: str | None = None
+    family_id: str | None = None
+    source_channel: Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"] | None = None
+    winning_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"] | None = None
+    winning_accession: str | None = None
+    detail: str = ""
+
+
+class _FamilyMemberModel(BaseModel):
+    """One constituent 13F sub-CIK row inside a collapsed institutional family
+    (#1644/#1649). Display-only breakdown; NOT additive (the family holder's
+    ``shares`` already counts it)."""
+
+    filer_cik: str | None
+    filer_name: str
+    shares: Decimal
+    source: Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"]
+    accession_number: str
+    edgar_url: str | None
+    as_of_date: date | None
 
 
 class _HolderModel(BaseModel):
@@ -4178,6 +4207,7 @@ class _HolderModel(BaseModel):
     as_of_date: date | None
     filer_type: str | None
     dropped_sources: list[_DroppedSourceModel]
+    family_members: list[_FamilyMemberModel] = []
 
 
 class _SliceModel(BaseModel):
@@ -4326,6 +4356,18 @@ def _rollup_to_response(
                             )
                             for d in h.dropped_sources
                         ],
+                        family_members=[
+                            _FamilyMemberModel(
+                                filer_cik=m.filer_cik,
+                                filer_name=m.filer_name,
+                                shares=m.shares,
+                                source=m.source,
+                                accession_number=m.accession_number,
+                                edgar_url=m.edgar_url,
+                                as_of_date=m.as_of_date,
+                            )
+                            for m in h.family_members
+                        ],
                     )
                     for h in s.holders
                 ],
@@ -4379,6 +4421,11 @@ def _rollup_to_response(
                 superseded_period=c.superseded_period,
                 winning_nt_period=c.winning_nt_period,
                 winning_nt_accession=c.winning_nt_accession,
+                family_id=c.family_id,
+                source_channel=c.source_channel,
+                winning_source=c.winning_source,
+                winning_accession=c.winning_accession,
+                detail=c.detail,
             )
             for c in rollup.corrections_applied
         ],
