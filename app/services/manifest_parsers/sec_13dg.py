@@ -362,7 +362,6 @@ def _parse_13dg(
                     accession_number=accession,
                     primary_document_url=primary_url,
                     filing=filing,
-                    filer_name=filer_name,
                     ref=ref,
                     run_id=uuid4(),  # one-shot per accession; no batch run_id concept on manifest path
                 )
