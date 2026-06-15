@@ -443,15 +443,14 @@ class TestDedupPriority:
         conn.commit()
         return conn
 
-    def test_form4_and_13d_both_render_for_same_cik(self, _setup: psycopg.Connection[tuple]) -> None:
-        """Cohen-on-GME shape: Form 4 (direct) + 13D/A (beneficial)
-        reporting the SAME CIK. Per #837 / #788 P0b, BOTH render —
-        Form 4 in insiders (38M direct), 13D/A in blockholders
-        (beneficial via family trusts / control entities). Form 4 and
-        13D/G describe different facts (Rule 13d-3 beneficial vs
-        physical record-name) and must not be deduped against each
-        other. The full two-axis ``source × ownership_nature`` model
-        lands in Phase 1 (#840); this test pins the immediate fix."""
+    def test_form4_and_13d_same_cik_counted_once(self, _setup: psycopg.Connection[tuple]) -> None:
+        """Cohen-on-GME shape: Form 4 (38.35M) + 13D/A (36.85M) reporting the
+        SAME CIK. Per #1640 the holder is counted ONCE — these are the same
+        stake through two lenses (live data falsified the #837 38-vs-75M
+        premise; 13D ≈ Form 4). Cohen lands in insiders at MAX (38.35M, from
+        Form 4, role = insider); his 13D is a ``dropped_source`` for
+        provenance; the blockholders slice (he was its only member) does not
+        render."""
         conn = _setup
         cik = "0001767470"
         _seed_form4(
@@ -479,27 +478,73 @@ class TestDedupPriority:
 
         insider_slices = [s for s in rollup.slices if s.category == "insiders"]
         assert len(insider_slices) == 1
-        cohen_insider = insider_slices[0].holders[0]
-        assert cohen_insider.filer_cik == cik
-        assert cohen_insider.shares == Decimal("38347842")
-        assert cohen_insider.winning_source == "form4"
-        # 13D no longer drops as a Form 4 ``dropped_source``.
-        assert all(d.source != "13d" for d in cohen_insider.dropped_sources)
+        assert insider_slices[0].filer_count == 1  # counted ONCE
+        cohen = insider_slices[0].holders[0]
+        assert cohen.filer_cik == cik
+        assert cohen.shares == Decimal("38347842")  # MAX, not 38.35M + 36.85M
+        assert cohen.winning_source == "form4"
+        # 13D preserved as provenance on the single deduped row.
+        assert [d.source for d in cohen.dropped_sources] == ["13d"]
+        assert cohen.dropped_sources[0].shares == Decimal("36847842")
 
-        # Blockholders slice now carries the 13D/A independently.
-        block_slices = [s for s in rollup.slices if s.category == "blockholders"]
-        assert len(block_slices) == 1
-        cohen_block = block_slices[0].holders[0]
-        assert cohen_block.filer_cik == cik
-        assert cohen_block.shares == Decimal("36847842")
-        assert cohen_block.winning_source == "13d"
+        # No standalone blockholders wedge — Cohen was its only member.
+        assert not any(s.category == "blockholders" for s in rollup.slices)
 
-    def test_13g_and_13f_both_render_for_same_cik(self, _setup: psycopg.Connection[tuple]) -> None:
-        """A large institution that crossed 5% files 13G AND a 13F.
-        Per #837, both surface — 13G in blockholders (beneficial
-        threshold cross), 13F in institutions/ETFs (quarterly economic
-        position). The full two-axis dedup lands in Phase 1; for now,
-        13D/G never competes against 13F."""
+    def test_concentration_counts_dual_channel_owner_once(self, _setup: psycopg.Connection[tuple]) -> None:
+        """The #1640 GME concentration repro: Cohen insider 38.35M + same-CIK
+        13D 36.85M + an institution 140M, outstanding 448.375M. Cohen is
+        counted ONCE → known = (38.35M + 140M) / 448.375M, NOT inflated by his
+        double-counted 13D. Public residual is the complement."""
+        conn = _setup
+        cik = "0001767470"
+        _seed_form4(
+            conn,
+            accession="0001234500-25-000201",
+            instrument_id=789_001,
+            filer_cik=cik,
+            filer_name="Cohen Ryan",
+            txn_date=date(2026, 1, 21),
+            post_transaction_shares="38347842",
+        )
+        _seed_block(
+            conn,
+            accession="0001234500-25-000202",
+            instrument_id=789_001,
+            filer_cik=cik,
+            filer_name="Cohen Ryan",
+            submission_type="SCHEDULE 13D/A",
+            aggregate_shares="36847842",
+            filed_at=datetime(2026, 1, 29, tzinfo=UTC),
+        )
+        _seed_inst_holding(
+            conn,
+            accession="0001234500-25-000203",
+            instrument_id=789_001,
+            filer_cik="0000102909",
+            filer_name="VANGUARD GROUP INC",
+            filer_type="INV",
+            period_of_report=date(2025, 12, 31),
+            shares="140000000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GME", instrument_id=789_001)
+
+        known = Decimal("38347842") + Decimal("140000000")  # Cohen once + institution
+        outstanding = Decimal("448375157")
+        assert rollup.concentration.pct_outstanding_known == known / outstanding
+        # The double-counted figure would have added the 36.85M 13D again.
+        inflated = (known + Decimal("36847842")) / outstanding
+        assert rollup.concentration.pct_outstanding_known < inflated
+        assert rollup.residual.shares == outstanding - known
+        assert not any(s.category == "blockholders" for s in rollup.slices)
+
+    def test_13g_and_13f_same_cik_counted_once(self, _setup: psycopg.Connection[tuple]) -> None:
+        """A large institution that crossed 5% files 13G (22M beneficial) AND
+        a 13F (21.8M, ETF). Per #1640 these report the same book through two
+        lenses → counted ONCE. Not an insider; has a 13F → bucketed by the 13F
+        filer_type (etfs). Lands at MAX (22M, the 13G); the 13F is a
+        ``dropped_source``. No standalone blockholders wedge."""
         conn = _setup
         cik = "0000102909"
         _seed_block(
@@ -526,21 +571,18 @@ class TestDedupPriority:
 
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GME", instrument_id=789_001)
 
-        block_slices = [s for s in rollup.slices if s.category == "blockholders"]
-        assert len(block_slices) == 1
-        vg_block = block_slices[0].holders[0]
-        assert vg_block.filer_cik == cik
-        assert vg_block.winning_source == "13g"
-        assert vg_block.shares == Decimal("22000000")
-
-        # 13F ETF row now also surfaces in its own slice instead of
-        # being dropped under the 13G winner.
+        # Counted once in the etfs slice (role: has a 13F, filer_type ETF).
         etf_slices = [s for s in rollup.slices if s.category == "etfs"]
         assert len(etf_slices) == 1
-        vg_etf = etf_slices[0].holders[0]
-        assert vg_etf.filer_cik == cik
-        assert vg_etf.winning_source == "13f"
-        assert vg_etf.shares == Decimal("21800000")
+        assert etf_slices[0].filer_count == 1
+        vg = etf_slices[0].holders[0]
+        assert vg.filer_cik == cik
+        assert vg.shares == Decimal("22000000")  # MAX(13G 22M, 13F 21.8M)
+        assert vg.winning_source == "13g"
+        assert [d.source for d in vg.dropped_sources] == ["13f"]
+
+        # No standalone blockholders wedge — the 13G collapsed into the owner.
+        assert not any(s.category == "blockholders" for s in rollup.slices)
 
     def test_form3_baseline_wins_when_no_form4(self, _setup: psycopg.Connection[tuple]) -> None:
         """Officer with Form 3 baseline + no Form 4 — Form 3 supplies
@@ -798,14 +840,16 @@ class TestDedupPriority:
         # ownership_blockholders_observations for drillthrough queries.
         assert block_slices[0].holders[0].dropped_sources == ()
 
-    def test_837_regression_other_instrument_blockholder_surfaces(
+    def test_insider_with_larger_13g_counted_once_at_max(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        """Regression coverage for a DIFFERENT instrument with a
-        13D/G + same-CIK Form 4. Prevents a future patch from
-        accidentally re-introducing the cross-source dedup that
-        dropped 13D/G whenever a Form 4 shared the CIK."""
+        """A Section-16 insider whose 13G beneficial (6M) exceeds their Form 4
+        direct (2M), same CIK. Per #1640: counted ONCE, classified by role
+        (insider), at their total beneficial ownership (MAX = 6M from the 13G);
+        the Form 4 is a ``dropped_source``. No standalone blockholders wedge.
+        (Was test_837_regression_*, which pinned the superseded show-both
+        posture — see docs/specs/etl/2026-06-15-ownership-owner-once-dedup.md.)"""
         conn = ebull_test_conn
         iid = 837_900
         cik = "0007770001"
@@ -834,17 +878,14 @@ class TestDedupPriority:
 
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="OTHER", instrument_id=iid)
 
-        # Both slices present, both keyed on the same CIK with their
-        # respective figures.
         insider_slices = [s for s in rollup.slices if s.category == "insiders"]
-        block_slices = [s for s in rollup.slices if s.category == "blockholders"]
         assert len(insider_slices) == 1
-        assert len(block_slices) == 1
-        assert insider_slices[0].holders[0].shares == Decimal("2000000")
-        assert insider_slices[0].holders[0].winning_source == "form4"
-        assert block_slices[0].holders[0].shares == Decimal("6000000")
-        assert block_slices[0].holders[0].winning_source == "13g"
-        assert block_slices[0].filer_count == 1
+        assert insider_slices[0].filer_count == 1
+        holder = insider_slices[0].holders[0]
+        assert holder.shares == Decimal("6000000")  # MAX(form4 2M, 13G 6M)
+        assert holder.winning_source == "13g"
+        assert [d.source for d in holder.dropped_sources] == ["form4"]
+        assert not any(s.category == "blockholders" for s in rollup.slices)
 
 
 # ---------------------------------------------------------------------------
@@ -865,14 +906,12 @@ class TestDef14aEnrichment:
         return conn
 
     def test_resolver_matches_form4_filer(self, _setup: psycopg.Connection[tuple]) -> None:
-        """DEF 14A holder ``"Smith Jane"`` resolves to a Form 4 filer
-        with CIK ``0001100100``. Under the two-axis model (#840 P1 +
-        #905 read-path cutover), Form 4 (direct) and DEF 14A
-        (beneficial) live in separate dedup groups by ownership_nature
-        and BOTH surface as holders in the insiders slice. The DEF 14A
-        is no longer dropped against Form 4 — they describe different
-        natures (record-name vs Rule 13d-3 beneficial) and the
-        operator-visible chart shows both."""
+        """DEF 14A holder ``"Smith Jane"`` resolves to a Form 4 filer with CIK
+        ``0001100100``. Per #1640 the matched DEF 14A (beneficial) and the
+        Form 4 (Section-16) are overlapping restatements of one stake → counted
+        ONCE in insiders at MAX (tie at 500K → Form 4 wins on priority). The
+        DEF 14A becomes a ``dropped_source``, NOT a second summed row (this is
+        the latent insiders double-count Codex surfaced). Still not unmatched."""
         conn = _setup
         cik = "0001100100"
         _seed_form4(
@@ -896,10 +935,11 @@ class TestDef14aEnrichment:
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="DEF14A", instrument_id=789_010)
 
         insiders = [s for s in rollup.slices if s.category == "insiders"][0]
-        sources_present = {h.winning_source for h in insiders.holders}
-        assert sources_present == {"form4", "def14a"}, (
-            f"insiders should carry both form4 + def14a holders: {sources_present}"
-        )
+        assert insiders.filer_count == 1  # counted ONCE, not form4 + def14a summed
+        assert insiders.total_shares == Decimal("500000")  # MAX, not 1,000,000
+        holder = insiders.holders[0]
+        assert holder.winning_source == "form4"
+        assert [d.source for d in holder.dropped_sources] == ["def14a"]
         # def14a was matched against the Form 4 by name resolver, so it
         # must NOT land in the unmatched slice.
         assert not any(s.category == "def14a_unmatched" for s in rollup.slices)
@@ -930,12 +970,11 @@ class TestDef14aEnrichment:
         row must route to the insiders slice (not def14a_unmatched).
         The resolver returns ``matched=True, cik=None`` for that case.
 
-        Post-#905 two-axis model: Form 4 (direct) and the resolved
-        DEF 14A (beneficial) BOTH render as holders in the insiders
-        slice. The matched DEF 14A is no longer ``def14a_unmatched`` —
-        which is the regression this test originally caught — but is
-        also no longer dropped against the Form 4 row, since they
-        describe different ownership natures."""
+        The matched DEF 14A must still route to insiders (not
+        ``def14a_unmatched``) — the regression this test guards. Per #1640 the
+        Form 4 and the matched DEF 14A (same NULL-CIK name identity) are now
+        counted ONCE at MAX, with the loser as a ``dropped_source`` — not two
+        summed rows."""
         conn = _setup
         _seed_form4(
             conn,
@@ -958,10 +997,13 @@ class TestDef14aEnrichment:
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="DEF14A", instrument_id=789_010)
         insiders = [s for s in rollup.slices if s.category == "insiders"]
         assert len(insiders) == 1
-        # Legacy NULL-CIK Form 4 + matched DEF 14A both surface in the
-        # insiders slice under the two-axis model.
-        sources_present = {h.winning_source for h in insiders[0].holders}
-        assert sources_present == {"form4", "def14a"}
+        # Legacy NULL-CIK Form 4 + matched DEF 14A collapse to ONE owner
+        # (name-key identity) at MAX, not two summed rows.
+        assert insiders[0].filer_count == 1
+        assert insiders[0].total_shares == Decimal("42000")  # MAX, not 84000
+        holder = insiders[0].holders[0]
+        assert holder.winning_source == "form4"
+        assert [d.source for d in holder.dropped_sources] == ["def14a"]
         # DEF 14A is matched, not unmatched.
         assert not any(s.category == "def14a_unmatched" for s in rollup.slices)
 

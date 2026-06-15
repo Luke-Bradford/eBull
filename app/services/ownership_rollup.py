@@ -33,7 +33,7 @@ reconcile.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal
@@ -812,20 +812,151 @@ def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
     return survivors
 
 
+# ---------------------------------------------------------------------------
+# Owner-identity reconciliation — one beneficial owner, counted once (#1640)
+# See docs/specs/etl/2026-06-15-ownership-owner-once-dedup.md
+# ---------------------------------------------------------------------------
+
+# Beneficial-restatement sources: each is an estimate of the SAME total
+# beneficial stake (Rule 13d-3). DEF 14A beneficial ≈ Form-4 Section-16 total
+# ≈ 13D/G beneficial — overlapping, so a single owner's contribution is the
+# MAX across them (not the sum).
+_BENEFICIAL_SOURCES: Final[frozenset[SourceTag]] = frozenset({"form4", "form3", "def14a", "13d", "13g"})
+# Section-16 / management sources: presence of any one makes the owner an
+# insider regardless of any other channel.
+_INSIDER_SOURCES: Final[frozenset[SourceTag]] = frozenset({"form4", "form3", "def14a"})
+# Sources whose per-owner nature rows ADD (Form 4 / Form 3 ``direct`` +
+# ``indirect`` are distinct Section-16 holdings — the #905 JPM rule). Every
+# other source's nature rows OVERLAP (DEF 14A ``beneficial`` vs ``voting``, a
+# single 13D/G beneficial figure, a single 13F economic position) and so are
+# collapsed to their largest representative, never summed (Codex #1640 ckpt-2).
+_ADDITIVE_SOURCES: Final[frozenset[SourceTag]] = frozenset({"form4", "form3"})
+
+
+def _argmax_source(sources: Iterable[SourceTag], src_total: dict[SourceTag, Decimal]) -> SourceTag:
+    """Source carrying the owner's largest total; tie-break to the
+    higher-priority (lower ``_PRIORITY_RANK``) source so form4 beats 13d
+    on equal shares."""
+    return max(sources, key=lambda s: (src_total[s], -_PRIORITY_RANK[s]))
+
+
+def _source_rows_and_total(source: SourceTag, rows: list[Holder]) -> tuple[list[Holder], Decimal]:
+    """The display rows + owner subtotal for one ``(owner, source)``.
+
+    Additive sources (Form 4 / Form 3): keep every nature row, sum them
+    (direct + indirect = the Section-16 total, #905). Overlapping sources
+    (DEF 14A beneficial/voting, 13D/G, 13F): keep only the largest row — the
+    others restate the same shares through a different lens and summing them
+    would double-count the owner (Codex #1640 ckpt-2 F3)."""
+    if source in _ADDITIVE_SOURCES:
+        return rows, sum((h.shares for h in rows), Decimal(0))
+    rep = max(rows, key=lambda h: h.shares)
+    return [rep], rep.shares
+
+
+def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Holder]]:
+    """Collapse each beneficial owner to a single pie-wedge contribution.
+
+    Input = the combined pie-wedge ``Holder`` set (insiders / institutions /
+    etfs survivors + blockholders), already deduped per-(cik, nature) and
+    per-source by the upstream passes. Output = per-category holder lists,
+    each owner appearing in exactly one category.
+
+    Rule (#1640, SEC proxy "beneficial owners and management" semantics):
+    one owner (identity = CIK, name fallback), counted once, at their total
+    beneficial ownership, classified by most-specific role. Beneficial-
+    restatement sources (Form 4 / 3 / DEF 14A / 13D / 13G) are overlapping
+    estimates of one stake → MAX; 13F is managed/economic exposure (often
+    clients' assets), a different concept that never inflates an insider's
+    figure. The losing sources become one ``dropped_sources`` entry each (at
+    that source's owner subtotal) on the owner's largest surviving row.
+
+    Note: a dropped source's own upstream ``dropped_sources`` (superseded
+    amendments collapsed by :func:`_dedup_by_priority` /
+    :func:`_dedup_within_source`) are not re-surfaced — they were never a
+    top-level holder either, and the per-source subtotal is the channel's
+    authoritative figure."""
+    groups: dict[str, list[Holder]] = {}
+    for h in holders:
+        groups.setdefault(_identity_key(h.filer_cik, h.filer_name), []).append(h)
+
+    by_category: dict[SliceCategory, list[Holder]] = {
+        "insiders": [],
+        "blockholders": [],
+        "institutions": [],
+        "etfs": [],
+    }
+    for group in groups.values():
+        by_source: dict[SourceTag, list[Holder]] = {}
+        for h in group:
+            by_source.setdefault(h.winning_source, []).append(h)
+        # Per-source display rows + subtotal (additive vs overlapping natures).
+        src_rows: dict[SourceTag, list[Holder]] = {}
+        src_total: dict[SourceTag, Decimal] = {}
+        for s, rows in by_source.items():
+            src_rows[s], src_total[s] = _source_rows_and_total(s, rows)
+
+        present = set(by_source)
+        bene_sources: list[SourceTag] = [s for s in present if s in _BENEFICIAL_SOURCES]
+        bene_max_source = _argmax_source(bene_sources, src_total) if bene_sources else None
+
+        if present & _INSIDER_SOURCES:
+            # Section-16 person: total beneficial = MAX of the beneficial
+            # restatements. Any 13F for this CIK is managed assets → it stays
+            # a dropped_source, never added to the insider's stake.
+            category: SliceCategory = "insiders"
+            figure_src = bene_max_source
+        elif "13f" in present:
+            biggest_13f = max(by_source["13f"], key=lambda h: h.shares)
+            category = "etfs" if (biggest_13f.filer_type or "").upper() == "ETF" else "institutions"
+            # A 13F manager that also filed a passive 13G/D reports the same
+            # book through two lenses → count once at the larger.
+            if bene_max_source is None or src_total["13f"] >= src_total[bene_max_source]:
+                figure_src = "13f"
+            else:
+                figure_src = bene_max_source
+        else:  # only 13d / 13g
+            category = "blockholders"
+            figure_src = bene_max_source
+
+        assert figure_src is not None  # every pie-wedge holder is in BENEFICIAL ∪ {13f}
+        keep = list(src_rows[figure_src])
+        losing_sources: list[SourceTag] = [s for s in present if s != figure_src]
+        if losing_sources:
+            primary_idx = max(range(len(keep)), key=lambda i: keep[i].shares)
+            dropped = list(keep[primary_idx].dropped_sources)
+            seen = {(d.source, d.accession_number) for d in dropped}
+            for s in losing_sources:
+                rep = max(by_source[s], key=lambda h: h.shares)  # link target for the channel
+                key = (s, rep.winning_accession)
+                if key in seen:
+                    continue
+                seen.add(key)
+                dropped.append(
+                    DroppedSource(
+                        source=s,
+                        accession_number=rep.winning_accession,
+                        shares=src_total[s],  # the channel's owner subtotal, not one row
+                        as_of_date=rep.as_of_date,
+                        edgar_url=rep.winning_edgar_url,
+                    )
+                )
+            keep[primary_idx] = replace(keep[primary_idx], dropped_sources=tuple(dropped))
+        by_category[category].extend(keep)
+
+    return by_category
+
+
 def _bucket_into_slices(
-    survivors: list[Holder],
-    blockholders: list[Holder],
+    by_category: dict[SliceCategory, list[Holder]],
     unmatched_def14a: list[_Candidate],
     outstanding: Decimal,
     *,
     funds_holders: list[Holder] | None = None,
 ) -> list[OwnershipSlice]:
-    """Split deduped survivors into slices by ``winning_source``
-    (and ``filer_type`` for 13F).
-
-    ``blockholders`` arrives pre-deduped from the parallel 13D/G
-    pipeline (#837 split). Insiders / institutions / ETFs still come
-    from cross-source priority dedup.
+    """Build slices from the per-category holder lists produced by
+    :func:`_reconcile_owner_once` (each owner already in exactly one
+    category).
 
     ``funds_holders`` (#919) arrives pre-deduped from
     :func:`_collect_funds_from_current` (PK-deduped at table level)
@@ -834,31 +965,9 @@ def _bucket_into_slices(
     N-PORT rows are fund-level detail of holdings already aggregated
     in the institutions slice via 13F-HR, so additive accounting would
     double-count."""
-    by_category: dict[SliceCategory, list[Holder]] = {
-        "insiders": [],
-        "blockholders": list(blockholders),
-        "institutions": [],
-        "etfs": [],
-    }
-    for h in survivors:
-        if h.winning_source in ("form4", "form3", "def14a"):
-            by_category["insiders"].append(h)
-        elif h.winning_source in ("13d", "13g"):
-            # Defensive: 13d/13g should now be partitioned out before
-            # cross-source dedup. If one slips through, it still
-            # surfaces in the blockholders slice rather than a
-            # ValueError below.
-            by_category["blockholders"].append(h)
-        elif h.winning_source == "13f":
-            if (h.filer_type or "").upper() == "ETF":
-                by_category["etfs"].append(h)
-            else:
-                by_category["institutions"].append(h)
-        else:
-            raise ValueError(f"unknown winning_source {h.winning_source!r}")
-
     slices: list[OwnershipSlice] = []
-    for category, holders in by_category.items():
+    for category in _CATEGORY_ORDER:
+        holders = by_category.get(category)
         if not holders:
             continue
         slices.append(_build_slice(category, holders, outstanding))
@@ -1371,26 +1480,26 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # via _bucket_into_slices.
     funds_holders = _collect_funds_from_current(conn, instrument_id)
 
-    # Split 13D/G out of the cross-source priority dedup (#837 / #788
-    # P0b). 13D/G reports BENEFICIAL ownership per Rule 13d-3
-    # (direct + indirect via family trusts, control entities, funds),
-    # while Form 4 reports DIRECT only. They are different facts; the
-    # legacy single-chain dedup ``form4 > 13d/g`` discards the
-    # beneficial figure entirely whenever the same CIK has any Form 4
-    # — Cohen-on-GME is the canonical case (38M direct vs 75M
-    # beneficial; only the 38M renders today). The full two-axis
-    # ``source × ownership_nature`` dedup model lands in Phase 1
-    # (#840); this PR is the immediate rollup-query patch so 13D/G
-    # filings always surface in the blockholders slice with their
-    # reported beneficial figure, regardless of any same-CIK Form 4.
+    # Dedup in two stages: (1) per-source winner selection — Form 4 amendment
+    # chains and 13D/G amendment chains each collapse to their latest filing;
+    # (2) owner-identity reconciliation (#1640) — one beneficial owner is
+    # counted ONCE across channels, classified by most-specific role, at their
+    # total beneficial ownership (MAX of the Form 4 / DEF 14A / 13D/G
+    # restatements; 13F managed assets excluded). This supersedes the #837/#788
+    # P0b "show both as additive wedges" posture, whose premise (Cohen 38M
+    # direct vs ~75M beneficial) the live data falsified (13D 36.85M ≈ Form 4
+    # 38.35M — one stake). #837's intent is honored: the larger beneficial
+    # figure is kept (via MAX) and the losing filing is preserved in
+    # ``dropped_sources``, not discarded.
+    # See docs/specs/etl/2026-06-15-ownership-owner-once-dedup.md.
     block_candidates = [c for c in matched if c.source in ("13d", "13g")]
     other_candidates = [c for c in matched if c.source not in ("13d", "13g")]
 
     survivors = _dedup_by_priority(other_candidates)
     blockholders = _dedup_within_source(block_candidates)
+    by_category = _reconcile_owner_once(survivors + blockholders)
     slices = _bucket_into_slices(
-        survivors,
-        blockholders,
+        by_category,
         unmatched_def14a,
         outstanding,
         funds_holders=funds_holders,
@@ -1532,6 +1641,31 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
             "",
         ]
     )
+
+    # Dropped-source provenance (#1640): when one beneficial owner is counted
+    # once across channels, the losing filings (e.g. Cohen's 13D behind his
+    # Form 4) become ``dropped_sources`` and would otherwise vanish from the
+    # CSV audit. Emit them as ``__dropped:<source>__`` memo rows — excluded
+    # from any SUM(shares) reconciliation (the sum invariant holds over the
+    # pie-wedge rows + treasury + residual), but visible so an operator can see
+    # the full filing trail behind a deduped owner.
+    for slc in pie_slices:
+        for holder in slc.holders:
+            for dropped in holder.dropped_sources:
+                writer.writerow(
+                    [
+                        _csv_safe(holder.filer_cik or ""),
+                        _csv_safe(holder.filer_name),
+                        f"__dropped:{dropped.source}__",
+                        str(dropped.shares),
+                        "",
+                        dropped.source,
+                        _csv_safe(dropped.accession_number),
+                        dropped.as_of_date.isoformat() if dropped.as_of_date is not None else "",
+                        "",
+                        _csv_safe(dropped.edgar_url or ""),
+                    ]
+                )
 
     # Memo-overlay slices land AFTER the residual row. Each row's
     # ``category`` column carries the ``__memo:<original_category>__``
