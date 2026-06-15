@@ -4150,6 +4150,23 @@ class _DroppedSourceModel(BaseModel):
     edgar_url: str | None
 
 
+class _CorrectionAppliedModel(BaseModel):
+    """A figure-changing correction applied at read time (#1639 / #1647).
+
+    First-class structured JSON so a machine consumer (or operator) sees WHY
+    the institutions total changed, not just the corrected number. ``kind`` is
+    a closed vocabulary; today only ``suppressed_by_13f_nt`` (a filer's stale
+    13F-HR removed because the filer filed a 13F-NT for a later quarter)."""
+
+    kind: Literal["suppressed_by_13f_nt"]
+    filer_cik: str
+    filer_name: str
+    shares_removed: Decimal
+    superseded_period: date
+    winning_nt_period: date
+    winning_nt_accession: str
+
+
 class _HolderModel(BaseModel):
     filer_cik: str | None
     filer_name: str
@@ -4254,6 +4271,12 @@ class OwnershipRollupResponse(BaseModel):
     # renders a "Filed as X" callout when the chain has any symbol
     # other than the current one.
     historical_symbols: list[_HistoricalSymbolModel]
+    # Figure-changing corrections applied at read time (#1639 / #1647). Today:
+    # 13F-NT supersessions. ``suppressed_by_notice`` is the convenience count of
+    # the ``suppressed_by_13f_nt`` kind so a consumer can branch without
+    # iterating. Empty list / 0 when no correction fired.
+    corrections_applied: list[_CorrectionAppliedModel]
+    suppressed_by_notice: int
     computed_at: datetime
 
 
@@ -4347,6 +4370,19 @@ def _rollup_to_response(
             )
             for h in rollup.historical_symbols
         ],
+        corrections_applied=[
+            _CorrectionAppliedModel(
+                kind=c.kind,  # type: ignore[arg-type]  # closed vocab, validated by Pydantic Literal
+                filer_cik=c.filer_cik,
+                filer_name=c.filer_name,
+                shares_removed=c.shares_removed,
+                superseded_period=c.superseded_period,
+                winning_nt_period=c.winning_nt_period,
+                winning_nt_accession=c.winning_nt_accession,
+            )
+            for c in rollup.corrections_applied
+        ],
+        suppressed_by_notice=sum(1 for c in rollup.corrections_applied if c.kind == "suppressed_by_13f_nt"),
         computed_at=rollup.computed_at,
     )
 

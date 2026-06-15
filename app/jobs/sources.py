@@ -419,6 +419,10 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.
     "sec_rebuild": "sec_rate",
+    # institutional_13f_notice_backfill — one-shot 13F-NT backfill (#1639).
+    # Per-day daily-index reads + per-Notice primary_doc fetches against SEC;
+    # shares the 10 req/s sec_rate budget.
+    "institutional_13f_notice_backfill": "sec_rate",
     # bootstrap_orchestrator — first-install + admin retry trigger (G14).
     # POST /system/bootstrap/run + POST /system/bootstrap/retry-failed
     # publish_manual_job_request(JOB_BOOTSTRAP_ORCHESTRATOR); the queue

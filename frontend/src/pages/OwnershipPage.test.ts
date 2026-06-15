@@ -102,6 +102,8 @@ function _baseRollup(
       body: "Treat as best-effort.",
     },
     historical_symbols: [],
+    corrections_applied: [],
+    suppressed_by_notice: 0,
     computed_at: "2026-06-12T00:00:00Z",
     ...overrides,
   };

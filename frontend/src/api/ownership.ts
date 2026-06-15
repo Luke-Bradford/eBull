@@ -180,6 +180,25 @@ export interface OwnershipSharesOutstandingSource {
   readonly edgar_url: string | null;
 }
 
+/** A figure-changing correction applied at read time (#1639 / #1647).
+ *  First-class structured record so the UI / a machine consumer sees WHY the
+ *  institutions total changed, not just the corrected number. ``kind`` is a
+ *  closed vocabulary; today only ``suppressed_by_13f_nt`` (a filer's stale
+ *  13F-HR removed because the filer filed a 13F-NT for a later quarter). */
+export interface OwnershipCorrectionApplied {
+  readonly kind: "suppressed_by_13f_nt";
+  readonly filer_cik: string;
+  readonly filer_name: string;
+  /** Decimal-as-string — shares removed from the institutions slice (they flow
+   *  into the residual). */
+  readonly shares_removed: string;
+  /** ISO ``YYYY-MM-DD`` — the superseded 13F-HR quarter. */
+  readonly superseded_period: string;
+  /** ISO ``YYYY-MM-DD`` — the 13F-NT quarter that superseded it. */
+  readonly winning_nt_period: string;
+  readonly winning_nt_accession: string;
+}
+
 export interface OwnershipRollupResponse {
   readonly symbol: string;
   readonly instrument_id: number;
@@ -196,6 +215,11 @@ export interface OwnershipRollupResponse {
   readonly coverage: OwnershipCoverage;
   readonly banner: OwnershipBanner;
   readonly historical_symbols: readonly OwnershipHistoricalSymbol[];
+  /** Figure-changing corrections applied at read time (#1639 / #1647). Empty
+   *  when none fired. ``suppressed_by_notice`` is the convenience count of the
+   *  ``suppressed_by_13f_nt`` kind. */
+  readonly corrections_applied: readonly OwnershipCorrectionApplied[];
+  readonly suppressed_by_notice: number;
   readonly computed_at: string;
 }
 

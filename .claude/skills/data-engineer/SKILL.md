@@ -48,6 +48,20 @@ If any step's answer disagrees with what your spec assumed, **fix the spec first
 | I12 | eToro broker is sole execution boundary; all order writes go via `app/services/order_client.py` and audit `decision_audit` | settled-decisions Provider strategy; `app/api/orders.py` |
 | I13 | Multi-row source positions (13F sub-manager splits, multi-lot tranches) are SUM-aggregated at EVERY ingest locus, with an identical key + secondary-field (voting) derivation across all paths | `app/services/thirteen_f_normalise.py` (per-filing); `sec_13f_dataset_ingest.py::_INSERT_FROM_STG_SQL` `GROUP BY ... SUM` (bulk); prevention-log "Multi-row source position must be SUM-aggregated at EVERY ingest locus" |
 | I14 | One beneficial owner counted ONCE in the rollup, classified by most-specific role (insider > institution > blockholder). Aggregation: SUM only *additive* natures (Form 4 `direct`+`indirect`); MAX *overlapping* restatements (DEF 14A beneficial/voting, 13D/G vs 13F vs Form 4 — same shares, different lens) | `app/services/ownership_rollup.py::_reconcile_owner_once` + `_source_rows_and_total` (`_ADDITIVE_SOURCES`={form4,form3}); spec `docs/specs/etl/2026-06-15-ownership-owner-once-dedup.md` (#1640); prevention-log "Same owner across reporting channels: MAX overlapping, SUM additive" |
+| I15 | A 13F-NT (Notice) supersedes the filer's prior 13F-HR. Rollup excludes a filer's `_current` HR when an NT for a LATER quarter exists (`NT.period_end > HR.period_end` — period axis, NEVER filed_at). Suppressions surface as structured `corrections_applied[]` JSON (first #1647 contract producer). Stops the ~2× double-count on a filer reorg | `sql/199`; `app/services/ownership_rollup.py::_read_notice_suppressions` + `NOT EXISTS` in `_collect_canonical_holders_from_current`; capture `app/services/sec_13f_notice_sync.py` (jobs `sec_13f_notice_sync` daily + `institutional_13f_notice_backfill` manual); spec `docs/specs/etl/2026-06-15-institutional-13f-nt-supersession.md` (#1639); prevention-log "A 13F-NT supersedes the filer's prior 13F-HR" |
+
+**13F-NT supersession (#1639, I15).** We ingest 13F-HR only — 13F-NT is
+deliberately absent from `_FORM_TO_SOURCE`. But an NT is SEC's anti-double-count
+primitive: the filer declares "nothing reportable this quarter" (its book moved
+to other managers post-reorg). `institutional_filer_13f_notices` (sql/199) is a
+standalone capture buffer (NOT a manifest source) filled by the daily
+`sec_13f_notice_sync` job; the rollup read excludes a filer's HR when an NT for a
+later quarter exists. Derive the NT `filer_cik` from the primary_doc header
+`<cik>` (first occurrence — an NT lists every *other* manager's CIK after it) so
+it joins identically to the HR-derived `ownership_institutions_current.filer_cik`.
+The exclusion is read-only (no `_current` re-backfill); after merge, the operator
+runs the one-shot `institutional_13f_notice_backfill` to seed the historical NT
+window — NO `sec_rebuild` (no parser-version bump).
 
 Multi-row source positions: SUM at every locus. A 13F-HR position split across
 sub-manager rows must be summed by every writer — three per-filing Python paths
@@ -164,6 +178,7 @@ Hard-rule corollaries:
 | `sec_nport_filer_directory` | sql/126 | RIC trust CIKs. PK `cik`. Populated by `sec_nport_filer_directory_sync`. Sibling of `institutional_filers` (#912). Disjoint universes |
 | `institutional_filers` | sql/090 | 13F-HR filer CIKs (managers). UNIQUE `cik`. CHECK `filer_type ∈ ETF/INV/INS/BD/OTHER` |
 | `institutional_holdings` | sql/090 | Legacy per-(accession, instrument, is_put_call) 13F holdings. Partial UNIQUE on `(accession_number, instrument_id, COALESCE(is_put_call,'EQUITY'))` |
+| `institutional_filer_13f_notices` | sql/199 | 13F-NT (Notice) capture buffer (#1639). PK `accession_number`. NOT a manifest source — standalone capture by `sec_13f_notice_sync`. Rollup excludes a filer's HR when an NT for a later `period_end` exists (I15). `(filer_cik, period_end DESC)` index serves the rollup `NOT EXISTS` |
 | `blockholder_filers` / `blockholder_filings` | sql/095 | 13D/G filer registry + per-reporter rows |
 | `def14a_beneficial_holdings` / `def14a_ingest_log` | sql/097 | DEF 14A bene-table holdings + per-accession tombstone. UNIQUE `(accession_number, holder_name)` |
 | `insider_transactions` | sql/056 | Form 4 per-transaction rows. UNIQUE `(accession_number, txn_row_num)` |
@@ -577,6 +592,7 @@ Notable triggers: `POST /jobs/sec_rebuild/run`, `POST /jobs/ownership_observatio
 - Service: `get_ownership_rollup` → slice `category='institutions'`.
 - Endpoint: `GET /instruments/AAPL/ownership-rollup`.
 - Caveat: AAPL real institutional % ~62%; pre-#841 universe expansion the dev DB number is much lower because `institutional_filers` only contains the 11k-row form.idx universe and CUSIP coverage is still being expanded (#914 weekly job).
+- Caveat (#1639, I15): the institutions slice EXCLUDES a filer's 13F-HR when that filer filed a 13F-NT for a later quarter (`institutional_filer_13f_notices`) — a filer mid-reorg (Vanguard 2026-Q1) otherwise double-counts its stale parent quarter + post-reorg sub-entity quarters (~2×). The exclusion is read-side only; `rollup.corrections_applied[]` lists what was removed.
 
 ### Q2. Who holds the most TSLA?
 - Same rollup endpoint. Holders sorted by shares within each slice.

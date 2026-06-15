@@ -36,6 +36,8 @@ from app.workers.scheduler import (
     JOB_FILING_EVENTS_SKIP_TIER_CLEANUP,
     JOB_FINRA_REGSHO_DAILY_REFRESH,
     JOB_FINRA_SHORT_INTEREST_REFRESH,
+    JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL,
+    JOB_SEC_13F_NOTICE_SYNC,
     JOB_SEC_ATOM_FAST_LANE,
     JOB_SEC_DAILY_INDEX_RECONCILE,
     JOB_SEC_MANIFEST_TOMBSTONE_STALE,
@@ -204,6 +206,67 @@ class TestFilingEventsSkipTierCleanupRegistry:
             validate_job_params(
                 JOB_FILING_EVENTS_SKIP_TIER_CLEANUP,
                 {"batch_size": 100},
+                allow_internal_keys=False,
+            )
+
+
+class TestSec13fNoticeSyncRegistry:
+    """#1639 — the daily 13F-NT supersession capture is a SCHEDULED job
+    (lane sec_rate, gated on bootstrap-complete), NOT a manual-only
+    triangle. It pairs with the manual backfill below."""
+
+    def test_in_valid_job_names(self) -> None:
+        assert JOB_SEC_13F_NOTICE_SYNC in VALID_JOB_NAMES
+
+    def test_in_scheduled_jobs_on_sec_rate(self) -> None:
+        job = _job_by_name(JOB_SEC_13F_NOTICE_SYNC)
+        assert job is not None
+        assert job.source == "sec_rate"
+
+    def test_gated_on_bootstrap_complete(self) -> None:
+        job = _job_by_name(JOB_SEC_13F_NOTICE_SYNC)
+        assert job is not None
+        # A quarterly figure: don't catch up on boot, but DO require
+        # bootstrap-complete (no institution rows to supersede before then).
+        assert job.catch_up_on_boot is False
+        assert job.prerequisite is not None
+
+    def test_source_for_resolves(self) -> None:
+        assert source_for(JOB_SEC_13F_NOTICE_SYNC) == "sec_rate"
+
+
+class TestInstitutional13fNoticeBackfillRegistry:
+    """#1639 — the one-shot NT backfill over the 8-quarter retention
+    horizon is manual-trigger-only: registered via the sibling
+    side-tables, NOT in SCHEDULED_JOBS (a backfill must never auto-fire).
+    Pins the full triangle (invoker + metadata + source)."""
+
+    def test_in_valid_job_names(self) -> None:
+        assert JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL in VALID_JOB_NAMES
+
+    def test_not_in_scheduled_jobs(self) -> None:
+        assert _job_by_name(JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL) is None
+
+    def test_in_manual_trigger_metadata_with_no_params(self) -> None:
+        assert JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL in MANUAL_TRIGGER_JOB_METADATA
+        assert MANUAL_TRIGGER_JOB_METADATA[JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL] == ()
+
+    def test_in_manual_trigger_sources(self) -> None:
+        assert MANUAL_TRIGGER_JOB_SOURCES[JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL] == "sec_rate"
+
+    def test_source_for_resolves(self) -> None:
+        assert source_for(JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL) == "sec_rate"
+
+    def test_zero_param_validation_contract(self) -> None:
+        """POST /jobs/institutional_13f_notice_backfill/run takes no params:
+        an empty body validates; any supplied key is rejected."""
+        metadata = _lookup_metadata(JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL)
+        assert metadata == ()
+        validate_job_params(JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL, {}, allow_internal_keys=False)
+        with pytest.raises(ParamValidationError):
+            validate_job_params(
+                JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL,
+                {"since": "2024-01-01"},
                 allow_internal_keys=False,
             )
 

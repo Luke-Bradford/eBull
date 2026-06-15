@@ -114,6 +114,27 @@ class ThirteenFFilerInfo:
 
 
 @dataclass(frozen=True)
+class ThirteenFNoticeInfo:
+    """Minimal metadata from a 13F-NT / 13F-NT/A (Notice) primary_doc.xml.
+
+    A Notice declares the filer holds NOTHING reportable this quarter — it
+    has no infotable and no summary page, so :func:`parse_primary_doc`'s
+    EdgarTools path (which requires the filing-manager name + summary page)
+    would raise. The supersession predicate (#1639) needs only two fields:
+
+      * ``cik`` — zero-padded 10-digit filer CIK.
+      * ``period_of_report`` — the quarter the Notice covers. This is the
+        load-bearing axis: a filer's 13F-HR for quarter ``P`` is superseded
+        iff that filer filed a 13F-NT for a LATER quarter. ``filed_at`` is
+        deliberately NOT modelled here — an NT/A amending an old quarter can
+        be filed after a resumed HR, so file-time is the wrong axis.
+    """
+
+    cik: str
+    period_of_report: date
+
+
+@dataclass(frozen=True)
 class ThirteenFHolding:
     """One ``<infoTable>`` row from an infotable.xml attachment.
 
@@ -269,6 +290,37 @@ def parse_primary_doc(xml: str) -> ThirteenFFilerInfo:
         filed_at=filed_at,
         table_value_total_usd=table_value_total_usd,
     )
+
+
+def parse_notice_primary_doc(xml: str) -> ThirteenFNoticeInfo:
+    """Parse a 13F-NT / 13F-NT/A ``primary_doc.xml`` — ``cik`` + ``periodOfReport``.
+
+    A Notice has no holdings table and no summary page, so we do NOT route
+    it through EdgarTools (:func:`parse_primary_doc`) — that path demands a
+    filing-manager name + summary page and would raise on a Notice. We read
+    only the two elements the supersession predicate (#1639) needs, reusing
+    the same namespace-stripping walk + CIK zero-pad as the HR path.
+
+    Raises ``ValueError`` when ``<cik>`` or ``<periodOfReport>`` is missing or
+    unparseable — the caller skips + logs that accession and retries it on the
+    next sync run (under-capture errs toward the existing non-suppressing
+    behaviour, never toward wrongly dropping a holding).
+    """
+    root = ET.fromstring(xml)  # noqa: S314 — SEC EDGAR is the trusted source.
+    cik_text = _walk_text(root, "cik")
+    if cik_text is None:
+        raise ValueError("13F-NT primary_doc.xml is missing a <cik> element")
+    cik = _zero_pad_cik(cik_text)
+
+    # ``periodOfReport`` is ``MM-DD-YYYY`` in the 13F primary_doc (same format
+    # as the signature date), so reuse the shared parser rather than a second
+    # format list. ``_parse_signature_date`` returns midnight-UTC datetime; we
+    # want the calendar date for the period axis.
+    period_dt = _parse_signature_date(_walk_text(root, "periodOfReport"))
+    if period_dt is None:
+        raise ValueError("13F-NT primary_doc.xml has no parseable <periodOfReport>")
+
+    return ThirteenFNoticeInfo(cik=cik, period_of_report=period_dt.date())
 
 
 def _normalise_put_call(raw: Any) -> Literal["PUT", "CALL"] | None:
