@@ -5920,10 +5920,12 @@ def institutional_13f_notice_backfill() -> None:
     """``_INVOKERS['institutional_13f_notice_backfill']`` — one-shot 13F-NT backfill (#1639).
 
     Manual-only (the ``sec_rebuild`` triangle). Scans the daily-index from the
-    oldest 13F-HR ``filed_at`` still in ``ownership_institutions_current`` (the
-    8-quarter retention horizon) to yesterday, capturing every Notice in that
-    window. Reuses :func:`sync_13f_notices` per-day so it cannot drift from the
-    steady-state path.
+    oldest 13F-HR quarter (``MIN(period_end)``, NOT ``filed_at``) still in
+    ``ownership_institutions_current`` (capped at the 8-quarter retention
+    horizon) to yesterday, capturing every Notice in that window. Shares the
+    per-day capture (``_scan_days`` → ``_process_day``) with
+    :func:`sync_13f_notices` so it cannot drift from the steady-state path,
+    but commits per-day for durability.
     """
     from app.services.sec_13f_notice_sync import backfill_13f_notices
 
