@@ -35,7 +35,7 @@ import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api._helpers import resolve_quote_price
 from app.api.auth import require_session_or_service_token
@@ -4229,6 +4229,13 @@ class _SliceModel(BaseModel):
     # Frontend filters on this to decide whether to render in the pie
     # vs as a memo panel below the pie.
     denominator_basis: Literal["pie_wedge", "institution_subset"] = "pie_wedge"
+    # As-of coherence envelope (#1647 part 1). The as-of span of this slice's
+    # deduped holders (incl. collapsed-family members) so a machine consumer
+    # sees the figure sums across quarters. NULL-as_of-only slice → None/0/False.
+    as_of_min: date | None = None
+    as_of_max: date | None = None
+    distinct_quarters: int = 0
+    mixed_period: bool = False
 
 
 class _ResidualModel(BaseModel):
@@ -4244,6 +4251,11 @@ class _CategoryCoverageModel(BaseModel):
     estimated_universe: int | None
     pct_universe: Decimal | None
     state: Literal["no_data", "red", "unknown_universe", "amber", "green"]
+    # Honest machine completeness flag (#1647 part 2). True ⇔ no real
+    # filer-universe estimate for this category (figure is a floor). Real
+    # coverage_ratio gate DEFERRED #790. Default True (back-compat with
+    # pre-envelope payloads, which were all unknown-universe).
+    is_estimate: bool = True
 
 
 class _CoverageModel(BaseModel):
@@ -4288,6 +4300,19 @@ class _DualClassDenominatorModel(BaseModel):
     note: str
 
 
+class _SanityChecksModel(BaseModel):
+    """Raw plausibility facts over the pie-wedge slices (#1647 part 4). NOT
+    pass/fail — measurements a decision agent can reason over to catch the next
+    silent inflation (the existing ``residual.oversubscribed`` guard cannot).
+    Memo-overlay slices excluded. ``shares_outstanding <= 0`` → zeroed."""
+
+    max_distinct_quarters: int = 0
+    institutions_pct: Decimal = Decimal(0)
+    institutions_over_100pct: bool = False
+    largest_single_holder_pct: Decimal = Decimal(0)
+    any_pie_slice_over_100pct: bool = False
+
+
 class OwnershipRollupResponse(BaseModel):
     """Cross-channel deduped ownership snapshot (#789).
 
@@ -4328,6 +4353,10 @@ class OwnershipRollupResponse(BaseModel):
     # and the no_data path. When set, the FE renders the caveat callout and every
     # percentage should be read as a combined-basis lower bound.
     dual_class_denominator: _DualClassDenominatorModel | None
+    # Sanity-invariant facts over the pie-wedge slices (#1647 part 4). Always
+    # present; zeroed on the no_data path. Default so older callers/tests need
+    # no change.
+    sanity: _SanityChecksModel = Field(default_factory=_SanityChecksModel)
     computed_at: datetime
 
 
@@ -4356,6 +4385,10 @@ def _rollup_to_response(
                 filer_count=s.filer_count,
                 dominant_source=s.dominant_source,
                 denominator_basis=s.denominator_basis,
+                as_of_min=s.as_of_min,
+                as_of_max=s.as_of_max,
+                distinct_quarters=s.distinct_quarters,
+                mixed_period=s.mixed_period,
                 holders=[
                     _HolderModel(
                         filer_cik=h.filer_cik,
@@ -4414,6 +4447,7 @@ def _rollup_to_response(
                     estimated_universe=c.estimated_universe,
                     pct_universe=c.pct_universe,
                     state=c.state,
+                    is_estimate=c.is_estimate,
                 )
                 for k, c in rollup.coverage.categories.items()
             },
@@ -4459,6 +4493,13 @@ def _rollup_to_response(
             )
             if rollup.dual_class_denominator is not None
             else None
+        ),
+        sanity=_SanityChecksModel(
+            max_distinct_quarters=rollup.sanity.max_distinct_quarters,
+            institutions_pct=rollup.sanity.institutions_pct,
+            institutions_over_100pct=rollup.sanity.institutions_over_100pct,
+            largest_single_holder_pct=rollup.sanity.largest_single_holder_pct,
+            any_pie_slice_over_100pct=rollup.sanity.any_pie_slice_over_100pct,
         ),
         computed_at=rollup.computed_at,
     )

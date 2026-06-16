@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal
@@ -209,6 +209,19 @@ class OwnershipSlice:
     dominant_source: SourceTag | None
     holders: tuple[Holder, ...]
     denominator_basis: DenominatorBasis = "pie_wedge"
+    # As-of coherence envelope (#1647 part 1). The as-of span of this slice's
+    # deduped holders, so a machine consumer can see the figure sums across
+    # quarters (98.2% of dev instruments mix ≥2 13F quarters in the
+    # institutions slice). Computed in :func:`_build_slice` from each holder's
+    # ``as_of_date`` PLUS its ``family_members`` as-of dates — a collapsed
+    # family is one Holder whose own ``as_of_date`` is ``min(member dates)``,
+    # so looking only at the holder would hide an intra-family quarter spread
+    # (Codex ckpt-1). NULL-as_of holders are ignored; an all-NULL slice keeps
+    # the defaults (None / 0 / False).
+    as_of_min: date | None = None
+    as_of_max: date | None = None
+    distinct_quarters: int = 0
+    mixed_period: bool = False
 
 
 @dataclass(frozen=True)
@@ -231,6 +244,14 @@ class CategoryCoverage:
     estimated_universe: int | None
     pct_universe: Decimal | None
     state: CoverageState
+    # Honest machine completeness flag (#1647 part 2, shippable half).
+    # ``True`` ⇔ no real filer-universe estimate exists for this category
+    # (``estimated_universe is None``) → the figure is a floor, not a measured
+    # share of a known universe. A real seeded ``estimate == 0`` (vacuously-
+    # green, "we know the SEC universe here is empty") is NOT an estimate.
+    # The real ``coverage_ratio`` gate is blocked on the per-instrument 13F
+    # universe-count ingest → DEFERRED #790. Derived in :func:`_compute_coverage`.
+    is_estimate: bool = True
 
 
 @dataclass(frozen=True)
@@ -248,6 +269,46 @@ class ConcentrationInfo:
 
     pct_outstanding_known: Decimal
     info_chip: str
+
+
+@dataclass(frozen=True)
+class SanityChecks:
+    """Raw plausibility facts over the pie-wedge slices (#1647 part 4).
+
+    NOT pass/fail thresholds — measurable facts a decision agent or operator
+    can reason over to catch the NEXT silent inflation bug. The only guard
+    today (``residual.oversubscribed``) cannot express sub-residual
+    granularity, so it never trips on a sub-100% inflation like #1639 (AAPL
+    44.4%). Memo-overlay slices (``denominator_basis != "pie_wedge"``) are
+    excluded everywhere — they are already-counted detail.
+
+      * ``max_distinct_quarters`` — worst per-slice as-of spread; >1 means at
+        least one slice sums filings from different quarters.
+      * ``institutions_pct`` — Σ pie-wedge institutions+etfs / outstanding.
+      * ``institutions_over_100pct`` — institutions own >100% (impossible).
+      * ``largest_single_holder_pct`` — biggest single deduped pie-wedge
+        holder / outstanding (a collapsed family is one holder, so this is
+        the committee's "single-family plausibility").
+      * ``any_pie_slice_over_100pct`` — any single slice exceeds 100%.
+
+    ``outstanding <= 0`` → all pct ``Decimal(0)``, both booleans ``False``."""
+
+    max_distinct_quarters: int
+    institutions_pct: Decimal
+    institutions_over_100pct: bool
+    largest_single_holder_pct: Decimal
+    any_pie_slice_over_100pct: bool
+
+    @classmethod
+    def empty(cls) -> SanityChecks:
+        """Zeroed checks for the ``no_data`` path (no slices to measure)."""
+        return cls(
+            max_distinct_quarters=0,
+            institutions_pct=Decimal(0),
+            institutions_over_100pct=False,
+            largest_single_holder_pct=Decimal(0),
+            any_pie_slice_over_100pct=False,
+        )
 
 
 @dataclass(frozen=True)
@@ -331,6 +392,11 @@ class OwnershipRollup:
     # combined-basis lower bound. None for single-class issuers and the no_data
     # path. Last field with a default so existing constructors need no change.
     dual_class_denominator: DualClassDenominator | None = None
+    # Sanity-invariant facts over the pie-wedge slices (#1647 part 4). Raw
+    # plausibility measurements (not pass/fail) so a machine consumer can
+    # catch the next silent inflation. Zeroed on the no_data path. Last field
+    # with a default so existing constructors need no change.
+    sanity: SanityChecks = field(default_factory=SanityChecks.empty)
 
     @classmethod
     def no_data(
@@ -1623,6 +1689,40 @@ def _bucket_into_slices(
     return slices
 
 
+def _calendar_quarter(d: date) -> tuple[int, int]:
+    """``(year, quarter)`` with quarter in ``1..4`` (human convention).
+
+    13F quarter-ends (03-31/06-30/09-30/12-31) map cleanly to Q1..Q4."""
+    return (d.year, (d.month - 1) // 3 + 1)
+
+
+def _slice_coherence(holders: Sequence[Holder]) -> tuple[date | None, date | None, int, bool]:
+    """As-of span of a slice's holders (#1647 part 1).
+
+    Gathers, per holder, ``holder.as_of_date`` PLUS every
+    ``family_member.as_of_date`` — a collapsed family is one synthetic Holder
+    whose own ``as_of_date`` is ``min(member dates)``, so looking only at the
+    holder would hide an intra-family quarter spread (Codex ckpt-1). Dropped
+    sources are NOT gathered — a dedup loser is not part of the counted
+    figure's span.
+
+    NULL as-of dates are ignored. Returns
+    ``(as_of_min, as_of_max, distinct_quarters, mixed_period)``; an all-NULL
+    (or empty) slice → ``(None, None, 0, False)``."""
+    dates: list[date] = []
+    for h in holders:
+        if h.as_of_date is not None:
+            dates.append(h.as_of_date)
+        for m in h.family_members:
+            if m.as_of_date is not None:
+                dates.append(m.as_of_date)
+    if not dates:
+        return (None, None, 0, False)
+    quarters = {_calendar_quarter(d) for d in dates}
+    distinct = len(quarters)
+    return (min(dates), max(dates), distinct, distinct > 1)
+
+
 def _build_slice(
     category: SliceCategory,
     holders: list[Holder],
@@ -1659,6 +1759,7 @@ def _build_slice(
     # the underlying filers), not as one row, so coverage % is not deflated by the
     # collapse (#1644/#1649). Ordinary holders (no members) count as 1.
     filer_count = sum(len(h.family_members) or 1 for h in holders)
+    as_of_min, as_of_max, distinct_quarters, mixed_period = _slice_coherence(enriched_holders)
     return OwnershipSlice(
         category=category,
         label=_SLICE_LABELS[category],
@@ -1668,6 +1769,10 @@ def _build_slice(
         dominant_source=dominant,
         holders=enriched_holders,
         denominator_basis=denominator_basis,
+        as_of_min=as_of_min,
+        as_of_max=as_of_max,
+        distinct_quarters=distinct_quarters,
+        mixed_period=mixed_period,
     )
 
 
@@ -1729,6 +1834,49 @@ _CATEGORY_ORDER: tuple[SliceCategory, ...] = (
 )
 
 
+_INSTITUTIONAL_CATEGORIES: frozenset[SliceCategory] = frozenset({"institutions", "etfs"})
+
+
+def _compute_sanity(slices: Sequence[OwnershipSlice], outstanding: Decimal) -> SanityChecks:
+    """Raw plausibility facts over the pie-wedge slices (#1647 part 4).
+
+    Measurements, not pass/fail. Memo-overlay slices are excluded — they are
+    already-counted detail. ``outstanding <= 0`` → zeroed pct / False booleans.
+    See :class:`SanityChecks`."""
+    pie = [s for s in slices if s.denominator_basis == "pie_wedge"]
+    max_distinct_quarters = max((s.distinct_quarters for s in pie), default=0)
+    if outstanding <= 0:
+        return SanityChecks(
+            max_distinct_quarters=max_distinct_quarters,
+            institutions_pct=Decimal(0),
+            institutions_over_100pct=False,
+            largest_single_holder_pct=Decimal(0),
+            any_pie_slice_over_100pct=False,
+        )
+    inst_shares = sum(
+        (s.total_shares for s in pie if s.category in _INSTITUTIONAL_CATEGORIES),
+        Decimal(0),
+    )
+    institutions_pct = inst_shares / outstanding
+    largest_holder_shares = max(
+        (h.shares for s in pie for h in s.holders),
+        default=Decimal(0),
+    )
+    largest_single_holder_pct = largest_holder_shares / outstanding
+    # Recompute from this function's ``outstanding`` arg (not the slice's
+    # precomputed ``pct_outstanding``) so all four facts share one denominator
+    # and cannot disagree if a slice were ever built against a different one
+    # (Codex ckpt-2). ``outstanding > 0`` guaranteed by the early return above.
+    any_pie_slice_over_100pct = any(s.total_shares / outstanding > 1 for s in pie)
+    return SanityChecks(
+        max_distinct_quarters=max_distinct_quarters,
+        institutions_pct=institutions_pct,
+        institutions_over_100pct=institutions_pct > 1,
+        largest_single_holder_pct=largest_single_holder_pct,
+        any_pie_slice_over_100pct=any_pie_slice_over_100pct,
+    )
+
+
 def _compute_coverage(
     slices: Sequence[OwnershipSlice],
     estimates: dict[str, int | None],
@@ -1757,6 +1905,9 @@ def _compute_coverage(
             estimated_universe=estimate,
             pct_universe=pct_universe,
             state=per_state,
+            # Honest machine flag (#1647): no real universe estimate ⇒ the
+            # figure is a floor. A real seeded estimate==0 is NOT an estimate.
+            is_estimate=estimate is None,
         )
     fold_state = _worst_of(cats[c].state for c in _CATEGORY_ORDER)
     return CoverageReport(state=fold_state, categories=cats)
@@ -2272,6 +2423,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     )
     residual = _compute_residual(outstanding, slices, treasury)
     concentration = _compute_concentration(outstanding, slices)
+    sanity = _compute_sanity(slices, outstanding)
     estimates = _read_universe_estimates(conn, instrument_id)
     coverage = _compute_coverage(slices, estimates)
     banner = _banner_for_state(coverage.state, coverage, concentration.pct_outstanding_known)
@@ -2305,6 +2457,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         dual_class_denominator=_detect_dual_class_denominator(
             conn, instrument_id, denominator_concept=outstanding_source.concept
         ),
+        sanity=sanity,
         computed_at=datetime.now(tz=UTC),
     )
 

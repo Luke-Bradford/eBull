@@ -133,6 +133,16 @@ export interface OwnershipSlice {
    *  overlays. Defaults to ``pie_wedge`` when absent for backwards
    *  compatibility with older payloads. */
   readonly denominator_basis?: OwnershipDenominatorBasis;
+  /** As-of coherence envelope (#1647 part 1). The as-of span of this slice's
+   *  deduped holders (incl. collapsed-family members) — lets a consumer see the
+   *  figure sums filings across quarters. ``mixed_period`` is
+   *  ``distinct_quarters > 1``. A slice whose holders all have null as-of →
+   *  ``as_of_min``/``as_of_max`` null, ``distinct_quarters`` 0, ``mixed_period``
+   *  false. Optional for back-compat with pre-envelope payloads. */
+  readonly as_of_min?: string | null;
+  readonly as_of_max?: string | null;
+  readonly distinct_quarters?: number;
+  readonly mixed_period?: boolean;
 }
 
 export interface OwnershipResidual {
@@ -152,6 +162,12 @@ export interface OwnershipCategoryCoverage {
   readonly estimated_universe: number | null;
   readonly pct_universe: string | null;
   readonly state: OwnershipCoverageState;
+  /** Honest machine completeness flag (#1647 part 2). ``true`` ⇔ no real
+   *  filer-universe estimate exists for this category, so the figure is a
+   *  floor, not a measured share of a known universe. The real
+   *  ``coverage_ratio`` gate is deferred to #790. Optional for back-compat;
+   *  treat absent as ``true`` (the pre-envelope state was all-unknown). */
+  readonly is_estimate?: boolean;
 }
 
 export interface OwnershipCoverage {
@@ -244,6 +260,23 @@ export interface OwnershipDualClassDenominator {
   readonly note: string;
 }
 
+/** Raw plausibility facts over the pie-wedge slices (#1647 part 4). NOT
+ *  pass/fail — measurements a machine consumer can reason over to catch the
+ *  next silent inflation (the existing ``residual.oversubscribed`` guard
+ *  cannot). Memo-overlay slices excluded; zeroed on the ``no_data`` path. All
+ *  optional for back-compat with pre-envelope payloads. */
+export interface OwnershipSanityChecks {
+  /** Worst per-slice as-of spread; >1 ⇒ a slice sums different quarters. */
+  readonly max_distinct_quarters?: number;
+  /** Decimal-as-string fraction: Σ pie-wedge institutions+etfs / outstanding. */
+  readonly institutions_pct?: string;
+  readonly institutions_over_100pct?: boolean;
+  /** Decimal-as-string: biggest single deduped pie-wedge holder / outstanding
+   *  (a collapsed family is one holder). */
+  readonly largest_single_holder_pct?: string;
+  readonly any_pie_slice_over_100pct?: boolean;
+}
+
 export interface OwnershipRollupResponse {
   readonly symbol: string;
   readonly instrument_id: number;
@@ -268,6 +301,9 @@ export interface OwnershipRollupResponse {
   /** Non-null only for one share class of a multi-class issuer; when set, every
    *  percentage in this rollup is a combined-basis lower bound (#1646). */
   readonly dual_class_denominator: OwnershipDualClassDenominator | null;
+  /** Raw plausibility facts over the pie-wedge slices (#1647 part 4). Optional
+   *  for back-compat with pre-envelope payloads. */
+  readonly sanity?: OwnershipSanityChecks;
   readonly computed_at: string;
 }
 
