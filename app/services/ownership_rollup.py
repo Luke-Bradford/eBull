@@ -142,6 +142,10 @@ class CorrectionApplied:
         counted once at MAX and the other members are folded. ``source_channel`` ==
         ``winning_source`` (intra-blockholder-channel collapse); the per-member fold
         detail is in ``detail`` + the surviving holder's ``dropped_sources``.
+      * ``insider_control_group_collapse`` (#1652) — a sponsor's GP/LP chain reported the
+        same deemed block under many related CIKs across Form 4 / Form 3 / 13D / 13G; the
+        cross-channel group is counted once (insiders slice) and the other members folded.
+        Folded member CIK+name+shares live in ``detail``.
 
     The NT-specific fields are ``Optional`` for the #1644/#1649/#1645 kinds (no NT
     quarters). The generic ``family_id`` / ``source_channel`` (the folded channel)
@@ -1561,8 +1565,11 @@ def _reconcile_13d_groups(
     ``_reconcile_owner_once`` reconciles by CIK) is EXCLUDED from clustering and
     passed through untouched. owner-once already merges that CIK's 13D with its other
     channels; folding it into a different rep would orphan those rows and re-count the
-    block (Codex ckpt-1 HIGH-3). The cross-channel control-group case (the Form 4
-    explosion on all-insider groups like TKO) is the #1652 follow-up.
+    block (Codex ckpt-1 HIGH-3). The cross-channel control-group case (a sponsor's GP/LP
+    chain that Form-4s the same deemed block) is handled UPSTREAM by
+    :func:`_reconcile_insider_control_groups` (#1652), which consumes those members'
+    13D/G rows before this pass sees them; this pass owns the purely-blockholder
+    co-investor group (no Form-4 footprint).
 
     Returns ``(survivors, corrections)``: the post-collapse blockholder list (each
     group folded to one MAX holder; non-group + excluded rows unchanged) and one
@@ -1632,6 +1639,159 @@ def _reconcile_13d_groups(
             else:
                 survivors.extend(cluster)
     return survivors, corrections
+
+
+# ---------------------------------------------------------------------------
+# Insider control-group collapse — count a deemed-ownership block once (#1652)
+# See docs/specs/etl/2026-06-16-insider-control-group-collapse.md
+# ---------------------------------------------------------------------------
+#
+# In a sponsor-controlled issuer every entity in a PE fund's GP/LP chain files its
+# own Form 4 for the SAME indirect-beneficial block (Rule 13d-3 deemed ownership),
+# and the same related CIKs restate it on Schedule 13D/G (a >10% owner is both a
+# Section-16 insider AND a 5% blockholder). Per-CIK dedup keeps every CIK, so the
+# block sums N× and the insiders wedge explodes past 100% of float (AMTM 423%,
+# VSAT 116%, LCID 1719%). Deemed ownership flows the BYTE-IDENTICAL number up the
+# chain and across channels, so the signal is exact (not #1645's near-equal band):
+# the same exact non-round value across ≥2 distinct CIKs on one instrument, spanning
+# Form 4 / Form 3 / 13D / 13G. Validated zero false positives over 1,150 dev buckets
+# (every one is a single genuine control group — Berkshire/Buffett, JAB/Reimann,
+# KKR, Blackstone, Carlos Slim — even those reporting a static block across years, so
+# NO period constraint: a window would wrongly split a long-held block).
+_INSIDER_GROUP_SOURCES: Final[frozenset[SourceTag]] = frozenset({"form4", "form3"})
+_BLOCK_GROUP_SOURCES: Final[frozenset[SourceTag]] = frozenset({"13d", "13g"})
+# Eligibility scope = the CIK-keyed beneficial-restatement channels (precomputed union
+# so _is_eligible doesn't rebuild it per holder).
+_GROUP_ELIGIBLE_SOURCES: Final[frozenset[SourceTag]] = _INSIDER_GROUP_SOURCES | _BLOCK_GROUP_SOURCES
+# Magnitude floor for the deemed-block signal. The non-round guard (_is_group_block,
+# divisibility by _ROUNDNESS_UNIT) is magnitude-BLIND — it flags a 19,532-share director
+# grant as "precise" exactly as it flags 45,026,743. Below ~1M, an exact non-round match
+# across distinct CIKs is dominated by coincidental equal small grants (dev: ~1,800 such
+# clusters, e.g. three EVEX directors each at 101,107 — independent, not a deemed block),
+# whereas every ≥1M exact-match cluster on dev (1,144 of them) is a genuine control group
+# (fund+principal, trust+person, parent/sub). A sub-1M deemed block also cannot
+# meaningfully explode a normal float, so the floor sheds the coincidence-prone tail while
+# keeping every explosion-causing block; the residual (a rare small real control group)
+# stays un-collapsed, the conservative direction (matches the round-lot residual).
+_INSIDER_GROUP_MIN_SHARES: Final[Decimal] = Decimal(1_000_000)
+
+
+def _collapse_insider_control_group(cluster: list[Holder]) -> tuple[Holder, CorrectionApplied]:
+    """Collapse a confirmed control-group ``cluster`` (≥2 distinct CIKs, ≥1 insider
+    member, all at the same exact non-round block value) to ONE holder at that value
+    (Rule 13d-3 total beneficial ownership, counted once).
+
+    Representative = a member, preferring an insider source (``form4``/``form3``) so the
+    rep routes to the insiders slice via owner-once, then deterministic tie-break
+    ``(insider-source, shares, filer_cik, winning_accession)`` descending. Non-rep members
+    (from BOTH channels) are appended to the rep's existing ``dropped_sources`` (amendment
+    provenance preserved) and folded into one ``insider_control_group_collapse`` correction
+    whose ``detail`` carries each folded member's CIK + name + shares (``DroppedSource`` has
+    no CIK/name field — same limitation as #1645)."""
+    rep = sorted(
+        cluster,
+        key=lambda h: (
+            h.winning_source in _INSIDER_GROUP_SOURCES,
+            h.shares,
+            h.filer_cik or "",
+            h.winning_accession,
+        ),
+        reverse=True,
+    )[0]
+    losers = [h for h in cluster if h is not rep]
+    dropped = list(rep.dropped_sources)
+    for loser in losers:
+        dropped.append(
+            DroppedSource(
+                source=loser.winning_source,
+                accession_number=loser.winning_accession,
+                shares=loser.shares,
+                as_of_date=loser.as_of_date,
+                edgar_url=loser.winning_edgar_url,
+            )
+        )
+    collapsed = replace(rep, dropped_sources=tuple(dropped))
+    shares_removed = sum((loser.shares for loser in losers), Decimal(0))
+    folded = "; ".join(f"{loser.filer_name} ({loser.filer_cik}) {loser.shares}" for loser in losers)
+    correction = CorrectionApplied(
+        kind="insider_control_group_collapse",
+        filer_name=rep.filer_name,
+        shares_removed=shares_removed,
+        filer_cik=rep.filer_cik,
+        source_channel=rep.winning_source,  # intra-insider-channel rep (cross-channel fold in detail)
+        winning_source=rep.winning_source,
+        winning_accession=rep.winning_accession,
+        detail=(
+            f"Control group: {len(cluster)} related CIKs reporting {rep.shares} (deemed "
+            f"ownership) counted once under {rep.filer_name}. Folded: {folded}"
+        ),
+    )
+    return collapsed, correction
+
+
+def _reconcile_insider_control_groups(
+    survivors: list[Holder],
+    blockholders: list[Holder],
+) -> tuple[list[Holder], list[Holder], list[CorrectionApplied]]:
+    """Collapse each inferred cross-channel control group to ONE insiders holder at the
+    block value, counted once (#1652). Pure read-path.
+
+    Operates on the union of insider survivors (``form4``/``form3``) and blockholders
+    (``13d``/``13g``), bucketed by EXACT ``shares`` value. A bucket collapses when it has
+    **≥2 distinct non-null CIKs** AND **≥1 insider-source member** (a Form-4 footprint —
+    the #1652 explosion). A purely-13D/G bucket (a co-investor group with no insider) is
+    left untouched for :func:`_reconcile_13d_groups` (#1645); the two passes partition the
+    work. Only **non-round** (:func:`_is_group_block`), positive, non-null-CIK rows are
+    eligible; everything else passes through to its channel unchanged.
+
+    Consumption is **exact-value only**: a consumed CIK's 13D/G row at a *different* value
+    (usually the larger full group block) stays in ``blockholders`` for #1645/owner-once —
+    folding a member's entire 13D footprint would delete the genuine larger block (see
+    spec, Codex ckpt-1 MED).
+
+    Returns ``(survivors, blockholders, corrections)``: the bucket members removed from
+    BOTH lists (nothing orphaned — the 13D rows of a collapsed group are consumed here, so
+    neither #1645 nor owner-once can re-count the block) and the rep added back to
+    ``survivors``; one ``insider_control_group_collapse`` correction per collapsed group."""
+    survivors_out: list[Holder] = []
+    blockholders_out: list[Holder] = []
+    eligible_by_value: dict[Decimal, list[tuple[str, Holder]]] = {}
+
+    def _is_eligible(h: Holder) -> bool:
+        cik = h.filer_cik
+        return (
+            h.shares >= _INSIDER_GROUP_MIN_SHARES
+            and cik is not None
+            and bool(cik.strip())
+            and _is_group_block(h.shares)
+            and h.winning_source in _GROUP_ELIGIBLE_SOURCES
+        )
+
+    for origin, source_list, out_list in (
+        ("s", survivors, survivors_out),
+        ("b", blockholders, blockholders_out),
+    ):
+        for h in source_list:
+            if _is_eligible(h):
+                eligible_by_value.setdefault(h.shares, []).append((origin, h))
+            else:
+                out_list.append(h)
+
+    corrections: list[CorrectionApplied] = []
+    for members in eligible_by_value.values():
+        holders = [h for _, h in members]
+        distinct_ciks = {h.filer_cik for h in holders}
+        has_insider = any(h.winning_source in _INSIDER_GROUP_SOURCES for h in holders)
+        if len(distinct_ciks) >= 2 and has_insider:
+            collapsed, correction = _collapse_insider_control_group(holders)
+            # The rep is always an insider-source row (≥1 insider member + rep preference),
+            # so it routes to the insiders slice via owner-once → goes to survivors.
+            survivors_out.append(collapsed)
+            corrections.append(correction)
+        else:
+            for origin, h in members:
+                (survivors_out if origin == "s" else blockholders_out).append(h)
+    return survivors_out, blockholders_out, corrections
 
 
 def _bucket_into_slices(
@@ -2404,12 +2564,21 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     family_by_category, survivors, blockholders, unmatched_def14a, family_corrections = (
         _reconcile_institutional_families(survivors, blockholders, unmatched_def14a, outstanding)
     )
+    # Insider control-group collapse (#1652): a sponsor's GP/LP chain Form-4s the SAME
+    # deemed block under many related CIKs (and restates it on 13D/G), so the insiders
+    # wedge explodes past 100% of float. Collapse the cross-channel union by EXACT
+    # non-round value to ONE insiders holder before #1645 + owner-once, removing the
+    # consumed rows from BOTH lists (nothing orphaned). Runs BEFORE #1645 so the control
+    # group's 13D rows are consumed here; a purely-13D co-investor group (no insider
+    # member) is left for #1645.
+    survivors, blockholders, insider_group_corrections = _reconcile_insider_control_groups(survivors, blockholders)
     # 13D/G group collapse (#1645): a Rule 13d-5 group's members each report the
     # identical aggregate stake on separate accessions/CIKs and otherwise sum N× in
     # the blockholders wedge. Collapse a near-equal, same-period, non-round cluster to
     # ONE holder at MAX before owner-once. survivor_keys excludes any blockholder CIK
     # that owner-once will reconcile cross-channel (so its other-channel rows are not
-    # orphaned). The cross-channel Form 4 explosion on all-insider groups is #1652.
+    # orphaned). Computed AFTER the #1652 pass so a consumed control-group CIK (no longer
+    # a survivor) is not wrongly excluded from this clustering.
     survivor_keys = frozenset(_identity_key(h.filer_cik, h.filer_name) for h in survivors)
     blockholders, group_corrections = _reconcile_13d_groups(blockholders, survivor_keys)
     by_category = _reconcile_owner_once(survivors + blockholders)
@@ -2433,6 +2602,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     corrections_applied = (
         *_read_notice_suppressions(conn, instrument_id),
         *family_corrections,
+        *insider_group_corrections,
         *group_corrections,
     )
     return OwnershipRollup(
@@ -2696,6 +2866,29 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
                 _csv_safe(corr.filer_cik or ""),
                 _csv_safe(corr.filer_name),
                 f"__group_collapse:{corr.filer_cik or 'unknown'}__",
+                str(corr.shares_removed),
+                "",
+                _csv_safe(corr.source_channel or ""),
+                _csv_safe(corr.winning_accession or ""),
+                "",
+                _csv_safe(corr.detail),
+                "",
+            ]
+        )
+
+    # Insider control-group collapse audit (#1652): a sponsor's GP/LP chain reported the
+    # same deemed block under many related CIKs across Form 4 / 13D / 13G; counted once
+    # in the insiders wedge, the others folded. Emit one ``__insider_group_collapse:<rep_cik>__``
+    # memo row per correction (folded member CIK+name+shares are in ``detail``). Excluded
+    # from any SUM(shares) reconciliation (the folded shares were never real).
+    for corr in rollup.corrections_applied:
+        if corr.kind != "insider_control_group_collapse":
+            continue
+        writer.writerow(
+            [
+                _csv_safe(corr.filer_cik or ""),
+                _csv_safe(corr.filer_name),
+                f"__insider_group_collapse:{corr.filer_cik or 'unknown'}__",
                 str(corr.shares_removed),
                 "",
                 _csv_safe(corr.source_channel or ""),

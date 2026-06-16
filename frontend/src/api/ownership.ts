@@ -226,7 +226,8 @@ export type OwnershipCorrectionKind =
   | "suppressed_by_13f_nt"
   | "def14a_restates_institution"
   | "institutional_family_collapse"
-  | "blockholder_group_collapse";
+  | "blockholder_group_collapse"
+  | "insider_control_group_collapse";
 
 export interface OwnershipCorrectionApplied {
   readonly kind: OwnershipCorrectionKind;

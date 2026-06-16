@@ -4162,6 +4162,10 @@ class _CorrectionAppliedModel(BaseModel):
         under a larger 13F family sum.
       * ``institutional_family_collapse`` (#1649) — a 13F shell figure folded under
         a larger consolidated proxy/13G family figure (gap-fill).
+      * ``blockholder_group_collapse`` (#1645) — a Rule 13d-5 group counted once in the
+        blockholders wedge.
+      * ``insider_control_group_collapse`` (#1652) — a sponsor's GP/LP chain deemed block
+        counted once across Form 4 / Form 3 / 13D / 13G (insiders slice).
 
     The NT-specific fields are null for the #1644/#1649 kinds; ``family_id`` /
     ``source_channel`` / ``winning_source`` / ``winning_accession`` / ``detail``
@@ -4173,6 +4177,7 @@ class _CorrectionAppliedModel(BaseModel):
         "def14a_restates_institution",
         "institutional_family_collapse",
         "blockholder_group_collapse",
+        "insider_control_group_collapse",
     ]
     filer_cik: str | None
     filer_name: str
