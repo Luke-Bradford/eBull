@@ -6,10 +6,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { OwnershipHistoryPoint } from "@/api/ownershipHistory";
+import type { AggregateCoverage, OwnershipHistoryPoint } from "@/api/ownershipHistory";
 
 import {
   buildHistoryRows,
+  coverageCaption,
   holderIdFromFilerKey,
   linesByNature,
   resolveHistoryMode,
@@ -193,5 +194,50 @@ describe("buildHistoryRows", () => {
       { key: "b", label: "B", points: [point({ shares: "5" })] },
     ]);
     expect(lines.map((l) => l.key)).toEqual(["b"]);
+  });
+});
+
+function cov(partial: Partial<AggregateCoverage>): AggregateCoverage {
+  return {
+    bucket_count: 1,
+    as_of_min: "2025-12-31",
+    as_of_max: "2025-12-31",
+    holder_count_min: null,
+    holder_count_max: null,
+    holder_count_latest: null,
+    ...partial,
+  };
+}
+
+describe("coverageCaption (#1648)", () => {
+  it("returns null when coverage is absent", () => {
+    expect(coverageCaption(null)).toBeNull();
+  });
+
+  it("returns null for an issuer-level (treasury) series — null holder counts", () => {
+    expect(
+      coverageCaption(cov({ bucket_count: 3, holder_count_min: null, holder_count_max: null })),
+    ).toBeNull();
+  });
+
+  it("surfaces the filer spread across quarters", () => {
+    const caption = coverageCaption(
+      cov({ bucket_count: 5, holder_count_min: 209, holder_count_max: 6011, holder_count_latest: 6011 }),
+    );
+    expect(caption).not.toBeNull();
+    expect(caption).toContain("209");
+    expect(caption).toContain("6,011"); // thousands separator
+    expect(caption).toContain("5 quarters");
+    expect(caption).toContain("filing coverage, not net flow");
+  });
+
+  it("pluralises a single quarter and collapses an equal spread", () => {
+    const caption = coverageCaption(
+      cov({ bucket_count: 1, holder_count_min: 5, holder_count_max: 5, holder_count_latest: 5 }),
+    );
+    expect(caption).toContain("5 filers"); // not "5–5 filers"
+    expect(caption).not.toContain("–");
+    expect(caption).toContain("1 quarter");
+    expect(caption).not.toContain("1 quarters");
   });
 });

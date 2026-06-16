@@ -30,12 +30,33 @@ export interface OwnershipHistoryPoint {
   readonly holder_count: number | null;
 }
 
+/** Coverage-coherence envelope for an aggregate series (#1648).
+ *  Mirrors ``AggregateCoverageResponse`` in ``app/api/instruments.py``
+ *  field-for-field. ``null`` on per-holder responses. Facts (not
+ *  thresholds): read the filer-coverage spread to tell a coverage-driven
+ *  slope from real flow. */
+export interface AggregateCoverage {
+  readonly bucket_count: number;
+  /** ISO ``YYYY-MM-DD`` earliest/latest period_end; ``null`` on empty. */
+  readonly as_of_min: string | null;
+  readonly as_of_max: string | null;
+  /** Min/max filers over non-issuer-level buckets; ``null`` ⇔ issuer-level
+   *  series (treasury) or empty. */
+  readonly holder_count_min: number | null;
+  readonly holder_count_max: number | null;
+  /** Filers in the LATEST bucket; ``null`` when that bucket is
+   *  issuer-level even if older buckets carry counts. */
+  readonly holder_count_latest: number | null;
+}
+
 export interface OwnershipHistoryResponse {
   readonly symbol: string;
   readonly instrument_id: number;
   readonly category: string;
   readonly holder_id: string | null;
   readonly points: readonly OwnershipHistoryPoint[];
+  /** ``null`` on per-holder series; populated for ``aggregate=true``. */
+  readonly coverage: AggregateCoverage | null;
 }
 
 export interface FetchOwnershipHistoryParams {

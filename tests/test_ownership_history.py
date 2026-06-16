@@ -655,3 +655,128 @@ class TestInstitutionsAggregate:
         assert points[0].source == "xbrl_dei"
         assert points[0].source_accession == "0000000000-26-000001"
         assert points[0].holder_count is None
+
+
+class TestAggregateCoverageEnvelope:
+    """#1648: the endpoint attaches the coverage-coherence envelope to
+    aggregate responses (filer spread, so a reader tells a coverage-driven
+    slope from real flow) and leaves it ``None`` on per-holder series.
+
+    Calls the endpoint function directly — the same pattern
+    ``TestHolderScopedAPIContract`` uses to avoid the TestClient lifespan
+    trip on this runner."""
+
+    def _seed_13f(
+        self,
+        conn: psycopg.Connection[tuple],
+        *,
+        iid: int,
+        filer_cik: str,
+        q_end: date,
+        doc_id: str,
+        accession: str,
+        filed_at: datetime,
+        shares: Decimal,
+    ) -> None:
+        record_institution_observation(
+            conn,
+            instrument_id=iid,
+            filer_cik=filer_cik,
+            filer_name=f"Filer {filer_cik}",
+            filer_type="INV",
+            ownership_nature="economic",
+            source="13f",
+            source_document_id=doc_id,
+            source_accession=accession,
+            source_field=None,
+            source_url=None,
+            filed_at=filed_at,
+            period_start=None,
+            period_end=q_end,
+            ingest_run_id=uuid4(),
+            shares=shares,
+            market_value_usd=None,
+            voting_authority="SOLE",
+        )
+
+    def test_aggregate_response_carries_coverage(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.api.instruments import get_instrument_ownership_history
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=843_700, symbol="COVAGG")
+        conn.commit()
+        # Q3: 1 filer; Q4: 2 filers → spread 1..2, latest 2, two buckets.
+        self._seed_13f(
+            conn,
+            iid=843_700,
+            filer_cik="0000000010",
+            q_end=date(2025, 9, 30),
+            doc_id="q1a",
+            accession="0001234600-25-000001",
+            filed_at=datetime(2025, 11, 1, tzinfo=UTC),
+            shares=Decimal("1000"),
+        )
+        self._seed_13f(
+            conn,
+            iid=843_700,
+            filer_cik="0000000010",
+            q_end=date(2025, 12, 31),
+            doc_id="q2a",
+            accession="0001234600-26-000001",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+            shares=Decimal("1100"),
+        )
+        self._seed_13f(
+            conn,
+            iid=843_700,
+            filer_cik="0000000011",
+            q_end=date(2025, 12, 31),
+            doc_id="q2b",
+            accession="0001234600-26-000002",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+            shares=Decimal("2200"),
+        )
+        conn.commit()
+
+        resp = get_instrument_ownership_history(symbol="COVAGG", category="institutions", aggregate=True, conn=conn)
+        assert resp.coverage is not None
+        assert resp.coverage.bucket_count == 2
+        assert resp.coverage.as_of_min == date(2025, 9, 30)
+        assert resp.coverage.as_of_max == date(2025, 12, 31)
+        assert resp.coverage.holder_count_min == 1
+        assert resp.coverage.holder_count_max == 2
+        assert resp.coverage.holder_count_latest == 2
+
+    def test_per_holder_response_has_no_coverage(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.api.instruments import get_instrument_ownership_history
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=843_701, symbol="COVHOLD")
+        conn.commit()
+        self._seed_13f(
+            conn,
+            iid=843_701,
+            filer_cik="0000000012",
+            q_end=date(2025, 12, 31),
+            doc_id="h1",
+            accession="0001234601-26-000001",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+            shares=Decimal("500"),
+        )
+        conn.commit()
+
+        resp = get_instrument_ownership_history(
+            symbol="COVHOLD",
+            category="institutions",
+            holder_id="0000000012",
+            aggregate=False,
+            conn=conn,
+        )
+        assert resp.coverage is None
+        assert len(resp.points) == 1

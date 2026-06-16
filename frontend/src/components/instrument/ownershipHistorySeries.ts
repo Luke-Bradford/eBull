@@ -14,6 +14,7 @@
  */
 
 import type {
+  AggregateCoverage,
   OwnershipHistoryCategory,
   OwnershipHistoryPoint,
 } from "@/api/ownershipHistory";
@@ -185,4 +186,23 @@ export function linesByNature(
     label: natures.size > 1 ? `${holderLabel} (${nature})` : holderLabel,
     points: pts,
   }));
+}
+
+/**
+ * One-line coverage-coherence caption for an aggregate series (#1648).
+ * ``null`` (no caption) when the envelope is absent, empty, or
+ * issuer-level (treasury — ``holder_count_*`` null): there is no filer
+ * coverage to qualify. Otherwise surfaces the filer spread so a reader
+ * tells a coverage-driven slope from real flow without hovering each
+ * point's tooltip.
+ */
+export function coverageCaption(coverage: AggregateCoverage | null): string | null {
+  if (coverage === null) return null;
+  const lo = coverage.holder_count_min;
+  const hi = coverage.holder_count_max;
+  if (lo === null || hi === null) return null;
+  const fmt = (x: number): string => x.toLocaleString("en-US");
+  const span = lo === hi ? `${fmt(lo)} filers` : `${fmt(lo)}–${fmt(hi)} filers`;
+  const quarters = coverage.bucket_count === 1 ? "1 quarter" : `${coverage.bucket_count} quarters`;
+  return `Coverage ${span} across ${quarters} — quarter-over-quarter changes may reflect filing coverage, not net flow.`;
 }

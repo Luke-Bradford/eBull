@@ -4521,6 +4521,22 @@ class OwnershipHistoryPointResponse(BaseModel):
     holder_count: int | None = None
 
 
+class AggregateCoverageResponse(BaseModel):
+    """Coverage-coherence envelope for an aggregate series (#1648).
+
+    Mirrors :class:`ownership_history.AggregateCoverage` field-for-field
+    (keep in sync with ``frontend/src/api/ownershipHistory.ts``). Facts a
+    consumer reads to tell coverage-driven slope from real flow; ``None`` on
+    per-holder responses (coverage spread is meaningless for one filer)."""
+
+    bucket_count: int
+    as_of_min: date | None
+    as_of_max: date | None
+    holder_count_min: int | None
+    holder_count_max: int | None
+    holder_count_latest: int | None
+
+
 class OwnershipHistoryResponse(BaseModel):
     """Time-bucketed deduped ownership history (#840.F).
 
@@ -4534,6 +4550,9 @@ class OwnershipHistoryResponse(BaseModel):
     category: str
     holder_id: str | None
     points: list[OwnershipHistoryPointResponse]
+    # Coverage-coherence envelope (#1648), populated only for
+    # ``aggregate=true`` requests; ``None`` on per-holder series.
+    coverage: AggregateCoverageResponse | None = None
 
 
 @router.get(
@@ -4621,6 +4640,7 @@ def get_instrument_ownership_history(
             inst_row = cur.fetchone()
         if inst_row is None:
             raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+        coverage_resp: AggregateCoverageResponse | None = None
         if aggregate:
             points = ownership_history.get_ownership_category_totals(
                 conn,
@@ -4628,6 +4648,17 @@ def get_instrument_ownership_history(
                 category=category,  # type: ignore[arg-type]
                 from_date=from_date,
                 to_date=to_date,
+            )
+            # Coverage-coherence envelope (#1648) — aggregate only; the spread
+            # tells a consumer when a Q/Q change is filing coverage, not flow.
+            cov = ownership_history.summarise_aggregate_coverage(points)
+            coverage_resp = AggregateCoverageResponse(
+                bucket_count=cov.bucket_count,
+                as_of_min=cov.as_of_min,
+                as_of_max=cov.as_of_max,
+                holder_count_min=cov.holder_count_min,
+                holder_count_max=cov.holder_count_max,
+                holder_count_latest=cov.holder_count_latest,
             )
         else:
             points = ownership_history.get_ownership_history(
@@ -4655,6 +4686,7 @@ def get_instrument_ownership_history(
             )
             for p in points
         ],
+        coverage=coverage_resp,
     )
 
 
