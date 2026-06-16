@@ -82,8 +82,10 @@ one instrument by the rollup):
    tiered tolerance of the cluster maximum**, computed by *descending-greedy,
    max-anchored* clustering: sort the period's rows by shares descending; each
    still-unused NON-ROUND row (in descending order) seeds a cluster and pulls in
-   every still-unused row whose shares are `≥ seed.shares × (1 − _GROUP_REL_TOL)`
-   (within the loose band *of that seed*, the cluster max). A row below the band
+   every still-unused **non-round** row whose shares are `≥ seed.shares ×
+   (1 − _GROUP_REL_TOL)` (within the loose band *of that seed*, the cluster max). A
+   round row is skipped as a member too (not just as a seed) so it cannot inflate a
+   cluster past the 2-member gate (Codex ckpt-2). A row below the band
    seeds its own later cluster — so a ladder `10,000,007 / 9,995,000 / 9,991,000 /
    9,980,000` at 0.1% partitions as `{a,b,c}` (all within the max's band) then
    `{d}` (0.2% below a, outside it — even though it is within 0.11% of c, which a
