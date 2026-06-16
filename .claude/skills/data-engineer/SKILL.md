@@ -66,6 +66,21 @@ The exclusion is read-only (no `_current` re-backfill); after merge, the operato
 runs the one-shot `institutional_13f_notice_backfill` to seed the historical NT
 window — NO `sec_rebuild` (no parser-version bump).
 
+**Snapshot-only — never ported to the history readers (#1648).** This NT exclusion
+is a *snapshot* correction: `_current` holds one row per filer and has no time
+axis, so it sums a reorganised parent's stale latest quarter alongside its
+successors' as if simultaneous, and the NT filter restores the lost ordering.
+`ownership_history.py` (`_institutions_aggregate_history` /
+`_institutions_history`) deliberately does NOT apply it: the time-series buckets
+by `period_end` so it KEEPS that axis — a 13F-HR for period P is a valid-time fact
+a later NT cannot retract. Porting `NT.period_end > HR.period_end` onto the
+append-only observations erases ~1.4B sh/qtr of valid AAPL history (parent files
+one NT for 2026-Q1 → every earlier quarter suppressed). The history series' honest
+concern is coverage coherence (`AggregateCoverage`, facts-not-thresholds), not
+supersession. Guarded by `tests/test_ownership_history_coverage.py::TestRejectNtGuard`;
+prevention-log "A snapshot-supersession correction is destructive when ported
+verbatim onto the matching time-series".
+
 Multi-row source positions: SUM at every locus. A 13F-HR position split across
 sub-manager rows must be summed by every writer — three per-filing Python paths
 (via `normalise_13f_holdings` + `merge_resolved_by_instrument`) AND the bulk COPY

@@ -30,7 +30,7 @@ function response(
   category: string,
   points: OwnershipHistoryResponse["points"],
 ): OwnershipHistoryResponse {
-  return { symbol: "AAPL", instrument_id: 1, category, holder_id: null, points };
+  return { symbol: "AAPL", instrument_id: 1, category, holder_id: null, points, coverage: null };
 }
 
 function aggPoint(period_end: string, shares: string) {

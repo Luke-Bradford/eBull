@@ -27,12 +27,13 @@ import {
 } from "recharts";
 
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
-import { fetchOwnershipHistory } from "@/api/ownershipHistory";
+import { type AggregateCoverage, fetchOwnershipHistory } from "@/api/ownershipHistory";
 import {
   HISTORY_WINDOWS,
   type HistoryLine,
   type HistoryWindow,
   buildHistoryRows,
+  coverageCaption,
   historyModeSignature,
   linesByNature,
   resolveHistoryMode,
@@ -67,6 +68,9 @@ interface HistoryFetchResult {
   /** Aggregate categories whose fetch failed while a sibling
    *  succeeded — rendered as a per-section note (spec D4). */
   readonly failed: readonly string[];
+  /** Coverage-coherence envelope of the institutions aggregate (#1648);
+   *  ``null`` in holder / unsupported modes and for treasury-only. */
+  readonly coverage: AggregateCoverage | null;
 }
 
 export function OwnershipHistoryChart({
@@ -95,7 +99,7 @@ export function OwnershipHistoryChart({
 
   const state = useAsync<HistoryFetchResult>(
     useCallback(async () => {
-      if (mode.kind === "unsupported") return { lines: [], failed: [] };
+      if (mode.kind === "unsupported") return { lines: [], failed: [], coverage: null };
       if (mode.kind === "holder") {
         const resp = await fetchOwnershipHistory(symbol, {
           category: mode.category,
@@ -105,6 +109,7 @@ export function OwnershipHistoryChart({
         return {
           lines: linesByNature(resp.points, filerLabel ?? mode.holder_id),
           failed: [],
+          coverage: null,
         };
       }
       const settled = await Promise.allSettled(
@@ -114,6 +119,7 @@ export function OwnershipHistoryChart({
       );
       const lines: HistoryLine[] = [];
       const failed: string[] = [];
+      let coverage: AggregateCoverage | null = null;
       settled.forEach((result, i) => {
         const category = mode.categories[i]!;
         if (result.status === "fulfilled") {
@@ -122,6 +128,9 @@ export function OwnershipHistoryChart({
             label: AGGREGATE_LABEL[category],
             points: result.value.points,
           });
+          // Only the institutions aggregate carries filer coverage;
+          // treasury is issuer-level (null counts → no caption).
+          if (category === "institutions") coverage = result.value.coverage;
         } else {
           console.error(`ownership-history ${category} fetch failed:`, result.reason);
           failed.push(AGGREGATE_LABEL[category]);
@@ -132,7 +141,7 @@ export function OwnershipHistoryChart({
       if (lines.length === 0 && failed.length > 0) {
         throw new Error("all ownership-history fetches failed");
       }
-      return { lines, failed };
+      return { lines, failed, coverage };
       // ``modeSig`` stands in for ``mode`` in the deps — it encodes
       // the full fetch plan as a stable string.
     }, [symbol, modeSig, fromDate, filerLabel]),
@@ -217,6 +226,7 @@ function HistoryBody({
   }
 
   const { rows, lines } = buildHistoryRows(state.data.lines);
+  const coverageNote = coverageCaption(state.data.coverage);
   // The partial-failure note must survive the empty branch — an empty
   // surviving series + a hidden failure would read as a clean empty
   // dataset (Codex ckpt-2 S3).
@@ -289,6 +299,9 @@ function HistoryBody({
           </li>
         ))}
       </ul>
+      {coverageNote !== null && (
+        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{coverageNote}</p>
+      )}
     </div>
   );
 }
