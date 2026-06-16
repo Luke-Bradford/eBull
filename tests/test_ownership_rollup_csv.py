@@ -31,11 +31,13 @@ from app.services.ownership_rollup import (
     ConcentrationInfo,
     CoverageReport,
     DroppedSource,
+    DualClassDenominator,
     Holder,
     OwnershipRollup,
     OwnershipSlice,
     ResidualBlock,
     SharesOutstandingSource,
+    _dual_class_note,
     build_rollup_csv,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
@@ -104,6 +106,7 @@ def _rollup(
     residual_shares: str = "0",
     residual_pct: str = "0",
     oversubscribed: bool = False,
+    dual_class: DualClassDenominator | None = None,
 ) -> OwnershipRollup:
     return OwnershipRollup(
         symbol=symbol,
@@ -137,6 +140,7 @@ def _rollup(
         banner=BannerCopy(state="green", variant="success", headline="", body=""),
         historical_symbols=(),
         computed_at=datetime(2026, 5, 3, tzinfo=UTC),
+        dual_class_denominator=dual_class,
     )
 
 
@@ -716,3 +720,41 @@ def test_csv_endpoint_returns_attachment_header_and_404_unknown_symbol(
     finally:
         app.dependency_overrides.pop(get_conn, None)
         app.dependency_overrides.pop(require_session_or_service_token, None)
+
+
+# ---------------------------------------------------------------------------
+# Dual-class denominator caveat (#1646) — pure CSV + copy tests
+# ---------------------------------------------------------------------------
+
+
+def test_dual_class_note_names_siblings_and_flags_lower_bound() -> None:
+    """Server-owned caveat copy lists the share-class siblings and states the
+    combined-basis-lower-bound semantics (FE renders this verbatim)."""
+    note = _dual_class_note(("GOOG", "GOOGL"))
+    assert "GOOG, GOOGL" in note
+    assert "combined" in note.lower()
+    assert "lower bound" in note.lower()
+
+
+def test_build_csv_emits_dual_class_memo_row_when_set() -> None:
+    """A multi-class denominator caveat emits one inert ``__dual_class_denominator__``
+    memo row (zero shares, so it never perturbs a SUM(shares) reconciliation)."""
+    dc = DualClassDenominator(
+        cik="0001652044",
+        sibling_symbols=("GOOG", "GOOGL"),
+        note=_dual_class_note(("GOOG", "GOOGL")),
+    )
+    csv = build_rollup_csv(_rollup(symbol="GOOGL", dual_class=dc))
+    memo = [ln for ln in csv.splitlines() if "__dual_class_denominator__" in ln]
+    assert len(memo) == 1
+    row = memo[0]
+    assert row.startswith("0001652044,")
+    assert "GOOG, GOOGL" in row
+    # Zero shares in the shares column → inert under SUM(shares).
+    assert ",__dual_class_denominator__,0," in row
+
+
+def test_build_csv_omits_dual_class_memo_row_when_absent() -> None:
+    """Single-class issuer (no caveat) emits no dual-class memo row."""
+    csv = build_rollup_csv(_rollup(symbol="AAPL", dual_class=None))
+    assert "__dual_class_denominator__" not in csv

@@ -66,6 +66,7 @@ function _baseRollup(
     historical_symbols: [],
     corrections_applied: [],
     suppressed_by_notice: 0,
+    dual_class_denominator: null,
     computed_at: "2026-05-03T00:00:00Z",
     ...overrides,
   };

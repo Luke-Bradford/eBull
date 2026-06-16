@@ -1755,3 +1755,162 @@ class TestEmptyStates:
         assert rollup.slices == ()
         assert rollup.residual.shares == Decimal("100000000")
         assert rollup.banner.state == "unknown_universe"
+
+
+def _seed_cik(conn: psycopg.Connection[tuple], *, iid: int, cik: str, is_primary: bool = True) -> None:
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (provider, identifier_type, identifier_value, instrument_id, is_primary)
+        VALUES ('sec', 'cik', %s, %s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (cik, iid, is_primary),
+    )
+
+
+def _seed_cusip(conn: psycopg.Connection[tuple], *, iid: int, cusip: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (provider, identifier_type, identifier_value, instrument_id, is_primary)
+        VALUES ('sec', 'cusip', %s, %s, FALSE)
+        ON CONFLICT DO NOTHING
+        """,
+        (cusip, iid),
+    )
+
+
+class TestDualClassDenominatorDetector:
+    """#1646: the multi-class denominator caveat detector — three gates, all
+    required (us-gaap denominator, ≥2 CIK siblings, ≥2 distinct CUSIPs)."""
+
+    def test_fires_for_multiclass_with_usgaap_denominator(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_601, symbol="ZGOOG")
+        _seed_instrument(conn, iid=794_602, symbol="ZGOOGL")
+        _seed_cik(conn, iid=794_601, cik="0009990001")
+        _seed_cik(conn, iid=794_602, cik="0009990001")
+        _seed_cusip(conn, iid=794_601, cusip="ZZ079K107")
+        _seed_cusip(conn, iid=794_602, cusip="ZZ079K305")
+
+        caveat = ownership_rollup._detect_dual_class_denominator(
+            conn, 794_601, denominator_concept="CommonStockSharesOutstanding"
+        )
+        assert caveat is not None
+        assert caveat.cik == "0009990001"
+        assert caveat.sibling_symbols == ("ZGOOG", "ZGOOGL")
+        assert "ZGOOG, ZGOOGL" in caveat.note
+
+    def test_gate1_dei_denominator_suppresses_caveat(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """A DEI denominator means a single non-dimensional cover value was
+        reported (single-class issuer, ETF trust, or .US dual-listing) — not the
+        combined class-blind count, so no caveat even with siblings + CUSIPs."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_611, symbol="ZDEI1")
+        _seed_instrument(conn, iid=794_612, symbol="ZDEI2")
+        _seed_cik(conn, iid=794_611, cik="0009990011")
+        _seed_cik(conn, iid=794_612, cik="0009990011")
+        _seed_cusip(conn, iid=794_611, cusip="ZZDEI1107")
+        _seed_cusip(conn, iid=794_612, cusip="ZZDEI2305")
+
+        caveat = ownership_rollup._detect_dual_class_denominator(
+            conn, 794_611, denominator_concept="EntityCommonStockSharesOutstanding"
+        )
+        assert caveat is None
+
+    def test_gate2_single_class_no_sibling_suppresses_caveat(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_621, symbol="ZSOLO")
+        _seed_cik(conn, iid=794_621, cik="0009990021")
+        _seed_cusip(conn, iid=794_621, cusip="ZZSOLO107")
+
+        caveat = ownership_rollup._detect_dual_class_denominator(
+            conn, 794_621, denominator_concept="CommonStockSharesOutstanding"
+        )
+        assert caveat is None
+
+    def test_gate3_shared_cusip_listing_dup_suppresses_caveat(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Two instruments on one CIK but only one distinct CUSIP between them is a
+        same-security .US listing dup, not separate share classes — no caveat."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_631, symbol="ZDUP")
+        _seed_instrument(conn, iid=794_632, symbol="ZDUP.US")
+        _seed_cik(conn, iid=794_631, cik="0009990031")
+        _seed_cik(conn, iid=794_632, cik="0009990031")
+        # Only one of the two carries a CUSIP → <2 distinct CUSIPs across siblings.
+        _seed_cusip(conn, iid=794_632, cusip="ZZDUP1107")
+
+        caveat = ownership_rollup._detect_dual_class_denominator(
+            conn, 794_631, denominator_concept="CommonStockSharesOutstanding"
+        )
+        assert caveat is None
+
+    def test_gate3_two_cusips_on_one_instrument_does_not_pass(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """One instrument carrying two historical CUSIPs + a CUSIP-less sibling must
+        NOT pass gate 3 — it is not two separate share-class securities (Codex LOW)."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_641, symbol="ZTWO")
+        _seed_instrument(conn, iid=794_642, symbol="ZTWO.US")
+        _seed_cik(conn, iid=794_641, cik="0009990041")
+        _seed_cik(conn, iid=794_642, cik="0009990041")
+        # Two distinct CUSIP values, but BOTH on the same instrument; sibling has none.
+        _seed_cusip(conn, iid=794_641, cusip="ZZTWO1107")
+        _seed_cusip(conn, iid=794_641, cusip="ZZTWO1305")
+
+        caveat = ownership_rollup._detect_dual_class_denominator(
+            conn, 794_641, denominator_concept="CommonStockSharesOutstanding"
+        )
+        assert caveat is None
+
+    def test_gate2_non_tradable_sibling_does_not_count(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """A delisted (non-tradable) instrument sharing the CIK does not manufacture
+        a spurious sibling — gate 2 counts only live, primary-CIK instruments (Codex MED)."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_651, symbol="ZLIVE")
+        _seed_instrument(conn, iid=794_652, symbol="ZDEAD")
+        conn.execute("UPDATE instruments SET is_tradable = FALSE WHERE instrument_id = 794652")
+        _seed_cik(conn, iid=794_651, cik="0009990051")
+        _seed_cik(conn, iid=794_652, cik="0009990051")
+        _seed_cusip(conn, iid=794_651, cusip="ZZLIVE107")
+        _seed_cusip(conn, iid=794_652, cusip="ZZDEAD305")
+
+        caveat = ownership_rollup._detect_dual_class_denominator(
+            conn, 794_651, denominator_concept="CommonStockSharesOutstanding"
+        )
+        assert caveat is None
+
+    def test_gate2_non_primary_cik_sibling_does_not_count(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """An instrument carrying the CIK only as a non-primary (historical) mapping
+        is not a current share-class sibling — gate 2 requires is_primary (Codex MED)."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_661, symbol="ZPRIM")
+        _seed_instrument(conn, iid=794_662, symbol="ZHIST")
+        _seed_cik(conn, iid=794_661, cik="0009990061", is_primary=True)
+        _seed_cik(conn, iid=794_662, cik="0009990061", is_primary=False)
+        _seed_cusip(conn, iid=794_661, cusip="ZZPRIM107")
+        _seed_cusip(conn, iid=794_662, cusip="ZZHIST305")
+
+        caveat = ownership_rollup._detect_dual_class_denominator(
+            conn, 794_661, denominator_concept="CommonStockSharesOutstanding"
+        )
+        assert caveat is None
