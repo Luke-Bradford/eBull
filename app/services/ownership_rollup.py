@@ -1660,6 +1660,9 @@ def _reconcile_13d_groups(
 # NO period constraint: a window would wrongly split a long-held block).
 _INSIDER_GROUP_SOURCES: Final[frozenset[SourceTag]] = frozenset({"form4", "form3"})
 _BLOCK_GROUP_SOURCES: Final[frozenset[SourceTag]] = frozenset({"13d", "13g"})
+# Eligibility scope = the CIK-keyed beneficial-restatement channels (precomputed union
+# so _is_eligible doesn't rebuild it per holder).
+_GROUP_ELIGIBLE_SOURCES: Final[frozenset[SourceTag]] = _INSIDER_GROUP_SOURCES | _BLOCK_GROUP_SOURCES
 # Magnitude floor for the deemed-block signal. The non-round guard (_is_group_block,
 # divisibility by _ROUNDNESS_UNIT) is magnitude-BLIND — it flags a 19,532-share director
 # grant as "precise" exactly as it flags 45,026,743. Below ~1M, an exact non-round match
@@ -1761,7 +1764,7 @@ def _reconcile_insider_control_groups(
             and cik is not None
             and bool(cik.strip())
             and _is_group_block(h.shares)
-            and h.winning_source in (_INSIDER_GROUP_SOURCES | _BLOCK_GROUP_SOURCES)
+            and h.winning_source in _GROUP_ELIGIBLE_SOURCES
         )
 
     for origin, source_list, out_list in (
