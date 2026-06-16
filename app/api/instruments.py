@@ -4277,6 +4277,17 @@ class _SharesOutstandingSourceModel(BaseModel):
     edgar_url: str | None
 
 
+class _DualClassDenominatorModel(BaseModel):
+    """Multi-class denominator caveat (#1646). Present only when this instrument
+    shares its SEC CIK with another traded share class, so every percentage in
+    the rollup is a combined-basis lower bound. ``note`` is server-owned copy the
+    FE renders verbatim."""
+
+    cik: str
+    sibling_symbols: list[str]
+    note: str
+
+
 class OwnershipRollupResponse(BaseModel):
     """Cross-channel deduped ownership snapshot (#789).
 
@@ -4312,6 +4323,11 @@ class OwnershipRollupResponse(BaseModel):
     # iterating. Empty list / 0 when no correction fired.
     corrections_applied: list[_CorrectionAppliedModel]
     suppressed_by_notice: int
+    # Multi-class denominator caveat (#1646). Non-null only for one share class of
+    # a multi-class issuer (GOOG/GOOGL, BRK.A/BRK.B); null for single-class issuers
+    # and the no_data path. When set, the FE renders the caveat callout and every
+    # percentage should be read as a combined-basis lower bound.
+    dual_class_denominator: _DualClassDenominatorModel | None
     computed_at: datetime
 
 
@@ -4435,6 +4451,15 @@ def _rollup_to_response(
             for c in rollup.corrections_applied
         ],
         suppressed_by_notice=sum(1 for c in rollup.corrections_applied if c.kind == "suppressed_by_13f_nt"),
+        dual_class_denominator=(
+            _DualClassDenominatorModel(
+                cik=rollup.dual_class_denominator.cik,
+                sibling_symbols=list(rollup.dual_class_denominator.sibling_symbols),
+                note=rollup.dual_class_denominator.note,
+            )
+            if rollup.dual_class_denominator is not None
+            else None
+        ),
         computed_at=rollup.computed_at,
     )
 

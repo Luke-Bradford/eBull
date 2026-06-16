@@ -267,6 +267,35 @@ class SharesOutstandingSource:
 
 
 @dataclass(frozen=True)
+class DualClassDenominator:
+    """Honest-degradation marker (#1646): this instrument is one share class of a
+    multi-class issuer whose classes share a single SEC CIK (GOOG/GOOGL, BRK.A/
+    BRK.B), but the only shares-outstanding figure on file is the issuer's
+    **combined all-class** count.
+
+    The per-class ``dei:EntityCommonStockSharesOutstanding`` exists only in the
+    per-filing XBRL instance, tagged with a ``us-gaap:StatementClassOfStockAxis``
+    member — the SEC companyfacts/companyconcept API strips those dimensional
+    facts, so for a multi-class issuer the per-class count is absent from our
+    pipeline entirely (only the combined us-gaap ``CommonStockSharesOutstanding``
+    survives). The precise per-class denominator rides on #1590 (DERA FSDS, whose
+    ``num.tsv`` carries the dimensional ``segments`` column).
+
+    Consequence: every percentage in this rollup is a combined-basis **lower
+    bound** — the true per-class concentration is higher. The numerators are
+    per-class-correct for the CUSIP-resolved channels (institutions / insiders /
+    blockholders); only the denominator is coarse. This field flags the caveat so
+    the chart's percentages are not silently misread as per-class figures. It
+    removes no shares and is therefore NOT a :class:`CorrectionApplied`."""
+
+    cik: str
+    # All traded classes sharing the CIK (incl. self), symbol-sorted. Class B and
+    # other untraded classes are absent — they have no ``instruments`` row.
+    sibling_symbols: tuple[str, ...]
+    note: str  # Server-owned copy for the FE caveat callout (single source).
+
+
+@dataclass(frozen=True)
 class OwnershipRollup:
     symbol: str
     instrument_id: int
@@ -296,6 +325,12 @@ class OwnershipRollup:
     # with a default so existing constructors (CSV-test fixtures, ``no_data``)
     # need no change.
     corrections_applied: tuple[CorrectionApplied, ...] = ()
+    # Multi-class denominator caveat (#1646). Non-None only when this instrument
+    # shares its SEC CIK with another traded share class, so the rollup's
+    # denominator is the combined all-class count and every percentage is a
+    # combined-basis lower bound. None for single-class issuers and the no_data
+    # path. Last field with a default so existing constructors need no change.
+    dual_class_denominator: DualClassDenominator | None = None
 
     @classmethod
     def no_data(
@@ -2002,6 +2037,127 @@ def _read_shares_outstanding(
     )
 
 
+def _dual_class_note(symbols: tuple[str, ...]) -> str:
+    """Server-owned copy for the multi-class denominator caveat (#1646). Single
+    source — the FE renders this verbatim, never re-derives the copy."""
+    joined = ", ".join(symbols)
+    return (
+        f"Percentages use the issuer's combined all-class share count — "
+        f"{joined} are separate share classes filed under one SEC CIK. The "
+        f"per-class share count is not yet available, so each figure is a "
+        f"combined-basis lower bound; true per-class concentration is higher."
+    )
+
+
+def _detect_dual_class_denominator(
+    conn: psycopg.Connection[Any], instrument_id: int, *, denominator_concept: str | None
+) -> DualClassDenominator | None:
+    """Detect that this instrument is one traded class of a multi-class issuer
+    (GOOG/GOOGL, HEI/HEI.A, METC/METCB) whose classes share one SEC CIK and whose
+    rollup denominator is therefore the combined all-class count (#1646).
+
+    Three complementary gates, ALL required — empirically zero false positives
+    across the dev universe (fires on exactly GOOG/GOOGL, HEI/HEI.A, METC/METCB):
+
+    1. **Denominator is the combined us-gaap count** (``denominator_concept ==
+       'CommonStockSharesOutstanding'``). This is the multi-class fingerprint: a
+       true multi-class issuer reports every per-class
+       ``dei:EntityCommonStockSharesOutstanding`` cover value with a
+       ``StatementClassOfStockAxis`` member, which the SEC companyfacts API strips,
+       so the ``instrument_share_count_latest`` view falls back to the combined
+       us-gaap ``CommonStockSharesOutstanding``. A ``dei`` denominator means one
+       non-dimensional cover value was reported — a single-class issuer, an
+       ETF/ETN trust, or a same-security ``.US`` dual-listing — none of which are
+       understated. Excludes every false positive (ProShares ETFs, iPath ETNs,
+       ``.US`` listing dups) by construction.
+    2. **≥2 tradable instruments share the CIK as their PRIMARY mapping** — the
+       multi-class structure exists in the live universe (data-engineer §Q15 /
+       settled fan-out rule: two instruments on one SEC CIK are share classes).
+       Restricting to ``is_primary`` CIK rows + ``is_tradable`` instruments stops a
+       stale/historical CIK mapping or a delisted instrument from manufacturing a
+       spurious sibling (Codex #1646 MED).
+    3. **≥2 of those siblings each carry a CUSIP, across ≥2 distinct CUSIP values**
+       — the siblings are genuinely different securities, not a same-security
+       ``.US`` listing dup (which shares or lacks a CUSIP). Counting distinct
+       *instruments-with-a-CUSIP* (not just distinct CUSIP values) stops one
+       instrument's two historical CUSIPs from passing the gate against a
+       CUSIP-less sibling (Codex #1646 LOW). Self-healing: an issuer with only one
+       class's CUSIP ingested (Brown-Forman BF.A/BF-B today) starts firing once the
+       second class's CUSIP lands.
+
+    The precise per-class denominator rides on #1590 (DERA FSDS ``num.tsv``
+    ``segments`` column); when that lands, this detector is superseded by a
+    per-class lookup. Limitation: a multi-class issuer with only ONE class in the
+    universe (BRK.B alone — BRK.A not ingested) cannot be caught by the sibling
+    test, so its combined-basis figures stay silently understated until #1590."""
+    # Gate 1: only the combined us-gaap denominator is class-blind.
+    if denominator_concept != "CommonStockSharesOutstanding":
+        return None
+    with conn.cursor() as cur:
+        # Canonical primary CIK for this instrument (§12.A canonical pick).
+        cur.execute(
+            """
+            SELECT identifier_value
+            FROM external_identifiers
+            WHERE provider = 'sec' AND identifier_type = 'cik'
+              AND instrument_id = %s
+            ORDER BY is_primary DESC, external_identifier_id ASC
+            LIMIT 1
+            """,
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cik = str(row[0])
+        # Gate 2: tradable share-class siblings for which this CIK is their PRIMARY
+        # mapping (incl. self). is_primary + is_tradable exclude a historical CIK
+        # mapping or a delisted instrument from manufacturing a spurious sibling.
+        cur.execute(
+            """
+            SELECT DISTINCT i.symbol
+            FROM external_identifiers ei
+            JOIN instruments i ON i.instrument_id = ei.instrument_id
+            WHERE ei.provider = 'sec' AND ei.identifier_type = 'cik'
+              AND ei.identifier_value = %s
+              AND ei.is_primary = TRUE
+              AND i.is_tradable = TRUE
+            ORDER BY i.symbol
+            """,
+            (cik,),
+        )
+        symbols = tuple(str(r[0]) for r in cur.fetchall())
+        if len(symbols) < 2:
+            return None
+        # Gate 3: ≥2 of those siblings each carry a CUSIP, across ≥2 distinct CUSIP
+        # values — genuinely separate securities, not a same-security listing dup
+        # and not one instrument's two historical CUSIPs standing in for a sibling.
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT cu.instrument_id), COUNT(DISTINCT cu.identifier_value)
+            FROM external_identifiers cu
+            WHERE cu.provider IN ('sec', 'openfigi')
+              AND cu.identifier_type = 'cusip'
+              AND cu.instrument_id IN (
+                  SELECT ei.instrument_id
+                  FROM external_identifiers ei
+                  JOIN instruments i ON i.instrument_id = ei.instrument_id
+                  WHERE ei.provider = 'sec' AND ei.identifier_type = 'cik'
+                    AND ei.identifier_value = %s
+                    AND ei.is_primary = TRUE
+                    AND i.is_tradable = TRUE
+              )
+            """,
+            (cik,),
+        )
+        cusip_row = cur.fetchone()
+        n_instruments_with_cusip = int(cusip_row[0])  # type: ignore[index]
+        n_distinct_cusips = int(cusip_row[1])  # type: ignore[index]
+    if n_instruments_with_cusip < 2 or n_distinct_cusips < 2:
+        return None
+    return DualClassDenominator(cik=cik, sibling_symbols=symbols, note=_dual_class_note(symbols))
+
+
 def _read_universe_estimates(conn: psycopg.Connection[Any], instrument_id: int) -> dict[str, int | None]:
     """Per-category universe estimates. Tier 0 returns NULL for every
     category — the per-instrument 13F filer-count ingest lands in
@@ -2142,6 +2298,13 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         banner=banner,
         historical_symbols=historical_symbols,
         corrections_applied=corrections_applied,
+        # Multi-class denominator caveat (#1646): non-None when this instrument
+        # shares its SEC CIK with another traded share class AND its denominator is
+        # the combined us-gaap count, flagging that every percentage above is a
+        # combined-basis lower bound.
+        dual_class_denominator=_detect_dual_class_denominator(
+            conn, instrument_id, denominator_concept=outstanding_source.concept
+        ),
         computed_at=datetime.now(tz=UTC),
     )
 
@@ -2386,6 +2549,28 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
                 _csv_safe(corr.winning_accession or ""),
                 "",
                 _csv_safe(corr.detail),
+                "",
+            ]
+        )
+
+    # Multi-class denominator caveat (#1646): one ``__dual_class_denominator__``
+    # memo row so the export self-documents that every ``pct_outstanding`` above
+    # is a combined-basis lower bound (the denominator is the issuer's combined
+    # all-class count; per-class is not yet ingested). Zero shares — it removes
+    # nothing — so it is inert under any SUM(shares) reconciliation.
+    if rollup.dual_class_denominator is not None:
+        dc = rollup.dual_class_denominator
+        writer.writerow(
+            [
+                _csv_safe(dc.cik),
+                _csv_safe(", ".join(dc.sibling_symbols)),
+                "__dual_class_denominator__",
+                "0",
+                "",
+                "",
+                "",
+                "",
+                _csv_safe(dc.note),
                 "",
             ]
         )

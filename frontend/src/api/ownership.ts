@@ -233,6 +233,17 @@ export interface OwnershipCorrectionApplied {
   readonly detail: string;
 }
 
+/** Multi-class denominator caveat (#1646). Present only when this instrument is
+ *  one share class of a multi-class issuer (GOOG/GOOGL, HEI/HEI.A) whose classes
+ *  share one SEC CIK, so the rollup denominator is the issuer's combined all-class
+ *  share count and every percentage is a combined-basis LOWER BOUND. ``note`` is
+ *  server-owned copy — render it verbatim, never re-derive the wording. */
+export interface OwnershipDualClassDenominator {
+  readonly cik: string;
+  readonly sibling_symbols: readonly string[];
+  readonly note: string;
+}
+
 export interface OwnershipRollupResponse {
   readonly symbol: string;
   readonly instrument_id: number;
@@ -254,6 +265,9 @@ export interface OwnershipRollupResponse {
    *  ``suppressed_by_13f_nt`` kind. */
   readonly corrections_applied: readonly OwnershipCorrectionApplied[];
   readonly suppressed_by_notice: number;
+  /** Non-null only for one share class of a multi-class issuer; when set, every
+   *  percentage in this rollup is a combined-basis lower bound (#1646). */
+  readonly dual_class_denominator: OwnershipDualClassDenominator | null;
   readonly computed_at: string;
 }
 

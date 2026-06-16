@@ -653,6 +653,21 @@ SEC's `xbrli:period` XSD typing is `xs:date`, which accepts year 1 → 9999 with
 
 Cleanup tool: `scripts/cleanup_1218_out_of_window_facts.py` (dry-run default, `--apply` to commit). Predicate MUST mirror the parser guard 1-to-1 — if you tune the window, tune both.
 
+### 7.17 companyfacts/companyconcept strip XBRL dimensional facts → per-share-class counts are ABSENT for multi-class issuers (#1646)
+
+The `data.sec.gov` XBRL APIs (`companyfacts`, `companyconcept`, `frames`) return ONLY the **non-dimensional ("default") member** of each concept. Any fact tagged with a dimensional axis member — `us-gaap:StatementClassOfStockAxis`, `dei:LegalEntityAxis`, segment/product axes — is **dropped entirely** from these JSON APIs. It survives only in the per-filing inline XBRL instance (`<accession>/<ticker>-<date>_htm.xml`), where the fact carries a `contextRef` whose `<context>` defines the `explicitMember`.
+
+Consequence for **multi-class issuers** (GOOG/GOOGL, HEI/HEI.A, BRK.A/BRK.B): the cover-page `dei:EntityCommonStockSharesOutstanding` is reported **per class** (one value per `StatementClassOfStockAxis` member), so there is NO non-dimensional default value → companyfacts/companyconcept return **404 / absent** for that concept. Empirically verified 2026-06-16: Alphabet CIK 1652044 `companyconcept/dei/EntityCommonStockSharesOutstanding.json` → **404**; its `companyfacts.json` dei section had only `EntityPublicFloat`. The per-class values (Class A 5.82B, Class C 5.459B) live only in `goog-20250331_htm.xml`:
+
+```xml
+<dei:EntityCommonStockSharesOutstanding contextRef="c-4">5820000000  <!-- us-gaap:CommonClassAMember -->
+<dei:EntityCommonStockSharesOutstanding contextRef="c-6">5459000000  <!-- goog:CapitalClassCMember -->
+```
+
+So `financial_facts_raw` (sourced from companyfacts JSON, NO dimension/member column) holds ONLY the **combined** us-gaap `CommonStockSharesOutstanding` (12.116B) for such issuers — the per-class denominator is not in our pipeline at all. The precise per-class facts ride on **#1590 (DERA Financial Statement Data Sets)**, whose `num.tsv` carries a `segments` column = the dimensional member.
+
+**Rule:** when a task assumes a per-class / per-segment / per-dimension XBRL fact "exists but isn't selected", verify it is actually reachable via our companyfacts ingest BEFORE designing — for multi-class share counts and any other dimensional fact, it is NOT. The combined-vs-per-class detection that ships meanwhile (#1646 `_detect_dual_class_denominator`) keys on the multi-class fingerprint: **the denominator falling back to us-gaap** `CommonStockSharesOutstanding` (taxonomy `us-gaap`, not `dei`) because every per-class DEI cover value was stripped. See data-engineer §Q15 + invariant I18.
+
 ## 8. Operator checklist for new SEC integrations
 
 Before writing code that hits SEC EDGAR:
