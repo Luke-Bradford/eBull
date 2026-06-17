@@ -295,6 +295,31 @@ export interface OwnershipSanityChecks {
   readonly any_pie_slice_over_100pct?: boolean;
 }
 
+/** Independent denominator tie-out (#1647 part 5). Facts, not a gate. ``method``
+ *  encodes the comparison's strength: ``independent_concept`` (single-class dei
+ *  cover-page vs us-gaap balance-sheet — a real independent cross-source) /
+ *  ``per_class_subset_bound`` (dual-class structural backstop — only flags the
+ *  impossible sibling-sum > combined) / ``unavailable``. ``primary_value`` &
+ *  ``comparison_value`` are the two figures compared (``primary_concept`` names
+ *  which); ``pct_diff`` = (primary - comparison) / comparison. Optional for
+ *  back-compat with pre-envelope payloads. */
+export interface OwnershipDenominatorCrossCheck {
+  readonly method: "independent_concept" | "per_class_subset_bound" | "unavailable";
+  /** Decimal-as-string; null when unavailable. */
+  readonly primary_value: string | null;
+  readonly primary_concept: string | null;
+  /** Decimal-as-string; null when unavailable. */
+  readonly comparison_value: string | null;
+  readonly comparison_concept: string | null;
+  readonly primary_as_of: string | null;
+  readonly comparison_as_of: string | null;
+  readonly as_of_delta_days: number | null;
+  /** Decimal-as-string fraction (primary - comparison) / comparison; null when unavailable. */
+  readonly pct_diff: string | null;
+  readonly status: "agrees" | "minor_skew" | "diverges" | "plausible" | "unavailable";
+  readonly note: string;
+}
+
 export interface OwnershipRollupResponse {
   readonly symbol: string;
   readonly instrument_id: number;
@@ -326,6 +351,8 @@ export interface OwnershipRollupResponse {
   /** Raw plausibility facts over the pie-wedge slices (#1647 part 4). Optional
    *  for back-compat with pre-envelope payloads. */
   readonly sanity?: OwnershipSanityChecks;
+  /** Independent denominator tie-out (#1647 part 5). Optional for back-compat. */
+  readonly denominator_cross_check?: OwnershipDenominatorCrossCheck;
   readonly computed_at: string;
 }
 

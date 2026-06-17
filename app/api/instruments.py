@@ -4334,6 +4334,31 @@ class _SanityChecksModel(BaseModel):
     any_pie_slice_over_100pct: bool = False
 
 
+class _DenominatorCrossCheckModel(BaseModel):
+    """Independent denominator tie-out (#1647 part 5). Facts, not a gate — it never
+    changes a share count. ``method`` encodes the comparison's STRENGTH:
+    ``independent_concept`` (single-class dei cover-page vs us-gaap balance-sheet — a
+    real independent cross-source); ``per_class_subset_bound`` (dual-class structural
+    backstop — only flags the impossible sibling-sum > combined; not independent);
+    ``unavailable``. ``primary_value`` / ``comparison_value`` are the two figures THIS
+    check compares (``primary_concept`` names which); ``pct_diff`` =
+    (primary - comparison) / comparison. The aggregate ownership PERCENTAGES have no
+    independent source (all vendors sum the same SEC filings + disagree by method) —
+    documented in the metrics-analyst skill, not a field. ``note`` is server-owned FE copy."""
+
+    method: Literal["independent_concept", "per_class_subset_bound", "unavailable"] = "unavailable"
+    primary_value: Decimal | None = None
+    primary_concept: str | None = None
+    comparison_value: Decimal | None = None
+    comparison_concept: str | None = None
+    primary_as_of: date | None = None
+    comparison_as_of: date | None = None
+    as_of_delta_days: int | None = None
+    pct_diff: Decimal | None = None
+    status: Literal["agrees", "minor_skew", "diverges", "plausible", "unavailable"] = "unavailable"
+    note: str = "No independent SEC figure on file to cross-check the share-count denominator."
+
+
 class OwnershipRollupResponse(BaseModel):
     """Cross-channel deduped ownership snapshot (#789).
 
@@ -4383,6 +4408,10 @@ class OwnershipRollupResponse(BaseModel):
     # present; zeroed on the no_data path. Default so older callers/tests need
     # no change.
     sanity: _SanityChecksModel = Field(default_factory=_SanityChecksModel)
+    # Independent denominator tie-out (#1647 part 5). Always present; ``unavailable``
+    # on the no_data path / when no comparison figure is on file. Default so older
+    # callers/tests need no change.
+    denominator_cross_check: _DenominatorCrossCheckModel = Field(default_factory=_DenominatorCrossCheckModel)
     computed_at: datetime
 
 
@@ -4540,6 +4569,19 @@ def _rollup_to_response(
             institutions_over_100pct=rollup.sanity.institutions_over_100pct,
             largest_single_holder_pct=rollup.sanity.largest_single_holder_pct,
             any_pie_slice_over_100pct=rollup.sanity.any_pie_slice_over_100pct,
+        ),
+        denominator_cross_check=_DenominatorCrossCheckModel(
+            method=rollup.denominator_cross_check.method,
+            primary_value=rollup.denominator_cross_check.primary_value,
+            primary_concept=rollup.denominator_cross_check.primary_concept,
+            comparison_value=rollup.denominator_cross_check.comparison_value,
+            comparison_concept=rollup.denominator_cross_check.comparison_concept,
+            primary_as_of=rollup.denominator_cross_check.primary_as_of,
+            comparison_as_of=rollup.denominator_cross_check.comparison_as_of,
+            as_of_delta_days=rollup.denominator_cross_check.as_of_delta_days,
+            pct_diff=rollup.denominator_cross_check.pct_diff,
+            status=rollup.denominator_cross_check.status,
+            note=rollup.denominator_cross_check.note,
         ),
         computed_at=rollup.computed_at,
     )
