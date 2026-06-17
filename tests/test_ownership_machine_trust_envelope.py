@@ -248,7 +248,12 @@ def test_sanity_any_slice_over_100pct() -> None:
 
 
 def _proxy(*holders: Holder) -> OwnershipSlice:
-    return _slice("def14a_unmatched", list(holders), outstanding="1000", basis="proxy_disclosure")
+    # ``_slice``'s ``basis`` kwarg maps to ``_build_slice(denominator_basis=...)``;
+    # assert it actually took so these exclusion tests can never silently go
+    # vacuous if the helper signature drifts (review PREVENTION).
+    s = _slice("def14a_unmatched", list(holders), outstanding="1000", basis="proxy_disclosure")
+    assert s.denominator_basis == "proxy_disclosure"
+    return s
 
 
 def test_proxy_disclosure_excluded_from_sanity() -> None:
