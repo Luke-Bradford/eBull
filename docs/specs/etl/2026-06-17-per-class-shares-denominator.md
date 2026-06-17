@@ -303,13 +303,21 @@ Insert after dedup/reconcile, before `_bucket_into_slices`:
    excluded from residual/concentration) and may double-count 13F, so they must not veto the
    denominator. Denominator-independent.
 4. `class_row = _read_class_shares_outstanding(conn, instrument_id)`.
-5. **Fail-closed guard** — use the per-class denominator only when ALL hold:
+5. **Fail-closed guard** (pure `_should_use_class_denominator`) — use the per-class
+   denominator only when ALL hold:
    - `class_row is not None`
-   - **`class_row.period_end == outstanding_as_of`** (period coherence, Codex ckpt-1 #2):
-     never divide fresh holdings by a stale class count, and bind the per-class figure to the
-     SAME filing period as the combined figure. If FSDS lags companyfacts (or vice-versa) the
-     periods diverge → fall back to the #1646 caveat. Exact equality (both are filing-period
-     instants from the same 10-K/10-Q).
+   - **freshness coherence** — `not _denominator_too_stale(class_row.period_end, today)`:
+     the per-class period clears the SAME 548-day staleness bound (#1581
+     `_STALE_DENOMINATOR_MAX_AGE_DAYS`) the combined denominator must clear. This is the
+     "tightly justified tolerance" Codex ckpt-1 #2 allowed in place of exact period-equality.
+     **Why NOT strict `class_period == combined_as_of` equality** (the v1 spec / Codex ckpt-1
+     proposal, REVISED at Codex ckpt-2): companyfacts (the combined as_of) updates a quarter
+     ahead of DERA FSDS (the per-class period), so an equality gate would make the swap
+     essentially never fire on live data. Bounding the per-class period by the repo's own
+     settled denominator-freshness window is the principled middle — shares-outstanding drifts
+     < a few % over that window, far below the ~2× error it corrects — and is uniform with how
+     the combined denominator is already checked (`_denominator_too_stale(outstanding_as_of,
+     today)` upstream). A class count older than 548 days → fall back to the #1646 caveat.
    - `0 < class_shares < outstanding` (structural: a class is a strict subset of the combined
      total when ≥2 classes; rejects a stale/garbage row ≥ combined)
    - `max_pie_holder_shares <= class_shares` (holdings-plausibility: no resolved pie holder can
@@ -360,10 +368,10 @@ Pure-logic (no DB) — extract the parse/guard decisions into pure functions:
 - row-filter: us-gaap tag/version/qtrs=0/uom=shares accept; dei tag / duration (qtrs>0) /
   wrong-uom reject.
 - current-period select: `ddate == period` picks current (5,835M) over comparative (5,899M).
-- fail-closed guard `_should_use_class_denominator(class_shares, combined, max_pie_holder,
-  class_period, combined_as_of)`: table-test — pass (Alphabet 5,835M < 12,211M, holder ≤
-  class, periods equal); reject class ≥ combined; reject class ≤ 0; reject holder > class;
-  **reject period mismatch** (class_period ≠ combined_as_of).
+- fail-closed guard `_should_use_class_denominator(class_shares, class_period_end,
+  combined_shares, today, max_pie_holder_shares)`: table-test — pass (Alphabet 5,835M <
+  12,211M, holder ≤ class, class period fresh); reject class ≥ combined; reject class ≤ 0;
+  reject holder > class; **reject stale class period** (> 548 days before `today`).
 - restatement no-demotion `_pick_restatement(rows)`: later `filed_at` wins; equal filed →
   larger `adsh`; never demotes.
 
@@ -378,8 +386,9 @@ DB-backed (one integration test, marker `db`):
   `per_class_denominator`, `dual_class_denominator is None`, and
   `shares_outstanding_source.accession_number == source_adsh`.
 - seed a too-small class row → holder > class → guard fails → #1646 caveat returns.
-- seed a class row whose `period_end` ≠ combined `as_of` → period-coherence guard fails →
-  #1646 caveat.
+- seed a class row whose `period_end` is > 548 days stale → freshness guard fails → #1646
+  caveat. (DB cases use periods relative to `date.today()` so the snapshot-clocked staleness
+  guard is exercised deterministically, not time-bombed.)
 
 CSV: `__per_class_denominator__` memo row + copy.
 
@@ -418,8 +427,11 @@ job invocation.
 1. **(High) Synthesize FSDS source on swap** — done (§7): the reported
    `SharesOutstandingSource` is rebuilt from `source_adsh`/`source_form_type`, never left
    claiming companyfacts. FSDS adsh → valid `edgar_archive_url`.
-2. **(High) Period-coherence guard** — added: `class_period_end == outstanding_as_of` required,
-   else fall back to #1646. Prevents fresh holdings ÷ stale class count.
+2. **(High) Freshness-coherence guard** — added. (Codex ckpt-1 proposed strict
+   `class_period_end == outstanding_as_of`; **REVISED at Codex ckpt-2** to the repo's existing
+   548-day `_denominator_too_stale` bound on `class_period_end` — companyfacts updates a
+   quarter ahead of FSDS, so equality would essentially never fire. See §7 step 5.) Prevents
+   fresh holdings ÷ a stale class count while letting the swap fire across the normal lag.
 3. **(High) Not a `CorrectionApplied`** — replaced with a new `PerClassDenominator` provenance
    field (removes no shares; mutually exclusive with `dual_class_denominator`). No correction
    vocab change.

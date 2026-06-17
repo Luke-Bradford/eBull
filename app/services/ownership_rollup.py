@@ -2448,6 +2448,12 @@ def _should_use_class_denominator(
     per-class count (#788). ALL must hold; any miss keeps the combined denominator
     + the #1646 caveat. Pure so the policy is table-tested without a DB.
 
+    KEEP IN SYNC: ``docs/specs/etl/2026-06-17-per-class-shares-denominator.md`` §7
+    step 5 describes these guards verbatim. If this signature or any condition
+    changes, update that spec section in the SAME change (a v1 strict-equality
+    coherence guard was relaxed here but the spec lagged → review BLOCKING; see
+    review-prevention-log "Relaxing a guard mid-PR").
+
       1. **Freshness coherence** — the per-class period clears the SAME staleness
          bound the combined denominator must clear (#1581
          ``_STALE_DENOMINATOR_MAX_AGE_DAYS`` = 548 days). This is Codex ckpt-1 #2's
