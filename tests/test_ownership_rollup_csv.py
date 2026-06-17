@@ -458,6 +458,57 @@ def test_build_csv_memo_overlay_slices_emit_after_residual_with_prefix() -> None
     assert memo_share_total > 0
 
 
+def test_build_csv_def14a_proxy_disclosure_emits_as_memo_excluded_from_sum() -> None:
+    """#1659: the DEF 14A ``def14a_unmatched`` slice is a non-additive overlay
+    (``denominator_basis='proxy_disclosure'``), so its rows emit in the trailing
+    memo block as ``__memo:def14a_unmatched__`` and are OUTSIDE the additive
+    SUM(shares) reconciliation — exactly like funds, but a distinct basis."""
+    insiders = _slice(
+        "insiders",
+        (
+            _holder(
+                cik="0000111111",
+                name="Insider",
+                shares="500000",
+                pct="0.05",
+                source="form4",
+                accession="0000111111-26-000001",
+            ),
+        ),
+    )
+    proxy = _slice(
+        "def14a_unmatched",
+        (
+            _holder(
+                cik=None,
+                name="Sponsor Control Group",
+                shares="300000",
+                pct="0.03",
+                source="def14a",
+                accession="0000222222-26-000001",
+                as_of=date(2026, 3, 31),
+            ),
+        ),
+        denominator_basis="proxy_disclosure",
+    )
+    csv = build_rollup_csv(
+        _rollup(
+            slices=(insiders, proxy),
+            treasury="100000",
+            residual_shares="9400000",  # 10M - 500k insiders - 100k treasury; proxy excluded
+        ),
+    )
+    lines = csv.splitlines()
+    # header / insider / treasury / residual / memo:def14a_unmatched = 5 lines.
+    assert len(lines) == 5
+    assert "insiders," in lines[1]
+    assert "__treasury__" in lines[2]
+    assert "__residual__" in lines[3]
+    assert "Sponsor Control Group,__memo:def14a_unmatched__,300000," in lines[4]
+    # Additive reconciliation excludes the proxy block.
+    assert Decimal("500000") + Decimal("100000") + Decimal("9400000") == Decimal("10000000")
+
+
 def test_build_csv_memo_overlay_only_no_pie_slices() -> None:
     """Edge: instrument with N-PORT data but no other ingest yet. Memo
     block still emits AFTER the (zero-row treasury skip + residual=full

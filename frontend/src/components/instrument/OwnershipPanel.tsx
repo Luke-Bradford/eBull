@@ -139,14 +139,12 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
  * denominator (treasury-on-top model); per-slice totals come from
  * the deduped rollup; per-filer holders feed the outer ring.
  *
- * ``def14a_unmatched`` is its own wedge (#1627). It carries
- * ``denominator_basis=pie_wedge`` (additive — already in the server
- * residual), and on large caps the unmatched proxy 5%+ holders dwarf
- * the real insiders (AAPL: 2.48B vs 10.3M), so folding them into the
- * insiders wedge mislabelled the majority of it. ``funds`` is the only
- * ``institution_subset`` overlay and is deliberately NOT flattened
- * here — it is a memo (N-PORT detail already inside the 13F-HR
- * institutional aggregate), never a wedge.
+ * ``def14a_unmatched`` is a NON-ADDITIVE memo overlay (#1659,
+ * ``denominator_basis=proxy_disclosure``) — DEF 14A beneficial ownership is a
+ * Rule 13d-3 deemed/overlapping disclosure (SEC Item 403), already counted via
+ * 13D/G, 13F, Form 4 — so it is NOT a sunburst wedge (it is rendered in the memo
+ * overlay below the pie, like ``funds``). Both overlays are deliberately NOT
+ * flattened into the sunburst here. (Reverses #1627's additive treatment.)
  */
 export function rollupToSunburstInputs(
   rollup: OwnershipRollupResponse,
@@ -199,22 +197,23 @@ export function rollupToSunburstInputs(
       ...flattenHolders("institutions", "institutions"),
       ...flattenHolders("etfs", "etfs"),
       ...flattenHolders("insiders", "insiders"),
-      // def14a_unmatched is its own wedge now (#1627), not folded into
-      // insiders. funds is an institution_subset overlay — never a
-      // wedge — so it is deliberately absent from this list.
-      ...flattenHolders("def14a_unmatched", "def14a"),
+      // def14a_unmatched (proxy_disclosure) and funds (institution_subset) are
+      // NON-ADDITIVE memo overlays — never sunburst wedges — so both are
+      // deliberately absent from this list (#1659 / #919).
       ...flattenHolders("blockholders", "blockholders"),
     ],
     institutions_total: sliceTotal("institutions"),
     etfs_total: sliceTotal("etfs"),
     insiders_total: sliceTotal("insiders"),
-    def14a_total: sliceTotal("def14a_unmatched"),
+    // Non-additive overlay (#1659): no DEF 14A sunburst wedge. The proxy holders
+    // render only in the memo overlay below the pie.
+    def14a_total: null,
     blockholders_total: sliceTotal("blockholders"),
     treasury_shares: treasury,
     institutions_as_of: sliceAsOf("institutions"),
     etfs_as_of: sliceAsOf("etfs"),
     insiders_as_of: sliceAsOf("insiders"),
-    def14a_as_of: sliceAsOf("def14a_unmatched"),
+    def14a_as_of: null,
     treasury_as_of: rollup.treasury_as_of,
     blockholders_as_of: sliceAsOf("blockholders"),
   };
@@ -379,7 +378,7 @@ const _CATEGORY_ORDER_TABLE: readonly OwnershipSliceCategory[] = [
   "blockholders",
   "institutions",
   "etfs",
-  "def14a_unmatched",
+  // def14a_unmatched is a non-additive overlay (#1659), not a pie-wedge row.
 ];
 
 function _denominatorBasis(slice: OwnershipSlice) {
@@ -388,8 +387,11 @@ function _denominatorBasis(slice: OwnershipSlice) {
 
 function SliceTable({ rollup }: SliceTableProps): JSX.Element {
   const pieSlices = rollup.slices.filter((s) => _denominatorBasis(s) === "pie_wedge");
+  // Any non-pie_wedge slice is a non-additive memo overlay (funds
+  // institution_subset #919, DEF 14A proxy_disclosure #1659). Basis-driven so a
+  // future overlay surfaces here automatically.
   const overlaySlices = rollup.slices.filter(
-    (s) => _denominatorBasis(s) === "institution_subset",
+    (s) => _denominatorBasis(s) !== "pie_wedge",
   );
   // Order the known categories, then append any unknown pie-wedge slice
   // the FE has no explicit slot for — so a new additive category can't
@@ -477,6 +479,7 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
   const totalPct = parseShareCount(slice.pct_outstanding) ?? 0;
   const { shown, remaining } = topHoldersByShares(slice.holders, _OVERLAY_TOP_N);
   const isFunds = slice.category === "funds";
+  const isProxy = slice.category === "def14a_unmatched";
   const unit = isFunds ? "fund series" : "holders";
   return (
     <div
@@ -487,7 +490,9 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
         Memo: {slice.label} —{" "}
         {isFunds
           ? "fund-level detail of positions already counted in Institutions via 13F-HR. "
-          : "non-additive overlay. "}
+          : isProxy
+            ? "DEF 14A beneficial ownership (Rule 13d-3): the same shares may be listed under multiple owners (control groups, parent/sub, “all officers as a group”), so it is shown as a cross-check, not added to the pie. The real holders are counted via 13D/G, 13F and Form 4. "
+            : "non-additive overlay. "}
         Does not contribute to the pie or residual math.
       </p>
       <table className="w-full">

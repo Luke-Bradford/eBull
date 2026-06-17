@@ -966,6 +966,13 @@ class TestDef14aEnrichment:
         assert len(unmatched) == 1
         assert unmatched[0].holders[0].filer_name == "Doe Jonathan III"
         assert unmatched[0].holders[0].shares == Decimal("123456")
+        # #1659: the unmatched DEF 14A slice is a NON-ADDITIVE memo overlay — it
+        # surfaces the holder (inspectable) but contributes nothing to the pie.
+        assert unmatched[0].denominator_basis == "proxy_disclosure"
+        # With no additive (13F/13D/Form 4) slice, known concentration is 0 and the
+        # proxy block is NOT subtracted from residual (it would be if additive).
+        assert rollup.concentration.pct_outstanding_known == Decimal(0)
+        assert not rollup.residual.oversubscribed
 
     def test_def14a_legacy_null_cik_match_routes_to_insiders(self, _setup: psycopg.Connection[tuple]) -> None:
         """Codex pre-push review (Batch 1 of #788) caught this: a

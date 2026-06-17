@@ -73,7 +73,17 @@ CoverageState = Literal["no_data", "red", "unknown_universe", "amber", "green"]
 # detail INSIDE the 13F-HR institutional aggregate; counting them
 # additively would double-count). Future ESOP / DRS / short-interest
 # overlays land here too (#961, etc.).
-DenominatorBasis = Literal["pie_wedge", "institution_subset"]
+#   * ``institution_subset`` — fund-level detail inside the 13F-HR
+#     institutional aggregate (funds / N-PORT, #919).
+#   * ``proxy_disclosure`` — DEF 14A "Security Ownership of Certain
+#     Beneficial Owners" rows (#1659). A Rule 13d-3 deemed-ownership
+#     disclosure (SEC Item 403) where the same securities are listed
+#     under multiple owners (control groups, parent/sub, spouse
+#     attribution, "all officers as a group" aggregates) — overlapping,
+#     NOT additive. The real holders are already counted + de-duplicated
+#     via 13D/G, 13F, Form 4; the proxy is a cross-check, not a wedge
+#     (reverses #1627's additive treatment — see data-engineer I14/I16).
+DenominatorBasis = Literal["pie_wedge", "institution_subset", "proxy_disclosure"]
 
 # Why an ``OwnershipRollup.no_data`` payload carries no usable denominator.
 # ``absent`` — no shares-outstanding row on file at all.
@@ -1941,7 +1951,19 @@ def _bucket_into_slices(
             )
             for c in unmatched_def14a
         ]
-        slices.append(_build_slice("def14a_unmatched", unmatched_holders, outstanding))
+        # Non-additive memo overlay (#1659): DEF 14A beneficial ownership is a Rule
+        # 13d-3 deemed/overlapping disclosure (SEC Item 403), not additive holdings —
+        # so it does NOT contribute to the pie / residual / concentration. Renders as
+        # a cross-check overlay (the additive math filters denominator_basis ==
+        # "pie_wedge"; the memo paths filter != "pie_wedge").
+        slices.append(
+            _build_slice(
+                "def14a_unmatched",
+                unmatched_holders,
+                outstanding,
+                denominator_basis="proxy_disclosure",
+            )
+        )
 
     if funds_holders:
         slices.append(
@@ -2056,10 +2078,11 @@ def _compute_residual(
     to oversubscription is the snapshot-lag class of bug, not a
     dedup mistake."""
     treasury_d = treasury if treasury is not None else Decimal(0)
-    # Memo-overlay slices (funds, future ESOP/DRS/short-interest) do NOT
-    # contribute to ``sum_known`` — they describe positions that are
-    # already counted via a pie-wedge slice (e.g. N-PORT funds are
-    # fund-level detail inside the 13F-HR institutional aggregate).
+    # Memo-overlay slices (funds N-PORT; DEF 14A proxy_disclosure #1659; future
+    # ESOP/DRS/short-interest) do NOT contribute to ``sum_known`` — they describe
+    # positions already counted via a pie-wedge slice (N-PORT funds are fund-level
+    # detail inside the 13F-HR institutional aggregate) or, for DEF 14A, a Rule
+    # 13d-3 deemed/overlapping disclosure already counted via 13D/G + 13F + Form 4.
     sum_known = sum(
         (s.total_shares for s in slices if s.denominator_basis == "pie_wedge"),
         Decimal(0),
@@ -2079,8 +2102,9 @@ def _compute_residual(
 def _compute_concentration(outstanding: Decimal, slices: Sequence[OwnershipSlice]) -> ConcentrationInfo:
     """Float concentration — sum-of-deduped-pie-wedge-slices / outstanding.
     Treasury excluded (the issuer doesn't invest in itself). Memo-overlay
-    slices (funds, etc.) excluded so the chip doesn't double-count
-    positions surfaced via both a pie wedge and an overlay."""
+    slices (funds; DEF 14A proxy_disclosure #1659) excluded so the chip counts
+    only additive filings (13F + 13D/G + Form 4) and doesn't double-count a
+    position surfaced via both a pie wedge and an overlay."""
     sum_known = sum(
         (s.total_shares for s in slices if s.denominator_basis == "pie_wedge"),
         Decimal(0),
@@ -3088,12 +3112,12 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     dual_class_denominator: DualClassDenominator | None = None
     class_row = _read_class_shares_outstanding(conn, instrument_id)
     if class_row is not None:
-        # Largest single pie-wedge holder (by_category holders + the additive
-        # unmatched-DEF-14A wedge). Funds are an institution_subset memo overlay
-        # (NOT a pie wedge; may double-count 13F) so they must not veto the
-        # denominator (Codex ckpt-1 #4). Denominator-independent.
+        # Largest single pie-wedge holder. Only ADDITIVE pie wedges (the
+        # by_category holders) count: funds (institution_subset) and DEF 14A
+        # (proxy_disclosure, #1659) are non-additive memo overlays — a deemed /
+        # overlapping figure must not veto the per-class denominator.
+        # Denominator-independent.
         _pie_shares = [h.shares for _hs in by_category.values() for h in _hs]
-        _pie_shares += [c.shares for c in unmatched_def14a if c.shares is not None]
         max_pie_holder_shares = max(_pie_shares, default=Decimal(0))
         if _should_use_class_denominator(
             class_shares=class_row.shares,

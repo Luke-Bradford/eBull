@@ -4243,11 +4243,11 @@ class _SliceModel(BaseModel):
     dominant_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"] | None
     holders: list[_HolderModel]
     # Tag added with #919 funds slice. ``pie_wedge`` slices contribute
-    # to residual / concentration math; ``institution_subset`` is a
-    # memo overlay (the funds slice today; future ESOP/DRS overlays).
-    # Frontend filters on this to decide whether to render in the pie
-    # vs as a memo panel below the pie.
-    denominator_basis: Literal["pie_wedge", "institution_subset"] = "pie_wedge"
+    # to residual / concentration math; ``institution_subset`` (funds) and
+    # ``proxy_disclosure`` (DEF 14A, #1659 — Rule 13d-3 deemed/overlapping
+    # beneficial ownership, not additive) are memo overlays. Frontend filters
+    # on this to decide whether to render in the pie vs as a memo panel.
+    denominator_basis: Literal["pie_wedge", "institution_subset", "proxy_disclosure"] = "pie_wedge"
     # As-of coherence envelope (#1647 part 1). The as-of span of this slice's
     # deduped holders (incl. collapsed-family members) so a machine consumer
     # sees the figure sums across quarters. NULL-as_of-only slice → None/0/False.
@@ -4850,12 +4850,14 @@ def rollup_csv_slice_filter(category: str) -> frozenset[str]:
 
     ``treasury`` keeps no slices (memo + residual rows only). Every
     other category maps to its own slice — including
-    ``def14a_unmatched``, which is its own wedge + L2 filer category
-    since #1627 (un-folded from insiders). The CSV must match the
-    un-folded chart/table 1:1: ``?category=insiders&view=raw`` now
-    carries insiders only, and ``?category=def14a_unmatched`` carries
-    the proxy-only holders. (Pre-#1627 the chart/table folded DEF 14A
-    into insiders and this filter mirrored that fold — prevention-log
+    ``def14a_unmatched``, which since #1659 is a NON-ADDITIVE memo
+    overlay (``denominator_basis=proxy_disclosure``) but keeps its own
+    L2 filer category + CSV scope so the proxy holders stay inspectable
+    / exportable as a cross-check. The CSV scope matches the chart/table
+    1:1: ``?category=insiders&view=raw`` carries insiders only, and
+    ``?category=def14a_unmatched`` carries the proxy-only holders.
+    (Pre-#1627 the chart/table folded DEF 14A into insiders and this
+    filter mirrored that fold — prevention-log
     #1767; un-folding one surface requires un-folding all three.)
     """
     if category == "treasury":
