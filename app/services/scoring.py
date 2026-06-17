@@ -32,6 +32,11 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
+from app.services.xbrl_derived_stats import (
+    MarketCapResolution,
+    resolve_market_cap_basis,
+)
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL_VERSION = "v1.1-balanced"
@@ -183,6 +188,40 @@ def _to_float(val: object) -> float | None:
         return float(val)  # type: ignore[arg-type]
     except TypeError, ValueError:
         return None
+
+
+def _apply_market_cap_basis(
+    valuation_row: dict[str, Any] | None,
+    resolution: MarketCapResolution,
+) -> dict[str, Any] | None:
+    """Overlay the #1662 total-company market cap onto the ranking view's row (#1664).
+
+    The ``instrument_valuation`` view (sql/201) NULLs the shares-distorted columns
+    (``market_cap_live``, ``fcf_yield``, …) for a curated dual-class issuer because it
+    cannot build the correct total-company cap in SQL (that needs per-class prices +
+    residual imputation + fail-closed guards — ``_assemble_total_company_cap``). This
+    restores the two figures the scorer consumes and can recompute company-wide-correctly:
+
+    - ``market_cap_live`` = the total-company cap (Σ class×price, identical across siblings).
+    - ``fcf_yield`` = company TTM free cash flow / total-company cap. ``fcf_ttm`` is the
+      issuer-level (combined-company) TTM FCF — dual-class siblings share one CIK's
+      fundamentals — so it is the right numerator against the total-company cap.
+
+    ``multiclass_unavailable`` leaves the view's NULLs (honest graceful degrade);
+    ``not_multiclass`` leaves the legacy single-class product untouched. Pure —
+    table-tested without a DB."""
+    if valuation_row is None:
+        return None
+    if resolution.basis != "total_company" or resolution.total is None:
+        return valuation_row
+    total_cap = _to_float(resolution.total.value)
+    valuation_row["market_cap_live"] = resolution.total.value
+    fcf_ttm = _to_float(valuation_row.get("fcf_ttm"))
+    if fcf_ttm is not None and total_cap is not None and total_cap > 0:
+        valuation_row["fcf_yield"] = fcf_ttm / total_cap
+    else:
+        valuation_row["fcf_yield"] = None
+    return valuation_row
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +836,8 @@ def _load_instrument_data(
                 cur.execute(
                     """
                     SELECT pe_ratio, pb_ratio, p_fcf_ratio, fcf_yield,
-                           debt_equity_ratio, market_cap_live, current_price
+                           debt_equity_ratio, market_cap_live, current_price,
+                           fcf_ttm
                     FROM instrument_valuation
                     WHERE instrument_id = %(id)s
                     """,
@@ -806,6 +846,21 @@ def _load_instrument_data(
                 valuation_row = cur.fetchone()
         except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
             pass  # savepoint already rolled back; prior queries intact
+
+    # #1664: for a curated dual-class issuer the view NULLs the shares-distorted
+    # valuation columns (combined-shares × one-class-price is structurally wrong;
+    # the correct total-company cap cannot be built in SQL). Overlay the #1662
+    # total-company figure via the single policy helper so the value score uses
+    # the correct market cap / FCF yield rather than a degraded NULL. Own savepoint:
+    # resolve_market_cap_basis reads instrument_class_shares_outstanding (#1623),
+    # which may be absent in a partial test DB → contain the rollback.
+    if valuation_row is not None:
+        try:
+            with conn.transaction():
+                resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id)
+        except (psycopg.errors.UndefinedTable,):
+            resolution = MarketCapResolution(basis="not_multiclass")
+        valuation_row = _apply_market_cap_basis(valuation_row, resolution)
 
     return {
         "fund_rows": fund_rows,
