@@ -58,6 +58,9 @@ _BOOTSTRAP_STAGE_FRESHNESS_SOURCES: Final[dict[str, frozenset[ManifestSource]]] 
     "sec_insider_ingest_from_dataset": frozenset({"sec_form3", "sec_form4", "sec_form5"}),
     "sec_nport_ingest_from_dataset": frozenset({"sec_n_port"}),
     "cusip_resolver_post_bulk_sweep": frozenset(),
+    # #788 — writes the per-class shares table from cached FSDS zips; NOT a
+    # manifest source, so no freshness sink (like the resolver sweep above).
+    "sec_fsds_class_shares_ingest": frozenset(),
     "sec_master_idx_gap_close": _ISSUER_FILING_METADATA,
     # First-install drain seeds filing_events (issuer filing-metadata) from the
     # local bulk submissions.zip.

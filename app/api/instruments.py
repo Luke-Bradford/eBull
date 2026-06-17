@@ -4305,6 +4305,22 @@ class _DualClassDenominatorModel(BaseModel):
     note: str
 
 
+class _PerClassDenominatorModel(BaseModel):
+    """Per-class denominator applied (#788). Present only when a verified FSDS
+    per-class share count replaced the issuer's combined all-class count, so every
+    percentage is per-class-true and the #1646 caveat is superseded (the two are
+    mutually exclusive). ``note`` is server-owned copy the FE renders verbatim."""
+
+    cik: str
+    class_member: str
+    period_end: date
+    per_class_shares: Decimal
+    combined_shares: Decimal
+    source_adsh: str
+    source_fsds_qtr: str
+    note: str
+
+
 class _SanityChecksModel(BaseModel):
     """Raw plausibility facts over the pie-wedge slices (#1647 part 4). NOT
     pass/fail — measurements a decision agent can reason over to catch the next
@@ -4358,6 +4374,11 @@ class OwnershipRollupResponse(BaseModel):
     # and the no_data path. When set, the FE renders the caveat callout and every
     # percentage should be read as a combined-basis lower bound.
     dual_class_denominator: _DualClassDenominatorModel | None
+    # Per-class denominator applied (#788). Non-null only when a verified FSDS
+    # per-class share count replaced the combined denominator (mutually exclusive
+    # with ``dual_class_denominator``). When set, percentages are per-class-true and
+    # the FE renders the per-class info note instead of the #1646 caveat.
+    per_class_denominator: _PerClassDenominatorModel | None = None
     # Sanity-invariant facts over the pie-wedge slices (#1647 part 4). Always
     # present; zeroed on the no_data path. Default so older callers/tests need
     # no change.
@@ -4497,6 +4518,20 @@ def _rollup_to_response(
                 note=rollup.dual_class_denominator.note,
             )
             if rollup.dual_class_denominator is not None
+            else None
+        ),
+        per_class_denominator=(
+            _PerClassDenominatorModel(
+                cik=rollup.per_class_denominator.cik,
+                class_member=rollup.per_class_denominator.class_member,
+                period_end=rollup.per_class_denominator.period_end,
+                per_class_shares=rollup.per_class_denominator.per_class_shares,
+                combined_shares=rollup.per_class_denominator.combined_shares,
+                source_adsh=rollup.per_class_denominator.source_adsh,
+                source_fsds_qtr=rollup.per_class_denominator.source_fsds_qtr,
+                note=rollup.per_class_denominator.note,
+            )
+            if rollup.per_class_denominator is not None
             else None
         ),
         sanity=_SanityChecksModel(

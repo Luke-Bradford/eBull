@@ -27,7 +27,7 @@ Click "Run bootstrap" on the admin page when:
 Do **not** run it as part of routine ops: scheduled jobs handle
 incremental refresh once bootstrap is complete.
 
-## 2. What runs (21 stages)
+## 2. What runs (22 stages)
 
 Phases in order; the catalogue lives in
 ``app/services/bootstrap_orchestrator.py::_BOOTSTRAP_STAGE_SPECS`` and
@@ -69,6 +69,14 @@ terminal ``bootstrap_validation`` stage (order 27).
 1. **Phase D — OpenFIGI CUSIP resolver sweep** (``openfigi`` lane,
    disjoint from every SEC budget):
    - S13 ``cusip_resolver_post_bulk_sweep`` (#1233 PR-1b)
+   - S14 ``sec_fsds_class_shares_ingest`` (#788; ``db`` lane; streams the cached
+     ``fsds_*.zip`` and upserts per-class shares-outstanding into
+     ``instrument_class_shares_outstanding`` for the dual-class denominator —
+     GOOGL ÷ Class-A not ÷ combined. Fail-closed. Depends only on
+     ``cusip_mapping_ready`` — it resolves the issuer's OWN per-class CUSIP (a
+     universe-instrument CUSIP from S3), NOT a 13F-holding CUSIP, so it is
+     independent of the post-bulk OpenFIGI sweep. ``stage_order`` is sequence-only;
+     the cap-driven dispatcher does not order on it.)
 1. **Phase C'' — filing-metadata recent-window gap-close** (``sec_rate``):
    - (order 15) ``sec_master_idx_gap_close`` (#1415; current + prev quarter
      ``master.idx``, one download/quarter, ZERO per-CIK; source-allowlist

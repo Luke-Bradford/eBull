@@ -12,7 +12,7 @@ suite to avoid collisions with #769 (DEF 14A drift) at 769_xxx.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -1914,3 +1914,114 @@ class TestDualClassDenominatorDetector:
             conn, 794_661, denominator_concept="CommonStockSharesOutstanding"
         )
         assert caveat is None
+
+
+def _seed_class_shares(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    period_end: date,
+    shares: str,
+    class_member: str = "CommonClassA",
+    source_cik: str = "0001652044",
+    source_adsh: str = "0001652044-25-000014",
+) -> None:
+    """Seed one ``instrument_class_shares_outstanding`` row (#788)."""
+    conn.execute(
+        """
+        INSERT INTO instrument_class_shares_outstanding (
+            instrument_id, period_end, shares, class_member, source_cik,
+            source_adsh, source_form_type, source_fsds_qtr, source_filed_at,
+            resolution_method, parser_version
+        ) VALUES (%s, %s, %s, %s, %s, %s, '10-K', '2025q1', %s, 'curated',
+                  'fsds_class_shares_v1')
+        ON CONFLICT (instrument_id, period_end) DO NOTHING
+        """,
+        (instrument_id, period_end, Decimal(shares), class_member, source_cik, source_adsh, period_end),
+    )
+
+
+class TestPerClassDenominator:
+    """#788 read-path swap: a verified FSDS per-class share count replaces the
+    combined denominator (GOOGL ÷ Class A, not ÷ combined) and supersedes the
+    #1646 caveat — only behind the fail-closed guards. Periods are relative to
+    ``date.today()`` so the freshness guard (#1581 548-day bound, clocked off the
+    snapshot transaction time) is exercised deterministically, not time-bombed."""
+
+    _IID = 788_500
+    # Both the combined denominator and the fresh class row must clear the 548-day
+    # staleness bound; 60 days is robustly fresh. The stale case is well past 548.
+    _FRESH = date.today() - timedelta(days=60)
+    _STALE = date.today() - timedelta(days=900)
+
+    def _setup(self, conn: psycopg.Connection[tuple], *, class_shares: str | None, class_period: date) -> None:
+        _seed_instrument(conn, iid=self._IID, symbol="GOOGL")
+        # Combined all-class count at a fresh period (so the rollup is not no_data).
+        _seed_outstanding(conn, instrument_id=self._IID, shares="12211000000", period_end=self._FRESH)
+        # One institutional pie-wedge holder (2.541B → 43.5% of Class A, 20.8% of combined).
+        _seed_inst_holding(
+            conn,
+            accession="0001000000-25-000001",
+            instrument_id=self._IID,
+            filer_cik="0000102909",
+            filer_name="Some Manager",
+            filer_type="INV",
+            period_of_report=self._FRESH,
+            shares="2541000000",
+        )
+        if class_shares is not None:
+            _seed_class_shares(conn, instrument_id=self._IID, period_end=class_period, shares=class_shares)
+        conn.commit()
+
+    def test_per_class_denominator_applied(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        self._setup(conn, class_shares="5835000000", class_period=self._FRESH)
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GOOGL", instrument_id=self._IID)
+        assert rollup.per_class_denominator is not None
+        assert rollup.dual_class_denominator is None
+        assert rollup.per_class_denominator.per_class_shares == Decimal("5835000000")
+        assert rollup.per_class_denominator.combined_shares == Decimal("12211000000")
+        # Denominator + source swapped to the per-class FSDS row.
+        assert rollup.shares_outstanding == Decimal("5835000000")
+        assert rollup.shares_outstanding_as_of == self._FRESH
+        assert rollup.shares_outstanding_source.accession_number == "0001652044-25-000014"
+        # The institutions slice now divides by Class A → ~43.5%, not ~20.8%.
+        inst = next(s for s in rollup.slices if s.category == "institutions")
+        assert inst.pct_outstanding > Decimal("0.43")
+        assert inst.pct_outstanding < Decimal("0.44")
+
+    def test_stale_class_period_falls_back(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        # Class row > 548 days old → freshness guard fails → keep the combined caveat path.
+        self._setup(conn, class_shares="5835000000", class_period=self._STALE)
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GOOGL", instrument_id=self._IID)
+        assert rollup.per_class_denominator is None
+        assert rollup.shares_outstanding == Decimal("12211000000")  # combined preserved
+
+    def test_too_small_class_falls_back(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        # Class 1B < the 2.541B holder → holdings-plausibility guard fails (the
+        # %-inflating direction) → fall back to the combined denominator.
+        self._setup(conn, class_shares="1000000000", class_period=self._FRESH)
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GOOGL", instrument_id=self._IID)
+        assert rollup.per_class_denominator is None
+        assert rollup.shares_outstanding == Decimal("12211000000")
+
+    def test_no_class_row_no_swap(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        self._setup(conn, class_shares=None, class_period=self._FRESH)
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GOOGL", instrument_id=self._IID)
+        assert rollup.per_class_denominator is None
+        assert rollup.shares_outstanding == Decimal("12211000000")

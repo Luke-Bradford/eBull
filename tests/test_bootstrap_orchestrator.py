@@ -119,7 +119,7 @@ def test_stage_catalogue_has_twenty_one_stages() -> None:
     + 1 db_fundamentals_raw + 1 openfigi.
     """
     specs = get_bootstrap_stage_specs()
-    assert len(specs) == 21
+    assert len(specs) == 22
 
 
 def test_stage_catalogue_lane_composition() -> None:
@@ -129,16 +129,18 @@ def test_stage_catalogue_lane_composition() -> None:
         by_lane[spec.lane] = by_lane.get(spec.lane, 0) + 1
     # #1413 — sec_rate: 16 − 8 per-CIK HTTP stages removed (incl. S27 N-CSR
     # drain) = 8; #1415 + 1 master.idx gap-close = 9. #1419 (P4) + 1 db stage
-    # (bootstrap_validation) → db = 7. Total 1 + 1 + 9 + 1 + 7 + 1 + 1 = 21.
-    # ``db`` = 7 (5 bulk ingesters + ownership_observations_backfill +
-    # bootstrap_validation); ``db_fundamentals_raw`` = 1 (S25 fundamentals_sync);
+    # (bootstrap_validation) → db = 7. #788 + 1 db stage (sec_fsds_class_shares_ingest)
+    # → db = 8. Total 1 + 1 + 9 + 1 + 8 + 1 + 1 = 22.
+    # ``db`` = 8 (5 bulk ingesters + sec_fsds_class_shares_ingest +
+    # ownership_observations_backfill + bootstrap_validation);
+    # ``db_fundamentals_raw`` = 1 (S25 fundamentals_sync);
     # ``openfigi`` = 1 (S13 cusip_resolver_post_bulk_sweep).
     assert by_lane == {
         "init": 1,
         "etoro": 1,
         "sec_rate": 9,
         "sec_bulk_download": 1,
-        "db": 7,
+        "db": 8,
         "db_fundamentals_raw": 1,
         "openfigi": 1,
     }
@@ -355,7 +357,7 @@ def test_orchestrator_happy_path_completes(
     # #1413 dropped 8 per-CIK HTTP stages + #1415 added the master.idx
     # gap-close + #1419 (P4) added the terminal bootstrap_validation stage
     # → 21 invokers fire on the happy path.
-    assert len(calls["order"]) == 21
+    assert len(calls["order"]) == 22
     # Phase A's universe sync was first.
     assert calls["order"][0] == "nightly_universe_sync"
     # #1419 (P4) — validation is genuinely TERMINAL: it requires a cap from

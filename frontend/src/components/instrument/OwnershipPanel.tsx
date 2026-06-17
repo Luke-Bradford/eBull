@@ -46,6 +46,7 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { HistoricalSymbolCallout } from "@/components/instrument/HistoricalSymbolCallout";
 import { OwnershipCoverageBanner } from "@/components/instrument/OwnershipCoverageBanner";
 import { DualClassDenominatorCallout } from "@/components/instrument/DualClassDenominatorCallout";
+import { PerClassDenominatorCallout } from "@/components/instrument/PerClassDenominatorCallout";
 import {
   OwnershipLegend,
   OwnershipSunburst,
@@ -274,6 +275,9 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
       <ConcentrationChip rollup={rollup} />
       {rollup.dual_class_denominator !== null && (
         <DualClassDenominatorCallout note={rollup.dual_class_denominator.note} />
+      )}
+      {rollup.per_class_denominator != null && (
+        <PerClassDenominatorCallout note={rollup.per_class_denominator.note} />
       )}
       {rollup.residual.oversubscribed && <OversubscribedWarning />}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start">

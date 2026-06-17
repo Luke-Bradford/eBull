@@ -310,6 +310,12 @@ Capability = Literal[
     # 'pass' validation while S25 is still in flight or about to fail. Status-only
     # (idempotent re-run can normalise 0 net rows).
     "fundamentals_synced",
+    # #788 — DERA FSDS per-class shares ingested (sec_fsds_class_shares_ingest).
+    # Provided for DAG visibility; intentionally NOT required by bootstrap_validation
+    # — a missing per-class row fails closed to the #1646 combined-basis caveat (a
+    # valid state), so it must not gate terminal completeness. The rollup reads the
+    # table lazily at request time, so it self-applies whenever the stage commits.
+    "fsds_class_shares_ingested",
 ]
 
 
@@ -352,6 +358,7 @@ _STAGE_PROVIDES: Final[dict[str, tuple[Capability, ...]]] = {
     "sec_insider_ingest_from_dataset": ("insider_inputs_seeded",),
     "sec_13f_ingest_from_dataset": ("institutional_inputs_seeded",),
     "sec_nport_ingest_from_dataset": ("nport_inputs_seeded",),
+    "sec_fsds_class_shares_ingest": ("fsds_class_shares_ingested",),
     # #1413 — S14 sec_submissions_files_walk + S15 filings_history_seed
     # dropped; ``filing_events_seeded`` re-homed to S8 (success) + S16.
     # S16 sec_first_install_drain seeds filing_events from bulk. Step 2.3
@@ -510,6 +517,10 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     "sec_13f_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cusip_mapping_ready")),
     "sec_insider_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cik_mapping_ready")),
     "sec_nport_ingest_from_dataset": CapRequirement(all_of=("bulk_archives_ready", "cusip_mapping_ready")),
+    # #788 — FSDS per-class ingest resolves the issuer's OWN per-class CUSIP (a
+    # universe-instrument CUSIP from S3 cusip_universe_backfill → cusip_mapping_ready),
+    # not a 13F-holding CUSIP, so it does NOT depend on the post-bulk OpenFIGI sweep.
+    "sec_fsds_class_shares_ingest": CapRequirement(all_of=("bulk_archives_ready", "cusip_mapping_ready")),
     # Phase D — #1233 PR-1b. OpenFIGI sweep over the bulk-source rows
     # written by S10 + S12. Requires both bulk ingesters to have
     # advertised their caps so we know the unresolved_13f_cusips
@@ -1034,6 +1045,7 @@ from app.services.sec_bulk_download import JOB_SEC_BULK_DOWNLOAD  # noqa: E402
 from app.services.sec_bulk_orchestrator_jobs import (  # noqa: E402
     JOB_SEC_13F_INGEST_FROM_DATASET,
     JOB_SEC_COMPANYFACTS_INGEST,
+    JOB_SEC_FSDS_CLASS_SHARES_INGEST,
     JOB_SEC_INSIDER_INGEST_FROM_DATASET,
     JOB_SEC_NPORT_INGEST_FROM_DATASET,
     JOB_SEC_SUBMISSIONS_INGEST,
@@ -1086,6 +1098,16 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         "openfigi",
         JOB_CUSIP_RESOLVER_POST_BULK_SWEEP,
     ),
+    # #788 — DERA FSDS per-class shares-outstanding ingest. db lane (tiny:
+    # hundreds of rows). Depends ONLY on ``cusip_mapping_ready`` — it resolves the
+    # issuer's OWN per-class CUSIP (a universe-instrument CUSIP written by S3
+    # cusip_universe_backfill), NOT a 13F-holding CUSIP, so it is independent of
+    # the post-bulk OpenFIGI sweep (which targets ``unresolved_13f_cusips``).
+    # stage_order is sequence-only; the cap-driven dispatcher does NOT order on it.
+    # Provides ``fsds_class_shares_ingested`` for DAG visibility; NOT required by
+    # bootstrap_validation — a missing per-class row fails closed to the #1646
+    # caveat, a valid state, so it must not gate terminal completeness.
+    _spec("sec_fsds_class_shares_ingest", 14, "db", JOB_SEC_FSDS_CLASS_SHARES_INGEST),
     # #1413 (bulk-only bootstrap) — S14 ``sec_submissions_files_walk`` and
     # S15 ``filings_history_seed`` DROPPED. Both re-derived data the bulk
     # path already produces: S14 walked ``filings.files[]`` overflow pages
@@ -2957,12 +2979,13 @@ __all__ = [
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
 # current stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 21, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 21 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+assert len(_BOOTSTRAP_STAGE_SPECS) == 22, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 22 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
     "update the spec, frontend, runbook, and stage_count tests in lockstep. "
     "#1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep; "
     "#1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages "
     "(S14/S15/S17/S19/S20/S22/S23 + S27 sec_n_csr_bootstrap_drain): 27 - 8 = 19; "
     "#1415 (P3) added the S15-slot master.idx recent-window gap-close: 19 + 1 = 20; "
-    "#1419 (P4) added the terminal bootstrap_validation stage: 20 + 1 = 21."
+    "#1419 (P4) added the terminal bootstrap_validation stage: 20 + 1 = 21; "
+    "#788 added S14 sec_fsds_class_shares_ingest (per-class denominator): 21 + 1 = 22."
 )

@@ -28,6 +28,7 @@ import psycopg
 
 from app.config import settings
 from app.security.master_key import resolve_data_dir
+from app.services.fsds_class_shares import ingest_fsds_class_shares_archive
 from app.services.sec_13f_dataset_ingest import ingest_13f_dataset_archive
 from app.services.sec_bulk_download import build_bulk_archive_inventory
 from app.services.sec_companyfacts_ingest import ingest_companyfacts_archive
@@ -43,6 +44,7 @@ JOB_SEC_COMPANYFACTS_INGEST: Final[str] = "sec_companyfacts_ingest"
 JOB_SEC_13F_INGEST_FROM_DATASET: Final[str] = "sec_13f_ingest_from_dataset"
 JOB_SEC_INSIDER_INGEST_FROM_DATASET: Final[str] = "sec_insider_ingest_from_dataset"
 JOB_SEC_NPORT_INGEST_FROM_DATASET: Final[str] = "sec_nport_ingest_from_dataset"
+JOB_SEC_FSDS_CLASS_SHARES_INGEST: Final[str] = "sec_fsds_class_shares_ingest"
 
 
 # Post-ingest batched _current refresh chunk size (PR-4 spec §8).
@@ -858,6 +860,108 @@ def sec_nport_ingest_from_dataset_job() -> None:
         logger.info(
             "sec_nport_ingest_from_dataset: refreshed ownership_funds_current for %d instruments",
             len(touched_ids),
+        )
+    for archive in succeeded:
+        _delete_archive_after_success(archive)
+
+
+# ---------------------------------------------------------------------------
+# C6 — DERA FSDS per-class shares-outstanding ingester (#788)
+# ---------------------------------------------------------------------------
+
+
+def sec_fsds_class_shares_ingest_job() -> None:
+    """Stream the cached ``fsds_*.zip`` archives and upsert per-class
+    shares-outstanding rows into ``instrument_class_shares_outstanding`` (sql/200).
+
+    The per-class denominator (GOOGL ÷ Class-A, not ÷ combined) supersedes the
+    #1646 caveat in the ownership rollup. Tiny output (hundreds of rows over the
+    curated dual-class set); fail-closed per-row (unmapped member / ambiguous CUSIP
+    / non-current-period → skipped, never written). Standalone-safe: with no
+    running bootstrap run it ingests whatever ``fsds_*.zip`` is cached.
+    """
+    from app.services.bootstrap_preconditions import assert_not_fallback_mode
+    from app.services.bootstrap_state import BootstrapStageCancelled
+    from app.services.processes.bootstrap_cancel_signal import (
+        active_bootstrap_stage_key,
+        bootstrap_cancel_requested,
+    )
+    from app.services.sec_bulk_download import BootstrapPartialDownloadError, read_run_manifest
+
+    run_id = _current_running_bootstrap_run_id()
+    archives = _list_archives_matching("fsds_")
+
+    if run_id is not None:
+        with psycopg.connect(settings.database_url) as conn:
+            assert_not_fallback_mode(_bulk_dir(), bootstrap_run_id=run_id)
+        # Manifest provenance gate (Codex ckpt-2): the per-run manifest lists only
+        # archives that landed (or were ETag-reused) under THIS bootstrap_run_id,
+        # so restricting to manifest names admits a freshly-downloaded optional
+        # quarter while excluding a stale same-name ``fsds_*.zip`` left on disk
+        # from a prior run (incl. an optional quarter this run 404'd). The
+        # ``bootstrap_run_id`` check rejects a STALE manifest from a prior run whose
+        # names happen to match (Codex ckpt-2b): a mismatched manifest is treated as
+        # absent so the no-archives guard below raises rather than ingesting stale
+        # zips. Mirrors ``assert_archives_in_manifest`` / the 13F ingester.
+        manifest = read_run_manifest(_bulk_dir())
+        if manifest is not None and int(manifest.get("bootstrap_run_id", -1)) == run_id:
+            manifest_names = {entry["name"] for entry in manifest.get("archives", [])}
+        else:
+            manifest_names = set()
+        archives = [a for a in archives if a.name in manifest_names]
+        if not archives:
+            raise BootstrapPartialDownloadError(
+                "sec_fsds_class_shares_ingest: no fsds_*.zip in this run's manifest; "
+                "upstream sec_bulk_download did not land FSDS archives."
+            )
+    elif not archives:
+        logger.info("sec_fsds_class_shares_ingest: no fsds_*.zip cached, skipping (no run)")
+        return
+
+    failed_archives: list[str] = []
+    succeeded: list[Path] = []
+    total_written = 0
+    no_row_pairs: set[str] = set()
+    for archive in archives:
+        if bootstrap_cancel_requested():
+            raise BootstrapStageCancelled(
+                f"sec_fsds_class_shares_ingest cancelled by operator after {len(succeeded)}/{len(archives)} archives",
+                stage_key=active_bootstrap_stage_key() or "",
+            )
+        fsds_qtr = archive.name.removeprefix("fsds_").removesuffix(".zip")
+        with psycopg.connect(settings.database_url) as conn:
+            try:
+                result = ingest_fsds_class_shares_archive(conn=conn, archive_path=archive, fsds_qtr=fsds_qtr)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                conn.rollback()
+                logger.exception("sec_fsds_class_shares_ingest: archive=%s failed", archive.name)
+                failed_archives.append(f"{archive.name}: {exc}")
+                continue
+        succeeded.append(archive)
+        total_written += result.rows_written
+        no_row_pairs.update(result.curated_pairs_without_row)
+        if run_id is not None:
+            _record_archive_result(
+                bootstrap_run_id=run_id,
+                stage_key="sec_fsds_class_shares_ingest",
+                archive_name=archive.name,
+                rows_written=result.rows_written,
+                rows_skipped={
+                    "not_current_period": result.skipped_not_current_period,
+                    "cusip_unresolved": result.skipped_cusip_unresolved,
+                    "cusip_ambiguous": result.skipped_cusip_ambiguous,
+                    "bad_value": result.skipped_bad_value,
+                },
+            )
+    logger.info(
+        "sec_fsds_class_shares_ingest: total_rows_written=%d archives=%d",
+        total_written,
+        len(succeeded),
+    )
+    if failed_archives:
+        raise RuntimeError(
+            f"sec_fsds_class_shares_ingest: {len(failed_archives)} archives failed: " + "; ".join(failed_archives)
         )
     for archive in succeeded:
         _delete_archive_after_success(archive)

@@ -35,6 +35,7 @@ from app.services.ownership_rollup import (
     Holder,
     OwnershipRollup,
     OwnershipSlice,
+    PerClassDenominator,
     ResidualBlock,
     SharesOutstandingSource,
     _dual_class_note,
@@ -107,6 +108,7 @@ def _rollup(
     residual_pct: str = "0",
     oversubscribed: bool = False,
     dual_class: DualClassDenominator | None = None,
+    per_class: PerClassDenominator | None = None,
 ) -> OwnershipRollup:
     return OwnershipRollup(
         symbol=symbol,
@@ -141,6 +143,7 @@ def _rollup(
         historical_symbols=(),
         computed_at=datetime(2026, 5, 3, tzinfo=UTC),
         dual_class_denominator=dual_class,
+        per_class_denominator=per_class,
     )
 
 
@@ -758,3 +761,33 @@ def test_build_csv_omits_dual_class_memo_row_when_absent() -> None:
     """Single-class issuer (no caveat) emits no dual-class memo row."""
     csv = build_rollup_csv(_rollup(symbol="AAPL", dual_class=None))
     assert "__dual_class_denominator__" not in csv
+
+
+def test_build_csv_emits_per_class_memo_row_when_set() -> None:
+    """A verified per-class denominator emits one inert ``__per_class_denominator__``
+    memo row (#788), carrying the class member + FSDS accession + period."""
+    pc = PerClassDenominator(
+        cik="0001652044",
+        class_member="CommonClassA",
+        period_end=date(2024, 12, 31),
+        per_class_shares=Decimal("5835000000"),
+        combined_shares=Decimal("12211000000"),
+        source_adsh="0001652044-25-000014",
+        source_fsds_qtr="2025q1",
+        note="Percentages use the verified per-class share count for CommonClassA.",
+    )
+    csv = build_rollup_csv(_rollup(symbol="GOOGL", per_class=pc))
+    memo = [ln for ln in csv.splitlines() if "__per_class_denominator__" in ln]
+    assert len(memo) == 1
+    row = memo[0]
+    assert "0001652044" in row
+    assert "CommonClassA" in row
+    assert ",__per_class_denominator__,0," in row  # inert (0 shares)
+    assert "0001652044-25-000014" in row
+    assert "2024-12-31" in row
+
+
+def test_build_csv_omits_per_class_memo_row_when_absent() -> None:
+    """No per-class denominator → no memo row."""
+    csv = build_rollup_csv(_rollup(symbol="AAPL", per_class=None))
+    assert "__per_class_denominator__" not in csv
