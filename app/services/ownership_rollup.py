@@ -387,6 +387,74 @@ class PerClassDenominator:
 
 
 @dataclass(frozen=True)
+class DenominatorCrossCheck:
+    """Independent tie-out of the operative shares-outstanding denominator to a
+    SECOND SEC-native figure (#1647 part 5). The denominator is the highest-leverage
+    number in the rollup (every wedge % divides by it) and the one figure the as-of
+    coherence (pt1) + sanity (pt4) layers structurally CANNOT validate: a
+    wrong-but-self-consistent denominator (#1646's 2x dual-class error) passes every
+    internal check. This reconciles it against an independent SEC disclosure of the
+    same quantity, as facts (NOT a gate — it never changes a share count).
+
+    ``primary_value`` / ``comparison_value`` are THE TWO FIGURES THIS CHECK COMPARES —
+    NOT necessarily the rollup's operative denominator, so ``pct_diff`` is one uniform
+    formula across methods. ``primary_concept`` names which is which:
+
+      * ``independent_concept`` — single-class: ``primary`` = the denominator used
+        (us-gaap ``CommonStockSharesOutstanding`` balance-sheet OR dei
+        ``EntityCommonStockSharesOutstanding`` cover-page); ``comparison`` = the OTHER
+        SEC concept, the row nearest ``primary``'s period (they are inherently
+        different instants — cover-page is dated weeks after quarter-end — so
+        ``as_of_delta_days`` surfaces the skew). A genuine independent cross-source.
+      * ``per_class_subset_bound`` — dual-class: ``primary`` = Σ resolved per-class
+        FSDS counts (sibling instruments); ``comparison`` = the combined all-class
+        us-gaap count at the same FSDS instant. NOT independent (same FSDS family;
+        omits untraded Class B) — only flags the IMPOSSIBLE (sum > combined). The
+        operative per-class denominator was already cross-source-verified at #1623
+        ingest + is structurally guarded (``_should_use_class_denominator``); this is
+        a thin backstop. The rollup's actual per-class denominator is in
+        ``OwnershipRollup.per_class_denominator``, not duplicated here.
+      * ``unavailable`` — no_data / ``outstanding <= 0`` / no comparison figure on file
+        / ``comparison_value <= 0``.
+
+    The aggregate ownership PERCENTAGES (institutions / insiders / blockholders) have
+    NO independent source — every vendor sums the same SEC 13F/Form 4/13D filings and
+    disagrees only by method (GOOGL: Fintel 84.99% vs ours 79.78%). That single-source
+    fact is a global contract truth documented in the metrics-analyst skill, NOT a
+    per-response field."""
+
+    method: Literal["independent_concept", "per_class_subset_bound", "unavailable"]
+    primary_value: Decimal | None
+    primary_concept: str | None
+    comparison_value: Decimal | None
+    comparison_concept: str | None
+    primary_as_of: date | None
+    comparison_as_of: date | None
+    as_of_delta_days: int | None
+    pct_diff: Decimal | None  # (primary_value - comparison_value) / comparison_value — uniform
+    status: Literal["agrees", "minor_skew", "diverges", "plausible", "unavailable"]
+    note: str  # Server-owned copy for the FE provenance caption (single source).
+
+    @classmethod
+    def unavailable(cls) -> DenominatorCrossCheck:
+        """No comparison figure on file (no_data path, dimension-stripped dual-class
+        with no combined sibling sum, thin single-concept issuer, or outstanding<=0)."""
+        return cls(
+            method="unavailable",
+            primary_value=None,
+            primary_concept=None,
+            comparison_value=None,
+            comparison_concept=None,
+            primary_as_of=None,
+            comparison_as_of=None,
+            as_of_delta_days=None,
+            pct_diff=None,
+            status="unavailable",
+            note="No independent SEC figure on file to cross-check the share-count denominator.",
+        )
+
+
+@dataclass(frozen=True)
 class OwnershipRollup:
     symbol: str
     instrument_id: int
@@ -433,6 +501,11 @@ class OwnershipRollup:
     # catch the next silent inflation. Zeroed on the no_data path. Last field
     # with a default so existing constructors need no change.
     sanity: SanityChecks = field(default_factory=SanityChecks.empty)
+    # Independent denominator tie-out (#1647 part 5). Facts, not a gate. The two
+    # real constructors (the main assembly + ``no_data``) set it explicitly; the
+    # default_factory is only the safety net for CSV-test fixtures, mirroring how
+    # ``sanity`` was added (Codex ckpt-1 LOW — no silent default masking a wiring miss).
+    denominator_cross_check: DenominatorCrossCheck = field(default_factory=DenominatorCrossCheck.unavailable)
 
     @classmethod
     def no_data(
@@ -503,6 +576,7 @@ class OwnershipRollup:
             banner=banner,
             historical_symbols=historical_symbols,
             corrections_applied=(),
+            denominator_cross_check=DenominatorCrossCheck.unavailable(),
             computed_at=datetime.now(tz=UTC),
         )
 
@@ -2614,6 +2688,246 @@ def _detect_dual_class_denominator(
     return DualClassDenominator(cik=cik, sibling_symbols=symbols, note=_dual_class_note(symbols))
 
 
+# --- Denominator cross-check (#1647 part 5) -------------------------------------
+# Single-class band on |pct_diff| between the two independent SEC concepts. 2% clears
+# the inherent cover-page-vs-balance-sheet date skew (panel: AAPL 0.13%, JPM 0.62%);
+# >5% is a real concern (the #1646 class: a 2x denominator error = 100%). Between =
+# informative "minor_skew", not alarming (Codex ckpt-1 MED — 5%-agree was too loose).
+_DENOM_CROSS_AGREE_TOL: Final[Decimal] = Decimal("0.02")
+_DENOM_CROSS_DIVERGE_TOL: Final[Decimal] = Decimal("0.05")
+
+# The two SEC shares-outstanding concepts the rollup uses as a denominator, each
+# mapped to the OTHER (taxonomy, concept) for the independent tie-out.
+_OPPOSITE_SHARES_CONCEPT: Final[dict[str, tuple[str, str]]] = {
+    "CommonStockSharesOutstanding": ("dei", "EntityCommonStockSharesOutstanding"),
+    "EntityCommonStockSharesOutstanding": ("us-gaap", "CommonStockSharesOutstanding"),
+}
+
+
+def _qualified_shares_concept(concept: str) -> str:
+    """Prefix the bare concept name (as carried on ``SharesOutstandingSource``) with its
+    taxonomy for the cross-check provenance field."""
+    taxonomy = "dei" if concept == "EntityCommonStockSharesOutstanding" else "us-gaap"
+    return f"{taxonomy}:{concept}"
+
+
+def _humanize_shares_concept(concept: str) -> str:
+    """Friendly label for the FE provenance caption."""
+    if "EntityCommonStock" in concept:
+        return "the SEC cover-page share count"
+    if "CommonStockSharesOutstanding" in concept:
+        return "the SEC balance-sheet share count"
+    return concept
+
+
+def _cross_check_note(
+    method: str,
+    status: str,
+    pct_diff: Decimal,
+    comparison_concept: str,
+) -> str:
+    """Server-owned copy for the FE provenance caption (single source)."""
+    signed = f"{pct_diff * 100:+.2f}%"
+    if method == "independent_concept":
+        ref = _humanize_shares_concept(comparison_concept)
+        if status == "agrees":
+            return (
+                f"Share-count denominator independently reconciled to {ref} (agrees within {abs(pct_diff) * 100:.2f}%)."
+            )
+        if status == "minor_skew":
+            return (
+                f"Denominator differs {signed} from {ref} — a cover-page vs "
+                f"balance-sheet date skew, not a material disagreement."
+            )
+        return f"Denominator diverges {signed} from {ref} — the share-count figure is suspect."
+    # per_class_subset_bound
+    if status == "plausible":
+        return (
+            f"Resolved per-class share counts are a valid subset of the combined all-class total "
+            f"({signed}); the untraded-class remainder is not independently verifiable."
+        )
+    return (
+        "Resolved per-class share counts EXCEED the combined all-class total — "
+        "an FSDS resolution error; per-class denominator is suspect."
+    )
+
+
+def _classify_cross_check(
+    *,
+    method: Literal["independent_concept", "per_class_subset_bound"],
+    primary_value: Decimal | None,
+    primary_concept: str,
+    primary_as_of: date | None,
+    comparison_value: Decimal | None,
+    comparison_concept: str,
+    comparison_as_of: date | None,
+) -> DenominatorCrossCheck:
+    """PURE (no DB) — given the two figures + method, compute the cross-check facts +
+    status. Table-tested. Any missing / non-positive figure → ``unavailable`` (never
+    divides; Codex ckpt-1 MED)."""
+    if primary_value is None or primary_value <= 0 or comparison_value is None or comparison_value <= 0:
+        return DenominatorCrossCheck.unavailable()
+    pct_diff = (primary_value - comparison_value) / comparison_value
+    as_of_delta = (
+        abs((primary_as_of - comparison_as_of).days)
+        if primary_as_of is not None and comparison_as_of is not None
+        else None
+    )
+    status: Literal["agrees", "minor_skew", "diverges", "plausible"]
+    if method == "independent_concept":
+        magnitude = abs(pct_diff)
+        if magnitude <= _DENOM_CROSS_AGREE_TOL:
+            status = "agrees"
+        elif magnitude <= _DENOM_CROSS_DIVERGE_TOL:
+            status = "minor_skew"
+        else:
+            status = "diverges"
+    else:
+        # Dual-class subset bound: only the IMPOSSIBLE (traded classes exceed the
+        # all-class total) diverges. The untraded-class remainder (Class B, no
+        # instruments row) is unverifiable, so a valid subset is "plausible" — NO
+        # arbitrary floor (Codex ckpt-1 BLOCKER: a material founder class / 49-51
+        # split would falsely diverge; a wrong map at 55% would falsely agree).
+        status = "diverges" if primary_value > comparison_value else "plausible"
+    return DenominatorCrossCheck(
+        method=method,
+        primary_value=primary_value,
+        primary_concept=primary_concept,
+        comparison_value=comparison_value,
+        comparison_concept=comparison_concept,
+        primary_as_of=primary_as_of,
+        comparison_as_of=comparison_as_of,
+        as_of_delta_days=as_of_delta,
+        pct_diff=pct_diff,
+        status=status,
+        note=_cross_check_note(method, status, pct_diff, comparison_concept),
+    )
+
+
+def _read_shares_outstanding_near(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    *,
+    taxonomy: str,
+    concept: str,
+    near_period: date,
+) -> tuple[Decimal, date] | None:
+    """The ``financial_facts_raw`` shares row for (instrument, taxonomy, concept) whose
+    ``period_end`` is NEAREST ``near_period`` — an exact same-period row sorts first at
+    delta 0 (Codex ckpt-1 HIGH: nearest, NOT latest, so we never compare different
+    instants). ``None`` when the concept is not on file for this instrument."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT val, period_end
+            FROM financial_facts_raw
+            WHERE instrument_id = %(iid)s
+              AND taxonomy = %(tax)s
+              AND concept = %(concept)s
+              AND unit = 'shares'
+              AND val IS NOT NULL
+            ORDER BY ABS(period_end - %(near)s::date) ASC, filed_date DESC
+            LIMIT 1
+            """,
+            {"iid": instrument_id, "tax": taxonomy, "concept": concept, "near": near_period},
+        )
+        row = cur.fetchone()
+    if row is None or row.get("val") is None:
+        return None
+    return Decimal(row["val"]), row["period_end"]  # type: ignore[arg-type]
+
+
+def _sum_sibling_class_shares(conn: psycopg.Connection[Any], source_cik: str, period_end: date) -> Decimal | None:
+    """Σ of the per-class FSDS share count across every traded sibling sharing this
+    issuer CIK, AT a single ``period_end`` (the dual-class subset-bound primary).
+
+    Filtering to one instant is load-bearing: the sum is labelled with this
+    ``period_end`` and compared to the combined us-gaap count at the same instant, so a
+    sibling whose latest FSDS row is an OLDER quarter must not be mixed in at a stale
+    figure (Codex ckpt-2 MED). The FSDS table PK is ``(instrument_id, period_end)`` so
+    one row per sibling at this period — no DISTINCT ON needed. A sibling absent at this
+    period simply drops out (the bound is over the classes we have at this instant).
+    ``None`` when no rows / non-positive."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(shares), 0)
+            FROM instrument_class_shares_outstanding
+            WHERE source_cik = %(cik)s AND period_end = %(pe)s
+            """,
+            {"cik": source_cik, "pe": period_end},
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    total = Decimal(row[0])
+    return total if total > 0 else None
+
+
+def _cross_validate_denominator(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    *,
+    effective_outstanding: Decimal | None,
+    effective_as_of: date | None,
+    effective_concept: str | None,
+    per_class_denominator: PerClassDenominator | None,
+) -> DenominatorCrossCheck:
+    """Independent tie-out of the operative denominator (#1647 part 5). Reads the
+    comparison figure(s) from the snapshot connection, then defers to the pure
+    :func:`_classify_cross_check`. See :class:`DenominatorCrossCheck`."""
+    if per_class_denominator is not None:
+        # Dual-class: Σ resolved sibling per-class FSDS counts vs the combined all-class
+        # us-gaap count at the SAME FSDS balance-sheet instant (exact-period match sorts
+        # first; nearest fallback exposes the gap via as_of_delta_days).
+        sibling_sum = _sum_sibling_class_shares(conn, per_class_denominator.cik, per_class_denominator.period_end)
+        combined = _read_shares_outstanding_near(
+            conn,
+            instrument_id,
+            taxonomy="us-gaap",
+            concept="CommonStockSharesOutstanding",
+            near_period=per_class_denominator.period_end,
+        )
+        if combined is None:
+            return DenominatorCrossCheck.unavailable()
+        combined_val, combined_as_of = combined
+        return _classify_cross_check(
+            method="per_class_subset_bound",
+            primary_value=sibling_sum,
+            primary_concept="sum of resolved per-class FSDS counts (sibling instruments)",
+            primary_as_of=per_class_denominator.period_end,
+            comparison_value=combined_val,
+            comparison_concept="us-gaap:CommonStockSharesOutstanding (combined all-class)",
+            comparison_as_of=combined_as_of,
+        )
+    # Single-class: the OTHER SEC shares concept, nearest the primary's period.
+    if effective_outstanding is None or effective_outstanding <= 0 or effective_concept is None:
+        return DenominatorCrossCheck.unavailable()
+    opposite = _OPPOSITE_SHARES_CONCEPT.get(effective_concept)
+    if opposite is None or effective_as_of is None:
+        return DenominatorCrossCheck.unavailable()
+    cmp_taxonomy, cmp_concept = opposite
+    comparison = _read_shares_outstanding_near(
+        conn,
+        instrument_id,
+        taxonomy=cmp_taxonomy,
+        concept=cmp_concept,
+        near_period=effective_as_of,
+    )
+    if comparison is None:
+        return DenominatorCrossCheck.unavailable()
+    cmp_val, cmp_as_of = comparison
+    return _classify_cross_check(
+        method="independent_concept",
+        primary_value=effective_outstanding,
+        primary_concept=_qualified_shares_concept(effective_concept),
+        primary_as_of=effective_as_of,
+        comparison_value=cmp_val,
+        comparison_concept=f"{cmp_taxonomy}:{cmp_concept}",
+        comparison_as_of=cmp_as_of,
+    )
+
+
 def _read_universe_estimates(conn: psycopg.Connection[Any], instrument_id: int) -> dict[str, int | None]:
     """Per-category universe estimates — INTENTIONALLY all-NULL.
 
@@ -2802,6 +3116,17 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     residual = _compute_residual(effective_outstanding, slices, treasury)
     concentration = _compute_concentration(effective_outstanding, slices)
     sanity = _compute_sanity(slices, effective_outstanding)
+    # Independent denominator tie-out (#1647 part 5) — reads the comparison figure from
+    # the same snapshot; facts only, never changes a share count. ``effective_*`` are the
+    # post-swap denominator the rollup actually used; per_class set ⟹ dual-class path.
+    denominator_cross_check = _cross_validate_denominator(
+        conn,
+        instrument_id,
+        effective_outstanding=effective_outstanding,
+        effective_as_of=effective_as_of,
+        effective_concept=effective_source.concept,
+        per_class_denominator=per_class_denominator,
+    )
     estimates = _read_universe_estimates(conn, instrument_id)
     coverage = _compute_coverage(slices, estimates)
     banner = _banner_for_state(coverage.state, coverage, concentration.pct_outstanding_known)
@@ -2836,6 +3161,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         dual_class_denominator=dual_class_denominator,
         per_class_denominator=per_class_denominator,
         sanity=sanity,
+        denominator_cross_check=denominator_cross_check,
         computed_at=datetime.now(tz=UTC),
     )
 
@@ -3148,6 +3474,27 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
                 pc.period_end.isoformat(),
                 "",
                 _csv_safe(pc.note),
+            ]
+        )
+
+    # Denominator cross-check (#1647 pt5): one ``__denominator_cross_check__`` memo row
+    # so the export self-documents the independent denominator tie-out (status + the two
+    # figures' concepts + pct_diff). Zero shares — inert under any SUM(shares) recon.
+    # Skipped on the ``unavailable`` path (no comparison figure → nothing to record).
+    dcc = rollup.denominator_cross_check
+    if dcc.method != "unavailable":
+        writer.writerow(
+            [
+                "",
+                _csv_safe(dcc.method),
+                "__denominator_cross_check__",
+                "0",
+                f"{dcc.pct_diff}" if dcc.pct_diff is not None else "",
+                _csv_safe(dcc.status),
+                _csv_safe(dcc.comparison_concept or ""),
+                dcc.comparison_as_of.isoformat() if dcc.comparison_as_of is not None else "",
+                _csv_safe(dcc.primary_concept or ""),
+                _csv_safe(dcc.note),
             ]
         )
 

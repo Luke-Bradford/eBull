@@ -2025,3 +2025,83 @@ class TestPerClassDenominator:
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GOOGL", instrument_id=self._IID)
         assert rollup.per_class_denominator is None
         assert rollup.shares_outstanding == Decimal("12211000000")
+
+
+# --- denominator cross-check SQL readers (#1647 pt5) -------------------------
+# Pins the novel SQL the pure `_classify_cross_check` tests can't reach
+# (tests/test_denominator_cross_check.py covers the band/subset logic). One DB
+# test per new mechanism per the repo's test-tiering rule.
+
+
+def test_read_shares_outstanding_near_picks_nearest_period(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """`_read_shares_outstanding_near` returns the row whose period_end is NEAREST the
+    target — NOT the latest (Codex ckpt-1 HIGH: never compare different instants)."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, iid=1_647_001, symbol="NEARX")
+    for pe, val in ((date(2024, 12, 31), "1000"), (date(2026, 3, 31), "2000")):
+        conn.execute(
+            """
+            INSERT INTO financial_facts_raw (
+                instrument_id, taxonomy, concept, unit, period_end, val,
+                form_type, filed_date, accession_number, fiscal_year, fiscal_period
+            ) VALUES (%s, 'us-gaap', 'CommonStockSharesOutstanding', 'shares', %s, %s,
+                      '10-K', %s, %s, %s, 'Q4')
+            """,
+            (1_647_001, pe, Decimal(val), pe, f"NEAR-{pe}", pe.year),
+        )
+    near = ownership_rollup._read_shares_outstanding_near(
+        conn,
+        1_647_001,
+        taxonomy="us-gaap",
+        concept="CommonStockSharesOutstanding",
+        near_period=date(2026, 3, 20),
+    )
+    assert near is not None
+    val, pe = near
+    assert pe == date(2026, 3, 31)  # nearest 2026-03-20, NOT the 2024 row
+    assert val == Decimal("2000")
+    # A concept not on file → None (drives the cross-check `unavailable` path).
+    assert (
+        ownership_rollup._read_shares_outstanding_near(
+            conn,
+            1_647_001,
+            taxonomy="dei",
+            concept="EntityCommonStockSharesOutstanding",
+            near_period=date(2026, 3, 20),
+        )
+        is None
+    )
+
+
+def test_sum_sibling_class_shares_filters_to_period(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """`_sum_sibling_class_shares` sums sibling per-class FSDS counts AT one period_end —
+    a sibling whose latest FSDS row is an OLDER quarter must not be mixed in at a stale
+    figure (Codex ckpt-2 MED)."""
+    conn = ebull_test_conn
+    cik = "0001647999"
+    target = date(2024, 12, 31)
+    for iid, sym, pe, sh in (
+        (1_647_010, "CLSA", target, "5835000000"),  # ClassA at target
+        (1_647_011, "CLSC", target, "5515000000"),  # ClassC at target
+        (1_647_012, "CLSLAG", date(2023, 12, 31), "9999000000"),  # lagging sibling, OLDER period
+    ):
+        _seed_instrument(conn, iid=iid, symbol=sym)
+        conn.execute(
+            """
+            INSERT INTO instrument_class_shares_outstanding (
+                instrument_id, period_end, shares, class_member, source_cik,
+                source_adsh, source_form_type, source_fsds_qtr, source_filed_at,
+                resolution_method, parser_version
+            ) VALUES (%s, %s, %s, 'CommonClassX', %s, %s, '10-K', '2025q1', %s,
+                      'curated', 'fsds_class_shares_v1')
+            """,
+            (iid, pe, Decimal(sh), cik, f"ADSH-{iid}", pe),
+        )
+    # Only the two siblings AT the target period sum; the lagging 2023 sibling drops out.
+    assert ownership_rollup._sum_sibling_class_shares(conn, cik, target) == Decimal("11350000000")
+    # A period with no rows → None.
+    assert ownership_rollup._sum_sibling_class_shares(conn, cik, date(2020, 1, 1)) is None

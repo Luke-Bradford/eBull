@@ -120,6 +120,11 @@
 
 The ownership card is the cleanest example of "one fetch, one snapshot, one denominator". Every slice comes from `app/services/ownership_rollup.py:get_ownership_rollup` and renders as one wedge in `frontend/src/components/instrument/OwnershipPanel.tsx`. The only denominator is XBRL-DEI `shares_outstanding`; treasury renders as additive top wedge and is **not** in the denominator.
 
+### Cross-source / validation contract (#1647 part 5)
+
+- **The aggregate ownership PERCENTAGES are single-source by construction.** Institutional / insider / blockholder % are *derived* by summing the same SEC 13F / Form 4 / 13D filings every vendor reads — there is NO independent source. Vendors differ only by method (GOOGL institutions: Fintel 84.99% vs ours 79.78%, identical SEC data, different 13F-NT supersession + Vanguard family dedup). A runtime "cross-source the %" check is neither possible (free-regulated-source-only, #532 — gurufocus/marketbeat are dev-time verification ONLY, never a runtime dependency) nor meaningful. Trust in the % comes from as-of coherence (pt1), sanity invariants (pt4), and structured corrections (#1639), NOT a second vendor.
+- **The DENOMINATOR is independently cross-checked** — it is the highest-leverage figure (every wedge ÷ it) and the one figure pt1/pt4 cannot validate (a wrong-but-self-consistent denominator passes every internal check; #1646 was 2× wrong with perfect provenance). `rollup.denominator_cross_check` ties it out to an independent SEC figure: single-class → `dei:EntityCommonStockSharesOutstanding` (cover-page) vs `us-gaap:CommonStockSharesOutstanding` (balance-sheet), `status` ∈ agrees(≤2%) / minor_skew(2–5%) / diverges(>5%); dual-class → Σ sibling per-class FSDS vs combined all-class, a `plausible`/`diverges` subset bound (the untraded Class B remainder is unverifiable — NOT claimed independent). `_classify_cross_check` is pure + table-tested; the SQL readers are dev-verified on the panel.
+
 ### Insider ownership %
 - **Definition**: percentage of `shares_outstanding` held by SEC Form 3/4 filers (officers, directors, 10% owners) after cross-channel dedup.
 - **Formula**: `Σ slice.holders.shares / shares_outstanding × 100`. Each holder's `shares` is highest-priority surviving row across `(form4 > form3)` per `(filer_cik, ownership_nature)`.
