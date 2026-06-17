@@ -107,11 +107,13 @@ export interface SunburstInputs {
    *  Null = no 13D/G blocks on file. */
   readonly blockholders_total: number | null;
 
-  /** DEF 14A proxy-statement beneficial holders that did NOT resolve
-   *  to a Form 4 / Form 3 / 13F filer (the ``def14a_unmatched`` slice;
-   *  ``denominator_basis=pie_wedge`` — additive, already in the server
-   *  residual). Surfaced as its own wedge (#1627), no longer folded
-   *  into insiders. Null = none on file. */
+  /** DEF 14A proxy-statement beneficial holders that did NOT resolve to a
+   *  Form 4 / Form 3 / 13F filer (the ``def14a_unmatched`` slice). Since #1659
+   *  this is a NON-ADDITIVE memo overlay (``denominator_basis=proxy_disclosure``
+   *  — a Rule 13d-3 deemed/overlapping disclosure, already counted via 13D/G +
+   *  13F + Form 4), so it is NOT a sunburst wedge: ``rollupToSunburstInputs``
+   *  feeds ``null`` here and the proxy holders render only in the memo overlay.
+   *  Field kept null for back-compat; the ring builder no longer fires. */
   readonly def14a_total: number | null;
 
   /** Treasury (issuer-held) shares from XBRL. ``null`` = not on
@@ -298,6 +300,9 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
       ),
     );
   }
+  // #1659: DEF 14A is a non-additive memo overlay, so ``rollupToSunburstInputs``
+  // always feeds ``def14a_total = null`` and this branch is dormant (no sunburst
+  // wedge). Kept for back-compat; the proxy holders render in the L1 overlay.
   if (input.def14a_total !== null && input.def14a_total > 0) {
     categories.push(
       buildCategoryFromTotal(

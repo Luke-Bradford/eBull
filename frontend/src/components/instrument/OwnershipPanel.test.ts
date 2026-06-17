@@ -257,7 +257,7 @@ describe("rollupToSunburstInputs — empty / no-data cases", () => {
   });
 });
 
-describe("rollupToSunburstInputs — def14a_unmatched is its own wedge (#1627)", () => {
+describe("rollupToSunburstInputs — def14a_unmatched is a non-additive overlay (#1659)", () => {
   /**
    * #1627 un-folds ``def14a_unmatched`` from the insiders wedge. It
    * carries ``denominator_basis=pie_wedge`` (additive, already in the
@@ -265,7 +265,7 @@ describe("rollupToSunburstInputs — def14a_unmatched is its own wedge (#1627)",
    * dwarf the real insiders, so folding mislabelled the majority of the
    * insiders wedge. It now renders as its own ``def14a`` category.
    */
-  it("surfaces def14a_unmatched as its own category, not folded into insiders", () => {
+  it("excludes def14a_unmatched from the sunburst (non-additive overlay), insiders unaffected", () => {
     const inputs = rollupToSunburstInputs(
       _baseRollup({
         shares_outstanding: "100000000",
@@ -321,16 +321,14 @@ describe("rollupToSunburstInputs — def14a_unmatched is its own wedge (#1627)",
     // Insiders is ONLY insiders now — no def14a fold.
     expect(inputs!.insiders_total).toBe(1_000_000);
     expect(inputs!.insiders_as_of).toBe("2026-01-01");
-    // def14a is its own category total + as_of.
-    expect(inputs!.def14a_total).toBe(500_000);
-    expect(inputs!.def14a_as_of).toBe("2026-03-01");
-    // Each holder surfaces under its own chart category.
+    // #1659: DEF 14A is a non-additive memo overlay — NOT a sunburst wedge. Its
+    // total/as_of are null and its holders are not flattened into the chart.
+    expect(inputs!.def14a_total).toBeNull();
+    expect(inputs!.def14a_as_of).toBeNull();
     expect(inputs!.holders.filter((h) => h.category === "insiders").map((h) => h.label)).toEqual([
       "Officer A",
     ]);
-    expect(inputs!.holders.filter((h) => h.category === "def14a").map((h) => h.label)).toEqual([
-      "Big Proxy Holder",
-    ]);
+    expect(inputs!.holders.filter((h) => h.category === "def14a")).toEqual([]);
   });
 
   it("returns null insiders_total AND def14a_total when both slices are absent", () => {

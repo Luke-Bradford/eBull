@@ -168,7 +168,9 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     const rows = rollupToFilerRows(rollup);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.category).toBe("def14a");
-    expect(rows[0]!.category_label).toBe("DEF 14A");
+    // #1659: labelled "(memo)" — the proxy holders stay inspectable as a
+    // cross-check but the L2 table marks them non-additive.
+    expect(rows[0]!.category_label).toBe("DEF 14A (memo)");
   });
 
   it("keeps a same-name holder in insiders and def14a as two distinct rows (#1627)", () => {
@@ -395,12 +397,20 @@ describe("rollupToFilerRows — wedge ↔ row key parity", () => {
     const inputs = rollupToSunburstInputs(rollup);
     expect(inputs).not.toBeNull();
     const wedgeKeys = new Set(inputs!.holders.map((h) => h.key));
-    const rowKeys = new Set(
+    // #1659: parity holds for the ADDITIVE pie categories. DEF 14A is a
+    // non-additive overlay — a filer row (inspectable) with NO sunburst wedge —
+    // so it is excluded from the parity, like treasury (and funds, which is
+    // dropped from the filer table entirely).
+    const additiveRowKeys = new Set(
       rollupToFilerRows(rollup)
-        .filter((r) => r.category !== "treasury")
+        .filter((r) => r.category !== "treasury" && r.category !== "def14a")
         .map((r) => r.key),
     );
-    expect(rowKeys).toEqual(wedgeKeys);
+    expect(additiveRowKeys).toEqual(wedgeKeys);
+    // The DEF 14A proxy holder IS a filer row (drilldownable) but is NOT a wedge.
+    const allRowKeys = new Set(rollupToFilerRows(rollup).map((r) => r.key));
+    expect(allRowKeys.has("name:JANE DOE")).toBe(true);
+    expect(wedgeKeys.has("name:JANE DOE")).toBe(false);
   });
 });
 

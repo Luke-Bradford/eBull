@@ -208,7 +208,7 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 | blockholders | pie_wedge | 13D/G; sums into pie |
 | institutions | pie_wedge | 13F-HR equity; sums into pie |
 | etfs | pie_wedge | 13F-HR by filer-type ETF; sums into pie |
-| def14a_unmatched | pie_wedge | DEF 14A holders unresolved to Form 4 / 13F; conservative addition |
+| def14a_unmatched | proxy_disclosure (memo overlay, #1659) | DEF 14A holders unresolved to Form 4 / 13F. NON-ADDITIVE — a Rule 13d-3 deemed/overlapping disclosure (SEC Item 403), already counted via 13D/G + 13F + Form 4; excluded from pie/residual/concentration, rendered as a cross-check overlay (reverses #1627's additive wedge) |
 | funds | institution_subset | N-PORT positions are strict subset of parent advisor's 13F-HR aggregate; memo overlay only |
 | treasury | (special) | Top-level field; rendered above pie; excluded from concentration numerator |
 

@@ -91,7 +91,9 @@ const CATEGORY_LABELS: Record<CategoryKey, string> = {
   institutions: "Institutions",
   etfs: "ETFs",
   insiders: "Insiders",
-  def14a: "DEF 14A",
+  // Non-additive cross-check overlay (#1659) — labelled (memo) so the filer
+  // table doesn't read as an additive pie category.
+  def14a: "DEF 14A (memo)",
   treasury: "Treasury",
   blockholders: "Blockholders",
 };

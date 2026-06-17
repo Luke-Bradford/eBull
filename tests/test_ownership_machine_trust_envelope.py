@@ -22,7 +22,9 @@ from app.services.ownership_rollup import (
     SourceTag,
     _build_slice,
     _calendar_quarter,
+    _compute_concentration,
     _compute_coverage,
+    _compute_residual,
     _compute_sanity,
     _slice_coherence,
 )
@@ -238,6 +240,43 @@ def test_sanity_any_slice_over_100pct() -> None:
     block = _slice("blockholders", [_h("1200", as_of=date(2025, 3, 31), source="13d")], outstanding="1000")
     s = _compute_sanity([block], Decimal("1000"))
     assert s.any_pie_slice_over_100pct is True
+
+
+# ---------------------------------------------------------------------------
+# DEF 14A proxy_disclosure overlay is non-additive (#1659)
+# ---------------------------------------------------------------------------
+
+
+def _proxy(*holders: Holder) -> OwnershipSlice:
+    return _slice("def14a_unmatched", list(holders), outstanding="1000", basis="proxy_disclosure")
+
+
+def test_proxy_disclosure_excluded_from_sanity() -> None:
+    inst = _slice("institutions", [_h("400", as_of=date(2025, 3, 31))], outstanding="1000")
+    # A huge proxy "All officers as a group" deemed block must NOT become the
+    # largest single holder or inflate any sanity fact.
+    proxy = _proxy(_h("900", as_of=date(2025, 3, 31), source="def14a", name="All officers"))
+    s = _compute_sanity([inst, proxy], Decimal("1000"))
+    assert s.largest_single_holder_pct == Decimal("0.4")  # the 400 inst, not the 900 proxy
+    assert s.institutions_pct == Decimal("0.4")
+    assert s.any_pie_slice_over_100pct is False  # the 900 proxy slice is not a pie slice
+
+
+def test_proxy_disclosure_excluded_from_concentration() -> None:
+    inst = _slice("institutions", [_h("400", as_of=date(2025, 3, 31))], outstanding="1000")
+    proxy = _proxy(_h("300", as_of=date(2025, 3, 31), source="def14a", name="Sponsor group"))
+    c = _compute_concentration(Decimal("1000"), [inst, proxy])
+    # Known (additive) filers = 400/1000 only; the proxy deemed block is excluded.
+    assert c.pct_outstanding_known == Decimal("0.4")
+
+
+def test_proxy_disclosure_excluded_from_residual() -> None:
+    inst = _slice("institutions", [_h("400", as_of=date(2025, 3, 31))], outstanding="1000")
+    proxy = _proxy(_h("300", as_of=date(2025, 3, 31), source="def14a", name="Sponsor group"))
+    r = _compute_residual(Decimal("1000"), [inst, proxy], None)
+    # Residual = 1000 - 400 (only the additive institutions); proxy not subtracted.
+    assert r.shares == Decimal("600")
+    assert r.oversubscribed is False
 
 
 # ---------------------------------------------------------------------------

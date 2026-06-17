@@ -45,14 +45,23 @@ export type OwnershipSliceCategory =
 
 /**
  * Tags whether a slice contributes to the pie wedges that sum to
- * ``shares_outstanding`` (``pie_wedge``) or is a memo overlay rendered
- * alongside without affecting the pie math (``institution_subset``).
+ * ``shares_outstanding`` (``pie_wedge``) or is a non-additive memo overlay
+ * rendered alongside without affecting the pie math (anything else).
  *
- * Funds slice (#919) is the first ``institution_subset`` overlay:
- * N-PORT rows are fund-level detail INSIDE the 13F-HR institutional
- * aggregate, so additive accounting would double-count.
+ * Overlays:
+ *   * ``institution_subset`` (funds, #919) — N-PORT rows are fund-level
+ *     detail INSIDE the 13F-HR institutional aggregate; additive accounting
+ *     would double-count.
+ *   * ``proxy_disclosure`` (DEF 14A, #1659) — a Rule 13d-3 deemed-ownership
+ *     disclosure (SEC Item 403) where the same securities are listed under
+ *     multiple owners (control groups, parent/sub, spouse attribution,
+ *     "all officers as a group"); overlapping, not additive. The real
+ *     holders are already counted via 13D/G, 13F, Form 4.
  */
-export type OwnershipDenominatorBasis = "pie_wedge" | "institution_subset";
+export type OwnershipDenominatorBasis =
+  | "pie_wedge"
+  | "institution_subset"
+  | "proxy_disclosure";
 
 export type OwnershipCoverageState =
   | "no_data"
