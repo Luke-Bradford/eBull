@@ -34,6 +34,7 @@ import type {
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { OwnershipCoverageBanner } from "@/components/instrument/OwnershipCoverageBanner";
 import { DualClassDenominatorCallout } from "@/components/instrument/DualClassDenominatorCallout";
+import { PerClassDenominatorCallout } from "@/components/instrument/PerClassDenominatorCallout";
 import { OwnershipFreshnessChips } from "@/components/instrument/OwnershipFreshnessChips";
 import { OwnershipHistoryChart } from "@/components/instrument/OwnershipHistoryChart";
 import { rollupToSunburstInputs } from "@/components/instrument/OwnershipPanel";
@@ -375,6 +376,13 @@ function OwnershipBody({
             <div className="mt-2">
               <DualClassDenominatorCallout
                 note={rollup.dual_class_denominator.note}
+              />
+            </div>
+          )}
+          {rollup.per_class_denominator != null && (
+            <div className="mt-2">
+              <PerClassDenominatorCallout
+                note={rollup.per_class_denominator.note}
               />
             </div>
           )}

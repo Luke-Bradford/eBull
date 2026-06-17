@@ -361,6 +361,31 @@ class DualClassDenominator:
 
 
 @dataclass(frozen=True)
+class PerClassDenominator:
+    """The rollup was divided by a VERIFIED per-class share count from the SEC
+    DERA FSDS (``instrument_class_shares_outstanding``, sql/200), not the issuer's
+    combined all-class count — so every percentage is per-class-true and the #1646
+    :class:`DualClassDenominator` caveat is SUPERSEDED (the two are mutually
+    exclusive: when this is set, ``dual_class_denominator`` is None).
+
+    Provenance only — it changes the operative denominator but removes no shares,
+    so it is NOT a :class:`CorrectionApplied` (whose contract is share removal).
+    The read-path applies it only when the fail-closed guards pass (period
+    coherence with the combined ``shares_outstanding_as_of``; ``0 < per_class <
+    combined``; no pie-wedge holder exceeds the per-class count); otherwise the
+    combined denominator + the #1646 caveat are preserved (#788 per-class spec)."""
+
+    cik: str
+    class_member: str  # FSDS ClassOfStock localname (CommonClassA / CapitalClassC / …)
+    period_end: date  # FSDS class period; == the combined as_of by the read-path guard
+    per_class_shares: Decimal  # the denominator actually used
+    combined_shares: Decimal  # what #1646 would have divided by (transparency)
+    source_adsh: str
+    source_fsds_qtr: str
+    note: str  # Server-owned copy for the FE info callout (single source).
+
+
+@dataclass(frozen=True)
 class OwnershipRollup:
     symbol: str
     instrument_id: int
@@ -396,6 +421,12 @@ class OwnershipRollup:
     # combined-basis lower bound. None for single-class issuers and the no_data
     # path. Last field with a default so existing constructors need no change.
     dual_class_denominator: DualClassDenominator | None = None
+    # Per-class denominator applied (#788). Non-None only when a verified FSDS
+    # per-class share count replaced the combined denominator (so every pct is
+    # per-class-true and ``dual_class_denominator`` is None). Mutually exclusive
+    # with ``dual_class_denominator``. None on the no_data path + single-class
+    # issuers. Last field with a default so existing constructors need no change.
+    per_class_denominator: PerClassDenominator | None = None
     # Sanity-invariant facts over the pie-wedge slices (#1647 part 4). Raw
     # plausibility measurements (not pass/fail) so a machine consumer can
     # catch the next silent inflation. Zeroed on the no_data path. Last field
@@ -2360,6 +2391,97 @@ def _dual_class_note(symbols: tuple[str, ...]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _ClassShareRow:
+    """One ``instrument_class_shares_outstanding`` row (latest period for the
+    instrument). Carries the FSDS provenance the read-path needs to synthesize a
+    :class:`SharesOutstandingSource` and a :class:`PerClassDenominator`."""
+
+    shares: Decimal
+    period_end: date
+    class_member: str
+    source_cik: str
+    source_adsh: str
+    source_form_type: str
+    source_fsds_qtr: str
+
+
+def _read_class_shares_outstanding(conn: psycopg.Connection[Any], instrument_id: int) -> _ClassShareRow | None:
+    """Latest verified per-class share count for this instrument (FSDS, sql/200),
+    or None when no per-class row exists. The read-path applies it only behind the
+    fail-closed guards in :func:`get_ownership_rollup`."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT shares, period_end, class_member, source_cik, source_adsh,
+                   source_form_type, source_fsds_qtr
+            FROM instrument_class_shares_outstanding
+            WHERE instrument_id = %s
+            ORDER BY period_end DESC
+            LIMIT 1
+            """,
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return _ClassShareRow(
+        shares=Decimal(row[0]),
+        period_end=row[1],
+        class_member=str(row[2]),
+        source_cik=str(row[3]),
+        source_adsh=str(row[4]),
+        source_form_type=str(row[5]),
+        source_fsds_qtr=str(row[6]),
+    )
+
+
+def _should_use_class_denominator(
+    *,
+    class_shares: Decimal,
+    class_period_end: date,
+    combined_shares: Decimal,
+    today: date,
+    max_pie_holder_shares: Decimal,
+) -> bool:
+    """Fail-closed gate for swapping the combined denominator to a verified FSDS
+    per-class count (#788). ALL must hold; any miss keeps the combined denominator
+    + the #1646 caveat. Pure so the policy is table-tested without a DB.
+
+      1. **Freshness coherence** — the per-class period clears the SAME staleness
+         bound the combined denominator must clear (#1581
+         ``_STALE_DENOMINATOR_MAX_AGE_DAYS`` = 548 days). This is Codex ckpt-1 #2's
+         "tightly justified tolerance": never divide fresh holdings by a STALE
+         class count, but don't demand exact period-equality with the combined
+         as_of — companyfacts (combined) updates a quarter ahead of DERA FSDS
+         (per-class), so an equality gate would make the swap essentially never
+         fire. Bounding the per-class period by the repo's own settled
+         denominator-freshness window is the principled middle (shares-outstanding
+         drifts < a few % over that window — far below the ~2× error it corrects).
+      2. **Structural subset** — ``0 < class < combined``. A class is a strict
+         subset of the combined all-class total when ≥2 classes exist; rejects a
+         stale/garbage row ≥ combined.
+      3. **Holdings-plausibility** — no resolved pie-wedge holder owns more shares
+         than exist in the class (catches a mis-mapped too-small denominator, the
+         %-inflating direction)."""
+    return (
+        not _denominator_too_stale(class_period_end, today)
+        and Decimal(0) < class_shares < combined_shares
+        and max_pie_holder_shares <= class_shares
+    )
+
+
+def _per_class_note(class_member: str, per_class_shares: Decimal) -> str:
+    """Server-owned copy for the per-class denominator info callout (#788). Single
+    source — the FE renders this verbatim, never re-derives the copy."""
+    millions = per_class_shares / Decimal(1_000_000)
+    return (
+        f"Percentages use the verified per-class share count for "
+        f"{class_member} ({millions:,.0f}M shares), not the issuer's combined "
+        f"all-class count — so each figure is a per-class-true value."
+    )
+
+
 def _detect_dual_class_denominator(
     conn: psycopg.Connection[Any], instrument_id: int, *, denominator_concept: str | None
 ) -> DualClassDenominator | None:
@@ -2470,11 +2592,19 @@ def _detect_dual_class_denominator(
 
 
 def _read_universe_estimates(conn: psycopg.Connection[Any], instrument_id: int) -> dict[str, int | None]:
-    """Per-category universe estimates. Tier 0 returns NULL for every
-    category — the per-instrument 13F filer-count ingest lands in
-    #790 / Batch 2, after which institutions starts returning a
-    real number. Other categories never get estimates in the
-    visible roadmap; they stay NULL until a curated seed lands."""
+    """Per-category universe estimates — INTENTIONALLY all-NULL.
+
+    #790 (disposed 2026-06-17, committee verdict): do NOT revive a universe
+    denominator here. A filer-count ``coverage_ratio`` is the WRONG metric — our
+    internal DERA universe is known by construction (ratio ≈ 1), and an external
+    SEC full-text-search count is size-correlated (+0.55) so it reintroduces the
+    very market-cap bias it claims to measure; both render as misleading-green.
+    The honest completeness story is already shipped elsewhere: as-of/quarter
+    coherence (#1647 pt1), value-plausibility sanity checks (#1647 pt4), NT
+    supersessions (#1639), history coverage (#1648). ``is_estimate=True`` /
+    ``unknown_universe`` IS the truthful state — faking a denominator is the lie.
+    The one real gap (size-debiasing the ownership LEVEL) is a ranking-engine
+    signal tracked in #1660, not a rollup denominator. GitHub #790 is CLOSED."""
     return {
         "insiders": None,
         "blockholders": None,
@@ -2584,15 +2714,65 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     by_category = _reconcile_owner_once(survivors + blockholders)
     for _cat, _fam_holders in family_by_category.items():
         by_category.setdefault(_cat, []).extend(_fam_holders)
+    # Per-class denominator swap (#788): when a VERIFIED FSDS per-class share count
+    # exists for this instrument and passes the fail-closed guards, divide by it so
+    # a multi-class issuer's percentages are per-class-true, instead of the combined
+    # all-class count + the #1646 caveat. Fail-closed: any guard miss keeps the
+    # combined denominator + the caveat. Mutually exclusive with the #1646 caveat.
+    effective_outstanding = outstanding
+    effective_as_of = outstanding_as_of
+    effective_source = outstanding_source
+    per_class_denominator: PerClassDenominator | None = None
+    dual_class_denominator = _detect_dual_class_denominator(
+        conn, instrument_id, denominator_concept=outstanding_source.concept
+    )
+    class_row = _read_class_shares_outstanding(conn, instrument_id)
+    if class_row is not None:
+        # Largest single pie-wedge holder (by_category holders + the additive
+        # unmatched-DEF-14A wedge). Funds are an institution_subset memo overlay
+        # (NOT a pie wedge; may double-count 13F) so they must not veto the
+        # denominator (Codex ckpt-1 #4). Denominator-independent.
+        _pie_shares = [h.shares for _hs in by_category.values() for h in _hs]
+        _pie_shares += [c.shares for c in unmatched_def14a if c.shares is not None]
+        max_pie_holder_shares = max(_pie_shares, default=Decimal(0))
+        if _should_use_class_denominator(
+            class_shares=class_row.shares,
+            class_period_end=class_row.period_end,
+            combined_shares=outstanding,
+            today=_snapshot_today(conn),
+            max_pie_holder_shares=max_pie_holder_shares,
+        ):
+            effective_outstanding = class_row.shares
+            effective_as_of = class_row.period_end
+            # Synthesize the FSDS source — the reported source must NOT claim
+            # companyfacts when the value came from FSDS (Codex ckpt-1 #1). The FSDS
+            # accession yields a valid EDGAR archive URL.
+            effective_source = SharesOutstandingSource(
+                accession_number=class_row.source_adsh,
+                concept="CommonStockSharesOutstanding",
+                form_type=class_row.source_form_type,
+                edgar_url=edgar_archive_url(class_row.source_adsh),
+            )
+            per_class_denominator = PerClassDenominator(
+                cik=class_row.source_cik,
+                class_member=class_row.class_member,
+                period_end=class_row.period_end,
+                per_class_shares=class_row.shares,
+                combined_shares=outstanding,
+                source_adsh=class_row.source_adsh,
+                source_fsds_qtr=class_row.source_fsds_qtr,
+                note=_per_class_note(class_row.class_member, class_row.shares),
+            )
+            dual_class_denominator = None  # superseded by the real per-class figure
     slices = _bucket_into_slices(
         by_category,
         unmatched_def14a,
-        outstanding,
+        effective_outstanding,
         funds_holders=funds_holders,
     )
-    residual = _compute_residual(outstanding, slices, treasury)
-    concentration = _compute_concentration(outstanding, slices)
-    sanity = _compute_sanity(slices, outstanding)
+    residual = _compute_residual(effective_outstanding, slices, treasury)
+    concentration = _compute_concentration(effective_outstanding, slices)
+    sanity = _compute_sanity(slices, effective_outstanding)
     estimates = _read_universe_estimates(conn, instrument_id)
     coverage = _compute_coverage(slices, estimates)
     banner = _banner_for_state(coverage.state, coverage, concentration.pct_outstanding_known)
@@ -2608,9 +2788,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     return OwnershipRollup(
         symbol=symbol,
         instrument_id=instrument_id,
-        shares_outstanding=outstanding,
-        shares_outstanding_as_of=outstanding_as_of,
-        shares_outstanding_source=outstanding_source,
+        shares_outstanding=effective_outstanding,
+        shares_outstanding_as_of=effective_as_of,
+        shares_outstanding_source=effective_source,
         treasury_shares=treasury,
         treasury_as_of=treasury_as_of,
         slices=tuple(slices),
@@ -2620,13 +2800,12 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         banner=banner,
         historical_symbols=historical_symbols,
         corrections_applied=corrections_applied,
-        # Multi-class denominator caveat (#1646): non-None when this instrument
-        # shares its SEC CIK with another traded share class AND its denominator is
-        # the combined us-gaap count, flagging that every percentage above is a
-        # combined-basis lower bound.
-        dual_class_denominator=_detect_dual_class_denominator(
-            conn, instrument_id, denominator_concept=outstanding_source.concept
-        ),
+        # Per-class denominator (#788) and the #1646 multi-class caveat are
+        # mutually exclusive — both computed in the swap block above. When a
+        # verified FSDS per-class count was applied, ``per_class_denominator`` is
+        # set and ``dual_class_denominator`` is None; otherwise the caveat fires.
+        dual_class_denominator=dual_class_denominator,
+        per_class_denominator=per_class_denominator,
         sanity=sanity,
         computed_at=datetime.now(tz=UTC),
     )
@@ -2918,6 +3097,28 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
                 "",
                 _csv_safe(dc.note),
                 "",
+            ]
+        )
+
+    # Per-class denominator (#788): one ``__per_class_denominator__`` memo row when
+    # a verified FSDS per-class share count was applied (mutually exclusive with the
+    # caveat above), so the export self-documents that ``pct_outstanding`` is
+    # per-class-true and records the provenance. Zero shares — inert under any
+    # SUM(shares) reconciliation.
+    if rollup.per_class_denominator is not None:
+        pc = rollup.per_class_denominator
+        writer.writerow(
+            [
+                _csv_safe(pc.cik),
+                _csv_safe(pc.class_member),
+                "__per_class_denominator__",
+                "0",
+                "",
+                "",
+                _csv_safe(pc.source_adsh),
+                pc.period_end.isoformat(),
+                "",
+                _csv_safe(pc.note),
             ]
         )
 

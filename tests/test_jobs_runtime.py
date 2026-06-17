@@ -459,6 +459,7 @@ class TestProductionInvokerRegistry:
             "sec_13f_ingest_from_dataset",
             "sec_insider_ingest_from_dataset",
             "sec_nport_ingest_from_dataset",
+            "sec_fsds_class_shares_ingest",  # #788 — bootstrap Phase-C stage + standalone operator trigger
             # #1155 — manual-trigger-only operator triage. Registered in
             # _INVOKERS so POST /jobs/sec_rebuild/run works; intentionally
             # NOT in SCHEDULED_JOBS (no cadence). Params declared in

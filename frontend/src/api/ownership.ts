@@ -261,6 +261,23 @@ export interface OwnershipDualClassDenominator {
   readonly note: string;
 }
 
+/** Per-class denominator applied (#788). Present only when a verified FSDS
+ *  per-class share count replaced the issuer's combined all-class count, so every
+ *  percentage is per-class-TRUE and the #1646 caveat is superseded (the two are
+ *  mutually exclusive). ``note`` is server-owned copy — render it verbatim. */
+export interface OwnershipPerClassDenominator {
+  readonly cik: string;
+  readonly class_member: string;
+  readonly period_end: string;
+  /** Decimal-as-string: the per-class denominator actually used. */
+  readonly per_class_shares: string;
+  /** Decimal-as-string: what #1646 would have divided by (transparency). */
+  readonly combined_shares: string;
+  readonly source_adsh: string;
+  readonly source_fsds_qtr: string;
+  readonly note: string;
+}
+
 /** Raw plausibility facts over the pie-wedge slices (#1647 part 4). NOT
  *  pass/fail — measurements a machine consumer can reason over to catch the
  *  next silent inflation (the existing ``residual.oversubscribed`` guard
@@ -302,6 +319,10 @@ export interface OwnershipRollupResponse {
   /** Non-null only for one share class of a multi-class issuer; when set, every
    *  percentage in this rollup is a combined-basis lower bound (#1646). */
   readonly dual_class_denominator: OwnershipDualClassDenominator | null;
+  /** Non-null only when a verified FSDS per-class denominator was applied (#788);
+   *  mutually exclusive with ``dual_class_denominator``. When set, percentages are
+   *  per-class-true and the FE renders the per-class info note, not the caveat. */
+  readonly per_class_denominator?: OwnershipPerClassDenominator | null;
   /** Raw plausibility facts over the pie-wedge slices (#1647 part 4). Optional
    *  for back-compat with pre-envelope payloads. */
   readonly sanity?: OwnershipSanityChecks;

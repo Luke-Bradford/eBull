@@ -257,6 +257,7 @@ def build_bulk_archive_inventory(
     n_quarters_13f: int = 4,
     n_quarters_insider: int = 8,
     n_quarters_nport: int = 4,
+    n_quarters_fsds: int = 4,
     today: date | None = None,
 ) -> list[BulkArchive]:
     """Return the full inventory of archives Phase A3 downloads."""
@@ -294,6 +295,20 @@ def build_bulk_archive_inventory(
             BulkArchive(
                 name=f"nport_{q}.zip",
                 url=f"{SEC_BASE_URL}/files/dera/data/form-n-port-data-sets/{q}_nport.zip",
+            )
+        )
+    # DERA Financial Statement Data Sets — the per-class shares-outstanding
+    # denominator source (#788). num.txt carries the dimensional
+    # ``ClassOfStock=<member>`` segments the companyfacts JSON API strips. The
+    # newest quarter is published weeks after the quarter closes, so mark it
+    # optional (idx 0) — its absence the day after a boundary must not fatal the
+    # db-lane stage (mirrors the 13F rolling-window posture, #1423).
+    for idx, q in enumerate(last_n_quarters(n_quarters_fsds, today=today)):
+        archives.append(
+            BulkArchive(
+                name=f"fsds_{q}.zip",
+                url=f"{SEC_BASE_URL}/files/dera/data/financial-statement-data-sets/{q}.zip",
+                optional=(idx == 0),
             )
         )
     return archives
