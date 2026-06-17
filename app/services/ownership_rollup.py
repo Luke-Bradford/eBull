@@ -33,6 +33,7 @@ reconcile.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
@@ -2477,14 +2478,30 @@ def _should_use_class_denominator(
     )
 
 
-def _per_class_note(class_member: str, per_class_shares: Decimal) -> str:
+def _humanize_class_member(class_member: str) -> str:
+    """FSDS ``ClassOfStock`` localname → human label for user-facing copy. The
+    localnames are XBRL technical strings (``CommonClassA``, ``CapitalClassC``,
+    ``HeicoCommonStock``) — never render them verbatim (review WARNING). Maps the
+    standard ``(Common|Capital|Preferred)Class<X>`` shape to ``Class X``; an
+    issuer-specific localname (e.g. ``HeicoCommonStock``) falls back to a
+    space-separated form (``Heico Common Stock``)."""
+    m = re.fullmatch(r"(?:Common|Capital|Preferred)Class([A-Z])", class_member)
+    if m is not None:
+        return f"Class {m.group(1)}"
+    # Fallback: split the CamelCase localname into spaced words.
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", class_member)
+
+
+def _per_class_note(symbol: str, class_member: str, per_class_shares: Decimal) -> str:
     """Server-owned copy for the per-class denominator info callout (#788). Single
-    source — the FE renders this verbatim, never re-derives the copy."""
+    source — the FE renders this verbatim, never re-derives the copy. Names the
+    instrument by its ``symbol`` + a humanized class label, never the raw FSDS
+    localname (review WARNING)."""
     millions = per_class_shares / Decimal(1_000_000)
     return (
-        f"Percentages use the verified per-class share count for "
-        f"{class_member} ({millions:,.0f}M shares), not the issuer's combined "
-        f"all-class count — so each figure is a per-class-true value."
+        f"Percentages use the verified per-class share count for {symbol} "
+        f"({_humanize_class_member(class_member)}; {millions:,.0f}M shares), not "
+        f"the issuer's combined all-class count — so each figure is per-class-true."
     )
 
 
@@ -2729,9 +2746,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     effective_as_of = outstanding_as_of
     effective_source = outstanding_source
     per_class_denominator: PerClassDenominator | None = None
-    dual_class_denominator = _detect_dual_class_denominator(
-        conn, instrument_id, denominator_concept=outstanding_source.concept
-    )
+    dual_class_denominator: DualClassDenominator | None = None
     class_row = _read_class_shares_outstanding(conn, instrument_id)
     if class_row is not None:
         # Largest single pie-wedge holder (by_category holders + the additive
@@ -2767,9 +2782,17 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
                 combined_shares=outstanding,
                 source_adsh=class_row.source_adsh,
                 source_fsds_qtr=class_row.source_fsds_qtr,
-                note=_per_class_note(class_row.class_member, class_row.shares),
+                note=_per_class_note(symbol, class_row.class_member, class_row.shares),
             )
-            dual_class_denominator = None  # superseded by the real per-class figure
+    # Only when we did NOT swap to a verified per-class denominator do we pay for
+    # the #1646 detector — the dual-class issuers this feature targets pass the
+    # guard, so the common case skips the extra DB round-trip (review WARNING).
+    # Self-review for any future pre-swap lookup: is this query's result still
+    # needed when the swap succeeds? If not, gate it like this.
+    if per_class_denominator is None:
+        dual_class_denominator = _detect_dual_class_denominator(
+            conn, instrument_id, denominator_concept=outstanding_source.concept
+        )
     slices = _bucket_into_slices(
         by_category,
         unmatched_def14a,

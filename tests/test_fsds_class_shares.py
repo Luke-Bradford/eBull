@@ -19,7 +19,7 @@ from app.services.fsds_class_shares import (
     _supersedes,
     parse_class_member,
 )
-from app.services.ownership_rollup import _should_use_class_denominator
+from app.services.ownership_rollup import _humanize_class_member, _should_use_class_denominator
 
 # --- parse_class_member -----------------------------------------------------
 
@@ -118,6 +118,25 @@ def test_curated_map_cusips_are_distinct_per_cik() -> None:
     for cik, cusips in by_cik.items():
         members = [m for (c, m) in _CLASS_MEMBER_TO_CUSIP if c == cik]
         assert len(cusips) == len(members), f"{cik} has colliding CUSIPs"
+
+
+# --- _humanize_class_member (user-facing copy, not the XBRL localname) -------
+
+
+@pytest.mark.parametrize(
+    ("member", "expected"),
+    [
+        ("CommonClassA", "Class A"),
+        ("CapitalClassC", "Class C"),
+        ("CommonClassB", "Class B"),
+        ("PreferredClassD", "Class D"),
+        # Issuer-specific localname → space-separated fallback, never verbatim.
+        ("HeicoCommonStock", "Heico Common Stock"),
+        ("CommonStockNonExchangeable", "Common Stock Non Exchangeable"),
+    ],
+)
+def test_humanize_class_member(member: str, expected: str) -> None:
+    assert _humanize_class_member(member) == expected
 
 
 # --- _should_use_class_denominator (fail-closed guard) ----------------------
