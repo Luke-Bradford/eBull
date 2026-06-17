@@ -2837,22 +2837,25 @@ def _read_shares_outstanding_near(
     return Decimal(row["val"]), row["period_end"]  # type: ignore[arg-type]
 
 
-def _sum_sibling_class_shares(conn: psycopg.Connection[Any], source_cik: str) -> Decimal | None:
-    """Σ of the LATEST per-instrument FSDS per-class share count across every traded
-    sibling sharing this issuer CIK (the dual-class subset-bound primary). ``None`` when
-    no rows / non-positive."""
+def _sum_sibling_class_shares(conn: psycopg.Connection[Any], source_cik: str, period_end: date) -> Decimal | None:
+    """Σ of the per-class FSDS share count across every traded sibling sharing this
+    issuer CIK, AT a single ``period_end`` (the dual-class subset-bound primary).
+
+    Filtering to one instant is load-bearing: the sum is labelled with this
+    ``period_end`` and compared to the combined us-gaap count at the same instant, so a
+    sibling whose latest FSDS row is an OLDER quarter must not be mixed in at a stale
+    figure (Codex ckpt-2 MED). The FSDS table PK is ``(instrument_id, period_end)`` so
+    one row per sibling at this period — no DISTINCT ON needed. A sibling absent at this
+    period simply drops out (the bound is over the classes we have at this instant).
+    ``None`` when no rows / non-positive."""
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT COALESCE(SUM(latest.shares), 0)
-            FROM (
-                SELECT DISTINCT ON (instrument_id) shares
-                FROM instrument_class_shares_outstanding
-                WHERE source_cik = %s
-                ORDER BY instrument_id, period_end DESC
-            ) AS latest
+            SELECT COALESCE(SUM(shares), 0)
+            FROM instrument_class_shares_outstanding
+            WHERE source_cik = %(cik)s AND period_end = %(pe)s
             """,
-            (source_cik,),
+            {"cik": source_cik, "pe": period_end},
         )
         row = cur.fetchone()
     if row is None or row[0] is None:
@@ -2877,7 +2880,7 @@ def _cross_validate_denominator(
         # Dual-class: Σ resolved sibling per-class FSDS counts vs the combined all-class
         # us-gaap count at the SAME FSDS balance-sheet instant (exact-period match sorts
         # first; nearest fallback exposes the gap via as_of_delta_days).
-        sibling_sum = _sum_sibling_class_shares(conn, per_class_denominator.cik)
+        sibling_sum = _sum_sibling_class_shares(conn, per_class_denominator.cik, per_class_denominator.period_end)
         combined = _read_shares_outstanding_near(
             conn,
             instrument_id,
