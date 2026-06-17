@@ -3413,19 +3413,33 @@ def get_instrument_summary(
     if use_local_sec:
         local_fundamentals = _fetch_local_fundamentals(conn, instrument_id_int)
 
-    # Market cap: SEC XBRL share count × eToro close (`compute_market_cap`).
-    # Returns None for instruments without SEC coverage; market cap
-    # then stays null on the identity rather than reaching for a
-    # non-canonical source.
+    # Market cap. For a CURATED multi-class issuer (GOOG/GOOGL, …) the combined-shares
+    # × this-class-price product is structurally wrong (one company → two different
+    # "caps"), so use the total-company cap Σ(class shares × class price) from the
+    # #1623 per-class FSDS table. `resolve_market_cap_basis` returns:
+    #   - total_company → use the total
+    #   - multiclass_unavailable → fail closed (null), never publish the broken
+    #     combined×price for a known dual-class issuer
+    #   - not_multiclass → legacy single-class product (exact; also the better total
+    #     when only one class of a multi-class issuer is in our universe)
+    # Returns None for instruments without SEC coverage; market cap then stays null
+    # on the identity rather than reaching for a non-canonical source.
     try:
-        from app.services.xbrl_derived_stats import compute_market_cap
+        from app.services.xbrl_derived_stats import compute_market_cap, resolve_market_cap_basis
 
-        computed_cap = compute_market_cap(conn, instrument_id=instrument_id_int)
+        cap_resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id_int)
+        if cap_resolution.basis == "total_company" and cap_resolution.total is not None:
+            computed_cap_value: Decimal | None = cap_resolution.total.value
+        elif cap_resolution.basis == "multiclass_unavailable":
+            computed_cap_value = None  # fail closed: known dual-class, no clean total
+        else:
+            single_cap = compute_market_cap(conn, instrument_id=instrument_id_int)
+            computed_cap_value = single_cap.value if single_cap is not None else None
     except Exception:
         logger.warning("compute_market_cap failed", exc_info=True)
-        computed_cap = None
-    if computed_cap is not None:
-        identity = identity.model_copy(update={"market_cap": computed_cap.value})
+        computed_cap_value = None
+    if computed_cap_value is not None:
+        identity = identity.model_copy(update={"market_cap": computed_cap_value})
 
     # Dividend yield: SEC dividend summary (#426). Empty when the
     # instrument has never paid a dividend; key stats path falls
