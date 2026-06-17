@@ -351,7 +351,8 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 ### Market cap (live)
 - Formula: SEC XBRL share count × current price ([xbrl_derived_stats.py:43-95](../../../app/services/xbrl_derived_stats.py#L43-L95)). Share count from `instrument_share_count_latest` (DEI > us-gaap; newest restated).
 - Endpoint: `/summary.identity.market_cap`.
-- Caveats: NULL for non-SEC instruments — no third-party fallback per #498/#499 settled decision.
+- **Dual-class issuers (#1662):** "market cap" is the TOTAL company capitalization = Σ over share-class siblings (per-class FSDS shares × that sibling's price) + an untraded residual class imputed at the largest traded class's price — IDENTICAL on every sibling's page (GOOG and GOOGL both show ~$4.45T, one company). The legacy combined-count × this-class-price is structurally wrong (one company → two caps) and is NOT a per-class *float* value. `resolve_market_cap_basis` picks: `total_company` (use it) / `multiclass_unavailable` (a CURATED dual-class issuer with no clean total → **suppress null**, never publish the broken product) / `not_multiclass` (legacy product). Multi-class is detected by presence in the #1623 curated `instrument_class_shares_outstanding` table — NOT a raw shared-CIK sibling count (56 dev CIKs, mostly `.US` dups / ETF trusts / warrants / preferreds). The `instrument_valuation.market_cap_live` VIEW (sql/080) feeding the ranking engine still carries the legacy combined-basis distortion → follow-up.
+- Caveats: NULL for non-SEC instruments — no third-party fallback per #498/#499 settled decision. Per-class **dilution** stays on the combined count (a growth-rate of total shares; not split by class).
 
 ## 4. Capital returns (dividends + buybacks)
 

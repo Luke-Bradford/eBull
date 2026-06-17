@@ -2511,6 +2511,35 @@ def _read_class_shares_outstanding(conn: psycopg.Connection[Any], instrument_id:
     )
 
 
+def class_shares_usable(
+    *,
+    class_shares: Decimal,
+    class_period_end: date,
+    combined_shares: Decimal,
+    today: date,
+) -> bool:
+    """Freshness + structural gate on a verified FSDS per-class share count, shared
+    by the ownership per-class denominator (:func:`_should_use_class_denominator`)
+    and the per-class total-company market-cap path
+    (``xbrl_derived_stats.compute_total_company_market_cap``, #1662). Single source
+    of truth for the policy so the two consumers can never drift. Pure — table-tested
+    without a DB.
+
+      1. **Freshness coherence** — the per-class period clears the same staleness
+         bound the combined denominator must clear (#1581
+         ``_STALE_DENOMINATOR_MAX_AGE_DAYS`` = 548 days). Never multiply/divide a
+         fresh figure by a STALE class count, but don't demand exact period-equality
+         with the combined as_of — companyfacts (combined) updates a quarter ahead of
+         DERA FSDS (per-class), so an equality gate would make the path essentially
+         never fire. Bounding the per-class period by the repo's own settled
+         denominator-freshness window is the principled middle (shares-outstanding
+         drifts < a few % over that window).
+      2. **Structural subset** — ``0 < class < combined``. A class is a strict subset
+         of the combined all-class total when ≥2 classes exist; rejects a
+         stale/garbage row ≥ combined."""
+    return not _denominator_too_stale(class_period_end, today) and Decimal(0) < class_shares < combined_shares
+
+
 def _should_use_class_denominator(
     *,
     class_shares: Decimal,
@@ -2529,25 +2558,21 @@ def _should_use_class_denominator(
     coherence guard was relaxed here but the spec lagged → review BLOCKING; see
     review-prevention-log "Relaxing a guard mid-PR").
 
-      1. **Freshness coherence** — the per-class period clears the SAME staleness
-         bound the combined denominator must clear (#1581
-         ``_STALE_DENOMINATOR_MAX_AGE_DAYS`` = 548 days). This is Codex ckpt-1 #2's
-         "tightly justified tolerance": never divide fresh holdings by a STALE
-         class count, but don't demand exact period-equality with the combined
-         as_of — companyfacts (combined) updates a quarter ahead of DERA FSDS
-         (per-class), so an equality gate would make the swap essentially never
-         fire. Bounding the per-class period by the repo's own settled
-         denominator-freshness window is the principled middle (shares-outstanding
-         drifts < a few % over that window — far below the ~2× error it corrects).
-      2. **Structural subset** — ``0 < class < combined``. A class is a strict
-         subset of the combined all-class total when ≥2 classes exist; rejects a
-         stale/garbage row ≥ combined.
+    Conditions 1–2 (freshness + structural subset) are :func:`class_shares_usable`;
+    this adds:
+
       3. **Holdings-plausibility** — no resolved pie-wedge holder owns more shares
          than exist in the class (catches a mis-mapped too-small denominator, the
-         %-inflating direction)."""
+         %-inflating direction). Ownership-specific — the market-cap path has no pie
+         holder, which is why this predicate is NOT in the shared
+         :func:`class_shares_usable`."""
     return (
-        not _denominator_too_stale(class_period_end, today)
-        and Decimal(0) < class_shares < combined_shares
+        class_shares_usable(
+            class_shares=class_shares,
+            class_period_end=class_period_end,
+            combined_shares=combined_shares,
+            today=today,
+        )
         and max_pie_holder_shares <= class_shares
     )
 
