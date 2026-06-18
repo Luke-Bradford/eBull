@@ -260,6 +260,11 @@ export interface InstrumentIdentity {
   display_name: string | null;
   sector: string | null;
   industry: string | null;
+  /** #1634: real GICS sector + its sector-SPDR, resolved from the SEC SIC
+   * (the bare `sector` is an opaque 1-9 code). null when the instrument has
+   * no SIC (ETFs / non-filers) or no confident mapping. */
+  gics_sector: string | null;
+  sector_spdr: string | null;
   exchange: string | null;
   country: string | null;
   currency: string | null;
