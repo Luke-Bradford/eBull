@@ -999,7 +999,10 @@ def _load_instrument_data(
                     {"id": instrument_id, "mv": RISK_METRICS_VERSION, "win": _RISK_PENALTY_WINDOW},
                 )
                 risk_row = cur.fetchone()
-        except psycopg.errors.UndefinedTable:
+        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+            # Mirror the valuation savepoint above: a partial schema where the
+            # table exists but a selected column is absent raises UndefinedColumn,
+            # which must also degrade to risk_row = None (no penalty), not propagate.
             pass  # savepoint already rolled back; prior queries intact
 
     # #1664: for a curated dual-class issuer the view NULLs the shares-distorted
