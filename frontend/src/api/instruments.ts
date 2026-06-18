@@ -9,6 +9,7 @@ import type {
   InstrumentRiskMetrics,
   InstrumentSummary,
   IntradayInterval,
+  PortfolioRelativeRisk,
 } from "@/api/types";
 
 export interface InstrumentsQuery {
@@ -515,5 +516,14 @@ export function fetchInstrumentRiskMetrics(
 ): Promise<InstrumentRiskMetrics> {
   return apiFetch<InstrumentRiskMetrics>(
     `/instruments/${encodeURIComponent(symbol)}/risk-metrics`,
+  );
+}
+
+// #1636 — candidate-vs-current-book risk (marginal risk contribution).
+export function fetchInstrumentPortfolioRisk(
+  symbol: string,
+): Promise<PortfolioRelativeRisk> {
+  return apiFetch<PortfolioRelativeRisk>(
+    `/instruments/${encodeURIComponent(symbol)}/portfolio-risk`,
   );
 }

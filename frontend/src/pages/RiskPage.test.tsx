@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import type { InstrumentRiskMetrics, RiskWindowMetrics } from "@/api/types";
@@ -11,7 +11,11 @@ vi.mock("@/api/instruments", async () => {
     await vi.importActual<typeof import("@/api/instruments")>(
       "@/api/instruments",
     );
-  return { ...actual, fetchInstrumentRiskMetrics: vi.fn() };
+  return {
+    ...actual,
+    fetchInstrumentRiskMetrics: vi.fn(),
+    fetchInstrumentPortfolioRisk: vi.fn(),
+  };
 });
 
 // Recharts needs a real layout pipeline jsdom lacks; the chart internals are
@@ -40,11 +44,42 @@ vi.mock("@/components/risk/riskCharts", () => ({
   ),
 }));
 
-import { fetchInstrumentRiskMetrics } from "@/api/instruments";
+import {
+  fetchInstrumentPortfolioRisk,
+  fetchInstrumentRiskMetrics,
+} from "@/api/instruments";
+import type { PortfolioRelativeRisk } from "@/api/types";
 
 const mockRisk = vi.mocked(fetchInstrumentRiskMetrics);
+const mockPortfolioRisk = vi.mocked(fetchInstrumentPortfolioRisk);
+
+function makePortfolioRisk(
+  overrides: Partial<PortfolioRelativeRisk> = {},
+): PortfolioRelativeRisk {
+  return {
+    symbol: "AAPL",
+    as_of_date: "2026-06-12",
+    status: "ok",
+    holdings_count: 5,
+    already_held: false,
+    current_weight: null,
+    portfolio_beta: "0.18",
+    correlation: "0.34",
+    candidate_vol: "0.28",
+    portfolio_vol: "0.53",
+    marginal_risk_contribution: "0.095",
+    n_obs: 997,
+    ...overrides,
+  };
+}
 
 afterEach(() => vi.clearAllMocks());
+
+// Default the supplementary #1636 fetch so every test resolves it; card-specific
+// tests override. Without a default, useAsync calls fn().then on undefined.
+beforeEach(() => {
+  mockPortfolioRisk.mockResolvedValue(makePortfolioRisk());
+});
 
 function makeWindow(
   key: string,
@@ -214,5 +249,38 @@ describe("RiskPage", () => {
     await screen.findByTestId("mock-underwater");
     const backLinks = screen.getAllByRole("link", { name: /Back to AAPL/i });
     expect(backLinks[0]).toHaveAttribute("href", "/instrument/AAPL");
+  });
+
+  it("renders the vs-portfolio card with a diversification verdict (#1636)", async () => {
+    mockRisk.mockResolvedValue(makePayload());
+    mockPortfolioRisk.mockResolvedValue(makePortfolioRisk({ portfolio_beta: "0.18" }));
+    renderPage();
+
+    await screen.findByTestId("mock-underwater");
+    expect(
+      await screen.findByText(/Dampens your book's swings/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Portfolio beta/i)).toBeInTheDocument();
+  });
+
+  it("shows the empty-book message on the vs-portfolio card when nothing is held", async () => {
+    mockRisk.mockResolvedValue(makePayload());
+    mockPortfolioRisk.mockResolvedValue(
+      makePortfolioRisk({
+        status: "empty_book",
+        holdings_count: 0,
+        portfolio_beta: null,
+        correlation: null,
+        portfolio_vol: null,
+        marginal_risk_contribution: null,
+        n_obs: 0,
+      }),
+    );
+    renderPage();
+
+    await screen.findByTestId("mock-underwater");
+    expect(
+      await screen.findByText(/You hold no positions yet/i),
+    ).toBeInTheDocument();
   });
 });
