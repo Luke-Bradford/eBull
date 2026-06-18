@@ -306,6 +306,65 @@ def _event_reason_for_form(form_type: str) -> StaleReason:
 # ---------------------------------------------------------------------------
 
 
+_RISK_BASIS_NOTE = (
+    "All returns/ratios are fractions (0.10 = 10%, not percent). "
+    "Drawdown, var_5 and worst_day are signed losses (negative is a loss). "
+    "Basis is price-return (no dividend reinvestment; total-return is future "
+    "work), so do not over-read CAGR for high-yield names. A non-'ok' status "
+    "means the metric is NOT a precise number: treat insufficient_history / "
+    "partial_window as provisional, and benchmark_missing beta/excess as "
+    "absent, not zero. Cite a risk figure as {window_key, as_of_date, "
+    "metric_version}."
+)
+
+
+def _shape_risk_metrics(
+    rows: Sequence[Sequence[object]],
+    metric_version: str,
+) -> dict[str, object] | None:
+    """Shape the `instrument_risk_metrics_current` rows into the context block.
+
+    Pure: no DB, no I/O — the row order/column order is fixed by the SELECT in
+    :func:`_assemble_context`. Returns ``None`` when there are no rows (the
+    instrument's metrics were never computed — distinct from a thin-history
+    instrument, which HAS rows carrying flagged statuses that pass through
+    verbatim). NULL scalars stay ``None`` via :func:`_to_float` — never a
+    fabricated zero. ``as_of_date`` rides each window (no constraint enforces
+    one shared snapshot date across windows).
+    """
+    if not rows:
+        return None
+    return {
+        "metric_version": metric_version,
+        "basis_note": _RISK_BASIS_NOTE,
+        "windows": [
+            {
+                "window_key": r[0],
+                "as_of_date": str(r[1]) if r[1] is not None else None,
+                "benchmark_symbol": r[2],
+                "cagr": _to_float(r[3]),
+                "excess_cagr_vs_spy": _to_float(r[4]),
+                "vol_annualized": _to_float(r[5]),
+                "beta": _to_float(r[6]),
+                "beta_r2": _to_float(r[7]),
+                "calmar": _to_float(r[8]),
+                "max_drawdown": _to_float(r[9]),
+                "current_drawdown": _to_float(r[10]),
+                "var_5": _to_float(r[11]),
+                "worst_day": _to_float(r[12]),
+                "cagr_status": r[13],
+                "excess_cagr_status": r[14],
+                "vol_status": r[15],
+                "beta_status": r[16],
+                "drawdown_status": r[17],
+                "distribution_status": r[18],
+                "calmar_status": r[19],
+            }
+            for r in rows
+        ],
+    }
+
+
 def _assemble_context(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -436,6 +495,37 @@ def _assemble_context(
             "currency": inst_row[5],
         }
 
+    # Realized-risk metrics (#1632): persisted, versioned, quality-flagged
+    # risk_v1 scalars per window as structured evidence for the writer + critic.
+    # Lazy import — risk_metrics pulls in app.workers.scheduler, which transitively
+    # imports this module (refresh_cascade); a module-level import would be a cycle.
+    # By call time thesis is fully initialized, so the function-level import is safe
+    # and keeps the version/window constants single-sourced (no magic-string dup).
+    from app.services.risk_metrics import RISK_METRICS_VERSION, WINDOW_KEYS
+
+    # ONE statement (LEFT JOIN for the benchmark symbol) so context assembly does
+    # not add a second snapshot-spanning read. No rows → None (never computed,
+    # like analyst_estimates); a thin-history instrument DOES have rows carrying
+    # flagged statuses, which pass through verbatim — honest-status discipline,
+    # never a fabricated zero (NULL scalars stay None via _to_float).
+    risk_rows = conn.execute(
+        """
+        SELECT c.window_key, c.as_of_date, b.symbol AS benchmark_symbol,
+               c.cagr, c.excess_cagr_vs_spy, c.vol_annualized,
+               c.beta, c.beta_r2, c.calmar,
+               c.max_drawdown, c.current_drawdown, c.var_5, c.worst_day,
+               c.cagr_status, c.excess_cagr_status, c.vol_status, c.beta_status,
+               c.drawdown_status, c.distribution_status, c.calmar_status
+        FROM instrument_risk_metrics_current c
+        LEFT JOIN instruments b ON b.instrument_id = c.benchmark_instrument_id
+        WHERE c.instrument_id = %(id)s
+          AND c.metric_version = %(ver)s
+        ORDER BY array_position(%(worder)s, c.window_key)
+        """,
+        {"id": instrument_id, "ver": RISK_METRICS_VERSION, "worder": list(WINDOW_KEYS)},
+    ).fetchall()
+    risk_metrics = _shape_risk_metrics(risk_rows, RISK_METRICS_VERSION)
+
     # #539: earnings_events + analyst_estimates retired with FMP. The
     # writer prompt's optional contextual fields fall back to None;
     # the writer system prompt already tolerates absent enrichment.
@@ -445,6 +535,7 @@ def _assemble_context(
         "filings": filings,
         "news": news,
         "prior_thesis": prior_thesis,
+        "risk_metrics": risk_metrics,
         "earnings_history": [],
         "analyst_estimates": None,
     }
@@ -463,6 +554,12 @@ You will be given a research context including:
 - recent filing summaries (up to 3)
 - recent news events (up to 10, last 30 days)
 - prior thesis if one exists
+- realized-risk metrics (`risk_metrics`): persisted, versioned, quality-flagged
+  scalars per window (1y/3y/full) — CAGR, annualized vol, beta + R² vs the
+  benchmark, Calmar, max/current drawdown, var_5. All are FRACTIONS (0.10 = 10%,
+  not percent); drawdown / var_5 / worst_day are SIGNED losses (negative). Basis
+  is PRICE-RETURN (no dividends) — do not over-read CAGR for high-yield names.
+  May be null when no metrics are computed.
 
 Produce a JSON object with EXACTLY these fields:
 
@@ -488,6 +585,12 @@ Rules:
 - break_conditions: list of concrete, specific events that would invalidate the thesis
 - memo_markdown: full structured memo covering: business quality, key financials, recent news
   impact, valuation, risks, stance rationale. Min 3 paragraphs.
+- Use `risk_metrics` to ground the risk section: deep max drawdown, high beta,
+  low Calmar, or fat-tail var_5 are downside context that can support or weaken
+  a long. Respect the status flags — do NOT cite a non-`ok` metric as a precise
+  number (a `benchmark_missing` beta is absent, not 0; a `partial_window` CAGR
+  is provisional). When you cite a risk figure, name its {window_key,
+  as_of_date, metric_version} so the claim stays reproducible.
 - Separate facts from judgement. Be explicit about what must go right.
 - Respond with ONLY valid JSON. No explanation outside the JSON object.
 """
@@ -522,6 +625,12 @@ Rules:
 - Fight confirmation bias. Do not restate the bull case.
 - Prefer the strongest realistic objection over generic cautions.
 - Be concrete — cite specific metrics, dates, or events where possible.
+- Mine `risk_metrics` for realized-risk objections the memo glossed over — e.g.
+  a deep peak-to-trough drawdown, a high beta, a weak Calmar, or fat-tail var_5
+  that the bull case ignores. These are FRACTIONS, signed losses are negative,
+  basis is price-return. Respect status flags (a non-`ok` metric is not precise;
+  `benchmark_missing` beta is absent, not 0) and cite {window_key, as_of_date,
+  metric_version}.
 - verdict must be exactly one of: "Strong challenge", "Moderate challenge", "Weak challenge"
 - Respond with ONLY valid JSON. No explanation outside the JSON object.
 """
