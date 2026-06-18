@@ -28,6 +28,8 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
       display_name: "Apple Inc.",
       sector: "Technology",
       industry: "Consumer Electronics",
+      gics_sector: null,
+      sector_spdr: null,
       exchange: "NMS",
       country: "United States",
       currency: "USD",
@@ -149,6 +151,29 @@ describe("SummaryStrip — action gating", () => {
     expect(screen.getByText("AAPL")).toBeInTheDocument();
     expect(screen.getByText("Apple Inc.")).toBeInTheDocument();
     expect(screen.getByText(/Technology/)).toBeInTheDocument();
+  });
+
+  it("prefers the real GICS sector + SPDR over the opaque sector code (#1634)", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          identity: {
+            ...summary().identity,
+            sector: "3",
+            gics_sector: "Information Technology",
+            sector_spdr: "XLK",
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(
+      screen.getByText(/Information Technology \(XLK\)/),
+    ).toBeInTheDocument();
+    // The opaque code is not surfaced when a real sector resolves.
+    expect(screen.queryByText(/^3 ·/)).not.toBeInTheDocument();
   });
 
   it("hides Close when not held", () => {

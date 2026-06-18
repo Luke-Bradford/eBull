@@ -178,9 +178,13 @@ export function SummaryStrip({
         ) : null}
       </div>
 
-      {/* Row 2: sector strip */}
+      {/* Row 2: sector strip. Prefer the real GICS sector (#1634, resolved from
+          the SEC SIC) over the opaque 1-9 `sector` code; show its sector-SPDR. */}
       <div className="mt-1 text-xs text-slate-500">
-        {identity.sector ?? "—"}
+        {identity.gics_sector ?? identity.sector ?? "—"}
+        {identity.gics_sector && identity.sector_spdr
+          ? ` (${identity.sector_spdr})`
+          : ""}
         {identity.industry ? ` · ${identity.industry}` : ""}
         {identity.exchange ? ` · ${identity.exchange}` : ""}
         {identity.country ? ` · ${identity.country}` : ""}

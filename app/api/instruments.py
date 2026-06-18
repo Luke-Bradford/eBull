@@ -65,6 +65,7 @@ from app.services.risk_metrics import (
     ols_beta,
     simple_returns,
 )
+from app.services.sector_classification import resolve_sector_spdr
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,13 @@ class InstrumentIdentity(BaseModel):
     display_name: str | None
     sector: str | None
     industry: str | None
+    # #1634: real GICS sector + its sector-SPDR, resolved on-read from the SEC
+    # SIC code (instruments.sector is an opaque 1-9 code). NULL when the
+    # instrument has no SIC (ETFs / non-filers) or its SIC has no confident
+    # mapping — never a guessed sector. Required-nullable (no default) to mirror
+    # the TS `string | null` exactly (Codex ckpt-2).
+    gics_sector: str | None
+    sector_spdr: str | None
     exchange: str | None
     country: str | None
     currency: str | None
@@ -3335,10 +3343,12 @@ def get_instrument_summary(
                    i.currency, i.sector, i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
                    q.bid, q.ask, q.last,
+                   p.sic,
                    canonical.symbol AS canonical_symbol
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
             LEFT JOIN quotes q USING (instrument_id)
+            LEFT JOIN instrument_sec_profile p USING (instrument_id)
             LEFT JOIN instruments canonical
               ON canonical.instrument_id = i.canonical_instrument_id
             WHERE i.instrument_id = %(id)s AND UPPER(i.symbol) = %(symbol)s
@@ -3350,10 +3360,12 @@ def get_instrument_summary(
                    i.currency, i.sector, i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
                    q.bid, q.ask, q.last,
+                   p.sic,
                    canonical.symbol AS canonical_symbol
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
             LEFT JOIN quotes q USING (instrument_id)
+            LEFT JOIN instrument_sec_profile p USING (instrument_id)
             LEFT JOIN instruments canonical
               ON canonical.instrument_id = i.canonical_instrument_id
             WHERE UPPER(i.symbol) = %(symbol)s
@@ -3370,11 +3382,16 @@ def get_instrument_summary(
 
     # Identity: local DB only. Fields the operator's universe sync
     # left null stay null — no third-party fill-in.
+    # #1634: resolve the real GICS sector + sector-SPDR from the SEC SIC
+    # (fail-closed None when no SIC / no confident mapping).
+    sector_cls = resolve_sector_spdr(row.get("sic"))  # type: ignore[arg-type]
     identity = InstrumentIdentity(
         symbol=row["symbol"],  # type: ignore[arg-type]
         display_name=row["company_name"] or None,  # type: ignore[arg-type]
         sector=row["sector"],  # type: ignore[arg-type]
         industry=row["industry"],  # type: ignore[arg-type]
+        gics_sector=sector_cls.gics_sector if sector_cls is not None else None,
+        sector_spdr=sector_cls.spdr_symbol if sector_cls is not None else None,
         exchange=row["exchange"],  # type: ignore[arg-type]
         country=row["country"],  # type: ignore[arg-type]
         currency=row["currency"],  # type: ignore[arg-type]
