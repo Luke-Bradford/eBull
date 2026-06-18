@@ -42,6 +42,8 @@ Restrained palette. Each color has one job. Mixing them dilutes the signal.
 
 Do not introduce new color families (purple, pink, cyan, etc.) without a documented reason. Do not use red for "in progress" or amber for "ok".
 
+**Chart colours:** in any component that calls `useChartTheme()`, read the returned `theme` for ALL colours — series fills/strokes included — never import `lightTheme` directly. The dark palette aliases the saturated slots (`up`/`down`/`accent`/`regression`) to the light values today, so `lightTheme.down` happens to render identically, but referencing `theme` is the fragility-free form (prevention-log → "Chart series colours should read the resolved `theme`").
+
 ## Status pill vocabulary
 
 Pills are defined once and reused. The current set:

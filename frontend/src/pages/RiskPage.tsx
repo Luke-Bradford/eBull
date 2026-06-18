@@ -91,21 +91,21 @@ function pctTone(v: number | null): "positive" | "negative" | undefined {
 }
 
 function ScalarSummary({
-  window,
+  win,
 }: {
-  readonly window: RiskWindowMetrics | null;
+  readonly win: RiskWindowMetrics | null;
 }): JSX.Element {
-  const cagr = parseDecimal(window?.cagr ?? null);
-  const excessCagr = parseDecimal(window?.excess_cagr_vs_spy ?? null);
-  const vol = parseDecimal(window?.vol_annualized ?? null);
-  const beta = parseDecimal(window?.beta ?? null);
-  const r2 = parseDecimal(window?.beta_r2 ?? null);
-  const maxDd = parseDecimal(window?.max_drawdown ?? null);
-  const curDd = parseDecimal(window?.current_drawdown ?? null);
-  const calmar = parseDecimal(window?.calmar ?? null);
-  const var5 = parseDecimal(window?.var_5 ?? null);
-  const trailing1y = parseDecimal(window?.trailing_1y ?? null);
-  const excessTrailing1y = parseDecimal(window?.excess_trailing_1y ?? null);
+  const cagr = parseDecimal(win?.cagr ?? null);
+  const excessCagr = parseDecimal(win?.excess_cagr_vs_spy ?? null);
+  const vol = parseDecimal(win?.vol_annualized ?? null);
+  const beta = parseDecimal(win?.beta ?? null);
+  const r2 = parseDecimal(win?.beta_r2 ?? null);
+  const maxDd = parseDecimal(win?.max_drawdown ?? null);
+  const curDd = parseDecimal(win?.current_drawdown ?? null);
+  const calmar = parseDecimal(win?.calmar ?? null);
+  const var5 = parseDecimal(win?.var_5 ?? null);
+  const trailing1y = parseDecimal(win?.trailing_1y ?? null);
+  const excessTrailing1y = parseDecimal(win?.excess_trailing_1y ?? null);
 
   return (
     <div className="grid grid-cols-2 gap-x-4 sm:grid-cols-3 lg:grid-cols-4">
@@ -206,7 +206,7 @@ export function RiskPage(): JSX.Element {
   const backHref = `/instrument/${encodeURIComponent(symbol)}`;
 
   const data = risk.data;
-  const window = data !== null ? pickWindow(data.windows, range) : null;
+  const selectedWindow = data !== null ? pickWindow(data.windows, range) : null;
   // The histogram + beta scatter are full-history (no date axis to slice), so
   // their honest status flags read from the full window regardless of range.
   const fullWindow = data !== null ? pickWindow(data.windows, "All") : null;
@@ -264,12 +264,12 @@ export function RiskPage(): JSX.Element {
         </EmptyState>
       ) : (
         <div className="space-y-4">
-          <ScalarSummary window={window} />
+          <ScalarSummary win={selectedWindow} />
 
           <RiskCard
             title="Drawdown (underwater)"
             scope="peak-to-trough % · selected range"
-            note={riskStatusCopy(window?.drawdown_status ?? null)}
+            note={riskStatusCopy(selectedWindow?.drawdown_status ?? null)}
             empty={ddPoints.length === 0}
             emptyMessage="No price history to chart drawdown."
           >
@@ -279,7 +279,7 @@ export function RiskPage(): JSX.Element {
           <RiskCard
             title="Rolling volatility"
             scope="30-day annualized · selected range"
-            note={riskStatusCopy(window?.vol_status ?? null)}
+            note={riskStatusCopy(selectedWindow?.vol_status ?? null)}
             empty={volPoints.length === 0}
             emptyMessage="Not enough history for a rolling-volatility window yet."
           >

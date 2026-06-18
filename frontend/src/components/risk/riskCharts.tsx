@@ -37,7 +37,7 @@ import type {
   HistogramBin,
   RollingVolPoint,
 } from "@/api/types";
-import { type ChartTheme, lightTheme } from "@/lib/chartTheme";
+import type { ChartTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 
 // ---------------------------------------------------------------------------
@@ -135,8 +135,8 @@ export function UnderwaterChart({ points }: UnderwaterProps): JSX.Element {
             type="monotone"
             dataKey="drawdown"
             name="Drawdown"
-            stroke={lightTheme.down}
-            fill={lightTheme.down}
+            stroke={theme.down}
+            fill={theme.down}
             fillOpacity={0.18}
             strokeWidth={2}
             dot={false}
@@ -193,7 +193,7 @@ export function RollingVolChart({ points }: RollingVolProps): JSX.Element {
             type="monotone"
             dataKey="vol"
             name="Annualized vol"
-            stroke={lightTheme.accent[3]}
+            stroke={theme.accent[3]}
             strokeWidth={2}
             dot={false}
             isAnimationActive={false}
@@ -282,7 +282,7 @@ export function ReturnsHistogram({ bins }: ReturnsHistogramProps): JSX.Element {
             <Bar
               dataKey="count"
               name="Days"
-              fill={lightTheme.accent[1]}
+              fill={theme.accent[1]}
               isAnimationActive={false}
             />
           </BarChart>
@@ -373,7 +373,7 @@ export function BetaScatterChart({
             />
             <Scatter
               data={data}
-              fill={lightTheme.accent[0]}
+              fill={theme.accent[0]}
               fillOpacity={0.45}
               isAnimationActive={false}
             />
