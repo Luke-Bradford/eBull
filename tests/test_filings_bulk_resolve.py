@@ -10,15 +10,15 @@ end-to-end ``refresh_filings`` flow, asserting that:
   - upsert / provider-error counters still surface correctly via the
     returned ``FilingsRefreshSummary``
 
-Uses the live ``ebull_test`` database (NOT the dev DB — destructive
-test rows would otherwise pollute fundamentals data); falls back to
-skip when that DB isn't available.
+Runs against the isolated per-worker pytest cluster via the canonical
+``ebull_test_conn`` fixture (NOT the dev DB — destructive test rows
+would otherwise pollute fundamentals data); skips cleanly when that
+cluster isn't available.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
 from datetime import date
 
 import psycopg
@@ -31,23 +31,21 @@ from app.services.filings import (
     refresh_filings,
 )
 
-# Use the dedicated test DB. Tests in this file insert into
-# external_identifiers + instruments; the dev DB is off-limits for
-# destructive tests per docs/settled-decisions + memory.
-TEST_DB_URL = "postgresql://postgres:postgres@127.0.0.1:5432/ebull_test"
 
-
+# Tests in this file seed instrument + external-identifier rows, so
+# they MUST run against the isolated per-worker pytest cluster — never the
+# operator's dev DB. The prior hand-rolled fixture hardcoded
+# ``localhost:5432/ebull_test`` (the DEV cluster port + a legacy plain
+# ``ebull_test`` DB that no longer exists), which (a) spammed the dev
+# Postgres log with ``FATAL: database "ebull_test" does not exist`` every
+# time these tests were collected/run and (b) was a latent foot-gun: had
+# such a DB ever existed on 5432, these destructive tests would have run
+# against the dev cluster. Reuse the canonical ``ebull_test_conn`` fixture
+# (isolated 5433 test cluster, per-worker DB, TRUNCATE teardown) instead —
+# same pattern as test_ownership_observations_refresh_batch.py.
 @pytest.fixture
-def conn() -> Iterator[psycopg.Connection]:  # type: ignore[type-arg]
-    try:
-        c = psycopg.connect(TEST_DB_URL)
-    except psycopg.OperationalError:
-        pytest.skip("ebull_test DB not available; run scripts/migrate.py against ebull_test first")
-    try:
-        yield c
-    finally:
-        c.rollback()
-        c.close()
+def conn(ebull_test_conn: psycopg.Connection[tuple]) -> psycopg.Connection[tuple]:
+    return ebull_test_conn
 
 
 def _seed_instrument(
@@ -58,9 +56,9 @@ def _seed_instrument(
     cik: str | None,
 ) -> None:
     """Seed an instrument + (optionally) a primary SEC CIK row.
-    The per-test fixture's `c.rollback()` cleans up regardless of
-    test outcome — every INSERT here lives in the test's open
-    transaction and is discarded at teardown."""
+    The `ebull_test_conn` fixture rolls back + TRUNCATEs the planner
+    tables at teardown, so every INSERT here is discarded regardless of
+    test outcome — no per-test cleanup needed."""
     conn.execute(
         """
         INSERT INTO exchanges (exchange_id, description, country, asset_class)
