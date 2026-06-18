@@ -34,6 +34,7 @@ from app.services.scoring import (
     _fetch_prior_ranks,
     _momentum_score,
     _quality_score,
+    _realized_risk_penalties,
     _sentiment_score,
     _turnaround_score,
     _value_score,
@@ -519,6 +520,80 @@ class TestComputePenalties:
 
 
 # ---------------------------------------------------------------------------
+# Realized-risk penalty (#1633, v1.2)
+# ---------------------------------------------------------------------------
+
+
+class TestRealizedRiskPenalties:
+    """Pure-logic table tests for _realized_risk_penalties (no DB).
+
+    Comparators are strict (> vol, < drawdown); boundary cases pinned.
+    """
+
+    @staticmethod
+    def _names(vol, vol_status, dd, dd_status):
+        pens, _notes = _realized_risk_penalties(vol, vol_status, dd, dd_status)
+        return {p.name: p.deduction for p in pens}
+
+    # --- volatility tiers ---
+    def test_vol_below_high_no_penalty(self) -> None:
+        assert self._names(0.50, "ok", -0.10, "ok") == {}
+
+    def test_vol_at_high_boundary_no_penalty(self) -> None:
+        # strict >: exactly 0.90 does not trigger
+        assert "high_realized_volatility" not in self._names(0.90, "ok", -0.10, "ok")
+
+    def test_vol_high_tier(self) -> None:
+        assert self._names(1.00, "ok", -0.10, "ok")["high_realized_volatility"] == pytest.approx(0.04)
+
+    def test_vol_at_extreme_boundary_is_high_tier(self) -> None:
+        # exactly 1.45 is NOT > 1.45 → falls to high tier
+        assert self._names(1.45, "ok", -0.10, "ok")["high_realized_volatility"] == pytest.approx(0.04)
+
+    def test_vol_extreme_tier(self) -> None:
+        assert self._names(2.00, "ok", -0.10, "ok")["high_realized_volatility"] == pytest.approx(0.08)
+
+    # --- drawdown tiers (negative; more negative = worse) ---
+    def test_dd_shallow_no_penalty(self) -> None:
+        assert self._names(0.50, "ok", -0.30, "ok") == {}
+
+    def test_dd_at_high_boundary_no_penalty(self) -> None:
+        # strict <: exactly -0.70 does not trigger
+        assert "deep_drawdown" not in self._names(0.50, "ok", -0.70, "ok")
+
+    def test_dd_high_tier(self) -> None:
+        assert self._names(0.50, "ok", -0.75, "ok")["deep_drawdown"] == pytest.approx(0.04)
+
+    def test_dd_at_extreme_boundary_is_high_tier(self) -> None:
+        # exactly -0.85 is NOT < -0.85 → falls to high tier
+        assert self._names(0.50, "ok", -0.85, "ok")["deep_drawdown"] == pytest.approx(0.04)
+
+    def test_dd_extreme_tier(self) -> None:
+        assert self._names(0.50, "ok", -0.95, "ok")["deep_drawdown"] == pytest.approx(0.08)
+
+    # --- both fire ---
+    def test_both_extreme_stack(self) -> None:
+        pens, _notes = _realized_risk_penalties(2.00, "ok", -0.95, "ok")
+        assert sum(p.deduction for p in pens) == pytest.approx(0.16)
+
+    # --- honest absence: never a penalty, always a note ---
+    def test_non_ok_status_no_penalty_but_notes(self) -> None:
+        pens, notes = _realized_risk_penalties(2.00, "insufficient_history", -0.95, "partial_window")
+        assert pens == []
+        assert len(notes) == 2  # one per metric
+
+    def test_none_value_with_ok_status_no_penalty_but_note(self) -> None:
+        pens, notes = _realized_risk_penalties(None, "ok", None, "ok")
+        assert pens == []
+        assert len(notes) == 2
+
+    def test_no_metrics_at_all_no_penalty(self) -> None:
+        pens, notes = _realized_risk_penalties(None, None, None, None)
+        assert pens == []
+        assert len(notes) == 2
+
+
+# ---------------------------------------------------------------------------
 # Penalty total_score clipping
 # ---------------------------------------------------------------------------
 
@@ -698,6 +773,7 @@ def _make_fake_conn(
     news_rows: list[dict[str, object]],
     avg_red_flag: float | None,
     valuation_row: dict[str, object] | None = None,
+    risk_row: dict[str, object] | None = None,
 ) -> MagicMock:
     """
     Return a MagicMock psycopg connection that supports the cursor(row_factory=...)
@@ -707,7 +783,7 @@ def _make_fake_conn(
     cur.fetchall() is called on the *same* cursor object. We model this by having
     execute() mutate cur.fetchone / cur.fetchall as a side effect, dispatching
     results in order: fundamentals, price, quote, thesis, news, red_flag,
-    valuation. (analyst_estimates retired with FMP under #539.)
+    valuation, risk (#1633 risk_v1 3y). (analyst_estimates retired with FMP under #539.)
     """
     rf_row: dict[str, object] = {"avg_red_flag": avg_red_flag}
 
@@ -720,6 +796,7 @@ def _make_fake_conn(
         ("fetchall", news_rows),
         ("fetchone", rf_row),
         ("fetchone", valuation_row),
+        ("fetchone", risk_row),  # #1633 realized-risk metrics (risk_v1 3y)
     ]
     response_iter = iter(responses)
 

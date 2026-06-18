@@ -901,11 +901,16 @@ def _should_persist_hold(
 
 def run_portfolio_review(
     conn: psycopg.Connection[Any],
-    model_version: str = "v1.1-balanced",
+    model_version: str | None = None,
 ) -> PortfolioReviewResult:
     """
     Evaluate the Tier 1 ranked candidate list against current portfolio state
     and produce action recommendations.
+
+    ``model_version`` defaults to ``scoring._DEFAULT_MODEL_VERSION`` (the single
+    source of truth — #1633: v1.2-balanced). It is resolved lazily (sentinel
+    ``None``) because portfolio.py avoids module-level ``app.services`` imports to
+    stay out of import cycles, and a parameter default would force one.
 
     Steps:
       1. Load latest scores (ranked, model_version).
@@ -918,6 +923,11 @@ def run_portfolio_review(
     Returns PortfolioReviewResult. Does not raise on partial data — instruments
     with missing data are held or skipped with a note in the rationale.
     """
+    if model_version is None:
+        from app.services.scoring import _DEFAULT_MODEL_VERSION
+
+        model_version = _DEFAULT_MODEL_VERSION
+
     run_at = datetime.now(tz=UTC)
 
     # --- Load state ---

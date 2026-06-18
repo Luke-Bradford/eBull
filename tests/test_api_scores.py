@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from app.db import get_conn
 from app.main import app
+from app.services.scoring import _DEFAULT_MODEL_VERSION
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -185,7 +186,7 @@ class TestListRankings:
         assert body["total"] == 1
         assert body["offset"] == 0
         assert body["limit"] == 50
-        assert body["model_version"] == "v1.1-balanced"
+        assert body["model_version"] == _DEFAULT_MODEL_VERSION
         assert body["scored_at"] is not None
         assert len(body["items"]) == 1
 

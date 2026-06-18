@@ -23,15 +23,14 @@ from typing import Any
 
 import psycopg
 
+from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.services.sync_orchestrator.layer_types import Cadence
 from app.services.sync_orchestrator.types import PREREQ_SKIP_MARKER
 
-# ---------------------------------------------------------------------------
-# Default model version for scoring freshness (must match app.api.scores)
-# ---------------------------------------------------------------------------
-
-
-_DEFAULT_MODEL_VERSION = "v1.1-balanced"
+# Default model version for scoring freshness is the single source of truth in
+# app.services.scoring (#1633: flipped to v1.2-balanced). Imported, not duplicated,
+# so the freshness query always targets the same model_version the scoring pass
+# writes — otherwise a flip silently wedges scoring as perpetually stale.
 
 
 # ---------------------------------------------------------------------------
