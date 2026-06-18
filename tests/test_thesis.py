@@ -15,7 +15,8 @@ Coverage:
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,6 +25,7 @@ from app.services.thesis import (
     ThesisResult,
     _call_critic,
     _call_writer,
+    _shape_risk_metrics,
     _to_float,
     _validate_critic_output,
     _validate_writer_output,
@@ -583,3 +585,105 @@ class TestGenerateThesis:
         assert result.base_value is None
         assert result.bull_value is None
         assert result.bear_value is None
+
+
+# ---------------------------------------------------------------------------
+# Risk-metrics context block (#1632) — pure row-shaping
+# ---------------------------------------------------------------------------
+
+# Column order mirrors the SELECT in _assemble_context (20 cols).
+#   0 window_key, 1 as_of_date, 2 benchmark_symbol,
+#   3 cagr, 4 excess_cagr_vs_spy, 5 vol_annualized, 6 beta, 7 beta_r2, 8 calmar,
+#   9 max_drawdown, 10 current_drawdown, 11 var_5, 12 worst_day,
+#   13 cagr_status, 14 excess_cagr_status, 15 vol_status, 16 beta_status,
+#   17 drawdown_status, 18 distribution_status, 19 calmar_status
+
+
+def _risk_row(
+    window_key: str = "1y",
+    as_of: date | None = date(2026, 6, 12),
+    *,
+    cagr: object = 0.46,
+    beta: object = 0.81,
+    max_dd: object = -0.14,
+    var_5: object = -0.02,
+    cagr_status: str | None = "ok",
+    beta_status: str | None = "ok",
+) -> tuple[object, ...]:
+    return (
+        window_key,
+        as_of,
+        "SPY",
+        cagr,
+        0.23,
+        0.24,
+        beta,
+        0.19,
+        3.36,
+        max_dd,
+        -0.075,
+        var_5,
+        -0.05,
+        cagr_status,
+        "ok",
+        "ok",
+        beta_status,
+        "ok",
+        "partial_window",
+        "ok",
+    )
+
+
+def _windows(out: dict[str, object] | None) -> list[Any]:
+    """Narrow the object-typed `windows` list for indexable test access."""
+    assert out is not None
+    windows = out["windows"]
+    assert isinstance(windows, list)
+    return windows
+
+
+class TestShapeRiskMetrics:
+    def test_no_rows_returns_none(self) -> None:
+        # Never-computed instrument — None, not an empty block, no fabricated data.
+        assert _shape_risk_metrics([], "risk_v1") is None
+
+    def test_shapes_windows_with_version_and_per_window_as_of(self) -> None:
+        out = _shape_risk_metrics(
+            [_risk_row("1y", date(2026, 6, 12)), _risk_row("3y", date(2026, 6, 11))],
+            "risk_v1",
+        )
+        assert out is not None
+        assert out["metric_version"] == "risk_v1"
+        assert "fractions" in str(out["basis_note"])
+        windows = _windows(out)
+        assert len(windows) == 2
+        # as_of_date rides each window (no shared-date assumption).
+        assert windows[0]["as_of_date"] == "2026-06-12"
+        assert windows[1]["as_of_date"] == "2026-06-11"
+        assert windows[0]["benchmark_symbol"] == "SPY"
+        assert windows[0]["beta"] == pytest.approx(0.81)
+
+    def test_signed_losses_preserved(self) -> None:
+        out = _shape_risk_metrics([_risk_row(max_dd=-0.52, var_5=-0.07)], "risk_v1")
+        w = _windows(out)[0]
+        # Losses stay negative — never abs()'d or flipped.
+        assert w["max_drawdown"] == pytest.approx(-0.52)
+        assert w["var_5"] == pytest.approx(-0.07)
+
+    def test_null_scalar_stays_none_not_zero(self) -> None:
+        # Thin-history: cagr NULL + flagged status. NULL must NOT become 0.
+        out = _shape_risk_metrics([_risk_row(cagr=None, cagr_status="partial_window")], "risk_v1")
+        w = _windows(out)[0]
+        assert w["cagr"] is None
+        assert w["cagr_status"] == "partial_window"
+
+    def test_flagged_status_passthrough(self) -> None:
+        # benchmark_missing beta passes through verbatim (absent, not zero).
+        out = _shape_risk_metrics([_risk_row(beta=None, beta_status="benchmark_missing")], "risk_v1")
+        w = _windows(out)[0]
+        assert w["beta"] is None
+        assert w["beta_status"] == "benchmark_missing"
+
+    def test_as_of_none_tolerated(self) -> None:
+        out = _shape_risk_metrics([_risk_row(as_of=None)], "risk_v1")
+        assert _windows(out)[0]["as_of_date"] is None
