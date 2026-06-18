@@ -57,6 +57,10 @@ from app.services.operators import (
     NoOperatorError,
     sole_operator_id,
 )
+from app.services.portfolio_risk import (
+    PortfolioRiskStatus,
+    compute_portfolio_relative_risk,
+)
 from app.services.risk_metrics import (
     RISK_METRICS_VERSION,
     annualized_vol,
@@ -5091,6 +5095,38 @@ class InstrumentRiskMetrics(BaseModel):
     series: RiskSeries | None
 
 
+class PortfolioRelativeRiskResponse(BaseModel):
+    """Response shape for GET /instruments/{symbol}/portfolio-risk (#1636).
+
+    The candidate's risk relative to the operator's CURRENT book — a
+    current-exposure covariance estimate (today's weights over past returns), NOT
+    realized book history. Every scalar is nullable; ``status`` carries the
+    degraded cases (``empty_book`` / ``book_history_unavailable`` /
+    ``single_holding_is_candidate`` / ``insufficient_history``). NULLs are never
+    coerced to 0.
+
+    - ``portfolio_beta`` = cov(candidate, book) / var(book): >1 amplifies book
+      risk, <1 dampens, <0 hedges.
+    - ``marginal_risk_contribution`` = portfolio_beta × portfolio_vol: the
+      candidate's annualized risk per unit weight at the margin (a small add
+      funded pro-rata from the book reduces per-unit risk iff this < portfolio_vol).
+    All return/vol figures are fractions; vols are annualized.
+    """
+
+    symbol: str
+    as_of_date: date | None
+    status: PortfolioRiskStatus
+    holdings_count: int
+    already_held: bool
+    current_weight: Decimal | None
+    portfolio_beta: Decimal | None
+    correlation: Decimal | None
+    candidate_vol: Decimal | None
+    portfolio_vol: Decimal | None
+    marginal_risk_contribution: Decimal | None
+    n_obs: int
+
+
 # Display-series tuning. The rolling-vol window is in RETURNS (≈ trading days).
 _ROLLING_VOL_WINDOW = 30
 _HISTOGRAM_BINS = 30
@@ -5337,4 +5373,57 @@ def get_instrument_risk_metrics(
         metric_version=RISK_METRICS_VERSION,
         windows=windows,
         series=series,
+    )
+
+
+@router.get("/{symbol}/portfolio-risk", response_model=PortfolioRelativeRiskResponse)
+def get_instrument_portfolio_risk(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> PortfolioRelativeRiskResponse:
+    """Candidate-vs-current-book risk (#1636) — marginal risk contribution.
+
+    How much the candidate moves the operator's existing book's risk: portfolio
+    beta / correlation / marginal-risk-contribution vs the current holdings.
+    ON-READ (the book is dynamic) — a current-exposure covariance estimate, not
+    realized book history. 404 for an unknown symbol; 200 with
+    ``status="empty_book"`` when the operator holds nothing.
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    result = compute_portfolio_relative_risk(
+        conn,
+        int(row["instrument_id"]),  # type: ignore[arg-type]
+        str(row["symbol"]),  # type: ignore[arg-type]
+        date.today(),
+    )
+    return PortfolioRelativeRiskResponse(
+        symbol=result.symbol,
+        as_of_date=result.as_of_date,
+        status=result.status,
+        holdings_count=result.holdings_count,
+        already_held=result.already_held,
+        current_weight=result.current_weight,
+        portfolio_beta=result.portfolio_beta,
+        correlation=result.correlation,
+        candidate_vol=result.candidate_vol,
+        portfolio_vol=result.portfolio_vol,
+        marginal_risk_contribution=result.marginal_risk_contribution,
+        n_obs=result.n_obs,
     )

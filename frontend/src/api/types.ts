@@ -523,6 +523,32 @@ export interface InstrumentRiskMetrics {
   series: RiskSeries | null;
 }
 
+/** Candidate-vs-current-book risk (#1636). Mirrors PortfolioRelativeRiskResponse
+ *  in app/api/instruments.py. Decimals → string | null; figures are fractions,
+ *  vols annualized. A current-exposure covariance estimate (today's weights over
+ *  past returns), NOT realized book history. */
+export type PortfolioRiskStatus =
+  | "ok"
+  | "empty_book"
+  | "book_history_unavailable"
+  | "insufficient_history"
+  | "single_holding_is_candidate";
+
+export interface PortfolioRelativeRisk {
+  symbol: string;
+  as_of_date: string | null;
+  status: PortfolioRiskStatus;
+  holdings_count: number;
+  already_held: boolean;
+  current_weight: string | null;
+  portfolio_beta: string | null;
+  correlation: string | null;
+  candidate_vol: string | null;
+  portfolio_vol: string | null;
+  marginal_risk_contribution: string | null;
+  n_obs: number;
+}
+
 // #601 — chart UI range token (the union the chart buttons render).
 // Translates to either a daily range (existing endpoint) or an
 // intraday (interval, count) pair via CHART_RANGE_PLAN. The API

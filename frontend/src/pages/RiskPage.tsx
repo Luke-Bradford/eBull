@@ -15,8 +15,15 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { fetchInstrumentRiskMetrics } from "@/api/instruments";
-import type { InstrumentRiskMetrics, RiskWindowMetrics } from "@/api/types";
+import {
+  fetchInstrumentPortfolioRisk,
+  fetchInstrumentRiskMetrics,
+} from "@/api/instruments";
+import type {
+  InstrumentRiskMetrics,
+  PortfolioRelativeRisk,
+  RiskWindowMetrics,
+} from "@/api/types";
 import {
   SectionError,
   SectionSkeleton,
@@ -190,6 +197,93 @@ function RiskCard({
 }
 
 // ---------------------------------------------------------------------------
+// Vs-your-portfolio card (#1636) — marginal risk contribution
+// ---------------------------------------------------------------------------
+
+function portfolioRiskCopy(status: string): string | null {
+  switch (status) {
+    case "empty_book":
+      return "You hold no positions yet — add holdings to see how this name fits your book.";
+    case "book_history_unavailable":
+      return "Not enough price history across your holdings yet.";
+    case "single_holding_is_candidate":
+      return "This is your only holding — there's nothing else in the book to compare it against.";
+    default:
+      return null;
+  }
+}
+
+function PortfolioRiskCard({
+  state,
+}: {
+  readonly state: ReturnType<typeof useAsync<PortfolioRelativeRisk>>;
+}): JSX.Element | null {
+  if (state.loading) {
+    return (
+      <Pane title="Vs your portfolio" scope="marginal risk contribution">
+        <SectionSkeleton rows={2} />
+      </Pane>
+    );
+  }
+  if (state.error !== null || !state.data) {
+    // Degrade quietly — this card is supplementary to the standalone risk view.
+    return null;
+  }
+  const d = state.data;
+  const degraded = portfolioRiskCopy(d.status);
+  if (degraded !== null) {
+    return (
+      <Pane title="Vs your portfolio" scope="marginal risk contribution">
+        <p className="px-2 py-3 text-xs text-slate-500">{degraded}</p>
+      </Pane>
+    );
+  }
+  const beta = parseDecimal(d.portfolio_beta);
+  const pvol = parseDecimal(d.portfolio_vol);
+  const mcr = parseDecimal(d.marginal_risk_contribution);
+  const weight = parseDecimal(d.current_weight);
+  const verdict =
+    beta === null
+      ? "—"
+      : beta < 0
+        ? "Hedges your book (moves opposite)."
+        : beta < 1
+          ? "Dampens your book's swings (less than your current mix)."
+          : "Amplifies your book's swings (more than your current mix).";
+  const provisional = d.status === "insufficient_history";
+  return (
+    <Pane title="Vs your portfolio" scope="marginal risk contribution">
+      {provisional ? (
+        <p className="px-2 pb-1 text-[11px] text-amber-700 dark:text-amber-500">
+          Short overlap with your book — figure is provisional.
+        </p>
+      ) : null}
+      <p className="px-2 pb-1 text-sm text-slate-700 dark:text-slate-300">
+        {verdict}
+        {d.already_held
+          ? ` You already hold this${
+              weight !== null ? ` (${formatUnsignedPct(weight)} of your book)` : ""
+            } — figures show an incremental tilt funded from the rest.`
+          : ""}
+      </p>
+      <div className="grid grid-cols-2 gap-x-4 sm:grid-cols-3">
+        <StatTile label="Portfolio beta" value={formatNumber(beta, 2)} />
+        <StatTile
+          label="Correlation"
+          value={formatNumber(parseDecimal(d.correlation), 2)}
+          hint="to your book's returns"
+        />
+        <StatTile
+          label="Marginal risk"
+          value={formatUnsignedPct(mcr)}
+          hint={`vs book vol ${formatUnsignedPct(pvol)}`}
+        />
+      </div>
+    </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -200,6 +294,12 @@ export function RiskPage(): JSX.Element {
   // useAsync captures fn via a ref — fresh arrow per render is fine.
   const risk = useAsync<InstrumentRiskMetrics>(
     () => fetchInstrumentRiskMetrics(symbol),
+    [symbol],
+  );
+  // #1636 — independent fetch; the card owns its own loading/empty/error and
+  // degrades to nothing if the endpoint fails (supplementary to the standalone view).
+  const portfolioRisk = useAsync<PortfolioRelativeRisk>(
+    () => fetchInstrumentPortfolioRisk(symbol),
     [symbol],
   );
 
@@ -265,6 +365,8 @@ export function RiskPage(): JSX.Element {
       ) : (
         <div className="space-y-4">
           <ScalarSummary win={selectedWindow} />
+
+          <PortfolioRiskCard state={portfolioRisk} />
 
           <RiskCard
             title="Drawdown (underwater)"
