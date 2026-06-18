@@ -34,7 +34,7 @@ needs a backfill).
 
 `app/services/sector_classification.py`: an **ordered** list of SIC integer
 ranges → `(gics_sector, spdr_symbol)`, most-specific override ranges first, then
-major-group ranges. `resolve_sector_spdr(sic: str | None) -> SectorClassification
+major-group ranges. `resolve_sector_spdr(sic: str | int | None) -> SectorClassification
 | None` parses the 4-digit SIC, walks the ranges, returns the first match (or
 None). Pure, no DB. The SPDR symbols are referenced from a single constant set
 (no magic strings; cross-checked against `BENCHMARK_SYMBOLS`).
@@ -71,74 +71,19 @@ below is the human summary. Carve-outs added:
 
 Crosswalk summary (major group → SPDR; *override ranges resolve first*):
 
-| SIC range | GICS sector | SPDR | Note |
-|---|---|---|---|
-| 2833–2836 | Health Care | XLV | drugs/pharma/biologicals (carved out of 28xx chemicals) |
-| 3570–3579 | Information Technology | XLK | computers & peripherals (carved out of 35xx machinery) |
-| 3670–3679 | Information Technology | XLK | semiconductors & electronic components |
-| 3660–3669 | Information Technology | XLK | communications equipment |
-| 3710–3716 | Consumer Discretionary | XLY | autos & parts (carved out of 37xx transport equip) |
-| 6320–6329 | Health Care | XLV | hospital/medical service plans (health insurers — GICS) |
-| 6798 | Real Estate | XLRE | REITs (carved out of 67xx holding offices) |
-| 6500–6599 | Real Estate | XLRE | real estate |
-| 7370–7379 | Information Technology | XLK | software / data processing (carved out of 73xx services) |
-| 7310–7319 | Communication Services | XLC | advertising |
-| 8731 | Health Care | XLV | commercial biological research (carved out of 87xx) |
-| 0100–0999 | Consumer Staples | XLP | agriculture / fishing |
-| 1000–1099 | Materials | XLB | metal mining |
-| 1200–1299 | Energy | XLE | coal |
-| 1300–1399 | Energy | XLE | oil & gas |
-| 1400–1499 | Materials | XLB | nonmetallic mineral mining |
-| 1500–1799 | Industrials | XLI | construction |
-| 2000–2099 | Consumer Staples | XLP | food |
-| 2100–2199 | Consumer Staples | XLP | tobacco |
-| 2200–2399 | Consumer Discretionary | XLY | textiles & apparel |
-| 2400–2499 | Materials | XLB | lumber & wood |
-| 2500–2599 | Consumer Discretionary | XLY | furniture |
-| 2600–2699 | Materials | XLB | paper |
-| 2700–2799 | Communication Services | XLC | printing & publishing (media) |
-| 2800–2899 | Materials | XLB | chemicals (non-pharma) |
-| 2900–2999 | Energy | XLE | petroleum refining |
-| 3000–3099 | Materials | XLB | rubber & plastics |
-| 3100–3199 | Consumer Discretionary | XLY | leather & footwear |
-| 3200–3399 | Materials | XLB | stone/clay/glass, primary metal |
-| 3400–3499 | Industrials | XLI | fabricated metal |
-| 3500–3599 | Industrials | XLI | industrial machinery (non-computer) |
-| 3600–3699 | Information Technology | XLK | electronics (semis dominate; 369x misc-electrical accepted) |
-| 3700–3799 | Industrials | XLI | aerospace & other transport equip (autos overridden above) |
-| 3800–3899 | Health Care | XLV | instruments (medical devices dominate our pop.) |
-| 3900–3999 | Consumer Discretionary | XLY | misc manufacturing (sporting goods, toys) |
-| 4000–4499 | Industrials | XLI | rail / transit / trucking / water transport |
-| 4500–4599 | Industrials | XLI | air transport |
-| 4600–4699 | Energy | XLE | pipelines |
-| 4700–4799 | Industrials | XLI | transportation services |
-| 4800–4899 | Communication Services | XLC | telephone / cable / broadcasting |
-| 4900–4999 | Utilities | XLU | electric / gas / water utilities |
-| 5000–5099 | Industrials | XLI | durable-goods wholesale (distributors) |
-| 5100–5199 | Consumer Staples | XLP | nondurable wholesale (food/drug plurality) |
-| 5200–5999 | Consumer Discretionary | XLY | retail (food retail 54xx overridden below) |
-| 5400–5499 | Consumer Staples | XLP | food & grocery retail |
-| 6000–6199 | Financials | XLF | banks & credit |
-| 6200–6299 | Financials | XLF | brokers / investment advice |
-| 6300–6399 | Financials | XLF | insurance (health plans 632x overridden above) |
-| 6400–6499 | Financials | XLF | insurance agents |
-| 6700–6799 | Financials | XLF | holding/investment offices (REIT 6798 overridden above) |
-| 7000–7099 | Consumer Discretionary | XLY | hotels |
-| 7200–7299 | Consumer Discretionary | XLY | personal services |
-| 7300–7399 | Industrials | XLI | business services (software 737x / advertising 731x overridden above) |
-| 7500–7699 | Industrials | XLI | auto repair/rental, repair services |
-| 7800–7899 | Communication Services | XLC | motion pictures |
-| 7900–7999 | Consumer Discretionary | XLY | amusement & recreation (leisure) |
-| 8000–8099 | Health Care | XLV | health services |
-| 8100–8199 | Industrials | XLI | legal services |
-| 8200–8299 | Consumer Discretionary | XLY | educational services |
-| 8300–8399 | Consumer Discretionary | XLY | social/child-care services |
-| 8700–8799 | Industrials | XLI | engineering / consulting (bio research 8731 overridden above) |
-
-Note: `5400–5499` and the autos/REIT/pharma/software/advertising/health-plan
-overrides must be matched **before** their enclosing major-group range — the
-resolver tries override ranges first. The 5200–5999 retail range and the 5400
-carve-out coexist via order.
+**The code `_CROSSWALK` in `app/services/sector_classification.py` is
+authoritative — this doc is not a second copy of it** (avoids spec-vs-code
+drift; review WARNING). The carve-out summary in "Codex ckpt-1 resolutions"
+above describes the GICS-driven overrides; the major-group bases are: agriculture
+0xx→XLP, mining/metals/chemicals/paper→XLB, oil&gas/coal/petroleum/pipelines→XLE,
+construction/machinery/**electrical-equipment 36xx**/transport-equip/fabricated-
+metal/transport-services→XLI, **electronic & measuring instruments 38xx→XLK**
+(medical devices carved to XLV), food/tobacco→XLP, textiles/apparel/furniture/
+leather/retail/hotels/leisure/education→XLY, publishing/telecom/broadcast/motion-
+pictures→XLC, utilities 49xx→XLU, banks/brokers/**insurance 63xx→XLF** (managed-
+care 6324 carved to XLV), real-estate 65xx + REIT 6798→XLRE, health-services
+80xx→XLV. Every range and its order is in `_CROSSWALK`; carve-outs precede their
+major group (first match wins), pinned by `tests/test_sector_classification.py`.
 
 **Full-population verification (mandatory):** a one-shot scan resolves every one
 of the 389 distinct SICs in the dev DB and prints `sic → spdr` for operator
