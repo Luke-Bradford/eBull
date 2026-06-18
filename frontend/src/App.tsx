@@ -11,6 +11,7 @@ import { InstrumentPage } from "@/pages/InstrumentPage";
 import { Tenk10KDrilldownPage } from "@/pages/Tenk10KDrilldownPage";
 import { EightKListPage } from "@/pages/EightKListPage";
 import { ChartPage } from "@/pages/ChartPage";
+import { RiskPage } from "@/pages/RiskPage";
 import { DividendsPage } from "@/pages/DividendsPage";
 import { FundamentalsPage } from "@/pages/FundamentalsPage";
 import { InsiderPage } from "@/pages/InsiderPage";
@@ -106,6 +107,10 @@ export function App() {
           <Route
             path="instrument/:symbol/chart"
             element={<ChartPage />}
+          />
+          <Route
+            path="instrument/:symbol/risk"
+            element={<RiskPage />}
           />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />

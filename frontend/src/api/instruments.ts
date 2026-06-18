@@ -6,6 +6,7 @@ import type {
   InstrumentFinancials,
   InstrumentIntradayCandles,
   InstrumentListResponse,
+  InstrumentRiskMetrics,
   InstrumentSummary,
   IntradayInterval,
 } from "@/api/types";
@@ -504,5 +505,15 @@ export function fetchInstrumentIntradayCandles(
   });
   return apiFetch<InstrumentIntradayCandles>(
     `/instruments/${encodeURIComponent(symbol)}/intraday-candles?${params.toString()}`,
+  );
+}
+
+// #591 PR-C — persisted risk scalars + on-read display series. The backend
+// owns all risk math (risk_metrics.py); the page is a pure renderer.
+export function fetchInstrumentRiskMetrics(
+  symbol: string,
+): Promise<InstrumentRiskMetrics> {
+  return apiFetch<InstrumentRiskMetrics>(
+    `/instruments/${encodeURIComponent(symbol)}/risk-metrics`,
   );
 }

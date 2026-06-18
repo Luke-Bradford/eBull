@@ -425,6 +425,99 @@ export interface InstrumentIntradayCandles {
   rows: IntradayBar[];
 }
 
+// ---------------------------------------------------------------------------
+// Risk metrics (#591 PR-B/PR-C) — mirrors RiskWindowMetrics / RiskSeries /
+// InstrumentRiskMetrics in app/api/instruments.py. Every persisted scalar is a
+// Pydantic `Decimal | None` → JSON string | null on the wire (never coerce to
+// number until the chart boundary). Statuses pass through verbatim as `str`.
+// ---------------------------------------------------------------------------
+
+/** Per-metric quality flag. Persisted as a bare string; this union documents
+ *  the closed vocabulary the FE branches on for empty states. */
+export type RiskStatus =
+  | "ok"
+  | "insufficient_history"
+  | "partial_window"
+  | "benchmark_missing"
+  | "benchmark_insufficient_history"
+  | "invalid_price_chain"
+  | "stale";
+
+export interface RiskWindowMetrics {
+  window_key: string;
+  cagr: string | null;
+  excess_cagr_vs_spy: string | null;
+  max_drawdown: string | null;
+  current_drawdown: string | null;
+  vol_annualized: string | null;
+  beta: string | null;
+  beta_r2: string | null;
+  calmar: string | null;
+  skew: string | null;
+  excess_kurtosis: string | null;
+  var_5: string | null;
+  worst_day: string | null;
+  best_day: string | null;
+  trailing_1m: string | null;
+  trailing_3m: string | null;
+  trailing_6m: string | null;
+  trailing_1y: string | null;
+  excess_trailing_1m: string | null;
+  excess_trailing_3m: string | null;
+  excess_trailing_6m: string | null;
+  excess_trailing_1y: string | null;
+  n_returns: number | null;
+  beta_n_obs: number | null;
+  window_days: number | null;
+  cagr_status: string | null;
+  vol_status: string | null;
+  beta_status: string | null;
+  drawdown_status: string | null;
+  distribution_status: string | null;
+  calmar_status: string | null;
+  trailing_status: string | null;
+  excess_cagr_status: string | null;
+}
+
+export interface DrawdownPoint {
+  date: string;
+  drawdown: string;
+}
+
+export interface RollingVolPoint {
+  date: string;
+  vol: string;
+}
+
+export interface HistogramBin {
+  lower: string;
+  upper: string;
+  count: number;
+}
+
+export interface BetaScatterPoint {
+  spy_return: string;
+  inst_return: string;
+}
+
+export interface RiskSeries {
+  drawdown_curve: DrawdownPoint[];
+  rolling_vol: RollingVolPoint[];
+  return_histogram: HistogramBin[];
+  beta_scatter: BetaScatterPoint[];
+  beta: string | null;
+  beta_r2: string | null;
+}
+
+export interface InstrumentRiskMetrics {
+  symbol: string;
+  as_of_date: string | null;
+  benchmark_symbol: string | null;
+  metric_version: string;
+  windows: RiskWindowMetrics[];
+  series: RiskSeries | null;
+}
+
 // #601 — chart UI range token (the union the chart buttons render).
 // Translates to either a daily range (existing endpoint) or an
 // intraday (interval, count) pair via CHART_RANGE_PLAN. The API

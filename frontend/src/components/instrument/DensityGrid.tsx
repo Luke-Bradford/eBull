@@ -44,7 +44,7 @@
 
 import type { InstrumentSummary, ThesisDetail } from "@/api/types";
 import { activeProviders } from "@/lib/capabilityProviders";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
@@ -107,6 +107,14 @@ export function DensityGrid({
   const ChartPane = (
     <Pane title="Price chart" onExpand={drillToWorkspace} fillHeight>
       <PriceChart symbol={symbol} instrumentId={instrumentId} />
+      <div className="mt-2">
+        <Link
+          to={`/instrument/${encodeURIComponent(symbol)}/risk`}
+          className="text-xs text-blue-600 hover:underline"
+        >
+          Risk &amp; returns →
+        </Link>
+      </div>
     </Pane>
   );
 
