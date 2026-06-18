@@ -28,13 +28,16 @@ from pydantic import BaseModel
 
 from app.db import get_conn
 
+# Single source of truth for the default model version (#1633: v1.2-balanced). The
+# read endpoints must default to the same version the scoring pass writes, or the
+# rankings page shows stale rows of a version no longer produced.
+from app.services.scoring import _DEFAULT_MODEL_VERSION
+
 router = APIRouter(prefix="/rankings", tags=["rankings"])
 
 MAX_PAGE_LIMIT = 200
 
 Stance = Literal["buy", "hold", "watch", "avoid"]
-
-_DEFAULT_MODEL_VERSION = "v1.1-balanced"
 
 # ---------------------------------------------------------------------------
 # Response models

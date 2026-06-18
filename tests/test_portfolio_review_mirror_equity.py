@@ -79,8 +79,11 @@ def test_run_portfolio_review_total_aum_includes_mirror_equity(
     expected_mirror = _load_mirror_equity(conn)
     assert expected_mirror == pytest.approx(1550.0, abs=1e-6)
 
+    # Pin the version to the fixture's scores row (copy_mirrors inserts
+    # v1.1-balanced) so this path-coverage test is decoupled from the default
+    # model-version flip (#1633 → v1.2-balanced).
     with caplog.at_level(logging.INFO, logger="app.services.portfolio"):
-        result = run_portfolio_review(conn)
+        result = run_portfolio_review(conn, model_version="v1.1-balanced")
 
     # Base fixture has empty positions + cash, so expected total_aum
     # is exactly the mirror contribution.

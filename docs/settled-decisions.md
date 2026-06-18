@@ -197,6 +197,13 @@ Use capped context in v1:
 ### Penalty style
 - penalties are additive in v1
 - do not use multiplicative penalties in v1
+- the realized-risk penalty (#1633, v1.2) uses tiered ADDITIVE deductions (high realized
+  vol / deep drawdown), not multiplicative; thresholds are explicit constants calibrated
+  to the universe tail, applied identically every run — NOT cohort-relative normalization
+  (which stays banned)
+- market-beta-vs-SPY is deliberately excluded from the risk penalty (full-population scan:
+  r²≥0.30 for only ~3.4% of instruments → noise for this universe); return-ratio rewards
+  (Calmar) are excluded pending a total-return series (#1635)
 
 ### Score auditability
 - each score row should carry enough detail to explain how it was produced
@@ -205,7 +212,11 @@ Use capped context in v1:
 
 ### Model versioning
 - `model_version` includes the scoring mode
-- default scoring mode is `v1.1-balanced` (v1.1 = TA-enhanced momentum)
+- default scoring mode is `v1.2-balanced` (#1633): v1.1 TA-enhanced momentum + an
+  additive realized-risk penalty (high realized vol / deep drawdown, from risk_v1
+  3y metrics). v1.2 keeps v1.1's family weights and TA momentum unchanged; the only
+  difference is the penalty block, so v1/v1.1 score history is preserved (append-only;
+  rank_delta compares only within a model_version)
 
 ### Rank delta comparison
 - compare rank delta only against the most recent prior run using the same model version / mode

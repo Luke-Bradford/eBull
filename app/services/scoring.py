@@ -39,7 +39,7 @@ from app.services.xbrl_derived_stats import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL_VERSION = "v1.1-balanced"
+_DEFAULT_MODEL_VERSION = "v1.2-balanced"
 
 # ---------------------------------------------------------------------------
 # Weight modes  (must sum to 1.0)
@@ -47,6 +47,8 @@ _DEFAULT_MODEL_VERSION = "v1.1-balanced"
 # v1   — return-only momentum (3 return windows, no TA)
 # v1.1 — TA-enhanced momentum (returns + trend/quality/volatility subcomponents)
 #         Same family weights as v1; the difference is inside _momentum_score.
+# v1.2 — v1.1 momentum/families + an additive realized-risk penalty (#1633).
+#         Same family weights as v1.1; the difference is the penalty block.
 # ---------------------------------------------------------------------------
 
 _WEIGHT_MODES: dict[str, dict[str, float]] = {
@@ -98,6 +100,32 @@ _WEIGHT_MODES: dict[str, dict[str, float]] = {
         "sentiment": 0.10,
         "quality": 0.05,
     },
+    # v1.2 — identical family weights to v1.1 (the realized-risk penalty is
+    # additive and does not touch family weights).
+    "v1.2-balanced": {
+        "quality": 0.25,
+        "value": 0.25,
+        "turnaround": 0.20,
+        "confidence": 0.15,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+    },
+    "v1.2-conservative": {
+        "quality": 0.35,
+        "value": 0.25,
+        "confidence": 0.20,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+        "turnaround": 0.05,
+    },
+    "v1.2-speculative": {
+        "turnaround": 0.30,
+        "value": 0.25,
+        "momentum": 0.15,
+        "confidence": 0.15,
+        "sentiment": 0.10,
+        "quality": 0.05,
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -114,6 +142,37 @@ _PENALTY_LOW_CONFIDENCE: float = 0.10  # thesis confidence_score < 0.4
 _RED_FLAG_PENALTY_THRESHOLD: float = 0.60  # avg red_flag_score above this triggers penalty
 _DILUTION_GROWTH_THRESHOLD: float = 0.20  # 20% share count growth triggers penalty
 _LOW_CONFIDENCE_THRESHOLD: float = 0.40
+
+# ---------------------------------------------------------------------------
+# Realized-risk penalty (#1633, scoring model v1.2 only)
+#
+# Reads risk_v1 realized metrics (instrument_risk_metrics_current, 3y window)
+# and penalises persistently high realized volatility / deep drawdowns. Beta is
+# deliberately NOT used: a full-population scan (2026-06-18, dev) found beta_r2
+# >= 0.30 for only ~3.4% of instruments, so a market-beta-vs-SPY penalty would
+# be statistical noise for this universe (its value is portfolio/sector-relative
+# — #1636 / #1674). Calmar / any return-ratio reward is excluded: it is materially
+# total-return-sensitive and the dividend/TR series is deferred (#1635); vol and
+# drawdown shape are only marginally TR-moved, so a vol/drawdown penalty is
+# accepted on the price-return basis.
+#
+# Thresholds are calibrated to the eToro universe's own tail (median annual vol
+# ~0.56, median max-drawdown ~-0.50 — SPY-like thresholds would flag ~90% and
+# discriminate nothing). They are explicit constants, applied identically every
+# run — NOT a cohort-relative normalization (banned in v1); reviewable at every
+# version bump like the other penalty constants. Comparators are strict.
+# Spec: docs/specs/ranking/2026-06-18-realized-risk-penalty-v1.2.md
+# ---------------------------------------------------------------------------
+
+_RISK_PENALTY_WINDOW: str = "3y"
+
+_VOL_HIGH_THRESHOLD: float = 0.90  # ~ universe p75 of vol_annualized
+_VOL_EXTREME_THRESHOLD: float = 1.45  # ~ universe p90
+_DD_HIGH_THRESHOLD: float = -0.70  # ~ universe p25 (worst quartile)
+_DD_EXTREME_THRESHOLD: float = -0.85  # ~ universe p10 (worst decile)
+
+_PENALTY_RISK_HIGH_TIER: float = 0.04
+_PENALTY_RISK_EXTREME_TIER: float = 0.08
 
 # Thesis is stale if it was created more than this many days ago and no
 # fresher one exists. In practice the thesis service enforces review_frequency
@@ -712,6 +771,77 @@ def _compute_penalties(
     return penalties
 
 
+def _realized_risk_penalties(
+    vol_annualized: float | None,
+    vol_status: str | None,
+    max_drawdown: float | None,
+    drawdown_status: str | None,
+) -> tuple[list[PenaltyRecord], list[str]]:
+    """Realized-risk penalties from risk_v1 3y metrics (#1633, v1.2 only).
+
+    Returns ``(penalties, notes)``. Notes carry the no-metric / non-ok / None
+    explanations (which are NOT penalties) so the caller can fold them into the
+    score explanation, exactly like the family notes.
+
+    Honest absence (prevention-log: a ``None`` / non-``ok`` status must not be
+    folded into a signal bucket): absence is never a risk signal. A missing row,
+    a non-``ok`` status, or a NULL value yields NO penalty and a note — never a
+    deduction. Only an ``ok`` status with a present value can trigger a penalty.
+
+    Comparators are strict (``>`` vol, ``<`` drawdown); a value exactly on a
+    threshold falls to the lower tier (or none). Tiers are additive deductions
+    sized by severity — NOT multiplicative (settled-decision compliant).
+    """
+    penalties: list[PenaltyRecord] = []
+    notes: list[str] = []
+
+    # Volatility
+    if vol_status != "ok":
+        notes.append(f"realized-risk: vol status={vol_status or 'no metrics'}")
+    elif vol_annualized is None:
+        notes.append("realized-risk: vol value missing despite ok status")
+    elif vol_annualized > _VOL_EXTREME_THRESHOLD:
+        penalties.append(
+            PenaltyRecord(
+                name="high_realized_volatility",
+                deduction=_PENALTY_RISK_EXTREME_TIER,
+                reason=(f"3y annualized vol={vol_annualized:.2f} > extreme threshold {_VOL_EXTREME_THRESHOLD}"),
+            )
+        )
+    elif vol_annualized > _VOL_HIGH_THRESHOLD:
+        penalties.append(
+            PenaltyRecord(
+                name="high_realized_volatility",
+                deduction=_PENALTY_RISK_HIGH_TIER,
+                reason=(f"3y annualized vol={vol_annualized:.2f} > high threshold {_VOL_HIGH_THRESHOLD}"),
+            )
+        )
+
+    # Max drawdown (negative fraction; more negative = worse)
+    if drawdown_status != "ok":
+        notes.append(f"realized-risk: drawdown status={drawdown_status or 'no metrics'}")
+    elif max_drawdown is None:
+        notes.append("realized-risk: drawdown value missing despite ok status")
+    elif max_drawdown < _DD_EXTREME_THRESHOLD:
+        penalties.append(
+            PenaltyRecord(
+                name="deep_drawdown",
+                deduction=_PENALTY_RISK_EXTREME_TIER,
+                reason=(f"3y max drawdown={max_drawdown:.2f} < extreme threshold {_DD_EXTREME_THRESHOLD}"),
+            )
+        )
+    elif max_drawdown < _DD_HIGH_THRESHOLD:
+        penalties.append(
+            PenaltyRecord(
+                name="deep_drawdown",
+                deduction=_PENALTY_RISK_HIGH_TIER,
+                reason=(f"3y max drawdown={max_drawdown:.2f} < high threshold {_DD_HIGH_THRESHOLD}"),
+            )
+        )
+
+    return penalties, notes
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -847,6 +977,36 @@ def _load_instrument_data(
         except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
             pass  # savepoint already rolled back; prior queries intact
 
+        # Realized-risk metrics (#1633, risk_v1 3y window). Read-only enrichment;
+        # consumed only by v1.2+ models. RISK_METRICS_VERSION is imported lazily
+        # to avoid the risk_metrics → scheduler → refresh_cascade module-scope
+        # import chain (mirrors #1632 thesis ingestion). Own savepoint: the table
+        # may be absent in a partial test DB → degrade to None (no penalty).
+        risk_row: dict[str, Any] | None = None
+        try:
+            from app.services.risk_metrics import RISK_METRICS_VERSION
+
+            with conn.transaction():
+                cur.execute(
+                    """
+                    SELECT vol_annualized, vol_status,
+                           max_drawdown, drawdown_status
+                    FROM instrument_risk_metrics_current
+                    WHERE instrument_id = %(id)s
+                      AND metric_version = %(mv)s
+                      AND window_key = %(win)s
+                    """,
+                    {"id": instrument_id, "mv": RISK_METRICS_VERSION, "win": _RISK_PENALTY_WINDOW},
+                )
+                risk_row = cur.fetchone()
+        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+            # Catches BOTH (PEP 758 bare-tuple except, valid on 3.14; ruff format
+            # normalises away the parens). Mirrors the valuation savepoint above:
+            # a partial schema where the table exists but a selected column is
+            # absent raises UndefinedColumn, which must also degrade to
+            # risk_row = None (no penalty), not propagate.
+            pass  # savepoint already rolled back; prior queries intact
+
     # #1664: for a curated dual-class issuer the view NULLs the shares-distorted
     # valuation columns (combined-shares × one-class-price is structurally wrong;
     # the correct total-company cap cannot be built in SQL). Overlay the #1662
@@ -872,6 +1032,7 @@ def _load_instrument_data(
         # rf_row is therefore never None; avg_red_flag may be None if no filings matched.
         "avg_red_flag_score": _to_float(rf_row["avg_red_flag"]) if rf_row is not None else None,
         "valuation_row": valuation_row,
+        "risk_row": risk_row,
     }
 
 
@@ -1007,7 +1168,7 @@ def compute_score(
     # Only v1.1+ models use TA-enhanced momentum; v1 models preserve
     # the original return-only formula for score history compatibility.
     ta_indicators: dict[str, float | None] | None = None
-    if price_row is not None and model_version.startswith("v1.1"):
+    if price_row is not None and model_version.startswith(("v1.1", "v1.2")):
         ta_keys = [
             "sma_200",
             "macd_histogram",
@@ -1078,6 +1239,21 @@ def compute_score(
         shares_outstanding_prior=shares_prior,
         now=now,
     )
+
+    # Realized-risk penalty — v1.2+ only (#1633). v1 / v1.1 score history is
+    # unchanged. Absence (no row / non-ok status / NULL) yields a note, never a
+    # deduction (handled inside _realized_risk_penalties).
+    if model_version.startswith("v1.2"):
+        risk_row = data.get("risk_row")
+        risk_penalties, risk_notes = _realized_risk_penalties(
+            vol_annualized=_to_float(risk_row["vol_annualized"]) if risk_row else None,
+            vol_status=risk_row["vol_status"] if risk_row else None,
+            max_drawdown=_to_float(risk_row["max_drawdown"]) if risk_row else None,
+            drawdown_status=risk_row["drawdown_status"] if risk_row else None,
+        )
+        penalties = penalties + risk_penalties
+        explanation_parts.extend(risk_notes)
+
     total_penalty = sum(p.deduction for p in penalties)
 
     if penalties:
