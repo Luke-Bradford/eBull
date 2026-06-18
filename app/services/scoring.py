@@ -1003,6 +1003,8 @@ def _load_instrument_data(
             # Mirror the valuation savepoint above: a partial schema where the
             # table exists but a selected column is absent raises UndefinedColumn,
             # which must also degrade to risk_row = None (no penalty), not propagate.
+            # Parenthesised tuple form (vs the bare-comma sibling above) is the
+            # unambiguous spelling — same behaviour, but clear to readers/scanners.
             pass  # savepoint already rolled back; prior queries intact
 
     # #1664: for a curated dual-class issuer the view NULLs the shares-distorted
