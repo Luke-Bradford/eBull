@@ -14,6 +14,13 @@ export default defineConfig({
   // single-operator dashboard on a current browser — raising the
   // build target is free; lowering it back requires esbuild <0.28.
   build: { target: "es2022" },
+  // Dev dep pre-bundling (optimizeDeps) runs esbuild too, and it does NOT
+  // inherit build.target — left unset it falls back to vite 6's legacy default
+  // (chrome87/safari14/es2020). esbuild >=0.28 (the #1606 GHSA pin) dropped the
+  // down-transforms for those targets, so `vite` (dev) crashes optimizing deps
+  // that ship modern syntax (e.g. @remix-run/router destructuring). Mirror the
+  // build target so dev and build agree.
+  optimizeDeps: { esbuildOptions: { target: "es2022" } },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
