@@ -9,7 +9,9 @@ dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "pydantic>=2.8.0",
-  "pydantic-settings>=2.4.0",
+  # pydantic-settings floor bumped for GHSA-4xgf-cpjx-pc3j (fixed 2.14.2),
+  # surfaced by pip-audit on PR #1682 CI (ambient — not introduced by this PR).
+  "pydantic-settings>=2.14.2",
   "psycopg[binary]>=3.2.0",
   "psycopg-pool>=3.2.0",
   "httpx>=0.27.0",
