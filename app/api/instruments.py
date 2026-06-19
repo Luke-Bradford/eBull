@@ -175,6 +175,14 @@ class InstrumentIdentity(BaseModel):
     country: str | None
     currency: str | None
     market_cap: Decimal | None
+    # #1665: per-class FLOAT value of THIS instrument's own share class — its
+    # FSDS shares × its price (GOOGL Class A ≈ $2.15T), a SEPARATE stat from
+    # ``market_cap`` (the whole company, ≈ $4.45T, identical across siblings).
+    # Non-null ONLY for a curated dual-class issuer where this instrument is a
+    # priced per-class leg; null for single-class issuers (``market_cap`` already
+    # IS the sole class value) and where no clean per-class leg exists.
+    # Required-nullable (no default) to mirror the TS ``string | null`` exactly.
+    class_market_value: Decimal | None
     # #819: when set, this instrument is an operational duplicate
     # (e.g. ``AAPL.RTH``) of the named canonical symbol
     # (``AAPL``). The frontend should redirect to the canonical
@@ -3429,6 +3437,7 @@ def get_instrument_summary(
         country=row["country"],  # type: ignore[arg-type]
         currency=row["currency"],  # type: ignore[arg-type]
         market_cap=None,
+        class_market_value=None,
         canonical_symbol=row.get("canonical_symbol"),  # type: ignore[arg-type]
     )
 
@@ -3485,11 +3494,21 @@ def get_instrument_summary(
         else:
             single_cap = compute_market_cap(conn, instrument_id=instrument_id_int)
             computed_cap_value = single_cap.value if single_cap is not None else None
+        # #1665: per-class float value of THIS instrument's own share class.
+        # Travels on the same resolution (no extra query); set only on the
+        # total_company basis, so it is null for single-class issuers.
+        class_market_value: Decimal | None = cap_resolution.class_market_value
     except Exception:
         logger.warning("compute_market_cap failed", exc_info=True)
         computed_cap_value = None
+        class_market_value = None
+    identity_update: dict[str, Decimal | None] = {}
     if computed_cap_value is not None:
-        identity = identity.model_copy(update={"market_cap": computed_cap_value})
+        identity_update["market_cap"] = computed_cap_value
+    if class_market_value is not None:
+        identity_update["class_market_value"] = class_market_value
+    if identity_update:
+        identity = identity.model_copy(update=identity_update)
 
     # Dividend yield: SEC dividend summary (#426). Empty when the
     # instrument has never paid a dividend; key stats path falls

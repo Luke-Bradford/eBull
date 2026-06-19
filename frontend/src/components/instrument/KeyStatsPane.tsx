@@ -75,6 +75,14 @@ function buildRows(summary: InstrumentSummary): Row[] {
   const fs = stats.field_source ?? {};
   const candidates: Array<Row | null> = [
     makeRow(formatMarketCap(summary.identity.market_cap), "Market cap", undefined),
+    // #1665: per-class FLOAT value (this share class's shares × price), a separate
+    // stat from total-company "Market cap". Labelled by the viewed symbol — the
+    // ticker IS the class. Null (row absent) for single-class issuers.
+    makeRow(
+      formatMarketCap(summary.identity.class_market_value),
+      `${summary.identity.symbol} market value`,
+      undefined,
+    ),
     makeRow(formatDecimal(stats.pe_ratio), "P/E ratio", fs["pe_ratio"]),
     makeRow(formatDecimal(stats.pb_ratio), "P/B ratio", fs["pb_ratio"]),
     makeRow(formatDecimal(stats.dividend_yield, { percent: true }), "Dividend yield", fs["dividend_yield"]),

@@ -189,6 +189,9 @@ class TestResolveMarketCapBasis:
         res = resolve_market_cap_basis(ebull_test_conn, instrument_id=iid)
         assert res.basis == "not_multiclass"
         assert res.total is None
+        # No per-class float stat for a single-class issuer — market cap already
+        # IS the sole class value (#1665).
+        assert res.class_market_value is None
 
     def test_dual_class_total_company_cap(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         # Two siblings sharing a CIK, each with a curated FSDS class row at a fresh
@@ -215,6 +218,12 @@ class TestResolveMarketCapBasis:
         # Identical regardless of which sibling the page renders.
         assert res_c.basis == "total_company" and res_c.total is not None
         assert res_c.total.value == res_a.total.value
+        # #1665: per-class float = the VIEWED sibling's OWN leg (shares × price),
+        # a separate stat from the (identical) total — and strictly less than it.
+        assert res_a.class_market_value == Decimal("6000")  # A: 600 × 10
+        assert res_c.class_market_value == Decimal("6000")  # C: 300 × 20 (per-sibling, not the total)
+        cmv_a = res_a.class_market_value
+        assert cmv_a is not None and cmv_a < res_a.total.value
 
     def test_dual_class_unpriced_sibling_suppressed(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         # Curated dual-class but one class has no quote → fail closed (suppress),
@@ -232,3 +241,5 @@ class TestResolveMarketCapBasis:
         res = resolve_market_cap_basis(ebull_test_conn, instrument_id=a)
         assert res.basis == "multiclass_unavailable"
         assert res.total is None
+        # No clean total → no per-class float either (#1665).
+        assert res.class_market_value is None
