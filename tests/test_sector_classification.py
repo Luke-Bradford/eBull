@@ -7,12 +7,14 @@ the override-before-major-group ordering, and the SPDR/SPDR_SECTORS invariants.
 
 from __future__ import annotations
 
+import psycopg
 import pytest
 
 from app.services.sector_classification import (
     _CROSSWALK,
     SPDR_SECTORS,
     resolve_sector_spdr,
+    sector_spdr_case_sql,
 )
 from app.workers.scheduler import BENCHMARK_SYMBOLS
 
@@ -104,3 +106,47 @@ class TestInvariants:
         out = resolve_sector_spdr("3841")
         assert out is not None
         assert out.gics_sector == SPDR_SECTORS[out.spdr_symbol] == "Health Care"
+
+
+class TestSqlCaseParity:
+    """The generated SQL CASE (#1675 sector_spdr filter) must resolve a SIC
+    identically to the Python ``resolve_sector_spdr``. Executed against real
+    Postgres — a Python-only re-eval could pass while the emitted SQL was
+    syntactically broken, mis-ordered, or cast/guarded wrong (Codex ckpt-1)."""
+
+    def test_full_domain_parity(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # Sweep every SIC 0..9999 through the emitted CASE (column aliased p.sic
+        # to match the hardcoded reference) and compare to the Python resolver.
+        case = sector_spdr_case_sql()
+        sql = (
+            f"SELECT p.sic, ({case}) AS spdr "  # noqa: S608 — module-constant fragment
+            "FROM (SELECT g::text AS sic FROM generate_series(0, 9999) g) p"
+        )
+        rows = ebull_test_conn.execute(sql).fetchall()  # type: ignore[arg-type]  # SQL built from module-constant fragment
+        assert len(rows) == 10_000
+        mismatches = [
+            (sic, sql_spdr, resolve_sector_spdr(sic))
+            for sic, sql_spdr in rows
+            if sql_spdr != (lambda r: r.spdr_symbol if r else None)(resolve_sector_spdr(sic))
+        ]
+        assert mismatches == []
+
+    @pytest.mark.parametrize(
+        "sic",
+        ["0100", " 0100 ", "abc", "", "05", "6021", "3571", "9999", "0"],
+    )
+    def test_edge_case_parity(self, ebull_test_conn: psycopg.Connection[tuple], sic: str) -> None:
+        # Leading zeros, whitespace, non-numeric, empty, out-of-range — the SQL
+        # guard + cast must agree with Python over the realistic SIC domain.
+        sql = f"SELECT ({sector_spdr_case_sql()}) FROM (VALUES (%s)) AS p(sic)"  # noqa: S608 — module-constant fragment
+        row = ebull_test_conn.execute(sql, (sic,)).fetchone()  # type: ignore[arg-type]
+        assert row is not None
+        py = resolve_sector_spdr(sic)
+        assert row[0] == (py.spdr_symbol if py is not None else None)
+
+    def test_null_sic_parity(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        sql = f"SELECT ({sector_spdr_case_sql()}) FROM (VALUES (CAST(NULL AS text))) AS p(sic)"  # noqa: S608
+        row = ebull_test_conn.execute(sql).fetchone()  # type: ignore[arg-type]
+        assert row is not None
+        assert row[0] is None
+        assert resolve_sector_spdr(None) is None

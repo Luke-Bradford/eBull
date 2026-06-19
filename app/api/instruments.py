@@ -69,7 +69,7 @@ from app.services.risk_metrics import (
     ols_beta,
     simple_returns,
 )
-from app.services.sector_classification import resolve_sector_spdr
+from app.services.sector_classification import resolve_sector_spdr, sector_spdr_case_sql
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,13 @@ class InstrumentListItem(BaseModel):
     exchange: str | None
     currency: str | None
     sector: str | None
+    # #1675: real GICS sector + its sector-SPDR, resolved on-read from the SEC
+    # SIC (same crosswalk as the identity payload). NULL for ETFs / non-filers /
+    # unmapped SIC — never a guessed sector. The opaque ``sector`` 1-9 code above
+    # is retained for back-compat but is no longer the operator-facing grouping
+    # dimension. Required-nullable to mirror the TS ``string | null`` exactly.
+    gics_sector: str | None
+    sector_spdr: str | None
     is_tradable: bool
     coverage_tier: int | None
     latest_quote: QuoteSnapshot | None
@@ -413,6 +420,7 @@ def list_instruments(
     conn: psycopg.Connection[object] = Depends(get_conn),
     search: str | None = Query(default=None, max_length=100),
     sector: str | None = Query(default=None),
+    sector_spdr: str | None = Query(default=None),
     coverage_tier: int | None = Query(default=None, ge=1, le=3),
     exchange: str | None = Query(default=None),
     has_dividend: bool | None = Query(default=None),
@@ -424,7 +432,11 @@ def list_instruments(
     Filters:
       - search: prefix match on symbol or case-insensitive substring on
         instrument_display_name (company_name)
-      - sector: exact match on instruments.sector
+      - sector_spdr: exact match on the real GICS sector-SPDR resolved from the
+        SEC SIC (#1675; e.g. ``XLK``). The operator-facing sector dimension.
+      - sector: DEPRECATED — exact match on the opaque ``instruments.sector``
+        1-9 code (no GICS meaning; SPY/XLF/JPM all share ``4``). Retained for
+        back-compat; use ``sector_spdr`` instead.
       - coverage_tier: exact match (1/2/3); untiered instruments excluded
       - exchange: exact match on instruments.exchange
       - has_dividend: True matches instruments with a positive TTM dividend
@@ -447,6 +459,12 @@ def list_instruments(
     if sector is not None:
         where_clauses.append("i.sector = %(sector)s")
         filter_params["sector"] = sector
+    if sector_spdr is not None:
+        # SQL-side resolve (faithful mirror of resolve_sector_spdr) so the
+        # filter paginates correctly. The items query already joins p; the
+        # COUNT join is added below when this filter is active.
+        where_clauses.append(f"({sector_spdr_case_sql()}) = %(sector_spdr)s")
+        filter_params["sector_spdr"] = sector_spdr
     if coverage_tier is not None:
         where_clauses.append("c.coverage_tier = %(coverage_tier)s")
         filter_params["coverage_tier"] = coverage_tier
@@ -470,8 +488,11 @@ def list_instruments(
     count_dividend_join = (
         "LEFT JOIN instrument_dividend_summary ds USING (instrument_id)" if count_needs_dividend else ""
     )
+    # The sector_spdr filter's WHERE references p.sic, so the COUNT must join the
+    # SEC profile when that filter is active (the items query always joins it).
+    count_sec_join = "LEFT JOIN instrument_sec_profile p USING (instrument_id)" if sector_spdr is not None else ""
     count_sql = (  # noqa: S608  — hardcoded fragments only
-        f"SELECT COUNT(*) AS cnt FROM instruments i {count_join} {count_dividend_join}{where_sql}"
+        f"SELECT COUNT(*) AS cnt FROM instruments i {count_join} {count_dividend_join} {count_sec_join}{where_sql}"
     )
 
     # -- Items query -------------------------------------------------------
@@ -480,13 +501,17 @@ def list_instruments(
     # unrelated query (e.g. a plain ``/instruments`` call) is pure overhead.
     items_dividend_join = count_dividend_join
     items_params: dict[str, object] = {**filter_params, "limit": limit, "offset": offset}
+    # Always join the SEC profile + select p.sic so every row can resolve its
+    # real GICS sector for display (#1675), independent of whether the
+    # sector_spdr filter is active. PK join — trivial cost.
     items_sql = f"""SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
-               i.currency, i.sector, i.is_tradable,
+               i.currency, i.sector, p.sic, i.is_tradable,
                c.coverage_tier,
                q.bid, q.ask, q.last, q.spread_pct, q.quoted_at
         FROM instruments i
         LEFT JOIN quotes q USING (instrument_id)
         LEFT JOIN coverage c USING (instrument_id)
+        LEFT JOIN instrument_sec_profile p USING (instrument_id)
         {items_dividend_join}
         {where_sql}
         ORDER BY i.symbol, i.instrument_id
@@ -500,20 +525,24 @@ def list_instruments(
         cur.execute(items_sql, items_params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
         rows = cur.fetchall()
 
-    items = [
-        InstrumentListItem(
-            instrument_id=r["instrument_id"],  # type: ignore[arg-type]
-            symbol=r["symbol"],  # type: ignore[arg-type]
-            company_name=r["company_name"],  # type: ignore[arg-type]
-            exchange=r["exchange"],  # type: ignore[arg-type]
-            currency=r["currency"],  # type: ignore[arg-type]
-            sector=r["sector"],  # type: ignore[arg-type]
-            is_tradable=r["is_tradable"],  # type: ignore[arg-type]
-            coverage_tier=r["coverage_tier"],  # type: ignore[arg-type]
-            latest_quote=_parse_quote(r),
+    items: list[InstrumentListItem] = []
+    for r in rows:
+        sc = resolve_sector_spdr(r.get("sic"))  # type: ignore[arg-type]
+        items.append(
+            InstrumentListItem(
+                instrument_id=r["instrument_id"],  # type: ignore[arg-type]
+                symbol=r["symbol"],  # type: ignore[arg-type]
+                company_name=r["company_name"],  # type: ignore[arg-type]
+                exchange=r["exchange"],  # type: ignore[arg-type]
+                currency=r["currency"],  # type: ignore[arg-type]
+                sector=r["sector"],  # type: ignore[arg-type]
+                gics_sector=sc.gics_sector if sc is not None else None,
+                sector_spdr=sc.spdr_symbol if sc is not None else None,
+                is_tradable=r["is_tradable"],  # type: ignore[arg-type]
+                coverage_tier=r["coverage_tier"],  # type: ignore[arg-type]
+                latest_quote=_parse_quote(r),
+            )
         )
-        for r in rows
-    ]
 
     return InstrumentListResponse(items=items, total=total, offset=offset, limit=limit)
 

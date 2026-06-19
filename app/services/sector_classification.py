@@ -160,3 +160,33 @@ def resolve_sector_spdr(sic: str | int | None) -> SectorClassification | None:
         if lo <= code <= hi:
             return SectorClassification(gics_sector=SPDR_SECTORS[spdr], spdr_symbol=spdr)
     return None
+
+
+def sector_spdr_case_sql() -> str:
+    """SQL ``CASE`` that resolves ``instrument_sec_profile.sic`` (aliased ``p.sic``)
+    to its sector-SPDR symbol, or ``NULL`` when unmappable — the SQL-side mirror of
+    :func:`resolve_sector_spdr` used by the ``sector_spdr`` filter (#1675).
+
+    Generated from ``_CROSSWALK`` in first-match order so the SQL projection cannot
+    drift from the Python resolver (a DB-backed parity test asserts equivalence over
+    the full SIC domain). The outer regex guard fires the ``::int`` cast only for
+    digit strings (SEC SIC is a bare 4-digit code; leading zeros parse fine, e.g.
+    ``'0100'::int = 100`` matching Python ``int('0100')``).
+
+    Safe to inline into SQL: embeds only module constants — the range bounds are
+    ``int``-formatted and every SPDR literal is asserted ∈ :data:`SPDR_SECTORS`. No
+    caller input. Callers MUST alias ``instrument_sec_profile`` AS ``p``.
+    """
+    branches: list[str] = []
+    for lo, hi, spdr in _CROSSWALK:
+        assert spdr in SPDR_SECTORS, f"crosswalk SPDR {spdr!r} not in SPDR_SECTORS"
+        branches.append(f"WHEN (btrim(p.sic))::int BETWEEN {int(lo)} AND {int(hi)} THEN '{spdr}'")
+    inner = "\n        ".join(branches)
+    return (
+        "CASE WHEN btrim(p.sic) ~ '^[0-9]+$' THEN (\n"
+        "      CASE\n"
+        f"        {inner}\n"
+        "        ELSE NULL\n"
+        "      END\n"
+        "    ) ELSE NULL END"
+    )

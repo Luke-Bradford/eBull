@@ -731,7 +731,8 @@ function InstrumentPageBody({
           <div className="lg:col-span-4">
             <RightRail
               instrumentId={summary.instrument_id}
-              sector={summary.identity.sector}
+              sectorSpdr={summary.identity.sector_spdr}
+              sectorLabel={summary.identity.gics_sector}
               currentSymbol={summary.identity.symbol}
               filingsActive={hasActiveCapability(summary, "filings")}
             />

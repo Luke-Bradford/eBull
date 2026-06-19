@@ -14,7 +14,9 @@ import type { RankingsListResponse } from "@/api/types";
  */
 export interface RankingsQuery {
   coverage_tier: number | null;
-  sector: string | null;
+  // #1675: real GICS sector-SPDR symbol (e.g. "XLF"); replaces the opaque
+  // instruments.sector code as the peer-grouping dimension.
+  sector_spdr: string | null;
   stance: "buy" | "hold" | "watch" | "avoid" | null;
 }
 
@@ -33,8 +35,8 @@ export async function fetchRankings(
   if (query.coverage_tier !== null) {
     params.set("coverage_tier", String(query.coverage_tier));
   }
-  if (query.sector !== null) {
-    params.set("sector", query.sector);
+  if (query.sector_spdr !== null) {
+    params.set("sector_spdr", query.sector_spdr);
   }
   if (query.stance !== null) {
     params.set("stance", query.stance);

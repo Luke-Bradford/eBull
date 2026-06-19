@@ -25,7 +25,7 @@ import { RankDeltaCell } from "@/components/rankings/RankDeltaCell";
 type SortKey =
   | "rank"
   | "symbol"
-  | "sector"
+  | "gics_sector"
   | "coverage_tier"
   | "total_score"
   | "quality_score"
@@ -49,7 +49,7 @@ const COLUMNS: ReadonlyArray<ColumnDef> = [
   { key: "rank", label: "Rank", align: "right", defaultDir: "asc" },
   { key: "rank_delta", label: "Δ", align: "right", defaultDir: "asc" },
   { key: "symbol", label: "Symbol", align: "left", defaultDir: "asc" },
-  { key: "sector", label: "Sector", align: "left", defaultDir: "asc" },
+  { key: "gics_sector", label: "Sector", align: "left", defaultDir: "asc" },
   { key: "coverage_tier", label: "Tier", align: "right", defaultDir: "asc" },
   { key: "total_score", label: "Total", align: "right", defaultDir: "desc" },
   { key: "quality_score", label: "Quality", align: "right", defaultDir: "desc" },
@@ -206,7 +206,7 @@ function RankingRow({ item }: { item: RankingItem }) {
           {item.symbol}
         </Link>
       </td>
-      <td className="px-2 py-2 text-slate-700">{item.sector ?? "—"}</td>
+      <td className="px-2 py-2 text-slate-700">{item.gics_sector ?? "—"}</td>
       <td className="px-2 py-2 text-right tabular-nums">
         {item.coverage_tier === null ? "—" : item.coverage_tier}
       </td>

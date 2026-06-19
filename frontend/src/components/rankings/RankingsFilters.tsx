@@ -1,11 +1,12 @@
 import type { RankingsQuery } from "@/api/rankings";
+import { SECTOR_OPTIONS } from "@/lib/sectors";
 
 /**
  * Filter bar for the rankings page.
  *
  * Server-side filters (sent to /rankings as query params):
  *   - coverage_tier (1 / 2 / 3)
- *   - sector
+ *   - sector_spdr (real GICS sector, #1675)
  *   - stance (buy / hold / watch / avoid)
  *
  * Client-side filter (applied to the in-memory result set):
@@ -13,10 +14,9 @@ import type { RankingsQuery } from "@/api/rankings";
  *
  * Sort is also client-side and lives on the table component, not here.
  *
- * Sector options are derived from rows the page has *seen so far*.  Once
- * the user selects a sector the API only returns rows for that sector, so
- * a naive "derive from current items" would shrink the dropdown to a
- * single option.  The page passes a monotonically-growing set instead.
+ * Sector options are the fixed 11 GICS sectors (#1675, SECTOR_OPTIONS) — value
+ * is the SPDR symbol sent to the API, label is the GICS name. No longer derived
+ * from data: the opaque 1-9 code it replaced had no operator meaning.
  */
 
 export const STANCE_OPTIONS = ["buy", "hold", "watch", "avoid"] as const;
@@ -29,7 +29,6 @@ export interface RankingsFiltersProps {
   onQueryChange: (next: RankingsQuery) => void;
   scoreThreshold: number | null;
   onScoreThresholdChange: (next: number | null) => void;
-  knownSectors: ReadonlyArray<string>;
   onClearAll: () => void;
   filtersDirty: boolean;
 }
@@ -39,7 +38,6 @@ export function RankingsFilters({
   onQueryChange,
   scoreThreshold,
   onScoreThresholdChange,
-  knownSectors,
   onClearAll,
   filtersDirty,
 }: RankingsFiltersProps) {
@@ -75,16 +73,16 @@ export function RankingsFilters({
         <select
           id="rk-sector"
           className={fieldClass}
-          value={query.sector ?? ""}
+          value={query.sector_spdr ?? ""}
           onChange={(e) => {
             const v = e.target.value;
-            onQueryChange({ ...query, sector: v === "" ? null : v });
+            onQueryChange({ ...query, sector_spdr: v === "" ? null : v });
           }}
         >
           <option value="">All</option>
-          {knownSectors.map((s) => (
-            <option key={s} value={s}>
-              {s}
+          {SECTOR_OPTIONS.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
             </option>
           ))}
         </select>

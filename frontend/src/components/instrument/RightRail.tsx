@@ -29,7 +29,11 @@ import { useAsync } from "@/lib/useAsync";
 
 export interface RightRailProps {
   instrumentId: number;
-  sector: string | null;
+  /** #1675: real GICS sector-SPDR symbol (e.g. "XLK") — the peer-grouping
+   *  filter value. null for ETFs / non-filers / unmapped SIC. */
+  sectorSpdr: string | null;
+  /** GICS sector name for the section heading (e.g. "Information Technology"). */
+  sectorLabel: string | null;
   currentSymbol: string;
   /** True when at least one filings provider has rows for this
    *  instrument — derived upstream from
@@ -42,21 +46,23 @@ export interface RightRailProps {
 
 export function RightRail({
   instrumentId,
-  sector,
+  sectorSpdr,
+  sectorLabel,
   currentSymbol,
   filingsActive,
 }: RightRailProps): JSX.Element {
   return (
     <aside className="space-y-4">
       {filingsActive ? <RecentFilings instrumentId={instrumentId} /> : null}
-      {/* `key={sector}` forces a full remount when the sector changes
+      {/* `key={sectorSpdr}` forces a full remount when the sector changes
           so `useAsync` re-initialises with `loading=true, data=null`
           on the first render for the new sector — otherwise one frame
           would show the prior sector's peers under the new sector's
           heading (Codex slice-2 round-2 stale-data finding). */}
       <PeerSnapshot
-        key={sector ?? "__no_sector__"}
-        sector={sector}
+        key={sectorSpdr ?? "__no_sector__"}
+        sectorSpdr={sectorSpdr}
+        sectorLabel={sectorLabel}
         currentSymbol={currentSymbol}
       />
       <CopyExposure instrumentId={instrumentId} />
@@ -121,26 +127,28 @@ function FilingRow({ f }: { f: FilingItem }) {
 // ---------------------------------------------------------------------------
 
 function PeerSnapshot({
-  sector,
+  sectorSpdr,
+  sectorLabel,
   currentSymbol,
 }: {
-  sector: string | null;
+  sectorSpdr: string | null;
+  sectorLabel: string | null;
   currentSymbol: string;
 }) {
-  // `sector=null` short-circuits the fetch to avoid a pointless 200-row
+  // `sectorSpdr=null` short-circuits the fetch to avoid a pointless 200-row
   // rankings call on unknown-sector instruments.
   const { data, error, loading, refetch } = useAsync(
     async () => {
-      if (sector === null) return null;
+      if (sectorSpdr === null) return null;
       return await fetchRankings(
-        { coverage_tier: null, sector, stance: null },
+        { coverage_tier: null, sector_spdr: sectorSpdr, stance: null },
         6, // top 5 + room to filter out the current instrument
       );
     },
-    [sector],
+    [sectorSpdr],
   );
 
-  if (sector === null) {
+  if (sectorSpdr === null) {
     return (
       <Section title="Peer snapshot">
         <div className="text-xs text-slate-500">
@@ -161,7 +169,7 @@ function PeerSnapshot({
       : data.items.filter((r) => r.symbol !== currentSymbol).slice(0, 5);
 
   return (
-    <Section title={`Peer snapshot · ${sector}`}>
+    <Section title={`Peer snapshot · ${sectorLabel ?? sectorSpdr}`}>
       {loading && <SectionSkeleton rows={3} />}
       {error !== null && <SectionError onRetry={refetch} />}
       {!loading && error === null && peers !== null && peers.length === 0 && (

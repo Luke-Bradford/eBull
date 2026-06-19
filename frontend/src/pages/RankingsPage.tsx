@@ -16,9 +16,9 @@ import type { RankingItem, RankingsListResponse } from "@/api/types";
  * this page does NOT call /instruments — calling it would be a redundant
  * round-trip for data already in hand.
  *
- * Server-side filters: coverage_tier, sector, stance — included in the
- * query string and therefore in the useAsync deps so a refetch fires when
- * they change.
+ * Server-side filters: coverage_tier, sector_spdr (real GICS sector, #1675),
+ * stance — included in the query string and therefore in the useAsync deps so
+ * a refetch fires when they change.
  *
  * Client-side filters / controls: minimum total_score, column sort. These
  * never trigger a refetch.
@@ -32,7 +32,7 @@ import type { RankingItem, RankingsListResponse } from "@/api/types";
 export function RankingsPage() {
   const [query, setQuery] = useState<RankingsQuery>({
     coverage_tier: null,
-    sector: null,
+    sector_spdr: null,
     stance: null,
   });
   const [scoreThreshold, setScoreThreshold] = useState<number | null>(null);
@@ -46,42 +46,15 @@ export function RankingsPage() {
     return () => clearTimeout(timer);
   }, [searchInput]);
 
-  // Sector dropdown options must be derived from data the page has seen,
-  // not from the *current* response. Once a sector filter is applied the
-  // response only contains rows for that sector, which would otherwise
-  // collapse the dropdown to one option. Cache grows monotonically.
-  const [knownSectors, setKnownSectors] = useState<ReadonlyArray<string>>([]);
-
   // useAsync captures fn via a ref — fresh arrow per render is fine.
   const rankings = useAsync(
     () => fetchRankings(query),
-    [query.coverage_tier, query.sector, query.stance],
+    [query.coverage_tier, query.sector_spdr, query.stance],
   );
-
-  // Functional setState reads the freshest `prev` snapshot from React,
-  // not the closure-captured `knownSectors` from the render in which this
-  // effect was registered. Without this, two rapid data updates landing
-  // in the same tick could re-seed from a stale snapshot and silently
-  // drop sectors added in the first update.
-  useEffect(() => {
-    const data = rankings.data;
-    if (data === null) return;
-    setKnownSectors((prev) => {
-      const next = new Set(prev);
-      let added = false;
-      for (const item of data.items) {
-        if (item.sector !== null && !next.has(item.sector)) {
-          next.add(item.sector);
-          added = true;
-        }
-      }
-      return added ? Array.from(next).sort() : prev;
-    });
-  }, [rankings.data]);
 
   const filtersDirty =
     query.coverage_tier !== null ||
-    query.sector !== null ||
+    query.sector_spdr !== null ||
     query.stance !== null ||
     scoreThreshold !== null ||
     // Use the un-debounced searchInput so Clear All shows immediately
@@ -115,7 +88,7 @@ export function RankingsPage() {
   }, [rankings.data]);
 
   const onClearAll = () => {
-    setQuery({ coverage_tier: null, sector: null, stance: null });
+    setQuery({ coverage_tier: null, sector_spdr: null, stance: null });
     setScoreThreshold(null);
     setSearchInput("");
     setSearch("");
@@ -177,7 +150,6 @@ export function RankingsPage() {
           onQueryChange={setQuery}
           scoreThreshold={scoreThreshold}
           onScoreThresholdChange={setScoreThreshold}
-          knownSectors={knownSectors}
           onClearAll={onClearAll}
           filtersDirty={filtersDirty}
         />
