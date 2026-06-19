@@ -371,7 +371,9 @@ class TestEveryInvokerJobResolvesASource:
             "daily_financial_facts",
             "daily_tax_reconciliation",
             "sec_def14a_ingest",
-            "sec_insider_transactions_ingest",
+            # sec_insider_transactions_ingest RE-INSTATED to SCHEDULED_JOBS
+            # 2026-06-20 — now resolves the sec_insider_ingest lane (no longer
+            # an unresolvable invoker-only orphan).
         }
     )
 

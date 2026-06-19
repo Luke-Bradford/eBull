@@ -25,7 +25,9 @@ Per-(subject, source) row in `data_freshness_index` keyed on `subject_type='issu
 Steady-state writes after that are 100% manifest-worker driven via the Layer 1/2/3 discovery → `_parse_form4` path. Wall-clock for stage 11: ~10 min cleanly per `project_1233_run2_measurement.md`.
 
 ## 5. Steady-state path
-**No SCHEDULED_JOBS cron for Form 4 hourly ingest** — retired post-#1155 (`scheduler.py:665-671`). Discovery flows: Atom fast-lane (every 5 min) + daily-index reconcile (daily) → `sec_manifest_worker` → `manifest_parsers/insider_345.py::_parse_form4` (one write-path per accession).
+**Two parsers run for Form 4** (2026-06-20):
+1. `sec_insider_transactions_ingest` — **newest-first** universe ingester, RE-INSTATED to `SCHEDULED_JOBS` (own `sec_insider_ingest` lane, hourly @:15). This is the RECENT keeper: it reads `filing_events` newest-first (correct `form4.xml` URLs) → `insider_transactions`/`insider_filings`/`insider_filers`. #1155 retired it on the premise the manifest worker keeps recent fresh; that was FALSIFIED — the worker drains `filed_at ASC` (oldest-first) against a ~1.46M pending backlog so recent Form 4 starved (eBay insider sales ~3mo stale). Spec: `docs/specs/ingest/2026-06-20-insider-recent-first-drain.md`.
+2. Manifest-worker path: Atom fast-lane (every 5 min) + daily-index reconcile (daily) → `sec_manifest_worker` (oldest-first) → `manifest_parsers/insider_345.py::_parse_form4`. Carries discovery + the historical tail; write-safe concurrently with (1) via the per-instrument advisory lock in `refresh_insiders_current`.
 
 Round-robin deep-tail backfill cron still scheduled: `ScheduledJob(name=JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL, source='sec_rate', cadence=hourly(minute=45))` at `scheduler.py:712-728`. Picks the 25 instruments with the largest pending backlog, clears up to 50 oldest-first per instrument per run. Prerequisite `_bootstrap_complete` (gated until first-install bootstrap finishes).
 
