@@ -58,11 +58,13 @@ def replace_accession_rows(
     bulk ``US`` rows for one accession — they don't collide on the ``member_qname``-bearing
     unique index, so the reader would double-count if that accession wins (#1590 §5).
     """
-    # Bigint-safe combined key (instrument_id is BIGINT — do NOT cast to int4). MUST be
+    # Bigint-safe combined key (instrument_id is BIGINT — do NOT cast to int4; both
+    # params ::text so `||` never depends on psycopg3 OID inference). MUST be
     # byte-identical to the #1590 bulk writer's lock (fsds_dimensional_facts.py) so the
-    # two writers serialize on the same (instrument, accession).
+    # two writers serialize on the same (instrument, accession) — pinned by
+    # tests/test_fsds_dimensional_facts.py::test_lock_templates_byte_identical.
     conn.execute(
-        "SELECT pg_advisory_xact_lock(hashtext(%s::text || ':' || %s)::bigint)",
+        "SELECT pg_advisory_xact_lock(hashtext(%s::text || ':' || %s::text)::bigint)",
         (instrument_id, source_accession),
     )
     conn.execute(

@@ -206,6 +206,26 @@ def test_accumulate_coreg_row_ignored() -> None:
     assert "acc" not in per
 
 
+def test_lock_templates_byte_identical() -> None:
+    # The #1590 bulk writer and #554 replace_accession_rows MUST take the SAME advisory
+    # lock key (identical SQL template) or they do not serialise against each other —
+    # a desync silently reopens the bulk/per-filing double-count window. Pin byte-identity
+    # so a future edit to one site can't drift (review PREVENTION on PR #1681).
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+
+    def _lock_sql(rel: str) -> set[str]:
+        src = (root / rel).read_text()
+        return set(re.findall(r'"([^"]*pg_advisory_xact_lock[^"]*)"', src))
+
+    bulk = _lock_sql("app/services/fsds_dimensional_facts.py")
+    store = _lock_sql("app/services/dimensional_facts_store.py")
+    assert bulk, "no pg_advisory_xact_lock template found in fsds_dimensional_facts.py"
+    assert store, "no pg_advisory_xact_lock template found in dimensional_facts_store.py"
+    assert bulk == store, f"advisory-lock templates desynced: bulk={bulk} store={store}"
+
+
 # --- DB integration: convergence guard + CIK fan-out + 10-K filter --------------
 
 _NUM_HEADER = "adsh\ttag\tversion\tddate\tqtrs\tuom\tsegments\tcoreg\tvalue\tfootnote"

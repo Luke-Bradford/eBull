@@ -210,9 +210,14 @@ def _write_bulk_accession(
     ``(instrument_id, accession)`` yet (never augment a per-filing accession). Runs in
     the caller's transaction. Takes the SAME advisory lock key as the per-filing
     ``replace_accession_rows`` so the check-then-insert is race-tight against it."""
-    # Bigint-safe combined key (instrument_id is BIGINT — do NOT cast to int4). MUST be
-    # byte-identical to replace_accession_rows' lock so the two writers serialize.
-    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s::text || ':' || %s)::bigint)", (instrument_id, accession))
+    # Bigint-safe combined key (instrument_id is BIGINT — do NOT cast to int4; both
+    # params ::text so `||` never depends on psycopg3 OID inference). MUST be
+    # byte-identical to replace_accession_rows' lock so the two writers serialize —
+    # tests/test_fsds_dimensional_facts.py::test_lock_templates_byte_identical pins it.
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s::text || ':' || %s::text)::bigint)",
+        (instrument_id, accession),
+    )
     existing = conn.execute(
         "SELECT 1 FROM instrument_dimensional_facts WHERE instrument_id = %s AND source_accession = %s LIMIT 1",
         (instrument_id, accession),
