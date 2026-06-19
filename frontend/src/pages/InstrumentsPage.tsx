@@ -21,6 +21,7 @@ import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/S
 import { EmptyState } from "@/components/states/EmptyState";
 import { Pagination } from "@/components/ui/Pagination";
 import { formatMoney } from "@/lib/format";
+import { SECTOR_OPTIONS } from "@/lib/sectors";
 import { useAsync } from "@/lib/useAsync";
 
 // ---------------------------------------------------------------------------
@@ -29,7 +30,9 @@ import { useAsync } from "@/lib/useAsync";
 
 interface Filters {
   search: string;
-  sector: string | null;
+  // #1675: real GICS sector-SPDR symbol (e.g. "XLK"); replaces the opaque
+  // instruments.sector code as the filter dimension.
+  sector_spdr: string | null;
   exchange: string | null;
   coverage_tier: number | null;
   has_dividend: boolean | null;
@@ -37,7 +40,7 @@ interface Filters {
 
 const INITIAL_FILTERS: Filters = {
   search: "",
-  sector: null,
+  sector_spdr: null,
   exchange: null,
   coverage_tier: null,
   has_dividend: null,
@@ -47,7 +50,7 @@ const INITIAL_FILTERS: Filters = {
 // Sort state (client-side within the fetched page)
 // ---------------------------------------------------------------------------
 
-type SortKey = "symbol" | "sector" | "exchange" | "coverage_tier" | "last";
+type SortKey = "symbol" | "gics_sector" | "exchange" | "coverage_tier" | "last";
 type SortDir = "asc" | "desc";
 
 function compare(a: unknown, b: unknown, dir: SortDir): number {
@@ -68,8 +71,8 @@ function sortValue(item: InstrumentListItem, key: SortKey): unknown {
   switch (key) {
     case "symbol":
       return item.symbol;
-    case "sector":
-      return item.sector;
+    case "gics_sector":
+      return item.gics_sector;
     case "exchange":
       return item.exchange;
     case "coverage_tier":
@@ -128,7 +131,7 @@ export function InstrumentsPage() {
   const query: InstrumentsQuery = useMemo(
     () => ({
       search: filters.search || null,
-      sector: filters.sector,
+      sector_spdr: filters.sector_spdr,
       exchange: filters.exchange,
       coverage_tier: filters.coverage_tier,
       has_dividend: filters.has_dividend,
@@ -141,28 +144,19 @@ export function InstrumentsPage() {
   // useAsync captures fn via a ref — fresh arrow per render is fine.
   const result = useAsync(() => fetchInstruments(query), [query]);
 
-  // Extract distinct sectors and exchanges from data for filter dropdowns.
-  // This gives us a good-enough set from the current page; a full enum
+  // Sector dropdown uses the fixed 11 GICS sectors (#1675, SECTOR_OPTIONS), so
+  // only exchange is still derived from the current page's data. A full enum
   // endpoint would be better but is not in scope.
-  const [knownSectors, setKnownSectors] = useState<string[]>([]);
   const [knownExchanges, setKnownExchanges] = useState<string[]>([]);
 
-  // Reset accumulated filter options when filters change (prevents stale
-  // options from prior queries lingering in the dropdowns).
+  // Reset accumulated exchange options when filters change (prevents stale
+  // options from prior queries lingering in the dropdown).
   useEffect(() => {
-    setKnownSectors([]);
     setKnownExchanges([]);
   }, [filters]);
 
   useEffect(() => {
     if (!result.data) return;
-    setKnownSectors((prev) => {
-      const next = new Set(prev);
-      for (const item of result.data!.items) {
-        if (item.sector) next.add(item.sector);
-      }
-      return Array.from(next).sort();
-    });
     setKnownExchanges((prev) => {
       const next = new Set(prev);
       for (const item of result.data!.items) {
@@ -231,12 +225,25 @@ export function InstrumentsPage() {
           />
         </div>
 
-        <FilterSelect
-          label="Sector"
-          value={filters.sector ?? ""}
-          options={knownSectors}
-          onChange={(v) => handleFilterChange("sector", v)}
-        />
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-600">
+            Sector
+          </label>
+          <select
+            value={filters.sector_spdr ?? ""}
+            onChange={(e) =>
+              handleFilterChange("sector_spdr", e.target.value || null)
+            }
+            className="rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+          >
+            <option value="">All</option>
+            {SECTOR_OPTIONS.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <FilterSelect
           label="Exchange"
           value={filters.exchange ?? ""}
@@ -298,7 +305,7 @@ export function InstrumentsPage() {
             title="No instruments found"
             description={
               filters.search ||
-              filters.sector ||
+              filters.sector_spdr ||
               filters.exchange ||
               filters.coverage_tier !== null ||
               filters.has_dividend !== null
@@ -368,7 +375,7 @@ function FilterSelect({
 
 const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
   { key: "symbol", label: "Instrument" },
-  { key: "sector", label: "Sector" },
+  { key: "gics_sector", label: "Sector" },
   { key: "exchange", label: "Exchange" },
   { key: "coverage_tier", label: "Tier" },
   { key: "last", label: "Last price", align: "right" },
@@ -435,7 +442,7 @@ function InstrumentsTable({
                 <div className="text-xs text-slate-500">{item.company_name}</div>
               </td>
               <td className="py-2 pr-4 text-xs text-slate-600">
-                {item.sector ?? "—"}
+                {item.gics_sector ?? "—"}
               </td>
               <td className="py-2 pr-4 text-xs text-slate-600">
                 {item.exchange ?? "—"}

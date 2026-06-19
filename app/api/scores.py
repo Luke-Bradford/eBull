@@ -32,6 +32,7 @@ from app.db import get_conn
 # read endpoints must default to the same version the scoring pass writes, or the
 # rankings page shows stale rows of a version no longer produced.
 from app.services.scoring import _DEFAULT_MODEL_VERSION
+from app.services.sector_classification import resolve_sector_spdr, sector_spdr_case_sql
 
 router = APIRouter(prefix="/rankings", tags=["rankings"])
 
@@ -51,6 +52,10 @@ class RankingItem(BaseModel):
     symbol: str
     company_name: str
     sector: str | None
+    # #1675: real GICS sector resolved on-read from the SEC SIC (same crosswalk
+    # as the instrument identity payload). NULL for ETFs / non-filers / unmapped
+    # SIC. The opaque ``sector`` 1-9 code above is retained for back-compat.
+    gics_sector: str | None
     coverage_tier: int | None
     rank: int | None
     rank_delta: int | None
@@ -128,6 +133,7 @@ def _parse_ranking_item(row: dict[str, object]) -> RankingItem:
         symbol=row["symbol"],  # type: ignore[arg-type]
         company_name=row["company_name"],  # type: ignore[arg-type]
         sector=row["sector"],  # type: ignore[arg-type]
+        gics_sector=(_sc.gics_sector if (_sc := resolve_sector_spdr(row.get("sic"))) is not None else None),  # type: ignore[arg-type]
         coverage_tier=_parse_optional_int(row, "coverage_tier"),
         rank=_parse_optional_int(row, "rank"),
         rank_delta=_parse_optional_int(row, "rank_delta"),
@@ -176,6 +182,7 @@ def list_rankings(
     model_version: str = Query(default=_DEFAULT_MODEL_VERSION),
     coverage_tier: int | None = Query(default=None, ge=1, le=3),
     sector: str | None = Query(default=None),
+    sector_spdr: str | None = Query(default=None),
     stance: Stance | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=MAX_PAGE_LIMIT),
@@ -190,7 +197,10 @@ def list_rankings(
 
     Filters:
       - coverage_tier: exact match (1/2/3); untiered instruments excluded
-      - sector: exact match on instruments.sector
+      - sector_spdr: exact match on the real GICS sector-SPDR resolved from the
+        SEC SIC (#1675; e.g. ``XLF``). The operator-facing peer dimension.
+      - sector: DEPRECATED — exact match on the opaque ``instruments.sector``
+        1-9 code (no GICS meaning). Retained for back-compat; use ``sector_spdr``.
       - stance: latest thesis stance for each instrument (adds LATERAL join only when used)
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -229,7 +239,10 @@ def list_rankings(
             "scored_at": latest_scored_at,
         }
 
-        extra_joins: list[str] = []
+        # Always join the SEC profile so every ranking row can resolve its real
+        # GICS sector for display (#1675) and the sector_spdr filter can resolve
+        # p.sic SQL-side. PK join — trivial cost; shared by COUNT + items.
+        extra_joins: list[str] = ["LEFT JOIN instrument_sec_profile p USING (instrument_id)"]
 
         if coverage_tier is not None:
             where_clauses.append("c.coverage_tier = %(coverage_tier)s")
@@ -238,6 +251,10 @@ def list_rankings(
         if sector is not None:
             where_clauses.append("i.sector = %(sector)s")
             filter_params["sector"] = sector
+
+        if sector_spdr is not None:
+            where_clauses.append(f"({sector_spdr_case_sql()}) = %(sector_spdr)s")
+            filter_params["sector_spdr"] = sector_spdr
 
         # Stance filter: LATERAL join to latest thesis only when needed.
         if stance is not None:
@@ -274,7 +291,7 @@ def list_rankings(
             "limit": limit,
             "offset": offset,
         }
-        items_sql = f"""SELECT s.instrument_id, i.symbol, i.company_name, i.sector,
+        items_sql = f"""SELECT s.instrument_id, i.symbol, i.company_name, i.sector, p.sic,
                    c.coverage_tier,
                    s.rank, s.rank_delta,
                    s.total_score, s.raw_total,

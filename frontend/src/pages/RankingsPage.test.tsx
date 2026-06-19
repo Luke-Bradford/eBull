@@ -12,6 +12,7 @@ function _item(overrides: Partial<RankingItem>): RankingItem {
     symbol: "AAA",
     company_name: "Alpha Co",
     sector: "Tech",
+    gics_sector: "Information Technology",
     coverage_tier: 1,
     rank: 1,
     rank_delta: 0,

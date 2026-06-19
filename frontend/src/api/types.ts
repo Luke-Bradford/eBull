@@ -225,6 +225,11 @@ export interface InstrumentListItem {
   exchange: string | null;
   currency: string | null;
   sector: string | null;
+  // #1675: real GICS sector + sector-SPDR resolved on-read from the SEC SIC.
+  // null for ETFs / non-filers / unmapped SIC. `sector` above is the deprecated
+  // opaque 1-9 code.
+  gics_sector: string | null;
+  sector_spdr: string | null;
   is_tradable: boolean;
   coverage_tier: number | null;
   latest_quote: QuoteSnapshot | null;
@@ -885,6 +890,9 @@ export interface RankingItem {
   symbol: string;
   company_name: string;
   sector: string | null;
+  // #1675: real GICS sector resolved on-read from the SEC SIC (null for
+  // ETFs / non-filers / unmapped SIC). `sector` is the deprecated opaque code.
+  gics_sector: string | null;
   coverage_tier: number | null;
   rank: number | null;
   rank_delta: number | null;

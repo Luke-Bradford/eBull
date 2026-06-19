@@ -41,6 +41,8 @@ function makeResponse(
         exchange: "NASDAQ",
         currency: "USD",
         sector: "Technology",
+        gics_sector: "Information Technology",
+        sector_spdr: "XLK",
         is_tradable: true,
         coverage_tier: 1,
         latest_quote: {
@@ -58,6 +60,8 @@ function makeResponse(
         exchange: "NASDAQ",
         currency: "USD",
         sector: "Technology",
+        gics_sector: "Information Technology",
+        sector_spdr: "XLK",
         is_tradable: true,
         coverage_tier: 2,
         latest_quote: {
@@ -75,6 +79,8 @@ function makeResponse(
         exchange: "NYSE",
         currency: "USD",
         sector: "Financial Services",
+        gics_sector: "Financials",
+        sector_spdr: "XLF",
         is_tradable: true,
         coverage_tier: null,
         latest_quote: null,

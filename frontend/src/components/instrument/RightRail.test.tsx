@@ -112,6 +112,7 @@ function rankingsWith(currentSymbol: string): RankingsListResponse {
         symbol: currentSymbol, // the current instrument appears in its own sector list
         company_name: `${currentSymbol} Inc.`,
         sector: "Technology",
+        gics_sector: "Information Technology",
         coverage_tier: 1,
         rank: 1,
         rank_delta: null,
@@ -133,6 +134,7 @@ function rankingsWith(currentSymbol: string): RankingsListResponse {
         symbol: "MSFT",
         company_name: "Microsoft Corp.",
         sector: "Technology",
+        gics_sector: "Information Technology",
         coverage_tier: 1,
         rank: 2,
         rank_delta: null,
@@ -179,19 +181,22 @@ beforeEach(() => {
 
 function renderRail(props: {
   instrumentId?: number;
-  sector?: string | null;
+  sectorSpdr?: string | null;
+  sectorLabel?: string | null;
   currentSymbol?: string;
 } = {}) {
   const {
     instrumentId = 42,
-    sector = "Technology",
+    sectorSpdr = "XLK",
+    sectorLabel = "Information Technology",
     currentSymbol = "AAPL",
   } = props;
   return render(
     <MemoryRouter>
       <RightRail
         instrumentId={instrumentId}
-        sector={sector}
+        sectorSpdr={sectorSpdr}
+        sectorLabel={sectorLabel}
         currentSymbol={currentSymbol}
         filingsActive={true}
       />
@@ -220,7 +225,7 @@ describe("RightRail", () => {
   });
 
   it("short-circuits peer fetch when sector is null", async () => {
-    renderRail({ sector: null });
+    renderRail({ sectorSpdr: null });
     await waitFor(() => {
       expect(
         screen.getByText(/Sector unknown — no peer set available/i),
@@ -260,6 +265,7 @@ describe("RightRail", () => {
           symbol: "AAPL",
           company_name: "Apple Inc.",
           sector: "Technology",
+          gics_sector: "Information Technology",
           coverage_tier: 1,
           rank: 1,
           rank_delta: null,
@@ -291,14 +297,14 @@ describe("RightRail", () => {
     });
   });
 
-  it("passes sector + limit=6 to fetchRankings", async () => {
+  it("passes sector_spdr + limit=6 to fetchRankings", async () => {
     mockedRankings.mockResolvedValue(rankingsEmpty());
-    renderRail({ sector: "Healthcare" });
+    renderRail({ sectorSpdr: "XLV" });
     await waitFor(() => {
       expect(mockedRankings).toHaveBeenCalledTimes(1);
     });
     const [query, limit] = mockedRankings.mock.calls[0]!;
-    expect(query).toMatchObject({ sector: "Healthcare" });
+    expect(query).toMatchObject({ sector_spdr: "XLV" });
     expect(limit).toBe(6);
   });
 });

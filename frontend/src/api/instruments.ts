@@ -14,7 +14,9 @@ import type {
 
 export interface InstrumentsQuery {
   search: string | null;
-  sector: string | null;
+  // #1675: real GICS sector-SPDR symbol (e.g. "XLK"); replaces the opaque
+  // instruments.sector code as the operator-facing filter dimension.
+  sector_spdr: string | null;
   coverage_tier: number | null;
   exchange: string | null;
   has_dividend: boolean | null;
@@ -29,7 +31,7 @@ export function fetchInstruments(
 ): Promise<InstrumentListResponse> {
   const params = new URLSearchParams();
   if (query.search !== null) params.set("search", query.search);
-  if (query.sector !== null) params.set("sector", query.sector);
+  if (query.sector_spdr !== null) params.set("sector_spdr", query.sector_spdr);
   if (query.coverage_tier !== null)
     params.set("coverage_tier", String(query.coverage_tier));
   if (query.exchange !== null) params.set("exchange", query.exchange);
