@@ -89,6 +89,51 @@ RiskStatus = Literal[
 ]
 RISK_STATUSES: frozenset[str] = frozenset(get_args(RiskStatus))
 
+# ---------------------------------------------------------------------------
+# Total return (#1635 / #1633-vnext)
+#
+# A SECOND CAGR — price return PLUS reinvested per-share dividends — alongside the
+# price-return cagr above. The cash-dividend amounts are SEC-derived us-gaap
+# per-share dividend/distribution facts in financial_facts_raw (the concept
+# identity is the documented source rule; reused from sec_fundamentals'
+# TRACKED_CONCEPTS so REIT/MLP/BDC pass-through names are captured). tr_status is
+# a DISTINCT coverage axis (NOT the RiskStatus enum) that gates the scoring reward
+# off any TR series we cannot reconstruct confidently.
+# Spec: docs/specs/ranking/2026-06-19-sec-total-return-calmar-v1.3.md
+# ---------------------------------------------------------------------------
+
+TrStatus = Literal["ok", "tr_incomplete", "no_dividends"]
+TR_STATUSES: frozenset[str] = frozenset(get_args(TrStatus))
+
+# Dividend frequency tier by fact DURATION (period_end - period_start), in days.
+# Empirical classification (validated on the full-population duration histogram,
+# 2026-06-19), NOT a first-principles SEC rule. (lo, hi, tier_days, tier_rank);
+# tier_rank orders finest-first for the non-overlapping greedy selection.
+_DIV_TIERS: tuple[tuple[int, int, Decimal, int], ...] = (
+    (25, 45, Decimal("30.44"), 0),  # monthly
+    (75, 100, Decimal("91.25"), 1),  # quarterly
+    (350, 380, Decimal("365"), 2),  # annual
+)
+# A period whose value exceeds this multiple of the global per-tier median is
+# dropped (a cumulative mis-tagged into a fine tier). Generous — keeps real
+# specials and real cuts.
+_DIV_OUTLIER_MULT = Decimal("5.0")
+# Outlier guard needs a stable median; skip it for streams shorter than this.
+_DIV_OUTLIER_MIN_SAMPLE = 3
+# Coverage gate: observed periods must be >= this fraction of expected.
+_TR_COVERAGE_MIN = Decimal("0.80")
+# Internal-gap ceiling: a consecutive period gap above this multiple of tier_days
+# is a dropped filing -> tr_incomplete.
+_TR_GAP_MULT = Decimal("1.5")
+# Terminal-staleness ceiling: as_of - last_period_end above this multiple of
+# tier_days (one unfiled current period + filing lag) -> tr_incomplete.
+_TR_TERMINAL_MULT = Decimal("2.0")
+# All SEC dividend facts arrive inside quarterly/annual filings, so a monthly
+# payer's latest months are structurally ~1 quarter stale (they appear in the
+# next 10-Q). The terminal check floors its tier at this filing cadence so a
+# monthly stream is not flagged stale for that unavoidable lag.
+_TR_FILING_CADENCE_DAYS = Decimal("91.25")
+
 # Trailing-return lookback windows, in calendar days.
 TRAILING_LOOKBACK_DAYS: dict[str, int] = {
     "1m": 30,
@@ -187,6 +232,14 @@ class WindowMetrics:
     excess_trailing_6m: Decimal | None
     excess_trailing_1y: Decimal | None
     trailing_status: RiskStatus
+    # Total return (#1635): price return + reinvested per-share dividends. tr_cagr
+    # mirrors cagr but over the total-return index; tr_calmar = tr_cagr / |max_dd|
+    # reusing the PRICE-based max_drawdown denominator. tr_status (own axis) gates
+    # the scoring reward; tr_n_periods = dividend periods reinvested in the window.
+    tr_cagr: Decimal | None
+    tr_calmar: Decimal | None
+    tr_status: TrStatus
+    tr_n_periods: int
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +447,295 @@ def calmar(annualized_return: Decimal, max_drawdown: Decimal) -> Decimal | None:
     if dd_mag < CALMAR_DD_EPSILON:
         return None
     return annualized_return / dd_mag
+
+
+# ---------------------------------------------------------------------------
+# Total-return dividend stream + index (#1635 / #1633-vnext)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DivFact:
+    """One raw per-share dividend/distribution fact from financial_facts_raw.
+
+    ``is_declared`` distinguishes the ``dps_declared`` concept group from
+    ``dps_cash_paid`` (declared wins for the same period — see
+    :func:`select_dividend_stream`).
+    """
+
+    period_start: date
+    period_end: date
+    val: Decimal
+    is_declared: bool
+
+
+@dataclass(frozen=True)
+class DivPeriod:
+    """One selected, non-overlapping dividend period in the canonical stream.
+
+    ``ex_date`` is ``period_end`` (the reinvest date approximation); ``tier_days``
+    is the period's frequency-tier length (monthly/quarterly/annual) used by the
+    coverage gate.
+    """
+
+    ex_date: date
+    dps: Decimal
+    tier_days: Decimal
+
+
+def _classify_div_tier(duration_days: int) -> tuple[Decimal, int] | None:
+    """Map a fact duration to ``(tier_days, tier_rank)``, or None if no fine tier.
+
+    Durations outside the monthly/quarterly/annual bands (e.g. ≈180 d H1, ≈270 d
+    9-mo, FY-cumulative per-unit concepts) are cumulatives and return None — they
+    overlap their constituents and must not enter the stream.
+    """
+    for lo, hi, tier_days, tier_rank in _DIV_TIERS:
+        if lo <= duration_days <= hi:
+            return tier_days, tier_rank
+    return None
+
+
+def _modal_value(values: Sequence[Decimal]) -> Decimal:
+    """Most frequent value; ties broken by the larger value."""
+    counts: dict[Decimal, int] = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    best_count = max(counts.values())
+    return max(v for v, c in counts.items() if c == best_count)
+
+
+def _median(values: Sequence[Decimal]) -> Decimal:
+    """Median of a non-empty sequence (mean of the two middle elements if even)."""
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / Decimal(2)
+
+
+# A coarse-fact residual below this (per share) is treated as fully covered by
+# finer periods (rounding / restatement noise), not a real uncovered sub-period.
+_DIV_RESIDUAL_EPS = Decimal("0.005")
+
+
+def select_dividend_stream(facts: Sequence[DivFact]) -> list[DivPeriod]:
+    """Canonical non-overlapping per-period dividend stream from raw facts.
+
+    Pure. Steps (spec §"Dividend stream"):
+      1. dedup to the modal value per (concept group, period_start, period_end)
+         and classify each into a frequency tier (monthly/quarterly/annual);
+         drop cumulatives (180 d H1, 270 d 9-mo, FY-per-unit);
+      2. pick ONE dominant concept group (the group with more usable periods;
+         tiebreak ``declared``) — never mix declared + cash_paid, which would
+         double-count the same economic dividend tagged under both / on offset
+         period bounds (308 instruments report both; full-pop verified);
+      3. HIGH-side outlier guard: drop a value above
+         ``_DIV_OUTLIER_MULT × global per-tier median`` (two-pass — the median is
+         position-independent so an early mis-tag cannot seed it);
+      4. **residual tier-fill, finest-first**: accept fine (monthly/quarterly)
+         periods; for each coarser fact, accept only the RESIDUAL not already
+         covered by finer periods inside its span (``annual − ΣYTD quarters`` =
+         the implied Q4 the issuer never tags separately — the documented SEC
+         FY=YTD+Q4 treatment, #682). This captures Q4 for the dominant US
+         "3×10-Q + 10-K" pattern instead of dropping the annual that contains it;
+      5. return :class:`DivPeriod` ascending by ``ex_date`` (= period_end).
+    """
+    # 1. dedup modal per (group, start, end), classified into a tier. Zero /
+    # negative per-share values are dropped here (not just at reinvestment) so they
+    # cannot skew the outlier median or inflate the coverage period count.
+    grouped: dict[tuple[bool, date, date], list[Decimal]] = {}
+    for f in facts:
+        if f.val <= ZERO:
+            continue
+        grouped.setdefault((f.is_declared, f.period_start, f.period_end), []).append(f.val)
+
+    # (is_declared, start, end, modal_val, tier_days, tier_rank)
+    classified: list[tuple[bool, date, date, Decimal, Decimal, int]] = []
+    for (is_declared, start, end), vals in grouped.items():
+        tier = _classify_div_tier((end - start).days)
+        if tier is None:
+            continue
+        tier_days, tier_rank = tier
+        classified.append((is_declared, start, end, _modal_value(vals), tier_days, tier_rank))
+    if not classified:
+        return []
+
+    # 2. dominant concept group (more usable periods; tiebreak declared).
+    declared_recs = [r for r in classified if r[0]]
+    cash_recs = [r for r in classified if not r[0]]
+    chosen = declared_recs if len(declared_recs) >= len(cash_recs) else cash_recs
+
+    # 3. global per-tier median for the outlier guard (two-pass).
+    by_tier: dict[int, list[Decimal]] = {}
+    for rec in chosen:
+        by_tier.setdefault(rec[5], []).append(rec[3])
+    tier_median: dict[int, Decimal] = {
+        rank: _median(vals) for rank, vals in by_tier.items() if len(vals) >= _DIV_OUTLIER_MIN_SAMPLE
+    }
+    chosen = [
+        rec
+        for rec in chosen
+        if not ((med := tier_median.get(rec[5])) is not None and med > ZERO and rec[3] > _DIV_OUTLIER_MULT * med)
+    ]
+    if not chosen:
+        return []
+
+    # 4. residual tier-fill, finest-first (monthly -> quarterly -> annual).
+    accepted: list[tuple[date, date, Decimal, Decimal, int]] = []  # (start, end, val, tier_days, rank)
+    for target_rank in (0, 1, 2):
+        tier_facts = sorted((r for r in chosen if r[5] == target_rank), key=lambda r: r[1])
+        for _is_declared, start, end, val, tier_days, rank in tier_facts:
+            # Portion already covered by accepted periods of a STRICTLY FINER tier
+            # WHOLLY CONTAINED in this fact's span (both bounds inside — a finer
+            # period that only straddles the boundary is not fully covered and must
+            # not reduce the residual, Codex ckpt-2 LOW). Same-tier neighbours
+            # (which share a boundary day) are NOT counted — they are handled by
+            # the overlap guard below — so consecutive months/quarters survive.
+            covered = sum(
+                (a_val for a_s, a_e, a_val, _td, a_rank in accepted if a_rank < rank and start <= a_s and a_e <= end),
+                ZERO,
+            )
+            if covered == ZERO:
+                # No finer coverage; accept the full period unless it overlaps an
+                # already-accepted period (strict — a shared boundary day is
+                # contiguous, not overlapping).
+                if any(start < a_end and a_start < end for a_start, a_end, _v, _td, _r in accepted):
+                    continue
+                accepted.append((start, end, val, tier_days, rank))
+            elif val - covered > _DIV_RESIDUAL_EPS:
+                # Partially covered: keep only the uncovered residual (implied Q4).
+                accepted.append((start, end, val - covered, tier_days, rank))
+            # else fully covered -> drop.
+
+    # 5. ascending by ex_date.
+    accepted.sort(key=lambda r: r[1])
+    return [DivPeriod(ex_date=end, dps=val, tier_days=tier_days) for _start, end, val, tier_days, _rank in accepted]
+
+
+def total_return_index(
+    closes: Sequence[PricePoint],
+    dividends: Sequence[tuple[date, Decimal]],
+) -> list[PricePoint]:
+    """Total-return index over the valid close sub-chain (Decimal end-to-end).
+
+    Reinvests each cash dividend at the first valid close on/after its ex-date:
+    ``TRI_t = shares_t · P_t`` with ``shares`` growing by ``dps / P`` at each
+    reinvest. Dividends at/before the FIRST valid close are skipped (they predate
+    this window). An empty dividend list returns the price series unchanged — so a
+    non-payer's TR == its price return, exactly. The CAGR of this series is the
+    total-return CAGR.
+    """
+    valid: list[tuple[date, Decimal]] = []
+    for d, raw in closes:
+        c = _valid_close(raw)
+        if c is not None:
+            valid.append((d, c))
+    if not valid:
+        return []
+
+    # Sum dividends that share an ex-date and apply ONCE per date (Codex ckpt-2
+    # MED): sequential reinvestment of same-date dividends adds a spurious
+    # cross-product term. Residual tier-fill can emit a coarse residual on the
+    # same date as a fine period, so this is reachable.
+    by_date: dict[date, Decimal] = {}
+    for ex, dps in dividends:
+        if dps > ZERO:
+            by_date[ex] = by_date.get(ex, ZERO) + dps
+    divs = sorted(by_date.items())
+    first_date = valid[0][0]
+    n = len(divs)
+    di = 0
+    while di < n and divs[di][0] < first_date:
+        di += 1  # skip dividends STRICTLY predating the first close (no price to reinvest at)
+
+    out: list[PricePoint] = []
+    shares = Decimal(1)
+    for d, c in valid:
+        while di < n and divs[di][0] <= d:
+            shares += shares * divs[di][1] / c
+            di += 1
+        out.append((d, shares * c))
+    return out
+
+
+def tr_status(
+    window_periods: Sequence[DivPeriod],
+    window_start: date | None,
+    as_of: date,
+    first_ever_ex_date: date | None,
+    *,
+    has_dividend: bool | None,
+    stream_nonempty: bool,
+) -> TrStatus:
+    """Coverage status for the total-return series over ONE window.
+
+    - ``no_dividends`` — no usable dividend facts AND ``has_dividend`` is not
+      ``True``: TR == price return, exact → trustworthy. ``has_dividend`` is the
+      ``instrument_dividend_summary`` flag, a view that ONLY rows instruments which
+      have EVER reported a positive dividend (sql/050) — so ``False`` (stopped
+      payer) and ``None`` (no row = never paid) BOTH mean "no dividend signal
+      anywhere", and an empty fact stream confirms it. (Refines Codex ckpt-2 MED:
+      the view's absence is a confirmed never-payer, not an unknown.)
+    - ``tr_incomplete`` — facts exist but coverage / gap / terminal checks fail;
+      OR ``has_dividend`` is ``True`` (the view reports a current TTM dividend) yet
+      the fact stream is EMPTY — a real payer whose facts we failed to ingest, so
+      price-return must NOT be claimed exact; OR no dividends in-window.
+    - ``ok`` — the in-window stream covers the window with no internal gap and a
+      recent terminal dividend, span-relative coverage anchored on the INITIATION
+      date (first-ever ex-date) so a missing early chunk is NOT mistaken for a
+      genuine mid-window initiation.
+    """
+    if not stream_nonempty:
+        return "tr_incomplete" if has_dividend is True else "no_dividends"
+    if not window_periods:
+        return "tr_incomplete"
+
+    ends = sorted(p.ex_date for p in window_periods)
+    # Modal tier among the in-window periods drives every span comparison.
+    tier_counts: dict[Decimal, int] = {}
+    for p in window_periods:
+        tier_counts[p.tier_days] = tier_counts.get(p.tier_days, 0) + 1
+    best = max(tier_counts.values())
+    modal_tier_days = min(t for t, c in tier_counts.items() if c == best)
+
+    # Terminal staleness: a recent dividend must exist (else missing latest
+    # filings, or a dividend cut → price-return is the honest basis anyway). The
+    # tier is floored at the filing cadence — monthly facts arrive ~1 quarter
+    # late inside the next 10-Q, which is not staleness.
+    terminal_tier = max(modal_tier_days, _TR_FILING_CADENCE_DAYS)
+    if Decimal((as_of - ends[-1]).days) > _TR_TERMINAL_MULT * terminal_tier:
+        return "tr_incomplete"
+
+    # Initiation anchor (first-ever ex-date) — distinguishes a genuine recent
+    # initiation from a long-time payer whose early window is missing (data gap).
+    recent_initiation = first_ever_ex_date is not None and (window_start is None or first_ever_ex_date >= window_start)
+
+    if len(ends) == 1:
+        # A single in-window period is ``ok`` ONLY when it is a genuine recent
+        # initiation (no dividend history before the window). A long-time payer
+        # reduced to one in-window period is a data gap (Codex ckpt-2 HIGH).
+        return "ok" if recent_initiation else "tr_incomplete"
+
+    # Internal gaps: a dropped mid-window filing.
+    gap_limit = _TR_GAP_MULT * modal_tier_days
+    for a, b in zip(ends, ends[1:], strict=False):
+        if Decimal((b - a).days) > gap_limit:
+            return "tr_incomplete"
+
+    # Span-relative coverage anchored on initiation (first-ever ex-date), so a
+    # missing early chunk is NOT mistaken for a genuine mid-window initiation.
+    initiation = first_ever_ex_date if first_ever_ex_date is not None else ends[0]
+    if window_start is not None and initiation < window_start:
+        initiation = window_start
+    active_days = (as_of - initiation).days
+    if active_days <= 0:
+        return "ok"
+    expected = Decimal(active_days) / modal_tier_days
+    if Decimal(len(ends)) >= _TR_COVERAGE_MIN * expected:
+        return "ok"
+    return "tr_incomplete"
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +1123,9 @@ def compute_instrument_risk(
     window_key: str,
     as_of_date: date,
     sector_closes: Sequence[PricePoint] = (),
+    dividend_stream: Sequence[DivPeriod] = (),
+    *,
+    has_dividend: bool | None = None,
 ) -> WindowMetrics:
     """Compute all risk metrics for ONE instrument over ONE window.
 
@@ -876,6 +1221,45 @@ def compute_instrument_risk(
         excess_trailing[key] = xs_val
     trailing_st = trailing_status(inst_closes, as_of_date, _count_invalid_closes(inst_closes))
 
+    # Total return (#1635): reinvest the in-window dividend stream into the
+    # window-sliced price series; tr_cagr is the CAGR of that index (== price cagr
+    # for a non-payer). tr_calmar reuses the PRICE max_drawdown denominator.
+    #
+    # The dividend window is floored at the FIRST VALID CLOSE: a dividend with no
+    # price on/before its ex-date cannot be reinvested, so it must be excluded from
+    # BOTH the reinvestment and the coverage gate (else tr_n_periods / coverage
+    # would count periods the index never reinvested — fresh-agent review). For a
+    # liquid name the first valid close is far before window_start, so this is a
+    # no-op; it only bites illiquid names whose price history starts late.
+    lookback = WINDOW_LOOKBACK_DAYS[window_key]
+    window_start = None if lookback is None else as_of_date - timedelta(days=lookback)
+    first_valid_close_date = next((d for d, raw in inst_w if _valid_close(raw) is not None), None)
+    if first_valid_close_date is None:
+        eff_window_start = window_start
+    elif window_start is None:
+        eff_window_start = first_valid_close_date
+    else:
+        eff_window_start = max(window_start, first_valid_close_date)
+    window_divs = [
+        p
+        for p in dividend_stream
+        if p.ex_date <= as_of_date and (eff_window_start is None or p.ex_date >= eff_window_start)
+    ]
+    tr_index = total_return_index(inst_w, [(p.ex_date, p.dps) for p in window_divs])
+    tr_cagr_val = cagr(tr_index) if tr_index else None
+    tr_calmar_val: Decimal | None = None
+    if tr_cagr_val is not None and dd.max_drawdown is not None:
+        tr_calmar_val = calmar(tr_cagr_val, dd.max_drawdown)
+    first_ever = dividend_stream[0].ex_date if dividend_stream else None
+    tr_st = tr_status(
+        window_divs,
+        eff_window_start,
+        as_of_date,
+        first_ever,
+        has_dividend=has_dividend,
+        stream_nonempty=bool(dividend_stream),
+    )
+
     return WindowMetrics(
         window_key=window_key,
         n_returns=n_returns,
@@ -911,6 +1295,10 @@ def compute_instrument_risk(
         excess_trailing_6m=excess_trailing["6m"],
         excess_trailing_1y=excess_trailing["1y"],
         trailing_status=trailing_st,
+        tr_cagr=tr_cagr_val,
+        tr_calmar=tr_calmar_val,
+        tr_status=tr_st,
+        tr_n_periods=len(window_divs),
     )
 
 
@@ -981,6 +1369,11 @@ _RISK_BUSINESS_COLS: tuple[str, ...] = (
     "sector_beta_status",
     "sector_excess_cagr",
     "sector_excess_cagr_status",
+    # Total return (#1635) — appended; order stays load-bearing.
+    "tr_cagr",
+    "tr_calmar",
+    "tr_n_periods",
+    "tr_status",
 )
 
 
@@ -1012,6 +1405,85 @@ def load_close_series(
     for price_date, close in rows:
         out.append((price_date, None if close is None else Decimal(str(close))))
     return out
+
+
+def _dividend_concept_groups() -> tuple[frozenset[str], frozenset[str]]:
+    """(declared, cash_paid) us-gaap per-share dividend/distribution concept sets.
+
+    REUSES the curated, ticket-justified alias groups in sec_fundamentals'
+    TRACKED_CONCEPTS (covers REIT-OP / MLP / BDC pass-through names that tag the
+    LP/LLC distribution concepts, #674/#682). Imported lazily to avoid pulling the
+    provider module's import chain into risk_metrics (mirrors #1632/#1633).
+    """
+    from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
+
+    return frozenset(TRACKED_CONCEPTS["dps_declared"]), frozenset(TRACKED_CONCEPTS["dps_cash_paid"])
+
+
+def load_dividend_facts_bulk(
+    conn: psycopg.Connection[Any],
+    instrument_ids: Sequence[int],
+) -> dict[int, list[DivFact]]:
+    """Bulk-load raw per-share dividend facts for the scoped instruments.
+
+    ONE query (not per-instrument): the dividend concepts cover ≈1,500 payers, so
+    a single ``concept = ANY`` scan grouped in Python is far cheaper than a query
+    per scoped instrument. ``unit='USD/shares'`` excludes the negligible ``pure``
+    rows; NULL value / NULL period bounds are filtered. Returns a dict keyed by
+    instrument_id (absent = non-payer / no facts).
+    """
+    if not instrument_ids:
+        return {}
+    declared, cash_paid = _dividend_concept_groups()
+    all_concepts = sorted(declared | cash_paid)
+    out: dict[int, list[DivFact]] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, period_start, period_end, val, concept
+            FROM financial_facts_raw
+            WHERE instrument_id = ANY(%(ids)s)
+              AND concept = ANY(%(concepts)s)
+              AND unit = 'USD/shares'
+              AND val IS NOT NULL
+              AND period_start IS NOT NULL
+              AND period_end IS NOT NULL
+            """,
+            {"ids": sorted(instrument_ids), "concepts": all_concepts},
+        )
+        for iid, period_start, period_end, val, concept in cur.fetchall():
+            out.setdefault(int(iid), []).append(
+                DivFact(
+                    period_start=period_start,
+                    period_end=period_end,
+                    val=Decimal(str(val)),
+                    is_declared=concept in declared,
+                )
+            )
+    return out
+
+
+def load_has_dividend(
+    conn: psycopg.Connection[Any],
+    instrument_ids: Sequence[int],
+) -> dict[int, bool]:
+    """Per-instrument ``has_dividend`` flag from instrument_dividend_summary.
+
+    Used ONLY as the non-payer signal (the table's ttm_dps amounts are unreliable
+    — EFC=1170). Absent from the dict -> treated as not-a-known-payer (False).
+    """
+    if not instrument_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, has_dividend
+            FROM instrument_dividend_summary
+            WHERE instrument_id = ANY(%(ids)s)
+            """,
+            {"ids": sorted(instrument_ids)},
+        )
+        return {int(iid): bool(flag) for iid, flag in cur.fetchall()}
 
 
 def _resolve_benchmark_instrument_ids(conn: psycopg.Connection[Any]) -> dict[str, int]:
@@ -1127,6 +1599,10 @@ def _metrics_row_values(
         "sector_beta_status": metrics.sector_beta_status,
         "sector_excess_cagr": metrics.sector_excess_cagr,
         "sector_excess_cagr_status": metrics.sector_excess_cagr_status,
+        "tr_cagr": metrics.tr_cagr,
+        "tr_calmar": metrics.tr_calmar,
+        "tr_n_periods": metrics.tr_n_periods,
+        "tr_status": metrics.tr_status,
     }
 
 
@@ -1239,7 +1715,16 @@ def compute_and_store_risk_metrics(conn: psycopg.Connection[Any]) -> int:
         for iid in sorted(scoped_ids):
             inst_series[iid] = load_close_series(conn, iid, current_date)
 
+        # Total-return inputs (#1635): bulk dividend facts (one query) + the
+        # has_dividend non-payer flag, both scoped to the same universe.
+        div_facts_by_instrument = load_dividend_facts_bulk(conn, sorted(scoped_ids))
+        has_dividend_by_instrument = load_has_dividend(conn, sorted(scoped_ids))
+
     # ---- COMPUTE PHASE (in memory; pure) ----------------------------------
+    # Canonical dividend stream per instrument (pure; window-filtered downstream).
+    div_stream_by_instrument: dict[int, list[DivPeriod]] = {
+        iid: select_dividend_stream(facts) for iid, facts in div_facts_by_instrument.items()
+    }
     pending: list[_PendingRow] = []
     for iid in sorted(scoped_ids):
         closes = inst_series.get(iid, [])
@@ -1259,8 +1744,20 @@ def compute_and_store_risk_metrics(conn: psycopg.Connection[Any]) -> int:
         sector_cls = resolve_sector_spdr(sic_by_instrument.get(iid))
         sector_closes = sector_series.get(sector_cls.spdr_symbol, []) if sector_cls is not None else []
         sector_benchmark_id = benchmark_ids.get(sector_cls.spdr_symbol) if sector_cls is not None else None
+        dividend_stream = div_stream_by_instrument.get(iid, [])
+        # Tri-state: True/False from the summary view, None when no row exists
+        # (unknown classification -> tr_incomplete, never trusted as no_dividends).
+        has_dividend = has_dividend_by_instrument.get(iid)
         for window_key in WINDOW_KEYS:
-            metrics = compute_instrument_risk(closes, spy_closes, window_key, as_of_date, sector_closes)
+            metrics = compute_instrument_risk(
+                closes,
+                spy_closes,
+                window_key,
+                as_of_date,
+                sector_closes,
+                dividend_stream,
+                has_dividend=has_dividend,
+            )
             values = _metrics_row_values(
                 metrics, closes, spy_closes, as_of_date, spy_instrument_id, sector_benchmark_id
             )

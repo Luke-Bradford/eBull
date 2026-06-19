@@ -39,7 +39,15 @@ from app.services.xbrl_derived_stats import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL_VERSION = "v1.2-balanced"
+_DEFAULT_MODEL_VERSION = "v1.3-balanced"
+
+# Model-version prefix gates (single source — the next version is a one-line add,
+# not a scattered string edit). TA-enhanced momentum applies from v1.1; the
+# realized-risk penalty from v1.2; both carry forward to v1.3 (which only ADDS the
+# Calmar reward on top — Codex ckpt-1 HIGH: v1.3 must inherit v1.2 behavior).
+_TA_MOMENTUM_PREFIXES: tuple[str, ...] = ("v1.1", "v1.2", "v1.3")
+_RISK_PENALTY_PREFIXES: tuple[str, ...] = ("v1.2", "v1.3")
+_CALMAR_REWARD_PREFIXES: tuple[str, ...] = ("v1.3",)
 
 # ---------------------------------------------------------------------------
 # Weight modes  (must sum to 1.0)
@@ -126,6 +134,33 @@ _WEIGHT_MODES: dict[str, dict[str, float]] = {
         "sentiment": 0.10,
         "quality": 0.05,
     },
+    # v1.3 — identical family weights to v1.2 (the Calmar TR-reward is additive,
+    # like the v1.2 penalty; family weights untouched so v1/v1.1/v1.2 score
+    # history is preserved). v1.3 = v1.2 penalties + the Calmar reward.
+    "v1.3-balanced": {
+        "quality": 0.25,
+        "value": 0.25,
+        "turnaround": 0.20,
+        "confidence": 0.15,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+    },
+    "v1.3-conservative": {
+        "quality": 0.35,
+        "value": 0.25,
+        "confidence": 0.20,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+        "turnaround": 0.05,
+    },
+    "v1.3-speculative": {
+        "turnaround": 0.30,
+        "value": 0.25,
+        "momentum": 0.15,
+        "confidence": 0.15,
+        "sentiment": 0.10,
+        "quality": 0.05,
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -151,10 +186,11 @@ _LOW_CONFIDENCE_THRESHOLD: float = 0.40
 # deliberately NOT used: a full-population scan (2026-06-18, dev) found beta_r2
 # >= 0.30 for only ~3.4% of instruments, so a market-beta-vs-SPY penalty would
 # be statistical noise for this universe (its value is portfolio/sector-relative
-# — #1636 / #1674). Calmar / any return-ratio reward is excluded: it is materially
-# total-return-sensitive and the dividend/TR series is deferred (#1635); vol and
-# drawdown shape are only marginally TR-moved, so a vol/drawdown penalty is
-# accepted on the price-return basis.
+# — #1636 / #1674). Calmar was excluded from THIS penalty block because it is
+# materially total-return-sensitive; the TR series shipped in #1635 and the Calmar
+# return-ratio REWARD now lives in v1.3 (see _calmar_reward). Vol and drawdown
+# shape are only marginally TR-moved, so this vol/drawdown penalty stays on the
+# price-return basis.
 #
 # Thresholds are calibrated to the eToro universe's own tail (median annual vol
 # ~0.56, median max-drawdown ~-0.50 — SPY-like thresholds would flag ~90% and
@@ -173,6 +209,39 @@ _DD_EXTREME_THRESHOLD: float = -0.85  # ~ universe p10 (worst decile)
 
 _PENALTY_RISK_HIGH_TIER: float = 0.04
 _PENALTY_RISK_EXTREME_TIER: float = 0.08
+
+# ---------------------------------------------------------------------------
+# Calmar return-ratio reward (#1635 / #1633-vnext, scoring model v1.3 only)
+#
+# Reads the risk_v1 3y total-return Calmar (tr_cagr / |max_drawdown|) and rewards
+# persistently strong risk-adjusted return. TR is the SEC-derived total return
+# (price + reinvested dividends, #1635); the reward fires from tr_calmar only when
+# tr_status is trustworthy ({ok, no_dividends}); for tr_incomplete it falls back to
+# the price-return calmar (dividend-blind but correct on its own terms) + a caveat
+# note. Additive (settled-decisions: additive not multiplicative); EXTREME tested
+# first so the extreme tier is reachable. Strict comparators. Thresholds are
+# calibrated to the universe's own tr_calmar tail (post-backfill — like the v1.2
+# penalty), NOT cohort-relative normalization (banned).
+# Spec: docs/specs/ranking/2026-06-19-sec-total-return-calmar-v1.3.md
+# ---------------------------------------------------------------------------
+
+# Calibrated to the full-population 3y tr_calmar tail (dev backfill 2026-06-19,
+# trustworthy rows n=4,512): p75≈0.73, p90≈2.05. HIGH = top quartile, EXTREME =
+# top decile — mirrors the v1.2 penalty's p75/p90 tail basis. Reviewable at every
+# version bump like the other constants.
+_CALMAR_HIGH_THRESHOLD: float = 0.75  # ~ universe p75 of tr_calmar (top quartile)
+_CALMAR_EXTREME_THRESHOLD: float = 2.00  # ~ universe p90 (top decile)
+
+_REWARD_CALMAR_HIGH_TIER: float = 0.04
+_REWARD_CALMAR_EXTREME_TIER: float = 0.08
+
+# Mode-scaled risk appetite: conservative weights risk-adjusted return most
+# (full reward); speculative least. Applied as a multiplier on the tier size.
+_CALMAR_REWARD_MODE_SCALE: dict[str, float] = {
+    "conservative": 1.0,
+    "balanced": 0.75,
+    "speculative": 0.50,
+}
 
 # Thesis is stale if it was created more than this many days ago and no
 # fresher one exists. In practice the thesis service enforces review_frequency
@@ -206,6 +275,20 @@ class PenaltyRecord:
 
 
 @dataclass(frozen=True)
+class RewardRecord:
+    """An additive bonus to total_score (v1.3 Calmar reward).
+
+    Kept SEPARATE from PenaltyRecord (Codex ckpt-1 LOW): a negative penalty would
+    corrupt ``total_penalty`` / "penalties fired" / the JSON. ``addition`` is a
+    positive magnitude added to the score.
+    """
+
+    name: str
+    addition: float
+    reason: str
+
+
+@dataclass(frozen=True)
 class ScoreResult:
     instrument_id: int
     model_version: str
@@ -215,6 +298,9 @@ class ScoreResult:
     raw_total: float
     total_score: float
     explanation: str
+    # Additive rewards (v1.3 Calmar). Empty for v1/v1.1/v1.2.
+    rewards: list[RewardRecord] = field(default_factory=list)
+    total_reward: float = 0.0
     # Set after ranking pass
     rank: int | None = None
     rank_delta: int | None = None
@@ -842,6 +928,70 @@ def _realized_risk_penalties(
     return penalties, notes
 
 
+def _calmar_reward(
+    model_version: str,
+    tr_calmar: float | None,
+    tr_status: str | None,
+    price_calmar: float | None,
+) -> tuple[list[RewardRecord], list[str]]:
+    """Calmar return-ratio reward from risk_v1 3y metrics (#1635, v1.3 only).
+
+    Returns ``(rewards, notes)``. The reward basis is the TOTAL-RETURN Calmar when
+    ``tr_status`` is trustworthy (``ok`` / ``no_dividends`` — for a non-payer
+    tr_calmar == price calmar, exact); for ``tr_incomplete`` the TR series is
+    untrusted so it falls back to the price-return ``calmar`` (dividend-blind but
+    correct on its own terms) + a caveat note. Absence (no metrics / no usable
+    Calmar) yields a note, never a reward (honest-absence — prevention-log).
+
+    Additive, mode-scaled. EXTREME tier tested first so it is reachable. Comparators
+    strict; a value exactly on a threshold falls to the lower tier (or none).
+    """
+    rewards: list[RewardRecord] = []
+    notes: list[str] = []
+
+    if tr_status in ("ok", "no_dividends"):
+        basis, basis_calmar = "total-return", tr_calmar
+    elif tr_status == "tr_incomplete":
+        basis, basis_calmar = "price-return (tr_incomplete)", price_calmar
+        notes.append("calmar reward: tr_incomplete — using dividend-blind price-return Calmar")
+    else:
+        notes.append(f"calmar reward: tr status={tr_status or 'no metrics'}")
+        return rewards, notes
+
+    if basis_calmar is None:
+        notes.append(f"calmar reward: {basis} Calmar value missing")
+        return rewards, notes
+
+    # Mode-scaled tier size. Mode is the suffix after the version (v1.3-balanced).
+    mode = model_version.split("-", 1)[1] if "-" in model_version else "balanced"
+    scale = _CALMAR_REWARD_MODE_SCALE.get(mode, _CALMAR_REWARD_MODE_SCALE["balanced"])
+
+    if basis_calmar > _CALMAR_EXTREME_THRESHOLD:
+        rewards.append(
+            RewardRecord(
+                name="strong_calmar",
+                addition=_REWARD_CALMAR_EXTREME_TIER * scale,
+                reason=(
+                    f"3y {basis} Calmar={basis_calmar:.2f} > extreme threshold "
+                    f"{_CALMAR_EXTREME_THRESHOLD} (mode scale {scale})"
+                ),
+            )
+        )
+    elif basis_calmar > _CALMAR_HIGH_THRESHOLD:
+        rewards.append(
+            RewardRecord(
+                name="strong_calmar",
+                addition=_REWARD_CALMAR_HIGH_TIER * scale,
+                reason=(
+                    f"3y {basis} Calmar={basis_calmar:.2f} > high threshold "
+                    f"{_CALMAR_HIGH_THRESHOLD} (mode scale {scale})"
+                ),
+            )
+        )
+
+    return rewards, notes
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -990,7 +1140,8 @@ def _load_instrument_data(
                 cur.execute(
                     """
                     SELECT vol_annualized, vol_status,
-                           max_drawdown, drawdown_status
+                           max_drawdown, drawdown_status,
+                           calmar, tr_calmar, tr_status
                     FROM instrument_risk_metrics_current
                     WHERE instrument_id = %(id)s
                       AND metric_version = %(mv)s
@@ -1168,7 +1319,7 @@ def compute_score(
     # Only v1.1+ models use TA-enhanced momentum; v1 models preserve
     # the original return-only formula for score history compatibility.
     ta_indicators: dict[str, float | None] | None = None
-    if price_row is not None and model_version.startswith(("v1.1", "v1.2")):
+    if price_row is not None and model_version.startswith(_TA_MOMENTUM_PREFIXES):
         ta_keys = [
             "sma_200",
             "macd_histogram",
@@ -1243,7 +1394,7 @@ def compute_score(
     # Realized-risk penalty — v1.2+ only (#1633). v1 / v1.1 score history is
     # unchanged. Absence (no row / non-ok status / NULL) yields a note, never a
     # deduction (handled inside _realized_risk_penalties).
-    if model_version.startswith("v1.2"):
+    if model_version.startswith(_RISK_PENALTY_PREFIXES):
         risk_row = data.get("risk_row")
         risk_penalties, risk_notes = _realized_risk_penalties(
             vol_annualized=_to_float(risk_row["vol_annualized"]) if risk_row else None,
@@ -1260,7 +1411,25 @@ def compute_score(
         penalty_names = ", ".join(p.name for p in penalties)
         explanation_parts.append(f"penalties fired: {penalty_names} (total deduction: {total_penalty:.2f})")
 
-    total_score = _clip(raw_total - total_penalty)
+    # Calmar TR-reward — v1.3+ only (#1635). Additive bonus from the risk_v1 3y
+    # total-return Calmar. Absence yields a note, never a reward.
+    rewards: list[RewardRecord] = []
+    if model_version.startswith(_CALMAR_REWARD_PREFIXES):
+        risk_row = data.get("risk_row")
+        rewards, reward_notes = _calmar_reward(
+            model_version=model_version,
+            tr_calmar=_to_float(risk_row["tr_calmar"]) if risk_row else None,
+            tr_status=risk_row["tr_status"] if risk_row else None,
+            price_calmar=_to_float(risk_row["calmar"]) if risk_row else None,
+        )
+        explanation_parts.extend(reward_notes)
+
+    total_reward = sum(r.addition for r in rewards)
+    if rewards:
+        reward_names = ", ".join(r.name for r in rewards)
+        explanation_parts.append(f"rewards fired: {reward_names} (total bonus: {total_reward:.2f})")
+
+    total_score = _clip(raw_total - total_penalty + total_reward)
 
     explanation = "; ".join(explanation_parts) if explanation_parts else "all signals present"
 
@@ -1273,6 +1442,8 @@ def compute_score(
         raw_total=raw_total,  # pre-penalty weighted sum; always [0,1] by construction
         total_score=total_score,
         explanation=explanation,
+        rewards=rewards,
+        total_reward=total_reward,
     )
 
 
@@ -1401,6 +1572,8 @@ def compute_rankings(
                 raw_total=result.raw_total,
                 total_score=result.total_score,
                 explanation=result.explanation,
+                rewards=result.rewards,
+                total_reward=result.total_reward,
                 rank=position,
                 rank_delta=rank_delta,
             )
@@ -1430,7 +1603,15 @@ def _insert_score(
     Insert a single score row. Append-only — never updates prior rows.
     Must be called inside an open transaction.
     """
-    penalties_payload = [{"name": p.name, "deduction": p.deduction, "reason": p.reason} for p in result.penalties]
+    # penalties_json carries BOTH penalties and rewards, disambiguated by `kind`
+    # (additive to the JSON shape — non-breaking; #1635). Penalties keep
+    # `deduction`; rewards use `addition`. total_penalty stays penalties-only.
+    penalties_payload: list[dict[str, object]] = [
+        {"name": p.name, "deduction": p.deduction, "reason": p.reason, "kind": "penalty"} for p in result.penalties
+    ]
+    penalties_payload += [
+        {"name": r.name, "addition": r.addition, "reason": r.reason, "kind": "reward"} for r in result.rewards
+    ]
 
     conn.execute(
         """

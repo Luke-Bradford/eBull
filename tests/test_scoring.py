@@ -29,6 +29,7 @@ from app.services.scoring import (
     FamilyScores,
     PenaltyRecord,
     ScoreResult,
+    _calmar_reward,
     _clip,
     _compute_penalties,
     _fetch_prior_ranks,
@@ -591,6 +592,64 @@ class TestRealizedRiskPenalties:
         pens, notes = _realized_risk_penalties(None, None, None, None)
         assert pens == []
         assert len(notes) == 2
+
+
+class TestCalmarReward:
+    """Pure-logic table tests for _calmar_reward (#1635, v1.3). No DB.
+
+    Reward basis is tr_calmar when tr_status is trustworthy ({ok, no_dividends});
+    price-return calmar (fallback) for tr_incomplete; nothing otherwise. EXTREME
+    tier reachable (tested first); comparators strict; mode-scaled.
+    """
+
+    @staticmethod
+    def _r(model, tr_calmar, tr_status, price_calmar):
+        rewards, notes = _calmar_reward(model, tr_calmar, tr_status, price_calmar)
+        return rewards, notes
+
+    def test_ok_high_tier_balanced_scaled(self) -> None:
+        rewards, _ = self._r("v1.3-balanced", 1.0, "ok", 0.9)
+        # 1.0 > HIGH(0.75), not > EXTREME(2.0) -> high tier × balanced scale 0.75.
+        assert len(rewards) == 1
+        assert rewards[0].addition == pytest.approx(0.04 * 0.75)
+
+    def test_ok_extreme_tier_conservative_full(self) -> None:
+        rewards, _ = self._r("v1.3-conservative", 2.5, "ok", 2.4)
+        assert rewards[0].addition == pytest.approx(0.08 * 1.0)
+
+    def test_high_boundary_strict_no_reward(self) -> None:
+        # exactly 0.75 is NOT > 0.75 -> no reward.
+        rewards, _ = self._r("v1.3-balanced", 0.75, "ok", 0.75)
+        assert rewards == []
+
+    def test_extreme_boundary_falls_to_high(self) -> None:
+        # exactly 2.0 is NOT > 2.0 -> high tier, not extreme.
+        rewards, _ = self._r("v1.3-conservative", 2.0, "ok", 2.0)
+        assert rewards[0].addition == pytest.approx(0.04 * 1.0)
+
+    def test_no_dividends_uses_tr_calmar(self) -> None:
+        rewards, _ = self._r("v1.3-balanced", 1.0, "no_dividends", 1.0)
+        assert len(rewards) == 1
+
+    def test_tr_incomplete_falls_back_to_price_calmar_with_note(self) -> None:
+        rewards, notes = self._r("v1.3-balanced", None, "tr_incomplete", 1.0)
+        assert len(rewards) == 1  # fired off price calmar 1.0 > 0.75
+        assert any("tr_incomplete" in n for n in notes)
+
+    def test_tr_incomplete_no_price_calmar_no_reward(self) -> None:
+        rewards, notes = self._r("v1.3-balanced", None, "tr_incomplete", None)
+        assert rewards == []
+        assert notes  # caveat + missing-value note
+
+    def test_absent_status_no_reward_but_note(self) -> None:
+        rewards, notes = self._r("v1.3-balanced", None, None, None)
+        assert rewards == []
+        assert notes
+
+    def test_speculative_scale_smallest(self) -> None:
+        spec, _ = self._r("v1.3-speculative", 1.0, "ok", 1.0)
+        cons, _ = self._r("v1.3-conservative", 1.0, "ok", 1.0)
+        assert spec[0].addition < cons[0].addition
 
 
 # ---------------------------------------------------------------------------
