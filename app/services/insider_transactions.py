@@ -1810,13 +1810,17 @@ def _process_candidates(
 
     for instrument_id, accession, url in candidates:
         xml = bodies.get(url)
-        if xml is None:
-            # Codex pre-flight: per-future exceptions logged
-            # generically by the helper. Re-emit at this scope with
-            # ``accession`` so operators can grep failures by
-            # filing identifier (matches the pre-#726 log shape).
+        if not xml:
+            # None  -> 404 / fetch error / caught per-future exception.
+            # ""    -> a 200 with an EMPTY body. This MUST be treated as a
+            #          fetch failure too: ``store_raw`` rejects an empty payload
+            #          ("payload is required …"), so letting "" through raises an
+            #          uncaught ValueError that fails the WHOLE backfill tick —
+            #          and the same poison accession is re-selected every run,
+            #          wedging all Form 4 ingest indefinitely (observed: eBay +
+            #          universe insider data frozen ~3 months). Tombstone + skip.
             logger.warning(
-                "ingest_insider_transactions: fetch failed accession=%s url=%s",
+                "ingest_insider_transactions: empty/failed fetch accession=%s url=%s",
                 accession,
                 url,
             )
