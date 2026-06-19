@@ -202,8 +202,13 @@ Use capped context in v1:
   to the universe tail, applied identically every run — NOT cohort-relative normalization
   (which stays banned)
 - market-beta-vs-SPY is deliberately excluded from the risk penalty (full-population scan:
-  r²≥0.30 for only ~3.4% of instruments → noise for this universe); return-ratio rewards
-  (Calmar) are excluded pending a total-return series (#1635)
+  r²≥0.30 for only ~3.4% of instruments → noise for this universe)
+- return-ratio reward (Calmar) SHIPPED in scoring v1.3 (#1635 / #1633-vnext): the
+  SEC-derived total-return series (price + reinvested per-share dividends from
+  financial_facts_raw) feeds a 3y tr_calmar, and v1.3 adds an additive, mode-scaled
+  Calmar REWARD gated on tr_status ∈ {ok, no_dividends} (tr_incomplete falls back to
+  price-return Calmar + caveat). Thresholds calibrated to the universe tr_calmar tail
+  (p75/p90). The earlier "Calmar excluded pending #1635" deferral is superseded.
 
 ### Score auditability
 - each score row should carry enough detail to explain how it was produced

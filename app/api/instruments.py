@@ -5087,6 +5087,13 @@ class RiskWindowMetrics(BaseModel):
     sector_beta_status: str | None
     sector_excess_cagr: Decimal | None
     sector_excess_cagr_status: str | None
+    # Total return (#1635): price return + reinvested per-share dividends. tr_calmar
+    # = tr_cagr / |max_drawdown|. tr_status (own axis) is {ok, tr_incomplete,
+    # no_dividends}; tr_n_periods = dividend periods reinvested in the window.
+    tr_cagr: Decimal | None
+    tr_calmar: Decimal | None
+    tr_status: str | None
+    tr_n_periods: int | None
 
 
 class DrawdownPoint(BaseModel):
@@ -5325,7 +5332,8 @@ def get_instrument_risk_metrics(
                     excess_cagr_status,
                     sector_benchmark_instrument_id,
                     sector_beta, sector_beta_r2, sector_beta_n_obs,
-                    sector_beta_status, sector_excess_cagr, sector_excess_cagr_status
+                    sector_beta_status, sector_excess_cagr, sector_excess_cagr_status,
+                    tr_cagr, tr_calmar, tr_status, tr_n_periods
                 FROM instrument_risk_metrics_current
                 WHERE instrument_id = %(iid)s
                   AND metric_version = %(ver)s
@@ -5430,6 +5438,10 @@ def get_instrument_risk_metrics(
             sector_beta_status=r["sector_beta_status"],
             sector_excess_cagr=r["sector_excess_cagr"],
             sector_excess_cagr_status=r["sector_excess_cagr_status"],
+            tr_cagr=r["tr_cagr"],
+            tr_calmar=r["tr_calmar"],
+            tr_status=r["tr_status"],
+            tr_n_periods=r["tr_n_periods"],
         )
         for r in risk_rows
     ]
