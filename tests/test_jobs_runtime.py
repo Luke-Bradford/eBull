@@ -421,7 +421,8 @@ class TestProductionInvokerRegistry:
             "sec_13f_quarterly_sweep",
             "sec_def14a_ingest",
             "sec_form3_ingest",
-            "sec_insider_transactions_ingest",
+            # sec_insider_transactions_ingest RE-INSTATED to SCHEDULED_JOBS
+            # 2026-06-20 (recent-first Form 4 keeper) — no longer on-demand-only.
             "sec_n_port_ingest",
             # #994 (first-install bootstrap orchestrator) — these jobs
             # are dispatched by the bootstrap orchestrator (not SCHEDULED)

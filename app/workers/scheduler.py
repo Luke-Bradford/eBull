@@ -775,13 +775,36 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # + `instrument_business_summary_sections`. The weekly Sunday safety-net
     # bootstrap (`sec_business_summary_bootstrap` below) stays for
     # one-shot drain + operator manual backfill.
-    # `sec_insider_transactions_ingest` retired from SCHEDULED_JOBS
-    # post-#1155: Layer 1/2/3 + sec_manifest_worker + manifest_parsers/
-    # insider_345.py (#1130) carry every Form 4 write to
-    # insider_transactions + insider_filings + insider_filers. The
-    # round-robin `sec_insider_transactions_backfill` cron stays
-    # scheduled for the deep-historical-tail drain. Function body +
-    # _INVOKERS entry preserved for Admin "Run now".
+    # `sec_insider_transactions_ingest` — RE-INSTATED to SCHEDULED_JOBS
+    # (2026-06-20). #1155 retired it on the premise that "Layer 1/2/3 +
+    # sec_manifest_worker" keeps recent Form 4 fresh. FALSIFIED on dev: the
+    # manifest worker drains `filed_at ASC` (oldest-first) against a ~1.46M-row
+    # pending backlog at 10 req/s, so recent Form 4s sit at the back of the queue
+    # and never parse — operator-reported eBay insider sales were ~3 months stale.
+    # This newest-first ingester (reads filing_events newest-first, correct
+    # form4.xml URLs, bounded 500/tick) is the recent keeper; the round-robin
+    # `sec_insider_transactions_backfill` stays for the historical tail. Both run
+    # concurrently + write-safe (per-instrument advisory lock in
+    # refresh_insiders_current; SEC 10 req/s is a process-global clock).
+    # Spec: docs/specs/ingest/2026-06-20-insider-recent-first-drain.md
+    ScheduledJob(
+        name=JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
+        display_name="SEC Form 4 newest-first ingest",
+        # Own single-job lane (#1540 pattern) — runs concurrently with the @:45
+        # backfill on its own lock; the global SEC clock bounds combined req/s.
+        source="sec_insider_ingest",
+        description=(
+            "Universe-wide newest-first Form 4 ingester (#456). Reads "
+            "filing_events newest-first, canonicalises to the raw form4.xml "
+            "URL, parses into insider_transactions / insider_filings / "
+            "insider_filers, bounded 500/tick. The steady-state RECENT keeper "
+            "(the oldest-first manifest worker + backfill cannot keep recent "
+            "fresh against a deep pending backlog). Re-instated 2026-06-20."
+        ),
+        cadence=Cadence.hourly(minute=15),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
+    ),
     ScheduledJob(
         name=JOB_SEC_FILING_DOCUMENTS_INGEST,
         display_name="SEC filing-documents manifest ingest",
@@ -838,8 +861,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         role="backfill",
         # #1540 — own lane: this @:45 tail drainer collided with the @:45 atom
         # tick every hour; #1538's retry can't cover the long holds. Write-safe
-        # concurrently with sec_insider_transactions_ingest (stays on sec_rate)
-        # via per-instrument advisory lock in refresh_insiders_current.
+        # concurrently with sec_insider_transactions_ingest (own sec_insider_ingest
+        # lane @:15, re-instated 2026-06-20) via the per-instrument advisory lock
+        # in refresh_insiders_current.
         source="sec_insider_backfill",
         description=(
             "Round-robin backfill of Form 4 filings for instruments "

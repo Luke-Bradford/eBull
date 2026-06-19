@@ -67,6 +67,7 @@ Lane = Literal[
     "sec_per_cik",
     "sec_filing_docs",
     "sec_insider_backfill",
+    "sec_insider_ingest",
     "sec_bulk_download",
     "db",
     "db_filings",
@@ -144,9 +145,9 @@ the rate — it does not.
   The hourly @ :45 oldest-first Form-4 tail drainer collides with the @ :45
   ``atom`` tick every hour; when it loses to a slow holder it skips the whole
   hour (#1538 retry can't cover the long holds). Own lane removes the
-  contention. Write-ordering-safety (it now runs concurrently with its former
-  lanemate ``sec_insider_transactions_ingest``, which stays on ``sec_rate`` and
-  shares its full write set): typed insider tables + ``ownership_insiders_observations``
+  contention. Write-ordering-safety (it runs concurrently with
+  ``sec_insider_transactions_ingest``, which has its OWN ``sec_insider_ingest``
+  lane @:15 since 2026-06-20, and shares its full write set): typed insider tables + ``ownership_insiders_observations``
   + ``filing_raw_documents`` are row-level ``ON CONFLICT`` idempotent from
   immutable filings; ``ownership_insiders_current`` + ``ownership_refresh_state``
   are written only inside ``refresh_insiders_current``, which holds a

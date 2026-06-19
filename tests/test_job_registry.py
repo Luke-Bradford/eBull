@@ -62,6 +62,11 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # See app/jobs/sources.py::Lane.
         "sec_filing_docs",
         "sec_insider_backfill",
+        # 2026-06-20 — sec_insider_transactions_ingest RE-INSTATED on its own
+        # single-job lane (newest-first Form 4 recent keeper; the oldest-first
+        # manifest worker can't keep recent fresh against the deep backlog).
+        # Concurrent with the @:45 backfill; global SEC clock bounds req/s.
+        "sec_insider_ingest",
         "sec_bulk_download",
         "db",
         # #1141 — Phase C bulk-ingest family sources. Bootstrap-only
@@ -791,6 +796,12 @@ class TestLongHoldSecRateLaneExtraction:
     def test_insider_backfill_has_own_lane(self) -> None:
         assert source_for("sec_insider_transactions_backfill") == "sec_insider_backfill"
 
+    def test_insider_ingest_has_own_lane(self) -> None:
+        # Re-instated 2026-06-20 (recent-first Form 4 keeper) on its own lane so
+        # it runs concurrently with the @:45 backfill (global SEC clock bounds
+        # combined req/s; per-instrument write lock keeps it safe).
+        assert source_for("sec_insider_transactions_ingest") == "sec_insider_ingest"
+
     def test_extracted_lanes_are_single_job(self) -> None:
         """Each new lane holds exactly one job across the FULL registry — the
         whole point of the split is that these heavy holders no longer share a
@@ -809,16 +820,20 @@ class TestLongHoldSecRateLaneExtraction:
 
         assert lane_counts["sec_filing_docs"] == 1, lane_to_jobs.get("sec_filing_docs")
         assert lane_counts["sec_insider_backfill"] == 1, lane_to_jobs.get("sec_insider_backfill")
+        assert lane_counts["sec_insider_ingest"] == 1, lane_to_jobs.get("sec_insider_ingest")
         assert lane_to_jobs["sec_filing_docs"] == ["sec_filing_documents_ingest"]
         assert lane_to_jobs["sec_insider_backfill"] == ["sec_insider_transactions_backfill"]
+        assert lane_to_jobs["sec_insider_ingest"] == ["sec_insider_transactions_ingest"]
 
     def test_extracted_lanes_differ_from_sec_rate(self) -> None:
         """If a future change re-collapses either onto ``sec_rate``, this
         re-breaks the #1540 extraction."""
         assert source_for("sec_filing_documents_ingest") != "sec_rate"
         assert source_for("sec_insider_transactions_backfill") != "sec_rate"
-        # ... and the two do not collapse onto each other.
+        assert source_for("sec_insider_transactions_ingest") != "sec_rate"
+        # ... and the extracted insider lanes do not collapse onto each other.
         assert source_for("sec_filing_documents_ingest") != source_for("sec_insider_transactions_backfill")
+        assert source_for("sec_insider_transactions_ingest") != source_for("sec_insider_transactions_backfill")
 
 
 # ---------------------------------------------------------------------------
