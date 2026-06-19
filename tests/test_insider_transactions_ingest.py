@@ -618,6 +618,44 @@ class TestIngestInsiderTransactions:
         assert second.filings_scanned == 0
         assert second_fetcher.calls == []
 
+    def test_empty_body_200_tombstones_instead_of_crashing_the_tick(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """A 200 with an EMPTY body ("") must tombstone + skip — NOT raise.
+
+        Regression: ``store_raw`` rejects an empty payload, so an empty-string
+        body slipping past the old ``xml is None`` guard raised an uncaught
+        ValueError that failed the whole backfill tick and re-poisoned every run
+        (insider data frozen ~3 months). The guard is now ``if not xml``.
+        """
+        iid = _seed_instrument(ebull_test_conn)
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="EMPTY-ACC",
+            url="https://www.sec.gov/empty.xml",
+        )
+        empty_fetcher = _StubFetcher({"https://www.sec.gov/empty.xml": ""})
+        # Must NOT raise.
+        ingest_insider_transactions(ebull_test_conn, cast("object", empty_fetcher))  # type: ignore[arg-type]
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT is_tombstone FROM insider_filings WHERE accession_number = %s",
+                ("EMPTY-ACC",),
+            )
+            ts_row = cur.fetchone()
+            assert ts_row is not None
+            assert ts_row[0] is True
+            # No raw row persisted for an empty body (store_raw never called).
+            cur.execute(
+                "SELECT COUNT(*) FROM filing_raw_documents WHERE accession_number = %s",
+                ("EMPTY-ACC",),
+            )
+            raw_row = cur.fetchone()
+            assert raw_row is not None
+            assert raw_row[0] == 0
+
     def test_tombstone_excluded_from_summary(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(

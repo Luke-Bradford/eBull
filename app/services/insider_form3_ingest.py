@@ -653,9 +653,13 @@ def _process_form_3_candidates(
 
     for instrument_id, accession, url in candidates:
         xml = bodies.get(url)
-        if xml is None:
+        if not xml:
+            # None -> 404 / fetch error; "" -> 200 with empty body. Both must
+            # tombstone+skip: store_raw rejects an empty payload, so letting ""
+            # through raises an uncaught ValueError that fails the whole tick and
+            # re-poisons every run (same class as the Form 4 backfill freeze).
             logger.warning(
-                "ingest_form_3_filings: fetch failed accession=%s url=%s",
+                "ingest_form_3_filings: empty/failed fetch accession=%s url=%s",
                 accession,
                 url,
             )
