@@ -808,3 +808,64 @@ def test_trailing_scalars_window_independent():
         v3 = getattr(wm_3y, f"trailing_{key}")
         vf = getattr(wm_full, f"trailing_{key}")
         assert v1 == v3 == vf
+
+
+# ===========================================================================
+# Group 18 — sector-relative beta/excess (#1674)
+# A SECOND OLS + excess-CAGR vs the instrument's sector SPDR, threaded through
+# compute_instrument_risk's `sector_closes` arg. Statuses reuse beta_status
+# (>=60 aligned) + excess_cagr's own status — NOT re-derived.
+# ===========================================================================
+
+
+def test_sector_beta_ok_and_independent_of_spy():
+    # 70 closes (69 returns >= 60). sector = 2x the inst series => identical
+    # returns => sector_beta == 1, r2 == 1, status ok. SPY is ABSENT ([]) — the
+    # sector block must still compute (proves it does not depend on SPY).
+    inst = _closes([100.0 + k for k in range(70)])
+    sector = _closes([(100.0 + k) * 2 for k in range(70)])
+    wm = rm.compute_instrument_risk(inst, [], "full", inst[-1][0], sector)
+    # SPY absent -> SPY beta benchmark_missing; sector still ok and computed.
+    assert wm.beta is None
+    assert wm.beta_status == "benchmark_missing"
+    assert wm.sector_beta_status == "ok"
+    assert wm.sector_beta is not None and abs(wm.sector_beta - Decimal("1")) < Decimal("1e-9")
+    assert wm.sector_r2 is not None and abs(wm.sector_r2 - Decimal("1")) < Decimal("1e-9")
+    assert wm.sector_beta_n_obs == 69
+    assert wm.sector_excess_cagr_status == "ok"
+
+
+def test_sector_beta_matches_direct_ols_and_differs_from_spy():
+    # Distinct inst / spy / sector series: the sector beta must use the SECTOR
+    # series (== a direct ols_beta on it), and differ from the SPY beta.
+    inst = _closes([100.0 + k for k in range(70)])
+    spy = _closes([100.0 + 2 * k for k in range(70)])
+    sector = _closes([100.0 * (1.01**k) for k in range(70)])
+    wm = rm.compute_instrument_risk(inst, spy, "full", inst[-1][0], sector)
+    direct = rm.ols_beta(rm.simple_returns(inst), rm.simple_returns(sector))
+    assert wm.sector_beta == direct.beta  # exact: same inputs, same fn
+    assert wm.beta is not None and wm.sector_beta is not None
+    assert wm.beta != wm.sector_beta  # different benchmark series
+    assert wm.beta_status == "ok" and wm.sector_beta_status == "ok"
+
+
+def test_sector_unresolved_is_benchmark_missing():
+    # No sector series (instrument has no resolvable sector) => sector fields NULL
+    # + benchmark_missing for BOTH the beta and the excess-CAGR status.
+    inst = _closes([100.0 + k for k in range(70)])
+    wm = rm.compute_instrument_risk(inst, [], "full", inst[-1][0], ())
+    assert wm.sector_beta is None
+    assert wm.sector_r2 is None
+    assert wm.sector_beta_status == "benchmark_missing"
+    assert wm.sector_excess_cagr is None
+    assert wm.sector_excess_cagr_status == "benchmark_missing"
+
+
+def test_sector_beta_insufficient_history_below_60():
+    # Sector series present but the aligned window has < MIN_RETURNS_VOL_BETA (60)
+    # pairs => benchmark_insufficient_history (the real threshold, NOT 2).
+    inst = _closes([100.0 + k for k in range(40)])  # 39 returns
+    sector = _closes([(100.0 + k) * 2 for k in range(40)])
+    wm = rm.compute_instrument_risk(inst, [], "full", inst[-1][0], sector)
+    assert wm.sector_beta_n_obs < rm.MIN_RETURNS_VOL_BETA
+    assert wm.sector_beta_status == "benchmark_insufficient_history"

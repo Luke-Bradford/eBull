@@ -5030,6 +5030,15 @@ class RiskWindowMetrics(BaseModel):
     calmar_status: str | None
     trailing_status: str | None
     excess_cagr_status: str | None
+    # Sector-relative beta/excess (#1674): a 2nd OLS + excess-CAGR vs the
+    # instrument's sector SPDR ETF (top-level ``sector_benchmark_symbol`` names
+    # which SPDR). Null + ``benchmark_missing`` status when no sector resolved.
+    sector_beta: Decimal | None
+    sector_beta_r2: Decimal | None
+    sector_beta_n_obs: int | None
+    sector_beta_status: str | None
+    sector_excess_cagr: Decimal | None
+    sector_excess_cagr_status: str | None
 
 
 class DrawdownPoint(BaseModel):
@@ -5090,6 +5099,7 @@ class InstrumentRiskMetrics(BaseModel):
     symbol: str
     as_of_date: date | None
     benchmark_symbol: str | None
+    sector_benchmark_symbol: str | None
     metric_version: str
     windows: list[RiskWindowMetrics]
     series: RiskSeries | None
@@ -5264,7 +5274,10 @@ def get_instrument_risk_metrics(
                     n_returns, beta_n_obs, window_days,
                     cagr_status, vol_status, beta_status, drawdown_status,
                     distribution_status, calmar_status, trailing_status,
-                    excess_cagr_status
+                    excess_cagr_status,
+                    sector_benchmark_instrument_id,
+                    sector_beta, sector_beta_r2, sector_beta_n_obs,
+                    sector_beta_status, sector_excess_cagr, sector_excess_cagr_status
                 FROM instrument_risk_metrics_current
                 WHERE instrument_id = %(iid)s
                   AND metric_version = %(ver)s
@@ -5279,6 +5292,7 @@ def get_instrument_risk_metrics(
                 symbol=out_symbol,
                 as_of_date=None,
                 benchmark_symbol=None,
+                sector_benchmark_symbol=None,
                 metric_version=RISK_METRICS_VERSION,
                 windows=[],
                 series=None,
@@ -5303,6 +5317,25 @@ def get_instrument_risk_metrics(
                 bench_row = cur.fetchone()
             if bench_row is not None:
                 benchmark_symbol = str(bench_row["symbol"])  # type: ignore[arg-type]
+
+        # Resolve the sector benchmark symbol (#1674) from the persisted
+        # sector_benchmark_instrument_id (one sector per instrument — shared
+        # across windows; null when the instrument has no resolvable sector).
+        sector_benchmark_symbol: str | None = None
+        sector_bench_id: int | None = None
+        for r in risk_rows:
+            if r["sector_benchmark_instrument_id"] is not None:
+                sector_bench_id = int(r["sector_benchmark_instrument_id"])  # type: ignore[arg-type]
+                break
+        if sector_bench_id is not None:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    "SELECT symbol FROM instruments WHERE instrument_id = %(id)s",
+                    {"id": sector_bench_id},
+                )
+                sector_bench_row = cur.fetchone()
+            if sector_bench_row is not None:
+                sector_benchmark_symbol = str(sector_bench_row["symbol"])  # type: ignore[arg-type]
 
         # Load the price series cut at the persisted as_of_date for the series.
         inst_closes = load_close_series(conn, instrument_id, as_of_date)
@@ -5343,6 +5376,12 @@ def get_instrument_risk_metrics(
             calmar_status=r["calmar_status"],
             trailing_status=r["trailing_status"],
             excess_cagr_status=r["excess_cagr_status"],
+            sector_beta=r["sector_beta"],
+            sector_beta_r2=r["sector_beta_r2"],
+            sector_beta_n_obs=r["sector_beta_n_obs"],
+            sector_beta_status=r["sector_beta_status"],
+            sector_excess_cagr=r["sector_excess_cagr"],
+            sector_excess_cagr_status=r["sector_excess_cagr_status"],
         )
         for r in risk_rows
     ]
@@ -5370,6 +5409,7 @@ def get_instrument_risk_metrics(
         symbol=out_symbol,
         as_of_date=as_of_date,
         benchmark_symbol=benchmark_symbol,
+        sector_benchmark_symbol=sector_benchmark_symbol,
         metric_version=RISK_METRICS_VERSION,
         windows=windows,
         series=series,

@@ -221,6 +221,21 @@ Use capped context in v1:
 ### Rank delta comparison
 - compare rank delta only against the most recent prior run using the same model version / mode
 
+### Risk-metrics evidence layer (#591, #1674)
+- `instrument_risk_metrics` is a DISPLAY/EVIDENCE layer (RiskPage + thesis evidence),
+  versioned by `metric_version` (`risk_v1`). It is NOT a scoring input — sector-relative
+  beta/excess (#1674), like SPY beta, is evidence-only; adding either to the scoring
+  penalty would need its own full-population r² justification + sign-off (sector full-pop:
+  median r²≈SPY's, but 13.6% of names clear r²≥0.30 vs 3.2% for SPY — strong tail, weak
+  median).
+- **Additive-nullable evidence under a stable `metric_version` is blessed — do NOT bump the
+  version to add new evidence columns.** New nullable metric columns (e.g. #1674 `sector_*`)
+  land under the SAME `risk_v1`: existing metrics are byte-identical, so bumping would force
+  a full-universe recompute of unchanged data and orphan the append-only history. Pre-#1674
+  rows keep NULL; the per-metric nullable `*_status` distinguishes "not computed then"
+  (status NULL) from "computed, no benchmark" (`benchmark_missing`). Bump the version only
+  when an EXISTING metric's computation changes.
+
 ---
 
 ## Portfolio manager semantics
