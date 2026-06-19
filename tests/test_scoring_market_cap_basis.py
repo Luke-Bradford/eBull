@@ -14,7 +14,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.services.scoring import _apply_market_cap_basis
-from app.services.xbrl_derived_stats import MarketCapResolution, TotalCompanyMarketCap
+from app.services.xbrl_derived_stats import MarketCapResolution, TotalCompanyMarketCap, _ClassLeg
 
 # The eight shares-distorted columns (each carries a price × combined-shares term)
 # the view must NULL for a curated dual-class issuer; and the clean ones it must
@@ -63,6 +63,10 @@ def _total(value: str) -> TotalCompanyMarketCap:
         residual_shares=Decimal("861000000"),
         imputed_residual=True,
         leg_count=2,
+        legs=(
+            _ClassLeg(1, Decimal("5835000000"), Decimal("369.20")),
+            _ClassLeg(2, Decimal("5515000000"), Decimal("358.20")),
+        ),
     )
 
 

@@ -47,4 +47,24 @@ describe("KeyStatsPane", () => {
     render(<KeyStatsPane summary={fixture(null)} />);
     expect(screen.getByText(/No key stats/i)).toBeInTheDocument();
   });
+
+  it("renders a per-class float row labelled by symbol when class_market_value is set (#1665)", () => {
+    const base = fixture({});
+    const dualClass = {
+      ...base,
+      identity: { ...base.identity, symbol: "GOOGL", class_market_value: "2154300000000" },
+    } as InstrumentSummary;
+    render(<KeyStatsPane summary={dualClass} />);
+    // Both the total-company "Market cap" and the per-class value are shown,
+    // clearly disambiguated by the symbol-anchored label.
+    expect(screen.getByText("Market cap")).toBeInTheDocument();
+    expect(screen.getByText("GOOGL market value")).toBeInTheDocument();
+    expect(screen.getByText("2.15T")).toBeInTheDocument();
+  });
+
+  it("omits the per-class float row for a single-class issuer (class_market_value null)", () => {
+    // The default fixture leaves class_market_value unset → row absent.
+    render(<KeyStatsPane summary={fixture({})} />);
+    expect(screen.queryByText(/market value$/)).not.toBeInTheDocument();
+  });
 });

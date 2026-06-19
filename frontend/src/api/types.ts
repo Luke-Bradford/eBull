@@ -274,6 +274,12 @@ export interface InstrumentIdentity {
   country: string | null;
   currency: string | null;
   market_cap: string | null;
+  /** #1665: per-class FLOAT value of THIS instrument's own share class — its
+   * FSDS shares × price (GOOGL Class A ≈ $2.15T), a SEPARATE stat from
+   * `market_cap` (the whole company, ≈ $4.45T, identical across siblings).
+   * Non-null only on curated dual-class issuers where this instrument is a
+   * priced per-class leg; null for single-class issuers. */
+  class_market_value: string | null;
   /** #819: when set, this instrument is an operational duplicate
    * (e.g. ``AAPL.RTH``) of the named canonical symbol (``AAPL``).
    * The frontend redirects to the canonical symbol's page so

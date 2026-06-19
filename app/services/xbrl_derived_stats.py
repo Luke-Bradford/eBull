@@ -173,6 +173,13 @@ class TotalCompanyMarketCap:
     residual_shares: Decimal
     imputed_residual: bool
     leg_count: int
+    # The priced traded legs that summed into ``value`` — one per share-class
+    # sibling instrument (the imputed untraded residual class is NOT a leg: it has
+    # no instrument). Carried so a caller can surface a single sibling's per-class
+    # FLOAT value (its ``shares × price``) — the tradable-class market value, a
+    # SEPARATE stat from this total-company ``value`` (#1665). Σ over ``legs`` =
+    # ``value - residual_shares × <largest-leg price>``.
+    legs: tuple[_ClassLeg, ...]
 
 
 MarketCapBasis = Literal["total_company", "multiclass_unavailable", "not_multiclass"]
@@ -192,6 +199,14 @@ class MarketCapResolution:
 
     basis: MarketCapBasis
     total: TotalCompanyMarketCap | None = None
+    # Per-class FLOAT value of the VIEWED instrument's own share class — its leg's
+    # ``shares × price`` (#1665). A SEPARATE stat from ``total.value`` (the whole
+    # company): GOOGL Class A ≈ $2.15T vs Alphabet total ≈ $4.45T. Set only for
+    # ``total_company`` basis, and only when the viewed instrument is itself a
+    # priced leg (``None`` for a same-CIK sibling with no FSDS class row, and for
+    # ``not_multiclass`` / ``multiclass_unavailable`` — which scopes the stat to
+    # curated dual-class issuers).
+    class_market_value: Decimal | None = None
 
 
 def _sum_class_caps(legs: list[_ClassLeg], residual_shares: Decimal, impute_price: Decimal) -> Decimal:
@@ -203,6 +218,20 @@ def _sum_class_caps(legs: list[_ClassLeg], residual_shares: Decimal, impute_pric
     if residual_shares > 0:
         total += residual_shares * impute_price
     return total
+
+
+def _leg_market_value(total: TotalCompanyMarketCap, instrument_id: int) -> Decimal | None:
+    """Per-class FLOAT value of ``instrument_id``'s own leg within ``total`` — its
+    ``shares × price`` (#1665). The FSDS table PK is ``(instrument_id, period_end)``
+    and ``_build_total_company_cap`` reads a single ``period_end``, so AT MOST ONE
+    leg can match a given instrument — this returns the first match (defensive: a
+    hypothetical duplicate-ID leg list must not double-count). ``None`` when the
+    viewed instrument is not itself a priced leg (e.g. a same-CIK ``.US`` listing
+    with no FSDS class row). Pure — table-tested without a DB."""
+    for leg in total.legs:
+        if leg.instrument_id == instrument_id:
+            return leg.shares * leg.price
+    return None
 
 
 def _latest_price(conn: psycopg.Connection[Any], instrument_id: int) -> Decimal | None:
@@ -329,6 +358,7 @@ def _assemble_total_company_cap(
         residual_shares=residual_shares,
         imputed_residual=residual_shares > 0,
         leg_count=len(legs),
+        legs=tuple(legs),
     )
 
 
@@ -439,7 +469,14 @@ def resolve_market_cap_basis(
 
     total = _build_total_company_cap(conn, instrument_id, cik)
     if total is not None:
-        return MarketCapResolution(basis="total_company", total=total)
+        # Also surface the viewed instrument's OWN per-class float value (#1665) —
+        # a SEPARATE stat from the total-company ``value``. None when this sibling
+        # is not itself a priced leg.
+        return MarketCapResolution(
+            basis="total_company",
+            total=total,
+            class_market_value=_leg_market_value(total, instrument_id),
+        )
     # Curated dual-class issuer but no clean total → suppress, do not publish the
     # structurally-wrong combined×price for a known dual-class issuer.
     return MarketCapResolution(basis="multiclass_unavailable")
