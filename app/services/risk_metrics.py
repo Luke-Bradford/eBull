@@ -31,6 +31,7 @@ Issue #591 PR-B, Task B1.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -42,7 +43,10 @@ import psycopg
 from psycopg import sql
 
 from app.db.snapshot import snapshot_read
+from app.services.sector_classification import SPDR_SECTORS, resolve_sector_spdr
 from app.workers.scheduler import BENCHMARK_SYMBOLS
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -159,6 +163,16 @@ class WindowMetrics:
     beta_status: RiskStatus
     excess_cagr: Decimal | None
     excess_cagr_status: RiskStatus
+    # Sector-relative beta/excess (#1674): a SECOND OLS + excess-CAGR against the
+    # instrument's sector SPDR ETF, alongside the SPY block above. Same honest
+    # statuses (beta_status / excess_cagr's own status), NULL + benchmark_missing
+    # when the instrument has no resolvable sector benchmark.
+    sector_beta: Decimal | None
+    sector_r2: Decimal | None
+    sector_beta_n_obs: int
+    sector_beta_status: RiskStatus
+    sector_excess_cagr: Decimal | None
+    sector_excess_cagr_status: RiskStatus
     distribution: DistributionResult | None
     distribution_status: RiskStatus
     # Trailing-return scalars (calendar-lookback from as_of_date). These are
@@ -766,6 +780,7 @@ def compute_instrument_risk(
     spy_closes: Sequence[PricePoint],
     window_key: str,
     as_of_date: date,
+    sector_closes: Sequence[PricePoint] = (),
 ) -> WindowMetrics:
     """Compute all risk metrics for ONE instrument over ONE window.
 
@@ -834,6 +849,24 @@ def compute_instrument_risk(
             # spy_w empty within the window though SPY exists globally.
             xs_cagr_st = "benchmark_insufficient_history"
 
+    # Sector-relative beta/excess (#1674): mirror the SPY block exactly, against
+    # the instrument's sector SPDR series. An empty sector_closes (instrument has
+    # no resolvable sector benchmark) yields benchmark_missing — same honest
+    # contract as a missing SPY. Status comes from the SAME helpers (beta_status,
+    # excess_cagr's own status); the >=60-aligned threshold is NOT re-derived.
+    sector_present = bool(sector_closes)
+    sector_w = _slice_window(sector_closes, as_of_date, window_key)
+    sector_rets = simple_returns(sector_w)
+    sector_beta_res = ols_beta(inst_rets, sector_rets)
+    sector_beta_st = beta_status(sector_beta_res.n_obs, sector_present)
+    if not sector_present:
+        sector_xs_cagr, sector_xs_cagr_st = None, "benchmark_missing"
+    else:
+        sector_xs_cagr, sector_xs_cagr_st = excess_cagr(inst_w, sector_w, window_key)
+        if sector_xs_cagr_st == "benchmark_missing":
+            # sector_w empty within the window though the sector ETF exists globally.
+            sector_xs_cagr_st = "benchmark_insufficient_history"
+
     # Trailing returns are window-INDEPENDENT: computed on the FULL series.
     trailing: dict[str, Decimal | None] = {}
     excess_trailing: dict[str, Decimal | None] = {}
@@ -861,6 +894,12 @@ def compute_instrument_risk(
         beta_status=beta_st,
         excess_cagr=xs_cagr,
         excess_cagr_status=xs_cagr_st,
+        sector_beta=sector_beta_res.beta,
+        sector_r2=sector_beta_res.r2,
+        sector_beta_n_obs=sector_beta_res.n_obs,
+        sector_beta_status=sector_beta_st,
+        sector_excess_cagr=sector_xs_cagr,
+        sector_excess_cagr_status=sector_xs_cagr_st,
         distribution=dist,
         distribution_status=dist_st,
         trailing_1m=trailing["1m"],
@@ -934,6 +973,14 @@ _RISK_BUSINESS_COLS: tuple[str, ...] = (
     "calmar_status",
     "trailing_status",
     "excess_cagr_status",
+    # Sector-relative beta/excess (#1674) — appended; order stays load-bearing.
+    "sector_beta",
+    "sector_beta_r2",
+    "sector_beta_n_obs",
+    "sector_benchmark_instrument_id",
+    "sector_beta_status",
+    "sector_excess_cagr",
+    "sector_excess_cagr_status",
 )
 
 
@@ -1020,6 +1067,7 @@ def _metrics_row_values(
     spy_closes: Sequence[tuple[date, Decimal | None]],  # noqa: ARG001 — kept for caller symmetry
     as_of_date: date,
     benchmark_instrument_id: int | None,
+    sector_benchmark_instrument_id: int | None = None,
 ) -> dict[str, object]:
     """Build the business-column value dict for one (instrument, window) row.
 
@@ -1072,6 +1120,13 @@ def _metrics_row_values(
         "calmar_status": metrics.calmar_status,
         "trailing_status": metrics.trailing_status,
         "excess_cagr_status": metrics.excess_cagr_status,
+        "sector_beta": metrics.sector_beta,
+        "sector_beta_r2": metrics.sector_r2,
+        "sector_beta_n_obs": metrics.sector_beta_n_obs,
+        "sector_benchmark_instrument_id": sector_benchmark_instrument_id,
+        "sector_beta_status": metrics.sector_beta_status,
+        "sector_excess_cagr": metrics.sector_excess_cagr,
+        "sector_excess_cagr_status": metrics.sector_excess_cagr_status,
     }
 
 
@@ -1146,6 +1201,40 @@ def compute_and_store_risk_metrics(conn: psycopg.Connection[Any]) -> int:
             load_close_series(conn, spy_instrument_id, current_date) if spy_instrument_id is not None else []
         )
 
+        # Sector-SPDR benchmark series (#1674), loaded ONCE each and keyed by SPDR
+        # symbol — reused across every instrument that resolves to that sector,
+        # NEVER reloaded per instrument (mirrors the single global spy_closes).
+        # Presence guard: a SPDR absent from the benchmark universe would silently
+        # turn its whole sector into benchmark_missing, so log it loudly.
+        missing_spdrs = sorted(s for s in SPDR_SECTORS if s not in benchmark_ids)
+        if missing_spdrs:
+            logger.warning(
+                "risk_metrics: %d sector SPDR(s) absent from benchmark universe -> "
+                "those sectors fall to benchmark_missing: %s",
+                len(missing_spdrs),
+                ", ".join(missing_spdrs),
+            )
+        sector_series: dict[str, list[tuple[date, Decimal | None]]] = {
+            spdr: load_close_series(conn, benchmark_ids[spdr], current_date)
+            for spdr in SPDR_SECTORS
+            if spdr in benchmark_ids
+        }
+
+        # Per-instrument SIC for sector resolution. dict.get(iid) -> None for an
+        # instrument absent from instrument_sec_profile (LEFT-JOIN semantics): it
+        # resolves to no sector -> benchmark_missing, but is NEVER dropped from
+        # scope (every scoped instrument still writes a row).
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, sic
+                FROM instrument_sec_profile
+                WHERE instrument_id = ANY(%(ids)s)
+                """,
+                {"ids": sorted(scoped_ids)},
+            )
+            sic_by_instrument: dict[int, str | None] = {int(r[0]): r[1] for r in cur.fetchall()}
+
         inst_series: dict[int, list[tuple[date, Decimal | None]]] = {}
         for iid in sorted(scoped_ids):
             inst_series[iid] = load_close_series(conn, iid, current_date)
@@ -1164,9 +1253,17 @@ def compute_and_store_risk_metrics(conn: psycopg.Connection[Any]) -> int:
         # Guard: never let a future-dated bar advance the snapshot past today.
         if as_of_date > current_date:
             as_of_date = current_date
+        # Resolve the sector SPDR ONCE per instrument (window-independent). An
+        # unresolved SIC / missing SPDR series -> empty sector_closes -> the
+        # compute reports sector benchmark_missing for every window.
+        sector_cls = resolve_sector_spdr(sic_by_instrument.get(iid))
+        sector_closes = sector_series.get(sector_cls.spdr_symbol, []) if sector_cls is not None else []
+        sector_benchmark_id = benchmark_ids.get(sector_cls.spdr_symbol) if sector_cls is not None else None
         for window_key in WINDOW_KEYS:
-            metrics = compute_instrument_risk(closes, spy_closes, window_key, as_of_date)
-            values = _metrics_row_values(metrics, closes, spy_closes, as_of_date, spy_instrument_id)
+            metrics = compute_instrument_risk(closes, spy_closes, window_key, as_of_date, sector_closes)
+            values = _metrics_row_values(
+                metrics, closes, spy_closes, as_of_date, spy_instrument_id, sector_benchmark_id
+            )
             pending.append(
                 _PendingRow(
                     instrument_id=iid,

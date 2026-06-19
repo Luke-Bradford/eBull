@@ -333,3 +333,47 @@ def test_fewer_than_two_valid_closes_no_row(ebull_test_conn: psycopg.Connection[
 
     assert _count_obs(conn, _ONE_CLOSE_ID, "1y") == 0
     assert _current_row(conn, _ONE_CLOSE_ID, "1y") is None
+
+
+def test_sector_beta_persists_and_resolves(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#1674: a subject whose SIC resolves to a sector SPDR gets sector_beta
+    persisted end-to-end (compute -> observation -> _current), with the SPDR's
+    instrument_id carried and an honest 'ok' status. An instrument with no SEC
+    profile (here SPY) stays sector benchmark_missing. This is the positive
+    load-bearing-path test: a name/order mismatch between _RISK_BUSINESS_COLS,
+    sql/202, and the API SELECT would surface here, not in the pure tests.
+    """
+    conn = ebull_test_conn
+    xlk_id = 990005
+    _seed_instrument(conn, _SPY_ID, "SPY")
+    _seed_instrument(conn, _SUBJECT_ID, "FAKE")
+    _seed_instrument(conn, xlk_id, "XLK")
+    _seed_series(conn, _SPY_ID, _clean_series(400, start=400.0, step=0.3))
+    _seed_series(conn, _SUBJECT_ID, _clean_series(400, start=100.0, step=0.5))
+    _seed_series(conn, xlk_id, _clean_series(400, start=200.0, step=0.4))
+    # SIC 7372 (software/data-processing) resolves to XLK via the #1634 crosswalk.
+    conn.execute(
+        """
+        INSERT INTO instrument_sec_profile (instrument_id, cik, sic)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (instrument_id) DO UPDATE SET sic = EXCLUDED.sic
+        """,
+        (_SUBJECT_ID, "0000000002", "7372"),
+    )
+    conn.commit()
+
+    compute_and_store_risk_metrics(conn)
+
+    cur = _current_row(conn, _SUBJECT_ID, "full")
+    assert cur is not None
+    assert cur["sector_benchmark_instrument_id"] == xlk_id
+    assert cur["sector_beta"] is not None
+    assert cur["sector_beta_status"] == "ok"
+    assert cur["sector_excess_cagr_status"] == "ok"
+
+    # SPY has no instrument_sec_profile row -> no sector resolves -> honest
+    # benchmark_missing (never a guessed sector).
+    spy_cur = _current_row(conn, _SPY_ID, "full")
+    assert spy_cur is not None
+    assert spy_cur["sector_beta"] is None
+    assert spy_cur["sector_beta_status"] == "benchmark_missing"
