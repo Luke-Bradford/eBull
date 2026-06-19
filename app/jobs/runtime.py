@@ -437,6 +437,7 @@ _INVOKERS[_bulk_jobs.JOB_SEC_INSIDER_INGEST_FROM_DATASET] = _adapt_zero_arg(
 )
 _INVOKERS[_bulk_jobs.JOB_SEC_NPORT_INGEST_FROM_DATASET] = _adapt_zero_arg(_bulk_jobs.sec_nport_ingest_from_dataset_job)
 _INVOKERS[_bulk_jobs.JOB_SEC_FSDS_CLASS_SHARES_INGEST] = _adapt_zero_arg(_bulk_jobs.sec_fsds_class_shares_ingest_job)
+_INVOKERS[_bulk_jobs.JOB_SEC_FSDS_DIMENSIONAL_INGEST] = _adapt_zero_arg(_bulk_jobs.sec_fsds_dimensional_ingest_job)
 _INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _adapt_zero_arg(_files_walk.sec_submissions_files_walk_job)
 
 # #819 — canonical-instrument redirect populate. Idempotent one-shot

@@ -521,6 +521,11 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
     # universe-instrument CUSIP from S3 cusip_universe_backfill → cusip_mapping_ready),
     # not a 13F-holding CUSIP, so it does NOT depend on the post-bulk OpenFIGI sweep.
     "sec_fsds_class_shares_ingest": CapRequirement(all_of=("bulk_archives_ready", "cusip_mapping_ready")),
+    # #1590 — FSDS dimensional bulk ingest maps issuer CIK → instruments by CIK fan-out
+    # (siblings_for_issuer_cik over external_identifiers sec/cik), NOT by CUSIP, so it
+    # depends on cik_mapping_ready (the CIK identifiers exist) + the FSDS archives, not
+    # the CUSIP map.
+    "sec_fsds_dimensional_ingest": CapRequirement(all_of=("bulk_archives_ready", "cik_mapping_ready")),
     # Phase D — #1233 PR-1b. OpenFIGI sweep over the bulk-source rows
     # written by S10 + S12. Requires both bulk ingesters to have
     # advertised their caps so we know the unresolved_13f_cusips
@@ -1046,6 +1051,7 @@ from app.services.sec_bulk_orchestrator_jobs import (  # noqa: E402
     JOB_SEC_13F_INGEST_FROM_DATASET,
     JOB_SEC_COMPANYFACTS_INGEST,
     JOB_SEC_FSDS_CLASS_SHARES_INGEST,
+    JOB_SEC_FSDS_DIMENSIONAL_INGEST,
     JOB_SEC_INSIDER_INGEST_FROM_DATASET,
     JOB_SEC_NPORT_INGEST_FROM_DATASET,
     JOB_SEC_SUBMISSIONS_INGEST,
@@ -1147,6 +1153,16 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
         # via JOB_INTERNAL_KEYS — the manual API path rejects them.
         params={"max_subjects": None, "use_bulk_zip": True, "follow_pagination": False},
     ),
+    # #1590 — DERA FSDS bulk dimensional-facts ingest (segment / product / geographic
+    # revenue/opinc/assets). db lane. Quick-tier bootstrap accelerator: writes
+    # instrument_dimensional_facts for ~2.3k instruments from one quarter in minutes
+    # (vs the ~4 h #554 per-filing drain), which the per-filing path then converges on.
+    # Depends on cik_mapping_ready (CIK fan-out) + bulk_archives_ready (the SAME
+    # fsds_*.zip the class-shares stage reads — neither deletes them). Provides no
+    # capability (nothing downstream requires it; the segments reader reads the table
+    # lazily). stage_order 17 fills the freed S17 (def14a-dropped) slot — sequence-only,
+    # the cap-driven dispatcher does not order on it.
+    _spec("sec_fsds_dimensional_ingest", 17, "db", JOB_SEC_FSDS_DIMENSIONAL_INGEST),
     # #1413 — S17 sec_def14a_bootstrap, S19 sec_insider_transactions_backfill,
     # S20 sec_form3_ingest DROPPED (bulk-only bootstrap). S17 provides no
     # capability; DEF14A holder tables are manifest-worker/lazy-on-view
@@ -2979,13 +2995,14 @@ __all__ = [
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
 # current stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 22, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 22 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+assert len(_BOOTSTRAP_STAGE_SPECS) == 23, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 23 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
     "update the spec, frontend, runbook, and stage_count tests in lockstep. "
     "#1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep; "
     "#1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages "
     "(S14/S15/S17/S19/S20/S22/S23 + S27 sec_n_csr_bootstrap_drain): 27 - 8 = 19; "
     "#1415 (P3) added the S15-slot master.idx recent-window gap-close: 19 + 1 = 20; "
     "#1419 (P4) added the terminal bootstrap_validation stage: 20 + 1 = 21; "
-    "#788 added S14 sec_fsds_class_shares_ingest (per-class denominator): 21 + 1 = 22."
+    "#788 added S14 sec_fsds_class_shares_ingest (per-class denominator): 21 + 1 = 22; "
+    "#1590 added S17-slot sec_fsds_dimensional_ingest (bulk dimensional facts): 22 + 1 = 23."
 )

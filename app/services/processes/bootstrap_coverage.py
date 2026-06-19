@@ -61,6 +61,10 @@ _BOOTSTRAP_STAGE_FRESHNESS_SOURCES: Final[dict[str, frozenset[ManifestSource]]] 
     # #788 — writes the per-class shares table from cached FSDS zips; NOT a
     # manifest source, so no freshness sink (like the resolver sweep above).
     "sec_fsds_class_shares_ingest": frozenset(),
+    # #1590 — bulk dimensional facts from the same cached FSDS zips; also NOT a
+    # manifest source (the #554 per-filing manifest worker owns sec_10k freshness),
+    # so no freshness sink.
+    "sec_fsds_dimensional_ingest": frozenset(),
     "sec_master_idx_gap_close": _ISSUER_FILING_METADATA,
     # First-install drain seeds filing_events (issuer filing-metadata) from the
     # local bulk submissions.zip.

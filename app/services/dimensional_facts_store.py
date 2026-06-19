@@ -50,7 +50,23 @@ def replace_accession_rows(
 
     Runs in the caller's transaction (the sec_10k parser wraps this in
     its own savepoint). Returns the number of rows inserted.
+
+    Takes a transaction-scoped advisory lock on ``(instrument_id, accession)`` FIRST so
+    it serialises against the #1590 FSDS bulk writer, which uses the SAME lock key before
+    its existence-check-then-insert. Without this, a bulk insert interleaved between this
+    DELETE and its INSERT (or vice-versa) could leave both per-filing ``country:US`` and
+    bulk ``US`` rows for one accession — they don't collide on the ``member_qname``-bearing
+    unique index, so the reader would double-count if that accession wins (#1590 §5).
     """
+    # Bigint-safe combined key (instrument_id is BIGINT — do NOT cast to int4; both
+    # params ::text so `||` never depends on psycopg3 OID inference). MUST be
+    # byte-identical to the #1590 bulk writer's lock (fsds_dimensional_facts.py) so the
+    # two writers serialize on the same (instrument, accession) — pinned by
+    # tests/test_fsds_dimensional_facts.py::test_lock_templates_byte_identical.
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s::text || ':' || %s::text)::bigint)",
+        (instrument_id, source_accession),
+    )
     conn.execute(
         "DELETE FROM instrument_dimensional_facts WHERE instrument_id = %s AND source_accession = %s",
         (instrument_id, source_accession),

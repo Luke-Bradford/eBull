@@ -435,6 +435,72 @@ def _instance_units(doc: ET._Element) -> dict[str, str]:
     return units
 
 
+def mark_value_overage_subtotals(
+    facts: list[DimensionalFact],
+    revenue_totals: Mapping[tuple[DimensionalMetric, date | None, date], Decimal],
+    *,
+    accession: str,
+) -> tuple[list[DimensionalFact], dict[str, int]]:
+    """Mark product/geographic revenue subtotals by value-overage. Shared by the #554
+    per-filing extractor and the #1590 FSDS bulk loader (ONE owner of the rule).
+
+    ASC 606 revenue disaggregation reconciles to consolidated revenue, so when member
+    sums OVERSHOOT the dimensionless total the overage is exactly the subtotal mass
+    (linkbases are often flat — AAPL nests Product⊃iPhone/Mac/iPad/Wearables in NEITHER
+    def nor pre). The smallest member subset summing exactly to the overage is the
+    subtotal set; ambiguity or no match marks nothing + WARNs. ``business_segment`` is
+    excluded: its sum legitimately differs from consolidated (unallocated corporate items
+    are filtered out via the ConsolidationItemsAxis route rule), so overage is signal-free.
+
+    ``revenue_totals`` maps (metric, period_start, period_end) → the dimensionless
+    consolidated Decimal value (the per-filing caller passes ``{k: v[2] for k, v in
+    totals.items()}``; the bulk caller builds the same shape from num.txt ``segments=''``
+    rows). Pure (no I/O): returns the re-marked facts + a per-pass rejection counter the
+    caller may surface in its own telemetry."""
+    facts = list(facts)
+    rejections: dict[str, int] = {}
+    groups: dict[tuple[DimensionalAxis, date | None, date], list[int]] = {}
+    for i, f in enumerate(facts):
+        if f.axis in ("product_service", "geographic") and f.metric == "revenue" and not f.is_subtotal:
+            groups.setdefault((f.axis, f.period_start, f.period_end), []).append(i)
+    for (axis, period_start, period_end), idxs in sorted(groups.items()):
+        if len(idxs) < 2:
+            continue
+        total = revenue_totals.get(("revenue", period_start, period_end))
+        if total is None:
+            rejections["no_consolidated_revenue_anchor"] = rejections.get("no_consolidated_revenue_anchor", 0) + 1
+            continue
+        member_sum = sum(facts[i].val for i in idxs)
+        if member_sum <= total:
+            continue  # flat or partial disaggregation — nothing overlaps
+        target = member_sum - total
+        marked: tuple[int, ...] | None = None
+        ambiguous = False
+        for size in (1, 2, 3):
+            matches = [c for c in combinations(idxs, size) if sum(facts[i].val for i in c) == target]
+            if len(matches) == 1:
+                marked = matches[0]
+                break
+            if len(matches) > 1:
+                ambiguous = True
+                break
+        if marked is not None:
+            for i in marked:
+                facts[i] = replace(facts[i], is_subtotal=True)
+        else:
+            reason = "subtotal_set_ambiguous" if ambiguous else "subtotal_overage_unresolved"
+            rejections[reason] = rejections.get(reason, 0) + 1
+            logger.warning(
+                "dimensional facts: %s accession=%s axis=%s period_end=%s overage=%s",
+                reason,
+                accession,
+                axis,
+                period_end,
+                target,
+            )
+    return facts, rejections
+
+
 def extract_dimensional_facts(
     instance_xml: bytes,
     label_xml: bytes | None,
@@ -641,55 +707,13 @@ def extract_dimensional_facts(
         for f in facts
     ]
 
-    # Value-overage pass — revenue on product/geographic axes only.
-    # ASC 606 revenue disaggregation reconciles to consolidated revenue,
-    # so when member sums OVERSHOOT the dimensionless total the overage
-    # is exactly the subtotal mass (linkbases are often flat — AAPL
-    # nests Product⊃iPhone/Mac/iPad/Wearables in NEITHER def nor pre).
-    # The smallest member subset summing exactly to the overage is the
-    # subtotal set; ambiguity or no match marks nothing + WARNs.
-    # business_segment is excluded: its sum legitimately differs from
-    # consolidated (unallocated corporate items are filtered out via
-    # the ConsolidationItemsAxis route rule), so overage is signal-free.
-    groups: dict[tuple[DimensionalAxis, date | None, date], list[int]] = {}
-    for i, f in enumerate(facts):
-        if f.axis in ("product_service", "geographic") and f.metric == "revenue" and not f.is_subtotal:
-            groups.setdefault((f.axis, f.period_start, f.period_end), []).append(i)
-    for (axis, period_start, period_end), idxs in sorted(groups.items()):
-        if len(idxs) < 2:
-            continue
-        anchor = totals.get(("revenue", period_start, period_end))
-        if anchor is None:
-            rejections["no_consolidated_revenue_anchor"] = rejections.get("no_consolidated_revenue_anchor", 0) + 1
-            continue
-        total = anchor[2]
-        member_sum = sum(facts[i].val for i in idxs)
-        if member_sum <= total:
-            continue  # flat or partial disaggregation — nothing overlaps
-        target = member_sum - total
-        marked: tuple[int, ...] | None = None
-        ambiguous = False
-        for size in (1, 2, 3):
-            matches = [c for c in combinations(idxs, size) if sum(facts[i].val for i in c) == target]
-            if len(matches) == 1:
-                marked = matches[0]
-                break
-            if len(matches) > 1:
-                ambiguous = True
-                break
-        if marked is not None:
-            for i in marked:
-                facts[i] = replace(facts[i], is_subtotal=True)
-        else:
-            reason = "subtotal_set_ambiguous" if ambiguous else "subtotal_overage_unresolved"
-            rejections[reason] = rejections.get(reason, 0) + 1
-            logger.warning(
-                "dimensional facts: %s accession=%s axis=%s period_end=%s overage=%s",
-                reason,
-                accession,
-                axis,
-                period_end,
-                target,
-            )
+    # Value-overage subtotal marking (product/geographic revenue) — extracted to the
+    # shared ``mark_value_overage_subtotals`` so the #1590 FSDS bulk path applies the
+    # SAME rule (DRY: one owner). ``totals`` here is keyed (metric, period_start,
+    # period_end) → (priority, rank, Decimal); the helper takes the bare Decimal anchor.
+    # The returned per-pass rejection counts are not summary-logged here (they never
+    # were — the summary WARN above ran before this pass; the per-overage WARN now
+    # lives inside the helper), so behaviour is preserved.
+    facts, _ = mark_value_overage_subtotals(facts, {k: v[2] for k, v in totals.items()}, accession=accession)
 
     return sorted(facts, key=lambda f: (f.axis, f.metric, f.period_end, f.member_qname))

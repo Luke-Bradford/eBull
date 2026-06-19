@@ -136,7 +136,7 @@ def test_bootstrap_end_to_end(
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None
     assert snap.run_id == run_id
-    assert len(snap.stages) == 22  # #1419 terminal bootstrap_validation; #788 sec_fsds_class_shares_ingest
+    assert len(snap.stages) == 23  # #1419 bootstrap_validation; #788 fsds_class_shares; #1590 fsds_dimensional
     assert all(s.status == "pending" for s in snap.stages)
 
     # 3. State is running, gate stays closed.
@@ -148,9 +148,9 @@ def test_bootstrap_end_to_end(
     # 4. Orchestrator drives Phase A → B → C with the stubbed invokers.
     run_bootstrap_orchestrator()
 
-    # 5. Every fake invoker fired once (22 stages post-#1413/#1415/#1419/#788 —
+    # 5. Every fake invoker fired once (23 stages post-#1413/#1415/#1419/#788/#1590 —
     # incl. the terminal bootstrap_validation stage).
-    assert len(calls["order"]) == 22
+    assert len(calls["order"]) == 23
     assert "bootstrap_validation" in calls["order"]
 
     # 6. State is complete; gate releases.
