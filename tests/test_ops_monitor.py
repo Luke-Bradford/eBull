@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import psycopg
 import pytest
 
 from app.services.ops_monitor import (
@@ -651,6 +652,12 @@ class TestReapOrphanedJobRuns:
         result = MagicMock()
         result.fetchall.return_value = run_ids
         conn.execute.return_value = result
+        # The post-reap retry-scheduling loop calls _retry_plan, which reads the
+        # row via conn.cursor().fetchone(). Returning None there makes _retry_plan
+        # short-circuit to (1, None) → no retry UPDATE → these mock tests keep
+        # asserting only the reap contract. Real retry-scheduling is covered by
+        # the DB-backed test below.
+        conn.cursor.return_value.__enter__.return_value.fetchone.return_value = None
         return conn
 
     def test_returns_count_of_reaped_rows(self) -> None:
@@ -675,7 +682,8 @@ class TestReapOrphanedJobRuns:
         conn = self._conn_returning([(1,)])
         reap_orphaned_job_runs(conn, reap_all=True)
 
-        sql, params = conn.execute.call_args[0]
+        # The reap is the FIRST execute; per-reaped-row retry-stamp UPDATEs follow.
+        sql, params = conn.execute.call_args_list[0][0]
         assert "UPDATE job_runs" in sql
         assert "status = 'failure'" in sql
         assert "WHERE status = 'running'" in sql
@@ -693,3 +701,35 @@ class TestReapOrphanedJobRuns:
         _, params = conn.execute.call_args[0]
         assert params["reap_all"] is False
         assert params["timeout"] == timedelta(hours=2)
+
+    def test_reaped_row_gets_auto_retry_scheduled(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A boot-reaped (restart-interrupted) job is TRANSIENT and must get a
+        near-term next_retry_at so the jobs_retry_sweeper re-fires it — instead
+        of sitting red on the admin console until the next natural cadence."""
+        from app.services.ops_monitor import reap_orphaned_job_runs
+
+        job = "test_reaper_autoretry_job"
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO job_runs (job_name, started_at, status) "
+                "VALUES (%s, now() - interval '5 min', 'running') RETURNING run_id",
+                (job,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            run_id = int(row[0])
+        ebull_test_conn.commit()
+
+        reaped = reap_orphaned_job_runs(ebull_test_conn, reap_all=True)
+        assert reaped >= 1
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, error_category, next_retry_at, attempt FROM job_runs WHERE run_id = %s",
+                (run_id,),
+            )
+            status, category, next_retry_at, attempt = cur.fetchone()  # type: ignore[misc]
+        assert status == "failure"
+        assert category == "internal_error"
+        assert next_retry_at is not None  # <- the fix: retry IS scheduled
+        assert attempt == 1

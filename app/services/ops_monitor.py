@@ -525,6 +525,32 @@ def reap_orphaned_job_runs(
             "timeout": timeout,
         },
     ).fetchall()
+
+    # Schedule an auto-retry for each reaped row (#1474 follow-up: a job
+    # interrupted by a restart / dead worker is TRANSIENT by definition — it
+    # never reached a terminal status, so re-firing it is the self-heal). The
+    # raw UPDATE above bypassed record_job_finish, so without this the reaped row
+    # carries no next_retry_at and the jobs_retry_sweeper never re-fires it — it
+    # sits red on the admin console until the next natural cadence. Route each
+    # reaped run through the SAME _retry_plan as a natural failure (INTERNAL_ERROR
+    # is self_heal): it sets a near-term, attempt-capped next_retry_at, and the
+    # sweeper re-enqueues it through the audited manual queue. Ineligible jobs
+    # (sync-runs-tracked / manual-only) get their stray next_retry_at cleared by
+    # the sweeper by design, so it is safe to stamp every reaped row here.
+    now = _utcnow()
+    for (run_id,) in reaped:
+        attempt, next_retry_at = _retry_plan(conn, int(run_id), FailureCategory.INTERNAL_ERROR, now)
+        # Always persist the computed attempt (so an exhausted streak shows its
+        # real attempt count, not the default 1); next_retry_at is NULL once the
+        # cap is exceeded → the sweeper won't re-fire, row reads Needs-attention.
+        # NOTE: ineligible (sync-tracked / manual-only) reaped jobs also get
+        # next_retry_at stamped here; the jobs_retry_sweeper clears those strays
+        # on the next due sweep (it never dispatches them), so this is at worst a
+        # brief "will retry" display before it self-corrects.
+        conn.execute(
+            "UPDATE job_runs SET attempt = %(a)s, next_retry_at = %(n)s WHERE run_id = %(id)s",
+            {"a": attempt, "n": next_retry_at, "id": int(run_id)},
+        )
     return len(reaped)
 
 
