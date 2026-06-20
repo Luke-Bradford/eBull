@@ -25,6 +25,7 @@ Provider contract:
     populate external_identifiers during daily CIK refresh.
 """
 
+import contextvars
 import hashlib
 import logging
 import threading
@@ -82,6 +83,34 @@ _PROCESS_RATE_LIMIT_CLOCK: list[float] = [0.0]
 # simultaneously and burst SEC's 10 req/s ceiling — triggering UA
 # throttling and cascading 4xx/5xx tombstones.
 _PROCESS_RATE_LIMIT_LOCK: threading.Lock = threading.Lock()
+
+
+# #1686 — tick-scoped prefetch body cache. The manifest worker prefetches
+# the bodies of a tick's single-primary-doc rows concurrently (overlapping
+# SEC's ~800ms latency up to the shared 10 req/s ceiling), then dispatches
+# parsers SERIALLY; each parser's ``fetch_document_text`` consults this
+# cache first. Stored values are SUCCESSFUL bodies ONLY (``str``) — a
+# prefetch ``None`` (404 OR a caught fetch exception; ``concurrent_fetch``
+# collapses both) is never cached, so it always falls through to the real
+# serial fetch, preserving the parser's exception->failed(retry) vs
+# empty/non-200->tombstone discrimination. A cache miss / key mismatch also
+# falls through: wrong key never yields wrong data, only no speedup.
+# ContextVar (not a module dict) so the scope is the worker tick and never
+# leaks across jobs; the serial parse path reads it in the same thread the
+# worker set it in.
+_PREFETCH_BODY_CACHE: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "_prefetch_body_cache", default=None
+)
+
+
+def set_prefetch_body_cache(cache: dict[str, str]) -> contextvars.Token[dict[str, str] | None]:
+    """Bind a tick-scoped {url: body} prefetch cache; returns the reset token."""
+    return _PREFETCH_BODY_CACHE.set(cache)
+
+
+def reset_prefetch_body_cache(token: contextvars.Token[dict[str, str] | None]) -> None:
+    """Clear the prefetch cache bound by :func:`set_prefetch_body_cache`."""
+    _PREFETCH_BODY_CACHE.reset(token)
 
 
 # Known SEC filing-agent CIKs (#752 defense-in-depth). These are
@@ -576,6 +605,17 @@ class SecFilingsProvider(FilingsProvider):
         service-layer caller that writes to disk and leaves the
         normalisation for "later".
         """
+        # #1686 — serve from the tick-scoped prefetch cache when present.
+        # Only successful bodies are cached, so a hit is always a real
+        # body; a miss (or no active cache) falls through to the live
+        # fetch below, which re-raises non-404 errors so the caller keeps
+        # its retry/tombstone discrimination.
+        cache = _PREFETCH_BODY_CACHE.get()
+        if cache is not None:
+            cached = cache.get(absolute_url)
+            if cached is not None:
+                return cached
+
         resp = self._http_tickers.get(absolute_url)
         if resp.status_code in (404, 410):
             return None

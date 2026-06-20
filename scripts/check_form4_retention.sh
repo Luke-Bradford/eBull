@@ -111,9 +111,17 @@ fi
 if [[ ! -f "$FILE_MANIFEST_FORM4" ]]; then
   fail "missing file: $FILE_MANIFEST_FORM4"
 else
-  within_calls=$(count_call_sites "$FILE_MANIFEST_FORM4" "form4_within_retention")
+  # #1686 — count the PARSER's exact gate literal, not the generic symbol.
+  # ``_parse_form4`` gates with ``form4_within_retention(filed_at.date())``;
+  # the Phase-2 prefetch hook ``_insider_fetch_url`` ALSO calls
+  # ``form4_within_retention(filed)`` (distinct arg) to avoid wasting SEC
+  # budget, but the hook only gates PREFETCH — the parser's own serial gate
+  # is the enforced chokepoint. Counting the generic symbol would let a
+  # stripped parser gate pass while the hook's call survives, so we pin the
+  # parser's exact call form.
+  within_calls=$(count_literal "$FILE_MANIFEST_FORM4" "form4_within_retention(filed_at.date())")
   if (( within_calls < 1 )); then
-    fail "$FILE_MANIFEST_FORM4: missing form4_within_retention(...) pre-fetch gate in _parse_form4. PR4 (#1233 §4.3) requires every Form 4 manifest-worker dispatch to honour the 3y cap before fetching."
+    fail "$FILE_MANIFEST_FORM4: missing form4_within_retention(filed_at.date()) pre-fetch gate in _parse_form4. PR4 (#1233 §4.3) requires every Form 4 manifest-worker dispatch to honour the 3y cap before fetching."
   fi
 fi
 

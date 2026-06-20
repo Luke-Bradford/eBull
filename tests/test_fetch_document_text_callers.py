@@ -169,6 +169,16 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # sec_pipelined_fetcher.py); no new disk-only persistence path.
         "app/services/sec_submissions_zip.py",
         "tests/test_sec_submissions_zip.py",
+        # #1686 — the manifest worker's Phase-2 concurrent body prefetch
+        # (`_prefetch_bodies`) warms a tick-scoped {url: body} cache that the
+        # already-allow-listed per-source parsers read first. Transport-only,
+        # mirrors concurrent_fetch.py / sec_pipelined_fetcher.py — it persists
+        # NOTHING itself; the parsers own the SQL normalisation as before.
+        # (The references here are `fetch_document_texts` + docstring mentions
+        # of `fetch_document_text`.) The test file references the method in
+        # the cache-chokepoint assertions.
+        "app/jobs/sec_manifest_worker.py",
+        "tests/test_manifest_worker_prefetch.py",
         # Retention/recency/lazy-body cap tests — each monkeypatches
         # fetch_document_text with a stub/sentinel to assert the cap gate
         # (no real fetch + no new persistence surface).

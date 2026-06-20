@@ -501,6 +501,30 @@ class TestTransitionStatus:
             transition_status(ebull_test_conn, accession, ingest_status="failed")
         ebull_test_conn.rollback()
 
+    def test_tombstoned_to_tombstoned_is_idempotent_noop(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #1686 — the concurrent double-tombstone race: bulk pre-retention
+        # sweep tombstones a pending row the worker already selected, then
+        # the worker's parser (same retention gate) calls transition_status
+        # tombstoned again. ``tombstoned`` is otherwise terminal, so this
+        # must be a NO-OP (no raise, no re-stamp) rather than the
+        # tick-aborting ``illegal transition`` ValueError.
+        accession = self._seed(ebull_test_conn)
+        transition_status(ebull_test_conn, accession, ingest_status="tombstoned", error="retention floor")
+        first = get_manifest_row(ebull_test_conn, accession)
+        assert first is not None and first.ingest_status == "tombstoned"
+
+        # Redundant tombstone with a DIFFERENT error string — must not raise
+        # and must NOT overwrite the existing error / last_attempted_at.
+        transition_status(ebull_test_conn, accession, ingest_status="tombstoned", error="something else")
+        after = get_manifest_row(ebull_test_conn, accession)
+        assert after is not None
+        assert after.ingest_status == "tombstoned"
+        assert after.error == "retention floor"  # unchanged — no re-stamp
+        assert after.last_attempted_at == first.last_attempted_at
+
     def test_rebuild_path_parsed_to_pending(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

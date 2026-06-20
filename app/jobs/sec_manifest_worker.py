@@ -125,6 +125,17 @@ connection; returns a ParseOutcome. The parser is responsible for
 fetching + parsing + persisting typed-table rows. The worker handles
 the manifest state transition based on the outcome."""
 
+FetchUrlFn = Callable[[ManifestRow], str | None]
+"""#1686 — optional per-source hook returning the SINGLE canonical URL
+the parser will GET, so the worker can prefetch it concurrently (Phase 2).
+Returns ``None`` when the row has no prefetchable single doc. Only wire
+this for SINGLE-primary-doc parsers — multi-doc fetchers (10-K/10-Q index
+walk, 13F index.json->primary->infotable) must NOT register a hook and
+stay serial. The hook MUST return the same URL the parser passes to
+``fetch_document_text``; a mismatch is SAFE (cache miss -> serial fetch,
+never wrong data) but yields no speedup, so keep it in sync with the
+parser's canonicalizer."""
+
 
 @dataclass(frozen=True)
 class ParserSpec:
@@ -141,6 +152,7 @@ class ParserSpec:
 
     fn: ParserFn
     requires_raw_payload: bool = False
+    fetch_url: FetchUrlFn | None = None
 
 
 _PARSERS: dict[ManifestSource, ParserSpec] = {}
@@ -151,6 +163,7 @@ def register_parser(
     parser: ParserFn,
     *,
     requires_raw_payload: bool = False,
+    fetch_url: FetchUrlFn | None = None,
 ) -> None:
     """Register a parser callable for one ManifestSource.
 
@@ -167,7 +180,7 @@ def register_parser(
     body bytes (Form 4 XML, 13F infotable, 13D/G primary doc, DEF 14A
     HTML, NPORT-P XML). Leave at the default for synthesised /
     non-payload sources."""
-    _PARSERS[source] = ParserSpec(fn=parser, requires_raw_payload=requires_raw_payload)
+    _PARSERS[source] = ParserSpec(fn=parser, requires_raw_payload=requires_raw_payload, fetch_url=fetch_url)
 
 
 def _backoff_for(attempt_count: int) -> timedelta:
@@ -324,7 +337,78 @@ def run_manifest_worker(
         )
         rows.extend(topup_retryable)
 
-    return _dispatch_rows(conn, rows, now=now)
+    # Fairness path = steady-state backlog drain → prefetch bodies concurrently.
+    return _prefetch_then_dispatch(conn, rows, now=now)
+
+
+def _prefetch_bodies(rows: list[ManifestRow]) -> dict[str, str]:
+    """#1686 Phase 2 — concurrently fetch the single-doc bodies for ``rows``.
+
+    For each row whose source registered a ``fetch_url`` hook, resolve the
+    canonical URL and fetch all of them concurrently (bounded threadpool,
+    shared SEC throttle ≤10 req/s) so the ~800ms-per-fetch latency overlaps
+    instead of serialising. Returns ``{url: body}`` for SUCCESSFUL fetches
+    ONLY — a ``None`` (404 or caught exception, indistinguishable through
+    ``fetch_document_texts``) is dropped so the serial parse path re-fetches
+    it and keeps its retry/tombstone discrimination (Codex ckpt-1 HIGH).
+
+    Returns ``{}`` when no row has a hook — the caller then skips the cache
+    entirely and the tick behaves exactly as pre-#1686.
+    """
+    urls: set[str] = set()
+    for row in rows:
+        spec = _PARSERS.get(row.source)
+        if spec is None or spec.fetch_url is None:
+            continue
+        url = spec.fetch_url(row)
+        if url:
+            urls.add(url)
+    if not urls:
+        return {}
+
+    # Lazy imports — keep the provider/HTTP + config deps off the worker's
+    # import-time path (also avoids any import cycle through the providers).
+    from app.config import settings
+    from app.providers.concurrent_fetch import fetch_document_texts
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+
+    with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+        fetched = fetch_document_texts(provider, urls)
+    return {url: body for url, body in fetched.items() if body is not None}
+
+
+def _prefetch_then_dispatch(
+    conn: psycopg.Connection[Any],
+    rows: list[ManifestRow],
+    *,
+    now: datetime,
+) -> WorkerStats:
+    """#1686 Phase 2 — prefetch single-doc bodies concurrently, bind the
+    tick-scoped cache, then run the serial per-row :func:`_dispatch_rows`.
+
+    Used ONLY by the steady-state fairness path (``source is None``) — that
+    is the every-5-min cron + boot catch-up that drains the backlog, the
+    target of #1686. The per-source rebuild path (``sec_rebuild``, operator-
+    triggered + scoped) stays serial via a direct :func:`_dispatch_rows`
+    call — small, operator-paced, no concurrency win needed.
+
+    The cache is ALWAYS bound (even when empty, so a prior tick's value can
+    never leak across ticks on the apscheduler threadpool) and reset in
+    ``finally`` so an exception can't strand it. With no ``fetch_url`` hooks
+    the cache is empty → every ``fetch_document_text`` misses → behaviour is
+    identical to pre-#1686.
+    """
+    from app.providers.implementations.sec_edgar import (
+        reset_prefetch_body_cache,
+        set_prefetch_body_cache,
+    )
+
+    cache = _prefetch_bodies(rows)
+    token = set_prefetch_body_cache(cache)
+    try:
+        return _dispatch_rows(conn, rows, now=now)
+    finally:
+        reset_prefetch_body_cache(token)
 
 
 def _dispatch_rows(
