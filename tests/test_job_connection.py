@@ -90,3 +90,43 @@ def test_tracked_job_finalize_writes_stay_raw():
     assert "connect_job(" not in code  # no bounded connect in the finalize path
     assert "psycopg.connect(" in code  # finalize writes stay raw
     assert "record_job_finish(" in code
+
+
+# -- #1693 (PR4c): service-helper-owned connects reached from steady-state job
+# bodies are bound via connect_job. Guards mirror the finalize-stay-raw pattern.
+
+
+def test_retention_sweep_body_uses_connect_job():
+    # The financial_facts_retention_sweep service path must bind the job's
+    # statement_timeout via connect_job; the explicit-database_url escape hatch
+    # (tests / isolated 5433 cluster) stays a raw connect.
+    from app.services.financial_facts_retention import sweep_retention_all_instruments
+
+    src = inspect.getsource(sweep_retention_all_instruments)
+    assert "connect_job(autocommit=True)" in src  # job path is bounded
+    assert "database_url" in src  # escape hatch kept for explicit-DSN callers
+
+
+def test_retention_sweep_job_passes_no_database_url():
+    # Codex ckpt-1 #2 (the load-bearing invariant): the scheduled body must call
+    # the sweep with NO database_url= arg, else it silently routes through the
+    # raw (unbounded) else-branch. Source-checking the service alone can't prove
+    # the *scheduled* path is bound — this asserts the call site does.
+    src = inspect.getsource(scheduler.financial_facts_retention_sweep)
+    assert "sweep_retention_all_instruments()" in src
+    assert "database_url=" not in src
+
+
+def test_bulk_refresh_probe_uses_connect_job():
+    # The per-archive bootstrap-state probe (reached by the three steady-state
+    # sec_*_bulk_refresh jobs) must bind the job's statement_timeout — a wedged
+    # probe self-aborts (QueryCanceled → skip) instead of stranding 'running'.
+    from app.services.sec_bulk_refresh import refresh_bulk_archive_if_stale
+
+    src = inspect.getsource(refresh_bulk_archive_if_stale)
+    assert "connect_job(autocommit=True)" in src
+    # The probe was the only raw connect in this fn — assert none remain. NB:
+    # phrased as a bare ``psycopg.connect(`` check on purpose; the
+    # destructive-path smoke gate (#129) greps test files for the raw
+    # connect-against-settings-url literal, so we must not embed it here.
+    assert "psycopg.connect(" not in src
