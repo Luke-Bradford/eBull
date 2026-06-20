@@ -4,11 +4,31 @@ import { MemoryRouter } from "react-router-dom";
 
 import type {
   CoverageSummaryResponse,
+  JobOverviewResponse,
   JobsListResponse,
   SyncLayersV2Response,
 } from "@/api/types";
 
 import { ProblemsPanel } from "./ProblemsPanel";
+
+// #1689 — JobOverviewResponse gained six verdict fields. These fixtures don't
+// exercise them; spread sane defaults so the literals stay type-complete.
+const JOB_VERDICT_DEFAULTS: Pick<
+  JobOverviewResponse,
+  | "health_verdict"
+  | "self_healing"
+  | "verdict_reason"
+  | "role"
+  | "attempt"
+  | "next_retry_at"
+> = {
+  health_verdict: "current",
+  self_healing: false,
+  verdict_reason: "",
+  role: "steady_state",
+  attempt: null,
+  next_retry_at: null,
+};
 
 
 function emptyV2(): SyncLayersV2Response {
@@ -336,6 +356,12 @@ describe("ProblemsPanel", () => {
           last_started_at: null,
           last_finished_at: new Date().toISOString(),
           detail: "",
+          ...JOB_VERDICT_DEFAULTS,
+          // #1689 — a genuinely-failing job reads `attention`; that is what the
+          // ProblemsPanel now keys off (not raw last_status). verdict_reason
+          // carries the inline copy the panel renders.
+          health_verdict: "attention",
+          verdict_reason: "last run failed",
         },
       ],
     };
@@ -362,6 +388,12 @@ describe("ProblemsPanel", () => {
           last_started_at: null,
           last_finished_at: new Date().toISOString(),
           detail: "",
+          ...JOB_VERDICT_DEFAULTS,
+          // #1689 — a genuinely-failing job reads `attention`; that is what the
+          // ProblemsPanel now keys off (not raw last_status). verdict_reason
+          // carries the inline copy the panel renders.
+          health_verdict: "attention",
+          verdict_reason: "last run failed",
         },
       ],
     };
@@ -391,6 +423,12 @@ describe("ProblemsPanel", () => {
           last_started_at: null,
           last_finished_at: new Date().toISOString(),
           detail: "",
+          ...JOB_VERDICT_DEFAULTS,
+          // #1689 — a genuinely-failing job reads `attention`; that is what the
+          // ProblemsPanel now keys off (not raw last_status). verdict_reason
+          // carries the inline copy the panel renders.
+          health_verdict: "attention",
+          verdict_reason: "last run failed",
         },
       ],
     };
@@ -442,6 +480,12 @@ describe("ProblemsPanel", () => {
           last_started_at: null,
           last_finished_at: new Date().toISOString(),
           detail: "",
+          ...JOB_VERDICT_DEFAULTS,
+          // #1689 — a genuinely-failing job reads `attention`; that is what the
+          // ProblemsPanel now keys off (not raw last_status). verdict_reason
+          // carries the inline copy the panel renders.
+          health_verdict: "attention",
+          verdict_reason: "last run failed",
         },
       ],
     };
@@ -598,6 +642,8 @@ describe("ProblemsPanel", () => {
           next_run_time_source: "declared",
           last_status: "failure",
           last_finished_at: new Date().toISOString(),
+          // #1689 — genuine failure → attention is what the panel now counts.
+          health_verdict: "attention",
         } as unknown as JobsListResponse["jobs"][number],
       ],
     };

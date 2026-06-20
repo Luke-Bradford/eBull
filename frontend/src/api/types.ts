@@ -129,6 +129,18 @@ export interface JobOverviewResponse {
   last_started_at: string | null;
   last_finished_at: string | null;
   detail: string;
+  // #1689 — the single computed verdict (same `compute_verdict` as the
+  // Processes Hub). Render this as the status pill instead of the raw
+  // `last_status` tone, so a transient/retrying/restart-reaped/aged-one-shot
+  // run is never painted red. `last_status` stays for back-compat.
+  health_verdict: HealthVerdict;
+  self_healing: boolean;
+  verdict_reason: string;
+  // Page-scope role (#1530) for the collapsed Manual & backfill split; attempt
+  // + next_retry_at (#1509) drive the "attempt N · next HH:MM" retrying label.
+  role: ProcessRole;
+  attempt: number | null;
+  next_retry_at: string | null;
 }
 
 export interface JobsListResponse {
@@ -1379,7 +1391,14 @@ export type ProcessStatus =
  * contradictory combos ("ok + schedule missed") are impossible. Derived
  * by `app/services/processes/health_verdict.py::compute_verdict`.
  */
-export type HealthVerdict = "current" | "working" | "self_healing" | "attention";
+export type HealthVerdict =
+  | "current"
+  | "working"
+  | "self_healing"
+  | "attention"
+  // #1689 — muted: an aged, exhausted one-shot (bootstrap/backfill) failure.
+  // Folds into the collapsed Manual & backfill section; not a steady-state red.
+  | "stale_manual";
 
 export type ProcessRunStatus =
   | "success"

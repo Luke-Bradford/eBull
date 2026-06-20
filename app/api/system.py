@@ -46,6 +46,7 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.api.bootstrap import BootstrapApiStatus, LaneApi, StageApiStatus
 from app.db import get_conn
+from app.db.snapshot import snapshot_read
 from app.providers.sec_throttle_metrics import sec_throttle_429_total as _sec_throttle_429_total
 from app.services.bootstrap_state import (
     compute_retryable_view,
@@ -60,6 +61,12 @@ from app.services.ops_monitor import (
     check_job_health,
     get_kill_switch_status,
 )
+from app.services.processes import (
+    HealthVerdict,
+    ProcessRole,
+    scheduled_adapter,
+)
+from app.services.processes.health_verdict import verdict_for_row
 from app.workers.scheduler import (
     JOB_ORCHESTRATOR_FULL_SYNC,
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
@@ -191,6 +198,19 @@ class JobOverviewResponse(BaseModel):
     last_started_at: datetime | None
     last_finished_at: datetime | None
     detail: str
+    # #1689 — the single computed verdict (same `compute_verdict` the Processes
+    # Hub renders), so this legacy table stops painting raw `last_status` red on
+    # a transient/retrying/restart-reaped/aged-one-shot run. `last_status` stays
+    # for back-compat (ProblemsPanel); the FE pill now renders `health_verdict`.
+    health_verdict: HealthVerdict = "current"
+    self_healing: bool = False
+    verdict_reason: str = ""
+    # Page-scope role (#1530) so the FE can split bootstrap/backfill into a
+    # collapsed "Manual & backfill" section, and `attempt` / `next_retry_at`
+    # (#1509) for the "attempt N · next HH:MM" retrying label.
+    role: ProcessRole = "steady_state"
+    attempt: int | None = None
+    next_retry_at: datetime | None = None
 
 
 class JobsProcessSubsystemHealth(BaseModel):
@@ -334,17 +354,46 @@ def _build_jobs_overview(
 ) -> list[JobOverviewResponse]:
     """Build the per-job overview view.
 
-    Since #719, next-run-time is always computed from the declared
-    cadence — the API no longer hosts APScheduler, so there is no live
-    fire-time to query. `compute_next_run(cadence, now)` returns the
-    next future occurrence, which is the same value APScheduler would
-    schedule against. The `_source="declared"` discriminator is kept
-    for frontend compat.
+    Legacy fields (``last_status`` / ``last_started_at`` / ``last_finished_at`` /
+    ``detail``) still come from ``check_job_health`` so their semantics are
+    unchanged. #1689 layers on the SAME computed verdict the Processes Hub
+    renders — via ``scheduled_adapter.list_rows`` + the shared
+    ``verdict_for_row`` choke point — so this legacy table stops painting a
+    transient / retrying / restart-reaped / aged-one-shot run red.
+
+    ``next_run_time`` is sourced from the row's ``next_fire_at`` (the same basis
+    as the verdict inputs; falls back to ``compute_next_run`` only when the row
+    is absent or has no next fire), avoiding cross-read drift. Per #719 this is
+    the *declared* cadence slot, not a live APScheduler fire-time — the
+    ``next_run_time_source="declared"`` discriminator is kept for FE compat.
+
+    The verdict rows are read once under a single ``snapshot_read`` snapshot
+    (``list_rows``'s documented caller-MUST) so all rows share one consistent
+    MVCC view. This roughly doubles the admin-poll probe cost vs the old
+    ``check_job_health``-only loop (it now also runs the Hub's per-row probes);
+    acceptable at the current job count and eliminated when the redundant
+    ``JobsTable`` is retired (see spec).
     """
+    with snapshot_read(conn):
+        verdict_rows = {r.process_id: r for r in scheduled_adapter.list_rows(conn)}
     overviews: list[JobOverviewResponse] = []
     for job in registry:
         health = check_job_health(conn, job.name)
-        next_run = compute_next_run(job.cadence, now)
+        row = verdict_rows.get(job.name)
+        if row is not None:
+            verdict, self_healing, verdict_reason = verdict_for_row(row, now=now)
+            role: ProcessRole = row.role
+            attempt = row.attempt
+            next_retry_at = row.next_retry_at
+            next_run = row.next_fire_at or compute_next_run(job.cadence, now)
+        else:
+            # Defensive: ``list_rows`` iterates the same ``SCHEDULED_JOBS``, so a
+            # miss is not expected — fall back to a calm verdict + declared cadence.
+            verdict, self_healing, verdict_reason = "current", False, ""
+            role = job.role
+            attempt = None
+            next_retry_at = None
+            next_run = compute_next_run(job.cadence, now)
         overviews.append(
             JobOverviewResponse(
                 name=job.name,
@@ -358,6 +407,12 @@ def _build_jobs_overview(
                 last_started_at=health.last_started_at,
                 last_finished_at=health.last_finished_at,
                 detail=health.detail,
+                health_verdict=verdict,
+                self_healing=self_healing,
+                verdict_reason=verdict_reason,
+                role=role,
+                attempt=attempt,
+                next_retry_at=next_retry_at,
             )
         )
     return overviews

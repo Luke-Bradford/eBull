@@ -152,9 +152,10 @@ describe("ProcessRow", () => {
     expect(screen.queryByText("ConnectionTimeout")).toBeNull();
   });
 
-  it("renders auto-hide tooltip on the self-healing (pending_retry) pill", () => {
+  it("renders auto-hide tooltip on the retrying (self_healing) pill", () => {
     renderRow({ row: makeProcessRow({ status: "pending_retry", stale_reasons: [] }) });
-    const pill = screen.getByText(/self-healing/i);
+    // #1689 — the self_healing pill label is now "retrying" (amber), not "self-healing".
+    const pill = screen.getByText(/retrying/i);
     expect(pill.getAttribute("title")).toContain("hiding");
     expect(pill.getAttribute("title")).toContain("retry");
   });
@@ -244,12 +245,14 @@ describe("ProcessRow", () => {
     expect(tr.className).toContain("border-l-red-500");
   });
 
-  it("#1508 C3: self_healing verdict is calm — no amber alarm border/pulse", () => {
+  it("#1689: self_healing gets an amber pill but no alarm row-border/pulse", () => {
     const { container } = renderRow({
       row: makeProcessRow({ status: "pending_retry", stale_reasons: [] }),
     });
     const tr = container.querySelector("tr") as HTMLElement;
-    // A scheduled retry is auto-recovery, not an action item → calm.
+    // #1689 — a scheduled retry now reads amber on the PILL (visible recovery),
+    // but is still auto-recovery, not an action item, so the ROW stays calm: no
+    // amber/red left-border, no pulse. Only `attention` wears the red row border.
     expect(tr.className).not.toContain("border-l-amber-500");
     expect(tr.className).not.toContain("animate-pulse");
     expect(tr.className).toContain("border-l-transparent");

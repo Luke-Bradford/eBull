@@ -130,7 +130,12 @@ export function ProblemsPanel({
 
   const baseActionNeeded = cache.v2?.action_needed ?? [];
   const secretMissing = cache.v2?.secret_missing ?? [];
-  const failingJobs = (cache.jobs?.jobs ?? []).filter((j) => j.last_status === "failure");
+  // #1689 — a job is a "problem" only when its COMPUTED verdict says the
+  // operator must act (`attention`). A retrying (`self_healing`), aged one-shot
+  // (`stale_manual`), `working`, or `current` job is NOT a problem. Keying off
+  // raw `last_status === "failure"` here re-introduced the exact false-red the
+  // verdict model exists to kill (a transient/reaped failure raised a red banner).
+  const failingJobs = (cache.jobs?.jobs ?? []).filter((j) => j.health_verdict === "attention");
   const coverageNullRows = cache.coverage?.null_rows ?? 0;
 
   // Inject the credential-rejected banner when the operator's aggregate
@@ -205,7 +210,9 @@ export function ProblemsPanel({
               <div className="flex items-start gap-2">
                 <span aria-hidden className="mt-1 inline-block h-2 w-2 rounded-full bg-red-500" />
                 <div className="flex-1">
-                  <div className="font-medium text-red-800">{label} — last run failed</div>
+                  <div className="font-medium text-red-800">
+                    {label} — {job.verdict_reason || "needs attention"}
+                  </div>
                   {job.last_finished_at !== null ? (
                     <div className="text-xs text-slate-600">Failed at {formatDateTime(job.last_finished_at)}</div>
                   ) : null}

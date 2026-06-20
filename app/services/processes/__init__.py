@@ -63,7 +63,7 @@ ProcessStatus = Literal[
 # see rendered side-by-side as contradictory chips. Derived (not stored)
 # at the API layer (``app/api/processes.py::_convert_row`` →
 # ``health_verdict.compute_verdict``). The FE renders ONE verdict pill.
-HealthVerdict = Literal["current", "working", "self_healing", "attention"]
+HealthVerdict = Literal["current", "working", "self_healing", "attention", "stale_manual"]
 
 RunStatus = Literal["success", "failure", "partial", "cancelled", "skipped"]
 
@@ -260,6 +260,12 @@ class ProcessRow:
     # ``"bootstrap"``; ingest_sweep_adapter keeps the default
     # ``"steady_state"`` (sweeps keep their source current).
     role: ProcessRole = "steady_state"
+    # #1689 — ``job_runs.attempt`` of the latest terminal run (the
+    # consecutive-failure streak position, 1 = first natural fire). Set by
+    # scheduled_adapter from the terminal row so the FE can render "attempt N"
+    # on a retrying row. None for adapters that don't track it (bootstrap /
+    # ingest_sweep) or jobs that have never failed.
+    attempt: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -77,7 +77,7 @@ from app.services.processes import (
     ingest_sweep_adapter,
     scheduled_adapter,
 )
-from app.services.processes.health_verdict import compute_verdict
+from app.services.processes.health_verdict import verdict_for_row
 from app.services.processes.ingest_sweep_adapter import is_sweep
 from app.services.processes.param_metadata import ParamMetadata
 from app.services.processes.stale_thresholds import get_threshold
@@ -196,6 +196,10 @@ class ProcessRowResponse(BaseModel):
     # rows move to the collapsed "Bootstrap & backfill" section. Defaults
     # to ``steady_state`` so an untagged row stays visible.
     role: ProcessRole = "steady_state"
+    # #1689 — latest terminal ``job_runs.attempt`` (consecutive-failure streak
+    # position). The FE renders "attempt N" on a self-healing/retrying row.
+    # None when never failed or for adapters that don't track it.
+    attempt: int | None = None
 
 
 class ProcessListResponse(BaseModel):
@@ -423,39 +427,12 @@ def _convert_error(err: ErrorClassSummary) -> ErrorClassSummaryResponse:
 
 
 def _convert_row(row: ProcessRow) -> ProcessRowResponse:
-    # #1509 / T3 — derive the retry inputs at the choke point (the clock lives
-    # here, not in the pure ``compute_verdict``). ``retry_in_flight`` is True
-    # whenever ``next_retry_at`` is set (past OR future): a due-but-not-yet-swept
-    # retry is still scheduled recovery, so the row must not flicker red in the
-    # ≤5m sweeper gap. The "HH:MM" label (UTC) is shown only while the retry is
-    # still in the future; once due, compute_verdict renders "retrying shortly".
-    retry_in_flight = row.next_retry_at is not None
-    retry_at_display = (
-        row.next_retry_at.strftime("%H:%M")
-        if row.next_retry_at is not None and row.next_retry_at > datetime.now(UTC)
-        else ""
-    )
-    verdict, self_healing, verdict_reason = compute_verdict(
-        status=row.status,
-        stale_reasons=row.stale_reasons,
-        watermark_is_fresh=row.source_watermark_fresh,
-        retry_in_flight=retry_in_flight,
-        retry_at_display=retry_at_display,
-        # #1510 / T4 — a fresh liveness-watchdog re-enqueue reads the stalled
-        # row as Self-healing "re-enqueued, recovering" (a genuine wedge still
-        # outranks). Set by scheduled_adapter; other adapters leave it False.
-        liveness_kick_in_flight=row.liveness_kick_in_flight,
-        # #1508 / C6 — a never-run scheduled job now overdue past its first
-        # expected fire reads attention "never started" instead of forever-green
-        # "first run pending". Set by scheduled_adapter; other adapters leave it
-        # False.
-        never_started=row.never_started,
-        # Task 5 (#1508) — an operator-traceable cancel reads benign Current;
-        # a system/crash cancel stays attention "last run cancelled". Set by
-        # scheduled_adapter via the process_stop_requests join; other adapters
-        # leave it False.
-        cancel_was_operator_initiated=row.cancel_was_operator_initiated,
-    )
+    # #1689 — the retry-input + aged-failure derivation and the verdict call now
+    # live in the shared ``verdict_for_row`` choke point, so the legacy
+    # ``/system/jobs`` overview renders the IDENTICAL computed verdict (single
+    # source of truth) instead of its old raw-``last_status`` red. The clock is
+    # injected once here (``compute_verdict`` itself stays pure).
+    verdict, self_healing, verdict_reason = verdict_for_row(row, now=datetime.now(UTC))
     return ProcessRowResponse(
         process_id=row.process_id,
         display_name=row.display_name,
@@ -481,6 +458,8 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         # C7 (#1530) — wire the page-scope role through so the FE can
         # partition steady-state keepers from bootstrap / backfill rows.
         role=row.role,
+        # #1689 — latest terminal attempt for the "attempt N" retrying label.
+        attempt=row.attempt,
     )
 
 

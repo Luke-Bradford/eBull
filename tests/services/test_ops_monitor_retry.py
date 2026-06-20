@@ -152,3 +152,41 @@ def test_success_breaks_streak_resets_attempt(ebull_test_conn: psycopg.Connectio
     _, next_retry_at, attempt = _retry_state(ebull_test_conn, run_id)
     assert attempt == 1
     assert next_retry_at == now + timedelta(seconds=300)
+
+
+# --- #1689 — record_job_finish first-writer-wins guard -------------------
+
+
+def test_finalize_guard_preserves_a_reaped_row(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """A late finalize must NOT clobber a row already terminalized out of band
+    (e.g. the boot reaper flipped it to failure + scheduled its own retry).
+    ``WHERE ... AND status='running'`` makes record_job_finish first-writer-wins."""
+    reaped_retry = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)
+    run_id = record_job_start(ebull_test_conn, "guard_jobR")
+    # Mimic reap_orphaned_job_runs: terminalize + stamp its own retry plan.
+    ebull_test_conn.execute(
+        """
+        UPDATE job_runs
+           SET status = 'failure', finished_at = now(),
+               error_category = %s, next_retry_at = %s, attempt = 2
+         WHERE run_id = %s
+        """,
+        (FailureCategory.INTERNAL_ERROR.value, reaped_retry, run_id),
+    )
+    ebull_test_conn.commit()
+    # The original worker now (late) finalizes the same run as success.
+    record_job_finish(ebull_test_conn, run_id, status="success", row_count=5)
+    status, next_retry_at, attempt = _retry_state(ebull_test_conn, run_id)
+    # Guard held: reaper's terminal + retry plan intact, not overwritten.
+    assert status == "failure"
+    assert next_retry_at == reaped_retry
+    assert attempt == 2
+
+
+def test_finalize_succeeds_on_a_running_row(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """The guard does not block the normal path: a still-running row finalizes."""
+    run_id = record_job_start(ebull_test_conn, "guard_jobN")
+    record_job_finish(ebull_test_conn, run_id, status="success", row_count=7)
+    status, next_retry_at, _ = _retry_state(ebull_test_conn, run_id)
+    assert status == "success"
+    assert next_retry_at is None

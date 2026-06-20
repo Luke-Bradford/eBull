@@ -33,7 +33,7 @@ import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import { ProcessesTable } from "@/components/admin/ProcessesTable";
-import { NEXT_RUN_EXPECTED_TOOLTIP } from "@/components/admin/processStatus";
+import { NEXT_RUN_EXPECTED_TOOLTIP, VERDICT_VISUAL } from "@/components/admin/processStatus";
 import {
   SectionError,
   SectionSkeleton,
@@ -47,13 +47,6 @@ type RowState =
   | { kind: "running" }
   | { kind: "error"; message: string }
   | { kind: "queued" };
-
-const STATUS_TONE: Record<string, string> = {
-  success: "text-emerald-600",
-  failure: "text-red-600",
-  running: "text-amber-600",
-  skipped: "text-slate-400",
-};
 
 const ORCHESTRATOR_OWNED = new Set([
   "orchestrator_full_sync",
@@ -351,7 +344,31 @@ function CoverageSummaryCard({
   );
 }
 
-function JobsTable({
+// #1689 — render the single computed verdict pill (the same `VERDICT_VISUAL`
+// the Processes Hub uses) instead of the raw `last_status` tone, plus an
+// "attempt N · <reason>" detail line for a retrying (self_healing) row. So a
+// transient / retrying / restart-reaped run is never painted red here.
+function JobStatusCell({ job }: { job: JobOverviewResponse }) {
+  const visual = VERDICT_VISUAL[job.health_verdict];
+  const detail =
+    job.self_healing && job.attempt != null
+      ? `attempt ${job.attempt}${job.verdict_reason ? ` · ${job.verdict_reason}` : ""}`
+      : job.verdict_reason;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span
+        data-testid="job-verdict-pill"
+        data-verdict={job.health_verdict}
+        className={`inline-flex w-fit items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${visual.toneClass}`}
+      >
+        {visual.label}
+      </span>
+      {detail ? <span className="text-[10px] text-slate-500">{detail}</span> : null}
+    </div>
+  );
+}
+
+function JobsSubTable({
   items,
   rowState,
   onRun,
@@ -360,9 +377,6 @@ function JobsTable({
   rowState: Record<string, RowState>;
   onRun: (name: string) => void;
 }) {
-  if (items.length === 0) {
-    return <p className="text-sm text-slate-500">No background jobs registered.</p>;
-  }
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
@@ -373,7 +387,7 @@ function JobsTable({
             <th className="py-2 pr-4" title={NEXT_RUN_EXPECTED_TOOLTIP}>
               Next run (expected)
             </th>
-            <th className="py-2 pr-4">Last result</th>
+            <th className="py-2 pr-4">Status</th>
             <th className="py-2 pr-4">Last finished</th>
             <th className="py-2 pr-4 text-right">Action</th>
           </tr>
@@ -383,7 +397,7 @@ function JobsTable({
             const state = rowState[job.name] ?? { kind: "idle" };
             const label = job.display_name ?? job.name;
             return (
-              <tr key={job.name} className="align-top">
+              <tr key={job.name} className="align-top" data-job-row={job.name}>
                 <td className="py-2 pr-4">
                   <div className="font-medium text-slate-700">{label}</div>
                   <div className="text-xs text-slate-500">{job.description}</div>
@@ -396,13 +410,7 @@ function JobsTable({
                   {formatDateTime(job.next_run_time)}
                 </td>
                 <td className="py-2 pr-4 text-xs">
-                  <span
-                    className={
-                      STATUS_TONE[job.last_status ?? ""] ?? "text-slate-400"
-                    }
-                  >
-                    {job.last_status ?? "never run"}
-                  </span>
+                  <JobStatusCell job={job} />
                 </td>
                 <td className="py-2 pr-4 text-xs text-slate-500">
                   {formatDateTime(job.last_finished_at)}
@@ -421,6 +429,45 @@ function JobsTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+// #1530 / #1689 — steady-state keepers render inline; one-shot bootstrap /
+// backfill jobs (which legitimately sit idle/failed between runs) move into a
+// collapsed section so an aged one-shot never reads as a steady-state alarm.
+function JobsTable({
+  items,
+  rowState,
+  onRun,
+}: {
+  items: JobOverviewResponse[];
+  rowState: Record<string, RowState>;
+  onRun: (name: string) => void;
+}) {
+  if (items.length === 0) {
+    return <p className="text-sm text-slate-500">No background jobs registered.</p>;
+  }
+  const steady = items.filter((j) => j.role === "steady_state");
+  const manual = items.filter((j) => j.role !== "steady_state");
+  return (
+    <>
+      {steady.length > 0 ? (
+        <JobsSubTable items={steady} rowState={rowState} onRun={onRun} />
+      ) : (
+        <p className="text-sm text-slate-500">No steady-state jobs.</p>
+      )}
+      {manual.length > 0 ? (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs font-medium text-slate-500">
+            Manual &amp; backfill ({manual.length}) — one-shot installs and historical
+            catch-ups
+          </summary>
+          <div className="mt-2">
+            <JobsSubTable items={manual} rowState={rowState} onRun={onRun} />
+          </div>
+        </details>
+      ) : null}
+    </>
   );
 }
 
