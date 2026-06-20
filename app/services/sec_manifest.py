@@ -610,6 +610,43 @@ def iter_pending(
             yield ManifestRow(**row)
 
 
+def iter_pending_recent(
+    conn: psycopg.Connection[Any],
+    *,
+    source: ManifestSource,
+    since: datetime,
+    limit: int = 30,
+) -> Iterator[ManifestRow]:
+    """Yield the NEWEST pending rows for one source filed on/after ``since``.
+
+    #1685 — the recent-first slice. ``filed_at DESC`` (newest first), floored at
+    ``since`` (the worker passes a 90-day window), so every source keeps its
+    recent filings fresh regardless of the oldest-first historical backlog the
+    main drain (``iter_pending``) works through. Served by the partial index
+    ``idx_manifest_recent (source, filed_at DESC, accession_number DESC) WHERE
+    ingest_status='pending'`` (sql/204) so a tick does not scan the ~1.46M-row
+    pending backlog. Source-scoped only — the worker allocates a per-source
+    recent quota via ``compute_quotas``."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT accession_number, cik, form, source,
+                   subject_type, subject_id, instrument_id,
+                   filed_at, accepted_at, primary_document_url,
+                   is_amendment, amends_accession,
+                   ingest_status, parser_version, raw_status,
+                   last_attempted_at, next_retry_at, error
+            FROM sec_filing_manifest
+            WHERE ingest_status = 'pending' AND source = %s AND filed_at >= %s
+            ORDER BY filed_at DESC, accession_number DESC
+            LIMIT %s
+            """,
+            (source, since, limit),
+        )
+        for row in cur.fetchall():
+            yield ManifestRow(**row)
+
+
 def iter_retryable(
     conn: psycopg.Connection[Any],
     *,
