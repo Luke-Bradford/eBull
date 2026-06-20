@@ -102,6 +102,7 @@ import httpx
 import psycopg
 
 from app.config import settings
+from app.jobs.job_connection import connect_job
 from app.providers.sec_throttle_metrics import incr_sec_429
 from app.security.master_key import resolve_data_dir
 from app.services.sec_bulk_download import (
@@ -675,8 +676,13 @@ def refresh_bulk_archive_if_stale(archive_name: str) -> RefreshResult:
 
     # Bootstrap fence — open a fresh autocommit conn so the SELECT is
     # not nested in any outer transaction held by the job runtime.
+    # #1693 — connect_job binds the active job's statement_timeout (ContextVar
+    # set by _tracked_job for the three steady-state bulk-refresh jobs). A wedged
+    # bootstrap_state probe self-aborts at the cap → raised as QueryCanceled
+    # (a psycopg.Error) → caught below → clean skip + re-fire next cadence,
+    # instead of stranding the job_runs row 'running' (#1689 mode).
     try:
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with connect_job(autocommit=True) as conn:
             if _bootstrap_running(conn):
                 logger.info(
                     "sec_bulk_refresh: %s skipped — bootstrap_state.status='running'",

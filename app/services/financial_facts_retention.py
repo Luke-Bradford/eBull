@@ -23,7 +23,10 @@ in default-mode psycopg conns the initial SELECT opens an implicit tx,
 making every subsequent ``with conn.transaction()`` a savepoint rather
 than a fresh top-level tx. The 12k-instrument loop would commit exactly
 once, on function exit, defeating per-instrument WAL bounding. Hence
-the orchestrator opens ``psycopg.connect(url, autocommit=True)``.
+the orchestrator opens an autocommit connection — ``connect_job(autocommit=True)``
+on the scheduled path (#1693: the active job's ``statement_timeout`` binds it),
+or a raw ``psycopg.connect(database_url, autocommit=True)`` when a caller passes
+an explicit ``database_url`` (tests / isolated cluster).
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from dataclasses import dataclass
 
 import psycopg
 
-from app.config import settings
+from app.jobs.job_connection import connect_job
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +140,19 @@ def sweep_retention_all_instruments(
     BEGIN/COMMIT pair so a failure on instrument N does not roll back
     the work done for instruments 1..N-1.
     """
-    url = database_url or settings.database_url
-
     total_deleted = 0
     iids: list[int] = []
 
-    with psycopg.connect(url, autocommit=True) as conn:
+    # #1693 — the scheduled-job body (financial_facts_retention_sweep) passes no
+    # database_url, so connect_job binds the active job's statement_timeout
+    # (ContextVar set by _tracked_job): a wedged sweep statement self-aborts
+    # instead of stranding the job_runs row 'running' (#1689 mode). An explicit
+    # database_url (tests, isolated 5433 cluster) takes the raw path — connect_job
+    # hardcodes settings.database_url and would escape test isolation onto dev.
+    connect_cm = (
+        connect_job(autocommit=True) if database_url is None else psycopg.connect(database_url, autocommit=True)
+    )
+    with connect_cm as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT DISTINCT instrument_id FROM financial_facts_raw "
