@@ -97,6 +97,8 @@ def test_process_row_carries_all_envelope_fields() -> None:
         "never_started",
         "cancel_was_operator_initiated",
         "role",
+        # #1689 — latest terminal job_runs.attempt, for the FE "attempt N" label.
+        "attempt",
     }
     assert set(row.__slots__) == expected
 

@@ -449,7 +449,14 @@ def record_job_finish(
         attempt, next_retry_at = _retry_plan(conn, run_id, error_category, now)
     else:
         attempt, next_retry_at = 1, None
-    conn.execute(
+    # #1689 — ``AND status = 'running'`` makes this a first-writer-wins finalize.
+    # If a boot/orphan reaper (or any future out-of-band terminal writer) already
+    # transitioned this row to a terminal status — and, for a transient category,
+    # already stamped its OWN ``_retry_plan`` (#1688) — a late finalize by the
+    # original worker must NOT clobber that terminal/retry. The guarded UPDATE
+    # no-ops (rowcount 0); we log and return without a secondary write. Mirrors
+    # ``sync_orchestrator.executor._finalize_sync_run``'s guarded UPDATE.
+    cur = conn.execute(
         """
         UPDATE job_runs
         SET finished_at    = %(finished)s,
@@ -460,6 +467,7 @@ def record_job_finish(
             next_retry_at  = %(next_retry_at)s,
             attempt        = %(attempt)s
         WHERE run_id = %(run_id)s
+          AND status = 'running'
         """,
         {
             "finished": now,
@@ -472,6 +480,12 @@ def record_job_finish(
             "run_id": run_id,
         },
     )
+    if cur.rowcount == 0:
+        logger.info(
+            "record_job_finish: run_id=%s already terminal (status != 'running'); "
+            "finalize raced a reaper — skipping, terminal/retry plan preserved",
+            run_id,
+        )
     conn.commit()
 
 

@@ -280,7 +280,7 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
             """
             SELECT run_id, started_at, finished_at, status, row_count,
                    error_msg, error_classes, rows_skipped_by_reason,
-                   rows_errored, cancelled_at, next_retry_at
+                   rows_errored, cancelled_at, next_retry_at, attempt
               FROM job_runs
              WHERE job_name = %(name)s
                AND status   IN ('success', 'failure', 'skipped', 'cancelled')
@@ -992,6 +992,9 @@ def _build_row(
         # C7 (#1530) — page-scope role straight from the registry entry so
         # the FE can partition steady-state keepers from bootstrap / backfill.
         role=job.role,
+        # #1689 — latest terminal ``attempt`` (``.get`` so a sync_runs-shaped
+        # orchestrator row, which has no such column, yields None).
+        attempt=terminal_row.get("attempt") if terminal_row is not None else None,
     )
 
 

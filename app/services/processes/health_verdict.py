@@ -39,13 +39,23 @@ In every case a genuine wedge (``queue_stuck`` / ``mid_flight_stuck`` /
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Final
 
 from app.services.processes import (
     HealthVerdict,
+    ProcessRow,
     ProcessStatus,
     StaleReason,
 )
+
+# #1689 — a bootstrap/backfill (one-shot, non-steady) job whose latest run
+# failed permanently (no retry in flight) and finished longer ago than this
+# window is aged-out history, not a steady-state alarm: it reads
+# ``stale_manual`` (muted, collapsed) instead of ``attention`` (red). A
+# *recent* failure inside the window still reads attention so the operator
+# sees their triggered job failed.
+STALE_MANUAL_WINDOW: Final[timedelta] = timedelta(hours=24)
 
 # All four stale reasons are actionable in v1 (none auto-recovers yet).
 ACTIONABLE_STALE: Final[frozenset[StaleReason]] = frozenset(
@@ -78,6 +88,7 @@ def compute_verdict(
     liveness_kick_in_flight: bool = False,
     never_started: bool = False,
     cancel_was_operator_initiated: bool = False,
+    manual_aged_exhausted: bool = False,
 ) -> tuple[HealthVerdict, bool, str]:
     """Collapse ``status`` + ``stale_reasons`` into one verdict.
 
@@ -85,7 +96,8 @@ def compute_verdict(
 
     * ``verdict`` — ``current`` (green, fresh) / ``working`` (blue,
       progressing) / ``self_healing`` (amber, auto-recovering, no action
-      needed) / ``attention`` (red, operator must act).
+      needed) / ``attention`` (red, operator must act) / ``stale_manual``
+      (muted, aged one-shot bootstrap/backfill failure — #1689).
     * ``self_healing`` — convenience boolean (``verdict == "self_healing"``
       today; kept distinct so T3/T4 can flag a row that is *both*
       surfaced and recovering).
@@ -168,6 +180,14 @@ def compute_verdict(
         # Cadence-covered fallback: next natural fire reattempts the failed
         # scope, but no explicit ``next_retry_at`` backoff is in flight.
         return ("self_healing", True, "retry scheduled")
+    if status == "failed" and manual_aged_exhausted:
+        # #1689 — an aged, exhausted one-shot (bootstrap/backfill) failure is
+        # history, not a steady-state alarm. Reads muted ``stale_manual`` and
+        # folds into the collapsed Manual & backfill section. Reached only when
+        # NO actionable wedge (block above) and NO retry-in-flight (branch
+        # above) apply, and ``verdict_for_row`` role-gated it to bootstrap/
+        # backfill — so a wedged or steady-state failure still reads attention.
+        return ("stale_manual", False, "aged one-shot failure")
     if status == "failed":
         return ("attention", False, "last run failed")
     if status == "cancelled":
@@ -212,4 +232,50 @@ def compute_verdict(
     return ("attention", False, "unknown state")
 
 
-__all__ = ["ACTIONABLE_STALE", "compute_verdict"]
+def verdict_for_row(row: ProcessRow, *, now: datetime) -> tuple[HealthVerdict, bool, str]:
+    """Derive a row's verdict from a built ``ProcessRow``.
+
+    The single choke point shared by ``/system/processes``
+    (``api/processes.py::_convert_row``) and the legacy ``/system/jobs``
+    overview (``api/system.py``, #1689) — so both surfaces render the SAME
+    computed verdict instead of two drifting status models (the naive
+    ``/system/jobs`` table previously rendered raw ``last_status`` →
+    ``failure`` painted red regardless of retry/reap/role).
+
+    The clock lives here, not in the pure ``compute_verdict``:
+    ``retry_in_flight`` and the aged-failure check both compare
+    ``next_retry_at`` / ``finished_at`` against ``now``. Callers pass one
+    ``now`` so a row's inputs cannot straddle a clock tick.
+    """
+    # #1509 / T3 — a scheduled retry (``next_retry_at`` set, past OR future) is
+    # recovery, not a red alarm. "HH:MM" label only while still in the future;
+    # once due, ``compute_verdict`` renders "retrying shortly".
+    retry_in_flight = row.next_retry_at is not None
+    retry_at_display = (
+        row.next_retry_at.strftime("%H:%M") if row.next_retry_at is not None and row.next_retry_at > now else ""
+    )
+    # #1689 — aged, exhausted one-shot failure → stale_manual. Role-gated to
+    # bootstrap/backfill (a ``steady_state`` failure is a real alarm); requires
+    # a permanent failure (no ``next_retry_at`` retry in flight) whose terminal
+    # run finished longer ago than ``STALE_MANUAL_WINDOW``.
+    manual_aged_exhausted = (
+        row.role in ("bootstrap", "backfill")
+        and row.status == "failed"
+        and row.next_retry_at is None
+        and row.last_run is not None
+        and row.last_run.finished_at < now - STALE_MANUAL_WINDOW
+    )
+    return compute_verdict(
+        status=row.status,
+        stale_reasons=row.stale_reasons,
+        watermark_is_fresh=row.source_watermark_fresh,
+        retry_in_flight=retry_in_flight,
+        retry_at_display=retry_at_display,
+        liveness_kick_in_flight=row.liveness_kick_in_flight,
+        never_started=row.never_started,
+        cancel_was_operator_initiated=row.cancel_was_operator_initiated,
+        manual_aged_exhausted=manual_aged_exhausted,
+    )
+
+
+__all__ = ["ACTIONABLE_STALE", "STALE_MANUAL_WINDOW", "compute_verdict", "verdict_for_row"]

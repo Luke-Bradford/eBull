@@ -31,11 +31,31 @@ import { AdminPage } from "@/pages/AdminPage";
 import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
+  JobOverviewResponse,
   JobsListResponse,
   RecommendationsListResponse,
   ConfigResponse,
   SyncLayersV2Response,
 } from "@/api/types";
+
+// #1689 — JobOverviewResponse gained six verdict fields. These fixtures don't
+// exercise them; spread sane defaults so the literals stay type-complete.
+const JOB_VERDICT_DEFAULTS: Pick<
+  JobOverviewResponse,
+  | "health_verdict"
+  | "self_healing"
+  | "verdict_reason"
+  | "role"
+  | "attempt"
+  | "next_retry_at"
+> = {
+  health_verdict: "current",
+  self_healing: false,
+  verdict_reason: "",
+  role: "steady_state",
+  attempt: null,
+  next_retry_at: null,
+};
 
 vi.mock("@/api/jobs", () => ({ fetchJobsOverview: vi.fn(), runJob: vi.fn() }));
 vi.mock("@/api/sync", () => ({
@@ -121,6 +141,7 @@ function jobsResponse(): JobsListResponse {
         last_started_at: null,
         last_finished_at: null,
         detail: "",
+        ...JOB_VERDICT_DEFAULTS,
       },
       {
         name: "execute_approved_orders",
@@ -134,6 +155,7 @@ function jobsResponse(): JobsListResponse {
         last_started_at: null,
         last_finished_at: null,
         detail: "",
+        ...JOB_VERDICT_DEFAULTS,
       },
       {
         name: "attribution_summary",
@@ -147,6 +169,11 @@ function jobsResponse(): JobsListResponse {
         last_started_at: null,
         last_finished_at: "2026-04-16T07:00:02Z",
         detail: "provider timeout",
+        ...JOB_VERDICT_DEFAULTS,
+        // #1689 — a genuinely-failed job reads attention; that is what the
+        // ProblemsPanel keys off now (not raw last_status).
+        health_verdict: "attention",
+        verdict_reason: "last run failed",
       },
     ],
   };
@@ -242,6 +269,7 @@ describe("AdminPage — top-level composition", () => {
           last_started_at: null,
           last_finished_at: null,
           detail: "",
+          ...JOB_VERDICT_DEFAULTS,
         },
       ],
     });

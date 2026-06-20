@@ -17,11 +17,24 @@ from __future__ import annotations
 
 import itertools
 import typing
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.services.processes import HealthVerdict, ProcessStatus, StaleReason
-from app.services.processes.health_verdict import ACTIONABLE_STALE, compute_verdict
+from app.services.processes import (
+    HealthVerdict,
+    ProcessRole,
+    ProcessRow,
+    ProcessRunSummary,
+    ProcessStatus,
+    StaleReason,
+)
+from app.services.processes.health_verdict import (
+    ACTIONABLE_STALE,
+    STALE_MANUAL_WINDOW,
+    compute_verdict,
+    verdict_for_row,
+)
 
 _ALL_STATUSES: tuple[ProcessStatus, ...] = typing.get_args(ProcessStatus)
 _ALL_REASONS: tuple[StaleReason, ...] = typing.get_args(StaleReason)
@@ -423,3 +436,119 @@ def test_recovery_signal_never_masks_a_wedge(wedge: str, recover: str) -> None:
         kw["retry_at_display"] = "21:20"
     verdict, _, _ = compute_verdict(**kw)  # type: ignore[arg-type]
     assert verdict == "attention", f"{recover} masked {wedge}"
+
+
+# ---------------------------------------------------------------------------
+# #1689 — stale_manual (aged one-shot bootstrap/backfill failure) + the
+# verdict_for_row choke point shared by /system/processes and /system/jobs.
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)
+
+
+def _row(
+    *,
+    role: ProcessRole,
+    status: ProcessStatus,
+    next_retry_at: datetime | None = None,
+    finished_ago: timedelta = timedelta(days=2),
+    stale_reasons: tuple[StaleReason, ...] = (),
+) -> ProcessRow:
+    """Minimal ProcessRow for verdict_for_row tests (most fields default)."""
+    last_run = ProcessRunSummary(
+        run_id=1,
+        started_at=_NOW - finished_ago - timedelta(minutes=5),
+        finished_at=_NOW - finished_ago,
+        duration_seconds=300.0,
+        rows_processed=0,
+        rows_skipped_by_reason={},
+        rows_errored=0,
+        status="failure" if status == "failed" else "success",
+        cancelled_by_operator_id=None,
+    )
+    return ProcessRow(
+        process_id="job_x",
+        display_name="Job X",
+        lane="sec",
+        mechanism="scheduled_job",
+        status=status,
+        last_run=last_run,
+        active_run=None,
+        cadence_human="daily",
+        cadence_cron=None,
+        next_fire_at=None,
+        watermark=None,
+        can_iterate=True,
+        can_full_wash=True,
+        can_cancel=False,
+        last_n_errors=(),
+        stale_reasons=stale_reasons,
+        role=role,
+        next_retry_at=next_retry_at,
+    )
+
+
+def test_compute_verdict_stale_manual_on_aged_one_shot() -> None:
+    verdict, self_healing, reason = compute_verdict(status="failed", stale_reasons=(), manual_aged_exhausted=True)
+    assert verdict == "stale_manual"
+    assert self_healing is False
+    assert reason  # non-empty inline copy
+
+
+@pytest.mark.parametrize("wedge", ["watermark_gap", "queue_stuck", "mid_flight_stuck"])
+def test_stale_manual_never_masks_a_wedge(wedge: StaleReason) -> None:
+    """An actionable wedge outranks the aged-one-shot demotion (precedence)."""
+    verdict, _, _ = compute_verdict(status="failed", stale_reasons=(wedge,), manual_aged_exhausted=True)
+    assert verdict == "attention"
+
+
+def test_failed_without_aged_flag_stays_attention() -> None:
+    verdict, _, _ = compute_verdict(status="failed", stale_reasons=(), manual_aged_exhausted=False)
+    assert verdict == "attention"
+
+
+def test_retry_in_flight_outranks_stale_manual() -> None:
+    """A scheduled retry reads self_healing even if the aged flag is set."""
+    verdict, self_healing, _ = compute_verdict(
+        status="failed", stale_reasons=(), retry_in_flight=True, manual_aged_exhausted=True
+    )
+    assert verdict == "self_healing"
+    assert self_healing is True
+
+
+@pytest.mark.parametrize("role", ["bootstrap", "backfill"])
+def test_verdict_for_row_aged_one_shot_is_stale_manual(role: ProcessRole) -> None:
+    row = _row(role=role, status="failed", finished_ago=STALE_MANUAL_WINDOW + timedelta(hours=1))
+    assert verdict_for_row(row, now=_NOW)[0] == "stale_manual"
+
+
+def test_verdict_for_row_steady_state_failure_never_muted() -> None:
+    """Role gate: a steady_state failure stays red however old — it is a real alarm."""
+    row = _row(role="steady_state", status="failed", finished_ago=STALE_MANUAL_WINDOW + timedelta(days=10))
+    assert verdict_for_row(row, now=_NOW)[0] == "attention"
+
+
+def test_verdict_for_row_recent_one_shot_failure_is_attention() -> None:
+    """Within STALE_MANUAL_WINDOW the operator still sees their triggered job failed (red)."""
+    row = _row(role="backfill", status="failed", finished_ago=timedelta(hours=1))
+    assert verdict_for_row(row, now=_NOW)[0] == "attention"
+
+
+def test_verdict_for_row_one_shot_with_retry_in_flight_is_self_healing() -> None:
+    row = _row(
+        role="backfill",
+        status="failed",
+        next_retry_at=_NOW + timedelta(minutes=10),
+        finished_ago=STALE_MANUAL_WINDOW + timedelta(days=1),
+    )
+    verdict, self_healing, _ = verdict_for_row(row, now=_NOW)
+    assert verdict == "self_healing"
+    assert self_healing is True
+
+
+def test_verdict_for_row_wedged_running_reads_red() -> None:
+    """#1689 running_too_long guarantee: a wedged running row (mid_flight_stuck,
+    keyed on COALESCE(last_progress_at, started_at) in stale_detection) reads
+    attention — a hung non-heartbeating job is never falsely calm."""
+    row = _row(role="steady_state", status="running", stale_reasons=("mid_flight_stuck",))
+    assert verdict_for_row(row, now=_NOW)[0] == "attention"

@@ -146,25 +146,28 @@ export const STALE_REASON_LABEL: Record<StaleReason, string> = {
 
 /**
  * Visuals for the single computed health verdict (#1512). The main
- * Processes row renders THIS pill instead of the raw `status` +
- * `stale_reasons` axes, so the operator never sees two cells that
- * disagree.
+ * Processes row AND the legacy Background Jobs table (#1689) both render
+ * THIS pill instead of raw `status` / `last_status`, so the operator
+ * never sees a transient / retrying / restart-reaped run painted red.
  *
- * #1508 C3 — two-colour fold. The page must read as binary: calm green
- * (no action) vs alarming red (act). `working` and `self_healing` are
- * "no action needed" states (a run is in flight / a retry is scheduled
- * — both are the system working AS DESIGNED), so they share `current`'s
- * calm emerald tone and DO NOT pulse-as-alarm. Their distinct LABEL text
- * ("working" / "self-healing") is preserved so the operator still sees
- * *why* a row is calm, but the colour no longer screams. Only `attention`
- * wears the alarming red tone.
- *
- * The calm-green Tailwind tone is hoisted to a single const so the three
- * calm verdicts cannot drift apart on a future dark-mode tweak
- * (single-source-of-truth).
+ * #1689 three-state semaphore (supersedes the #1508 C3 two-colour fold):
+ *   - green  (`current` / `working`)  — ok, system working as designed.
+ *   - amber  (`self_healing`)         — recovering: an auto-scheduled retry
+ *       is in flight. The operator should SEE it healing, not mistake it for
+ *       done (green) or broken (red). This is the deliberate reversal of C3,
+ *       which painted self_healing calm-green; the operator asked for amber.
+ *   - red    (`attention`)            — act: operator must intervene.
+ *   - muted  (`stale_manual`)         — aged history: an exhausted one-shot
+ *       (bootstrap/backfill) failure that is no longer a live alarm (#1689).
+ * Each tone is hoisted to a single const so verdicts cannot drift apart on a
+ * future dark-mode tweak (single-source-of-truth).
  */
 const CALM_TONE =
   "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300";
+const AMBER_TONE =
+  "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300";
+const MUTED_TONE =
+  "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-400";
 
 export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
   current: {
@@ -180,10 +183,10 @@ export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
     pulse: false,
   },
   self_healing: {
-    // Distinct label, calm-green tone: a scheduled retry is auto-recovery,
-    // not an operator action item.
-    label: "self-healing",
-    toneClass: CALM_TONE,
+    // #1689 — amber: a scheduled retry is auto-recovery in progress. Distinct
+    // from green (done) and red (broken) so the operator SEES it healing.
+    label: "retrying",
+    toneClass: AMBER_TONE,
     pulse: false,
   },
   attention: {
@@ -192,20 +195,28 @@ export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
       "border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300",
     pulse: false,
   },
+  stale_manual: {
+    // #1689 — muted: an aged, exhausted one-shot (bootstrap/backfill) failure.
+    // No longer a live alarm; sits in the collapsed Manual & backfill section.
+    label: "stale",
+    toneClass: MUTED_TONE,
+    pulse: false,
+  },
 };
 
 /**
- * Sort priority (#1508 C3): only `attention` pins to the top. The three
- * calm verdicts (`current` / `working` / `self_healing`) share one rank
- * so they form a single quiet group that the table can collapse behind
- * one disclosure. Replaces the prior four-rank ordering (#1512) — the
- * page is two-state now, not four.
+ * Sort priority: `attention` pins to the top (rank 0). The calm/recovering
+ * verdicts (`current` / `working` / `self_healing`) share rank 1 — one quiet
+ * group the table collapses behind a disclosure. `stale_manual` (#1689) sinks
+ * to rank 2 so aged one-shot history settles below live jobs. Only `attention`
+ * pins; lower number = higher.
  */
 export const VERDICT_SORT_PRIORITY: Record<HealthVerdict, number> = {
   attention: 0,
   current: 1,
   working: 1,
   self_healing: 1,
+  stale_manual: 2,
 };
 
 /**
