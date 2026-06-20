@@ -33,6 +33,7 @@ import psycopg.sql
 from psycopg.types.json import Jsonb
 
 from app.config import settings
+from app.jobs.job_connection import connect_job, job_statement_timeout_ms
 from app.jobs.sources import Lane
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
 from app.providers.implementations.etoro import EtoroMarketDataProvider
@@ -228,6 +229,16 @@ PrerequisiteResult = tuple[bool, str]
 PrerequisiteFn = Callable[[psycopg.Connection[Any]], PrerequisiteResult]
 
 
+# #1690 — default per-job statement_timeout (ms) for a steady-state job body.
+# Generous: bounds a single *statement* (incl. lock-wait time), NOT whole-job
+# wall-clock, so a long sweep made of many short statements is safe. Exceeds
+# the longest legitimate single statement for steady-state keepers; heavy
+# bootstrap/backfill bodies that may run a single >cap bulk statement set
+# ``statement_timeout_ms=None`` (unbounded) explicitly. See
+# docs/specs/infra/job-statement-timeout.md.
+_DEFAULT_JOB_STATEMENT_TIMEOUT_MS: Final[int] = 30 * 60 * 1000
+
+
 @dataclass(frozen=True)
 class ScheduledJob:
     """A registered scheduled job."""
@@ -293,6 +304,17 @@ class ScheduledJob:
     # while a real keeper is dead. Carried onto the wire via ProcessRow
     # so the FE can partition.
     role: Literal["steady_state", "bootstrap", "backfill"] = "steady_state"
+    # #1690 — per-job statement_timeout (ms) applied to body connections opened
+    # via ``app.jobs.job_connection.connect_job``. ``_tracked_job`` reads this
+    # off ``_JOBS_BY_NAME`` and sets the ContextVar for the body's duration so a
+    # wedged SQL statement self-aborts and the existing retry/self-heal path
+    # fires (a ``QueryCanceled`` is ``source_down``/transient). ``None`` =
+    # unbounded (explicit exemption for heavy bootstrap/backfill bodies whose
+    # single bulk statement may legitimately exceed the cap). Manual-trigger
+    # jobs not in ``SCHEDULED_JOBS`` resolve to ``None`` (no registry row) and
+    # so are unbounded — the desired exemption for the heavy operator-initiated
+    # jobs. See docs/specs/infra/job-statement-timeout.md.
+    statement_timeout_ms: int | None = _DEFAULT_JOB_STATEMENT_TIMEOUT_MS
 
 
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
@@ -838,6 +860,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # fire is a safety net, not steady-state freshness). Layer 1/2/3 +
         # sec_manifest_worker carry ongoing 10-K freshness.
         role="bootstrap",
+        # #1690 — heavy install drain; a single bulk candidate-resolve
+        # statement may legitimately exceed the steady-state cap.
+        statement_timeout_ms=None,
         source="sec_rate",
         description=(
             "One-shot drain of the 10-K Item 1 candidate set (#535). "
@@ -859,6 +884,8 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # oldest-first). The hourly universe-wide ingester (Layer 1/2/3 +
         # sec_manifest_worker) is the steady-state keeper for new Form 4s.
         role="backfill",
+        # #1690 — heavy historical-tail drain; unbounded statement timeout.
+        statement_timeout_ms=None,
         # #1540 — own lane: this @:45 tail drainer collided with the @:45 atom
         # tick every hour; #1538's retry can't cover the long holds. Write-safe
         # concurrently with sec_insider_transactions_ingest (own sec_insider_ingest
@@ -931,6 +958,8 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # Write-through (#888-#891) + the daily ownership_observations_sync
         # repair sweep are the steady-state keepers.
         role="backfill",
+        # #1690 — heavy one-shot legacy backfill; unbounded statement timeout.
+        statement_timeout_ms=None,
         source="db",
         description=(
             "One-shot legacy → ownership_*_observations backfill (#909). "
@@ -995,6 +1024,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # is a safety net for the historical backlog). Layer 1/2/3 +
         # sec_manifest_worker carry ongoing DEF 14A freshness.
         role="bootstrap",
+        # #1690 — heavy install drain; a single bulk candidate-resolve
+        # statement may legitimately exceed the steady-state cap.
+        statement_timeout_ms=None,
         source="sec_rate",
         description=(
             "One-shot drain of the DEF 14A candidate set (#839). "
@@ -1657,6 +1689,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
 ]
 
 
+# #1690 — name → ScheduledJob lookup for the per-job statement_timeout.
+# ``_tracked_job`` reads ``statement_timeout_ms`` off this. A name not present
+# (manual-trigger jobs not registered in ``SCHEDULED_JOBS``) resolves to no
+# bound — the intended exemption for heavy operator-initiated jobs.
+_JOBS_BY_NAME: dict[str, ScheduledJob] = {job.name: job for job in SCHEDULED_JOBS}
+
+
 def compute_next_run(cadence: Cadence, now: datetime) -> datetime:
     """Return the next future occurrence of ``cadence`` after ``now``.
 
@@ -1771,17 +1810,81 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
     # below (``record_job_start``); the prelude branch already wrote the
     # snapshot in its own INSERT.
     fallback_params_snapshot = consume_params_snapshot()
-    if pre_allocated_run_id is not None:
-        tracker.run_id = pre_allocated_run_id
-        # Advance straight to the body — the prelude already wrote the
-        # ``status='running'`` row in its own committed tx.
+    # #1690 — bound this job body's statement_timeout so a wedged SQL
+    # statement self-aborts and the retry/self-heal path fires. Read off
+    # the registry; manual jobs absent from SCHEDULED_JOBS resolve to None
+    # (unbounded). connect_job() reads this var. The record_job_* infra
+    # writes below stay RAW psycopg.connect so the finalize write itself is
+    # never bounded by the per-job cap (Codex ckpt-1 #1). Token set/reset
+    # nests for the orchestrator inner-adapter re-entry.
+    _job = _JOBS_BY_NAME.get(job_name)
+    _timeout_token = job_statement_timeout_ms.set(_job.statement_timeout_ms if _job is not None else None)
+    try:
+        if pre_allocated_run_id is not None:
+            tracker.run_id = pre_allocated_run_id
+            # Advance straight to the body — the prelude already wrote the
+            # ``status='running'`` row in its own committed tx.
+            try:
+                yield tracker
+            except Exception as exc:
+                try:
+                    from app.services.sync_orchestrator.exception_classifier import (
+                        classify_exception,
+                    )
+
+                    with psycopg.connect(settings.database_url) as conn:
+                        record_job_finish(
+                            conn,
+                            tracker.run_id,
+                            status="failure",
+                            error_msg=str(exc),
+                            error_category=classify_exception(exc),
+                        )
+                except Exception:
+                    logger.error("Failed to record job failure for %s", job_name, exc_info=True)
+                raise
+            else:
+                try:
+                    with psycopg.connect(settings.database_url) as conn:
+                        record_job_finish(
+                            conn,
+                            tracker.run_id,
+                            status="success",
+                            row_count=tracker.row_count,
+                            error_msg=tracker.note,
+                        )
+                        if tracker.row_count is not None:
+                            spike = check_row_count_spike(
+                                conn,
+                                job_name,
+                                tracker.row_count,
+                                exclude_run_id=tracker.run_id,
+                            )
+                            if spike.flagged:
+                                logger.warning("Row-count spike detected: %s", spike.detail)
+                except Exception:
+                    logger.error("Failed to record job success for %s", job_name, exc_info=True)
+            return
+
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                tracker.run_id = record_job_start(
+                    conn,
+                    job_name,
+                    params_snapshot=dict(fallback_params_snapshot) if fallback_params_snapshot is not None else None,
+                )
+        except Exception:
+            logger.error("Failed to record job start for %s", job_name, exc_info=True)
+            # Still run the job even if tracking fails.
+            yield tracker
+            return
+
         try:
             yield tracker
         except Exception as exc:
             try:
-                from app.services.sync_orchestrator.exception_classifier import (
-                    classify_exception,
-                )
+                # Function-local import: scheduler is above classify_exception in the orchestrator graph.
+                from app.services.sync_orchestrator.exception_classifier import classify_exception
 
                 with psycopg.connect(settings.database_url) as conn:
                     record_job_finish(
@@ -1804,69 +1907,17 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                         row_count=tracker.row_count,
                         error_msg=tracker.note,
                     )
+                    # Check for row-count spikes after recording the successful run.
+                    # Exclude the current run_id so we compare against the *previous*
+                    # successful run, not the one we just wrote.
                     if tracker.row_count is not None:
-                        spike = check_row_count_spike(
-                            conn,
-                            job_name,
-                            tracker.row_count,
-                            exclude_run_id=tracker.run_id,
-                        )
+                        spike = check_row_count_spike(conn, job_name, tracker.row_count, exclude_run_id=tracker.run_id)
                         if spike.flagged:
                             logger.warning("Row-count spike detected: %s", spike.detail)
             except Exception:
                 logger.error("Failed to record job success for %s", job_name, exc_info=True)
-        return
-
-    try:
-        with psycopg.connect(settings.database_url) as conn:
-            tracker.run_id = record_job_start(
-                conn,
-                job_name,
-                params_snapshot=dict(fallback_params_snapshot) if fallback_params_snapshot is not None else None,
-            )
-    except Exception:
-        logger.error("Failed to record job start for %s", job_name, exc_info=True)
-        # Still run the job even if tracking fails.
-        yield tracker
-        return
-
-    try:
-        yield tracker
-    except Exception as exc:
-        try:
-            # Function-local import: scheduler is above classify_exception in the orchestrator graph.
-            from app.services.sync_orchestrator.exception_classifier import classify_exception
-
-            with psycopg.connect(settings.database_url) as conn:
-                record_job_finish(
-                    conn,
-                    tracker.run_id,
-                    status="failure",
-                    error_msg=str(exc),
-                    error_category=classify_exception(exc),
-                )
-        except Exception:
-            logger.error("Failed to record job failure for %s", job_name, exc_info=True)
-        raise
-    else:
-        try:
-            with psycopg.connect(settings.database_url) as conn:
-                record_job_finish(
-                    conn,
-                    tracker.run_id,
-                    status="success",
-                    row_count=tracker.row_count,
-                    error_msg=tracker.note,
-                )
-                # Check for row-count spikes after recording the successful run.
-                # Exclude the current run_id so we compare against the *previous*
-                # successful run, not the one we just wrote.
-                if tracker.row_count is not None:
-                    spike = check_row_count_spike(conn, job_name, tracker.row_count, exclude_run_id=tracker.run_id)
-                    if spike.flagged:
-                        logger.warning("Row-count spike detected: %s", spike.detail)
-        except Exception:
-            logger.error("Failed to record job success for %s", job_name, exc_info=True)
+    finally:
+        job_statement_timeout_ms.reset(_timeout_token)
 
 
 class _JobTracker:
@@ -1898,6 +1949,8 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
     must not silently roll back the api_key audit row).
     """
     try:
+        # #1690 — deliberately RAW (not connect_job): a quick credential
+        # read+commit on the auth path; left unbounded by the per-job cap.
         with psycopg.connect(settings.database_url) as conn:
             # #1265 — lazily (re)load the broker-encryption key if this
             # process booted before broker creds existed (clean-DB jobs
@@ -1948,6 +2001,8 @@ def _record_prereq_skip(job_name: str, detail: str) -> None:
     stale-forever while the prerequisite is missing.
     """
     try:
+        # #1690 — deliberately RAW (not connect_job): runs BEFORE _tracked_job
+        # sets the timeout var; a short audit write, left unbounded.
         with psycopg.connect(settings.database_url, autocommit=True) as conn:
             record_job_skip(conn, job_name, prereq_skip_reason(detail))
     except Exception:
@@ -1989,7 +2044,7 @@ def nightly_universe_sync() -> None:
     with _tracked_job(JOB_NIGHTLY_UNIVERSE_SYNC) as tracker:
         with (
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             # Two separate transactions so a coverage-seeding failure
             # does not roll back a completed universe sync.  Each
@@ -2161,7 +2216,7 @@ def daily_candle_refresh() -> None:
     with _tracked_job(JOB_DAILY_CANDLE_REFRESH) as tracker:
         with (
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             # Held positions — always included, regardless of coverage
             # tier OR is_tradable status. A delisted/suspended instrument
@@ -2359,7 +2414,7 @@ def daily_cik_refresh() -> None:
     with _tracked_job(JOB_DAILY_CIK_REFRESH) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             # #1056: detect empty destination. If the operator wiped
             # external_identifiers but the watermark survived (the
@@ -2541,7 +2596,7 @@ def daily_research_refresh() -> None:
         logger.warning("daily_research_refresh: COMPANIES_HOUSE_API_KEY not set, skipping CH filings")
 
     with _tracked_job(JOB_DAILY_RESEARCH_REFRESH) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             rows = conn.execute(
                 """
                 SELECT i.symbol, i.instrument_id::text
@@ -2598,7 +2653,7 @@ def daily_research_refresh() -> None:
         elif sec_symbols:
             with (
                 SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
-                psycopg.connect(settings.database_url) as conn,
+                connect_job() as conn,
             ):
                 sec_fund.set_cik_cache(cik_map)
                 summary = refresh_fundamentals(sec_fund, conn, sec_symbols)
@@ -2629,7 +2684,7 @@ def daily_research_refresh() -> None:
         else:
             with (
                 SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-                psycopg.connect(settings.database_url) as conn,
+                connect_job() as conn,
             ):
                 # #1011 — daily incremental uses the same three-tier
                 # allow-list as the bootstrap. Pre-fix this was
@@ -2661,7 +2716,7 @@ def daily_research_refresh() -> None:
         if settings.companies_house_api_key:
             with (
                 CompaniesHouseFilingsProvider(api_key=settings.companies_house_api_key) as ch,
-                psycopg.connect(settings.database_url) as conn,
+                connect_job() as conn,
             ):
                 ch_summary: FilingsRefreshSummary = refresh_filings(
                     provider=ch,
@@ -2687,7 +2742,7 @@ def daily_financial_facts() -> None:
     """Incremental SEC facts refresh driven by the daily master-index
     + per-CIK watermarks. See app.services.sec_incremental."""
     with _tracked_job(JOB_DAILY_FINANCIAL_FACTS) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             from app.services.fundamentals import execute_refresh, plan_refresh
 
             today = datetime.now(UTC).date()
@@ -2887,7 +2942,7 @@ def daily_thesis_refresh() -> None:
         # Previously: except Exception: log + return silent-success.
         # That left the layer looking fresh after a DB failure. Now:
         # let the exception propagate — _tracked_job records failure.
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             # Generate theses for T1 and T2 instruments.  T2 instruments
             # need theses to be promoted to T1 (coverage.py requires
             # thesis for T2→T1).  The portfolio manager also requires a
@@ -2916,7 +2971,7 @@ def daily_thesis_refresh() -> None:
         total = len(stale)
         for idx, item in enumerate(stale, start=1):
             try:
-                with psycopg.connect(settings.database_url) as conn:
+                with connect_job() as conn:
                     with instrument_lock(conn, item.instrument_id) as acquired:
                         if not acquired:
                             logger.info(
@@ -2992,7 +3047,7 @@ def daily_portfolio_sync() -> None:
     with _tracked_job(JOB_DAILY_PORTFOLIO_SYNC) as tracker:
         # Watermark read on its own short-lived conn BEFORE the provider
         # session — no DB conn held across HTTP (#1593 spec PR-1 plan).
-        with psycopg.connect(settings.database_url) as wm_conn:
+        with connect_job() as wm_conn:
             history_min_date = compute_history_min_date(wm_conn)
 
         with EtoroBrokerProvider(
@@ -3005,7 +3060,7 @@ def daily_portfolio_sync() -> None:
             # unmoved watermark re-covers the window next tick.
             trade_history = fetch_trade_history_safely(broker, history_min_date)
 
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             result = sync_portfolio(conn, portfolio, trade_history=trade_history)
 
             # Auto-promote held instruments to Tier 1 so market data,
@@ -3090,7 +3145,7 @@ def morning_candidate_review() -> None:
             from app.services.ops_monitor import get_kill_switch_status
             from app.services.runtime_config import get_runtime_config
 
-            with psycopg.connect(settings.database_url) as conn:
+            with connect_job() as conn:
                 ks = get_kill_switch_status(conn)
                 config = get_runtime_config(conn)
 
@@ -3140,7 +3195,7 @@ def compute_morning_recommendations() -> MorningComputeResult:
     review does NOT run and `review_result` is None.
     """
     logger.info("compute_morning_recommendations: starting scoring run")
-    with psycopg.connect(settings.database_url) as conn:
+    with connect_job() as conn:
         score_result = compute_rankings(conn)
 
     if not score_result.scored:
@@ -3157,7 +3212,7 @@ def compute_morning_recommendations() -> MorningComputeResult:
     )
 
     logger.info("compute_morning_recommendations: starting portfolio review")
-    with psycopg.connect(settings.database_url) as conn:
+    with connect_job() as conn:
         rec_result = run_portfolio_review(conn, model_version=score_result.model_version)
 
     return MorningComputeResult(ranking_result=score_result, review_result=rec_result)
@@ -3176,7 +3231,7 @@ def _timing_error_defer(
     'proposed' — logged by caller).
     """
     try:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             conn.execute(
                 """
                 INSERT INTO decision_audit
@@ -3247,7 +3302,7 @@ def execute_approved_orders() -> None:
         timing_candidates: list[tuple[Any, ...]] = []
 
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with connect_job() as conn:
                 timing_candidates = conn.execute(
                     """
                     SELECT recommendation_id, action, instrument_id
@@ -3273,7 +3328,7 @@ def execute_approved_orders() -> None:
                 timing_skipped += 1
                 continue
             try:
-                with psycopg.connect(settings.database_url) as conn:
+                with connect_job() as conn:
                     evaluation = evaluate_entry_conditions(conn, rec_id)
 
                     pass_fail = "DEFER" if evaluation.verdict == "defer" else "PASS"
@@ -3402,7 +3457,7 @@ def execute_approved_orders() -> None:
 
         # --- Phase 1: guard proposed recommendations ---
         # Re-query proposed recs (timing_deferred ones are now excluded).
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             proposed = conn.execute(
                 """
                 SELECT recommendation_id
@@ -3417,7 +3472,7 @@ def execute_approved_orders() -> None:
         for row in proposed:
             rec_id = row[0]
             try:
-                with psycopg.connect(settings.database_url) as conn:
+                with connect_job() as conn:
                     result = evaluate_recommendation(conn, rec_id)
                     conn.commit()
                 if result.verdict == "PASS":
@@ -3450,7 +3505,7 @@ def execute_approved_orders() -> None:
         )
 
         # --- Phase 2: execute approved recommendations ---
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             # Use DISTINCT ON to pick the latest PASS decision per
             # recommendation (in case the guard was run more than once).
             approved = conn.execute(
@@ -3496,7 +3551,7 @@ def execute_approved_orders() -> None:
             for row in approved:
                 rec_id, decision_id = row[0], row[1]
                 try:
-                    with psycopg.connect(settings.database_url) as conn:
+                    with connect_job() as conn:
                         result = execute_order(
                             conn,
                             recommendation_id=rec_id,
@@ -3576,7 +3631,7 @@ def retry_deferred_recommendations_job() -> None:
         # Single connection for config check + service call so the kill
         # switch state cannot change between the gate and the work.
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with connect_job() as conn:
                 # Safety gate: kill switch + auto-trading check
                 ks = get_kill_switch_status(conn)
                 config = get_runtime_config(conn)
@@ -3627,7 +3682,7 @@ def monitor_positions_job() -> None:
         # the writer's transaction block is the outer transaction (not a
         # savepoint) — see prevention log entry "conn.transaction() savepoint
         # release does not commit the outer transaction".
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with connect_job(autocommit=True) as conn:
             result = check_position_health(conn)
             # Report row_count BEFORE the risky persist call so that if the
             # writer raises, _tracked_job still records the count of
@@ -3712,7 +3767,7 @@ def fundamentals_sync() -> None:
     # ``app/jobs/runtime.py``.
     ingest_paused = False
     try:
-        with psycopg.connect(settings.database_url, autocommit=True) as gate_conn:
+        with connect_job(autocommit=True) as gate_conn:
             if not is_layer_enabled(gate_conn, "fundamentals_ingest"):
                 ingest_paused = True
                 logger.info(
@@ -3792,7 +3847,7 @@ def fundamentals_sync() -> None:
         phase1b_rows = 0
         if settings.enable_sec_fundamentals_dedupe:
             try:
-                with psycopg.connect(settings.database_url) as conn:
+                with connect_job() as conn:
                     # ``ei.is_primary = TRUE`` matches the phase-2 audit
                     # query. Without it, an instrument with a demoted
                     # historical SEC CIK row would appear twice in the
@@ -3818,7 +3873,7 @@ def fundamentals_sync() -> None:
                     cik_map = {str(row[0]).upper(): str(row[2]) for row in cik_rows}
                     with (
                         SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
-                        psycopg.connect(settings.database_url) as conn,
+                        connect_job() as conn,
                     ):
                         sec_fund.set_cik_cache(cik_map)
                         snap_summary = refresh_fundamentals(sec_fund, conn, sec_symbols)
@@ -3842,7 +3897,7 @@ def fundamentals_sync() -> None:
         # --- Phase 2: coverage audit + eligibility-gated backfill --------
         outcomes: dict[BackfillOutcome, int] = {o: 0 for o in BackfillOutcome}
         eligible_count = 0
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             pre_audit = audit_all_instruments(conn)
 
             eligible_rows = conn.execute(
@@ -3919,7 +3974,7 @@ def fundamentals_sync() -> None:
         # "try/except + return" semantics of the retired weekly_coverage_review.
         review_rows = 0
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with connect_job() as conn:
                 review_result = review_coverage(conn)
             review_rows = len(review_result.promotions) + len(review_result.demotions)
             logger.info(
@@ -3997,7 +4052,7 @@ def fx_rates_refresh() -> None:
         # Fetch USD → every other supported currency.
         targets = sorted(c for c in SUPPORTED_CURRENCIES if c != "USD")
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with connect_job() as conn:
                 prior = get_watermark(conn, FX_SOURCE, FX_WATERMARK_KEY)
                 if_none_match = prior.watermark if (prior and prior.watermark) else None
 
@@ -4014,7 +4069,7 @@ def fx_rates_refresh() -> None:
                     ecb_quoted_at = datetime.fromisoformat(result.ecb_date).replace(tzinfo=UTC)
                 else:
                     ecb_quoted_at = datetime.now(UTC)
-                with psycopg.connect(settings.database_url) as conn:
+                with connect_job() as conn:
                     # Upsert + watermark advance inside one transaction so
                     # a crash between them can't leave the watermark ahead
                     # of the data (next run would skip unfinished work).
@@ -4069,7 +4124,7 @@ def portfolio_eod_snapshot_job() -> None:
     from app.services.portfolio_eod import compute_and_store_eod_snapshot
 
     with _tracked_job(JOB_PORTFOLIO_EOD_SNAPSHOT) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             equity = compute_and_store_eod_snapshot(conn)
         tracker.row_count = equity.positions_priced
 
@@ -4086,7 +4141,7 @@ def fx_history_backfill_job() -> None:
     from app.services.fx_history import ensure_fx_history
 
     with _tracked_job(JOB_FX_HISTORY_BACKFILL) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT CURRENT_DATE")
                 row = cur.fetchone()
@@ -4112,7 +4167,7 @@ def risk_metrics_refresh() -> None:
     from app.services.risk_metrics import compute_and_store_risk_metrics
 
     with _tracked_job(JOB_RISK_METRICS_REFRESH) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             tracker.row_count = compute_and_store_risk_metrics(conn)
 
 
@@ -4136,7 +4191,7 @@ def exchanges_metadata_refresh() -> None:
     with _tracked_job(JOB_EXCHANGES_METADATA_REFRESH) as tracker:
         with (
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             summary = refresh_exchanges_metadata(provider, conn)
             tracker.row_count = summary.inserted + summary.description_updated
@@ -4167,7 +4222,7 @@ def etoro_lookups_refresh() -> None:
     with _tracked_job(JOB_ETORO_LOOKUPS_REFRESH) as tracker:
         with (
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             summary = refresh_etoro_lookups(provider, conn)
             tracker.row_count = (
@@ -4204,7 +4259,7 @@ def daily_tax_reconciliation() -> None:
         logger.info("daily_tax_reconciliation: starting")
 
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with connect_job() as conn:
                 ingestion = ingest_tax_events(conn)
         except Exception:
             logger.error("daily_tax_reconciliation: ingestion failed", exc_info=True)
@@ -4218,7 +4273,7 @@ def daily_tax_reconciliation() -> None:
         )
 
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with connect_job() as conn:
                 matching = run_disposal_matching(conn)
         except Exception:
             logger.error("daily_tax_reconciliation: matching failed", exc_info=True)
@@ -4238,7 +4293,7 @@ def daily_tax_reconciliation() -> None:
 def attribution_summary_job() -> None:
     """Compute and persist attribution summaries for all configured windows."""
     with _tracked_job(JOB_ATTRIBUTION_SUMMARY) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             total_positions = 0
             for window in SUMMARY_WINDOWS:
                 summary = compute_attribution_summary(conn, window)
@@ -4265,7 +4320,7 @@ def weekly_report() -> None:
         period_end = today - timedelta(days=(today.weekday() + 1) % 7)  # last Sunday
         period_start = period_end - timedelta(days=6)  # Monday of that week
 
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             report = generate_weekly_report(conn, period_start, period_end)
             persist_report_snapshot(
                 conn,
@@ -4288,7 +4343,7 @@ def monthly_report() -> None:
         period_end = today.replace(day=1) - timedelta(days=1)  # last day of prev month
         period_start = period_end.replace(day=1)  # first day of prev month
 
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             report = generate_monthly_report(conn, period_start, period_end)
             persist_report_snapshot(
                 conn,
@@ -4306,7 +4361,7 @@ def seed_cost_models() -> None:
     from app.services.transaction_cost import seed_cost_models_from_quotes
 
     with _tracked_job(JOB_SEED_COST_MODELS) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             result = seed_cost_models_from_quotes(conn)
             conn.commit()
         tracker.row_count = result["processed"]
@@ -4427,7 +4482,7 @@ def raw_data_retention_sweep() -> None:
         total_deleted = 0
         total_bytes = 0
 
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             for source in _RETENTION_POLICY:
                 # --- Compaction phase (throttled by staleness) ---
                 # A compaction error MUST NOT skip the sweep phase
@@ -4644,7 +4699,7 @@ def jobs_liveness_watchdog() -> None:
 
     with _tracked_job(JOB_LIVENESS_WATCHDOG) as tracker:
         now = datetime.now(UTC)
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with connect_job(autocommit=True) as conn:
             stalled, active = evaluate_liveness(conn, jobs, now)
             # T4 (#1510): act — re-enqueue each stalled job once via the audited
             # manual queue (bounded by in-tx stall recheck + in-flight dedup +
@@ -4698,7 +4753,7 @@ def jobs_retry_sweeper() -> None:
 
     with _tracked_job(JOB_RETRY_SWEEPER) as tracker:
         now = datetime.now(UTC)
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with connect_job(autocommit=True) as conn:
             refired = sweep_due_retries(conn, eligible_job_names=eligible, now=now)
         tracker.row_count = len(refired)
 
@@ -4719,7 +4774,7 @@ def sec_manifest_worker_tick() -> None:
     from app.jobs.sec_manifest_worker import run_manifest_worker
 
     with _tracked_job(JOB_SEC_MANIFEST_WORKER) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             # tick_id=None → run_manifest_worker pulls next value from
             # the module-global _TICK_COUNTER (per-process +1-per-tick
             # rotation). Tests inject explicitly via the helper signature.
@@ -4758,7 +4813,7 @@ def sec_manifest_tombstone_stale() -> None:
     from app.services.sec_manifest import tombstone_stale_failed_upserts
 
     with _tracked_job(JOB_SEC_MANIFEST_TOMBSTONE_STALE) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             result = tombstone_stale_failed_upserts(conn)
             conn.commit()
 
@@ -4882,7 +4937,7 @@ def sec_business_summary_bootstrap() -> None:
 
     with _tracked_job(JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP) as tracker:
         with (
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
             # #1045: prefetch cohort URLs via PipelinedSecFetcher for
@@ -4924,7 +4979,7 @@ def sec_insider_transactions_ingest() -> None:
 
     with _tracked_job(JOB_SEC_INSIDER_TRANSACTIONS_INGEST) as tracker:
         with (
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
             result = ingest_insider_transactions(conn, provider)
@@ -4956,7 +5011,7 @@ def sec_form3_ingest() -> None:
 
     with _tracked_job(JOB_SEC_FORM3_INGEST) as tracker:
         with (
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
             result = ingest_form_3_filings(conn, provider)
@@ -4992,7 +5047,7 @@ def sec_def14a_ingest() -> None:
 
     with _tracked_job(JOB_SEC_DEF14A_INGEST) as tracker:
         with (
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
             result = ingest_def14a(conn, provider)
@@ -5039,7 +5094,7 @@ def sec_def14a_bootstrap() -> None:
 
     with _tracked_job(JOB_SEC_DEF14A_BOOTSTRAP) as tracker:
         with (
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
             # #1045: prefetch DEF 14A primary docs via PipelinedSecFetcher.
@@ -5098,7 +5153,7 @@ def ownership_observations_sync() -> None:
     from app.jobs.ownership_observations_repair import run_observations_repair_sweep
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_SYNC) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             stats = run_observations_repair_sweep(conn)
             conn.commit()
 
@@ -5154,7 +5209,7 @@ def ownership_observations_backfill() -> None:
     from app.services.ownership_observations_sync import sync_all
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_BACKFILL) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             result = sync_all(conn)
 
         tracker.row_count = result.total_observations_recorded
@@ -5184,7 +5239,7 @@ def cusip_universe_backfill() -> None:
     from app.services.sec_13f_securities_list import backfill_cusip_coverage
 
     with _tracked_job(JOB_CUSIP_UNIVERSE_BACKFILL) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             result = backfill_cusip_coverage(conn)
 
         tracker.row_count = result.inserted
@@ -5278,7 +5333,7 @@ def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
     with _tracked_job(JOB_SEC_13F_QUARTERLY_SWEEP) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             ciks = list_directory_filer_ciks(conn, min_last_13f_hr_at=min_last_13f_hr_at)
             # #1273 PR2 — long-pole stage instrumentation (S22). Pin
@@ -5393,7 +5448,7 @@ def filings_history_seed(params: Mapping[str, Any]) -> None:
     instrument_id_param = params.get("instrument_id")
 
     with _tracked_job(JOB_FILINGS_HISTORY_SEED) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             if instrument_id_param is not None:
                 # Operator-triage path: single instrument, validated
                 # CIK-mapped tradable. We resolve through the same
@@ -5463,7 +5518,7 @@ def filings_history_seed(params: Mapping[str, Any]) -> None:
 
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             summary = refresh_filings(
                 provider=sec,
@@ -5591,7 +5646,7 @@ def sec_first_install_drain(params: Mapping[str, Any]) -> None:
     with _tracked_job(JOB_SEC_FIRST_INSTALL_DRAIN) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             stats = run_first_install_drain(
                 conn,
@@ -5661,7 +5716,7 @@ def mf_directory_sync(params: Mapping[str, Any]) -> None:
     with _tracked_job(JOB_MF_DIRECTORY_SYNC) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             result = refresh_mf_directory(conn, provider=provider)
         tracker.row_count = int(result["directory_rows"])
@@ -5698,7 +5753,7 @@ def sec_n_csr_bootstrap_drain(params: Mapping[str, Any]) -> None:
     with _tracked_job(JOB_SEC_N_CSR_BOOTSTRAP_DRAIN) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             stats = bootstrap_n_csr_drain(
                 conn,
@@ -5755,7 +5810,7 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
     with _tracked_job(JOB_CUSIP_RESOLVER_POST_BULK_SWEEP) as tracker:
         with (
             OpenFigiResolver.from_env() as resolver,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             # #1349 — tombstone bulk rows whose CUSIP got mapped by ANY
             # route (SEC curated backfill, fuzzy resolver, prior OpenFIGI
@@ -5864,7 +5919,7 @@ def sec_atom_fast_lane() -> None:
     with _tracked_job(JOB_SEC_ATOM_FAST_LANE) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             stats = run_atom_fast_lane(conn, http_get=_make_sec_http_get(sec))  # type: ignore[arg-type]
             conn.commit()
@@ -5899,7 +5954,7 @@ def sec_daily_index_reconcile() -> None:
     with _tracked_job(JOB_SEC_DAILY_INDEX_RECONCILE) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             stats = run_daily_index_reconcile(conn, http_get=_make_sec_http_get(sec))  # type: ignore[arg-type]
             conn.commit()
@@ -5928,7 +5983,7 @@ def sec_13f_notice_sync() -> None:
     with _tracked_job(JOB_SEC_13F_NOTICE_SYNC) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             result = sync_13f_notices(
                 conn,
@@ -5956,7 +6011,7 @@ def institutional_13f_notice_backfill() -> None:
     with _tracked_job(JOB_INSTITUTIONAL_13F_NOTICE_BACKFILL) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             result = backfill_13f_notices(
                 conn,
@@ -5984,7 +6039,7 @@ def sec_per_cik_poll() -> None:
     with _tracked_job(JOB_SEC_PER_CIK_POLL) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             # Item 7 (#1233): conditional-GET path via Last-Modified
             # watermark namespace ``sec.last_modified.per_cik_poll``.
@@ -6033,7 +6088,7 @@ def sec_master_idx_quarterly_sweep() -> None:
     with _tracked_job(JOB_SEC_MASTER_IDX_QUARTERLY_SWEEP) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             stats = run_master_idx_quarterly_sweep(
                 conn,
@@ -6086,7 +6141,7 @@ def sec_master_idx_gap_close() -> None:
     with _tracked_job(JOB_SEC_MASTER_IDX_GAP_CLOSE) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             stats = run_master_idx_quarterly_sweep(
                 conn,
@@ -6133,7 +6188,7 @@ def finra_short_interest_refresh() -> None:
     )
 
     with _tracked_job(JOB_FINRA_SHORT_INTEREST_REFRESH) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             stats = run_finra_short_interest_refresh(conn)
         tracker.row_count = stats.total_upserted
         logger.info(
@@ -6168,7 +6223,7 @@ def finra_regsho_daily_refresh() -> None:
     )
 
     with _tracked_job(JOB_FINRA_REGSHO_DAILY_REFRESH) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             stats = run_finra_regsho_daily_refresh(conn)
         tracker.row_count = stats.total_upserted
         logger.info(
@@ -6216,7 +6271,7 @@ def sec_rebuild(params: Mapping[str, Any]) -> None:
     with _tracked_job(JOB_SEC_REBUILD) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             stats = run_sec_rebuild(
                 conn,
@@ -6290,7 +6345,7 @@ def sec_13f_filer_directory_sync() -> None:
     from app.services.sec_13f_filer_directory import sync_filer_directory
 
     with _tracked_job(JOB_SEC_13F_FILER_DIRECTORY_SYNC) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             result = sync_filer_directory(conn)
 
         tracker.row_count = result.filers_inserted
@@ -6323,7 +6378,7 @@ def sec_nport_filer_directory_sync() -> None:
     from app.services.sec_nport_filer_directory import sync_nport_filer_directory
 
     with _tracked_job(JOB_SEC_NPORT_FILER_DIRECTORY_SYNC) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             result = sync_nport_filer_directory(conn)
 
         tracker.row_count = result.filers_inserted
@@ -6359,7 +6414,7 @@ def ncen_classifier_yearly() -> None:
     with _tracked_job(JOB_NCEN_CLASSIFIER) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             report = classify_filers_via_ncen(conn, sec)
 
@@ -6485,7 +6540,7 @@ def sec_n_port_ingest(params: Mapping[str, Any]) -> None:
     with _tracked_job(JOB_SEC_N_PORT_INGEST) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
         ):
             ciks = list_nport_filer_ciks(
                 conn,
@@ -6600,7 +6655,7 @@ def cusip_extid_sweep() -> None:
     from app.services.cusip_resolver import sweep_resolvable_unresolved_cusips
 
     with _tracked_job(JOB_CUSIP_EXTID_SWEEP) as tracker:
-        with psycopg.connect(settings.database_url) as conn:
+        with connect_job() as conn:
             report = sweep_resolvable_unresolved_cusips(conn)
             conn.commit()
 
@@ -6633,7 +6688,7 @@ def sec_filing_documents_ingest() -> None:
 
     with _tracked_job(JOB_SEC_FILING_DOCUMENTS_INGEST) as tracker:
         with (
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
             result = ingest_filing_documents(conn, provider)
@@ -6663,7 +6718,7 @@ def sec_8k_events_ingest() -> None:
 
     with _tracked_job(JOB_SEC_8K_EVENTS_INGEST) as tracker:
         with (
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
             # #1045: prefetch 8-K primary docs via PipelinedSecFetcher
@@ -6703,7 +6758,7 @@ def sec_insider_transactions_backfill() -> None:
 
     with _tracked_job(JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL) as tracker:
         with (
-            psycopg.connect(settings.database_url) as conn,
+            connect_job() as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
             totals = ingest_insider_transactions_backfill(conn, provider)
