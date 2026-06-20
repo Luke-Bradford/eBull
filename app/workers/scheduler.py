@@ -400,6 +400,12 @@ JOB_SEC_MANIFEST_WORKER = "sec_manifest_worker"
 # DEF 14A ingest. Operator-triggered + auto-fires once per day until
 # the legacy backlog drains.
 JOB_SEC_MANIFEST_TOMBSTONE_STALE = "sec_manifest_tombstone_stale"
+# #1686 — daily bulk pre-retention tombstone sweep. Tombstones pending
+# manifest rows older than their source's PRE-FETCH retention cutoff
+# (Form 4 / 13D / 13G only) in bulk SQL, so the worker's scarce per-tick
+# budget is spent on fetchable rows rather than free no-HTTP tombstones.
+# catch_up_on_boot clears the standing backlog on first restart.
+JOB_SEC_MANIFEST_PRE_RETENTION_SWEEP = "sec_manifest_pre_retention_sweep"
 
 # PR1c #1064 — promoted from bespoke wrappers in
 # ``app/services/bootstrap_orchestrator.py``. Each is now a registered
@@ -1410,6 +1416,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # 5 min before processing any manifest backlog. The tick is
         # bounded at max_rows=100 so the boot cost is small.
         catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_MANIFEST_PRE_RETENTION_SWEEP,
+        display_name="SEC manifest pre-retention sweep",
+        source="sec_manifest",
+        description=(
+            "Bulk-tombstone pending sec_filing_manifest rows older than "
+            "their source's PRE-FETCH retention cutoff (Form 4 = today-3y; "
+            "13D/13G = max(today-3y, 2024-12-18 XML-mandate)). Identical "
+            "transition to the per-row parser gate, done in batched SQL "
+            "with no HTTP — frees the worker's per-tick budget for "
+            "fetchable rows. Reversible via sec_rebuild. #1686."
+        ),
+        # Daily 03:30 UTC keeps the rolling cutoff boundary swept; the
+        # boot run clears the standing pre-retention backlog. Own lane is
+        # the sec_manifest lane (DB-only, no SEC HTTP).
+        cadence=Cadence.daily(hour=3, minute=30),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,  # no-op on empty DB pre-bootstrap
     ),
     # -- #1155 Layer 1 / 2 / 3 freshness redesign wiring -------------------
     ScheduledJob(
@@ -4651,6 +4676,28 @@ def financial_facts_retention_sweep() -> None:
             "financial_facts_retention_sweep complete: instruments=%d rows_deleted=%d",
             summary.instruments,
             summary.rows_deleted,
+        )
+
+
+def sec_manifest_pre_retention_sweep() -> None:
+    """Daily bulk pre-retention tombstone sweep (#1686).
+
+    Thin scheduler-side wrapper around
+    :func:`app.services.manifest_pre_retention_sweep.sweep_pre_retention`.
+    The service owns transaction shape (autocommit conn + per-batch
+    ``with conn.transaction()``); this wrapper only adds job-runs
+    telemetry. Idempotent — a swept boundary tombstones 0 rows on the
+    next fire.
+    """
+    from app.services.manifest_pre_retention_sweep import sweep_pre_retention
+
+    with _tracked_job(JOB_SEC_MANIFEST_PRE_RETENTION_SWEEP) as tracker:
+        summary = sweep_pre_retention()
+        tracker.row_count = summary.total
+        logger.info(
+            "sec_manifest_pre_retention_sweep complete: tombstoned=%d by_source=%s",
+            summary.total,
+            dict(sorted(summary.by_source.items())),
         )
 
 

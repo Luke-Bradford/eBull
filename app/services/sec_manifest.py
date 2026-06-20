@@ -408,6 +408,23 @@ def transition_status(
         current_status: IngestStatus = row[0]
         current_raw_status: RawStatus = row[1]
         allowed = _ALLOWED_TRANSITIONS[current_status]
+        # #1686 — idempotent terminal-tombstone no-op for the concurrent
+        # double-tombstone race. The bulk pre-retention sweep
+        # (``manifest_pre_retention_sweep``) and the worker apply the
+        # IDENTICAL pre-fetch retention gate, so both can tombstone the
+        # same pending row: the sweep wins (pending->tombstoned commits),
+        # then the worker's parser returns ``status='tombstoned'`` and
+        # calls here with ``current='tombstoned'``. ``tombstoned`` is
+        # otherwise terminal (``_ALLOWED_TRANSITIONS['tombstoned']={pending}``),
+        # so without this guard the redundant transition raises and aborts
+        # the whole worker tick. Return as a NO-OP (do NOT re-stamp
+        # last_attempted_at/error) — a concurrent writer reaching the same
+        # terminal state is benign. This is the ONLY self-transition
+        # exemption to the #879 "explicitly-allowed" rule, and because it
+        # writes nothing it cannot mask a double-error write (the #879
+        # failure mode the rule guards against).
+        if current_status == "tombstoned" and ingest_status == "tombstoned":
+            return
         # Claude bot review on PR #879 (WARNING): same-status no-op
         # was previously short-circuited unconditionally; that masked
         # double-error writes (e.g. worker calls failed->failed twice

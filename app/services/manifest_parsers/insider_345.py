@@ -779,6 +779,34 @@ def _parse_form5(
     )
 
 
+def _insider_fetch_url(row: Any) -> str | None:  # row: ManifestRow
+    """#1686 Phase 2 prefetch hook — the SINGLE canonical ownership-XML URL
+    Form 3/4/5 parsers GET, returned ONLY when the parser would actually
+    fetch it.
+
+    The hook MUST mirror every PRE-FETCH tombstone gate the parser applies,
+    or the concurrent prefetch wastes SEC rate budget fetching bodies the
+    parser then discards (Codex ckpt-2 HIGH). The gates, reusing the SAME
+    chokepoint predicates the parsers call (no duplicated date math):
+      * missing ``instrument_id`` → parser tombstones pre-fetch (`_parse_*`).
+      * missing ``primary_document_url`` / ``filed_at`` → pre-fetch tombstone.
+      * Form 4 past the 3y cap (``form4_within_retention``) / Form 5 past the
+        18-month cap (``form5_within_retention``) → pre-fetch tombstone.
+        Form 3 has NO retention gate, so it is fetched whenever it has a URL.
+    Returning ``None`` here just means "no prefetch" — the parser still runs
+    serially and reaches the identical tombstone, so an over-broad ``None``
+    is always safe (worst case: no speedup)."""
+    url = row.primary_document_url
+    if not url or row.instrument_id is None or row.filed_at is None:
+        return None
+    filed = row.filed_at.date()
+    if row.source == "sec_form4" and not form4_within_retention(filed):
+        return None
+    if row.source == "sec_form5" and not form5_within_retention(filed):
+        return None
+    return _canonical_form_4_url(url)
+
+
 def register() -> None:
     """Register Form 3 + Form 4 + Form 5 parsers with the manifest
     worker. All three share the EDGAR ownership XML schema but route
@@ -786,6 +814,6 @@ def register() -> None:
     parser_version watermarks."""
     from app.jobs.sec_manifest_worker import register_parser
 
-    register_parser("sec_form4", _parse_form4, requires_raw_payload=True)
-    register_parser("sec_form3", _parse_form3, requires_raw_payload=True)
-    register_parser("sec_form5", _parse_form5, requires_raw_payload=True)
+    register_parser("sec_form4", _parse_form4, requires_raw_payload=True, fetch_url=_insider_fetch_url)
+    register_parser("sec_form3", _parse_form3, requires_raw_payload=True, fetch_url=_insider_fetch_url)
+    register_parser("sec_form5", _parse_form5, requires_raw_payload=True, fetch_url=_insider_fetch_url)
