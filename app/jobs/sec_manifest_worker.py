@@ -48,6 +48,7 @@ from app.services.sec_manifest import (
     ManifestRow,
     ManifestSource,
     iter_pending,
+    iter_pending_recent,
     iter_pending_topup,
     iter_retryable,
     iter_retryable_topup,
@@ -55,6 +56,15 @@ from app.services.sec_manifest import (
 )
 
 logger = logging.getLogger(__name__)
+
+# #1685 — recent-first slice budget. Of each ``max_rows`` fairness tick, up to
+# this many rows are reserved for the NEWEST pending filings (filed within
+# ``RECENT_WINDOW``) per source, so recent events (8-K-class, 13D/G, DEF 14A,
+# …) stay fresh regardless of the oldest-first historical backlog the main
+# drain works through. The worker caps it at ``max_rows // 2`` so the backlog
+# drain is never starved to zero.
+RECENT_SLICE_ROWS = 30
+RECENT_WINDOW = timedelta(days=90)
 
 
 # Tick counter for Phase A `lead` rotation (#1179). Module-global
@@ -231,8 +241,8 @@ def run_manifest_worker(
             rows.extend(iter_retryable(conn, source=source, limit=max_rows - len(rows)))
         return _dispatch_rows(conn, rows, now=now)
 
-    # Fairness path (#1179) — Phase A per-source slice + Phase B
-    # top-up across the global oldest tail.
+    # Fairness path (#1179) — Phase R recent-first slice (#1685) +
+    # Phase A per-source oldest slice + Phase B global oldest top-up.
     sources = sorted(registered_parser_sources())
     n = len(sources)
     if n == 0:
@@ -246,24 +256,50 @@ def run_manifest_worker(
 
     if tick_id is None:
         tick_id = next(_TICK_COUNTER)
-    quotas = compute_quotas(sources, max_rows, tick_id)
 
-    rows = []
+    rows: list[ManifestRow] = []
+    seen: set[str] = set()
 
-    # Phase A — per-source quota slice (pending first, retryable
-    # within the same per-source budget).
+    # Phase R (#1685) — recent-first slice. Reserve a bounded budget for the
+    # NEWEST pending filings (within RECENT_WINDOW) per source, allocated with
+    # the same #1179 rotation, newest first. ``max_rows // 2`` guarantees the
+    # backlog budget below stays > 0 even for a small ``max_rows`` (Codex
+    # ckpt-1: a base-zero backlog would collapse the fairness rotation).
+    recent_budget = min(RECENT_SLICE_ROWS, max_rows // 2)
+    if recent_budget > 0:
+        recent_cutoff = now - RECENT_WINDOW
+        recent_quotas = compute_quotas(sources, recent_budget, tick_id)
+        for s in sources:
+            q = recent_quotas[s]
+            if q == 0:
+                continue
+            recent = list(iter_pending_recent(conn, source=s, since=recent_cutoff, limit=q))
+            rows.extend(recent)
+            seen.update(r.accession_number for r in recent)
+
+    # Phase A — per-source oldest-first slice over whatever budget Phase R did
+    # NOT consume (unused recent budget rolls into the backlog). The pending
+    # pick is filtered against ``seen`` so a tiny all-recent source cannot have
+    # a row dispatched twice in one tick (Codex ckpt-1: the only overlap case —
+    # for a large backlog Phase R's newest prefix and Phase A's oldest prefix
+    # are disjoint). Retryable rows are ``failed`` so can never collide with the
+    # ``pending`` Phase R picks — no filter needed there.
+    backlog_budget = max_rows - len(rows)
+    quotas = compute_quotas(sources, backlog_budget, tick_id)
     for s in sources:
         q = quotas[s]
         if q == 0:
             continue
-        per_source: list[ManifestRow] = list(iter_pending(conn, source=s, limit=q))
+        per_source: list[ManifestRow] = [
+            r for r in iter_pending(conn, source=s, limit=q) if r.accession_number not in seen
+        ]
         if len(per_source) < q:
             per_source.extend(iter_retryable(conn, source=s, limit=q - len(per_source)))
         rows.extend(per_source)
+        seen.update(r.accession_number for r in per_source)
 
     # Phase B — top-up pending, then retryable, both scoped to
-    # registered sources, excluding Phase A picks.
-    seen: set[str] = {r.accession_number for r in rows}
+    # registered sources, excluding everything already picked.
     remaining = max_rows - len(rows)
     if remaining > 0:
         topup_pending = list(

@@ -14,7 +14,7 @@ Covers:
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -29,6 +29,7 @@ from app.jobs.sec_manifest_worker import (
 from app.services.sec_manifest import (
     ManifestRow,
     get_manifest_row,
+    iter_pending_recent,
     record_manifest_entry,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
@@ -1052,3 +1053,130 @@ class TestFairness:
         )
         assert len(retryable_rows) == 1
         assert retryable_rows[0].accession_number == accessions[0]
+
+
+class TestRecentFirstSlice:
+    """#1685 — Phase R recent-first slice keeps every source's recent filings
+    fresh regardless of the oldest-first historical backlog."""
+
+    _NOW = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)
+
+    def test_recent_picked_despite_old_backlog(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # 120 OLD def14a would fill a max_rows=100 oldest-first tick entirely;
+        # the 5 RECENT (within 90d) would never surface without Phase R.
+        captures: list[tuple[str, ManifestSource]] = []
+        register_parser("sec_def14a", _make_capturing_parser(captures))
+        _seed_pending_n(
+            ebull_test_conn,
+            source="sec_def14a",
+            n=120,
+            base_filed_at=datetime(2020, 1, 1, tzinfo=UTC),
+            iid=1,
+            cik="0000000001",
+        )
+        recent = _seed_pending_n(
+            ebull_test_conn,
+            source="sec_def14a",
+            n=5,
+            base_filed_at=self._NOW - timedelta(days=10),
+            iid=2,
+            cik="0000000002",
+        )
+        ebull_test_conn.commit()
+        run_manifest_worker(ebull_test_conn, source=None, max_rows=100, tick_id=0, now=self._NOW)
+        ebull_test_conn.commit()
+        dispatched = {a for a, _ in captures}
+        assert set(recent) <= dispatched, "Phase R must surface recent filings despite the old backlog"
+
+    def test_no_double_dispatch_when_source_is_all_recent(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # A source whose entire (small) pending set is recent: Phase R + Phase A
+        # both reach for it — the seen-dedup must prevent a double dispatch.
+        captures: list[tuple[str, ManifestSource]] = []
+        register_parser("sec_13d", _make_capturing_parser(captures))
+        accs = _seed_pending_n(
+            ebull_test_conn,
+            source="sec_13d",
+            n=3,
+            base_filed_at=self._NOW - timedelta(days=5),
+            iid=3,
+            cik="0000000003",
+        )
+        ebull_test_conn.commit()
+        run_manifest_worker(ebull_test_conn, source=None, max_rows=100, tick_id=0, now=self._NOW)
+        ebull_test_conn.commit()
+        dispatched = [a for a, _ in captures]
+        assert sorted(dispatched) == sorted(accs)
+        assert len(dispatched) == len(set(dispatched)), "no accession dispatched twice in a tick"
+
+    def test_backlog_not_starved_at_small_max_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # max_rows < RECENT_SLICE_ROWS: the `// 2` floor must leave backlog
+        # budget > 0 so the oldest-first drain is not starved to zero.
+        captures: list[tuple[str, ManifestSource]] = []
+        register_parser("sec_form4", _make_capturing_parser(captures))
+        old = _seed_pending_n(
+            ebull_test_conn,
+            source="sec_form4",
+            n=10,
+            base_filed_at=datetime(2019, 1, 1, tzinfo=UTC),
+            iid=4,
+            cik="0000000004",
+        )
+        _seed_pending_n(
+            ebull_test_conn,
+            source="sec_form4",
+            n=10,
+            base_filed_at=self._NOW - timedelta(days=3),
+            iid=5,
+            cik="0000000005",
+        )
+        ebull_test_conn.commit()
+        run_manifest_worker(ebull_test_conn, source=None, max_rows=4, tick_id=0, now=self._NOW)
+        ebull_test_conn.commit()
+        dispatched = {a for a, _ in captures}
+        assert any(a in dispatched for a in old), "backlog must not be starved to zero at small max_rows"
+
+    def test_iter_pending_recent_desc_floor_and_source_scope(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Old (outside 90d) excluded; other-source excluded; recent returned DESC.
+        _seed_pending_n(
+            ebull_test_conn,
+            source="sec_13g",
+            n=2,
+            base_filed_at=self._NOW - timedelta(days=120),
+            iid=6,
+            cik="0000000006",
+        )
+        recent = _seed_pending_n(
+            ebull_test_conn,
+            source="sec_13g",
+            n=3,
+            base_filed_at=self._NOW - timedelta(days=10),
+            iid=7,
+            cik="0000000007",
+        )
+        _seed_pending_n(
+            ebull_test_conn,
+            source="sec_13d",
+            n=2,
+            base_filed_at=self._NOW - timedelta(days=5),
+            iid=8,
+            cik="0000000008",
+        )
+        ebull_test_conn.commit()
+        cutoff = self._NOW - timedelta(days=90)
+        rows = list(iter_pending_recent(ebull_test_conn, source="sec_13g", since=cutoff, limit=10))
+        got = [r.accession_number for r in rows]
+        assert set(got) == set(recent), "only this source's pending rows within the window"
+        # Same filed_at across the recent rows → accession DESC tie-break.
+        assert got == sorted(recent, reverse=True), "newest-first (filed_at DESC, accession DESC)"
