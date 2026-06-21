@@ -1047,8 +1047,8 @@ def test_two_phase_prefetch_out_of_retention_never_fetches_infotable(
     assert row is not None and row.ingest_status == "tombstoned"
 
 
-def test_parser_uses_batched_current_refresh_not_per_holding_loop() -> None:
-    """#1703 regression pin (perf — invisible to the correctness tests above).
+def test_all_13f_current_writers_use_batched_refresh_not_per_holding_loop() -> None:
+    """#1703 regression pin (perf + deadlock — invisible to the correctness tests).
 
     A 13F carries hundreds–thousands of holdings; the ``ownership_institutions_
     current`` refresh MUST be ONE batched MERGE
@@ -1056,15 +1056,29 @@ def test_parser_uses_batched_current_refresh_not_per_holding_loop() -> None:
     ``refresh_institutions_current`` loop. The loop ran one advisory-lock +
     MERGE PER holding and was the dominant per-tick cost (dev-verify: the serial
     wall that blocked raising the manifest worker's max_rows — NOT the infotable
-    fetch the issue assumed). Both forms are functionally identical, so only a
-    source-level assertion catches a revert. Comment mentions of the old name
-    are allowed (a comment documents why the loop was removed)."""
+    fetch the issue assumed).
+
+    Pin EVERY 13F ``_current`` writer (Codex/bot review #1706): once one path
+    batches (hash-sorted lock order) and another loops (set-iteration order),
+    two filings with overlapping instruments can take the same advisory locks in
+    opposite orders and DEADLOCK. Safety now requires ALL writers to share the
+    one canonical batch order — a revert of ANY re-introduces both the wall and
+    the deadlock. Both forms are functionally identical, so only a source-level
+    assertion catches a revert. Comment mentions of the old name are allowed.
+
+    The bulk orchestrator (``sec_bulk_orchestrator_jobs``) already batched
+    pre-#1703 and is covered by its own writer-pattern guards."""
     import inspect
 
+    from app.services import institutional_holdings, rewash_filings
     from app.services.manifest_parsers import sec_13f_hr
 
-    code = "\n".join(ln for ln in inspect.getsource(sec_13f_hr).splitlines() if not ln.lstrip().startswith("#"))
-    assert "refresh_institutions_current_batch(" in code, "13F refresh must use the batch helper"
-    assert "refresh_institutions_current(" not in code, (
-        "per-holding refresh_institutions_current(...) loop reintroduced — use the batch helper (#1703)"
-    )
+    for module in (sec_13f_hr, institutional_holdings, rewash_filings):
+        code = "\n".join(ln for ln in inspect.getsource(module).splitlines() if not ln.lstrip().startswith("#"))
+        assert "refresh_institutions_current_batch(" in code, (
+            f"{module.__name__} must batch the institutions _current refresh (#1703)"
+        )
+        assert "refresh_institutions_current(" not in code, (
+            f"{module.__name__} reintroduced the per-instrument refresh loop — "
+            "use refresh_institutions_current_batch (one global lock order = deadlock-safe, #1703)"
+        )
