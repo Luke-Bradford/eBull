@@ -1109,7 +1109,7 @@ def _apply_13f_infotable(
     # log "rewashed accession=..." while leaving every ownership rollup
     # query showing zero institutional shares (#945).
     from app.services.institutional_holdings import _record_13f_observations_for_filing
-    from app.services.ownership_observations import refresh_institutions_current
+    from app.services.ownership_observations import refresh_institutions_current_batch
 
     if resolved:
         # ``filed_at`` from the SELECT above is a tuple-row Decimal/None
@@ -1132,8 +1132,13 @@ def _apply_13f_infotable(
     # provably non-empty here today (empty parse and unresolved-CUSIP
     # paths return earlier), but if a refactor ever changes that, the
     # deleted prior observations must still propagate to _current.
-    for unique_instrument_id in prior_instrument_ids | {iid for iid, _ in resolved}:
-        refresh_institutions_current(conn, instrument_id=unique_instrument_id)
+    # ONE batched refresh over the UNION of prior + new instruments (#1703;
+    # batch helper = the canonical hash-sorted, deadlock-safe lock order shared
+    # by every 13F writer). Empty union → no-op (preserves the #953 semantic).
+    refresh_institutions_current_batch(
+        conn,
+        instrument_ids=sorted(prior_instrument_ids | {iid for iid, _ in resolved}),
+    )
 
     # Log full success.
     with conn.cursor() as cur:

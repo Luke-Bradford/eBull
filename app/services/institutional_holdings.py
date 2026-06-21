@@ -60,7 +60,7 @@ from app.services.bootstrap_state import (
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
     record_institution_observation,
-    refresh_institutions_current,
+    refresh_institutions_current_batch,
     resolve_filer_cik_or_raise,
 )
 from app.services.thirteen_f_normalise import (
@@ -1660,12 +1660,16 @@ def _ingest_single_accession(
             filed_at=filed_at,
             resolved_holdings=resolved_holdings,
         )
-        # Dedupe touched instruments → one refresh per unique
-        # instrument. A single 13F can carry 1000+ holdings; refreshing
-        # per-row would be O(N²). The set collapses to the count of
-        # distinct issuers held.
-        for unique_instrument_id in {iid for iid, _ in resolved_holdings}:
-            refresh_institutions_current(conn, instrument_id=unique_instrument_id)
+        # Dedupe touched instruments → ONE batched refresh for the whole
+        # filing. A single 13F can carry 1000+ holdings; the per-instrument
+        # loop ran one advisory-lock + MERGE PER holding (#1703). The batch
+        # helper takes every held instrument's advisory lock in one
+        # hash-sorted query (the canonical deadlock-safe order shared by
+        # every 13F writer) + a single scoped MERGE.
+        refresh_institutions_current_batch(
+            conn,
+            instrument_ids=sorted({iid for iid, _ in resolved_holdings}),
+        )
 
     # Promote to 'partial' when at least one holding was dropped due
     # to an unresolved CUSIP. The accession itself is recorded so
