@@ -41,7 +41,7 @@ from uuid import uuid4
 
 import psycopg
 
-from app.providers.concurrent_fetch import fetch_document_texts
+from app.providers.concurrent_fetch import FetchOutcome, fetch_document_texts_classified
 from app.services import raw_filings
 from app.services.insider_transactions import (
     ParsedForm3,
@@ -50,6 +50,7 @@ from app.services.insider_transactions import (
     lookup_sec_filed_at,
     parse_form_3_xml,
 )
+from app.services.manifest_parsers._classify import format_upsert_error, is_transient_upsert_error
 from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
@@ -533,6 +534,10 @@ class IngestForm3Result:
     rows_inserted: int
     fetch_errors: int
     parse_misses: int
+    # #1698 — transient upsert errors (serialization / deadlock / conn
+    # drop) that rolled back + skipped WITHOUT tombstoning. Surfaced so a
+    # DB connection storm is visible in the job summary, not silent.
+    transient_upsert_errors: int = 0
 
 
 def ingest_form_3_filings_for_instrument(
@@ -648,18 +653,31 @@ def _process_form_3_candidates(
     rows_inserted = 0
     fetch_errors = 0
     parse_misses = 0
+    transient_upsert_errors = 0
 
-    bodies = fetch_document_texts(fetcher, (url for _, _, url in candidates))
+    # #1698 — discriminated outcomes: a transient 429 (caught -> None
+    # through the lossy ``fetch_document_texts``) must NOT tombstone like a
+    # 404, or a recoverable SEC throttle permanently drops a real filing.
+    outcomes = fetch_document_texts_classified(fetcher, (url for _, _, url in candidates))
 
     for instrument_id, accession, url in candidates:
-        xml = bodies.get(url)
-        if not xml:
-            # None -> 404 / fetch error; "" -> 200 with empty body. Both must
-            # tombstone+skip: store_raw rejects an empty payload, so letting ""
-            # through raises an uncaught ValueError that fails the whole tick and
-            # re-poisons every run (same class as the Form 4 backfill freeze).
+        # Absent key defaults to TRANSIENT — never tombstone on an
+        # unclassified result (Codex ckpt-1 MED).
+        outcome, xml = outcomes.get(url, (FetchOutcome.TRANSIENT, None))
+        if outcome is FetchOutcome.TRANSIENT:
+            # 429-after-retries / 5xx / network. Leave selectable for the
+            # next run — tombstoning here is the #1698 data-loss bug. The
+            # classifier already logged the exception class.
+            fetch_errors += 1
+            continue
+        if outcome is not FetchOutcome.OK:
+            # MISSING (404 / 410) or EMPTY (empty 200). Both PERMANENT:
+            # store_raw rejects an empty payload, so an empty body that
+            # slipped through would raise an uncaught ValueError and
+            # re-poison every run (same class as the Form 4 freeze, #1683).
             logger.warning(
-                "ingest_form_3_filings: empty/failed fetch accession=%s url=%s",
+                "ingest_form_3_filings: permanent fetch outcome=%s accession=%s url=%s",
+                outcome.value,
                 accession,
                 url,
             )
@@ -672,6 +690,10 @@ def _process_form_3_candidates(
             )
             conn.commit()
             continue
+
+        # outcome is FetchOutcome.OK — the classifier only emits OK with a
+        # non-empty body (EMPTY / MISSING / TRANSIENT all returned above).
+        assert xml is not None
 
         # Persist raw body BEFORE parsing — re-wash workflows depend
         # on this row even if parsing fails. Operator audit
@@ -707,27 +729,42 @@ def _process_form_3_candidates(
                 parsed=parsed,
             )
             conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
             logger.warning(
-                "ingest_form_3_filings: upsert failed accession=%s",
+                "ingest_form_3_filings: upsert failed accession=%s (%s)",
                 accession,
+                type(exc).__name__,
                 exc_info=True,
             )
-            # Tombstone the accession so a persistent constraint
-            # violation (or any other deterministic upsert failure)
-            # doesn't loop the scheduler refetching the same dead
-            # XML on every tick. A fix-and-bump of the parser version
-            # will re-pick the accession via the parser_version <
-            # selector branch above. Codex round 2 review of #768 PR2.
-            _write_form_3_tombstone(
-                conn,
-                instrument_id=instrument_id,
-                accession_number=accession,
-                primary_document_url=url,
-            )
-            conn.commit()
-            parse_misses += 1
+            # #1698 — discriminate transient vs deterministic (the #1131
+            # rule the Form 4 upsert path already applies). A transient DB
+            # error (OperationalError: serialization / deadlock / conn
+            # drop) must NOT tombstone — that permanently drops a real
+            # filing on a recoverable error; rollback + continue lets the
+            # next tick retry. Only a DETERMINISTIC failure (constraint
+            # violation / bad data / logic bug) tombstones so the selector
+            # stops refetching the same dead XML; a fix-and-bump of the
+            # parser version re-picks it via the parser_version < branch.
+            if not is_transient_upsert_error(exc):
+                _write_form_3_tombstone(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession,
+                    primary_document_url=url,
+                )
+                conn.commit()
+                parse_misses += 1
+                logger.info(
+                    "ingest_form_3_filings: tombstoned accession=%s after deterministic upsert error: %s",
+                    accession,
+                    format_upsert_error(exc),
+                )
+            else:
+                # Transient DB error — rolled back, NOT tombstoned, will
+                # retry next run. Count it so a connection storm is visible
+                # in the job summary instead of vanishing (#1698 review).
+                transient_upsert_errors += 1
             continue
 
         filings_parsed += 1
@@ -739,6 +776,7 @@ def _process_form_3_candidates(
         rows_inserted=rows_inserted,
         fetch_errors=fetch_errors,
         parse_misses=parse_misses,
+        transient_upsert_errors=transient_upsert_errors,
     )
 
 

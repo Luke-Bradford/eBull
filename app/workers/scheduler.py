@@ -5033,12 +5033,14 @@ def sec_insider_transactions_ingest() -> None:
 
         tracker.row_count = result.rows_inserted
         logger.info(
-            "sec_insider_transactions_ingest: scanned=%d parsed=%d inserted=%d fetch_errors=%d parse_misses=%d",
+            "sec_insider_transactions_ingest: scanned=%d parsed=%d inserted=%d fetch_errors=%d"
+            " parse_misses=%d transient_upsert_errors=%d",
             result.filings_scanned,
             result.filings_parsed,
             result.rows_inserted,
             result.fetch_errors,
             result.parse_misses,
+            result.transient_upsert_errors,
         )
 
 
@@ -5065,12 +5067,14 @@ def sec_form3_ingest() -> None:
 
         tracker.row_count = result.rows_inserted
         logger.info(
-            "sec_form3_ingest: scanned=%d parsed=%d inserted=%d fetch_errors=%d parse_misses=%d",
+            "sec_form3_ingest: scanned=%d parsed=%d inserted=%d fetch_errors=%d"
+            " parse_misses=%d transient_upsert_errors=%d",
             result.filings_scanned,
             result.filings_parsed,
             result.rows_inserted,
             result.fetch_errors,
             result.parse_misses,
+            result.transient_upsert_errors,
         )
 
 
@@ -6812,10 +6816,12 @@ def sec_insider_transactions_backfill() -> None:
 
         tracker.row_count = totals["rows_inserted"]
         logger.info(
-            "sec_insider_transactions_backfill: instruments=%d parsed=%d inserted=%d fetch_errors=%d parse_misses=%d",
+            "sec_insider_transactions_backfill: instruments=%d parsed=%d inserted=%d fetch_errors=%d"
+            " parse_misses=%d transient_upsert_errors=%d",
             totals["instruments_processed"],
             totals["filings_parsed"],
             totals["rows_inserted"],
             totals["fetch_errors"],
             totals["parse_misses"],
+            totals["transient_upsert_errors"],
         )

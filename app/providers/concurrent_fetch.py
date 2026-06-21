@@ -30,6 +30,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 from collections.abc import Callable, Iterable, Iterator
+from enum import Enum
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
@@ -203,3 +204,97 @@ def fetch_document_texts(
         log_label="fetch_document_texts",
     )
     return {url: body for url, body in pairs}
+
+
+# ---------------------------------------------------------------------------
+# Discriminated text-fetch wrapper (#1698)
+# ---------------------------------------------------------------------------
+
+
+class FetchOutcome(Enum):
+    """Discriminated result of one document fetch (#1698).
+
+    :func:`fetch_document_texts` returns a **lossy** ``body | None`` —
+    a ``None`` collapses three outcomes a tombstone decision must keep
+    apart (see the lossy-``None`` note on :func:`concurrent_map`). This
+    enum splits them:
+
+      * ``OK`` — a non-empty body was fetched.
+      * ``MISSING`` — the fetcher returned ``None`` (SEC 404 / 410,
+        filing withdrawn). PERMANENT → safe to tombstone.
+      * ``EMPTY`` — a 200 with an empty body (the #1683 poison-pill).
+        PERMANENT (empirical local policy) → safe to tombstone.
+      * ``TRANSIENT`` — the fetcher RAISED: a 429 surviving
+        ``ResilientClient``'s retries, a 5xx, a network/transport
+        fault, or any unexpected error. RETRIABLE → callers MUST NOT
+        tombstone, else a transient SEC throttle permanently drops a
+        real filing (the data-loss bug #1698 fixes).
+    """
+
+    OK = "ok"
+    MISSING = "missing"
+    EMPTY = "empty"
+    TRANSIENT = "transient"
+
+
+def _classify_text_fetch(fetcher: _TextFetcher, url: str) -> tuple[FetchOutcome, str | None]:
+    """Run one fetch and map it to a :class:`FetchOutcome`.
+
+    The transient/permanent split needs no HTTP-status parsing:
+    ``fetch_document_text`` returns ``None`` ONLY on 404/410, returns
+    ``""`` on an empty 200, and RAISES on everything else (429/5xx
+    after retries, transport faults). So a raise == transient by
+    construction. The exception class is logged so a *deterministic*
+    fetcher/config bug — which now retries forever instead of
+    tombstoning — stays operator-visible rather than silent (Codex
+    ckpt-1 MED on #1698).
+    """
+    try:
+        body = fetcher.fetch_document_text(url)
+    except Exception as exc:  # noqa: BLE001 — any raise is transient (see docstring)
+        logger.warning(
+            "fetch_document_texts_classified: transient fetch url=%s (%s: %s)",
+            url,
+            type(exc).__name__,
+            exc,
+        )
+        return (FetchOutcome.TRANSIENT, None)
+    if body is None:
+        return (FetchOutcome.MISSING, None)
+    if not body:
+        return (FetchOutcome.EMPTY, None)
+    return (FetchOutcome.OK, body)
+
+
+def fetch_document_texts_classified(
+    fetcher: _TextFetcher,
+    urls: Iterable[str],
+    *,
+    max_workers: int = DEFAULT_FETCH_WORKERS,
+) -> dict[str, tuple[FetchOutcome, str | None]]:
+    """Concurrent fetch returning a discriminated outcome per URL (#1698).
+
+    Like :func:`fetch_document_texts` but each URL maps to a
+    ``(FetchOutcome, body)`` pair instead of a lossy ``body | None``.
+    A tombstoning caller uses this to tombstone ONLY the PERMANENT
+    outcomes (``MISSING`` / ``EMPTY``) and retry the ``TRANSIENT`` ones
+    — a 429 must never permanently drop a filing.
+
+    Look up with a TRANSIENT default — ``out.get(url, (FetchOutcome.
+    TRANSIENT, None))`` — so a URL dropped by de-dup (falsey) or
+    otherwise absent from the map never tombstones (Codex ckpt-1 MED).
+    """
+    unique = list({u for u in urls if u})
+    pairs = concurrent_map(
+        lambda u: _classify_text_fetch(fetcher, u),
+        unique,
+        max_workers=max_workers,
+        log_label="fetch_document_texts_classified",
+    )
+    out: dict[str, tuple[FetchOutcome, str | None]] = {}
+    for url, res in pairs:
+        # ``res`` is None only if ``_classify_text_fetch`` itself died in
+        # ``_safe`` (it catches Exception, so this is defensive) — treat
+        # an unclassified result as TRANSIENT, never tombstone.
+        out[url] = res if res is not None else (FetchOutcome.TRANSIENT, None)
+    return out
