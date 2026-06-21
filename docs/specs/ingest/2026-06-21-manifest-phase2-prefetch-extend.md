@@ -70,8 +70,16 @@ Both passes use `concurrent_fetch.fetch_document_texts` (None dropped). `_prefet
 
 Each hook reuses the SAME predicate functions the parser calls (no duplicated date/rank math). An over-broad `None`/URL is safe (cache miss → serial, never wrong data); over-broad fetch only wastes one request, which the mirrored gates prevent.
 
-### 3. Raise max_rows 100 → 150 (empirically tuned)
-`scheduler.py::sec_manifest_worker_tick` literal `max_rows=100` → **`150`** + comment. Initially set to 200; **dev-verify falsified 200**: the first post-restart tick ran **293s** (13f=114/200, `processed=200 parsed=70 tombstoned=130 failed=0`, no 429s) — grazing the 300s cadence ceiling (worsened by boot-job contention). 13f's `infotable.xml` stays serial behind its post-primary retention gate AND 13f dominates the global-oldest top-up (~57%), so the tick wall-clock scales with 13f in-retention infotable fetches faster than the prefetch saves. **150 is the conservative steady-state value** that keeps margin under the cadence; raising further is gated on making 13f's infotable concurrent too (follow-up).
+### 3. Raise max_rows — ATTEMPTED, FALSIFIED by dev-verify → stays 100
+Tried `max_rows=100` → 200 → 150. **Dev-verify (mandatory, ETL DoD clause 11) killed the raise.** Measured tick durations:
+
+| max_rows | tick durations (post-boot) | outcome |
+|---|---|---|
+| 200 | 293s | grazes 300s ceiling |
+| 150 | 439s, skip, 461s, skip, 52s | heavy 13f slices OVERRUN → next tick skipped |
+| 100 (revert) | 49–299s historically; prefetch now lowers heavy slices | safe |
+
+Root cause: 13F's `infotable.xml` stays SERIAL (post-primary retention gate, can't prefetch — §source-rule), 13F is ~56% of every slice (global-oldest top-up), and the infotable fetch+parse is large + HIGHLY VARIABLE (a 13F can hold thousands of holdings). So raising max_rows scales the variable heavy-13F cost and the worst slice blows past the 300s cadence → the singleton lane SKIPS the next tick → **lower effective throughput than clean 100-row ticks** (150/10min < 100/5min) + operator-visible amber. `max_rows` stays **100**. The prefetch is retained — it is a pure latency win (light slices ~52s) and fully overlaps the out-of-retention 13F backlog. **Raising max_rows is gated on a prerequisite** (filed follow-up): make 13F infotable concurrent (3-phase prefetch) and/or per-source row budgeting to bound the heavy 13F slice. No 429s at any tested value — the wall is serial infotable work, not the rate budget.
 
 ## Tests
 - **Pure-logic** (`tests/test_sec_manifest_worker.py` + per-parser): each new hook returns the URL when gates pass and `None` when each gate fails (table-test per gate). 13f `expand_urls` returns `[primary_url]` (primary only) on a valid index.json, `[]` on a missing-`primary_name` index. Pass-2 only runs for rows with a pass-1 cache hit.
