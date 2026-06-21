@@ -4808,24 +4808,28 @@ def jobs_retry_sweeper() -> None:
 def sec_manifest_worker_tick() -> None:
     """#873 — One drain pass over ``sec_filing_manifest``.
 
-    Reads up to 150 pending / retryable rows (across all sources),
+    Reads up to 100 pending / retryable rows (across all sources),
     dispatches the registered parser for each row's source, and lets
     the worker handle the manifest state transitions. Sources with
     no parser are debug-skipped and surface in
     ``GET /coverage/manifest-parsers``.
 
-    Bounded at ``max_rows=150`` per tick (#1700, raised from 100). The
-    Phase 2 concurrent body prefetch overlaps the index+primary fetch
-    latency for every fetch-bound source (Form 3/4/5 + 13D/G + DEF 14A
-    single-doc, 13F index+primary via the 2-phase expander) — but 13F's
-    ``infotable.xml`` stays SERIAL (it sits behind a post-primary
-    retention gate), and 13F dominates the global-oldest top-up
-    (~57% of the slice on dev), so the tick wall-clock scales with the
-    13F in-retention infotable fetches. Dev-verified: max_rows=200 ran
-    ~293s (grazing the 300s cadence ceiling under boot contention), so
-    150 is the conservative steady-state value that keeps comfortable
-    margin under the every-5-min cadence declared in ``SCHEDULED_JOBS``.
-    Raising further is gated on making 13F's infotable concurrent too.
+    Bounded at ``max_rows=100`` per tick. #1700 added the Phase 2
+    concurrent body prefetch (index+primary for every fetch-bound source;
+    13F index+primary via the 2-phase expander) — a pure latency win that
+    makes light slices fast (dev: ~52s). It ALSO tried raising max_rows,
+    but dev-verify FALSIFIED that: 13F's ``infotable.xml`` stays SERIAL
+    (it sits behind a post-primary retention gate) and 13F dominates the
+    global-oldest top-up (~56% of the slice), and the infotable fetch+
+    parse cost is large + HIGHLY VARIABLE per slice (a 13F filing can hold
+    thousands of holdings). At max_rows=150 heavy slices ran 439s / 461s →
+    OVERRAN the 300s cadence → the next tick was skipped (singleton lane)
+    → LOWER effective throughput than clean 100-row ticks (150/10min <
+    100/5min) plus operator-visible amber. So max_rows stays at 100 until
+    13F's infotable is made concurrent (3-phase prefetch) and/or per-source
+    row budgeting bounds the heavy 13F slice — tracked as the prerequisite
+    for any raise. The prefetch itself is retained (it lowers tick latency
+    and fully overlaps the out-of-retention 13F backlog).
     """
     from app.jobs.sec_manifest_worker import run_manifest_worker
 
@@ -4834,7 +4838,7 @@ def sec_manifest_worker_tick() -> None:
             # tick_id=None → run_manifest_worker pulls next value from
             # the module-global _TICK_COUNTER (per-process +1-per-tick
             # rotation). Tests inject explicitly via the helper signature.
-            stats = run_manifest_worker(conn, source=None, max_rows=150, tick_id=None)
+            stats = run_manifest_worker(conn, source=None, max_rows=100, tick_id=None)
             conn.commit()
 
         tracker.row_count = stats.parsed + stats.tombstoned + stats.failed
