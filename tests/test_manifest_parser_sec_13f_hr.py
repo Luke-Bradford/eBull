@@ -919,3 +919,129 @@ def test_parser_registered_via_register_all() -> None:
     assert "sec_13f_hr" not in registered_parser_sources()
     register_all_parsers()
     assert "sec_13f_hr" in registered_parser_sources()
+
+
+# --- #1700 two-phase concurrent prefetch (fairness path) ------------------
+
+_FAKE_PRIMARY_XML_OLD = _FAKE_PRIMARY_XML.replace("09-30-2024", "09-30-2015")
+
+
+def _dispatch_via_prefetch_path(
+    conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    filer_cik: str,
+    accession: str,
+    primary_xml: str,
+    cusip: str,
+) -> list[str]:
+    """Drive the steady-state fairness path (``source=None`` → Phase 2
+    prefetch) for a single seeded 13F row and return the list of URLs that
+    actually hit the SERIAL (HTTP) fetch — i.e. cache MISSES. index.json +
+    primary_doc.xml are prefetched concurrently and must be served from the
+    tick-scoped cache (no entry here); infotable.xml stays serial."""
+    from app.providers.implementations import sec_edgar
+    from app.providers.implementations.sec_edgar import (
+        _PREFETCH_BODY_CACHE,
+        SecFilingsProvider,
+    )
+    from app.services.institutional_holdings import _archive_file_url
+
+    base = _archive_file_url(filer_cik, accession, "")
+    index_url = base + "index.json"
+    primary_url = base + "primary_doc.xml"
+    infotable_url = base + "infotable.xml"
+
+    # Pass 1 (index.json) + pass 2 (primary_doc.xml) come through the
+    # CONCURRENT fetch helper — fill the cache from here.
+    prefetch_payloads = {index_url: _index_json(), primary_url: primary_xml}
+
+    def _fake_concurrent(_provider, urls, **_k):  # noqa: ANN001, ANN202
+        return {u: prefetch_payloads.get(u) for u in urls}
+
+    monkeypatch.setattr("app.providers.concurrent_fetch.fetch_document_texts", _fake_concurrent)
+
+    # Serial fetch: a spy that serves cache hits via the REAL implementation
+    # (so the ContextVar cache is genuinely exercised) and records every miss
+    # that would have hit the network. infotable is served live on miss.
+    serial_payloads = {infotable_url: _infotable_xml(holdings=[{"cusip": cusip}])}
+    real_fetch = SecFilingsProvider.fetch_document_text
+    http_misses: list[str] = []
+
+    def _spy(self, url: str):  # noqa: ANN202
+        cache = _PREFETCH_BODY_CACHE.get()
+        if cache is not None and url in cache:
+            return real_fetch(self, url)  # cache hit → no HTTP
+        http_misses.append(url)
+        return serial_payloads.get(url)
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _spy)
+
+    # source=None → fairness path → _prefetch_then_dispatch. Only our seeded
+    # row is pending in the isolated test DB, so it is the one dispatched.
+    run_manifest_worker(conn, source=None, max_rows=10)
+    conn.commit()
+    return http_misses
+
+
+def test_two_phase_prefetch_in_retention_serves_index_primary_from_cache(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1700 — an in-retention 13F row dispatched via the fairness path gets
+    index.json + primary_doc.xml from the prefetch cache (no HTTP); only the
+    retention-gated infotable.xml is fetched serially. Row reaches parsed."""
+    iid, cusip, filer_cik = 9701, "037833100", "0001067983"
+    accession = "0001067983-24-000099"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPL")
+    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid, cusip=cusip)
+    _seed_pending_13f_hr(ebull_test_conn, accession=accession, filer_cik=filer_cik)
+    ebull_test_conn.commit()
+
+    misses = _dispatch_via_prefetch_path(
+        ebull_test_conn,
+        monkeypatch,
+        filer_cik=filer_cik,
+        accession=accession,
+        primary_xml=_FAKE_PRIMARY_XML,
+        cusip=cusip,
+    )
+
+    from app.services.institutional_holdings import _archive_file_url
+
+    infotable_url = _archive_file_url(filer_cik, accession, "") + "infotable.xml"
+    # index + primary served from cache → only infotable hit the serial path.
+    assert misses == [infotable_url]
+    row = get_manifest_row(ebull_test_conn, accession)
+    assert row is not None and row.ingest_status == "parsed"
+
+
+def test_two_phase_prefetch_out_of_retention_never_fetches_infotable(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1700 — an OUT-of-retention 13F row tombstones after the primary parse
+    (the retention gate is post-primary), so infotable.xml is NEVER fetched.
+    index + primary are still served from the prefetch cache → ZERO serial
+    HTTP. This is the contract guard: pass-2 prefetches primary ONLY, so the
+    (potentially large) infotable is never fetched for a row that tombstones."""
+    iid, cusip, filer_cik = 9702, "037833100", "0001067983"
+    accession = "0001067983-15-000099"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPL")
+    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid, cusip=cusip)
+    _seed_pending_13f_hr(ebull_test_conn, accession=accession, filer_cik=filer_cik)
+    ebull_test_conn.commit()
+
+    misses = _dispatch_via_prefetch_path(
+        ebull_test_conn,
+        monkeypatch,
+        filer_cik=filer_cik,
+        accession=accession,
+        primary_xml=_FAKE_PRIMARY_XML_OLD,  # period 2015 → past the 8-quarter cap
+        cusip=cusip,
+    )
+
+    # index + primary from cache; infotable never requested (tombstone first).
+    assert misses == []
+    row = get_manifest_row(ebull_test_conn, accession)
+    assert row is not None and row.ingest_status == "tombstoned"

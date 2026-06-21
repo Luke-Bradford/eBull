@@ -779,10 +779,12 @@ def _parse_form5(
     )
 
 
-def _insider_fetch_url(row: Any) -> str | None:  # row: ManifestRow
+def _insider_fetch_url(conn: Any, row: Any) -> str | None:  # conn: Connection (unused), row: ManifestRow
     """#1686 Phase 2 prefetch hook — the SINGLE canonical ownership-XML URL
     Form 3/4/5 parsers GET, returned ONLY when the parser would actually
-    fetch it.
+    fetch it. ``conn`` is part of the #1700 hook contract (DEF 14A needs a
+    DB read for its cap gate); the insider gates are all row-local so it is
+    unused here.
 
     The hook MUST mirror every PRE-FETCH tombstone gate the parser applies,
     or the concurrent prefetch wastes SEC rate budget fetching bodies the

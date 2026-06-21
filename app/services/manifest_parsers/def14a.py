@@ -433,6 +433,32 @@ def _parse_def14a(
     )
 
 
+def _def14a_fetch_url(conn: psycopg.Connection[Any], row: Any) -> str | None:  # row: ManifestRow
+    """#1700 Phase 2 prefetch hook — the SINGLE proxy-doc URL the DEF 14A
+    parser GETs, returned ONLY when the parser would actually fetch it.
+    Mirrors EVERY pre-fetch gate in :func:`_parse_def14a` (in order):
+      * missing ``primary_document_url`` → tombstone pre-fetch.
+      * ``form == 'PRE 14A'`` (preliminary) → tombstone pre-fetch.
+      * missing ``instrument_id`` → tombstone pre-fetch.
+      * past the latest-N-per-filer cap (``def14a_within_cap``) → tombstone
+        pre-fetch. This gate needs a DB read (ranks proxies via
+        ``filing_events``) — hence the ``conn`` in the #1700 hook contract.
+        Calls the SAME helper the parser calls (one rank source of truth).
+    An over-broad ``None`` is always safe (serial fallback reaches the
+    identical tombstone).
+    """
+    url = row.primary_document_url
+    if not url:
+        return None
+    if (row.form or "").strip().upper() == "PRE 14A":
+        return None
+    if row.instrument_id is None:
+        return None
+    if not def14a_within_cap(conn, accession_number=row.accession_number, instrument_id=row.instrument_id):
+        return None
+    return url
+
+
 def register() -> None:
     """Register the DEF 14A parser with the manifest worker.
 
@@ -442,4 +468,4 @@ def register() -> None:
     """
     from app.jobs.sec_manifest_worker import register_parser
 
-    register_parser("sec_def14a", _parse_def14a, requires_raw_payload=True)
+    register_parser("sec_def14a", _parse_def14a, requires_raw_payload=True, fetch_url=_def14a_fetch_url)
