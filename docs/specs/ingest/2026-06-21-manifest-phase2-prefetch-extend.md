@@ -70,8 +70,8 @@ Both passes use `concurrent_fetch.fetch_document_texts` (None dropped). `_prefet
 
 Each hook reuses the SAME predicate functions the parser calls (no duplicated date/rank math). An over-broad `None`/URL is safe (cache miss → serial, never wrong data); over-broad fetch only wastes one request, which the mirrored gates prevent.
 
-### 3. Raise max_rows 100 → 200
-`scheduler.py::sec_manifest_worker_tick` literal `max_rows=100` → `200` + comment. With 13f fully concurrent and the single-doc sources concurrent, the per-tick fetch phase overlaps to the ≤10 req/s ceiling (~30–40s of saturated fetch) and the serial remainder is parse-only. **Verify empirically on dev** (tick duration < ~120s with margin under the 300s cadence; no sustained 429 storm beyond the #1698-tolerated burst) before finalising; dial to 150 if ticks approach 300s.
+### 3. Raise max_rows 100 → 150 (empirically tuned)
+`scheduler.py::sec_manifest_worker_tick` literal `max_rows=100` → **`150`** + comment. Initially set to 200; **dev-verify falsified 200**: the first post-restart tick ran **293s** (13f=114/200, `processed=200 parsed=70 tombstoned=130 failed=0`, no 429s) — grazing the 300s cadence ceiling (worsened by boot-job contention). 13f's `infotable.xml` stays serial behind its post-primary retention gate AND 13f dominates the global-oldest top-up (~57%), so the tick wall-clock scales with 13f in-retention infotable fetches faster than the prefetch saves. **150 is the conservative steady-state value** that keeps margin under the cadence; raising further is gated on making 13f's infotable concurrent too (follow-up).
 
 ## Tests
 - **Pure-logic** (`tests/test_sec_manifest_worker.py` + per-parser): each new hook returns the URL when gates pass and `None` when each gate fails (table-test per gate). 13f `expand_urls` returns `[primary_url]` (primary only) on a valid index.json, `[]` on a missing-`primary_name` index. Pass-2 only runs for rows with a pass-1 cache hit.
