@@ -534,6 +534,10 @@ class IngestForm3Result:
     rows_inserted: int
     fetch_errors: int
     parse_misses: int
+    # #1698 — transient upsert errors (serialization / deadlock / conn
+    # drop) that rolled back + skipped WITHOUT tombstoning. Surfaced so a
+    # DB connection storm is visible in the job summary, not silent.
+    transient_upsert_errors: int = 0
 
 
 def ingest_form_3_filings_for_instrument(
@@ -649,6 +653,7 @@ def _process_form_3_candidates(
     rows_inserted = 0
     fetch_errors = 0
     parse_misses = 0
+    transient_upsert_errors = 0
 
     # #1698 — discriminated outcomes: a transient 429 (caught -> None
     # through the lossy ``fetch_document_texts``) must NOT tombstone like a
@@ -755,6 +760,11 @@ def _process_form_3_candidates(
                     accession,
                     format_upsert_error(exc),
                 )
+            else:
+                # Transient DB error — rolled back, NOT tombstoned, will
+                # retry next run. Count it so a connection storm is visible
+                # in the job summary instead of vanishing (#1698 review).
+                transient_upsert_errors += 1
             continue
 
         filings_parsed += 1
@@ -766,6 +776,7 @@ def _process_form_3_candidates(
         rows_inserted=rows_inserted,
         fetch_errors=fetch_errors,
         parse_misses=parse_misses,
+        transient_upsert_errors=transient_upsert_errors,
     )
 
 

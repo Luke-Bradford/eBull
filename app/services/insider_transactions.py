@@ -1650,6 +1650,10 @@ class IngestResult:
     rows_inserted: int
     fetch_errors: int
     parse_misses: int
+    # #1698 — transient upsert errors (serialization / deadlock / conn
+    # drop) that rolled back + skipped WITHOUT tombstoning. Surfaced so a
+    # DB connection storm is visible in the job summary, not silent.
+    transient_upsert_errors: int = 0
 
 
 def ingest_insider_transactions_for_instrument(
@@ -1802,6 +1806,7 @@ def _process_candidates(
     rows_inserted = 0
     fetch_errors = 0
     parse_misses = 0
+    transient_upsert_errors = 0
 
     # Pre-fetch every URL concurrently. Each maps to a discriminated
     # ``(FetchOutcome, body)`` — #1698: a transient 429 (caught -> None
@@ -1922,6 +1927,11 @@ def _process_candidates(
                         " error accession=%s",
                         accession,
                     )
+            else:
+                # Transient DB error — rolled back, NOT tombstoned, will
+                # retry next run. Count it so a connection storm is visible
+                # in the job summary instead of vanishing (#1698 review).
+                transient_upsert_errors += 1
             continue
 
         filings_parsed += 1
@@ -1933,6 +1943,7 @@ def _process_candidates(
         rows_inserted=rows_inserted,
         fetch_errors=fetch_errors,
         parse_misses=parse_misses,
+        transient_upsert_errors=transient_upsert_errors,
     )
 
 
@@ -2000,6 +2011,7 @@ def ingest_insider_transactions_backfill(
         "rows_inserted": 0,
         "fetch_errors": 0,
         "parse_misses": 0,
+        "transient_upsert_errors": 0,
     }
 
     for instrument_id, _unfetched in targets:
@@ -2047,6 +2059,7 @@ def ingest_insider_transactions_backfill(
         totals["rows_inserted"] += result.rows_inserted
         totals["fetch_errors"] += result.fetch_errors
         totals["parse_misses"] += result.parse_misses
+        totals["transient_upsert_errors"] += result.transient_upsert_errors
 
     return totals
 

@@ -553,6 +553,43 @@ class TestUpsertFailureTombstone:
         result2 = ingest_form_3_filings(ebull_test_conn, fetcher)
         assert result2.filings_scanned == 0
 
+    def test_transient_upsert_failure_does_not_write_tombstone(
+        self, ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1698: the Form 3 upsert path gained the #1131 transient-vs-
+        deterministic split. A transient ``OperationalError`` (serialise
+        / deadlock / conn drop) must NOT tombstone — rollback + continue
+        lets the next tick retry — and must increment a counter so a DB
+        connection storm is visible in the job summary, not silent."""
+        import psycopg.errors
+
+        from app.services import insider_form3_ingest
+
+        iid = _seed_instrument(ebull_test_conn)
+        url = "https://example.test/form3-transient.xml"
+        accession = "0000000222-26-000099"
+        _seed_filing(ebull_test_conn, instrument_id=iid, accession=accession, url=url)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise psycopg.errors.SerializationFailure("synthetic serialisation failure")
+
+        monkeypatch.setattr(insider_form3_ingest, "upsert_form_3_filing", _boom)
+
+        fetcher = _StubFetcher({url: _FORM_3_RICH})
+        result = ingest_form_3_filings(ebull_test_conn, fetcher)
+
+        # No row written — neither parsed nor tombstoned — so the selector
+        # re-picks the accession next tick (retry, don't burn the slot).
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM insider_filings WHERE accession_number = %s",
+                (accession,),
+            )
+            assert cur.fetchone() is None
+
+        assert result.transient_upsert_errors == 1
+        assert result.parse_misses == 0
+
 
 class TestStaleChildCleanup:
     def test_reparse_to_smaller_xml_drops_stale_footnotes_and_filers(

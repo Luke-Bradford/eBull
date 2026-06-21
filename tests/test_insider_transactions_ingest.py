@@ -816,7 +816,7 @@ class TestIngestInsiderTransactions:
 
         monkeypatch.setattr(ingest_module, "upsert_filing", _raising_upsert)
 
-        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        result = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
         # No insider_filings row exists — neither parsed nor tombstoned
         # — so the candidate selector still picks this row on the next
@@ -828,6 +828,11 @@ class TestIngestInsiderTransactions:
                 ("LEGACY-TRANSIENT-1",),
             )
             assert cur.fetchone() is None
+
+        # #1698 review: the transient-and-continue branch must surface a
+        # counter so a DB connection storm is visible in the job summary,
+        # not silently zero.
+        assert result.transient_upsert_errors == 1
 
     def test_transient_fetch_failure_does_not_write_tombstone(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """#1698: a transient fetch error (429 after retries / 5xx /
