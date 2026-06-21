@@ -125,16 +125,40 @@ connection; returns a ParseOutcome. The parser is responsible for
 fetching + parsing + persisting typed-table rows. The worker handles
 the manifest state transition based on the outcome."""
 
-FetchUrlFn = Callable[[ManifestRow], str | None]
-"""#1686 — optional per-source hook returning the SINGLE canonical URL
+FetchUrlFn = Callable[[psycopg.Connection[Any], ManifestRow], str | None]
+"""#1686 — optional per-source hook returning the FIRST canonical URL
 the parser will GET, so the worker can prefetch it concurrently (Phase 2).
-Returns ``None`` when the row has no prefetchable single doc. Only wire
-this for SINGLE-primary-doc parsers — multi-doc fetchers (10-K/10-Q index
-walk, 13F index.json->primary->infotable) must NOT register a hook and
-stay serial. The hook MUST return the same URL the parser passes to
-``fetch_document_text``; a mismatch is SAFE (cache miss -> serial fetch,
-never wrong data) but yields no speedup, so keep it in sync with the
-parser's canonicalizer."""
+Returns ``None`` when the row has no prefetchable doc OR when any of the
+parser's PRE-FETCH gates would tombstone the row (so prefetch never burns
+SEC budget on a doc the parser discards — #1686 Codex ckpt-2 HIGH).
+
+Receives the worker's DB connection (#1700) so a hook can mirror a gate
+that needs a DB read (e.g. DEF 14A's latest-N-per-filer cap). The conn is
+the same one the dispatch loop uses; the hook must only READ (no writes /
+no commit) — it runs before the serial dispatch transaction work.
+
+For SINGLE-primary-doc parsers (Form 3/4/5, 13D/G, DEF 14A) this URL is the
+whole fetch. For MULTI-doc parsers (13F: index.json -> primary_doc.xml ->
+infotable.xml) this is the FIRST doc only; the next doc is prefetched via
+``expand_urls`` once the first body is in hand. The hook MUST return the
+same URL the parser passes to ``fetch_document_text``; a mismatch is SAFE
+(cache miss -> serial fetch, never wrong data) but yields no speedup, so
+keep it in sync with the parser's canonicalizer."""
+
+ExpandUrlsFn = Callable[[str, ManifestRow], list[str]]
+"""#1700 — optional per-source SECOND-phase prefetch hook for multi-doc
+parsers. Given the SUCCESSFULLY-prefetched ``fetch_url`` body (pass 1) and
+the row, return additional URLs the parser will GET next, to prefetch
+concurrently in pass 2. Pure (no DB). Only invoked for rows whose pass-1
+URL was a cache hit (a pass-1 miss means the serial parser re-fetches from
+the top, so pass 2 would be wasted).
+
+The expander MUST NOT return a URL gated by a check the parser applies
+AFTER the pass-1 doc but BEFORE that URL's fetch. 13F is the canonical
+case: ``infotable.xml`` is gated by ``thirteen_f_within_retention`` on the
+period parsed FROM ``primary_doc.xml`` — so the 13F expander returns
+``primary_doc.xml`` ONLY (infotable stays serial, fetched live after the
+parser's retention gate passes). Returning ``[]`` is always safe."""
 
 
 @dataclass(frozen=True)
@@ -153,6 +177,7 @@ class ParserSpec:
     fn: ParserFn
     requires_raw_payload: bool = False
     fetch_url: FetchUrlFn | None = None
+    expand_urls: ExpandUrlsFn | None = None
 
 
 _PARSERS: dict[ManifestSource, ParserSpec] = {}
@@ -164,6 +189,7 @@ def register_parser(
     *,
     requires_raw_payload: bool = False,
     fetch_url: FetchUrlFn | None = None,
+    expand_urls: ExpandUrlsFn | None = None,
 ) -> None:
     """Register a parser callable for one ManifestSource.
 
@@ -180,7 +206,12 @@ def register_parser(
     body bytes (Form 4 XML, 13F infotable, 13D/G primary doc, DEF 14A
     HTML, NPORT-P XML). Leave at the default for synthesised /
     non-payload sources."""
-    _PARSERS[source] = ParserSpec(fn=parser, requires_raw_payload=requires_raw_payload, fetch_url=fetch_url)
+    _PARSERS[source] = ParserSpec(
+        fn=parser,
+        requires_raw_payload=requires_raw_payload,
+        fetch_url=fetch_url,
+        expand_urls=expand_urls,
+    )
 
 
 def _backoff_for(attempt_count: int) -> timedelta:
@@ -341,29 +372,64 @@ def run_manifest_worker(
     return _prefetch_then_dispatch(conn, rows, now=now)
 
 
-def _prefetch_bodies(rows: list[ManifestRow]) -> dict[str, str]:
-    """#1686 Phase 2 — concurrently fetch the single-doc bodies for ``rows``.
+def _prefetch_bodies(
+    conn: psycopg.Connection[Any],
+    rows: list[ManifestRow],
+) -> dict[str, str]:
+    """#1686/#1700 Phase 2 — concurrently fetch parser bodies for ``rows``.
 
-    For each row whose source registered a ``fetch_url`` hook, resolve the
-    canonical URL and fetch all of them concurrently (bounded threadpool,
-    shared SEC throttle ≤10 req/s) so the ~800ms-per-fetch latency overlaps
-    instead of serialising. Returns ``{url: body}`` for SUCCESSFUL fetches
-    ONLY — a ``None`` (404 or caught exception, indistinguishable through
+    Two passes so multi-doc parsers (13F) get concurrency too:
+
+    - **Pass 1:** for each row whose source registered a ``fetch_url`` hook,
+      resolve the FIRST canonical URL (the hook mirrors the parser's
+      pre-fetch gates, reading ``conn`` if needed) and fetch all of them
+      concurrently (bounded threadpool, shared SEC throttle ≤10 req/s).
+    - **Pass 2:** for each row whose source also registered ``expand_urls``
+      AND whose pass-1 URL was a SUCCESSFUL fetch, call the expander with
+      that body to get the NEXT URLs (e.g. 13F's ``primary_doc.xml`` once
+      ``index.json`` is in hand), then fetch those concurrently too.
+
+    Returns ``{url: body}`` for SUCCESSFUL fetches across both passes ONLY —
+    a ``None`` (404 or caught exception, indistinguishable through
     ``fetch_document_texts``) is dropped so the serial parse path re-fetches
-    it and keeps its retry/tombstone discrimination (Codex ckpt-1 HIGH).
+    it and keeps its retry/tombstone discrimination (#1698 / Codex ckpt-1
+    HIGH). A pass-1 miss skips that row's pass-2 entirely (the serial parser
+    re-fetches from the top, so pass-2 work would be wasted).
 
     Returns ``{}`` when no row has a hook — the caller then skips the cache
     entirely and the tick behaves exactly as pre-#1686.
     """
-    urls: set[str] = set()
+    # row index keyed by pass-1 URL so pass 2 can find the rows whose
+    # first doc was fetched successfully (multiple rows can share a URL in
+    # principle; we keep them all so each gets its expander invoked).
+    pass1_url_to_rows: dict[str, list[ManifestRow]] = defaultdict(list)
     for row in rows:
         spec = _PARSERS.get(row.source)
         if spec is None or spec.fetch_url is None:
             continue
-        url = spec.fetch_url(row)
+        # A hook raising (e.g. DEF 14A's cap query hitting a DB error) must
+        # NOT abort the tick — prefetch is best-effort. Run it inside a
+        # SAVEPOINT (``conn.transaction()``) so a raised DB error rolls back
+        # to the savepoint, leaving the shared connection's outer transaction
+        # usable for the remaining hooks + the serial ``_dispatch_rows``
+        # path; without it the conn would be stuck in InFailedSqlTransaction
+        # and every later DB op would fail (Codex ckpt-2 P2 + P1). Skip this
+        # row's prefetch on any exception — the serial parser still runs and
+        # its per-row failure handling applies.
+        try:
+            with conn.transaction():
+                url = spec.fetch_url(conn, row)
+        except Exception:
+            logger.exception(
+                "manifest prefetch: fetch_url hook raised for source=%s accession=%s; "
+                "skipping prefetch (serial parser will handle it)",
+                row.source,
+                row.accession_number,
+            )
+            continue
         if url:
-            urls.add(url)
-    if not urls:
+            pass1_url_to_rows[url].append(row)
+    if not pass1_url_to_rows:
         return {}
 
     # Lazy imports — keep the provider/HTTP + config deps off the worker's
@@ -373,8 +439,39 @@ def _prefetch_bodies(rows: list[ManifestRow]) -> dict[str, str]:
     from app.providers.implementations.sec_edgar import SecFilingsProvider
 
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-        fetched = fetch_document_texts(provider, urls)
-    return {url: body for url, body in fetched.items() if body is not None}
+        pass1 = fetch_document_texts(provider, set(pass1_url_to_rows))
+        cache: dict[str, str] = {url: body for url, body in pass1.items() if body is not None}
+
+        # Pass 2 — expand only rows whose pass-1 doc was fetched OK.
+        pass2_urls: set[str] = set()
+        for url, body in cache.items():
+            for row in pass1_url_to_rows.get(url, ()):
+                spec = _PARSERS.get(row.source)
+                if spec is None or spec.expand_urls is None:
+                    continue
+                # A malformed pass-1 body that makes the expander /
+                # parse_archive_index raise must NOT abort the tick — skip
+                # this row's pass-2 expansion so the serial parser re-parses
+                # the (cached) body and applies its own tombstone/failure
+                # path (Codex ckpt-2 P2).
+                try:
+                    extra = spec.expand_urls(body, row)
+                except Exception:
+                    logger.exception(
+                        "manifest prefetch: expand_urls hook raised for source=%s accession=%s; "
+                        "skipping pass-2 prefetch (serial parser will handle it)",
+                        row.source,
+                        row.accession_number,
+                    )
+                    continue
+                pass2_urls.update(u for u in extra if u)
+        # Don't re-fetch anything already cached in pass 1.
+        pass2_urls -= cache.keys()
+        if pass2_urls:
+            pass2 = fetch_document_texts(provider, pass2_urls)
+            cache.update({url: body for url, body in pass2.items() if body is not None})
+
+    return cache
 
 
 def _prefetch_then_dispatch(
@@ -403,7 +500,7 @@ def _prefetch_then_dispatch(
         set_prefetch_body_cache,
     )
 
-    cache = _prefetch_bodies(rows)
+    cache = _prefetch_bodies(conn, rows)
     token = set_prefetch_body_cache(cache)
     try:
         return _dispatch_rows(conn, rows, now=now)

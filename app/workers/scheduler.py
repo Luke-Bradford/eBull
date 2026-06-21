@@ -4808,15 +4808,19 @@ def jobs_retry_sweeper() -> None:
 def sec_manifest_worker_tick() -> None:
     """#873 — One drain pass over ``sec_filing_manifest``.
 
-    Reads up to 100 pending / retryable rows (across all sources),
+    Reads up to 200 pending / retryable rows (across all sources),
     dispatches the registered parser for each row's source, and lets
     the worker handle the manifest state transitions. Sources with
     no parser are debug-skipped and surface in
     ``GET /coverage/manifest-parsers``.
 
-    Bounded at ``max_rows=100`` per tick so each fire is short.
-    Backlog drains across successive ticks at the every-5-min cadence
-    declared in ``SCHEDULED_JOBS``.
+    Bounded at ``max_rows=200`` per tick (#1700, raised from 100). With
+    the Phase 2 concurrent body prefetch now covering every fetch-bound
+    source (Form 3/4/5 + 13D/G + DEF 14A single-doc, 13F index+primary
+    via the 2-phase expander), the per-tick fetch latency overlaps to the
+    ≤10 req/s ceiling instead of serialising, so doubling the row budget
+    keeps each fire well inside the every-5-min cadence declared in
+    ``SCHEDULED_JOBS`` (dev-verified tick duration < 300s).
     """
     from app.jobs.sec_manifest_worker import run_manifest_worker
 
@@ -4825,7 +4829,7 @@ def sec_manifest_worker_tick() -> None:
             # tick_id=None → run_manifest_worker pulls next value from
             # the module-global _TICK_COUNTER (per-process +1-per-tick
             # rotation). Tests inject explicitly via the helper signature.
-            stats = run_manifest_worker(conn, source=None, max_rows=100, tick_id=None)
+            stats = run_manifest_worker(conn, source=None, max_rows=200, tick_id=None)
             conn.commit()
 
         tracker.row_count = stats.parsed + stats.tombstoned + stats.failed

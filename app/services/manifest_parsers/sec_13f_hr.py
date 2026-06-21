@@ -586,4 +586,61 @@ def register() -> None:
     """
     from app.jobs.sec_manifest_worker import register_parser
 
-    register_parser("sec_13f_hr", _parse_13f_hr, requires_raw_payload=True)
+    register_parser(
+        "sec_13f_hr",
+        _parse_13f_hr,
+        requires_raw_payload=True,
+        fetch_url=_thirteen_f_index_url,
+        expand_urls=_thirteen_f_expand,
+    )
+
+
+def _thirteen_f_index_url(conn: Any, row: Any) -> str | None:  # conn unused; row: ManifestRow
+    """#1700 Phase 2 prefetch hook (pass 1) — the ``index.json`` URL the 13F
+    parser GETs first, returned ONLY when the parser would actually fetch it.
+    Mirrors the parser's PRE-``index.json``-fetch gates (:func:`_parse_13f_hr`):
+      * missing filer cik → tombstone pre-fetch.
+      * filer cik resolves to a known filing-agent CIK → tombstone pre-fetch.
+    The ``thirteen_f_within_retention`` gate is POST-parse (on
+    ``period_of_report`` from the primary doc) — not knowable here — so it is
+    deliberately NOT mirrored; the parser still applies it after the primary
+    parse. All pre-index gates are row-local → ``conn`` unused. Built the SAME
+    way the parser builds it (``_archive_file_url(cik, accn, "") + index.json``).
+    """
+    filer_cik = (row.cik or "").strip()
+    if not filer_cik:
+        return None
+    from app.providers.implementations.sec_edgar import (
+        KNOWN_FILING_AGENT_CIKS,
+        _zero_pad_cik,
+    )
+
+    if _zero_pad_cik(filer_cik) in KNOWN_FILING_AGENT_CIKS:
+        return None
+    return _archive_file_url(filer_cik, row.accession_number, "") + "index.json"
+
+
+def _thirteen_f_expand(index_body: str, row: Any) -> list[str]:  # row: ManifestRow
+    """#1700 Phase 2 prefetch hook (pass 2) — given the prefetched
+    ``index.json`` body, return ``[primary_doc.xml URL]`` to prefetch next.
+
+    Returns ``primary_doc.xml`` ONLY — NOT ``infotable.xml``. The parser
+    fetches ``infotable.xml`` only AFTER parsing the primary doc and passing
+    the ``thirteen_f_within_retention(period_of_report)`` gate
+    (``sec_13f_hr.py:332``). Prefetching the (often large) infotable here
+    would fetch it for out-of-retention rows the parser tombstones
+    post-primary — violating the mirror-every-pre-fetch-gate contract (Codex
+    ckpt-1 HIGH). Infotable stays serial, fetched live after the gate passes.
+
+    Reuses the parser's OWN :func:`parse_archive_index` so the expander cannot
+    diverge from the attachment name the parser resolves. Returns ``[]`` unless
+    BOTH ``primary_doc.xml`` AND ``infotable.xml`` are present — the parser
+    tombstones when EITHER name is None (``sec_13f_hr.py`` `primary_name is
+    None or infotable_name is None`) BEFORE fetching the primary, so an index
+    with a primary but no infotable (the ~55k pre-2013 missing-infotable
+    backlog) must NOT prefetch the primary (Codex ckpt-2 P2 — no wasted request).
+    """
+    primary_name, infotable_name = parse_archive_index(index_body)
+    if primary_name is None or infotable_name is None:
+        return []
+    return [_archive_file_url((row.cik or "").strip(), row.accession_number, primary_name)]

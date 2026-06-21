@@ -429,6 +429,31 @@ def _parse_13dg(
     )
 
 
+def _blockholder_fetch_url(conn: Any, row: Any) -> str | None:  # conn unused; row: ManifestRow
+    """#1700 Phase 2 prefetch hook — the SINGLE canonical primary_doc.xml URL
+    the 13D/G parser GETs, returned ONLY when the parser would actually fetch
+    it. Mirrors EVERY pre-fetch gate in :func:`_parse_13dg` (in order), so
+    prefetch never burns SEC budget on a row the parser tombstones before any
+    HTTP. All gates are row-local — ``conn`` is unused (part of the shared
+    hook contract). An over-broad ``None`` is always safe (serial fallback
+    reaches the identical tombstone).
+    """
+    filer_cik = (row.cik or "").strip()
+    if not filer_cik:
+        return None  # parser tombstones pre-fetch: "missing filer cik"
+    from app.providers.implementations.sec_edgar import (
+        KNOWN_FILING_AGENT_CIKS,
+        _zero_pad_cik,
+    )
+
+    if _zero_pad_cik(filer_cik) in KNOWN_FILING_AGENT_CIKS:
+        return None  # parser tombstones pre-fetch: agent CIK
+    if not blockholders_within_retention(row.filed_at):
+        return None  # parser tombstones pre-fetch: retention floor
+    # Same canonical URL the parser builds (sec_13dg.py:_parse_13dg).
+    return _archive_file_url(filer_cik, row.accession_number, "primary_doc.xml")
+
+
 def register() -> None:
     """Register the 13D/G parser under BOTH manifest sources.
 
@@ -438,5 +463,5 @@ def register() -> None:
     """
     from app.jobs.sec_manifest_worker import register_parser
 
-    register_parser("sec_13d", _parse_13dg, requires_raw_payload=True)
-    register_parser("sec_13g", _parse_13dg, requires_raw_payload=True)
+    register_parser("sec_13d", _parse_13dg, requires_raw_payload=True, fetch_url=_blockholder_fetch_url)
+    register_parser("sec_13g", _parse_13dg, requires_raw_payload=True, fetch_url=_blockholder_fetch_url)
