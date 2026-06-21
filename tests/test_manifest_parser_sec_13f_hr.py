@@ -1045,3 +1045,26 @@ def test_two_phase_prefetch_out_of_retention_never_fetches_infotable(
     assert misses == []
     row = get_manifest_row(ebull_test_conn, accession)
     assert row is not None and row.ingest_status == "tombstoned"
+
+
+def test_parser_uses_batched_current_refresh_not_per_holding_loop() -> None:
+    """#1703 regression pin (perf — invisible to the correctness tests above).
+
+    A 13F carries hundreds–thousands of holdings; the ``ownership_institutions_
+    current`` refresh MUST be ONE batched MERGE
+    (``refresh_institutions_current_batch``), never a per-instrument
+    ``refresh_institutions_current`` loop. The loop ran one advisory-lock +
+    MERGE PER holding and was the dominant per-tick cost (dev-verify: the serial
+    wall that blocked raising the manifest worker's max_rows — NOT the infotable
+    fetch the issue assumed). Both forms are functionally identical, so only a
+    source-level assertion catches a revert. Comment mentions of the old name
+    are allowed (a comment documents why the loop was removed)."""
+    import inspect
+
+    from app.services.manifest_parsers import sec_13f_hr
+
+    code = "\n".join(ln for ln in inspect.getsource(sec_13f_hr).splitlines() if not ln.lstrip().startswith("#"))
+    assert "refresh_institutions_current_batch(" in code, "13F refresh must use the batch helper"
+    assert "refresh_institutions_current(" not in code, (
+        "per-holding refresh_institutions_current(...) loop reintroduced — use the batch helper (#1703)"
+    )

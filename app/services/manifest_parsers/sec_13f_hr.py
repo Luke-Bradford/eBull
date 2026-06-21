@@ -77,7 +77,7 @@ from app.services.manifest_parsers._classify import (
     format_upsert_error,
     is_transient_upsert_error,
 )
-from app.services.ownership_observations import refresh_institutions_current
+from app.services.ownership_observations import refresh_institutions_current_batch
 from app.services.raw_filings import store_raw
 from app.services.thirteen_f_normalise import (
     merge_resolved_by_instrument,
@@ -463,9 +463,10 @@ def _parse_13f_hr(
             # (alongside live ingest and rewash). Acquire the per-accession advisory
             # lock FIRST (inside the transaction, after all SEC fetches) so the
             # DELETE+INSERT rewash cannot race this upsert. Lock order: per-accession
-            # (ingest_13f_accession key space) THEN per-instrument
-            # (refresh_institutions_current, acquired inside refresh_institutions_current
-            # below) — matches the other two paths; no deadlock risk.
+            # (ingest_13f_accession key space) THEN per-instrument (the
+            # refresh_institutions_current_batch call below acquires every held
+            # instrument's advisory lock in one hash-sorted, deadlock-safe query)
+            # — matches the other two paths; no deadlock risk.
             acquire_13f_accession_write_lock(conn, accession)
 
             filer_id = _upsert_filer(conn, info)
@@ -507,8 +508,19 @@ def _parse_13f_hr(
                     filed_at=filed_at,
                     resolved_holdings=resolved_holdings,
                 )
-                for unique_instrument_id in {iid for iid, _ in resolved_holdings}:
-                    refresh_institutions_current(conn, instrument_id=unique_instrument_id)
+                # #1703 — ONE batched MERGE for every held instrument, not a
+                # per-holding loop. A 13F carries hundreds–thousands of holdings;
+                # the old per-instrument `refresh_institutions_current` loop ran
+                # one advisory-lock + MERGE PER holding, which dev-verify showed
+                # is the dominant per-tick cost (the serial wall that blocked
+                # raising the manifest worker's max_rows — NOT the infotable
+                # fetch). The batch helper acquires all per-instrument advisory
+                # locks in one hash-sorted query (deadlock-safe) + a single
+                # scoped MERGE — identical semantics, O(1) statements per filing.
+                refresh_institutions_current_batch(
+                    conn,
+                    instrument_ids=sorted({iid for iid, _ in resolved_holdings}),
+                )
 
             total_skipped = skipped_no_cusip + skipped_non_sh
             status = "partial" if total_skipped > 0 else "success"
