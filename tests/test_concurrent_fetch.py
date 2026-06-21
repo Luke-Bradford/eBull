@@ -8,9 +8,11 @@ import time
 import pytest
 
 from app.providers.concurrent_fetch import (
+    FetchOutcome,
     concurrent_iter,
     concurrent_map,
     fetch_document_texts,
+    fetch_document_texts_classified,
 )
 
 
@@ -92,6 +94,56 @@ class TestConcurrentFetch:
         fetcher = _Fetcher({"u1": "body1"})
         result = fetch_document_texts(fetcher, ["u1", "", "u1"], max_workers=4)
         assert result == {"u1": "body1"}
+
+
+class TestFetchDocumentTextsClassified:
+    """#1698 — discriminated outcomes so a transient 429 (a RAISE) is
+    never collapsed into the same lossy ``None`` as a permanent 404,
+    then tombstoned. A tombstone on a transient throttle permanently
+    drops a real filing (411 lost in one burst, dev 2026-06-21)."""
+
+    def test_each_outcome_classified(self) -> None:
+        fetcher = _Fetcher(
+            {
+                "ok": "body",
+                "missing": None,  # SEC 404 / 410 -> MISSING (permanent)
+                "empty": "",  # empty 200 -> EMPTY (permanent)
+                "boom": RuntimeError,  # raise -> TRANSIENT (retry)
+            }
+        )
+        out = fetch_document_texts_classified(fetcher, ["ok", "missing", "empty", "boom"], max_workers=4)
+        assert out["ok"] == (FetchOutcome.OK, "body")
+        assert out["missing"] == (FetchOutcome.MISSING, None)
+        assert out["empty"] == (FetchOutcome.EMPTY, None)
+        assert out["boom"] == (FetchOutcome.TRANSIENT, None)
+
+    def test_transient_raise_distinct_from_missing_none(self) -> None:
+        """The core of the fix: a raised exception (429/timeout) and a
+        legit ``None`` (404) must NOT collapse to the same outcome —
+        only ``MISSING`` may be tombstoned."""
+        fetcher = _Fetcher({"raises": RuntimeError, "not_found": None})
+        out = fetch_document_texts_classified(fetcher, ["raises", "not_found"])
+        assert out["raises"][0] is FetchOutcome.TRANSIENT
+        assert out["not_found"][0] is FetchOutcome.MISSING
+        assert out["raises"][0] is not out["not_found"][0]
+
+    def test_absent_url_get_default_is_transient(self) -> None:
+        """A URL filtered by de-dup (falsy) / absent from the map must
+        default to TRANSIENT via the caller's ``.get`` default — never
+        tombstone on an unclassified result (Codex ckpt-1 MED)."""
+        fetcher = _Fetcher({"u1": "body"})
+        out = fetch_document_texts_classified(fetcher, ["u1", ""], max_workers=2)
+        assert "" not in out  # falsy URL dropped before fetch
+        assert out.get("", (FetchOutcome.TRANSIENT, None)) == (FetchOutcome.TRANSIENT, None)
+
+    def test_duplicate_urls_dedup_before_fetch(self) -> None:
+        fetcher = _Fetcher({"u1": "body"})
+        out = fetch_document_texts_classified(fetcher, ["u1", "u1", "u1"], max_workers=4)
+        assert out == {"u1": (FetchOutcome.OK, "body")}
+        assert fetcher.calls.count("u1") == 1
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert fetch_document_texts_classified(_Fetcher({}), []) == {}
 
 
 class TestConcurrencyAchievesActualThroughput:

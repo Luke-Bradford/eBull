@@ -829,6 +829,59 @@ class TestIngestInsiderTransactions:
             )
             assert cur.fetchone() is None
 
+    def test_transient_fetch_failure_does_not_write_tombstone(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#1698: a transient fetch error (429 after retries / 5xx /
+        network) surfaces as a RAISE from the fetcher -> classified
+        TRANSIENT. It must NOT tombstone — that permanently drops a real
+        filing on a recoverable SEC throttle (411 filings lost in one
+        burst, dev 2026-06-21). The accession stays selectable and IS
+        re-fetched next run. Contrast ``test_fetch_404_...`` where a
+        None (MISSING) correctly tombstones + is NOT re-fetched."""
+        import httpx
+
+        iid = _seed_instrument(ebull_test_conn, iid=1000698, symbol="TRANSF")
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="TRANSIENT-FETCH-1",
+            url="https://www.sec.gov/throttled.xml",
+            filing_date=date.today().isoformat(),
+        )
+
+        class _RaisingFetcher:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def fetch_document_text(self, absolute_url: str) -> str | None:
+                self.calls.append(absolute_url)
+                req = httpx.Request("GET", absolute_url)
+                raise httpx.HTTPStatusError(
+                    "429 Too Many Requests",
+                    request=req,
+                    response=httpx.Response(429, request=req),
+                )
+
+        fetcher = _RaisingFetcher()
+        # Must NOT raise — the per-future exception is trapped + classified.
+        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        assert fetcher.calls  # the URL was attempted
+
+        with ebull_test_conn.cursor() as cur:
+            # NO row written — not parsed, not tombstoned — so the
+            # candidate selector re-picks it on the next run.
+            cur.execute(
+                "SELECT 1 FROM insider_filings WHERE accession_number = %s",
+                ("TRANSIENT-FETCH-1",),
+            )
+            assert cur.fetchone() is None
+
+        # Proof of no silent drop: the next run RE-FETCHES the same URL
+        # (vs the 404 path, which tombstones and is never re-fetched).
+        second = _RaisingFetcher()
+        result = ingest_insider_transactions(ebull_test_conn, cast("object", second))  # type: ignore[arg-type]
+        assert len(second.calls) == 1
+        assert result.fetch_errors >= 1
+
 
 class TestGetInsiderSummary:
     def test_unique_filers_dedups_by_cik_not_name(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:

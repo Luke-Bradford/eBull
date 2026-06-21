@@ -49,7 +49,7 @@ from uuid import uuid4
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.providers.concurrent_fetch import fetch_document_texts
+from app.providers.concurrent_fetch import FetchOutcome, fetch_document_texts_classified
 from app.services import raw_filings
 from app.services.manifest_parsers._classify import (
     format_upsert_error,
@@ -1803,24 +1803,34 @@ def _process_candidates(
     fetch_errors = 0
     parse_misses = 0
 
-    # Pre-fetch every URL concurrently. ``bodies[url]`` is the XML
-    # text on success, ``None`` on 404 / fetch error / per-future
-    # exception (the helper traps + logs each).
-    bodies = fetch_document_texts(fetcher, (url for _, _, url in candidates))
+    # Pre-fetch every URL concurrently. Each maps to a discriminated
+    # ``(FetchOutcome, body)`` — #1698: a transient 429 (caught -> None
+    # through the lossy ``fetch_document_texts``) must NOT be tombstoned
+    # like a 404, or a recoverable SEC throttle permanently drops a real
+    # filing (411 filings lost in one 429 burst, dev 2026-06-21).
+    outcomes = fetch_document_texts_classified(fetcher, (url for _, _, url in candidates))
 
     for instrument_id, accession, url in candidates:
-        xml = bodies.get(url)
-        if not xml:
-            # None  -> 404 / fetch error / caught per-future exception.
-            # ""    -> a 200 with an EMPTY body. This MUST be treated as a
-            #          fetch failure too: ``store_raw`` rejects an empty payload
-            #          ("payload is required …"), so letting "" through raises an
-            #          uncaught ValueError that fails the WHOLE backfill tick —
-            #          and the same poison accession is re-selected every run,
-            #          wedging all Form 4 ingest indefinitely (observed: eBay +
-            #          universe insider data frozen ~3 months). Tombstone + skip.
+        # Absent key (URL de-duped away / missing) defaults to TRANSIENT —
+        # never tombstone on an unclassified result (Codex ckpt-1 MED).
+        outcome, xml = outcomes.get(url, (FetchOutcome.TRANSIENT, None))
+        if outcome is FetchOutcome.TRANSIENT:
+            # 429-after-retries / 5xx / network / unexpected raise. Leave
+            # the accession selectable so the next hourly run retries it —
+            # tombstoning here is the #1698 data-loss bug. The classifier
+            # already logged the exception class.
+            fetch_errors += 1
+            continue
+        if outcome is not FetchOutcome.OK:
+            # MISSING (404 / 410) or EMPTY (a 200 with an empty body).
+            # Both PERMANENT: ``store_raw`` rejects an empty payload, so an
+            # empty body that slipped through would raise an uncaught
+            # ValueError and re-poison every run (eBay + universe insider
+            # data frozen ~3 months, #1683). Tombstone + skip stops the
+            # selector re-fetching a dead/empty URL.
             logger.warning(
-                "ingest_insider_transactions: empty/failed fetch accession=%s url=%s",
+                "ingest_insider_transactions: permanent fetch outcome=%s accession=%s url=%s",
+                outcome.value,
                 accession,
                 url,
             )
@@ -1833,6 +1843,10 @@ def _process_candidates(
             )
             conn.commit()
             continue
+
+        # outcome is FetchOutcome.OK — the classifier only emits OK with a
+        # non-empty body (EMPTY / MISSING / TRANSIENT all returned above).
+        assert xml is not None
 
         # Persist raw body BEFORE parsing — re-wash workflows depend
         # on this row even if parsing fails. Operator audit

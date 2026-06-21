@@ -283,6 +283,49 @@ class TestTombstones:
         result2 = ingest_form_3_filings(ebull_test_conn, fetcher)
         assert result2.filings_scanned == 0
 
+    def test_transient_fetch_failure_does_not_write_tombstone(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#1698: a transient fetch error (429 / 5xx / network) RAISES ->
+        classified TRANSIENT -> must NOT tombstone (that permanently
+        drops a real filing on a recoverable throttle). The accession
+        stays selectable and is re-fetched next run — contrast the 404
+        path above (MISSING -> tombstone -> never re-fetched)."""
+        import httpx
+
+        iid = _seed_instrument(ebull_test_conn)
+        url = "https://www.sec.gov/Archives/edgar/data/320193/000099/throttled3.xml"
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="0000000099-26-000777",
+            url=url,
+        )
+
+        class _RaisingFetcher:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def fetch_document_text(self, absolute_url: str) -> str | None:
+                self.calls.append(absolute_url)
+                req = httpx.Request("GET", absolute_url)
+                raise httpx.HTTPStatusError(
+                    "429 Too Many Requests", request=req, response=httpx.Response(429, request=req)
+                )
+
+        fetcher = _RaisingFetcher()
+        result = ingest_form_3_filings(ebull_test_conn, fetcher)  # must not raise
+        assert result.fetch_errors == 1
+        assert result.filings_parsed == 0
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM insider_filings WHERE accession_number = '0000000099-26-000777'")
+            assert cur.fetchone() is None  # not tombstoned
+
+        # Re-selected next run (no silent drop).
+        second = _RaisingFetcher()
+        result2 = ingest_form_3_filings(ebull_test_conn, second)
+        assert result2.filings_scanned == 1
+        assert len(second.calls) == 1
+
     def test_parse_miss_writes_tombstone(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         url = "https://www.sec.gov/Archives/edgar/data/320193/000098/form3.xml"
