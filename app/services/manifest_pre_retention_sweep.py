@@ -11,8 +11,8 @@ This sweep performs the IDENTICAL ``pending -> tombstoned`` transition in
 bulk SQL (no HTTP, no parser dispatch), clearing the standing backlog in
 minutes and keeping the rolling-cutoff boundary swept daily.
 
-Scope is deliberately narrow — ONLY sources with a **pre-fetch** ``filed_at``
-gate:
+Scope is deliberately narrow — ONLY sources where a ``pending`` row's
+out-of-retention status is PROVABLE from ``filed_at`` alone:
 
   * ``sec_form4`` — ``form4_retention_cutoff()`` (today - 3y), gate at
     ``manifest_parsers/insider_345.py``.
@@ -21,18 +21,28 @@ gate:
   * ``sec_13d`` / ``sec_13g`` — ``blockholders_retention_cutoff()``
     (``max(today - 3y, 2024-12-18 XML-mandate)``), gate at
     ``manifest_parsers/sec_13dg.py``.
-
-``sec_form3`` is EXCLUDED — its parser has no retention gate.
+  * ``sec_13f_hr`` — ``thirteen_f_retention_cutoff()`` (#1703). Its parser
+    gate is POST-parse on ``period_of_report``
+    (``manifest_parsers/sec_13f_hr.py:332``), NOT a pre-fetch ``filed_at``
+    gate — but SEC Rule 13f-1(a) (file within 45 days AFTER the quarter end)
+    means ``filed_at >= period_of_report`` ALWAYS, so a row with
+    ``filed_at < thirteen_f_retention_cutoff()`` necessarily has
+    ``period_of_report < cutoff`` ⟹ out-of-retention. Sweeping on the
+    period cutoff (the MAXIMUM-safe ``filed_at`` cutoff — any larger value
+    could catch an in-retention boundary filing) is therefore a
+    provably-safe SUBSET of the parser's period gate: zero false tombstones
+    (verified — 0 / 62,374 filings have ``filed_at < period_of_report``).
+    This is NOT the 13F-NT period-vs-``filed_at`` hazard (#1639): that
+    compares TWO filings' periods across amendments; this bounds ONE
+    filing's OWN period. Spec
+    ``docs/specs/ingest/2026-06-21-manifest-13f-pre-retention-sweep.md``.
 
 EXCLUDED and why (see spec ``docs/specs/ingest/2026-06-20-manifest-drain-capacity.md``):
 
-  * ``sec_13f_hr`` — retention gate is POST-parse on ``period_of_report``
-    (``manifest_parsers/sec_13f_hr.py``), not ``filed_at``. A ``filed_at``
-    bulk sweep would wrongly tombstone in-scope filings whose period is
-    recent.
   * ``sec_10q`` / ``sec_10k`` / ``sec_form3`` / ``sec_def14a`` — no
-    pre-fetch retention gate at all. A bulk ``filed_at`` tombstone would
-    destroy fetchable, in-scope rows = silent data loss.
+    retention gate at all (the parser keeps every fetched row). A bulk
+    ``filed_at`` tombstone would destroy fetchable, in-scope rows = silent
+    data loss.
 
 Reversible: ``POST /jobs/sec_rebuild/run`` re-pends tombstoned rows.
 
@@ -64,11 +74,16 @@ def gated_cutoffs() -> dict[ManifestSource, Callable[[], date]]:
     """Per-source pre-fetch retention cutoff resolver.
 
     The SINGLE source of truth is each source's own chokepoint function
-    (never a copied literal). A source appears here IFF its parser
-    tombstones pre-cutoff rows BEFORE the HTTP fetch, keyed on ``filed_at``
-    (see module docstring for the inclusion/exclusion rule). ``13d`` and
-    ``13g`` share the blockholders cutoff; ``form4`` (3y) and ``form5``
-    (18-month) each carry their own insider cutoff.
+    (never a copied literal). A source appears here IFF a ``pending`` row's
+    out-of-retention status is provable from ``filed_at`` alone — either the
+    parser has a pre-fetch ``filed_at`` gate (``form4``/``form5``/``13d``/
+    ``13g``), or ``filed_at`` provably bounds the parser's period gate
+    (``sec_13f_hr``: ``filed_at >= period_of_report`` by SEC Rule 13f-1, so
+    the period cutoff doubles as a safe ``filed_at`` cutoff). See module
+    docstring for the inclusion/exclusion rule. ``13d`` and ``13g`` share
+    the blockholders cutoff; ``form4`` (3y) and ``form5`` (18-month) each
+    carry their own insider cutoff; ``sec_13f_hr`` reuses the 8-quarter
+    period cutoff (couples to ``THIRTEEN_F_HR_RETENTION_QUARTERS``).
 
     Imports are LAZY (inside the function) so importing this module never
     forces ``insider_transactions`` cold — that module participates in a
@@ -78,12 +93,14 @@ def gated_cutoffs() -> dict[ManifestSource, Callable[[], date]]:
     """
     from app.services.blockholders import blockholders_retention_cutoff
     from app.services.insider_transactions import form4_retention_cutoff, form5_retention_cutoff
+    from app.services.institutional_holdings import thirteen_f_retention_cutoff
 
     return {
         "sec_form4": form4_retention_cutoff,
         "sec_form5": form5_retention_cutoff,
         "sec_13d": blockholders_retention_cutoff,
         "sec_13g": blockholders_retention_cutoff,
+        "sec_13f_hr": thirteen_f_retention_cutoff,
     }
 
 
@@ -159,8 +176,12 @@ def _sweep_one_source(
     ``last_attempted_at=clock_timestamp()``; ``raw_status`` is left untouched
     (no #948 evidence-downgrade concern — the bulk path never writes it).
 
-    ``(filed_at AT TIME ZONE 'UTC')::date`` matches the parser gate, which
-    compares ``filed_at.date()`` on the UTC-aware timestamp. ``FOR UPDATE
+    ``(filed_at AT TIME ZONE 'UTC')::date < cutoff`` is the swept predicate.
+    For the ``filed_at``-gated sources (form4/5/13d/g) it matches the
+    parser's pre-fetch ``filed_at.date()`` gate exactly; for ``sec_13f_hr``
+    it is a provably-safe SUBSET of the parser's POST-parse
+    ``period_of_report`` gate (``filed_at >= period_of_report`` by SEC Rule
+    13f-1, so ``filed_at < cutoff`` ⟹ ``period < cutoff``). ``FOR UPDATE
     SKIP LOCKED`` skips a row the live worker is mid-``transition_status``
     on rather than blocking; that row is tombstoned by the worker's own
     gate (idempotent no-op absorbs the double-tombstone).

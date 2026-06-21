@@ -7,7 +7,7 @@ sources are never touched (the silent-data-loss guard).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import psycopg.rows
@@ -15,6 +15,10 @@ import pytest
 
 from app.services.blockholders import blockholders_retention_cutoff
 from app.services.insider_transactions import form4_retention_cutoff, form5_retention_cutoff
+from app.services.institutional_holdings import (
+    thirteen_f_retention_cutoff,
+    thirteen_f_within_retention,
+)
 from app.services.manifest_pre_retention_sweep import gated_cutoffs, sweep_pre_retention
 from app.services.sec_manifest import record_manifest_entry
 from tests.fixtures.ebull_test_db import ebull_test_conn, test_database_url  # noqa: F401 — fixture re-export
@@ -68,14 +72,32 @@ def _seed(
 
 def test_gated_cutoffs_resolve_to_source_functions() -> None:
     """SINGLE-source-of-truth: the resolver returns the sources' OWN cutoff
-    functions (identity), never a copied literal — and exactly the three
-    pre-fetch-gated sources."""
+    functions (identity), never a copied literal — and exactly the sources
+    whose out-of-retention status is provable from ``filed_at`` (the four
+    pre-fetch-``filed_at``-gated sources + ``sec_13f_hr`` via #1703's
+    ``filed_at >= period_of_report`` proof)."""
     gc = gated_cutoffs()
-    assert set(gc) == {"sec_form4", "sec_form5", "sec_13d", "sec_13g"}
+    assert set(gc) == {"sec_form4", "sec_form5", "sec_13d", "sec_13g", "sec_13f_hr"}
     assert gc["sec_form4"] is form4_retention_cutoff
     assert gc["sec_form5"] is form5_retention_cutoff
     assert gc["sec_13d"] is blockholders_retention_cutoff
     assert gc["sec_13g"] is blockholders_retention_cutoff
+    assert gc["sec_13f_hr"] is thirteen_f_retention_cutoff
+
+
+def test_13f_filed_cutoff_is_max_safe_and_boundary() -> None:
+    """#1703 safety pin (pure, no DB). The 13F sweep cuts on the PERIOD cutoff
+    used as a ``filed_at`` bound. SEC Rule 13f-1(a) gives
+    ``filed_at >= period_of_report``, so any row with
+    ``filed_at < thirteen_f_retention_cutoff()`` is provably out-of-retention
+    (``period <= filed_at < cutoff``). Pin (a) the coupling — identity to the
+    parser's own cutoff fn = single source of truth, max-safe value; and
+    (b) the boundary semantics the proof relies on: a filing AT the cutoff is
+    in-retention, one strictly before is out."""
+    assert gated_cutoffs()["sec_13f_hr"] is thirteen_f_retention_cutoff
+    cutoff = thirteen_f_retention_cutoff()
+    assert thirteen_f_within_retention(cutoff) is True
+    assert thirteen_f_within_retention(cutoff - timedelta(days=1)) is False
 
 
 def _status(conn: psycopg.Connection[tuple], accession: str) -> str:
@@ -140,8 +162,9 @@ def test_sweep_tombstones_only_gated_pre_cutoff_rows(
         subject_type="blockholder_filer",
     )  # noqa: E501
 
-    # EXCLUDED sources — OLD rows that MUST stay pending (no pre-fetch gate;
-    # a filed_at sweep here would be silent data loss).
+    # EXCLUDED sources (sec_10q / sec_def14a) — OLD rows that MUST stay
+    # pending: no parser retention gate, so a filed_at sweep = silent data
+    # loss. (sec_13f_hr is NOT excluded — it is gated via #1703, seeded next.)
     _seed(
         conn,
         accession="0000000001-18-000002",
@@ -160,6 +183,8 @@ def test_sweep_tombstones_only_gated_pre_cutoff_rows(
         cik="0000000001",
         subject_type="issuer",
     )  # noqa: E501
+    # Gated 13F (#1703) — OLD (filed pre-cutoff ⟹ provably out-of-retention ⟹
+    # tombstone) + RECENT (filed post-cutoff ⟹ in-retention ⟹ stays pending).
     _seed(
         conn,
         accession="0000000004-18-000001",
@@ -169,26 +194,43 @@ def test_sweep_tombstones_only_gated_pre_cutoff_rows(
         cik="0000000004",
         subject_type="institutional_filer",
     )  # noqa: E501
+    _seed(
+        conn,
+        accession="0000000004-26-000001",
+        source="sec_13f_hr",
+        filed_at=_RECENT,
+        issuer_iid=None,
+        cik="0000000004",
+        subject_type="institutional_filer",
+    )  # noqa: E501
     conn.commit()
 
     summary = sweep_pre_retention(database_url=test_database_url())
 
-    # Per-source counts: 1 form4 + 1 13d + 1 13g tombstoned; form5 seeded none.
-    assert summary.by_source == {"sec_form4": 1, "sec_form5": 0, "sec_13d": 1, "sec_13g": 1}
-    assert summary.total == 3
+    # Per-source counts: 1 form4 + 1 13d + 1 13g + 1 13f_hr tombstoned;
+    # form5 seeded none.
+    assert summary.by_source == {
+        "sec_form4": 1,
+        "sec_form5": 0,
+        "sec_13d": 1,
+        "sec_13g": 1,
+        "sec_13f_hr": 1,
+    }
+    assert summary.total == 4
 
     # Re-read on a fresh transaction so the autocommit sweep's writes are visible.
     conn.rollback()
     assert _status(conn, "0000000001-18-000001") == "tombstoned"  # form4 OLD
     assert _status(conn, "0000000002-18-000001") == "tombstoned"  # 13d OLD
     assert _status(conn, "0000000003-18-000001") == "tombstoned"  # 13g OLD
+    assert _status(conn, "0000000004-18-000001") == "tombstoned"  # 13f OLD (gated #1703)
     # in-retention gated rows untouched
     assert _status(conn, "0000000001-26-000001") == "pending"  # form4 RECENT
     assert _status(conn, "0000000002-26-000001") == "pending"  # 13d RECENT
+    assert _status(conn, "0000000004-26-000001") == "pending"  # 13f RECENT in-retention
     # excluded sources untouched even though OLD
     assert _status(conn, "0000000001-18-000002") == "pending"  # 10q OLD
     assert _status(conn, "0000000001-18-000003") == "pending"  # def14a OLD
-    assert _status(conn, "0000000004-18-000001") == "pending"  # 13f OLD
 
 
 @pytest.mark.db
