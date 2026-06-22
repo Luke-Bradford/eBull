@@ -66,6 +66,22 @@ logger = logging.getLogger(__name__)
 RECENT_SLICE_ROWS = 30
 RECENT_WINDOW = timedelta(days=90)
 
+# #1703 — sources kept OFF the Phase B global-oldest top-up (fairness path only).
+# The top-up is the ONLY phase that admits a source BEYOND its per-source quota
+# (it picks global-oldest across ``sources``). ``sec_13f_hr`` is the one heavy
+# source: each filing's ``infotable.xml`` fetch+parse is serial (post-primary
+# retention gate, NOT prefetch-overlapped) and costs ~3-4.4s — thousands of
+# holdings/filing (measured 2026-06-22: 200 oldest in-retention 13F = 878s).
+# Leaving 13F in the top-up lets a drained-backlog regime flood a tick with
+# heavy 13F and overrun the 5-min cadence. Excluding it caps 13F at its Phase R
+# + Phase A quota share (~max_rows/n ≈ 13-16/tick at max_rows=200) — drained by
+# fair quota, never by the oldest-first flood. The freed top-up budget rolls to
+# other sources via the top-up SQL's own ``source = ANY(...)`` LIMIT (no
+# under-fill while form4/form3 hold a backlog). The per-source rebuild path
+# (``source is not None``) has no top-up phase and is unaffected. A future
+# ``max_rows`` raise scales the quota share, so re-check the 13F slice cost then.
+_TOPUP_EXCLUDED_SOURCES: frozenset[ManifestSource] = frozenset({"sec_13f_hr"})
+
 
 # Tick counter for Phase A `lead` rotation (#1179). Module-global
 # because the production scheduled tick wrapper passes
@@ -343,13 +359,19 @@ def run_manifest_worker(
         seen.update(r.accession_number for r in per_source)
 
     # Phase B — top-up pending, then retryable, both scoped to
-    # registered sources, excluding everything already picked.
+    # registered sources, excluding everything already picked. #1703:
+    # ``_TOPUP_EXCLUDED_SOURCES`` (13F) are dropped here so the
+    # global-oldest flood cannot push a heavy source past its quota —
+    # those sources are drained by Phase R + Phase A only. The freed
+    # budget rolls to the remaining sources via the top-up SQL's own
+    # ``source = ANY(...)`` LIMIT.
+    topup_sources: list[ManifestSource] = [s for s in sources if s not in _TOPUP_EXCLUDED_SOURCES]
     remaining = max_rows - len(rows)
     if remaining > 0:
         topup_pending = list(
             iter_pending_topup(
                 conn,
-                sources=sources,
+                sources=topup_sources,
                 exclude_accessions=sorted(seen),
                 limit=remaining,
             )
@@ -361,7 +383,7 @@ def run_manifest_worker(
         topup_retryable = list(
             iter_retryable_topup(
                 conn,
-                sources=sources,
+                sources=topup_sources,
                 exclude_accessions=sorted(seen),
                 limit=remaining,
             )
