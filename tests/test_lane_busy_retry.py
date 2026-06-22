@@ -170,3 +170,53 @@ def test_body_job_already_running_after_retry_not_replayed(
     assert state["enter"] == 2  # failed acquire + the acquire whose body raised
     assert sleeps == [0.25]  # only the pre-retry sleep
     assert _slots_available(fresh_slots) == runtime._MAX_CONCURRENT_LANE_WAITERS  # slot released in finally
+
+
+def test_full_sync_gets_a_longer_patient_backoff_than_the_default() -> None:
+    """A DAILY sync (orchestrator_full_sync) must wait out a multi-second
+    high-freq gate hold, not the ~1.75s default (which made it skip a whole DAY,
+    7/7 — last real run 15 Jun). A FREQUENT peer keeps the cheap default."""
+    from app.workers.scheduler import (
+        JOB_ORCHESTRATOR_FULL_SYNC,
+        JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+    )
+
+    patient = runtime._LANE_BACKOFF_OVERRIDES[JOB_ORCHESTRATOR_FULL_SYNC]
+    assert sum(patient) > sum(runtime._LANE_BUSY_RETRY_BACKOFF)
+    assert len(patient) > len(runtime._LANE_BUSY_RETRY_BACKOFF)
+    # the every-5-min peer that holds the gate keeps the cheap default — skipping
+    # one of its cadences is harmless, and it must never wait long enough to
+    # starve the pool.
+    assert JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC not in runtime._LANE_BACKOFF_OVERRIDES
+
+
+def test_patient_backoff_rides_out_a_hold_the_default_would_skip(
+    monkeypatch: pytest.MonkeyPatch, fresh_slots: threading.BoundedSemaphore
+) -> None:
+    """The fix, proven on the exact starvation shape: high-freq holds the sync
+    gate for ~5s ≈ 4 failed acquires before releasing. The DEFAULT window (3
+    retries → 4 acquires) exhausts and SKIPS (the day-long starvation). The
+    PATIENT window (5 retries → 6 acquires) rides it out and RUNS."""
+    from app.workers.scheduler import JOB_ORCHESTRATOR_FULL_SYNC
+
+    patient = runtime._LANE_BACKOFF_OVERRIDES[JOB_ORCHESTRATOR_FULL_SYNC]
+
+    # DEFAULT: busy through all 4 acquires → never runs (the bug).
+    default_state = {"enter": 0, "fail_n": 4}
+    monkeypatch.setattr(runtime, "JobLock", _fake_joblock_factory(default_state))
+    default_ran: list[int] = []
+    runtime._fire_scheduled_with_lane_retry(
+        "db://x", "orchestrator_full_sync", lambda: default_ran.append(1), backoff=_BACKOFF, sleep=lambda _s: None
+    )
+    assert default_ran == []  # default window starves
+
+    # PATIENT: same 4-acquire hold, then the 5th acquire (gate released) succeeds → runs.
+    patient_state = {"enter": 0, "fail_n": 4}
+    monkeypatch.setattr(runtime, "JobLock", _fake_joblock_factory(patient_state))
+    patient_ran: list[int] = []
+    runtime._fire_scheduled_with_lane_retry(
+        "db://x", "orchestrator_full_sync", lambda: patient_ran.append(1), backoff=patient, sleep=lambda _s: None
+    )
+    assert patient_ran == [1]  # patient window rides out the hold and runs
+    assert patient_state["enter"] == 5  # 4 failed acquires + 1 success
+    assert _slots_available(fresh_slots) == runtime._MAX_CONCURRENT_LANE_WAITERS  # slot released

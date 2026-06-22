@@ -495,6 +495,23 @@ _LANE_BUSY_RETRY_BACKOFF: Final[tuple[float, ...]] = (0.25, 0.5, 1.0)  # 3 retri
 _MAX_CONCURRENT_LANE_WAITERS: Final[int] = 3
 _LANE_WAIT_SLOTS: Final[threading.BoundedSemaphore] = threading.BoundedSemaphore(_MAX_CONCURRENT_LANE_WAITERS)
 
+# Per-job acquire-backoff overrides. The default ~1.75s window suits FREQUENT
+# jobs: a 5-min job that loses the lane race just runs next cadence (5 min
+# later), no harm. It is WRONG for a DAILY job — skipping "next cadence" means
+# skipping a whole DAY. ``orchestrator_full_sync`` (daily 03:00) co-fires with
+# ``orchestrator_high_frequency_sync`` (every 5 min, same 03:00 slot, same sync
+# gate); high-freq holds the gate ~2-5s, so the ~1.75s window always expires
+# first and full-sync was starved 7/7 days (last real run 15 Jun). A daily sync
+# can afford to WAIT out the brief high-freq run (running ~10s late once a day is
+# irrelevant), so give it a longer, "patient" window that outlasts high-freq's
+# hold. Bounded by ``_MAX_CONCURRENT_LANE_WAITERS`` exactly like the default, so
+# it can never drain the scheduler pool. General rule: a job's acquire patience
+# should scale with its cadence — frequent jobs skip cheaply, daily jobs wait.
+_LANE_BACKOFF_DAILY_PATIENT: Final[tuple[float, ...]] = (0.5, 1.0, 2.0, 4.0, 4.0)  # ~11.5s
+_LANE_BACKOFF_OVERRIDES: Final[dict[str, tuple[float, ...]]] = {
+    JOB_ORCHESTRATOR_FULL_SYNC: _LANE_BACKOFF_DAILY_PATIENT,
+}
+
 
 def _fire_scheduled_with_lane_retry(
     database_url: str,
@@ -1917,7 +1934,14 @@ class JobRuntime:
                 # #1538 — retry the source-level lane acquire on transient
                 # cross-job contention so a fire that loses the shared-lane race
                 # runs the SAME period instead of skipping the whole cadence.
-                _fire_scheduled_with_lane_retry(database_url, job_name, _run_scheduled_body)
+                # Daily syncs use a longer "patient" window (_LANE_BACKOFF_OVERRIDES)
+                # so a 5-min peer holding the gate can't starve them for a day.
+                _fire_scheduled_with_lane_retry(
+                    database_url,
+                    job_name,
+                    _run_scheduled_body,
+                    backoff=_LANE_BACKOFF_OVERRIDES.get(job_name, _LANE_BUSY_RETRY_BACKOFF),
+                )
             except JobAlreadyRunning:
                 # The helper retries the ACQUIRE, so this is reached ONLY when
                 # the body raised it — the same job is already running in this
