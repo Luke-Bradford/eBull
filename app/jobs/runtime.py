@@ -123,6 +123,7 @@ from app.workers.scheduler import (
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
     Cadence,
+    CadenceKind,
     ScheduledJob,
     attribution_summary_job,
     compute_next_run,
@@ -495,22 +496,43 @@ _LANE_BUSY_RETRY_BACKOFF: Final[tuple[float, ...]] = (0.25, 0.5, 1.0)  # 3 retri
 _MAX_CONCURRENT_LANE_WAITERS: Final[int] = 3
 _LANE_WAIT_SLOTS: Final[threading.BoundedSemaphore] = threading.BoundedSemaphore(_MAX_CONCURRENT_LANE_WAITERS)
 
-# Per-job acquire-backoff overrides. The default ~1.75s window suits FREQUENT
-# jobs: a 5-min job that loses the lane race just runs next cadence (5 min
-# later), no harm. It is WRONG for a DAILY job — skipping "next cadence" means
-# skipping a whole DAY. ``orchestrator_full_sync`` (daily 03:00) co-fires with
-# ``orchestrator_high_frequency_sync`` (every 5 min, same 03:00 slot, same sync
-# gate); high-freq holds the gate ~2-5s, so the ~1.75s window always expires
-# first and full-sync was starved 7/7 days (last real run 15 Jun). A daily sync
-# can afford to WAIT out the brief high-freq run (running ~10s late once a day is
-# irrelevant), so give it a longer, "patient" window that outlasts high-freq's
-# hold. Bounded by ``_MAX_CONCURRENT_LANE_WAITERS`` exactly like the default, so
-# it can never drain the scheduler pool. General rule: a job's acquire patience
-# should scale with its cadence — frequent jobs skip cheaply, daily jobs wait.
+# Acquire-backoff by cadence. The default ~1.75s window suits FREQUENT jobs: a
+# 5-min job that loses the lane race just runs next cadence (5 min later), no
+# harm. It is WRONG for a DAILY (or coarser) job — skipping "next cadence" means
+# skipping a whole DAY+ (settled-decisions: "lost-forever reconcile"). Daily
+# jobs co-fire with ``orchestrator_high_frequency_sync`` (every 5 min) on the
+# shared sync gate; high-freq holds it ~2-5s, so the ~1.75s window expires first
+# and the daily fire skips. ``orchestrator_full_sync`` was starved 7/7 days
+# (#1707); ``raw_data_retention_sweep`` (02:00) + ``fundamentals_sync`` (02:30)
+# were then starved 2+ days because #1707 hardcoded ONLY full_sync into the
+# override (#1710). A daily job can afford to WAIT out the brief high-freq run
+# (running ~10s late once a day is irrelevant), so give EVERY daily-or-coarser
+# job a longer, "patient" window that outlasts high-freq's hold. Derived from
+# the registered cadence (not a hand-maintained name list) so a newly-added
+# daily job is protected automatically and the set can't silently drift from the
+# schedule. Bounded by ``_MAX_CONCURRENT_LANE_WAITERS`` exactly like the default,
+# so it can never drain the scheduler pool. General rule: acquire patience scales
+# with cadence — frequent jobs skip cheaply, daily+ jobs wait.
 _LANE_BACKOFF_DAILY_PATIENT: Final[tuple[float, ...]] = (0.5, 1.0, 2.0, 4.0, 4.0)  # ~11.5s
-_LANE_BACKOFF_OVERRIDES: Final[dict[str, tuple[float, ...]]] = {
-    JOB_ORCHESTRATOR_FULL_SYNC: _LANE_BACKOFF_DAILY_PATIENT,
-}
+
+# Cadence kinds whose missed "next cadence" loses a long window → patient wait.
+# Frequent kinds (every_n_minutes, hourly) skip cheaply and keep the default.
+_PATIENT_BACKOFF_CADENCE_KINDS: Final[frozenset[CadenceKind]] = frozenset({"daily", "weekly", "monthly", "yearly"})
+
+
+def _lane_backoff_for(job_name: str) -> tuple[float, ...]:
+    """Acquire-retry backoff for *job_name*'s scheduled fire (#1538/#1707/#1710).
+
+    Patience scales with cadence: a daily-or-coarser job waits out a brief
+    lane-holder (its missed window is lost for a day+); a frequent job skips
+    cheaply. Derived from the registered cadence so the protected set can never
+    drift from the schedule. Unknown names (no ``SCHEDULED_JOBS`` row) fall back
+    to the cheap default — they are not grid-aligned daily fires.
+    """
+    job = _scheduler._JOBS_BY_NAME.get(job_name)
+    if job is not None and job.cadence.kind in _PATIENT_BACKOFF_CADENCE_KINDS:
+        return _LANE_BACKOFF_DAILY_PATIENT
+    return _LANE_BUSY_RETRY_BACKOFF
 
 
 def _fire_scheduled_with_lane_retry(
@@ -1934,13 +1956,14 @@ class JobRuntime:
                 # #1538 — retry the source-level lane acquire on transient
                 # cross-job contention so a fire that loses the shared-lane race
                 # runs the SAME period instead of skipping the whole cadence.
-                # Daily syncs use a longer "patient" window (_LANE_BACKOFF_OVERRIDES)
-                # so a 5-min peer holding the gate can't starve them for a day.
+                # Daily-or-coarser jobs use a longer "patient" window
+                # (cadence-derived, #1710) so a 5-min peer holding the gate
+                # can't starve them for a day+.
                 _fire_scheduled_with_lane_retry(
                     database_url,
                     job_name,
                     _run_scheduled_body,
-                    backoff=_LANE_BACKOFF_OVERRIDES.get(job_name, _LANE_BUSY_RETRY_BACKOFF),
+                    backoff=_lane_backoff_for(job_name),
                 )
             except JobAlreadyRunning:
                 # The helper retries the ACQUIRE, so this is reached ONLY when
