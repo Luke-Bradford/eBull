@@ -29,11 +29,15 @@ import psycopg
 import pytest
 
 from app.services.insider_transactions import (
+    ParsedFiler,
+    ParsedFiling,
+    ParsedTransaction,
     get_insider_summary,
     ingest_insider_transactions,
     ingest_insider_transactions_backfill,
     ingest_insider_transactions_for_instrument,
     list_insider_transactions,
+    upsert_filing,
 )
 
 pytestmark = pytest.mark.integration
@@ -1238,3 +1242,156 @@ def test_fixture_imports_ok(ebull_test_conn: psycopg.Connection[tuple]) -> None:
             "insider_transaction_footnotes",
             "insider_transactions",
         ]
+
+
+# ---------------------------------------------------------------------
+# #1687 — future-dated txn_date guard (parse-time) + reader exclusion
+# ---------------------------------------------------------------------
+
+
+def _filer_1687() -> ParsedFiler:
+    return ParsedFiler(
+        filer_cik="0001000099",
+        filer_name="Jane Smith",
+        street1=None,
+        street2=None,
+        city=None,
+        state=None,
+        zip_code=None,
+        state_description=None,
+        is_director=True,
+        is_officer=False,
+        officer_title=None,
+        is_ten_percent_owner=False,
+        is_other=False,
+        other_text=None,
+    )
+
+
+def _txn_1687(
+    row_num: int,
+    txn_date: date,
+    *,
+    post: Decimal,
+    timeliness: str | None = None,
+    deemed: date | None = None,
+) -> ParsedTransaction:
+    return ParsedTransaction(
+        txn_row_num=row_num,
+        is_derivative=False,
+        filer_cik="0001000099",
+        security_title="Common Stock",
+        txn_date=txn_date,
+        deemed_execution_date=deemed,
+        txn_code="P",
+        equity_swap_involved=None,
+        transaction_timeliness=timeliness,
+        shares=Decimal("10"),
+        price=Decimal("5"),
+        acquired_disposed_code="A",
+        post_transaction_shares=post,
+        direct_indirect="D",
+        nature_of_ownership=None,
+        conversion_exercise_price=None,
+        exercise_date=None,
+        expiration_date=None,
+        underlying_security_title=None,
+        underlying_shares=None,
+        underlying_value=None,
+    )
+
+
+def _filing_1687(txns: tuple[ParsedTransaction, ...]) -> ParsedFiling:
+    return ParsedFiling(
+        document_type="4",
+        period_of_report=date(2026, 6, 15),
+        date_of_original_submission=None,
+        not_subject_to_section_16=None,
+        form3_holdings_reported=None,
+        form4_transactions_reported=None,
+        # Empty issuer_cik -> upsert_filing skips sibling resolution and
+        # records observations for the passed instrument_id only.
+        issuer_cik="",
+        issuer_name="Liquidity Services",
+        issuer_trading_symbol="LQDT",
+        remarks=None,
+        signature_name=None,
+        signature_date=None,
+        filers=(_filer_1687(),),
+        footnotes=(),
+        transactions=txns,
+    )
+
+
+class TestFutureDatedTxnDateGuard:
+    """#1687 — a txn_date that postdates filed_at (Rule 16a-3(a) makes this
+    impossible for a non-early filing) is flagged at parse time, excluded
+    from the operator list, and never wins the current ownership holding."""
+
+    _FILED = datetime(2026, 6, 16, 20, 7, tzinfo=UTC)
+    _ACC = "0001000099-26-000001"
+
+    def test_future_txn_flagged_excluded_and_loses_ownership(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, iid=1687, symbol="LQDT")
+        valid = _txn_1687(0, date(2026, 6, 15), post=Decimal("1000"))
+        future = _txn_1687(1, date(2035, 1, 10), post=Decimal("9999"))
+        upsert_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession_number=self._ACC,
+            primary_document_url="https://sec.gov/lqdt-form4.xml",
+            parsed=_filing_1687((valid, future)),
+            filed_at=self._FILED,
+        )
+        ebull_test_conn.commit()
+
+        # Both rows persist; only the impossible-date row is flagged.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT txn_date, txn_date_invalid FROM insider_transactions "
+                "WHERE accession_number = %s ORDER BY txn_row_num",
+                (self._ACC,),
+            )
+            rows = cur.fetchall()
+        assert rows == [
+            (date(2026, 6, 15), False),
+            (date(2035, 1, 10), True),
+        ]
+
+        # Operator list excludes the flagged row.
+        listed = list_insider_transactions(ebull_test_conn, instrument_id=iid)
+        assert [d.txn_date for d in listed] == [date(2026, 6, 15)]
+
+        # Current ownership winner is the valid txn, not the future typo.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT shares, period_end FROM ownership_insiders_current WHERE instrument_id = %s",
+                (iid,),
+            )
+            current = cur.fetchall()
+        assert current == [(Decimal("1000"), date(2026, 6, 15))]
+
+    def test_early_filing_future_txn_is_kept(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # transaction_timeliness='E' (early) -> a future txn_date is legit
+        # and must NOT be flagged or hidden.
+        iid = _seed_instrument(ebull_test_conn, iid=1688, symbol="EARLY")
+        early = _txn_1687(0, date(2026, 7, 1), post=Decimal("500"), timeliness="E")
+        upsert_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession_number="0001000099-26-000002",
+            primary_document_url="https://sec.gov/early-form4.xml",
+            parsed=_filing_1687((early,)),
+            filed_at=self._FILED,
+        )
+        ebull_test_conn.commit()
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT txn_date_invalid FROM insider_transactions WHERE accession_number = %s",
+                ("0001000099-26-000002",),
+            )
+            rows = cur.fetchall()
+        assert rows == [(False,)]
+        listed = list_insider_transactions(ebull_test_conn, instrument_id=iid)
+        assert [d.txn_date for d in listed] == [date(2026, 7, 1)]

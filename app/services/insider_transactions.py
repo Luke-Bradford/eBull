@@ -40,7 +40,7 @@ import json
 import logging
 import re
 import xml.etree.ElementTree as ET  # noqa: S405 — Form 4 source is SEC EDGAR, trusted.
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
@@ -261,6 +261,54 @@ class ParsedTransaction:
     underlying_shares: Decimal | None
     underlying_value: Decimal | None
     footnote_refs: tuple[ParsedFootnoteRef, ...] = ()
+    # #1687 — TRUE when txn_date postdates the SEC filing date, which is
+    # impossible per Rule 16a-3(a) for a non-early filing (a filer source
+    # typo). Set in :func:`upsert_filing` once filed_at is resolved; the raw
+    # txn_date is retained for audit and operator-visible readers exclude
+    # flagged rows.
+    txn_date_invalid: bool = False
+
+
+def evaluate_insider_date_validity(
+    txn_date: date,
+    deemed_execution_date: date | None,
+    filed_at: datetime | None,
+    transaction_timeliness: str | None,
+) -> tuple[bool, date | None]:
+    """Apply the Rule 16a-3(a) execution-date invariant to one transaction.
+
+    A Form 4 is due before the end of the 2nd business day *following* the
+    reportable transaction (Securities Exchange Act §16(a) / Rule 16a-3(a)),
+    so the execution date precedes or equals the filing date. A ``txn_date``
+    / ``deemed_execution_date`` that postdates ``filed_at`` is therefore
+    impossible — a filer source typo (#1687).
+
+    Returns ``(txn_date_invalid, deemed_execution_date)``:
+
+    - ``txn_date_invalid`` is True when ``txn_date > filed_at`` (the row is
+      flagged; the raw value is kept since ``txn_date`` is NOT NULL).
+    - ``deemed_execution_date`` is dropped to ``None`` when it postdates
+      ``filed_at`` (nullable ⇒ quarantine, never invent a value).
+
+    Exemptions (return inert ``(False, deemed unchanged)``):
+
+    - ``filed_at is None`` — no authoritative anchor (mirrors the
+      ``upsert_filing`` filed_at fallback semantics).
+    - ``transaction_timeliness == 'E'`` — an early filing (EDGAR ownership
+      XML ``transactionTimeliness``; see ``sql/057``) may legitimately
+      report a transaction dated after the filing.
+    """
+    if filed_at is None or transaction_timeliness == "E":
+        return (False, deemed_execution_date)
+    # Anchor on the UTC calendar date (the SEC filing date is a UTC-stamped
+    # acceptance date) so the boundary is session-timezone independent and
+    # matches the migration's ``(filed_at AT TIME ZONE 'UTC')::date``.
+    filed_date = filed_at.astimezone(UTC).date()
+    txn_date_invalid = txn_date > filed_date
+    deemed_out = (
+        None if deemed_execution_date is not None and deemed_execution_date > filed_date else deemed_execution_date
+    )
+    return (txn_date_invalid, deemed_out)
 
 
 @dataclass(frozen=True)
@@ -1167,6 +1215,22 @@ def upsert_filing(
     historical ``txn_date @ midnight UTC``, logged."""
     if filed_at is None:
         filed_at = lookup_sec_filed_at(conn, accession_number)
+
+    # #1687 — apply the Rule 16a-3(a) execution-date guard once filed_at is
+    # resolved. Sanitise the parsed transactions BEFORE both the DB insert
+    # loop and the ownership write-through below: a future-dated typo must
+    # neither surface in the insider list nor win the latest-per-group
+    # ownership observation.
+    sanitised: list[ParsedTransaction] = []
+    for txn in parsed.transactions:
+        invalid, deemed = evaluate_insider_date_validity(
+            txn.txn_date, txn.deemed_execution_date, filed_at, txn.transaction_timeliness
+        )
+        if invalid != txn.txn_date_invalid or deemed != txn.deemed_execution_date:
+            txn = replace(txn, txn_date_invalid=invalid, deemed_execution_date=deemed)
+        sanitised.append(txn)
+    parsed = replace(parsed, transactions=tuple(sanitised))
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1310,7 +1374,7 @@ def upsert_filing(
                     exercise_date, expiration_date,
                     underlying_security_title,
                     underlying_shares, underlying_value,
-                    footnote_refs
+                    footnote_refs, txn_date_invalid
                 ) VALUES (
                     %s, %s, %s,
                     %s, %s, %s,
@@ -1325,7 +1389,7 @@ def upsert_filing(
                     %s, %s,
                     %s,
                     %s, %s,
-                    %s
+                    %s, %s
                 )
                 ON CONFLICT (accession_number, txn_row_num) DO UPDATE SET
                     filer_cik                 = EXCLUDED.filer_cik,
@@ -1350,7 +1414,8 @@ def upsert_filing(
                     underlying_security_title = EXCLUDED.underlying_security_title,
                     underlying_shares         = EXCLUDED.underlying_shares,
                     underlying_value          = EXCLUDED.underlying_value,
-                    footnote_refs             = EXCLUDED.footnote_refs
+                    footnote_refs             = EXCLUDED.footnote_refs,
+                    txn_date_invalid          = EXCLUDED.txn_date_invalid
                 """,
                 (
                     instrument_id,
@@ -1379,6 +1444,7 @@ def upsert_filing(
                     txn.underlying_shares,
                     txn.underlying_value,
                     footnote_refs_json,
+                    txn.txn_date_invalid,
                 ),
             )
 
@@ -1452,6 +1518,11 @@ def _record_form4_observations_for_filing(
         if txn.post_transaction_shares is None:
             continue
         if txn.txn_date is None:
+            continue
+        # #1687 — a future-dated typo must not win the latest-per-group
+        # holding (it would write a future period_end and the wrong share
+        # balance into ownership_insiders_current).
+        if txn.txn_date_invalid:
             continue
         key = (txn.filer_cik, txn.direct_indirect)
         prior = latest.get(key)
@@ -2198,6 +2269,7 @@ def get_insider_summary(
                AND f.is_tombstone = FALSE
             WHERE it.instrument_id = %s
               AND it.is_derivative = FALSE
+              AND NOT it.txn_date_invalid  -- #1687 — exclude future-dated typos
               AND it.txn_date >= CURRENT_DATE - INTERVAL '90 days'
             """,
             (instrument_id,),
@@ -2319,6 +2391,7 @@ def list_insider_transactions(
                 ON f.accession_number = it.accession_number
                AND f.is_tombstone = FALSE
             WHERE it.instrument_id = %s
+              AND NOT it.txn_date_invalid  -- #1687 — exclude future-dated typos
             ORDER BY it.txn_date DESC, it.id DESC
             LIMIT %s
             """,

@@ -194,7 +194,9 @@ def sync_insiders(
         form5_retention_cutoff,
     )
 
-    where = "WHERE it.post_transaction_shares IS NOT NULL AND it.is_derivative = FALSE"
+    # #1687 — exclude future-dated txn_date typos so the latest-per-group
+    # re-derivation never picks an impossible date as the current holding.
+    where = "WHERE it.post_transaction_shares IS NOT NULL AND it.is_derivative = FALSE AND NOT it.txn_date_invalid"
     params: dict[str, Any] = {
         "form4_cutoff": form4_retention_cutoff(),
         "form5_cutoff": form5_retention_cutoff(),

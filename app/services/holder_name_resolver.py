@@ -130,6 +130,7 @@ def resolve_holder_to_filer(
             FROM insider_transactions
             WHERE instrument_id = %(iid)s
               AND post_transaction_shares IS NOT NULL
+              AND NOT txn_date_invalid  -- #1687 — a future-dated typo must not win the latest balance
             ORDER BY COALESCE(filer_cik, ''), filer_name,
                      txn_date DESC NULLS LAST, id DESC
             """,

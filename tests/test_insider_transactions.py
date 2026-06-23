@@ -11,7 +11,7 @@ covering both the happy and the ``None`` / missing paths.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -21,6 +21,7 @@ from app.services.insider_transactions import (
     ParsedFiling,
     ParsedTransaction,
     _canonical_form_4_url,
+    evaluate_insider_date_validity,
     filer_role_string,
     parse_form_4_xml,
     parse_form_5_xml,
@@ -780,3 +781,57 @@ class TestParseForm5Xml:
         parsed = parse_form_5_xml(xml)
         assert parsed is not None
         assert parsed.document_type == "5"
+
+
+class TestEvaluateInsiderDateValidity:
+    """#1687 — Rule 16a-3(a) execution-date guard.
+
+    A Form 4 is due <= 2 business days after the transaction, so txn_date /
+    deemed_execution_date cannot postdate filed_at — except an early filing
+    (transaction_timeliness='E'), which may legitimately report a
+    future-dated transaction.
+    """
+
+    _FILED = datetime(2026, 6, 16, 20, 7, tzinfo=UTC)  # filed_at: 2026-06-16
+
+    @pytest.mark.parametrize(
+        ("txn_date", "expected_invalid"),
+        [
+            (date(2026, 6, 17), True),  # day after filing -> impossible
+            (date(2035, 1, 10), True),  # decade typo
+            (date(2026, 6, 16), False),  # same-day filing is valid
+            (date(2026, 6, 15), False),  # before filing
+            (date(2020, 1, 1), False),  # long before
+        ],
+    )
+    def test_txn_date_flagged_only_when_after_filed(self, txn_date, expected_invalid):
+        invalid, deemed = evaluate_insider_date_validity(txn_date, None, self._FILED, None)
+        assert invalid is expected_invalid
+        assert deemed is None
+
+    def test_early_filing_exempts_future_txn_date(self):
+        # transaction_timeliness='E' (early) -> future txn_date is legit.
+        invalid, deemed = evaluate_insider_date_validity(date(2026, 7, 1), date(2026, 7, 1), self._FILED, "E")
+        assert invalid is False
+        assert deemed == date(2026, 7, 1)
+
+    def test_no_filed_at_anchor_is_inert(self):
+        # No authoritative anchor -> never flag, never null.
+        invalid, deemed = evaluate_insider_date_validity(date(2035, 1, 10), date(2035, 1, 10), None, None)
+        assert invalid is False
+        assert deemed == date(2035, 1, 10)
+
+    @pytest.mark.parametrize(
+        ("deemed_in", "expected_out"),
+        [
+            (date(2026, 6, 17), None),  # after filing -> quarantine to NULL
+            (date(2026, 6, 16), date(2026, 6, 16)),  # same-day -> kept
+            (date(2026, 6, 15), date(2026, 6, 15)),  # before -> kept
+            (None, None),  # absent -> stays None
+        ],
+    )
+    def test_deemed_execution_date_nulled_only_when_after_filed(self, deemed_in, expected_out):
+        # txn_date itself is valid here; only the deemed column is assessed.
+        invalid, deemed = evaluate_insider_date_validity(date(2026, 6, 15), deemed_in, self._FILED, None)
+        assert invalid is False
+        assert deemed == expected_out
