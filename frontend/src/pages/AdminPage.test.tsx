@@ -29,6 +29,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { AdminPage } from "@/pages/AdminPage";
 import { ApiError } from "@/api/client";
+import { TestConfigProvider } from "@/lib/ConfigContext";
 import type {
   CoverageSummaryResponse,
   JobOverviewResponse,
@@ -64,7 +65,11 @@ vi.mock("@/api/sync", () => ({
 }));
 vi.mock("@/api/coverage", () => ({ fetchCoverageSummary: vi.fn() }));
 vi.mock("@/api/recommendations", () => ({ fetchRecommendations: vi.fn() }));
-vi.mock("@/api/config", () => ({ fetchConfig: vi.fn() }));
+vi.mock("@/api/config", () => ({ fetchConfig: vi.fn(), postKillSwitch: vi.fn() }));
+// KillSwitchSection (#1231) reads the authenticated operator for attribution.
+vi.mock("@/lib/session", () => ({
+  useSession: () => ({ operator: { id: "1", username: "operator" } }),
+}));
 vi.mock("@/api/system", () => ({ fetchSystemStatus: vi.fn() }));
 vi.mock("@/api/processes", () => ({ fetchProcesses: vi.fn() }));
 
@@ -236,7 +241,10 @@ afterEach(() => vi.clearAllMocks());
 function renderPage() {
   return render(
     <MemoryRouter>
-      <AdminPage />
+      {/* KillSwitchSection (#1231) consumes the shared config context. */}
+      <TestConfigProvider value={{ data: demoConfig() }}>
+        <AdminPage />
+      </TestConfigProvider>
     </MemoryRouter>,
   );
 }
