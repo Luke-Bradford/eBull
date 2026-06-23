@@ -37,6 +37,16 @@ export interface KillSwitchResponse {
   reason: string | null;
 }
 
+// Request body for POST /config/kill-switch (KillSwitchRequest in
+// app/api/config.py). `reason` and `activated_by` are required non-empty
+// on every transition — the backend model_validator rejects blanks (422)
+// so the runtime_config_audit row always carries identity + justification.
+export interface KillSwitchRequest {
+  active: boolean;
+  reason: string;
+  activated_by: string;
+}
+
 export interface ConfigResponse {
   app_env: string;
   etoro_env: string;

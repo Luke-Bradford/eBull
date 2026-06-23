@@ -31,6 +31,7 @@ import type {
 } from "@/api/types";
 import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
+import { KillSwitchSection } from "@/components/admin/KillSwitchSection";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import { ProcessesTable } from "@/components/admin/ProcessesTable";
 import { NEXT_RUN_EXPECTED_TOOLTIP, VERDICT_VISUAL } from "@/components/admin/processStatus";
@@ -177,6 +178,8 @@ export function AdminPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Admin</h1>
       </div>
+
+      <KillSwitchSection />
 
       <ProblemsPanel
         v2={v2.data}
