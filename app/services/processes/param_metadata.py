@@ -257,6 +257,14 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # invoker) — the missing sources.py half made the job
     # untriggerable from #819's merge until 2026-06-11.
     "populate_canonical_redirects": (),
+    # --- #1571 outside-DAG ops jobs wired for manual trigger. All three are
+    # zero-arg bodies (no operator-tunable params); the explicit empty tuples
+    # complete the manual-only triangle (source in MANUAL_TRIGGER_JOB_SOURCES +
+    # metadata here + invoker in _INVOKERS) so the manual API validator accepts
+    # a zero-param trigger instead of rejecting it.
+    "attribution_summary": (),
+    "daily_financial_facts": (),
+    "daily_tax_reconciliation": (),
     # sec_manifest_tombstone_stale — #1614. The drained #1131
     # stale-failed-upsert backfill, retired from SCHEDULED_JOBS to
     # manual-only. No operator-tunable params (it scans + promotes

@@ -229,6 +229,54 @@ def _adapt_zero_arg(fn: Callable[[], None]) -> JobInvoker:
     return _adapted
 
 
+def _tracked_zero_arg(job_name: str, fn: Callable[[], object]) -> JobInvoker:
+    """Adapt a bare zero-arg invoker like :func:`_adapt_zero_arg` BUT run the
+    body inside ``_tracked_job`` so the manual-dispatch prelude's ``running``
+    ``job_runs`` row is finalised (#1573).
+
+    Without this, a bare bulk-dataset invoker returns without adopting the
+    prelude's pre-allocated ``run_id`` (it never calls
+    ``consume_prelude_run_id``), so ``run_with_prelude`` leaves the row
+    ``running`` forever — admin Processes shows it wedged; only the #1510
+    aged-running boot reaper later marks it ``failure`` ("orphaned: reaped
+    at boot"). Reproduced on dev: a no-op manual ``sec_submissions_ingest``
+    left ``job_runs`` stuck ``running`` while the queue row showed
+    ``completed``.
+
+    This mirrors the ``populate_canonical_redirects`` fix (a scheduler-side
+    ``_tracked_job`` wrapper), collapsed into one registration-boundary
+    helper because the 9 bulk wrappers would otherwise be byte-identical.
+
+    ``row_count`` is intentionally NOT stamped (the bodies return ``None`` —
+    there is no count to report; the operator-facing per-archive figures
+    live in the job logs + ``bootstrap_archive_results``). This is also the
+    bootstrap-safe choice: these jobs are ALSO bootstrap stages, and
+    ``bootstrap_orchestrator._resolve_stage_rows`` resolves ``rows_processed``
+    from ``bootstrap_archive_results`` (Sources 1/2) BEFORE the ``job_runs``
+    window (Source 3), where a NULL-``row_count`` row is skipped — so the new
+    row keeps bootstrap ``rows_processed`` byte-identical. ``_tracked_job``'s
+    spike check is gated on ``row_count is not None`` so it stays inert too.
+    """
+
+    def _adapted(params: Mapping[str, Any]) -> None:
+        del params  # bulk bodies are zero-arg; params are not consumed.
+        # Lazy import: app.workers.scheduler imports this module's contextvars
+        # at module load, so the reverse import has to be at call time.
+        from app.workers.scheduler import _tracked_job
+
+        with _tracked_job(job_name):
+            fn()
+
+    _adapted.__wrapped__ = fn  # type: ignore[attr-defined]
+    # Explicit finalisation marker. ``inspect.getsource`` follows
+    # ``__wrapped__`` (→ the bare body, which has no ``_tracked_job``), so a
+    # source-grep cannot see the wrapper here. The #1573 regression-guard
+    # invariant (``tests/test_layer_123_wiring.py``) reads this marker to
+    # confirm a reach-prelude invoker finalises its prelude ``job_runs`` row.
+    _adapted.__finalises_prelude_row__ = True  # type: ignore[attr-defined]
+    return _adapted
+
+
 _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_NIGHTLY_UNIVERSE_SYNC: _adapt_zero_arg(nightly_universe_sync),
     JOB_DAILY_CANDLE_REFRESH: _adapt_zero_arg(daily_candle_refresh),
@@ -309,11 +357,12 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
 # transitively (the orchestrator imports from this module via
 # ``from app.jobs.runtime import _INVOKERS`` at call time).
 from app.services import bootstrap_orchestrator as _bootstrap_orchestrator  # noqa: E402
-from app.services import sec_bulk_download as _sec_bulk_download  # noqa: E402
 
 # #1021 — bulk-archive download stage A3 of the bulk-datasets-first
-# bootstrap (#1020). Registered so the orchestrator can dispatch it.
-_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _adapt_zero_arg(_sec_bulk_download.sec_bulk_download_job)
+# bootstrap (#1020). ``sec_bulk_download`` is now registered (tracked) in the
+# consolidated Phase A3/C bulk block below; the duplicate bare registration
+# that used to sit here was removed (#1573 — it would have shadowed the
+# tracked one with a row-orphaning bare invoker depending on import order).
 _INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR] = _adapt_zero_arg(
     _bootstrap_orchestrator.run_bootstrap_orchestrator
 )
@@ -429,20 +478,43 @@ from app.services import sec_bulk_download as _sec_bulk_download  # noqa: E402
 from app.services import sec_bulk_orchestrator_jobs as _bulk_jobs  # noqa: E402
 from app.services import sec_submissions_files_walk as _files_walk  # noqa: E402
 
-# Phase A3 — bulk archive download (#1021 / #1020). Registered here
-# so PR7 is self-consistent if PR #1029 has not yet landed; the
-# duplicate dict-key assignment when both PRs are merged is a no-op.
-_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _adapt_zero_arg(_sec_bulk_download.sec_bulk_download_job)
-_INVOKERS[_bulk_jobs.JOB_SEC_SUBMISSIONS_INGEST] = _adapt_zero_arg(_bulk_jobs.sec_submissions_ingest_job)
-_INVOKERS[_bulk_jobs.JOB_SEC_COMPANYFACTS_INGEST] = _adapt_zero_arg(_bulk_jobs.sec_companyfacts_ingest_job)
-_INVOKERS[_bulk_jobs.JOB_SEC_13F_INGEST_FROM_DATASET] = _adapt_zero_arg(_bulk_jobs.sec_13f_ingest_from_dataset_job)
-_INVOKERS[_bulk_jobs.JOB_SEC_INSIDER_INGEST_FROM_DATASET] = _adapt_zero_arg(
-    _bulk_jobs.sec_insider_ingest_from_dataset_job
+# Phase A3 bulk download + Phase C bulk-dataset ingesters. All registered
+# via ``_tracked_zero_arg`` (NOT ``_adapt_zero_arg``): each is a bare
+# zero-arg body that, on manual dispatch ("Run now" / POST /jobs/{name}/run),
+# would otherwise orphan the prelude's ``running`` job_runs row forever
+# (#1573 — the populate_canonical_redirects defect class). The ``_tracked_job``
+# wrapper finalises the row. This is the SOLE registration of
+# ``sec_bulk_download`` (a prior duplicate near the bootstrap-orchestrator
+# block was removed — #1573). row_count is left unstamped (bodies return
+# ``None``); bootstrap ``rows_processed`` is unaffected — see
+# ``_tracked_zero_arg``.
+_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _tracked_zero_arg(
+    _sec_bulk_download.JOB_SEC_BULK_DOWNLOAD, _sec_bulk_download.sec_bulk_download_job
 )
-_INVOKERS[_bulk_jobs.JOB_SEC_NPORT_INGEST_FROM_DATASET] = _adapt_zero_arg(_bulk_jobs.sec_nport_ingest_from_dataset_job)
-_INVOKERS[_bulk_jobs.JOB_SEC_FSDS_CLASS_SHARES_INGEST] = _adapt_zero_arg(_bulk_jobs.sec_fsds_class_shares_ingest_job)
-_INVOKERS[_bulk_jobs.JOB_SEC_FSDS_DIMENSIONAL_INGEST] = _adapt_zero_arg(_bulk_jobs.sec_fsds_dimensional_ingest_job)
-_INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _adapt_zero_arg(_files_walk.sec_submissions_files_walk_job)
+_INVOKERS[_bulk_jobs.JOB_SEC_SUBMISSIONS_INGEST] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_SUBMISSIONS_INGEST, _bulk_jobs.sec_submissions_ingest_job
+)
+_INVOKERS[_bulk_jobs.JOB_SEC_COMPANYFACTS_INGEST] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_COMPANYFACTS_INGEST, _bulk_jobs.sec_companyfacts_ingest_job
+)
+_INVOKERS[_bulk_jobs.JOB_SEC_13F_INGEST_FROM_DATASET] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_13F_INGEST_FROM_DATASET, _bulk_jobs.sec_13f_ingest_from_dataset_job
+)
+_INVOKERS[_bulk_jobs.JOB_SEC_INSIDER_INGEST_FROM_DATASET] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_INSIDER_INGEST_FROM_DATASET, _bulk_jobs.sec_insider_ingest_from_dataset_job
+)
+_INVOKERS[_bulk_jobs.JOB_SEC_NPORT_INGEST_FROM_DATASET] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_NPORT_INGEST_FROM_DATASET, _bulk_jobs.sec_nport_ingest_from_dataset_job
+)
+_INVOKERS[_bulk_jobs.JOB_SEC_FSDS_CLASS_SHARES_INGEST] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_FSDS_CLASS_SHARES_INGEST, _bulk_jobs.sec_fsds_class_shares_ingest_job
+)
+_INVOKERS[_bulk_jobs.JOB_SEC_FSDS_DIMENSIONAL_INGEST] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_FSDS_DIMENSIONAL_INGEST, _bulk_jobs.sec_fsds_dimensional_ingest_job
+)
+_INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _tracked_zero_arg(
+    _files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK, _files_walk.sec_submissions_files_walk_job
+)
 
 # #819 — canonical-instrument redirect populate. Idempotent one-shot
 # the operator triggers after a universe sync introduces new

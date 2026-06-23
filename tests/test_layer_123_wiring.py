@@ -19,9 +19,11 @@ Verifies:
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
-from app.jobs.runtime import VALID_JOB_NAMES
+from app.jobs.runtime import _INVOKERS, _PRELUDE_OPT_OUT_JOBS, VALID_JOB_NAMES
 from app.jobs.sources import MANUAL_TRIGGER_JOB_SOURCES, source_for
 from app.services.canonical_instrument_redirects import (
     JOB_POPULATE_CANONICAL_REDIRECTS,
@@ -360,20 +362,26 @@ class TestEveryInvokerJobResolvesASource:
     with only the invoker half and was silently untriggerable for a
     month — this pins the whole class, not just that one job."""
 
-    # Jobs ALREADY in this broken state on main when the invariant
-    # landed (S6 audit 2026-06-11). Each needs per-job triage — right
-    # lane vs delete-the-invoker-as-dead-code — tracked in #1571.
-    # Adding a NEW name here is never the fix; complete the triangle
-    # instead.
+    # Jobs intentionally left unresolvable (manual trigger rejects cleanly,
+    # not a crash). Adding a NEW name here is never the fix; complete the
+    # triangle (MANUAL_TRIGGER_JOB_SOURCES + _METADATA + _INVOKERS) instead.
+    #
+    # #1571 wired attribution_summary / daily_financial_facts /
+    # daily_tax_reconciliation (each had a real body + _tracked_job, only the
+    # source registry was missing) — they LEFT this set and now resolve.
+    # sec_insider_transactions_ingest left earlier (re-instated to
+    # SCHEDULED_JOBS 2026-06-20, resolves the sec_insider_ingest lane).
     _KNOWN_UNRESOLVABLE: frozenset[str] = frozenset(
         {
-            "attribution_summary",
-            "daily_financial_facts",
-            "daily_tax_reconciliation",
+            # sec_def14a_ingest — manifest-driven post-#1155 (the manifest
+            # worker owns DEF 14A discovery + parse; there is no standalone
+            # ingest lane to dispatch). DELIBERATELY absent from every source
+            # registry so a manual "Run now" rejects cleanly via source_for's
+            # KeyError (POST → 202 → audit row status='rejected'; no 500, no
+            # orphaned job_runs row — it is rejected BEFORE the prelude). Do
+            # NOT wire it: that would imply a standalone trigger path the
+            # manifest model does not have.
             "sec_def14a_ingest",
-            # sec_insider_transactions_ingest RE-INSTATED to SCHEDULED_JOBS
-            # 2026-06-20 — now resolves the sec_insider_ingest lane (no longer
-            # an unresolvable invoker-only orphan).
         }
     )
 
@@ -396,6 +404,130 @@ class TestEveryInvokerJobResolvesASource:
         for name in sorted(self._KNOWN_UNRESOLVABLE):
             with pytest.raises(KeyError):
                 source_for(name)
+
+
+class TestOpsJobsWired:
+    """#1571 — three outside-DAG ops jobs were in ``_INVOKERS`` but missing
+    from every source registry, so every manual trigger landed ``rejected``.
+    Each had a real ``_tracked_job`` body; only the source-registry half was
+    missing. Pins the completed triangle (source + metadata + invoker)."""
+
+    _WIRED: dict[str, str] = {
+        "attribution_summary": "db",
+        "daily_financial_facts": "sec_rate",
+        "daily_tax_reconciliation": "db",
+    }
+
+    def test_source_for_resolves_to_expected_lane(self) -> None:
+        for name, lane in self._WIRED.items():
+            assert source_for(name) == lane
+
+    def test_in_invokers(self) -> None:
+        for name in self._WIRED:
+            assert name in VALID_JOB_NAMES
+
+    def test_zero_param_metadata(self) -> None:
+        for name in self._WIRED:
+            assert MANUAL_TRIGGER_JOB_METADATA[name] == ()
+
+    def test_zero_param_validation_contract(self) -> None:
+        """Empty body validates; any supplied key is rejected (zero-arg jobs)."""
+        for name in self._WIRED:
+            validate_job_params(name, {}, allow_internal_keys=False)
+            with pytest.raises(ParamValidationError):
+                validate_job_params(name, {"unexpected": 1}, allow_internal_keys=False)
+
+    def test_left_known_unresolvable(self) -> None:
+        """The three wired jobs must NOT linger in the unresolvable allow-list."""
+        assert self._WIRED.keys().isdisjoint(TestEveryInvokerJobResolvesASource._KNOWN_UNRESOLVABLE)
+
+
+def _invoker_finalises_prelude_row(invoker: object) -> bool:
+    """True iff ``invoker`` adopts + finalises the manual-dispatch prelude's
+    ``running`` ``job_runs`` row (#1573).
+
+    Two finalising shapes:
+    * ``_tracked_zero_arg`` outputs carry the explicit
+      ``__finalises_prelude_row__`` marker (``inspect.getsource`` follows
+      ``__wrapped__`` to the BARE body, so a source-grep cannot see the
+      wrapper for this shape).
+    * Every other finalising invoker (native ``_tracked_job`` body,
+      ``_adapt_zero_arg`` of a scheduler-side tracked wrapper) references
+      ``_tracked_job`` in the source that ``getsource`` resolves to.
+    """
+    if getattr(invoker, "__finalises_prelude_row__", False):
+        return True
+    try:
+        return "_tracked_job" in inspect.getsource(invoker)  # type: ignore[arg-type]
+    except OSError, TypeError:
+        return False
+
+
+class TestEveryReachPreludeInvokerFinalises:
+    """#1573 regression guard (sibling of ``TestEveryInvokerJobResolvesASource``).
+
+    Manual dispatch of any job that resolves a source and is NOT prelude-opt-out
+    routes through ``run_with_prelude``, which opens a ``running`` ``job_runs``
+    row and hands its ``run_id`` to a ContextVar. ONLY an invoker that runs its
+    body inside ``_tracked_job`` (→ ``consume_prelude_run_id``) adopts + closes
+    that row. A bare invoker leaves it ``running`` forever (admin Processes
+    shows it wedged; only the boot reaper later marks it ``failure``). This
+    pins the whole class so a future bare reach-prelude registration fails at
+    test time, not in production."""
+
+    # Known bare reach-prelude invokers, deferred to #1712. Both are
+    # bootstrap-only by design (manual exposure is doubly-latent); wrapping
+    # ``fundamentals_sync_bootstrap`` additionally needs its own bootstrap
+    # cap-eval verification (it feeds rows_processed via the job_runs path).
+    # Shrink-only, exactly like ``_KNOWN_UNRESOLVABLE``.
+    _KNOWN_NON_FINALISING: frozenset[str] = frozenset(
+        {
+            "bootstrap_validation",
+            "fundamentals_sync_bootstrap",
+        }
+    )
+
+    def _reach_prelude_jobs(self) -> list[str]:
+        jobs = []
+        for name in sorted(VALID_JOB_NAMES):
+            if name in _PRELUDE_OPT_OUT_JOBS:
+                continue
+            try:
+                source_for(name)
+            except KeyError:
+                continue
+            jobs.append(name)
+        return jobs
+
+    def test_no_bare_reach_prelude_invoker(self) -> None:
+        bare = [name for name in self._reach_prelude_jobs() if not _invoker_finalises_prelude_row(_INVOKERS[name])]
+        new_bare = sorted(set(bare) - self._KNOWN_NON_FINALISING)
+        assert new_bare == [], (
+            "reach-prelude invokers that do not finalise their prelude job_runs row "
+            f"(orphan 'running' on manual dispatch — wrap in _tracked_job): {new_bare}"
+        )
+
+    def test_known_non_finalising_shrinks_only(self) -> None:
+        """A deferred job that gets wrapped must leave the allow-list."""
+        for name in sorted(self._KNOWN_NON_FINALISING):
+            assert not _invoker_finalises_prelude_row(_INVOKERS[name]), (
+                f"{name} now finalises — remove it from _KNOWN_NON_FINALISING"
+            )
+
+    def test_wired_bulk_jobs_finalise(self) -> None:
+        """The 9 #1573 bulk-dataset jobs must read as finalising."""
+        for name in (
+            "sec_submissions_ingest",
+            "sec_companyfacts_ingest",
+            "sec_13f_ingest_from_dataset",
+            "sec_insider_ingest_from_dataset",
+            "sec_nport_ingest_from_dataset",
+            "sec_fsds_class_shares_ingest",
+            "sec_fsds_dimensional_ingest",
+            "sec_submissions_files_walk",
+            "sec_bulk_download",
+        ):
+            assert _invoker_finalises_prelude_row(_INVOKERS[name]), name
 
 
 class TestLookupMetadataFallback:
