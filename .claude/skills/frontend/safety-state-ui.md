@@ -76,6 +76,22 @@ A safety-state indicator and its toggle never live in the same component. Displa
 
 This mirrors the settled `kill switch separate from config flags` decision in `docs/settled-decisions.md`. If you find yourself adding an `onToggle` prop to a component on a dashboard, stop — you're on the wrong page.
 
+## Attribution is real-identity-or-block, never a fabricated fallback
+
+A mutation on a safety-state control (kill switch, live-trading flag) writes an audit row naming who did it. The `activated_by` / `deactivated_by` / `decision_by` value MUST come from the authenticated session — and if no operator is present, the action is **blocked**, not defaulted.
+
+```tsx
+// WRONG — backend's non-empty check passes; audit row names nobody real
+activated_by: operator?.username ?? "operator"
+
+// RIGHT — block the transition when identity is absent
+const operatorName = operator?.username ?? null;
+const canSubmit = reason.trim().length > 0 && operatorName !== null && !submitting;
+// ...and a fixed-phrase blocker in the dialog when operatorName === null
+```
+
+A `?? "operator"` fallback turns "we don't know who did this" into a confident, wrong audit record — it defeats the whole point of attribution. Grep `?? "operator"` / `?? "system"` near any `*_by` field. (See `docs/review-prevention-log.md` → "Never fabricate audit attribution".)
+
 ## Cold-start rule
 
 On the very first render, before any source has resolved, there is no cached snapshot. The banner does not show. This is correct: there is no prior state to be fail-safe about. As soon as either source resolves once, the cache is populated and the fail-safe rules above kick in.

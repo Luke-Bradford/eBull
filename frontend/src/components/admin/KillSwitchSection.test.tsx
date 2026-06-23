@@ -19,9 +19,8 @@ import type { ConfigResponse } from "@/api/types";
 import type { AsyncState } from "@/lib/useAsync";
 
 vi.mock("@/api/config", () => ({ postKillSwitch: vi.fn() }));
-vi.mock("@/lib/session", () => ({
-  useSession: () => ({ operator: { id: "1", username: "luke" } }),
-}));
+const useSessionMock = vi.fn();
+vi.mock("@/lib/session", () => ({ useSession: () => useSessionMock() }));
 
 import { postKillSwitch } from "@/api/config";
 
@@ -60,6 +59,8 @@ function renderSection(value: Partial<AsyncState<ConfigResponse>>) {
 
 beforeEach(() => {
   mockedPost.mockReset();
+  useSessionMock.mockReset();
+  useSessionMock.mockReturnValue({ operator: { id: "1", username: "luke" } });
 });
 afterEach(() => {
   vi.clearAllMocks();
@@ -157,6 +158,20 @@ describe("KillSwitchSection", () => {
     await userEvent.click(screen.getByRole("button", { name: "Activate" }));
     expect(mockedPost).not.toHaveBeenCalled();
     expect(refetch).not.toHaveBeenCalled();
+  });
+
+  it("blocks the transition (no fabricated attribution) when no operator", async () => {
+    useSessionMock.mockReturnValue({ operator: null });
+    renderSection({ data: config(false) });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Activate kill switch" }),
+    );
+    expect(
+      screen.getByText(/No authenticated operator/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Activate" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Activate" }));
+    expect(mockedPost).not.toHaveBeenCalled();
   });
 
   it("surfaces a distinct phrase on 503 (singleton missing)", async () => {

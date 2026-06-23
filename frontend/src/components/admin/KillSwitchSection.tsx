@@ -48,6 +48,11 @@ export function KillSwitchSection(): JSX.Element {
   const refetchConfig = config.refetch;
   const ks = config.data?.kill_switch ?? null;
   const active = ks?.active ?? false;
+  // Audit attribution must be a REAL identity — never a fabricated
+  // fallback string. The backend's non-empty check would happily accept
+  // a literal "operator", silently writing a false runtime_config_audit
+  // row. Block the transition instead when no operator is authenticated.
+  const operatorName = operator?.username ?? null;
 
   function openModal(): void {
     setReason(COMMON_REASONS[0]);
@@ -60,10 +65,11 @@ export function KillSwitchSection(): JSX.Element {
     setModalOpen(false);
   }
 
-  const canSubmit = reason.trim().length > 0 && !submitting;
+  const canSubmit =
+    reason.trim().length > 0 && operatorName !== null && !submitting;
 
   async function handleConfirm(): Promise<void> {
-    if (!canSubmit) return;
+    if (!canSubmit || operatorName === null) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
@@ -71,7 +77,7 @@ export function KillSwitchSection(): JSX.Element {
         // Toggle to the opposite of the current live state.
         active: !active,
         reason: reason.trim(),
-        activated_by: operator?.username ?? "operator",
+        activated_by: operatorName,
       });
       // Success: reset busy state, close the modal, THEN refetch the
       // shared config. Closing first means any refetch error surfaces on
@@ -187,9 +193,19 @@ export function KillSwitchSection(): JSX.Element {
             placeholder="Reason for this transition"
             className="mt-2 w-full rounded border border-slate-300 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
           />
-          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-            Attributed to {operator?.username ?? "operator"}.
-          </p>
+          {operatorName !== null ? (
+            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+              Attributed to {operatorName}.
+            </p>
+          ) : (
+            <p
+              role="alert"
+              className="mt-2 text-xs font-medium text-red-700 dark:text-red-300"
+            >
+              No authenticated operator — cannot attribute this action. Sign in
+              again before toggling.
+            </p>
+          )}
 
           {submitError !== null && (
             <div
