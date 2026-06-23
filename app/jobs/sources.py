@@ -483,6 +483,38 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # Lane — module-global throttle clock shared with bimonthly so the
     # in-process FINRA budget never exceeds 1 req/s combined.
     "finra_regsho_daily_refresh": "finra",
+    # --- #1571 outside-DAG ops jobs wired for manual trigger. Each is in
+    # ``_INVOKERS`` (VALID_JOB_NAMES) but was retired from SCHEDULED_JOBS and
+    # is only a DASHBOARD member of the orchestrator (``JOB_TO_LAYERS`` empty
+    # tuple = "Background tasks" panel — display, not dispatch). Without a
+    # source entry ``source_for`` KeyErrored and every manual trigger landed
+    # ``rejected`` (the populate_canonical_redirects / #1413 trap). All three
+    # already finalise via ``_tracked_job`` + ``connect_job``; zero-param
+    # (empty MANUAL_TRIGGER_JOB_METADATA). Triage #1571 = wire as
+    # manual-trigger-only (the steady-state freshness path moved to the
+    # manifest worker / fundamentals derivation).
+    #
+    # attribution_summary — pure-DB; sole writer of the attribution-summary
+    # store (``app/services/return_attribution.py``). Catch-all ``db`` lane.
+    "attribution_summary": "db",
+    # daily_financial_facts — incremental SEC XBRL facts refresh (SEC HTTP via
+    # SecFilings/SecFundamentals providers). Lane ``sec_rate`` — a SEC
+    # producer that shares the per-IP rate budget, the same lane as its
+    # sibling ``daily_research_refresh``; ``db`` would be wrong (it would hold
+    # a DB lane across slow SEC HTTP and block db-lane jobs, the #1478 class).
+    # NOT a sole writer of ``financial_facts_raw`` — ``fundamentals_sync`` (db)
+    # calls it internally (``scheduler.py`` phase 1) and Stage 9
+    # ``sec_companyfacts_ingest`` also writes it — but the cross-lane overlap
+    # is benign for correctness: the writer ``upsert_facts_for_instrument`` is
+    # keyed last-write-wins/idempotent ("data-layer writes are last-write-wins
+    # UPSERTs so the race is benign for correctness, only telemetry-confusing"
+    # — ``docs/etl/sources/sec_xbrl_facts.md``). So the lane need not serialise
+    # the write.
+    "daily_financial_facts": "sec_rate",
+    # daily_tax_reconciliation — pure-DB tax-lot ingest + disposal matching;
+    # sole writer of ``tax_lots`` / ``disposal_matches``
+    # (``app/services/tax_ledger.py``). Catch-all ``db`` lane.
+    "daily_tax_reconciliation": "db",
     # --- #1413 bulk-only bootstrap — per-CIK SEC jobs dropped from
     # ``_BOOTSTRAP_STAGE_SPECS`` but KEPT in ``_INVOKERS`` as on-demand
     # (steady-state safety-net + sec_rebuild + Admin "Run now"). Their
