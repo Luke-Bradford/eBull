@@ -353,6 +353,66 @@ def test_resolver_falls_back_to_job_runs_or_none(
     assert resolved_empty is None
 
 
+def test_resolver_null_row_count_job_run_is_inert(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#1712 — wrapping ``fundamentals_sync_bootstrap`` in ``_tracked_zero_arg``
+    writes a NULL-``row_count`` ``success`` ``job_runs`` row on the bootstrap
+    path. The Source-3 query picks the latest success row but guards
+    ``row[0] is not None``, so a NULL ``row_count`` resolves to ``None`` —
+    byte-identical to the pre-#1712 no-job_runs-row case. This pins that the
+    finalisation row does NOT perturb bootstrap ``rows_processed`` cap-eval.
+
+    Shape mirrors the real fundamentals_sync_bootstrap stage: a ``__job__``
+    archive row with ``rows_written=0`` (Source 1 empty, Source 2 falls through)
+    that, pre-#1712, resolved via an empty Source-3 window → ``None``.
+    """
+    _wipe_bootstrap_state(ebull_test_conn)
+    run_id = _insert_run(ebull_test_conn, run_status="running")
+    stage_key = "fundamentals_sync"
+    job_name = "fundamentals_sync_bootstrap"
+    _insert_stage(
+        ebull_test_conn,
+        run_id=run_id,
+        stage_key=stage_key,
+        stage_order=25,
+        lane="db_fundamentals_raw",
+        job_name=job_name,
+        status="running",
+    )
+    # Source 2: __job__ row with rows_written=0 (zero canonical_upserted) →
+    # falls through to Source 3, exactly as the live invoker's audit row does
+    # when no periods normalise.
+    record_archive_result(
+        ebull_test_conn,
+        bootstrap_run_id=run_id,
+        stage_key=stage_key,
+        archive_name="__job__",
+        rows_written=0,
+    )
+    ebull_test_conn.commit()
+
+    before = _snapshot_job_runs_max_id(ebull_test_conn, job_name=job_name)
+    # The #1712 _tracked_job finaliser: success, NULL row_count (no count stamped).
+    ebull_test_conn.execute(
+        "INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count) "
+        "VALUES (%s, now(), now(), 'success', NULL)",
+        (job_name,),
+    )
+    ebull_test_conn.commit()
+    after = _snapshot_job_runs_max_id(ebull_test_conn, job_name=job_name)
+
+    resolved = _resolve_stage_rows(
+        ebull_test_conn,
+        bootstrap_run_id=run_id,
+        stage_key=stage_key,
+        job_name=job_name,
+        job_runs_id_before=before,
+        job_runs_id_after=after,
+    )
+    assert resolved is None
+
+
 # ---------------------------------------------------------------------------
 # record_archive_result_if_absent vs record_archive_result
 # ---------------------------------------------------------------------------

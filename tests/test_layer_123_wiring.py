@@ -475,17 +475,12 @@ class TestEveryReachPreludeInvokerFinalises:
     pins the whole class so a future bare reach-prelude registration fails at
     test time, not in production."""
 
-    # Known bare reach-prelude invokers, deferred to #1712. Both are
-    # bootstrap-only by design (manual exposure is doubly-latent); wrapping
-    # ``fundamentals_sync_bootstrap`` additionally needs its own bootstrap
-    # cap-eval verification (it feeds rows_processed via the job_runs path).
-    # Shrink-only, exactly like ``_KNOWN_UNRESOLVABLE``.
-    _KNOWN_NON_FINALISING: frozenset[str] = frozenset(
-        {
-            "bootstrap_validation",
-            "fundamentals_sync_bootstrap",
-        }
-    )
+    # Known bare reach-prelude invokers. #1712 wrapped the last two
+    # (``bootstrap_validation`` + ``fundamentals_sync_bootstrap``) in
+    # ``_tracked_zero_arg``, so the allow-list is now empty: EVERY reach-prelude
+    # invoker must finalise its prelude ``job_runs`` row. Shrink-only, exactly
+    # like ``_KNOWN_UNRESOLVABLE`` — a new bare registration fails at test time.
+    _KNOWN_NON_FINALISING: frozenset[str] = frozenset()
 
     def _reach_prelude_jobs(self) -> list[str]:
         jobs = []

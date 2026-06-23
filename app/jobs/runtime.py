@@ -402,8 +402,18 @@ _INVOKERS[_scheduler.JOB_SEC_N_CSR_BOOTSTRAP_DRAIN] = _scheduler.sec_n_csr_boots
 # Wraps a no-arg derivation function; discards the params dict.
 from app.services.fundamentals import bootstrap as _fundamentals_bootstrap  # noqa: E402
 
-_INVOKERS[_fundamentals_bootstrap.JOB_FUNDAMENTALS_SYNC_BOOTSTRAP] = (
-    _fundamentals_bootstrap.fundamentals_sync_bootstrap_invoker
+# #1712 — wrap in ``_tracked_job`` so a manual "Run now" finalises the
+# prelude's ``running`` ``job_runs`` row instead of orphaning it (#1573 class).
+# The invoker accepts zero args (``_params`` defaults to None), so
+# ``_tracked_zero_arg`` calls it directly — no adapter needed. The NULL
+# ``row_count`` row is inert to the bootstrap cap-eval: ``_resolve_stage_rows``
+# resolves S25 ``rows_processed`` from the ``__job__`` archive row (Source 2,
+# ``normalize_periods_canonical_upserted``) when >0, and Source 3 returns None
+# both before (no row) and after (NULL ``row_count`` → ``row[0] is None``) when
+# ==0 — see ``bootstrap_orchestrator._resolve_stage_rows``.
+_INVOKERS[_fundamentals_bootstrap.JOB_FUNDAMENTALS_SYNC_BOOTSTRAP] = _tracked_zero_arg(
+    _fundamentals_bootstrap.JOB_FUNDAMENTALS_SYNC_BOOTSTRAP,
+    _fundamentals_bootstrap.fundamentals_sync_bootstrap_invoker,
 )
 
 # #1233 PR-1b — OpenFIGI CUSIP resolver post-bulk sweep (Phase D, S13).
@@ -430,8 +440,13 @@ _INVOKERS[_scheduler.JOB_SEC_MASTER_IDX_GAP_CLOSE] = _adapt_zero_arg(_scheduler.
 # hard-floor breach so the stage errors → finalize_run → partial_error.
 from app.services import bootstrap_validation as _bootstrap_validation  # noqa: E402
 
-_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_VALIDATION] = _adapt_zero_arg(
-    _bootstrap_validation.run_bootstrap_validation
+# #1712 — wrap in ``_tracked_job`` so a manual dispatch finalises the prelude's
+# ``running`` ``job_runs`` row (#1573 class). Bootstrap-only and "provides
+# nothing" (status-only validation gate), so there is no ``rows_processed``
+# path to perturb; the NULL ``row_count`` row is purely the prelude finaliser.
+_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_VALIDATION] = _tracked_zero_arg(
+    _bootstrap_orchestrator.JOB_BOOTSTRAP_VALIDATION,
+    _bootstrap_validation.run_bootstrap_validation,
 )
 _INVOKERS[_scheduler.JOB_SEC_REBUILD] = _scheduler.sec_rebuild  # params-taking, no _adapt_zero_arg
 # #1013 — one-shot skip-tier filing_events cleanup. Manual-trigger-only
