@@ -761,6 +761,48 @@ class TestFairness:
         assert stats.processed_by_source == {"sec_n_csr": 10}
         assert all(s == "sec_n_csr" for _, s in captures)
 
+    def test_case11_topup_excluded_13f_held_to_quota_residual_rolls_onward(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #1703 — sec_13f_hr is the GLOBAL-OLDEST backlog here, so without
+        # the Phase B top-up exclusion the global-oldest top-up would flood
+        # the tick with heavy 13F. With the exclusion, 13F is capped at its
+        # Phase A quota and the residual top-up budget rolls onto the next
+        # source (form4) — the tick still fills to max_rows (no under-fill).
+        _seed_pending_n(
+            ebull_test_conn,
+            source="sec_13f_hr",
+            n=50,
+            base_filed_at=datetime(2010, 1, 1, tzinfo=UTC),  # global oldest
+            iid=10,
+            cik="0000000010",
+        )
+        _seed_pending_n(
+            ebull_test_conn,
+            source="sec_form4",
+            n=50,
+            base_filed_at=datetime(2015, 1, 1, tzinfo=UTC),  # newer than 13F
+            iid=11,
+            cik="0000000011",
+        )
+        ebull_test_conn.commit()
+
+        captures: list[tuple[str, ManifestSource]] = []
+        self._register_all_fakes(captures)
+
+        stats = run_manifest_worker(ebull_test_conn, source=None, max_rows=40, tick_id=0)
+        ebull_test_conn.commit()
+
+        quotas = compute_quotas(sorted(registered_parser_sources()), max_rows=40, tick_id=0)
+        # 13F held to EXACTLY its Phase A quota — excluded from the top-up
+        # flood despite being the global-oldest source.
+        assert stats.processed_by_source.get("sec_13f_hr", 0) == quotas["sec_13f_hr"]
+        # form4 absorbs its own quota + ALL residual top-up budget.
+        assert stats.processed_by_source["sec_form4"] == 40 - quotas["sec_13f_hr"]
+        # No under-fill: the tick still drained the full max_rows.
+        assert sum(stats.processed_by_source.values()) == 40
+
     def test_case4_determinism_same_input_same_output(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

@@ -4808,28 +4808,29 @@ def jobs_retry_sweeper() -> None:
 def sec_manifest_worker_tick() -> None:
     """#873 — One drain pass over ``sec_filing_manifest``.
 
-    Reads up to 100 pending / retryable rows (across all sources),
+    Reads up to 200 pending / retryable rows (across all sources),
     dispatches the registered parser for each row's source, and lets
     the worker handle the manifest state transitions. Sources with
     no parser are debug-skipped and surface in
     ``GET /coverage/manifest-parsers``.
 
-    Bounded at ``max_rows=100`` per tick. #1700 added the Phase 2
-    concurrent body prefetch (index+primary for every fetch-bound source;
-    13F index+primary via the 2-phase expander) — a pure latency win that
-    makes light slices fast (dev: ~52s). It ALSO tried raising max_rows,
-    but dev-verify FALSIFIED that: 13F's ``infotable.xml`` stays SERIAL
-    (it sits behind a post-primary retention gate) and 13F dominates the
-    global-oldest top-up (~56% of the slice), and the infotable fetch+
-    parse cost is large + HIGHLY VARIABLE per slice (a 13F filing can hold
-    thousands of holdings). At max_rows=150 heavy slices ran 439s / 461s →
-    OVERRAN the 300s cadence → the next tick was skipped (singleton lane)
-    → LOWER effective throughput than clean 100-row ticks (150/10min <
-    100/5min) plus operator-visible amber. So max_rows stays at 100 until
-    13F's infotable is made concurrent (3-phase prefetch) and/or per-source
-    row budgeting bounds the heavy 13F slice — tracked as the prerequisite
-    for any raise. The prefetch itself is retained (it lowers tick latency
-    and fully overlaps the out-of-retention 13F backlog).
+    Bounded at ``max_rows=200`` per tick (#1703 raise, from 100). The
+    cheap single-doc sources (form4/form3/10q/def14a/13d/13g — ~0.2-0.3s/
+    filing) are the real backlog (form4 alone ~443k pending) and want the
+    extra rows. The one heavy source is 13F: its ``infotable.xml`` fetch+
+    parse is SERIAL (post-primary retention gate, NOT prefetch-overlapped)
+    at ~3-4.4s/filing — measured 2026-06-22, 200 oldest in-retention 13F =
+    878s. #1700 tried raising max_rows naked and dev-verify FALSIFIED it:
+    when the global-oldest top-up shifts onto 13F, a 150-row slice ran
+    439s/461s → OVERRAN the 300s cadence → next tick skipped (singleton
+    lane) → LOWER effective throughput. The fix that unblocks the raise:
+    PR1 (de443459) drained the out-of-retention 13F fetch-storm; PR2
+    (535b2462) batched the per-holding ``_current`` refresh; and this
+    change keeps 13F OFF the Phase B top-up flood
+    (``_TOPUP_EXCLUDED_SOURCES``) so 13F drains by its fair quota only
+    (~13-16/tick at max_rows=200) and can never saturate a tick. Worst
+    fairness tick ≈ the measured 54s. A further max_rows raise must
+    re-check 13F's quota-share slice cost against the cadence.
     """
     from app.jobs.sec_manifest_worker import run_manifest_worker
 
@@ -4838,7 +4839,7 @@ def sec_manifest_worker_tick() -> None:
             # tick_id=None → run_manifest_worker pulls next value from
             # the module-global _TICK_COUNTER (per-process +1-per-tick
             # rotation). Tests inject explicitly via the helper signature.
-            stats = run_manifest_worker(conn, source=None, max_rows=100, tick_id=None)
+            stats = run_manifest_worker(conn, source=None, max_rows=200, tick_id=None)
             conn.commit()
 
         tracker.row_count = stats.parsed + stats.tombstoned + stats.failed
