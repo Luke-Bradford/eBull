@@ -181,13 +181,41 @@ def test_full_sync_gets_a_longer_patient_backoff_than_the_default() -> None:
         JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     )
 
-    patient = runtime._LANE_BACKOFF_OVERRIDES[JOB_ORCHESTRATOR_FULL_SYNC]
+    patient = runtime._lane_backoff_for(JOB_ORCHESTRATOR_FULL_SYNC)
     assert sum(patient) > sum(runtime._LANE_BUSY_RETRY_BACKOFF)
     assert len(patient) > len(runtime._LANE_BUSY_RETRY_BACKOFF)
     # the every-5-min peer that holds the gate keeps the cheap default — skipping
     # one of its cadences is harmless, and it must never wait long enough to
     # starve the pool.
-    assert JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC not in runtime._LANE_BACKOFF_OVERRIDES
+    assert runtime._lane_backoff_for(JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC) == runtime._LANE_BUSY_RETRY_BACKOFF
+
+
+def test_every_daily_or_coarser_job_gets_patient_backoff() -> None:
+    """#1710 regression guard. #1707 hardcoded patient backoff to
+    orchestrator_full_sync ONLY, so raw_data_retention_sweep (02:00) +
+    fundamentals_sync (02:30) — same 5-min-grid co-fire with high-freq — kept
+    the ~1.75s default and were starved 2+ days. Patience is now DERIVED from
+    cadence, so EVERY daily-or-coarser job is protected and the set can't drift
+    from the schedule again."""
+    from app.workers.scheduler import SCHEDULED_JOBS
+
+    patient_kinds = runtime._PATIENT_BACKOFF_CADENCE_KINDS
+    for job in SCHEDULED_JOBS:
+        backoff = runtime._lane_backoff_for(job.name)
+        if job.cadence.kind in patient_kinds:
+            assert backoff is runtime._LANE_BACKOFF_DAILY_PATIENT, (
+                f"{job.name} ({job.cadence.kind}) must get the patient backoff"
+            )
+        else:
+            assert backoff is runtime._LANE_BUSY_RETRY_BACKOFF, (
+                f"{job.name} ({job.cadence.kind}) must keep the cheap default"
+            )
+
+    # the two jobs that #1707 missed, asserted by name as explicit regression pins
+    assert runtime._lane_backoff_for("raw_data_retention_sweep") is (runtime._LANE_BACKOFF_DAILY_PATIENT)
+    assert runtime._lane_backoff_for("fundamentals_sync") is (runtime._LANE_BACKOFF_DAILY_PATIENT)
+    # an unknown name (no SCHEDULED_JOBS row) falls back to the cheap default
+    assert runtime._lane_backoff_for("not_a_real_job") is runtime._LANE_BUSY_RETRY_BACKOFF
 
 
 def test_patient_backoff_rides_out_a_hold_the_default_would_skip(
@@ -199,7 +227,7 @@ def test_patient_backoff_rides_out_a_hold_the_default_would_skip(
     PATIENT window (5 retries → 6 acquires) rides it out and RUNS."""
     from app.workers.scheduler import JOB_ORCHESTRATOR_FULL_SYNC
 
-    patient = runtime._LANE_BACKOFF_OVERRIDES[JOB_ORCHESTRATOR_FULL_SYNC]
+    patient = runtime._lane_backoff_for(JOB_ORCHESTRATOR_FULL_SYNC)
 
     # DEFAULT: busy through all 4 acquires → never runs (the bug).
     default_state = {"enter": 0, "fail_n": 4}
