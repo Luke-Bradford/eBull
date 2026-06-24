@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+import psycopg
 import pytest
 
 from app.runbooks.safety import RunbookRefused, assert_no_multixact_wraparound
@@ -52,6 +53,22 @@ class _StubCursor:
 
 class _StubConn:
     """Minimal psycopg.Connection stub for unit-testing safety probes.
+
+    Surface contract (#1331): this stub implements ONLY the connection
+    surface ``assert_no_multixact_wraparound`` actually uses
+    (``conn.execute(...)`` -> ``.fetchone()`` / ``.fetchall()``). It is
+    deliberately NOT a full ``psycopg.Connection`` — the call sites pass
+    it with ``# type: ignore[arg-type]``, an intentional stub
+    substitution rather than a masked row-factory bug (cf.
+    review-prevention-log "type: ignore[arg-type] masking a psycopg
+    Connection row-factory mismatch": the stub returns tuple rows, so
+    nothing is masked). The two ``test_stub_*`` guards below pin this
+    surface so a future probe that drifts to an unstubbed surface (e.g.
+    ``conn.cursor()``) fails loudly instead of silently passing, and so
+    the stub can never claim a method ``psycopg`` does not have. Per
+    settled-decisions "do not shape production APIs around test
+    convenience", the probe signature stays ``psycopg.Connection`` — we
+    pin the stub to that surface, not the reverse.
 
     Each .execute() pops the next canned response from a queue. Tests
     set up the queue to mirror the exact sequence of cursors returned
@@ -161,3 +178,56 @@ def test_refuses_lists_multiple_breaching_tables() -> None:
     msg = exc_info.value.msg
     assert "job_runtime_heartbeat" in msg
     assert "broker_credentials" in msg
+
+
+# ---------------------------------------------------------------------------
+# Stub-surface guards (#1331): keep the stub honest against the real probe
+# and the real ``psycopg`` ABC, so the four ``# type: ignore[arg-type]``
+# substitutions above can never silently mask probe/API drift.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_drifting_to_unstubbed_surface_fails_loud() -> None:
+    """A probe reaching for a connection surface the stub does not
+    implement (e.g. ``conn.cursor()``) must FAIL loudly, never silently
+    pass.
+
+    The current ``assert_no_multixact_wraparound`` uses only
+    ``conn.execute(...)``. If a future revision drifts to
+    ``conn.cursor().execute(...).fetchmany(...)``, the stub — which has
+    no ``cursor`` attribute — raises ``AttributeError`` and the suite
+    breaks, forcing the stub to be consciously extended (which in turn
+    re-trips this guard). This is the #1331 acceptance criterion and a
+    tripwire against a future too-permissive stub (e.g. a blanket
+    ``__getattr__`` returning a mock) that would let drift pass green.
+    """
+
+    def _drifted_probe(conn: Any) -> None:
+        cur = conn.cursor()  # surface the stub deliberately does not provide
+        cur.execute("SELECT 1")
+        cur.fetchmany(5)
+
+    conn = _StubConn([(1,)])
+    with pytest.raises(AttributeError):
+        _drifted_probe(conn)
+
+
+def test_stub_surface_is_subset_of_real_psycopg_abc() -> None:
+    """Every public method the stubs implement must exist on the real
+    ``psycopg`` class they stand in for.
+
+    The stubs may implement FEWER methods than ``psycopg.Connection`` /
+    ``psycopg.Cursor`` (they only need the probe's surface), but never a
+    method ``psycopg`` lacks — otherwise the suite would pin the probe
+    against a contract a live Postgres connection cannot honour, and the
+    ``# type: ignore[arg-type]`` would be hiding a genuine API mismatch
+    rather than a benign substitution.
+    """
+    conn_surface = {name for name in vars(_StubConn) if not name.startswith("_")}
+    cursor_surface = {name for name in vars(_StubCursor) if not name.startswith("_")}
+
+    conn_extra = conn_surface - set(dir(psycopg.Connection))
+    cursor_extra = cursor_surface - set(dir(psycopg.Cursor))
+
+    assert not conn_extra, f"_StubConn methods absent from psycopg.Connection: {conn_extra}"
+    assert not cursor_extra, f"_StubCursor methods absent from psycopg.Cursor: {cursor_extra}"
