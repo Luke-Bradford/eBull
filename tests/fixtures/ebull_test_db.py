@@ -254,6 +254,28 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "finra_short_interest_observations",
     # G6 / #916 — FINRA RegSHO daily short volume (sql/154). Phase 6 PR 12.
     "finra_regsho_daily_observations",
+    # #1602 — tables the v2 report reads that were never truncated, so
+    # rows leaked across tests sharing a worker DB and corrupted the
+    # report cover under xdist colocation. None are reachable from an
+    # existing CASCADE chain, so each MUST be listed explicitly.
+    #   AUM = Σ position market_value + cash_balance + mirror_equity
+    #         (app/services/valuation.py). cash_ledger feeds cash_balance;
+    #   the copy_* cluster feeds mirror_equity
+    #         (app/services/portfolio.py::load_mirror_breakdowns) — a
+    #   leaked mirror inflated opening/closing_value (2100 → 3600).
+    # capital_events feeds the flow-adjusted return; report_snapshots
+    # feeds `_prior_v2_chain` across reporting tests (a leaked prior
+    # breaks first-snapshot parity). Same class as the "Test-teardown
+    # list missing new FK-child tables" prevention entry.
+    # copy_* listed child→parent: copy_mirror_positions FK→copy_mirrors
+    # FK→copy_traders (copy_mirror_positions.instrument_id is a bare
+    # BIGINT, not an FK, so instruments' CASCADE never reaches it).
+    "copy_mirror_positions",
+    "copy_mirrors",
+    "copy_traders",
+    "cash_ledger",
+    "capital_events",
+    "report_snapshots",
 )
 
 
