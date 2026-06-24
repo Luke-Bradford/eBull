@@ -799,6 +799,45 @@ class TestFormMapping:
         assert map_form_to_source("CORRESP") is None
         assert map_form_to_source("") is None
 
+    def test_documented_unmapped_forms_stay_none(self) -> None:
+        """#1321: representative forms the operator FAQ documents as
+        intentionally NOT ingested (docs/etl/sources/README.md §"Forms NOT
+        ingested by the manifest + why") must return None. Pins the doc↔code
+        contract so a future accidental ``_FORM_TO_SOURCE`` addition trips this
+        test instead of silently contradicting the README. Uses real SEC form
+        codes (e.g. ``D``, not the colloquial "Form D")."""
+        documented_unmapped = [
+            "6-K",
+            "6-K/A",
+            "20-F",
+            "20-F/A",
+            "40-F",
+            "40-F/A",
+            "S-1",
+            "S-3",
+            "S-4",
+            "F-1",
+            "F-3",
+            "F-4",
+            "424B3",
+            "424B5",
+            "PRE 14A",
+            "PRER14A",
+            "13F-NT",
+            "13F-NT/A",
+            "144",
+            "11-K",
+            "25",
+            "25-NSE",
+            "15F-12B",
+            "CORRESP",
+            "D",
+            "D/A",
+        ]
+        mapped = {f: map_form_to_source(f) for f in documented_unmapped}
+        offenders = {f: src for f, src in mapped.items() if src is not None}
+        assert offenders == {}, f"forms documented as unmapped in README now map to a source: {offenders}"
+
     def test_pre_14a_is_not_mapped(self) -> None:
         """#1320: PRE 14A (preliminary proxy) is a metadata-only draft — it
         must NOT route to sec_def14a. Mapping it seeded 6k+ preliminary

@@ -201,6 +201,13 @@ SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
 # Tier 2 — metadata-only. No parser, no raw body. filing_events row
 # costs ~200 bytes; cheap insurance for future parsers + ad-hoc
 # operator queries. See spec for per-form rationale (Codex round 1).
+#
+# Scope: this is the ``filing_events`` (refresh_filings) tier classification
+# ONLY — independent of the manifest worker's ``_FORM_TO_SOURCE`` ingest map
+# (sec_manifest.py). A form may be metadata-only HERE yet still be ingested by
+# the manifest worker: ``5`` / ``5/A`` are listed below AND mapped to
+# ``sec_form5`` (parsed via manifest_parsers/insider_345). Do not treat the two
+# sets as disjoint. Operator FAQ on unmapped forms: docs/etl/sources/README.md.
 SEC_METADATA_ONLY: frozenset[str] = frozenset(
     {
         # Late-filing red flags — restatement / auditor-change signal.
