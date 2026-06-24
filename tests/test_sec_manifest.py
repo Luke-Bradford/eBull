@@ -829,7 +829,7 @@ class TestFormMapping:
             "11-K",
             "25",
             "25-NSE",
-            "15F",
+            "15F-12B",
             "CORRESP",
             "D",
             "D/A",
