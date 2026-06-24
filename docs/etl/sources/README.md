@@ -41,6 +41,38 @@ CI gate: `scripts/check_etl_source_docs.sh` enforces.
 
 ---
 
+## Forms NOT ingested by the manifest + why
+
+`map_form_to_source` (`app/services/sec_manifest.py`) returns `None` for any
+form absent from `_FORM_TO_SOURCE`, and the discovery paths skip it. That is
+intentional for the forms below. "Where instead" names the pipeline that *does*
+recognise the form, if any — most are recorded as a metadata-only
+`filing_events` row (`SEC_METADATA_ONLY` in `app/services/filings.py`), which is
+a **different taxonomy** from the manifest source map: a form can be
+metadata-only at the `filing_events` tier yet still be ingested by the manifest
+worker (Form 5 is — see note).
+
+| Form(s) | Why no manifest source | Where instead |
+|---|---|---|
+| `6-K`, `6-K/A` | Foreign private issuer interim report — no manifest parser, and deliberately excluded from fundamentals (typically lacks structured XBRL, so companyfacts yields no new rows — `FUNDAMENTALS_FORMS` in `app/services/fundamentals/__init__.py`). | `filing_events` metadata-only. |
+| `20-F`, `20-F/A`, `40-F`, `40-F/A` | Foreign private issuer annual — no manifest ownership/insider parser. **Fundamentals ARE ingested** for these, but via the companyfacts (`sec_xbrl_facts`) path keyed by CIK (`FUNDAMENTALS_FORMS`), not by form→source discovery. | Fundamentals: companyfacts / XBRL; `filing_events` metadata-only otherwise. |
+| `S-1`, `S-3`, `S-4`, `F-1/3/4`, `424B2/3/4/5/7/8` | Registration / prospectus capital-action filings — no ownership, fundamentals, or insider payload to parse. | New-instrument discovery is via `company_tickers`, not form discovery; `filing_events` metadata-only. |
+| `PRE 14A`, `PRER14A` | Preliminary proxy **drafts** (#1320) — the definitive `DEF 14A` that follows is what we ingest; mapping the draft seeded 6k+ rows the parser then tombstoned. | `filing_events` metadata-only; the `DEF 14A` → `sec_def14a`. |
+| `13F-NT`, `13F-NT/A` | Institutional **notice-only** (manager reports nothing this quarter) — no holdings table. | `filing_events` metadata-only, used for institutional-filer classification. **Note:** dropping NT at discovery is the known gap behind stale-parent 13F double-counts — see `docs/review-prevention-log.md` (Vanguard/AAPL). |
+| `144` | Proposed restricted-share sale notice — intent, not an executed transaction. | `filing_events` metadata-only (insider-overhang signal). |
+| `11-K` | Employee stock-purchase-plan annual report — no instrument-level ownership. | `filing_events` metadata-only. |
+| `25`, `25-NSE`, `15-12B/12G/15D`, `15F*` | Delisting / deregistration — terminal-state signal, no recurring data. | `filing_events` metadata-only. |
+| `CORRESP` | SEC ↔ filer correspondence — free text, no structured data. | `filing_events` metadata-only (rare red-flag signal). |
+| `D`, `D/A` | Private-placement notice (Reg D) — irrelevant to public-equity investing. | Dropped entirely (not even `filing_events`). |
+
+> **Form 5 is the exception that proves the two-taxonomy split:** `5` / `5/A`
+> are `SEC_METADATA_ONLY` at the `filing_events` tier **and** mapped in
+> `_FORM_TO_SOURCE` → `sec_form5` (the manifest worker parses them via
+> `manifest_parsers/insider_345._parse_form5`). The two sets are independent
+> axes; do not assume disjointness.
+
+---
+
 ## Template — required sections per source file
 
 ```markdown

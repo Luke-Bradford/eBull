@@ -1055,7 +1055,18 @@ def map_form_to_source(form: str) -> ManifestSource | None:
     Returns ``None`` for unsupported forms (e.g. ``S-1``, ``424B5``,
     ``CORRESP``) — the discovery paths skip these. Matching is exact;
     callers must canonicalise spacing first (SEC sometimes emits
-    ``13F-HR`` and sometimes ``13F-HR  `` with trailing whitespace)."""
+    ``13F-HR`` and sometimes ``13F-HR  `` with trailing whitespace).
+
+    The intentionally-unmapped forms and the rationale for each (operator
+    FAQ: "where is 6-K?") live in ``docs/etl/sources/README.md`` §"Forms NOT
+    ingested by the manifest + why". Most are recorded as a metadata-only
+    ``filing_events`` row — see ``SEC_METADATA_ONLY`` in
+    ``app/services/filings.py`` — which is a SEPARATE taxonomy from this map
+    (a form can be in both: ``5``/``5/A`` are metadata-only at the
+    ``filing_events`` tier yet mapped here to ``sec_form5``). ``13F-NT`` is
+    deliberately unmapped (notice-only, no holdings) — see
+    ``docs/review-prevention-log.md`` for the stale-parent double-count gap
+    that drop creates."""
     return _FORM_TO_SOURCE.get(form.strip())
 
 
