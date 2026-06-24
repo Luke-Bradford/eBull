@@ -664,9 +664,9 @@ class TestParserPreFetchGate:
         _seed_profile(conn, instrument_id=iid, cik=cik)
         # 3 DEF 14A accessions; latest 2 are top-2, oldest is capped.
         seed_data = [
-            ("PFG-NEW", date(2026, 3, 1)),
-            ("PFG-MID", date(2025, 3, 1)),
-            ("PFG-OLD", date(2024, 3, 1)),
+            ("0000780001-26-000003", date(2026, 3, 1)),
+            ("0000780001-25-000002", date(2025, 3, 1)),
+            ("0000780001-24-000001", date(2024, 3, 1)),
         ]
         for acc, fdate in seed_data:
             _seed_filing_event(
@@ -679,7 +679,7 @@ class TestParserPreFetchGate:
         # Manifest row for the capped (oldest) accession.
         record_manifest_entry(
             conn,
-            "PFG-OLD",
+            "0000780001-24-000001",
             cik=cik,
             form="DEF 14A",
             source="sec_def14a",
@@ -687,7 +687,7 @@ class TestParserPreFetchGate:
             subject_id=str(iid),
             instrument_id=iid,
             filed_at=datetime(2024, 3, 1, tzinfo=UTC),
-            primary_document_url="https://example.test/PFG-OLD.htm",
+            primary_document_url="https://example.test/0000780001-24-000001.htm",
         )
         conn.commit()
 
@@ -703,7 +703,7 @@ class TestParserPreFetchGate:
         # Fetch the manifest row and run the parser directly.
         from app.services.sec_manifest import get_manifest_row
 
-        manifest_row = get_manifest_row(conn, "PFG-OLD")
+        manifest_row = get_manifest_row(conn, "0000780001-24-000001")
         assert manifest_row is not None
 
         outcome = _parse_def14a(conn, manifest_row)
@@ -716,7 +716,7 @@ class TestParserPreFetchGate:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT COUNT(*) FROM def14a_ingest_log WHERE accession_number = %s",
-                ("PFG-OLD",),
+                ("0000780001-24-000001",),
             )
             count = cur.fetchone()[0]  # type: ignore[index]
         assert count == 0
