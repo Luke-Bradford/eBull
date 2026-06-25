@@ -783,3 +783,102 @@ class TestIngest13FFigiCapture:
 
         assert result.figi_identifiers_seen == 0
         assert result.figi_identifiers_written == 0
+
+
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestUnresolvedChunkedFlushParity:
+    """#1436 — the unresolved-CUSIP buffer flushes in bounded chunks
+    inside the INFOTABLE loop instead of one end-of-archive flush.
+
+    Parity bar: the flush helper aggregates COUNT/MIN/MAX grouped by
+    (cusip, source) with an ON CONFLICT that sums count + LEAST/GREATEST
+    of the periods, so N chunked flushes within one archive transaction
+    land byte-identical final rows to a single batch flush. This test
+    drives a SMALL chunk size so the buffer flushes multiple times —
+    including a (cusip) whose two holdings straddle a chunk boundary —
+    and asserts the per-(cusip) aggregate is exactly what a single flush
+    would produce.
+    """
+
+    def test_chunked_flush_matches_single_batch_aggregate(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.services import sec_13f_dataset_ingest as ingest_mod
+
+        # Seed nothing in the universe for these CUSIPs → every INFOTABLE
+        # row is unresolved and lands in the buffer.
+        flush_calls = {"n": 0}
+        real_flush = ingest_mod._flush_unresolved_buffer
+
+        def _counting_flush(*args: object, **kwargs: object) -> None:
+            flush_calls["n"] += 1
+            real_flush(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(ingest_mod, "_flush_unresolved_buffer", _counting_flush)
+        # Chunk of 2 → buffer flushes at sizes 2, 2, then the remainder.
+        monkeypatch.setattr(ingest_mod, "_UNRESOLVED_FLUSH_CHUNK", 2)
+
+        # Two accessions; 5 unresolved holdings across 4 distinct CUSIPs.
+        # Order is chosen so CHUNK0033's two holdings straddle a chunk
+        # boundary (rows 1 + 3) — proving cross-chunk COUNT summing via
+        # ON CONFLICT, not just within-chunk aggregation.
+        subs = [
+            {"ACCESSION_NUMBER": "0009990000-25-000001", "CIK": "9990000", "FILING_DATE": "2025-11-14"},
+            {"ACCESSION_NUMBER": "0009990000-25-000002", "CIK": "9990000", "FILING_DATE": "2025-11-14"},
+        ]
+        covers = [
+            {
+                "ACCESSION_NUMBER": "0009990000-25-000001",
+                "FILINGMANAGER_NAME": "Chunk Fund",
+                "REPORTCALENDARORQUARTER": "2025-09-30",
+            },
+            {
+                "ACCESSION_NUMBER": "0009990000-25-000002",
+                "FILINGMANAGER_NAME": "Chunk Fund",
+                "REPORTCALENDARORQUARTER": "2025-09-30",
+            },
+        ]
+        infotable = [
+            {"ACCESSION_NUMBER": "0009990000-25-000001", "CUSIP": "CHUNK0033", "VALUE": "1", "SSHPRNAMT": "1"},
+            {"ACCESSION_NUMBER": "0009990000-25-000001", "CUSIP": "CHUNK0011", "VALUE": "1", "SSHPRNAMT": "1"},
+            {"ACCESSION_NUMBER": "0009990000-25-000001", "CUSIP": "CHUNK0033", "VALUE": "1", "SSHPRNAMT": "1"},
+            {"ACCESSION_NUMBER": "0009990000-25-000002", "CUSIP": "CHUNK0022", "VALUE": "1", "SSHPRNAMT": "1"},
+            {"ACCESSION_NUMBER": "0009990000-25-000002", "CUSIP": "CHUNK0044", "VALUE": "1", "SSHPRNAMT": "1"},
+        ]
+        archive_bytes = _build_dataset_zip(submissions=subs, coverpages=covers, infotable=infotable)
+        archive_path = tmp_path / "form13f_chunk.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_13f_dataset_archive(conn=ebull_test_conn, archive_path=archive_path, ingest_run_id=uuid4())
+        ebull_test_conn.commit()
+
+        # 5 unresolved holdings counted; nothing written (no universe match).
+        assert result.rows_written == 0
+        assert result.rows_skipped_unresolved_cusip == 5
+        # Chunking actually fired: flushes at 2, 2, remainder 1 = 3 calls.
+        assert flush_calls["n"] == 3
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cusip, observation_count, first_period_end, last_period_end
+                FROM unresolved_13f_cusips
+                WHERE source = 'bulk_13f_dataset' AND cusip LIKE 'CHUNK00%'
+                ORDER BY cusip
+                """
+            )
+            rows = cur.fetchall()
+
+        # Exactly the single-batch aggregate: one row per distinct CUSIP,
+        # CHUNK0033 count=2 (summed ACROSS two separate chunk flushes).
+        from datetime import date as _date
+
+        assert rows == [
+            ("CHUNK0011", 1, _date(2025, 9, 30), _date(2025, 9, 30)),
+            ("CHUNK0022", 1, _date(2025, 9, 30), _date(2025, 9, 30)),
+            ("CHUNK0033", 2, _date(2025, 9, 30), _date(2025, 9, 30)),
+            ("CHUNK0044", 1, _date(2025, 9, 30), _date(2025, 9, 30)),
+        ]

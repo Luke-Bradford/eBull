@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID, uuid4
 
 import psycopg
@@ -68,6 +68,23 @@ from app.services.ownership_observations import period_end_within_bounds
 from app.services.thirteen_f_normalise import VALUE_DOLLARS_CUTOVER as _VALUE_DOLLARS_CUTOVER
 
 logger = logging.getLogger(__name__)
+
+
+# #1436 — flush the unresolved-CUSIP buffer in bounded chunks rather than
+# accumulating millions of ``(cusip, filer_cik, period_end)`` triples in one
+# Python list before a single end-of-archive flush. Parity: the flush helper
+# (:func:`cusip_resolver.flush_unresolved_cusips_bulk`) aggregates
+# ``COUNT(*) / MIN / MAX`` grouped by ``(cusip, source)`` and on conflict does
+# ``observation_count += EXCLUDED``, ``first = LEAST(...)``, ``last =
+# GREATEST(...)``, ``last_observed_at = NOW()`` — a commutative monoid with a
+# tx-constant timestamp, so N chunked flushes within one archive transaction
+# land byte-identical final rows to one batch flush. The flush MUST run with
+# the connection OUT of COPY mode (a live ``cur.copy()`` owns the connection
+# protocol), so the row loop tears down + reopens the staging COPY at each
+# chunk boundary — a handful of times per multi-million-row archive, negligible
+# cost. Multiple COPY appends to the same ``ON COMMIT DROP`` TEMP table are
+# valid within the per-archive transaction.
+_UNRESOLVED_FLUSH_CHUNK: Final = 100_000
 
 
 @dataclass
@@ -243,23 +260,32 @@ def _read_voting_components(row: dict[str, str]) -> tuple[Decimal, Decimal, Deci
     )
 
 
-def _open_tsv(zf: zipfile.ZipFile, name: str) -> list[dict[str, str]]:
-    """Read a TSV from the archive into a list of dicts.
+def _index_tsv_by_accession(zf: zipfile.ZipFile, name: str) -> tuple[dict[str, dict[str, str]], int]:
+    """Stream a TSV and index its rows by ``ACCESSION_NUMBER`` (#1436).
 
-    The 13F datasets are typically <100 MB so loading SUBMISSION.tsv
-    + COVERPAGE.tsv into memory is acceptable. INFOTABLE can be 30M+
-    rows so the caller iterates that one streamingly.
+    Replaces the prior ``_open_tsv`` (whole-file ``list(csv.DictReader)``)
+    + dict-comprehension. SUBMISSION/COVERPAGE were materialised into a
+    transient ``list[dict]`` held in worker RAM alongside the
+    accession-keyed dict the caller actually used — O(rows) + O(accessions)
+    peak. Streaming builds only the dict — O(accessions).
+
+    Returns ``(index, total_rows)``. ``index`` keeps the LAST row per
+    accession, identical to the overwriting dict-comprehension
+    ``{r["ACCESSION_NUMBER"]: r for r in rows if "ACCESSION_NUMBER" in r}``
+    it replaces. ``total_rows`` counts EVERY data row — including
+    duplicates and rows missing ``ACCESSION_NUMBER`` — so the ``*_seen``
+    telemetry stays byte-identical to the old ``len(list(...))``.
     """
-    if name not in zf.namelist():
-        # Some archives bundle CSVs at top-level and others nest under
-        # a directory. Try to fall back.
-        candidates = [n for n in zf.namelist() if n.endswith("/" + name) or n == name]
-        if not candidates:
-            return []
-        name = candidates[0]
-    with zf.open(name) as fh:
-        text = io.TextIOWrapper(fh, encoding="utf-8", newline="")
-        return list(csv.DictReader(text, delimiter="\t"))
+    index: dict[str, dict[str, str]] = {}
+    total = 0
+    for row in _iter_tsv(zf, name):
+        total += 1
+        # Same predicate as the dict-comprehension it replaces — a short
+        # row missing the column (DictReader restval=None) is excluded
+        # by ``in``, matching the prior behaviour exactly.
+        if "ACCESSION_NUMBER" in row:
+            index[row["ACCESSION_NUMBER"]] = row
+    return index, total
 
 
 def _iter_tsv(zf: zipfile.ZipFile, name: str) -> Iterator[dict[str, str]]:
@@ -589,13 +615,12 @@ def ingest_13f_dataset_archive(
     figi_to_instrument: dict[str, int] = {}
 
     with zipfile.ZipFile(archive_path) as zf:
-        submissions = _open_tsv(zf, "SUBMISSION.tsv")
-        coverpages = _open_tsv(zf, "COVERPAGE.tsv")
-        result.submissions_seen = len(submissions)
-        result.coverpage_seen = len(coverpages)
-
-        sub_by_accession = {row["ACCESSION_NUMBER"]: row for row in submissions if "ACCESSION_NUMBER" in row}
-        cover_by_accession = {row["ACCESSION_NUMBER"]: row for row in coverpages if "ACCESSION_NUMBER" in row}
+        # #1436 — stream-index SUBMISSION/COVERPAGE straight into the
+        # accession-keyed dicts the loop joins against; never materialise
+        # the whole TSV as a transient list first. ``*_seen`` counts every
+        # row (parity with the old ``len(list(...))``).
+        sub_by_accession, result.submissions_seen = _index_tsv_by_accession(zf, "SUBMISSION.tsv")
+        cover_by_accession, result.coverpage_seen = _index_tsv_by_accession(zf, "COVERPAGE.tsv")
 
         # Stream INFOTABLE → pre-validate → COPY into _stg_13f. Single
         # cursor.copy() context spans every validated row in the
@@ -608,168 +633,187 @@ def ingest_13f_dataset_archive(
             + ") FROM STDIN WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)"
         )
         copy_attempted = 0
-        with conn.cursor() as cur, cur.copy(copy_sql) as copy:
-            for row in _iter_tsv(zf, "INFOTABLE.tsv"):
-                result.infotable_seen += 1
-                accession = row.get("ACCESSION_NUMBER", "").strip()
-                if not accession:
-                    result.rows_skipped_orphan_accession += 1
-                    continue
-                sub = sub_by_accession.get(accession)
-                cover = cover_by_accession.get(accession)
-                if sub is None or cover is None:
-                    result.rows_skipped_orphan_accession += 1
-                    continue
+        # #1436 — one shared INFOTABLE generator consumed across COPY
+        # segments. When the unresolved-CUSIP buffer reaches a chunk
+        # boundary the COPY context closes (so the connection leaves COPY
+        # mode), the buffer flushes, then a fresh COPY context reopens and
+        # the SAME generator resumes at the next row. Multiple COPY appends
+        # to the ON COMMIT DROP _stg_13f are valid within the per-archive
+        # tx. Generator exhaustion (the ``for`` ends without break) leaves
+        # ``chunk_full`` False → the outer loop flushes the remainder and
+        # breaks.
+        infotable = _iter_tsv(zf, "INFOTABLE.tsv")
+        while True:
+            chunk_full = False
+            with conn.cursor() as cur, cur.copy(copy_sql) as copy:
+                for row in infotable:
+                    result.infotable_seen += 1
+                    accession = row.get("ACCESSION_NUMBER", "").strip()
+                    if not accession:
+                        result.rows_skipped_orphan_accession += 1
+                        continue
+                    sub = sub_by_accession.get(accession)
+                    cover = cover_by_accession.get(accession)
+                    if sub is None or cover is None:
+                        result.rows_skipped_orphan_accession += 1
+                        continue
 
-                cusip = (row.get("CUSIP") or "").strip().upper()
-                if not cusip:
-                    result.rows_skipped_bad_data += 1
-                    continue
+                    cusip = (row.get("CUSIP") or "").strip().upper()
+                    if not cusip:
+                        result.rows_skipped_bad_data += 1
+                        continue
 
-                filer_cik_raw = str(sub.get("CIK") or "").strip()
-                if not filer_cik_raw:
-                    result.rows_skipped_bad_data += 1
-                    continue
-                filer_cik = filer_cik_raw.zfill(10)
+                    filer_cik_raw = str(sub.get("CIK") or "").strip()
+                    if not filer_cik_raw:
+                        result.rows_skipped_bad_data += 1
+                        continue
+                    filer_cik = filer_cik_raw.zfill(10)
 
-                period_end = _parse_period_end(cover.get("REPORTCALENDARORQUARTER"))
-                # #1433 — reject a NULL or out-of-[1900,2100) period_end
-                # before it reaches the partitioned table. Mirrors the
-                # #1218 XBRL guard: a year-6016 / pre-1900 value would land
-                # in the DEFAULT partition and silently skew every
-                # period-bounded institutional rollup. A 13F-HR with no
-                # parseable cover period has nothing to rewash either, so
-                # this also keeps it out of the unresolved-CUSIP buffer.
-                if not period_end_within_bounds(period_end):
-                    result.rows_skipped_bad_data += 1
-                    continue
-                filed_at = _parse_filing_date(sub.get("FILING_DATE") or sub.get("DATE_FILED"))
+                    period_end = _parse_period_end(cover.get("REPORTCALENDARORQUARTER"))
+                    # #1433 — reject a NULL or out-of-[1900,2100) period_end
+                    # before it reaches the partitioned table. Mirrors the
+                    # #1218 XBRL guard: a year-6016 / pre-1900 value would land
+                    # in the DEFAULT partition and silently skew every
+                    # period-bounded institutional rollup. A 13F-HR with no
+                    # parseable cover period has nothing to rewash either, so
+                    # this also keeps it out of the unresolved-CUSIP buffer.
+                    if not period_end_within_bounds(period_end):
+                        result.rows_skipped_bad_data += 1
+                        continue
+                    filed_at = _parse_filing_date(sub.get("FILING_DATE") or sub.get("DATE_FILED"))
 
-                instrument_id = cusip_map.get(cusip)
-                if instrument_id is None:
-                    result.rows_skipped_unresolved_cusip += 1
-                    # PR-1a — record (cusip, filer, period) so the
-                    # PR-1b OpenFIGI sweep can rewash. period_end is
-                    # guaranteed in-window (non-None) by the #1433 guard
-                    # above, so the bulk-path index always has a period.
-                    unresolved_buffer.append((cusip, filer_cik, period_end))
-                    continue
+                    instrument_id = cusip_map.get(cusip)
+                    if instrument_id is None:
+                        result.rows_skipped_unresolved_cusip += 1
+                        # PR-1a — record (cusip, filer, period) so the
+                        # PR-1b OpenFIGI sweep can rewash. period_end is
+                        # guaranteed in-window (non-None) by the #1433 guard
+                        # above, so the bulk-path index always has a period.
+                        unresolved_buffer.append((cusip, filer_cik, period_end))
+                        # #1436 — bounded-chunk flush: break out to drain
+                        # this chunk (outside COPY mode) then resume.
+                        if len(unresolved_buffer) >= _UNRESOLVED_FLUSH_CHUNK:
+                            chunk_full = True
+                            break
+                        continue
 
-                # #1302 — capture the security's FIGI (12-char OpenFIGI id,
-                # new INFOTABLE column 2023-01-03) against the instrument it
-                # resolved to. Collected before the share/retention gates
-                # below: the FIGI<->instrument identity holds regardless of
-                # whether THIS holding row is a valid current position.
-                figi = (row.get("FIGI") or "").strip().upper()
-                if figi and _FIGI_RE.match(figi):
-                    figi_to_instrument.setdefault(figi, instrument_id)
+                    # #1302 — capture the security's FIGI (12-char OpenFIGI id,
+                    # new INFOTABLE column 2023-01-03) against the instrument it
+                    # resolved to. Collected before the share/retention gates
+                    # below: the FIGI<->instrument identity holds regardless of
+                    # whether THIS holding row is a valid current position.
+                    figi = (row.get("FIGI") or "").strip().upper()
+                    if figi and _FIGI_RE.match(figi):
+                        figi_to_instrument.setdefault(figi, instrument_id)
 
-                filer_name = (cover.get("FILINGMANAGER_NAME") or "").strip()
-                if not filer_name:
-                    # Schema requires NOT NULL filer_name; fall back to
-                    # the CIK to keep the row instead of dropping it.
-                    filer_name = f"CIK{filer_cik}"
+                    filer_name = (cover.get("FILINGMANAGER_NAME") or "").strip()
+                    if not filer_name:
+                        # Schema requires NOT NULL filer_name; fall back to
+                        # the CIK to keep the row instead of dropping it.
+                        filer_name = f"CIK{filer_cik}"
 
-                # period_end already validated in-window above (#1433); only
-                # filed_at remains to null-check here.
-                if filed_at is None:
-                    result.rows_skipped_bad_data += 1
-                    continue
+                    # period_end already validated in-window above (#1433); only
+                    # filed_at remains to null-check here.
+                    if filed_at is None:
+                        result.rows_skipped_bad_data += 1
+                        continue
 
-                # PR6 #1233 §4.5 — per-row retention gate. Bulk dataset
-                # archives can span 30+ years; the per-row check honours
-                # the calendar-quarter cap regardless of the archive's
-                # nominal coverage window.
-                if period_end < retention_cutoff:
-                    result.rows_skipped_retention += 1
-                    continue
+                    # PR6 #1233 §4.5 — per-row retention gate. Bulk dataset
+                    # archives can span 30+ years; the per-row check honours
+                    # the calendar-quarter cap regardless of the archive's
+                    # nominal coverage window.
+                    if period_end < retention_cutoff:
+                        result.rows_skipped_retention += 1
+                        continue
 
-                # SSHPRNAMT carries shares OR principal-amount depending on
-                # SSHPRNAMTTYPE (SH | PRN). PRN rows hold bond principal in
-                # dollars, NOT shares — must skip to avoid silent
-                # corruption (PR #1054 finding: 20k PRN rows in 2026Q1).
-                shprn_type = (row.get("SSHPRNAMTTYPE") or "").strip().upper()
-                if shprn_type and shprn_type != "SH":
-                    result.rows_skipped_bad_data += 1
-                    continue
-                shares = _parse_decimal(row.get("SSHPRNAMT"))
-                # #1433 — an SH-type 13F holding must carry a positive share
-                # count. NULL / 0 / negative SSHPRNAMT is malformed (the
-                # schema column is nullable, sql/114, so the guard lives
-                # here at parse) and would otherwise be summed into the
-                # institutional ownership rollup as a phantom position.
-                if shares is None or shares <= 0:
-                    result.rows_skipped_bad_data += 1
-                    continue
-                # VALUE column unit changed 2023-01-03 — pre-cutover it
-                # was reported in $thousands, post-cutover in $dollars.
-                # See _VALUE_DOLLARS_CUTOVER constant at module top.
-                # Discriminate on FILED_AT (when the filer reported), NOT
-                # period_end — a 2022Q4 restatement filed in March 2023
-                # reports in dollars even though period_end is pre-cutover.
-                value_raw = _parse_decimal(row.get("VALUE"))
-                if value_raw is None:
-                    market_value_usd = None
-                elif filed_at.date() >= _VALUE_DOLLARS_CUTOVER:
-                    market_value_usd = value_raw
-                else:
-                    market_value_usd = value_raw * Decimal("1000")
+                    # SSHPRNAMT carries shares OR principal-amount depending on
+                    # SSHPRNAMTTYPE (SH | PRN). PRN rows hold bond principal in
+                    # dollars, NOT shares — must skip to avoid silent
+                    # corruption (PR #1054 finding: 20k PRN rows in 2026Q1).
+                    shprn_type = (row.get("SSHPRNAMTTYPE") or "").strip().upper()
+                    if shprn_type and shprn_type != "SH":
+                        result.rows_skipped_bad_data += 1
+                        continue
+                    shares = _parse_decimal(row.get("SSHPRNAMT"))
+                    # #1433 — an SH-type 13F holding must carry a positive share
+                    # count. NULL / 0 / negative SSHPRNAMT is malformed (the
+                    # schema column is nullable, sql/114, so the guard lives
+                    # here at parse) and would otherwise be summed into the
+                    # institutional ownership rollup as a phantom position.
+                    if shares is None or shares <= 0:
+                        result.rows_skipped_bad_data += 1
+                        continue
+                    # VALUE column unit changed 2023-01-03 — pre-cutover it
+                    # was reported in $thousands, post-cutover in $dollars.
+                    # See _VALUE_DOLLARS_CUTOVER constant at module top.
+                    # Discriminate on FILED_AT (when the filer reported), NOT
+                    # period_end — a 2022Q4 restatement filed in March 2023
+                    # reports in dollars even though period_end is pre-cutover.
+                    value_raw = _parse_decimal(row.get("VALUE"))
+                    if value_raw is None:
+                        market_value_usd = None
+                    elif filed_at.date() >= _VALUE_DOLLARS_CUTOVER:
+                        market_value_usd = value_raw
+                    else:
+                        market_value_usd = value_raw * Decimal("1000")
 
-                voting_sole, voting_shared, voting_none = _read_voting_components(row)
-                exposure_kind = _map_putcall(row.get("PUTCALL"))
+                    voting_sole, voting_shared, voting_none = _read_voting_components(row)
+                    exposure_kind = _map_putcall(row.get("PUTCALL"))
 
-                accession_no_dashes = accession.replace("-", "")
-                source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
+                    accession_no_dashes = accession.replace("-", "")
+                    source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
 
-                copy.write_row(
-                    _build_copy_row(
-                        instrument_id=instrument_id,
-                        filer_cik=filer_cik,
-                        filer_name=filer_name,
-                        # Spec maps 13F filers to ``filer_type='INV'``
-                        # (investment manager) by default. The schema
-                        # CHECK accepts ETF/INV/INS/BD/OTHER. INV is
-                        # the right default for typical 13F-HR filers.
-                        filer_type="INV",
-                        # ``ownership_nature`` for 13F-HR: pass
-                        # ``'economic'`` for the full reported
-                        # position. Mapping pinned in
-                        # ``record_institution_observation`` docstring.
-                        ownership_nature="economic",
-                        source="13f",
-                        source_document_id=accession,
-                        source_accession=accession,
-                        source_field=None,
-                        source_url=source_url,
-                        filed_at=filed_at,
-                        period_start=None,
-                        period_end=period_end,
-                        ingest_run_id=ingest_run_id,
-                        shares=shares,
-                        market_value_usd=market_value_usd,
-                        voting_sole=voting_sole,
-                        voting_shared=voting_shared,
-                        voting_none=voting_none,
-                        exposure_kind=exposure_kind,
+                    copy.write_row(
+                        _build_copy_row(
+                            instrument_id=instrument_id,
+                            filer_cik=filer_cik,
+                            filer_name=filer_name,
+                            # Spec maps 13F filers to ``filer_type='INV'``
+                            # (investment manager) by default. The schema
+                            # CHECK accepts ETF/INV/INS/BD/OTHER. INV is
+                            # the right default for typical 13F-HR filers.
+                            filer_type="INV",
+                            # ``ownership_nature`` for 13F-HR: pass
+                            # ``'economic'`` for the full reported
+                            # position. Mapping pinned in
+                            # ``record_institution_observation`` docstring.
+                            ownership_nature="economic",
+                            source="13f",
+                            source_document_id=accession,
+                            source_accession=accession,
+                            source_field=None,
+                            source_url=source_url,
+                            filed_at=filed_at,
+                            period_start=None,
+                            period_end=period_end,
+                            ingest_run_id=ingest_run_id,
+                            shares=shares,
+                            market_value_usd=market_value_usd,
+                            voting_sole=voting_sole,
+                            voting_shared=voting_shared,
+                            voting_none=voting_none,
+                            exposure_kind=exposure_kind,
+                        )
                     )
-                )
-                copy_attempted += 1
-                result.touched_instrument_ids.add(instrument_id)
+                    copy_attempted += 1
+                    result.touched_instrument_ids.add(instrument_id)
 
-    # Flush accumulated unresolved CUSIPs after the COPY context
-    # closes (a COPY context exclusively owns the cursor so we cannot
-    # interleave normal statements; flushing post-stream is the
-    # simplest correct shape). #1295: a single COPY pass handles
-    # millions of triples — no per-chunk loop needed.
-    if unresolved_buffer:
-        _flush_unresolved_buffer(
-            conn,
-            buffer=unresolved_buffer,
-            source="bulk_13f_dataset",
-            cutoff=retention_cutoff,
-            result=result,
-        )
-        unresolved_buffer.clear()
+            # COPY context closed → connection is out of COPY mode. Flush
+            # this chunk of unresolved CUSIPs (#1436). A partial flush at
+            # the generator's end drains the remainder; the helper's
+            # aggregation is order-independent so chunked == single-batch.
+            if unresolved_buffer:
+                _flush_unresolved_buffer(
+                    conn,
+                    buffer=unresolved_buffer,
+                    source="bulk_13f_dataset",
+                    cutoff=retention_cutoff,
+                    result=result,
+                )
+                unresolved_buffer.clear()
+
+            if not chunk_full:
+                break
 
     # Drain staging into the partitioned observations table.
     #
