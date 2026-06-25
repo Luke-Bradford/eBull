@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     # dedicated fund-filer directory walk lands as a follow-up.
     sec_n_port_sweep_deadline_seconds: float = 6 * 60 * 60
 
+    # Number of concurrent per-filer ingest pipelines for the universe-wide
+    # SEC sweeps (13F #913 + N-PORT #917), all sharing one process-global SEC
+    # rate gate (#1274). The serial loop used ~5-10% of the 10 req/s budget;
+    # N pipelines saturate it — the gate, not the worker count, bounds the
+    # request rate (app/providers/rate_gate.py::InProcessFloorGate). Each
+    # worker opens its own DB connection, so this also caps concurrent
+    # job-pool conns. Clamped to >=1 by the concurrency driver.
+    sec_filer_ingest_concurrency: int = 8
+
     anthropic_api_key: str | None = None
 
     # OpenFIGI free fallback CUSIP→ticker resolver (#1233 PR-1b + SD-1).

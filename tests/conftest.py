@@ -53,6 +53,8 @@ from tests.fixtures.ebull_test_db import (  # noqa: E402, F401
     _run_id,  # noqa: E402
     build_template_if_stale,
     drop_worker_database,
+    test_database_url,  # noqa: E402 — #1274 redirect driver worker conns to test DB
+    test_db_available,  # noqa: E402
 )
 from tests.fixtures.ebull_test_db import (
     _worker_db_keepalive as _worker_db_keepalive,  # noqa: F401 — autouse; #1208 Phase 2 Rail 1
@@ -111,6 +113,25 @@ app.dependency_overrides[require_session_or_service_token] = _noop_auth
 @pytest.fixture(autouse=True)
 def _reassert_auth_bypass() -> None:
     app.dependency_overrides[require_session_or_service_token] = _noop_auth
+
+
+@pytest.fixture(autouse=True)
+def _filer_ingest_worker_conns_use_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1274 — the parallel filer-ingest driver opens its OWN per-worker
+    connections via ``connect_job()`` (psycopg conns are not thread-safe), and
+    ``connect_job`` reads ``settings.database_url`` = the operator's DEV DB.
+    ``ebull_test_conn`` does NOT redirect that global, so without this fixture a
+    test exercising ``ingest_all_active_filers`` / ``ingest_all_fund_filers``
+    would open worker conns against the dev DB — a wrong-DB correctness failure
+    AND a dev-DB write (the size tripwire is warn-only while the jobs daemon
+    holds the lock). Redirect ONLY the driver's ``connect_job`` reference
+    (narrow: no other module imports it from there) to the per-worker test DB.
+    No-op when no test DB is available (pure-logic runs)."""
+    if not test_db_available():
+        return
+    import app.services.sec_filer_concurrency as _sfc
+
+    monkeypatch.setattr(_sfc, "connect_job", lambda: psycopg.connect(test_database_url()))
 
 
 # #1208 Sub 6 — session-wide tripwire on dev DB growth.

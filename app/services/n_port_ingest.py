@@ -62,6 +62,8 @@ from uuid import uuid4
 
 import psycopg
 
+from app.config import settings
+from app.jobs.job_connection import job_statement_timeout_ms
 from app.services.bootstrap_state import (
     resolve_progress_context,
     set_stage_processed,
@@ -71,6 +73,11 @@ from app.services.ownership_observations import (
     record_fund_observation,
     refresh_funds_current,
     upsert_sec_fund_series,
+)
+from app.services.sec_filer_concurrency import (
+    FilerWorkResult,
+    drain_filers_concurrently,
+    make_filer_runner,
 )
 
 logger = logging.getLogger(__name__)
@@ -787,15 +794,26 @@ def ingest_all_fund_filers(
     deadline_seconds: float | None = None,
     source_label: str = "sec_n_port_ingest",
     min_period_of_report: date | None = None,
+    concurrency: int | None = None,
 ) -> list[IngestSummary]:
     """Walk a list of fund-filer CIKs and ingest each one's pending
     NPORT-Ps. Per-filer crashes isolated; a soft deadline allows the
     sweep to be interrupted cleanly with the next run resuming the
     tail (already-attempted accessions tombstoned in
-    ``n_port_ingest_log``)."""
+    ``n_port_ingest_log``).
+
+    ``concurrency`` (#1274) runs N per-filer pipelines in parallel,
+    each on its own DB connection, sharing the one process-global SEC
+    rate gate; ``None`` uses ``settings.sec_filer_ingest_concurrency``
+    (default 8). ``conn`` owns only the data_ingestion_runs audit row,
+    not per-filer writes. N-PORT has no cooperative-cancel signal (the
+    13F bootstrap stage does); only the soft deadline interrupts."""
     if not ciks:
         logger.info("n_port ingest: no fund-filer CIKs to ingest; nothing to do")
         return []
+    # Order-preserving de-dupe at entry so len(ciks) matches the set the driver
+    # processes (#1274 Codex ckpt-2 LOW); the driver de-dupes again defensively.
+    ciks = list(dict.fromkeys(ciks))
 
     deadline_ts: float | None
     if deadline_seconds is None:
@@ -835,52 +853,75 @@ def ingest_all_fund_filers(
     _emit_every_n = max(1, len(ciks) // 100)
     _last_progress_emit = time.monotonic()
 
-    try:
-        for cik in ciks:
-            if deadline_ts is not None and time.monotonic() >= deadline_ts:
-                deadline_hit = True
-                logger.info(
-                    "n_port ingest: deadline reached after %d/%d filers",
-                    filers_attempted,
-                    len(ciks),
-                )
-                break
-            filers_attempted += 1
-            try:
-                summary = ingest_fund_n_port(
-                    conn,
-                    sec,
-                    filer_cik=cik,
-                    min_period_of_report=min_period_of_report,
-                )
-            except Exception as exc:  # noqa: BLE001 — per-filer crash isolation
-                logger.exception("n_port ingest: filer %s raised; continuing", cik)
-                crash_error = f"{cik}: {exc}"
-                conn.rollback()
-                continue
-            conn.commit()
-            summaries.append(summary)
-            rows_upserted += summary.holdings_inserted
-            rows_skipped += (
-                summary.holdings_skipped_no_cusip
-                + summary.holdings_skipped_non_equity
-                + summary.holdings_skipped_short
-                + summary.holdings_skipped_non_share_units
-                + summary.holdings_skipped_zero_shares
+    # #1274 — fan per-filer pipelines across a bounded thread pool sharing the
+    # one process-global SEC rate gate. Each worker opens its own connection;
+    # ``conn`` here owns only the data_ingestion_runs audit row. N-PORT has no
+    # cooperative-cancel signal (``should_cancel=None``); only the soft
+    # deadline interrupts, after which the in-flight set drains and the next
+    # monthly sweep resumes the tail via ``n_port_ingest_log`` tombstones.
+    def _ingest_one(worker_conn: psycopg.Connection[tuple], filer_cik: str) -> IngestSummary:
+        return ingest_fund_n_port(
+            worker_conn,
+            sec,
+            filer_cik=filer_cik,
+            min_period_of_report=min_period_of_report,
+        )
+
+    run_one = make_filer_runner(_ingest_one, statement_timeout_ms=job_statement_timeout_ms.get())
+
+    def _accumulate(result: FilerWorkResult[IngestSummary]) -> None:
+        nonlocal crash_error, rows_upserted, rows_skipped, accession_failures
+        nonlocal first_accession_error
+        if result.summary is None:
+            if crash_error is None:
+                crash_error = result.error
+            return
+        summary = result.summary
+        summaries.append(summary)
+        rows_upserted += summary.holdings_inserted
+        rows_skipped += (
+            summary.holdings_skipped_no_cusip
+            + summary.holdings_skipped_non_equity
+            + summary.holdings_skipped_short
+            + summary.holdings_skipped_non_share_units
+            + summary.holdings_skipped_zero_shares
+        )
+        accession_failures += summary.accessions_failed
+        if summary.first_error and first_accession_error is None:
+            first_accession_error = f"{result.cik} {summary.first_error}"
+
+    def _emit_progress(completed: int) -> None:
+        # #1273 PR2 — cadenced operator-progress emit (every max(1, len/100)
+        # completions OR every 30s; driver ticks ``completed`` on heartbeats).
+        nonlocal _last_progress_emit
+        if progress_ctx is None:
+            return
+        _now = time.monotonic()
+        if completed % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+            set_stage_processed(
+                run_id=progress_ctx.run_id,
+                stage_key=progress_ctx.stage_key,
+                processed_count=completed,
             )
-            accession_failures += summary.accessions_failed
-            if summary.first_error and first_accession_error is None:
-                first_accession_error = f"{cik} {summary.first_error}"
-            # #1273 PR2 — cadenced operator-progress emit.
-            if progress_ctx is not None:
-                _now = time.monotonic()
-                if filers_attempted % _emit_every_n == 0 or _now - _last_progress_emit > 30:
-                    set_stage_processed(
-                        run_id=progress_ctx.run_id,
-                        stage_key=progress_ctx.stage_key,
-                        processed_count=filers_attempted,
-                    )
-                    _last_progress_emit = _now
+            _last_progress_emit = _now
+
+    try:
+        outcome = drain_filers_concurrently(
+            ciks,
+            run_one=run_one,
+            concurrency=(settings.sec_filer_ingest_concurrency if concurrency is None else concurrency),
+            deadline_ts=deadline_ts,
+            on_result=_accumulate,
+            on_progress=_emit_progress,
+        )
+        deadline_hit = outcome.deadline_hit
+        filers_attempted = outcome.completed
+        if deadline_hit:
+            logger.info(
+                "n_port ingest: deadline reached; %d/%d filers completed, tail resumes next sweep",
+                outcome.completed,
+                len(ciks),
+            )
     finally:
         # Status precedence mirrors institutional_holdings.ingest_all_active_filers:
         #   deadline beats crash-only; crash-only with summaries beats failed.

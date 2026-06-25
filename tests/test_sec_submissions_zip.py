@@ -122,3 +122,32 @@ class TestZipBackedArchiveFetcher:
         fetcher = ZipBackedArchiveFetcher(zf, fallback=fallback)
         assert fetcher.fetch_document_text(_DOC) == "<xml/>"
         fallback.fetch_document_text.assert_called_once_with(_DOC)
+
+
+class TestConcurrentReadsAreSerialised:
+    """#1274 — the N-PORT bootstrap sweep fans per-filer pipelines across a
+    thread pool that shares ONE fetcher. ``zipfile.ZipFile.open`` shares the
+    underlying file object's seek position, so concurrent reads on one handle
+    corrupt each other without the internal lock."""
+
+    def test_many_concurrent_primary_reads_return_uncorrupted_entries(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        # 50 distinct CIK entries, each with a unique body keyed to its CIK.
+        ciks = [f"{i:010d}" for i in range(1, 51)]
+        zf = _zip_with({f"CIK{cik}.json": f'{{"cik":"{cik}"}}'.encode() for cik in ciks})
+        fallback = MagicMock()
+        fallback.fetch_document_text.return_value = None  # absence would be a bug here
+        fetcher = ZipBackedArchiveFetcher(zf, fallback=fallback)
+
+        urls = [f"https://data.sec.gov/submissions/CIK{cik}.json" for cik in ciks] * 4
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(fetcher.fetch_document_text, urls))
+
+        # Every read returns exactly its own CIK's body — no cross-thread
+        # corruption, no fallthrough to the fallback.
+        for url, body in zip(urls, results, strict=True):
+            cik = url.removeprefix("https://data.sec.gov/submissions/CIK").removesuffix(".json")
+            assert body == f'{{"cik":"{cik}"}}'
+        fallback.fetch_document_text.assert_not_called()

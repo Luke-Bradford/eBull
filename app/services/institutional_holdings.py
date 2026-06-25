@@ -45,6 +45,8 @@ from uuid import uuid4
 import psycopg
 import psycopg.rows
 
+from app.config import settings
+from app.jobs.job_connection import job_statement_timeout_ms
 from app.providers.implementations.sec_13f import (
     ThirteenFFilerInfo,
     ThirteenFHolding,
@@ -62,6 +64,11 @@ from app.services.ownership_observations import (
     record_institution_observation,
     refresh_institutions_current_batch,
     resolve_filer_cik_or_raise,
+)
+from app.services.sec_filer_concurrency import (
+    FilerWorkResult,
+    drain_filers_concurrently,
+    make_filer_runner,
 )
 from app.services.thirteen_f_normalise import (
     merge_resolved_by_instrument,
@@ -1126,6 +1133,7 @@ def ingest_all_active_filers(
     deadline_seconds: float | None = None,
     source_label: str = "sec_edgar_13f",
     min_period_of_report: date | None = None,
+    concurrency: int | None = None,
 ) -> list[IngestSummary]:
     """Walk a list of filer CIKs and ingest each filer's pending 13F-HRs.
 
@@ -1155,9 +1163,23 @@ def ingest_all_active_filers(
     13F filings whose primary_doc/infotable XML structure didn't
     exist yet. ``None`` keeps the previous full-history behaviour
     for the standalone weekly cron.
+
+    ``concurrency`` (#1274) is the number of per-filer pipelines run
+    in parallel, each on its own DB connection, all sharing the one
+    process-global SEC rate gate. ``None`` uses
+    ``settings.sec_filer_ingest_concurrency`` (default 8). The legacy
+    serial loop used ~5-10% of the 10 req/s budget; N pipelines
+    saturate it. ``conn`` is used only for the audit row, NOT for
+    per-filer writes (workers open their own).
     """
     if ciks is None:
         ciks = _list_active_filer_seeds(conn)
+    # Order-preserving de-dupe at entry so len(ciks) (audit instrument_count,
+    # stage target, progress denominator, deadline/cancel messages) matches the
+    # set the driver actually processes (#1274 Codex ckpt-2 LOW). Production
+    # lists are already distinct (institutional_filers.cik is UNIQUE); this
+    # keeps a hypothetical duplicate-bearing caller internally consistent.
+    ciks = list(dict.fromkeys(ciks))
     if not ciks:
         logger.info("13F ingest: no filer CIKs to ingest; nothing to do")
         return []
@@ -1202,79 +1224,97 @@ def ingest_all_active_filers(
     deadline_hit = False
     cancelled_by_operator = False
     filers_attempted = 0
-    # PR3d #1064 follow-up — poll the bootstrap cancel signal between
-    # filers. The 13F-HR universe is ~11k filers @ ~30s each; a
-    # cooperative cancel from the operator's modal lands within one
-    # filer-iteration (~30s) instead of waiting on the soft 6h deadline.
-    # Outside a bootstrap dispatch the contextvar is unset and the
-    # helper short-circuits to False, so the standalone weekly sweep
-    # and operator manual-trigger paths are unaffected.
+    # #1274 — fan the per-filer pipelines across a bounded thread pool that
+    # shares ONE process-global SEC rate gate (the gate, not the worker
+    # count, bounds the request rate). Each worker opens its OWN connection;
+    # the orchestrator ``conn`` here owns only the data_ingestion_runs audit
+    # row (start/finish), never a per-filer write.
+    #
+    # PR3d #1064 — cooperative cancel: the driver polls
+    # ``bootstrap_cancel_requested`` between submissions and on a ~5s
+    # heartbeat, so an operator cancel halts NEW filer dispatch within
+    # seconds while the in-flight set drains. Outside a bootstrap dispatch
+    # the contextvar is unset and the poll short-circuits to False, so the
+    # standalone weekly sweep and manual-trigger paths are unaffected. Cancel
+    # ranks above deadline (driver precedence) so the audit trail names the
+    # operator action rather than a clock that never actually expired.
     from app.services.processes.bootstrap_cancel_signal import (
         active_bootstrap_stage_key,
         bootstrap_cancel_requested,
     )
 
+    def _ingest_one(worker_conn: psycopg.Connection[Any], filer_cik: str) -> IngestSummary:
+        return ingest_filer_13f(
+            worker_conn,
+            sec,
+            filer_cik=filer_cik,
+            ingestion_run_id=run_id,
+            min_period_of_report=min_period_of_report,
+        )
+
+    run_one = make_filer_runner(_ingest_one, statement_timeout_ms=job_statement_timeout_ms.get())
+
+    def _accumulate(result: FilerWorkResult[IngestSummary]) -> None:
+        nonlocal crash_error, rows_upserted, rows_skipped, accession_failures
+        nonlocal first_accession_error
+        if result.summary is None:
+            # Per-filer crash — the worker rolled back its own conn; the batch
+            # continues. Surface the first crash as the executive summary.
+            if crash_error is None:
+                crash_error = result.error
+            return
+        summary = result.summary
+        summaries.append(summary)
+        rows_upserted += summary.holdings_inserted
+        rows_skipped += summary.holdings_skipped_no_cusip
+        accession_failures += summary.accessions_failed
+        if summary.first_error and first_accession_error is None:
+            first_accession_error = f"{result.cik} {summary.first_error}"
+
+    def _emit_progress(completed: int) -> None:
+        # #1273 PR2 — cadenced operator-progress emit. Hybrid rule: every
+        # max(1, len/100) completions OR every 30s wall-clock. The driver
+        # ticks ``completed`` on every wake-up (completion OR heartbeat), so
+        # the 30s heartbeat still fires during a long in-flight batch.
+        nonlocal _last_progress_emit
+        if progress_ctx is None:
+            return
+        _now = time.monotonic()
+        if completed % _emit_every_n == 0 or _now - _last_progress_emit > 30:
+            set_stage_processed(
+                run_id=progress_ctx.run_id,
+                stage_key=progress_ctx.stage_key,
+                processed_count=completed,
+            )
+            _last_progress_emit = _now
+
     try:
-        for cik in ciks:
-            # Cancel ranks above deadline: the operator-cancel branch
-            # raises BootstrapStageCancelled to flip the bootstrap_stage
-            # to ``cancelled``, while deadline returns normally
-            # (status='success' on bootstrap_stage, partial in
-            # data_ingestion_runs). If both signals fire on the same
-            # iteration, taking the deadline branch first would silently
-            # treat the cancel as "success — incremental progress" and
-            # the bootstrap row would never reach ``cancelled``. Codex
-            # pre-push round 1.
-            if bootstrap_cancel_requested():
-                cancelled_by_operator = True
-                logger.info(
-                    "13F ingest: cancel signal observed after %d/%d filers; bookkeeping then raising",
-                    filers_attempted,
-                    len(ciks),
-                )
-                break
-            if deadline_ts is not None and time.monotonic() >= deadline_ts:
-                deadline_hit = True
-                logger.info(
-                    "13F ingest: deadline reached after %d/%d filers; remaining will be picked up by the next sweep",
-                    filers_attempted,
-                    len(ciks),
-                )
-                break
-            filers_attempted += 1
-            try:
-                summary = ingest_filer_13f(
-                    conn,
-                    sec,
-                    filer_cik=cik,
-                    ingestion_run_id=run_id,
-                    min_period_of_report=min_period_of_report,
-                )
-            except Exception as exc:  # noqa: BLE001 — per-filer crash must not abort the batch
-                logger.exception("13F ingest: filer %s raised; continuing batch", cik)
-                crash_error = f"{cik}: {exc}"
-                conn.rollback()
-                continue
-            conn.commit()
-            summaries.append(summary)
-            rows_upserted += summary.holdings_inserted
-            rows_skipped += summary.holdings_skipped_no_cusip
-            accession_failures += summary.accessions_failed
-            if summary.first_error and first_accession_error is None:
-                first_accession_error = f"{cik} {summary.first_error}"
-            # #1273 PR2 — cadenced operator-progress emit. Hybrid
-            # rule: every max(1, len/100) iterations OR every 30s
-            # wall-clock. processed_count is the running attempt count
-            # (mirrors the deadline / cancel log messages above).
-            if progress_ctx is not None:
-                _now = time.monotonic()
-                if filers_attempted % _emit_every_n == 0 or _now - _last_progress_emit > 30:
-                    set_stage_processed(
-                        run_id=progress_ctx.run_id,
-                        stage_key=progress_ctx.stage_key,
-                        processed_count=filers_attempted,
-                    )
-                    _last_progress_emit = _now
+        outcome = drain_filers_concurrently(
+            ciks,
+            run_one=run_one,
+            concurrency=(settings.sec_filer_ingest_concurrency if concurrency is None else concurrency),
+            deadline_ts=deadline_ts,
+            on_result=_accumulate,
+            should_cancel=bootstrap_cancel_requested,
+            on_progress=_emit_progress,
+        )
+        cancelled_by_operator = outcome.cancelled
+        deadline_hit = outcome.deadline_hit
+        # Every submitted filer is drained to completion before the driver
+        # returns, so ``completed`` is the count actually processed.
+        filers_attempted = outcome.completed
+        if cancelled_by_operator:
+            logger.info(
+                "13F ingest: cancel observed; %d/%d filers completed before drain; raising after bookkeeping",
+                outcome.completed,
+                len(ciks),
+            )
+        elif deadline_hit:
+            logger.info(
+                "13F ingest: deadline reached; %d/%d filers completed, tail resumes next sweep",
+                outcome.completed,
+                len(ciks),
+            )
     finally:
         # Status precedence:
         #   * deadline hit (work was interrupted, partial by definition)
@@ -1608,24 +1648,35 @@ def _ingest_single_accession(
     # case of two CUSIPs resolving to the same instrument.
     holdings = normalise_13f_holdings(holdings, filed_at=filed_at)
     resolved: list[tuple[int, ThirteenFHolding]] = []
+    unresolved: list[ThirteenFHolding] = []
     for holding in holdings:
         instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
         if instrument_id is None:
             skipped_no_cusip += 1
-            # Track the unresolved CUSIP so the resolver service
-            # (#781) can fuzzy-match against ``instruments.
-            # company_name`` later without re-fetching the SEC
-            # archive. Idempotent — re-encountering the same CUSIP
-            # increments ``observation_count`` and refreshes the
-            # latest filer-supplied issuer name.
-            _record_unresolved_cusip(
-                conn,
-                cusip=holding.cusip,
-                name_of_issuer=holding.name_of_issuer,
-                accession_number=ref.accession_number,
-            )
+            unresolved.append(holding)
             continue
         resolved.append((instrument_id, holding))
+
+    # Track unresolved CUSIPs so the resolver service (#781) can fuzzy-match
+    # against ``instruments.company_name`` later without re-fetching the SEC
+    # archive. Idempotent — re-encountering a CUSIP increments
+    # ``observation_count`` and refreshes the latest filer-supplied name.
+    #
+    # #1274 — upsert in a deterministic GLOBAL order (sorted by the stored
+    # cusip key) so concurrent filer pipelines acquire the shared
+    # ``unresolved_13f_cusips (cusip)`` row locks in the SAME order and cannot
+    # deadlock. Many institutions report the same unresolved CUSIPs; without a
+    # consistent order two parallel transactions insert overlapping keys in
+    # opposite orders and Postgres aborts one as a deadlock victim (caught in
+    # #1274 dev-verify: 38/60 filers deadlocked at concurrency=8). The
+    # ``make_filer_runner`` deadlock-retry is the belt to this braces.
+    for holding in sorted(unresolved, key=lambda h: h.cusip.strip().upper()):
+        _record_unresolved_cusip(
+            conn,
+            cusip=holding.cusip,
+            name_of_issuer=holding.name_of_issuer,
+            accession_number=ref.accession_number,
+        )
 
     resolved_holdings: list[tuple[int, ThirteenFHolding]] = merge_resolved_by_instrument(resolved)
     for instrument_id, holding in resolved_holdings:

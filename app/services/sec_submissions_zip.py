@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import zipfile
 from typing import Protocol
 
@@ -88,6 +89,15 @@ class ZipBackedArchiveFetcher:
     def __init__(self, zf: zipfile.ZipFile, *, fallback: _DocFetcher) -> None:
         self._zf = zf
         self._fallback = fallback
+        # The N-PORT bootstrap sweep (#1274) fans per-filer pipelines across a
+        # thread pool that shares this one fetcher. ``zipfile.ZipFile.open``
+        # shares the underlying file object's seek position, so concurrent
+        # reads on one handle corrupt each other — serialise the local zip
+        # read. The lock guards ONLY ``read_zip_entry``; the decode and HTTP
+        # fallback delegation stay outside it (the SEC rate gate already
+        # coordinates HTTP concurrency), and the zip read is a tiny fraction of
+        # per-filer wall-clock, so this barely serialises the pipeline.
+        self._read_lock = threading.Lock()
 
     def fetch_document_text(self, absolute_url: str) -> str | None:
         cik = match_primary_submissions_cik(absolute_url)
@@ -96,7 +106,8 @@ class ZipBackedArchiveFetcher:
             return self._fallback.fetch_document_text(absolute_url)
         entry_name = f"CIK{cik}.json"
         try:
-            data = read_zip_entry(self._zf, entry_name)
+            with self._read_lock:
+                data = read_zip_entry(self._zf, entry_name)
         except (zipfile.BadZipFile, OSError) as exc:
             logger.warning(
                 "submissions-zip: entry %s unreadable (%s) — delegating to HTTP",
