@@ -61,12 +61,17 @@ Lane = Literal[
     "db_ownership_inst",
     "db_ownership_insider",
     "db_ownership_funds",
+    "openfigi",
 ]
 """Row-shape Literal for ``bootstrap_stages.lane`` reads. Mirrors
 ``app/jobs/sources.py::Lane`` plus the legacy ``"sec"`` catch-all
 preserved for pre-#1020 rows. New family lanes added by #1141 /
 Task E of #1136 audit (see
-``docs/superpowers/specs/2026-05-13-db-lane-family-split.md``)."""
+``docs/superpowers/specs/2026-05-13-db-lane-family-split.md``).
+``"openfigi"`` added by #1233 PR-1b (S13 CUSIP resolver sweep lane) —
+mirrored here from ``sources.py::Lane`` + ``LaneApi`` + sql/165; the
+#1486 guard (``tests/test_bootstrap_lane_consistency.py``) keeps this
+Literal a superset of every writable bootstrap-stage lane."""
 
 
 class BootstrapAlreadyRunning(RuntimeError):
