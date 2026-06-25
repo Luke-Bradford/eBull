@@ -1484,8 +1484,8 @@ eBull doesn't keep every historical filing forever. Each source has a backfill h
 | 10-K | last 3 annual | atom + daily-index | 3 filings |
 | 10-Q | last 8 quarterly | atom + daily-index | 8 filings |
 | FINRA short interest | last 2 years | bi-monthly per FINRA cadence | ~48 bi-monthly rows |
-| Form 144 | rolling 90 days (effective ≤ 90d post-filing) | atom | ephemeral |
-| SC 13E | last 2 years | atom + daily-index | rare event filings |
+
+> **Coverage scope (#1304):** Form 144 + SC 13E are **metadata-only** `filing_events` (`SEC_METADATA_ONLY` in [app/services/filings.py](../../../app/services/filings.py)) — no `ManifestSource` / parser / observation table, so they are deliberately off this structured-ingest table. No decision-path consumer reads insider sell-intent (not even Form 4's *executed* sells). Full source-rule rationale + re-open condition: [`sec-edgar.md` §11.2](../data-sources/sec-edgar.md) "Coverage scope".
 
 ### 13.A Backfill horizon enforcement
 
