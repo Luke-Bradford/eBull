@@ -878,7 +878,13 @@ def _make_fake_conn(
 
 
 class TestComputeScore:
-    def test_full_fixture_produces_valid_result(self) -> None:
+    def test_full_fixture_produces_valid_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # compute_score reads wall-clock via scoring._utcnow(); pin it to
+        # the fixture's anchor so thesis-age math is deterministic. Without
+        # this the _RECENT (=_NOW-10d) thesis crosses the 90-day stale
+        # threshold once real time passes _NOW+80d, flipping penalties to a
+        # one-item list (date-bomb #1720).
+        monkeypatch.setattr("app.services.scoring._utcnow", lambda: _NOW)
         conn = _make_fake_conn(
             fund_rows=[
                 _fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0),
