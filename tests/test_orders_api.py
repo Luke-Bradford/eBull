@@ -235,7 +235,7 @@ class TestPlaceOrder:
             json={"instrument_id": 999, "action": "BUY", "amount": 500},
         )
         assert resp.status_code == 422
-        assert "no quote" in resp.json()["detail"].lower()
+        assert "no usable quote" in resp.json()["detail"].lower()
 
     def test_units_buy_rejects_when_no_quote(self) -> None:
         """Units-based BUY with no quote also fails closed (422)."""
@@ -246,23 +246,54 @@ class TestPlaceOrder:
             json={"instrument_id": 999, "action": "BUY", "units": 10},
         )
         assert resp.status_code == 422
-        assert "no quote" in resp.json()["detail"].lower()
+        assert "no usable quote" in resp.json()["detail"].lower()
 
     def test_buy_rejects_when_quote_last_is_zero(self) -> None:
-        """#1439: a quote row with last=0.00 is not a usable mark.
+        """#1439: a quote row with last=0.00 AND no book is not a usable mark.
 
         eToro persists last=0.00 for instruments with no recent trade.
         Treating 0 as a price filled the order at 0 (free holdings).
-        It must fail closed exactly like a missing quote (422).
+        With bid/ask also absent there is no usable side — fail closed
+        exactly like a missing quote (422). (Contrast #1465: a 0.00 last
+        WITH a positive ask now fills at ask — see test below.)
         """
-        zero_quote = [{"last": 0.0}]
+        zero_quote = [{"last": 0.0, "bid": 0.0, "ask": 0.0}]
         _with_conn([_KILL_SWITCH_OFF, zero_quote])
         resp = client.post(
             "/portfolio/orders",
             json={"instrument_id": 999, "action": "BUY", "units": 10},
         )
         assert resp.status_code == 422
-        assert "no quote" in resp.json()["detail"].lower()
+        assert "no usable quote" in resp.json()["detail"].lower()
+
+    def test_buy_fills_at_ask_when_last_zero_but_book_positive(self) -> None:
+        """#1465: a 0.00 last with a valid two-sided book fills at ask
+        (parity with the recommendation path), not a spurious 422."""
+        zero_last_book = [{"last": 0.0, "bid": 99.0, "ask": 101.0}]
+        order_row = [{"order_id": 43}]
+        fill_row = [{"fill_id": 8}]
+        _with_conn([_KILL_SWITCH_OFF, zero_last_book, order_row, fill_row])
+        resp = client.post(
+            "/portfolio/orders",
+            json={"instrument_id": 1, "action": "BUY", "units": 10},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "filled"
+        assert body["filled_price"] == 101.0  # ask, not last(=0)
+
+    def test_buy_fills_at_ask_over_last_when_both_positive(self) -> None:
+        """#1465: BUY crosses the spread at ask even when last is valid."""
+        book = [{"last": 100.0, "bid": 99.0, "ask": 101.0}]
+        order_row = [{"order_id": 44}]
+        fill_row = [{"fill_id": 9}]
+        _with_conn([_KILL_SWITCH_OFF, book, order_row, fill_row])
+        resp = client.post(
+            "/portfolio/orders",
+            json={"instrument_id": 1, "action": "BUY", "units": 10},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["filled_price"] == 101.0  # ask, not last
 
     def test_buy_fill_writes_to_broker_positions(self) -> None:
         """Verify that a BUY fill includes an INSERT into broker_positions."""
@@ -368,10 +399,12 @@ class TestClosePosition:
         assert body["filled_price"] == 150.0  # fallback to open_rate
 
     def test_demo_close_falls_back_to_open_rate_when_quote_last_is_zero(self) -> None:
-        """#1439: a quote row with last=0.00 is not a usable mark — the
-        close must fall back to open_rate, not fill the EXIT at 0."""
+        """#1439: a quote row with last=0.00 AND no book is not a usable
+        mark — the close must fall back to open_rate, not fill at 0.
+        (Contrast #1465: a 0.00 last WITH a positive bid fills at bid —
+        see test below.)"""
         pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
-        zero_quote = [{"last": 0.0}]
+        zero_quote = [{"last": 0.0, "bid": 0.0, "ask": 0.0}]
         order_row = [{"order_id": 81}]
         fill_row = [{"fill_id": 19}]
         locked_row = [(10.0,)]
@@ -382,6 +415,21 @@ class TestClosePosition:
         assert resp.status_code == 200
         body = resp.json()
         assert body["filled_price"] == 150.0  # fallback to open_rate, not 0
+
+    def test_demo_close_fills_at_bid_when_last_zero_but_book_positive(self) -> None:
+        """#1465: a 0.00 last with a valid bid fills the EXIT at bid
+        (parity with the recommendation path), not open_rate."""
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        zero_last_book = [{"last": 0.0, "bid": 158.0, "ask": 162.0}]
+        order_row = [{"order_id": 82}]
+        fill_row = [{"fill_id": 20}]
+        locked_row = [(10.0,)]
+        _with_conn([_KILL_SWITCH_OFF, pos_row, zero_last_book, order_row, fill_row, locked_row])
+
+        resp = client.post("/portfolio/positions/500/close")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["filled_price"] == 158.0  # bid, not open_rate(=150) or last(=0)
 
     def test_demo_close_fails_closed_when_quote_and_open_rate_non_positive(self) -> None:
         """#1439: when both the quote (last=0) and open_rate (0) are

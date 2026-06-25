@@ -33,7 +33,7 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.providers.broker import BrokerOrderResult
 from app.services.ops_monitor import get_kill_switch_status
-from app.services.quote_marks import positive_decimal_or_none
+from app.services.quote_marks import directional_fill_price, positive_decimal_or_none
 from app.services.runtime_config import get_runtime_config
 from app.services.trade_events import enqueue_post_trade_sync
 
@@ -136,25 +136,25 @@ def _synthetic_fill(
     )
 
 
-def _load_latest_quote_price(
+def _load_quote_for_execution(
     conn: psycopg.Connection[Any],
     instrument_id: int,
-) -> Decimal | None:
-    """Return the latest strictly-positive quote last-price, or None.
+) -> dict[str, Any] | None:
+    """Load the latest quote's last/bid/ask for directional fill pricing.
 
-    A last=0.00 row (eToro's no-recent-trade marker) is not a usable mark
-    (#1439) — return None so demo orders fail closed / fall back to open_rate
-    rather than filling at 0.
+    Mirrors ``order_client._load_quote_for_execution`` so the manual order
+    route prices fills with the same book sides as the recommendation path
+    (#1465). The strictly-positive contract (a 0.00 side is not a usable
+    mark, #1439) is applied by ``directional_fill_price`` at the call site.
+    Returns ``None`` when no quote row exists.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            "SELECT last FROM quotes WHERE instrument_id = %(iid)s ORDER BY quoted_at DESC LIMIT 1",
+            "SELECT last, bid, ask FROM quotes WHERE instrument_id = %(iid)s ORDER BY quoted_at DESC LIMIT 1",
             {"iid": instrument_id},
         )
         row = cur.fetchone()
-    if row is None:
-        return None
-    return positive_decimal_or_none(row["last"])
+    return dict(row) if row is not None else None
 
 
 def _persist_order_and_fill(
@@ -536,15 +536,23 @@ def place_order(
     # Demo mode: synthetic fill
     amount_d = Decimal(str(body.amount)) if body.amount is not None else None
     units_d = Decimal(str(body.units)) if body.units is not None else None
-    quote_price = _load_latest_quote_price(conn, body.instrument_id)
+    quote = _load_quote_for_execution(conn, body.instrument_id)
+    # Directional pricing (#1465): BUY/ADD fills at ask, falling back to
+    # last. A 0.00 last with a valid two-sided book now prices at ask
+    # instead of rejecting — parity with the recommendation path.
+    quote_price = (
+        directional_fill_price(body.action, quote.get("last"), quote.get("bid"), quote.get("ask"))
+        if quote is not None
+        else None
+    )
 
-    # Fail closed: demo orders need a usable quote to set a fill price.
-    # Without a quote, amount-based orders can't compute units and
+    # Fail closed: demo orders need a usable price to fill. Without any
+    # positive book side, amount-based orders can't compute units and
     # units-based orders would fill at price=0 (creating free holdings).
     if quote_price is None:
         raise HTTPException(
             status_code=422,
-            detail=f"No quote available for instrument {body.instrument_id} — cannot fill without a price.",
+            detail=f"No usable quote for instrument {body.instrument_id} — cannot fill without a price.",
         )
 
     broker_result = _synthetic_fill(
@@ -615,11 +623,19 @@ def close_position(
                 detail=f"units_to_deduct ({close_units}) exceeds position units ({position_units})",
             )
 
-    # Use current quote for realistic P&L; fall back to open_rate if
-    # unavailable. Both are floored to strictly-positive (#1439): a 0.00
-    # quote OR a 0/garbage open_rate must not price the EXIT at 0 — fail
-    # closed so _persist_order_and_fill never books a zero-price sale.
-    quote_price = _load_latest_quote_price(conn, instrument_id)
+    # Use the current quote for realistic P&L; fall back to open_rate if
+    # unavailable. Directional pricing (#1465): EXIT fills at bid, falling
+    # back to last. Every candidate is floored to strictly-positive (#1439):
+    # a 0.00 book side OR a 0/garbage open_rate must not price the EXIT at
+    # 0 — fail closed so _persist_order_and_fill never books a zero-price
+    # sale. A 0.00 last with a valid bid now fills at bid instead of
+    # falling back to cost basis — parity with the recommendation path.
+    quote = _load_quote_for_execution(conn, instrument_id)
+    quote_price = (
+        directional_fill_price("EXIT", quote.get("last"), quote.get("bid"), quote.get("ask"))
+        if quote is not None
+        else None
+    )
     fill_price = quote_price if quote_price is not None else positive_decimal_or_none(pos_row["open_rate"])
     if fill_price is None:
         raise HTTPException(

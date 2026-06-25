@@ -33,7 +33,7 @@ import psycopg.rows
 from psycopg.types.json import Jsonb
 
 from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
-from app.services.quote_marks import positive_decimal_or_none
+from app.services.quote_marks import directional_fill_price, positive_decimal_or_none
 from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import get_runtime_config
 from app.services.trade_events import enqueue_post_trade_sync
@@ -234,15 +234,11 @@ def _synthetic_fill(
     """
     # Determine fill price: BUY at ask, EXIT at bid, fallback to last.
     # A non-positive book side / last is treated as missing (#1439): a 0.00
-    # ask must not override a valid last and price the fill at 0.
-    if action in ("BUY", "ADD") and ask is not None and ask > 0:
-        price = ask
-    elif action == "EXIT" and bid is not None and bid > 0:
-        price = bid
-    elif quote_price is not None and quote_price > 0:
-        price = quote_price
-    else:
-        price = Decimal("0")
+    # ask must not override a valid last and price the fill at 0. The rule
+    # is owned by quote_marks.directional_fill_price (#1465) so the manual
+    # order route applies the identical pricing; None (no usable side) is
+    # coerced to 0 here to preserve this path's existing zero-price guards.
+    price = directional_fill_price(action, quote_price, bid, ask) or Decimal("0")
 
     # Fail-closed for demo EXIT with no quote (#241).
     #
