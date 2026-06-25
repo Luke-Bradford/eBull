@@ -3,8 +3,9 @@
 Surfaces the five operator signals that Phases 1-3 of #1208 lacked a
 live readout for:
 
-- `pg_database_size('ebull')` against a 30 GB warn threshold (matches
-  the pre-push hook gate at `.githooks/pre-push`; rebased by #1556).
+- `pg_database_size('ebull')` against a 60 GB warn threshold (matches
+  the pre-push hook gate at `.githooks/pre-push`; rebased by #1556 then
+  #1436 follow-up).
 - Leaked `ebull_test_*` DB count + names (Phase 2 enforced zero leaks
   but had no operator surface).
 - WAL: `wal_dir_bytes` (size of pg_wal/ on disk) against a 4 GB
@@ -57,11 +58,24 @@ logger = logging.getLogger(__name__)
 # genuine live data (always-red alarm = operator noise, same failure
 # class as #1221). Measured genuine baseline after the #1349 cusips
 # grain collapse + the #1014 primary_doc payload sweep + VACUUM FULL:
-# 15 GB (2026-06-10). 30 GB = 2x headroom over the swept baseline; the
-# alarm now means "something is growing unexpectedly", not "the DB
-# contains data".
+# 15 GB (2026-06-10).
+#
+# Rebased 30 GB -> 60 GB (2026-06-25, #1436 follow-up): the swept-15 GB
+# baseline no longer holds — the now-fully-ingested SEC ownership corpus
+# is genuine live data at 44 GB. Breakdown (investigated 2026-06-25):
+# filing_raw_documents 18 GB (dominated by ~27 GB-raw def14a_body, which
+# is CONSCIOUSLY retention-excluded in
+# `raw_payload_retention.SWEPT_DOCUMENT_KINDS` because the Item 403
+# ownership rewash consumer re-parses the stored body) + retention-bounded
+# 13F/N-PORT observation partitions (~11 GB). Dead-tuple ratios are low
+# (autovacuum healthy) — NOT bloat. The raw_payload_retention_sweep is
+# current (only ~274 MB eligible). 60 GB ~= 1.4x headroom over the 44 GB
+# real baseline; the alarm again means "growing unexpectedly", not "the
+# DB contains the data we deliberately ingested". A future def14a-body
+# retention/recompression decision (settled-decision change, operator
+# sign-off) is the only material lever to shrink it.
 
-DB_SIZE_WARN_BYTES: int = 30 * 1024 * 1024 * 1024  # 30 GB
+DB_SIZE_WARN_BYTES: int = 60 * 1024 * 1024 * 1024  # 60 GB
 # 4 GB absolute pg_wal disk-bloat alarm. Effective max_wal_size is 1 GB
 # (docker-compose `command:` flag, #1410), so steady-state pg_wal sits
 # well below this even during bootstrap write bursts; crossing 4 GB
