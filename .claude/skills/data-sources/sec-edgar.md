@@ -742,8 +742,11 @@ Bootstrap drains the horizon. Steady-state refresh fetches only new accessions d
 | 10-K | last 3 annual | atom + daily-index |
 | 10-Q | last 8 quarterly | atom + daily-index |
 | FINRA short interest | last 2 years | bi-monthly per FINRA cadence |
-| Form 144 | rolling 90 days (filing → effective ≤ 90d) | atom |
-| SC 13E | last 2 years | atom + daily-index |
+
+**Coverage scope — Form 144 / SC 13E are metadata-only, NOT structurally parsed (#1304).** Both are captured as lightweight `filing_events` rows (`SEC_METADATA_ONLY`, [app/services/filings.py](../../../app/services/filings.py)) — visible in the filings feed but with **no `ManifestSource`, no `manifest_parsers/` parser, no observation table** (absent from `_FORM_TO_SOURCE`). They are deliberately off this structured-ingest table; their prior presence here over-claimed coverage.
+- **Source rule.** Form 144 (Rule 144) = *"Notice of Proposed Sale of Securities"* — insider *intent* to sell restricted/control shares (>5,000 sh or >$50k), filed *before* a sale that may never occur; the *executed* sale is **Form 4** (filed ≤2 business days), which eBull already ingests. Structured Form 144 XML exists only since the 2023-04-13 e-filing mandate (paper before). SC 13E (Rule 13e-3) = going-private / issuer-tender disclosure — a rare terminal corporate event.
+- **Why not wired.** No decision-path consumer reads insider sell-intent: `scoring` / `thesis` / `entry_timing` / `portfolio` / `execution_guard` carry zero insider references — eBull does not consume even Form 4's *executed* sells (insider data is display/audit-only: the ownership-rollup pie wedge + instrument page). A Form 144 observation surface would have no reader; SC 13E has no long-only use.
+- **Re-open condition.** Build an insider-sell decision signal off the already-ingested **Form 4** executed-sale data first; only then weigh whether Form 144's leading-indicator delta (intent ahead of execution) earns a dedicated ingest. Cross-ref `docs/specs/etl/retention-rubric.md` §4.14 (metadata-only forms).
 
 **Why per-source rather than uniform:** Form 4 has tens of millions of accessions in a 2-year window but is small per filing (~10 KB XML); the cost is well within bounds. 13F has fewer but heavier filings — limiting to 4 quarters keeps disk + parse cost bounded. Per-filing-size × per-source-cadence determines retention; arbitrary cutoffs cost storage without informing decisions.
 
