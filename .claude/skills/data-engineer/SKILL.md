@@ -522,6 +522,28 @@ cur.execute("""
 
 **Cancel observation cost**: per-row INSERT used to checkpoint operator-cancel at sub-second latency. COPY drains atomically per archive (10-60s on multi-million-row archives). Operator cancel is observed at the archive boundary; the trade-off is documented in spec §7 and accepted (the throughput gain is ~30× for first-install bootstrap, which is the dominant cost driver).
 
+**A live `cur.copy()` owns the connection protocol — you cannot interleave other SQL mid-COPY (#1436).** While a `cur.copy(...)` context is open, the connection is in PG `COPY_IN` state: any other `execute` (including a savepoint-wrapped flush on the *same* connection) corrupts the protocol. So a Python-side buffer that must be drained *during* the row stream (e.g. the `unresolved_buffer` of `(cusip, filer, period)` triples — millions deep on a full quarter) cannot be flushed inside the COPY loop. To bound its RAM, flush in chunks by **tearing down + reopening** the COPY context at each chunk boundary:
+
+```python
+rows = _iter_tsv(zf, "INFOTABLE.tsv")          # ONE generator, consumed across segments
+while True:
+    chunk_full = False
+    with conn.cursor() as cur, cur.copy(copy_sql) as copy:
+        for row in rows:                        # resumes where the prior segment broke
+            ...
+            buffer.append(triple)
+            if len(buffer) >= _CHUNK:
+                chunk_full = True
+                break                           # leave COPY → connection exits COPY_IN
+    if buffer:                                  # now safe to run other SQL
+        _flush_unresolved_buffer(conn, buffer=buffer, ...)
+        buffer.clear()
+    if not chunk_full:
+        break                                   # generator exhausted → done
+```
+
+Multiple `cur.copy()` appends to the same `ON COMMIT DROP` TEMP table within one archive tx are valid (the temp table is tx-scoped, not cursor-scoped). **Parity precondition:** chunked == single-batch ONLY if the flush helper's aggregation is a commutative monoid — `cusip_resolver.flush_unresolved_cusips_bulk` is (`COUNT/MIN/MAX` grouped by key; `ON CONFLICT` does `count +=`, `LEAST`/`GREATEST`, `NOW()` which is tx-constant). If a helper instead did `last = EXCLUDED.last` (overwrite, not `GREATEST`), chunk *order* would change the result and chunking would break parity. Verify the helper's conflict clause before chunking a buffer. Same rule for `_open_tsv`-style whole-file `list(csv.DictReader)` loads feeding an accession-keyed dict: stream straight into the dict (`_index_tsv_by_accession`) — keep the *last* row per key and count *every* row to preserve `*_seen` parity — instead of materialising the list first (O(rows)+O(accessions) → O(accessions); measured −82% peak Python heap on a 3.36M-row 13F quarter).
+
 **Companyfacts is NOT on this pattern** — `sec_companyfacts_ingest.py` reads XBRL JSON not TSV and already uses multi-row INSERT chunked at `_UPSERT_PAGE_SIZE=1000` via `upsert_facts_for_instrument`. The per-CIK savepoint there is intentional (one savepoint per CIK-payload, NOT per-row); it stays.
 
 Spec: `docs/_archive/2026-05/superseded-bootstrap-etl-optimisation-v2.md` §7. Tests: `tests/test_pr3_copy_refactor.py` (throughput floor, ON_ERROR skip, commit-boundary preservation, idempotency, touched-instrument set).

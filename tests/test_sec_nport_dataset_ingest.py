@@ -595,3 +595,112 @@ class TestIngestNPortDatasetArchive:
 
         assert result.rows_written == 0
         assert result.rows_skipped_missing_series == 1
+
+
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestUnresolvedChunkedFlushParity:
+    """#1436 — N-PORT unresolved-CUSIP buffer flushes in bounded chunks
+    inside the holding loop (before the staging drain, matching the 13F
+    sibling) instead of one end-of-archive flush. Same parity bar: the
+    flush helper's (cusip, source) aggregation is a commutative monoid,
+    so chunked flushes land byte-identical final rows to a single batch.
+    """
+
+    def test_chunked_flush_matches_single_batch_aggregate(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from datetime import date as _date
+
+        from app.services import sec_nport_dataset_ingest as ingest_mod
+
+        flush_calls = {"n": 0}
+        real_flush = ingest_mod._flush_unresolved_buffer
+
+        def _counting_flush(*args: object, **kwargs: object) -> None:
+            flush_calls["n"] += 1
+            real_flush(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(ingest_mod, "_flush_unresolved_buffer", _counting_flush)
+        monkeypatch.setattr(ingest_mod, "_UNRESOLVED_FLUSH_CHUNK", 2)
+
+        accn1 = "0009990000-25-000001"
+        accn2 = "0009990000-25-000002"
+        subs = [
+            {
+                "ACCESSION_NUMBER": accn1,
+                "FILING_DATE": "2025-11-30",
+                "SUB_TYPE": "NPORT-P",
+                "REPORT_DATE": "2025-09-30",
+            },
+            {
+                "ACCESSION_NUMBER": accn2,
+                "FILING_DATE": "2025-11-30",
+                "SUB_TYPE": "NPORT-P",
+                "REPORT_DATE": "2025-09-30",
+            },
+        ]
+        regs = [
+            {"ACCESSION_NUMBER": accn1, "CIK": "9990000", "REGISTRANT_NAME": "Chunk Trust"},
+            {"ACCESSION_NUMBER": accn2, "CIK": "9990000", "REGISTRANT_NAME": "Chunk Trust"},
+        ]
+        funds = [
+            {"ACCESSION_NUMBER": accn1, "SERIES_ID": "S000099000", "SERIES_NAME": "Chunk Series"},
+            {"ACCESSION_NUMBER": accn2, "SERIES_ID": "S000099000", "SERIES_NAME": "Chunk Series"},
+        ]
+
+        def _holding(accn: str, hid: str, cusip: str) -> dict[str, str]:
+            # Valid EC / Long / NS / positive-balance holding with an
+            # UNMAPPED cusip → lands in the unresolved buffer.
+            return {
+                "ACCESSION_NUMBER": accn,
+                "HOLDING_ID": hid,
+                "ISSUER_CUSIP": cusip,
+                "BALANCE": "500000",
+                "UNIT": "NS",
+                "CURRENCY_CODE": "USD",
+                "CURRENCY_VALUE": "1000000",
+                "PAYOFF_PROFILE": "Long",
+                "ASSET_CAT": "EC",
+            }
+
+        # CHUNK0033 straddles a chunk boundary (rows 1 + 3) → cross-chunk
+        # COUNT summing via ON CONFLICT.
+        holdings = [
+            _holding(accn1, "1", "CHUNK0033"),
+            _holding(accn1, "2", "CHUNK0011"),
+            _holding(accn1, "3", "CHUNK0033"),
+            _holding(accn2, "4", "CHUNK0022"),
+            _holding(accn2, "5", "CHUNK0044"),
+        ]
+        archive_bytes = _build_dataset_zip(submissions=subs, registrants=regs, fund_info=funds, holdings=holdings)
+        archive_path = tmp_path / "nport_chunk.zip"
+        archive_path.write_bytes(archive_bytes)
+
+        result = ingest_nport_dataset_archive(conn=ebull_test_conn, archive_path=archive_path, ingest_run_id=uuid4())
+        ebull_test_conn.commit()
+
+        assert result.rows_written == 0
+        assert result.rows_skipped_unresolved_cusip == 5
+        # Flushes at 2, 2, remainder 1 = 3 calls.
+        assert flush_calls["n"] == 3
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cusip, observation_count, first_period_end, last_period_end
+                FROM unresolved_13f_cusips
+                WHERE source = 'bulk_nport_dataset' AND cusip LIKE 'CHUNK00%'
+                ORDER BY cusip
+                """
+            )
+            rows = cur.fetchall()
+
+        assert rows == [
+            ("CHUNK0011", 1, _date(2025, 9, 30), _date(2025, 9, 30)),
+            ("CHUNK0022", 1, _date(2025, 9, 30), _date(2025, 9, 30)),
+            ("CHUNK0033", 2, _date(2025, 9, 30), _date(2025, 9, 30)),
+            ("CHUNK0044", 1, _date(2025, 9, 30), _date(2025, 9, 30)),
+        ]

@@ -66,6 +66,21 @@ logger = logging.getLogger(__name__)
 _BALANCE_QUANTUM: Final = Decimal("0.0001")
 
 
+# #1436 — flush the unresolved-CUSIP buffer in bounded chunks rather than
+# accumulating millions of ``(cusip, filer_cik, period_end)`` triples in one
+# Python list before a single end-of-archive flush. Parity: the flush helper
+# (:func:`cusip_resolver.flush_unresolved_cusips_bulk`) aggregates
+# ``COUNT(*) / MIN / MAX`` grouped by ``(cusip, source)`` and on conflict sums
+# count + takes ``LEAST``/``GREATEST`` of the periods (``NOW()`` tx-constant) —
+# a commutative monoid, so N chunked flushes within one archive transaction
+# land byte-identical final rows to one batch flush. The flush MUST run with
+# the connection OUT of COPY mode, so the holding loop tears down + reopens the
+# staging COPY at each chunk boundary (a handful of times per multi-million-row
+# archive). Multiple COPY appends to the ON COMMIT DROP _stg_nport are valid
+# within the per-archive transaction.
+_UNRESOLVED_FLUSH_CHUNK: Final = 100_000
+
+
 @dataclass
 class NPortIngestResult:
     """Per-archive ingest outcome."""
@@ -167,21 +182,28 @@ def _parse_decimal(value: str | None) -> Decimal | None:
         return None
 
 
-def _open_tsv(zf: zipfile.ZipFile, *candidate_names: str) -> list[dict[str, str]]:
-    """Open the first matching TSV from a list of candidate filenames."""
-    available = zf.namelist()
-    for name in candidate_names:
-        if name in available:
-            with zf.open(name) as fh:
-                text = io.TextIOWrapper(fh, encoding="utf-8", newline="")
-                return list(csv.DictReader(text, delimiter="\t"))
-    for name in candidate_names:
-        nested = [n for n in available if n.endswith("/" + name)]
-        if nested:
-            with zf.open(nested[0]) as fh:
-                text = io.TextIOWrapper(fh, encoding="utf-8", newline="")
-                return list(csv.DictReader(text, delimiter="\t"))
-    return []
+def _index_tsv_by_accession(zf: zipfile.ZipFile, *candidate_names: str) -> tuple[dict[str, dict[str, str]], int]:
+    """Stream the first matching TSV and index its rows by accession (#1436).
+
+    Replaces the prior ``_open_tsv`` (whole-file ``list(csv.DictReader)``)
+    + dict-comprehension for the per-accession lookup tables
+    (SUBMISSION/REGISTRANT/FUND_REPORTED_INFO). The list materialisation
+    held every row in worker RAM transiently alongside the accession-keyed
+    dict the caller used. Streaming builds only the dict — O(accessions).
+
+    Returns ``(index, total_rows)``. ``index`` keeps the LAST row per
+    accession, identical to the overwriting
+    ``{r["ACCESSION_NUMBER"]: r for r in rows if "ACCESSION_NUMBER" in r}``
+    it replaces. ``total_rows`` counts EVERY data row so the
+    ``submissions_seen`` telemetry stays byte-identical to ``len(list(...))``.
+    """
+    index: dict[str, dict[str, str]] = {}
+    total = 0
+    for row in _iter_tsv(zf, *candidate_names):
+        total += 1
+        if "ACCESSION_NUMBER" in row:
+            index[row["ACCESSION_NUMBER"]] = row
+    return index, total
 
 
 def _iter_tsv(zf: zipfile.ZipFile, *candidate_names: str) -> Iterator[dict[str, str]]:
@@ -469,20 +491,14 @@ def ingest_nport_dataset_archive(
         cur.execute(_CREATE_STG_SQL)
 
     with zipfile.ZipFile(archive_path) as zf:
-        submissions = _open_tsv(zf, "SUBMISSION.tsv")
-        registrants = _open_tsv(zf, "REGISTRANT.tsv")
-        fund_info = _open_tsv(zf, "FUND_REPORTED_INFO.tsv")
-        result.submissions_seen = len(submissions)
-
-        sub_by_accn: dict[str, dict[str, str]] = {
-            r["ACCESSION_NUMBER"]: r for r in submissions if "ACCESSION_NUMBER" in r
-        }
-        reg_by_accn: dict[str, dict[str, str]] = {
-            r["ACCESSION_NUMBER"]: r for r in registrants if "ACCESSION_NUMBER" in r
-        }
-        fund_by_accn: dict[str, dict[str, str]] = {
-            r["ACCESSION_NUMBER"]: r for r in fund_info if "ACCESSION_NUMBER" in r
-        }
+        # #1436 — stream-index the per-accession lookup tables straight into
+        # the dicts the holding loop joins against; never materialise the
+        # whole TSV as a transient list first. ``submissions_seen`` counts
+        # every row (parity with the old ``len(list(...))``); the registrant
+        # / fund counts are not surfaced so their totals are discarded.
+        sub_by_accn, result.submissions_seen = _index_tsv_by_accession(zf, "SUBMISSION.tsv")
+        reg_by_accn, _ = _index_tsv_by_accession(zf, "REGISTRANT.tsv")
+        fund_by_accn, _ = _index_tsv_by_accession(zf, "FUND_REPORTED_INFO.tsv")
 
         # PR7 #1233 §4.6 — 8-quarter (24-month) retention cap. Cutoff
         # resolved ONCE per archive to avoid date-rollover during a
@@ -524,184 +540,221 @@ def ingest_nport_dataset_archive(
             + ") FROM STDIN WITH (FORMAT text, ON_ERROR ignore, LOG_VERBOSITY verbose)"
         )
         copy_attempted = 0
-        with conn.cursor() as cur, cur.copy(copy_sql) as copy:
-            for holding in _iter_tsv(zf, "FUND_REPORTED_HOLDING.tsv"):
-                result.holdings_seen += 1
-                accn = holding.get("ACCESSION_NUMBER", "").strip()
-                if not accn:
-                    result.rows_skipped_orphan_accession += 1
-                    continue
-                sub = sub_by_accn.get(accn)
-                if sub is None:
-                    result.rows_skipped_orphan_accession += 1
-                    continue
+        # #1436 — one shared FUND_REPORTED_HOLDING generator consumed across
+        # COPY segments. When the unresolved-CUSIP buffer reaches a chunk
+        # boundary the COPY context closes (connection leaves COPY mode), the
+        # buffer flushes, and a fresh COPY context reopens to resume the SAME
+        # generator. Multiple COPY appends to the ON COMMIT DROP _stg_nport are
+        # valid within the per-archive tx. Ordering note: the chunked flush now
+        # runs DURING the holding loop, i.e. BEFORE the staging drain — same as
+        # the 13F sibling. Failure isolation is unchanged: the flush's
+        # ``with conn.transaction()`` savepoint rolls back only its own writes
+        # on error, never the staged observations (independent of order).
+        holdings = _iter_tsv(zf, "FUND_REPORTED_HOLDING.tsv")
+        while True:
+            chunk_full = False
+            with conn.cursor() as cur, cur.copy(copy_sql) as copy:
+                for holding in holdings:
+                    result.holdings_seen += 1
+                    accn = holding.get("ACCESSION_NUMBER", "").strip()
+                    if not accn:
+                        result.rows_skipped_orphan_accession += 1
+                        continue
+                    sub = sub_by_accn.get(accn)
+                    if sub is None:
+                        result.rows_skipped_orphan_accession += 1
+                        continue
 
-                # PR7 §4.6 retention gate (EARLY) — same shape as
-                # legacy.
-                period_end_early = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(
-                    sub.get("REPORT_ENDING_PERIOD")
-                )
-                # #1433 — reject a NULL or out-of-[1900,2100) period_end
-                # BEFORE the retention gate and the unresolved-CUSIP buffer,
-                # so a junk year-6016 with an unresolved CUSIP never leaks
-                # into unresolved markers, and a pre-1900 date is counted as
-                # bad_data rather than masked as retention (mirrors the #1218
-                # XBRL guard; shared bound via period_end_within_bounds).
-                # period_end_early == the staged period_end (same
-                # REPORT_DATE / REPORT_ENDING_PERIOD expression below).
-                if not period_end_within_bounds(period_end_early):
-                    result.rows_skipped_bad_data += 1
-                    continue
-                if period_end_early < retention_cutoff:
-                    result.rows_skipped_retention += 1
-                    continue
+                    # PR7 §4.6 retention gate (EARLY) — same shape as
+                    # legacy.
+                    period_end_early = _parse_iso_date(sub.get("REPORT_DATE")) or _parse_iso_date(
+                        sub.get("REPORT_ENDING_PERIOD")
+                    )
+                    # #1433 — reject a NULL or out-of-[1900,2100) period_end
+                    # BEFORE the retention gate and the unresolved-CUSIP buffer,
+                    # so a junk year-6016 with an unresolved CUSIP never leaks
+                    # into unresolved markers, and a pre-1900 date is counted as
+                    # bad_data rather than masked as retention (mirrors the #1218
+                    # XBRL guard; shared bound via period_end_within_bounds).
+                    # period_end_early == the staged period_end (same
+                    # REPORT_DATE / REPORT_ENDING_PERIOD expression below).
+                    if not period_end_within_bounds(period_end_early):
+                        result.rows_skipped_bad_data += 1
+                        continue
+                    if period_end_early < retention_cutoff:
+                        result.rows_skipped_retention += 1
+                        continue
 
-                reg = reg_by_accn.get(accn)
-                fund = fund_by_accn.get(accn)
-                if reg is None or fund is None:
-                    result.rows_skipped_orphan_accession += 1
-                    continue
+                    reg = reg_by_accn.get(accn)
+                    fund = fund_by_accn.get(accn)
+                    if reg is None or fund is None:
+                        result.rows_skipped_orphan_accession += 1
+                        continue
 
-                # ─── filter at write boundary ───────────────────────
-                asset_cat = (holding.get("ASSET_CAT") or "").strip()
-                if asset_cat != "EC":
-                    result.rows_skipped_non_equity += 1
-                    continue
-                payoff = (holding.get("PAYOFF_PROFILE") or "").strip()
-                if payoff != "Long":
-                    result.rows_skipped_non_long += 1
-                    continue
-                unit = (holding.get("UNIT") or "").strip().upper()
-                if unit != "NS":
-                    result.rows_skipped_non_share_units += 1
-                    continue
-                balance = _parse_decimal(holding.get("BALANCE"))
-                if balance is None or balance <= 0:
-                    result.rows_skipped_non_positive_shares += 1
-                    continue
-                # PR-3 regression guard: ``ownership_funds_observations.shares``
-                # is NUMERIC(24, 4) with a strict ``CHECK (shares > 0)``
-                # (sql/123:84). A fractional-share holding like 0.00005
-                # passes the ``> 0`` predicate above but quantises to
-                # 0.0000 on COPY into staging, then trips the CHECK on
-                # the INSERT...SELECT drain — aborting the entire archive.
-                # Pre-PR-3 per-row INSERT path masked this via per-row
-                # SAVEPOINT (counted as bad_data, loop continued); the
-                # COPY-batched path cannot. Quantise here at the same
-                # precision the column will store, and reject the row
-                # if it underflows to zero.
-                # ROUND_HALF_EVEN matches Postgres NUMERIC coercion
-                # semantics exactly — what PG would do on INSERT, we do
-                # here so the pre-validation outcome lines up with the
-                # CHECK constraint outcome. ``0.00005 → 0.0000`` (tie
-                # to even, reject); ``0.00006 → 0.0001`` (accept);
-                # ``0.00004 → 0.0000`` (reject). Codex 2 finding on
-                # the fix branch — implicit rounding mode was a
-                # forensic gap.
-                balance_q = balance.quantize(_BALANCE_QUANTUM, rounding=ROUND_HALF_EVEN)
-                if balance_q <= 0:
-                    result.rows_skipped_non_positive_shares += 1
-                    continue
-                balance = balance_q
+                    # ─── filter at write boundary ───────────────────────
+                    asset_cat = (holding.get("ASSET_CAT") or "").strip()
+                    if asset_cat != "EC":
+                        result.rows_skipped_non_equity += 1
+                        continue
+                    payoff = (holding.get("PAYOFF_PROFILE") or "").strip()
+                    if payoff != "Long":
+                        result.rows_skipped_non_long += 1
+                        continue
+                    unit = (holding.get("UNIT") or "").strip().upper()
+                    if unit != "NS":
+                        result.rows_skipped_non_share_units += 1
+                        continue
+                    balance = _parse_decimal(holding.get("BALANCE"))
+                    if balance is None or balance <= 0:
+                        result.rows_skipped_non_positive_shares += 1
+                        continue
+                    # PR-3 regression guard: ``ownership_funds_observations.shares``
+                    # is NUMERIC(24, 4) with a strict ``CHECK (shares > 0)``
+                    # (sql/123:84). A fractional-share holding like 0.00005
+                    # passes the ``> 0`` predicate above but quantises to
+                    # 0.0000 on COPY into staging, then trips the CHECK on
+                    # the INSERT...SELECT drain — aborting the entire archive.
+                    # Pre-PR-3 per-row INSERT path masked this via per-row
+                    # SAVEPOINT (counted as bad_data, loop continued); the
+                    # COPY-batched path cannot. Quantise here at the same
+                    # precision the column will store, and reject the row
+                    # if it underflows to zero.
+                    # ROUND_HALF_EVEN matches Postgres NUMERIC coercion
+                    # semantics exactly — what PG would do on INSERT, we do
+                    # here so the pre-validation outcome lines up with the
+                    # CHECK constraint outcome. ``0.00005 → 0.0000`` (tie
+                    # to even, reject); ``0.00006 → 0.0001`` (accept);
+                    # ``0.00004 → 0.0000`` (reject). Codex 2 finding on
+                    # the fix branch — implicit rounding mode was a
+                    # forensic gap.
+                    balance_q = balance.quantize(_BALANCE_QUANTUM, rounding=ROUND_HALF_EVEN)
+                    if balance_q <= 0:
+                        result.rows_skipped_non_positive_shares += 1
+                        continue
+                    balance = balance_q
 
-                cusip = (holding.get("ISSUER_CUSIP") or "").strip().upper()
-                if not cusip:
-                    result.rows_skipped_unresolved_cusip += 1
-                    continue
-                instrument_id = cusip_map.get(cusip)
-                if instrument_id is None:
-                    filer_cik_raw_buf = (reg.get("CIK") or "").strip()
-                    # period_end_early guaranteed non-None by the #1433 guard.
-                    if filer_cik_raw_buf:
-                        filer_cik_buf = filer_cik_raw_buf.zfill(10)
-                        unresolved_buffer.append((cusip, filer_cik_buf, period_end_early))
-                    # #1340 — recoverable miss: hold this accession back from
-                    # the n_port_ingest_log seed so S23 can re-fetch it after
-                    # the CUSIP resolves.
-                    unresolved_accns.add(accn)
-                    result.rows_skipped_unresolved_cusip += 1
-                    continue
+                    cusip = (holding.get("ISSUER_CUSIP") or "").strip().upper()
+                    if not cusip:
+                        result.rows_skipped_unresolved_cusip += 1
+                        continue
+                    instrument_id = cusip_map.get(cusip)
+                    if instrument_id is None:
+                        filer_cik_raw_buf = (reg.get("CIK") or "").strip()
+                        # period_end_early guaranteed non-None by the #1433 guard.
+                        if filer_cik_raw_buf:
+                            filer_cik_buf = filer_cik_raw_buf.zfill(10)
+                            unresolved_buffer.append((cusip, filer_cik_buf, period_end_early))
+                            # #1436 — bounded-chunk flush boundary.
+                            if len(unresolved_buffer) >= _UNRESOLVED_FLUSH_CHUNK:
+                                chunk_full = True
+                        # #1340 — recoverable miss: hold this accession back from
+                        # the n_port_ingest_log seed so S23 can re-fetch it after
+                        # the CUSIP resolves.
+                        unresolved_accns.add(accn)
+                        result.rows_skipped_unresolved_cusip += 1
+                        # #1436 — break out to drain this chunk (outside COPY
+                        # mode) then resume the generator.
+                        if chunk_full:
+                            break
+                        continue
 
-                # ─── series identity ────────────────────────────────
-                series_id = (fund.get("SERIES_ID") or "").strip()
-                series_name = (fund.get("SERIES_NAME") or "").strip()
-                if not series_id:
-                    result.rows_skipped_missing_series += 1
-                    continue
+                    # ─── series identity ────────────────────────────────
+                    series_id = (fund.get("SERIES_ID") or "").strip()
+                    series_name = (fund.get("SERIES_NAME") or "").strip()
+                    if not series_id:
+                        result.rows_skipped_missing_series += 1
+                        continue
 
-                filer_cik_raw = (reg.get("CIK") or "").strip()
-                if not filer_cik_raw:
-                    result.rows_skipped_bad_data += 1
-                    continue
-                filer_cik = filer_cik_raw.zfill(10)
+                    filer_cik_raw = (reg.get("CIK") or "").strip()
+                    if not filer_cik_raw:
+                        result.rows_skipped_bad_data += 1
+                        continue
+                    filer_cik = filer_cik_raw.zfill(10)
 
-                filed_at = _parse_filing_date(sub.get("FILING_DATE"))
-                # period_end == period_end_early (same REPORT_DATE /
-                # REPORT_ENDING_PERIOD), already validated in-window by the
-                # #1433 guard above — reuse it (non-None) and only null-check
-                # filed_at here.
-                period_end = period_end_early
-                if filed_at is None:
-                    result.rows_skipped_bad_data += 1
-                    continue
+                    filed_at = _parse_filing_date(sub.get("FILING_DATE"))
+                    # period_end == period_end_early (same REPORT_DATE /
+                    # REPORT_ENDING_PERIOD), already validated in-window by the
+                    # #1433 guard above — reuse it (non-None) and only null-check
+                    # filed_at here.
+                    period_end = period_end_early
+                    if filed_at is None:
+                        result.rows_skipped_bad_data += 1
+                        continue
 
-                # Series upsert is deferred to post-COPY. Buffer this
-                # (accn, series_id) tuple iff this is the first
-                # qualifying holding for the pair. Legacy semantic:
-                # one upsert per (accn, series_id) — re-encountering
-                # the same series under a different accession in the
-                # same archive STILL upserts so ``GREATEST(...)``
-                # advances ``last_seen_period_end``.
-                series_key = (accn, series_id)
-                if series_key not in seen_series:
-                    seen_series.add(series_key)
-                    series_upsert_buffer.append(
+                    # Series upsert is deferred to post-COPY. Buffer this
+                    # (accn, series_id) tuple iff this is the first
+                    # qualifying holding for the pair. Legacy semantic:
+                    # one upsert per (accn, series_id) — re-encountering
+                    # the same series under a different accession in the
+                    # same archive STILL upserts so ``GREATEST(...)``
+                    # advances ``last_seen_period_end``.
+                    series_key = (accn, series_id)
+                    if series_key not in seen_series:
+                        seen_series.add(series_key)
+                        series_upsert_buffer.append(
+                            (
+                                accn,
+                                series_id,
+                                series_name or f"Series {series_id}",
+                                filer_cik,
+                                period_end,
+                            )
+                        )
+
+                    holding_id = (holding.get("HOLDING_ID") or "0").strip() or "0"
+                    source_document_id = f"{accn}:{holding_id}"
+                    accession_no_dashes = accn.replace("-", "")
+                    source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
+
+                    # CURRENCY_VALUE in local currency; only treat USD
+                    # as canonical USD per legacy posture.
+                    currency_code = (holding.get("CURRENCY_CODE") or "").strip().upper()
+                    if currency_code == "USD":
+                        market_value_usd = _parse_decimal(holding.get("CURRENCY_VALUE"))
+                    else:
+                        market_value_usd = None
+
+                    copy.write_row(
                         (
-                            accn,
+                            instrument_id,
                             series_id,
                             series_name or f"Series {series_id}",
                             filer_cik,
+                            "economic",
+                            "nport",
+                            source_document_id,
+                            accn,
+                            holding_id,
+                            source_url,
+                            filed_at,
+                            None,
                             period_end,
+                            str(ingest_run_id),
+                            balance,
+                            market_value_usd,
+                            payoff,
+                            asset_cat,
                         )
                     )
+                    copy_attempted += 1
+                    result.touched_instrument_ids.add(instrument_id)
 
-                holding_id = (holding.get("HOLDING_ID") or "0").strip() or "0"
-                source_document_id = f"{accn}:{holding_id}"
-                accession_no_dashes = accn.replace("-", "")
-                source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
-
-                # CURRENCY_VALUE in local currency; only treat USD
-                # as canonical USD per legacy posture.
-                currency_code = (holding.get("CURRENCY_CODE") or "").strip().upper()
-                if currency_code == "USD":
-                    market_value_usd = _parse_decimal(holding.get("CURRENCY_VALUE"))
-                else:
-                    market_value_usd = None
-
-                copy.write_row(
-                    (
-                        instrument_id,
-                        series_id,
-                        series_name or f"Series {series_id}",
-                        filer_cik,
-                        "economic",
-                        "nport",
-                        source_document_id,
-                        accn,
-                        holding_id,
-                        source_url,
-                        filed_at,
-                        None,
-                        period_end,
-                        str(ingest_run_id),
-                        balance,
-                        market_value_usd,
-                        payoff,
-                        asset_cat,
-                    )
+            # COPY context closed → connection is out of COPY mode. Flush this
+            # chunk of unresolved CUSIPs (#1436). A partial flush at the
+            # generator's end drains the remainder; the helper's aggregation
+            # is order-independent so chunked == single-batch.
+            if unresolved_buffer:
+                _flush_unresolved_buffer(
+                    conn,
+                    unresolved_buffer,
+                    source="bulk_nport_dataset",
+                    cutoff=retention_cutoff,
+                    result=result,
                 )
-                copy_attempted += 1
-                result.touched_instrument_ids.add(instrument_id)
+                unresolved_buffer.clear()
+
+            if not chunk_full:
+                break
 
     # Drain staging into the partitioned observations table FIRST,
     # before the series upsert + unresolved-CUSIP flushes. Rationale:
@@ -765,18 +818,11 @@ def ingest_nport_dataset_archive(
 
     series_upsert_buffer.clear()
 
-    # Flush accumulated unresolved CUSIPs AFTER the staging drain so
-    # a flush failure cannot roll it back. #1295: single COPY pass
-    # handles the whole buffer; no per-chunk loop needed.
-    if unresolved_buffer:
-        _flush_unresolved_buffer(
-            conn,
-            unresolved_buffer,
-            source="bulk_nport_dataset",
-            cutoff=retention_cutoff,
-            result=result,
-        )
-        unresolved_buffer.clear()
+    # #1436 — the unresolved-CUSIP buffer is flushed in bounded chunks INSIDE
+    # the holding loop (above), so by here it is already drained and empty; no
+    # end-of-archive flush remains. ``unresolved_accns`` (the seed-log hold-back
+    # set, not the triple buffer) was intentionally NOT cleared and was consumed
+    # by the n_port_ingest_log seed above.
 
     # #1349 — the #1399 inline marker-delete that used to follow here is
     # gone: with per-(cusip, source) marker grain, mapped-CUSIP hygiene
