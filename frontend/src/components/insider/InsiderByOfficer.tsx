@@ -21,6 +21,7 @@ import {
 } from "recharts";
 
 import type { InsiderTransactionDetail } from "@/api/instruments";
+import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { lightTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import {
@@ -141,21 +142,21 @@ function OfficerTooltip({ active, payload }: TooltipProps) {
   if (!bucket) return null;
   const colorClass =
     bucket.net > 0
-      ? "text-emerald-700"
+      ? "text-emerald-700 dark:text-emerald-400"
       : bucket.net < 0
-        ? "text-red-700"
-        : "text-slate-600";
+        ? "text-red-700 dark:text-red-400"
+        : "text-slate-600 dark:text-slate-400";
   return (
-    <div className="rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-2 py-1 text-xs shadow-md">
-      <div className="font-medium text-slate-700">{bucket.officer}</div>
+    <ChartTooltip>
+      <div className="font-medium text-slate-700 dark:text-slate-200">{bucket.officer}</div>
       <div className={`font-mono tabular-nums ${colorClass}`}>
         {bucket.net > 0 ? "+" : ""}
         {formatShares(bucket.net)} sh
       </div>
-      <div className="text-[10px] text-slate-500">
+      <div className="text-[10px] text-slate-500 dark:text-slate-400">
         {bucket.txnCount} txn{bucket.txnCount === 1 ? "" : "s"}
       </div>
-    </div>
+    </ChartTooltip>
   );
 }
 
