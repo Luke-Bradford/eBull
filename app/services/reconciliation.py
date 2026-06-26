@@ -308,6 +308,23 @@ def _fetch_companyfacts_payload(
     if cached is not None:
         return cached
 
+    # #815 — the read-miss -> fetch -> write window below is
+    # deliberately UNLOCKED. A concurrent caller for the same
+    # (cik, 'companyfacts') that also misses will redundantly fetch SEC
+    # and write; worst case is ONE duplicate ~30s fetch. There is no
+    # clobber/corruption: ``_write_cache`` goes through
+    # ``store_cik_raw``, whose ``ON CONFLICT (cik, document_kind) DO
+    # UPDATE`` means the second writer restamps the same row,
+    # last-writer-wins. A lock here would have to span the 30s
+    # ``urlopen`` — the stranded-idle-connection failure mode
+    # (#719 / #1129) — for zero gain, because the only callers are
+    # operator CLIs (``scripts/run_reconciliation.py``,
+    # ``scripts/seed_top_13f_filers.py``), never a scheduler/API route.
+    # Build the ``pg_try_advisory_lock`` fast-skip (loser dup-fetches;
+    # winner re-checks the cache then fetches; session lock released in
+    # ``finally``; ``%s::text`` key, never int4) ONLY when that changes:
+    # a ScheduledJob/API route calls ``run_spot_check``, OR a 2nd
+    # concurrent same-(cik, document_kind) consumer lands (#815).
     req = urllib.request.Request(
         _companyfacts_url(cik_padded),
         headers={"User-Agent": settings.sec_user_agent},
