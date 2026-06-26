@@ -188,6 +188,57 @@ def test_get_filing_threads_issuer_cik_through_to_archive_url() -> None:
     assert captured[0].url.path == "/Archives/edgar/data/19617/000149315226019548/index.json"
 
 
+def test_filing_index_served_from_prefetch_cache_without_http() -> None:
+    """#1730 — when the tick-scoped prefetch cache holds the index URL's text,
+    ``fetch_filing_index`` parses it and issues NO HTTP (the XBRL prefetch chain
+    pre-populated it). Mirrors the body-cache consult on the text-fetch path."""
+    from app.providers.implementations.sec_edgar import (
+        reset_prefetch_body_cache,
+        set_prefetch_body_cache,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("HTTP must not run on a prefetch-cache hit")
+
+    provider = SecFilingsProvider(user_agent="test test@example.com")
+    _rewire_tickers_transport(provider, httpx.MockTransport(handler))
+
+    index_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/index.json"
+    token = set_prefetch_body_cache({index_url: json.dumps({"directory": {"item": [{"name": "x"}]}})})
+    try:
+        result = provider.fetch_filing_index("0000320193-24-000001")
+    finally:
+        reset_prefetch_body_cache(token)
+    assert result == {"directory": {"item": [{"name": "x"}]}}
+
+
+def test_filing_index_malformed_cache_entry_falls_through_to_http() -> None:
+    """#1730 — a malformed / non-dict cached index text must NOT crash; fall
+    through to the live fetch (never trust a cache entry blindly)."""
+    from app.providers.implementations.sec_edgar import (
+        reset_prefetch_body_cache,
+        set_prefetch_body_cache,
+    )
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=json.dumps({"directory": {"item": []}}))
+
+    provider = SecFilingsProvider(user_agent="test test@example.com")
+    _rewire_tickers_transport(provider, httpx.MockTransport(handler))
+
+    index_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/index.json"
+    token = set_prefetch_body_cache({index_url: "<<not json>>"})
+    try:
+        result = provider.fetch_filing_index("0000320193-24-000001")
+    finally:
+        reset_prefetch_body_cache(token)
+    assert result == {"directory": {"item": []}}
+    assert len(captured) == 1  # live fetch ran
+
+
 def test_filing_index_legacy_path_still_works_for_self_filers() -> None:
     """Back-compat: callers that don't pass ``issuer_cik`` (e.g.
     bare ``get_filing(accession)`` lookups) keep the legacy

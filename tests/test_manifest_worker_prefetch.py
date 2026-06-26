@@ -560,3 +560,231 @@ def test_per_source_rebuild_routes_through_prefetch(monkeypatch: pytest.MonkeyPa
 
     assert routed["prefetch"] is True
     assert routed["serial"] is False  # not the old direct-serial path
+
+
+# --- #1730 prefetch_chain (independent-doc-chain prefetch) ------------------
+
+
+def _dummy_provider() -> Any:
+    class _P:
+        def __init__(self, **_k: Any) -> None: ...
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_a: Any) -> None:
+            return None
+
+    return _P
+
+
+def test_prefetch_chain_runs_and_merges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1730 — a source's ``prefetch_chain`` output is merged into the tick cache
+    alongside the pass-1 body."""
+    register_parser(
+        "sec_10k",
+        lambda c, r: None,  # type: ignore[arg-type,return-value]
+        fetch_url=lambda c, r: r.primary_document_url,
+        prefetch_chain=lambda rows, provider: {"https://sec.gov/xbrl/i.xml": "XBRL"},
+    )
+
+    def _fake_fetch_texts(_provider: Any, urls: Any, **_k: Any) -> dict[str, str | None]:
+        return {u: "BODY" for u in urls}
+
+    monkeypatch.setattr("app.providers.concurrent_fetch.fetch_document_texts", _fake_fetch_texts)
+    monkeypatch.setattr("app.providers.implementations.sec_edgar.SecFilingsProvider", _dummy_provider())
+
+    rows = [_row(source="sec_10k", url="https://sec.gov/10k.htm", accession="A")]
+    cache = _prefetch_bodies(_FAKE_CONN, rows)
+    assert cache == {"https://sec.gov/10k.htm": "BODY", "https://sec.gov/xbrl/i.xml": "XBRL"}
+
+
+def test_prefetch_chain_runs_even_with_no_fetch_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1730 — a chain-only source (NO ``fetch_url``) must still run its chain;
+    the ``pass1_url_to_rows`` empty early-return must not skip it."""
+    register_parser(
+        "sec_10k",
+        lambda c, r: None,  # type: ignore[arg-type,return-value]
+        prefetch_chain=lambda rows, provider: {"https://sec.gov/xbrl/i.xml": "XBRL"},
+    )
+
+    def _fail_texts(*_a: Any, **_k: Any) -> dict[str, str | None]:
+        raise AssertionError("no fetch_url rows → worker must not run pass-1 fetch")
+
+    monkeypatch.setattr("app.providers.concurrent_fetch.fetch_document_texts", _fail_texts)
+    monkeypatch.setattr("app.providers.implementations.sec_edgar.SecFilingsProvider", _dummy_provider())
+
+    rows = [_row(source="sec_10k", url=None, accession="A")]
+    cache = _prefetch_bodies(_FAKE_CONN, rows)
+    assert cache == {"https://sec.gov/xbrl/i.xml": "XBRL"}
+
+
+def test_prefetch_chain_raise_skips_chain_not_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1730 — a ``prefetch_chain`` raising must NOT abort the tick; the pass-1
+    bodies from other sources survive (best-effort, mirrors the fetch_url/expand
+    hook handling)."""
+
+    def _boom_chain(rows: Any, provider: Any) -> dict[str, str]:
+        raise RuntimeError("xbrl prefetch blew up")
+
+    register_parser(
+        "sec_form4",
+        lambda c, r: None,  # type: ignore[arg-type,return-value]
+        fetch_url=lambda c, r: r.primary_document_url,
+    )
+    register_parser(
+        "sec_10k",
+        lambda c, r: None,  # type: ignore[arg-type,return-value]
+        prefetch_chain=_boom_chain,
+    )
+
+    def _fake_fetch_texts(_provider: Any, urls: Any, **_k: Any) -> dict[str, str | None]:
+        return {u: "BODY" for u in urls}
+
+    monkeypatch.setattr("app.providers.concurrent_fetch.fetch_document_texts", _fake_fetch_texts)
+    monkeypatch.setattr("app.providers.implementations.sec_edgar.SecFilingsProvider", _dummy_provider())
+
+    rows = [
+        _row(source="sec_form4", url="https://sec.gov/ok.xml", accession="A"),
+        _row(source="sec_10k", url=None, accession="B"),
+    ]
+    cache = _prefetch_bodies(_FAKE_CONN, rows)
+    assert cache == {"https://sec.gov/ok.xml": "BODY"}  # form4 survived; chain contributed nothing
+
+
+# --- #1730 _sec10k_xbrl_prefetch + _xbrl_index_locator ----------------------
+
+_TENK_URL = "https://www.sec.gov/Archives/edgar/data/1/000/10k.htm"
+_TENK_ACCESSION = "0000000001-26-000001"
+
+
+def _tenk_base() -> str:
+    from app.providers.implementations.sec_edgar import archive_dir_url
+
+    return archive_dir_url(_TENK_ACCESSION.replace("-", ""), 1)
+
+
+def test_xbrl_index_locator_shares_urls_with_filing_index() -> None:
+    """#1730 — the locator's index URL is built via the SAME ``archive_dir_url``
+    builder ``fetch_filing_index`` routes through, so the prefetched index URL
+    byte-matches the serial lookup. primary_name strips a ``.txt`` full-submission
+    name; a non-numeric cik → None."""
+    from app.services.manifest_parsers.sec_10k import _xbrl_index_locator
+
+    loc = _xbrl_index_locator(accession=_TENK_ACCESSION, issuer_cik="0000000001", primary_document_url=_TENK_URL)
+    assert loc is not None
+    index_url, base, primary_name = loc
+    assert base == _tenk_base()
+    assert index_url == _tenk_base() + "index.json"
+    assert primary_name == "10k.htm"
+    # full-submission .txt → primary_name None (discovery falls back to size rules).
+    txt = _xbrl_index_locator(
+        accession=_TENK_ACCESSION,
+        issuer_cik="0000000001",
+        primary_document_url="https://www.sec.gov/Archives/edgar/data/1/0000000001-26-000001.txt",
+    )
+    assert txt is not None and txt[2] is None
+    # non-numeric / missing cik → None (no usable archive path).
+    assert _xbrl_index_locator(accession=_TENK_ACCESSION, issuer_cik=None, primary_document_url=_TENK_URL) is None
+    assert _xbrl_index_locator(accession=_TENK_ACCESSION, issuer_cik="abc", primary_document_url=_TENK_URL) is None
+
+
+def test_sec10k_xbrl_prefetch_fetches_index_then_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1730 — two concurrent rounds: index.json, then the discovered
+    instance/label/def. All bodies returned for the tick cache."""
+    from app.services.dimensional_facts import XbrlFileRefs
+    from app.services.manifest_parsers import sec_10k
+
+    batches: list[list[str]] = []
+    index_json = '{"directory": {"item": []}}'
+
+    def _fake_texts(_provider: Any, urls: Any, **_k: Any) -> dict[str, str | None]:
+        batch = sorted(urls)
+        batches.append(batch)
+        return {u: (index_json if u.endswith("index.json") else "ARTIFACT") for u in batch}
+
+    monkeypatch.setattr(sec_10k, "fetch_document_texts", _fake_texts)
+    monkeypatch.setattr(
+        sec_10k,
+        "discover_xbrl_files",
+        lambda raw_index, *, primary_document_name: XbrlFileRefs(
+            instance_name="i.xml", label_name="l.xml", definition_name="d.xml"
+        ),
+    )
+
+    row = _row(source="sec_10k", url=_TENK_URL, accession=_TENK_ACCESSION)
+    cache = sec_10k._sec10k_xbrl_prefetch([row], object())
+
+    base = _tenk_base()
+    assert cache[base + "index.json"] == index_json
+    assert cache[base + "i.xml"] == "ARTIFACT"
+    assert cache[base + "l.xml"] == "ARTIFACT"
+    assert cache[base + "d.xml"] == "ARTIFACT"
+    # Round 1 = the index, round 2 = the three artifacts.
+    assert len(batches) == 2
+    assert batches[0] == [base + "index.json"]
+    assert batches[1] == sorted(base + n for n in ("i.xml", "l.xml", "d.xml"))
+
+
+def test_sec10k_xbrl_prefetch_dedups_def_equals_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1730 — when discovery resolves def==label (xsd fallback serves both), the
+    artifact set collapses to ONE fetch, matching the serial path's single-fetch."""
+    from app.services.dimensional_facts import XbrlFileRefs
+    from app.services.manifest_parsers import sec_10k
+
+    batches: list[list[str]] = []
+
+    def _fake_texts(_provider: Any, urls: Any, **_k: Any) -> dict[str, str | None]:
+        batches.append(sorted(urls))
+        return {u: ('{"directory": {"item": []}}' if u.endswith("index.json") else "B") for u in urls}
+
+    monkeypatch.setattr(sec_10k, "fetch_document_texts", _fake_texts)
+    monkeypatch.setattr(
+        sec_10k,
+        "discover_xbrl_files",
+        lambda raw_index, *, primary_document_name: XbrlFileRefs(
+            instance_name="i.xml", label_name="shared.xsd", definition_name="shared.xsd"
+        ),
+    )
+    cache = sec_10k._sec10k_xbrl_prefetch([_row(source="sec_10k", url=_TENK_URL, accession=_TENK_ACCESSION)], object())
+    base = _tenk_base()
+    assert batches[1] == sorted(base + n for n in ("i.xml", "shared.xsd"))  # one artifact, not two
+    assert cache[base + "shared.xsd"] == "B"
+
+
+def test_sec10k_xbrl_prefetch_skips_gated_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1730 — rows the parser would skip before the XBRL step (missing url /
+    instrument_id / filed_at / numeric cik) are not prefetched (gate mirror)."""
+    import dataclasses
+
+    from app.services.manifest_parsers import sec_10k
+
+    def _fail(*_a: Any, **_k: Any) -> dict[str, str | None]:
+        raise AssertionError("gated rows must not fetch")
+
+    monkeypatch.setattr(sec_10k, "fetch_document_texts", _fail)
+
+    good = _row(source="sec_10k", url=_TENK_URL, accession=_TENK_ACCESSION)
+    rows = [
+        dataclasses.replace(good, primary_document_url=None),
+        dataclasses.replace(good, instrument_id=None),
+        dataclasses.replace(good, filed_at=None),
+        dataclasses.replace(good, cik=""),
+    ]
+    assert sec_10k._sec10k_xbrl_prefetch(rows, object()) == {}
+
+
+def test_sec10k_xbrl_prefetch_404_index_drops_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1730 — a 404 (None) index has no XBRL: no discovery, no artifact round."""
+    from app.services.manifest_parsers import sec_10k
+
+    def _fake_texts(_provider: Any, urls: Any, **_k: Any) -> dict[str, str | None]:
+        return {u: None for u in urls}  # index 404
+
+    monkeypatch.setattr(sec_10k, "fetch_document_texts", _fake_texts)
+
+    def _no_discover(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("must not discover on a 404 index")
+
+    monkeypatch.setattr(sec_10k, "discover_xbrl_files", _no_discover)
+    cache = sec_10k._sec10k_xbrl_prefetch([_row(source="sec_10k", url=_TENK_URL, accession=_TENK_ACCESSION)], object())
+    assert cache == {}
