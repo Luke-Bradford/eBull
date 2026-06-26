@@ -245,9 +245,10 @@ export function buildYoyGrowth(
     const prior = i >= lag ? periods[i - lag] : undefined;
     const fcf = (cur: JoinedPeriod): number | null => {
       if (cur.operating_cf === null || cur.capex === null) return null;
-      // capex is reported as a positive outflow in XBRL `us-gaap:
-      // PaymentsToAcquirePropertyPlantAndEquipment`. FCF subtracts it.
-      return cur.operating_cf - cur.capex;
+      // capex is XBRL `us-gaap:PaymentsToAcquirePropertyPlantAndEquipment`,
+      // normally a positive outflow — but the sign convention varies between
+      // filers (prevention-log #596), so abs() before subtracting.
+      return cur.operating_cf - Math.abs(cur.capex);
     };
     return {
       period_end: p.period_end,
@@ -442,9 +443,10 @@ export function buildRoic(periods: ReadonlyArray<JoinedPeriod>): RoicRow[] {
 
 export interface FcfRow {
   readonly period_end: string;
-  /** Free cash flow = operating_cf - capex. Both are absolute values
-   *  in the source statement; capex is XBRL `PaymentsToAcquirePPE`
-   *  reported as a positive outflow, so subtraction is correct. */
+  /** Free cash flow = operating_cf - |capex|. capex is XBRL
+   *  `PaymentsToAcquirePPE`, normally a positive outflow, but the sign
+   *  convention varies between filers (prevention-log #596) — abs() to
+   *  normalise, matching the TTM view (sql/080:78). */
   readonly fcf: number | null;
 }
 
@@ -453,7 +455,7 @@ export function buildFcf(periods: ReadonlyArray<JoinedPeriod>): FcfRow[] {
     period_end: p.period_end,
     fcf:
       p.operating_cf !== null && p.capex !== null
-        ? p.operating_cf - p.capex
+        ? p.operating_cf - Math.abs(p.capex)
         : null,
   }));
 }

@@ -152,7 +152,9 @@ function joinCashflow(
     .map((r) => {
       const op = num(r.values["operating_cf"]);
       const cx = num(r.values["capex"]);
-      const fcf = op !== null && cx !== null ? op - cx : null;
+      // capex sign convention varies between filers (prevention-log #596) —
+      // abs() to normalise, matching buildFcf + the TTM view (sql/080:78).
+      const fcf = op !== null && cx !== null ? op - Math.abs(cx) : null;
       const div = num(r.values["dividends_paid"]);
       // SEC XBRL `PaymentsOfDividends` is a positive outflow. Some
       // issuers under-report by emitting it as a negative number;

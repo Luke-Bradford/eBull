@@ -614,6 +614,25 @@ export interface InstrumentFinancials {
   rows: InstrumentFinancialRow[];
 }
 
+// FCF yield trend (#671). Decimals → string | null on the wire (coerce at the
+// chart boundary). `suppressed_reason` set → fail-closed (multi-class cap
+// distortion #1662 / cross-currency FCF↔price); `points` is then empty.
+export interface FcfYieldPoint {
+  period_end: string;
+  period_type: string;
+  fcf_ttm: string | null;
+  market_cap: string | null;
+  fcf_yield_pct: string | null;
+  price: string | null;
+  price_as_of: string | null;
+}
+
+export interface FcfYieldSeries {
+  symbol: string;
+  suppressed_reason: "multiclass" | "currency_mismatch" | null;
+  points: FcfYieldPoint[];
+}
+
 // ---------------------------------------------------------------------------
 // /portfolio (app/api/portfolio.py)
 // ---------------------------------------------------------------------------

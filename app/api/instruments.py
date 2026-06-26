@@ -51,6 +51,7 @@ from app.services.broker_credentials import (
 )
 from app.services.dimensional_facts import DimensionalAxis
 from app.services.dimensional_facts_store import read_segments
+from app.services.fcf_yield import fcf_yield_series
 from app.services.intraday_candles import fetch_intraday_candles
 from app.services.operators import (
     AmbiguousOperatorError,
@@ -246,6 +247,24 @@ class InstrumentFinancials(BaseModel):
     currency: str | None
     source: str  # "financial_periods" (local SEC XBRL) | "unavailable"
     rows: list[InstrumentFinancialRow]
+
+
+class FcfYieldPoint(BaseModel):
+    period_end: date
+    period_type: str  # Q1/Q2/Q3/Q4 (quarterly) | FY (annual)
+    fcf_ttm: Decimal | None  # trailing-4Q (quarterly) or FY (annual); ABS(SUM capex)
+    market_cap: Decimal | None  # period_end shares × period_end close
+    fcf_yield_pct: Decimal | None  # fcf_ttm / market_cap × 100; negative preserved
+    price: Decimal | None  # close at/before period_end
+    price_as_of: date | None
+
+
+class FcfYieldSeries(BaseModel):
+    symbol: str
+    # Set → instrument is fail-closed suppressed (multi-class cap distortion
+    # #1662, or cross-currency FCF/price); ``points`` is then empty.
+    suppressed_reason: Literal["multiclass", "currency_mismatch"] | None
+    points: list[FcfYieldPoint]
 
 
 class CandleBar(BaseModel):
@@ -764,6 +783,62 @@ def get_instrument_financials(
         currency=None,
         source="unavailable",
         rows=[],
+    )
+
+
+@router.get("/{symbol}/fcf-yield", response_model=FcfYieldSeries)
+def get_instrument_fcf_yield(
+    symbol: str,
+    period: Literal["quarterly", "annual"] = Query(default="quarterly"),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> FcfYieldSeries:
+    """Per-period FCF-yield series for the fundamentals drill overlay (#671).
+
+    Single-class, currency-coherent issuers get the TTM-FCF / period-end-cap
+    trend. Multi-class issuers (the retired dual-class distortion #1662) and
+    cross-currency issuers (no FX normaliser) are fail-closed SUPPRESSED
+    (``suppressed_reason`` set, ``points`` empty); the FE keeps the absolute
+    FCF line + a caveat. Policy lives in app/services/fcf_yield.py.
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    result = fcf_yield_series(
+        conn,
+        instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        period=period,
+    )
+    return FcfYieldSeries(
+        symbol=str(inst_row["symbol"]),  # type: ignore[index]
+        suppressed_reason=result.suppressed_reason,
+        points=[
+            FcfYieldPoint(
+                period_end=row.period_end,
+                period_type=row.period_type,
+                fcf_ttm=row.fcf_ttm,
+                market_cap=row.market_cap,
+                fcf_yield_pct=row.fcf_yield_pct,
+                price=row.price,
+                price_as_of=row.price_as_of,
+            )
+            for row in result.rows
+        ],
     )
 
 

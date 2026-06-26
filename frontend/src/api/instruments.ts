@@ -1,6 +1,7 @@
 import { apiFetch } from "@/api/client";
 import type {
   CandleRange,
+  FcfYieldSeries,
   InstrumentCandles,
   InstrumentDetail,
   InstrumentFinancials,
@@ -484,6 +485,16 @@ export function fetchInstrumentFinancials(
   });
   return apiFetch<InstrumentFinancials>(
     `/instruments/${encodeURIComponent(symbol)}/financials?${params.toString()}`,
+  );
+}
+
+export function fetchFcfYield(
+  symbol: string,
+  query: { period: "quarterly" | "annual" },
+): Promise<FcfYieldSeries> {
+  const params = new URLSearchParams({ period: query.period });
+  return apiFetch<FcfYieldSeries>(
+    `/instruments/${encodeURIComponent(symbol)}/fcf-yield?${params.toString()}`,
   );
 }
 
