@@ -628,6 +628,17 @@ def _dispatch_rows(
     #938 raw-payload audit invariant fires here (payload-backed
     parsers cannot transition ``parsed + raw_status='absent'``).
 
+    #1735 — commits PER ROW, not per batch. A ``conn.commit()`` before
+    the loop closes the row-selection read-tx (so each parser's
+    ``with conn.transaction()`` is top-level, not a savepoint nested in
+    the batch txn), and a ``conn.commit()`` after each row's terminal
+    ``transition_status`` releases that accession's per-accession
+    advisory xact lock (#817 / #1542) + per-instrument
+    ``refresh_*_current`` locks at the row boundary. Each accession is
+    independent (no cross-row dependency), so per-row commit is safe and
+    strictly more granular than the prior whole-tick commit at
+    ``app/workers/scheduler.py``.
+
     Returns a :class:`WorkerStats` summary; the caller has already
     decided WHICH rows to dispatch (fairness allocation or per-source
     rebuild).
@@ -639,6 +650,21 @@ def _dispatch_rows(
     raw_violations = 0
     skipped_by_source: dict[ManifestSource, int] = defaultdict(int)
     processed_by_source: dict[ManifestSource, int] = defaultdict(int)
+
+    # #1735: close the implicit read-transaction opened by the
+    # row-selection SELECTs (``iter_pending`` / ``iter_retryable`` /
+    # ``iter_pending_topup`` in ``run_manifest_worker``) and the
+    # ``_prefetch_then_dispatch`` savepoints, so the FIRST per-row
+    # ``transition_status``'s ``with conn.transaction()`` opens a
+    # TOP-LEVEL transaction (BEGIN), not a SAVEPOINT nested in the batch
+    # txn. Same ``conn.commit()`` + rationale as the stale-failed sweep
+    # (``app/services/sec_manifest.py``, PR #1132). Without it every
+    # per-row tx is a savepoint inside the one batch txn (committed at
+    # ``app/workers/scheduler.py`` ``sec_manifest_worker`` tick), so each
+    # accession's per-accession advisory xact lock (#817 / #1542) and
+    # per-instrument ``refresh_*_current`` locks are held until the batch
+    # commit instead of releasing at the accession's row boundary.
+    conn.commit()
 
     for row in rows:
         spec = _PARSERS.get(row.source)
@@ -659,83 +685,112 @@ def _dispatch_rows(
         # (which writes both ``failed += 1`` and ``raw_violations += 1``).
         processed_by_source[row.source] += 1
 
+        # #1735: per-row robustness mirrors the stale-failed sweep
+        # (``app/services/sec_manifest.py`` ``tombstone_stale_failed_upserts``).
+        # Each accession now commits at its row boundary, so an
+        # unexpected failure on ONE row (a deadlock victim aborted
+        # mid-transition, a commit-time DB error) rolls back only that
+        # row's uncommitted work and continues — the row keeps its prior
+        # status and re-drains next tick rather than aborting the whole
+        # tick (already-committed prior rows stay durable; pre-#1735 the
+        # raise rolled the whole batch back). The outer ``except`` logs
+        # with a full traceback — the illegal-transition signal the #879
+        # contract guards is NOT silently swallowed.
         try:
-            outcome = spec.fn(conn, row)
-        except Exception as exc:  # parser-internal failure — fail loudly
+            try:
+                outcome = spec.fn(conn, row)
+            except Exception as exc:  # parser-internal failure — fail loudly
+                logger.exception(
+                    "manifest worker: parser raised for source=%s accession=%s",
+                    row.source,
+                    row.accession_number,
+                )
+                transition_status(
+                    conn,
+                    row.accession_number,
+                    ingest_status="failed",
+                    error=f"{type(exc).__name__}: {exc}"[:500],
+                    next_retry_at=now + _backoff_for(0),
+                )
+                conn.commit()  # #1735: release this accession's locks at its row boundary
+                failed += 1
+                continue
+
+            # #938 audit invariant: payload-backed parsers cannot transition
+            # to ``parsed`` while the row's effective raw_status is
+            # ``absent``. Convert to a ``failed`` transition with a
+            # descriptive error so the row remains visible to the operator
+            # + retry path. Silent ``parsed + absent`` would leave an
+            # unauditable row in the manifest forever.
+            #
+            # Effective raw_status falls back to the row's existing value
+            # when the parser doesn't restamp (``outcome.raw_status is
+            # None``). This matches ``transition_status`` semantics — a
+            # ``parsed`` transition with ``raw_status=None`` preserves the
+            # row's existing column — so a rebuild/retry flow where raw
+            # evidence already exists on disk doesn't get misclassified
+            # as a violation. (Codex pre-push catch.)
+            effective_raw_status = outcome.raw_status or row.raw_status
+            if (
+                outcome.status == "parsed"
+                and spec.requires_raw_payload
+                and effective_raw_status not in ("stored", "compacted")
+            ):
+                logger.error(
+                    "manifest worker: source=%s accession=%s parser returned parsed but "
+                    "effective raw_status=%r — payload-backed parsers must persist evidence; "
+                    "transitioning to failed for retry",
+                    row.source,
+                    row.accession_number,
+                    effective_raw_status,
+                )
+                transition_status(
+                    conn,
+                    row.accession_number,
+                    ingest_status="failed",
+                    error=(
+                        "raw payload missing: parser returned parsed without storing "
+                        f"the upstream body (effective raw_status={effective_raw_status!r}). "
+                        "Payload-backed parsers must persist evidence (#938)."
+                    ),
+                    next_retry_at=now + _backoff_for(0),
+                )
+                conn.commit()  # #1735
+                failed += 1
+                raw_violations += 1
+                continue
+
+            target_status: IngestStatus = outcome.status
+            transition_status(
+                conn,
+                row.accession_number,
+                ingest_status=target_status,
+                parser_version=outcome.parser_version,
+                raw_status=outcome.raw_status,
+                error=outcome.error,
+                next_retry_at=outcome.next_retry_at if outcome.status == "failed" else None,
+            )
+            conn.commit()  # #1735
+            if outcome.status == "parsed":
+                parsed += 1
+            elif outcome.status == "tombstoned":
+                tombstoned += 1
+            else:
+                failed += 1
+        except Exception:  # noqa: BLE001 — a per-row failure must not abort the tick
+            # Reached only when ``transition_status`` / ``conn.commit()``
+            # itself raised (illegal state transition, deadlock victim
+            # aborted at the ``FOR UPDATE``, commit-time DB error). Roll
+            # back the aborted txn so the next row runs on a clean
+            # connection; the row keeps its prior status and re-drains.
+            # Logged with full traceback — NOT silent.
             logger.exception(
-                "manifest worker: parser raised for source=%s accession=%s",
+                "manifest worker: row dispatch failed; rolling back and continuing (source=%s accession=%s)",
                 row.source,
                 row.accession_number,
             )
-            transition_status(
-                conn,
-                row.accession_number,
-                ingest_status="failed",
-                error=f"{type(exc).__name__}: {exc}"[:500],
-                next_retry_at=now + _backoff_for(0),
-            )
-            failed += 1
+            conn.rollback()
             continue
-
-        # #938 audit invariant: payload-backed parsers cannot transition
-        # to ``parsed`` while the row's effective raw_status is
-        # ``absent``. Convert to a ``failed`` transition with a
-        # descriptive error so the row remains visible to the operator
-        # + retry path. Silent ``parsed + absent`` would leave an
-        # unauditable row in the manifest forever.
-        #
-        # Effective raw_status falls back to the row's existing value
-        # when the parser doesn't restamp (``outcome.raw_status is
-        # None``). This matches ``transition_status`` semantics — a
-        # ``parsed`` transition with ``raw_status=None`` preserves the
-        # row's existing column — so a rebuild/retry flow where raw
-        # evidence already exists on disk doesn't get misclassified
-        # as a violation. (Codex pre-push catch.)
-        effective_raw_status = outcome.raw_status or row.raw_status
-        if (
-            outcome.status == "parsed"
-            and spec.requires_raw_payload
-            and effective_raw_status not in ("stored", "compacted")
-        ):
-            logger.error(
-                "manifest worker: source=%s accession=%s parser returned parsed but "
-                "effective raw_status=%r — payload-backed parsers must persist evidence; "
-                "transitioning to failed for retry",
-                row.source,
-                row.accession_number,
-                effective_raw_status,
-            )
-            transition_status(
-                conn,
-                row.accession_number,
-                ingest_status="failed",
-                error=(
-                    "raw payload missing: parser returned parsed without storing "
-                    f"the upstream body (effective raw_status={effective_raw_status!r}). "
-                    "Payload-backed parsers must persist evidence (#938)."
-                ),
-                next_retry_at=now + _backoff_for(0),
-            )
-            failed += 1
-            raw_violations += 1
-            continue
-
-        target_status: IngestStatus = outcome.status
-        transition_status(
-            conn,
-            row.accession_number,
-            ingest_status=target_status,
-            parser_version=outcome.parser_version,
-            raw_status=outcome.raw_status,
-            error=outcome.error,
-            next_retry_at=outcome.next_retry_at if outcome.status == "failed" else None,
-        )
-        if outcome.status == "parsed":
-            parsed += 1
-        elif outcome.status == "tombstoned":
-            tombstoned += 1
-        else:
-            failed += 1
 
     # #940: surface no-parser drops at WARNING level with per-source
     # breakdown. Per-row debug logs above let operators dig in if

@@ -183,16 +183,16 @@ def acquire_filing_accession_write_lock(conn: psycopg.Connection[Any], accession
     across network I/O), and BEFORE any count/gate read that feeds a DELETE and
     BEFORE any per-instrument refresh lock (per-accession then per-instrument).
 
-    Release granularity follows the CALLER's commit boundary. Rewash + legacy
-    commit per accession, so the lock releases per accession there. The live
-    manifest worker batches the whole tick under one ``autocommit=False`` txn
-    (commit at ``scheduler.py``), so a ``with conn.transaction()`` inside a
-    parser is a SAVEPOINT and this lock is absorbed by the batch txn and held
-    until BATCH commit — the same coarse-but-correct property the #1542 13F lock
-    has. Mutual exclusion still holds; the uniform-order acyclic argument holds
-    strictly only for the per-accession-commit callers — under the batch txn a
-    rare rewash-vs-live overlap can deadlock and Postgres aborts+retries one side
-    (no corruption). Root-cause (per-accession commit in the worker) → #1735.
+    Release granularity follows the CALLER's commit boundary, and ALL callers
+    now commit per accession: rewash + legacy commit per accession, and the live
+    manifest worker commits per row in ``_dispatch_rows`` (#1735) — it commits the
+    implicit read-tx before the dispatch loop so each parser's
+    ``with conn.transaction()`` is a TOP-LEVEL txn, then commits after each row's
+    terminal ``transition_status``. So this lock releases at each accession's row
+    boundary on every path. Mutual exclusion holds and the uniform-order acyclic
+    argument (per-accession lock then per-instrument refresh lock, one accession
+    in flight at a time) holds for all callers, so the pre-#1735 rare
+    rewash-vs-live batch-txn deadlock no longer arises.
 
     Own namespace (``ingest_filing_accession``) — distinct from the 13F helper's
     ``ingest_13f_accession``; 13F filings carry their own kinds and keep their
