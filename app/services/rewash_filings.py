@@ -471,9 +471,10 @@ def _apply_form5(
     return True
 
 
-# Form 5 parser version is "form5-v{N}" — see _PARSER_VERSION_FORM5 in
-# insider_transactions.py. Bump both in lockstep when the parser semantics
-# change in a way that affects what lands in typed tables.
+# Form 5 parser version is "form5-v{N}" — defined as _PARSER_VERSION_FORM5 in
+# insider_transactions.py (imported by manifest_parsers/insider_345.py, not
+# redefined there). Bump both in lockstep when the parser semantics change in a
+# way that affects what lands in typed tables.
 register_parser(
     ParserSpec(
         document_kind="form5_xml",
