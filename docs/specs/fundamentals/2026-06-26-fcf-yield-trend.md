@@ -102,7 +102,7 @@ WITH q AS (
 )
 SELECT q.period_end_date, q.period_type, q.shares_outstanding,
        CASE WHEN q.n_q = 4                                  -- 4 consecutive quarters present
-             AND q.period_end_date - q.ttm_start <= 400     -- ~12-month span guard (no gap)
+             AND q.period_end_date - q.ttm_start <= 330     -- gap guard: consecutive ~275d, missing-quarter ~365d
             THEN q.ocf_ttm - ABS(COALESCE(q.capex_ttm, 0))  -- mirror sql/080:78 ABS(SUM)
             ELSE NULL END AS fcf_ttm,
        pd.close AS price, pd.price_date AS price_as_of

@@ -65,10 +65,18 @@ def fcf_yield_pct(fcf_ttm: Decimal | None, market_cap: Decimal | None) -> Decima
     return fcf_ttm / market_cap * 100
 
 
-# Per-period TTM over 4 consecutive normalized quarters. Mirrors
-# financial_periods_ttm (sql/032:209) but PER PERIOD via a trailing-row window;
-# adds a span guard financial_periods_ttm lacks, so a MISSING quarter (4 rows
-# spanning >~11 months) yields NULL rather than a silently-wrong 15-month "TTM".
+# Per-period TTM over 4 CONSECUTIVE normalized quarters. Mirrors
+# financial_periods_ttm (sql/032:209) but PER PERIOD via a trailing-row window,
+# plus a span guard financial_periods_ttm lacks.
+#
+# Span guard = 330 days. The (newest_end - oldest_end) span of 4 *consecutive*
+# quarter-ends is ~273-275 days (3 inter-quarter gaps; <=~280d even on 53-week
+# fiscal calendars — empirically max 275d across AAPL/MSFT/JPM/HD/GME on dev). A
+# MISSING quarter pulls a 4th quarter from the prior year, pushing the 4-row
+# window to ~364-365d. 330 cleanly separates the two: keeps every consecutive
+# window (>=50d margin) and NULLs the gap windows (a silently-wrong cross-year
+# "TTM"). A looser bound (e.g. 400) would ADMIT the 365d gap windows. Keep this
+# `330` in sync with the spec (docs/specs/fundamentals/2026-06-26-fcf-yield-trend.md).
 _QUARTERLY_SQL = """
     WITH q AS (
         SELECT
