@@ -1275,3 +1275,57 @@ def test_form3_reuse_stored_body_skips_fetch(
     assert stats.parsed == 1
     row = get_manifest_row(ebull_test_conn, acc)
     assert row is not None and row.ingest_status == "parsed" and row.raw_status == "stored"
+
+
+def test_form5_reuse_stored_body_skips_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1731 — Form 5 reuses its stored form5_xml body on re-drain (no SEC fetch,
+    fetched_at preserved), the same branch as Form 4/3. form5_xml is promoted out
+    of KEPT_NEGLIGIBLE into REWASH in this change."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.services.raw_filings import store_raw
+
+    iid = 8760053
+    acc = "0000320193-26-000053"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPL5R")
+    _seed_pending(ebull_test_conn, accession=acc, instrument_id=iid, source="sec_form5", form="5")
+    store_raw(
+        ebull_test_conn,
+        accession_number=acc,
+        document_kind="form5_xml",
+        payload=_FAKE_FORM_5_XML,
+        parser_version="form5-v1",
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000053/primary_doc.xml",
+    )
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT fetched_at FROM filing_raw_documents WHERE accession_number = %s AND document_kind = 'form5_xml'",
+            (acc,),
+        )
+        before_row = cur.fetchone()
+    assert before_row is not None
+    fetched_at_before = before_row[0]
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _no_fetch)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, acc)
+    assert row is not None and row.ingest_status == "parsed" and row.raw_status == "stored"
+
+    # Reuse must NOT re-store → fetched_at unchanged.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT fetched_at FROM filing_raw_documents WHERE accession_number = %s AND document_kind = 'form5_xml'",
+            (acc,),
+        )
+        after_row = cur.fetchone()
+    assert after_row is not None and after_row[0] == fetched_at_before

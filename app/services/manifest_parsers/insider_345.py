@@ -637,56 +637,64 @@ def _parse_form5(
     # ``/xslF345Xnn/`` prefixes used by Forms 3/4/5 (shared XSL).
     canonical_url = _canonical_form_4_url(url)
 
-    try:
-        with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-            xml = provider.fetch_document_text(canonical_url)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "form5 manifest parser: fetch raised accession=%s url=%s: %s",
-            accession,
-            canonical_url,
-            exc,
-        )
-        return _failed_outcome(f"fetch error: {exc}", parser_version=_PARSER_VERSION_FORM5)
+    # #1731 — reuse the stored form5_xml body on a re-drain instead of
+    # re-downloading (SEC filings immutable per accession; same contract as
+    # _parse_form4/_parse_form3). Fetch + store only on a miss; reuse skips both
+    # so fetched_at is preserved. form5_xml is promoted out of KEPT_NEGLIGIBLE
+    # into the REWASH bucket in this change (rewash_filings registers a Form 5
+    # apply_fn) so the #1617 partition test stays green.
+    xml = stored_body(conn, accession_number=accession, document_kind="form5_xml")
+    if xml is None:
+        try:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                xml = provider.fetch_document_text(canonical_url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "form5 manifest parser: fetch raised accession=%s url=%s: %s",
+                accession,
+                canonical_url,
+                exc,
+            )
+            return _failed_outcome(f"fetch error: {exc}", parser_version=_PARSER_VERSION_FORM5)
 
-    if not xml:
+        if not xml:
+            try:
+                with conn.transaction():
+                    _write_tombstone(
+                        conn,
+                        instrument_id=instrument_id,
+                        accession_number=accession,
+                        primary_document_url=canonical_url,
+                        document_type="5",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "form5 manifest parser: tombstone INSERT failed accession=%s",
+                    accession,
+                )
+                return _failed_outcome(f"tombstone error: {exc}", parser_version=_PARSER_VERSION_FORM5)
+            return ParseOutcome(
+                status="tombstoned",
+                parser_version=_PARSER_VERSION_FORM5,
+                error="empty or non-200 fetch",
+            )
+
         try:
             with conn.transaction():
-                _write_tombstone(
+                store_raw(
                     conn,
-                    instrument_id=instrument_id,
                     accession_number=accession,
-                    primary_document_url=canonical_url,
-                    document_type="5",
+                    document_kind="form5_xml",
+                    payload=xml,
+                    parser_version=_PARSER_VERSION_FORM5,
+                    source_url=canonical_url,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                "form5 manifest parser: tombstone INSERT failed accession=%s",
+                "form5 manifest parser: store_raw failed accession=%s",
                 accession,
             )
-            return _failed_outcome(f"tombstone error: {exc}", parser_version=_PARSER_VERSION_FORM5)
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_PARSER_VERSION_FORM5,
-            error="empty or non-200 fetch",
-        )
-
-    try:
-        with conn.transaction():
-            store_raw(
-                conn,
-                accession_number=accession,
-                document_kind="form5_xml",
-                payload=xml,
-                parser_version=_PARSER_VERSION_FORM5,
-                source_url=canonical_url,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "form5 manifest parser: store_raw failed accession=%s",
-            accession,
-        )
-        return _failed_outcome(f"store_raw error: {exc}", parser_version=_PARSER_VERSION_FORM5)
+            return _failed_outcome(f"store_raw error: {exc}", parser_version=_PARSER_VERSION_FORM5)
 
     try:
         parsed = parse_form_5_xml(xml)
@@ -823,12 +831,17 @@ def _insider_fetch_url(conn: Any, row: Any) -> str | None:  # conn: Connection, 
         return None
     if row.source == "sec_form5" and not form5_within_retention(filed):
         return None
-    # Map source → the EXACT stored kind; fail closed (Codex ckpt-1 #4).
-    # ``sec_form5`` is deliberately absent — _parse_form5 does NOT reuse
-    # (form5_xml stays KEPT_NEGLIGIBLE per #1617), so it falls through and
-    # prefetches as before. A shared form4_xml check would wrongly skip
-    # Form 3/5 rows whose form4_xml body happens to exist.
-    reuse_kind: dict[str, DocumentKind] = {"sec_form3": "form3_xml", "sec_form4": "form4_xml"}
+    # Map source → the EXACT stored kind; fail closed (Codex ckpt-1 #4). All
+    # three insider forms now reuse their stored body on re-drain (Form 5 joined
+    # in #1731 — promoted out of KEPT_NEGLIGIBLE into REWASH). The per-source map
+    # (vs a shared form4_xml check) keeps a stored form4_xml body from wrongly
+    # skipping a Form 3/5 prefetch; a source NOT in the map falls through and
+    # prefetches as before.
+    reuse_kind: dict[str, DocumentKind] = {
+        "sec_form3": "form3_xml",
+        "sec_form4": "form4_xml",
+        "sec_form5": "form5_xml",
+    }
     kind = reuse_kind.get(row.source)
     if kind is not None and stored_body(conn, accession_number=row.accession_number, document_kind=kind) is not None:
         return None

@@ -241,10 +241,13 @@ def test_insider_fetch_url_mirrors_prefetch_gates(monkeypatch: pytest.MonkeyPatc
     # #1591 — body already stored → skip prefetch (parser reuses it from the DB).
     monkeypatch.setattr(ins, "stored_body", _fake_stored_body((_MK_ACCESSION, "form4_xml")))
     assert _insider_fetch_url(None, _mk(source="sec_form4", url=base, filed_at=recent, iid=1)) is None
-    # Fail-closed map (Codex ckpt-1 #4): Form 5 is NOT reused by _parse_form5,
-    # so its source is absent from the reuse map — a stored form5_xml body must
-    # NOT skip the prefetch (the parser will fetch it).
+    # #1731 — Form 5 now reuses its stored body too (promoted out of
+    # KEPT_NEGLIGIBLE into REWASH). A stored form5_xml body skips the prefetch.
     monkeypatch.setattr(ins, "stored_body", _fake_stored_body((_MK_ACCESSION, "form5_xml")))
+    assert _insider_fetch_url(None, _mk(source="sec_form5", url=base, filed_at=recent, iid=1)) is None
+    # Fail-closed map still holds: a stored form4_xml body must NOT skip a Form 5
+    # prefetch (per-source map, not a shared kind check).
+    monkeypatch.setattr(ins, "stored_body", _fake_stored_body((_MK_ACCESSION, "form4_xml")))
     assert _insider_fetch_url(None, _mk(source="sec_form5", url=base, filed_at=recent, iid=1)) is not None
 
 
