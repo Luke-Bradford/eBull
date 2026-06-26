@@ -176,6 +176,22 @@ period parsed FROM ``primary_doc.xml`` — so the 13F expander returns
 ``primary_doc.xml`` ONLY (infotable stays serial, fetched live after the
 parser's retention gate passes). Returning ``[]`` is always safe."""
 
+PrefetchChainFn = Callable[[list["ManifestRow"], Any], dict[str, str]]
+"""#1730 — optional per-source prefetch for an INDEPENDENT doc-chain the
+pass-1/pass-2 (``fetch_url`` -> ``expand_urls``) body-keyed mechanism can't
+reach. pass-2 expands the pass-1 BODY; a chain discovered from a DIFFERENT doc
+(e.g. the 10-K's XBRL linkbases, discovered from the archive ``index.json`` —
+independent of the primary HTML pass-1) needs its own self-contained pass.
+
+Given the batch's rows for one source + an open ``SecFilingsProvider``, the hook
+runs its OWN concurrent fetch rounds (``concurrent_fetch.fetch_document_texts``,
+the same shared ≤10 req/s throttle) and returns ``{url: body}`` to merge into the
+tick cache. Pure HTTP keyed on row-local fields (no DB) — it MUST mirror the
+parser's pre-fetch gates for the chain (return nothing for a row the parser would
+skip) so it never burns SEC budget on a doc the parser discards. A raise is
+best-effort-skipped (serial parser re-fetches). Runs regardless of whether the
+source registered ``fetch_url``."""
+
 
 @dataclass(frozen=True)
 class ParserSpec:
@@ -194,6 +210,7 @@ class ParserSpec:
     requires_raw_payload: bool = False
     fetch_url: FetchUrlFn | None = None
     expand_urls: ExpandUrlsFn | None = None
+    prefetch_chain: PrefetchChainFn | None = None
 
 
 _PARSERS: dict[ManifestSource, ParserSpec] = {}
@@ -206,6 +223,7 @@ def register_parser(
     requires_raw_payload: bool = False,
     fetch_url: FetchUrlFn | None = None,
     expand_urls: ExpandUrlsFn | None = None,
+    prefetch_chain: PrefetchChainFn | None = None,
 ) -> None:
     """Register a parser callable for one ManifestSource.
 
@@ -227,6 +245,7 @@ def register_parser(
         requires_raw_payload=requires_raw_payload,
         fetch_url=fetch_url,
         expand_urls=expand_urls,
+        prefetch_chain=prefetch_chain,
     )
 
 
@@ -457,7 +476,19 @@ def _prefetch_bodies(
             continue
         if url:
             pass1_url_to_rows[url].append(row)
-    if not pass1_url_to_rows:
+
+    # #1730 — rows whose source registered a self-contained INDEPENDENT-doc-chain
+    # prefetch (e.g. the 10-K XBRL linkbases, discovered from index.json — NOT
+    # reachable via the primary-HTML-keyed pass-2 expander). Collected separately
+    # so the chain runs even when NO source registered a ``fetch_url`` (pass-1
+    # empty) — the early return below must not skip a chain-only source.
+    chain_rows_by_source: dict[ManifestSource, list[ManifestRow]] = defaultdict(list)
+    for row in rows:
+        spec = _PARSERS.get(row.source)
+        if spec is not None and spec.prefetch_chain is not None:
+            chain_rows_by_source[row.source].append(row)
+
+    if not pass1_url_to_rows and not chain_rows_by_source:
         return {}
 
     # Lazy imports — keep the provider/HTTP + config deps off the worker's
@@ -467,7 +498,7 @@ def _prefetch_bodies(
     from app.providers.implementations.sec_edgar import SecFilingsProvider
 
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-        pass1 = fetch_document_texts(provider, set(pass1_url_to_rows))
+        pass1 = fetch_document_texts(provider, set(pass1_url_to_rows)) if pass1_url_to_rows else {}
         cache: dict[str, str] = {url: body for url, body in pass1.items() if body is not None}
 
         # Pass 2 — expand only rows whose pass-1 doc was fetched OK.
@@ -498,6 +529,27 @@ def _prefetch_bodies(
         if pass2_urls:
             pass2 = fetch_document_texts(provider, pass2_urls)
             cache.update({url: body for url, body in pass2.items() if body is not None})
+
+        # #1730 — independent-doc-chain prefetch (e.g. 10-K XBRL linkbases). Each
+        # hook runs its OWN concurrent fetch rounds against the shared throttle and
+        # returns {url: body}; merge into the cache. Best-effort — a raise must NOT
+        # abort the tick (the serial parser re-fetches), mirroring the pass-1/pass-2
+        # hook handling. Pure HTTP (no DB), so no savepoint wrapper.
+        for source, chain_rows in chain_rows_by_source.items():
+            spec = _PARSERS.get(source)
+            if spec is None or spec.prefetch_chain is None:
+                continue
+            try:
+                extra_bodies = spec.prefetch_chain(chain_rows, provider)
+            except Exception:
+                logger.exception(
+                    "manifest prefetch: prefetch_chain hook raised for source=%s "
+                    "(%d rows); skipping chain prefetch (serial parser will handle it)",
+                    source,
+                    len(chain_rows),
+                )
+                continue
+            cache.update({url: body for url, body in extra_bodies.items() if body is not None})
 
     return cache
 

@@ -27,6 +27,7 @@ Provider contract:
 
 import contextvars
 import hashlib
+import json
 import logging
 import threading
 import urllib.parse
@@ -111,6 +112,17 @@ def set_prefetch_body_cache(cache: dict[str, str]) -> contextvars.Token[dict[str
 def reset_prefetch_body_cache(token: contextvars.Token[dict[str, str] | None]) -> None:
     """Clear the prefetch cache bound by :func:`set_prefetch_body_cache`."""
     _PREFETCH_BODY_CACHE.reset(token)
+
+
+def archive_dir_url(raw_id: str, cik_for_url: int) -> str:
+    """Canonical SEC archive directory URL ``.../Archives/edgar/data/{cik}/{raw_id}/``
+    (trailing slash). SINGLE builder shared by :meth:`SecFilingsProvider.fetch_filing_index`,
+    the 10-K dimensional-facts serial fetch, and the #1730 XBRL prefetch chain so their
+    index.json / linkbase-artifact URLs can NEVER drift — a one-character mismatch
+    silently misses the prefetch cache (no wrong data, just no speedup). ``raw_id`` is the
+    18-char dashless accession; ``cik_for_url`` is the ISSUER CIK as an int (SEC archives a
+    filing under the issuer CIK, not the filer-of-record — #736)."""
+    return f"https://www.sec.gov/Archives/edgar/data/{cik_for_url}/{raw_id}/"
 
 
 # Known SEC filing-agent CIKs (#752 defense-in-depth). These are
@@ -482,7 +494,24 @@ class SecFilingsProvider(FilingsProvider):
                 provider_filing_id,
             )
             cik_for_url = int(raw_id[:10])
-        absolute_url = f"https://www.sec.gov/Archives/edgar/data/{cik_for_url}/{raw_id}/index.json"
+        absolute_url = archive_dir_url(raw_id, cik_for_url) + "index.json"
+        # #1730 — serve from the tick-scoped prefetch cache when present, mirroring
+        # fetch_document_text (:613). The cache stores resp.text; the XBRL prefetch
+        # chain fetches the index via fetch_document_text, so a hit is the index.json
+        # text → parse it here. Guard malformed/non-dict → fall through to live fetch
+        # (never crash on a cache entry). Outside a worker tick the cache is None → no
+        # behaviour change; inside a tick a same-URL caller now gets the cached JSON
+        # (intended — the index is the same immutable doc).
+        cache = _PREFETCH_BODY_CACHE.get()
+        if cache is not None:
+            cached = cache.get(absolute_url)
+            if cached is not None:
+                try:
+                    parsed_cached = json.loads(cached)
+                except json.JSONDecodeError:
+                    parsed_cached = None
+                if isinstance(parsed_cached, dict):
+                    return parsed_cached
         resp = self._http_tickers.get(absolute_url)
         if resp.status_code == 404:
             return None

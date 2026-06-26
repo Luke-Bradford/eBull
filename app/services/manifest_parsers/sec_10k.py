@@ -56,6 +56,7 @@ that as a successful drain (no body write needed).
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -63,7 +64,8 @@ from typing import Any
 import psycopg
 
 from app.config import settings
-from app.providers.implementations.sec_edgar import SecFilingsProvider
+from app.providers.concurrent_fetch import fetch_document_texts
+from app.providers.implementations.sec_edgar import SecFilingsProvider, archive_dir_url
 from app.services.business_summary import (
     _MIN_BODY_LEN,
     _find_prior_plain_10k,
@@ -140,6 +142,35 @@ class _DimensionalFetchError(Exception):
     dimensional write is delete-then-insert)."""
 
 
+def _xbrl_index_locator(
+    *,
+    accession: str,
+    issuer_cik: str | None,
+    primary_document_url: str,
+) -> tuple[str, str, str | None] | None:
+    """Shared (index_url, archive_base, discovery_primary_name) for an accession's
+    XBRL, or ``None`` when the issuer CIK is missing / non-numeric (no usable
+    archive path → no dimensional facts).
+
+    SINGLE source of the index + base URLs so the serial
+    :func:`_fetch_dimensional_facts` and the #1730 prefetch chain
+    :func:`_sec10k_xbrl_prefetch` can NEVER drift — a one-character mismatch
+    silently misses the prefetch cache. ``archive_dir_url`` is the same builder
+    :meth:`SecFilingsProvider.fetch_filing_index` routes through, so the chain's
+    cached index URL byte-matches the serial path's ``fetch_filing_index`` lookup.
+
+    ``discovery_primary_name`` is the basename passed to ``discover_xbrl_files``
+    for its size-preference rule: full-submission ``.txt`` names carry no useful
+    stem, so pass ``None`` and let discovery fall back to its size rules."""
+    if issuer_cik is None or not issuer_cik.strip().isdigit():
+        return None
+    raw_id = accession.replace("-", "")
+    base = archive_dir_url(raw_id, int(issuer_cik))
+    primary_basename = primary_document_url.rsplit("/", 1)[-1]
+    primary_name = None if primary_basename.lower().endswith(".txt") else primary_basename
+    return base + "index.json", base, primary_name
+
+
 def _fetch_dimensional_facts(
     *,
     accession: str,
@@ -163,23 +194,21 @@ def _fetch_dimensional_facts(
     ``filing_raw_documents`` (raw-payload scope narrowing #470: every
     extracted field lands in SQL).
     """
-    # Archive base is built from (cik, accession) — the same shape
-    # filing_documents.py uses — NEVER from the primary URL's directory:
-    # legacy manifest rows carry the full-submission ``.txt`` URL
-    # (``…/data/{cik}/{accn}.txt``), whose dirname is the CIK root, so
-    # every artifact fetch would 404 and the step would silently yield
-    # zero facts (caught live on GME/HD/JPM in the dev backfill).
-    if issuer_cik is None or not issuer_cik.strip().isdigit():
+    # Archive base + index URL + discovery primary-name from (cik, accession) —
+    # via the SHARED locator so the serial path here and the #1730 prefetch chain
+    # (``_sec10k_xbrl_prefetch``) resolve byte-identical URLs (a mismatch silently
+    # misses the prefetch cache). NEVER from the primary URL's directory: legacy
+    # manifest rows carry the full-submission ``.txt`` URL (``…/data/{cik}/{accn}.txt``),
+    # whose dirname is the CIK root, so every artifact fetch would 404 (caught live
+    # on GME/HD/JPM in the dev backfill).
+    locator = _xbrl_index_locator(accession=accession, issuer_cik=issuer_cik, primary_document_url=primary_document_url)
+    if locator is None:
         logger.warning(
             "sec_10k manifest parser: accession=%s has no usable issuer cik; skipping dimensional facts",
             accession,
         )
         return []
-    base = f"https://www.sec.gov/Archives/edgar/data/{int(issuer_cik)}/{accession.replace('-', '')}/"
-    primary_basename = primary_document_url.rsplit("/", 1)[-1]
-    # Full-submission .txt names carry no useful stem for discovery
-    # preference; pass None so discovery falls back to its size rules.
-    primary_name = None if primary_basename.lower().endswith(".txt") else primary_basename
+    _index_url, base, primary_name = locator
 
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
         try:
@@ -578,12 +607,13 @@ def _sec10k_fetch_url(conn: Any, row: Any) -> str | None:  # conn unused; row: M
 
     Scope is the PRIMARY doc only. The 10-K also fetches XBRL linkbase
     artifacts (``index.json`` + instance + label/def) via a SEPARATE provider
-    in :func:`_fetch_dimensional_facts` after an independent index discovery
-    — those are NOT prefetched here (no clean single next-URL; a 13F-style
-    ``expand_urls`` keyed off the primary HTML wouldn't reach them). So on a
-    re-drain the primary docs overlap across rows while the XBRL stays serial;
-    full XBRL overlap is a documented follow-up. An over-broad ``None`` is
-    always safe (serial fallback reaches the identical fetch/tombstone).
+    in :func:`_fetch_dimensional_facts` after an independent index discovery —
+    the pass-2 ``expand_urls`` (keyed off the primary HTML body) can't reach
+    them. As of #1730 those are prefetched by the independent
+    :func:`_sec10k_xbrl_prefetch` ``prefetch_chain`` hook, so on a re-drain BOTH
+    the primary doc AND the XBRL chain overlap across rows. An over-broad
+    ``None`` is always safe (serial fallback reaches the identical
+    fetch/tombstone).
 
     ``primary_doc`` is born-compacted (SWEPT #1617) so there is no stored body
     to mirror a #1591-PR1 reuse gate against — the 10-K always (re-)fetches /
@@ -593,6 +623,80 @@ def _sec10k_fetch_url(conn: Any, row: Any) -> str | None:  # conn unused; row: M
     if not url or row.instrument_id is None:
         return None
     return url
+
+
+def _sec10k_xbrl_prefetch(rows: list[Any], provider: Any) -> dict[str, str]:  # rows: list[ManifestRow]
+    """#1730 ``prefetch_chain`` hook — concurrently prefetch the 10-K XBRL chain
+    (archive ``index.json`` + instance/label/def linkbases) for a batch of rows so
+    a re-drain overlaps them across rows instead of fetching ~4 docs SERIALLY per
+    row inside dispatch (:func:`_fetch_dimensional_facts`). Parse-and-drop (#470 —
+    artifacts never stored), so this is pure concurrency, NOT reuse.
+
+    Mirrors the parser's pre-XBRL gates (return nothing for a row the parser would
+    skip before the dimensional step): ``primary_document_url`` + ``instrument_id``
+    present (``_parse_sec_10k`` step-1 tombstone), ``filed_at`` present (step-2.5
+    guard), ``cik`` present + numeric (``_xbrl_index_locator`` returns None
+    otherwise). The primary-fetch / ``store_raw`` outcomes are NOT
+    row-local-knowable, so a row the serial parser later tombstones (primary 404)
+    or fails (transient / store_raw) wastes its prefetched XBRL — a rate-budget cost
+    only (parse-and-drop; the serial parser still gates), accepted (rare on the
+    last-3-annual horizon).
+
+    Two concurrent rounds against the shared ≤10 req/s throttle:
+      1. ``index.json`` for every gated row.
+      2. instance/label/def for every successfully-discovered index.
+
+    Returns ``{url: body}`` (index bodies + artifact bodies) for the tick cache.
+    The serial :func:`_fetch_dimensional_facts` then does 0 HTTP:
+    ``fetch_filing_index`` hits the cached index (#1730 cache-aware), each artifact
+    hits via ``fetch_document_text``, and roles (instance vs label vs def) are
+    re-discovered from the cached index — no role info crosses this hook, so a flat
+    URL→body cache is sufficient. The locator is SHARED with the serial path so the
+    URLs cannot drift."""
+    # accession -> (index_url, base, primary_name) for rows past the cheap gates.
+    index_url_to_loc: dict[str, tuple[str, str | None]] = {}
+    for row in rows:
+        if not row.primary_document_url or row.instrument_id is None or row.filed_at is None:
+            continue
+        loc = _xbrl_index_locator(
+            accession=row.accession_number,
+            issuer_cik=row.cik,
+            primary_document_url=row.primary_document_url,
+        )
+        if loc is None:
+            continue
+        index_url, base, primary_name = loc
+        index_url_to_loc[index_url] = (base, primary_name)
+    if not index_url_to_loc:
+        return {}
+
+    cache: dict[str, str] = {}
+    artifact_urls: set[str] = set()
+    index_bodies = fetch_document_texts(provider, set(index_url_to_loc))
+    for index_url, body in index_bodies.items():
+        if body is None:
+            continue
+        cache[index_url] = body
+        base, primary_name = index_url_to_loc[index_url]
+        try:
+            raw_index = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw_index, dict):
+            continue
+        refs = discover_xbrl_files(raw_index, primary_document_name=primary_name)
+        if refs is None:
+            continue
+        # A set auto-dedups the def==label single-fetch case the serial path also
+        # collapses (sec_10k.py: ``if refs.definition_name == refs.label_name``).
+        for name in (refs.instance_name, refs.label_name, refs.definition_name):
+            if name:
+                artifact_urls.add(base + name)
+
+    if artifact_urls:
+        artifact_bodies = fetch_document_texts(provider, artifact_urls)
+        cache.update({url: body for url, body in artifact_bodies.items() if body is not None})
+    return cache
 
 
 def register() -> None:
@@ -605,4 +709,10 @@ def register() -> None:
     """
     from app.jobs.sec_manifest_worker import register_parser
 
-    register_parser("sec_10k", _parse_sec_10k, requires_raw_payload=True, fetch_url=_sec10k_fetch_url)
+    register_parser(
+        "sec_10k",
+        _parse_sec_10k,
+        requires_raw_payload=True,
+        fetch_url=_sec10k_fetch_url,
+        prefetch_chain=_sec10k_xbrl_prefetch,
+    )
