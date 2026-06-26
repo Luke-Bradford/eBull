@@ -62,7 +62,9 @@ Cross-source confirm: spot-check the latest GME days-to-cover figure against FIN
 
 ## 12. Smoke test
 
-Path: `tests/smoke/test_etl_source_to_sink.py::test_finra_short_interest`. Asserts: provider importable; parser registered (`registered_parser_sources()` contains `'finra_short_interest'`); ScheduledJob `JOB_FINRA_SHORT_INTEREST_REFRESH` exists in `SCHEDULED_JOBS`; tables `finra_short_interest_observations` + `finra_short_interest_current` present in schema; PARSER_VERSION matches across writer + synth-no-op modules.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`, the per-source parametrized cases: `test_source_has_spec_file[finra_short_interest]`, `test_source_spec_has_required_sections[finra_short_interest]`, `test_manifest_source_has_registered_parser[finra_short_interest]`, `test_manifest_source_has_freshness_cadence[finra_short_interest]`, `test_manifest_source_has_sink_tables[finra_short_interest-spec*]` (synth-noop: asserts no sink tables + `_SYNTH_NOOP=True` parity). `test_manifest_source_form_mapping_present[finra_short_interest]` SKIPS — FINRA is in `FORM_MAPPING_EXEMPT` (not discovered via SEC form type).
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): provider importable, the `JOB_FINRA_SHORT_INTEREST_REFRESH` ScheduledJob, PARSER_VERSION parity across the writer + synth-no-op modules, the `finra_short_interest_observations` / `_current` tables, and the operator-visible figure.
 
 ## 13. Known gotchas
 

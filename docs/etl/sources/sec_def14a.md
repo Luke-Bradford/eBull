@@ -73,7 +73,9 @@ ORDER BY oeo.filed_at DESC LIMIT 10;
 Smoke: `curl localhost:8000/instruments/AAPL/ownership-rollup | jq '.def14a, .esop'`. Cross-source: spot-check insider+5% holders against `proxymonitor.org` filings DB or SEC EDGAR full-text DEF 14A.
 
 ## 12. Smoke test
-`tests/smoke/test_etl_source_to_sink.py::test_sec_def14a_wired`. Asserts parser registered, stage 17 in `_BOOTSTRAP_STAGE_SPECS`, both `ownership_def14a_observations` + `ownership_esop_observations` + their `_current` tables exist.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`, the per-source parametrized cases: `test_source_has_spec_file[sec_def14a]`, `test_source_spec_has_required_sections[sec_def14a]`, `test_manifest_source_has_registered_parser[sec_def14a]`, `test_manifest_source_form_mapping_present[sec_def14a]`, `test_manifest_source_has_freshness_cadence[sec_def14a]`, `test_manifest_source_has_sink_tables[sec_def14a-spec*]` (asserts the declared sinks `ownership_def14a_observations` / `_current` + `ownership_esop_observations` / `_current` exist).
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): bootstrap stage 17 in `_BOOTSTRAP_STAGE_SPECS` and the operator-visible figure.
 
 ## 13. Known gotchas
 1. **Two observation destinations from one parser.** `_record_def14a_observations_for_filing` + `_record_esop_observations_for_filing` MUST both run before `_record_ingest_attempt(status='success')` (`def14a.py:363-388`). Partial-fan-out is rolled back by the single outer `with conn.transaction()`.

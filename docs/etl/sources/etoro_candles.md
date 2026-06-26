@@ -71,7 +71,9 @@ Cross-source confirm: spot-check AAPL daily close against `https://finance.yahoo
 
 ## 12. Smoke test
 
-Path: `tests/smoke/test_etl_source_to_sink.py::test_etoro_candles`. Asserts: `EtoroProvider` importable; `daily_candle_refresh` registered against the sync_orchestrator DAG (`JOB_TO_LAYERS["daily_candle_refresh"] == ("candles",)`); bootstrap stage S2 `candle_refresh` present in `_BOOTSTRAP_STAGE_SPECS`; `price_daily` table exists; `GET /instruments/AAPL/candles?range=1m` returns ≥1 bar against the seeded dev DB.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`: `test_source_has_spec_file[etoro_candles]` + `test_source_spec_has_required_sections[etoro_candles]`. (A BULK_REFERENCE source — NOT a `ManifestSource`, so the manifest-source parametrized cases do not apply to it.)
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): `EtoroProvider` importable, the `daily_candle_refresh` DAG registration (`JOB_TO_LAYERS["daily_candle_refresh"] == ("candles",)`), bootstrap stage S2 `candle_refresh`, the `price_daily` table, and the `GET /instruments/AAPL/candles?range=1m` endpoint.
 
 ## 13. Known gotchas
 

@@ -71,7 +71,9 @@ Cross-source confirm: spot-check AAPL CUSIP `037833100` against `https://www.cus
 
 ## 12. Smoke test
 
-Path: `tests/smoke/test_etl_source_to_sink.py::test_sec_13f_securities_list`. Asserts: service importable; ScheduledJob `JOB_CUSIP_UNIVERSE_BACKFILL` exists in `SCHEDULED_JOBS`; bootstrap stage S3 `cusip_universe_backfill` present in `_BOOTSTRAP_STAGE_SPECS`; cap `cusip_mapping_ready` published by S3; `external_identifiers` row exists for the AAPL fixture with `provider='sec'`, `identifier_type='cusip'`.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`: `test_source_has_spec_file[sec_13f_securities_list]` + `test_source_spec_has_required_sections[sec_13f_securities_list]`. (A BULK_REFERENCE source — NOT a `ManifestSource`, so the manifest-source parametrized cases do not apply to it.)
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): service importable, the `JOB_CUSIP_UNIVERSE_BACKFILL` ScheduledJob, bootstrap stage S3 `cusip_universe_backfill`, the `cusip_mapping_ready` cap, and the AAPL `external_identifiers (sec, cusip)` row.
 
 ## 13. Known gotchas
 

@@ -66,7 +66,9 @@ Cross-source confirm: spot-check the CNMS aggregate short_volume against FINRA's
 
 ## 12. Smoke test
 
-Path: `tests/smoke/test_etl_source_to_sink.py::test_finra_regsho_daily`. Asserts: provider importable; parser registered (`registered_parser_sources()` contains `'finra_regsho_daily'`); ScheduledJob `JOB_FINRA_REGSHO_DAILY_REFRESH` exists in `SCHEDULED_JOBS`; table `finra_regsho_daily_observations` present in schema; six `PREFIXES` tuple pinned membership.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`, the per-source parametrized cases: `test_source_has_spec_file[finra_regsho_daily]`, `test_source_spec_has_required_sections[finra_regsho_daily]`, `test_manifest_source_has_registered_parser[finra_regsho_daily]`, `test_manifest_source_has_freshness_cadence[finra_regsho_daily]`, `test_manifest_source_has_sink_tables[finra_regsho_daily-spec*]` (synth-noop: asserts no sink tables + `_SYNTH_NOOP=True` parity). `test_manifest_source_form_mapping_present[finra_regsho_daily]` SKIPS — FINRA is in `FORM_MAPPING_EXEMPT` (not discovered via SEC form type).
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): provider importable, the `JOB_FINRA_REGSHO_DAILY_REFRESH` ScheduledJob, the six-element `PREFIXES` tuple, the `finra_regsho_daily_observations` table, and the operator-visible figure.
 
 ## 13. Known gotchas
 

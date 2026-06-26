@@ -67,7 +67,9 @@ WHERE i.symbol = 'SPY';
 Smoke: `curl localhost:8000/instruments/SPY/fund-metadata | jq '.expense_ratio_pct, .net_assets_amt'`. Cross-source: spot-check `expense_ratio_pct` against the fund's published prospectus or `etfdb.com` expense-ratio page.
 
 ## 12. Smoke test
-`tests/smoke/test_etl_source_to_sink.py::test_sec_n_csr_wired`. Asserts parser registered, stages 26 + 27 in `_BOOTSTRAP_STAGE_SPECS`, `fund_metadata_observations` + `fund_metadata_current` tables exist.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`, the per-source parametrized cases: `test_source_has_spec_file[sec_n_csr]`, `test_source_spec_has_required_sections[sec_n_csr]`, `test_manifest_source_has_registered_parser[sec_n_csr]`, `test_manifest_source_form_mapping_present[sec_n_csr]`, `test_manifest_source_has_freshness_cadence[sec_n_csr]`, `test_manifest_source_has_sink_tables[sec_n_csr-spec*]` (asserts the declared sinks `fund_metadata_observations` / `fund_metadata_current` exist).
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): bootstrap stages 26 + 27 in `_BOOTSTRAP_STAGE_SPECS` and the operator-visible figure.
 
 ## 13. Known gotchas
 1. **730d retention is hard-pinned** (`N_CSR_RETENTION_DAYS = 730` at `sec_n_csr.py:73-82` per `project_1233_pr8_ncsr_730d_cap.md`). Unlike PR6 (13F-HR) / PR7 (N-PORT), N-CSR has NO deep-dive override — `sec_rebuild` requeues a pre-cap accession and the parser gate tombstones with `outside_retention`. Pre-cap fund-metadata is NOT part of any consumer surface — accepting the loss is the explicit trade-off in spec §8 acceptance #6.

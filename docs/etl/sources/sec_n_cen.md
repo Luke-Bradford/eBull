@@ -79,7 +79,9 @@ ORDER BY f.cik;
 **Smoke** is currently the test suite, NOT a live cron: `uv run pytest tests/test_ncen_classifier.py -v`. Cross-source: spot-check `investmentCompanyType` from `https://efts.sec.gov/LATEST/search-index?q=%22N-CEN%22&forms=N-CEN&ciks=<cik>`.
 
 ## 12. Smoke test
-`tests/smoke/test_etl_source_to_sink.py::test_sec_n_cen_wired`. Asserts: provider importable, `ncen_filer_classifications` table exists. **Skips** all manifest / bootstrap / scheduled-job / freshness-cadence checks (explicit `pytest.skip("ad-hoc bypass — see docs/etl/sources/sec_n_cen.md §0 + #1313")`). The skip is the audit framework correctly reporting "this source is exceptional".
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`: `test_source_has_spec_file[sec_n_cen]`, `test_source_spec_has_required_sections[sec_n_cen]`, `test_ad_hoc_source_has_architectural_exception_section[sec_n_cen]` (asserts the `## 0. Architectural exception` section documenting the manifest bypass). As an AD_HOC source `sec_n_cen` is NOT in the `ManifestSource` Literal, so the manifest-source parametrized cases (registered-parser / form-mapping / freshness-cadence / sink-tables) do not enumerate it at all — the bypass is reported by its absence from those lists plus the architectural-exception assertion above.
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): provider importable and the `ncen_filer_classifications` table.
 
 ## 13. Known gotchas
 1. **NOT in the manifest framework.** Every assumption from the README's "Cross-cutting invariants" section that keys on `ManifestSource` fails for N-CEN. Specifically: invariant #2 ("Manifest source enum is the registry") explicitly carves out N-CEN as the ONE ad-hoc bypass; invariants #4-#7 do not apply.

@@ -69,7 +69,9 @@ ORDER BY ofo.market_value_usd DESC NULLS LAST LIMIT 20;
 Smoke: `curl localhost:8000/instruments/MSFT/ownership-rollup | jq '.funds[:10]'`. Cross-source: spot-check top-10 holders against `fintel.io` mutual-fund holdings page or SEC EDGAR direct NPORT-P viewer.
 
 ## 12. Smoke test
-`tests/smoke/test_etl_source_to_sink.py::test_sec_n_port_wired`. Asserts parser registered, stage 23 in `_BOOTSTRAP_STAGE_SPECS`, `ownership_funds_observations` + `ownership_funds_current` + `sec_fund_series` tables exist.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`, the per-source parametrized cases: `test_source_has_spec_file[sec_n_port]`, `test_source_spec_has_required_sections[sec_n_port]`, `test_manifest_source_has_registered_parser[sec_n_port]`, `test_manifest_source_form_mapping_present[sec_n_port]`, `test_manifest_source_has_freshness_cadence[sec_n_port]`, `test_manifest_source_has_sink_tables[sec_n_port-spec*]` (asserts the declared sinks `ownership_funds_observations` / `ownership_funds_current` exist).
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): bootstrap stage 23 in `_BOOTSTRAP_STAGE_SPECS`, the `sec_fund_series` table (not a declared sink), and the operator-visible figure.
 
 ## 13. Known gotchas
 1. **EdgarTools Pydantic validation cliff (#932)**. `pyproject.toml:21` pins `edgartools==5.30.2`. Pin-bump risk: internal `pydantic.ValidationError` on missing required Decimal fields is converted to `NPortParseError` (`n_port_ingest.py:28-31`) — a pin bump may silently broaden the failure surface. See `.claude/skills/data-sources/edgartools.md` for the decision tree.
