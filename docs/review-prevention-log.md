@@ -348,6 +348,14 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### `scripts/rewash.py` must pre-import `manifest_parsers` or a real rewash crashes mid-run on a circular import
+- First seen in: #1731 (noted in memory); fixed in #817
+- Symptom: `scripts/rewash.py --kind form4_xml` (any non-dry-run with a non-empty cohort) crashes on the FIRST insider accession with `ImportError: cannot import name 'ParsedForm3' from partially initialized module 'app.services.insider_transactions'`. The apply-fn (`_apply_form4/5/3`) does a lazy `from app.services.insider_transactions import ...`; if that is the process's first import of `insider_transactions`, the chain `insider_transactions -> manifest_parsers._classify -> insider_345 -> insider_form3_ingest -> insider_transactions` re-enters the module mid-init. The app + test entrypoints import `manifest_parsers` first by side effect, masking it; the standalone CLI did not. Dry-run does NOT reproduce (it skips the apply import). Reproduces on a clean `main` tree — NOT introduced by any single PR.
+- Prevention: the rewash CLI imports `app.services.manifest_parsers` BEFORE `app.services.rewash_filings`. Any new standalone entrypoint that drives ownership apply-fns must do the same (or the deeper fix: make `insider_transactions`'s top-level `manifest_parsers._classify` import lazy). When dev-verifying a rewash, run a REAL (non-dry-run) pass on a forced cohort of 1 — a dry-run will not surface apply-time import or parse failures.
+- Enforced in: this prevention log; `scripts/rewash.py` (pre-import + comment)
+
+---
+
 ### `assert` as a runtime guard in service code
 - First seen in: #109
 - Symptom: A service function used `assert row is not None` after a `RETURNING` INSERT (or after a transaction block) to enforce a DB-contract invariant. `python -O` strips assertions, so the guard vanishes in any optimised build and the next line crashes with a confusing `TypeError: 'NoneType' object is not subscriptable` (or similar) instead of the intended structured error.
