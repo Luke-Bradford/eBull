@@ -21,6 +21,7 @@ import {
 } from "recharts";
 
 import type { InsiderTransactionDetail } from "@/api/instruments";
+import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { lightTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { directionOf, signedShares } from "@/lib/insiderClassify";
@@ -131,20 +132,20 @@ function NetTooltip({ active, payload }: TooltipProps) {
   if (!bucket) return null;
   const colorClass =
     bucket.net > 0
-      ? "text-emerald-700"
+      ? "text-emerald-700 dark:text-emerald-400"
       : bucket.net < 0
-        ? "text-red-700"
-        : "text-slate-700";
+        ? "text-red-700 dark:text-red-400"
+        : "text-slate-700 dark:text-slate-300";
   return (
-    <div className="rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-2 py-1 text-xs shadow-md">
-      <div className="font-medium text-slate-700">
+    <ChartTooltip>
+      <div className="font-medium text-slate-700 dark:text-slate-200">
         {shortMonthLabel(bucket.month)}
       </div>
       <div className={`font-mono tabular-nums ${colorClass}`}>
         {bucket.net > 0 ? "+" : ""}
         {formatShares(bucket.net)} sh
       </div>
-    </div>
+    </ChartTooltip>
   );
 }
 

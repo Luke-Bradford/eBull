@@ -33,6 +33,7 @@
 import { type KeyboardEvent, useId, useMemo } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
+import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { formatPct, formatShares } from "@/components/instrument/ownershipMetrics";
 import {
   type CategoryKey,
@@ -533,15 +534,15 @@ function SunburstTooltip(props: RechartsTooltipProps): JSX.Element | null {
   if (datum.is_gap && !datum.is_residual) return null;
   if (datum.is_residual) {
     return (
-      <div className="max-w-[18rem] rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
-        <div className="text-slate-700 dark:text-slate-300">
+      <ChartTooltip>
+        <div className="max-w-[18rem] text-slate-700 dark:text-slate-300">
           {residualTooltipText(datum.shares, datum.pct)}
         </div>
-      </div>
+      </ChartTooltip>
     );
   }
   return (
-    <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
+    <ChartTooltip>
       <div className="font-medium text-slate-900 dark:text-slate-100">{datum.name}</div>
       <div className="text-slate-600 dark:text-slate-400">
         {formatShares(datum.shares)} shares
@@ -549,7 +550,7 @@ function SunburstTooltip(props: RechartsTooltipProps): JSX.Element | null {
       <div className="text-slate-600 dark:text-slate-400">
         {formatPct(datum.pct)} of total shares
       </div>
-    </div>
+    </ChartTooltip>
   );
 }
 

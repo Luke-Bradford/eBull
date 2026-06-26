@@ -26,6 +26,7 @@ import {
   YAxis,
 } from "recharts";
 
+import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { type AggregateCoverage, fetchOwnershipHistory } from "@/api/ownershipHistory";
 import {
@@ -342,7 +343,7 @@ function HistoryTooltip(props: HistoryTooltipProps): JSX.Element | null {
   if (!props.active || props.payload === undefined || props.payload.length === 0) return null;
   const period = props.label ?? "";
   return (
-    <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
+    <ChartTooltip>
       <div className="font-medium text-slate-900 dark:text-slate-100">{period}</div>
       {props.payload.map((entry) => {
         const shares = typeof entry.value === "number" ? entry.value : null;
@@ -358,6 +359,6 @@ function HistoryTooltip(props: HistoryTooltipProps): JSX.Element | null {
           </div>
         );
       })}
-    </div>
+    </ChartTooltip>
   );
 }
