@@ -415,6 +415,76 @@ register_parser(
 
 
 # ---------------------------------------------------------------------------
+# Form 5 wiring (#1731 — promotes form5_xml out of KEPT_NEGLIGIBLE)
+# ---------------------------------------------------------------------------
+
+
+def _apply_form5(
+    conn: psycopg.Connection[Any],
+    raw_doc: RawFilingDocument,
+) -> bool:
+    """Re-parse the Form 5 XML body and re-apply the typed-table upsert.
+
+    Same shape as :func:`_apply_form4` — Form 5 (annual statement of changes,
+    Rule 16a-3(f)) shares the Form 4 ownership XML schema and persists through
+    the SAME ``insider_filings`` (``document_type='5'``) + ``insider_transactions``
+    path via ``upsert_filing``; only the parser differs (``parse_form_5_xml``).
+    The parsed object carries the document_type, so no extra kwarg is needed
+    (mirrors the live ``insider_345._parse_form5`` call).
+
+    Returns ``False`` when no existing ``insider_filings`` row is found (re-wash
+    is not a first-time ingester). Raises :class:`RewashParseError` on parser
+    regression — for Form 5 that includes the holdings-only / wrong-document_type
+    filings ``parse_form_5_xml`` returns ``None`` for, so the failure surfaces in
+    ``rows_failed`` rather than silently in ``rows_skipped``."""
+    from app.services.insider_transactions import parse_form_5_xml, upsert_filing
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, primary_document_url
+            FROM insider_filings
+            WHERE accession_number = %s
+            """,
+            (raw_doc.accession_number,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return False
+    instrument_id, primary_document_url = row
+
+    body = raw_doc.require_payload()
+    parsed = parse_form_5_xml(body)
+    if parsed is None:
+        raise RewashParseError(
+            f"parse_form_5_xml returned None for accession={raw_doc.accession_number} body_size={len(body)}"
+        )
+
+    upsert_filing(
+        conn,
+        instrument_id=int(instrument_id),
+        accession_number=raw_doc.accession_number,
+        primary_document_url=str(primary_document_url) if primary_document_url else "",
+        parsed=parsed,
+        is_rewash=True,
+    )
+    return True
+
+
+# Form 5 parser version is "form5-v{N}" — defined as _PARSER_VERSION_FORM5 in
+# insider_transactions.py (imported by manifest_parsers/insider_345.py, not
+# redefined there). Bump both in lockstep when the parser semantics change in a
+# way that affects what lands in typed tables.
+register_parser(
+    ParserSpec(
+        document_kind="form5_xml",
+        current_version="form5-v1",
+        apply_fn=_apply_form5,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
 # DEF 14A proxy beneficial-ownership table wiring
 # ---------------------------------------------------------------------------
 

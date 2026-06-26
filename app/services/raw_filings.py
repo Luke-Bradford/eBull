@@ -104,15 +104,20 @@ SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset({"primary_doc"})
 # in ``ownership_drillthrough`` / ``instruments`` are satisfied by the
 # row, not the bytes).
 KEPT_NEGLIGIBLE_DOCUMENT_KINDS: dict[DocumentKind, str] = {
-    # Parsed in-memory at ingest; ownership_drillthrough COUNT(*)s the row
-    # but never reads the body. ~11 MB (dev). Retained for a planned Form 5
-    # rewash parser (insider_345.py:563-565) — promote to REWASH when that
-    # spec is registered; the partition test forces the move (it would
-    # otherwise be in two buckets).
-    "form5_xml": "write-only ~11MB; held for a future Form 5 rewash parser",
-    # Parsed in-memory at ingest; rewash re-fetches from EDGAR rather than
-    # re-reading the stored body (n_port_ingest.py:82). ~6 MB (dev).
-    "nport_xml": "write-only ~6MB; rewash re-fetches from EDGAR, no payload reader",
+    # form5_xml PROMOTED to REWASH in #1731 — _parse_form5 now reuses the stored
+    # body on re-drain + rewash_filings registers a Form 5 apply_fn, so it is a
+    # payload reader and lives in registered_specs(), not here (the partition
+    # test would fail if it stayed).
+    # n_port: VERIFIED 2026-06-26 (#1731) — the "rewash re-fetches from EDGAR"
+    # behaviour is DESCRIPTIVE (no payload reader wired), NOT a hard design
+    # constraint: nport_xml is stored + retained, the filing is immutable per
+    # accession, and parse_n_port_payload would produce identical output from the
+    # stored bytes. Reuse is DEFERRED (not forbidden): 151 dev rows (~12× smaller
+    # than Form 5's already-negligible 1,586) don't justify promoting — promotion
+    # needs a full _apply_nport rewash spec (the series + per-holding equity-filter
+    # + fund-observation ladder, far heavier than Form 5's upsert_filing mirror).
+    # Revisit if the manifest-adapter nport population grows materially.
+    "nport_xml": "write-only ~6MB; rewash re-fetches from EDGAR, no payload reader (reuse deferred by volume #1731)",
     # Parsed in-memory at ingest; the bimonthly job re-fetches fresh from
     # FINRA each cadence (finra_short_interest_refresh.py), never from the
     # store. Part of ~92 MB FINRA raw (dev).
