@@ -313,9 +313,9 @@ def _fetch_companyfacts_payload(
     # (cik, 'companyfacts') that also misses will redundantly fetch SEC
     # and write; worst case is ONE duplicate ~30s fetch. There is no
     # clobber/corruption: ``_write_cache`` goes through
-    # ``store_cik_raw`` (``ON CONFLICT (cik, document_kind) DO UPDATE``,
-    # ``cik_raw_filings.py:121``), so the second writer restamps the
-    # same row, last-writer-wins. A lock here would have to span the 30s
+    # ``store_cik_raw``, whose ``ON CONFLICT (cik, document_kind) DO
+    # UPDATE`` means the second writer restamps the same row,
+    # last-writer-wins. A lock here would have to span the 30s
     # ``urlopen`` — the stranded-idle-connection failure mode
     # (#719 / #1129) — for zero gain, because the only callers are
     # operator CLIs (``scripts/run_reconciliation.py``,
