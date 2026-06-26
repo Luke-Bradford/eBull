@@ -340,6 +340,22 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### `pg_advisory_xact_lock` inside a manifest-worker savepoint is held until BATCH commit, not per accession
+- First seen in: #817 (Codex ckpt-2), generalising the #1542 13F lock
+- Symptom: A per-accession `pg_advisory_xact_lock` was acquired inside a manifest parser's `with conn.transaction()` to serialise that accession's typed-table write. But `sec_manifest_worker_tick` opens `connect_job()` (default `autocommit=False`) and commits ONCE after the whole batch (`scheduler.py`), and `_dispatch_rows` has no per-row commit — so the parser's `with conn.transaction()` is a SAVEPOINT, and `pg_advisory_xact_lock` acquired in a savepoint is absorbed by the parent and held until the TOP-LEVEL (batch) transaction commits. Result: the lock is held across all subsequent rows' SEC fetches, accumulates one lock per accession + per instrument across the batch, and the "one accession lock at a time → deadlock-free" argument breaks (a concurrent per-accession writer can deadlock; Postgres aborts+retries, so no corruption but an availability blip). The #1542 13F lock and every `refresh_*_current` lock share this property.
+- Prevention: `with conn.transaction()` is a SAVEPOINT when the connection is already in a transaction (the default under `autocommit=False`). A `pg_advisory_xact_lock` taken inside it releases at the OUTER transaction's commit, NOT at the `with` block's exit. Before claiming a per-accession (or per-anything) advisory lock releases "per iteration", confirm the enclosing loop actually commits per iteration — grep the worker/driver for a per-row `conn.commit()`. If the driver batches, either (a) commit per row, or (b) use a session lock (`pg_advisory_lock`/`pg_advisory_unlock`) released in a `finally` — but only where the surrounding txn is recoverable on the release (a savepoint write, not direct-on-conn statements that abort the txn). For a coarse-but-correct lock (mutual exclusion preserved, deadlock self-heals) the batch-hold may be acceptable — but document it at the call site and ticket the root cause; do NOT silently imply per-accession granularity.
+- Enforced in: this prevention log; #817 (`manifest_parsers/def14a.py`, `sec_13dg.py`, `insider_transactions.py` call-site comments); root-cause tracked in #1735
+
+---
+
+### `scripts/rewash.py` must pre-import `manifest_parsers` or a real rewash crashes mid-run on a circular import
+- First seen in: #1731 (noted in memory); fixed in #817
+- Symptom: `scripts/rewash.py --kind form4_xml` (any non-dry-run with a non-empty cohort) crashes on the FIRST insider accession with `ImportError: cannot import name 'ParsedForm3' from partially initialized module 'app.services.insider_transactions'`. The apply-fn (`_apply_form4/5/3`) does a lazy `from app.services.insider_transactions import ...`; if that is the process's first import of `insider_transactions`, the chain `insider_transactions -> manifest_parsers._classify -> insider_345 -> insider_form3_ingest -> insider_transactions` re-enters the module mid-init. The app + test entrypoints import `manifest_parsers` first by side effect, masking it; the standalone CLI did not. Dry-run does NOT reproduce (it skips the apply import). Reproduces on a clean `main` tree — NOT introduced by any single PR.
+- Prevention: the rewash CLI imports `app.services.manifest_parsers` BEFORE `app.services.rewash_filings`. Any new standalone entrypoint that drives ownership apply-fns must do the same (or the deeper fix: make `insider_transactions`'s top-level `manifest_parsers._classify` import lazy). When dev-verifying a rewash, run a REAL (non-dry-run) pass on a forced cohort of 1 — a dry-run will not surface apply-time import or parse failures.
+- Enforced in: this prevention log; `scripts/rewash.py` (pre-import + comment)
+
+---
+
 ### `assert` as a runtime guard in service code
 - First seen in: #109
 - Symptom: A service function used `assert row is not None` after a `RETURNING` INSERT (or after a transaction block) to enforce a DB-contract invariant. `python -O` strips assertions, so the guard vanishes in any optimised build and the next line crashes with a confusing `TypeError: 'NoneType' object is not subscriptable` (or similar) instead of the intended structured error.

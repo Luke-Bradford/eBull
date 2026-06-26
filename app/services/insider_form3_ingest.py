@@ -109,6 +109,11 @@ def upsert_form_3_filing(
     pattern as ``upsert_filing``); final fallback is the historical
     as-of derivation, logged.
     """
+    # #817 — the single once-per-accession chokepoint for Form 3 typed-table
+    # writes (live manifest drain, rewash, legacy ingest all funnel here).
+    # Serialise concurrent writers of this accession's rows before the first
+    # read/mutation (no SEC fetch in this function — safe to hold).
+    raw_filings.acquire_filing_accession_write_lock(conn, accession_number)
     if filed_at is None:
         filed_at = lookup_sec_filed_at(conn, accession_number)
     with conn.cursor() as cur:

@@ -79,7 +79,11 @@ from app.services.ownership_observations import (
     refresh_def14a_current,
     refresh_esop_current,
 )
-from app.services.raw_filings import store_raw, stored_body
+from app.services.raw_filings import (
+    acquire_filing_accession_write_lock,
+    store_raw,
+    stored_body,
+)
 from app.services.sec_identity import siblings_for_issuer_cik
 
 logger = logging.getLogger(__name__)
@@ -355,6 +359,18 @@ def _parse_def14a(
 
     try:
         with conn.transaction():
+            # #817 — serialise this accession's def14a_beneficial_holdings
+            # writes against a concurrent rewash DELETE+INSERT (same lock key).
+            # First statement in the txn, after the body fetch above (no SEC
+            # fetch inside this block).
+            # NB: this ``with conn.transaction()`` is a SAVEPOINT (the manifest
+            # worker runs the whole batch under one autocommit=False txn, commit
+            # at scheduler.py:4843), so this xact lock is held until BATCH commit,
+            # not per accession — the same coarse-but-correct property the #1542
+            # 13F lock has. Mutual exclusion is preserved; a rare rewash-vs-live
+            # deadlock self-heals (Postgres aborts+retries, no corruption).
+            # Root-cause (per-accession commit) tracked in #1735.
+            acquire_filing_accession_write_lock(conn, accession)
             siblings = _resolve_siblings(conn, instrument_id=instrument_id, issuer_cik=issuer_cik)
             for sibling_iid in siblings:
                 for holder in parsed.rows:

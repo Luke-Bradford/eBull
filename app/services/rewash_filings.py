@@ -524,6 +524,13 @@ def _apply_def14a(
     #      the old parser_version forever.
     from app.services.def14a_ingest import _upsert_holding, def14a_within_cap
 
+    # #817 — acquire BEFORE the existence/cap-gate reads below: the
+    # def14a_within_cap decision feeds the DELETE+INSERT, so the whole
+    # read→DELETE→insert window must be serialised against a concurrent live
+    # _upsert_holding (prevention-log "SELECT COUNT(*) race when gating a
+    # DELETE"). No SEC fetch in this function — safe to hold.
+    raw_filings.acquire_filing_accession_write_lock(conn, raw_doc.accession_number)
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -702,6 +709,13 @@ def _apply_blockholders(
     )
 
     accession = raw_doc.accession_number
+
+    # #817 — acquire BEFORE the COUNT(*)/within_retention gate below: that
+    # decision feeds the DELETE+INSERT, so the read→DELETE→insert window must
+    # be serialised against a concurrent live _upsert_filing_row writer
+    # (prevention-log "SELECT COUNT(*) race when gating a DELETE"). No SEC
+    # fetch in this function — safe to hold.
+    raw_filings.acquire_filing_accession_write_lock(conn, accession)
 
     # Branch-order step 1: count existing typed rows for the accession.
     with conn.cursor() as cur:

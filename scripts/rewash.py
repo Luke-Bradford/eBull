@@ -26,8 +26,23 @@ from datetime import date
 import psycopg
 
 from app.config import settings
+
+# Pre-import the manifest_parsers package BEFORE rewash_filings so
+# ``app.services.insider_transactions`` finishes initialising before any
+# rewash apply-fn's lazy ``from app.services.insider_transactions import ...``
+# runs. Without this, a real (non-dry-run) rewash crashes on the first insider
+# accession with a partially-initialised ``ParsedForm3`` ImportError: the chain
+# insider_transactions -> manifest_parsers._classify -> insider_345 ->
+# insider_form3_ingest -> insider_transactions re-enters mid-init. The app/test
+# entrypoints import manifest_parsers first by side effect; this CLI did not.
+# Recurring trap — see review-prevention-log + memory (#1731). isort must NOT
+# reorder this block (the ordering is the fix).
+# isort: off
+import app.services.manifest_parsers  # noqa: F401 — side-effect import, must precede rewash_filings
 from app.services.raw_filings import DocumentKind
 from app.services.rewash_filings import registered_specs, run_rewash
+
+# isort: on
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
