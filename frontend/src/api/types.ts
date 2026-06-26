@@ -1562,7 +1562,14 @@ export type TriggerConflictReason =
   // job request is rejected because bootstrap_state.status !=
   // 'complete' and no override flag was set. Surfaces to the operator
   // via the rejected pending_job_requests row's error_msg.
-  | "bootstrap_not_complete";
+  | "bootstrap_not_complete"
+  // #1139 — bootstrap "Re-run failed" (iterate) preconditions, raised as
+  // synchronous 409s by app/api/processes.py::_apply_bootstrap_iterate_reset.
+  // `bootstrap_not_resettable`: singleton status not in {partial_error,
+  // cancelled}. `bootstrap_no_failed_stages`: latest run had no failed
+  // stages to iterate (the common "Re-run failed on a clean bootstrap" case).
+  | "bootstrap_not_resettable"
+  | "bootstrap_no_failed_stages";
 
 // ---------------------------------------------------------------------------
 // Orchestrator DAG drill-in (#1078, umbrella #1064 — PR6)

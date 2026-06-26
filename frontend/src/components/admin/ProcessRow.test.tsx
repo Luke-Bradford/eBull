@@ -145,6 +145,42 @@ describe("ProcessRow", () => {
     expect(screen.getByText("MissingCIK")).toBeTruthy();
   });
 
+  it("#1229: '+N more' expands the full failed-stage list, then collapses", () => {
+    // A bootstrap in partial_error surfaces each failed stage as an entry
+    // keyed by stage_key (bootstrap_adapter). With >2, the surplus hides
+    // behind an expandable disclosure instead of a dead-end "+N more".
+    renderRow({
+      row: makeProcessRow({
+        process_id: "bootstrap",
+        mechanism: "bootstrap",
+        status: "failed",
+        last_n_errors: [
+          makeError({ error_class: "sec_def14a_bootstrap", count: 1 }),
+          makeError({ error_class: "sec_business_summary_bootstrap", count: 1 }),
+          makeError({ error_class: "sec_insider_transactions_backfill", count: 1 }),
+          makeError({ error_class: "sec_13f_recent_sweep", count: 1 }),
+        ],
+      }),
+    });
+    // Collapsed: first two shown, last two hidden behind "+2 more".
+    expect(screen.getByText("sec_def14a_bootstrap")).toBeTruthy();
+    expect(screen.getByText("sec_business_summary_bootstrap")).toBeTruthy();
+    expect(screen.queryByText("sec_13f_recent_sweep")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "+2 more" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(toggle);
+    // Expanded: every failed stage visible.
+    expect(screen.getByText("sec_insider_transactions_backfill")).toBeTruthy();
+    expect(screen.getByText("sec_13f_recent_sweep")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "show fewer" }).getAttribute("aria-expanded"),
+    ).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "show fewer" }));
+    expect(screen.queryByText("sec_13f_recent_sweep")).toBeNull();
+  });
+
   it("does NOT render error preview on status=running (auto-hide-on-retry already empty BE-side)", () => {
     renderRow({
       row: makeProcessRow({ status: "running", last_n_errors: [] }),
@@ -160,21 +196,60 @@ describe("ProcessRow", () => {
     expect(pill.getAttribute("title")).toContain("retry");
   });
 
-  it("renders structured 409 reason tooltip when triggerError is an ApiError", () => {
-    renderRow({
+  it("#1230: surfaces the rejection category inline + full hint in the tooltip", () => {
+    const { getByTestId } = renderRow({
       triggerError: new ApiError(409, "iterate already in flight", {
         reason: "iterate_already_pending",
       }),
     });
-    const note = screen.getByText("trigger rejected");
+    const note = getByTestId("trigger-rejected");
+    // Category is visible without hovering (#1230).
+    expect(note.textContent).toContain("iterate already pending");
+    expect(note.textContent).toContain("trigger rejected");
+    // Full "what to do" sentence still lives on the tooltip.
     expect(note.getAttribute("title")).toContain("already in flight");
   });
 
-  it("falls back to a fixed phrase when error has no known reason", () => {
-    renderRow({
+  it("#1230: kill_switch_active renders its category inline", () => {
+    const { getByTestId } = renderRow({
+      triggerError: new ApiError(409, "blocked", {
+        reason: "kill_switch_active",
+      }),
+    });
+    const note = getByTestId("trigger-rejected");
+    expect(note.textContent).toContain("kill switch active");
+    expect(note.getAttribute("title")).toContain("Kill switch");
+  });
+
+  it("#1230: bootstrap_no_failed_stages (Re-run-failed on a clean bootstrap) shows its category", () => {
+    const { getByTestId } = renderRow({
+      triggerError: new ApiError(409, "no failed stages", {
+        reason: "bootstrap_no_failed_stages",
+      }),
+    });
+    const note = getByTestId("trigger-rejected");
+    expect(note.textContent).toContain("no failed stages");
+    expect(note.getAttribute("title")).toContain("no failed stages");
+  });
+
+  it("#1230: cancel rejection surfaces its own inline category", () => {
+    const { getByTestId } = renderRow({
+      cancelError: new ApiError(409, "nothing to cancel", {
+        reason: "no_active_run",
+      }),
+    });
+    const note = getByTestId("cancel-rejected");
+    expect(note.textContent).toContain("cancel rejected");
+    expect(note.textContent).toContain("no active run");
+  });
+
+  it("#1230: unknown reason shows the generic label with no inline category", () => {
+    const { getByTestId } = renderRow({
       triggerError: new ApiError(500, "Internal Server Error"),
     });
-    const note = screen.getByText("trigger rejected");
+    const note = getByTestId("trigger-rejected");
+    expect(note.textContent).toBe("trigger rejected");
+    expect(note.textContent).not.toContain("—");
     expect(note.getAttribute("title")).toContain("browser console");
   });
 

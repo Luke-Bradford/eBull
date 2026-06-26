@@ -107,6 +107,36 @@ export const REASON_TOOLTIP: Record<TriggerConflictReason, string> = {
     "Sweeps have no in-flight state — cancel the underlying scheduled job.",
   bootstrap_not_complete:
     "First-install bootstrap is not complete — finish or override before triggering this job.",
+  bootstrap_not_resettable:
+    "Bootstrap is not in a re-runnable state — only a failed or cancelled run can be re-run.",
+  bootstrap_no_failed_stages:
+    "Nothing to re-run — the latest bootstrap run has no failed stages.",
+};
+
+/**
+ * Short inline-visible label for a structured trigger / cancel reason
+ * (#1230). Sibling to REASON_TOOLTIP: the tooltip carries the full
+ * "what to do" sentence (hover), this carries the *category* so the
+ * operator scanning the page sees WHY a row is blocked without hovering.
+ * Keep keys in lock-step with REASON_TOOLTIP.
+ */
+export const REASON_SHORT_LABEL: Record<TriggerConflictReason, string> = {
+  kill_switch_active: "kill switch active",
+  bootstrap_already_running: "bootstrap already running",
+  bootstrap_state_missing: "bootstrap not initialised",
+  bootstrap_not_resumable: "nothing to iterate",
+  iterate_already_pending: "iterate already pending",
+  full_wash_already_pending: "full-wash already pending",
+  active_run_in_progress: "run in progress",
+  shared_source_active_run: "sibling job running",
+  shared_source_full_wash_pending: "sibling full-wash pending",
+  no_active_run: "no active run",
+  stop_already_pending: "cancel already pending",
+  trigger_not_supported: "trigger not supported",
+  cancel_not_supported: "cancel not supported",
+  bootstrap_not_complete: "bootstrap not complete",
+  bootstrap_not_resettable: "bootstrap not re-runnable",
+  bootstrap_no_failed_stages: "no failed stages",
 };
 
 const KNOWN_REASONS = new Set<string>(Object.keys(REASON_TOOLTIP));
@@ -125,6 +155,17 @@ export function reasonTooltip(err: unknown): string {
   const reason = reasonFromError(err);
   if (reason !== null) return REASON_TOOLTIP[reason];
   return "Request rejected. Check the browser console for details.";
+}
+
+/**
+ * Short inline category for a trigger / cancel rejection (#1230), or
+ * null when the reason is unstructured/unknown — the caller then shows
+ * the generic "rejected" label alone (the full hint stays in the
+ * tooltip; we never render exception text inline).
+ */
+export function reasonShortLabel(err: unknown): string | null {
+  const reason = reasonFromError(err);
+  return reason !== null ? REASON_SHORT_LABEL[reason] : null;
 }
 
 /**

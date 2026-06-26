@@ -124,8 +124,10 @@ describe("ProcessesTable", () => {
     );
     renderTable();
     fireEvent.click(screen.getByRole("button", { name: "Iterate" }));
-    await waitFor(() => expect(screen.getByText("trigger rejected")).toBeTruthy());
-    const note = screen.getByText("trigger rejected");
+    await waitFor(() => expect(screen.getByTestId("trigger-rejected")).toBeTruthy());
+    const note = screen.getByTestId("trigger-rejected");
+    // #1230 — category visible inline; full hint on the tooltip.
+    expect(note.textContent).toContain("iterate already pending");
     expect(note.getAttribute("title")).toContain("already in flight");
   });
 

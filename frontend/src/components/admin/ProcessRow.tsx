@@ -22,6 +22,7 @@ import {
   NEXT_RUN_EXPECTED_TOOLTIP,
   REASON_TOOLTIP,
   VERDICT_VISUAL,
+  reasonShortLabel,
   reasonTooltip,
 } from "@/components/admin/processStatus";
 
@@ -253,24 +254,8 @@ function ProcessRowImpl({
             />
           )}
         </div>
-        {triggerError ? (
-          <div
-            role="status"
-            className="mt-1 text-right text-[11px] text-red-700 dark:text-red-300"
-            title={reasonTooltip(triggerError)}
-          >
-            trigger rejected
-          </div>
-        ) : null}
-        {cancelError ? (
-          <div
-            role="status"
-            className="mt-1 text-right text-[11px] text-red-700 dark:text-red-300"
-            title={reasonTooltip(cancelError)}
-          >
-            cancel rejected
-          </div>
-        ) : null}
+        <RejectedNote kind="trigger" err={triggerError} />
+        <RejectedNote kind="cancel" err={cancelError} />
       </td>
     </tr>
   );
@@ -357,6 +342,42 @@ function ActionButton({
   );
 }
 
+/**
+ * Inline trigger / cancel rejection note (#1230). Surfaces the specific
+ * reason CATEGORY ("kill switch active", "bootstrap already running", …)
+ * next to the generic "rejected" label so the operator scanning the page
+ * sees what blocks the row without hovering. The full-sentence "what to
+ * do" hint stays on the `title` tooltip. Unknown / unstructured errors
+ * render the generic label alone (no exception text inline — the
+ * loading-error-empty-states fixed-phrase rule).
+ */
+function RejectedNote({
+  kind,
+  err,
+}: {
+  kind: "trigger" | "cancel";
+  err: unknown;
+}) {
+  if (!err) return null;
+  const short = reasonShortLabel(err);
+  return (
+    <div
+      role="status"
+      data-testid={`${kind}-rejected`}
+      className="mt-1 text-right text-[11px] text-red-700 dark:text-red-300"
+      title={reasonTooltip(err)}
+    >
+      {kind} rejected
+      {short !== null ? (
+        <>
+          {" — "}
+          <span className="font-medium">{short}</span>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function ErrorPreview({
   errors,
 }: {
@@ -364,13 +385,19 @@ function ErrorPreview({
 }) {
   // Spec §"Error display rules" — inline preview is always visible
   // (no click-to-reveal); drill-in shows the full list on the Errors
-  // tab. Show up to two error classes inline; truncate the rest with
-  // a `+N more` link to the drill-in.
-  const head = errors.slice(0, 2);
-  const remainder = errors.length - head.length;
+  // tab. Show up to two error classes inline; the rest collapse behind
+  // an expandable "+N more" disclosure (#1229 — for a bootstrap in
+  // partial_error each entry is a failed stage_key, so the operator can
+  // see every failed stage inline instead of clicking into the detail
+  // page). The disclosure starts collapsed; plain local state, no
+  // prop-derived initializer (so no reset path needed — prevention-log
+  // "prop-derived useState").
+  const [expanded, setExpanded] = useState(false);
+  const remainder = errors.length - 2;
+  const shown = expanded ? errors : errors.slice(0, 2);
   return (
     <ul className="mt-1 space-y-0.5 text-xs text-red-700 dark:text-red-300">
-      {head.map((e) => (
+      {shown.map((e) => (
         <li key={e.error_class} className="truncate" title={e.sample_message}>
           <span className="font-medium">{e.error_class}</span>{" "}
           <span className="text-slate-500 dark:text-slate-400">
@@ -384,8 +411,15 @@ function ErrorPreview({
         </li>
       ))}
       {remainder > 0 ? (
-        <li className="text-[11px] text-slate-500 dark:text-slate-400">
-          +{remainder} more
+        <li>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            className="text-[11px] text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+          >
+            {expanded ? "show fewer" : `+${remainder} more`}
+          </button>
         </li>
       ) : null}
     </ul>
