@@ -387,4 +387,15 @@ describe("buildFcf", () => {
     );
     expect(buildFcf(periods)[0]!.fcf).toBeNull();
   });
+
+  it("normalises capex sign — abs() before subtracting (prevention-log #596)", () => {
+    const periods = joinStatements(
+      [],
+      [],
+      [row("2026", { operating_cf: "150", capex: "-40" }, "annual")],
+    );
+    // A filer reporting capex as a negative outflow must not INFLATE FCF:
+    // 150 - abs(-40) = 110, never 150 - (-40) = 190.
+    expect(buildFcf(periods)[0]!.fcf).toBe(110);
+  });
 });

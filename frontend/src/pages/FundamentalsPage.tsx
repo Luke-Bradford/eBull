@@ -32,8 +32,8 @@
 import { useCallback, useMemo } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
-import { fetchInstrumentFinancials } from "@/api/instruments";
-import type { InstrumentFinancials } from "@/api/types";
+import { fetchFcfYield, fetchInstrumentFinancials } from "@/api/instruments";
+import type { FcfYieldSeries, InstrumentFinancials } from "@/api/types";
 import {
   SectionError,
   SectionSkeleton,
@@ -100,6 +100,14 @@ export function FundamentalsPage(): JSX.Element {
     ),
     [symbol, period],
   );
+  // Supplementary: the FCF-yield overlay (#671). Independent lifecycle — never
+  // gates the page or the absolute FCF line. Multi-class / cross-currency
+  // issuers come back `suppressed`; a fetch error just leaves the FCF line
+  // intact (the chart reads `yieldSeries` defensively).
+  const fcfYield = useAsync<FcfYieldSeries>(
+    useCallback(() => fetchFcfYield(symbol, { period }), [symbol, period]),
+    [symbol, period],
+  );
 
   const periods = useMemo(() => {
     if (income.data === null || balance.data === null || cashflow.data === null) {
@@ -135,6 +143,7 @@ export function FundamentalsPage(): JSX.Element {
     income.refetch();
     balance.refetch();
     cashflow.refetch();
+    fcfYield.refetch();
   }
 
   return (
@@ -269,11 +278,7 @@ export function FundamentalsPage(): JSX.Element {
             scope={periodScope(period)}
             source={{ providers: ["sec_xbrl"] }}
           >
-            {/* Spec calls for FCF *yield* (FCF / market cap) over time.
-                Yield needs price + shares-outstanding joined per
-                period; tracked at #671. The absolute FCF line ships
-                here so the trend is visible from day one. */}
-            <FcfChart periods={periods} />
+            <FcfChart periods={periods} yieldSeries={fcfYield.data} />
           </Pane>
         </div>
       )}

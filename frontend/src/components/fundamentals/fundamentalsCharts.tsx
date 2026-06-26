@@ -30,6 +30,8 @@ import {
   YAxis,
 } from "recharts";
 
+import type { FcfYieldSeries } from "@/api/types";
+import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { type ChartTheme, lightTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import {
@@ -501,25 +503,109 @@ export function RoicChart({ periods }: PnlChartProps): JSX.Element {
 // 9. Free cash flow trend
 // ---------------------------------------------------------------------------
 
-export function FcfChart({ periods }: PnlChartProps): JSX.Element {
+interface FcfChartRow {
+  readonly period_end: string;
+  readonly fcf: number | null;
+  readonly fcf_yield_pct: number | null;
+}
+
+interface FcfTooltipProps {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload?: FcfChartRow }>;
+}
+
+function FcfTooltip({ active, payload }: FcfTooltipProps): JSX.Element | null {
+  if (active !== true || !payload || payload.length === 0) return null;
+  const row = payload[0]?.payload;
+  if (!row) return null;
+  return (
+    <ChartTooltip>
+      <div className="font-medium text-slate-700 dark:text-slate-200">{formatPeriod(row.period_end)}</div>
+      <div className="tabular-nums text-slate-600 dark:text-slate-300">
+        FCF (quarter) {row.fcf !== null ? formatBigNumber(row.fcf) : "—"}
+      </div>
+      {row.fcf_yield_pct !== null ? (
+        <div className="tabular-nums text-slate-500 dark:text-slate-400">
+          FCF yield (TTM) {row.fcf_yield_pct.toFixed(2)}%
+        </div>
+      ) : null}
+    </ChartTooltip>
+  );
+}
+
+/**
+ * FCF (absolute, quarterly bars) + FCF yield (TTM, %) overlay (#671). The
+ * yield denominator (market cap) is a fail-closed server policy
+ * (`/instruments/{symbol}/fcf-yield`): multi-class (the retired dual-class
+ * distortion #1662) and cross-currency issuers come back `suppressed`, so the
+ * absolute line shows alone with a caveat. `yieldSeries` null = yield fetch in
+ * flight / errored — the absolute line still renders (supplementary signal,
+ * never blocks the FCF line).
+ */
+export function FcfChart({
+  periods,
+  yieldSeries,
+}: {
+  readonly periods: ReadonlyArray<JoinedPeriod>;
+  readonly yieldSeries: FcfYieldSeries | null;
+}): JSX.Element {
   const theme = useChartTheme();
   const f = buildFcf(periods);
   const hasData = f.some((r) => r.fcf !== null);
   if (!hasData) {
     return <NoData message="FCF needs operating cash flow and capex on the cash-flow statement." />;
   }
+  // Decimal arrives as a string on the wire (#671 / types.ts) — coerce to
+  // number at this chart boundary only.
+  const yieldByPeriod = new Map<string, number | null>();
+  for (const p of yieldSeries?.points ?? []) {
+    yieldByPeriod.set(p.period_end, p.fcf_yield_pct === null ? null : Number(p.fcf_yield_pct));
+  }
+  const data: FcfChartRow[] = f.map((r) => ({
+    period_end: r.period_end,
+    fcf: r.fcf,
+    fcf_yield_pct: yieldByPeriod.get(r.period_end) ?? null,
+  }));
+  const suppressed = yieldSeries?.suppressed_reason ?? null;
+  const hasYield = suppressed === null && data.some((r) => r.fcf_yield_pct !== null);
+  const caveat =
+    suppressed === "multiclass"
+      ? "FCF yield unavailable for multi-class issuers."
+      : suppressed === "currency_mismatch"
+        ? "FCF yield unavailable when reporting and trading currencies differ."
+        : null;
   return (
-    <div style={{ height: CHART_HEIGHT }} className="w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={f} margin={{ top: 8, right: 8, left: 8, bottom: 4 }}>
-          <SharedGrid theme={theme} />
-          <XAxis dataKey="period_end" tickFormatter={formatPeriod} interval="preserveStartEnd" minTickGap={20} {...sharedAxis(theme)} />
-          <YAxis tickFormatter={(v: number) => formatBigNumber(v)} width={60} {...sharedAxis(theme)} />
-          <ReferenceLine y={0} stroke={theme.borderColor} />
-          <Tooltip formatter={(value: number) => formatBigNumber(value)} labelFormatter={formatPeriod} contentStyle={{ fontSize: "11px" }} />
-          <Line type="monotone" dataKey="fcf" name="FCF" stroke={lightTheme.accent[1]} strokeWidth={2.5} dot={false} isAnimationActive={false} />
-        </LineChart>
-      </ResponsiveContainer>
+    <div className="space-y-1">
+      <div style={{ height: CHART_HEIGHT }} className="w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data} margin={{ top: 8, right: hasYield ? 32 : 8, left: 8, bottom: 4 }}>
+            <SharedGrid theme={theme} />
+            <XAxis dataKey="period_end" tickFormatter={formatPeriod} interval="preserveStartEnd" minTickGap={20} {...sharedAxis(theme)} />
+            <YAxis yAxisId="fcf" tickFormatter={(v: number) => formatBigNumber(v)} width={60} {...sharedAxis(theme)} />
+            {hasYield ? (
+              <YAxis yAxisId="yield" orientation="right" tickFormatter={(v: number) => `${v.toFixed(1)}%`} width={48} {...sharedAxis(theme)} />
+            ) : null}
+            <ReferenceLine yAxisId="fcf" y={0} stroke={theme.borderColor} />
+            <Tooltip content={<FcfTooltip />} cursor={{ stroke: theme.crosshair }} />
+            <Line yAxisId="fcf" type="monotone" dataKey="fcf" name="FCF" stroke={theme.accent[1]} strokeWidth={2.5} dot={false} isAnimationActive={false} />
+            {hasYield ? (
+              <Line
+                yAxisId="yield"
+                type="monotone"
+                dataKey="fcf_yield_pct"
+                name="FCF yield (TTM)"
+                stroke={theme.accent[0]}
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+                dot={false}
+                isAnimationActive={false}
+                connectNulls={false}
+              />
+            ) : null}
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      {caveat ? <p className="text-xs text-slate-500">{caveat}</p> : null}
     </div>
   );
 }
