@@ -568,6 +568,33 @@ def _parse_sec_10k(
     )
 
 
+def _sec10k_fetch_url(conn: Any, row: Any) -> str | None:  # conn unused; row: ManifestRow
+    """#1591 Part 2 prefetch hook — the SINGLE primary-document URL the 10-K
+    parser GETs (the business-summary HTML), returned ONLY when the parser
+    would actually fetch it. Mirrors :func:`_parse_sec_10k`'s pre-fetch
+    tombstone gates (missing ``primary_document_url`` / missing
+    ``instrument_id``); both are row-local so ``conn`` is unused (part of the
+    shared #1700 hook contract).
+
+    Scope is the PRIMARY doc only. The 10-K also fetches XBRL linkbase
+    artifacts (``index.json`` + instance + label/def) via a SEPARATE provider
+    in :func:`_fetch_dimensional_facts` after an independent index discovery
+    — those are NOT prefetched here (no clean single next-URL; a 13F-style
+    ``expand_urls`` keyed off the primary HTML wouldn't reach them). So on a
+    re-drain the primary docs overlap across rows while the XBRL stays serial;
+    full XBRL overlap is a documented follow-up. An over-broad ``None`` is
+    always safe (serial fallback reaches the identical fetch/tombstone).
+
+    ``primary_doc`` is born-compacted (SWEPT #1617) so there is no stored body
+    to mirror a #1591-PR1 reuse gate against — the 10-K always (re-)fetches /
+    rehydrates from source.
+    """
+    url = row.primary_document_url
+    if not url or row.instrument_id is None:
+        return None
+    return url
+
+
 def register() -> None:
     """Register the 10-K parser with the manifest worker.
 
@@ -578,4 +605,4 @@ def register() -> None:
     """
     from app.jobs.sec_manifest_worker import register_parser
 
-    register_parser("sec_10k", _parse_sec_10k, requires_raw_payload=True)
+    register_parser("sec_10k", _parse_sec_10k, requires_raw_payload=True, fetch_url=_sec10k_fetch_url)

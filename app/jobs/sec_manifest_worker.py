@@ -295,11 +295,17 @@ def run_manifest_worker(
         now = datetime.now(tz=UTC)
 
     if source is not None:
-        # Per-source rebuild path — unchanged shape.
+        # Per-source rebuild path (sec_rebuild, scoped operator re-drain).
         rows: list[ManifestRow] = list(iter_pending(conn, source=source, limit=max_rows))
         if len(rows) < max_rows:
             rows.extend(iter_retryable(conn, source=source, limit=max_rows - len(rows)))
-        return _dispatch_rows(conn, rows, now=now)
+        # #1591 Part 2 — prefetch this batch's bodies concurrently against the
+        # shared SEC throttle before the serial dispatch, same as the fairness
+        # path. The dominant re-drain cost is the per-row SEC fetch
+        # (~4.7s/row, ~1 req/s observed in the #554 backlog); overlapping the
+        # fetches saturates the 10 req/s floor. No-op for sources without a
+        # ``fetch_url`` hook (empty cache → identical to the old serial path).
+        return _prefetch_then_dispatch(conn, rows, now=now)
 
     # Fairness path (#1179) — Phase R recent-first slice (#1685) +
     # Phase A per-source oldest slice + Phase B global oldest top-up.
@@ -505,11 +511,37 @@ def _prefetch_then_dispatch(
     """#1686 Phase 2 — prefetch single-doc bodies concurrently, bind the
     tick-scoped cache, then run the serial per-row :func:`_dispatch_rows`.
 
-    Used ONLY by the steady-state fairness path (``source is None``) — that
-    is the every-5-min cron + boot catch-up that drains the backlog, the
-    target of #1686. The per-source rebuild path (``sec_rebuild``, operator-
-    triggered + scoped) stays serial via a direct :func:`_dispatch_rows`
-    call — small, operator-paced, no concurrency win needed.
+    Used by BOTH worker paths: the steady-state fairness path (``source is
+    None`` — the every-5-min cron + boot catch-up, the original #1686 target)
+    AND, since #1591 Part 2, the per-source rebuild path (``sec_rebuild``,
+    scoped operator re-drain). The re-drain's dominant cost is the per-row SEC
+    fetch (#554: ~4.7s/row, ~1 req/s against a 10 req/s floor); overlapping
+    the batch's fetches saturates the floor. Born-compacted sources (10-K/8-K)
+    benefit most — their body cannot be reused (#1591 PR1) so it must be
+    (re-)fetched, and concurrency is their only lever.
+
+    Accepted tradeoff (Codex ckpt-1 #5 + ckpt-2): prefetching the whole batch
+    up front widens the window between row-select and the parser's transition,
+    so if another drainer finalises a row in that window this worker re-parses
+    the stale row (rate-budget + redundant-write cost; the writes are
+    idempotent via the filed_at gate / replace-then-insert). The manifest
+    transition that follows:
+      * same-status collision (drainer B also parses → ``parsed -> parsed``,
+        the common case) is absorbed by an idempotent no-op
+        (``sec_manifest.transition_status``, #1591 Part 2, mirroring the #1686
+        ``tombstoned -> tombstoned`` no-op) — no raise.
+      * cross-terminal collision (B's redundant re-parse returns
+        failed/tombstoned where A committed parsed — needs a TRANSIENT fetch
+        discrepancy in the window) still raises ``illegal transition``. It is
+        NOT made a no-op on purpose: that would have to allow ``parsed ->
+        failed``, masking the single-drainer bug ``test_illegal_transition_
+        raises`` guards. This path is caught by the standalone drain's
+        broad-except rollback-retry (``scripts/drain_554_sec10k.py``) — the
+        only context that creates concurrent drainers.
+    Production runs a SINGLETON fairness tick (``scheduler.py`` max-instances
+    =1) and the per-source path has no scheduled caller, so production never
+    races; any non-finalised row simply stays pending and re-drains. No path
+    corrupts data.
 
     The cache is ALWAYS bound (even when empty, so a prior tick's value can
     never leak across ticks on the apscheduler threadpool) and reset in
