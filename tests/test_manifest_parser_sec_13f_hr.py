@@ -386,6 +386,121 @@ def test_infotable_empty_body_tombstones_preserving_stored_raw(
         assert cur.fetchone() is not None
 
 
+def test_redrain_reuses_stored_infotable_no_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1729 — on a re-drain the parser REUSES the stored ``infotable_13f``
+    body (skips its fetch). primary_doc stays SWEPT (re-fetched). Seed the
+    infotable raw row directly, serve index + primary only, and assert the
+    infotable URL is never fetched yet the row parses end-to-end."""
+    from app.services.raw_filings import store_raw
+
+    iid = 8790100
+    cusip = "037833100"  # AAPL
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPL")
+    _seed_cusip_mapping(ebull_test_conn, instrument_id=iid, cusip=cusip)
+    accession = "0001067983-25-000100"
+    filer_cik = "0001067983"
+    _seed_pending_13f_hr(ebull_test_conn, accession=accession, filer_cik=filer_cik)
+
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession.replace('-', '')}/"
+    infotable_url = base + "infotable.xml"  # resolved name from _index_json() default
+    # Pre-seed the stored infotable body — the re-drain reuse target.
+    store_raw(
+        ebull_test_conn,
+        accession_number=accession,
+        document_kind="infotable_13f",
+        payload=_infotable_xml(holdings=[{"cusip": cusip}]),
+        parser_version="13f-infotable-v1",
+        source_url=infotable_url,
+    )
+    ebull_test_conn.commit()
+
+    # Fetch map deliberately OMITS infotable.xml — if the parser fetched it the
+    # call would be recorded (and return None → tombstone), so the assertions
+    # below catch any regression that bypasses reuse.
+    calls = _patch_fetch_map(
+        monkeypatch,
+        {
+            base + "index.json": _index_json(),
+            base + "primary_doc.xml": _FAKE_PRIMARY_XML,
+        },
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13f_hr", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, accession)
+    assert row is not None and row.ingest_status == "parsed" and row.raw_status == "stored"
+
+    # Reuse: infotable URL never fetched; primary (SWEPT) still fetched.
+    assert infotable_url not in calls
+    assert base + "primary_doc.xml" in calls
+
+    # Holdings upserted from the reused body — identical to the fetch path.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id FROM institutional_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        holdings = cur.fetchall()
+    assert len(holdings) == 1 and holdings[0][0] == iid
+
+
+def test_redrain_reuse_parse_failure_preserves_stored_raw(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1729 — a parse crash on the REUSE path still returns
+    ``raw_status='stored'`` (the body is on disk; the manifest must reflect it so
+    the retry sees the stored body, no re-fetch). Mirrors the PR1 ckpt-1 #2
+    invariant audit applied to the reuse branch."""
+    from app.services.manifest_parsers import sec_13f_hr as parser_module
+    from app.services.raw_filings import store_raw
+
+    accession = "0001067983-25-000101"
+    filer_cik = "0001067983"
+    _seed_pending_13f_hr(ebull_test_conn, accession=accession, filer_cik=filer_cik)
+
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession.replace('-', '')}/"
+    infotable_url = base + "infotable.xml"
+    store_raw(
+        ebull_test_conn,
+        accession_number=accession,
+        document_kind="infotable_13f",
+        payload=_infotable_xml(holdings=[{"cusip": "037833100"}]),
+        parser_version="13f-infotable-v1",
+        source_url=infotable_url,
+    )
+    ebull_test_conn.commit()
+
+    calls = _patch_fetch_map(
+        monkeypatch,
+        {
+            base + "index.json": _index_json(),
+            base + "primary_doc.xml": _FAKE_PRIMARY_XML,
+        },
+    )
+
+    def _raising_infotable(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("synthetic infotable parse crash on reuse")
+
+    monkeypatch.setattr(parser_module, "parse_infotable", _raising_infotable)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13f_hr", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.failed == 1
+    row = get_manifest_row(ebull_test_conn, accession)
+    assert row is not None
+    assert row.ingest_status == "failed"
+    assert row.raw_status == "stored"
+    # Crash came from the reused body, not a fetch — infotable never requested.
+    assert infotable_url not in calls
+
+
 def test_fetch_exception_marks_failed_with_backoff(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

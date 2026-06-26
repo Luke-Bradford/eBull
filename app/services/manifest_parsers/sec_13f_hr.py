@@ -78,7 +78,7 @@ from app.services.manifest_parsers._classify import (
     is_transient_upsert_error,
 )
 from app.services.ownership_observations import refresh_institutions_current_batch
-from app.services.raw_filings import store_raw
+from app.services.raw_filings import store_raw, stored_body
 from app.services.thirteen_f_normalise import (
     merge_resolved_by_instrument,
     normalise_13f_holdings,
@@ -358,58 +358,71 @@ def _parse_13f_hr(
             error="retention floor",
         )
 
-    # Step 3: fetch infotable.xml + store_raw inside savepoint.
-    try:
-        with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-            infotable_xml = provider.fetch_document_text(infotable_url)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "13F-HR manifest parser: infotable fetch raised accession=%s: %s",
-            accession,
-            exc,
-        )
-        return _failed_outcome(f"fetch error: {exc}", raw_status="stored")
+    # Step 3: reuse the stored infotable on a re-drain (#1729), else fetch + store.
+    # SEC Form 13F has exactly ONE Information Table per accession and the EDGAR
+    # archive is immutable once filed (an amendment is a NEW accession), so a
+    # present ``infotable_13f`` body is always the right one to re-parse — keyed
+    # by (accession, kind), no source_url re-check, matching the PR1 single-primary
+    # kinds (#1591). ``primary_doc`` stays SWEPT (re-fetched + re-parsed above for
+    # period_of_report / filer info); only this — the largest attachment (avg
+    # ~199 KB) — is reused, so a re-drain of a parsed 13F-HR drops from 3 HTTP to 2.
+    # The body parser ``parse_infotable`` still runs on reuse, so a parser-version
+    # bump is picked up; only the structurally-deterministic attachment selection
+    # (``parse_archive_index``) is skipped. On reuse, fetch + empty-guard + store_raw
+    # are all skipped (fetched_at preserved); the flow joins below at parse_infotable.
+    infotable_xml = stored_body(conn, accession_number=accession, document_kind="infotable_13f")
+    if infotable_xml is None:
+        try:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                infotable_xml = provider.fetch_document_text(infotable_url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "13F-HR manifest parser: infotable fetch raised accession=%s: %s",
+                accession,
+                exc,
+            )
+            return _failed_outcome(f"fetch error: {exc}", raw_status="stored")
 
-    if not infotable_xml:
+        if not infotable_xml:
+            try:
+                with conn.transaction():
+                    _record_ingest_attempt(
+                        conn,
+                        filer_cik=filer_cik,
+                        accession_number=accession,
+                        period_of_report=info.period_of_report,
+                        status="tombstoned",
+                        error="infotable.xml fetch failed",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "13F-HR manifest parser: ingest-log INSERT failed accession=%s",
+                    accession,
+                )
+                return _failed_outcome(f"log error: {exc}", raw_status="stored")
+            return ParseOutcome(
+                status="tombstoned",
+                parser_version=_PARSER_VERSION_13F_HR,
+                raw_status="stored",
+                error="infotable.xml fetch failed",
+            )
+
         try:
             with conn.transaction():
-                _record_ingest_attempt(
+                store_raw(
                     conn,
-                    filer_cik=filer_cik,
                     accession_number=accession,
-                    period_of_report=info.period_of_report,
-                    status="tombstoned",
-                    error="infotable.xml fetch failed",
+                    document_kind="infotable_13f",
+                    payload=infotable_xml,
+                    parser_version=_PARSER_VERSION_13F_INFOTABLE,
+                    source_url=infotable_url,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                "13F-HR manifest parser: ingest-log INSERT failed accession=%s",
+                "13F-HR manifest parser: infotable store_raw failed accession=%s",
                 accession,
             )
-            return _failed_outcome(f"log error: {exc}", raw_status="stored")
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_PARSER_VERSION_13F_HR,
-            raw_status="stored",
-            error="infotable.xml fetch failed",
-        )
-
-    try:
-        with conn.transaction():
-            store_raw(
-                conn,
-                accession_number=accession,
-                document_kind="infotable_13f",
-                payload=infotable_xml,
-                parser_version=_PARSER_VERSION_13F_INFOTABLE,
-                source_url=infotable_url,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "13F-HR manifest parser: infotable store_raw failed accession=%s",
-            accession,
-        )
-        return _failed_outcome(f"store_raw error: {exc}", raw_status="stored")
+            return _failed_outcome(f"store_raw error: {exc}", raw_status="stored")
 
     try:
         holdings: list[ThirteenFHolding] = parse_infotable(infotable_xml)
@@ -651,6 +664,16 @@ def _thirteen_f_expand(index_body: str, row: Any) -> list[str]:  # row: Manifest
     None or infotable_name is None`) BEFORE fetching the primary, so an index
     with a primary but no infotable (the ~55k pre-2013 missing-infotable
     backlog) must NOT prefetch the primary (Codex ckpt-2 P2 — no wasted request).
+
+    #1729 — the parser now REUSES a stored ``infotable_13f`` body on re-drain
+    (skips its fetch). The prefetch-hook-mirrors-the-gate rule (prevention-log
+    #1956) does NOT apply to that reuse here, because this expander does not
+    prefetch the infotable in the first place (only ``primary_doc.xml``, which is
+    SWEPT and always re-fetched). Adding an infotable-reuse gate here would be
+    WRONG — it would first require prefetching the infotable, re-introducing the
+    very fetch-for-a-row-that-tombstones bug this expander avoids (the retention
+    gate is post-primary-parse). The reuse gate lives only at the serial fetch
+    site. Do NOT "fix" this asymmetry.
     """
     primary_name, infotable_name = parse_archive_index(index_body)
     if primary_name is None or infotable_name is None:
