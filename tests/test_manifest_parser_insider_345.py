@@ -1118,3 +1118,154 @@ def test_parser_registers_form3_form4_form5() -> None:
     assert "sec_form3" in registered_parser_sources()
     assert "sec_form4" in registered_parser_sources()
     assert "sec_form5" in registered_parser_sources()
+
+
+# ---------------------------------------------------------------------------
+# #1591 — reuse the stored body on a re-drain instead of re-fetching from SEC
+# ---------------------------------------------------------------------------
+
+# Well-formed-open but never-closed → the XML parser raises, exercising the
+# post-body parse-failure path on the REUSE branch.
+_MALFORMED_OWNERSHIP_XML = "<ownershipDocument><unclosed>"
+
+
+def _no_fetch(_self: object, _url: str) -> str:
+    raise AssertionError("stored body must be reused — no SEC fetch on re-drain")
+
+
+def test_form4_reuse_stored_body_skips_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1591 — when the form4_xml body is already in filing_raw_documents (a
+    re-drain after a parser-version bump → sec_rebuild resets the row to
+    pending), _parse_form4 REUSES it: no SEC fetch, no re-store (fetched_at
+    preserved), and the typed rows still write from the stored body."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.services.raw_filings import store_raw
+
+    iid = 8760050
+    acc = "0000320193-26-000050"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPLR")
+    _seed_pending(ebull_test_conn, accession=acc, instrument_id=iid, source="sec_form4", form="4")
+    store_raw(
+        ebull_test_conn,
+        accession_number=acc,
+        document_kind="form4_xml",
+        payload=_FAKE_FORM_4_XML,
+        parser_version="form4-v1",
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000050/primary_doc.xml",
+    )
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT fetched_at FROM filing_raw_documents WHERE accession_number = %s AND document_kind = 'form4_xml'",
+            (acc,),
+        )
+        before_row = cur.fetchone()
+    assert before_row is not None
+    fetched_at_before = before_row[0]
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _no_fetch)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, acc)
+    assert row is not None and row.ingest_status == "parsed" and row.raw_status == "stored"
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM insider_transactions WHERE accession_number = %s", (acc,))
+        c = cur.fetchone()
+    assert c is not None and c[0] >= 1
+
+    # Reuse must NOT re-store → fetched_at unchanged (preserves the
+    # operator-visible "when SEC last published"; matches _bump_parser_version).
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT fetched_at FROM filing_raw_documents WHERE accession_number = %s AND document_kind = 'form4_xml'",
+            (acc,),
+        )
+        after_row = cur.fetchone()
+    assert after_row is not None and after_row[0] == fetched_at_before
+
+
+def test_form4_reuse_failure_preserves_raw_status_stored(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1591 / Codex ckpt-1 #2 — a parse failure on the REUSE path must still
+    return raw_status='stored' so the worker's #938 audit sees the body as
+    present, even though a fresh pending row starts raw_status='absent'.
+    Proves effective_raw_status is repaired by the outcome on the reuse
+    branch, identically to the fetch path."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.services.raw_filings import store_raw
+
+    iid = 8760051
+    acc = "0000320193-26-000051"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPLF")
+    _seed_pending(ebull_test_conn, accession=acc, instrument_id=iid, source="sec_form4", form="4")
+    store_raw(
+        ebull_test_conn,
+        accession_number=acc,
+        document_kind="form4_xml",
+        payload=_MALFORMED_OWNERSHIP_XML,
+        parser_version="form4-v1",
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000051/primary_doc.xml",
+    )
+    ebull_test_conn.commit()
+
+    row_before = get_manifest_row(ebull_test_conn, acc)
+    assert row_before is not None and row_before.raw_status == "absent"
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _no_fetch)
+
+    run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
+    ebull_test_conn.commit()
+
+    row = get_manifest_row(ebull_test_conn, acc)
+    assert row is not None
+    assert row.raw_status == "stored"  # repaired from 'absent' on the failure path
+    assert row.ingest_status in ("failed", "tombstoned")
+
+
+def test_form3_reuse_stored_body_skips_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1591 — Form 3 reuses its stored form3_xml body on re-drain. Guards the
+    per-parser document_kind wiring (same branch shape as Form 4)."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.services.raw_filings import store_raw
+
+    iid = 8760052
+    acc = "0000320193-26-000052"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPL3R")
+    _seed_pending(ebull_test_conn, accession=acc, instrument_id=iid, source="sec_form3", form="3")
+    store_raw(
+        ebull_test_conn,
+        accession_number=acc,
+        document_kind="form3_xml",
+        payload=_FAKE_FORM_3_XML,
+        parser_version="form3-v1",
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000052/primary_doc.xml",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _no_fetch)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_form3", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, acc)
+    assert row is not None and row.ingest_status == "parsed" and row.raw_status == "stored"

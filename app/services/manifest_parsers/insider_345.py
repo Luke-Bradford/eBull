@@ -82,7 +82,7 @@ from app.services.manifest_parsers._classify import (
     format_upsert_error,
     is_transient_upsert_error,
 )
-from app.services.raw_filings import store_raw
+from app.services.raw_filings import DocumentKind, store_raw, stored_body
 
 logger = logging.getLogger(__name__)
 
@@ -174,58 +174,66 @@ def _parse_form4(
 
     canonical_url = _canonical_form_4_url(url)
 
-    try:
-        with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-            xml = provider.fetch_document_text(canonical_url)
-    except Exception as exc:  # noqa: BLE001 — transient retries via 1h backoff
-        logger.warning(
-            "form4 manifest parser: fetch raised accession=%s url=%s: %s",
-            accession,
-            canonical_url,
-            exc,
-        )
-        return _failed_outcome(f"fetch error: {exc}", parser_version=_PARSER_VERSION_FORM4)
+    # #1591 — reuse the stored body on a re-drain (parser-version bump →
+    # sec_rebuild resets the row to pending) instead of re-downloading.
+    # SEC filings are immutable per accession, so a present form4_xml body
+    # is always safe to re-parse. Fetch + store only on a miss (first
+    # ingest); reuse skips both so fetched_at is not churned and the
+    # rate-limited SEC budget is spared.
+    xml = stored_body(conn, accession_number=accession, document_kind="form4_xml")
+    if xml is None:
+        try:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                xml = provider.fetch_document_text(canonical_url)
+        except Exception as exc:  # noqa: BLE001 — transient retries via 1h backoff
+            logger.warning(
+                "form4 manifest parser: fetch raised accession=%s url=%s: %s",
+                accession,
+                canonical_url,
+                exc,
+            )
+            return _failed_outcome(f"fetch error: {exc}", parser_version=_PARSER_VERSION_FORM4)
 
-    if not xml:
-        # Empty / non-200. Legacy tombstones the row in insider_filings;
-        # mirror so dashboard counts match. Savepoint isolates the
-        # tombstone write from the outer worker tx.
+        if not xml:
+            # Empty / non-200. Legacy tombstones the row in insider_filings;
+            # mirror so dashboard counts match. Savepoint isolates the
+            # tombstone write from the outer worker tx.
+            try:
+                with conn.transaction():
+                    _write_tombstone(
+                        conn,
+                        instrument_id=instrument_id,
+                        accession_number=accession,
+                        primary_document_url=canonical_url,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "form4 manifest parser: tombstone INSERT failed accession=%s",
+                    accession,
+                )
+                return _failed_outcome(f"tombstone error: {exc}", parser_version=_PARSER_VERSION_FORM4)
+            return ParseOutcome(
+                status="tombstoned",
+                parser_version=_PARSER_VERSION_FORM4,
+                error="empty or non-200 fetch",
+            )
+
         try:
             with conn.transaction():
-                _write_tombstone(
+                store_raw(
                     conn,
-                    instrument_id=instrument_id,
                     accession_number=accession,
-                    primary_document_url=canonical_url,
+                    document_kind="form4_xml",
+                    payload=xml,
+                    parser_version=_PARSER_VERSION_FORM4,
+                    source_url=canonical_url,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                "form4 manifest parser: tombstone INSERT failed accession=%s",
+                "form4 manifest parser: store_raw failed accession=%s",
                 accession,
             )
-            return _failed_outcome(f"tombstone error: {exc}", parser_version=_PARSER_VERSION_FORM4)
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_PARSER_VERSION_FORM4,
-            error="empty or non-200 fetch",
-        )
-
-    try:
-        with conn.transaction():
-            store_raw(
-                conn,
-                accession_number=accession,
-                document_kind="form4_xml",
-                payload=xml,
-                parser_version=_PARSER_VERSION_FORM4,
-                source_url=canonical_url,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "form4 manifest parser: store_raw failed accession=%s",
-            accession,
-        )
-        return _failed_outcome(f"store_raw error: {exc}", parser_version=_PARSER_VERSION_FORM4)
+            return _failed_outcome(f"store_raw error: {exc}", parser_version=_PARSER_VERSION_FORM4)
 
     # Parse-phase exceptions AFTER store_raw must return
     # raw_status='stored' so the manifest matches filing_raw_documents
@@ -390,55 +398,60 @@ def _parse_form3(
 
     canonical_url = _canonical_form_4_url(url)
 
-    try:
-        with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-            xml = provider.fetch_document_text(canonical_url)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "form3 manifest parser: fetch raised accession=%s url=%s: %s",
-            accession,
-            canonical_url,
-            exc,
-        )
-        return _failed_outcome(f"fetch error: {exc}", parser_version=_FORM3_PARSER_VERSION_STR)
+    # #1591 — reuse the stored body on a re-drain instead of re-downloading
+    # (SEC filings immutable per accession; see _parse_form4). Fetch + store
+    # only on a miss; reuse skips both.
+    xml = stored_body(conn, accession_number=accession, document_kind="form3_xml")
+    if xml is None:
+        try:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                xml = provider.fetch_document_text(canonical_url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "form3 manifest parser: fetch raised accession=%s url=%s: %s",
+                accession,
+                canonical_url,
+                exc,
+            )
+            return _failed_outcome(f"fetch error: {exc}", parser_version=_FORM3_PARSER_VERSION_STR)
 
-    if not xml:
+        if not xml:
+            try:
+                with conn.transaction():
+                    _write_form_3_tombstone(
+                        conn,
+                        instrument_id=instrument_id,
+                        accession_number=accession,
+                        primary_document_url=canonical_url,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "form3 manifest parser: tombstone INSERT failed accession=%s",
+                    accession,
+                )
+                return _failed_outcome(f"tombstone error: {exc}", parser_version=_FORM3_PARSER_VERSION_STR)
+            return ParseOutcome(
+                status="tombstoned",
+                parser_version=_FORM3_PARSER_VERSION_STR,
+                error="empty or non-200 fetch",
+            )
+
         try:
             with conn.transaction():
-                _write_form_3_tombstone(
+                store_raw(
                     conn,
-                    instrument_id=instrument_id,
                     accession_number=accession,
-                    primary_document_url=canonical_url,
+                    document_kind="form3_xml",
+                    payload=xml,
+                    parser_version=_FORM3_PARSER_VERSION_STR,
+                    source_url=canonical_url,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                "form3 manifest parser: tombstone INSERT failed accession=%s",
+                "form3 manifest parser: store_raw failed accession=%s",
                 accession,
             )
-            return _failed_outcome(f"tombstone error: {exc}", parser_version=_FORM3_PARSER_VERSION_STR)
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_FORM3_PARSER_VERSION_STR,
-            error="empty or non-200 fetch",
-        )
-
-    try:
-        with conn.transaction():
-            store_raw(
-                conn,
-                accession_number=accession,
-                document_kind="form3_xml",
-                payload=xml,
-                parser_version=_FORM3_PARSER_VERSION_STR,
-                source_url=canonical_url,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "form3 manifest parser: store_raw failed accession=%s",
-            accession,
-        )
-        return _failed_outcome(f"store_raw error: {exc}", parser_version=_FORM3_PARSER_VERSION_STR)
+            return _failed_outcome(f"store_raw error: {exc}", parser_version=_FORM3_PARSER_VERSION_STR)
 
     try:
         parsed = parse_form_3_xml(xml)
@@ -779,12 +792,11 @@ def _parse_form5(
     )
 
 
-def _insider_fetch_url(conn: Any, row: Any) -> str | None:  # conn: Connection (unused), row: ManifestRow
+def _insider_fetch_url(conn: Any, row: Any) -> str | None:  # conn: Connection, row: ManifestRow
     """#1686 Phase 2 prefetch hook — the SINGLE canonical ownership-XML URL
     Form 3/4/5 parsers GET, returned ONLY when the parser would actually
-    fetch it. ``conn`` is part of the #1700 hook contract (DEF 14A needs a
-    DB read for its cap gate); the insider gates are all row-local so it is
-    unused here.
+    fetch it. ``conn`` (part of the #1700 hook contract) is used for the
+    #1591 stored-body gate below.
 
     The hook MUST mirror every PRE-FETCH tombstone gate the parser applies,
     or the concurrent prefetch wastes SEC rate budget fetching bodies the
@@ -795,6 +807,11 @@ def _insider_fetch_url(conn: Any, row: Any) -> str | None:  # conn: Connection (
       * Form 4 past the 3y cap (``form4_within_retention``) / Form 5 past the
         18-month cap (``form5_within_retention``) → pre-fetch tombstone.
         Form 3 has NO retention gate, so it is fetched whenever it has a URL.
+      * #1591 — body already stored → the parser REUSES it (no fetch), so
+        skip the prefetch (prevention-log #1956: a prefetch hook must mirror
+        EVERY pre-fetch gate, reuse included, or it burns the budget it
+        exists to save). Checked LAST (after the cheap row-local gates) so a
+        gated-out row never pays the DB read.
     Returning ``None`` here just means "no prefetch" — the parser still runs
     serially and reaches the identical tombstone, so an over-broad ``None``
     is always safe (worst case: no speedup)."""
@@ -805,6 +822,15 @@ def _insider_fetch_url(conn: Any, row: Any) -> str | None:  # conn: Connection (
     if row.source == "sec_form4" and not form4_within_retention(filed):
         return None
     if row.source == "sec_form5" and not form5_within_retention(filed):
+        return None
+    # Map source → the EXACT stored kind; fail closed (Codex ckpt-1 #4).
+    # ``sec_form5`` is deliberately absent — _parse_form5 does NOT reuse
+    # (form5_xml stays KEPT_NEGLIGIBLE per #1617), so it falls through and
+    # prefetches as before. A shared form4_xml check would wrongly skip
+    # Form 3/5 rows whose form4_xml body happens to exist.
+    reuse_kind: dict[str, DocumentKind] = {"sec_form3": "form3_xml", "sec_form4": "form4_xml"}
+    kind = reuse_kind.get(row.source)
+    if kind is not None and stored_body(conn, accession_number=row.accession_number, document_kind=kind) is not None:
         return None
     return _canonical_form_4_url(url)
 

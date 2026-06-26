@@ -625,3 +625,117 @@ def test_parser_registered_via_register_all() -> None:
 
     register_all_parsers()
     assert "sec_def14a" in registered_parser_sources()
+
+
+# ---------------------------------------------------------------------------
+# #1591 — reuse the stored body on a re-drain instead of re-fetching from SEC
+# ---------------------------------------------------------------------------
+
+
+def _no_fetch(_self: object, _url: str) -> str:
+    raise AssertionError("stored body must be reused — no SEC fetch on re-drain")
+
+
+def test_def14a_reuse_stored_body_skips_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1591 — when the def14a_body (avg ~725KB) is already stored, the parser
+    REUSES it on a re-drain: no SEC fetch, no re-store (fetched_at preserved),
+    holdings still write from the stored body. The pre-fetch latest-N cap gate
+    still runs above the reuse (it sits before the fetch)."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.services.raw_filings import store_raw
+
+    iid = 8740050
+    acc = "0000320193-26-000050"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPLR", cik="0000320193")
+    _seed_pending_def14a(ebull_test_conn, accession=acc, instrument_id=iid)
+    store_raw(
+        ebull_test_conn,
+        accession_number=acc,
+        document_kind="def14a_body",
+        payload=_FAKE_DEF14A_HTML,
+        parser_version="def14a-v1",
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000050/def14a.htm",
+    )
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT fetched_at FROM filing_raw_documents WHERE accession_number = %s AND document_kind = 'def14a_body'",
+            (acc,),
+        )
+        before_row = cur.fetchone()
+    assert before_row is not None
+    fetched_at_before = before_row[0]
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _no_fetch)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_def14a", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, acc)
+    assert row is not None and row.ingest_status == "parsed" and row.raw_status == "stored"
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM def14a_beneficial_holdings WHERE accession_number = %s AND instrument_id = %s",
+            (acc, iid),
+        )
+        c = cur.fetchone()
+    assert c is not None and c[0] >= 2
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT fetched_at FROM filing_raw_documents WHERE accession_number = %s AND document_kind = 'def14a_body'",
+            (acc,),
+        )
+        after_row = cur.fetchone()
+    assert after_row is not None and after_row[0] == fetched_at_before
+
+
+def test_def14a_reuse_failure_preserves_raw_status_stored(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1591 / Codex ckpt-1 #2 — a post-body failure on the REUSE path returns
+    raw_status='stored'. A notice-only proxy (no beneficial-ownership table)
+    tombstones AFTER the body is in hand; the outcome must repair a fresh
+    pending row's raw_status='absent' to 'stored', identical to the fetch
+    path. Hoisting issuer_cik above the reuse branch keeps the tombstone
+    ingest-log write intact."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.services.raw_filings import store_raw
+
+    iid = 8740051
+    acc = "0000320193-26-000051"
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPLF", cik="0000320193")
+    _seed_pending_def14a(ebull_test_conn, accession=acc, instrument_id=iid)
+    store_raw(
+        ebull_test_conn,
+        accession_number=acc,
+        document_kind="def14a_body",
+        payload=_NOTICE_ONLY_DEF14A_HTML,
+        parser_version="def14a-v1",
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000051/def14a.htm",
+    )
+    ebull_test_conn.commit()
+
+    row_before = get_manifest_row(ebull_test_conn, acc)
+    assert row_before is not None and row_before.raw_status == "absent"
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _no_fetch)
+
+    run_manifest_worker(ebull_test_conn, source="sec_def14a", max_rows=10)
+    ebull_test_conn.commit()
+
+    row = get_manifest_row(ebull_test_conn, acc)
+    assert row is not None
+    assert row.raw_status == "stored"  # repaired from 'absent'
+    assert row.ingest_status == "tombstoned"

@@ -80,6 +80,18 @@ def _row(*, source: str, url: str | None, accession: str) -> ManifestRow:
     )
 
 
+def _fake_stored_body(*present_kinds: str) -> Any:
+    """A ``stored_body`` stand-in for the pure hook tests: returns a body for
+    the given ``document_kind``s (simulating a re-drain where the payload is
+    already on disk), ``None`` otherwise. Lets the #1591 reuse gate be
+    exercised without a DB cursor."""
+
+    def _f(_conn: Any, *, accession_number: str, document_kind: str) -> str | None:
+        return "<stored/>" if document_kind in present_kinds else None
+
+    return _f
+
+
 # --- fetch chokepoint cache read ------------------------------------------
 
 
@@ -190,16 +202,21 @@ def test_prefetch_empty_when_no_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- _insider_fetch_url mirrors the parser's pre-fetch gates ---------------
 
 
-def test_insider_fetch_url_mirrors_prefetch_gates() -> None:
+def test_insider_fetch_url_mirrors_prefetch_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     """The hook must NOT return a URL for a row the parser would tombstone
     before fetching — else the prefetch wastes SEC budget (Codex ckpt-2 HIGH)."""
     from datetime import timedelta
 
+    import app.services.manifest_parsers.insider_345 as ins
     from app.services.manifest_parsers.insider_345 import _insider_fetch_url
 
     recent = datetime.now(tz=UTC) - timedelta(days=30)
     old = datetime(2015, 1, 1, tzinfo=UTC)  # past both the 3y + 18mo caps
     base = "https://www.sec.gov/Archives/edgar/data/1/000/primary_doc.xml"
+
+    # Default: nothing stored, so the gate asserts below exercise the
+    # row-local gates only (the #1591 stored-body gate is a no-op here).
+    monkeypatch.setattr(ins, "stored_body", _fake_stored_body())
 
     # In-retention Form 4 with a URL + instrument_id → prefetch (canonical, XSL-free).
     assert _insider_fetch_url(None, _mk(source="sec_form4", url=base, filed_at=recent, iid=1)) is not None
@@ -212,6 +229,15 @@ def test_insider_fetch_url_mirrors_prefetch_gates() -> None:
     assert _insider_fetch_url(None, _mk(source="sec_form5", url=base, filed_at=old, iid=1)) is None
     # Form 3 has NO retention gate — an old Form 3 with a URL is still fetched.
     assert _insider_fetch_url(None, _mk(source="sec_form3", url=base, filed_at=old, iid=1)) is not None
+
+    # #1591 — body already stored → skip prefetch (parser reuses it from the DB).
+    monkeypatch.setattr(ins, "stored_body", _fake_stored_body("form4_xml"))
+    assert _insider_fetch_url(None, _mk(source="sec_form4", url=base, filed_at=recent, iid=1)) is None
+    # Fail-closed map (Codex ckpt-1 #4): Form 5 is NOT reused by _parse_form5,
+    # so its source is absent from the reuse map — a stored form5_xml body must
+    # NOT skip the prefetch (the parser will fetch it).
+    monkeypatch.setattr(ins, "stored_body", _fake_stored_body("form5_xml"))
+    assert _insider_fetch_url(None, _mk(source="sec_form5", url=base, filed_at=recent, iid=1)) is not None
 
 
 def _mk(*, source: str, url: str | None, filed_at: Any, iid: int | None) -> ManifestRow:
@@ -377,10 +403,13 @@ def test_prefetch_no_pass2_when_no_expander(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_blockholder_fetch_url_mirrors_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.services.manifest_parsers.sec_13dg as d13dg
     from app.services.manifest_parsers.sec_13dg import _blockholder_fetch_url
 
     recent = datetime.now(tz=UTC)  # within blockholders retention (post-mandate)
     old = datetime(2010, 1, 1, tzinfo=UTC)  # pre-cutoff → tombstone pre-fetch
+
+    monkeypatch.setattr(d13dg, "stored_body", _fake_stored_body())  # nothing stored
 
     ok = _mk(source="sec_13d", url=None, filed_at=recent, iid=1)
     assert _blockholder_fetch_url(None, ok) is not None  # cik present, not agent, in retention
@@ -392,6 +421,10 @@ def test_blockholder_fetch_url_mirrors_gates(monkeypatch: pytest.MonkeyPatch) ->
 
     no_cik = dataclasses.replace(ok, cik="")
     assert _blockholder_fetch_url(None, no_cik) is None
+    # #1591 — body already stored → skip prefetch (parser reuses it).
+    monkeypatch.setattr(d13dg, "stored_body", _fake_stored_body("primary_doc_13dg"))
+    assert _blockholder_fetch_url(None, ok) is None
+    monkeypatch.setattr(d13dg, "stored_body", _fake_stored_body())  # reset: nothing stored
     # Agent CIK → None.
     monkeypatch.setattr("app.providers.implementations.sec_edgar.KNOWN_FILING_AGENT_CIKS", {"0000000001"})
     assert _blockholder_fetch_url(None, ok) is None
@@ -402,6 +435,7 @@ def test_def14a_fetch_url_mirrors_gates(monkeypatch: pytest.MonkeyPatch) -> None
     from app.services.manifest_parsers.def14a import _def14a_fetch_url
 
     monkeypatch.setattr(d14a, "def14a_within_cap", lambda *a, **k: True)
+    monkeypatch.setattr(d14a, "stored_body", _fake_stored_body())  # nothing stored
     base = "https://www.sec.gov/Archives/edgar/data/1/000/proxy.htm"
     recent = datetime.now(tz=UTC)
     ok = _mk(source="sec_def14a", url=base, filed_at=recent, iid=1)
@@ -416,6 +450,11 @@ def test_def14a_fetch_url_mirrors_gates(monkeypatch: pytest.MonkeyPatch) -> None
     assert _def14a_fetch_url(None, pre) is None  # type: ignore[arg-type]
     # Past the latest-N cap → None (gate needs conn; helper stubbed False).
     monkeypatch.setattr(d14a, "def14a_within_cap", lambda *a, **k: False)
+    assert _def14a_fetch_url(None, ok) is None  # type: ignore[arg-type]
+    # #1591 — body already stored → skip prefetch (parser reuses it). Cap reset
+    # to True so the None below is attributable to the stored-body gate alone.
+    monkeypatch.setattr(d14a, "def14a_within_cap", lambda *a, **k: True)
+    monkeypatch.setattr(d14a, "stored_body", _fake_stored_body("def14a_body"))
     assert _def14a_fetch_url(None, ok) is None  # type: ignore[arg-type]
 
 

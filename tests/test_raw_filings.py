@@ -355,3 +355,60 @@ def test_byte_count_generated_from_octet_length(
     )
     assert doc is not None
     assert doc.byte_count == len(b"<short/>")
+
+
+# ---------------------------------------------------------------------------
+# #1591 — stored_body: reuse a present body, else fall through to fetch
+# ---------------------------------------------------------------------------
+
+
+def test_stored_body_returns_payload_on_hit(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """A retained kind with a present payload returns the body for reuse."""
+    conn = ebull_test_conn
+    raw_filings.store_raw(
+        conn,
+        accession_number="0001767470-26-000091",
+        document_kind="form4_xml",
+        payload=_SAMPLE_FORM4,
+        parser_version="form4-v1",
+    )
+    conn.commit()
+    assert (
+        raw_filings.stored_body(conn, accession_number="0001767470-26-000091", document_kind="form4_xml")
+        == _SAMPLE_FORM4
+    )
+
+
+def test_stored_body_returns_none_on_missing_row(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """No row → None → the caller fetches (first ingest)."""
+    assert (
+        raw_filings.stored_body(ebull_test_conn, accession_number="9999999999-26-000000", document_kind="form4_xml")
+        is None
+    )
+
+
+def test_stored_body_returns_none_on_swept_payload(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """A SWEPT kind (primary_doc) is born-compacted (payload NULL) by
+    store_raw, so stored_body returns None and the caller rehydrates /
+    re-fetches — reuse is impossible for a body that was never stored. This
+    is exactly why #1591 excludes 10-K/8-K from the reuse retarget."""
+    conn = ebull_test_conn
+    raw_filings.store_raw(
+        conn,
+        accession_number="0000000009-26-000001",
+        document_kind="primary_doc",
+        payload="<html>10-K body</html>",
+        parser_version="10k-v2",
+        source_url="https://www.sec.gov/Archives/edgar/data/9/000/primary.htm",
+    )
+    conn.commit()
+    # Sanity: the row exists but its payload was born-compacted to NULL.
+    doc = raw_filings.read_raw(conn, accession_number="0000000009-26-000001", document_kind="primary_doc")
+    assert doc is not None and doc.payload is None
+    assert raw_filings.stored_body(conn, accession_number="0000000009-26-000001", document_kind="primary_doc") is None

@@ -910,3 +910,58 @@ def test_parser_registered_for_both_sources() -> None:
     register_all_parsers()
     assert "sec_13d" in registered_parser_sources()
     assert "sec_13g" in registered_parser_sources()
+
+
+# ---------------------------------------------------------------------------
+# #1591 — reuse the stored body on a re-drain instead of re-fetching from SEC
+# ---------------------------------------------------------------------------
+
+
+def _no_fetch(_self: object, _url: str) -> str:
+    raise AssertionError("stored body must be reused — no SEC fetch on re-drain")
+
+
+def test_13dg_reuse_stored_body_skips_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1591 — when the primary_doc_13dg body is already stored, _parse_13dg
+    REUSES it on a re-drain: no SEC fetch, and the filer/filing rows still
+    write from the stored body (re-resolving the issuer from the parsed
+    CUSIP). Guards the per-parser document_kind wiring."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.services.raw_filings import store_raw
+
+    acc = "0001140361-25-040863"
+    _seed_instrument_with_cusip(ebull_test_conn, iid=8750050, symbol="ELR", cusip="518439104")
+    _seed_pending_13dg(ebull_test_conn, accession=acc, filer_cik="0002093607", source="sec_13d", form="SC 13D")
+    store_raw(
+        ebull_test_conn,
+        accession_number=acc,
+        document_kind="primary_doc_13dg",
+        payload=_FAKE_13D_XML,
+        parser_version="13dg-primary-v1",
+        source_url="https://www.sec.gov/Archives/edgar/data/2093607/000114036125040863/primary_doc.xml",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _no_fetch)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_13d", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, acc)
+    assert row is not None and row.ingest_status == "parsed" and row.raw_status == "stored"
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT submission_type, instrument_id FROM blockholder_filings WHERE accession_number = %s",
+            (acc,),
+        )
+        bf = cur.fetchall()
+    assert len(bf) == 1
+    assert bf[0][0] == "SCHEDULE 13D"
+    assert bf[0][1] == 8750050  # CUSIP re-resolved from the reused body

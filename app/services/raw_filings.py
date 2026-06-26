@@ -267,6 +267,37 @@ def read_raw(
     return _row_to_document(row)
 
 
+def stored_body(
+    conn: psycopg.Connection[Any],
+    *,
+    accession_number: str,
+    document_kind: DocumentKind,
+) -> str | None:
+    """Return a stored body to REUSE in place of an upstream re-fetch, or
+    ``None`` when the caller must fetch.
+
+    ``None`` covers two cases the caller handles identically (fetch):
+
+      * no ``filing_raw_documents`` row yet — first ingest.
+      * the row exists but ``payload IS NULL`` — a SWEPT / born-compacted
+        kind (#1014 / #1615). Reuse is impossible; the caller rehydrates
+        from ``source_url`` (i.e. re-fetches).
+
+    A non-``None`` return is always safe to reuse without a freshness
+    check: SEC filings are **immutable once filed** (an amendment is a NEW
+    accession with its own number), so for a fixed ``(accession_number,
+    document_kind)`` a present body never goes stale — "present" ==
+    "fresh". The manifest-worker parsers (#1591) call this BEFORE their
+    fetch so a re-drain (parser-version bump → ``sec_rebuild`` resets rows
+    to pending) re-parses the stored body instead of re-downloading it.
+
+    Only valid for retained kinds (a payload reader on a SWEPT kind is
+    barred by ``tests/test_raw_payload_retention.py``); SWEPT kinds always
+    return ``None`` here and fall through to the fetch path."""
+    doc = read_raw(conn, accession_number=accession_number, document_kind=document_kind)
+    return doc.payload if doc is not None else None
+
+
 def _row_to_document(row: dict[str, Any]) -> RawFilingDocument:
     """Map a dict_row to the dataclass. ``payload`` / ``byte_count``
     are NULL on swept rows (#1014) — must map to ``None``, never

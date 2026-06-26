@@ -79,7 +79,7 @@ from app.services.ownership_observations import (
     refresh_def14a_current,
     refresh_esop_current,
 )
-from app.services.raw_filings import store_raw
+from app.services.raw_filings import store_raw, stored_body
 from app.services.sec_identity import siblings_for_issuer_cik
 
 logger = logging.getLogger(__name__)
@@ -215,70 +215,80 @@ def _parse_def14a(
             error="latest-N primary cap",
         )
 
-    try:
-        with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-            body = provider.fetch_document_text(url)
-    except Exception as exc:  # noqa: BLE001 — transient fetch errors retry via worker backoff
-        logger.warning(
-            "def14a manifest parser: fetch raised accession=%s url=%s: %s",
-            accession,
-            url,
-            exc,
-        )
-        return _failed_outcome(f"fetch error: {exc}")
-
-    # Resolve issuer CIK once; threaded through every outcome path so
-    # the ingest-log write doesn't re-issue the lookup (same shape as
-    # the legacy ingester's _AccessionOutcome.issuer_cik).
+    # Resolve issuer CIK once; threaded through every outcome path (the
+    # empty-body ingest-log write + the parse/upsert below) so neither
+    # re-issues the lookup. Hoisted above the fetch branch so the #1591
+    # reuse path resolves it too (same shape as the legacy ingester's
+    # _AccessionOutcome.issuer_cik).
     issuer_cik = _resolve_issuer_cik(conn, instrument_id=instrument_id) or _CIK_MISSING_SENTINEL
 
-    if not body:
-        # Non-200 or empty body. Legacy path returned status='failed'
-        # for this case; manifest path treats it as a tombstone so the
-        # row doesn't get retried forever on a persistently-404 doc.
-        # Write the ingest-log row with status='failed' to match legacy
-        # accounting; manifest itself records tombstoned.
+    # #1591 — reuse the stored body on a re-drain (parser-version bump →
+    # sec_rebuild resets the row to pending) instead of re-downloading.
+    # def14a_body is retained (avg ~725KB) and SEC filings are immutable
+    # per accession, so a present body is always safe to re-parse. Fetch +
+    # store only on a miss (first ingest); reuse skips both so fetched_at
+    # is not churned and the rate-limited SEC budget is spared.
+    body = stored_body(conn, accession_number=accession, document_kind="def14a_body")
+    if body is None:
+        try:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                body = provider.fetch_document_text(url)
+        except Exception as exc:  # noqa: BLE001 — transient fetch errors retry via worker backoff
+            logger.warning(
+                "def14a manifest parser: fetch raised accession=%s url=%s: %s",
+                accession,
+                url,
+                exc,
+            )
+            return _failed_outcome(f"fetch error: {exc}")
+
+        if not body:
+            # Non-200 or empty body. Legacy path returned status='failed'
+            # for this case; manifest path treats it as a tombstone so the
+            # row doesn't get retried forever on a persistently-404 doc.
+            # Write the ingest-log row with status='failed' to match legacy
+            # accounting; manifest itself records tombstoned.
+            try:
+                with conn.transaction():
+                    _record_ingest_attempt(
+                        conn,
+                        accession_number=accession,
+                        issuer_cik=issuer_cik,
+                        status="failed",
+                        error="primary doc fetch returned empty or non-200",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "def14a manifest parser: ingest-log INSERT failed accession=%s",
+                    accession,
+                )
+                return _failed_outcome(f"log error: {exc}")
+            return ParseOutcome(
+                status="tombstoned",
+                parser_version=_PARSER_VERSION_DEF14A,
+                error="empty or non-200 fetch",
+            )
+
+        # store_raw in a savepoint so a partial write doesn't abort the
+        # worker's outer transaction. The body lands in
+        # filing_raw_documents BEFORE parse so a downstream re-wash can
+        # reparse without re-fetching from SEC.
         try:
             with conn.transaction():
-                _record_ingest_attempt(
+                store_raw(
                     conn,
                     accession_number=accession,
-                    issuer_cik=issuer_cik,
-                    status="failed",
-                    error="primary doc fetch returned empty or non-200",
+                    document_kind="def14a_body",
+                    payload=body,
+                    parser_version=_PARSER_VERSION_DEF14A,
+                    source_url=url,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                "def14a manifest parser: ingest-log INSERT failed accession=%s",
+                "def14a manifest parser: store_raw failed accession=%s",
                 accession,
             )
-            return _failed_outcome(f"log error: {exc}")
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_PARSER_VERSION_DEF14A,
-            error="empty or non-200 fetch",
-        )
-
-    # store_raw in a savepoint so a partial write doesn't abort the
-    # worker's outer transaction. The body lands in
-    # filing_raw_documents BEFORE parse so a downstream re-wash can
-    # reparse without re-fetching from SEC.
-    try:
-        with conn.transaction():
-            store_raw(
-                conn,
-                accession_number=accession,
-                document_kind="def14a_body",
-                payload=body,
-                parser_version=_PARSER_VERSION_DEF14A,
-                source_url=url,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "def14a manifest parser: store_raw failed accession=%s",
-            accession,
-        )
-        return _failed_outcome(f"store_raw error: {exc}")
+            return _failed_outcome(f"store_raw error: {exc}")
 
     # Parse-phase exceptions must return raw_status='stored' because
     # store_raw already committed inside its savepoint — the manifest
@@ -444,6 +454,9 @@ def _def14a_fetch_url(conn: psycopg.Connection[Any], row: Any) -> str | None:  #
         pre-fetch. This gate needs a DB read (ranks proxies via
         ``filing_events``) — hence the ``conn`` in the #1700 hook contract.
         Calls the SAME helper the parser calls (one rank source of truth).
+      * #1591 — body already stored → the parser REUSES it (no fetch), so
+        skip the prefetch (prevention-log #1956). Checked LAST, after the
+        cheap row-local gates, so a gated-out row never pays the DB read.
     An over-broad ``None`` is always safe (serial fallback reaches the
     identical tombstone).
     """
@@ -455,6 +468,8 @@ def _def14a_fetch_url(conn: psycopg.Connection[Any], row: Any) -> str | None:  #
     if row.instrument_id is None:
         return None
     if not def14a_within_cap(conn, accession_number=row.accession_number, instrument_id=row.instrument_id):
+        return None
+    if stored_body(conn, accession_number=row.accession_number, document_kind="def14a_body") is not None:
         return None
     return url
 
