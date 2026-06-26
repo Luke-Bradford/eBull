@@ -74,7 +74,11 @@ from app.services.manifest_parsers._schedule13_adapter import (
     build_filing_from_edgartools_dict,
 )
 from app.services.ownership_observations import refresh_blockholders_current
-from app.services.raw_filings import store_raw, stored_body
+from app.services.raw_filings import (
+    acquire_filing_accession_write_lock,
+    store_raw,
+    stored_body,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +329,16 @@ def _parse_13dg(
     inserted = 0
     try:
         with conn.transaction():
+            # #817 — serialise this accession's blockholder_filings writes
+            # against a concurrent rewash DELETE+INSERT (same lock key). First
+            # statement in the txn, after the stored-body read above (no SEC
+            # fetch inside this block).
+            # NB: SAVEPOINT, not a top-level txn (the manifest worker batches the
+            # whole tick under one autocommit=False txn) → this xact lock is held
+            # until BATCH commit, matching the #1542 13F lock. Correct mutual
+            # exclusion; rare rewash-vs-live deadlock self-heals. Root-cause
+            # (per-accession commit) tracked in #1735.
+            acquire_filing_accession_write_lock(conn, accession)
             # Resolve the subject company to an instrument (#1628). CUSIP
             # is the security-precise key (disambiguates share-class
             # siblings; settled "CIK = entity, CUSIP = security" #1102),

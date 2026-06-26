@@ -773,6 +773,13 @@ def _ingest_single_accession(
     inserted = 0
     updated = 0
 
+    # #817 — legacy per-accession ingest is a third writer of
+    # def14a_beneficial_holdings (alongside the live manifest drain and rewash).
+    # Acquire the per-accession lock here — AFTER the fetch+parse above (never
+    # held across the SEC fetch at line ~715), BEFORE the write fan-out — so a
+    # concurrent rewash DELETE+INSERT serialises against it.
+    raw_filings.acquire_filing_accession_write_lock(conn, ref.accession_number)
+
     # Per-share-class fan-out (#1117 PR-B). Same DEF 14A document
     # describes the same issuer; each share-class sibling renders
     # its own copy of the per-instrument tables. Bulk path covered

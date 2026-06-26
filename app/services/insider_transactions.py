@@ -1231,6 +1231,15 @@ def upsert_filing(
         sanitised.append(txn)
     parsed = replace(parsed, transactions=tuple(sanitised))
 
+    # #817 — the single once-per-accession chokepoint for Form 4/5 typed-table
+    # writes (live manifest drain, rewash, legacy ingest all funnel here).
+    # Serialise concurrent writers of this accession's rows before the first
+    # mutation (no SEC fetch happens in this function — safe to hold). Rewash +
+    # legacy commit per accession (xact lock auto-releases there); on the
+    # manifest-worker path the surrounding batch txn holds it until batch commit
+    # (#1735, same property as the #1542 13F lock) — coarse but correct.
+    raw_filings.acquire_filing_accession_write_lock(conn, accession_number)
+
     with conn.cursor() as cur:
         cur.execute(
             """

@@ -157,6 +157,53 @@ class RawFilingDocument:
         return self.payload
 
 
+def acquire_filing_accession_write_lock(conn: psycopg.Connection[Any], accession_number: str) -> None:
+    """Serialise concurrent writers of ONE accession's typed ownership rows
+    (#817 — generalises the 13F #1542 lock to Form 3/4/5, DEF 14A and 13D/G
+    blockholders).
+
+    Three writer classes target the same accession's typed tables: the live
+    manifest drain (``manifest_parsers/*``), the operator rewash
+    (``rewash_filings``), and the legacy manual ingesters. After
+    ``POST /jobs/sec_rebuild/run`` requeues a parser-version cohort for the live
+    worker, an operator-triggered ``scripts/rewash.py`` can target the same
+    accession the worker is re-draining; #1274/#1591 also made the live drain
+    concurrent. This transaction-scoped advisory lock makes those mutations
+    mutually exclusive per accession.
+
+    An advisory lock is cooperative: EVERY writer of the guarded rows MUST call
+    this with the identical key (prevention-log "Advisory lock scope vs
+    concurrent writers"). It lives inside the once-per-accession write path so a
+    future caller cannot forget it (prevention-log "lock acquisition belongs
+    inside the function").
+
+    Transaction-scoped (``pg_advisory_xact_lock``): auto-releases on
+    COMMIT/ROLLBACK/connection-close. MUST be called inside the same
+    non-autocommit transaction as the write, AFTER any SEC fetch (never held
+    across network I/O), and BEFORE any count/gate read that feeds a DELETE and
+    BEFORE any per-instrument refresh lock (per-accession then per-instrument).
+
+    Release granularity follows the CALLER's commit boundary. Rewash + legacy
+    commit per accession, so the lock releases per accession there. The live
+    manifest worker batches the whole tick under one ``autocommit=False`` txn
+    (commit at ``scheduler.py``), so a ``with conn.transaction()`` inside a
+    parser is a SAVEPOINT and this lock is absorbed by the batch txn and held
+    until BATCH commit — the same coarse-but-correct property the #1542 13F lock
+    has. Mutual exclusion still holds; the uniform-order acyclic argument holds
+    strictly only for the per-accession-commit callers — under the batch txn a
+    rare rewash-vs-live overlap can deadlock and Postgres aborts+retries one side
+    (no corruption). Root-cause (per-accession commit in the worker) → #1735.
+
+    Own namespace (``ingest_filing_accession``) — distinct from the 13F helper's
+    ``ingest_13f_accession``; 13F filings carry their own kinds and keep their
+    #1542 serialisation domain. Key derivation mirrors
+    :func:`institutional_holdings.acquire_13f_accession_write_lock`."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock((hashtextextended('ingest_filing_accession', 0) # hashtextextended(%s, 0)))",
+        (accession_number,),
+    )
+
+
 def store_raw(
     conn: psycopg.Connection[Any],
     *,
