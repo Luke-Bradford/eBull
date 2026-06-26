@@ -425,6 +425,21 @@ def transition_status(
         # failure mode the rule guards against).
         if current_status == "tombstoned" and ingest_status == "tombstoned":
             return
+        # #1591 Part 2 — idempotent parsed-on-parsed no-op for the SAME
+        # concurrent-drainer race, now reachable because the prefetch
+        # (``_prefetch_then_dispatch``, extended to the per-source rebuild +
+        # 10-K/8-K) widens the window between row-select and transition.
+        # Drainer A commits ``pending -> parsed``; drainer B, which read the
+        # row as pending before A committed, finishes its (idempotent) parse
+        # and calls here with ``current='parsed'``. ``parsed`` is otherwise
+        # terminal (``_ALLOWED_TRANSITIONS['parsed']={pending}`` — re-parses
+        # must go through pending), so without this the redundant transition
+        # raises and aborts B's whole tick. Benign NO-OP: writes nothing (same
+        # #879-safe property as the tombstoned case above) and cannot mask a
+        # single-drainer bug — that path always goes ``pending -> parsed``, so
+        # ``parsed -> parsed`` is unreachable without a concurrent writer.
+        if current_status == "parsed" and ingest_status == "parsed":
+            return
         # Claude bot review on PR #879 (WARNING): same-status no-op
         # was previously short-circuited unconditionally; that masked
         # double-error writes (e.g. worker calls failed->failed twice

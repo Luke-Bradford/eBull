@@ -445,6 +445,23 @@ def _parse_eight_k(
     )
 
 
+def _eight_k_fetch_url(conn: Any, row: Any) -> str | None:  # conn unused; row: ManifestRow
+    """#1591 Part 2 prefetch hook — the SINGLE primary-document URL the 8-K
+    parser GETs, returned ONLY when the parser would actually fetch it.
+    Mirrors :func:`_parse_eight_k`'s pre-fetch tombstone gates (missing
+    ``primary_document_url`` / missing ``instrument_id``); both are row-local
+    so ``conn`` is unused (part of the shared #1700 hook contract). The 8-K is
+    single-doc (no XBRL dimensional step) so this URL is the whole fetch. An
+    over-broad ``None`` is always safe (serial fallback reaches the identical
+    fetch/tombstone). ``primary_doc`` is born-compacted (SWEPT #1617) → no
+    stored body → the 8-K always (re-)fetches, no reuse gate to mirror.
+    """
+    url = row.primary_document_url
+    if not url or row.instrument_id is None:
+        return None
+    return url
+
+
 def register() -> None:
     """Register the 8-K parser with the manifest worker.
 
@@ -455,4 +472,4 @@ def register() -> None:
     """
     from app.jobs.sec_manifest_worker import register_parser
 
-    register_parser("sec_8k", _parse_eight_k, requires_raw_payload=True)
+    register_parser("sec_8k", _parse_eight_k, requires_raw_payload=True, fetch_url=_eight_k_fetch_url)

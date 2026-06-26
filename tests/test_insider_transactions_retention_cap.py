@@ -518,7 +518,12 @@ class TestManifestWorkerGate:
         run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
         ebull_test_conn.commit()
 
-        assert len(call_log) == 1  # fetched once
+        # In-cap row → the retention gate did NOT fire → fetch was reached.
+        # (Since #1591 Part 2 the per-source rebuild prefetches; this
+        # cache-bypassing spy records both the prefetch and the parser call,
+        # so assert "fetched" rather than an exact count — in production the
+        # parser's call is a prefetch-cache hit → one real HTTP.)
+        assert call_log
 
     def test_filed_at_none_tombstones_per_existing_pattern(
         self,
@@ -641,7 +646,11 @@ class TestForm5ManifestWorkerGate:
         run_manifest_worker(ebull_test_conn, source="sec_form5", max_rows=10)
         ebull_test_conn.commit()
 
-        assert len(call_log) == 1  # gate did NOT fire; fetch reached.
+        # Gate did NOT fire (within 18mo) → fetch reached. Asserting "fetched"
+        # rather than an exact count: the #1591-Part-2 per-source prefetch +
+        # the serial parser both call this cache-bypassing spy (production: one
+        # real HTTP via the prefetch-cache hit).
+        assert call_log
 
     def test_form5_filed_at_none_tombstones(
         self,

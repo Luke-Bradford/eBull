@@ -525,6 +525,32 @@ class TestTransitionStatus:
         assert after.error == "retention floor"  # unchanged — no re-stamp
         assert after.last_attempted_at == first.last_attempted_at
 
+    def test_parsed_to_parsed_is_idempotent_noop(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #1591 Part 2 — the concurrent-drainer race the prefetch widens:
+        # drainer A commits pending->parsed; drainer B (which read the row as
+        # pending before A committed) finishes its idempotent parse and calls
+        # transition_status parsed again. ``parsed`` is otherwise terminal
+        # (only ->pending, so re-parses go through the explicit rewash gate),
+        # so this must be a NO-OP rather than the tick-aborting ``illegal
+        # transition`` ValueError.
+        accession = self._seed(ebull_test_conn)
+        transition_status(ebull_test_conn, accession, ingest_status="fetched", raw_status="stored")
+        transition_status(ebull_test_conn, accession, ingest_status="parsed", parser_version="v1")
+        first = get_manifest_row(ebull_test_conn, accession)
+        assert first is not None and first.ingest_status == "parsed"
+
+        # Redundant parsed with a DIFFERENT parser_version — must not raise
+        # and must NOT re-stamp (the first writer's state is preserved).
+        transition_status(ebull_test_conn, accession, ingest_status="parsed", parser_version="v2")
+        after = get_manifest_row(ebull_test_conn, accession)
+        assert after is not None
+        assert after.ingest_status == "parsed"
+        assert after.parser_version == "v1"  # unchanged — no re-stamp
+        assert after.last_attempted_at == first.last_attempted_at
+
     def test_rebuild_path_parsed_to_pending(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

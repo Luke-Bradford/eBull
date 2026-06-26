@@ -502,3 +502,61 @@ def test_thirteen_f_index_url_and_expander(monkeypatch: pytest.MonkeyPatch) -> N
         lambda _body: ("primary_doc.xml", None),
     )
     assert _thirteen_f_expand("<index/>", ok) == []
+
+
+# --- #1591 Part 2 — 10-K / 8-K prefetch hooks + per-source rebuild routing ---
+
+
+def test_sec10k_fetch_url_mirrors_gates() -> None:
+    """`_sec10k_fetch_url` returns the primary URL only when `_parse_sec_10k`
+    would fetch it — i.e. url + instrument_id present (no retention gate). The
+    10-K parser GETs `row.primary_document_url` verbatim (no canonicalisation),
+    so the hook returns it unchanged."""
+    from app.services.manifest_parsers.sec_10k import _sec10k_fetch_url
+
+    base = "https://www.sec.gov/Archives/edgar/data/1/000/10k.htm"
+    recent = datetime(2026, 1, 1, tzinfo=UTC)
+    assert _sec10k_fetch_url(None, _mk(source="sec_10k", url=base, filed_at=recent, iid=1)) == base
+    assert _sec10k_fetch_url(None, _mk(source="sec_10k", url=None, filed_at=recent, iid=1)) is None
+    assert _sec10k_fetch_url(None, _mk(source="sec_10k", url=base, filed_at=recent, iid=None)) is None
+
+
+def test_eight_k_fetch_url_mirrors_gates() -> None:
+    """`_eight_k_fetch_url` mirrors `_parse_eight_k`'s pre-fetch gates (url +
+    instrument_id); single-doc, so the URL is the whole fetch."""
+    from app.services.manifest_parsers.eight_k import _eight_k_fetch_url
+
+    base = "https://www.sec.gov/Archives/edgar/data/1/000/8k.htm"
+    recent = datetime(2026, 1, 1, tzinfo=UTC)
+    assert _eight_k_fetch_url(None, _mk(source="sec_8k", url=base, filed_at=recent, iid=1)) == base
+    assert _eight_k_fetch_url(None, _mk(source="sec_8k", url=None, filed_at=recent, iid=1)) is None
+    assert _eight_k_fetch_url(None, _mk(source="sec_8k", url=base, filed_at=recent, iid=None)) is None
+
+
+def test_per_source_rebuild_routes_through_prefetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1591 Part 2 — the per-source rebuild path (`source is not None`, what
+    `sec_rebuild` drains into) now prefetches concurrently via
+    `_prefetch_then_dispatch` instead of the old direct `_dispatch_rows` serial
+    call. Pure-logic: iter_pending/iter_retryable + the prefetch entry point are
+    monkeypatched so no DB is touched."""
+    import app.jobs.sec_manifest_worker as w
+
+    monkeypatch.setattr(w, "iter_pending", lambda conn, *, source, limit: [])
+    monkeypatch.setattr(w, "iter_retryable", lambda conn, *, source, limit: [])
+    routed = {"prefetch": False, "serial": False}
+
+    def _spy_prefetch(conn: Any, rows: Any, *, now: Any) -> Any:
+        routed["prefetch"] = True
+        return w.WorkerStats(rows_processed=0, parsed=0, tombstoned=0, failed=0, skipped_no_parser=0)
+
+    def _spy_serial(conn: Any, rows: Any, *, now: Any) -> Any:
+        routed["serial"] = True
+        return w.WorkerStats(rows_processed=0, parsed=0, tombstoned=0, failed=0, skipped_no_parser=0)
+
+    monkeypatch.setattr(w, "_prefetch_then_dispatch", _spy_prefetch)
+    monkeypatch.setattr(w, "_dispatch_rows", _spy_serial)
+
+    w.run_manifest_worker(None, source="sec_10k", max_rows=10)  # type: ignore[arg-type]  # faked iter_* ignore conn
+
+    assert routed["prefetch"] is True
+    assert routed["serial"] is False  # not the old direct-serial path

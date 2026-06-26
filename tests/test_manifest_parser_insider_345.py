@@ -755,9 +755,15 @@ def test_xsl_url_canonicalised_before_fetch(
     ebull_test_conn.commit()
 
     assert stats.parsed == 1
-    # Confirm canonicalisation actually stripped the XSL segment.
-    assert len(fetched_urls) == 1
-    assert "/xslF345X05/" not in fetched_urls[0]
+    # Canonicalisation strips the XSL segment BEFORE every fetch. Since #1591
+    # Part 2 the per-source rebuild prefetches concurrently (_insider_fetch_url
+    # returns the canonical URL) and the serial parser then reads it; both
+    # canonicalise, so the cache-bypassing spy here records two canonical
+    # calls (in production the parser's call is a prefetch-cache hit → one real
+    # HTTP — proven by tests/test_manifest_worker_prefetch.py). The invariant
+    # under test is that NO fetch ever sees the XSL-rendered URL.
+    assert fetched_urls
+    assert all("/xslF345X05/" not in u for u in fetched_urls)
 
 
 def test_form5_happy_path(
