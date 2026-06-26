@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1401,6 +1402,124 @@ def _resolve_stage_rows(
     return None
 
 
+# #1226 — bootstrap stages race standalone cron / manual triggers for the
+# source-level ``JobLock``. The universal bootstrap-state gate (#1064) blocks
+# most scheduled jobs during a bootstrap, so contention is only with the short
+# carve-out jobs (#1181: sec_daily_index_reconcile, orchestrator_high_frequency_
+# _sync — seconds of work) or an operator's gate-override manual trigger. Such
+# holds clear quickly, so the stage waits the holder out with a bounded
+# acquire-retry instead of erroring on the first miss (the prior behaviour
+# surfaced six scary "another instance holds the advisory lock" stage errors in
+# run_id=3, each needing a manual retry click). ~30s window: comfortably longer
+# than a carve-out job's hold, short enough that a stuck genuine-deadlock case
+# still surfaces promptly.
+_LOCK_BUSY_RETRY_BACKOFF: Final[tuple[float, ...]] = (1.0, 2.0, 4.0, 8.0, 15.0)
+
+
+def _bootstrap_run_cancelled(database_url: str, run_id: int) -> bool:
+    """True iff the bootstrap run is no longer ``running`` (cancelled / finalised).
+
+    Authoritative cancel signal for the acquire-retry wait (#1226 / Codex
+    ckpt-2). ``bootstrap_cancel_requested()`` is NOT sufficient here: the
+    dispatcher's cancel path completes the ``process_stop_requests`` row (which
+    ``is_stop_requested`` then filters out) and sweeps the run via
+    ``mark_run_cancelled`` (``bootstrap_runs.status='cancelled'``). Reading the
+    run status directly survives that completion, so a future sleeping between
+    failed lock acquires cannot wake up and start the body after the run was
+    swept cancelled. Errors are treated as "not cancelled" — a transient DB
+    blip must not abort an otherwise-valid stage; worst case the existing
+    between-stage checkpoint catches the cancel.
+    """
+    try:
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT status FROM bootstrap_runs WHERE id = %(run_id)s",
+                {"run_id": run_id},
+            ).fetchone()
+        return row is not None and row[0] != "running"
+    except Exception as exc:  # noqa: BLE001 — cancel probe must not crash the stage
+        logger.warning("bootstrap stage cancel-probe failed for run %s: %s", run_id, exc)
+        return False
+
+
+def _run_stage_under_lock_with_retry(
+    *,
+    database_url: str,
+    job_name: str,
+    run_id: int,
+    stage_key: str,
+    run: Callable[[], None],
+    backoff: tuple[float, ...] = _LOCK_BUSY_RETRY_BACKOFF,
+    sleep: Callable[[float], None] = time.sleep,
+    cancel_check: Callable[[], bool] | None = None,
+) -> None:
+    """Acquire the source-level ``JobLock`` and invoke ``run()`` under it,
+    retrying ONLY a failed lock ACQUIRE on transient contention (#1226).
+
+    Mirrors the scheduled-fire ``_fire_scheduled_with_lane_retry`` (#1538)
+    invariant: ``JobAlreadyRunning`` raised by ``JobLock.__enter__`` (acquire)
+    is retried with ``backoff``; the SAME exception raised from inside ``run``
+    (body-origin) is RE-RAISED, never replayed — the body may have partially
+    executed. The ``acquired`` flag distinguishes them.
+
+    Cancel-awareness (Codex ckpt-2): the up-to-~30s pre-body wait widened the
+    window in which the dispatcher could cancel the run while this future
+    sleeps. Before each sleep AND before invoking after a successful acquire,
+    ``cancel_check`` (default: authoritative ``bootstrap_runs.status`` read) is
+    consulted; if the run was cancelled, ``BootstrapStageCancelled`` is raised
+    so the body does not start post-cancel and the caller tones the stage gray.
+    Best-effort by design: ``_bootstrap_run_cancelled`` returns False on a probe
+    error (a transient DB blip must not false-cancel a valid stage), so the
+    invoker's own in-body ``bootstrap_cancel_requested`` checkpoints remain the
+    backstop for the rare probe-failed-during-cancel case.
+
+    On success returns normally (``run`` ran under the lock). If the lock stays
+    held through the whole retry window, re-raises ``JobAlreadyRunning`` — now a
+    genuine-contention/deadlock signal the caller records as a stage error.
+    ``active_bootstrap_run`` is scoped per attempt, so the cancel contextvar is
+    set only while the invoker actually runs.
+    """
+    from app.services.bootstrap_state import BootstrapStageCancelled
+    from app.services.processes.bootstrap_cancel_signal import active_bootstrap_run
+
+    if cancel_check is None:
+        cancel_check = lambda: _bootstrap_run_cancelled(database_url, run_id)  # noqa: E731
+
+    for attempt in range(len(backoff) + 1):
+        acquired = False
+        try:
+            with JobLock(database_url, job_name), active_bootstrap_run(run_id, stage_key):
+                acquired = True
+                # Do NOT start the body if the run was cancelled while we waited
+                # for the lock — bail cooperatively (caller marks stage cancelled).
+                if cancel_check():
+                    raise BootstrapStageCancelled("run cancelled during lock-acquire wait")
+                run()
+            return
+        except JobAlreadyRunning:
+            if acquired:
+                # Body-origin (an invoker sub-call hit its own JobLock) — not a
+                # lane-acquire skip; re-raise so a partial stage is never replayed.
+                raise
+            if attempt < len(backoff):
+                # Don't burn the rest of the window if the run is already gone.
+                if cancel_check():
+                    raise BootstrapStageCancelled("run cancelled during lock-acquire wait") from None
+                delay = backoff[attempt]
+                logger.info(
+                    "bootstrap stage %s: %r lock busy (cron/manual contention); retrying acquire %d/%d after %.1fs",
+                    stage_key,
+                    job_name,
+                    attempt + 1,
+                    len(backoff),
+                    delay,
+                )
+                sleep(delay)
+                continue
+            # Held through the whole window → genuine contention.
+            raise
+
+
 def _run_one_stage(
     *,
     run_id: int,
@@ -1460,40 +1579,53 @@ def _run_one_stage(
     # context manager scopes the contextvar so scheduled / manual
     # triggers of the same job (outside bootstrap) see no signal.
     from app.services.bootstrap_state import BootstrapStageCancelled, mark_stage_cancelled
-    from app.services.processes.bootstrap_cancel_signal import active_bootstrap_run
+
+    def _invoke_under_lock() -> None:
+        # Body run while holding ``JobLock`` (and the cancel contextvar).
+        nonlocal job_runs_id_after
+        snap_token = _params_snapshot_var.set(effective_params)
+        try:
+            invoker(effective_params)
+        finally:
+            _params_snapshot_var.reset(snap_token)
+        # #1140 Task C — capture the upper bound while still
+        # holding ``JobLock``. Any job_runs row created here must
+        # belong to our invocation; same-source serialisation
+        # prevents a parallel same-job_name fire from sneaking in.
+        #
+        # Wrapped in try/except so a snapshot failure (transient DB
+        # blip, pool exhausted) does NOT mark a successful invoker
+        # as error (Codex pre-push round 2 WARNING). The resolver
+        # falls back to ``job_runs_id_before`` window (which is the
+        # same value as ``job_runs_id_after`` initialised above) →
+        # an empty window → ``rows_processed = None``. The stage
+        # still records ``success``; cap-eval handles the None per
+        # the strict-gate rule.
+        try:
+            with psycopg.connect(database_url) as snap_conn:
+                job_runs_id_after = _snapshot_job_runs_max_id(snap_conn, job_name=job_name)
+        except Exception as snap_exc:  # noqa: BLE001 — snapshot is best-effort
+            logger.warning(
+                "bootstrap stage %s: failed to capture job_runs_id_after: %s",
+                stage_key,
+                snap_exc,
+            )
 
     try:
-        with JobLock(database_url, job_name), active_bootstrap_run(run_id, stage_key):
-            snap_token = _params_snapshot_var.set(effective_params)
-            try:
-                invoker(effective_params)
-            finally:
-                _params_snapshot_var.reset(snap_token)
-            # #1140 Task C — capture the upper bound while still
-            # holding ``JobLock``. Any job_runs row created here must
-            # belong to our invocation; same-source serialisation
-            # prevents a parallel same-job_name fire from sneaking in.
-            #
-            # Wrapped in try/except so a snapshot failure (transient DB
-            # blip, pool exhausted) does NOT mark a successful invoker
-            # as error (Codex pre-push round 2 WARNING). The resolver
-            # falls back to ``job_runs_id_before`` window (which is the
-            # same value as ``job_runs_id_after`` initialised above) →
-            # an empty window → ``rows_processed = None``. The stage
-            # still records ``success``; cap-eval handles the None per
-            # the strict-gate rule.
-            try:
-                with psycopg.connect(database_url) as snap_conn:
-                    job_runs_id_after = _snapshot_job_runs_max_id(snap_conn, job_name=job_name)
-            except Exception as snap_exc:  # noqa: BLE001 — snapshot is best-effort
-                logger.warning(
-                    "bootstrap stage %s: failed to capture job_runs_id_after: %s",
-                    stage_key,
-                    snap_exc,
-                )
+        # #1226 — bounded acquire-retry: wait out a standalone cron / manual
+        # trigger holding the source JobLock instead of erroring on the first
+        # miss. Only a persistent hold through the window surfaces as an error.
+        _run_stage_under_lock_with_retry(
+            database_url=database_url,
+            job_name=job_name,
+            run_id=run_id,
+            stage_key=stage_key,
+            run=_invoke_under_lock,
+        )
     except JobAlreadyRunning:
         message = (
-            f"another instance of {job_name!r} holds the advisory lock; "
+            f"another instance of {job_name!r} held the advisory lock through the "
+            f"~{sum(_LOCK_BUSY_RETRY_BACKOFF):.0f}s retry window; "
             "retry from the bootstrap panel after the other run completes"
         )
         with psycopg.connect(database_url) as conn:
