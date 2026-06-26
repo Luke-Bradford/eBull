@@ -1554,6 +1554,33 @@ Only the `read_raw` / `iter_raw` payload paths (driven by `registered_specs`) co
 
 **Promotion rule:** registering a rewash parser for a kind currently in `KEPT_NEGLIGIBLE_DOCUMENT_KINDS` (e.g. the planned Form 5 parser hinted at `insider_345.py:563-565`) MUST remove it from that map in the same change — the pairwise-disjoint test fails if it lands in two buckets. Settled decision: `docs/settled-decisions.md` "Raw-payload retention (#1617)".
 
+### 13.G Manifest-parser reuse-on-redrain + the prefetch-hook-mirrors-the-gate rule (#1591/#1729)
+
+A `sec_rebuild` re-drain (parser-version bump → manifest rows reset to `pending` → manifest worker re-runs the parser) re-fetches the upstream body unconditionally — even when it is already in `filing_raw_documents`. #1591 added a **manifest-parser reuse fast path** so a re-drain re-parses the stored body instead of re-downloading at 10 req/s.
+
+**This is a SECOND payload reader on a REWASH kind, distinct from the `rewash_filings` bulk spec.** A retained kind in `rewash_filings.registered_specs()` (form4/form3/def14a/13dg/infotable_13f) already has the `scripts/rewash.py` CLI re-parser; #1591/#1729 added an *independent* in-parser reuse branch. Both read the same retained payload; adding the manifest-parser branch needs NO retention-bucket change (the kind is already REWASH). Promoting a KEPT_NEGLIGIBLE kind to reuse DOES require the §13.F bucket move (register a `rewash_filings` spec) so the classification test stays green — that is the form5/nport (#1731) cost, not the infotable (#1729) cost.
+
+**The reuse-branch shape (mirror PR1 exactly):**
+
+```python
+body = stored_body(conn, accession_number=acc, document_kind="<kind>")
+if body is None:                       # first ingest, or SWEPT → rehydrate
+    <existing fetch via provider.fetch_document_text(...)>
+    if not body: <existing empty-body tombstone, raw_status="stored">
+    <existing store_raw(...)>          # fetch path only
+# parse(body) — unchanged; reuse joins the flow here
+```
+
+Invariants (all verified at #1591 ckpt-1, re-audited per parser):
+- The reuse branch wraps ONLY the fetch + empty-guard + store_raw. It must sit BELOW every pre-fetch gate (instrument_id / url / filed_at / retention / def14a cap / 13F post-primary retention) — reuse replaces the fetch, never a gate.
+- EVERY post-body outcome (success, parse-failure, tombstone, transient-upsert-fail, deterministic-upsert-tombstone) must already return `raw_status="stored"` — the reuse path joins at the parse step, so a reuse-hit failure with a stale manifest `raw_status='absent'` must still repair `effective_raw_status` (#938 audit). Audit this before wiring reuse.
+- `fetched_at` is NOT churned on reuse (no re-store) — preserves the operator-visible last-published timestamp.
+- `stored_body` returns `None` for a SWEPT kind (payload NULL), so a born-compacted kind (primary_doc) falls through to the fetch path automatically — reuse is safe to call unconditionally.
+
+**The prefetch-hook-mirrors-the-gate rule (prevention-log #1956).** A `fetch_url`/`expand_urls` prefetch hook front-runs the serial parser to overlap fetches against the shared throttle. It MUST mirror EVERY pre-fetch gate the parser applies — including the #1591 reuse gate — or it burns the rate budget it exists to save (it would prefetch a body the parser then reuses-not-fetches). Mirror via the SAME chokepoint predicates the parser calls, placed AFTER the cheap row-local gates so a gated-out row never pays the DB read. Hooks run savepoint-wrapped in `_prefetch_bodies` (prevention-log #1963), so the `stored_body` read is safe on the shared conn. For a hook shared across forms (Form 3/4/5 share `_insider_fetch_url`), map `row.source` → the EXACT stored kind via an explicit dict and **fail closed** — a source NOT in the dict prefetches as before (a shared `form4_xml` check would wrongly skip Form 3/5 rows).
+
+**Mirror ONLY the kinds the hook actually prefetches.** The rule is conditional on the hook prefetching the reused kind. 13F-HR (#1729) is the worked counter-example: its infotable is reused, but `_thirteen_f_expand` deliberately prefetches `primary_doc.xml` ONLY (the infotable's retention gate is post-primary-parse, so prefetching the often-large infotable for a row that tombstones would itself violate the mirror contract). Because no hook prefetches the infotable, its reuse gate has NO hook to mirror — and adding one would be wrong (it would first require prefetching the infotable). So: a reused kind that is never prefetched needs no hook change. Document the asymmetry in the hook's docstring so a future reader doesn't "fix" it.
+
 ## 14. Postgres crash-recovery fsync tax — diagnosis runbook (#1444, 2026-06-02)
 
 **Symptom:** dev PG stuck in `the database system is in recovery mode` for tens of minutes to HOURS, rejecting every connection. Blocks bootstrap, live verification, DB-backed tests.
