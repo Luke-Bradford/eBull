@@ -80,14 +80,22 @@ def _row(*, source: str, url: str | None, accession: str) -> ManifestRow:
     )
 
 
-def _fake_stored_body(*present_kinds: str) -> Any:
+# Accession `_mk` stamps on every gate-test row (via `_row`); the stored-body
+# stub keys on it so a hook querying the WRONG accession is caught.
+_MK_ACCESSION = "0000000001-26-000001"
+
+
+def _fake_stored_body(*present_pairs: tuple[str, str]) -> Any:
     """A ``stored_body`` stand-in for the pure hook tests: returns a body for
-    the given ``document_kind``s (simulating a re-drain where the payload is
-    already on disk), ``None`` otherwise. Lets the #1591 reuse gate be
-    exercised without a DB cursor."""
+    the given ``(accession_number, document_kind)`` pairs (simulating a re-drain
+    where that exact filing's payload is on disk), ``None`` otherwise. Keying on
+    BOTH accession and kind means a hook that queries the wrong accession (e.g. a
+    hardcoded literal instead of ``row.accession_number``) or the wrong kind is
+    caught — the stub returns None and the hook fails to skip (Claude review
+    NITPICK on #1727). Lets the #1591 reuse gate be exercised without a DB."""
 
     def _f(_conn: Any, *, accession_number: str, document_kind: str) -> str | None:
-        return "<stored/>" if document_kind in present_kinds else None
+        return "<stored/>" if (accession_number, document_kind) in present_pairs else None
 
     return _f
 
@@ -231,12 +239,12 @@ def test_insider_fetch_url_mirrors_prefetch_gates(monkeypatch: pytest.MonkeyPatc
     assert _insider_fetch_url(None, _mk(source="sec_form3", url=base, filed_at=old, iid=1)) is not None
 
     # #1591 — body already stored → skip prefetch (parser reuses it from the DB).
-    monkeypatch.setattr(ins, "stored_body", _fake_stored_body("form4_xml"))
+    monkeypatch.setattr(ins, "stored_body", _fake_stored_body((_MK_ACCESSION, "form4_xml")))
     assert _insider_fetch_url(None, _mk(source="sec_form4", url=base, filed_at=recent, iid=1)) is None
     # Fail-closed map (Codex ckpt-1 #4): Form 5 is NOT reused by _parse_form5,
     # so its source is absent from the reuse map — a stored form5_xml body must
     # NOT skip the prefetch (the parser will fetch it).
-    monkeypatch.setattr(ins, "stored_body", _fake_stored_body("form5_xml"))
+    monkeypatch.setattr(ins, "stored_body", _fake_stored_body((_MK_ACCESSION, "form5_xml")))
     assert _insider_fetch_url(None, _mk(source="sec_form5", url=base, filed_at=recent, iid=1)) is not None
 
 
@@ -422,7 +430,7 @@ def test_blockholder_fetch_url_mirrors_gates(monkeypatch: pytest.MonkeyPatch) ->
     no_cik = dataclasses.replace(ok, cik="")
     assert _blockholder_fetch_url(None, no_cik) is None
     # #1591 — body already stored → skip prefetch (parser reuses it).
-    monkeypatch.setattr(d13dg, "stored_body", _fake_stored_body("primary_doc_13dg"))
+    monkeypatch.setattr(d13dg, "stored_body", _fake_stored_body((_MK_ACCESSION, "primary_doc_13dg")))
     assert _blockholder_fetch_url(None, ok) is None
     monkeypatch.setattr(d13dg, "stored_body", _fake_stored_body())  # reset: nothing stored
     # Agent CIK → None.
@@ -454,7 +462,7 @@ def test_def14a_fetch_url_mirrors_gates(monkeypatch: pytest.MonkeyPatch) -> None
     # #1591 — body already stored → skip prefetch (parser reuses it). Cap reset
     # to True so the None below is attributable to the stored-body gate alone.
     monkeypatch.setattr(d14a, "def14a_within_cap", lambda *a, **k: True)
-    monkeypatch.setattr(d14a, "stored_body", _fake_stored_body("def14a_body"))
+    monkeypatch.setattr(d14a, "stored_body", _fake_stored_body((_MK_ACCESSION, "def14a_body")))
     assert _def14a_fetch_url(None, ok) is None  # type: ignore[arg-type]
 
 
