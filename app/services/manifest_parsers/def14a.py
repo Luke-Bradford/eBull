@@ -363,13 +363,12 @@ def _parse_def14a(
             # writes against a concurrent rewash DELETE+INSERT (same lock key).
             # First statement in the txn, after the body fetch above (no SEC
             # fetch inside this block).
-            # NB: this ``with conn.transaction()`` is a SAVEPOINT (the manifest
-            # worker runs the whole batch under one autocommit=False txn, commit
-            # at scheduler.py:4843), so this xact lock is held until BATCH commit,
-            # not per accession — the same coarse-but-correct property the #1542
-            # 13F lock has. Mutual exclusion is preserved; a rare rewash-vs-live
-            # deadlock self-heals (Postgres aborts+retries, no corruption).
-            # Root-cause (per-accession commit) tracked in #1735.
+            # #1735: the manifest worker now commits per row (``_dispatch_rows``
+            # commits the implicit read-tx before the loop), so this
+            # ``with conn.transaction()`` is a TOP-LEVEL txn and this xact lock
+            # releases at the accession's row boundary, same as the rewash +
+            # legacy per-accession callers. Mutual exclusion preserved; the
+            # pre-#1735 batch-txn rewash-vs-live deadlock no longer arises.
             acquire_filing_accession_write_lock(conn, accession)
             siblings = _resolve_siblings(conn, instrument_id=instrument_id, issuer_cik=issuer_cik)
             for sibling_iid in siblings:
