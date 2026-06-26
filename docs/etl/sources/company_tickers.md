@@ -74,7 +74,9 @@ Cross-source confirm: `curl -s 'https://www.sec.gov/cgi-bin/browse-edgar?action=
 
 ## 12. Smoke test
 
-Path: `tests/smoke/test_etl_source_to_sink.py::test_company_tickers`. Asserts: provider importable; `daily_cik_refresh` registered against the sync_orchestrator DAG; `external_identifiers` row exists for the AAPL fixture with `provider='sec', identifier_type='cik'`; watermark row exists for `source='sec.tickers', key='global'`. Bootstrap stage S6 present in `_BOOTSTRAP_STAGE_SPECS`.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`: `test_source_has_spec_file[company_tickers]` + `test_source_spec_has_required_sections[company_tickers]`. (A BULK_REFERENCE source — NOT a `ManifestSource`, so the manifest-source parametrized cases do not apply to it.)
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): provider importable, the `daily_cik_refresh` DAG registration, the AAPL `external_identifiers (sec, cik)` row, the `sec.tickers` / `global` watermark row, and bootstrap stage S6 in `_BOOTSTRAP_STAGE_SPECS`.
 
 ## 13. Known gotchas
 

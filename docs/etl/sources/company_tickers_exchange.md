@@ -84,7 +84,9 @@ Cross-source confirm: spot-check NVDA → Nasdaq against `https://www.nasdaq.com
 
 ## 12. Smoke test
 
-Path: `tests/smoke/test_etl_source_to_sink.py::test_company_tickers_exchange`. Asserts: `refresh_exchange_directory` importable; bundled sibling enrichment present in `daily_cik_refresh` body; table `cik_refresh_exchange_directory` keyed `(cik, ticker)` present in schema; empirical-shape sanity (>5k rows; ≥1 multi-ticker CIK).
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`: `test_source_has_spec_file[company_tickers_exchange]` + `test_source_spec_has_required_sections[company_tickers_exchange]`. (A BULK_REFERENCE source — NOT a `ManifestSource`, so the manifest-source parametrized cases do not apply to it.)
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): `refresh_exchange_directory` importable, the bundled sibling enrichment in `daily_cik_refresh`, the `cik_refresh_exchange_directory` table keyed `(cik, ticker)`, and the empirical-shape sanity (>5k rows; ≥1 multi-ticker CIK).
 
 ## 13. Known gotchas
 

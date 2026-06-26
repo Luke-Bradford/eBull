@@ -63,7 +63,9 @@ ORDER BY oio.filed_at DESC LIMIT 10;
 Smoke: `curl localhost:8000/instruments/AAPL/ownership-rollup | jq '.institutions[:5]'`. Cross-source: spot-check top-10 against `whalewisdom.com` or `gurufocus.com` quarterly 13F page.
 
 ## 12. Smoke test
-`tests/smoke/test_etl_source_to_sink.py::test_sec_13f_hr_wired`. Asserts: provider importable, parser registered (`registered_parser_sources()` includes `sec_13f_hr`), stage 22 in `_BOOTSTRAP_STAGE_SPECS`, `ownership_institutions_observations` + `ownership_institutions_current` exist.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`, the per-source parametrized cases: `test_source_has_spec_file[sec_13f_hr]`, `test_source_spec_has_required_sections[sec_13f_hr]`, `test_manifest_source_has_registered_parser[sec_13f_hr]`, `test_manifest_source_form_mapping_present[sec_13f_hr]`, `test_manifest_source_has_freshness_cadence[sec_13f_hr]`, `test_manifest_source_has_sink_tables[sec_13f_hr-spec*]` (asserts the declared sinks `ownership_institutions_observations` / `ownership_institutions_current` exist).
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): provider importable, bootstrap stage 22 in `_BOOTSTRAP_STAGE_SPECS`, and the operator-visible figure.
 
 ## 13. Known gotchas
 1. **VALUE-cutover 2023-01-03** (`sec_13f_hr.py:92-104, 467, 490-491`). SEC EDGAR Release 22.4.1 switched Column 4 from $thousands to whole $dollars. Branch on `filed_at` NOT `period_of_report` — a 2022Q4 restatement filed March 2023 was entered in new-regime whole dollars.

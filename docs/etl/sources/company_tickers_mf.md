@@ -84,7 +84,9 @@ Cross-source confirm: `curl -s 'https://www.sec.gov/cgi-bin/browse-edgar?action=
 
 ## 12. Smoke test
 
-Path: `tests/smoke/test_etl_source_to_sink.py::test_company_tickers_mf`. Asserts: `refresh_mf_directory` importable; bootstrap stage S26 `mf_directory_sync` present in `_BOOTSTRAP_STAGE_SPECS`; cap `class_id_mapping_ready` published by S26; tables `cik_refresh_mf_directory` + write-through to `external_identifiers (sec, class_id)` present.
+Import-time gate — `tests/smoke/test_etl_source_to_sink.py`: `test_source_has_spec_file[company_tickers_mf]` + `test_source_spec_has_required_sections[company_tickers_mf]`. (A BULK_REFERENCE source — NOT a `ManifestSource`, so the manifest-source parametrized cases do not apply to it.)
+
+Not covered by the import-time gate (verified by the live-smoke runbooks under `app/runbooks/`, not pytest): `refresh_mf_directory` importable, bootstrap stage S26 `mf_directory_sync`, the `class_id_mapping_ready` cap, and the `cik_refresh_mf_directory` + `external_identifiers (sec, class_id)` write-through.
 
 ## 13. Known gotchas
 

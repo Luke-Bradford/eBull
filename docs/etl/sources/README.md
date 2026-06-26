@@ -41,6 +41,54 @@ CI gate: `scripts/check_etl_source_docs.sh` enforces.
 
 ---
 
+## Retry posture (all sources)
+
+Scan-level summary of what happens on failure per source. **§3 of each per-source
+spec is authoritative** — this table is the cross-source index, not a second source
+of truth. Vocabulary:
+
+- **1h backoff** — transient failure (fetch raise / HTTP 5xx / `psycopg.OperationalError`)
+  re-fires the manifest row after `_FAILED_RETRY_DELAY = timedelta(hours=1)`
+  (`app/services/manifest_parsers/def14a.py:94` + 7 sibling parsers).
+- **tombstone** — terminal `ingest_status='tombstoned'`, never retried; a *deterministic*
+  defect (empty body, missing required field, score-floor miss, unparseable payload).
+- **benign skip** — FINRA `FinraNotFound` on HTTP **403/404** (file not yet published);
+  the ScheduledJob re-fires next cron. NOT a failure
+  (`finra_short_interest.py:122-123`, `finra_regsho.py:129-130`).
+- **24h CIK-refresh** — `sec_n_csr` only: trust-CIK→series resolver miss waits
+  `_PENDING_CIK_REFRESH_DELAY = timedelta(hours=24)` (`manifest_parsers/sec_n_csr.py:71`)
+  for the daily MF-directory refresh, rather than tombstoning.
+- **synth no-op** — parser cannot fail (always `parsed`); the ScheduledJob owns the real
+  writes + its own retry.
+- **job-level** — bulk/reference sources retry at the ScheduledJob / provider
+  `ResilientClient` layer, not the manifest worker.
+
+| Source | Transient (fetch / 5xx) | Deterministic defect | Not-yet-published / special |
+|---|---|---|---|
+| sec_form3 | 1h backoff | tombstone (missing iid/url/filed_at; parse error) | — |
+| sec_form4 | 1h backoff | tombstone (missing iid/url/filed_at; parse error) | — |
+| sec_form5 | 1h backoff | tombstone (missing iid/url/filed_at; parse error) | — |
+| sec_13d | 1h backoff | tombstone (empty cik; parse error) | — |
+| sec_13g | 1h backoff | tombstone (empty cik; parse error) | — |
+| sec_13f_hr | 1h backoff | tombstone (index.json 404 / empty body) | — |
+| sec_def14a | 1h backoff | tombstone (empty / 404; score-floor miss) | — |
+| sec_n_port | 1h backoff | tombstone (empty body; missing `<seriesId>`) | — |
+| sec_n_csr | 1h backoff | tombstone (parse error) | **24h CIK-refresh** on trust-CIK→series resolver miss |
+| sec_n_cen | per-filer try/except, loop continues | per-filer `crash_failures`++ | ad-hoc; crash-isolated, no manifest retry |
+| sec_10k | 1h backoff | tombstone | — |
+| sec_10q | — | — | **synth no-op** — companyfacts job owns writes |
+| sec_8k | 1h backoff | tombstone | — |
+| sec_xbrl_facts | — | — | **synth no-op** — `fundamentals_sync` job owns writes |
+| finra_short_interest | 5xx → `HTTPStatusError` after retry budget | — | **403/404 → benign skip** (next-fire revisits) |
+| finra_regsho_daily | 5xx → raise; other 4xx → raise | — | **403/404 → benign skip** (403 = not-yet-published pre-EOD ~6pm ET) |
+| company_tickers | 304 dominant; 5xx → provider retry budget | — | job-level; sibling enrichment logs-but-doesn't-raise |
+| company_tickers_mf | `ResilientClient` backoff | `RuntimeError` on empty body | job-level; bundled call logs-but-doesn't-raise |
+| company_tickers_exchange | `ResilientClient` backoff | `RuntimeError` on empty body | job-level; bundled call logs-but-doesn't-raise |
+| sec_13f_securities_list | HTTP errors propagate to caller | per-row drop (CUSIP regex miss) | job-level; defensive per-row parse |
+| etoro_candles | broker retry (429 → back-off; 5xx → retry budget) | — | 401 → token refresh; per-instrument isolated |
+
+---
+
 ## Forms NOT ingested by the manifest + why
 
 `map_form_to_source` (`app/services/sec_manifest.py`) returns `None` for any
