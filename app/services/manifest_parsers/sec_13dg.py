@@ -74,7 +74,7 @@ from app.services.manifest_parsers._schedule13_adapter import (
     build_filing_from_edgartools_dict,
 )
 from app.services.ownership_observations import refresh_blockholders_current
-from app.services.raw_filings import store_raw
+from app.services.raw_filings import store_raw, stored_body
 
 logger = logging.getLogger(__name__)
 
@@ -178,63 +178,70 @@ def _parse_13dg(
     # an HTML wrapper and immediately tombstone-on-parse.
     primary_url = _archive_file_url(filer_cik, accession, "primary_doc.xml")
 
-    try:
-        with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-            primary_xml = provider.fetch_document_text(primary_url)
-    except Exception as exc:  # noqa: BLE001 — transient fetch errors retry via backoff
-        logger.warning(
-            "13D/G manifest parser: fetch raised accession=%s url=%s: %s",
-            accession,
-            primary_url,
-            exc,
-        )
-        return _failed_outcome(f"fetch error: {exc}")
+    # #1591 — reuse the stored body on a re-drain (parser-version bump →
+    # sec_rebuild resets the row to pending) instead of re-downloading.
+    # primary_doc_13dg is retained and SEC filings are immutable per
+    # accession, so a present body is always safe to re-parse. Fetch +
+    # store only on a miss (first ingest); reuse skips both.
+    primary_xml = stored_body(conn, accession_number=accession, document_kind="primary_doc_13dg")
+    if primary_xml is None:
+        try:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                primary_xml = provider.fetch_document_text(primary_url)
+        except Exception as exc:  # noqa: BLE001 — transient fetch errors retry via backoff
+            logger.warning(
+                "13D/G manifest parser: fetch raised accession=%s url=%s: %s",
+                accession,
+                primary_url,
+                exc,
+            )
+            return _failed_outcome(f"fetch error: {exc}")
 
-    if not primary_xml:
-        # Empty / non-200. Log the attempt with status='failed' to
-        # match legacy accounting; manifest itself tombstones so we
-        # don't spin retry on a persistently-404 doc.
+        if not primary_xml:
+            # Empty / non-200. Log the attempt with status='failed' to
+            # match legacy accounting; manifest itself tombstones so we
+            # don't spin retry on a persistently-404 doc.
+            try:
+                with conn.transaction():
+                    _record_ingest_attempt(
+                        conn,
+                        filer_cik=filer_cik,
+                        accession_number=accession,
+                        submission_type=None,
+                        status="failed",
+                        error="primary_doc.xml fetch returned empty or non-200",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "13D/G manifest parser: ingest-log INSERT failed accession=%s",
+                    accession,
+                )
+                return _failed_outcome(f"log error: {exc}")
+            return ParseOutcome(
+                status="tombstoned",
+                parser_version=_PARSER_VERSION_13DG,
+                error="empty or non-200 fetch",
+            )
+
+        # store_raw in a savepoint so the worker's outer tx stays clean
+        # on partial failure. Raw body persisted BEFORE parse so #938
+        # invariant holds even when downstream raises.
         try:
             with conn.transaction():
-                _record_ingest_attempt(
+                store_raw(
                     conn,
-                    filer_cik=filer_cik,
                     accession_number=accession,
-                    submission_type=None,
-                    status="failed",
-                    error="primary_doc.xml fetch returned empty or non-200",
+                    document_kind="primary_doc_13dg",
+                    payload=primary_xml,
+                    parser_version=_PARSER_VERSION_13DG,
+                    source_url=primary_url,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                "13D/G manifest parser: ingest-log INSERT failed accession=%s",
+                "13D/G manifest parser: store_raw failed accession=%s",
                 accession,
             )
-            return _failed_outcome(f"log error: {exc}")
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_PARSER_VERSION_13DG,
-            error="empty or non-200 fetch",
-        )
-
-    # store_raw in a savepoint so the worker's outer tx stays clean
-    # on partial failure. Raw body persisted BEFORE parse so #938
-    # invariant holds even when downstream raises.
-    try:
-        with conn.transaction():
-            store_raw(
-                conn,
-                accession_number=accession,
-                document_kind="primary_doc_13dg",
-                payload=primary_xml,
-                parser_version=_PARSER_VERSION_13DG,
-                source_url=primary_url,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "13D/G manifest parser: store_raw failed accession=%s",
-            accession,
-        )
-        return _failed_outcome(f"store_raw error: {exc}")
+            return _failed_outcome(f"store_raw error: {exc}")
 
     # Parse-phase errors AFTER store_raw must return
     # raw_status='stored' so the manifest matches filing_raw_documents.
@@ -429,14 +436,14 @@ def _parse_13dg(
     )
 
 
-def _blockholder_fetch_url(conn: Any, row: Any) -> str | None:  # conn unused; row: ManifestRow
+def _blockholder_fetch_url(conn: Any, row: Any) -> str | None:  # conn: Connection; row: ManifestRow
     """#1700 Phase 2 prefetch hook — the SINGLE canonical primary_doc.xml URL
     the 13D/G parser GETs, returned ONLY when the parser would actually fetch
     it. Mirrors EVERY pre-fetch gate in :func:`_parse_13dg` (in order), so
     prefetch never burns SEC budget on a row the parser tombstones before any
-    HTTP. All gates are row-local — ``conn`` is unused (part of the shared
-    hook contract). An over-broad ``None`` is always safe (serial fallback
-    reaches the identical tombstone).
+    HTTP. ``conn`` (part of the shared hook contract) is used for the #1591
+    stored-body gate below. An over-broad ``None`` is always safe (serial
+    fallback reaches the identical tombstone).
     """
     filer_cik = (row.cik or "").strip()
     if not filer_cik:
@@ -450,6 +457,10 @@ def _blockholder_fetch_url(conn: Any, row: Any) -> str | None:  # conn unused; r
         return None  # parser tombstones pre-fetch: agent CIK
     if not blockholders_within_retention(row.filed_at):
         return None  # parser tombstones pre-fetch: retention floor
+    # #1591 — body already stored → parser reuses it; skip prefetch
+    # (prevention-log #1956). Checked last, after the cheap row-local gates.
+    if stored_body(conn, accession_number=row.accession_number, document_kind="primary_doc_13dg") is not None:
+        return None
     # Same canonical URL the parser builds (sec_13dg.py:_parse_13dg).
     return _archive_file_url(filer_cik, row.accession_number, "primary_doc.xml")
 
