@@ -210,6 +210,17 @@ def _fetch_submissions(
     if cached is not None:
         return cached
 
+    # #815 — see ``reconciliation._fetch_companyfacts_payload``: this
+    # read-miss -> fetch -> write window is deliberately UNLOCKED. A
+    # concurrent same-(cik, 'submissions_json') caller redundantly
+    # fetches at worst once; ``_write_cache`` is idempotent via
+    # ``store_cik_raw`` (``ON CONFLICT (cik, document_kind) DO UPDATE``),
+    # so last-writer-wins with no clobber. The only callers are operator
+    # CLIs (``scripts/verify_filer_seeds.py``); a lock across the 30s
+    # ``urlopen`` would strand an idle conn (#719 / #1129) for zero gain.
+    # Add the ``pg_try_advisory_lock`` fast-skip only when a
+    # ScheduledJob/API route calls the seed verifier, OR a 2nd concurrent
+    # same-(cik, document_kind) consumer lands (#815).
     req = urllib.request.Request(
         _submissions_url(cik_padded),
         headers={"User-Agent": settings.sec_user_agent},
