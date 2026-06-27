@@ -226,3 +226,19 @@ A migration-behaviour test (seed pre-state → run the migration SQL inline → 
 - Migrations with NO embedded transaction (e.g. `sql/111`) are fine to execute directly — the issue is only the embedded `BEGIN/COMMIT`.
 
 Origin: PR #1467 (#1320) review WARNING — `test_migration_182_pre14a_purge.py` executed `sql/182` (which wraps in `BEGIN;…COMMIT;`) inline then called `conn.commit()` again. EXTRACTED here rather than as a grep lint: the failure mode is narrow (migration tests only) and the fix is a one-liner at the call site.
+
+## A negative test must fail for the RIGHT reason
+
+Asserting `== []` / "does NOT fire" only proves something if the branch you
+*claim* to cover is what suppressed it — not an incidental earlier guard. A
+multi-guard function (e.g. `detectCoverageGaps`: cross-day guard THEN
+closed-window guard) will short-circuit on the first guard, so a fixture meant
+to exercise guard #2 can pass entirely on guard #1 and silently cover nothing.
+
+Construct the fixture so ONLY the target guard can be responsible: hold every
+earlier guard non-firing. For the closed-window case that meant a SAME-NY-date
+pair (cross-day guard inert) with the prev bar in a pre-04:00 closed window —
+not a cross-day pair that passes before the closed check is ever reached.
+
+Origin: PR #1763 (#1754) review WARNING — the "closed window" gap test passed
+because the two bars were different NY dates, never reaching the closed guard.

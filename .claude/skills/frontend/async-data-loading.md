@@ -182,3 +182,17 @@ grep -nE '\.error\b' frontend/src/pages/*.tsx            # duplicate error surfa
 ```
 
 Each match must be deliberate. Each `useAsync` state should appear in the error branch exactly once.
+
+## Render-stable hook arguments (#1754)
+
+A fresh array/object **literal** passed to a custom hook each render — e.g.
+`useMarketSpecials("us_equity", [{ time: now }])` — is a refetch/recompute
+hazard: if the hook ever uses that arg in a `useEffect`/`useMemo` dependency
+by identity, it loops every render. Memoise it (`useMemo(() => […], deps)`)
+or hoist it to module scope. This holds even when the hook *currently* derives
+a stable key internally — the call site must not bank on the hook's private
+implementation staying that way. Grep before push:
+
+```bash
+grep -nE 'use[A-Z][A-Za-z]+\([^)]*\[\{' frontend/src/**/*.tsx   # literal array-of-object hook args
+```

@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 from pandas.tseries.holiday import (
     AbstractHolidayCalendar,
@@ -165,3 +166,21 @@ def us_market_specials(year: int) -> MarketYear:
         )
         _CACHE[year] = cached
     return cached
+
+
+UsMarketStatus = Literal["open", "half_day", "closed"]
+
+
+def us_market_status(d: date) -> UsMarketStatus:
+    """NYSE trading status for an ``America/New_York`` civil date (#1754).
+
+    ``closed`` on weekends and full closures; ``half_day`` on a 13:00-ET early
+    close; ``open`` otherwise. The argument is a NY-local date — the caller maps
+    "today"/the week to NY-local civil dates first (the calendar is keyed that
+    way, like ``us_market_specials``)."""
+    specials = us_market_specials(d.year)
+    if d.weekday() >= 5 or d in specials.full_closures:
+        return "closed"
+    if d in specials.half_days:
+        return "half_day"
+    return "open"
