@@ -1061,6 +1061,19 @@ export interface FilingsListResponse {
   limit: number;
 }
 
+// Per-(quarter, filing_type) counts for the filings-analytics drill (#592).
+export interface FilingQuarterCount {
+  quarter: string; // "YYYY-Qn"
+  filing_type: string;
+  count: number;
+}
+
+export interface FilingQuarterlyCounts {
+  instrument_id: number;
+  symbol: string | null;
+  counts: FilingQuarterCount[];
+}
+
 // ---------------------------------------------------------------------------
 // /news/{instrument_id} (app/api/news.py)
 // ---------------------------------------------------------------------------
