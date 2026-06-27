@@ -1121,6 +1121,18 @@ export interface FilingQuarterlyCounts {
   counts: FilingQuarterCount[];
 }
 
+export interface RedFlagTrendPoint {
+  quarter: string; // "YYYY-Qn"
+  avg_score: number; // mean red_flag_score over scored filings that quarter
+  n: number; // number of scored (non-null) filings in the quarter
+}
+
+export interface RedFlagTrend {
+  instrument_id: number;
+  symbol: string | null;
+  points: RedFlagTrendPoint[];
+}
+
 // ---------------------------------------------------------------------------
 // /news/{instrument_id} (app/api/news.py)
 // ---------------------------------------------------------------------------

@@ -47,6 +47,7 @@ from app.services.filings import (
     FILING_EVENTS_RETENTION_YEARS,
     filing_within_retention,
 )
+from app.services.filings_risk import score_filing_red_flag
 from app.services.ownership_observations import (
     record_treasury_observation,
     refresh_treasury_current,
@@ -2349,18 +2350,21 @@ def _upsert_filing_from_master_index(
         INSERT INTO filing_events (
             instrument_id, filing_date, filing_type,
             provider, provider_filing_id, source_url, primary_document_url,
-            raw_payload_json
+            raw_payload_json, red_flag_score
         )
         VALUES (
             %(instrument_id)s, %(filing_date)s, %(filing_type)s,
             %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
-            %(raw_payload_json)s
+            %(raw_payload_json)s, %(red_flag_score)s
         )
         ON CONFLICT (provider, provider_filing_id, instrument_id) DO UPDATE SET
             filing_date          = EXCLUDED.filing_date,
             filing_type          = EXCLUDED.filing_type,
             source_url           = COALESCE(filing_events.source_url, EXCLUDED.source_url),
-            primary_document_url = COALESCE(filing_events.primary_document_url, EXCLUDED.primary_document_url)
+            primary_document_url = COALESCE(filing_events.primary_document_url, EXCLUDED.primary_document_url),
+            -- NT late-filing flag only (EXCLUDED is NT-or-NULL here); the 8-K
+            -- score is owned by apply_8k_items_to_filing_events. #1748.
+            red_flag_score       = COALESCE(EXCLUDED.red_flag_score, filing_events.red_flag_score)
         """,
         {
             "instrument_id": instrument_id,
@@ -2370,6 +2374,9 @@ def _upsert_filing_from_master_index(
             "provider_filing_id": entry.accession_number,
             "source_url": master_index_url,
             "primary_document_url": master_index_url,
+            # items unknown here (set later by the 8-K items path); only the
+            # Form NT late-filing flag is computable at insert. #1748.
+            "red_flag_score": score_filing_red_flag(entry.form_type, None, {}),
             "raw_payload_json": json.dumps(
                 {
                     "source": "master-index",

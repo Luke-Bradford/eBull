@@ -1,40 +1,60 @@
 /**
- * /instrument/:symbol/filings/analytics — filings-analytics drill (#592).
+ * /instrument/:symbol/filings/analytics — filings-analytics drill (#592, #1748).
  *
- * Two charts over the server's per-(quarter, filing_type) counts
- * (`/filings/{id}/quarterly-counts`): a stacked filing-density timeline + a
- * form-type heatmap. The red-flag-score trend the issue also called for is
- * deferred to #1748 — `red_flag_score` is unpopulated across the filings corpus.
+ * Three charts over the server's filings aggregates: a stacked filing-density
+ * timeline + a form-type heatmap (`/filings/{id}/quarterly-counts`), and the
+ * red-flag-score trend (`/filings/{id}/red-flag-trend`, #1748 — now that
+ * `red_flag_score` is populated).
  */
 import { useCallback } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { fetchFilingQuarterlyCounts } from "@/api/filings";
+import { fetchFilingQuarterlyCounts, fetchRedFlagTrend } from "@/api/filings";
 import { fetchInstrumentSummary } from "@/api/instruments";
-import type { FilingQuarterlyCounts } from "@/api/types";
+import type { FilingQuarterlyCounts, RedFlagTrend } from "@/api/types";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import {
   FilingDensityChart,
   FilingHeatmapChart,
+  RedFlagTrendChart,
 } from "@/components/filings/filingsAnalyticsCharts";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
+
+interface FilingsAnalytics {
+  readonly counts: FilingQuarterlyCounts;
+  readonly trend: RedFlagTrend;
+}
 
 export function FilingsAnalyticsPage(): JSX.Element {
   const { symbol = "" } = useParams<{ symbol: string }>();
   const backHref = `/instrument/${encodeURIComponent(symbol)}`;
 
   // The /filings endpoints are instrument_id-keyed; resolve :symbol → id via the
-  // summary, then pull the aggregated counts — one lifecycle, one error surface.
-  const counts = useAsync<FilingQuarterlyCounts>(
+  // summary, then pull both aggregates together — one lifecycle, one error
+  // surface. The trend can be empty even when counts has filings (no
+  // risk-bearing filing), so its chart carries its own empty guard.
+  const analytics = useAsync<FilingsAnalytics>(
     useCallback(
       () =>
-        fetchInstrumentSummary(symbol).then((s) => fetchFilingQuarterlyCounts(s.instrument_id)),
+        fetchInstrumentSummary(symbol).then(async (s) => {
+          const [counts, trend] = await Promise.all([
+            fetchFilingQuarterlyCounts(s.instrument_id),
+            fetchRedFlagTrend(s.instrument_id),
+          ]);
+          return { counts, trend };
+        }),
       [symbol],
     ),
     [symbol],
   );
 
+  const counts = {
+    loading: analytics.loading,
+    error: analytics.error,
+    data: analytics.data?.counts ?? null,
+    refetch: analytics.refetch,
+  };
   const isEmpty = counts.data !== null && counts.data.counts.length === 0;
 
   return (
@@ -83,6 +103,9 @@ export function FilingsAnalyticsPage(): JSX.Element {
           </Section>
           <Section title="Form-type heatmap">
             <FilingHeatmapChart counts={counts.data.counts} />
+          </Section>
+          <Section title="Red-flag score trend">
+            <RedFlagTrendChart points={analytics.data?.trend.points ?? []} />
           </Section>
         </>
       )}

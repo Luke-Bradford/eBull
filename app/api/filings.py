@@ -81,6 +81,18 @@ class FilingQuarterlyCounts(BaseModel):
     counts: list[FilingQuarterCount]
 
 
+class RedFlagTrendPoint(BaseModel):
+    quarter: str  # "YYYY-Qn"
+    avg_score: float  # mean red_flag_score over scored filings that quarter
+    n: int  # number of scored (non-NULL) filings in the quarter
+
+
+class RedFlagTrend(BaseModel):
+    instrument_id: int
+    symbol: str | None
+    points: list[RedFlagTrendPoint]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -197,8 +209,8 @@ def filing_quarterly_counts(
     form-type heatmap. Aggregated server-side so the client never pulls the raw
     filing rows (an active filer has hundreds of Form 4s alone, past the
     /filings page cap); the small {quarter, filing_type, count} payload is
-    categorised + bucketed on the FE. ``red_flag_score`` is unpopulated across
-    the corpus, so the red-flag trend chart was deferred to #1748.
+    categorised + bucketed on the FE. The red-flag-score trend is served
+    separately by ``/{instrument_id}/red-flag-trend`` (#1748).
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -234,6 +246,59 @@ def filing_quarterly_counts(
                 quarter=str(r["quarter"]),
                 filing_type=str(r["filing_type"]),
                 count=int(r["count"]),
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.get("/{instrument_id}/red-flag-trend", response_model=RedFlagTrend)
+def filing_red_flag_trend(
+    instrument_id: int,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+    years: int = Query(default=5, ge=1, le=20),
+) -> RedFlagTrend:
+    """Per-quarter mean ``red_flag_score`` over the last ``years`` years.
+
+    The #592-deferred third filings-analytics chart (#1748). Only scored
+    filings (``red_flag_score IS NOT NULL`` — critical 8-Ks and Form NT
+    late filings) contribute, so a quarter with no risk-bearing filing is
+    simply absent (the FE renders an empty state / gaps).
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT symbol FROM instruments WHERE instrument_id = %(id)s",
+            {"id": instrument_id},
+        )
+        inst_row = cur.fetchone()
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail="Instrument not found")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT to_char(date_trunc('quarter', filing_date), 'YYYY-"Q"Q') AS quarter,
+                   AVG(red_flag_score) AS avg_score,
+                   COUNT(*) AS n
+            FROM filing_events
+            WHERE instrument_id = %(id)s
+              AND red_flag_score IS NOT NULL
+              AND filing_date >= (CURRENT_DATE - make_interval(years => %(years)s))
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            {"id": instrument_id, "years": years},
+        )
+        rows = cur.fetchall()
+
+    return RedFlagTrend(
+        instrument_id=instrument_id,
+        symbol=inst_row["symbol"],  # type: ignore[index]
+        points=[
+            RedFlagTrendPoint(
+                quarter=str(r["quarter"]),
+                avg_score=float(r["avg_score"]),
+                n=int(r["n"]),
             )
             for r in rows
         ],
