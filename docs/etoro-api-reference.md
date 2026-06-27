@@ -419,7 +419,20 @@ Response: `{"success": true/false, "errorCode": "...", "errorMessage": "..."}`
 }
 ```
 
-Rate message fields: `Ask`, `Bid`, `LastExecution`, `Date` (ISO 8601), `PriceRateID`
+Rate message fields: `Ask`, `Bid`, `LastExecution`, `Date` (ISO 8601),
+`PriceRateID`, plus margin-derived prices (`NewUnitMargin`, `UnitMarginAsk`,
+`UnitMarginBid`, `BidDiscounted`, `AskDiscounted`,
+`UnitMarginBidDiscounted`, `UnitMarginAskDiscounted`).
+
+**No volume / size / quantity field exists on any WS topic** (#608, verified
+2026-06-27 against both api-portal `/websocket/topics` and
+`websocket-doc.html`). eToro's WS has exactly two topics — `instrument:<id>`
+(rate) and `private` (order/position) — and neither carries per-trade or
+per-tick volume. There is **no** `Trading.Instrument.Trade` topic. The only
+volume eToro exposes is the **per-bar** `volume` field on the REST candles
+endpoint (cumulative for the in-progress bar). Live intraday volume on the
+chart would therefore require polling candles, not the WS — out of #608 scope,
+deferred.
 
 ### Subscribe to private channel (order/position updates)
 
@@ -443,9 +456,12 @@ with fields: `OrderID`, `StatusID`, `InstrumentID`, `ExecutedUnits`,
 
 ### eBull WebSocket status
 
-Not yet implemented. Planned for live price streaming (alternative to polling
-`/instruments/rates`). Would eliminate the 1.1s throttle overhead for
-real-time dashboard updates.
+Implemented (`app/services/etoro_websocket.py`, #274). Live price streaming via
+`instrument:<id>` (rate fan-out to SSE `/sse/quotes`) + `private` (debounced
+portfolio reconcile), with a 5s REST `/instruments/rates` poll as a freshness
+floor. Live in-progress-bar OHLC rides this stream (#602); **volume stays
+static** because the WS push carries no volume (#607/#608 — see rate-fields
+note above).
 
 ---
 
