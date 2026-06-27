@@ -27,7 +27,7 @@ import {
 
 import type { DividendPeriod } from "@/api/instruments";
 import type { InstrumentFinancialRow } from "@/api/types";
-import { type ChartTheme, lightTheme } from "@/lib/chartTheme";
+import { type ChartTheme, defaultTooltipStyle, lightTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import {
   buildCumulativeDps,
@@ -135,7 +135,7 @@ export function DpsLineChart({ history }: HistoryProps): JSX.Element {
           <Tooltip
             formatter={(value: number) => formatDps(value, currency)}
             labelFormatter={formatPeriod}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Line
             type="monotone"
@@ -194,7 +194,7 @@ export function CumulativeDpsChart({ history }: HistoryProps): JSX.Element {
           <Tooltip
             formatter={(value: number) => formatDps(value, currency)}
             labelFormatter={formatPeriod}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Area
             type="monotone"
@@ -261,7 +261,7 @@ export function PayoutRatioChart({ cashflowRows }: PayoutRatioProps): JSX.Elemen
           <Tooltip
             formatter={(value: number) => formatPct(value)}
             labelFormatter={formatPeriod}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Line
             type="monotone"
@@ -320,7 +320,7 @@ export function YieldOnCostChart({
                 : [value.toFixed(4), name]
             }
             labelFormatter={(fy: number) => `FY${fy}`}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Bar dataKey="yoc_pct" name="Yield-on-cost" isAnimationActive={false}>
             {series.map((s) => (
