@@ -163,8 +163,8 @@ class YahooRssNewsProvider(NewsProvider):
         try:
             published = parsedate_to_datetime(pub)
         except TypeError, ValueError:
-            return None
-        if published is None:
+            # parsedate_to_datetime raises on any malformed date (verified); it
+            # never returns None, so no None-guard is needed here.
             return None
         published = _to_utc_aware(published)
 
