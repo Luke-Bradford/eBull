@@ -10,6 +10,7 @@ import type {
   InstrumentRiskMetrics,
   InstrumentSummary,
   IntradayInterval,
+  PeerComparison,
   PortfolioRelativeRisk,
 } from "@/api/types";
 
@@ -467,6 +468,14 @@ export function fetchInstrumentSummary(
 ): Promise<InstrumentSummary> {
   return apiFetch<InstrumentSummary>(
     `/instruments/${encodeURIComponent(symbol)}/summary`,
+  );
+}
+
+export function fetchPeerComparison(
+  symbol: string,
+): Promise<PeerComparison> {
+  return apiFetch<PeerComparison>(
+    `/instruments/${encodeURIComponent(symbol)}/peer-comparison`,
   );
 }
 

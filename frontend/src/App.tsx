@@ -18,6 +18,7 @@ import { FundamentalsPage } from "@/pages/FundamentalsPage";
 import { InsiderPage } from "@/pages/InsiderPage";
 import { OwnershipPage } from "@/pages/OwnershipPage";
 import { NewsAnalysisPage } from "@/pages/NewsAnalysisPage";
+import { PeersPage } from "@/pages/PeersPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
@@ -121,6 +122,10 @@ export function App() {
           <Route
             path="instrument/:symbol/news-analysis"
             element={<NewsAnalysisPage />}
+          />
+          <Route
+            path="instrument/:symbol/peers"
+            element={<PeersPage />}
           />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />

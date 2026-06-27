@@ -442,6 +442,42 @@ export interface InstrumentCandles {
   rows: CandleBar[];
 }
 
+// ---------------------------------------------------------------------------
+// /instruments/{symbol}/peer-comparison (app/api/instruments.py:277-305, #1751)
+// ---------------------------------------------------------------------------
+
+/** One radar factor: the instrument's value vs its sector median. */
+export interface PeerFactor {
+  key: string;
+  label: string;
+  instrument_value: number | null;
+  sector_median: number | null;
+  /** # sector members with a non-null value (low n → noisy median). */
+  sector_n: number;
+  /** True for price-gated factors (P/E) — thin on dev. */
+  dev_limited: boolean;
+  better_when: "higher" | "lower";
+}
+
+/** A sector peer with its factor row (for the heatmap). */
+export interface PeerInstrument {
+  instrument_id: number;
+  symbol: string;
+  company_name: string | null;
+  size_proxy: number | null;
+  factors: Record<string, number | null>;
+}
+
+export interface PeerComparison {
+  symbol: string;
+  instrument_id: number;
+  /** Raw SIC division code "1".."9" — no name lookup table. */
+  sector: string;
+  sector_member_count: number;
+  factors: PeerFactor[];
+  peers: PeerInstrument[];
+}
+
 // #600 — intraday OHLCV bars served live by the eToro provider.
 // Distinct from CandleBar: bars carry a UTC ISO timestamp instead of
 // a YYYY-MM-DD date. Not persisted in price_daily.

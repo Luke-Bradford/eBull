@@ -60,7 +60,7 @@ import { lightTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { useCallback, useId, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 const SLICE = 8;
 const CELL_HEIGHT = 96;
@@ -301,6 +301,14 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
       ) : (
         <FundamentalsGrid series={series} />
       )}
+      <div className="mt-2 border-t border-slate-100 dark:border-slate-800 pt-2 text-right">
+        <Link
+          to={`/instrument/${encodeURIComponent(symbol)}/peers`}
+          className="text-[11px] text-sky-700 hover:underline"
+        >
+          Peer comparison →
+        </Link>
+      </div>
     </Pane>
   );
 }
