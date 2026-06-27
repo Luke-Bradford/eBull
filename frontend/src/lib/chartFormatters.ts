@@ -101,10 +101,12 @@ export function nyDateString(epochSeconds: number): string {
  * Session classification keyed by the instrument's `session_profile` (#609).
  *
  *   - `continuous` (fx / commodity / index / crypto): no session concept —
- *     every bar is `"rth"` (no tint).
+ *     every bar is `"rth"` (no tint). These trade ~around the clock, so no
+ *     weekend-closed band either.
  *   - `foreign_equity` (non-US listing): eToro emits bars only within that
- *     market's session, and exposes no extended-hours data, so every in-feed
- *     bar renders as `"rth"`. No PM/AH/weekend bands.
+ *     market's session and exposes no extended-hours data, so an in-session
+ *     bar renders as `"rth"` (no PM/AH). A weekend bar (defensive — e.g. a
+ *     backfill artifact; foreign markets are also Sat/Sun-closed) → `"closed"`.
  *   - `us_equity` / `us_equity_rth`: NYSE ET windows, overridden by the NY-local
  *     date's `specials`:
  *       * date ∈ `fullClosures` → `"closed"` all day.
@@ -119,10 +121,14 @@ export function classifySession(
   epochSeconds: number,
   specials: MarketSpecials = _EMPTY_SPECIALS,
 ): SessionKind {
-  if (profile === "continuous" || profile === "foreign_equity") return "rth";
+  if (profile === "continuous") return "rth";
 
   const { day, hh, mm } = _nyParts(epochSeconds);
-  if (day === 0 || day === 6) return "closed";
+  const isWeekend = day === 0 || day === 6;
+
+  if (profile === "foreign_equity") return isWeekend ? "closed" : "rth";
+
+  if (isWeekend) return "closed";
 
   const ymd = nyDateString(epochSeconds);
   if (specials.fullClosures.has(ymd)) return "closed";
