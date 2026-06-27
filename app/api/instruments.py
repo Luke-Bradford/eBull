@@ -58,6 +58,13 @@ from app.services.operators import (
     NoOperatorError,
     sole_operator_id,
 )
+from app.services.peer_comparison import (
+    DEV_LIMITED_FACTORS,
+    FACTOR_BETTER_WHEN,
+    FACTOR_KEYS,
+    FACTOR_LABELS,
+    compute_peer_comparison,
+)
 from app.services.portfolio_risk import (
     PortfolioRiskStatus,
     compute_portfolio_relative_risk,
@@ -265,6 +272,37 @@ class FcfYieldSeries(BaseModel):
     # #1662, or cross-currency FCF/price); ``points`` is then empty.
     suppressed_reason: Literal["multiclass", "currency_mismatch"] | None
     points: list[FcfYieldPoint]
+
+
+class PeerFactor(BaseModel):
+    """One radar factor: the instrument's value vs its sector median (#1751)."""
+
+    key: str
+    label: str
+    instrument_value: float | None
+    sector_median: float | None
+    sector_n: int  # # sector members with a non-null value for this factor
+    dev_limited: bool  # True for price-gated factors (P/E) — thin on dev
+    better_when: Literal["higher", "lower"]
+
+
+class PeerInstrument(BaseModel):
+    """A sector peer with its factor row (for the #594 heatmap)."""
+
+    instrument_id: int
+    symbol: str
+    company_name: str | None
+    size_proxy: float | None  # total_assets (peer-proximity ranking key)
+    factors: dict[str, float | None]
+
+
+class PeerComparison(BaseModel):
+    symbol: str
+    instrument_id: int
+    sector: str  # raw code "1".."9" (instruments.sector is TEXT; no lookup table)
+    sector_member_count: int  # complete-TTM members in the sector (median base)
+    factors: list[PeerFactor]
+    peers: list[PeerInstrument]
 
 
 class CandleBar(BaseModel):
@@ -872,6 +910,76 @@ def get_instrument_fcf_yield(
                 price_as_of=row.price_as_of,
             )
             for row in result.rows
+        ],
+    )
+
+
+@router.get("/{symbol}/peer-comparison", response_model=PeerComparison)
+def get_instrument_peer_comparison(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> PeerComparison:
+    """Peer-comparison data for the #594 radar + sector heatmap (#1751).
+
+    Per instrument: the radar factors (P/E, ROE, revenue growth YoY, operating
+    margin, debt/equity, net margin), their sector medians, and a size-proximity
+    peer set — all derived server-side from existing fundamentals (no new
+    ingest). P/E is ``dev_limited`` (price-gated). 404 when the instrument has no
+    sector classification or no complete-TTM fundamentals. Policy lives in
+    app/services/peer_comparison.py.
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    result = compute_peer_comparison(conn, instrument_id=int(inst_row["instrument_id"]))  # type: ignore[arg-type]
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No peer-comparison data for {symbol} (no sector classification or no complete-TTM fundamentals)",
+        )
+
+    return PeerComparison(
+        symbol=result.symbol,
+        instrument_id=result.instrument_id,
+        sector=result.sector,
+        sector_member_count=result.sector_member_count,
+        factors=[
+            PeerFactor(
+                key=key,
+                label=FACTOR_LABELS[key],
+                instrument_value=result.self_factors.get(key),
+                sector_median=result.medians[key].median,
+                sector_n=result.medians[key].n,
+                dev_limited=key in DEV_LIMITED_FACTORS,
+                better_when=FACTOR_BETTER_WHEN[key],  # type: ignore[arg-type]
+            )
+            for key in FACTOR_KEYS
+        ],
+        peers=[
+            PeerInstrument(
+                instrument_id=p.instrument_id,
+                symbol=p.symbol,
+                company_name=p.company_name,
+                size_proxy=p.total_assets,
+                factors=p.factors,
+            )
+            for p in result.peers
         ],
     )
 
