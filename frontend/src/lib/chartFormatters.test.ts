@@ -105,12 +105,9 @@ describe("classifySession (#609 profile-aware)", () => {
   it("foreign_equity → in-session bar is rth (no PM/AH); weekend → closed", () => {
     expect(classifySession("foreign_equity", utc(2026, 4, 21, 8, 0))).toBe("rth"); // Tue
     expect(classifySession("foreign_equity", utc(2026, 4, 21, 21, 0))).toBe("rth");
-    // Sat Apr 25 2026 — defensive weekend branch (backfill artifact).
+    // Sat Apr 25 2026 — defensive weekend branch (backfill artifact);
+    // contrast with `continuous` (Saturday → rth) asserted above.
     expect(classifySession("foreign_equity", utc(2026, 4, 25, 16, 0))).toBe("closed");
-  });
-
-  it("continuous → weekend bar stays rth (24/7 markets, no weekend tint)", () => {
-    expect(classifySession("continuous", utc(2026, 4, 25, 16, 0))).toBe("rth"); // Sat
   });
 
   it("us_equity matches the legacy classifier with no specials", () => {
