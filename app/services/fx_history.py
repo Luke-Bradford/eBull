@@ -19,6 +19,7 @@ Two responsibilities:
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -195,3 +196,30 @@ def load_fx_rates_for_date(
         if used is None or rd > used:
             used = rd
     return rates, used
+
+
+def fx_cross_rate(
+    rates: Mapping[tuple[str, str], Decimal],
+    *,
+    from_ccy: str,
+    to_ccy: str,
+) -> Decimal | None:
+    """USD-base cross rate: ``amount_in_from_ccy × result = amount_in_to_ccy``.
+
+    ``rates`` is the ``load_fx_rates_for_date`` dict, keyed ``(base, quote) -> rate``
+    where base is always ``USD`` (``FX_BASE``) and the value is units of *quote* per
+    1 USD. USD is treated as ``1`` (it is never a stored pair). Cross = (to per USD)
+    / (from per USD). Returns ``None`` (fail-closed) if either currency is neither
+    USD nor a stored USD-quote pair — never call ``convert()`` for a non-USD cross
+    (Codex ckpt-1 MED). Pure — table-tested without a DB."""
+
+    def per_usd(ccy: str) -> Decimal | None:
+        if ccy == "USD":
+            return Decimal(1)
+        return rates.get(("USD", ccy))
+
+    to_rate = per_usd(to_ccy)
+    from_rate = per_usd(from_ccy)
+    if to_rate is None or from_rate is None or from_rate == 0:
+        return None
+    return to_rate / from_rate
