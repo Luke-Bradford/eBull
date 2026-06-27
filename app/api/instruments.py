@@ -397,6 +397,34 @@ class InstrumentSummary(BaseModel):
     capabilities: dict[str, CapabilityCellPayload]
 
 
+# Session-shading profile for the intraday chart (#609 Phase A). Derived
+# from the instrument's exchange + ``exchanges.asset_class``; drives which
+# session bands the frontend paints. Single source of truth for the four
+# values — the frontend mirrors this Literal.
+#   us_equity      — full PM/RTH/AH bands + NYSE holiday calendar
+#   us_equity_rth  — eToro RTH-only duplicate (exchange 33), no PM/AH
+#   foreign_equity — non-US listing: open/closed only, no PM/AH tint
+#   continuous     — fx / commodity / index / crypto: no bands
+SessionProfile = Literal["us_equity", "us_equity_rth", "foreign_equity", "continuous"]
+
+# SQL fragment deriving ``session_profile`` from a row that has ``i.exchange``
+# and a ``LEFT JOIN exchanges e``. Exchange-33's RTH-only nature is NOT
+# encoded in ``asset_class`` (it is ``us_equity``) so the exchange-id check
+# must come first. Total + default-bearing: any unrecognised / NULL
+# asset_class falls through to ``us_equity`` (the charted-intraday set is
+# us-equity-dominant; preserves prior behaviour) — never errors on a new enum.
+_SESSION_PROFILE_SQL = """
+        CASE
+            WHEN i.exchange = '33' THEN 'us_equity_rth'
+            WHEN e.asset_class = 'us_equity' THEN 'us_equity'
+            WHEN e.asset_class IN ('eu_equity', 'uk_equity', 'asia_equity', 'mena_equity')
+                THEN 'foreign_equity'
+            WHEN e.asset_class IN ('commodity', 'fx', 'index', 'crypto') THEN 'continuous'
+            ELSE 'us_equity'
+        END AS session_profile
+"""
+
+
 class InstrumentDetail(BaseModel):
     instrument_id: int
     symbol: str
@@ -410,6 +438,7 @@ class InstrumentDetail(BaseModel):
     first_seen_at: datetime
     last_seen_at: datetime
     coverage_tier: int | None
+    session_profile: SessionProfile
     latest_quote: QuoteSnapshot | None
     external_identifiers: list[ExternalIdentifier]
 
@@ -3708,15 +3737,17 @@ def get_instrument(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> InstrumentDetail:
     """Single instrument with latest quote, coverage tier, and external identifiers."""
-    instrument_sql = """
+    instrument_sql = f"""
         SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                i.currency, i.sector, i.industry, i.country,
                i.is_tradable, i.first_seen_at, i.last_seen_at,
                c.coverage_tier,
+               {_SESSION_PROFILE_SQL},
                q.bid, q.ask, q.last, q.spread_pct, q.quoted_at
         FROM instruments i
         LEFT JOIN quotes q USING (instrument_id)
         LEFT JOIN coverage c USING (instrument_id)
+        LEFT JOIN exchanges e ON e.exchange_id = i.exchange
         WHERE i.instrument_id = %(instrument_id)s
     """
 
@@ -3761,6 +3792,7 @@ def get_instrument(
         first_seen_at=row["first_seen_at"],  # type: ignore[arg-type]
         last_seen_at=row["last_seen_at"],  # type: ignore[arg-type]
         coverage_tier=row["coverage_tier"],  # type: ignore[arg-type]
+        session_profile=row["session_profile"],  # type: ignore[arg-type]
         latest_quote=_parse_quote(row),
         external_identifiers=ext_ids,
     )
