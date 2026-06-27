@@ -167,9 +167,12 @@ describe("detectCoverageGaps (#1754 Phase C)", () => {
     expect(detectCoverageGaps([bar(t0), bar(nextDay)], 60, "us_equity")).toEqual([]);
   });
 
-  it("does NOT flag a gap touching a closed window", () => {
-    const closed = utc(2026, 4, 21, 2, 0); // 22:00 ET prior — closed
-    expect(detectCoverageGaps([bar(closed), bar(t0)], 60, "us_equity")).toEqual([]);
+  it("does NOT flag when an endpoint is in a same-day closed window", () => {
+    // Both bars are Apr 21 ET (same NY date, so the cross-day guard does NOT
+    // fire) — the suppression must come from the closed-window guard: 03:00 ET
+    // (07:00 UTC) is before the 04:00 pre-market open → classifySession "closed".
+    const closedSameDay = utc(2026, 4, 21, 7, 0); // 03:00 ET Apr 21 — closed
+    expect(detectCoverageGaps([bar(closedSameDay), bar(t0)], 60, "us_equity")).toEqual([]);
   });
 
   it("is disabled for non-US profiles (no precise session model)", () => {
