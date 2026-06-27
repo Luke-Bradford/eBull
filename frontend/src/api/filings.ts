@@ -1,5 +1,5 @@
 import { apiFetch } from "@/api/client";
-import type { FilingsListResponse } from "@/api/types";
+import type { FilingQuarterlyCounts, FilingsListResponse } from "@/api/types";
 
 export interface FetchFilingsOpts {
   readonly filing_type?: string;
@@ -20,5 +20,15 @@ export function fetchFilings(
   }
   return apiFetch<FilingsListResponse>(
     `/filings/${instrumentId}?${params.toString()}`,
+  );
+}
+
+export function fetchFilingQuarterlyCounts(
+  instrumentId: number,
+  years = 5,
+): Promise<FilingQuarterlyCounts> {
+  const params = new URLSearchParams({ years: String(years) });
+  return apiFetch<FilingQuarterlyCounts>(
+    `/filings/${instrumentId}/quarterly-counts?${params.toString()}`,
   );
 }

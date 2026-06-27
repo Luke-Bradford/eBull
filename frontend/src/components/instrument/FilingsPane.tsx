@@ -179,6 +179,14 @@ export function FilingsPane({
           })}
         </ul>
       )}
+      <div className="mt-2 border-t border-slate-100 dark:border-slate-800 pt-2 text-right">
+        <Link
+          to={`/instrument/${encodeURIComponent(symbol)}/filings/analytics`}
+          className="text-[11px] text-sky-700 hover:underline"
+        >
+          Filing analytics →
+        </Link>
+      </div>
     </Pane>
   );
 }
