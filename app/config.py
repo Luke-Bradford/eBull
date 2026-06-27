@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # SEC EDGAR requires no API key (public API, 10 req/s fair-use limit)
     sec_user_agent: str = "eBull dev@example.com"
 
+    # Yahoo Finance per-ticker RSS news feed (#1750) rejects the default
+    # httpx User-Agent; a browser-like UA is required (verified). No API key.
+    news_rss_user_agent: str = "Mozilla/5.0 (compatible; eBull/1.0; +research)"
+
     # Soft deadline (seconds) for the universe-wide 13F-HR quarterly
     # sweep (#913). The sweep walks ~11k filers in ``institutional_filers``;
     # at ~1-3s per filer the cold first sweep can run several hours.
