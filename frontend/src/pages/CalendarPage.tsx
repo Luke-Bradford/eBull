@@ -10,7 +10,7 @@
  * Forward earnings + filing dates are intentionally absent — we ingest no
  * forward earnings calendar or filing-due dates (stated on-page, not faked).
  */
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import { fetchCalendarEvents } from "@/api/calendar";
 import type { CalendarEvents, CalendarScope, MarketDayType, SessionProfile } from "@/api/types";
@@ -56,8 +56,12 @@ function weekdayShort(isoDate: string): string {
   });
 }
 
-function nowSession(profile: SessionProfile, specials: ReturnType<typeof useMarketSpecials>): SessionKind {
-  return classifySession(profile, Math.floor(Date.now() / 1000), specials);
+function nowSession(
+  profile: SessionProfile,
+  epochSeconds: number,
+  specials: ReturnType<typeof useMarketSpecials>,
+): SessionKind {
+  return classifySession(profile, epochSeconds, specials);
 }
 
 export function CalendarPage(): JSX.Element {
@@ -67,10 +71,14 @@ export function CalendarPage(): JSX.Element {
     [scope],
   );
 
-  // One specials fetch (current year) reused for every profile's live-session
-  // badge — useMarketSpecials only fetches for US profiles; foreign/continuous
-  // ignore specials in classifySession anyway.
-  const nowBar = [{ time: Math.floor(Date.now() / 1000) }];
+  // "Now" frozen at mount — the live-session badge is a load-time snapshot
+  // (refresh re-reads it). Memoised so the array reference is render-stable:
+  // passing a fresh literal to a hook each render is a refetch hazard even
+  // though useMarketSpecials currently keys on a derived years-string, not the
+  // array identity. One specials fetch (current year) reused for every
+  // profile's badge — the hook only fetches for US profiles; foreign/continuous
+  // ignore specials in classifySession.
+  const nowBar = useMemo(() => [{ time: Math.floor(Date.now() / 1000) }], []);
   const specials = useMarketSpecials("us_equity", nowBar);
 
   return (
@@ -123,7 +131,9 @@ export function CalendarPage(): JSX.Element {
                     <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
                       {row.label}
                     </span>
-                    <span className="text-[11px] text-slate-500">{SESSION_LABEL[nowSession(row.profile, specials)]} now</span>
+                    <span className="text-[11px] text-slate-500">
+                      {SESSION_LABEL[nowSession(row.profile, nowBar[0]!.time, specials)]} now
+                    </span>
                     {!row.holidays_modelled && (
                       <span className="text-[10px] text-slate-400">· holidays not modelled</span>
                     )}
