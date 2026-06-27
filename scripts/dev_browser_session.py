@@ -29,7 +29,22 @@ _DEV_BASE_URL = "http://localhost:5173"
 _SESSION_TTL = timedelta(hours=12)
 
 
+def _assert_dev_environment() -> None:
+    """Refuse to mint a privileged session against anything but a local dev DB.
+
+    Two independent guards (BLOCKING review #1765): ``app_env`` must be a dev
+    value AND the DB must be localhost — so a stray ``DATABASE_URL`` pointing at
+    a remote/prod host (CI override, env misfire) can never create a live
+    operator session."""
+    if settings.app_env not in ("dev", "development", "local", "test"):
+        raise SystemExit(f"refusing to mint a session: app_env={settings.app_env!r} is not a dev environment")
+    url = settings.database_url
+    if not ("@localhost" in url or "@127.0.0.1" in url or "@::1" in url):
+        raise SystemExit("refusing to mint a session: database_url is not localhost (dev-only tool)")
+
+
 def main() -> int:
+    _assert_dev_environment()
     with psycopg.connect(settings.database_url) as conn:
         operator_id = sole_operator_id(conn)
         session_id, expires_at = create_session(
