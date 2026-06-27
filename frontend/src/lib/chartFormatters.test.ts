@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyUsSession } from "./chartFormatters";
+import { classifySession, classifyUsSession, type MarketSpecials } from "./chartFormatters";
 
 /**
  * Lock down US-equity session classification across the four windows
@@ -90,5 +90,58 @@ describe("classifyUsSession (DST handling)", () => {
     // Jul 6 2026 — Monday, EDT.
     expect(classifyUsSession(utc(2026, 7, 6, 13, 30))).toBe("rth");
     expect(classifyUsSession(utc(2026, 7, 6, 13, 29))).toBe("pre");
+  });
+});
+
+describe("classifySession (#609 profile-aware)", () => {
+  // Tue Apr 21 2026 (EDT): 13:30 UTC = 09:30 ET (RTH), 08:00 UTC = 04:00 ET (PM),
+  // 21:00 UTC = 17:00 ET (AH on a normal day).
+  it("continuous → every bar is rth (no PM/AH/closed)", () => {
+    expect(classifySession("continuous", utc(2026, 4, 21, 8, 0))).toBe("rth"); // 04:00 ET
+    expect(classifySession("continuous", utc(2026, 4, 22, 6, 0))).toBe("rth"); // 02:00 ET overnight
+    expect(classifySession("continuous", utc(2026, 4, 25, 16, 0))).toBe("rth"); // Saturday
+  });
+
+  it("foreign_equity → in-session bar is rth (no PM/AH); weekend → closed", () => {
+    expect(classifySession("foreign_equity", utc(2026, 4, 21, 8, 0))).toBe("rth"); // Tue
+    expect(classifySession("foreign_equity", utc(2026, 4, 21, 21, 0))).toBe("rth");
+    // Sat Apr 25 2026 — defensive weekend branch (backfill artifact);
+    // contrast with `continuous` (Saturday → rth) asserted above.
+    expect(classifySession("foreign_equity", utc(2026, 4, 25, 16, 0))).toBe("closed");
+  });
+
+  it("us_equity matches the legacy classifier with no specials", () => {
+    expect(classifySession("us_equity", utc(2026, 4, 21, 8, 0))).toBe("pre");
+    expect(classifySession("us_equity", utc(2026, 4, 21, 13, 30))).toBe("rth");
+    expect(classifySession("us_equity", utc(2026, 4, 21, 20, 0))).toBe("ah");
+  });
+
+  it("us_equity_rth → no PM/AH; only 09:30–16:00 ET is rth", () => {
+    expect(classifySession("us_equity_rth", utc(2026, 4, 21, 8, 0))).toBe("closed"); // 04:00 ET PM → closed
+    expect(classifySession("us_equity_rth", utc(2026, 4, 21, 13, 30))).toBe("rth"); // 09:30 ET
+    expect(classifySession("us_equity_rth", utc(2026, 4, 21, 20, 0))).toBe("closed"); // 16:00 ET AH → closed
+  });
+
+  it("full closure → closed all day even during RTH clock", () => {
+    const specials: MarketSpecials = { fullClosures: new Set(["2026-04-21"]), halfDays: new Set() };
+    expect(classifySession("us_equity", utc(2026, 4, 21, 16, 0), specials)).toBe("closed"); // 12:00 ET
+  });
+
+  it("half-day → RTH ends 13:00 ET; 13:00–17:00 is ah; ≥17:00 closed", () => {
+    const specials: MarketSpecials = { fullClosures: new Set(), halfDays: new Set(["2026-04-21"]) };
+    // 12:59 ET = 16:59 UTC → still rth.
+    expect(classifySession("us_equity", utc(2026, 4, 21, 16, 59), specials)).toBe("rth");
+    // 13:00 ET = 17:00 UTC → ah (early-close afternoon).
+    expect(classifySession("us_equity", utc(2026, 4, 21, 17, 0), specials)).toBe("ah");
+    // 16:59 ET = 20:59 UTC → still ah (bounded to 17:00 ET).
+    expect(classifySession("us_equity", utc(2026, 4, 21, 20, 59), specials)).toBe("ah");
+    // 17:00 ET = 21:00 UTC → closed (the prior unbounded bug tinted this).
+    expect(classifySession("us_equity", utc(2026, 4, 21, 21, 0), specials)).toBe("closed");
+  });
+
+  it("half-day + us_equity_rth → ≥13:00 ET is closed (no AH)", () => {
+    const specials: MarketSpecials = { fullClosures: new Set(), halfDays: new Set(["2026-04-21"]) };
+    expect(classifySession("us_equity_rth", utc(2026, 4, 21, 16, 59), specials)).toBe("rth"); // 12:59 ET
+    expect(classifySession("us_equity_rth", utc(2026, 4, 21, 17, 0), specials)).toBe("closed"); // 13:00 ET
   });
 });

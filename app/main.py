@@ -41,6 +41,7 @@ from app.api.filings import router as filings_router
 from app.api.fund_metadata import router as fund_metadata_router
 from app.api.instruments import router as instruments_router
 from app.api.jobs import router as jobs_router
+from app.api.market_calendar import router as market_calendar_router
 from app.api.news import router as news_router
 from app.api.operator_ingest import router as operator_ingest_router
 from app.api.operators import router as operators_router
@@ -539,6 +540,7 @@ app.include_router(capability_overrides_admin_router)
 app.include_router(filings_router)
 app.include_router(instruments_router)
 app.include_router(jobs_router)
+app.include_router(market_calendar_router)
 app.include_router(operator_ingest_router)
 app.include_router(news_router)
 app.include_router(orders_router)
