@@ -141,6 +141,11 @@ If the diff touches `frontend/`, also read and apply these before pushing:
 - `.claude/skills/frontend/api-shape-and-types.md` — `types.ts` mirrors Pydantic `response_model` in the same PR; `apiFetch` path contract; auth stays in the client
 - `.claude/skills/frontend/operator-ui-conventions.md` — formatters, color semantics, density, status pill vocabulary
 
+- **encoding-comment vs test:** a comment that states a numeric encoding (gradient
+  offset, sign convention, index→meaning) must match the sign-regime tests in the
+  same file. After writing one, read the test that pins it. (PR #1758: an inverted
+  `splitOffset` JSDoc claimed `1 = full red` when the tests prove `1 = full emerald`.)
+
 For frontend pages, also grep:
 
 ```bash

@@ -56,8 +56,9 @@ export interface SentimentSeries {
   /**
    * Gradient stop offset for the bicolor split, as a fraction from the
    * TOP of the y-domain `[min(0,min) .. max(0,max)]`. Emerald above the
-   * stop (≥0), red below (<0). 1 = all-negative (full red), 0 =
-   * all-positive (full emerald). Drives `<stop offset={splitOffset}>`.
+   * stop (≥0), red below (<0). 1 = all-non-negative (full emerald), 0 =
+   * all-negative (full red) — verified by the sign-regime tests in
+   * newsAnalytics.test.ts. Drives `<stop offset={splitOffset}>`.
    */
   readonly splitOffset: number;
 }
