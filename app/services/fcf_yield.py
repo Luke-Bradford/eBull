@@ -1,18 +1,24 @@
-"""Per-period FCF-yield series for the fundamentals drill page (#671).
+"""Per-period FCF-yield series for the fundamentals drill page (#671, #1745).
 
 FCF yield = TTM free cash flow / period-end market cap, rendered as a trend
 overlay on the absolute-FCF line (`/instrument/:symbol/fundamentals`).
 
 This module owns the fail-closed market-cap policy the frontend cannot
-reproduce (data-eng I20 / prevention-log #1664):
+reproduce (data-eng I20 / prevention-log #1664). #1745 replaced the two
+whole-series *suppressions* with per-period reconstruction:
 
-  * **Multi-class issuers** — `close × combined_shares` is the structurally-wrong
-    figure #1662 retired. v1 does no per-period per-class reconstruction, so any
-    curated multi-class issuer (``resolve_market_cap_basis().basis !=
-    "not_multiclass"``) is SUPPRESSED, not approximated.
+  * **Multi-class issuers** — ``close × combined_shares`` is the structurally-wrong
+    figure #1662 retired. Each period's cap is now the per-period total-company cap
+    (``xbrl_derived_stats.total_company_cap_at_period``: Σ per-class price×shares +
+    residual, fail-closed guards). A period with no clean cap → NULL yield for that
+    point (not a whole-series suppression).
   * **Cross-currency** — FCF is in ``financial_periods.reported_currency``; price
-    is the instrument's eToro trading currency (``instruments.currency``). With no
-    FX normaliser (sql/024 caveat), a proven mismatch is SUPPRESSED.
+    (hence cap) is the eToro trading currency (``instruments.currency``). A mismatch
+    is normalised at the period-end FX rate (``fx_history``) before dividing; a
+    period with no usable rate → NULL yield for that point.
+
+``suppressed_reason`` is retained on the response for forward-compat but is no
+longer set by either path (always ``None`` post-#1745).
 
 Single-class, currency-coherent issuers get the per-period TTM yield:
 ``fcf_ttm = SUM(operating_cf) − ABS(SUM(capex))`` over 4 consecutive normalized
@@ -30,10 +36,16 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
-from app.services.xbrl_derived_stats import resolve_market_cap_basis
+from app.services.fx_history import fx_cross_rate
+from app.services.xbrl_derived_stats import resolve_market_cap_basis, total_company_cap_at_period
 
 FcfYieldSuppression = Literal["multiclass", "currency_mismatch"]
 FinancialsPeriod = Literal["quarterly", "annual"]
+
+# FX is daily; a period-end rate carried forward more than this from the nearest
+# stored business day is too stale to trust for that period → NULL yield (Codex
+# ckpt-1 MED-2). Generous (covers a long holiday) but bounded.
+_MAX_FX_CARRY_FORWARD_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -80,7 +92,7 @@ def fcf_yield_pct(fcf_ttm: Decimal | None, market_cap: Decimal | None) -> Decima
 _QUARTERLY_SQL = """
     WITH q AS (
         SELECT
-            period_end_date, period_type, shares_outstanding,
+            period_end_date, period_type, shares_outstanding, reported_currency,
             SUM(operating_cf)    OVER w AS ocf_ttm,
             SUM(capex)           OVER w AS capex_ttm,
             COUNT(*)             OVER w AS n_q,
@@ -93,7 +105,7 @@ _QUARTERLY_SQL = """
         WINDOW w AS (ORDER BY period_end_date ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)
     )
     SELECT
-        q.period_end_date, q.period_type, q.shares_outstanding,
+        q.period_end_date, q.period_type, q.shares_outstanding, q.reported_currency,
         CASE
             WHEN q.n_q = 4 AND (q.period_end_date - q.ttm_start) <= 330
             THEN q.ocf_ttm - ABS(COALESCE(q.capex_ttm, 0))
@@ -116,7 +128,7 @@ _QUARTERLY_SQL = """
 # Annual: a FY row is already 12 months, so fcf = that row's own ocf − |capex|.
 _ANNUAL_SQL = """
     SELECT
-        fp.period_end_date, fp.period_type, fp.shares_outstanding,
+        fp.period_end_date, fp.period_type, fp.shares_outstanding, fp.reported_currency,
         fp.operating_cf - ABS(COALESCE(fp.capex, 0)) AS fcf_ttm,
         pd.close AS price, pd.price_date AS price_as_of
     FROM financial_periods fp
@@ -137,34 +149,61 @@ _ANNUAL_SQL = """
 """
 
 
-def _currency_mismatch(conn: psycopg.Connection[Any], instrument_id: int) -> bool:
-    """True only on a PROVEN mismatch — both currencies known and different.
+def _trading_currency(conn: psycopg.Connection[Any], instrument_id: int) -> str | None:
+    """The instrument's eToro trading currency (``None`` on a data gap). Stable per
+    instrument; the per-period *reporting* currency comes from each row instead, so
+    a historical reporting-currency change converts each period correctly (Codex
+    ckpt-2)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT currency FROM instruments WHERE instrument_id = %s", (instrument_id,))
+        row = cur.fetchone()
+    return row[0] if row is not None else None
 
-    A NULL trading currency (data gap) is NOT treated as a mismatch: over-
-    suppressing US instruments is worse for the operator than a rare undetected
-    foreign mismatch. The full-population verification (spec) reports the
-    mismatch count; reported_currency is NOT NULL (sql/032:121).
-    """
+
+def _instrument_cik(conn: psycopg.Connection[Any], instrument_id: int) -> str | None:
+    """10-digit primary SEC CIK, or ``None``. Same normalization as
+    ``resolve_market_cap_basis`` so the curated FSDS oracle is hit identically."""
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT i.currency AS trading_ccy,
-                   (SELECT reported_currency
-                    FROM financial_periods
-                    WHERE instrument_id = %(iid)s AND superseded_at IS NULL
-                      AND normalization_status = 'normalized'
-                    ORDER BY period_end_date DESC, filed_date DESC NULLS LAST
-                    LIMIT 1) AS reported_ccy
-            FROM instruments i
-            WHERE i.instrument_id = %(iid)s
+            SELECT identifier_value FROM external_identifiers
+            WHERE instrument_id = %s AND provider = 'sec' AND identifier_type = 'cik'
+              AND is_primary = TRUE
+            LIMIT 1
             """,
-            {"iid": instrument_id},
+            (instrument_id,),
         )
         row = cur.fetchone()
-    if row is None:
-        return False
-    trading_ccy, reported_ccy = row
-    return trading_ccy is not None and reported_ccy is not None and trading_ccy != reported_ccy
+    return str(row[0]).zfill(10) if row is not None and row[0] is not None else None
+
+
+def _period_fx_rate(
+    conn: psycopg.Connection[Any], *, period_end: date, reported_ccy: str, trading_ccy: str
+) -> Decimal | None:
+    """Reported→trading cross rate at ``period_end``, or ``None`` (fail-closed) if
+    EITHER currency leg lacks a USD-base rate within ``_MAX_FX_CARRY_FORWARD_DAYS``
+    of the period.
+
+    Freshness is checked on each SPECIFIC leg, NOT the aggregate newest rate_date —
+    a fresh unrelated pair must not let a stale ``reported``/``trading`` leg through
+    (Codex ckpt-2). USD legs are unity (no stored row needed)."""
+    rates: dict[tuple[str, str], Decimal] = {}
+    with conn.cursor() as cur:
+        for ccy in {reported_ccy, trading_ccy} - {"USD"}:
+            cur.execute(
+                """
+                SELECT rate, rate_date FROM fx_rates_daily
+                WHERE base_currency = 'USD' AND quote_currency = %(c)s AND rate_date <= %(d)s::date
+                ORDER BY rate_date DESC
+                LIMIT 1
+                """,
+                {"c": ccy, "d": period_end},
+            )
+            row = cur.fetchone()
+            if row is None or (period_end - row[1]).days > _MAX_FX_CARRY_FORWARD_DAYS:
+                return None
+            rates[("USD", ccy)] = Decimal(row[0])
+    return fx_cross_rate(rates, from_ccy=reported_ccy, to_ccy=trading_ccy)
 
 
 def fcf_yield_series(
@@ -173,11 +212,19 @@ def fcf_yield_series(
     instrument_id: int,
     period: FinancialsPeriod,
 ) -> FcfYieldComputation:
-    """Per-period FCF-yield series, or a suppression reason (empty rows)."""
-    if resolve_market_cap_basis(conn, instrument_id=instrument_id).basis != "not_multiclass":
-        return FcfYieldComputation(suppressed_reason="multiclass", rows=[])
-    if _currency_mismatch(conn, instrument_id):
-        return FcfYieldComputation(suppressed_reason="currency_mismatch", rows=[])
+    """Per-period FCF-yield series. Per-period fail-closed: a period whose market
+    cap or FX rate can't be sourced cleanly gets a NULL yield (its absolute FCF
+    still renders); the series itself is never suppressed (#1745)."""
+    basis = resolve_market_cap_basis(conn, instrument_id=instrument_id).basis
+    is_multiclass = basis != "not_multiclass"
+    cik = _instrument_cik(conn, instrument_id) if is_multiclass else None
+
+    trading_ccy = _trading_currency(conn, instrument_id)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date")
+        today_row = cur.fetchone()
+    today: date = today_row[0] if today_row is not None else date.max
 
     sql = _QUARTERLY_SQL if period == "quarterly" else _ANNUAL_SQL
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -186,17 +233,41 @@ def fcf_yield_series(
 
     rows: list[FcfYieldRow] = []
     for r in db_rows:
+        period_end: date = r["period_end_date"]
         shares = r["shares_outstanding"]
         price = r["price"]
         fcf_ttm = r["fcf_ttm"]
-        market_cap = shares * price if shares is not None and price is not None else None
+
+        # Market cap: per-period total-company cap for a multi-class issuer (#1745),
+        # else the single-class period_end shares × close.
+        if is_multiclass:
+            cap = (
+                total_company_cap_at_period(conn, cik=cik, target_period_end=period_end, today=today)
+                if cik is not None
+                else None
+            )
+            market_cap = cap.value if cap is not None else None
+        else:
+            market_cap = shares * price if shares is not None and price is not None else None
+
+        # FX-normalise the (reporting-currency) FCF into the trading currency the cap
+        # is denominated in, before taking the ratio. The reporting currency is read
+        # PER ROW (an issuer can change it over time — Codex ckpt-2). No usable rate →
+        # NULL yield for this period. The displayed absolute fcf_ttm stays in its
+        # reporting currency.
+        reported_ccy = r["reported_currency"]
+        fcf_for_yield = fcf_ttm
+        if fcf_ttm is not None and trading_ccy is not None and reported_ccy is not None and reported_ccy != trading_ccy:
+            rate = _period_fx_rate(conn, period_end=period_end, reported_ccy=reported_ccy, trading_ccy=trading_ccy)
+            fcf_for_yield = fcf_ttm * rate if rate is not None else None
+
         rows.append(
             FcfYieldRow(
-                period_end=r["period_end_date"],
+                period_end=period_end,
                 period_type=str(r["period_type"]),
                 fcf_ttm=fcf_ttm,
                 market_cap=market_cap,
-                fcf_yield_pct=fcf_yield_pct(fcf_ttm, market_cap),
+                fcf_yield_pct=fcf_yield_pct(fcf_for_yield, market_cap),
                 price=price,
                 price_as_of=r["price_as_of"],
             )
