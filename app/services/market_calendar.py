@@ -22,20 +22,26 @@ Verified against NYSE's published calendars (2026-06-27): 2025 closures =
 2026 = {Jan 1, Jan 19, Feb 16, Apr 3, May 25, Jun 19, Jul 3, Sep 7, Nov 26,
 Dec 25}.
 
-**Half-day (early-close) derivation + its one known limitation.** Early closes
-are irregular, so we derive the common cases by rule and subtract any that are
-actually full closures (closure always wins):
+**Half-day (early-close) derivation.** Early closes are irregular, so we derive
+the recurring cases by rule and subtract any that are actually full closures
+(closure always wins):
   * the Friday after Thanksgiving (always a half day),
-  * Dec 24 when it is a weekday,
+  * Dec 24 when it is a weekday and not itself the observed Christmas closure,
   * Jul 3 when it is a weekday and Jul 4 is also a weekday (i.e. Jul 4 is the
     real holiday and Jul 3 is the eve) — when Jul 4 is a Saturday, Jul 3 is the
     *observed* full closure instead, removed by the minus-closures step.
-Known v1 omission: when Christmas (Dec 25) falls on a **Saturday**, NYSE
-observes the closure on Fri Dec 24 and early-closes Thu Dec 23 — we do not model
-that Dec-23 early close, so that rare day shades as full RTH. This fails **safe**
-(a real session shown as regular hours, never a closed day shown as open) and is
-refreshed by transcribing the published date if it ever matters. Re-verify the
-half-day set annually against nyse.com.
+Anchored to verified years: 2021 (Sat-Christmas → observed Fri Dec 24 closed,
+no Dec early close — matches NYSE) and 2024/2025/2026 (Dec 24 half day).
+Re-verify the half-day set annually against nyse.com.
+
+**Extraordinary closures.** Beyond the scheduled holidays above, NYSE has
+closed on a handful of ad-hoc days (9/11, Hurricane Sandy, national days of
+mourning). These are transcribed in ``_EXTRAORDINARY_CLOSURES`` from the NYSE
+historical record. The intraday chart (the sole Phase A consumer) only requests
+recent years, but the endpoint serves the full 2000-2100 range, so we include
+them for correctness. Any *future* ad-hoc closure NYSE declares must be added
+here; until then such a day fails **safe** (renders as regular hours, never a
+closed day shown as open).
 """
 
 from __future__ import annotations
@@ -78,6 +84,25 @@ class _NyseHolidayCalendar(AbstractHolidayCalendar):
 _CALENDAR = _NyseHolidayCalendar()
 _CACHE: dict[int, MarketYear] = {}
 
+# Ad-hoc NYSE full closures not produced by the scheduled-holiday rules,
+# transcribed from the NYSE historical record. Source: NYSE holidays &
+# trading-hours history (https://www.nyse.com/markets/hours-calendars) +
+# press releases for national days of mourning.
+_EXTRAORDINARY_CLOSURES: frozenset[date] = frozenset(
+    {
+        date(2001, 9, 11),  # 9/11 attacks — markets closed Sep 11-14
+        date(2001, 9, 12),
+        date(2001, 9, 13),
+        date(2001, 9, 14),
+        date(2004, 6, 11),  # National day of mourning — President Reagan
+        date(2007, 1, 2),  # National day of mourning — President Ford
+        date(2012, 10, 29),  # Hurricane Sandy — closed Oct 29-30
+        date(2012, 10, 30),
+        date(2018, 12, 5),  # National day of mourning — President G.H.W. Bush
+        date(2025, 1, 9),  # National day of mourning — President Carter
+    }
+)
+
 
 @dataclass(frozen=True)
 class MarketYear:
@@ -98,7 +123,9 @@ def _full_closures_for_year(year: int) -> frozenset[date]:
     attributed to the year its *observed* date lands in (mirrors
     ``sec_calendar._holidays_for_year``)."""
     stamps = _CALENDAR.holidays(start=date(year - 1, 12, 15), end=date(year + 1, 1, 15))
-    return frozenset(ts.date() for ts in stamps if ts.year == year)
+    scheduled = {ts.date() for ts in stamps if ts.year == year}
+    scheduled.update(d for d in _EXTRAORDINARY_CLOSURES if d.year == year)
+    return frozenset(scheduled)
 
 
 def _half_days_for_year(year: int, full_closures: frozenset[date]) -> frozenset[date]:

@@ -114,9 +114,11 @@ holiday rules duplicated in TypeScript.
                                           THEN 'foreign_equity'
      WHEN e.asset_class IN ('commodity','fx','index','crypto')
                                           THEN 'continuous'
-     ELSE 'us_equity'                    -- 'unknown' / NULL / any unrecognized value:
-   END                                   -- preserve today's behaviour (charted set is
-                                         -- us-equity-dominant); never error on a new enum.
+     ELSE 'continuous'                   -- 'unknown' / NULL / any unrecognized value:
+   END                                   -- no bands. Codex ckpt-2: unclassified FOREIGN
+                                         -- exchanges (Tokyo/Toronto/...) must NOT get NYSE
+                                         -- PM/AH bands. US lives only on 4/5/33/19/20 (all
+                                         -- classified) so never hits ELSE. Never errors.
    ```
 
    The `session_profile` Literal type is the **single source of truth** for the four values;
@@ -159,6 +161,10 @@ holiday rules duplicated in TypeScript.
   Nov 26, Dec 25 — Codex-verified pandas run) and half_days == **{Nov 27, Dec 24}** (Jul 3
   is a closure, not a half-day → closure-wins). Cross-check 2025 + 2027 against nyse.com.
 - Juneteenth guard: `us_market_specials(2021)` does **not** contain Jun 18/19 (pre-2022).
+- Extraordinary ad-hoc closures (Codex ckpt-2): transcribed set merged into full_closures —
+  9/11 (2001-09-11..14), Sandy (2012-10-29/30), mourning days (Reagan/Ford/Bush/Carter incl.
+  2025-01-09). 2021 Sat-Christmas → observed Fri Dec 24 closure, **no** Dec half-day (matches
+  NYSE; the rule omits no real early close).
 - Good Friday present in market but absent from `is_us_federal_holiday` (asserts the two
   calendars genuinely differ).
 - Observed shift: New Year 2028-01-01 = Sat → Jan-going; July 4 2026 = Sat → observed Jul 3

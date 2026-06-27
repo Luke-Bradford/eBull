@@ -28,7 +28,8 @@
 import { useEffect, useState, type JSX, type RefObject } from "react";
 import type { IChartApi, Time } from "lightweight-charts";
 
-import { classifyUsSession, type SessionKind } from "@/lib/chartFormatters";
+import type { SessionProfile } from "@/api/types";
+import { classifySession, type MarketSpecials, type SessionKind } from "@/lib/chartFormatters";
 
 interface Band {
   readonly kind: SessionKind;
@@ -66,9 +67,21 @@ export interface SessionBandsProps {
    *  intra-bar boundaries to mark. Caller passes `false` so the
    *  overlay short-circuits. */
   readonly enabled: boolean;
+  /** Instrument session profile (#609) — drives which bands apply.
+   *  `continuous` / `foreign_equity` yield no tinted bands. */
+  readonly profile: SessionProfile;
+  /** NYSE special days for the visible years (#609); closed-day + half-day
+   *  overrides. Empty = weekday-only behaviour. */
+  readonly specials: MarketSpecials;
 }
 
-export function SessionBands({ chartRef, bars, enabled }: SessionBandsProps): JSX.Element | null {
+export function SessionBands({
+  chartRef,
+  bars,
+  enabled,
+  profile,
+  specials,
+}: SessionBandsProps): JSX.Element | null {
   const [bands, setBands] = useState<Band[]>([]);
   const [inset, setInset] = useState<PaneInset>({ right: 0, bottom: 0 });
 
@@ -107,7 +120,7 @@ export function SessionBands({ chartRef, bars, enabled }: SessionBandsProps): JS
         setBands([]);
         return;
       }
-      const sessions: SessionKind[] = bars.map((b) => classifyUsSession(b.time));
+      const sessions: SessionKind[] = bars.map((b) => classifySession(profile, b.time, specials));
 
       // Group consecutive bars with the same session kind into runs.
       const runs: Array<{ kind: SessionKind; startIdx: number; endIdx: number }> = [];
@@ -211,7 +224,7 @@ export function SessionBands({ chartRef, bars, enabled }: SessionBandsProps): JS
       }
       if (ro !== null) ro.disconnect();
     };
-  }, [chartRef, bars, enabled]);
+  }, [chartRef, bars, enabled, profile, specials]);
 
   if (!enabled || bands.length === 0) return null;
 

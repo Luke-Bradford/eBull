@@ -15,6 +15,7 @@ from app.services.market_calendar import us_market_specials
 # NYSE published full closures (https://www.nyse.com/markets/hours-calendars).
 _CLOSURES_2025 = {
     date(2025, 1, 1),  # New Year's Day
+    date(2025, 1, 9),  # National day of mourning — President Carter (extraordinary)
     date(2025, 1, 20),  # MLK
     date(2025, 2, 17),  # Washington's Birthday
     date(2025, 4, 18),  # Good Friday
@@ -61,6 +62,24 @@ def test_half_days_2026_closure_wins_over_jul3() -> None:
     assert specials.half_days == frozenset({date(2026, 11, 27), date(2026, 12, 24)})
 
 
+def test_extraordinary_closures_included() -> None:
+    # Ad-hoc NYSE closures not produced by the scheduled-holiday rules.
+    assert date(2012, 10, 29) in us_market_specials(2012).full_closures  # Hurricane Sandy
+    assert date(2012, 10, 30) in us_market_specials(2012).full_closures
+    assert date(2018, 12, 5) in us_market_specials(2018).full_closures  # Bush mourning
+    assert date(2025, 1, 9) in us_market_specials(2025).full_closures  # Carter mourning
+    for d in (date(2001, 9, 11), date(2001, 9, 12), date(2001, 9, 13), date(2001, 9, 14)):
+        assert d in us_market_specials(2001).full_closures
+
+
+def test_saturday_christmas_has_no_dec_half_day() -> None:
+    # 2021: Dec 25 = Sat → observed Fri Dec 24 closure; NYSE had NO Dec early
+    # close that year (only the day after Thanksgiving). The rule must agree.
+    specials = us_market_specials(2021)
+    assert date(2021, 12, 24) in specials.full_closures
+    assert specials.half_days == frozenset({date(2021, 11, 26)})
+
+
 def test_juneteenth_guard_pre_2022() -> None:
     # NYSE first observed Juneteenth in 2022; 2021 must carry neither Jun 18
     # nor Jun 19 as a closure.
@@ -92,3 +111,46 @@ def test_result_is_cached_and_immutable() -> None:
     b = us_market_specials(2026)
     assert a is b
     assert isinstance(a.full_closures, frozenset)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint (pure — no DB; the session_profile join is dev-verified live).
+# ---------------------------------------------------------------------------
+
+
+def test_endpoint_serialises_sorted_iso_dates_and_sets_cache() -> None:
+    from fastapi import Response
+
+    from app.api.market_calendar import get_us_market_calendar
+
+    resp = Response()
+    body = get_us_market_calendar(2026, resp)
+    assert body["year"] == 2026
+    assert body["full_closures"] == [
+        "2026-01-01",
+        "2026-01-19",
+        "2026-02-16",
+        "2026-04-03",
+        "2026-05-25",
+        "2026-06-19",
+        "2026-07-03",
+        "2026-09-07",
+        "2026-11-26",
+        "2026-12-25",
+    ]
+    assert body["half_days"] == ["2026-11-27", "2026-12-24"]
+    assert resp.headers["Cache-Control"] == "public, max-age=86400"
+
+
+def test_endpoint_rejects_out_of_range_year() -> None:
+    from fastapi import HTTPException, Response
+
+    from app.api.market_calendar import get_us_market_calendar
+
+    for bad in (1999, 2101):
+        try:
+            get_us_market_calendar(bad, Response())
+        except HTTPException as exc:
+            assert exc.status_code == 400
+        else:  # pragma: no cover - guard
+            raise AssertionError(f"year {bad} should have raised")

@@ -12,6 +12,8 @@
  * produced by `lib/chartData.ts` for both daily and intraday bars).
  */
 
+import type { SessionProfile } from "@/api/types";
+
 const _MONTH_ABBR = [
   "Jan",
   "Feb",
@@ -49,6 +51,20 @@ export type SessionKind = "pre" | "rth" | "ah" | "closed";
 
 const _NY_TZ = "America/New_York";
 
+/** NYSE special-day sets for the years a chart spans (#609). Dates are
+ *  `America/New_York` civil dates (`YYYY-MM-DD`), matching the
+ *  `/market-calendar/us/{year}` endpoint. `fullClosures` → no trading;
+ *  `halfDays` → 13:00 ET early close. */
+export interface MarketSpecials {
+  readonly fullClosures: ReadonlySet<string>;
+  readonly halfDays: ReadonlySet<string>;
+}
+
+const _EMPTY_SPECIALS: MarketSpecials = {
+  fullClosures: new Set<string>(),
+  halfDays: new Set<string>(),
+};
+
 function _nyParts(epochSeconds: number): { day: number; hh: number; mm: number } {
   const d = new Date(epochSeconds * 1000);
   // Intl.DateTimeFormat parts in NY tz.
@@ -69,14 +85,69 @@ function _nyParts(epochSeconds: number): { day: number; hh: number; mm: number }
   return { day, hh: hh % 24, mm };
 }
 
-export function classifyUsSession(epochSeconds: number): SessionKind {
+/** The instant's `America/New_York` civil date as `YYYY-MM-DD`, so it keys
+ *  the same special-day sets the backend computes. `en-CA` formats as
+ *  ISO `YYYY-MM-DD`. */
+export function nyDateString(epochSeconds: number): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: _NY_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(epochSeconds * 1000));
+}
+
+/**
+ * Session classification keyed by the instrument's `session_profile` (#609).
+ *
+ *   - `continuous` (fx / commodity / index / crypto): no session concept —
+ *     every bar is `"rth"` (no tint).
+ *   - `foreign_equity` (non-US listing): eToro emits bars only within that
+ *     market's session, and exposes no extended-hours data, so every in-feed
+ *     bar renders as `"rth"`. No PM/AH/weekend bands.
+ *   - `us_equity` / `us_equity_rth`: NYSE ET windows, overridden by the NY-local
+ *     date's `specials`:
+ *       * date ∈ `fullClosures` → `"closed"` all day.
+ *       * date ∈ `halfDays` → RTH ends 13:00 ET; AH 13:00–17:00; ≥17:00 closed.
+ *       * `us_equity_rth` (eToro RTH-only duplicate) → no PM/AH at all.
+ *
+ * `specials` defaults to empty (weekday-only behaviour) so callers that don't
+ * need holiday precision — or whose fetch failed — degrade gracefully.
+ */
+export function classifySession(
+  profile: SessionProfile,
+  epochSeconds: number,
+  specials: MarketSpecials = _EMPTY_SPECIALS,
+): SessionKind {
+  if (profile === "continuous" || profile === "foreign_equity") return "rth";
+
   const { day, hh, mm } = _nyParts(epochSeconds);
   if (day === 0 || day === 6) return "closed";
+
+  const ymd = nyDateString(epochSeconds);
+  if (specials.fullClosures.has(ymd)) return "closed";
+
   const minutes = hh * 60 + mm;
+  const isHalf = specials.halfDays.has(ymd);
+  const rthEnd = isHalf ? 13 * 60 : 16 * 60;
+
+  if (profile === "us_equity_rth") {
+    // RTH-only duplicate: 09:30–close is the only live window; no PM/AH.
+    return minutes >= 9 * 60 + 30 && minutes < rthEnd ? "rth" : "closed";
+  }
+
+  // us_equity — full PM / RTH / AH.
   if (minutes >= 4 * 60 && minutes < 9 * 60 + 30) return "pre";
-  if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return "rth";
-  if (minutes >= 16 * 60 && minutes < 20 * 60) return "ah";
+  if (minutes >= 9 * 60 + 30 && minutes < rthEnd) return "rth";
+  const ahEnd = isHalf ? 17 * 60 : 20 * 60;
+  if (minutes >= rthEnd && minutes < ahEnd) return "ah";
   return "closed";
+}
+
+/** Back-compat alias — US-equity classification with no special days.
+ *  Prefer `classifySession(profile, …)` at new call sites. */
+export function classifyUsSession(epochSeconds: number): SessionKind {
+  return classifySession("us_equity", epochSeconds);
 }
 
 

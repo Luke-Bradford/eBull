@@ -37,9 +37,12 @@ import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { ISeriesApi, Time, UTCTimestamp } from "lightweight-charts";
 
 import { useLiveTick, useLiveQuoteConnection } from "@/components/quotes/LiveQuoteProvider";
+import type { SessionProfile } from "@/api/types";
 import { floorToBucket } from "@/lib/chartData";
-import { classifyUsSession } from "@/lib/chartFormatters";
+import { classifySession, type MarketSpecials } from "@/lib/chartFormatters";
 import type { LiveTickPayload } from "@/lib/useLiveQuote";
+
+const _EMPTY_SPECIALS: MarketSpecials = { fullClosures: new Set(), halfDays: new Set() };
 
 interface LiveBarState {
   time: number;
@@ -174,6 +177,14 @@ export interface UseLiveLastBarParams {
   /** Drop after-hours ticks (16:00–20:00 ET). Same contract as
    *  `acceptPre`. */
   acceptAh?: boolean;
+  /** Instrument session profile (#609) — gates which ticks count as
+   *  pre/ah. Defaults `us_equity`. Non-US / continuous profiles classify
+   *  every tick as `rth`, so the accept filters become no-ops. */
+  sessionProfile?: SessionProfile;
+  /** NYSE special days (#609) for half-day-afternoon classification.
+   *  Optional — the live-tick filter mainly needs `sessionProfile`; the
+   *  normal-day PM/AH gate (the common case) works with empty specials. */
+  specials?: MarketSpecials;
 }
 
 export interface UseLiveLastBarResult {
@@ -213,6 +224,8 @@ export function useLiveLastBar({
   refs,
   acceptPre = true,
   acceptAh = true,
+  sessionProfile = "us_equity",
+  specials = _EMPTY_SPECIALS,
 }: UseLiveLastBarParams): UseLiveLastBarResult {
   const tick = useLiveTick(instrumentId);
   const { connected, unavailable } = useLiveQuoteConnection();
@@ -265,7 +278,14 @@ export function useLiveLastBar({
     // re-fires. The filter is "going-forward" — a tick that was
     // rejected stays rejected even if the user later opens that
     // session. PR #610 round 3 review WARNING.
-    const tickSession = classifyUsSession(tickEpoch);
+    //
+    // #609 edge: before `specials` loads (sub-second), a 13:00–16:00 ET
+    // tick on a half-day classifies `rth` (not `ah`), so a tick that
+    // should be AH-filtered can slip through. This self-heals: the 60s
+    // REST refetch rebuilds the `clean` set in ChartCanvas WITH specials
+    // applied, dropping the mislabelled bar. The window is the first
+    // calendar fetch on a half-day afternoon with AH hidden — negligible.
+    const tickSession = classifySession(sessionProfile, tickEpoch, specials);
     if (tickSession === "pre" && !acceptPre) {
       lastAppliedKeyRef.current = dedupeKey;
       return;
@@ -314,7 +334,7 @@ export function useLiveLastBar({
     // on tick / anchor / bucket / instrument / session-visibility
     // changes — adding `refs` would re-fire on every parent render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, bucketSeconds, historicalLastBar, instrumentId, acceptPre, acceptAh]);
+  }, [tick, bucketSeconds, historicalLastBar, instrumentId, acceptPre, acceptAh, sessionProfile, specials]);
 
   return { connected, unavailable, appliedTicks, lastAppliedAt, lastVerdict };
 }

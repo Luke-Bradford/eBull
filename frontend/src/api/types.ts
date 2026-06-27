@@ -277,9 +277,17 @@ export interface InstrumentDetail {
   first_seen_at: string;
   last_seen_at: string;
   coverage_tier: number | null;
+  /** Intraday-chart session-shading profile (#609). Mirrors the backend
+   *  `SessionProfile` Literal — drives which session bands the chart
+   *  paints. See `classifySession` in `lib/chartFormatters`. */
+  session_profile: SessionProfile;
   latest_quote: QuoteSnapshot | null;
   external_identifiers: ExternalIdentifier[];
 }
+
+/** Session-shading profile for the intraday chart (#609 Phase A). Mirrors
+ *  `app/api/instruments.py::SessionProfile`. */
+export type SessionProfile = "us_equity" | "us_equity_rth" | "foreign_equity" | "continuous";
 
 // Phase 2.2 — per-ticker research summary
 export interface InstrumentIdentity {
@@ -370,6 +378,9 @@ export interface InstrumentSummary {
   instrument_id: number;
   is_tradable: boolean;
   coverage_tier: number | null;
+  /** Intraday-chart session-shading profile (#609). Mirrors the backend
+   *  `SessionProfile` Literal. */
+  session_profile: SessionProfile;
   identity: InstrumentIdentity;
   price: InstrumentPrice | null;
   key_stats: InstrumentKeyStats | null;

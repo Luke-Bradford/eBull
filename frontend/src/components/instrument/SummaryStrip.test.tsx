@@ -23,6 +23,7 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
     instrument_id: 42,
     is_tradable: true,
     coverage_tier: 1,
+    session_profile: "us_equity",
     identity: {
       symbol: "AAPL",
       display_name: "Apple Inc.",

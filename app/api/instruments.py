@@ -345,6 +345,37 @@ class CapabilityCellPayload(BaseModel):
     data_present: dict[str, bool]
 
 
+# Session-shading profile for the intraday chart (#609 Phase A). Derived
+# from the instrument's exchange + ``exchanges.asset_class``; drives which
+# session bands the frontend paints. Single source of truth for the four
+# values — the frontend mirrors this Literal.
+#   us_equity      — full PM/RTH/AH bands + NYSE holiday calendar
+#   us_equity_rth  — eToro RTH-only duplicate (exchange 33), no PM/AH
+#   foreign_equity — non-US listing: open/closed only, no PM/AH tint
+#   continuous     — fx / commodity / index / crypto: no bands
+SessionProfile = Literal["us_equity", "us_equity_rth", "foreign_equity", "continuous"]
+
+# SQL fragment deriving ``session_profile`` from a row that has ``i.exchange``
+# and a ``LEFT JOIN exchanges e``. Exchange-33's RTH-only nature is NOT
+# encoded in ``asset_class`` (it is ``us_equity``) so the exchange-id check
+# must come first. Total + default-bearing: any unrecognised / NULL
+# asset_class falls through to ``continuous`` (no session bands) — never
+# errors on a new enum, and never paints NYSE PM/AH bands on an unclassified
+# *foreign* exchange (Tokyo / Toronto / Tadawul etc. carry asset_class
+# ``unknown``). US instruments only live on exchanges 4/5/33/19/20, which are
+# all classified, so a US instrument never reaches the ELSE branch.
+_SESSION_PROFILE_SQL = """
+        CASE
+            WHEN i.exchange = '33' THEN 'us_equity_rth'
+            WHEN e.asset_class = 'us_equity' THEN 'us_equity'
+            WHEN e.asset_class IN ('eu_equity', 'uk_equity', 'asia_equity', 'mena_equity')
+                THEN 'foreign_equity'
+            WHEN e.asset_class IN ('commodity', 'fx', 'index', 'crypto') THEN 'continuous'
+            ELSE 'continuous'
+        END AS session_profile
+"""
+
+
 class InstrumentSummary(BaseModel):
     """Per-ticker research summary.
 
@@ -364,6 +395,8 @@ class InstrumentSummary(BaseModel):
     instrument_id: int
     is_tradable: bool
     coverage_tier: int | None
+    # Intraday-chart session-shading profile (#609). See SessionProfile.
+    session_profile: SessionProfile
     identity: InstrumentIdentity
     price: InstrumentPrice | None
     key_stats: InstrumentKeyStats | None
@@ -395,34 +428,6 @@ class InstrumentSummary(BaseModel):
     # PR 3b retires them once frontend reads ``capabilities``
     # directly.
     capabilities: dict[str, CapabilityCellPayload]
-
-
-# Session-shading profile for the intraday chart (#609 Phase A). Derived
-# from the instrument's exchange + ``exchanges.asset_class``; drives which
-# session bands the frontend paints. Single source of truth for the four
-# values — the frontend mirrors this Literal.
-#   us_equity      — full PM/RTH/AH bands + NYSE holiday calendar
-#   us_equity_rth  — eToro RTH-only duplicate (exchange 33), no PM/AH
-#   foreign_equity — non-US listing: open/closed only, no PM/AH tint
-#   continuous     — fx / commodity / index / crypto: no bands
-SessionProfile = Literal["us_equity", "us_equity_rth", "foreign_equity", "continuous"]
-
-# SQL fragment deriving ``session_profile`` from a row that has ``i.exchange``
-# and a ``LEFT JOIN exchanges e``. Exchange-33's RTH-only nature is NOT
-# encoded in ``asset_class`` (it is ``us_equity``) so the exchange-id check
-# must come first. Total + default-bearing: any unrecognised / NULL
-# asset_class falls through to ``us_equity`` (the charted-intraday set is
-# us-equity-dominant; preserves prior behaviour) — never errors on a new enum.
-_SESSION_PROFILE_SQL = """
-        CASE
-            WHEN i.exchange = '33' THEN 'us_equity_rth'
-            WHEN e.asset_class = 'us_equity' THEN 'us_equity'
-            WHEN e.asset_class IN ('eu_equity', 'uk_equity', 'asia_equity', 'mena_equity')
-                THEN 'foreign_equity'
-            WHEN e.asset_class IN ('commodity', 'fx', 'index', 'crypto') THEN 'continuous'
-            ELSE 'us_equity'
-        END AS session_profile
-"""
 
 
 class InstrumentDetail(BaseModel):
@@ -3483,34 +3488,38 @@ def get_instrument_summary(
     if instrument_id is not None:
         # instrument_id is the PK so the lookup is already unique; no
         # ORDER BY / LIMIT needed.
-        lookup_sql = """
+        lookup_sql = f"""
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                    i.currency, i.sector, i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
                    q.bid, q.ask, q.last,
                    p.sic,
+                   {_SESSION_PROFILE_SQL},
                    canonical.symbol AS canonical_symbol
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
             LEFT JOIN quotes q USING (instrument_id)
             LEFT JOIN instrument_sec_profile p USING (instrument_id)
+            LEFT JOIN exchanges e ON e.exchange_id = i.exchange
             LEFT JOIN instruments canonical
               ON canonical.instrument_id = i.canonical_instrument_id
             WHERE i.instrument_id = %(id)s AND UPPER(i.symbol) = %(symbol)s
         """
         params: dict[str, object] = {"id": instrument_id, "symbol": symbol_clean}
     else:
-        lookup_sql = """
+        lookup_sql = f"""
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                    i.currency, i.sector, i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
                    q.bid, q.ask, q.last,
                    p.sic,
+                   {_SESSION_PROFILE_SQL},
                    canonical.symbol AS canonical_symbol
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
             LEFT JOIN quotes q USING (instrument_id)
             LEFT JOIN instrument_sec_profile p USING (instrument_id)
+            LEFT JOIN exchanges e ON e.exchange_id = i.exchange
             LEFT JOIN instruments canonical
               ON canonical.instrument_id = i.canonical_instrument_id
             WHERE UPPER(i.symbol) = %(symbol)s
@@ -3685,6 +3694,7 @@ def get_instrument_summary(
         instrument_id=row["instrument_id"],  # type: ignore[arg-type]
         is_tradable=row["is_tradable"],  # type: ignore[arg-type]
         coverage_tier=row["coverage_tier"],  # type: ignore[arg-type]
+        session_profile=row["session_profile"],  # type: ignore[arg-type]
         identity=identity,
         price=price_block,
         key_stats=stats_block,

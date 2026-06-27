@@ -47,7 +47,7 @@ import {
   type NormalisedChartCandles,
 } from "@/lib/chartData";
 import {
-  classifyUsSession,
+  classifySession,
   formatHoverLabel,
   humanizeVolume,
   tickFormatter,
@@ -55,6 +55,8 @@ import {
 import { useAsync } from "@/lib/useAsync";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { useLiveLastBar } from "@/lib/useLiveLastBar";
+import { useMarketSpecials } from "@/lib/useMarketSpecials";
+import type { SessionProfile } from "@/api/types";
 
 const RANGES: { id: ChartRange; label: string }[] = [
   { id: "1d", label: "1D" },
@@ -129,12 +131,17 @@ export interface PriceChartProps {
    *  historical fetch is unaffected. */
   instrumentId?: number | null;
   initialRange?: ChartRange;
+  /** Instrument session profile (#609) — drives intraday session shading.
+   *  Defaults to `us_equity` (the charted-intraday-dominant case, and the
+   *  prior hardcoded behaviour) when the caller has no profile yet. */
+  sessionProfile?: SessionProfile;
 }
 
 export function PriceChart({
   symbol,
   instrumentId = null,
   initialRange = "1m",
+  sessionProfile = "us_equity",
 }: PriceChartProps): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const rawChart = searchParams.get("chart");
@@ -386,6 +393,7 @@ export function PriceChart({
           intraday={intraday}
           showPm={showPm}
           showAh={showAh}
+          sessionProfile={sessionProfile}
           // Override the default `h-[340px] w-full` so the chart
           // fills the Pane fillHeight layout instead of sitting at
           // the intrinsic 340px. min-h-[340px] preserves the
@@ -416,6 +424,8 @@ export interface ChartCanvasProps {
   showPm?: boolean;
   /** Show after-hours (16:00–20:00 ET) bars + tint band. Default true. */
   showAh?: boolean;
+  /** Instrument session profile (#609). Default `us_equity`. */
+  sessionProfile?: SessionProfile;
   containerClassName?: string;
 }
 
@@ -429,6 +439,7 @@ export function ChartCanvas({
   intraday = false,
   showPm = true,
   showAh = true,
+  sessionProfile = "us_equity",
   containerClassName,
 }: ChartCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -723,6 +734,11 @@ export function ChartCanvas({
     return out;
   }, [rows]);
 
+  // NYSE special days (#609) for the years these bars span — closed-day +
+  // half-day overrides for session classification. Empty for non-US /
+  // continuous profiles and until the fetch resolves.
+  const specials = useMarketSpecials(sessionProfile, cleanAll);
+
   // Visibility-filtered set — what gets fed into the price/volume
   // series. PM/AH bars drop when the operator toggles them off, but
   // RTH and `closed` bars are never hidden (closed bars are already
@@ -730,12 +746,12 @@ export function ChartCanvas({
   const clean = useMemo<NumericBar[]>(() => {
     if (!intraday || (showPm && showAh)) return cleanAll;
     return cleanAll.filter((b) => {
-      const k = classifyUsSession(b.time);
+      const k = classifySession(sessionProfile, b.time, specials);
       if (k === "pre" && !showPm) return false;
       if (k === "ah" && !showAh) return false;
       return true;
     });
-  }, [cleanAll, intraday, showPm, showAh]);
+  }, [cleanAll, intraday, showPm, showAh, sessionProfile, specials]);
 
   // Mirror `clean` into the crosshair handler's ref. The handler is
   // registered once at mount; reading from a ref avoids stale-closure
@@ -833,6 +849,8 @@ export function ChartCanvas({
       },
       acceptPre: showPm,
       acceptAh: showAh,
+      sessionProfile,
+      specials,
     });
   const liveActive = connected && !unavailable && instrumentId !== null && range !== undefined;
   const lastTickHHMM = lastAppliedAt !== null
@@ -888,6 +906,8 @@ export function ChartCanvas({
         chartRef={chartRef}
         bars={bandBars}
         enabled={intraday && (showPm || showAh)}
+        profile={sessionProfile}
+        specials={specials}
       />
       {hover !== null ? <RichTooltip hover={hover} /> : null}
       {liveActive ? (

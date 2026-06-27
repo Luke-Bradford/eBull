@@ -615,6 +615,7 @@ export function ChartPage(): JSX.Element {
             intraday={intraday}
             showPm={showPm}
             showAh={showAh}
+            sessionProfile={summaryAsync.data?.session_profile ?? "us_equity"}
             containerClassName="h-[70vh] w-full"
           />
         ) : null}

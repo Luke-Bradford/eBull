@@ -26,7 +26,7 @@ import type { ChartRange } from "@/api/types";
 import { SessionBands } from "@/components/instrument/SessionBands";
 import { floorToBucket, intervalSecondsFor, type NormalisedBar } from "@/lib/chartData";
 import {
-  classifyUsSession,
+  classifySession,
   formatHoverLabel,
   humanizeVolume,
   tickFormatter,
@@ -34,6 +34,8 @@ import {
 import { lightTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { useLiveLastBar } from "@/lib/useLiveLastBar";
+import { useMarketSpecials } from "@/lib/useMarketSpecials";
+import type { SessionProfile } from "@/api/types";
 
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
 export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
@@ -201,6 +203,8 @@ export interface ChartWorkspaceCanvasProps {
   readonly showPm?: boolean;
   /** Show after-hours (16:00–20:00 ET) bars + tint band. Default true. */
   readonly showAh?: boolean;
+  /** Instrument session profile (#609). Default `us_equity`. */
+  readonly sessionProfile?: SessionProfile;
   readonly containerClassName?: string;
 }
 
@@ -216,6 +220,7 @@ export function ChartWorkspaceCanvas({
   intraday = false,
   showPm = true,
   showAh = true,
+  sessionProfile = "us_equity",
   containerClassName,
 }: ChartWorkspaceCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -468,18 +473,21 @@ export function ChartWorkspaceCanvas({
     });
   }, [rows]);
 
+  // NYSE special days (#609) for the years these bars span.
+  const specials = useMarketSpecials(sessionProfile, cleanAll);
+
   // Visibility-filtered set — what gets fed into the price/volume
   // series + indicator/trend pipelines. PM/AH bars drop when the
   // operator hides them; RTH and `closed` bars are never hidden.
   const clean = useMemo<NumericBar[]>(() => {
     if (!intraday || (showPm && showAh)) return cleanAll;
     return cleanAll.filter((b) => {
-      const k = classifyUsSession(b.time);
+      const k = classifySession(sessionProfile, b.time, specials);
       if (k === "pre" && !showPm) return false;
       if (k === "ah" && !showAh) return false;
       return true;
     });
-  }, [cleanAll, intraday, showPm, showAh]);
+  }, [cleanAll, intraday, showPm, showAh, sessionProfile, specials]);
 
   // Mirror `clean` into the crosshair handler's ref. Registered once
   // at mount; ref avoids stale-closure capture.
@@ -801,6 +809,8 @@ export function ChartWorkspaceCanvas({
       },
       acceptPre: showPm,
       acceptAh: showAh,
+      sessionProfile,
+      specials,
     });
   const liveActive = connected && !unavailable && liveTargetId !== null;
   const lastTickHHMM = lastAppliedAt !== null
@@ -843,6 +853,8 @@ export function ChartWorkspaceCanvas({
         chartRef={chartRef}
         bars={bandBars}
         enabled={intraday && !compareMode && (showPm || showAh)}
+        profile={sessionProfile}
+        specials={specials}
       />
       {hover !== null ? <RichTooltip hover={hover} /> : null}
       {liveActive ? (
