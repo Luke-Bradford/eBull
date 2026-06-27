@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { fetchNews } from "@/api/news";
 import type { NewsListResponse } from "@/api/types";
@@ -70,6 +70,14 @@ export function RecentNewsPane({
           </li>
         ))}
       </ul>
+      <div className="mt-2 border-t border-slate-100 dark:border-slate-800 pt-2 text-right">
+        <Link
+          to={`/instrument/${encodeURIComponent(symbol)}/news-analysis`}
+          className="text-[11px] text-sky-700 hover:underline"
+        >
+          News analytics →
+        </Link>
+      </div>
     </Pane>
   );
 }

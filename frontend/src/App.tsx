@@ -17,6 +17,7 @@ import { DividendsPage } from "@/pages/DividendsPage";
 import { FundamentalsPage } from "@/pages/FundamentalsPage";
 import { InsiderPage } from "@/pages/InsiderPage";
 import { OwnershipPage } from "@/pages/OwnershipPage";
+import { NewsAnalysisPage } from "@/pages/NewsAnalysisPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
@@ -116,6 +117,10 @@ export function App() {
           <Route
             path="instrument/:symbol/risk"
             element={<RiskPage />}
+          />
+          <Route
+            path="instrument/:symbol/news-analysis"
+            element={<NewsAnalysisPage />}
           />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
