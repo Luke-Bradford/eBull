@@ -32,7 +32,7 @@ import {
 
 import type { FcfYieldSeries } from "@/api/types";
 import { ChartTooltip } from "@/components/charts/ChartTooltip";
-import { type ChartTheme, lightTheme } from "@/lib/chartTheme";
+import { type ChartTheme, defaultTooltipStyle, lightTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import {
   buildCashflowWaterfall,
@@ -151,7 +151,7 @@ export function PnlStackedChart({ periods }: PnlChartProps): JSX.Element {
             cursor={{ fill: theme.gridLine }}
             formatter={(value: number) => formatBigNumber(value)}
             labelFormatter={formatPeriod}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Legend wrapperStyle={{ fontSize: "11px" }} />
           <Bar dataKey="cogs" name="COGS" stackId="a" fill={lightTheme.accent[3]} isAnimationActive={false} />
@@ -185,7 +185,7 @@ export function MarginTrendsChart({ periods }: PnlChartProps): JSX.Element {
           <Tooltip
             formatter={(value: number) => formatPct(value)}
             labelFormatter={formatPeriod}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Legend wrapperStyle={{ fontSize: "11px" }} />
           <Line type="monotone" dataKey="gross_pct" name="Gross" stroke={lightTheme.accent[1]} strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -226,7 +226,7 @@ export function YoyGrowthChart({
           <XAxis dataKey="period_end" tickFormatter={formatPeriod} interval="preserveStartEnd" minTickGap={20} {...sharedAxis(theme)} />
           <YAxis tickFormatter={(v: number) => `${v.toFixed(0)}%`} width={48} {...sharedAxis(theme)} />
           <ReferenceLine y={0} stroke={theme.borderColor} />
-          <Tooltip formatter={(value: number) => formatPct(value)} labelFormatter={formatPeriod} contentStyle={{ fontSize: "11px" }} />
+          <Tooltip formatter={(value: number) => formatPct(value)} labelFormatter={formatPeriod} contentStyle={defaultTooltipStyle(theme)} />
           <Legend wrapperStyle={{ fontSize: "11px" }} />
           <Bar dataKey="revenue_yoy_pct" name="Revenue" fill={lightTheme.accent[1]} isAnimationActive={false} />
           <Bar dataKey="eps_yoy_pct" name="EPS (diluted)" fill={lightTheme.accent[2]} isAnimationActive={false} />
@@ -300,7 +300,7 @@ export function CashflowWaterfallChart({ period }: WaterfallProps): JSX.Element 
               return [formatBigNumber(payload.value), payload.label];
             }}
             labelFormatter={() => ""}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Bar dataKey="base" stackId="a" fill="transparent" isAnimationActive={false} />
           <Bar dataKey="delta" stackId="a" isAnimationActive={false}>
@@ -361,7 +361,7 @@ export function BalanceStructureChart({
             <YAxis type="category" dataKey="side" width={140} {...sharedAxis(theme)} />
             <Tooltip
               formatter={(value: number, name: string) => [formatBigNumber(value), name]}
-              contentStyle={{ fontSize: "11px" }}
+              contentStyle={defaultTooltipStyle(theme)}
             />
             <Legend wrapperStyle={{ fontSize: "11px" }} />
             <Bar dataKey="assets" name="Assets" stackId="a" fill={lightTheme.accent[1]} isAnimationActive={false} />
@@ -400,7 +400,7 @@ export function DebtStructureChart({ periods }: PnlChartProps): JSX.Element {
                 : [formatBigNumber(value), name]
             }
             labelFormatter={formatPeriod}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Legend wrapperStyle={{ fontSize: "11px" }} />
           <Bar yAxisId="left" dataKey="long_term" name="Long-term debt" stackId="d" fill={lightTheme.accent[3]} isAnimationActive={false} />
@@ -455,7 +455,7 @@ export function DupontChart({ periods }: PnlChartProps): JSX.Element {
                 : [formatRatio(value), name]
             }
             labelFormatter={formatPeriod}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Legend wrapperStyle={{ fontSize: "11px" }} />
           <Line yAxisId="pct" type="monotone" dataKey="roe_pct" name="ROE" stroke={lightTheme.accent[0]} strokeWidth={2.5} dot={false} isAnimationActive={false} />
@@ -491,7 +491,7 @@ export function RoicChart({ periods }: PnlChartProps): JSX.Element {
           <XAxis dataKey="period_end" tickFormatter={formatPeriod} interval="preserveStartEnd" minTickGap={20} {...sharedAxis(theme)} />
           <YAxis tickFormatter={(v: number) => `${v.toFixed(0)}%`} width={48} {...sharedAxis(theme)} />
           <ReferenceLine y={0} stroke={theme.borderColor} />
-          <Tooltip formatter={(value: number) => formatPct(value)} labelFormatter={formatPeriod} contentStyle={{ fontSize: "11px" }} />
+          <Tooltip formatter={(value: number) => formatPct(value)} labelFormatter={formatPeriod} contentStyle={defaultTooltipStyle(theme)} />
           <Line type="monotone" dataKey="roic_pct" name="ROIC" stroke={lightTheme.accent[2]} strokeWidth={2.5} dot={false} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>

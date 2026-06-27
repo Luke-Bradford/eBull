@@ -17,6 +17,8 @@
  * only if no existing slot fits the semantic role. Add the key to BOTH
  * palettes. Do NOT inline hex values in chart components.
  */
+import type { CSSProperties } from "react";
+
 export interface ChartTheme {
   /** Background of the chart surface. Matches the page card chrome. */
   readonly bg: string;
@@ -179,3 +181,26 @@ export const darkTheme: ChartTheme = {
   areaTopAlpha: lightTheme.areaTopAlpha,
   areaBottomAlpha: lightTheme.areaBottomAlpha,
 };
+
+/**
+ * Inline style for recharts' DEFAULT `<Tooltip>` (the ones rendered with
+ * no custom `content`). recharts paints that card with inline styles
+ * (white surface, dark text), and Tailwind's class-based `dark:` cannot
+ * reach an inline style — so on the dark `slate-950` page the card stays
+ * white. Theme the surface from the palette here.
+ *
+ * `color` cascades to the date label (`.recharts-tooltip-label`, which
+ * carries no explicit color); the series rows keep their own legible
+ * series colors, so the value→series color link survives. Custom-content
+ * tooltips use `<ChartTooltip>` (Tailwind classes) instead — keep the two
+ * surfaces visually aligned when editing either.
+ */
+export function defaultTooltipStyle(theme: ChartTheme): CSSProperties {
+  return {
+    fontSize: "11px",
+    backgroundColor: theme.bg,
+    border: `1px solid ${theme.borderColor}`,
+    borderRadius: 4,
+    color: theme.textPrimary,
+  };
+}

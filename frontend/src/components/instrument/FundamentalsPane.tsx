@@ -56,7 +56,7 @@ import type { InstrumentFinancialRow, InstrumentSummary } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
 import { formatBigNumber } from "@/lib/format";
-import { lightTheme } from "@/lib/chartTheme";
+import { defaultTooltipStyle, lightTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { useCallback, useId, useMemo } from "react";
@@ -469,11 +469,7 @@ function FundamentalCell({
                   return [formatBigNumber(Number.isFinite(n) ? n : null), label];
                 }}
                 labelFormatter={formatPeriodTick}
-                contentStyle={{
-                  fontSize: "11px",
-                  borderColor: theme.borderColor,
-                  borderRadius: 4,
-                }}
+                contentStyle={defaultTooltipStyle(theme)}
               />
               <Area
                 type="monotone"

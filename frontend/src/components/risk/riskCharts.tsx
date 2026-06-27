@@ -37,7 +37,7 @@ import type {
   HistogramBin,
   RollingVolPoint,
 } from "@/api/types";
-import type { ChartTheme } from "@/lib/chartTheme";
+import { type ChartTheme, defaultTooltipStyle } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 
 // ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ export function UnderwaterChart({ points }: UnderwaterProps): JSX.Element {
           <Tooltip
             formatter={(value: number) => [pctSigned(value), "Drawdown"]}
             labelFormatter={formatDay}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Area
             type="monotone"
@@ -187,7 +187,7 @@ export function RollingVolChart({ points }: RollingVolProps): JSX.Element {
           <Tooltip
             formatter={(value: number) => [pct(value), "Annualized vol"]}
             labelFormatter={formatDay}
-            contentStyle={{ fontSize: "11px" }}
+            contentStyle={defaultTooltipStyle(theme)}
           />
           <Line
             type="monotone"
@@ -277,7 +277,7 @@ export function ReturnsHistogram({ bins }: ReturnsHistogramProps): JSX.Element {
             <Tooltip
               formatter={(value: number) => [String(value), "Days"]}
               labelFormatter={(v: number) => `~${pctSigned(v, 2)}`}
-              contentStyle={{ fontSize: "11px" }}
+              contentStyle={defaultTooltipStyle(theme)}
             />
             <Bar
               dataKey="count"
@@ -369,7 +369,7 @@ export function BetaScatterChart({
             <Tooltip
               cursor={{ strokeDasharray: "3 3" }}
               formatter={(value: number, name: string) => [pctSigned(value), name]}
-              contentStyle={{ fontSize: "11px" }}
+              contentStyle={defaultTooltipStyle(theme)}
             />
             <Scatter
               data={data}
