@@ -1,5 +1,5 @@
 import { apiFetch } from "@/api/client";
-import type { FilingQuarterlyCounts, FilingsListResponse } from "@/api/types";
+import type { FilingQuarterlyCounts, FilingsListResponse, RedFlagTrend } from "@/api/types";
 
 export interface FetchFilingsOpts {
   readonly filing_type?: string;
@@ -30,5 +30,15 @@ export function fetchFilingQuarterlyCounts(
   const params = new URLSearchParams({ years: String(years) });
   return apiFetch<FilingQuarterlyCounts>(
     `/filings/${instrumentId}/quarterly-counts?${params.toString()}`,
+  );
+}
+
+export function fetchRedFlagTrend(
+  instrumentId: number,
+  years = 5,
+): Promise<RedFlagTrend> {
+  const params = new URLSearchParams({ years: String(years) });
+  return apiFetch<RedFlagTrend>(
+    `/filings/${instrumentId}/red-flag-trend?${params.toString()}`,
   );
 }

@@ -15,6 +15,8 @@ from typing import Any
 
 import psycopg
 
+from app.services.filings_risk import load_severity_by_code, score_filing_red_flag
+
 
 def parse_8k_items_by_accession(submissions: dict[str, Any]) -> dict[str, list[str]]:
     """Extract accession_number → list[item_code] for every 8-K /
@@ -85,14 +87,22 @@ def apply_8k_items_to_filing_events(
     conn: psycopg.Connection[Any],
     items_by_accession: dict[str, list[str]],
 ) -> int:
-    """UPDATE ``filing_events.items`` for every accession we've parsed.
+    """UPDATE ``filing_events.items`` (and ``red_flag_score``) for every
+    accession we've parsed.
 
     Only touches rows that already exist (no INSERT). Returns the
     count of rows updated. Empty-list updates are still applied so
     operators can tell "parsed, no items" from "never parsed".
+
+    This is the canonical 8-K source-of-truth for ``red_flag_score``
+    (#1748): ``items[]`` is known here, set after the ``filing_events``
+    row exists, so the score is computed alongside it rather than at the
+    earlier INSERT (which doesn't carry items).
     """
     if not items_by_accession:
         return 0
+
+    severity_by_code = load_severity_by_code(conn)
 
     # One UPDATE per accession. At daily-cadence volume (tens of
     # 8-Ks across all covered CIKs) this is fine — a bulk UNNEST
@@ -102,13 +112,15 @@ def apply_8k_items_to_filing_events(
     updated = 0
     with conn.cursor() as cur:
         for accession, codes in items_by_accession.items():
+            # parse_8k_items_by_accession only emits 8-K / 8-K/A rows.
+            red_flag_score = score_filing_red_flag("8-K", codes, severity_by_code)
             cur.execute(
                 """
                 UPDATE filing_events
-                SET items = %s
+                SET items = %s, red_flag_score = %s
                 WHERE provider = 'sec' AND provider_filing_id = %s
                 """,
-                (codes, accession),
+                (codes, red_flag_score, accession),
             )
             updated += cur.rowcount
     return updated

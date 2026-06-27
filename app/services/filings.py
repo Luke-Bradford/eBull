@@ -48,6 +48,7 @@ from app.services.bootstrap_state import (
     resolve_progress_context,
     set_stage_processed,
 )
+from app.services.filings_risk import score_filing_red_flag
 
 logger = logging.getLogger(__name__)
 
@@ -648,19 +649,23 @@ def _upsert_filing_event(
         INSERT INTO filing_events (
             instrument_id, filing_date, filing_type,
             provider, provider_filing_id, source_url, primary_document_url,
-            report_date, raw_payload_json
+            report_date, raw_payload_json, red_flag_score
         )
         VALUES (
             %(instrument_id)s, %(filing_date)s, %(filing_type)s,
             %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
-            %(report_date)s, %(raw_payload_json)s
+            %(report_date)s, %(raw_payload_json)s, %(red_flag_score)s
         )
         ON CONFLICT (provider, provider_filing_id, instrument_id) DO UPDATE SET
             filing_date          = EXCLUDED.filing_date,
             filing_type          = EXCLUDED.filing_type,
             source_url           = EXCLUDED.source_url,
             primary_document_url = EXCLUDED.primary_document_url,
-            report_date          = COALESCE(EXCLUDED.report_date, filing_events.report_date)
+            report_date          = COALESCE(EXCLUDED.report_date, filing_events.report_date),
+            -- NT late-filing flag only (EXCLUDED is NT-or-NULL here). NEVER
+            -- clobber an 8-K's score, which apply_8k_items_to_filing_events
+            -- owns and sets after items[] are known (#1748).
+            red_flag_score       = COALESCE(EXCLUDED.red_flag_score, filing_events.red_flag_score)
         """,
         {
             "instrument_id": instrument_id,
@@ -670,6 +675,10 @@ def _upsert_filing_event(
             "provider_filing_id": event.provider_filing_id,
             "source_url": event.primary_document_url,
             "primary_document_url": event.primary_document_url,
+            # items are not known at insert time (set later by the 8-K items
+            # path); only the Form NT late-filing flag (filing_type-driven)
+            # is computable here. #1748.
+            "red_flag_score": score_filing_red_flag(event.filing_type, None, {}),
             # #1343 — promote reportDate to a column (was raw_payload_json-only;
             # a §903 structured-field-in-SQL gap). Feeds the 8-K metadata seed's
             # date_of_report with no body fetch.
@@ -723,19 +732,23 @@ def _upsert_filing(
         INSERT INTO filing_events (
             instrument_id, filing_date, filing_type,
             provider, provider_filing_id, source_url, primary_document_url,
-            report_date, raw_payload_json
+            report_date, raw_payload_json, red_flag_score
         )
         VALUES (
             %(instrument_id)s, %(filing_date)s, %(filing_type)s,
             %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
-            %(report_date)s, %(raw_payload_json)s
+            %(report_date)s, %(raw_payload_json)s, %(red_flag_score)s
         )
         ON CONFLICT (provider, provider_filing_id, instrument_id) DO UPDATE SET
             filing_date          = EXCLUDED.filing_date,
             filing_type          = EXCLUDED.filing_type,
             source_url           = EXCLUDED.source_url,
             primary_document_url = EXCLUDED.primary_document_url,
-            report_date          = COALESCE(EXCLUDED.report_date, filing_events.report_date)
+            report_date          = COALESCE(EXCLUDED.report_date, filing_events.report_date),
+            -- NT late-filing flag only (EXCLUDED is NT-or-NULL here). NEVER
+            -- clobber an 8-K's score, which apply_8k_items_to_filing_events
+            -- owns and sets after items[] are known (#1748).
+            red_flag_score       = COALESCE(EXCLUDED.red_flag_score, filing_events.red_flag_score)
         """,
         {
             "instrument_id": instrument_id,
@@ -745,6 +758,9 @@ def _upsert_filing(
             "provider_filing_id": result.provider_filing_id,
             "source_url": result.primary_document_url,
             "primary_document_url": result.primary_document_url,
+            # items unknown at insert (set later by the 8-K items path); only
+            # the Form NT late-filing flag is computable here. #1748.
+            "red_flag_score": score_filing_red_flag(result.filing_type, None, {}),
             # #1343 — promote reportDate to a column (was raw_payload_json-only;
             # a §903 structured-field-in-SQL gap).
             "report_date": result.period_of_report,

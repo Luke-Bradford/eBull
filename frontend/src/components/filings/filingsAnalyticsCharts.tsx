@@ -10,13 +10,15 @@ import {
   BarChart,
   CartesianGrid,
   Legend,
+  Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 
-import type { FilingQuarterCount } from "@/api/types";
+import type { FilingQuarterCount, RedFlagTrendPoint } from "@/api/types";
 import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import {
   buildDensity,
@@ -181,6 +183,82 @@ export function FilingHeatmapChart({
       </div>
       <p className="mt-2 text-[10px] text-slate-400">
         Cell shade ∝ filing count (peak {h.max}). Routine insider Form 3/4/5 excluded.
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 3. Red-flag score trend — mean red_flag_score per quarter (#1748)
+// ---------------------------------------------------------------------------
+
+interface RedFlagTooltipProps {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload?: RedFlagTrendPoint }>;
+}
+
+function RedFlagTooltip({ active, payload }: RedFlagTooltipProps): JSX.Element | null {
+  if (active !== true || !payload || payload.length === 0) return null;
+  const p = payload[0]?.payload;
+  if (!p) return null;
+  return (
+    <ChartTooltip>
+      <div className="font-medium text-slate-700 dark:text-slate-200">{p.quarter}</div>
+      <div className="tabular-nums text-slate-600 dark:text-slate-300">
+        avg red-flag {p.avg_score.toFixed(2)}
+      </div>
+      <div className="tabular-nums text-slate-500 dark:text-slate-400">
+        {p.n} scored filing{p.n === 1 ? "" : "s"}
+      </div>
+    </ChartTooltip>
+  );
+}
+
+export function RedFlagTrendChart({
+  points,
+}: {
+  readonly points: ReadonlyArray<RedFlagTrendPoint>;
+}): JSX.Element {
+  const theme = useChartTheme();
+  if (points.length === 0) {
+    return (
+      <NoFilings message="No red-flag filings (critical 8-K or late NT) in the window." />
+    );
+  }
+  return (
+    <div style={{ height: CHART_HEIGHT }} className="w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={[...points]} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+          <CartesianGrid stroke={theme.gridLine} vertical={false} />
+          <XAxis
+            dataKey="quarter"
+            stroke={theme.textSecondary}
+            tick={{ fill: theme.textMuted, fontSize: 10 }}
+            interval="preserveStartEnd"
+            minTickGap={16}
+          />
+          <YAxis
+            domain={[0, 1]}
+            ticks={[0, 0.5, 1]}
+            stroke={theme.textSecondary}
+            tick={{ fill: theme.textMuted, fontSize: 10 }}
+            width={32}
+          />
+          <Tooltip content={<RedFlagTooltip />} cursor={{ stroke: theme.crosshair }} />
+          <Line
+            type="monotone"
+            dataKey="avg_score"
+            name="avg red-flag"
+            stroke={theme.down}
+            strokeWidth={2}
+            dot={{ r: 3 }}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+      <p className="mt-2 text-[10px] text-slate-400">
+        Mean red-flag score per quarter (1.0 = critical 8-K; 0.7 = late NT filing). Higher
+        = worse; quarters with no risk-bearing filing are absent.
       </p>
     </div>
   );
