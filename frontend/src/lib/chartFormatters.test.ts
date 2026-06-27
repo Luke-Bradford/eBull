@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { classifySession, classifyUsSession, type MarketSpecials } from "./chartFormatters";
+import {
+  classifySession,
+  classifyUsSession,
+  detectCoverageGaps,
+  type MarketSpecials,
+} from "./chartFormatters";
 
 /**
  * Lock down US-equity session classification across the four windows
@@ -143,5 +148,38 @@ describe("classifySession (#609 profile-aware)", () => {
     const specials: MarketSpecials = { fullClosures: new Set(), halfDays: new Set(["2026-04-21"]) };
     expect(classifySession("us_equity_rth", utc(2026, 4, 21, 16, 59), specials)).toBe("rth"); // 12:59 ET
     expect(classifySession("us_equity_rth", utc(2026, 4, 21, 17, 0), specials)).toBe("closed"); // 13:00 ET
+  });
+});
+
+describe("detectCoverageGaps (#1754 Phase C)", () => {
+  // April 21 2026 is a Tue (EDT); 14:00 UTC = 10:00 ET (RTH). interval = 60s.
+  const t0 = utc(2026, 4, 21, 14, 0);
+  const bar = (sec: number) => ({ time: sec });
+
+  it("flags an intrasession hole > 2 buckets, tolerating one missing bar", () => {
+    // +60 (clean), +120 (one missing — tolerated), +300 (≥2 missing — gap).
+    const bars = [bar(t0), bar(t0 + 60), bar(t0 + 60 + 120), bar(t0 + 60 + 120 + 300)];
+    expect(detectCoverageGaps(bars, 60, "us_equity")).toEqual([3]);
+  });
+
+  it("does NOT flag the expected overnight (cross-day) gap", () => {
+    const nextDay = utc(2026, 4, 22, 14, 0); // next RTH day — huge delta, cross-day
+    expect(detectCoverageGaps([bar(t0), bar(nextDay)], 60, "us_equity")).toEqual([]);
+  });
+
+  it("does NOT flag a gap touching a closed window", () => {
+    const closed = utc(2026, 4, 21, 2, 0); // 22:00 ET prior — closed
+    expect(detectCoverageGaps([bar(closed), bar(t0)], 60, "us_equity")).toEqual([]);
+  });
+
+  it("is disabled for non-US profiles (no precise session model)", () => {
+    const bars = [bar(t0), bar(t0 + 600)];
+    expect(detectCoverageGaps(bars, 60, "foreign_equity")).toEqual([]);
+    expect(detectCoverageGaps(bars, 60, "continuous")).toEqual([]);
+  });
+
+  it("handles degenerate inputs", () => {
+    expect(detectCoverageGaps([bar(t0)], 60, "us_equity")).toEqual([]);
+    expect(detectCoverageGaps([bar(t0), bar(t0 + 600)], 0, "us_equity")).toEqual([]);
   });
 });

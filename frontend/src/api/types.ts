@@ -1133,6 +1133,37 @@ export interface RedFlagTrend {
   points: RedFlagTrendPoint[];
 }
 
+// #1754 calendar-of-events
+export type CalendarScope = "portfolio" | "watchlist" | "all";
+export type MarketDayType = "open" | "half_day" | "closed" | "not_modelled";
+
+export interface MarketStatusDay {
+  date: string; // YYYY-MM-DD
+  day_type: MarketDayType;
+}
+
+export interface MarketStatusRow {
+  profile: SessionProfile;
+  label: string;
+  timezone: string;
+  holidays_modelled: boolean;
+  week: MarketStatusDay[];
+}
+
+export interface UpcomingExDividend {
+  symbol: string;
+  instrument_id: number;
+  ex_date: string; // YYYY-MM-DD
+  pay_date: string | null;
+}
+
+export interface CalendarEvents {
+  scope: CalendarScope;
+  as_of: string; // YYYY-MM-DD
+  market_status: MarketStatusRow[];
+  ex_dividends: UpcomingExDividend[];
+}
+
 // ---------------------------------------------------------------------------
 // /news/{instrument_id} (app/api/news.py)
 // ---------------------------------------------------------------------------

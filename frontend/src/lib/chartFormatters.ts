@@ -150,6 +150,47 @@ export function classifySession(
   return "closed";
 }
 
+/**
+ * Indices of bars preceded by an intrasession coverage gap (#1754 Phase C).
+ *
+ * A gap = a missing-bars hole INSIDE a trading session, distinct from the
+ * expected overnight / weekend / holiday gaps the ordinal chart axis already
+ * collapses. Only the US-equity profiles have a session model precise enough to
+ * tell the two apart — `foreign_equity` (no exchange-local session/lunch model)
+ * and `continuous` are skipped (would false-flag e.g. Tokyo lunch breaks).
+ *
+ * A pair `(bar[i-1], bar[i])` is a gap iff:
+ *   - they are more than TWO buckets apart (one missing bar is tolerated;
+ *     `delta > 2×interval` ⇒ ≥2 missing buckets), AND
+ *   - they share the same NY-local trading date (a cross-day gap is the
+ *     expected overnight close, not missing coverage), AND
+ *   - neither end is `"closed"` (both inside a tradable window).
+ *
+ * Returns the indices `i` (the bar AFTER each gap). Runs on the full provider
+ * bar set — never the PM/AH-visibility-filtered subset, so a user toggle can't
+ * fabricate a gap.
+ */
+export function detectCoverageGaps(
+  bars: ReadonlyArray<{ readonly time: number }>,
+  intervalSeconds: number,
+  profile: SessionProfile,
+  specials: MarketSpecials = _EMPTY_SPECIALS,
+): number[] {
+  if (profile !== "us_equity" && profile !== "us_equity_rth") return [];
+  if (intervalSeconds <= 0 || bars.length < 2) return [];
+  const gaps: number[] = [];
+  for (let i = 1; i < bars.length; i++) {
+    const prev = bars[i - 1]!;
+    const cur = bars[i]!;
+    if (cur.time - prev.time <= intervalSeconds * 2) continue;
+    if (nyDateString(prev.time) !== nyDateString(cur.time)) continue;
+    if (classifySession(profile, prev.time, specials) === "closed") continue;
+    if (classifySession(profile, cur.time, specials) === "closed") continue;
+    gaps.push(i);
+  }
+  return gaps;
+}
+
 /** Back-compat alias — US-equity classification with no special days.
  *  Prefer `classifySession(profile, …)` at new call sites. */
 export function classifyUsSession(epochSeconds: number): SessionKind {

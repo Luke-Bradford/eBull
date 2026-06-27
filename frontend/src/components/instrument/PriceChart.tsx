@@ -36,6 +36,7 @@ import {
 
 import type { ChartRange } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { CoverageGapMarkers } from "@/components/instrument/CoverageGapMarkers";
 import { SessionBands } from "@/components/instrument/SessionBands";
 import { EmptyState } from "@/components/states/EmptyState";
 import {
@@ -906,6 +907,13 @@ export function ChartCanvas({
         chartRef={chartRef}
         bars={bandBars}
         enabled={intraday && (showPm || showAh)}
+        profile={sessionProfile}
+        specials={specials}
+      />
+      <CoverageGapMarkers
+        chartRef={chartRef}
+        bars={cleanAll}
+        enabled={intraday}
         profile={sessionProfile}
         specials={specials}
       />
