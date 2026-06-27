@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -82,6 +83,131 @@ class SentimentScorer(ABC):
 
         Returns a SentimentResult. Raises on unrecoverable scorer errors.
         """
+
+
+class LexiconSentimentScorer(SentimentScorer):
+    """
+    Keyless deterministic fallback scorer (#1750).
+
+    A small signed finance lexicon — no external calls, no API key, no new
+    dependency. Used when ``ANTHROPIC_API_KEY`` is absent (e.g. dev) so the
+    news pipeline degrades gracefully instead of hard-skipping. Quality is
+    lower than Haiku (bag-of-words, no negation/context handling); the signed
+    score still satisfies the settled-decision contract (signed numeric, no
+    label column). Haiku is the primary scorer when a key is present.
+    """
+
+    # Net hits are normalised by this divisor → magnitude saturates at 3 net
+    # signed terms. Keeps a single strong word from pinning magnitude to 1.0.
+    _SATURATION = 3.0
+
+    _POSITIVE: frozenset[str] = frozenset(
+        {
+            "beat",
+            "beats",
+            "surge",
+            "surged",
+            "soar",
+            "soars",
+            "soared",
+            "rally",
+            "rallies",
+            "jump",
+            "jumps",
+            "jumped",
+            "gain",
+            "gains",
+            "rise",
+            "rises",
+            "rose",
+            "upgrade",
+            "upgraded",
+            "outperform",
+            "strong",
+            "growth",
+            "record",
+            "profit",
+            "profitable",
+            "dividend",
+            "buyback",
+            "raises",
+            "raised",
+            "bullish",
+            "win",
+            "wins",
+            "approval",
+            "approved",
+            "boost",
+            "boosts",
+            "expands",
+            "expansion",
+            "tops",
+            "beating",
+        }
+    )
+    _NEGATIVE: frozenset[str] = frozenset(
+        {
+            "miss",
+            "misses",
+            "missed",
+            "plunge",
+            "plunges",
+            "plunged",
+            "drop",
+            "drops",
+            "dropped",
+            "fall",
+            "falls",
+            "fell",
+            "slump",
+            "slumps",
+            "decline",
+            "declines",
+            "downgrade",
+            "downgraded",
+            "underperform",
+            "weak",
+            "loss",
+            "losses",
+            "cut",
+            "cuts",
+            "warning",
+            "warns",
+            "lawsuit",
+            "probe",
+            "investigation",
+            "fine",
+            "fined",
+            "layoff",
+            "layoffs",
+            "bearish",
+            "bankruptcy",
+            "default",
+            "recall",
+            "halt",
+            "halted",
+            "fraud",
+            "slashes",
+            "slashed",
+            "tumble",
+            "tumbles",
+            "tumbled",
+        }
+    )
+
+    _TOKEN_RE = re.compile(r"[a-z]+")
+
+    def score(self, headline: str, snippet: str | None) -> SentimentResult:
+        text = f"{headline} {snippet or ''}".lower()
+        tokens = self._TOKEN_RE.findall(text)
+        pos = sum(1 for t in tokens if t in self._POSITIVE)
+        neg = sum(1 for t in tokens if t in self._NEGATIVE)
+        net = pos - neg
+        if net == 0:
+            return SentimentResult(label="neutral", magnitude=0.0)
+        magnitude = min(1.0, abs(net) / self._SATURATION)
+        label: SentimentLabel = "positive" if net > 0 else "negative"
+        return SentimentResult(label=label, magnitude=round(magnitude, 4))
 
 
 class ClaudeSentimentScorer(SentimentScorer):
@@ -197,3 +323,19 @@ class ClaudeSentimentScorer(SentimentScorer):
 
         magnitude = max(0.0, min(1.0, magnitude))
         return SentimentResult(label=label, magnitude=magnitude)
+
+
+def make_sentiment_scorer() -> SentimentScorer:
+    """
+    Build the active sentiment scorer (#1750).
+
+    Single source of truth for "which scorer": Claude Haiku when
+    ``ANTHROPIC_API_KEY`` is configured, else the keyless lexicon fallback so
+    the news pipeline never hard-blocks on Anthropic availability.
+    """
+    from app.config import settings
+
+    if settings.anthropic_api_key:
+        return ClaudeSentimentScorer(settings.anthropic_api_key)
+    logger.info("Sentiment: no ANTHROPIC_API_KEY — using keyless lexicon fallback scorer")
+    return LexiconSentimentScorer()

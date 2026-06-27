@@ -721,6 +721,21 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
     ),
     ScheduledJob(
+        name=JOB_DAILY_NEWS_REFRESH,
+        display_name="Daily news refresh",
+        # Catch-all ``db`` lane — no ``news`` lane exists and a lane bounds
+        # job-overlap, not request rate (Yahoo RSS has no shared budget). Daily
+        # @ :17 is NOT a 5-min-aligned slot, so it cannot lose the db-lane
+        # tick-race to orchestrator_high_frequency_sync (every_5min) the way a
+        # :00/:05/... slot would (#1526/#1527 class).
+        source="db",
+        description="Fetch + dedup + sentiment-score news_events for Tier 1/2 instruments (Yahoo RSS).",
+        cadence=Cadence.daily(hour=7, minute=17),
+        # catch_up_on_boot=True = the first-load run over Tier 1/2 (RSS is
+        # recent-only; there is no deeper historical bulk source for news).
+        catch_up_on_boot=True,
+    ),
+    ScheduledJob(
         name=JOB_MONITOR_POSITIONS,
         display_name="Monitor open positions",
         # Own single-job lane (#1527). Hourly @ :15 is a 5-min-aligned slot,
@@ -2925,24 +2940,41 @@ def daily_financial_facts() -> None:
 
 def daily_news_refresh() -> None:
     """
-    Fetch, deduplicate, and score news events for all active Tier 1/2 instruments.
+    Fetch, deduplicate, and score news events for all covered Tier 1/2 instruments.
 
-    Runs daily (or on-demand). Idempotent — safe to re-run.
-    Requires ANTHROPIC_API_KEY to be set; skips sentiment scoring otherwise.
+    Runs daily (or on-demand). Idempotent — safe to re-run (dedup keyed on
+    (instrument_id, url_hash)). Source is keyless Yahoo Finance per-ticker RSS
+    (#1750). Sentiment uses Claude Haiku when ANTHROPIC_API_KEY is set, else a
+    keyless lexicon fallback — the refresh never hard-blocks on Anthropic.
     """
-    if not settings.anthropic_api_key:
-        logger.error("daily_news_refresh: ANTHROPIC_API_KEY not set, skipping")
-        _record_prereq_skip(JOB_DAILY_NEWS_REFRESH, "anthropic api key missing")
-        return
+    from app.providers.implementations.yahoo_rss_news import YahooRssNewsProvider
+    from app.services.news import refresh_news, select_tier12_instruments
+    from app.services.sentiment import make_sentiment_scorer
 
-    # No concrete NewsProvider implementation wired in v1. The guard
-    # must live OUTSIDE `_tracked_job` — otherwise a naive
-    # record_job_skip inside the tracker would produce two job_runs
-    # rows for one invocation (skipped + tracked-success). Wire a real
-    # provider here once one is available and remove this block.
-    logger.warning("daily_news_refresh: no NewsProvider implementation wired in v1 — skipping fetch")
-    _record_prereq_skip(JOB_DAILY_NEWS_REFRESH, "news provider not configured")
-    return
+    with _tracked_job(JOB_DAILY_NEWS_REFRESH) as tracker:
+        provider = YahooRssNewsProvider()
+        scorer = make_sentiment_scorer()
+        to_dt = datetime.now(UTC)
+        from_dt = to_dt - timedelta(days=7)  # RSS is recent-only
+
+        with connect_job() as conn:
+            symbols = select_tier12_instruments(conn)
+            if not symbols:
+                logger.info("daily_news_refresh: no covered Tier 1/2 instruments in scope")
+                tracker.row_count = 0
+                return
+            logger.info("daily_news_refresh: refreshing news for %d Tier 1/2 instrument(s)", len(symbols))
+            summary = refresh_news(provider, scorer, conn, symbols, from_dt, to_dt)
+
+        tracker.row_count = summary.articles_upserted
+        tracker.note = (
+            f"instruments={summary.instruments_attempted} "
+            f"fetched={summary.articles_fetched} "
+            f"upserted={summary.articles_upserted} "
+            f"exact_dupes={summary.exact_duplicates_skipped} "
+            f"near_dupes={summary.near_duplicates_skipped} "
+            f"instruments_skipped={summary.instruments_skipped}"
+        )
 
 
 def daily_thesis_refresh() -> None:

@@ -120,6 +120,31 @@ class NewsRefreshSummary:
 # ---------------------------------------------------------------------------
 
 
+def select_tier12_instruments(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+) -> list[tuple[str, str]]:
+    """
+    Return (symbol, instrument_id) for the covered Tier 1/2 universe — the
+    daily news-refresh scope (#1750).
+
+    Not ``find_stale_instruments`` (thesis-staleness semantics); news wants the
+    full covered set. ``instrument_id::text`` to match the ``refresh_news``
+    contract ``list[tuple[str, str]]``.
+    """
+    rows = conn.execute(
+        """
+        SELECT i.symbol, i.instrument_id::text
+        FROM coverage c
+        JOIN instruments i USING (instrument_id)
+        WHERE i.is_tradable
+          AND c.filings_status = 'analysable'
+          AND c.coverage_tier IN (1, 2)
+        ORDER BY i.symbol
+        """
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
 def refresh_news(
     provider: NewsProvider,
     scorer: SentimentScorer,
