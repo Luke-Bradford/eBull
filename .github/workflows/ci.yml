@@ -20,11 +20,14 @@ jobs:
 
       - name: Install uv
         # Pinned so CI / local dev / supply-chain audit see the
-        # same resolver behavior across runs.
-        run: pip install "uv==0.5.21"
+        # same resolver behavior across runs. Retry-wrapped (#1747): a
+        # transient PyPI/CDN fetch error otherwise fails the job.
+        run: bash scripts/ci_retry.sh pip install "uv==0.5.21"
 
       - name: Install dependencies
-        run: uv sync --group dev
+        # Retry-wrapped (#1747): uv sync downloads wheels from PyPI; a
+        # broken-pipe/reset mid-download is transient (PR #1744/#1746).
+        run: bash scripts/ci_retry.sh uv sync --group dev
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -226,7 +229,8 @@ jobs:
         # uv pinned for resolver determinism (matches the lint/pytest
         # jobs above); pip-audit floats so we always hit the latest
         # advisory database — pinning that would defeat the gate.
-        run: pip install "uv==0.5.21" pip-audit
+        # Retry-wrapped (#1747): transient PyPI fetch.
+        run: bash scripts/ci_retry.sh pip install "uv==0.5.21" pip-audit
 
       - name: Export Python lockfile to requirements.txt
         # GitHub's default ``bash -e`` does not reliably run process
@@ -291,13 +295,14 @@ jobs:
 
       - name: Install uv
         # Pinned to match the sibling ``lint`` + ``supply-chain`` jobs.
-        run: pip install "uv==0.5.21"
+        # Retry-wrapped (#1747): transient PyPI fetch.
+        run: bash scripts/ci_retry.sh pip install "uv==0.5.21"
 
       - name: Install dependencies
         # ``pyyaml`` (load floors.yaml + manifest.yaml) is already in
         # the dev group via uv.lock; use uv sync for parity with the
-        # local pre-push hook + sibling CI jobs.
-        run: uv sync --group dev
+        # local pre-push hook + sibling CI jobs. Retry-wrapped (#1747).
+        run: bash scripts/ci_retry.sh uv sync --group dev
 
       - name: Perf-claim artifact lint
         # All untrusted PR inputs are bound via env, not interpolated
