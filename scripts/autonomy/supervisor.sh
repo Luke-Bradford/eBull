@@ -76,11 +76,52 @@ run_session() {
     --output-format stream-json --verbose \
     >>"$log_file" 2>&1
   local rc=$?
-  # Usage/rate-limit signal anywhere in the session output.
-  if grep -qiE 'usage limit|rate limit|resets at|overloaded_error|too many requests|"?429"?|exceeded your' "$log_file"; then
+  # Usage/rate-limit signal from STRUCTURED stream-json events ONLY — never from
+  # assistant/tool text (#1770: a session editing SEC retry code is full of '429'/
+  # 'rate limit' literals; the old whole-log grep tripped on code content + slept
+  # ~31m for nothing on a session that SUCCEEDED). A real block = the session did
+  # NOT succeed AND a rate_limit_event's primary-window status is "rejected" and
+  # not covered by overage. A successful session was never blocked, whatever
+  # literals its content carried.
+  if is_usage_limit_hit "$log_file"; then
     return 3
   fi
   return $rc
+}
+
+# Classify a usage/rate-limit block from the session's stream-json log. Exit 0 =
+# blocked (caller maps to the limit backoff), 1 = not blocked. Parses events by
+# `type`; reads ONLY the structured rate_limit_info + the terminal result's
+# is_error — never greps content text (the #1770 false-positive class).
+is_usage_limit_hit() {
+  python3 - "$1" <<'PY'
+import json, sys
+
+rejected = False
+result = None
+for line in open(sys.argv[1], errors="replace"):
+    if '"type"' not in line:
+        continue
+    try:
+        o = json.loads(line)
+    except Exception:
+        continue
+    t = o.get("type")
+    if t == "rate_limit_event":
+        rli = o.get("rate_limit_info") or {}
+        # Primary window rejected AND overage isn't carrying the request.
+        if rli.get("status") == "rejected" and not rli.get("isUsingOverage"):
+            rejected = True
+    elif t == "result":
+        result = o
+
+# A session that produced a non-error terminal result was NOT blocked, regardless
+# of any rate_limit_event noise (overage/window allowed it through). Only treat as
+# a usage-limit hit when the run failed (errored or no terminal result) AND a
+# rejected rate_limit_event is present.
+succeeded = result is not None and not result.get("is_error")
+sys.exit(0 if (rejected and not succeeded) else 1)
+PY
 }
 
 while true; do
