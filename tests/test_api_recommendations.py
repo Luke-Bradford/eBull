@@ -43,6 +43,8 @@ def _make_rec_row(
     cash_balance_known: bool | None = True,
     created_at: datetime = _NOW,
     total_score: float | None = None,
+    data_completeness: float | None = 0.75,
+    completeness_tier: str | None = "full",
 ) -> dict[str, Any]:
     """Build a dict matching the recommendations query shape."""
     return {
@@ -58,6 +60,8 @@ def _make_rec_row(
         "suggested_size_pct": suggested_size_pct,
         "target_entry": target_entry,
         "cash_balance_known": cash_balance_known,
+        "data_completeness": data_completeness,
+        "completeness_tier": completeness_tier,
         "created_at": created_at,
         "total_score": total_score,
     }

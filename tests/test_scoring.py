@@ -32,6 +32,7 @@ from app.services.scoring import (
     _calmar_reward,
     _clip,
     _compute_penalties,
+    _data_completeness,
     _fetch_prior_ranks,
     _momentum_score,
     _quality_score,
@@ -594,6 +595,125 @@ class TestRealizedRiskPenalties:
         assert len(notes) == 2
 
 
+class TestDataCompleteness:
+    """Pure-logic table tests for _data_completeness (#1815 §4 / #1820). No DB.
+
+    C = 0.30*fund + 0.30*filing + 0.15*thesis + 0.15*price + 0.10*news.
+    Tiers: insufficient_data (<0.40), thin_data (<0.70), full (>=0.70).
+    """
+
+    def test_everything_present_is_full(self) -> None:
+        c, tier = _data_completeness(
+            fund_present=True,
+            filing_age_months=5.0,
+            thesis_present=True,
+            thesis_age_days=10,
+            price_td_count=300,
+            news_90d_count=5,
+        )
+        assert c == _approx(1.0)
+        assert tier == "full"
+
+    def test_price_only_is_insufficient(self) -> None:
+        # The exact bug class #1820 kills: price .15 + news .10 = .25 < .40.
+        c, tier = _data_completeness(
+            fund_present=False,
+            filing_age_months=None,
+            thesis_present=False,
+            thesis_age_days=None,
+            price_td_count=300,
+            news_90d_count=0,
+        )
+        assert c == _approx(0.15)
+        assert tier == "insufficient_data"
+
+    def test_fund_plus_filing_is_thin(self) -> None:
+        # .30 + .30 (no thesis, no price, no news) = .60 -> thin_data.
+        c, tier = _data_completeness(
+            fund_present=True,
+            filing_age_months=10.0,
+            thesis_present=False,
+            thesis_age_days=None,
+            price_td_count=0,
+            news_90d_count=0,
+        )
+        assert c == _approx(0.60)
+        assert tier == "thin_data"
+
+    def _filing(self, months: float | None) -> float:
+        # fund-only-off isolates the filing term.
+        return _data_completeness(
+            fund_present=False,
+            filing_age_months=months,
+            thesis_present=False,
+            thesis_age_days=None,
+            price_td_count=0,
+            news_90d_count=0,
+        )[0]
+
+    def test_filing_recency_bands(self) -> None:
+        # <=15mo full, <=27mo half, else 0.
+        assert self._filing(15.0) == _approx(0.30)
+        assert self._filing(20.0) == _approx(0.15)
+        assert self._filing(30.0) == _approx(0.0)
+        assert self._filing(None) == _approx(0.0)
+
+    def _thesis(self, present: bool, age_days: int | None) -> float:
+        return _data_completeness(
+            fund_present=False,
+            filing_age_months=None,
+            thesis_present=present,
+            thesis_age_days=age_days,
+            price_td_count=0,
+            news_90d_count=0,
+        )[0]
+
+    def test_thesis_present_but_stale_is_half(self) -> None:
+        assert self._thesis(True, 10) == _approx(0.15)
+        assert self._thesis(True, 200) == _approx(0.075)
+        assert self._thesis(False, None) == _approx(0.0)
+
+    def _price_news(self, price_td: int, news: int) -> float:
+        return _data_completeness(
+            fund_present=False,
+            filing_age_months=None,
+            thesis_present=False,
+            thesis_age_days=None,
+            price_td_count=price_td,
+            news_90d_count=news,
+        )[0]
+
+    def test_price_and_news_bands(self) -> None:
+        assert self._price_news(252, 3) == _approx(0.25)
+        assert self._price_news(63, 1) == _approx(0.125)
+        assert self._price_news(10, 0) == _approx(0.0)
+
+    def test_tier_boundaries_are_inclusive_lower(self) -> None:
+        # C exactly 0.40 is NOT insufficient (insufficient is strictly <0.40).
+        # fund .30 + news-full .10 = .40.
+        c_040, tier_040 = _data_completeness(
+            fund_present=True,
+            filing_age_months=None,
+            thesis_present=False,
+            thesis_age_days=None,
+            price_td_count=0,
+            news_90d_count=3,
+        )
+        assert c_040 == _approx(0.40)
+        assert tier_040 == "thin_data"
+        # C exactly 0.70 is full (full is >=0.70). fund .30 + filing .30 + news-full .10.
+        c_070, tier_070 = _data_completeness(
+            fund_present=True,
+            filing_age_months=5.0,
+            thesis_present=False,
+            thesis_age_days=None,
+            price_td_count=0,
+            news_90d_count=3,
+        )
+        assert c_070 == _approx(0.70)
+        assert tier_070 == "full"
+
+
 class TestCalmarReward:
     """Pure-logic table tests for _calmar_reward (#1635, v1.3). No DB.
 
@@ -833,6 +953,10 @@ def _make_fake_conn(
     avg_red_flag: float | None,
     valuation_row: dict[str, object] | None = None,
     risk_row: dict[str, object] | None = None,
+    fund_present: bool = True,
+    last_10kq: object = None,
+    price_td: int = 0,
+    news_90d: int = 0,
 ) -> MagicMock:
     """
     Return a MagicMock psycopg connection that supports the cursor(row_factory=...)
@@ -854,6 +978,11 @@ def _make_fake_conn(
         ("fetchone", thesis_row),
         ("fetchall", news_rows),
         ("fetchone", rf_row),
+        # #1820 data-completeness inputs (between red-flag and valuation):
+        ("fetchone", {"fund_present": fund_present}),
+        ("fetchone", {"last_10kq": last_10kq}),
+        ("fetchone", {"price_td": price_td}),
+        ("fetchone", {"news_90d": news_90d}),
         ("fetchone", valuation_row),
         ("fetchone", risk_row),  # #1633 realized-risk metrics (risk_v1 3y)
     ]

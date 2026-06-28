@@ -301,6 +301,10 @@ class ScoreResult:
     # Additive rewards (v1.3 Calmar). Empty for v1/v1.1/v1.2.
     rewards: list[RewardRecord] = field(default_factory=list)
     total_reward: float = 0.0
+    # Data-completeness evidence (#1820 §4). Additive — does NOT affect
+    # total_score; surfaced to the action layer + LLM record as a gate.
+    data_completeness: float | None = None
+    completeness_tier: str | None = None
     # Set after ranking pass
     rank: int | None = None
     rank_delta: int | None = None
@@ -367,6 +371,96 @@ def _apply_market_cap_basis(
     else:
         valuation_row["fcf_yield"] = None
     return valuation_row
+
+
+# ---------------------------------------------------------------------------
+# Data-completeness score C (#1815 §4 / #1820)
+# ---------------------------------------------------------------------------
+
+# §4 weights — must sum to 1.0.
+_C_WEIGHT_FUND = 0.30
+_C_WEIGHT_FILING = 0.30
+_C_WEIGHT_THESIS = 0.15
+_C_WEIGHT_PRICE = 0.15
+_C_WEIGHT_NEWS = 0.10
+
+# §4 thresholds.
+_C_FILING_FULL_MONTHS = 15.0  # 10-K/10-Q filed within this window → full credit
+_C_FILING_HALF_MONTHS = 27.0  # within this window → half credit
+_C_THESIS_FRESH_DAYS = 90  # thesis newer than this → full credit
+_C_PRICE_FULL_TD = 252  # ~1y of trading days → full credit
+_C_PRICE_HALF_TD = 63  # ~1 quarter → half credit
+_C_NEWS_FULL = 3  # items in last 90d → full credit
+_C_NEWS_HALF = 1  # ≥1 item → half credit
+
+# §4 tier cut-points. C < 0.40 is unclearable on price alone (price .15 +
+# news .10 = .25), which is exactly the thin-data bug class the gate kills.
+_C_TIER_INSUFFICIENT = 0.40
+_C_TIER_THIN = 0.70
+
+
+def _data_completeness(
+    fund_present: bool,
+    filing_age_months: float | None,
+    thesis_present: bool,
+    thesis_age_days: int | None,
+    price_td_count: int,
+    news_90d_count: int,
+) -> tuple[float, str]:
+    """Compute the #1815 §4 data-completeness score C (0-1) and its tier.
+
+    Pure — table-tested without a DB. Surfaces missingness as missingness; it
+    never neutral-fills. Tiers: ``insufficient_data`` (C<0.40 — action layer
+    caps at HOLD), ``thin_data`` (<0.70), ``full``.
+    """
+    fund = 1.0 if fund_present else 0.0
+
+    if filing_age_months is None:
+        filing = 0.0
+    elif filing_age_months <= _C_FILING_FULL_MONTHS:
+        filing = 1.0
+    elif filing_age_months <= _C_FILING_HALF_MONTHS:
+        filing = 0.5
+    else:
+        filing = 0.0
+
+    if not thesis_present or thesis_age_days is None:
+        thesis = 0.0
+    elif thesis_age_days <= _C_THESIS_FRESH_DAYS:
+        thesis = 1.0
+    else:
+        thesis = 0.5
+
+    if price_td_count >= _C_PRICE_FULL_TD:
+        price = 1.0
+    elif price_td_count >= _C_PRICE_HALF_TD:
+        price = 0.5
+    else:
+        price = 0.0
+
+    if news_90d_count >= _C_NEWS_FULL:
+        news = 1.0
+    elif news_90d_count >= _C_NEWS_HALF:
+        news = 0.5
+    else:
+        news = 0.0
+
+    c = (
+        _C_WEIGHT_FUND * fund
+        + _C_WEIGHT_FILING * filing
+        + _C_WEIGHT_THESIS * thesis
+        + _C_WEIGHT_PRICE * price
+        + _C_WEIGHT_NEWS * news
+    )
+
+    if c < _C_TIER_INSUFFICIENT:
+        tier = "insufficient_data"
+    elif c < _C_TIER_THIN:
+        tier = "thin_data"
+    else:
+        tier = "full"
+
+    return c, tier
 
 
 # ---------------------------------------------------------------------------
@@ -1105,6 +1199,65 @@ def _load_instrument_data(
         )
         rf_row: dict[str, Any] | None = cur.fetchone()
 
+        # --- Data-completeness inputs (#1820 §4) ---------------------------
+        # Each feeds the C score; all are EVIDENCE/safety-gate inputs, so they
+        # query the full population, not the LIMIT-5 fund sample.
+        #
+        # fund_present: any snapshot with revenue_ttm AND (op OR gross) margin.
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM fundamentals_snapshot
+                WHERE instrument_id = %(id)s
+                  AND revenue_ttm IS NOT NULL
+                  AND (operating_margin IS NOT NULL OR gross_margin IS NOT NULL)
+            ) AS fund_present
+            """,
+            {"id": instrument_id},
+        )
+        fund_present_row: dict[str, Any] | None = cur.fetchone()
+
+        # Latest 10-K / 10-Q filed date. Source rule: SEC annual (10-K, Reg S-K)
+        # / quarterly (10-Q, Exchange Act §13) reports; filing_events is our
+        # ingested EDGAR filing-event record (column is filing_type, NOT
+        # form_type). Amendments included.
+        cur.execute(
+            """
+            SELECT MAX(filing_date) AS last_10kq
+            FROM filing_events
+            WHERE instrument_id = %(id)s
+              AND filing_type IN ('10-K', '10-Q', '10-K/A', '10-Q/A')
+            """,
+            {"id": instrument_id},
+        )
+        filing_recency_row: dict[str, Any] | None = cur.fetchone()
+
+        # Price-history depth (trading days with a close).
+        cur.execute(
+            """
+            SELECT COUNT(*) AS price_td
+            FROM price_daily
+            WHERE instrument_id = %(id)s
+              AND close IS NOT NULL
+            """,
+            {"id": instrument_id},
+        )
+        price_count_row: dict[str, Any] | None = cur.fetchone()
+
+        # News coverage in the last 90 days (§4 uses a 90d window, distinct
+        # from the 30d sentiment lookback above).
+        news_cutoff_90 = now - timedelta(days=90)
+        cur.execute(
+            """
+            SELECT COUNT(*) AS news_90d
+            FROM news_events
+            WHERE instrument_id = %(id)s
+              AND event_time >= %(cutoff)s
+            """,
+            {"id": instrument_id, "cutoff": news_cutoff_90},
+        )
+        news_count_row: dict[str, Any] | None = cur.fetchone()
+
         # Valuation multiples from view (enrichment).
         # Degrade gracefully if the view or table does not exist yet
         # (pre-migration environment, partial test setup).
@@ -1184,6 +1337,11 @@ def _load_instrument_data(
         "avg_red_flag_score": _to_float(rf_row["avg_red_flag"]) if rf_row is not None else None,
         "valuation_row": valuation_row,
         "risk_row": risk_row,
+        # Data-completeness inputs (#1820 §4)
+        "fund_present": bool(fund_present_row["fund_present"]) if fund_present_row is not None else False,
+        "last_10kq_date": filing_recency_row["last_10kq"] if filing_recency_row is not None else None,
+        "price_td_count": int(price_count_row["price_td"]) if price_count_row is not None else 0,
+        "news_90d_count": int(news_count_row["news_90d"]) if news_count_row is not None else 0,
     }
 
 
@@ -1433,6 +1591,23 @@ def compute_score(
 
     explanation = "; ".join(explanation_parts) if explanation_parts else "all signals present"
 
+    # ------------------------------------------------------------------
+    # Data-completeness evidence (#1820 §4). Additive — independent of the
+    # total_score math above; consumed by the portfolio action layer (caps
+    # BUY/ADD when insufficient) and the LLM record.
+    # ------------------------------------------------------------------
+    last_10kq = data.get("last_10kq_date")
+    filing_age_months = ((now.date() - last_10kq).days / 30.4375) if last_10kq is not None else None
+    thesis_age_days = (now - thesis_created_at).days if thesis_created_at is not None else None
+    data_completeness, completeness_tier = _data_completeness(
+        fund_present=bool(data.get("fund_present", False)),
+        filing_age_months=filing_age_months,
+        thesis_present=thesis_row is not None,
+        thesis_age_days=thesis_age_days,
+        price_td_count=int(data.get("price_td_count", 0)),
+        news_90d_count=int(data.get("news_90d_count", 0)),
+    )
+
     return ScoreResult(
         instrument_id=instrument_id,
         model_version=model_version,
@@ -1444,6 +1619,8 @@ def compute_score(
         explanation=explanation,
         rewards=rewards,
         total_reward=total_reward,
+        data_completeness=data_completeness,
+        completeness_tier=completeness_tier,
     )
 
 
@@ -1574,6 +1751,8 @@ def compute_rankings(
                 explanation=result.explanation,
                 rewards=result.rewards,
                 total_reward=result.total_reward,
+                data_completeness=result.data_completeness,
+                completeness_tier=result.completeness_tier,
                 rank=position,
                 rank_delta=rank_delta,
             )
@@ -1621,7 +1800,8 @@ def _insert_score(
             momentum_score, sentiment_score, confidence_score,
             raw_total, total_score, model_version,
             penalties_json, explanation,
-            rank, rank_delta
+            rank, rank_delta,
+            data_completeness, completeness_tier
         )
         VALUES (
             %(instrument_id)s, %(scored_at)s,
@@ -1629,7 +1809,8 @@ def _insert_score(
             %(momentum_score)s, %(sentiment_score)s, %(confidence_score)s,
             %(raw_total)s, %(total_score)s, %(model_version)s,
             %(penalties_json)s, %(explanation)s,
-            %(rank)s, %(rank_delta)s
+            %(rank)s, %(rank_delta)s,
+            %(data_completeness)s, %(completeness_tier)s
         )
         """,
         {
@@ -1648,5 +1829,7 @@ def _insert_score(
             "explanation": result.explanation,
             "rank": result.rank,
             "rank_delta": result.rank_delta,
+            "data_completeness": result.data_completeness,
+            "completeness_tier": result.completeness_tier,
         },
     )

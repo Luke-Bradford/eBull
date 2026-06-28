@@ -70,7 +70,7 @@ EXIT_RED_FLAG_THRESHOLD: float = 0.80
 # Public types
 # ---------------------------------------------------------------------------
 
-Action = Literal["BUY", "ADD", "HOLD", "EXIT"]
+Action = Literal["BUY", "ADD", "HOLD", "EXIT", "CONSIDERED"]
 
 
 @dataclass(frozen=True)
@@ -384,7 +384,8 @@ def _load_ranked_scores(
                 s.confidence_score,
                 s.rank,
                 s.model_version,
-                s.scored_at
+                s.scored_at,
+                s.completeness_tier
             FROM scores s
             JOIN coverage c ON c.instrument_id = s.instrument_id
             WHERE s.model_version = %(mv)s
@@ -557,7 +558,7 @@ def _load_prior_recommendations(
 ) -> dict[int, dict[str, Any]]:
     """
     Return the most recent recommendation row per instrument.
-    Used to deduplicate redundant HOLD rows.
+    Used to deduplicate redundant HOLD and CONSIDERED rows (#1820).
     """
     if not instrument_ids:
         return {}
@@ -663,6 +664,11 @@ def _evaluate_add(
     if total_aum <= 0:
         return False, ""
 
+    # Data-completeness gate (#1820 §4): cap a held name at HOLD when its
+    # evidence is insufficient (C<0.40) — do not ADD to a thinly-evidenced bet.
+    if latest_score.get("completeness_tier") == "insufficient_data":
+        return False, ""
+
     current_pct = pos.market_value / total_aum
     if current_pct >= MAX_FULL_POSITION_PCT:
         return False, ""
@@ -757,6 +763,15 @@ def _evaluate_buy(
     pending_sector_pct: accumulated sector exposure from BUYs approved so far,
         keyed by sector name. Callers must update this after each approval.
     """
+    # Data-completeness gate (#1820 §4): a name with C<0.40 is too thinly
+    # evidenced to enter. The action layer caps it at HOLD — it is still
+    # ranked + surfaced (as CONSIDERED) but never bought.
+    if latest_score.get("completeness_tier") == "insufficient_data":
+        return (
+            False,
+            "BUY blocked: insufficient data (completeness C<0.40) — max HOLD until evidence improves",
+        )
+
     if len(positions) + pending_buy_count >= MAX_ACTIVE_POSITIONS:
         return (
             False,
@@ -867,7 +882,7 @@ def _insert_recommendation(
              score_id, model_version, cash_balance_known)
         VALUES
             (%(instrument_id)s, %(created_at)s, %(action)s, %(target_entry)s,
-             %(suggested_size_pct)s, %(rationale)s, 'proposed',
+             %(suggested_size_pct)s, %(rationale)s, %(status)s,
              %(score_id)s, %(model_version)s, %(cash_balance_known)s)
         """,
         {
@@ -877,6 +892,9 @@ def _insert_recommendation(
             "target_entry": rec.target_entry,
             "suggested_size_pct": rec.suggested_size_pct,
             "rationale": rec.rationale,
+            # CONSIDERED rows are informational only — status='considered' keeps
+            # them out of every execution selector (which filter status='proposed').
+            "status": "considered" if rec.action == "CONSIDERED" else "proposed",
             "score_id": rec.score_id,
             "model_version": rec.model_version,
             "cash_balance_known": rec.cash_balance_known,
@@ -884,23 +902,29 @@ def _insert_recommendation(
     )
 
 
-def _should_persist_hold(
+def _should_persist_dedup(
+    action: str,
     instrument_id: int,
     rationale: str,
     prior_recs: dict[int, dict[str, Any]],
 ) -> bool:
     """
-    Return True if this HOLD should be written to the DB.
+    Return True if this repeated-action row should be written to the DB.
 
-    Suppress redundant HOLDs: only write when there is no prior row,
-    the prior action was not HOLD, or the rationale materially changed.
+    Applies to the two informational, every-run actions — HOLD and CONSIDERED
+    (#1820) — which would otherwise spam an identical row each review
+    (settled decision: "recommendation history is append-oriented; do not spam
+    identical HOLD rows"). Suppress only when the prior row for this instrument
+    has the SAME action AND an identical rationale; write when there is no prior
+    row, the prior action differed, or the rationale materially changed.
     """
     prior = prior_recs.get(instrument_id)
     if prior is None:
         return True
-    if prior["action"] != "HOLD":
+    if prior["action"] != action:
         return True
-    # Rationale changed (e.g. instrument fell out of ranking)
+    # Rationale changed (e.g. instrument fell out of ranking, or a different
+    # gate now blocks it)
     if prior["rationale"] != rationale:
         return True
     return False
@@ -1138,26 +1162,49 @@ def run_portfolio_review(
             pending_buy_count += 1
             if sector is not None and total_aum > 0:
                 pending_sector_pct[sector] = pending_sector_pct.get(sector, 0.0) + MAX_INITIAL_POSITION_PCT
+        else:
+            # #1820: persist the blocked candidate as CONSIDERED with its
+            # buy_reason instead of silently discarding it, so the operator can
+            # see the unheld universe WAS evaluated. CONSIDERED rows are
+            # informational only — they get status='considered' (never
+            # 'proposed') and are invisible to every execution selector.
+            recommendations.append(
+                Recommendation(
+                    instrument_id=iid,
+                    symbol=symbol,
+                    action="CONSIDERED",
+                    target_entry=None,
+                    suggested_size_pct=None,
+                    rationale=buy_reason,
+                    score_id=score_id,
+                    model_version=mv,
+                    cash_balance_known=cash_known,
+                )
+            )
 
     # --- Persist atomically ---
     written = 0
     with conn.transaction():
         for rec in recommendations:
-            if rec.action == "HOLD" and not _should_persist_hold(rec.instrument_id, rec.rationale, prior_recs):
+            if rec.action in ("HOLD", "CONSIDERED") and not _should_persist_dedup(
+                rec.action, rec.instrument_id, rec.rationale, prior_recs
+            ):
                 continue
             _insert_recommendation(conn, rec, run_at)
             written += 1
 
-    # Log counts of generated recommendations; written may be less due to HOLD dedup
-    counts = {a: sum(1 for r in recommendations if r.action == a) for a in ("BUY", "ADD", "HOLD", "EXIT")}
+    # Log counts of generated recommendations; written may be less due to
+    # HOLD/CONSIDERED dedup.
+    counts = {a: sum(1 for r in recommendations if r.action == a) for a in ("BUY", "ADD", "HOLD", "EXIT", "CONSIDERED")}
     logger.info(
-        "run_portfolio_review complete: generated=%d written=%d BUY=%d ADD=%d HOLD=%d EXIT=%d",
+        "run_portfolio_review complete: generated=%d written=%d BUY=%d ADD=%d HOLD=%d EXIT=%d CONSIDERED=%d",
         len(recommendations),
         written,
         counts["BUY"],
         counts["ADD"],
         counts["HOLD"],
         counts["EXIT"],
+        counts["CONSIDERED"],
     )
 
     return PortfolioReviewResult(

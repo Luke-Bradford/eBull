@@ -891,8 +891,22 @@ export interface OrderResponse {
 // /recommendations (app/api/recommendations.py)
 // ---------------------------------------------------------------------------
 
-export type RecommendationAction = "BUY" | "ADD" | "HOLD" | "EXIT";
-export type RecommendationStatus = "proposed" | "approved" | "rejected" | "executed";
+export type RecommendationAction = "BUY" | "ADD" | "HOLD" | "EXIT" | "CONSIDERED";
+export type RecommendationStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "executed"
+  | "execution_pending"
+  | "execution_failed"
+  | "timing_deferred"
+  | "timing_expired"
+  | "cancelled"
+  | "considered";
+
+// Data-completeness tier (#1815 §4 / #1820): how well-evidenced the instrument
+// is. `insufficient_data` (C<0.40) caps the action layer at HOLD.
+export type CompletenessTier = "insufficient_data" | "thin_data" | "full";
 
 export interface RecommendationListItem {
   recommendation_id: number;
@@ -910,6 +924,10 @@ export interface RecommendationListItem {
   suggested_size_pct: number | null;
   target_entry: number | null;
   cash_balance_known: boolean | null;
+  // Data-completeness from the linked score (#1820); null for rows with no
+  // score_id or a pre-migration score row.
+  data_completeness: number | null;
+  completeness_tier: string | null;
   created_at: string;
 }
 
@@ -934,6 +952,8 @@ export interface RecommendationDetail {
   target_entry: number | null;
   cash_balance_known: boolean | null;
   total_score: number | null;
+  data_completeness: number | null;
+  completeness_tier: string | null;
   created_at: string;
 }
 

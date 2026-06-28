@@ -40,8 +40,23 @@ router = APIRouter(
 
 MAX_PAGE_LIMIT = 200
 
-Action = Literal["BUY", "ADD", "HOLD", "EXIT"]
-Status = Literal["proposed", "approved", "rejected", "executed"]
+# Filter inputs are closed enums so a nonsense value 422s (review-prevention-log:
+# "unbounded enum filters accept nonsense values silently"). Response `action`/
+# `status` fields stay open `str` (audit open-vocab pattern). CONSIDERED (#1820)
+# is informational; the full status set mirrors the live chk_recommendation_status.
+Action = Literal["BUY", "ADD", "HOLD", "EXIT", "CONSIDERED"]
+Status = Literal[
+    "proposed",
+    "approved",
+    "rejected",
+    "executed",
+    "execution_pending",
+    "execution_failed",
+    "timing_deferred",
+    "timing_expired",
+    "cancelled",
+    "considered",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +77,8 @@ class RecommendationListItem(BaseModel):
     suggested_size_pct: float | None
     target_entry: float | None
     cash_balance_known: bool | None
+    data_completeness: float | None
+    completeness_tier: str | None
     created_at: datetime
 
 
@@ -86,6 +103,8 @@ class RecommendationDetail(BaseModel):
     target_entry: float | None
     cash_balance_known: bool | None
     total_score: float | None
+    data_completeness: float | None
+    completeness_tier: str | None
     created_at: datetime
 
 
@@ -108,6 +127,8 @@ def _parse_list_item(row: dict[str, object]) -> RecommendationListItem:
         suggested_size_pct=parse_optional_float(row, "suggested_size_pct"),
         target_entry=parse_optional_float(row, "target_entry"),
         cash_balance_known=row["cash_balance_known"],  # type: ignore[arg-type]
+        data_completeness=parse_optional_float(row, "data_completeness"),
+        completeness_tier=row["completeness_tier"],  # type: ignore[arg-type]
         created_at=row["created_at"],  # type: ignore[arg-type]
     )
 
@@ -117,14 +138,16 @@ def _parse_list_item(row: dict[str, object]) -> RecommendationListItem:
 # ---------------------------------------------------------------------------
 
 
-# The CTE deduplicates consecutive HOLDs: for each (instrument_id, action='HOLD')
-# group, only the latest row (by created_at DESC, recommendation_id DESC) is kept.
-# Non-HOLD rows always pass through (rn is set to 1 unconditionally).
+# The CTE deduplicates consecutive HOLD/CONSIDERED rows: for each
+# (instrument_id, action) group in those two informational actions, only the
+# latest row (by created_at DESC, recommendation_id DESC) is kept. Every other
+# action passes through (rn is set to 1 unconditionally). CONSIDERED (#1820)
+# is, like HOLD, written every review run, so it gets the same dedup.
 _DEDUPED_CTE = """
 WITH deduped AS (
     SELECT r.*,
            CASE
-               WHEN r.action = 'HOLD' THEN
+               WHEN r.action IN ('HOLD', 'CONSIDERED') THEN
                    ROW_NUMBER() OVER (
                        PARTITION BY r.instrument_id, r.action
                        ORDER BY r.created_at DESC, r.recommendation_id DESC
@@ -145,17 +168,20 @@ def list_recommendations(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=MAX_PAGE_LIMIT),
 ) -> RecommendationsListResponse:
-    """Paginated recommendation history with HOLD dedup.
+    """Paginated recommendation history with HOLD/CONSIDERED dedup.
 
     Filters:
-      - action: exact match (BUY, ADD, HOLD, EXIT)
-      - status: exact match (proposed, approved, rejected, executed)
+      - action: exact match (BUY, ADD, HOLD, EXIT, CONSIDERED)
+      - status: exact match (proposed, approved, rejected, executed,
+        execution_pending, execution_failed, timing_deferred, timing_expired,
+        cancelled, considered)
       - instrument_id: exact match
 
     Ordering: created_at DESC, recommendation_id DESC (newest first).
 
-    HOLD dedup: for each instrument, only the latest HOLD is returned.
-    Non-HOLD actions are always returned.
+    HOLD/CONSIDERED dedup: for each instrument, only the latest row of each of
+    those two informational actions is returned. Every other action is always
+    returned.
     """
     where_clauses: list[str] = ["d.rn = 1"]
     filter_params: dict[str, object] = {}
@@ -193,9 +219,12 @@ def list_recommendations(
                d.action, d.status, d.rationale,
                d.score_id, d.model_version,
                d.suggested_size_pct, d.target_entry,
-               d.cash_balance_known, d.created_at
+               d.cash_balance_known,
+               s.data_completeness, s.completeness_tier,
+               d.created_at
         FROM deduped d
         JOIN instruments i USING (instrument_id)
+        LEFT JOIN scores s ON s.score_id = d.score_id
         {where_sql}
         ORDER BY d.created_at DESC, d.recommendation_id DESC
         LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608
@@ -233,7 +262,8 @@ def get_recommendation(
                r.score_id, r.model_version,
                r.suggested_size_pct, r.target_entry,
                r.cash_balance_known, r.created_at,
-               s.total_score
+               s.total_score,
+               s.data_completeness, s.completeness_tier
         FROM trade_recommendations r
         JOIN instruments i USING (instrument_id)
         LEFT JOIN scores s USING (score_id)
@@ -265,5 +295,7 @@ def get_recommendation(
         target_entry=parse_optional_float(row, "target_entry"),
         cash_balance_known=row["cash_balance_known"],  # type: ignore[arg-type]
         total_score=parse_optional_float(row, "total_score"),
+        data_completeness=parse_optional_float(row, "data_completeness"),
+        completeness_tier=row["completeness_tier"],  # type: ignore[arg-type]
         created_at=row["created_at"],  # type: ignore[arg-type]
     )

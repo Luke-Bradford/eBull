@@ -1,8 +1,19 @@
 import type { RecommendationsQuery } from "@/api/recommendations";
 import type { RecommendationAction, RecommendationStatus } from "@/api/types";
 
-const ACTION_OPTIONS: RecommendationAction[] = ["BUY", "ADD", "HOLD", "EXIT"];
-const STATUS_OPTIONS: RecommendationStatus[] = ["proposed", "approved", "rejected", "executed"];
+const ACTION_OPTIONS: RecommendationAction[] = ["BUY", "ADD", "HOLD", "EXIT", "CONSIDERED"];
+const STATUS_OPTIONS: RecommendationStatus[] = [
+  "proposed",
+  "approved",
+  "rejected",
+  "executed",
+  "execution_pending",
+  "execution_failed",
+  "timing_deferred",
+  "timing_expired",
+  "cancelled",
+  "considered",
+];
 
 export interface RecommendationsFiltersProps {
   query: RecommendationsQuery;
