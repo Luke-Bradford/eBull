@@ -18,36 +18,20 @@ from __future__ import annotations
 import json
 import sys
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
 
 import psycopg
 
 from app.config import settings
 from app.security.sessions import create_session
 from app.services.operators import sole_operator_id
+from scripts._dev_guard import assert_dev_environment
 
 _DEV_BASE_URL = "http://localhost:5173"
 _SESSION_TTL = timedelta(hours=12)
 
 
-def _assert_dev_environment() -> None:
-    """Refuse to mint a privileged session against anything but a local dev DB.
-
-    Two independent guards (BLOCKING review #1765): ``app_env`` must be a dev
-    value AND the DB must be localhost — so a stray ``DATABASE_URL`` pointing at
-    a remote/prod host (CI override, env misfire) can never create a live
-    operator session."""
-    if settings.app_env not in ("dev", "development", "local", "test"):
-        raise SystemExit(f"refusing to mint a session: app_env={settings.app_env!r} is not a dev environment")
-    # Exact hostname match — a substring check (`"@localhost" in url`) is bypassed
-    # by `@localhost.evil.com` (review #1765).
-    host = urlparse(settings.database_url).hostname
-    if host not in ("localhost", "127.0.0.1", "::1"):
-        raise SystemExit(f"refusing to mint a session: database_url host {host!r} is not localhost (dev-only tool)")
-
-
 def main() -> int:
-    _assert_dev_environment()
+    assert_dev_environment()  # refuse to mint against non-dev / remote DB (#1765)
     with psycopg.connect(settings.database_url) as conn:
         operator_id = sole_operator_id(conn)
         session_id, expires_at = create_session(

@@ -34,6 +34,7 @@ import psycopg
 import psycopg.rows
 
 from app.config import settings
+from scripts._dev_guard import assert_dev_environment
 
 # (table, holder-key column, share column) — the three ownership rollups the
 # operator sees. The share column differs: blockholders store the amount as
@@ -90,6 +91,7 @@ def _control_group_dup(
 
 
 def main() -> int:
+    assert_dev_environment()  # read-only, but dev scripts never touch a remote DB (#1765)
     findings: list[dict[str, object]] = []
     # autocommit so one check's error (e.g. a missing column on a schema change)
     # doesn't poison the transaction for the remaining checks.
