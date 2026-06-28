@@ -154,3 +154,33 @@ intraday row on the last day. (PR #1597 review suggested exactly that
 rewrite; it would have excluded the whole final day of each report
 period.) `reporting.py` uses the half-open form at every period-bounded
 query — keep new queries consistent with it.
+
+## Two date-resolved lookups can collapse to one row → a fake zero
+
+When a metric is a difference between two "latest row relative to a
+date" lookups — e.g. `close_end / close_start - 1` where
+`close_start` = latest close `< period_start` and `close_end` = latest
+close `<= period_end` — stale or sparse data can make BOTH queries
+resolve to the **same row**, so the difference is a confident `0`,
+indistinguishable from a real flat period.
+
+```sql
+-- close_start: latest STRICTLY BEFORE the window
+SELECT price_date, close FROM price_daily
+WHERE instrument_id = %(iid)s AND close IS NOT NULL AND price_date < %(start)s
+ORDER BY price_date DESC LIMIT 1;
+-- close_end: latest AT-OR-BEFORE the window end
+SELECT price_date, close FROM price_daily
+WHERE instrument_id = %(iid)s AND close IS NOT NULL AND price_date <= %(end)s
+ORDER BY price_date DESC LIMIT 1;
+-- if the latest available close predates the whole window, BOTH return
+-- the same pre-window row → close_end/close_start - 1 == 0 (FAKE).
+```
+
+Fix: select each endpoint WITH its `price_date` and gate the
+computation on coverage — only compute when the end row's date
+`>= period_start` (a row actually fell inside the span); otherwise
+return null so the UI shows "—"/"unavailable", never `0`. Same
+"no-data ≠ zero" rule the risk layer encodes as `benchmark_missing`.
+Verify on a window the data does NOT cover, not just a healthy one.
+(#1817 `_benchmark_closes`.)
