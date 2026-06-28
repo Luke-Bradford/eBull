@@ -19,7 +19,11 @@ branches, no unpushed WIP).
    population BEFORE speccing** → spec → Codex ckpt-1 → implement (schema →
    service → tests → glue) → local gates → Codex ckpt-2 → branch + PR → poll the
    Claude review bot + CI → resolve EVERY comment (FIXED/EXTRACTED/REBUTTED) →
-   merge only on APPROVE-on-latest-commit + green.
+   **merge ONLY via `scripts/autonomy/safe_merge.sh <pr>`** (mechanically
+   verifies bot-APPROVE-on-latest-SHA + CI-green; never `gh pr merge` directly).
+   If the latest round is **rebuttal-only** (no code change, you think the bot is
+   wrong), do NOT merge unattended — that needs Codex ckpt-3 + human judgment;
+   leave the PR open with your reasoning and move on.
 3. **Restart the jobs daemon** onto new main after any jobs/ingest/parser/
    scheduler merge (graceful SIGTERM, confirm old PID gone), `sec_rebuild` the
    affected source only if output changed. FE/API/docs/test/script merges need
@@ -33,9 +37,12 @@ branches, no unpushed WIP).
 
 ## Hard safety rules — NEVER violate, even unattended
 - **NEVER execute, approve, or simulate a trade.** Do not POST to order
-  endpoints, do not approve recommendations, do not touch the kill-switch, do
-  **not close any position**. Trade execution is human-gated by design. If a
-  ticket's only path forward is executing a trade, skip it.
+  endpoints (`/portfolio/orders`, `/positions/{id}/close`), do not approve
+  recommendations, do not touch the kill-switch, do **not close any position** —
+  demo fills are still persisted writes. Trade execution is human-gated by
+  design. If a ticket's only path forward is executing a trade, skip it. (The
+  loop is also run with NO broker credentials configured, so the order client
+  fails closed — see setup.md; this rule is the second layer.)
 - Never `git push --no-verify` (emergencies only, which this is not).
 - Never restart the API (`:8000`) or vite (`:5173`) VS Code tasks.
 - Never hard-delete dev data; never run destructive ops on the dev DB beyond a

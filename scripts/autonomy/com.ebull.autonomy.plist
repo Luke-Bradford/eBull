@@ -37,9 +37,11 @@
   <key>RunAtLoad</key>
   <false/>
 
+  <!-- /tmp always exists — launchd opens these BEFORE run_loop.sh can mkdir its
+       var/ logdir (Codex ckpt-2 MED). Per-run transcripts still go to var/autonomy-logs. -->
   <key>StandardOutPath</key>
-  <string>/Users/lukebradford/Dev/eBull/var/autonomy-logs/launchd.out.log</string>
+  <string>/tmp/ebull-autonomy-launchd.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/lukebradford/Dev/eBull/var/autonomy-logs/launchd.err.log</string>
+  <string>/tmp/ebull-autonomy-launchd.err.log</string>
 </dict>
 </plist>

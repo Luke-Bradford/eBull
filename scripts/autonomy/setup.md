@@ -47,6 +47,28 @@ gh pr list ; gh issue list --state open      # the board draining
   review bot, or `--no-verify`. Trade execution stays human-gated; the review bot
   + execution-guard remain the safety gates.
 
+## REQUIRED before going unattended (mechanical safety gates — Codex ckpt-2)
+A prompt rule is not a control under `--dangerously-skip-permissions`. Two
+server/credential-level gates make the loop safe regardless of session behaviour:
+
+1. **Server-side merge gate — required status checks on `main`.** `main` already
+   requires a review; also require the bot + CI checks so GitHub itself blocks a
+   merge until they pass (the loop physically cannot merge a red/un-reviewed PR):
+   ```bash
+   gh api -X PUT repos/Luke-Bradford/eBull/branches/main/protection/required_status_checks \
+     -f strict=true -f 'contexts[]=review' -f 'contexts[]=lint' -f 'contexts[]=build'
+   ```
+   Decide separately whether to keep the human PR-approval requirement: keep it →
+   the loop does everything and leaves each PR for your one-click merge
+   (recommended for a trading repo); drop it → the loop self-merges once checks
+   are green (zero clicks, less oversight). `safe_merge.sh` enforces the
+   bot-APPROVE+green check locally either way (defence-in-depth).
+
+2. **No broker credentials for the loop.** Run with NO eToro creds configured so
+   the order client fails closed — an unattended session then cannot place even a
+   demo order. Verify `GET /broker/credentials` is empty (or creds absent from
+   the loop's env) before loading the agent.
+
 ## Notes / caveats
 - `run_loop.sh` uses `--dangerously-skip-permissions` so the unattended session
   isn't blocked on edit/commit prompts. That's the trade-off for hands-off; the
