@@ -24,6 +24,19 @@ branches, no unpushed WIP).
    If the latest round is **rebuttal-only** (no code change, you think the bot is
    wrong), do NOT merge unattended — that needs Codex ckpt-3 + human judgment;
    leave the PR open with your reasoning and move on.
+
+   **Push discipline — run the terminal push/PR step in the FOREGROUND, never
+   background it (#1771).** The pre-push gate is slow (full fast tier + smoke +
+   chokepoint lints, often >2 min); run `git push` as a normal FOREGROUND Bash
+   call with a long timeout (up to 10 min / 600000 ms), and run `gh pr create`
+   right after it succeeds — both foreground. Do **NOT** kick off the push or the
+   gate as a background task and then yield/end the turn: a headless run that
+   completes kills any still-running background tasks, so the push never finishes,
+   no branch is pushed and **no PR ever opens** even though the fix is committed
+   locally. Only AFTER the branch is pushed AND the PR is confirmed open may you
+   background the review-bot/CI **poll** (the PR already exists at that point).
+   Never end a turn with an unpushed commit or an un-opened PR for work you
+   intended to ship — verify `git push` succeeded and the PR URL exists first.
 3. **Restart the jobs daemon** onto new main after any jobs/ingest/parser/
    scheduler merge (graceful SIGTERM, confirm old PID gone), `sec_rebuild` the
    affected source only if output changed. FE/API/docs/test/script merges need
