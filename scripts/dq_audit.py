@@ -8,8 +8,17 @@ this surfaces candidates, it does not assert bugs).
 First check class: **control-group double-count** in the ownership ``*_current``
 rollups — within one instrument, a single ``source_accession`` emitting ≥2 rows
 with the SAME non-zero ``shares`` but different holders is one beneficial
-position reported by a control chain (e.g. Buffett indirect == Berkshire
-direct) and counted N times. (Found #1764 this way.)
+position reported by a control chain and counted N times. (Found #1764 this way.)
+
+IMPORTANT — audit the OPERATOR-VISIBLE layer, not just the raw table. The
+``/ownership-rollup`` endpoint already collapses LARGE same-value control groups
+via ``ownership_rollup._reconcile_insider_control_groups`` (#1652), but only
+ABOVE a magnitude floor (``_INSIDER_GROUP_MIN_SHARES`` = 1,000,000). So a raw
+``*_current`` scan over-reports massively (≥1M groups are fixed downstream); the
+genuine live bug is the SUB-floor tail. We split the count on that floor and flag
+only the sub-floor subset as the operator-visible candidate. (Lesson: a feeder
+that scans the wrong layer cries wolf — #1764 first looked like 74.5B shares;
+the real operator-visible figure is ~387M.)
 
 Run::
 
@@ -36,12 +45,19 @@ _OWNERSHIP_CURRENT = [
 ]
 
 
+# The #1652 insider control-group collapse only fires at/above this magnitude
+# (ownership_rollup._INSIDER_GROUP_MIN_SHARES). Groups below it survive to the
+# operator-visible rollup — that sub-floor subset is the genuine candidate.
+_COLLAPSE_FLOOR = 1_000_000
+
+
 def _control_group_dup(
     conn: psycopg.Connection[object], table: str, holder_col: str, share_col: str
 ) -> dict[str, object]:
     """Count (instrument, accession, shares) groups with >1 distinct holder and
-    shares>0 — the same position double-counted by a control chain."""
-    # table/holder_col are from the static module list, never user input.
+    shares>0 — same position double-counted by a control chain — split on the
+    #1652 collapse floor so the operator-visible (sub-floor) subset is distinct."""
+    # table/holder_col/share_col are from the static module list, never user input.
     sql = f"""
         WITH dup AS (
             SELECT instrument_id, source_accession, {share_col} AS shares,
@@ -51,22 +67,25 @@ def _control_group_dup(
             GROUP BY 1, 2, 3
             HAVING count(DISTINCT {holder_col}) > 1
         )
-        SELECT count(*) AS dup_groups,
-               count(DISTINCT instrument_id) AS instruments,
-               COALESCE(SUM((nholders - 1) * shares), 0) AS overcounted_shares
+        SELECT
+            count(*) FILTER (WHERE shares < %(floor)s) AS live_groups,
+            count(DISTINCT instrument_id) FILTER (WHERE shares < %(floor)s) AS live_instruments,
+            COALESCE(SUM((nholders - 1) * shares) FILTER (WHERE shares < %(floor)s), 0) AS live_overcount,
+            count(*) AS total_groups,
+            COALESCE(SUM((nholders - 1) * shares), 0) AS total_overcount
         FROM dup
     """  # noqa: S608 — identifiers are static module constants
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        # sql is built only from static module constants (table/holder/share
-        # identifiers) — no user input; cast to satisfy psycopg's LiteralString.
-        cur.execute(cast(LiteralString, sql))
+        cur.execute(cast(LiteralString, sql), {"floor": _COLLAPSE_FLOOR})
         row = cur.fetchone() or {}
     return {
         "check": "control_group_dup",
         "table": table,
-        "dup_groups": int(row.get("dup_groups", 0)),
-        "instruments": int(row.get("instruments", 0)),
-        "overcounted_shares": float(row.get("overcounted_shares", 0)),
+        "live_groups": int(row.get("live_groups", 0)),
+        "live_instruments": int(row.get("live_instruments", 0)),
+        "live_overcount": float(row.get("live_overcount", 0)),
+        "total_groups": int(row.get("total_groups", 0)),
+        "total_overcount": float(row.get("total_overcount", 0)),
     }
 
 
@@ -82,17 +101,20 @@ def main() -> int:
                 findings.append({"check": "control_group_dup", "table": table, "error": str(exc)})
 
     print("=== DQ audit — control-group double-count in ownership rollups ===")
+    print("(live = operator-visible, below the #1652 collapse floor; total = raw table incl. downstream-collapsed)")
     for f in findings:
         if "error" in f:
             print(f"  {f['table']}: ERROR {f['error']}")
             continue
-        flag = "  ⚠ CANDIDATE" if int(f["dup_groups"]) > 0 else "  ok"  # type: ignore[call-overload]
+        live = int(f["live_groups"])  # type: ignore[call-overload]
+        flag = "  ⚠ CANDIDATE" if live > 0 else "  ok"
         print(
-            f"{flag}  {f['table']}: {f['dup_groups']} dup groups over "
-            f"{f['instruments']} instruments, {f['overcounted_shares']:,.0f} shares overcounted"
+            f"{flag}  {f['table']}: LIVE {live} groups / "
+            f"{f['live_instruments']} instruments / {f['live_overcount']:,.0f} shares "
+            f"(total incl. collapsed: {f['total_groups']} groups / {f['total_overcount']:,.0f})"
         )
     print(
-        "\nNon-zero dup_groups = a candidate ticket. Confirm the signature on the "
+        "\nNon-zero LIVE groups = a candidate ticket. Confirm the signature on the "
         "full population + cite the source rule before filing (see #1764)."
     )
     return 0
