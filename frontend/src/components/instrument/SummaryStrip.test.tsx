@@ -27,7 +27,8 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
     identity: {
       symbol: "AAPL",
       display_name: "Apple Inc.",
-      sector: "Technology",
+      sector: "8",
+      sector_name: "Technology",
       industry: "Consumer Electronics",
       gics_sector: null,
       sector_spdr: null,
@@ -176,6 +177,28 @@ describe("SummaryStrip — action gating", () => {
     ).toBeInTheDocument();
     // The opaque code is not surfaced when a real sector resolves.
     expect(screen.queryByText(/^3 ·/)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the resolved eToro industry name, never the raw id (#1599)", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          identity: {
+            ...summary().identity,
+            sector: "5",
+            sector_name: "Healthcare",
+            gics_sector: null,
+            sector_spdr: null,
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByText(/Healthcare/)).toBeInTheDocument();
+    // The opaque eToro numeric id must never be surfaced.
+    expect(screen.queryByText(/^5 ·/)).not.toBeInTheDocument();
   });
 
   it("hides Close when not held", () => {

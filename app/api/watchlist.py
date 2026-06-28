@@ -39,7 +39,10 @@ class WatchlistItem(BaseModel):
     company_name: str
     exchange: str | None
     currency: str | None
-    sector: str | None
+    sector: str | None  # eToro numeric industry id, as text (provider contract)
+    # Resolved eToro industry name via etoro_stocks_industries (sql/070); None when
+    # sector is NULL or the id has no dictionary row. The operator-facing label.
+    sector_name: str | None
     added_at: datetime
     notes: str | None
 
@@ -75,10 +78,12 @@ def list_watchlist(
         cur.execute(
             """
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
-                   i.currency, i.sector,
+                   i.currency, i.sector, esi.name AS sector_name,
                    w.added_at, w.notes
             FROM watchlist w
             JOIN instruments i USING (instrument_id)
+            LEFT JOIN etoro_stocks_industries esi
+              ON esi.industry_id::text = i.sector
             WHERE w.operator_id = %(op)s
             ORDER BY w.added_at DESC
             """,
@@ -93,6 +98,7 @@ def list_watchlist(
             exchange=r["exchange"],  # type: ignore[union-attr]
             currency=r["currency"],  # type: ignore[union-attr]
             sector=r["sector"],  # type: ignore[union-attr]
+            sector_name=r["sector_name"],  # type: ignore[union-attr]
             added_at=r["added_at"],  # type: ignore[arg-type]
             notes=r["notes"],  # type: ignore[union-attr]
         )
@@ -113,8 +119,11 @@ def add_to_watchlist(
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            "SELECT instrument_id, symbol, company_name, exchange, currency, sector "
-            "FROM instruments WHERE UPPER(symbol) = %(s)s LIMIT 1",
+            "SELECT i.instrument_id, i.symbol, i.company_name, i.exchange, "
+            "i.currency, i.sector, esi.name AS sector_name "
+            "FROM instruments i "
+            "LEFT JOIN etoro_stocks_industries esi ON esi.industry_id::text = i.sector "
+            "WHERE UPPER(i.symbol) = %(s)s LIMIT 1",
             {"s": symbol_clean},
         )
         inst = cur.fetchone()
@@ -152,6 +161,7 @@ def add_to_watchlist(
         exchange=inst["exchange"],  # type: ignore[union-attr]
         currency=inst["currency"],  # type: ignore[union-attr]
         sector=inst["sector"],  # type: ignore[union-attr]
+        sector_name=inst["sector_name"],  # type: ignore[union-attr]
         added_at=wl_row["added_at"],  # type: ignore[arg-type]
         notes=wl_row["notes"],  # type: ignore[union-attr]
     )

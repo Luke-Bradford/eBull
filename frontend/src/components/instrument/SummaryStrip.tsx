@@ -179,9 +179,10 @@ export function SummaryStrip({
       </div>
 
       {/* Row 2: sector strip. Prefer the real GICS sector (#1634, resolved from
-          the SEC SIC) over the opaque 1-9 `sector` code; show its sector-SPDR. */}
+          the SEC SIC); fall back to the resolved eToro industry name (#1599) for
+          non-SEC instruments. Never the opaque numeric `sector` id. */}
       <div className="mt-1 text-xs text-slate-500">
-        {identity.gics_sector ?? identity.sector ?? "—"}
+        {identity.gics_sector ?? identity.sector_name ?? "—"}
         {identity.gics_sector && identity.sector_spdr
           ? ` (${identity.sector_spdr})`
           : ""}

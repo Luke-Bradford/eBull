@@ -95,9 +95,11 @@ def test_happy_path_with_quote_and_no_sec(client: TestClient) -> None:
         "exchange": "8",
         "currency": "USD",
         "sector": None,
+        "sector_name": None,
         "industry": None,
         "country": None,
         "is_tradable": True,
+        "session_profile": "continuous",
         "coverage_tier": 3,
         "bid": Decimal("60000.50"),
         "ask": Decimal("60001.00"),
@@ -119,6 +121,7 @@ def test_happy_path_with_quote_and_no_sec(client: TestClient) -> None:
     assert body["identity"]["currency"] == "USD"
     # No yfinance fill-in for sector/industry/country.
     assert body["identity"]["sector"] is None
+    assert body["identity"]["sector_name"] is None
     assert body["identity"]["industry"] is None
     # Price reflects ``quotes.last``, not yfinance.
     assert body["price"]["current"] == "60000.75"
@@ -146,9 +149,11 @@ def test_no_quote_returns_null_price_block(client: TestClient) -> None:
         "exchange": "8",
         "currency": "USD",
         "sector": None,
+        "sector_name": None,
         "industry": None,
         "country": None,
         "is_tradable": True,
+        "session_profile": "continuous",
         "coverage_tier": 3,
         "bid": None,
         "ask": None,
@@ -179,9 +184,11 @@ def test_bid_ask_mid_when_last_missing(client: TestClient) -> None:
         "exchange": "NYSE",
         "currency": "USD",
         "sector": None,
+        "sector_name": None,
         "industry": None,
         "country": None,
         "is_tradable": True,
+        "session_profile": "continuous",
         "coverage_tier": 2,
         "bid": Decimal("12.34"),
         "ask": Decimal("12.36"),
@@ -211,9 +218,11 @@ def test_zero_last_uses_bid_ask_mid(client: TestClient) -> None:
         "exchange": "NYSE",
         "currency": "USD",
         "sector": None,
+        "sector_name": None,
         "industry": None,
         "country": None,
         "is_tradable": True,
+        "session_profile": "continuous",
         "coverage_tier": 2,
         "bid": Decimal("697.16"),
         "ask": Decimal("697.22"),
@@ -241,10 +250,12 @@ def test_local_company_name_authoritative(client: TestClient) -> None:
         "company_name": "Apple Inc.",
         "exchange": "NMS",
         "currency": "USD",
-        "sector": "Technology",
+        "sector": "8",
+        "sector_name": "Technology",
         "industry": "Consumer Electronics",
         "country": "United States",
         "is_tradable": True,
+        "session_profile": "continuous",
         "coverage_tier": 1,
         "bid": Decimal("180.00"),
         "ask": Decimal("180.05"),
@@ -262,7 +273,10 @@ def test_local_company_name_authoritative(client: TestClient) -> None:
     body = resp.json()
     assert body["identity"]["display_name"] == "Apple Inc."
     assert body["identity"]["symbol"] == "AAPL"
-    assert body["identity"]["sector"] == "Technology"
+    # #1599: raw `sector` keeps the eToro numeric id (provider contract);
+    # `sector_name` carries the resolved label the FE renders.
+    assert body["identity"]["sector"] == "8"
+    assert body["identity"]["sector_name"] == "Technology"
     assert body["identity"]["industry"] == "Consumer Electronics"
 
 
@@ -362,10 +376,14 @@ def test_id_override_pinned_lookup(client: TestClient) -> None:
         "company_name": "Grayscale Bitcoin Mini Trust",
         "exchange": "5",
         "currency": "USD",
-        "sector": None,
+        # #1599: prove the ?id= lookup branch also carries the resolved
+        # sector_name (raw eToro id preserved, name resolved via the join).
+        "sector": "4",
+        "sector_name": "Financial",
         "industry": None,
         "country": "United States",
         "is_tradable": True,
+        "session_profile": "us_equity",
         "coverage_tier": 3,
         "bid": Decimal("34.30"),
         "ask": Decimal("34.40"),
@@ -379,6 +397,9 @@ def test_id_override_pinned_lookup(client: TestClient) -> None:
         _clear_conn()
     assert resp.status_code == 200, resp.text
     assert resp.json()["instrument_id"] == 12220
+    # id-branch SELECT carries the resolved sector_name (#1599).
+    assert resp.json()["identity"]["sector"] == "4"
+    assert resp.json()["identity"]["sector_name"] == "Financial"
 
 
 def test_id_override_symbol_mismatch_returns_404(client: TestClient) -> None:
@@ -407,9 +428,11 @@ def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
         "exchange": "NYSE",
         "currency": "USD",
         "sector": None,
+        "sector_name": None,
         "industry": None,
         "country": "United States",
         "is_tradable": True,
+        "session_profile": "continuous",
         "coverage_tier": 2,
         "bid": Decimal("50"),
         "ask": Decimal("50.10"),
@@ -472,9 +495,11 @@ def test_canonical_symbol_surfaced_for_rth_variant(client: TestClient) -> None:
         "exchange": "33",
         "currency": None,
         "sector": None,
+        "sector_name": None,
         "industry": None,
         "country": None,
         "is_tradable": True,
+        "session_profile": "us_equity_rth",
         "coverage_tier": None,
         "bid": None,
         "ask": None,
@@ -504,10 +529,12 @@ def test_canonical_symbol_null_for_canonical_instrument(client: TestClient) -> N
         "company_name": "Apple Inc",
         "exchange": "4",
         "currency": "USD",
-        "sector": "Technology",
+        "sector": "8",  # eToro numeric industry id (provider contract)
+        "sector_name": "Technology",
         "industry": "Consumer Electronics",
         "country": "US",
         "is_tradable": True,
+        "session_profile": "us_equity",
         "coverage_tier": 1,
         "bid": None,
         "ask": None,

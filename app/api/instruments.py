@@ -170,7 +170,11 @@ class InstrumentListResponse(BaseModel):
 class InstrumentIdentity(BaseModel):
     symbol: str
     display_name: str | None
-    sector: str | None
+    sector: str | None  # eToro numeric industry id, as text (provider contract)
+    # Resolved eToro industry name via etoro_stocks_industries (sql/070); None when
+    # sector is NULL or unmapped. The FE uses this as the fallback sector label for
+    # non-SEC instruments that have no GICS sector (resolved from SIC below).
+    sector_name: str | None
     industry: str | None
     # #1634: real GICS sector + its sector-SPDR, resolved on-read from the SEC
     # SIC code (instruments.sector is an opaque 1-9 code). NULL when the
@@ -3598,7 +3602,8 @@ def get_instrument_summary(
         # ORDER BY / LIMIT needed.
         lookup_sql = f"""
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
-                   i.currency, i.sector, i.industry, i.country,
+                   i.currency, i.sector, esi.name AS sector_name,
+                   i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
                    q.bid, q.ask, q.last,
                    p.sic,
@@ -3609,6 +3614,8 @@ def get_instrument_summary(
             LEFT JOIN quotes q USING (instrument_id)
             LEFT JOIN instrument_sec_profile p USING (instrument_id)
             LEFT JOIN exchanges e ON e.exchange_id = i.exchange
+            LEFT JOIN etoro_stocks_industries esi
+              ON esi.industry_id::text = i.sector
             LEFT JOIN instruments canonical
               ON canonical.instrument_id = i.canonical_instrument_id
             WHERE i.instrument_id = %(id)s AND UPPER(i.symbol) = %(symbol)s
@@ -3617,7 +3624,8 @@ def get_instrument_summary(
     else:
         lookup_sql = f"""
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
-                   i.currency, i.sector, i.industry, i.country,
+                   i.currency, i.sector, esi.name AS sector_name,
+                   i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
                    q.bid, q.ask, q.last,
                    p.sic,
@@ -3628,6 +3636,8 @@ def get_instrument_summary(
             LEFT JOIN quotes q USING (instrument_id)
             LEFT JOIN instrument_sec_profile p USING (instrument_id)
             LEFT JOIN exchanges e ON e.exchange_id = i.exchange
+            LEFT JOIN etoro_stocks_industries esi
+              ON esi.industry_id::text = i.sector
             LEFT JOIN instruments canonical
               ON canonical.instrument_id = i.canonical_instrument_id
             WHERE UPPER(i.symbol) = %(symbol)s
@@ -3651,6 +3661,7 @@ def get_instrument_summary(
         symbol=row["symbol"],  # type: ignore[arg-type]
         display_name=row["company_name"] or None,  # type: ignore[arg-type]
         sector=row["sector"],  # type: ignore[arg-type]
+        sector_name=row["sector_name"],  # type: ignore[arg-type]
         industry=row["industry"],  # type: ignore[arg-type]
         gics_sector=sector_cls.gics_sector if sector_cls is not None else None,
         sector_spdr=sector_cls.spdr_symbol if sector_cls is not None else None,

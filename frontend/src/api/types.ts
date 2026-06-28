@@ -294,6 +294,9 @@ export interface InstrumentIdentity {
   symbol: string;
   display_name: string | null;
   sector: string | null;
+  /** #1599: resolved eToro industry name (the bare `sector` is the opaque eToro
+   * numeric id). The display fallback when `gics_sector` is null (non-SEC). */
+  sector_name: string | null;
   industry: string | null;
   /** #1634: real GICS sector + its sector-SPDR, resolved from the SEC SIC
    * (the bare `sector` is an opaque 1-9 code). null when the instrument has

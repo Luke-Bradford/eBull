@@ -66,7 +66,8 @@ def test_list_returns_items_sorted_newest_first(client: TestClient) -> None:
             "company_name": "Apple Inc.",
             "exchange": "NMS",
             "currency": "USD",
-            "sector": "Technology",
+            "sector": "8",  # eToro numeric industry id (provider contract)
+            "sector_name": "Technology",  # resolved via etoro_stocks_industries join
             "added_at": datetime(2026, 4, 15),
             "notes": "core holding",
         },
@@ -76,7 +77,10 @@ def test_list_returns_items_sorted_newest_first(client: TestClient) -> None:
             "company_name": "Vodafone",
             "exchange": "LSE",
             "currency": "GBP",
-            "sector": "Telecom",
+            # raw eToro id present but absent from etoro_stocks_industries →
+            # the join yields NULL; sector_name must surface as None, not the id.
+            "sector": "99",
+            "sector_name": None,
             "added_at": datetime(2026, 4, 10),
             "notes": None,
         },
@@ -90,6 +94,10 @@ def test_list_returns_items_sorted_newest_first(client: TestClient) -> None:
     assert body["items"][0]["symbol"] == "AAPL"
     assert body["items"][0]["notes"] == "core holding"
     assert body["items"][1]["notes"] is None
+    # #1599: raw `sector` keeps the eToro id; `sector_name` is the resolved label.
+    assert body["items"][0]["sector"] == "8"
+    assert body["items"][0]["sector_name"] == "Technology"
+    assert body["items"][1]["sector_name"] is None
 
 
 def test_add_happy_path(client: TestClient) -> None:
@@ -101,7 +109,8 @@ def test_add_happy_path(client: TestClient) -> None:
             "company_name": "Apple Inc.",
             "exchange": "NMS",
             "currency": "USD",
-            "sector": "Technology",
+            "sector": "8",
+            "sector_name": "Technology",
         },
         {"added_at": datetime(2026, 4, 19), "notes": "watch for earnings"},
     ]
@@ -115,6 +124,7 @@ def test_add_happy_path(client: TestClient) -> None:
     body = resp.json()
     assert body["symbol"] == "AAPL"
     assert body["notes"] == "watch for earnings"
+    assert body["sector_name"] == "Technology"  # #1599 resolved on add
 
 
 def test_add_without_notes_preserves_existing_notes(client: TestClient) -> None:
@@ -127,7 +137,8 @@ def test_add_without_notes_preserves_existing_notes(client: TestClient) -> None:
             "company_name": "Apple Inc.",
             "exchange": "NMS",
             "currency": "USD",
-            "sector": "Technology",
+            "sector": "8",
+            "sector_name": "Technology",
         },
         # Server returns the PRESERVED note, not NULL.
         {"added_at": datetime(2026, 4, 10), "notes": "core holding"},
