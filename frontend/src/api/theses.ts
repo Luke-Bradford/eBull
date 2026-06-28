@@ -7,8 +7,10 @@ import type {
 
 export function fetchLatestThesis(
   instrumentId: number,
-): Promise<ThesisDetail> {
-  return apiFetch<ThesisDetail>(`/theses/${instrumentId}`);
+): Promise<ThesisDetail | null> {
+  // Returns null when no thesis exists yet — the endpoint now answers
+  // 200 + null for the pre-analysis state instead of 404 (#1813).
+  return apiFetch<ThesisDetail | null>(`/theses/${instrumentId}`);
 }
 
 export function fetchThesisHistory(

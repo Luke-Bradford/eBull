@@ -1410,15 +1410,21 @@ class InstrumentHeadcount(BaseModel):
     source_accession: str
 
 
-@router.get("/{symbol}/employees", response_model=InstrumentHeadcount)
+@router.get("/{symbol}/employees", response_model=InstrumentHeadcount | None)
 def get_instrument_employees(
     symbol: str,
     conn: psycopg.Connection[object] = Depends(get_conn),
-) -> InstrumentHeadcount:
+) -> InstrumentHeadcount | None:
     """Latest ``dei:EntityNumberOfEmployees`` fact for an instrument.
 
-    Returns 404 when no fact is on file (non-SEC issuer, fundamentals
-    sync hasn't seeded yet, or DEI cover-page tagging absent).
+    Returns **200 with a null body** when the instrument exists but has
+    no headcount fact on file — which is the common case: only ~16 of
+    ~5,200 instruments XBRL-tag ``dei:EntityNumberOfEmployees`` (it is an
+    optional concept; AAPL/GME and most majors report headcount as 10-K
+    narrative text, not a structured fact — verified against SEC
+    companyfacts, #1813). A 404 is reserved for an *unknown* symbol, so
+    the FE can fetch this unconditionally without polluting the browser
+    console with an error on every instrument page (#1813).
     """
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -1454,7 +1460,10 @@ def get_instrument_employees(
         row = cur.fetchone()
 
     if row is None:
-        raise HTTPException(status_code=404, detail=f"No employee count on file for {symbol}")
+        # Known instrument, no headcount fact — absent optional datum, not
+        # an error. 200 + null keeps the instrument page console clean
+        # (#1813). Unknown-symbol still 404s above (line ~1439).
+        return None
 
     return InstrumentHeadcount(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]

@@ -152,12 +152,26 @@ class TestGetLatestThesis:
         assert body["critic_json"] == {"overall": "sound"}
         assert body["created_at"] is not None
 
-    def test_no_thesis_returns_404(self) -> None:
-        _with_conn([[]])
+    def test_known_instrument_no_thesis_returns_200_null(self) -> None:
+        """Known instrument, no thesis yet → 200 + null body, not 404
+        (#1813). The instrument page fetches this on every load; a 404
+        meant a console error on every un-analysed instrument. Two
+        queries: thesis (empty) then instrument-existence (present)."""
+        _with_conn([[], [{"exists": 1}]])
+        resp = client.get("/theses/100")
+
+        assert resp.status_code == 200
+        assert resp.json() is None
+
+    def test_unknown_instrument_returns_404(self) -> None:
+        """Unknown instrument → 404 (#1813 reserves 404 for an unknown
+        resource, distinct from the absent-optional-datum null case).
+        Two queries: thesis (empty) then instrument-existence (empty)."""
+        _with_conn([[], []])
         resp = client.get("/theses/999")
 
         assert resp.status_code == 404
-        assert "No thesis found" in resp.json()["detail"]
+        assert "not found" in resp.json()["detail"].lower()
 
     def test_nullable_numeric_fields_returned_as_null(self) -> None:
         """All nullable numeric fields can be None without crashing."""
