@@ -511,7 +511,7 @@ function FilerTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {rows.map((row, i) => {
             const isHighlight = highlightFiler !== null && row.key === highlightFiler;
             // Logical-side ``border-t-*`` instead of all-sides shorthand
             // so an isHighlight row's ``border-l-sky-500`` can't be
@@ -523,7 +523,13 @@ function FilerTable({
               : "";
             return (
               <tr
-                key={`${row.category}-${row.key}`}
+                // ``row.key`` (the bare ``filer_cik``/``name:`` drill token,
+                // matched against ``?filer=`` for the highlight above) is NOT
+                // unique — an insider can recur with the same CIK (and even a
+                // byte-identical row) within a category (#1800, verified on GME
+                // insiders). Append the array index so the React row key is
+                // unique while ``row.key`` stays the clean ``?filer=`` token.
+                key={`${row.category}-${row.key}-${i}`}
                 ref={isHighlight ? highlightRef : null}
                 className={`${baseCls} ${highlightCls}`}
                 onClick={isHighlight ? onClearHighlight : undefined}

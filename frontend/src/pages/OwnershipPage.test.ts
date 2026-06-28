@@ -208,6 +208,44 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     expect(new Set(rows.map((r) => r.category))).toEqual(new Set(["insiders", "def14a"]));
   });
 
+  it("keeps two same-CIK insider rows distinct, each with the bare-CIK drill key (#1800)", () => {
+    // filer_cik is NOT unique: an insider can recur within one category with
+    // the SAME cik+name (and even a byte-identical row) — verified on the live
+    // GME rollup (Wolf Kurt James / Cheng Lawrence). Both rows MUST survive
+    // (dropping one is operator-visible omission) and each row.key MUST stay
+    // the bare cik so the ``?filer=`` drill (holderIdFromFilerKey expects pure
+    // digits) and the wedge↔row parity hold. Row-key uniqueness for React is
+    // the render site's job (composes the array index), NOT the token.
+    const rollup = _baseRollup({
+      slices: [
+        _slice({
+          category: "insiders",
+          filer_count: 2,
+          holders: [
+            _holder({
+              filer_cik: "0001693906",
+              filer_name: "Wolf Kurt James",
+              shares: "406500",
+              winning_source: "form4",
+              winning_accession: "0001192482-20-000524",
+            }),
+            _holder({
+              filer_cik: "0001693906",
+              filer_name: "Wolf Kurt James",
+              shares: "21400",
+              winning_source: "form4",
+              winning_accession: "0001192482-20-000524",
+            }),
+          ],
+        }),
+      ],
+    });
+    const rows = rollupToFilerRows(rollup).filter((r) => r.category === "insiders");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.key)).toEqual(["0001693906", "0001693906"]);
+    expect(rows.map((r) => r.shares).sort((a, b) => a - b)).toEqual([21400, 406500]);
+  });
+
   it("excludes the funds memo slice (N-PORT, non-additive)", () => {
     const rollup = _baseRollup({
       slices: [
