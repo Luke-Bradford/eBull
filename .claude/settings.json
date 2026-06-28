@@ -18,6 +18,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_narrate_waiting.py\" || printf '{}\\n'",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
