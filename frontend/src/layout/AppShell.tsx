@@ -1,5 +1,6 @@
 import { Outlet } from "react-router-dom";
 import { BootstrapNudgeBanner } from "@/components/dashboard/BootstrapNudgeBanner";
+import { OpenFigiKeyNudgeBanner } from "@/components/dashboard/OpenFigiKeyNudgeBanner";
 import { Sidebar } from "@/layout/Sidebar";
 import { Header } from "@/layout/Header";
 
@@ -15,6 +16,11 @@ export function AppShell() {
             bootstrap is complete or the operator dismisses it for
             the current session. */}
         <BootstrapNudgeBanner />
+        {/* #1344 — pre-bootstrap nudge to set OPENFIGI_API_KEY (faster
+            CUSIP resolution). Self-hides when a key is configured, once
+            bootstrap leaves the pending/partial_error window, or when
+            dismissed (persistent localStorage). */}
+        <OpenFigiKeyNudgeBanner />
         {/* No top padding: pages with sticky headers (e.g. SummaryStrip
             on the instrument page) must be able to flush with the
             <Header> bar above. Pages that need top breathing room add

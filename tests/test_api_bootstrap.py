@@ -69,6 +69,8 @@ def test_get_status_with_no_runs(client: TestClient) -> None:
     assert body["current_run_id"] is None
     assert body["last_completed_at"] is None
     assert body["stages"] == []
+    # #1344 — field present on the snap-None return path (schema backcompat).
+    assert "openfigi_key_present" in body
 
 
 def test_get_status_with_running_run(client: TestClient) -> None:
@@ -136,6 +138,42 @@ def test_get_status_with_running_run(client: TestClient) -> None:
     assert body["stages"][1]["status"] == "running"
     assert body["stages"][1]["expected_units"] == 9000
     assert body["stages"][1]["units_done"] == 4500
+    # #1344 — field present on the snap-present return path too.
+    assert "openfigi_key_present" in body
+
+
+@pytest.mark.parametrize(
+    ("key_value", "expected"),
+    [("test-figi-key", True), (None, False), ("", False)],
+)
+def test_get_status_reports_openfigi_key_presence(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    key_value: str | None,
+    expected: bool,
+) -> None:
+    """#1344 — ``openfigi_key_present`` mirrors ``settings.openfigi_api_key``
+    as a boolean (presence only, never the value — ADR 0001). Empty string
+    is absent, matching the resolver's ``settings.openfigi_api_key or None``."""
+    from app.services.bootstrap_state import BootstrapState
+
+    _install_conn()
+    monkeypatch.setattr("app.api.bootstrap.settings.openfigi_api_key", key_value)
+    with (
+        patch(
+            "app.api.bootstrap.read_state",
+            return_value=BootstrapState(status="pending", last_run_id=None, last_completed_at=None),
+        ),
+        patch("app.api.bootstrap.read_latest_run_with_stages", return_value=None),
+    ):
+        resp = client.get("/system/bootstrap/status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["openfigi_key_present"] is expected
+    # The secret value itself never appears in the payload.
+    if key_value:
+        assert key_value not in resp.text
 
 
 # ---------------------------------------------------------------------------

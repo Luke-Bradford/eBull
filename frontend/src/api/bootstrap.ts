@@ -88,6 +88,11 @@ export interface BootstrapStatusResponse {
   last_completed_at: string | null;
   stages: BootstrapStageResponse[];
   bulk_manifest: BulkManifestResponse | null;
+  // #1344 — whether OPENFIGI_API_KEY is configured server-side (presence
+  // only, never the value — ADR 0001). Drives the pre-bootstrap
+  // OpenFigiKeyNudgeBanner. Reflects the key as of API process start
+  // (backend `settings` is process-global, not hot-reloaded).
+  openfigi_key_present: boolean;
 }
 
 export interface BootstrapRunQueuedResponse {
