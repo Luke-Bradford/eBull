@@ -419,16 +419,22 @@ def _load_instrument_details(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT instrument_id, symbol, sector
-            FROM instruments
-            WHERE instrument_id = ANY(%(ids)s)
+            SELECT i.instrument_id, i.symbol, i.sector, esi.name AS sector_name
+            FROM instruments i
+            LEFT JOIN etoro_stocks_industries esi
+              ON esi.industry_id::text = i.sector
+            WHERE i.instrument_id = ANY(%(ids)s)
             """,
             {"ids": instrument_ids},
         )
         for r in cur.fetchall():
             iid = int(r["instrument_id"])
             details[iid]["symbol"] = str(r["symbol"])
+            # ``sector`` is the eToro numeric industry id (provider contract) — it
+            # remains the grouping/cap key. ``sector_name`` resolves it to the
+            # human label (sql/070) used ONLY in operator-facing reason strings.
             details[iid]["sector"] = r["sector"]
+            details[iid]["sector_name"] = r["sector_name"]
 
     # Latest thesis
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -702,9 +708,12 @@ def _evaluate_add(
     pending_pct = pending_sector_pct.get(pos.sector, 0.0) if pos.sector is not None else 0.0
     sector_after = held_sector_pct + pending_pct + add_pct
     if pos.sector is not None and sector_after > MAX_SECTOR_EXPOSURE_PCT:
+        # Display the resolved industry name (#1778); fall back to the raw id
+        # when unmapped. Keying above stays on the raw ``pos.sector``.
+        label = details.get("sector_name") or pos.sector
         return (
             False,
-            f"ADD blocked: sector {pos.sector!r} would reach {sector_after:.1%} > max {MAX_SECTOR_EXPOSURE_PCT:.0%}",
+            f"ADD blocked: sector {label!r} would reach {sector_after:.1%} > max {MAX_SECTOR_EXPOSURE_PCT:.0%}",
         )
 
     signals: list[str] = []
@@ -777,9 +786,12 @@ def _evaluate_buy(
         pending_pct = pending_sector_pct.get(sector, 0.0)
         sector_after = held_pct + pending_pct + MAX_INITIAL_POSITION_PCT
         if sector_after > MAX_SECTOR_EXPOSURE_PCT:
+            # Display the resolved industry name (#1778); fall back to the raw id
+            # when unmapped. Keying above stays on the raw ``sector``.
+            label = details.get("sector_name") or sector
             return (
                 False,
-                f"BUY blocked: sector {sector!r} would reach {sector_after:.1%} > max {MAX_SECTOR_EXPOSURE_PCT:.0%}",
+                f"BUY blocked: sector {label!r} would reach {sector_after:.1%} > max {MAX_SECTOR_EXPOSURE_PCT:.0%}",
             )
 
     if cash is not None and total_aum > 0:

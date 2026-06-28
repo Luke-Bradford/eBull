@@ -304,6 +304,47 @@ class TestEvaluateAdd:
         assert should_add is False
         assert "sector" in reason.lower()
 
+    def test_add_block_reason_shows_resolved_sector_name_not_raw_id(self) -> None:
+        """#1778: the breach reason displays the resolved eToro industry name
+        (from details['sector_name']); the raw numeric id never reaches the
+        operator. Keying still uses the raw id."""
+        pos1 = _pos(instrument_id=1, symbol="A", sector="8", market_value=2_000.0)
+        pos2 = _pos(instrument_id=2, symbol="B", sector="8", market_value=400.0)
+        details: dict[str, Any] = {
+            "thesis": _thesis(stance="buy"),
+            "prev_thesis_confidence": 0.60,
+            "sector_name": "Technology",
+        }
+        should_add, reason = _evaluate_add(
+            pos2,
+            details,
+            _score(total_score=0.80, confidence_score=0.80),
+            prev_score_total=0.60,
+            total_aum=10_000.0,
+            positions={1: pos1, 2: pos2},
+            pending_sector_pct={},
+        )
+        assert should_add is False
+        assert "Technology" in reason
+        assert "'8'" not in reason
+
+    def test_add_block_reason_falls_back_to_raw_id_when_unmapped(self) -> None:
+        """#1778: when sector_name is absent (unmapped id), the reason falls
+        back to the raw id rather than crashing."""
+        pos1 = _pos(instrument_id=1, symbol="A", sector="99", market_value=2_000.0)
+        pos2 = _pos(instrument_id=2, symbol="B", sector="99", market_value=400.0)
+        should_add, reason = _evaluate_add(
+            pos2,
+            {"thesis": _thesis(stance="buy"), "prev_thesis_confidence": 0.60},
+            _score(total_score=0.80, confidence_score=0.80),
+            prev_score_total=0.60,
+            total_aum=10_000.0,
+            positions={1: pos1, 2: pos2},
+            pending_sector_pct={},
+        )
+        assert should_add is False
+        assert "'99'" in reason
+
     def test_pending_sector_pct_accumulator_pushes_add_over_cap(self) -> None:
         """#42: even if held-sector-only math stays under the cap, a large
         in-flight pending BUY allocation in the same sector should block
@@ -435,6 +476,44 @@ class TestEvaluateBuy:
         )
         assert should_buy is False
         assert "sector" in reason
+
+    def test_buy_block_reason_shows_resolved_sector_name_not_raw_id(self) -> None:
+        """#1778: BUY breach reason displays the resolved industry name, not the
+        raw eToro id. Keying still uses the raw id."""
+        pos = _pos(sector="8", market_value=25_000.0)
+        should_buy, reason = _evaluate_buy(
+            2,
+            "MSFT",
+            "8",
+            {"thesis": _thesis(stance="buy"), "sector_name": "Technology"},
+            _score(total_score=0.80),
+            {1: pos},
+            total_aum=100_000.0,
+            cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
+        )
+        assert should_buy is False
+        assert "Technology" in reason
+        assert "'8'" not in reason
+
+    def test_buy_block_reason_falls_back_to_raw_id_when_unmapped(self) -> None:
+        """#1778: BUY breach reason falls back to the raw id when unmapped."""
+        pos = _pos(sector="99", market_value=25_000.0)
+        should_buy, reason = _evaluate_buy(
+            2,
+            "MSFT",
+            "99",
+            {"thesis": _thesis(stance="buy")},
+            _score(total_score=0.80),
+            {1: pos},
+            total_aum=100_000.0,
+            cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
+        )
+        assert should_buy is False
+        assert "'99'" in reason
 
     def test_sector_cap_blocks_second_buy_via_accumulator(self) -> None:
         # No held positions; first BUY approved (5% Tech pending).
@@ -687,7 +766,7 @@ class TestRunPortfolioReview:
                 ]
             ),
             # 4a. _load_instrument_details: instruments
-            _make_cursor([{"instrument_id": 1, "symbol": "AAPL", "sector": "Technology"}]),
+            _make_cursor([{"instrument_id": 1, "symbol": "AAPL", "sector": "Technology", "sector_name": "Technology"}]),
             # 4b. theses
             _make_cursor(
                 [
@@ -758,7 +837,7 @@ class TestRunPortfolioReview:
                 ]
             ),
             # _load_instrument_details: instruments
-            _make_cursor([{"instrument_id": 1, "symbol": "AAPL", "sector": "Technology"}]),
+            _make_cursor([{"instrument_id": 1, "symbol": "AAPL", "sector": "Technology", "sector_name": "Technology"}]),
             # theses
             _make_cursor(
                 [
@@ -821,7 +900,7 @@ class TestRunPortfolioReview:
                     }
                 ]
             ),
-            _make_cursor([{"instrument_id": 1, "symbol": "XYZ", "sector": "Energy"}]),
+            _make_cursor([{"instrument_id": 1, "symbol": "XYZ", "sector": "Energy", "sector_name": "Energy"}]),
             _make_cursor(
                 [
                     {
@@ -871,7 +950,7 @@ class TestRunPortfolioReview:
             # ranked_scores — instrument 1 is NOT here
             _make_cursor([]),
             # _load_instrument_details — called for held instrument
-            _make_cursor([{"instrument_id": 1, "symbol": "OLD", "sector": "Utilities"}]),
+            _make_cursor([{"instrument_id": 1, "symbol": "OLD", "sector": "Utilities", "sector_name": "Utilities"}]),
             _make_cursor([]),  # theses
             _make_cursor([]),  # prev thesis
             _make_cursor([]),  # filing_events
@@ -919,7 +998,7 @@ class TestRunPortfolioReview:
                     }
                 ]
             ),
-            _make_cursor([{"instrument_id": 1, "symbol": "AAPL", "sector": "Technology"}]),
+            _make_cursor([{"instrument_id": 1, "symbol": "AAPL", "sector": "Technology", "sector_name": "Technology"}]),
             _make_cursor(
                 [
                     {
@@ -1008,9 +1087,9 @@ class TestRunPortfolioReview:
             # instruments — includes held instrument 10 and candidates 1, 2
             _make_cursor(
                 [
-                    {"instrument_id": 1, "symbol": "AAPL", "sector": "Technology"},
-                    {"instrument_id": 2, "symbol": "MSFT", "sector": "Technology"},
-                    {"instrument_id": 10, "symbol": "HELD", "sector": "Technology"},
+                    {"instrument_id": 1, "symbol": "AAPL", "sector": "Technology", "sector_name": "Technology"},
+                    {"instrument_id": 2, "symbol": "MSFT", "sector": "Technology", "sector_name": "Technology"},
+                    {"instrument_id": 10, "symbol": "HELD", "sector": "Technology", "sector_name": "Technology"},
                 ]
             ),
             # theses
@@ -1096,7 +1175,7 @@ class TestRunPortfolioReview:
                     }
                 ]
             ),
-            _make_cursor([{"instrument_id": 1, "symbol": "AAPL", "sector": "Technology"}]),
+            _make_cursor([{"instrument_id": 1, "symbol": "AAPL", "sector": "Technology", "sector_name": "Technology"}]),
             _make_cursor(
                 [
                     {
