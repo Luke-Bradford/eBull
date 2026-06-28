@@ -61,7 +61,16 @@ function teaseBody(body: string): string {
 /** Pick the first up-to-MAX_CARDS sections that have a non-empty
  *  body. `section_order` from the API is already authoritative — the
  *  ingester emits sections in 10-K presentation order — so a simple
- *  prefix is what we want. */
+ *  prefix is what we want.
+ *
+ *  Key cards by `section_order`, NOT `section_key` (#1810): `section_key`
+ *  is a classification bucket and collides (a 10-K's leading subsections
+ *  often share `"other"`), which gave React duplicate keys — reconciliation
+ *  is then unsupported (cards can be omitted or reused). `section_order`
+ *  is unique per filing — `sql/059_instrument_business_summary_sections.sql`
+ *  carries `UNIQUE (instrument_id, source_accession, section_order)` and the
+ *  response is single-accession — so it is a safe, stable, authoritative key
+ *  (the #1800 precedent for non-unique identifiers). */
 function pickCards(
   sections: ReadonlyArray<BusinessSection>,
 ): Array<{ key: string; label: string; teaser: string }> {
@@ -70,7 +79,7 @@ function pickCards(
     if (out.length >= MAX_CARDS) break;
     const t = teaseBody(s.body);
     if (t.length === 0) continue;
-    out.push({ key: s.section_key, label: s.section_label, teaser: t });
+    out.push({ key: String(s.section_order), label: s.section_label, teaser: t });
   }
   return out;
 }
