@@ -1,12 +1,16 @@
 """Unit test for scripts/check_shellcheck.sh (#1257).
 
-The gate runs shellcheck (``-S warning``) over ``scripts/*.sh`` and is
-wired into both ``.githooks/pre-push`` and ``.github/workflows/ci.yml``.
+The gate runs shellcheck (``-S warning``) recursively over
+``scripts/**/*.sh`` (top level + subdirs like ``scripts/autonomy/`` and
+``scripts/perf_bench/`` — the old top-level-only glob silently ungated
+them, which let a shell bug ship in the autonomy supervisor, #1801) and
+is wired into both ``.githooks/pre-push`` and ``.github/workflows/ci.yml``.
 This test pins three contracts:
 
-1. The current ``scripts/*.sh`` tree passes — a regression test, so any
+1. The current ``scripts/**/*.sh`` tree passes — a regression test, so any
    developer who introduces an SC2034 / SC2261 / SC2046-class bug in a
-   shell script sees this fail locally before the push gate fires.
+   shell script (including a subdir one) sees this fail locally before the
+   push gate fires.
 2. The gate returns non-zero when pointed at a synthetic script with a
    warning-level finding (acceptance: "a deliberately-broken check_*.sh
    fails CI").
@@ -44,7 +48,7 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.skipif(not _HAVE_SHELLCHECK, reason="shellcheck unavailable (no binary, no uv)")
 def test_gate_passes_on_clean_tree() -> None:
-    """scripts/*.sh must be shellcheck-clean at -S warning."""
+    """scripts/**/*.sh (recursive — incl. subdirs) must be shellcheck-clean at -S warning."""
     result = _run()
     assert result.returncode == 0, (
         f"shellcheck gate failed on the real scripts/ tree:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"

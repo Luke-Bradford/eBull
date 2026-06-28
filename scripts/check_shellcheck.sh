@@ -24,9 +24,12 @@
 # / SC2261) without forcing churn on by-design idioms. Tighten to
 # ``-S info`` later only after auditing every note.
 #
-# Scope: scripts/*.sh (the whole shell-script tree is warning-clean as
-# of #1257). Pure invocation of the shellcheck binary — no DB / docker
-# / Python. ~200ms.
+# Scope: scripts/**/*.sh — the WHOLE shell-script tree, recursively.
+# (#1257 shipped a top-level-only `scripts/*.sh` glob; that silently
+# left subdir scripts ungated — scripts/autonomy/ + scripts/perf_bench/.
+# A shell bug then shipped in the autonomy supervisor, #1801. The tree is
+# warning-clean as of #1801; recursion keeps it that way.) Pure
+# invocation of the shellcheck binary — no DB / docker / Python. ~200ms.
 #
 # Wired into BOTH .githooks/pre-push and .github/workflows/ci.yml so a
 # --no-verify push cannot dodge it; the parity guard
@@ -35,7 +38,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "==> check_shellcheck: linting scripts/*.sh at -S warning"
+echo "==> check_shellcheck: linting scripts/**/*.sh (recursive) at -S warning"
 
 # Prefer the system binary (GitHub ubuntu runners ship shellcheck; brew
 # installs it locally). Fall back to `uv run --with shellcheck-py` —
@@ -59,10 +62,16 @@ fi
 if [[ $# -gt 0 ]]; then
   targets=("$@")
 else
-  # cd to root so the glob and any ::error annotations carry
-  # repo-relative paths.
+  # cd to root so paths and any ::error annotations carry repo-relative
+  # paths. Recurse the WHOLE tree (not just top level): subdir scripts
+  # were ungated under the old `scripts/*.sh` glob, which let a shell bug
+  # ship in scripts/autonomy/supervisor.sh (#1801). Portable to bash 3.2
+  # (macOS system bash — no mapfile/globstar): collect via find + while-read.
   cd "$root"
-  targets=(scripts/*.sh)
+  targets=()
+  # NUL-delimited so a path with whitespace/newline can't split into bogus
+  # targets (Codex #1801); order is irrelevant to a pass/fail lint, so no sort.
+  while IFS= read -r -d '' _f; do targets+=("$_f"); done < <(find scripts -name '*.sh' -type f -print0)
 fi
 
 "${shellcheck_cmd[@]}" -S warning "${targets[@]}"
