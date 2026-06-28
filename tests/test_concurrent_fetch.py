@@ -171,35 +171,76 @@ class TestConcurrencyAchievesActualThroughput:
 
         from app.providers.resilient_client import ResilientClient
 
-        rc = ResilientClient.__new__(ResilientClient)
-        rc._min_interval = 0.02  # 20 ms floor
-        rc._last_request_at = [0.0]
-        rc._throttle_lock = threading.Lock()
-        rc._gate = None  # #1484: no cross-process gate -> exercise the in-process floor
-
-        # Simulated work: each worker stamps then sleeps 100ms
+        # Simulated work: each worker stamps then sleeps RESPONSE_MS
         # (the "HTTP RTT") OUTSIDE the lock, exactly like the real
         # ResilientClient._request flow.
-        N_REQUESTS = 16
+        N_REQUESTS = 12
         RESPONSE_MS = 0.1
 
-        def fire() -> None:
+        def _make_rc() -> ResilientClient:
+            rc = ResilientClient.__new__(ResilientClient)
+            rc._min_interval = 0.02  # 20 ms floor
+            rc._last_request_at = [0.0]
+            rc._throttle_lock = threading.Lock()
+            rc._gate = None  # #1484: no cross-process gate -> exercise the in-process floor
+            return rc
+
+        def fire(rc: ResilientClient) -> None:
             rc._throttle_and_stamp()  # pyright: ignore[reportPrivateUsage]
             time.sleep(RESPONSE_MS)  # outside the lock
 
-        sequential_estimate = N_REQUESTS * (rc._min_interval + RESPONSE_MS)
+        # #1769 — measure the sequential baseline IN-PROCESS rather than
+        # against a precomputed constant. A constant (the old
+        # ``N*(min_interval+R)``) silently assumes an idle host: on a busy
+        # box wall-clock dilates and the concurrent run dilates with it, so
+        # an absolute threshold becomes unreachable and the test false-fails
+        # the push gate. The *ratio* concurrency buys is what we actually
+        # want to pin: it tracks host load far better than an absolute bar
+        # (both arms dilate under scheduler pressure, though not perfectly in
+        # lock-step — the concurrent arm also pays thread/lock contention).
+        # The R sleeps overlap even on a single core — sleeping needs no CPU
+        # — so a healthy design still wins regardless of contention. This is
+        # a coarse "did we preserve substantial overlap?" guard, not a fine
+        # throughput regression detector; basic overlap correctness is pinned
+        # deterministically by ``test_concurrency_actually_overlaps``.
+        # Best-of-2 on BOTH arms — symmetric sampling. Measuring sequential
+        # once but concurrent best-of-2 is one-sided: a single noise-inflated
+        # sequential run lifts the threshold, which could let a serialised
+        # regression squeak under ``sequential*0.85``. Taking the fastest of 2
+        # sequential runs too removes that hole — both arms shed transient
+        # scheduler stalls, so the ratio reflects the design, not host noise.
+        def _time_sequential() -> float:
+            rc_local = _make_rc()
+            start = time.monotonic()
+            for _ in range(N_REQUESTS):
+                fire(rc_local)
+            return time.monotonic() - start
 
-        t0 = time.monotonic()
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            list(pool.map(lambda _: fire(), range(N_REQUESTS)))
-        elapsed = time.monotonic() - t0
+        sequential = min(_time_sequential() for _ in range(2))
 
-        # With 8 workers, response time overlaps. Wall-clock should
-        # be much closer to N*min_interval + RESPONSE_MS (~0.42s)
-        # than the sequential estimate (~1.92s).
-        assert elapsed < sequential_estimate * 0.5, (
-            f"Concurrent total {elapsed:.3f}s did not beat sequential {sequential_estimate:.3f}s "
-            "by ≥2x — throttle design may be serialising HTTP RTT across threads."
+        # Best-of-2 concurrent: sheds a transient scheduler stall that would
+        # otherwise mask a genuinely-parallel design as serial. A throttle
+        # regression that serialises HTTP RTT inside the lock collapses the
+        # ratio toward ~1.0 in EVERY run, so best-of-2 still fails it.
+        def _time_concurrent() -> float:
+            rc_local = _make_rc()
+            start = time.monotonic()
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda _: fire(rc_local), range(N_REQUESTS)))
+            return time.monotonic() - start
+
+        concurrent = min(_time_concurrent() for _ in range(2))
+
+        # Healthy design overlaps RTT across threads: ratio ~0.4 idle, ~0.68
+        # under heavy load (measured). A serialising regression -> ~1.0. The
+        # 0.85 bar sits in that gap, deliberately biased toward the looser
+        # side: a false FAIL wedges the push gate (#1769 — the exact bug this
+        # rewrite fixes), whereas a false pass is still caught by the
+        # deterministic overlap guard (``test_concurrency_actually_overlaps``).
+        assert concurrent < sequential * 0.85, (
+            f"Concurrent best {concurrent:.3f}s did not beat measured sequential "
+            f"{sequential:.3f}s by ≥15% (ratio {concurrent / sequential:.2f}) — "
+            "throttle design may be serialising HTTP RTT across threads."
         )
 
 
