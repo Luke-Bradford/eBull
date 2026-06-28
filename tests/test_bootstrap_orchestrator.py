@@ -104,22 +104,25 @@ def _register_synthetic_jobs(monkeypatch: pytest.MonkeyPatch, mapping: dict[str,
 # ---------------------------------------------------------------------------
 
 
-def test_stage_catalogue_has_twenty_one_stages() -> None:
+def test_stage_catalogue_cardinality() -> None:
     """Catalogue size pinned to surface adds/removes in code review.
 
-    #1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages
-    (S14 submissions_files_walk, S15 filings_history_seed, S17 def14a,
-    S19 insider_transactions_backfill, S20 form3, S22 13f_recent_sweep,
-    S23 n_port_ingest, S27 sec_n_csr_bootstrap_drain) → 27 - 8 = 19.
-    #1415 (P3) added the S15-slot master.idx recent-window gap-close
-    (filing-metadata-scoped, with the per-source watermark guard) → 20.
-    #1419 (P4) added the terminal bootstrap_validation stage → 21.
+    The number is a deliberate pin (NOT derived from the registry — that
+    would be tautological): a stage add/remove must update this assertion,
+    forcing the change through review. Lane-level structure is pinned
+    separately in ``test_stage_catalogue_lane_composition``.
 
-    21 = 1 init + 1 etoro + 9 sec_rate + 1 sec_bulk_download + 7 db
+    History: #1413 (bulk-only) dropped 8 per-CIK HTTP stages → 19;
+    #1415 (P3) added the master.idx gap-close → 20; #1419 (P4) added the
+    terminal bootstrap_validation stage → 21; #788 added
+    sec_fsds_class_shares_ingest → 22; #1590 added
+    sec_fsds_dimensional_ingest → 23.
+
+    23 = 1 init + 1 etoro + 9 sec_rate + 1 sec_bulk_download + 9 db
     + 1 db_fundamentals_raw + 1 openfigi.
     """
     specs = get_bootstrap_stage_specs()
-    assert len(specs) == 22
+    assert len(specs) == 23
 
 
 def test_stage_catalogue_lane_composition() -> None:
@@ -129,10 +132,12 @@ def test_stage_catalogue_lane_composition() -> None:
         by_lane[spec.lane] = by_lane.get(spec.lane, 0) + 1
     # #1413 — sec_rate: 16 − 8 per-CIK HTTP stages removed (incl. S27 N-CSR
     # drain) = 8; #1415 + 1 master.idx gap-close = 9. #1419 (P4) + 1 db stage
-    # (bootstrap_validation) → db = 7. #788 + 1 db stage (sec_fsds_class_shares_ingest)
-    # → db = 8. Total 1 + 1 + 9 + 1 + 8 + 1 + 1 = 22.
-    # ``db`` = 8 (5 bulk ingesters + sec_fsds_class_shares_ingest +
-    # ownership_observations_backfill + bootstrap_validation);
+    # (bootstrap_validation); #788 + 1 db stage (sec_fsds_class_shares_ingest);
+    # #1590 + 1 db stage (sec_fsds_dimensional_ingest) → db = 9.
+    # Total 1 + 1 + 9 + 1 + 9 + 1 + 1 = 23.
+    # ``db`` = 9 (5 bulk ingesters + sec_fsds_class_shares_ingest +
+    # sec_fsds_dimensional_ingest + ownership_observations_backfill +
+    # bootstrap_validation);
     # ``db_fundamentals_raw`` = 1 (S25 fundamentals_sync);
     # ``openfigi`` = 1 (S13 cusip_resolver_post_bulk_sweep).
     assert by_lane == {
@@ -140,7 +145,7 @@ def test_stage_catalogue_lane_composition() -> None:
         "etoro": 1,
         "sec_rate": 9,
         "sec_bulk_download": 1,
-        "db": 8,
+        "db": 9,
         "db_fundamentals_raw": 1,
         "openfigi": 1,
     }
@@ -354,10 +359,10 @@ def test_orchestrator_happy_path_completes(
     state = read_state(ebull_test_conn)
     assert state.status == "complete"
 
-    # #1413 dropped 8 per-CIK HTTP stages + #1415 added the master.idx
-    # gap-close + #1419 (P4) added the terminal bootstrap_validation stage
-    # → 21 invokers fire on the happy path.
-    assert len(calls["order"]) == 22
+    # On the happy path every catalogue stage fires exactly once — derive
+    # the expected count from the registry rather than re-pinning a literal
+    # (the literal is pinned once in test_stage_catalogue_cardinality).
+    assert len(calls["order"]) == len(get_bootstrap_stage_specs())
     # Phase A's universe sync was first.
     assert calls["order"][0] == "nightly_universe_sync"
     # #1419 (P4) — validation is genuinely TERMINAL: it requires a cap from
