@@ -43,6 +43,18 @@ describe("KeyStatsPane", () => {
     expect(screen.getAllByText("SEC").length).toBeGreaterThanOrEqual(2);
   });
 
+  it("renders dividend yield as an already-percent value, not double-scaled ×100 (#1827)", () => {
+    // The wire value is `ttm_yield_pct = (ttm_dps / price) * 100` — already a
+    // percent. AAPL's 0.2744 must render "0.27%", NOT "27.45%" (the old
+    // {percent:true} double-scale bug). Sibling roe stays a fraction → ×100.
+    render(<KeyStatsPane summary={fixture({ dividend_yield: "0.27448", roe: "0.2777" })} />);
+    expect(screen.getByText("Dividend yield")).toBeInTheDocument();
+    expect(screen.getByText("0.27%")).toBeInTheDocument();
+    expect(screen.queryByText("27.45%")).not.toBeInTheDocument();
+    // roe is a raw fraction → still ×100.
+    expect(screen.getByText("27.77%")).toBeInTheDocument();
+  });
+
   it("renders empty state when key_stats is null", () => {
     render(<KeyStatsPane summary={fixture(null)} />);
     expect(screen.getByText(/No key stats/i)).toBeInTheDocument();
