@@ -390,6 +390,12 @@ from app.workers import scheduler as _scheduler  # noqa: E402
 _INVOKERS[_scheduler.JOB_FILINGS_HISTORY_SEED] = _scheduler.filings_history_seed
 _INVOKERS[_scheduler.JOB_SEC_FIRST_INSTALL_DRAIN] = _scheduler.sec_first_install_drain
 
+# #1788 (#677 Part B) — expected-filings seed + poller. Both zero-arg bodies
+# defined in scheduler.py; registered here (lazy ``_scheduler.`` access) so the
+# scheduler's SCHEDULED_JOBS rows have dispatchable invokers.
+_INVOKERS[_scheduler.JOB_EXPECTED_FILINGS_SEED] = _adapt_zero_arg(_scheduler.expected_filings_seed)
+_INVOKERS[_scheduler.JOB_EXPECTED_FILINGS_POLLER] = _adapt_zero_arg(_scheduler.expected_filings_poller)
+
 # #1174 — dedicated MF directory refresh + N-CSR fund-scoped bootstrap
 # drain. Both invokers are params-aware natively (no ``_adapt_zero_arg``).
 # Both discard params: ``mf_directory_sync`` never honoured any, and

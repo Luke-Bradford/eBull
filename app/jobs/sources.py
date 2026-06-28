@@ -65,6 +65,7 @@ Lane = Literal[
     "sec_rate",
     "sec_manifest",
     "sec_per_cik",
+    "sec_expected_filings",
     "sec_filing_docs",
     "sec_insider_backfill",
     "sec_insider_ingest",
@@ -132,6 +133,15 @@ the rate — it does not.
   ``sec.last_modified.per_cik_poll`` namespace) have no other lane writer.
   Scheduled-only, so NOT added to the ``bootstrap_stages.lane`` CHECK (like
   ``sec_manifest`` / ``db_liveness`` / ``db_retry``).
+* ``sec_expected_filings`` — ``expected_filings_poller`` only (#1788). The 15-min
+  targeted submissions.json poll for instruments in an expected 10-Q/10-K window.
+  Own lane so its high cadence can't lose the JobLock race to the hourly
+  ``sec_per_cik_poll`` / manifest worker. Its only shared write target is
+  ``sec_filing_manifest`` via ``record_manifest_entry`` (idempotent ``ON CONFLICT``
+  upsert keyed by accession — already written concurrently from other lanes since
+  #1478, proven-safe). Scheduled-only, so NOT added to the ``bootstrap_stages.lane``
+  CHECK. (The companion ``expected_filings_seed`` runs on the existing
+  ``db_fundamentals_raw`` lane — DB-only, no SEC HTTP.)
 * ``sec_filing_docs`` — ``sec_filing_documents_ingest`` only (#1540). The
   hourly @ :35 producer holds the lane ~96s per tick (it expands every filing's
   ``{accession}-index.json`` into ``filing_documents`` rows). On the shared

@@ -51,6 +51,10 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # watchdog kick hit the same lock and no-opped). Same shape as the
         # #1478 sec_manifest split. See app/jobs/sources.py::Lane.
         "sec_per_cik",
+        # #1788 — expected_filings_poller (15-min targeted submissions poll)
+        # own lane so its high cadence can't lose the JobLock race to the
+        # hourly per-CIK poll. See app/jobs/sources.py::Lane.
+        "sec_expected_filings",
         # #1540 — sec_filing_documents_ingest (@:35, ~96s/tick sole writer of
         # filing_documents) + sec_insider_transactions_backfill (@:45 tail
         # drainer) extracted from sec_rate into their own single-job lanes.

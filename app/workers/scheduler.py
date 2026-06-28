@@ -355,6 +355,12 @@ JOB_FINANCIAL_FACTS_RETENTION_SWEEP = "financial_facts_retention_sweep"
 # #1564 — daily pg_database_size snapshot into pg_size_sample, read by the
 # postgres-health db_size_growth_7d trend signal. Own ``db_size_sample`` lane.
 JOB_PG_SIZE_SAMPLE = "pg_size_sample"
+# #1788 (#677 Part B) — event-driven fundamentals catch-up. The seed derives
+# the next expected 10-Q/10-K window per high-value instrument; the poller
+# force-refreshes fundamentals the moment that filing appears (own
+# ``sec_expected_filings`` lane).
+JOB_EXPECTED_FILINGS_SEED = "expected_filings_seed"
+JOB_EXPECTED_FILINGS_POLLER = "expected_filings_poller"
 # #1013 — one-shot retroactive cleanup of skip-tier filing_events rows.
 # Manual-trigger-only (NOT in SCHEDULED_JOBS): a one-shot delete must
 # never auto-fire. Source-lock binding in MANUAL_TRIGGER_JOB_SOURCES,
@@ -1132,6 +1138,48 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # completes — harmless, the DB is tiny then and there is no trend to
         # track yet.
         catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_EXPECTED_FILINGS_SEED,
+        display_name="Expected-filings seed",
+        # #1788 — derive the next-expected 10-Q/10-K window per high-value
+        # instrument (watchlist + open positions) from financial_periods.
+        # Reads financial_periods + sec_filing_manifest only (no SEC HTTP) →
+        # the fundamentals-raw DB lane. Daily refresh because scope membership
+        # (watchlist/positions) is operator-mutable and rolls forward as new
+        # filings land. catch_up_on_boot so a bootstrapped install self-seeds
+        # within one cycle of bootstrap completion (prevention:
+        # backfills-belong-in-bootstrap — the surface ships seeded, not
+        # per-tick only).
+        source="db_fundamentals_raw",
+        description=(
+            "#1788 (#677 Part B) — upsert the next expected periodic filing "
+            "(10-Q/10-K) per high-value instrument, period-end anchored from "
+            "financial_periods. Conditional re-seed on anchor advance; feeds "
+            "the expected_filings_poller."
+        ),
+        cadence=Cadence.daily(hour=6, minute=0),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_EXPECTED_FILINGS_POLLER,
+        display_name="Expected-filings poller",
+        # #1788 — own lane so the 15-min cadence can't lose the JobLock race
+        # to the hourly sec_per_cik poll / manifest worker. The shared 10 req/s
+        # SEC HTTP floor is enforced process-wide in sec_edgar regardless of
+        # lane; this lane only serialises job overlap.
+        source="sec_expected_filings",
+        description=(
+            "#1788 (#677 Part B) — 15-min targeted submissions.json poll for "
+            "instruments in an expected 10-Q/10-K window; on a strictly-newer, "
+            "exact-form, non-amendment accession records the manifest row and "
+            "force-refreshes fundamentals (Part A run_force_refresh). "
+            "Budget-bounded (max 100 subjects/run, most-stale-first)."
+        ),
+        cadence=Cadence.every_n_minutes(interval=15),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_ORPHAN_TEST_DB_REAP,
@@ -6205,6 +6253,53 @@ def sec_per_cik_poll() -> None:
             stats.poll_errors,
             stats.recheck_subjects_polled,
             stats.recheck_new_filings_recorded,
+        )
+
+
+def expected_filings_seed() -> None:
+    """``_INVOKERS['expected_filings_seed']`` — #1788 daily seed.
+
+    Derives the next expected 10-Q/10-K window per high-value instrument
+    (watchlist + open positions) from financial_periods and upserts
+    expected_filings. Reads only the DB (no SEC HTTP)."""
+    from app.jobs.expected_filings_poller import seed_expected_filings
+
+    with _tracked_job(JOB_EXPECTED_FILINGS_SEED) as tracker:
+        with connect_job() as conn:
+            stats = seed_expected_filings(conn)
+        tracker.row_count = stats.rows_upserted
+        logger.info(
+            "expected_filings_seed: scoped=%d upserted=%d",
+            stats.instruments_scoped,
+            stats.rows_upserted,
+        )
+
+
+def expected_filings_poller() -> None:
+    """``_INVOKERS['expected_filings_poller']`` — #1788 15-min targeted poll.
+
+    Polls submissions.json for instruments in an expected filing window;
+    on a strictly-newer exact-form non-amendment accession records the
+    manifest row + force-refreshes fundamentals (Part A)."""
+    from app.jobs.expected_filings_poller import run_expected_filings_poller
+
+    with _tracked_job(JOB_EXPECTED_FILINGS_POLLER) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            connect_job() as conn,
+        ):
+            stats = run_expected_filings_poller(
+                conn,
+                http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
+                now=datetime.now(UTC),
+                user_agent=settings.sec_user_agent,
+            )
+        tracker.row_count = stats.fulfilled
+        logger.info(
+            "expected_filings_poller: subjects=%d fulfilled=%d errors=%d",
+            stats.subjects_polled,
+            stats.fulfilled,
+            stats.poll_errors,
         )
 
 
