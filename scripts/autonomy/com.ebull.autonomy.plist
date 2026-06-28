@@ -14,14 +14,15 @@
   <key>Label</key>
   <string>com.ebull.autonomy</string>
 
+  <!-- __REPO__ substituted with the repo root by the setup.md install step (sed). -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/lukebradford/Dev/eBull/scripts/autonomy/run_loop.sh</string>
+    <string>__REPO__/scripts/autonomy/run_loop.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/lukebradford/Dev/eBull</string>
+  <string>__REPO__</string>
 
   <!-- launchd gives a minimal PATH; add Homebrew + system bins so claude/uv/gh/git resolve. -->
   <key>EnvironmentVariables</key>
@@ -37,11 +38,10 @@
   <key>RunAtLoad</key>
   <false/>
 
-  <!-- /tmp always exists — launchd opens these BEFORE run_loop.sh can mkdir its
-       var/ logdir (Codex ckpt-2 MED). Per-run transcripts still go to var/autonomy-logs. -->
+  <!-- Persist across reboots; setup.md mkdirs var/autonomy-logs before load. -->
   <key>StandardOutPath</key>
-  <string>/tmp/ebull-autonomy-launchd.out.log</string>
+  <string>__REPO__/var/autonomy-logs/launchd.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/ebull-autonomy-launchd.err.log</string>
+  <string>__REPO__/var/autonomy-logs/launchd.err.log</string>
 </dict>
 </plist>

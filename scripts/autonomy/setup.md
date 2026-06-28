@@ -22,8 +22,10 @@ backs off to the reset window → retries when capacity returns; board empty →
 idle-polls; kept alive across crashes/reboots by launchd `KeepAlive`. Start it
 once and leave for days.
 ```bash
-mkdir -p var/autonomy-logs
-cp scripts/autonomy/com.ebull.autonomy.supervisor.plist ~/Library/LaunchAgents/
+mkdir -p var/autonomy-logs   # must exist before launchd opens its log paths
+# substitute __REPO__ with this checkout's path (plists ship path-agnostic):
+sed "s#__REPO__#$(pwd)#g" scripts/autonomy/com.ebull.autonomy.supervisor.plist \
+  > ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
 launchctl load ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
 launchctl list | grep ebull          # confirm loaded
 tail -f var/autonomy-logs/supervisor.log
@@ -38,8 +40,10 @@ One fresh session per hour (lock = no overlap). Less tight than the supervisor
 and no smart limit-backoff (a limited hour just retries next hour), but minimal.
 Use this OR the supervisor, **not both**.
 ```bash
-cp scripts/autonomy/com.ebull.autonomy.plist ~/Library/LaunchAgents/
-launchctl load   ~/Library/LaunchAgents/com.ebull.autonomy.plist
+mkdir -p var/autonomy-logs
+sed "s#__REPO__#$(pwd)#g" scripts/autonomy/com.ebull.autonomy.plist \
+  > ~/Library/LaunchAgents/com.ebull.autonomy.plist
+launchctl load ~/Library/LaunchAgents/com.ebull.autonomy.plist
 ```
 
 ### Stop / remove

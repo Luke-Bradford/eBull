@@ -55,7 +55,13 @@ err_backoff=$ERR_BACKOFF_START
 limit_backoff=$LIMIT_BACKOFF_START
 
 run_session() {
-  # Preflight: clean, latest main, or skip this iteration.
+  # Preflight: clean, latest main, or skip this iteration. Guard dirty tree /
+  # in-progress rebase|cherry-pick BEFORE `git checkout` — checkout could discard
+  # or abort that work silently (review #1768).
+  [ -z "$(git status --porcelain)" ] || { log "preflight: tree dirty — skip (won't checkout over uncommitted work)"; return 2; }
+  if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ] || [ -f .git/CHERRY_PICK_HEAD ] || [ -f .git/MERGE_HEAD ]; then
+    log "preflight: rebase/cherry-pick/merge in progress — skip"; return 2
+  fi
   git fetch origin -q 2>>"$SUPLOG" || { log "preflight: fetch failed"; return 2; }
   git checkout main -q 2>>"$SUPLOG" || { log "preflight: checkout main failed"; return 2; }
   git pull -q --ff-only 2>>"$SUPLOG" || { log "preflight: main not fast-forward"; return 2; }
