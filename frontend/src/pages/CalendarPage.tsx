@@ -26,10 +26,12 @@ const SCOPES: ReadonlyArray<{ key: CalendarScope; label: string }> = [
   { key: "all", label: "All" },
 ];
 
-const HORIZONS: ReadonlyArray<{ days: number; label: string }> = [
-  { days: 7, label: "1 week" },
-  { days: 14, label: "2 weeks" },
-  { days: 28, label: "4 weeks" },
+const HORIZONS: ReadonlyArray<{ days: number; label: string; window: string }> = [
+  // `window` is the period phrasing used in the section title + intro so they
+  // track the selected horizon (not a stale "this week").
+  { days: 7, label: "1 week", window: "this week" },
+  { days: 14, label: "2 weeks", window: "next 2 weeks" },
+  { days: 28, label: "4 weeks", window: "next 4 weeks" },
 ];
 
 const DAY_TYPE_STYLE: Record<MarketDayType, string> = {
@@ -88,12 +90,16 @@ export function CalendarPage(): JSX.Element {
   const nowBar = useMemo(() => [{ time: Math.floor(Date.now() / 1000) }], []);
   const specials = useMarketSpecials("us_equity", nowBar);
 
+  // Period phrasing for the intro + section title, tracking the selected
+  // horizon (falls back to the default if days is ever off-list).
+  const windowLabel = HORIZONS.find((h) => h.days === days)?.window ?? "this week";
+
   return (
     <div className="mx-auto max-w-screen-lg space-y-4 p-4">
       <header className="border-b border-slate-200 pb-3 dark:border-slate-800">
         <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Calendar</h1>
         <p className="mt-1 text-xs text-slate-500">
-          Market status for the week ahead + upcoming ex-dividends across your{" "}
+          Market status for {windowLabel} + upcoming ex-dividends across your{" "}
           {scope === "all" ? "portfolio & watchlist" : scope}. US markets are NYSE-precise;
           foreign exchanges show weekday/weekend only (holidays not modelled).
         </p>
@@ -149,7 +155,7 @@ export function CalendarPage(): JSX.Element {
         />
       ) : (
         <>
-          <Section title="Market status — this week">
+          <Section title={`Market status — ${windowLabel}`}>
             <div className="space-y-3">
               {events.data.market_status.map((row) => (
                 <div key={row.profile}>
