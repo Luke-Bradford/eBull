@@ -168,7 +168,7 @@ export function DashboardPage() {
 
       <Section title={`Watchlist${watchlist.data ? ` · ${watchlist.data.total}` : ""}`}>
         {watchlistError !== null && (
-          <div className="mb-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+          <div className="mb-2 rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 p-2 text-xs text-red-700 dark:text-red-300">
             {watchlistError}
             <button
               type="button"

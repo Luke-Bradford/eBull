@@ -45,9 +45,9 @@ export interface EightKEventsPanelProps {
 function severityTone(severity: string | null): string {
   switch (severity) {
     case "critical":
-      return "bg-rose-100 text-rose-800";
+      return "bg-rose-100 dark:bg-rose-900/40 text-rose-800 dark:text-rose-200";
     case "material":
-      return "bg-amber-100 text-amber-800";
+      return "bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200";
     case "informational":
       return "bg-slate-100 dark:bg-slate-800 text-slate-600";
     default:
@@ -109,8 +109,8 @@ function FilingCard({ filing }: { filing: EightKFiling }) {
         <span
           className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ${
             filing.is_amendment
-              ? "bg-amber-50 text-amber-800"
-              : "bg-sky-50 text-sky-800"
+              ? "bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200"
+              : "bg-sky-50 dark:bg-sky-950/40 text-sky-800 dark:text-sky-200"
           }`}
         >
           {filing.document_type}

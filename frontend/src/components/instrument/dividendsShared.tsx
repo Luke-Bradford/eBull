@@ -76,7 +76,7 @@ export function NextDividendBanner({ upcoming }: { upcoming: UpcomingDividend })
   // banner's job is "operator awareness", not a filled-in calendar.
   const exOrPay = upcoming.ex_date ?? upcoming.pay_date;
   return (
-    <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm">
+    <div className="mb-4 rounded-md border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-sm">
       <div className="flex items-baseline justify-between gap-3">
         <span className="font-semibold text-amber-900">Next dividend</span>
         {upcoming.dps_declared !== null && (

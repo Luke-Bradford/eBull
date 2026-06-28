@@ -53,7 +53,7 @@ export function CrossRefPopover({
     <span className="relative inline-block">
       <button
         type="button"
-        className="rounded bg-sky-100 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 hover:bg-sky-200"
+        className="rounded bg-sky-100 dark:bg-sky-900/40 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300 hover:bg-sky-200"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
       >

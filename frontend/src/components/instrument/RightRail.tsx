@@ -233,8 +233,8 @@ function RecentNews({ instrumentId }: { instrumentId: number }) {
 
 function sentimentTone(score: number | null): string {
   if (score === null) return "bg-slate-100 dark:bg-slate-800 text-slate-500";
-  if (score >= 0.3) return "bg-emerald-50 text-emerald-700";
-  if (score <= -0.3) return "bg-red-50 text-red-700";
+  if (score >= 0.3) return "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300";
+  if (score <= -0.3) return "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300";
   return "bg-slate-100 dark:bg-slate-800 text-slate-600";
 }
 

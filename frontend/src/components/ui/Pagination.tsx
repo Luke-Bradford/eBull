@@ -53,7 +53,7 @@ const BTN_BASE =
 const BTN_IDLE =
   "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 hover:bg-slate-50 dark:hover:bg-slate-800/40";
 const BTN_ACTIVE =
-  "border-blue-400 bg-blue-50 text-blue-700";
+  "border-blue-400 bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300";
 const BTN_DISABLED =
   "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-300 cursor-not-allowed";
 

@@ -56,12 +56,12 @@ function isThesisStale(thesis: ThesisDetail | null): boolean {
 function thesisTone(stance: string): string {
   switch (stance.toLowerCase()) {
     case "buy":
-      return "bg-emerald-50 text-emerald-700 border-emerald-300";
+      return "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700";
     case "hold":
       return "bg-slate-100 dark:bg-slate-800 text-slate-700 border-slate-300 dark:border-slate-700";
     case "exit":
     case "sell":
-      return "bg-red-50 text-red-700 border-red-300";
+      return "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-300 dark:border-red-700";
     default:
       return "bg-slate-100 dark:bg-slate-800 text-slate-700 border-slate-300 dark:border-slate-700";
   }
@@ -151,7 +151,7 @@ export function SummaryStrip({
         {summary.coverage_tier !== null ? (
           <Term
             term={`Tier ${summary.coverage_tier}`}
-            className="rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700 no-underline"
+            className="rounded bg-blue-100 dark:bg-blue-900/40 px-2 py-0.5 text-xs font-medium text-blue-700 dark:text-blue-300 no-underline"
           >
             Tier {summary.coverage_tier}
           </Term>
@@ -223,7 +223,7 @@ export function SummaryStrip({
         {thesisError ? (
           <span
             data-testid="thesis-badge-error"
-            className="inline-flex items-center rounded border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+            className="inline-flex items-center rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-300"
           >
             Thesis unavailable
           </span>
@@ -232,14 +232,14 @@ export function SummaryStrip({
         {positionError ? (
           <span
             data-testid="position-badge-error"
-            className="inline-flex items-center rounded border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+            className="inline-flex items-center rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-300"
           >
             Holdings unavailable
           </span>
         ) : positionLoaded && isHeld ? (
           <span
             data-testid="held-badge"
-            className="inline-flex items-center rounded border border-blue-300 bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700"
+            className="inline-flex items-center rounded border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/40 px-2 py-0.5 text-xs font-medium text-blue-700 dark:text-blue-300"
           >
             Held: {heldUnits}u
           </span>

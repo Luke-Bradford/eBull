@@ -37,8 +37,8 @@ export function DemoLivePill(): JSX.Element {
     <span
       className={
         isLive
-          ? "inline-flex items-center gap-1 rounded border border-red-300 bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-red-700"
-          : "inline-flex items-center gap-1 rounded border border-blue-300 bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-blue-700"
+          ? "inline-flex items-center gap-1 rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-red-700 dark:text-red-300"
+          : "inline-flex items-center gap-1 rounded border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-blue-700 dark:text-blue-300"
       }
       data-testid="demo-live-pill"
       data-live={isLive ? "true" : "false"}

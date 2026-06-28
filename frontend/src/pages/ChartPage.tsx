@@ -539,7 +539,7 @@ export function ChartPage(): JSX.Element {
                 key={sym}
                 className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
                   hasFailed
-                    ? "border-red-400 bg-red-50 text-red-700"
+                    ? "border-red-400 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300"
                     : "border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 text-slate-700"
                 }`}
                 title={hasFailed ? "Failed to fetch — check ticker" : undefined}

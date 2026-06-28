@@ -31,15 +31,15 @@ function FieldSourceTag({ source }: { source: KeyStatsFieldSource | undefined })
   let label: string = source;
   switch (source) {
     case "sec_xbrl":
-      tone = "bg-emerald-50 text-emerald-700";
+      tone = "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300";
       label = "SEC";
       break;
     case "sec_dividend_summary":
-      tone = "bg-emerald-50 text-emerald-700";
+      tone = "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300";
       label = "SEC · div";
       break;
     case "sec_xbrl_price_missing":
-      tone = "bg-amber-50 text-amber-700";
+      tone = "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300";
       label = "SEC · price?";
       break;
     case "unavailable":

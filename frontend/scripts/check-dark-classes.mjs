@@ -36,10 +36,10 @@
  *
  * Exits non-zero with file:line:reason for each violation.
  *
- * SKIP_FILES below records pre-existing violators that are queued
- * for a separate sweep PR. Each entry should reference the tracking
- * issue. New files MUST NOT be added to this list — fix the
- * violation in the same PR that introduces it.
+ * All checks (A-F) apply tree-wide with no per-file exemptions. The
+ * Check F tinted-bg skip-list was fully drained in #987; do NOT
+ * reintroduce one — fix the violation in the same PR that introduces
+ * it.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -48,49 +48,10 @@ import { fileURLToPath } from "node:url";
 const ROOT = fileURLToPath(new URL("../src", import.meta.url));
 const SKIP_DIRS = new Set(["test", "__mocks__"]);
 
-/**
- * Files exempt from check F only — they carry pre-existing tinted-bg
- * violations being drained in a separate sweep ticket.
- *
- * Tracking: #987 (sweep). When that ticket lands the entire set
- * should empty out and this constant can be removed.
- *
- * Do NOT add new files here. Fix the violation in the same PR.
- */
-const CHECK_F_SKIP_FILES = new Set([
-  "src/components/broker/ValidationResultDisplay.tsx",
-  "src/components/dashboard/AlertsStrip.tsx",
-  "src/components/dashboard/RecentRecommendations.tsx",
-  "src/components/instrument/CrossRefPopover.tsx",
-  "src/components/instrument/EightKEventsPanel.tsx",
-  "src/components/instrument/InsiderActivityPanel.tsx",
-  "src/components/instrument/KeyStatsPane.tsx",
-  "src/components/instrument/RightRail.tsx",
-  "src/components/instrument/SummaryStrip.tsx",
-  "src/components/instrument/dividendsShared.tsx",
-  "src/components/orders/ClosePositionModal.tsx",
-  "src/components/orders/DemoLivePill.tsx",
-  "src/components/orders/OrderEntryModal.tsx",
-  "src/components/rankings/RankingsTable.tsx",
-  "src/components/recommendations/AuditTrail.tsx",
-  "src/components/recommendations/RecommendationsTable.tsx",
-  "src/components/settings/BudgetConfigSection.tsx",
-  "src/components/settings/DisplayCurrencySection.tsx",
-  "src/components/states/ErrorBanner.tsx",
-  "src/components/ui/Pagination.tsx",
-  "src/pages/AdminPage.tsx",
-  "src/pages/ChartPage.tsx",
-  "src/pages/CopyTradingPage.tsx",
-  "src/pages/DashboardPage.tsx",
-  "src/pages/EightKListPage.tsx",
-  "src/pages/InstrumentPage.tsx",
-  "src/pages/InstrumentsPage.tsx",
-  "src/pages/LoginPage.tsx",
-  "src/pages/OperatorsPage.tsx",
-  "src/pages/ReportsPage.tsx",
-  "src/pages/SettingsPage.tsx",
-  "src/pages/SetupPage.tsx",
-]);
+// #987 — the Check F tinted-bg skip-list has been fully drained (every
+// file received its dark:bg- partner). Check F now applies to the whole
+// tree with no exemptions; do NOT reintroduce a skip-list — fix the
+// violation in the same PR.
 
 function walk(dir) {
   const out = [];
@@ -219,9 +180,6 @@ const violations = [];
 const files = walk(ROOT);
 for (const file of files) {
   const lines = readFileSync(file, "utf8").split("\n");
-  const rel = relative(ROOT, file).split(sep).join("/");
-  const relFromSrc = `src/${rel}`;
-  const skipCheckF = CHECK_F_SKIP_FILES.has(relFromSrc);
   lines.forEach((line, i) => {
     const lineNo = i + 1;
     const dups = findDuplicateVariants(line);
@@ -248,11 +206,9 @@ for (const file of files) {
     if (deadHover) {
       violations.push({ file, line: lineNo, reason: deadHover });
     }
-    if (!skipCheckF) {
-      const tintedMiss = findMissingTintedBgPartner(line);
-      if (tintedMiss) {
-        violations.push({ file, line: lineNo, reason: tintedMiss });
-      }
+    const tintedMiss = findMissingTintedBgPartner(line);
+    if (tintedMiss) {
+      violations.push({ file, line: lineNo, reason: tintedMiss });
     }
   });
 }

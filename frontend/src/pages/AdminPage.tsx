@@ -496,9 +496,9 @@ function RunButton({
           : "Run now";
   const tone =
     state.kind === "error"
-      ? "border-red-300 bg-red-50 text-red-700 hover:bg-red-100"
+      ? "border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 hover:bg-red-100"
       : state.kind === "queued"
-        ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+        ? "border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300"
         : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40";
   return (
     <button

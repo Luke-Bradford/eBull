@@ -9,7 +9,7 @@ export function ValidationResultDisplay({
 }): JSX.Element | null {
   if (error !== null) {
     return (
-      <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+      <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
         {error}
       </div>
     );
@@ -18,7 +18,7 @@ export function ValidationResultDisplay({
 
   if (!result.auth_valid) {
     return (
-      <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+      <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
         Authentication failed — check your eToro public key and private key.
       </div>
     );
@@ -27,7 +27,7 @@ export function ValidationResultDisplay({
   if (!result.env_valid) {
     return (
       <div className="space-y-1">
-        <div className="rounded bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
+        <div className="rounded bg-amber-50 dark:bg-amber-950/40 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
           Authenticated, but environment check failed: {result.env_check}
         </div>
         {result.note && (
@@ -39,7 +39,7 @@ export function ValidationResultDisplay({
 
   return (
     <div className="space-y-1">
-      <div className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-700">
+      <div className="rounded bg-emerald-50 dark:bg-emerald-950/40 px-2 py-1.5 text-xs text-emerald-700 dark:text-emerald-300">
         Connection verified
         {result.identity?.gcid != null && (
           <span className="ml-1 text-emerald-600">

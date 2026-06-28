@@ -155,7 +155,7 @@ export function ClosePositionModal({
         </header>
 
         {detail.error !== null ? (
-          <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">
+          <div className="rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300">
             <span>Could not load position details.</span>{" "}
             <button
               type="button"
@@ -170,7 +170,7 @@ export function ClosePositionModal({
         ) : staleTrade ? (
           <p
             role="alert"
-            className="rounded border border-red-300 bg-red-50 px-2 py-1.5 text-xs text-red-700"
+            className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300"
           >
             This position no longer exists — refresh the portfolio.
           </p>
@@ -282,7 +282,7 @@ export function ClosePositionModal({
         {errorMessage !== null ? (
           <p
             role="alert"
-            className="rounded border border-red-300 bg-red-50 px-2 py-1.5 text-xs text-red-700"
+            className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300"
           >
             {errorMessage}
           </p>
