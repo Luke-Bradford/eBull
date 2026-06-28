@@ -51,13 +51,26 @@ function s13Stage(status: BootstrapStageStatus): BootstrapStageResponse {
 
 const NUDGE = /OPENFIGI_API_KEY/;
 
+function runningS13(startedAt: string | null): BootstrapStatusResponse {
+  return status({
+    status: "running",
+    current_run_id: 42,
+    openfigi_key_present: false,
+    stages: [{ ...s13Stage("running"), started_at: startedAt }],
+  });
+}
+
+const DRIFTHEAL = /running over 2 minutes/;
+
 beforeEach(() => {
   mockedFetch.mockReset();
   window.localStorage.clear();
+  window.sessionStorage.clear();
 });
 
 afterEach(() => {
   vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
 describe("OpenFigiKeyNudgeBanner", () => {
@@ -127,5 +140,100 @@ describe("OpenFigiKeyNudgeBanner", () => {
     render(<OpenFigiKeyNudgeBanner />);
     await waitFor(() => expect(mockedFetch).toHaveBeenCalled());
     expect(screen.queryByText(NUDGE)).not.toBeInTheDocument();
+  });
+
+  // --- drift-heal mode (#1791) ---
+
+  it("drift-heal shows when S13 has run > 2 min with no key", async () => {
+    const startedAt = new Date(Date.now() - 3 * 60_000).toISOString();
+    mockedFetch.mockResolvedValue(runningS13(startedAt));
+    render(<OpenFigiKeyNudgeBanner />);
+    expect(await screen.findByText(DRIFTHEAL)).toBeInTheDocument();
+  });
+
+  it("drift-heal hidden when S13 under the 2-min threshold", async () => {
+    const startedAt = new Date(Date.now() - 60_000).toISOString();
+    mockedFetch.mockResolvedValue(runningS13(startedAt));
+    render(<OpenFigiKeyNudgeBanner />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalled());
+    expect(screen.queryByText(DRIFTHEAL)).not.toBeInTheDocument();
+  });
+
+  it("drift-heal hidden when running but S13 stage is not running", async () => {
+    mockedFetch.mockResolvedValue(
+      status({
+        status: "running",
+        current_run_id: 42,
+        openfigi_key_present: false,
+        stages: [s13Stage("success")],
+      }),
+    );
+    render(<OpenFigiKeyNudgeBanner />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalled());
+    expect(screen.queryByText(DRIFTHEAL)).not.toBeInTheDocument();
+  });
+
+  it("drift-heal hidden when started_at is null (no parseable clock)", async () => {
+    mockedFetch.mockResolvedValue(runningS13(null));
+    render(<OpenFigiKeyNudgeBanner />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalled());
+    expect(screen.queryByText(DRIFTHEAL)).not.toBeInTheDocument();
+  });
+
+  it("drift-heal hidden when key already present", async () => {
+    const startedAt = new Date(Date.now() - 3 * 60_000).toISOString();
+    mockedFetch.mockResolvedValue({
+      ...runningS13(startedAt),
+      openfigi_key_present: true,
+    });
+    render(<OpenFigiKeyNudgeBanner />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalled());
+    expect(screen.queryByText(DRIFTHEAL)).not.toBeInTheDocument();
+  });
+
+  it("drift-heal dismiss is run-scoped (sessionStorage) and survives remount, but a new run re-surfaces it", async () => {
+    const startedAt = new Date(Date.now() - 3 * 60_000).toISOString();
+    mockedFetch.mockResolvedValue(runningS13(startedAt));
+    const user = userEvent.setup();
+    const { unmount } = render(<OpenFigiKeyNudgeBanner />);
+    expect(await screen.findByText(DRIFTHEAL)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /dismiss/i }));
+    expect(screen.queryByText(DRIFTHEAL)).not.toBeInTheDocument();
+    expect(
+      window.sessionStorage.getItem("openfigiKeyDriftHealDismissed:42"),
+    ).toBe("1");
+    // Pre-flight localStorage key untouched — independent dismiss state.
+    expect(window.localStorage.getItem("openfigiKeyNudgeDismissed")).toBeNull();
+
+    // Same run, remount — run-scoped dismiss keeps it hidden.
+    unmount();
+    render(<OpenFigiKeyNudgeBanner />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(DRIFTHEAL)).not.toBeInTheDocument();
+
+    // A new bootstrap run (different current_run_id) re-surfaces the nudge.
+    mockedFetch.mockResolvedValue({
+      ...runningS13(startedAt),
+      current_run_id: 99,
+    });
+    const next = render(<OpenFigiKeyNudgeBanner />);
+    expect(await next.findByText(DRIFTHEAL)).toBeInTheDocument();
+  });
+
+  it("pre-flight dismiss does NOT suppress a later drift-heal nudge", async () => {
+    // Operator dismisses the pre-flight nudge…
+    mockedFetch.mockResolvedValue(status({ status: "pending" }));
+    const user = userEvent.setup();
+    const { unmount } = render(<OpenFigiKeyNudgeBanner />);
+    expect(await screen.findByText(NUDGE)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /dismiss/i }));
+    unmount();
+
+    // …then S13 crawls mid-run: the drift-heal nudge still shows.
+    const startedAt = new Date(Date.now() - 3 * 60_000).toISOString();
+    mockedFetch.mockResolvedValue(runningS13(startedAt));
+    render(<OpenFigiKeyNudgeBanner />);
+    expect(await screen.findByText(DRIFTHEAL)).toBeInTheDocument();
   });
 });
