@@ -35,7 +35,7 @@ runtime is available, falling back to the declared cadence computation
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Literal
 
 import psycopg
@@ -839,6 +839,10 @@ class PostgresHealthResponse(BaseModel):
     db_size_pretty: str | None
     db_size_warn_threshold_bytes: int
     db_size_breached_warn: bool | None
+    # #1564 — 7-day on-disk growth trend (informational, no breach flag). Null
+    # until ≥7d of daily samples accumulate (or if the baseline is too stale).
+    db_size_growth_7d_bytes: int | None
+    db_size_growth_7d_baseline_date: date | None
     leaked_test_db_count: int | None
     leaked_test_db_names: list[str] | None
     leaked_test_db_total_bytes: int | None
@@ -1038,6 +1042,8 @@ def get_postgres_health() -> PostgresHealthResponse:
         db_size_pretty=snapshot.db_size_pretty,
         db_size_warn_threshold_bytes=snapshot.db_size_warn_threshold_bytes,
         db_size_breached_warn=snapshot.db_size_breached_warn,
+        db_size_growth_7d_bytes=snapshot.db_size_growth_7d_bytes,
+        db_size_growth_7d_baseline_date=snapshot.db_size_growth_7d_baseline_date,
         leaked_test_db_count=snapshot.leaked_test_db_count,
         leaked_test_db_names=snapshot.leaked_test_db_names,
         leaked_test_db_total_bytes=snapshot.leaked_test_db_total_bytes,

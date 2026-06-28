@@ -118,6 +118,7 @@ _LANE_BY_JOB: dict[str, ProcessLane] = {
     "weekly_report": "ops",
     "monthly_report": "ops",
     "raw_data_retention_sweep": "ops",
+    "pg_size_sample": "ops",
     "financial_facts_retention_sweep": "ops",
     "daily_tax_reconciliation": "ops",
     "daily_portfolio_sync": "ops",

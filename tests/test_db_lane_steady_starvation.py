@@ -24,6 +24,7 @@ from app.workers.scheduler import (
     JOB_CUSIP_EXTID_SWEEP,
     JOB_MONITOR_POSITIONS,
     JOB_OWNERSHIP_OBSERVATIONS_SYNC,
+    JOB_PG_SIZE_SAMPLE,
 )
 
 # (job_name, expected own lane). Job names via the scheduler constants so a
@@ -33,6 +34,7 @@ _STEADY_LANES: tuple[tuple[str, str], ...] = (
     (JOB_MONITOR_POSITIONS, "db_positions"),
     (JOB_CUSIP_EXTID_SWEEP, "db_cusip"),
     (JOB_OWNERSHIP_OBSERVATIONS_SYNC, "db_ownership_obs"),
+    (JOB_PG_SIZE_SAMPLE, "db_size_sample"),
 )
 
 
