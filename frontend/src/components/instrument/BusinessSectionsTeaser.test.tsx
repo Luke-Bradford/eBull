@@ -192,6 +192,59 @@ describe("BusinessSectionsTeaser", () => {
     expect(screen.getByText(/retail and institutional/)).toBeInTheDocument();
   });
 
+  it("keys cards by section_order so colliding section_key buckets don't drop cards or warn (#1810)", async () => {
+    // `section_key` is a classification bucket — GME's leading Item-1
+    // subsections collapse to "other". Keying by it gave React duplicate
+    // keys, which make reconciliation unsupported (cards can be omitted or
+    // reused). `section_order` is unique per filing.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
+      symbol: "GME",
+      source_accession: null,
+      cik: null,
+      sections: [
+        {
+          section_order: 5,
+          section_key: "other",
+          section_label: "Business Priorities",
+          body: "We prioritise the long-term transformation of the business.",
+          cross_references: [],
+          tables: [],
+        },
+        {
+          section_order: 6,
+          section_key: "other",
+          section_label: "Capital Deployment",
+          body: "We deploy capital toward high-return initiatives.",
+          cross_references: [],
+          tables: [],
+        },
+        {
+          section_order: 7,
+          section_key: "other",
+          section_label: "Retail Business",
+          body: "Our retail footprint spans thousands of stores.",
+          cross_references: [],
+          tables: [],
+        },
+      ],
+    } as never);
+    render(
+      <MemoryRouter>
+        <BusinessSectionsTeaser symbol="GME" />
+      </MemoryRouter>,
+    );
+    // All three distinct cards render despite the shared "other" bucket.
+    expect(await screen.findByText("Business Priorities")).toBeInTheDocument();
+    expect(screen.getByText("Capital Deployment")).toBeInTheDocument();
+    expect(screen.getByText("Retail Business")).toBeInTheDocument();
+    // No "two children with the same key" warning was emitted.
+    const sameKeyWarning = errorSpy.mock.calls.some((args) =>
+      args.some((a) => typeof a === "string" && a.includes("same key")),
+    );
+    expect(sameKeyWarning).toBe(false);
+  });
+
   it("renders a loading skeleton (not parse-failed copy) for the deferred state (#1343)", async () => {
     vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
       symbol: "GME",
