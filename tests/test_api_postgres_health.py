@@ -19,7 +19,7 @@ Codex 1a/1b regressions:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from unittest.mock import MagicMock, patch
 
 import psycopg
@@ -48,6 +48,8 @@ def _snapshot(**overrides: object) -> PostgresHealthSnapshot:
         "db_size_pretty": "5 GB",
         "db_size_warn_threshold_bytes": 10 * 1024 * 1024 * 1024,
         "db_size_breached_warn": False,
+        "db_size_growth_7d_bytes": 2 * 1024 * 1024 * 1024,  # +2 GB / 7d
+        "db_size_growth_7d_baseline_date": date(2026, 5, 12),
         "leaked_test_db_count": 0,
         "leaked_test_db_names": [],
         "leaked_test_db_total_bytes": 0,
@@ -98,6 +100,8 @@ def test_endpoint_returns_200_with_all_fields() -> None:
         "db_size_pretty",
         "db_size_warn_threshold_bytes",
         "db_size_breached_warn",
+        "db_size_growth_7d_bytes",
+        "db_size_growth_7d_baseline_date",
         "leaked_test_db_count",
         "leaked_test_db_names",
         "leaked_test_db_total_bytes",
@@ -141,6 +145,38 @@ def test_db_size_breach_flag_above_threshold() -> None:
         resp = client.get("/system/postgres-health")
     assert resp.status_code == 200
     assert resp.json()["db_size_breached_warn"] is True
+
+
+def test_db_size_growth_7d_passthrough() -> None:
+    # #1564 — the informational trend fields round-trip through the endpoint.
+    with patch(
+        "app.services.postgres_health.collect_postgres_health",
+        return_value=_snapshot(
+            db_size_growth_7d_bytes=3 * 1024 * 1024 * 1024,
+            db_size_growth_7d_baseline_date=date(2026, 5, 11),
+        ),
+    ):
+        resp = client.get("/system/postgres-health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["db_size_growth_7d_bytes"] == 3 * 1024 * 1024 * 1024
+    assert body["db_size_growth_7d_baseline_date"] == "2026-05-11"
+
+
+def test_db_size_growth_7d_null_on_cold_start() -> None:
+    # Cold start (<7d history) — both fields null, endpoint still 200.
+    with patch(
+        "app.services.postgres_health.collect_postgres_health",
+        return_value=_snapshot(
+            db_size_growth_7d_bytes=None,
+            db_size_growth_7d_baseline_date=None,
+        ),
+    ):
+        resp = client.get("/system/postgres-health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["db_size_growth_7d_bytes"] is None
+    assert body["db_size_growth_7d_baseline_date"] is None
 
 
 def test_default_partition_warn_flag_above_threshold() -> None:

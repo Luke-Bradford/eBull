@@ -352,6 +352,9 @@ JOB_SEED_COST_MODELS = "seed_cost_models"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_FINANCIAL_FACTS_RETENTION_SWEEP = "financial_facts_retention_sweep"
+# #1564 — daily pg_database_size snapshot into pg_size_sample, read by the
+# postgres-health db_size_growth_7d trend signal. Own ``db_size_sample`` lane.
+JOB_PG_SIZE_SAMPLE = "pg_size_sample"
 # #1013 — one-shot retroactive cleanup of skip-tier filing_events rows.
 # Manual-trigger-only (NOT in SCHEDULED_JOBS): a one-shot delete must
 # never auto-fire. Source-lock binding in MANUAL_TRIGGER_JOB_SOURCES,
@@ -1103,6 +1106,32 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=2, minute=45),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # no-op on empty DB pre-bootstrap
+    ),
+    ScheduledJob(
+        name=JOB_PG_SIZE_SAMPLE,
+        display_name="DB size sample",
+        # Own single-job ``db_size_sample`` lane (#1564). A daily-precision
+        # snapshot on the catch-all ``db`` lane would lose the JobLock race to
+        # raw_data_retention_sweep's @02:00 filesystem rehash overrunning past
+        # 02:15 and skip a day — the #1526/#1527 starvation class. See
+        # app/jobs/sources.py::Lane.
+        source="db_size_sample",
+        description=(
+            "#1564 — daily snapshot of pg_database_size(current_database()) "
+            "into pg_size_sample (upsert on sampled_on). Feeds the "
+            "/system/postgres-health db_size_growth_7d trend signal "
+            "(informational, no alarm). Trivial one-row INSERT; empty-DB safe."
+        ),
+        # 02:15 UTC — between the retention sweeps; the own lane removes the
+        # contention the slot would otherwise create.
+        cadence=Cadence.daily(hour=2, minute=15),
+        # catch_up_on_boot=True so a restart of an already-bootstrapped install
+        # lands the next sample promptly (the growth field needs ≥7d of history
+        # to populate). NOT exempt from the universal bootstrap gate: on a fresh
+        # PRE-bootstrap install the gate defers dispatch until bootstrap
+        # completes — harmless, the DB is tiny then and there is no trend to
+        # track yet.
+        catch_up_on_boot=True,
     ),
     ScheduledJob(
         name=JOB_ORPHAN_TEST_DB_REAP,
@@ -4497,6 +4526,29 @@ def orchestrator_high_frequency_sync() -> None:
             "orchestrator_high_frequency_sync skipped: sync %s already running",
             exc.active_sync_run_id,
         )
+
+
+def pg_size_sample() -> None:
+    """Daily on-disk DB-size snapshot for the db_size_growth_7d trend (#1564).
+
+    Upserts one row per calendar day into ``pg_size_sample`` keyed on
+    ``sampled_on`` — a same-day re-run / boot catch-up refreshes the value
+    rather than duplicating. ``pg_database_size(current_database())`` is the
+    authoritative on-disk size (same source as ``_q_db_size`` + the pre-push
+    bloat-warn hook). The INSERT body itself is empty-DB safe; the job is
+    non-exempt from the universal bootstrap gate, so dispatch is deferred until
+    bootstrap completes on a fresh install (no trend to track pre-bootstrap
+    anyway). The ``with connect_job()`` block commits on clean exit.
+    """
+    with _tracked_job(JOB_PG_SIZE_SAMPLE), connect_job() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO pg_size_sample (sampled_on, db_size_bytes) "
+                "VALUES (CURRENT_DATE, pg_database_size(current_database())) "
+                "ON CONFLICT (sampled_on) DO UPDATE "
+                "  SET db_size_bytes = EXCLUDED.db_size_bytes, sampled_at = NOW()"
+            )
+        logger.info("pg_size_sample: recorded daily db_size snapshot")
 
 
 def raw_data_retention_sweep() -> None:

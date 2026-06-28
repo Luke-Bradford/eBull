@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 
@@ -83,6 +83,13 @@ DB_SIZE_WARN_BYTES: int = 60 * 1024 * 1024 * 1024  # 60 GB
 # normal checkpoint pressure.
 WAL_WARN_BYTES: int = 4 * 1024 * 1024 * 1024  # 4 GB
 DEFAULT_PARTITION_WARN_ROWS: int = 5000
+# #1564 — max age of the baseline sample still allowed to back a
+# "7-day growth" figure. 7d target + 3d slack: a daily sampler that
+# misses up to 3 consecutive days still yields a baseline; beyond that
+# the growth field reports None rather than mislabelling (e.g.) a 30-day
+# delta as 7-day. The exact baseline date is exposed alongside so the
+# operator always sees the true window.
+DB_SIZE_GROWTH_BASELINE_MAX_AGE_DAYS: int = 10
 
 # #1221 — sanity window mirrored from the parser-side guard
 # (`app/providers/implementations/sec_fundamentals.py::_PERIOD_MIN/_PERIOD_MAX`,
@@ -125,6 +132,15 @@ class PostgresHealthSnapshot:
     db_size_pretty: str | None
     db_size_warn_threshold_bytes: int
     db_size_breached_warn: bool | None
+    # #1564 — 7-day on-disk growth trend (informational, NO breach flag).
+    # ``db_size_growth_7d_bytes`` = current db_size_bytes minus the most-recent
+    # daily sample on-or-before 7 days ago (None on cold start <7d history, a
+    # failed db_size probe, or a baseline staler than
+    # DB_SIZE_GROWTH_BASELINE_MAX_AGE_DAYS). ``db_size_growth_7d_baseline_date``
+    # is the exact ``sampled_on`` of that baseline so the operator sees the true
+    # window even when the sampler skipped days.
+    db_size_growth_7d_bytes: int | None
+    db_size_growth_7d_baseline_date: date | None
     leaked_test_db_count: int | None
     leaked_test_db_names: list[str] | None
     # #1444 — total on-disk size of leaked ``ebull_test_*`` DBs. Bloat
@@ -200,6 +216,48 @@ def _q_db_size(conn: psycopg.Connection[tuple]) -> tuple[int, str]:
         row = cur.fetchone()
     assert row is not None
     return int(row[0]), str(row[1])
+
+
+def _q_db_size_growth_7d_baseline(conn: psycopg.Connection[tuple]) -> tuple[int, date] | None:
+    """Most-recent ``pg_size_sample`` row on or before 7 days ago (#1564).
+
+    Returns ``(db_size_bytes, sampled_on)`` or None when no such sample exists
+    (cold start — <7 days of history). The staleness floor (don't call a too-old
+    baseline "7-day growth") is applied by ``compute_db_size_growth_7d``, not
+    here, so the decision stays in a pure, table-tested function.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT db_size_bytes, sampled_on FROM pg_size_sample "
+            " WHERE sampled_on <= CURRENT_DATE - INTERVAL '7 days' "
+            " ORDER BY sampled_on DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return int(row[0]), row[1]
+
+
+def compute_db_size_growth_7d(
+    current_bytes: int | None,
+    baseline: tuple[int, date] | None,
+    *,
+    today: date,
+) -> tuple[int | None, date | None]:
+    """Pure 7-day growth decision (#1564).
+
+    Returns ``(current_bytes - baseline_bytes, baseline_date)`` only when both
+    inputs are present AND the baseline is no older than
+    ``DB_SIZE_GROWTH_BASELINE_MAX_AGE_DAYS`` (so a sampler gap can't mislabel a
+    30-day delta as 7-day). Otherwise ``(None, None)``. A negative result is
+    legitimate (e.g. a retention sweep / VACUUM FULL shrank the DB).
+    """
+    if current_bytes is None or baseline is None:
+        return None, None
+    baseline_bytes, baseline_date = baseline
+    if baseline_date < today - timedelta(days=DB_SIZE_GROWTH_BASELINE_MAX_AGE_DAYS):
+        return None, None
+    return current_bytes - baseline_bytes, baseline_date
 
 
 def _q_leaked_test_dbs(conn: psycopg.Connection[tuple]) -> list[str]:
@@ -422,6 +480,11 @@ def collect_postgres_health(
         if result is not None:
             db_size_bytes, db_size_pretty = result
 
+        # #1564 — 7-day growth trend. Probe the baseline sample; the delta
+        # (vs the live db_size_bytes above) + staleness floor are computed by
+        # the pure compute_db_size_growth_7d below.
+        growth_baseline = _safe(conn, "db_size_growth_7d_baseline", _q_db_size_growth_7d_baseline, errors)
+
         leaked_names = _safe(conn, "leaked_test_dbs", _q_leaked_test_dbs, errors)
 
         leaked_size = _safe(conn, "leaked_test_db_bytes", _q_leaked_test_db_bytes, errors)
@@ -440,6 +503,9 @@ def collect_postgres_health(
         listener_conns = _safe(conn, "listener_connections", _q_listener_connections, errors)
 
     db_size_breached: bool | None = None if db_size_bytes is None else db_size_bytes > db_size_warn_threshold_bytes
+    db_size_growth_7d_bytes, db_size_growth_7d_baseline_date = compute_db_size_growth_7d(
+        db_size_bytes, growth_baseline, today=datetime.now(UTC).date()
+    )
     wal_breached: bool | None = None if wal_dir_bytes is None else wal_dir_bytes > wal_warn_threshold_bytes
     # #1221 — breach keys on the parser-junk count, not the raw row
     # count; raw count stays informational.
@@ -454,6 +520,8 @@ def collect_postgres_health(
         db_size_pretty=db_size_pretty,
         db_size_warn_threshold_bytes=db_size_warn_threshold_bytes,
         db_size_breached_warn=db_size_breached,
+        db_size_growth_7d_bytes=db_size_growth_7d_bytes,
+        db_size_growth_7d_baseline_date=db_size_growth_7d_baseline_date,
         leaked_test_db_count=leaked_count,
         leaked_test_db_names=leaked_names,
         leaked_test_db_total_bytes=leaked_bytes,

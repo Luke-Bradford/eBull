@@ -112,6 +112,11 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         "db_eod_snapshot",
         "db_cusip",
         "db_ownership_obs",
+        # #1564 — pg_size_sample single-job lane. A daily db_size snapshot
+        # would lose the catch-all ``db`` lane race to raw_data_retention_sweep's
+        # @02:00 rehash and skip a day (the #1526/#1527 starvation class). See
+        # app/jobs/sources.py::Lane.
+        "db_size_sample",
     }
 )
 

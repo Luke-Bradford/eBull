@@ -82,6 +82,7 @@ Lane = Literal[
     "db_cusip",
     "db_ownership_obs",
     "db_raw_sweep",
+    "db_size_sample",
     "risk_metrics",
     "bootstrap",
     "finra",
@@ -250,6 +251,16 @@ when one overruns). Scheduled-only, so NOT added to the
   ``pg_advisory_xact_lock`` (the lane is not the guard), and their
   schedules are staggered (backfill 03:00, sweep 03:30) so they never
   co-fire in practice.
+
+* ``db_size_sample`` — ``pg_size_sample`` (#1564, daily @ 02:15) only. A
+  trivial one-row ``INSERT … ON CONFLICT`` snapshot of
+  ``pg_database_size``, but daily-precision: on the catch-all ``db`` lane it
+  would lose the ``job_source:db`` race to a long lanemate
+  (``raw_data_retention_sweep`` @ 02:00, whose filesystem rehash can overrun
+  past 02:15) and skip a full day's sample — the #1526/#1527 starvation class
+  for a once-daily job. Write-disjoint: sole writer of ``pg_size_sample``, no
+  other job touches it. Scheduled-only, so NOT added to the
+  ``bootstrap_stages.lane`` CHECK (matches ``db_liveness`` / ``db_raw_sweep``).
 
 * ``risk_metrics`` — ``risk_metrics_refresh`` (#591 PR-B) only. The
   orchestrator-driven weekly risk-metric recompute. DB-only producer (no
