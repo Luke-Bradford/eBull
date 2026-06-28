@@ -1,6 +1,7 @@
 import { Outlet } from "react-router-dom";
 import { BootstrapNudgeBanner } from "@/components/dashboard/BootstrapNudgeBanner";
 import { OpenFigiKeyNudgeBanner } from "@/components/dashboard/OpenFigiKeyNudgeBanner";
+import { OpenFigiKeyDriftHealBanner } from "@/components/dashboard/OpenFigiKeyDriftHealBanner";
 import { Sidebar } from "@/layout/Sidebar";
 import { Header } from "@/layout/Header";
 
@@ -21,6 +22,12 @@ export function AppShell() {
             bootstrap leaves the pending/partial_error window, or when
             dismissed (persistent localStorage). */}
         <OpenFigiKeyNudgeBanner />
+        {/* #1791 — mid-run drift-heal sibling of the pre-flight nudge.
+            Re-surfaces (amber) when bootstrap stage S13 is still running
+            5+ min with no key — disjoint window from the pre-flight nudge
+            above (which only shows pending/partial_error), so they never
+            stack. Per-run sessionStorage dismiss. */}
+        <OpenFigiKeyDriftHealBanner />
         {/* No top padding: pages with sticky headers (e.g. SummaryStrip
             on the instrument page) must be able to flush with the
             <Header> bar above. Pages that need top breathing room add
