@@ -60,12 +60,50 @@ def test_imports_resolve_from_new_path() -> None:
     assert hasattr(row_count_spikes, "check_row_count_spike")
 
 
-def test_backcompat_shim_from_ops_monitor() -> None:
-    # The old import path must still resolve via the shim so existing
-    # callers / tests outside this chunk keep working.
-    from app.services.ops_monitor import check_row_count_spike as legacy_fn
+# Boundary cases moved from tests/test_ops_monitor.py::TestCheckRowCountSpike
+# when the ops_monitor back-compat shim was retired (#340). They guard the
+# 50%-of-prior threshold edges (prevention-log §"check_row_count_spike compared
+# the run against itself").
 
-    # Same object identity or at minimum same callable semantics.
-    conn = _mock_conn_with_prior(None)
-    result = legacy_fn(conn, "jobname", current_count=100)
+
+def test_count_above_threshold_not_flagged() -> None:
+    # Previous: 100, current: 80 → ratio 0.8 > 0.5 threshold.
+    conn = _mock_conn_with_prior({"row_count": 100})
+    result = check_row_count_spike(conn, "jobname", current_count=80)
     assert result.flagged is False
+    assert result.previous_count == 100
+
+
+def test_drop_detail_names_the_drop() -> None:
+    conn = _mock_conn_with_prior({"row_count": 100})
+    result = check_row_count_spike(conn, "jobname", current_count=40)
+    assert result.flagged is True
+    assert "dropped" in result.detail
+
+
+def test_zero_current_flagged() -> None:
+    # Previous: 50, current: 0 → ratio 0.0 < 0.5 threshold.
+    conn = _mock_conn_with_prior({"row_count": 50})
+    result = check_row_count_spike(conn, "jobname", current_count=0)
+    assert result.flagged is True
+
+
+def test_zero_previous_not_flagged() -> None:
+    # Previous: 0 → skip comparison (avoid divide by zero).
+    conn = _mock_conn_with_prior({"row_count": 0})
+    result = check_row_count_spike(conn, "jobname", current_count=0)
+    assert result.flagged is False
+
+
+def test_exactly_at_threshold_not_flagged() -> None:
+    # Previous: 100, current: 50 → ratio 0.5 == threshold (not strictly less).
+    conn = _mock_conn_with_prior({"row_count": 100})
+    result = check_row_count_spike(conn, "jobname", current_count=50)
+    assert result.flagged is False
+
+
+def test_just_below_threshold_flagged() -> None:
+    # Previous: 100, current: 49 → ratio 0.49 < 0.5 threshold.
+    conn = _mock_conn_with_prior({"row_count": 100})
+    result = check_row_count_spike(conn, "jobname", current_count=49)
+    assert result.flagged is True

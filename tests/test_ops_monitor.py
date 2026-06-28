@@ -29,7 +29,6 @@ from app.services.ops_monitor import (
     check_all_layers,
     check_job_health,
     check_layer_staleness,
-    check_row_count_spike,
     deactivate_kill_switch,
     get_kill_switch_status,
     record_job_finish,
@@ -473,57 +472,11 @@ class TestFetchLatestSuccessfulRuns:
         assert result == {}
 
 
-# ---------------------------------------------------------------------------
-# TestCheckRowCountSpike
-# ---------------------------------------------------------------------------
-
-
-class TestCheckRowCountSpike:
-    """Test row-count spike detection."""
-
-    def test_no_prior_run_not_flagged(self) -> None:
-        conn = _make_conn([_make_cursor([])])
-        result = check_row_count_spike(conn, "test_job", 100)
-        assert not result.flagged
-        assert "no prior" in result.detail
-
-    def test_count_above_threshold_not_flagged(self) -> None:
-        # Previous: 100, current: 80 → ratio 0.8 > 0.5 threshold
-        conn = _make_conn([_make_cursor([{"row_count": 100}])])
-        result = check_row_count_spike(conn, "test_job", 80)
-        assert not result.flagged
-        assert result.previous_count == 100
-
-    def test_count_below_threshold_flagged(self) -> None:
-        # Previous: 100, current: 40 → ratio 0.4 < 0.5 threshold
-        conn = _make_conn([_make_cursor([{"row_count": 100}])])
-        result = check_row_count_spike(conn, "test_job", 40)
-        assert result.flagged
-        assert "dropped" in result.detail
-
-    def test_zero_current_flagged(self) -> None:
-        # Previous: 50, current: 0 → ratio 0.0 < 0.5 threshold
-        conn = _make_conn([_make_cursor([{"row_count": 50}])])
-        result = check_row_count_spike(conn, "test_job", 0)
-        assert result.flagged
-
-    def test_zero_previous_not_flagged(self) -> None:
-        # Previous: 0 → skip comparison (avoid divide by zero).
-        conn = _make_conn([_make_cursor([{"row_count": 0}])])
-        result = check_row_count_spike(conn, "test_job", 0)
-        assert not result.flagged
-
-    def test_exactly_at_threshold_not_flagged(self) -> None:
-        # Previous: 100, current: 50 → ratio 0.5 == threshold (not strictly less)
-        conn = _make_conn([_make_cursor([{"row_count": 100}])])
-        result = check_row_count_spike(conn, "test_job", 50)
-        assert not result.flagged
-
-    def test_just_below_threshold_flagged(self) -> None:
-        # Previous: 100, current: 49 → ratio 0.49 < 0.5 threshold
-        conn = _make_conn([_make_cursor([{"row_count": 100}])])
-        result = check_row_count_spike(conn, "test_job", 49)
-        assert result.flagged
+# Row-count spike detection moved to
+# app.services.sync_orchestrator.row_count_spikes (#328 chunk 7); its tests
+# (incl. the boundary cases formerly here) now live in
+# tests/services/sync_orchestrator/test_row_count_spikes.py. The ops_monitor
+# back-compat shim was retired in #340.
 
 
 # ---------------------------------------------------------------------------
