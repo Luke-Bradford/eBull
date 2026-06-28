@@ -16,19 +16,36 @@ bash scripts/autonomy/run_loop.sh        # blocks for the session; tail the log 
 Watch it pick a ticket, open a PR, wait for the bot, merge. Ctrl-C to stop; the
 lock auto-clears on exit.
 
-## Install the scheduler (refreshing sessions, unattended)
+## Walk-away-for-days mode (RECOMMENDED): the supervisor
+Runs sessions back-to-back forever with **usage-limit backoff** — hits a limit →
+backs off to the reset window → retries when capacity returns; board empty →
+idle-polls; kept alive across crashes/reboots by launchd `KeepAlive`. Start it
+once and leave for days.
+```bash
+mkdir -p var/autonomy-logs
+cp scripts/autonomy/com.ebull.autonomy.supervisor.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
+launchctl list | grep ebull          # confirm loaded
+tail -f var/autonomy-logs/supervisor.log
+```
+Stop:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
+```
+
+## Simpler alternative: hourly run_loop (no continuous supervisor)
+One fresh session per hour (lock = no overlap). Less tight than the supervisor
+and no smart limit-backoff (a limited hour just retries next hour), but minimal.
+Use this OR the supervisor, **not both**.
 ```bash
 cp scripts/autonomy/com.ebull.autonomy.plist ~/Library/LaunchAgents/
-launchctl load   ~/Library/LaunchAgents/com.ebull.autonomy.plist   # start
-launchctl list | grep ebull                                        # confirm
+launchctl load   ~/Library/LaunchAgents/com.ebull.autonomy.plist
 ```
-It now fires hourly. While a session is mid-drain the next firing no-ops (lock),
-so effectively a new session starts within ~1h of the previous finishing.
 
 ### Stop / remove
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.ebull.autonomy.plist
-rm ~/Library/LaunchAgents/com.ebull.autonomy.plist
+launchctl unload ~/Library/LaunchAgents/com.ebull.autonomy.plist        # or .supervisor.plist
+rm ~/Library/LaunchAgents/com.ebull.autonomy*.plist
 ```
 
 ### Watch it
