@@ -8,14 +8,23 @@ import { SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { EvidencePanel } from "@/components/recommendations/EvidencePanel";
 
+// Full decision_audit vocabulary (#1808). Both maps fall back at the call site
+// (`?? raw`), so an unknown writer value still renders — never blanks or crashes.
 const PASS_FAIL_TONE: Record<string, string> = {
   PASS: "text-emerald-600",
   FAIL: "text-red-600",
+  KICK: "text-sky-600",
+  RETRY: "text-amber-600",
+  DEFER: "text-amber-600",
 };
 
 const STAGE_LABEL: Record<string, string> = {
   execution_guard: "Guard",
   order_client: "Order",
+  manual_order: "Manual",
+  liveness_kick: "Liveness",
+  retry_backoff: "Retry",
+  entry_timing: "Timing",
 };
 
 export type AuditView =

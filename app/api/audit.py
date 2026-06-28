@@ -41,8 +41,25 @@ router = APIRouter(
 
 MAX_PAGE_LIMIT = 200
 
-PassFail = Literal["PASS", "FAIL"]
-Stage = Literal["execution_guard", "order_client"]
+# decision_audit.stage / .pass_fail are open, append-only TEXT columns written
+# by SIX independent subsystems — the read API has no authority over the set:
+#   stage:     execution_guard (execution_guard.py), order_client (order_client.py),
+#              manual_order (orders.py), liveness_kick (job_liveness_act.py),
+#              retry_backoff (job_retry.py), entry_timing (scheduler.py)
+#   pass_fail: PASS / FAIL (guards), KICK (liveness), RETRY (retry), DEFER (timing)
+# These Literals are used ONLY for the filter Query params (input validation, per
+# the prevention-log "closed value set" rule). The RESPONSE models (#1808) type
+# stage/pass_fail as bare ``str`` so the audit DISPLAY never rejects a row a writer
+# legitimately logged — a stale response Literal here 500s the whole trail.
+PassFail = Literal["PASS", "FAIL", "KICK", "RETRY", "DEFER"]
+Stage = Literal[
+    "execution_guard",
+    "order_client",
+    "manual_order",
+    "liveness_kick",
+    "retry_backoff",
+    "entry_timing",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +74,11 @@ class AuditListItem(BaseModel):
     symbol: str | None
     company_name: str | None
     recommendation_id: int | None
-    stage: Stage
+    # str, not Stage/PassFail: an audit DISPLAY mirrors the storage column and
+    # must render any value a writer logged — never reject it (#1808).
+    stage: str
     model_version: str | None
-    pass_fail: PassFail
+    pass_fail: str
     explanation: str
 
 
@@ -77,9 +96,10 @@ class AuditDetail(BaseModel):
     symbol: str | None
     company_name: str | None
     recommendation_id: int | None
-    stage: Stage
+    # str, not Stage/PassFail — see AuditListItem (#1808).
+    stage: str
     model_version: str | None
-    pass_fail: PassFail
+    pass_fail: str
     explanation: str
     evidence_json: object | None
 

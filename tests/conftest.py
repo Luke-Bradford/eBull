@@ -323,6 +323,13 @@ _DB_SOURCE_MARKERS: tuple[str, ...] = (
     "ebull_test_conn",
     "test_database_url",
     "run_migrations(",
+    # Ephemeral-DB helpers from tests/fixtures/ebull_test_db.py: a module that
+    # builds an admin DB or applies migrations against the 5433 cluster IS a DB
+    # test. Missing these let test_migration_156 / test_dev_test_db_reaper leak
+    # into the fast tier, breaking the "no DB ⇒ no xdist contention" invariant
+    # the pre-push gate relies on (#1808 follow-up).
+    "_admin_database_url",
+    "_apply_migrations(",
     "settings.database_url",
     "TestClient",
 )
