@@ -4,9 +4,12 @@ Ops monitor.
 Responsibilities:
   - Check staleness of each data layer against expected refresh frequency.
   - Track job executions (start, finish, success/failure, row count).
-  - Detect row-count spikes (broken-source indicator).
   - Manage the kill switch (activate / deactivate).
   - Produce per-layer and per-job health checks consumed by /system/status.
+
+Row-count spike detection moved to
+``app.services.sync_orchestrator.row_count_spikes`` (#328 chunk 7); the
+backward-compat shim that re-exported it from here was retired in #340.
 
 Data layers monitored:
   - universe   — instruments.last_seen_at
@@ -55,11 +58,6 @@ if TYPE_CHECKING:
     # cycle if we import at module level. Guarding under TYPE_CHECKING breaks
     # the cycle; pyright still resolves the annotation correctly.
     from app.services.sync_orchestrator.layer_types import FailureCategory
-
-    # SpikeResult moved to row_count_spikes in chunk 7.  Import here so
-    # pyright resolves annotations that reference it from this module.
-    # No runtime import — the lazy shim below handles call-time resolution.
-    from app.services.sync_orchestrator.row_count_spikes import SpikeResult
 
 logger = logging.getLogger(__name__)
 
@@ -718,31 +716,6 @@ def fetch_latest_successful_runs(
         )
         rows = cur.fetchall()
     return {row["job_name"]: row["started_at"] for row in rows}
-
-
-# ---------------------------------------------------------------------------
-# Row-count spike detection — lazy shim (backward compat for one release)
-# ---------------------------------------------------------------------------
-
-
-# check_row_count_spike moved to app.services.sync_orchestrator.row_count_spikes.
-# A direct module-level re-export would trigger the sync_orchestrator.__init__
-# which creates a circular import (adapters → ops_monitor). A lazy wrapper
-# breaks the cycle while keeping the old call path working.
-# Remove this shim and its callers in the tech-debt cleanup (see linked issue).
-def check_row_count_spike(  # type: ignore[no-redef]
-    conn: Any,
-    job_name: str,
-    current_count: int,
-    *,
-    exclude_run_id: int | None = None,
-) -> SpikeResult:
-    """Shim: delegates to sync_orchestrator.row_count_spikes.check_row_count_spike."""
-    from app.services.sync_orchestrator.row_count_spikes import (
-        check_row_count_spike as _real,
-    )
-
-    return _real(conn, job_name, current_count, exclude_run_id=exclude_run_id)  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
