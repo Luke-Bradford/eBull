@@ -53,7 +53,9 @@ export function WatchlistPanel({ items, onRemove }: Props) {
                 </Link>
               </td>
               <td className="px-2 py-1">{item.company_name}</td>
-              <td className="px-2 py-1 text-slate-500 dark:text-slate-400">{item.sector ?? "—"}</td>
+              <td className="px-2 py-1 text-slate-500 dark:text-slate-400">
+                {item.sector_name ?? "—"}
+              </td>
               <td className="px-2 py-1 text-xs text-slate-500 dark:text-slate-400">
                 {item.notes ?? ""}
               </td>

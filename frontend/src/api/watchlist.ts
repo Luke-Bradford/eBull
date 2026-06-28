@@ -6,7 +6,8 @@ export interface WatchlistItem {
   company_name: string;
   exchange: string | null;
   currency: string | null;
-  sector: string | null;
+  sector: string | null; // eToro numeric industry id (provider contract)
+  sector_name: string | null; // resolved eToro industry name — the display label
   added_at: string;
   notes: string | null;
 }
