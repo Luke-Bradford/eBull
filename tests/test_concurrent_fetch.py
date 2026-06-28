@@ -203,11 +203,20 @@ class TestConcurrencyAchievesActualThroughput:
         # a coarse "did we preserve substantial overlap?" guard, not a fine
         # throughput regression detector; basic overlap correctness is pinned
         # deterministically by ``test_concurrency_actually_overlaps``.
-        rc = _make_rc()
-        t0 = time.monotonic()
-        for _ in range(N_REQUESTS):
-            fire(rc)
-        sequential = time.monotonic() - t0
+        # Best-of-2 on BOTH arms — symmetric sampling. Measuring sequential
+        # once but concurrent best-of-2 is one-sided: a single noise-inflated
+        # sequential run lifts the threshold, which could let a serialised
+        # regression squeak under ``sequential*0.85``. Taking the fastest of 2
+        # sequential runs too removes that hole — both arms shed transient
+        # scheduler stalls, so the ratio reflects the design, not host noise.
+        def _time_sequential() -> float:
+            rc_local = _make_rc()
+            start = time.monotonic()
+            for _ in range(N_REQUESTS):
+                fire(rc_local)
+            return time.monotonic() - start
+
+        sequential = min(_time_sequential() for _ in range(2))
 
         # Best-of-2 concurrent: sheds a transient scheduler stall that would
         # otherwise mask a genuinely-parallel design as serial. A throttle
