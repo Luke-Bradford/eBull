@@ -46,6 +46,7 @@ from app.runbooks.safety import (  # noqa: E402
     assert_dev_db,
     assert_dev_db_name_in_url,
     assert_dev_env,
+    prune_old_runbook_logs,
 )
 from app.runbooks.stream_a_stream_c_gate_schema import validate_envelope  # noqa: E402
 from app.services.capability_manifest_mapping import (  # noqa: E402
@@ -354,6 +355,7 @@ def _persist_status(conn: psycopg.Connection[Any], *, run_id: int, status_value:
 def _write_log_jsonl(envelope: dict[str, Any]) -> Path:
     """Append the envelope to ``var/runbooks/stream_a_stream_c_gate-<id>-<ts>.jsonl``."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    prune_old_runbook_logs(LOG_DIR)  # #1328 — bound dev-local log growth
     ts = int(time.time())
     run_id = envelope.get("bootstrap_run_id", "unknown")
     path = LOG_DIR / f"stream_a_stream_c_gate-{run_id}-{ts}.jsonl"

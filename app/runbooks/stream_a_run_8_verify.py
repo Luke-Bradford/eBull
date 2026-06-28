@@ -81,6 +81,7 @@ from app.runbooks.safety import (
     assert_jobs_process_stopped,
     assert_no_multixact_wraparound,
     parse_db_name_from_url,
+    prune_old_runbook_logs,
     wait_for_jobs_process_started,
 )
 
@@ -377,6 +378,7 @@ def _poll_once_with_retry(
 
 def _write_log_jsonl(envelope: dict[str, Any]) -> Path:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    prune_old_runbook_logs(LOG_DIR)  # #1328 — bound dev-local log growth
     ts = int(time.time())
     run_id = envelope.get("captured_run_id") or "queued"
     path = LOG_DIR / f"stream_a_run_8_verify-{run_id}-{ts}.jsonl"
