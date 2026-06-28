@@ -72,3 +72,4 @@ calendar-page.png
 # autonomy loop runtime artifacts
 var/autonomy-logs/
 var/autonomy-loop.lock/
+var/autonomy-supervisor.lock/

@@ -28,10 +28,23 @@ branches, no unpushed WIP).
    scheduler merge (graceful SIGTERM, confirm old PID gone), `sec_rebuild` the
    affected source only if output changed. FE/API/docs/test/script merges need
    no restart.
-4. **Feed the board.** Periodically run `uv run python scripts/dq_audit.py` and
-   review the live site (`scripts/dev_browser_session.py` + Playwright) for new
-   bugs / UX gaps; file verified tickets (confirm the signal full-population +
-   cite the source rule first — do not file unverified candidates).
+4. **Feed the board (data QA + front-end QA).** Periodically:
+   - **Data QA:** `uv run python scripts/dq_audit.py` → confirm any candidate on
+     the full population + cite the source rule before filing.
+   - **Front-end QA:** mint a dev session (`uv run python
+     scripts/dev_browser_session.py`), inject the cookie into a Playwright/chrome
+     context (`addCookies`, it's HttpOnly), and actually USE the app as an
+     operator would. Walk the key routes — `/` dashboard, `/portfolio`,
+     `/calendar`, `/instrument/<symbol>` + its drills (chart, fundamentals,
+     dividends, risk, peers, news, filings, ownership, insider), `/rankings`,
+     `/recommendations`, `/reports`, `/admin`. For each, screenshot + judge:
+     does it look good and intuitive? loading/empty/error states present and
+     honest? dark mode clean? numbers match the API (spot-check one figure
+     against the endpoint)? any broken layout, dead link, confusing affordance,
+     or thin/placeholder content (like the bare calendar #1766)? File verified
+     **bug / ux / tech-debt** tickets with the screenshot + the exact route, one
+     issue per distinct problem. Site review needs vite (`:5173`) + API
+     (`:8000`) up; if down, skip FE-QA this iteration and note it.
 5. Update memory (the index + topic files) as you land work, per the memory rules.
 6. Next ticket.
 
