@@ -43,6 +43,7 @@ from app.runbooks.safety import (
     assert_dev_db_name_in_url,
     assert_dev_env,
     assert_jobs_process_stopped,
+    prune_old_runbook_logs,
 )
 from app.services.sec_submissions_ingest import repair_cik_sidecar_from_archive
 
@@ -71,6 +72,7 @@ def _count_archive_entries(archive_path: Path, *, cik: str | None) -> int:
 
 def _write_log_jsonl(envelope: dict[str, Any]) -> Path:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    prune_old_runbook_logs(LOG_DIR)  # #1328 — bound dev-local log growth
     ts = int(time.time())
     path = LOG_DIR / f"stream_a_t13_sidecar_repair-{ts}.jsonl"
     with path.open("a") as fh:

@@ -25,8 +25,10 @@ precondition) so runbooks can re-raise without wrapping.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
+from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
 
@@ -34,6 +36,8 @@ import psycopg
 
 from app.config import settings
 from app.jobs.locks import probe_jobs_process_running
+
+logger = logging.getLogger(__name__)
 
 # Default dev-DB allowlist when EBULL_DEV_DB_NAMES is unset. Matches the
 # post-connection default in ``assert_dev_db`` so pre + post checks agree.
@@ -288,3 +292,40 @@ def assert_no_multixact_wraparound(conn: psycopg.Connection[object]) -> None:
             f"project_1233_pr12_ownership_merge_writer.md) BEFORE "
             f"re-running this runbook."
         )
+
+
+# #1328 — runbook log retention. ``var/runbooks/*.jsonl`` is .gitignored +
+# dev-local, so these logs only accrete on a long-running dev box; bound the
+# growth instead of letting them grow forever.
+RUNBOOK_LOG_RETENTION_DAYS = 30
+
+
+def prune_old_runbook_logs(
+    log_dir: Path,
+    *,
+    retention_days: int = RUNBOOK_LOG_RETENTION_DAYS,
+    now: float | None = None,
+) -> list[Path]:
+    """Delete ``*.jsonl`` logs in ``log_dir`` older than ``retention_days``
+    (by mtime). Returns the files actually removed.
+
+    Best-effort + FAIL-OPEN: rotation is a side cleanup, never the runbook's
+    purpose, so it must not break the write it is bundled with. Every
+    filesystem error (dir absent, file vanished mid-prune, permission race) is
+    swallowed and logged at DEBUG. ``now`` is injectable for tests.
+    """
+    cutoff = (now if now is not None else time.time()) - retention_days * 86400
+    deleted: list[Path] = []
+    try:
+        candidates = sorted(log_dir.glob("*.jsonl"))
+    except OSError:
+        logger.debug("prune_old_runbook_logs: glob failed for %s", log_dir, exc_info=True)
+        return deleted
+    for path in candidates:
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                deleted.append(path)
+        except OSError:
+            logger.debug("prune_old_runbook_logs: skip %s", path, exc_info=True)
+    return deleted

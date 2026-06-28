@@ -47,6 +47,7 @@ from app.runbooks.safety import (
     assert_dev_db,
     assert_dev_db_name_in_url,
     assert_dev_env,
+    prune_old_runbook_logs,
 )
 
 LOG_DIR: Path = Path("var/runbooks")
@@ -87,6 +88,7 @@ def _flip_deferred_to_pending(conn: psycopg.Connection[Any], *, source: str, ins
 
 def _write_log_jsonl(envelope: dict[str, Any]) -> Path:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    prune_old_runbook_logs(LOG_DIR)  # #1328 — bound dev-local log growth
     ts = int(time.time())
     path = LOG_DIR / f"sec_lazy_body_backfill-{ts}.jsonl"
     with path.open("a") as fh:
