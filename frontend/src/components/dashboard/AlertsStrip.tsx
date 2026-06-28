@@ -109,8 +109,8 @@ function isUnseen(r: AlertRow, c: Cursors): boolean {
 
 function KindPill({ kind }: { kind: AlertRow["kind"] }) {
   const style = {
-    guard: "bg-amber-100 text-amber-800",
-    position: "bg-red-100 text-red-800",
+    guard: "bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200",
+    position: "bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200",
     coverage: "bg-slate-100 dark:bg-slate-800 text-slate-700",
   }[kind];
   const label = { guard: "GUARD", position: "POSITION", coverage: "COVERAGE" }[kind];
@@ -410,7 +410,7 @@ export function AlertsStrip(): JSX.Element | null {
             Alerts
           </h2>
           {totalUnseen > 0 ? (
-            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+            <span className="rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
               {totalUnseen} new
             </span>
           ) : null}
@@ -429,7 +429,7 @@ export function AlertsStrip(): JSX.Element | null {
             <button
               type="button"
               onClick={onDismissAll}
-              className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 hover:bg-amber-100"
+              className="rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-200 hover:bg-amber-100"
             >
               Dismiss all ({totalUnseen}) as acknowledged
             </button>

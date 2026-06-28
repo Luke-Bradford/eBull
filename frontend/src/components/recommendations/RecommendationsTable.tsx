@@ -8,17 +8,17 @@ import { SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 
 const ACTION_TONE: Record<string, string> = {
-  BUY: "bg-emerald-100 text-emerald-700",
-  ADD: "bg-emerald-50 text-emerald-700",
+  BUY: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300",
+  ADD: "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300",
   HOLD: "bg-slate-100 dark:bg-slate-800 text-slate-600",
-  EXIT: "bg-red-100 text-red-700",
+  EXIT: "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300",
 };
 
 const STATUS_TONE: Record<string, string> = {
-  proposed: "bg-amber-100 text-amber-700",
-  approved: "bg-blue-100 text-blue-700",
-  rejected: "bg-red-100 text-red-700",
-  executed: "bg-emerald-100 text-emerald-700",
+  proposed: "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300",
+  approved: "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300",
+  rejected: "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300",
+  executed: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300",
 };
 
 export type RecommendationsView =
@@ -39,7 +39,7 @@ export function RecommendationsTable({ view }: { view: RecommendationsView }) {
     return (
       <div
         role="alert"
-        className="flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+        className="flex items-center justify-between rounded-md border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-sm text-red-700 dark:text-red-300"
       >
         <span>Failed to load. Check the browser console for details.</span>
         <button

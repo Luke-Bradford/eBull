@@ -297,7 +297,7 @@ function SubPositionRow({
       <td className="py-1.5 pl-6 pr-2 text-left">
         <span
           className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
-            position.is_buy ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"
+            position.is_buy ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300"
           }`}
         >
           {position.is_buy ? "LONG" : "SHORT"}

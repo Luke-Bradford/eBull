@@ -87,8 +87,8 @@ function sortValue(item: InstrumentListItem, key: SortKey): unknown {
 // ---------------------------------------------------------------------------
 
 const TIER_TONE: Record<number, string> = {
-  1: "bg-emerald-50 text-emerald-700 border-emerald-200",
-  2: "bg-blue-50 text-blue-700 border-blue-200",
+  1: "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/60",
+  2: "bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900/60",
   3: "bg-slate-50 dark:bg-slate-900/40 text-slate-600 border-slate-200 dark:border-slate-800",
 };
 

@@ -54,7 +54,7 @@ import { useAsync } from "@/lib/useAsync";
 function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const message = error instanceof Error ? error.message : "Request failed.";
   return (
-    <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+    <div className="rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 p-3 text-sm text-red-700 dark:text-red-300">
       <p>{message}</p>
       {onRetry && (
         <button
@@ -320,9 +320,9 @@ function sentimentBadge(score: number | null) {
   const positive = score > 0.2;
   const negative = score < -0.2;
   const color = positive
-    ? "bg-emerald-100 text-emerald-700"
+    ? "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300"
     : negative
-      ? "bg-red-100 text-red-700"
+      ? "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300"
       : "bg-slate-100 dark:bg-slate-800 text-slate-600";
   const prefix = positive ? "+" : negative ? "" : "";
   return (
@@ -397,9 +397,9 @@ function redFlagBadge(score: number | null) {
   if (score === null) return null;
   const color =
     score > 0.5
-      ? "bg-red-100 text-red-700"
+      ? "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300"
       : score > 0.2
-        ? "bg-amber-100 text-amber-700"
+        ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300"
         : "bg-slate-100 dark:bg-slate-800 text-slate-600";
   return (
     <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
@@ -667,7 +667,7 @@ function InstrumentPageBody({
       {thesisErr !== null ? (
         <div
           role="status"
-          className="rounded border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700"
+          className="rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-1.5 text-xs text-red-700 dark:text-red-300"
         >
           Thesis generation failed: {thesisErr}
         </div>

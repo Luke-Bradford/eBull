@@ -206,14 +206,14 @@ export function BudgetConfigSection() {
               </button>
 
               {configSuccess && (
-                <p className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-700">
+                <p className="rounded bg-emerald-50 dark:bg-emerald-950/40 px-2 py-1.5 text-xs text-emerald-700 dark:text-emerald-300">
                   Budget config updated.
                 </p>
               )}
               {configError && (
                 <p
                   role="alert"
-                  className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700"
+                  className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300"
                 >
                   Failed to save budget config. Check the browser console for
                   details.
@@ -301,14 +301,14 @@ export function BudgetConfigSection() {
             </button>
 
             {eventSuccess && (
-              <p className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-700">
+              <p className="rounded bg-emerald-50 dark:bg-emerald-950/40 px-2 py-1.5 text-xs text-emerald-700 dark:text-emerald-300">
                 Capital event recorded.
               </p>
             )}
             {eventError && (
               <p
                 role="alert"
-                className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700"
+                className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300"
               >
                 Failed to record capital event. Check the browser console for
                 details.

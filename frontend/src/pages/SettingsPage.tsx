@@ -400,7 +400,7 @@ function BrokerCredentialsSection(): JSX.Element {
       </div>
 
       {loadError !== null && (
-        <div role="alert" className="rounded bg-rose-50 px-3 py-2 text-xs text-rose-700">
+        <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
           {loadError}
         </div>
       )}
@@ -531,7 +531,7 @@ function BrokerCredentialsSection(): JSX.Element {
             />
           </label>
           {editError !== null && (
-            <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+            <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
               {editError}
             </div>
           )}
@@ -614,7 +614,7 @@ function BrokerCredentialsSection(): JSX.Element {
           />
 
           {editError !== null && (
-            <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+            <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
               {editError}
             </div>
           )}
@@ -715,7 +715,7 @@ function BrokerCredentialsSection(): JSX.Element {
           {createError !== null && (
             <div
               role="alert"
-              className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700"
+              className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300"
             >
               {createError}
             </div>

@@ -120,12 +120,12 @@ function formatDelta(raw: string): { label: string; colour: string } {
   if (num > 0) {
     return {
       label: `+${Math.round(num).toLocaleString("en-US")}`,
-      colour: "bg-emerald-100 text-emerald-800",
+      colour: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-200",
     };
   }
   return {
     label: Math.round(num).toLocaleString("en-US"),
-    colour: "bg-rose-100 text-rose-800",
+    colour: "bg-rose-100 dark:bg-rose-900/40 text-rose-800 dark:text-rose-200",
   };
 }
 
@@ -273,7 +273,7 @@ function Row({ txn }: { txn: InsiderTransactionDetail }) {
         )}
         {late && (
           <span
-            className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800"
+            className="ml-1 rounded bg-amber-100 dark:bg-amber-900/40 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200"
             title="Filed after the 2-business-day deadline"
           >
             Late

@@ -223,7 +223,7 @@ export function OrderEntryModal({
         {errorMessage !== null ? (
           <p
             role="alert"
-            className="rounded border border-red-300 bg-red-50 px-2 py-1.5 text-xs text-red-700"
+            className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300"
           >
             {errorMessage}
           </p>
@@ -275,7 +275,7 @@ function PriceContext({
 }): JSX.Element {
   if (detailError !== null) {
     return (
-      <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">
+      <div className="rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300">
         <span>Could not load price context.</span>{" "}
         <button
           type="button"

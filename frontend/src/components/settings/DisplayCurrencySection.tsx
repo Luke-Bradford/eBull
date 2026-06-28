@@ -75,7 +75,7 @@ export function DisplayCurrencySection({ currentCurrency, onChanged }: Props) {
         {error !== null && (
           <div
             role="alert"
-            className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700"
+            className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300"
           >
             {error}
           </div>

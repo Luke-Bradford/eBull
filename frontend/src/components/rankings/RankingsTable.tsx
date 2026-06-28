@@ -125,7 +125,7 @@ export function RankingsTable({ view }: { view: RankingsView }) {
             <MessageRow>
               <div
                 role="alert"
-                className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+                className="rounded-md border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 text-sm text-amber-800 dark:text-amber-200"
               >
                 Authentication required. Sign in to view rankings.
               </div>
@@ -134,7 +134,7 @@ export function RankingsTable({ view }: { view: RankingsView }) {
             <MessageRow>
               <div
                 role="alert"
-                className="flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+                className="flex items-center justify-between rounded-md border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-sm text-red-700 dark:text-red-300"
               >
                 <span>Failed to load. Check the browser console for details.</span>
                 <button

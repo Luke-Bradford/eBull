@@ -36,7 +36,7 @@ export function AuditTrail({ view }: { view: AuditView }) {
     return (
       <div
         role="alert"
-        className="flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+        className="flex items-center justify-between rounded-md border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-sm text-red-700 dark:text-red-300"
       >
         <span>Failed to load. Check the browser console for details.</span>
         <button
