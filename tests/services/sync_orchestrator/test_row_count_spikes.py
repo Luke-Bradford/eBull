@@ -64,6 +64,12 @@ def test_imports_resolve_from_new_path() -> None:
 # when the ops_monitor back-compat shim was retired (#340). They guard the
 # 50%-of-prior threshold edges (prevention-log §"check_row_count_spike compared
 # the run against itself").
+#
+# The retired class's no-prior-run and counts-match cases are NOT re-added here:
+# they were already covered above by test_returns_not_flagged_when_no_prior_runs
+# (asserts the "no prior row_count" detail) and test_returns_not_flagged_when_
+# counts_match. Only the threshold-boundary and zero-handling cases were unique
+# to the old class, so only those are migrated below — no branch loses coverage.
 
 
 def test_count_above_threshold_not_flagged() -> None:
