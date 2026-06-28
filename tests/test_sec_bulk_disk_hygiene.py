@@ -89,3 +89,28 @@ class TestS16CleanupSubmissionsZip:
         # _delete_archive_after_success.
         _cleanup_submissions_zip_after_drain(archive)
         assert not archive.exists()
+
+
+class TestListArchivesExcludesSidecars:
+    """#1576 — ``_list_archives_matching`` must return only ``.zip`` archives,
+    never the ``.zip.etag`` / ``.zip.sha256`` sidecars the downloader writes
+    alongside each zip. Those also match ``startswith(prefix)`` and, in STANDALONE
+    mode (no run-manifest name filter), reached ``zipfile.ZipFile`` → a
+    ``BadZipFile`` ERROR per sidecar per run (caught, but pure log noise)."""
+
+    def test_sidecars_excluded(self, tmp_path: Path) -> None:
+        base = tmp_path / "sec" / "bulk"
+        base.mkdir(parents=True)
+        (base / "form13f_2025q1.zip").write_bytes(b"PK\x03\x04")
+        (base / "form13f_2025q1.zip.etag").write_text('"abc"')
+        (base / "form13f_2025q1.zip.sha256").write_text("deadbeef")
+        (base / "form13f_2024q4.zip").write_bytes(b"PK\x03\x04")
+        (base / "nport_2025q1.zip").write_bytes(b"PK\x03\x04")  # different prefix
+
+        with patch.object(jobs, "_bulk_dir", return_value=base):
+            matched = jobs._list_archives_matching("form13f_")
+
+        names = [p.name for p in matched]
+        assert names == ["form13f_2024q4.zip", "form13f_2025q1.zip"]  # sorted, zips only
+        assert all(n.endswith(".zip") for n in names)
+        assert not any(n.endswith((".etag", ".sha256")) for n in names)

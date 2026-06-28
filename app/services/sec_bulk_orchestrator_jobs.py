@@ -72,15 +72,23 @@ def _archive_path(name: str) -> Path:
 
 
 def _list_archives_matching(prefix: str) -> list[Path]:
-    """Return every archive in the cache whose filename starts with ``prefix``.
+    """Return every ``.zip`` archive in the cache whose filename starts with ``prefix``.
 
-    Used for the multi-quarter Phase C ingesters (13F, insider, N-PORT)
+    Used for the multi-quarter Phase C ingesters (13F, insider, N-PORT, FSDS)
     which iterate every quarterly ZIP in the cache.
+
+    The ``.zip`` suffix filter is load-bearing (#1576): the downloader writes
+    ``<archive>.zip.etag`` / ``.zip.sha256`` sidecars next to each zip, and those
+    also match ``startswith(prefix)``. In orchestrated bootstrap mode the run-manifest
+    name filter hides them, but in STANDALONE mode (run_id None — manual trigger /
+    direct invocation) each sidecar reached ``zipfile.ZipFile`` and logged a
+    ``BadZipFile`` ERROR per sidecar per run (caught per-archive, so pure noise +
+    misleading "failed" lines). All callers only ever want the zips.
     """
     base = _bulk_dir()
     if not base.exists():
         return []
-    return sorted(p for p in base.iterdir() if p.is_file() and p.name.startswith(prefix))
+    return sorted(p for p in base.iterdir() if p.is_file() and p.name.startswith(prefix) and p.name.endswith(".zip"))
 
 
 def _run_with_conn(fn: Callable[[psycopg.Connection[tuple]], object]) -> None:
