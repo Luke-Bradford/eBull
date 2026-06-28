@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from app.api.auth import require_session_or_service_token
+from app.config import settings
 from app.db import get_conn
 from app.services.bootstrap_orchestrator import (
     JOB_BOOTSTRAP_ORCHESTRATOR,
@@ -141,6 +142,14 @@ class BootstrapStatusResponse(BaseModel):
     last_completed_at: datetime | None
     stages: list[BootstrapStageResponse]
     bulk_manifest: BulkManifestResponse | None = None
+    # #1344 — whether ``OPENFIGI_API_KEY`` is configured (presence only,
+    # never the value — ADR 0001 "the UI sees metadata only"). The CUSIP
+    # resolver (S13 ``cusip_resolver_post_bulk_sweep``) runs ~10× faster
+    # wall-clock with a key (app/config.py). The frontend surfaces a
+    # pre-bootstrap nudge when this is False and bootstrap has not yet
+    # completed S13. Reflects the key as of API process start —
+    # ``settings`` is process-global and not hot-reloaded.
+    openfigi_key_present: bool = False
 
 
 class BootstrapRunQueuedResponse(BaseModel):
@@ -265,6 +274,7 @@ def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusR
                         completed_at=completed_at,
                     )
                 )
+    openfigi_key_present = bool(settings.openfigi_api_key)
     if snap is None:
         return BootstrapStatusResponse(
             status=state.status,
@@ -272,6 +282,7 @@ def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusR
             last_completed_at=state.last_completed_at,
             stages=[],
             bulk_manifest=_read_bulk_manifest_response(),
+            openfigi_key_present=openfigi_key_present,
         )
 
     stages = [
@@ -298,6 +309,7 @@ def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusR
         last_completed_at=state.last_completed_at,
         stages=stages,
         bulk_manifest=_read_bulk_manifest_response(),
+        openfigi_key_present=openfigi_key_present,
     )
 
 
