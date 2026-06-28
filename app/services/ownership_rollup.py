@@ -199,6 +199,11 @@ class Holder:
     # Constituent rows of a collapsed institutional family (#1644 + #1649);
     # display-only breakdown, NOT additive. Empty for ordinary holders.
     family_members: tuple[FamilyMember, ...] = ()
+    # Form 4/3 ownership nature (``direct`` / ``indirect`` / ``beneficial``);
+    # carried so :func:`_source_rows_and_total` can apply the within-source
+    # additive-vs-overlapping regime (#905 / prevention-log 1835). ``None`` for
+    # holders where nature is not meaningful (13F / family reps / treasury).
+    ownership_nature: str | None = None
 
 
 @dataclass(frozen=True)
@@ -707,13 +712,36 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
 
     # Insiders.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Dual-pipeline de-collision (#788): the same Form 4/3 accession is
+        # written by BOTH the XML manifest parser (plain ``source_document_id`` =
+        # the bare accession, nature from Table II Direct/Indirect) AND the bulk
+        # SEC insider dataset (``<accn>:NDT:<sk>`` for Form-4 transactions /
+        # ``<accn>:NDH:<sk>`` for Form-3 holdings, nature relabelled from the
+        # reporting person's relationship — ``_map_relationship``). Since
+        # ``ownership_nature`` is in the MERGE key the two coexist, so the same
+        # stake is counted under two natures (direct+beneficial, direct+indirect).
+        # Drop the dataset row (its id carries a ``:NDT:`` / ``:NDH:`` marker)
+        # whenever an XML-manifest row exists for the same ``(holder_cik,
+        # source_accession)`` — the manifest parse is the authoritative
+        # full-Table-II view of that filing; the dataset only fills accessions the
+        # manifest never parsed.
         cur.execute(
             """
             SELECT holder_cik, holder_name, ownership_nature,
                    source, source_accession, shares, period_end
-            FROM ownership_insiders_current
+            FROM ownership_insiders_current oc
             WHERE instrument_id = %s
               AND shares IS NOT NULL
+              AND NOT (
+                oc.source_document_id ~ ':(NDT|NDH):'
+                AND EXISTS (
+                    SELECT 1 FROM ownership_insiders_current x
+                    WHERE x.instrument_id = oc.instrument_id
+                      AND x.holder_cik IS NOT DISTINCT FROM oc.holder_cik
+                      AND x.source_accession = oc.source_accession
+                      AND x.source_document_id !~ ':(NDT|NDH):'
+                )
+              )
             """,
             (instrument_id,),
         )
@@ -1097,6 +1125,7 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 winning_edgar_url=edgar_archive_url(winner.accession_number),
                 as_of_date=winner.as_of_date,
                 filer_type=winner.filer_type,
+                ownership_nature=winner.ownership_nature,
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,
@@ -1170,6 +1199,7 @@ def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
                 winning_edgar_url=edgar_archive_url(winner.accession_number),
                 as_of_date=winner.as_of_date,
                 filer_type=winner.filer_type,
+                ownership_nature=winner.ownership_nature,
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,  # type: ignore[arg-type]
@@ -1204,6 +1234,15 @@ _INSIDER_SOURCES: Final[frozenset[SourceTag]] = frozenset({"form4", "form3", "de
 # single 13D/G beneficial figure, a single 13F economic position) and so are
 # collapsed to their largest representative, never summed (Codex #1640 ckpt-2).
 _ADDITIVE_SOURCES: Final[frozenset[SourceTag]] = frozenset({"form4", "form3"})
+# Within an additive source, only these natures are the distinct Section-16
+# holdings that SUM (#905). A ``beneficial`` / ``voting`` / ``economic`` row is an
+# OVERLAPPING restatement of the owner's total (Rule 13d-3, prevention-log 1835)
+# and must MAX against the additive sum, never add to it. The bulk SEC insider
+# dataset (`sec_insider_dataset_ingest._map_relationship`) relabels a 10%-owner's
+# directly-held lot ``beneficial`` purely from the relationship flag, so the same
+# Form-4 position lands under BOTH a ``direct``/``indirect`` (XML) and a
+# ``beneficial`` (dataset) row; summing them double-counts one stake.
+_ADDITIVE_NATURES: Final[frozenset[str]] = frozenset({"direct", "indirect"})
 
 
 def _argmax_source(sources: Iterable[SourceTag], src_total: dict[SourceTag, Decimal]) -> SourceTag:
@@ -1216,15 +1255,69 @@ def _argmax_source(sources: Iterable[SourceTag], src_total: dict[SourceTag, Deci
 def _source_rows_and_total(source: SourceTag, rows: list[Holder]) -> tuple[list[Holder], Decimal]:
     """The display rows + owner subtotal for one ``(owner, source)``.
 
-    Additive sources (Form 4 / Form 3): keep every nature row, sum them
-    (direct + indirect = the Section-16 total, #905). Overlapping sources
-    (DEF 14A beneficial/voting, 13D/G, 13F): keep only the largest row — the
-    others restate the same shares through a different lens and summing them
-    would double-count the owner (Codex #1640 ckpt-2 F3)."""
-    if source in _ADDITIVE_SOURCES:
-        return rows, sum((h.shares for h in rows), Decimal(0))
-    rep = max(rows, key=lambda h: h.shares)
+    Additive sources (Form 4 / Form 3): the ``direct`` + ``indirect`` nature rows
+    are distinct Section-16 holdings and SUM (#905); a ``beneficial`` (or
+    ``voting`` / ``economic``) row is an OVERLAPPING restatement of the owner's
+    total (Rule 13d-3, prevention-log 1835) and MAXes against that sum rather than
+    adding to it — the within-source half of the regime the earlier source-level
+    code missed (the dual-pipeline ``direct`` vs dataset-``beneficial`` collision,
+    #788). Owner subtotal = ``MAX(additive_sum, overlap_max)``; this is monotone —
+    it can only remove or hold counted shares vs the old blanket sum, never add
+    (verified on the full dev population, all 1,206 same-accession both-nature
+    groups). Overlapping sources (DEF 14A beneficial/voting, 13D/G, 13F): keep
+    only the largest row — the others restate the same shares through a different
+    lens (Codex #1640 ckpt-2 F3)."""
+    if source not in _ADDITIVE_SOURCES:
+        rep = max(rows, key=lambda h: h.shares)
+        return [rep], rep.shares
+
+    additive = [h for h in rows if (h.ownership_nature or "direct") in _ADDITIVE_NATURES]
+    overlap = [h for h in rows if (h.ownership_nature or "direct") not in _ADDITIVE_NATURES]
+    additive_sum = sum((h.shares for h in additive), Decimal(0))
+    overlap_max = max((h.shares for h in overlap), default=Decimal(0))
+
+    if additive and additive_sum >= overlap_max:
+        # Additive lots dominate: keep them, fold the subsumed overlap
+        # restatement(s) into the largest additive row's provenance.
+        keep = list(additive)
+        if overlap:
+            primary_idx = max(range(len(keep)), key=lambda i: keep[i].shares)
+            keep[primary_idx] = _fold_overlap_into(keep[primary_idx], overlap)
+        return keep, additive_sum
+
+    # Overlap exceeds the additive sum (XML under-captured the position) or no
+    # additive row exists (dataset-only owner): the beneficial restatement is the
+    # better total. Keep its largest row, fold the additive lots as provenance.
+    rep = max(overlap, key=lambda h: h.shares)
+    if additive:
+        rep = _fold_overlap_into(rep, additive)
     return [rep], rep.shares
+
+
+def _fold_overlap_into(rep: Holder, folded: list[Holder]) -> Holder:
+    """Append ``folded`` rows to ``rep``'s ``dropped_sources`` (provenance only),
+    de-duped on ``(source, accession, shares)`` against what is already recorded —
+    so the subsumed same-source restatement (e.g. the dataset ``:NDT:`` beneficial
+    row) stays auditable instead of vanishing. ``shares`` is in the key so two
+    distinct lots on ONE accession (a folded ``direct`` + ``indirect`` when the
+    overlap row wins) are BOTH preserved, not collapsed to one (Codex ckpt-2)."""
+    dropped = list(rep.dropped_sources)
+    seen = {(d.source, d.accession_number, d.shares) for d in dropped}
+    for h in folded:
+        key = (h.winning_source, h.winning_accession, h.shares)
+        if key in seen:
+            continue
+        seen.add(key)
+        dropped.append(
+            DroppedSource(
+                source=h.winning_source,
+                accession_number=h.winning_accession,
+                shares=h.shares,
+                as_of_date=h.as_of_date,
+                edgar_url=h.winning_edgar_url,
+            )
+        )
+    return replace(rep, dropped_sources=tuple(dropped))
 
 
 def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Holder]]:
