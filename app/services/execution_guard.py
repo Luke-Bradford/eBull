@@ -124,6 +124,12 @@ class GuardResult:
     decision_id: int  # PK of the written decision_audit row
 
 
+# Actions the guard is allowed to evaluate. CONSIDERED (#1820) is informational
+# only and must never be flipped to approved/rejected — see the guard at the top
+# of evaluate_recommendation.
+EXECUTABLE_ACTIONS: frozenset[str] = frozenset({"BUY", "ADD", "HOLD", "EXIT"})
+
+
 # ---------------------------------------------------------------------------
 # DB loaders (all read-only; called before any transaction is opened)
 # ---------------------------------------------------------------------------
@@ -686,6 +692,18 @@ def evaluate_recommendation(
     instrument_id: int = int(rec["instrument_id"])
     action: str = str(rec["action"])
     model_version: str | None = rec.get("model_version")
+
+    # Defense-in-depth (#1820): the guard flips status to approved/rejected
+    # unconditionally in _write_audit, so it must never run on an
+    # informational, non-executable action (e.g. CONSIDERED). The scheduler
+    # only ever passes status='proposed' rows, but a stray manual/admin call
+    # with a CONSIDERED id would otherwise make it executable. Treat as a
+    # programmer error — same class as the not-found raise above.
+    if action not in EXECUTABLE_ACTIONS:
+        raise ValueError(
+            f"evaluate_recommendation: recommendation_id={recommendation_id} "
+            f"has non-executable action={action!r}; the guard only evaluates {sorted(EXECUTABLE_ACTIONS)}"
+        )
 
     # --- Step 2: load all state (no transaction open yet) ---
     # Always load kill switch and runtime config (apply to every action).

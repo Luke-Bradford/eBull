@@ -24,7 +24,7 @@ from app.services.portfolio import (
     _evaluate_buy,
     _evaluate_exit,
     _hold_rationale,
-    _should_persist_hold,
+    _should_persist_dedup,
     run_portfolio_review,
 )
 
@@ -656,21 +656,38 @@ class TestEvaluateBuy:
 # ---------------------------------------------------------------------------
 
 
-class TestShouldPersistHold:
+class TestShouldPersistDedup:
     def test_no_prior_recommendation_persists(self) -> None:
-        assert _should_persist_hold(1, "some reason", {}) is True
+        assert _should_persist_dedup("HOLD", 1, "some reason", {}) is True
 
     def test_prior_hold_same_rationale_suppressed(self) -> None:
         prior = {1: {"action": "HOLD", "rationale": "same reason"}}
-        assert _should_persist_hold(1, "same reason", prior) is False
+        assert _should_persist_dedup("HOLD", 1, "same reason", prior) is False
 
     def test_prior_hold_different_rationale_persists(self) -> None:
         prior = {1: {"action": "HOLD", "rationale": "old reason"}}
-        assert _should_persist_hold(1, "new reason", prior) is True
+        assert _should_persist_dedup("HOLD", 1, "new reason", prior) is True
 
     def test_prior_action_not_hold_persists(self) -> None:
         prior = {1: {"action": "BUY", "rationale": "same reason"}}
-        assert _should_persist_hold(1, "same reason", prior) is True
+        assert _should_persist_dedup("HOLD", 1, "same reason", prior) is True
+
+    # CONSIDERED (#1820) dedups the same way HOLD does.
+    def test_considered_no_prior_persists(self) -> None:
+        assert _should_persist_dedup("CONSIDERED", 1, "below min_buy_score", {}) is True
+
+    def test_prior_considered_same_rationale_suppressed(self) -> None:
+        prior = {1: {"action": "CONSIDERED", "rationale": "below min_buy_score"}}
+        assert _should_persist_dedup("CONSIDERED", 1, "below min_buy_score", prior) is False
+
+    def test_prior_considered_different_rationale_persists(self) -> None:
+        prior = {1: {"action": "CONSIDERED", "rationale": "below min_buy_score"}}
+        assert _should_persist_dedup("CONSIDERED", 1, "sector cap breached", prior) is True
+
+    def test_considered_after_hold_persists(self) -> None:
+        # Action changed HOLD -> CONSIDERED: not a redundant repeat.
+        prior = {1: {"action": "HOLD", "rationale": "below min_buy_score"}}
+        assert _should_persist_dedup("CONSIDERED", 1, "below min_buy_score", prior) is True
 
 
 # ---------------------------------------------------------------------------

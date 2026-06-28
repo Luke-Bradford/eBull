@@ -107,6 +107,13 @@ export function RecommendationsPage() {
     setAuditOffset(0);
   };
 
+  // From a rejected recommendation: jump to the audit trail filtered to that
+  // instrument so the operator sees which guard rule failed (#1820).
+  const onViewAudit = (instrumentId: number) => {
+    setAuditQuery((prev) => ({ ...prev, instrument_id: instrumentId }));
+    setAuditOffset(0);
+  };
+
   // -- Top-level error banner -----------------------------------------------
   const allFailed = recs.error !== null && audit.error !== null;
 
@@ -168,7 +175,7 @@ export function RecommendationsPage() {
           ) : undefined
         }
       >
-        <RecommendationsTable view={recView} />
+        <RecommendationsTable view={recView} onViewAudit={onViewAudit} />
       </Section>
 
       <AuditFilters

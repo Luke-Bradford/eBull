@@ -61,6 +61,8 @@ function recsResponse(): RecommendationsListResponse {
         suggested_size_pct: 0.05,
         target_entry: 180.5,
         cash_balance_known: true,
+        data_completeness: 0.85,
+        completeness_tier: "full",
         created_at: "2026-04-08T10:00:00Z",
       },
       {
@@ -76,10 +78,29 @@ function recsResponse(): RecommendationsListResponse {
         suggested_size_pct: null,
         target_entry: null,
         cash_balance_known: true,
+        data_completeness: 0.7,
+        completeness_tier: "full",
         created_at: "2026-04-08T09:00:00Z",
       },
+      {
+        recommendation_id: 3,
+        instrument_id: 30,
+        symbol: "ZZZ",
+        company_name: "Zeta Corp.",
+        action: "CONSIDERED",
+        status: "considered",
+        rationale: "Score 0.42 below min_buy_score=0.55",
+        score_id: 102,
+        model_version: "v1-balanced",
+        suggested_size_pct: null,
+        target_entry: null,
+        cash_balance_known: true,
+        data_completeness: 0.25,
+        completeness_tier: "insufficient_data",
+        created_at: "2026-04-08T08:00:00Z",
+      },
     ],
-    total: 2,
+    total: 3,
     offset: 0,
     limit: 50,
   };
@@ -100,6 +121,8 @@ function recDetailResponse(): RecommendationDetail {
     target_entry: 180.5,
     cash_balance_known: true,
     total_score: 78.5,
+    data_completeness: 0.85,
+    completeness_tier: "full",
     created_at: "2026-04-08T10:00:00Z",
   };
 }
@@ -256,6 +279,22 @@ describe("RecommendationsPage — recommendations section", () => {
     await waitFor(() => {
       expect(screen.getByText(/Total score:/)).toBeInTheDocument();
     });
+  });
+
+  it("groups rows into funnel sections including CONSIDERED — blocked (#1820)", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Recommendation history")).toBeInTheDocument();
+    });
+    // Section subheaders for non-empty buckets.
+    expect(screen.getByText("To buy")).toBeInTheDocument();
+    expect(screen.getByText("Considered — blocked")).toBeInTheDocument();
+    expect(screen.getByText("Hold")).toBeInTheDocument();
+    // The blocked candidate is surfaced with its reason — previously discarded.
+    expect(screen.getByText(/below min_buy_score/)).toBeInTheDocument();
+    expect(screen.getAllByText("ZZZ").length).toBeGreaterThanOrEqual(1);
+    // Its completeness tier renders as a badge.
+    expect(screen.getByText("insufficient")).toBeInTheDocument();
   });
 });
 
