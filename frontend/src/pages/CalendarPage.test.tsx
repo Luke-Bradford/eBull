@@ -1,8 +1,10 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 import { CalendarPage } from "./CalendarPage";
+import { fetchCalendarEvents } from "@/api/calendar";
 import type { CalendarEvents } from "@/api/types";
 
 const sample: CalendarEvents = {
@@ -15,8 +17,8 @@ const sample: CalendarEvents = {
       timezone: "America/New_York",
       holidays_modelled: true,
       week: [
-        { date: "2026-06-29", day_type: "open" },
-        { date: "2026-07-03", day_type: "closed" },
+        { date: "2026-06-29", day_type: "open", reason: null },
+        { date: "2026-07-03", day_type: "closed", reason: "Independence Day" },
       ],
     },
   ],
@@ -47,5 +49,20 @@ describe("CalendarPage", () => {
     expect(screen.getByText(/ex 2026-07-01/)).toBeInTheDocument();
     // the honest "not ingested" note about earnings/filings.
     expect(screen.getByText(/does not ingest forward earnings/i)).toBeInTheDocument();
+    // closure reason (#1766) renders on the closed tile.
+    expect(screen.getByText("Independence Day")).toBeInTheDocument();
+  });
+
+  it("requests the default 1-week horizon, then widens to 4 weeks", async () => {
+    render(
+      <MemoryRouter>
+        <CalendarPage />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("US equity")).toBeInTheDocument());
+    expect(fetchCalendarEvents).toHaveBeenCalledWith("portfolio", 7);
+
+    await userEvent.click(screen.getByRole("button", { name: "4 weeks" }));
+    await waitFor(() => expect(fetchCalendarEvents).toHaveBeenCalledWith("portfolio", 28));
   });
 });

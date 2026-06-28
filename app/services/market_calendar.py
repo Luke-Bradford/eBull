@@ -46,10 +46,13 @@ closed day shown as open).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, cast
 
+from pandas import Series, Timestamp
 from pandas.tseries.holiday import (
     AbstractHolidayCalendar,
     GoodFriday,
@@ -88,81 +91,103 @@ _CACHE: dict[int, MarketYear] = {}
 # Ad-hoc NYSE full closures not produced by the scheduled-holiday rules,
 # transcribed from the NYSE historical record. Source: NYSE holidays &
 # trading-hours history (https://www.nyse.com/markets/hours-calendars) +
-# press releases for national days of mourning.
-_EXTRAORDINARY_CLOSURES: frozenset[date] = frozenset(
-    {
-        date(2001, 9, 11),  # 9/11 attacks — markets closed Sep 11-14
-        date(2001, 9, 12),
-        date(2001, 9, 13),
-        date(2001, 9, 14),
-        date(2004, 6, 11),  # National day of mourning — President Reagan
-        date(2007, 1, 2),  # National day of mourning — President Ford
-        date(2012, 10, 29),  # Hurricane Sandy — closed Oct 29-30
-        date(2012, 10, 30),
-        date(2018, 12, 5),  # National day of mourning — President G.H.W. Bush
-        date(2025, 1, 9),  # National day of mourning — President Carter
-    }
-)
+# press releases for national days of mourning. Each date carries its
+# operator-facing reason; the closure SET is derived from this map so the two
+# can never drift (the reasons map is total over the closures by construction).
+_EXTRAORDINARY_CLOSURE_NAMES: dict[date, str] = {
+    date(2001, 9, 11): "9/11 attacks",  # markets closed Sep 11-14
+    date(2001, 9, 12): "9/11 attacks",
+    date(2001, 9, 13): "9/11 attacks",
+    date(2001, 9, 14): "9/11 attacks",
+    date(2004, 6, 11): "Day of mourning — President Reagan",
+    date(2007, 1, 2): "Day of mourning — President Ford",
+    date(2012, 10, 29): "Hurricane Sandy",  # closed Oct 29-30
+    date(2012, 10, 30): "Hurricane Sandy",
+    date(2018, 12, 5): "Day of mourning — President G.H.W. Bush",
+    date(2025, 1, 9): "Day of mourning — President Carter",
+}
+_EXTRAORDINARY_CLOSURES: frozenset[date] = frozenset(_EXTRAORDINARY_CLOSURE_NAMES)
 
 
 @dataclass(frozen=True)
 class MarketYear:
     """The NYSE special days for one calendar year, as ``America/New_York``
     civil dates. ``full_closures`` = no trading; ``half_days`` = 13:00 ET
-    early close."""
+    early close; ``reasons`` = each special date → its operator-facing name
+    (holiday / early-close occasion). ``reasons`` is read-only so the cached
+    instance stays effectively immutable."""
 
     year: int
     full_closures: frozenset[date]
     half_days: frozenset[date]
+    reasons: Mapping[date, str]
 
 
-def _full_closures_for_year(year: int) -> frozenset[date]:
-    """Observed NYSE full closures whose observed date lands in ``year``.
+def _scheduled_closure_names(year: int) -> dict[date, str]:
+    """Observed scheduled NYSE closures landing in ``year`` → holiday name.
 
     The query window straddles the adjacent year boundaries so a New Year's
     Day that falls on a Saturday — observed on the prior Dec 31 — is
     attributed to the year its *observed* date lands in (mirrors
-    ``sec_calendar._holidays_for_year``)."""
-    stamps = _CALENDAR.holidays(start=date(year - 1, 12, 15), end=date(year + 1, 1, 15))
-    scheduled = {ts.date() for ts in stamps if ts.year == year}
-    scheduled.update(d for d in _EXTRAORDINARY_CLOSURES if d.year == year)
-    return frozenset(scheduled)
+    ``sec_calendar._holidays_for_year``). ``return_name=True`` reuses the same
+    ``pandas`` rules that produce the dates, so the names cannot drift from the
+    closure set."""
+    # ``return_name=True`` makes ``holidays`` return a name-valued Series keyed
+    # by the observed dates; the pandas stub types it as ``DatetimeIndex`` (it
+    # does not model the overload), so cast for the ``.items()`` iteration.
+    named = cast(
+        Series,
+        _CALENDAR.holidays(start=date(year - 1, 12, 15), end=date(year + 1, 1, 15), return_name=True),
+    )
+    out: dict[date, str] = {}
+    for ts, name in named.items():
+        stamp = cast(Timestamp, ts)
+        if stamp.year == year:
+            out[stamp.date()] = str(name)
+    return out
 
 
-def _half_days_for_year(year: int, full_closures: frozenset[date]) -> frozenset[date]:
-    """Rule-derived 13:00 ET early-close days, minus any that are full
+def _half_day_names_for_year(year: int, full_closures: frozenset[date]) -> dict[date, str]:
+    """Rule-derived 13:00 ET early-close days → name, minus any that are full
     closures (closure wins). See module docstring for the rule set + the
     single known omission (Saturday-Christmas → Dec 23)."""
-    candidates: set[date] = set()
+    candidates: dict[date, str] = {}
 
     # Friday after Thanksgiving. Thanksgiving (4th Thursday of Nov) is always
     # a full closure; the early-close day is the Thursday + 1.
     for c in full_closures:
         if c.month == 11 and c.weekday() == 3:  # the Thursday Thanksgiving
-            candidates.add(date(c.year, 11, c.day + 1))
+            candidates[date(c.year, 11, c.day + 1)] = "Friday after Thanksgiving"
 
     # Christmas Eve when a weekday.
     dec24 = date(year, 12, 24)
     if dec24.weekday() < 5:
-        candidates.add(dec24)
+        candidates[dec24] = "Christmas Eve"
 
     # Eve of Independence Day: Jul 3 when both Jul 3 and Jul 4 are weekdays.
     jul3, jul4 = date(year, 7, 3), date(year, 7, 4)
     if jul3.weekday() < 5 and jul4.weekday() < 5:
-        candidates.add(jul3)
+        candidates[jul3] = "Independence Day eve"
 
-    return frozenset(c for c in candidates if c not in full_closures)
+    return {d: name for d, name in candidates.items() if d not in full_closures}
 
 
 def us_market_specials(year: int) -> MarketYear:
     """NYSE full closures + half days for ``year`` (cached; immutable)."""
     cached = _CACHE.get(year)
     if cached is None:
-        closures = _full_closures_for_year(year)
+        scheduled = _scheduled_closure_names(year)
+        extraordinary = {d: name for d, name in _EXTRAORDINARY_CLOSURE_NAMES.items() if d.year == year}
+        closures = frozenset(scheduled) | frozenset(extraordinary)
+        half_day_names = _half_day_names_for_year(year, closures)
+        # Closures and half days are disjoint (closure-wins is applied above),
+        # so the merged reasons map has no key collisions.
+        reasons = {**scheduled, **extraordinary, **half_day_names}
         cached = MarketYear(
             year=year,
             full_closures=closures,
-            half_days=_half_days_for_year(year, closures),
+            half_days=frozenset(half_day_names),
+            reasons=MappingProxyType(reasons),
         )
         _CACHE[year] = cached
     return cached
@@ -184,3 +209,17 @@ def us_market_status(d: date) -> UsMarketStatus:
     if d in specials.half_days:
         return "half_day"
     return "open"
+
+
+def us_market_reason(d: date) -> str | None:
+    """Operator-facing reason a NYSE civil date is not a regular session, or
+    ``None`` for a normal open day.
+
+    ``"Weekend"`` on Sat/Sun (checked first, matching ``us_market_status``'s
+    weekend-or-closure precedence — observed NYSE closures are always shifted
+    onto weekdays, so a special date never lands on a weekend). Otherwise the
+    holiday / early-close name from the year's ``reasons`` map; ``None`` on a
+    plain trading weekday."""
+    if d.weekday() >= 5:
+        return "Weekend"
+    return us_market_specials(d.year).reasons.get(d)

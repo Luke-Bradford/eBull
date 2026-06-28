@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.api.instruments import _SESSION_PROFILE_SQL
 from app.db import get_conn
-from app.services.market_calendar import us_market_status
+from app.services.market_calendar import us_market_reason, us_market_status
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 
 router = APIRouter(
@@ -49,7 +49,8 @@ router = APIRouter(
 )
 
 _NY = ZoneInfo("America/New_York")
-_WEEK_DAYS = 7
+_DEFAULT_HORIZON_DAYS = 7
+_MAX_HORIZON_DAYS = 28
 
 CalendarScope = Literal["portfolio", "watchlist", "all"]
 DayType = Literal["open", "half_day", "closed", "not_modelled"]
@@ -67,6 +68,10 @@ _PROFILE_META: dict[str, tuple[str, str, bool]] = {
 class MarketStatusDay(BaseModel):
     date: date
     day_type: DayType
+    # Why the day is not a regular session (holiday / early-close occasion /
+    # "Weekend"), or None on a normal open day. US is precise; foreign carries
+    # only "Weekend" (holidays not modelled); continuous is always None.
+    reason: str | None = None
 
 
 class MarketStatusRow(BaseModel):
@@ -108,6 +113,20 @@ def _day_type(profile: str, d: date) -> DayType:
         # the same way the chart + the live now-badge do, not as not_modelled.
         return "open"
     return "not_modelled"  # unknown/future profile — safe default
+
+
+def _day_reason(profile: str, d: date) -> str | None:
+    """Operator-facing reason a day is non-open, paired with ``_day_type``.
+
+    US profiles are NYSE-precise (holiday/early-close names + "Weekend").
+    ``foreign_equity`` carries only "Weekend" — its holidays are not modelled,
+    so naming a weekday closure we cannot detect would be misleading.
+    ``continuous`` / unknown profiles have no reason."""
+    if profile in ("us_equity", "us_equity_rth"):
+        return us_market_reason(d)
+    if profile == "foreign_equity":
+        return "Weekend" if d.weekday() >= 5 else None
+    return None
 
 
 def _scope_instruments(conn: psycopg.Connection[object], scope: CalendarScope) -> list[tuple[int, str, str]]:
@@ -157,20 +176,23 @@ def _scope_instruments(conn: psycopg.Connection[object], scope: CalendarScope) -
 def calendar_events(
     conn: psycopg.Connection[object] = Depends(get_conn),
     scope: CalendarScope = Query(default="portfolio"),
+    days: int = Query(
+        default=_DEFAULT_HORIZON_DAYS, ge=1, le=_MAX_HORIZON_DAYS, description="Horizon in days (incl. today)."
+    ),
 ) -> CalendarEvents:
     instruments = _scope_instruments(conn, scope)
     today_ny = datetime.now(tz=_NY).date()
 
     # One market-status row per DISTINCT profile present in the scope.
     profiles = sorted({p for _, _, p in instruments})
-    week_dates = [today_ny + timedelta(days=i) for i in range(_WEEK_DAYS)]
+    horizon_dates = [today_ny + timedelta(days=i) for i in range(days)]
     market_status = [
         MarketStatusRow(
             profile=p,
             label=_PROFILE_META.get(p, (p, "UTC", False))[0],
             timezone=_PROFILE_META.get(p, (p, "UTC", False))[1],
             holidays_modelled=_PROFILE_META.get(p, (p, "UTC", False))[2],
-            week=[MarketStatusDay(date=d, day_type=_day_type(p, d)) for d in week_dates],
+            week=[MarketStatusDay(date=d, day_type=_day_type(p, d), reason=_day_reason(p, d)) for d in horizon_dates],
         )
         for p in profiles
     ]

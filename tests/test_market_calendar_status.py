@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from app.api.calendar import _day_type
+from app.api.calendar import _day_reason, _day_type
 from app.services.market_calendar import us_market_status
 
 
@@ -41,3 +41,28 @@ class TestDayType:
         # Matches the shipped #609 classifySession (continuous = always trading).
         assert _day_type("continuous", date(2026, 6, 23)) == "open"
         assert _day_type("continuous", date(2026, 6, 27)) == "open"  # weekend too
+
+
+class TestDayReason:
+    """`_day_reason` (#1766) — operator-facing reason per profile/day."""
+
+    def test_us_holiday_name(self) -> None:
+        assert _day_reason("us_equity", date(2026, 1, 1)) == "New Year's Day"
+        assert _day_reason("us_equity_rth", date(2026, 12, 24)) == "Christmas Eve"
+        assert _day_reason("us_equity", date(2026, 7, 3)) == "Independence Day"  # observed
+
+    def test_us_plain_weekday_none(self) -> None:
+        assert _day_reason("us_equity", date(2026, 6, 23)) is None  # Tuesday
+
+    def test_us_weekend(self) -> None:
+        assert _day_reason("us_equity", date(2026, 6, 27)) == "Weekend"  # Saturday
+
+    def test_foreign_only_weekend(self) -> None:
+        # Holidays not modelled — a weekday holiday gets no reason.
+        assert _day_reason("foreign_equity", date(2026, 1, 1)) is None  # Thu, but unmodelled
+        assert _day_reason("foreign_equity", date(2026, 6, 27)) == "Weekend"  # Sat
+
+    def test_continuous_and_unknown_none(self) -> None:
+        assert _day_reason("continuous", date(2026, 1, 1)) is None
+        assert _day_reason("continuous", date(2026, 6, 27)) is None  # weekend too
+        assert _day_reason("mystery_profile", date(2026, 1, 1)) is None

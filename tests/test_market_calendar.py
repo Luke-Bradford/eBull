@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.providers.implementations.sec_calendar import is_us_federal_holiday
-from app.services.market_calendar import us_market_specials
+from app.services.market_calendar import us_market_reason, us_market_specials
 
 # NYSE published full closures (https://www.nyse.com/markets/hours-calendars).
 _CLOSURES_2025 = {
@@ -154,3 +154,46 @@ def test_endpoint_rejects_out_of_range_year() -> None:
             assert exc.status_code == 400
         else:  # pragma: no cover - guard
             raise AssertionError(f"year {bad} should have raised")
+
+
+class TestUsMarketReason:
+    """`us_market_reason` (#1766) — the operator-facing name for a non-open
+    NYSE day, or None on a regular session. Names come from the same pandas
+    rules that derive the closure set (no drift)."""
+
+    def test_scheduled_holiday_name(self) -> None:
+        assert us_market_reason(date(2026, 1, 1)) == "New Year's Day"
+        assert us_market_reason(date(2026, 12, 25)) == "Christmas"
+
+    def test_observed_shift_carries_name(self) -> None:
+        # Jul 4 2026 is a Saturday → observed full closure on Fri Jul 3.
+        assert us_market_reason(date(2026, 7, 3)) == "Independence Day"
+
+    def test_independence_day_eve_vs_observed_closure_across_years(self) -> None:
+        # 2025: Jul 4 is a Friday (full closure), Jul 3 Thu is the half-day eve.
+        assert us_market_reason(date(2025, 7, 3)) == "Independence Day eve"
+        assert us_market_reason(date(2025, 7, 4)) == "Independence Day"
+        # 2026: Jul 4 Sat → Jul 3 is the OBSERVED closure, not an eve.
+        assert us_market_reason(date(2026, 7, 3)) == "Independence Day"
+
+    def test_half_day_names(self) -> None:
+        assert us_market_reason(date(2026, 12, 24)) == "Christmas Eve"
+        assert us_market_reason(date(2026, 11, 27)) == "Friday after Thanksgiving"
+
+    def test_extraordinary_closure_name(self) -> None:
+        assert us_market_reason(date(2025, 1, 9)) == "Day of mourning — President Carter"
+        assert us_market_reason(date(2012, 10, 30)) == "Hurricane Sandy"
+
+    def test_weekend(self) -> None:
+        assert us_market_reason(date(2026, 6, 27)) == "Weekend"  # Saturday
+        assert us_market_reason(date(2026, 6, 28)) == "Weekend"  # Sunday
+
+    def test_plain_weekday_is_none(self) -> None:
+        assert us_market_reason(date(2026, 6, 23)) is None  # Tuesday
+
+    def test_reasons_total_over_specials(self) -> None:
+        # Every special date has a reason; closure/half-day sets stay disjoint.
+        sp = us_market_specials(2026)
+        assert sp.full_closures.isdisjoint(sp.half_days)
+        for d in sp.full_closures | sp.half_days:
+            assert sp.reasons.get(d), f"missing reason for {d}"
