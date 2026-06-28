@@ -12,8 +12,11 @@ from datetime import date
 from decimal import Decimal
 
 from app.services.ownership_rollup import (
+    _PRIORITY_RANK,
     Holder,
     SourceTag,
+    _Candidate,
+    _dedup_by_priority,
     _reconcile_owner_once,
     _source_rows_and_total,
 )
@@ -27,6 +30,7 @@ def _h(
     *,
     filer_type: str | None = None,
     accession: str = "0000000000-00-000000",
+    nature: str | None = None,
 ) -> Holder:
     return Holder(
         filer_cik=cik,
@@ -39,6 +43,7 @@ def _h(
         as_of_date=date(2026, 1, 1),
         filer_type=filer_type,
         dropped_sources=(),
+        ownership_nature=nature,
     )
 
 
@@ -214,6 +219,96 @@ def test_source_rows_and_total_helper() -> None:
     d14 = [_h("c", "n", "def14a", "5000000"), _h("c", "n", "def14a", "4000000")]
     rows, total = _source_rows_and_total("def14a", d14)
     assert len(rows) == 1 and total == Decimal("5000000")  # overlapping → MAX rep only
+
+
+# --- #788: within-source additive (direct/indirect) vs overlapping (beneficial)
+#     nature regime. ``beneficial`` is a Rule-13d-3 restatement (MAX), never a
+#     third additive Section-16 lot (prevention-log 1835 / #905). ----------------
+
+
+def test_nature_direct_plus_indirect_sums() -> None:
+    """#905 preserved: direct + indirect are distinct lots → SUM."""
+    rows, total = _source_rows_and_total(
+        "form4", [_h("c", "n", "form4", "100", nature="direct"), _h("c", "n", "form4", "50", nature="indirect")]
+    )
+    assert total == Decimal("150")
+    assert sum((h.shares for h in rows), Decimal(0)) == Decimal("150")
+
+
+def test_nature_beneficial_equal_to_direct_not_doubled() -> None:
+    """The bug: dataset ``beneficial`` == XML ``direct`` for one stake → counted
+    ONCE (MAX), the beneficial restatement folded as provenance, not summed."""
+    rows, total = _source_rows_and_total(
+        "form4", [_h("c", "n", "form4", "100", nature="direct"), _h("c", "n", "form4", "100", nature="beneficial")]
+    )
+    assert total == Decimal("100")
+    assert len(rows) == 1 and rows[0].ownership_nature == "direct"
+    # beneficial restatement preserved for audit, not dropped silently.
+    assert any(d.source == "form4" for d in rows[0].dropped_sources)
+
+
+def test_nature_beneficial_only_is_the_figure() -> None:
+    """Dataset-only owner (no XML rows): the sole ``beneficial`` row stands."""
+    rows, total = _source_rows_and_total("form4", [_h("c", "n", "form4", "200", nature="beneficial")])
+    assert total == Decimal("200") and len(rows) == 1
+
+
+def test_nature_beneficial_exceeds_additive_wins_and_folds() -> None:
+    """``beneficial`` (250) > direct (100): XML under-captured → take the
+    Rule-13d-3 total, fold the additive lot as provenance."""
+    rows, total = _source_rows_and_total(
+        "form4", [_h("c", "n", "form4", "100", nature="direct"), _h("c", "n", "form4", "250", nature="beneficial")]
+    )
+    assert total == Decimal("250")
+    assert len(rows) == 1 and rows[0].shares == Decimal("250")
+    assert any(d.shares == Decimal("100") for d in rows[0].dropped_sources)
+
+
+def test_nature_additive_sum_beats_smaller_beneficial() -> None:
+    """direct(100) + indirect(50) = 150 dominates a 120 beneficial restatement."""
+    rows, total = _source_rows_and_total(
+        "form4",
+        [
+            _h("c", "n", "form4", "100", nature="direct"),
+            _h("c", "n", "form4", "50", nature="indirect"),
+            _h("c", "n", "form4", "120", nature="beneficial"),
+        ],
+    )
+    assert total == Decimal("150")
+
+
+def _cand(cik: str, source: SourceTag, shares: str, *, nature: str, accession: str, row_id: int) -> _Candidate:
+    return _Candidate(
+        source=source,
+        priority_rank=_PRIORITY_RANK[source],
+        filer_cik=cik,
+        filer_name="Insider Same",
+        filer_type=None,
+        shares=Decimal(shares),
+        as_of_date=date(2026, 1, 1),
+        accession_number=accession,
+        source_row_id=row_id,
+        ownership_nature=nature,
+    )
+
+
+def test_readpath_candidate_to_owner_once_collapses_cross_nature() -> None:
+    """Read-path test through the lossy candidate→Holder boundary (Codex ckpt-1):
+    a dual-pipeline collision (one ``direct`` + one ``beneficial`` row, same cik /
+    accession / shares — the RNTX signature) must resolve to ONE insiders
+    contribution at the single value, not a summed 2×. Exercises
+    ``ownership_nature`` propagation through ``_dedup_by_priority``."""
+    cands = [
+        _cand("0001019231", "form4", "1746549", nature="direct", accession="acc-1", row_id=1),
+        _cand("0001019231", "form4", "1746549", nature="beneficial", accession="acc-1", row_id=2),
+    ]
+    holders = _dedup_by_priority(cands)
+    # _dedup_by_priority keeps both natures (key includes nature) and carries it.
+    assert {h.ownership_nature for h in holders} == {"direct", "beneficial"}
+    out = _reconcile_owner_once(holders)
+    insiders = out["insiders"]
+    assert len(insiders) == 1
+    assert insiders[0].shares == Decimal("1746549")
 
 
 def test_pure_blockholder_unchanged() -> None:
