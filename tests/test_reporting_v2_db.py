@@ -198,6 +198,80 @@ def test_benchmark_resolved_by_symbol(ebull_test_conn: psycopg.Connection[tuple]
     assert Decimal(benchmark["return_pct"]) == Decimal("0.02")
 
 
+def test_benchmark_stale_no_in_window_close_returns_null(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """When the latest benchmark close predates the whole period (stale
+    data — #1818), close_end collapses onto the pre-period baseline and
+    close_end/close_start - 1 == 0. That 0 is a fabricated "flat", not a
+    real return: return_pct must be null so the FE shows "—" (#1817)."""
+    conn = ebull_test_conn
+    _seed_portfolio(conn)
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (789802, 'SPX500', 'S&P 500 Index', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """
+    )
+    # Both closes land BEFORE _PERIOD_B (06-01 .. 06-07): no close inside
+    # the window. close_start (strict < 06-01) and close_end (<= 06-07)
+    # both resolve to the 05-29 row.
+    conn.execute(
+        """
+        INSERT INTO price_daily (instrument_id, price_date, close)
+        VALUES (789802, '2026-05-22', 5000), (789802, '2026-05-29', 5100)
+        ON CONFLICT (instrument_id, price_date) DO UPDATE SET close = EXCLUDED.close
+        """
+    )
+    conn.commit()
+
+    report = generate_weekly_report(conn, period_start=_PERIOD_B[0], period_end=_PERIOD_B[1])
+    benchmark = report["performance"]["benchmark"]
+    assert benchmark["symbol"] == "SPX500"
+    # Closes still reported for transparency (both the stale 05-29 row)…
+    assert Decimal(benchmark["close_start"]) == Decimal("5100")
+    assert Decimal(benchmark["close_end"]) == Decimal("5100")
+    # …but the return is null, NOT a spurious 0.00%.
+    assert benchmark["return_pct"] is None
+    # Cover + excess null-out too (no fabricated excess vs a flat line).
+    assert report["cover"]["benchmark_return"] is None
+    assert report["cover"]["excess_return"] is None
+
+
+def test_benchmark_close_exactly_on_period_start_computes(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Boundary: a benchmark close landing exactly on period_start IS
+    inside the window — the `end_row.date >= period_start` guard is
+    inclusive, so the return computes (locks against a `>` regression)."""
+    conn = ebull_test_conn
+    _seed_portfolio(conn)
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (789802, 'SPX500', 'S&P 500 Index', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """
+    )
+    # baseline before the window, plus a close ON period_start (06-01).
+    conn.execute(
+        """
+        INSERT INTO price_daily (instrument_id, price_date, close)
+        VALUES (789802, '2026-05-29', 5000), (789802, %(start)s, 5100)
+        ON CONFLICT (instrument_id, price_date) DO UPDATE SET close = EXCLUDED.close
+        """,
+        {"start": _PERIOD_B[0]},
+    )
+    conn.commit()
+
+    report = generate_weekly_report(conn, period_start=_PERIOD_B[0], period_end=_PERIOD_B[1])
+    benchmark = report["performance"]["benchmark"]
+    assert Decimal(benchmark["close_start"]) == Decimal("5000")
+    assert Decimal(benchmark["close_end"]) == Decimal("5100")
+    assert Decimal(benchmark["return_pct"]) == Decimal("0.02")
+
+
 def test_v2_fixture_is_backend_emitted(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
     """The SnapshotV2 fixture for child 2's FE type test is generated
     by the real builders. ``REPORT_FIXTURE_WRITE=1`` regenerates the

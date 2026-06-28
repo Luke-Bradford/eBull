@@ -957,12 +957,12 @@ def _benchmark_closes(
             "return_pct": None,
         }
 
-    def _close(on_or_before: date, *, strict_before: bool) -> Decimal | None:
+    def _close(on_or_before: date, *, strict_before: bool) -> tuple[date, Decimal] | None:
         op = "<" if strict_before else "<="
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 f"""
-                SELECT close FROM price_daily
+                SELECT price_date, close FROM price_daily
                 WHERE instrument_id = %(iid)s
                   AND close IS NOT NULL
                   AND price_date {op} %(day)s
@@ -972,12 +972,30 @@ def _benchmark_closes(
                 {"iid": inst["instrument_id"], "day": on_or_before},
             )
             row = cur.fetchone()
-        return row["close"] if row else None
+        return (row["price_date"], row["close"]) if row else None
 
-    close_start = _close(period_start, strict_before=True)
-    close_end = _close(period_end, strict_before=False)
+    start_row = _close(period_start, strict_before=True)
+    end_row = _close(period_end, strict_before=False)
+    close_start = start_row[1] if start_row is not None else None
+    close_end = end_row[1] if end_row is not None else None
     return_pct: Decimal | None = None
-    if close_start is not None and close_end is not None and close_start > 0:
+    # Honest coverage: a return is only real when the benchmark actually
+    # has a close INSIDE [period_start, period_end]. If the latest
+    # available close predates the whole window (stale/missing data —
+    # e.g. an index symbol the price provider can't refresh, #1818),
+    # `end_row` collapses onto the same pre-period row as `start_row`
+    # and `close_end / close_start - 1 == 0` — a SPURIOUS "benchmark was
+    # flat", not a real 0%. Leave return_pct null so the FE renders "—"
+    # / "benchmark unavailable" rather than a fabricated 0.00% + excess
+    # (#1817). Matches the docstring contract: null on missing closes.
+    if (
+        start_row is not None
+        and end_row is not None
+        and end_row[0] >= period_start
+        and close_start is not None
+        and close_end is not None
+        and close_start > 0
+    ):
         return_pct = close_end / close_start - 1
     return {
         "symbol": BENCHMARK_SYMBOL,
