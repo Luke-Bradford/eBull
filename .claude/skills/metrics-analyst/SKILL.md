@@ -370,6 +370,7 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Storage: `instrument_dividend_summary.ttm_yield_pct`.
 - Endpoint: `/summary.key_stats.dividend_yield` and `/dividends.summary.ttm_yield_pct`.
 - Caveats: NULL when `ttm_dps` null/zero or price null/zero. `dividend_streak_q` counts consecutive positive-DPS quarters.
+- ⚠ **UNIT: `ttm_yield_pct` is ALREADY a percent** (the `× 100` is baked into the view, sql/050:170) — and `key_stats.dividend_yield` surfaces it verbatim. Sibling key-stats (`roe`/`roa`/`revenue_growth_yoy`) are raw FRACTIONS. So a renderer that applies one `× 100` policy to the whole block double-scales the yield 100× (AAPL 0.27% → 27.45%, #1827). Render dividend yield as-is (`formatYieldPct` / `{alreadyPercent:true}`); apply `× 100` only to the fraction-valued siblings.
 
 ### TTM DPS / TTM dividends paid
 - `instrument_dividend_summary.ttm_dps`, `ttm_dividends_paid`.

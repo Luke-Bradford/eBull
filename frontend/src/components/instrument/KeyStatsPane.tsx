@@ -6,11 +6,19 @@ import type { InstrumentSummary, KeyStatsFieldSource } from "@/api/types";
 
 function formatDecimal(
   value: string | null | undefined,
-  opts: { percent?: boolean } = {},
+  // `percent`: value is a raw FRACTION (e.g. roe 0.277) → render ×100 as
+  // "27.70%". `alreadyPercent`: value is ALREADY in percent units → append
+  // "%" without re-scaling. The two must not be confused: dividend_yield is
+  // `ttm_yield_pct = (ttm_dps / price) * 100` (already a percent, sql/050),
+  // so it takes `alreadyPercent`; its fraction-valued siblings (roe/roa/…)
+  // take `percent`. Mixing them double-scaled the yield 100× (#1827). Same
+  // already-percent convention as `dividendsShared.formatYieldPct`.
+  opts: { percent?: boolean; alreadyPercent?: boolean } = {},
 ): string | null {
   if (value === null || value === undefined) return null;
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
+  if (opts.alreadyPercent) return `${num.toFixed(2)}%`;
   if (opts.percent) return `${(num * 100).toFixed(2)}%`;
   return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
@@ -85,7 +93,9 @@ function buildRows(summary: InstrumentSummary): Row[] {
     ),
     makeRow(formatDecimal(stats.pe_ratio), "P/E ratio", fs["pe_ratio"]),
     makeRow(formatDecimal(stats.pb_ratio), "P/B ratio", fs["pb_ratio"]),
-    makeRow(formatDecimal(stats.dividend_yield, { percent: true }), "Dividend yield", fs["dividend_yield"]),
+    // dividend_yield is already a percent (ttm_yield_pct, sql/050) — render
+    // as-is, do NOT re-multiply by 100 (#1827).
+    makeRow(formatDecimal(stats.dividend_yield, { alreadyPercent: true }), "Dividend yield", fs["dividend_yield"]),
     makeRow(formatDecimal(stats.payout_ratio, { percent: true }), "Payout ratio", fs["payout_ratio"]),
     makeRow(formatDecimal(stats.roe, { percent: true }), "ROE", fs["roe"]),
     makeRow(formatDecimal(stats.roa, { percent: true }), "ROA", fs["roa"]),
