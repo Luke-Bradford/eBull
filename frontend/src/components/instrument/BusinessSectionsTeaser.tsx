@@ -70,7 +70,10 @@ function pickCards(
     if (out.length >= MAX_CARDS) break;
     const t = teaseBody(s.body);
     if (t.length === 0) continue;
-    out.push({ key: s.section_key, label: s.section_label, teaser: t });
+    // section_key is a classification bucket (`other` repeats many times per
+    // filing), NOT an identifier — keying React rows by it collides (#1810).
+    // section_order is unique + authoritative (10-K presentation order).
+    out.push({ key: `${s.section_key}-${s.section_order}`, label: s.section_label, teaser: t });
   }
   return out;
 }

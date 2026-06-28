@@ -744,6 +744,14 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### React list keys must be a unique identifier, not a classification / category field that repeats per parent
+
+- First seen in: #1800 (`filer_cik` — a registrant CIK fronts N series; insider rows are byte-identical) and again #1810 (`section_key` — a 10-K Item 1 classification bucket; GME has `other` ×12 in one filing). Both keyed `.map()` rows by a field that *looks* like an id but is a non-unique grouping label → React "Encountered two children with the same key" → cards/rows silently duplicated or omitted.
+- Prevention: before keying a `.map()` by `x.foo_key` / `x.foo_id`, confirm the field is unique **within the rendered list**, not just "looks like an identifier". Classification buckets, category enums, group labels, and shared-parent foreign keys repeat by design. Prefer a guaranteed-unique field (an ordinal like `section_order`, a surrogate row id) or compose one (`` `${x.key}-${x.order}` ``, or append the array index per #1800). Self-review prompt: "can two rows in this list legitimately share this field?" — if yes, the key is wrong.
+- Enforced in: `frontend/src/components/instrument/BusinessSectionsTeaser.tsx::pickCards` (`` key: `${section_key}-${section_order}` ``); `tests/.../BusinessSectionsTeaser.test.tsx` ("keys cards uniquely when section_key buckets repeat (#1810)" — asserts no `same key` console warning); the three #1800 ownership render sites append the array index.
+
+---
+
 ### Audit / event-log DISPLAY response fields type by the storage column (`str`), not a curated `Literal`
 
 - First seen in: #1808 (found via FE-QA, 2026-06-28). `app/api/audit.py` response models declared `stage: Literal["execution_guard","order_client"]` / `pass_fail: Literal["PASS","FAIL"]`, but `decision_audit.stage`/`.pass_fail` are open, append-only `TEXT` columns written by **six independent subsystems** (execution_guard, order_client, manual_order, liveness_kick, retry_backoff, entry_timing × PASS/FAIL/KICK/RETRY/DEFER). FastAPI validates the response against the model → any row outside the stale subset raised `ResponseValidationError` → **500**. Because the newest rows were all new-vocabulary, the entire execution audit trail (a compliance surface) was unviewable.
