@@ -744,6 +744,15 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Audit / event-log DISPLAY response fields type by the storage column (`str`), not a curated `Literal`
+
+- First seen in: #1808 (found via FE-QA, 2026-06-28). `app/api/audit.py` response models declared `stage: Literal["execution_guard","order_client"]` / `pass_fail: Literal["PASS","FAIL"]`, but `decision_audit.stage`/`.pass_fail` are open, append-only `TEXT` columns written by **six independent subsystems** (execution_guard, order_client, manual_order, liveness_kick, retry_backoff, entry_timing × PASS/FAIL/KICK/RETRY/DEFER). FastAPI validates the response against the model → any row outside the stale subset raised `ResponseValidationError` → **500**. Because the newest rows were all new-vocabulary, the entire execution audit trail (a compliance surface) was unviewable.
+- Distinction from the §"Loose `string` on API response fields" rule above: that rule applies to **reader-owned, closed domains** (currency USD/GBP, cgt_scenario) where the API controls the value set. An **audit / event-log display** is a *passive mirror of an append-only log* whose vocabulary is owned by N independent WRITERS and grows freely — the reader has no authority over the set and **must never reject a row a writer legitimately logged** (rejecting logged history is a category error for an audit surface). For these endpoints, type the response field by the storage column (`str`).
+- Prevention: For a read endpoint over a multi-writer log/audit/event table, type **response** `stage`/`status`/`kind`-style fields as `str`; keep `Literal` only on the **filter Query params** (input validation per §"closed value set"), and widen that Literal to the *full* writer vocabulary (grep every `INSERT INTO <table> (... stage ...)` writer for its literal). Self-review prompt: "does any writer outside this file insert a value this response Literal would reject?" If yes → `str` on the response.
+- Enforced in: `app/api/audit.py` (response `stage`/`pass_fail` → `str`; filter `Stage`/`PassFail` Literals widened to all 6/5 values); `tests/test_api_audit.py::TestOpenVocabulary` (new-vocab + unforeseen-value rows return 200, not 500); FE `frontend/src/components/recommendations/AuditTrail.tsx` + `AuditFilters.tsx` use `Record<string,…>` label/tone maps with raw-key fallback.
+
+---
+
 ### Infinity/out-of-range numeric inputs bypass `Number.isNaN` guards
 
 - First seen in: #236 (review WARNING 4)

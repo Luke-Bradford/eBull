@@ -319,3 +319,66 @@ class TestFilterValidation:
     def test_invalid_stage_returns_422(self) -> None:
         resp = client.get("/audit?stage=unknown_stage")
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# TestOpenVocabulary (#1808)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenVocabulary:
+    """decision_audit.stage / .pass_fail are open, append-only TEXT columns
+    written by six independent subsystems. A stale response-model Literal here
+    500s the whole audit trail (it did — every newest row was new-vocabulary).
+    The display must faithfully render any value a writer logged."""
+
+    def teardown_method(self) -> None:
+        _cleanup()
+
+    # (stage, pass_fail) pairs from writers OUTSIDE the original
+    # {execution_guard, order_client} × {PASS, FAIL} subset.
+    _NEW_VOCAB = [
+        ("liveness_kick", "KICK"),
+        ("retry_backoff", "RETRY"),
+        ("manual_order", "PASS"),
+        ("entry_timing", "DEFER"),
+    ]
+
+    def test_list_renders_new_vocabulary_without_500(self) -> None:
+        for stage, pf in self._NEW_VOCAB:
+            row = _make_audit_row(stage=stage, pass_fail=pf)
+            _with_conn([[{"cnt": 1}], [row]])
+
+            resp = client.get("/audit")
+            assert resp.status_code == 200, f"{stage}/{pf} 500'd the list"
+            item = resp.json()["items"][0]
+            assert item["stage"] == stage
+            assert item["pass_fail"] == pf
+
+    def test_detail_renders_new_vocabulary_without_500(self) -> None:
+        for stage, pf in self._NEW_VOCAB:
+            row = _make_audit_row(stage=stage, pass_fail=pf)
+            _with_conn([[row]])
+
+            resp = client.get("/audit/1")
+            assert resp.status_code == 200, f"{stage}/{pf} 500'd the detail"
+            body = resp.json()
+            assert body["stage"] == stage
+            assert body["pass_fail"] == pf
+
+    def test_unforeseen_value_still_renders(self) -> None:
+        """Even a stage/pass_fail no writer uses today must not 500 — the
+        reader has no authority over the column, so it never rejects a row."""
+        row = _make_audit_row(stage="future_stage_v9", pass_fail="WAT")
+        _with_conn([[{"cnt": 1}], [row]])
+
+        resp = client.get("/audit")
+        assert resp.status_code == 200
+        assert resp.json()["items"][0]["stage"] == "future_stage_v9"
+
+    def test_filter_accepts_new_vocabulary(self) -> None:
+        for stage, pf in self._NEW_VOCAB:
+            _with_conn([[{"cnt": 0}], []])
+            assert client.get(f"/audit?stage={stage}").status_code == 200
+            _with_conn([[{"cnt": 0}], []])
+            assert client.get(f"/audit?pass_fail={pf}").status_code == 200

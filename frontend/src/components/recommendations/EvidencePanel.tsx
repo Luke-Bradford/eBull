@@ -1,5 +1,3 @@
-import type { AuditStage } from "@/api/types";
-
 interface GuardRule {
   rule: string;
   passed: boolean;
@@ -23,7 +21,9 @@ export function EvidencePanel({
   stage,
   evidence,
 }: {
-  stage: AuditStage;
+  // `string`, not AuditStage: the audit display mirrors the open BE vocabulary
+  // (#1808). Unknown stages fall through to GenericEvidence below.
+  stage: string;
   evidence: Record<string, unknown> | Record<string, unknown>[] | null;
 }) {
   if (evidence === null) {

@@ -941,8 +941,20 @@ export interface RecommendationDetail {
 // /audit (app/api/audit.py)
 // ---------------------------------------------------------------------------
 
-export type AuditPassFail = "PASS" | "FAIL";
-export type AuditStage = "execution_guard" | "order_client";
+// decision_audit.stage / .pass_fail are written by six independent subsystems
+// (#1808). These unions enumerate the known vocabulary for the FILTER inputs
+// (AuditQuery) + the label/tone maps only. The RESPONSE fields below are typed
+// `string` to mirror the BE (which sends them as bare `str`) — the audit display
+// must render any value a writer logged, so callers must never assume a closed
+// set. The row renderer falls back to the raw string for unknown values.
+export type AuditPassFail = "PASS" | "FAIL" | "KICK" | "RETRY" | "DEFER";
+export type AuditStage =
+  | "execution_guard"
+  | "order_client"
+  | "manual_order"
+  | "liveness_kick"
+  | "retry_backoff"
+  | "entry_timing";
 
 export interface AuditListItem {
   decision_id: number;
@@ -951,9 +963,9 @@ export interface AuditListItem {
   symbol: string | null;
   company_name: string | null;
   recommendation_id: number | null;
-  stage: AuditStage;
+  stage: string;
   model_version: string | null;
-  pass_fail: AuditPassFail;
+  pass_fail: string;
   explanation: string;
 }
 
@@ -964,9 +976,9 @@ export interface AuditDetail {
   symbol: string | null;
   company_name: string | null;
   recommendation_id: number | null;
-  stage: AuditStage;
+  stage: string;
   model_version: string | null;
-  pass_fail: AuditPassFail;
+  pass_fail: string;
   explanation: string;
   evidence_json: Record<string, unknown> | Record<string, unknown>[] | null;
 }

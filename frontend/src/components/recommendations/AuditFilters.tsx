@@ -1,8 +1,26 @@
 import type { AuditQuery } from "@/api/audit";
 import type { AuditPassFail, AuditStage } from "@/api/types";
 
-const PASS_FAIL_OPTIONS: AuditPassFail[] = ["PASS", "FAIL"];
-const STAGE_OPTIONS: AuditStage[] = ["execution_guard", "order_client"];
+const PASS_FAIL_OPTIONS: AuditPassFail[] = ["PASS", "FAIL", "KICK", "RETRY", "DEFER"];
+const STAGE_OPTIONS: AuditStage[] = [
+  "execution_guard",
+  "order_client",
+  "manual_order",
+  "liveness_kick",
+  "retry_backoff",
+  "entry_timing",
+];
+
+// Full-vocabulary labels (#1808) — a lookup, not a binary ternary, so every
+// stage reads correctly. Unknown values fall back to the raw key.
+const STAGE_FILTER_LABEL: Record<string, string> = {
+  execution_guard: "Execution guard",
+  order_client: "Order client",
+  manual_order: "Manual order",
+  liveness_kick: "Liveness kick",
+  retry_backoff: "Retry backoff",
+  entry_timing: "Entry timing",
+};
 
 export interface AuditFiltersProps {
   query: AuditQuery;
@@ -61,7 +79,7 @@ export function AuditFilters({
           <option value="">All</option>
           {STAGE_OPTIONS.map((s) => (
             <option key={s} value={s}>
-              {s === "execution_guard" ? "Execution guard" : "Order client"}
+              {STAGE_FILTER_LABEL[s] ?? s}
             </option>
           ))}
         </select>
