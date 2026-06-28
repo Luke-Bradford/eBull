@@ -753,6 +753,14 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### React list keys must be a guaranteed-unique identifier, not a classification / category field that repeats per parent
+
+- First seen in: #1800 (`filer_cik` — one registrant CIK fronts N N-PORT series; insider rows are byte-identical) and again #1810 (`section_key` — a 10-K Item 1 classification bucket; GME has `other` ×12 in one filing). Both keyed `.map()` rows by a field that *looks* like an id but is a non-unique grouping label → React "Encountered two children with the same key" → reconciliation is unsupported, so cards/rows are silently dropped or reused.
+- Prevention: before keying a `.map()` by `x.foo_key` / `x.foo_id`, confirm the field is unique **within the rendered list**, not just "looks like an identifier". Classification buckets, category enums, group labels, and shared-parent foreign keys repeat by design. Prefer a field whose uniqueness is **backed by a DB constraint over the rendered scope** (grep before cite — e.g. `sql/059` carries `UNIQUE (instrument_id, source_accession, section_order)` and the response is single-accession → `section_order` is safe), or compose/append the array index (#1800). Self-review prompt: "can two rows in this list legitimately share this field?" — if yes, the key is wrong.
+- Enforced in: `frontend/src/components/instrument/BusinessSectionsTeaser.tsx::pickCards` (`key: String(s.section_order)`); `frontend/src/components/instrument/BusinessSectionsTeaser.test.tsx` ("keys cards by section_order so colliding section_key buckets don't drop cards or warn (#1810)"); the three #1800 ownership render sites append the array index.
+
+---
+
 ### Infinity/out-of-range numeric inputs bypass `Number.isNaN` guards
 
 - First seen in: #236 (review WARNING 4)
