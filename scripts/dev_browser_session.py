@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sys
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 import psycopg
 
@@ -38,9 +39,11 @@ def _assert_dev_environment() -> None:
     operator session."""
     if settings.app_env not in ("dev", "development", "local", "test"):
         raise SystemExit(f"refusing to mint a session: app_env={settings.app_env!r} is not a dev environment")
-    url = settings.database_url
-    if not ("@localhost" in url or "@127.0.0.1" in url or "@::1" in url):
-        raise SystemExit("refusing to mint a session: database_url is not localhost (dev-only tool)")
+    # Exact hostname match — a substring check (`"@localhost" in url`) is bypassed
+    # by `@localhost.evil.com` (review #1765).
+    host = urlparse(settings.database_url).hostname
+    if host not in ("localhost", "127.0.0.1", "::1"):
+        raise SystemExit(f"refusing to mint a session: database_url host {host!r} is not localhost (dev-only tool)")
 
 
 def main() -> int:
