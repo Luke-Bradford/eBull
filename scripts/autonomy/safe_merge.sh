@@ -14,9 +14,13 @@ PR="${1:?usage: safe_merge.sh <pr-number>}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO"
 
-# Latest commit on the PR head.
-head_sha="$(gh pr view "$PR" --json headRefOid -q .headRefOid)"
-[ -n "$head_sha" ] || { echo "safe_merge: cannot resolve PR #$PR head SHA" >&2; exit 1; }
+# Timestamp of the latest commit on the PR head. The Claude review bot posts its
+# verdict as an ISSUE COMMENT (NOT a GitHub review object — `.reviews` is empty),
+# so we can't tie it to a SHA directly; instead require the latest bot comment to
+# be NEWER than the latest commit (i.e. it re-reviewed after the last push) AND
+# to read APPROVE. Empirically verified gh schema (Codex/bot ckpt-2).
+head_time="$(gh pr view "$PR" --json commits -q '.commits[-1].committedDate')"
+[ -n "$head_time" ] || { echo "safe_merge: cannot resolve PR #$PR head commit time" >&2; exit 1; }
 
 # 1) CI: no check may be failing; none may still be pending.
 checks_json="$(gh pr checks "$PR" --json name,state 2>/dev/null || echo '[]')"
@@ -27,14 +31,27 @@ if echo "$checks_json" | grep -qiE '"state":"(pending|queued|in_progress)"'; the
   echo "safe_merge: REFUSE — CI still running on #$PR (re-check later)" >&2; exit 1
 fi
 
-# 2) Bot review APPROVE on the LATEST commit. The Claude review posts a review;
-# require its latest review to be APPROVED and tied to the current head SHA.
-review_ok="$(gh pr view "$PR" --json reviews -q \
-  "[.reviews[] | select(.state==\"APPROVED\" and .commit.oid==\"$head_sha\")] | length")"
-if [ "${review_ok:-0}" -lt 1 ]; then
-  echo "safe_merge: REFUSE — no APPROVE on latest commit $head_sha (bot may not have re-reviewed)" >&2
+# 2) Latest Claude-review bot comment, by createdAt.
+latest="$(gh pr view "$PR" --json comments -q \
+  '[.comments[] | select(.author.login=="github-actions" and (.body|contains("Claude Code Review")))]
+   | sort_by(.createdAt) | last')"
+[ -n "$latest" ] && [ "$latest" != "null" ] || {
+  echo "safe_merge: REFUSE — no Claude review comment on #$PR yet" >&2; exit 1; }
+review_time="$(printf '%s' "$latest" | python3 -c 'import sys,json;print(json.load(sys.stdin)["createdAt"])')"
+review_body="$(printf '%s' "$latest" | python3 -c 'import sys,json;print(json.load(sys.stdin)["body"])')"
+
+# 2a) The review must POST-DATE the latest commit (re-reviewed after last push).
+if [[ "$review_time" < "$head_time" ]]; then
+  echo "safe_merge: REFUSE — latest review ($review_time) predates head commit ($head_time); push reset the gate" >&2
   exit 1
 fi
+# 2b) The verdict must be APPROVE, with no blocking/changes language.
+if printf '%s' "$review_body" | grep -qiE 'REQUEST CHANGES|\[BLOCKING\]|must fix before merge'; then
+  echo "safe_merge: REFUSE — latest review requests changes / has blocking findings" >&2; exit 1
+fi
+if ! printf '%s' "$review_body" | grep -qiE 'APPROVE'; then
+  echo "safe_merge: REFUSE — latest review is not an APPROVE" >&2; exit 1
+fi
 
-echo "safe_merge: gates pass on #$PR @ $head_sha — merging."
+echo "safe_merge: gates pass on #$PR (review $review_time ≥ head $head_time) — merging."
 gh pr merge "$PR" --squash --delete-branch

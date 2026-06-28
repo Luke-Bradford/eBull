@@ -52,7 +52,7 @@ echo "=== autonomy loop start $(date -u +%FT%TZ) -> $LOG ==="
 # Clean-state preflight (Codex ckpt-2 MED): each session starts on clean, latest
 # main. If a prior crash left a dirty tree or an un-fast-forwardable main, ABORT
 # and leave it for inspection — never start a session on top of half-done work.
-git fetch origin -q || true
+git fetch origin -q 2>>"$LOG" || { echo "preflight: git fetch failed (network?) — abort, won't run on stale state" | tee -a "$LOG" >&2; exit 1; }
 git checkout main -q 2>>"$LOG" || { echo "preflight: cannot checkout main — abort" | tee -a "$LOG" >&2; exit 1; }
 if ! git pull -q --ff-only 2>>"$LOG"; then
   echo "preflight: main not fast-forward — abort (manual inspection)" | tee -a "$LOG" >&2; exit 1
