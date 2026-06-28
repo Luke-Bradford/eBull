@@ -506,11 +506,17 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
           </tr>
         </thead>
         <tbody>
-          {shown.map((h) => {
+          {shown.map((h, i) => {
             const hShares = parseShareCount(h.shares) ?? 0;
             const hPct = parseShareCount(h.pct_outstanding) ?? 0;
+            // filer_cik is NOT unique — a registrant CIK fronts many N-PORT
+            // series funds (#1800: Vanguard 0000036405 = 43 rows on AAPL). This
+            // overlay table never navigates, so the row key is a pure React
+            // reconciliation id: compose with the array index, the only
+            // guaranteed-unique discriminator (full-population check found
+            // byte-identical holder rows that no data field disambiguates).
             return (
-              <tr key={h.filer_cik ?? `name:${h.filer_name}`}>
+              <tr key={`${h.filer_cik ?? `name:${h.filer_name}`}:${i}`}>
                 <td className="py-1 text-slate-600 dark:text-slate-300">
                   {h.winning_edgar_url !== null ? (
                     <a

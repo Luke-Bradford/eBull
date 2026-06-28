@@ -393,7 +393,15 @@ export function OwnershipSunburst({
           >
             {outerData.map((d, i) => (
               <Cell
-                key={d.id}
+                // ``d.id`` (``leaf-<cat>-<leaf.key>``) is NOT unique: a
+                // registrant CIK fronts many holders and an insider can recur
+                // with a byte-identical row, so two leaves can share a key
+                // (#1800, full-population verified on GME insiders). The Cell
+                // key is React-reconciliation only (the drill token rides on
+                // ``d.target.leaf_key`` and keyboard targeting reads
+                // ``data-idx``), so the array index makes it unique without
+                // touching the ``?filer=`` contract.
+                key={`${d.id}-${i}`}
                 fill={d.is_residual ? `url(#${patternId})` : d.fill}
                 stroke={d.is_gap ? "transparent" : wedgeStroke}
                 data-known={d.is_gap ? "false" : "true"}
