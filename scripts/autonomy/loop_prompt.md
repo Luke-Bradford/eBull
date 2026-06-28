@@ -61,6 +61,27 @@ branches, no unpushed WIP).
 5. Update memory (the index + topic files) as you land work, per the memory rules.
 6. Next ticket.
 
+## Board discipline — keep the Projects v2 board honest (every ticket)
+
+The board ("eBull engineering board") is the operator's at-a-glance view of live
+task state. Keep it truthful by updating it inline via
+`scripts/autonomy/board.sh` — it uses your existing `gh` auth (the token already
+carries `project` scope; no PAT/Action/secret). It is **best-effort**: a board
+hiccup warns and exits 0, so it can NEVER block or fail the real engineering work.
+Run it at each lifecycle transition for the issue # you are working:
+
+- Pick a ticket #N (start work)        → `scripts/autonomy/board.sh status N "In Progress"`
+- Open its PR                          → `scripts/autonomy/board.sh status N "In Review"`
+- After `safe_merge.sh <pr>` succeeds  → `scripts/autonomy/board.sh status N "Done"`
+- File a NEW ticket #M                 → `scripts/autonomy/board.sh add M` (lands in the backlog)
+- Park a ticket (blocked / operator-hold) → `scripts/autonomy/board.sh status N "Blocked"`
+
+**Future (NOT active yet — do NOT gate merges on this until the operator says the
+product is polished):** a "QA" column between In Review and Done, gated by a QA
+subagent that exercises the change (FE-QA / behaviour) and must pass before
+`safe_merge`. `board.sh status N "QA"` already works the moment that column is
+added — no code change. Until activated, the flow is In Review → Done directly.
+
 ## Hard safety rules — NEVER violate, even unattended
 - **NEVER execute, approve, or simulate a trade.** Do not POST to order
   endpoints (`/portfolio/orders`, `/positions/{id}/close`), do not approve
