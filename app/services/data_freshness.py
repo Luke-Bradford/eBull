@@ -103,6 +103,12 @@ _CADENCE: dict[ManifestSource, timedelta] = {
     # 2-day cadence ceiling allows 1 weekend + 1 holiday slack before
     # the freshness panel paints the slot as overdue.
     "finra_regsho_daily": timedelta(days=2),
+    # Late-filing notices (Form 12b-25) — EPISODIC, not periodic (#1015). A
+    # healthy filer never files an NT, so there is no real "staleness"; a
+    # generous ceiling keeps the freshness panel from painting NT overdue for
+    # an instrument that simply has nothing to file. NT rows piggyback on the
+    # per-CIK submissions poll for discovery, same as every other SEC form.
+    "sec_nt": timedelta(days=400),
 }
 
 

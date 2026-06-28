@@ -44,6 +44,7 @@ from app.services.manifest_parsers import sec_13dg as _sec_13dg
 from app.services.manifest_parsers import sec_13f_hr as _sec_13f_hr
 from app.services.manifest_parsers import sec_n_csr as _sec_n_csr
 from app.services.manifest_parsers import sec_n_port as _sec_n_port
+from app.services.manifest_parsers import sec_nt as _sec_nt
 from app.services.manifest_parsers import sec_xbrl_facts as _sec_xbrl_facts
 
 
@@ -61,6 +62,7 @@ def register_all_parsers() -> None:
     _sec_13f_hr.register()
     _sec_n_csr.register()  # real fund-metadata parser (#1171; replaced synth no-op)
     _sec_n_port.register()
+    _sec_nt.register()  # NT 10-K / NT 10-Q late-filing parser (#1015)
     _sec_xbrl_facts.register()  # synth no-op per sec-edgar §11.5.1 (G7)
     _finra_short_interest.register()  # synth no-op (G6/#915 — ScheduledJob owns writes)
     _finra_regsho_daily.register()  # synth no-op (G6/#916 — ScheduledJob owns writes)

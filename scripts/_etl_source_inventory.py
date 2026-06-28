@@ -60,7 +60,7 @@ ALL_SOURCES: tuple[str, ...] = tuple(sorted(set(MANIFEST_SOURCES + AD_HOC_SOURCE
 # equals ``set(get_args(ManifestSource))`` so future ``Literal`` additions
 # without a sink declaration fail the smoke loudly.
 #
-# kind ∈ {ownership_observation, fund_metadata, business_summary, eight_k, synth_noop}
+# kind ∈ {ownership_observation, fund_metadata, business_summary, eight_k, nt_notice, synth_noop}
 MANIFEST_SOURCE_SINKS: dict[str, tuple[tuple[str, ...], str]] = {
     "sec_form3": (
         ("ownership_insiders_observations", "ownership_insiders_current"),
@@ -116,6 +116,10 @@ MANIFEST_SOURCE_SINKS: dict[str, tuple[tuple[str, ...], str]] = {
     "sec_xbrl_facts": ((), "synth_noop"),
     "finra_short_interest": ((), "synth_noop"),
     "finra_regsho_daily": ((), "synth_noop"),
+    "sec_nt": (
+        ("nt_filing_notices",),
+        "nt_notice",
+    ),
 }
 
 # Closure check enforced at import-time + by the smoke test.
