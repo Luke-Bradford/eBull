@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -1845,6 +1845,134 @@ def _collapse_insider_control_group(cluster: list[Holder]) -> tuple[Holder, Corr
     return collapsed, correction
 
 
+def _collapse_same_accession_channel(
+    holders: list[Holder],
+    *,
+    eligible: Callable[[Holder], bool],
+    collapse: Callable[[list[Holder]], tuple[Holder, CorrectionApplied]],
+    corrections: list[CorrectionApplied],
+    sort_cluster_shares_desc: bool = False,
+) -> list[Holder]:
+    """Collapse same-(``winning_accession``, ``shares``) groups within one channel.
+
+    Eligible holders are bucketed by ``(winning_accession, shares)``; a bucket with **≥2
+    distinct** :func:`_identity_key` collapses via ``collapse`` (one rep + the folded
+    members in ``dropped_sources`` + one ``corrections`` entry). Single-member buckets and
+    ineligible holders pass through unchanged. ``sort_cluster_shares_desc`` pre-sorts the
+    cluster shares-descending (with a deterministic ``(shares, filer_cik, accession)``
+    tie-break) for collapsers that take the rep as ``cluster[0]``
+    (:func:`_collapse_blockholder_group`); the insider collapser sorts internally."""
+    groups: dict[tuple[str, Decimal], list[Holder]] = {}
+    out: list[Holder] = []
+    for h in holders:
+        if eligible(h):
+            groups.setdefault((h.winning_accession, h.shares), []).append(h)
+        else:
+            out.append(h)
+    for cluster in groups.values():
+        if len({_identity_key(h.filer_cik, h.filer_name) for h in cluster}) >= 2:
+            if sort_cluster_shares_desc:
+                cluster = sorted(
+                    cluster,
+                    key=lambda h: (h.shares, h.filer_cik or "", h.winning_accession),
+                    reverse=True,
+                )
+            rep, correction = collapse(cluster)
+            out.append(rep)
+            corrections.append(correction)
+        else:
+            out.extend(cluster)
+    return out
+
+
+def _reconcile_same_accession_groups(
+    survivors: list[Holder],
+    blockholders: list[Holder],
+) -> tuple[list[Holder], list[Holder], list[CorrectionApplied]]:
+    """Collapse a same-accession control-chain duplicate to ONE holder, counted once (#1764).
+
+    A joint Form 4/3 (or 13D/G) accession reports the SAME deemed block under ≥2 distinct
+    reporting owners (the controlling person + the controlled entity, or a fund GP/LP chain)
+    — Rule 16a-1(a)(2) / Rule 13d-3 deemed beneficial ownership. Per-CIK dedup keeps all N
+    rows and a ``SUM`` counts the one block N× (data-engineer I14: MAX overlapping, SUM
+    additive). This is the PRECISE same-accession variant of the fuzzy cross-accession #1652
+    pass: the accession itself is direct group-membership evidence (parties co-file ONE
+    accession only when they ARE a group under Rule 16a-3(j) / Rule 13d-1(k)), so unlike
+    #1652/#1645 it needs **NO magnitude floor or roundness proxy** — those guards exist only
+    to substitute for the membership evidence that a shared accession already provides.
+
+    Restricted to insider sources ``{form4, form3}`` (in ``survivors``) and the blockholder
+    channel ``{13d, 13g}`` (in ``blockholders``) ONLY. DEF 14A is deliberately excluded: all
+    proxy holders share ONE accession, so same-accession does NOT separate independent
+    equal-grant executives there (the #1659 false-positive class) — and a def14a-source
+    holder CAN reach ``survivors`` (matched proxy rows). 13F is excluded too (one filer per
+    accession → no same-accession multi-holder dup by construction).
+
+    Group key = ``(winning_accession, shares)`` with a NON-EMPTY accession (a NULL/'' accession
+    coerces to '' and would wrongly bucket unrelated equal-share holders — Codex ckpt-2 #1),
+    ``shares > 0``, and ≥2 distinct :func:`_identity_key`. Distinctness is keyed on holder
+    identity, NOT rows, so a single person's direct+indirect on one accession (distinct count
+    = 1) is untouched and flows to :func:`_reconcile_owner_once`'s additive SUM.
+
+    **Cross-channel consume (Codex ckpt-2 #2, like #1652).** A folded insider member often ALSO
+    restates the SAME deemed block on a 13D/G (226 such pairs on dev). If only the insider rows
+    collapsed, the loser's matching blockholder row would orphan — it is no longer a survivor so
+    ``survivor_keys`` cannot exclude it and owner-once would re-count it (relocating, not removing,
+    the double-count). So each insider group ALSO pulls in every blockholder row whose
+    ``(_identity_key, shares)`` matches a group member; those fold into the insider rep's
+    ``dropped_sources`` and are removed from ``blockholders``. The blockholder-only same-accession
+    pass then runs over the remainder (a purely-13D/G co-investor group with no insider member).
+
+    Pure read-path; runs BEFORE the #1652 and #1645 fuzzy passes (so they see the single
+    representative, never the N dups). The rep keeps its original ``_identity_key`` so the
+    downstream survivor-key exclusion + owner-once see it correctly."""
+    corrections: list[CorrectionApplied] = []
+
+    # --- Insider side: bucket form4/form3 survivors by (accession, shares), pull matching
+    #     cross-channel 13D/G restatements into the cluster so they fold into the rep. ---
+    eligible_insider: dict[tuple[str, Decimal], list[Holder]] = {}
+    survivors_out: list[Holder] = []
+    for h in survivors:
+        if h.winning_source in _INSIDER_GROUP_SOURCES and h.shares > 0 and h.winning_accession.strip():
+            eligible_insider.setdefault((h.winning_accession, h.shares), []).append(h)
+        else:
+            survivors_out.append(h)
+
+    blockholders_by_key: dict[tuple[str, Decimal], list[Holder]] = {}
+    for b in blockholders:
+        blockholders_by_key.setdefault((_identity_key(b.filer_cik, b.filer_name), b.shares), []).append(b)
+    consumed_blockholders: set[int] = set()
+
+    for (_acc, shares), cluster in eligible_insider.items():
+        if len({_identity_key(h.filer_cik, h.filer_name) for h in cluster}) < 2:
+            survivors_out.extend(cluster)
+            continue
+        cross_channel: list[Holder] = []
+        for member in cluster:
+            for b in blockholders_by_key.get((_identity_key(member.filer_cik, member.filer_name), shares), []):
+                if id(b) not in consumed_blockholders:
+                    cross_channel.append(b)
+                    consumed_blockholders.add(id(b))
+        rep, correction = _collapse_insider_control_group(cluster + cross_channel)
+        survivors_out.append(rep)
+        corrections.append(correction)
+
+    blockholders_remaining = [b for b in blockholders if id(b) not in consumed_blockholders]
+
+    # --- Blockholder-only side: a purely-13D/G joint accession (Rule 13d-5 group, each member
+    #     deemed to own the whole stake → identical aggregate) with no insider footprint. ---
+    blockholders_out = _collapse_same_accession_channel(
+        blockholders_remaining,
+        eligible=lambda h: (
+            h.winning_source in _BLOCK_GROUP_SOURCES and h.shares > 0 and bool(h.winning_accession.strip())
+        ),
+        collapse=_collapse_blockholder_group,
+        corrections=corrections,
+        sort_cluster_shares_desc=True,
+    )
+    return survivors_out, blockholders_out, corrections
+
+
 def _reconcile_insider_control_groups(
     survivors: list[Holder],
     blockholders: list[Holder],
@@ -3087,6 +3215,13 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # consumed rows from BOTH lists (nothing orphaned). Runs BEFORE #1645 so the control
     # group's 13D rows are consumed here; a purely-13D co-investor group (no insider
     # member) is left for #1645.
+    # Same-accession control-group collapse (#1764): a joint Form 4/3 (or 13D/G) accession
+    # reports the SAME deemed block under ≥2 distinct reporting owners (controlling person +
+    # entity, or a fund chain). The fuzzy #1652 pass only fires ≥1M, so every sub-1M same-
+    # accession dup leaks. Collapse the PRECISE same-accession signal first (no floor — the
+    # shared accession IS the group evidence #1652/#1645 must infer); insiders restricted to
+    # {form4,form3}, blockholders to {13d,13g}, never def14a (#1659 FP class).
+    survivors, blockholders, same_accession_corrections = _reconcile_same_accession_groups(survivors, blockholders)
     survivors, blockholders, insider_group_corrections = _reconcile_insider_control_groups(survivors, blockholders)
     # 13D/G group collapse (#1645): a Rule 13d-5 group's members each report the
     # identical aggregate stake on separate accessions/CIKs and otherwise sum N× in
@@ -3185,6 +3320,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     corrections_applied = (
         *_read_notice_suppressions(conn, instrument_id),
         *family_corrections,
+        *same_accession_corrections,
         *insider_group_corrections,
         *group_corrections,
     )
