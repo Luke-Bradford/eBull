@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS LaunchAgent for the eBull autonomy loop.
+  Fires run_loop.sh hourly; the runner's lockfile makes a firing a no-op while a
+  prior session is still draining the board, so this is effectively "start a
+  fresh session within ~1h of the previous one finishing, around the clock".
+  A LaunchAgent (not a Daemon) runs in YOUR login context so claude/gh auth +
+  the dev DB are reachable.
+
+  Install:  see scripts/autonomy/setup.md
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ebull.autonomy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/lukebradford/Dev/eBull/scripts/autonomy/run_loop.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/lukebradford/Dev/eBull</string>
+
+  <!-- launchd gives a minimal PATH; add Homebrew + system bins so claude/uv/gh/git resolve. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <!-- Don't fire the instant it's loaded — start on the next interval. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/lukebradford/Dev/eBull/var/autonomy-logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/lukebradford/Dev/eBull/var/autonomy-logs/launchd.err.log</string>
+</dict>
+</plist>

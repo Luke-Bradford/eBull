@@ -68,3 +68,7 @@ docs/internal/
 # dev browser screenshots (headless session navigation)
 calendar-page.png
 .playwright-mcp/
+
+# autonomy loop runtime artifacts
+var/autonomy-logs/
+var/autonomy-loop.lock/
