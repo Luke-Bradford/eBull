@@ -26,6 +26,12 @@ const SCOPES: ReadonlyArray<{ key: CalendarScope; label: string }> = [
   { key: "all", label: "All" },
 ];
 
+const HORIZONS: ReadonlyArray<{ days: number; label: string }> = [
+  { days: 7, label: "1 week" },
+  { days: 14, label: "2 weeks" },
+  { days: 28, label: "4 weeks" },
+];
+
 const DAY_TYPE_STYLE: Record<MarketDayType, string> = {
   open: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
   half_day: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
@@ -66,9 +72,10 @@ function nowSession(
 
 export function CalendarPage(): JSX.Element {
   const [scope, setScope] = useState<CalendarScope>("portfolio");
+  const [days, setDays] = useState<number>(7);
   const events = useAsync<CalendarEvents>(
-    useCallback(() => fetchCalendarEvents(scope), [scope]),
-    [scope],
+    useCallback(() => fetchCalendarEvents(scope, days), [scope, days]),
+    [scope, days],
   );
 
   // "Now" frozen at mount — the live-session badge is a load-time snapshot
@@ -90,21 +97,40 @@ export function CalendarPage(): JSX.Element {
           {scope === "all" ? "portfolio & watchlist" : scope}. US markets are NYSE-precise;
           foreign exchanges show weekday/weekend only (holidays not modelled).
         </p>
-        <div className="mt-2 flex gap-1">
-          {SCOPES.map((s) => (
-            <button
-              key={s.key}
-              type="button"
-              onClick={() => setScope(s.key)}
-              className={`rounded px-2 py-1 text-xs ${
-                scope === s.key
-                  ? "bg-sky-600 text-white"
-                  : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
-              }`}
-            >
-              {s.label}
-            </button>
-          ))}
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <div className="flex gap-1">
+            {SCOPES.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                onClick={() => setScope(s.key)}
+                className={`rounded px-2 py-1 text-xs ${
+                  scope === s.key
+                    ? "bg-sky-600 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-1" role="group" aria-label="Horizon">
+            {HORIZONS.map((h) => (
+              <button
+                key={h.days}
+                type="button"
+                onClick={() => setDays(h.days)}
+                aria-pressed={days === h.days}
+                className={`rounded px-2 py-1 text-xs ${
+                  days === h.days
+                    ? "bg-slate-700 text-white dark:bg-slate-600"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
+                }`}
+              >
+                {h.label}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
@@ -142,11 +168,14 @@ export function CalendarPage(): JSX.Element {
                     {row.week.map((d) => (
                       <div
                         key={d.date}
-                        className={`rounded px-2 py-1 text-[11px] tabular-nums ${DAY_TYPE_STYLE[d.day_type]}`}
-                        title={`${d.date}: ${DAY_TYPE_LABEL[d.day_type]}`}
+                        className={`w-[4.75rem] rounded px-2 py-1 text-[11px] tabular-nums ${DAY_TYPE_STYLE[d.day_type]}`}
+                        title={`${d.date}: ${DAY_TYPE_LABEL[d.day_type]}${d.reason !== null ? ` — ${d.reason}` : ""}`}
                       >
                         <span className="block font-medium">{weekdayShort(d.date)}</span>
                         <span className="block">{DAY_TYPE_LABEL[d.day_type]}</span>
+                        {d.reason !== null && d.reason !== "Weekend" && (
+                          <span className="block truncate text-[10px] opacity-80">{d.reason}</span>
+                        )}
                       </div>
                     ))}
                   </div>

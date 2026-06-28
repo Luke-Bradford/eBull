@@ -1143,6 +1143,7 @@ export type MarketDayType = "open" | "half_day" | "closed" | "not_modelled";
 export interface MarketStatusDay {
   date: string; // YYYY-MM-DD
   day_type: MarketDayType;
+  reason: string | null; // why non-open (holiday / "Weekend"); null on open days
 }
 
 export interface MarketStatusRow {
