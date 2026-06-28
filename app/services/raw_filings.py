@@ -72,6 +72,9 @@ DocumentKind = Literal[
     # (sql/153). Keyed by synthetic accession
     # ``FINRA_REGSHO_{PREFIX}_{YYYYMMDD}`` (6 prefixes × per trade-date).
     "finra_regsho_daily_txt",
+    # #1015 — SEC Form 12b-25 late-filing notice body (NT 10-K / NT 10-Q).
+    # Small HTML (~3-8 KB); retained, not swept. sql/208.
+    "nt_body",
 ]
 # submissions.json / companyfacts.json are keyed by CIK, not by SEC
 # accession number — they belong in their own per-CIK store, not in
@@ -125,6 +128,11 @@ KEPT_NEGLIGIBLE_DOCUMENT_KINDS: dict[DocumentKind, str] = {
     # Parsed in-memory at ingest; the daily job re-fetches fresh from FINRA
     # (finra_regsho_daily_refresh.py), never from the store.
     "finra_regsho_daily_txt": "write-only; steady-state re-fetches from FINRA, no payload reader",
+    # #1015 — Form 12b-25 body. Stored for the #938 raw-before-parse invariant;
+    # the sec_nt parser always re-fetches on re-drain (no stored-body reuse
+    # wired), so it has no payload reader. Reuse-on-redrain deferred (negligible
+    # volume), mirroring nport_xml's #1731 rationale.
+    "nt_body": "write-only ~3-8KB; sec_nt re-fetches from EDGAR, no payload reader (reuse deferred by volume #1015)",
 }
 
 

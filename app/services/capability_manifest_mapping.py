@@ -105,6 +105,15 @@ _UNMAPPED_MANIFEST_SOURCES: dict[ManifestSource, str] = {
         "``CapabilityProvider`` and a mapping entry above when the operator-"
         "visible memo overlay sparkline lands."
     ),
+    # Late-filing notices (Form 12b-25). #1015 — an issuer red-flag SIGNAL
+    # (surfaced via filing_events.red_flag_score + the filings list), not a
+    # standing data-coverage capability: a healthy issuer files no NT, so an
+    # absent NT is the norm, not missing coverage. No capability cell applies.
+    "sec_nt": (
+        "Late-filing notice (Form 12b-25, #1015). A red-flag signal, not a "
+        "coverage capability — absence is the healthy default, so it has no "
+        "per-instrument capability cell."
+    ),
 }
 
 

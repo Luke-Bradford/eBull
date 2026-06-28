@@ -195,6 +195,11 @@ SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
         "SC 13D/A",
         "SC 13G",
         "SC 13G/A",
+        # Late-filing notices (Form 12b-25). #1015 — sec_nt parser extracts the
+        # reason narrative + anticipated-results-change signal. red_flag_score
+        # is already set at ingest (filings_risk); the body is the new content.
+        "NT 10-K",
+        "NT 10-Q",
     }
 )
 
@@ -211,9 +216,11 @@ SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
 # sets as disjoint. Operator FAQ on unmapped forms: docs/etl/sources/README.md.
 SEC_METADATA_ONLY: frozenset[str] = frozenset(
     {
-        # Late-filing red flags — restatement / auditor-change signal.
-        "NT 10-K",
-        "NT 10-Q",
+        # NT 10-K / NT 10-Q PROMOTED to PARSE+RAW (#1015 — sec_nt parser,
+        # Form 12b-25 reason + results-change extraction). See
+        # SEC_PARSE_AND_RAW above. NT 20-F stays metadata-only (foreign
+        # deadline regime, out of scope).
+        "NT 20-F",
         # Foreign-issuer classification + future parsers.
         "20-F",
         "20-F/A",

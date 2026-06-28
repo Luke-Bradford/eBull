@@ -375,6 +375,7 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
                 "sec_8k",
                 "sec_xbrl_facts",
                 "finra_short_interest",
+                "sec_nt",
             ),
             default=None,
             advanced_group=False,

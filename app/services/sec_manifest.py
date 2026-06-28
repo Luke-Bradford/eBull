@@ -120,6 +120,7 @@ ManifestSource = Literal[
     "sec_xbrl_facts",
     "finra_short_interest",
     "finra_regsho_daily",
+    "sec_nt",
 ]
 
 # Sources intentionally absent from ``_FORM_TO_SOURCE``:
@@ -1061,6 +1062,11 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     "10-Q/A": "sec_10q",
     "8-K": "sec_8k",
     "8-K/A": "sec_8k",
+    # Late-filing notices (Form 12b-25). #1015 — NT 10-K / NT 10-Q upgraded
+    # from metadata-only to PARSE+RAW. The ``/A`` variants (2 rows total) and
+    # NT 20-F (foreign deadline regime) stay metadata-only, out of scope.
+    "NT 10-K": "sec_nt",
+    "NT 10-Q": "sec_nt",
 }
 
 

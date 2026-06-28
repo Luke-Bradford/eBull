@@ -71,6 +71,9 @@ def test_active_parser_forms_are_in_parse_and_raw() -> None:
         "SC 13D/A",
         "SC 13G",
         "SC 13G/A",
+        # Late-filing notices (Form 12b-25). #1015 — sec_nt parser.
+        "NT 10-K",
+        "NT 10-Q",
     }
     missing = must_parse - SEC_PARSE_AND_RAW
     assert missing == set(), f"forms missing from SEC_PARSE_AND_RAW (parsers will starve): {sorted(missing)}"
@@ -133,8 +136,9 @@ def test_metadata_only_forms_have_no_parser_today() -> None:
         "144",
         "CORRESP",
         "11-K",
-        "NT 10-K",
-        "NT 10-Q",
+        # NT 10-K / NT 10-Q PROMOTED to SEC_PARSE_AND_RAW (#1015 — sec_nt).
+        # NT 20-F stays metadata-only (foreign deadline regime).
+        "NT 20-F",
         "20-F",
         "40-F",
         "6-K",

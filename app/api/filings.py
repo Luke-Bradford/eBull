@@ -34,6 +34,22 @@ MAX_PAGE_LIMIT = 200
 # ---------------------------------------------------------------------------
 
 
+class NtNoticeSummary(BaseModel):
+    """Parsed Form 12b-25 fields for an NT 10-K / NT 10-Q filing (#1015).
+
+    Attached to ``FilingItem.nt_notice`` for NT rows; ``None`` for every
+    other form. The red-flag badge already renders via ``red_flag_score``;
+    this exposes the body content (why late + whether a significant change in
+    results of operations vs the prior-year period is anticipated).
+    """
+
+    late_form: str  # '10-K' | '10-Q'
+    period_of_report: date | None
+    grace_period_days: int  # 15 for 10-K, 5 for 10-Q (Rule 12b-25(b))
+    reason_excerpt: str | None  # first ~280 chars of the Part III narrative
+    results_change_anticipated: bool | None
+
+
 class FilingItem(BaseModel):
     """Single filing event for an instrument.
 
@@ -58,6 +74,8 @@ class FilingItem(BaseModel):
     extracted_summary: str | None
     red_flag_score: float | None
     created_at: datetime
+    # Form 12b-25 detail for NT 10-K / NT 10-Q rows (#1015); None otherwise.
+    nt_notice: NtNoticeSummary | None = None
 
 
 class FilingsListResponse(BaseModel):
@@ -98,6 +116,31 @@ class RedFlagTrend(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_NT_REASON_EXCERPT_CHARS = 280
+
+
+def _parse_nt_notice(row: dict[str, object]) -> NtNoticeSummary | None:
+    """Build the NT detail sub-object from a LEFT-JOINed nt_filing_notices row.
+
+    Returns ``None`` when the join produced no NT row (non-NT filings).
+    Keyed on ``nt_late_form`` being present.
+    """
+    late_form = row.get("nt_late_form")
+    if late_form is None:
+        return None
+    reason = row.get("nt_reason_text")
+    excerpt: str | None = None
+    if isinstance(reason, str) and reason:
+        excerpt = reason[:_NT_REASON_EXCERPT_CHARS]
+    return NtNoticeSummary(
+        late_form=late_form,  # type: ignore[arg-type]
+        period_of_report=row.get("nt_period_of_report"),  # type: ignore[arg-type]
+        grace_period_days=row["nt_grace_period_days"],  # type: ignore[arg-type]
+        reason_excerpt=excerpt,
+        results_change_anticipated=row.get("nt_results_change_anticipated"),  # type: ignore[arg-type]
+    )
+
+
 def _parse_filing_item(row: dict[str, object]) -> FilingItem:
     return FilingItem(
         filing_event_id=row["filing_event_id"],  # type: ignore[arg-type]
@@ -111,6 +154,7 @@ def _parse_filing_item(row: dict[str, object]) -> FilingItem:
         extracted_summary=row["extracted_summary"],  # type: ignore[arg-type]
         red_flag_score=parse_optional_float(row, "red_flag_score"),
         created_at=row["created_at"],  # type: ignore[arg-type]
+        nt_notice=_parse_nt_notice(row),
     )
 
 
@@ -146,21 +190,23 @@ def list_filings(
 
     symbol: str = inst_row["symbol"]  # type: ignore[assignment]
 
-    # Build dynamic WHERE.
-    where_clauses: list[str] = ["instrument_id = %(instrument_id)s"]
+    # Build dynamic WHERE. Columns are qualified with the ``fe`` alias because
+    # the items query LEFT JOINs ``nt_filing_notices`` (which also has an
+    # instrument_id column) — unqualified names would be ambiguous there.
+    where_clauses: list[str] = ["fe.instrument_id = %(instrument_id)s"]
     filter_params: dict[str, object] = {"instrument_id": instrument_id}
 
     if filing_type is not None:
         types = [t.strip() for t in filing_type.split(",") if t.strip()]
         if types:
-            where_clauses.append("filing_type = ANY(%(filing_types)s)")
+            where_clauses.append("fe.filing_type = ANY(%(filing_types)s)")
             filter_params["filing_types"] = types
 
     where_sql = " AND ".join(where_clauses)
 
     # COUNT query — separate cursor, separate params dict.
     # where_sql is built from hardcoded clause strings only — not user input.
-    count_sql = f"SELECT COUNT(*) AS cnt FROM filing_events WHERE {where_sql}"  # noqa: S608
+    count_sql = f"SELECT COUNT(*) AS cnt FROM filing_events fe WHERE {where_sql}"  # noqa: S608
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(count_sql, filter_params)  # type: ignore[arg-type]
         # COUNT always returns exactly one row; the column value is 0 when empty.
@@ -173,14 +219,22 @@ def list_filings(
         "limit": limit,
         "offset": offset,
     }
-    items_sql = f"""SELECT filing_event_id, instrument_id, filing_date,
-                       filing_type, provider, provider_filing_id,
-                       source_url, primary_document_url,
-                       extracted_summary, red_flag_score,
-                       created_at
-                FROM filing_events
+    items_sql = f"""SELECT fe.filing_event_id, fe.instrument_id, fe.filing_date,
+                       fe.filing_type, fe.provider, fe.provider_filing_id,
+                       fe.source_url, fe.primary_document_url,
+                       fe.extracted_summary, fe.red_flag_score,
+                       fe.created_at,
+                       nn.late_form               AS nt_late_form,
+                       nn.period_of_report        AS nt_period_of_report,
+                       nn.grace_period_days       AS nt_grace_period_days,
+                       nn.reason_text             AS nt_reason_text,
+                       nn.results_change_anticipated AS nt_results_change_anticipated
+                FROM filing_events fe
+                LEFT JOIN nt_filing_notices nn
+                       ON nn.accession_number = fe.provider_filing_id
+                      AND fe.provider = 'sec'
                 WHERE {where_sql}
-                ORDER BY filing_date DESC, filing_event_id DESC
+                ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
                 LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — where_sql is hardcoded clauses only
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(items_sql, items_params)  # type: ignore[arg-type]
