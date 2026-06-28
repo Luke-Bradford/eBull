@@ -144,6 +144,14 @@ jobs:
         # SDK default that wedged the jobs boot ~43min on 2026-06-04.
         run: bash scripts/check_anthropic_timeout.sh
 
+      - name: frontend skip-test accumulation gate (#990)
+        # Fails if the describe.skip / it.skip count under frontend/src
+        # exceeds scripts/frontend_skip_baseline.txt. Stops silent
+        # coverage debt (#989-style "skip pending cleanup") from piling
+        # up across PRs; adding a justified skip requires an explicit
+        # baseline bump in the same diff.
+        run: bash scripts/check_frontend_skip_count.sh
+
       - name: pre-push <-> ci.yml lint parity (#1329)
         # Self-enforcing mirror: fails if any `bash scripts/check_*.sh`
         # runs in only one of .githooks/pre-push / this file. Stops the

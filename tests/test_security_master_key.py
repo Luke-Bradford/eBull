@@ -337,8 +337,57 @@ class TestRevokeStaleCiphertext:
 
         first = master_key._revoke_stale_ciphertext(ebull_test_conn, derived_key=None)
         assert first.no_key == 1
+        assert first.notified_operators == (str(op_id),)
         second = master_key._revoke_stale_ciphertext(ebull_test_conn, derived_key=None)
         assert second.total == 0
+
+    def test_notify_excludes_orphan_operators(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],
+    ) -> None:
+        """Orphan-class operators are revoked but NOT notified — their
+        ``operator_id`` is absent from ``operators`` so the
+        credential-health listener would resolve empty health (noise),
+        #990.
+
+        Orphans cannot arise via supported paths (the FK is
+        ``ON DELETE CASCADE``), so forge one by dropping the FK inside an
+        uncommitted transaction and rolling the whole thing back in
+        ``finally`` — no schema residue leaks to sibling tests sharing
+        the per-worker DB.
+        """
+        live_op = _insert_operator(ebull_test_conn)
+        _insert_credential(
+            ebull_test_conn,
+            operator_id=live_op,
+            label="api_key",
+            ciphertext=b"\x00" * 32,
+        )
+        orphan_op = uuid4()
+        try:
+            with ebull_test_conn.cursor() as cur:
+                cur.execute("ALTER TABLE broker_credentials DROP CONSTRAINT broker_credentials_operator_id_fkey")
+                cur.execute(
+                    """
+                    INSERT INTO broker_credentials
+                        (id, operator_id, provider, label, environment,
+                         ciphertext, last_four, key_version, health_state, revoked_at)
+                    VALUES (%s, %s, 'etoro', 'api_key', 'demo',
+                            %s, 'abcd', 1, 'untested', NULL)
+                    """,
+                    (uuid4(), orphan_op, b"\x00" * 32),
+                )
+            result = master_key._revoke_stale_ciphertext(ebull_test_conn, derived_key=None)
+        finally:
+            # Roll back the DDL drop + orphan insert + the revoke UPDATEs;
+            # the FK constraint is restored and the worker DB is pristine.
+            ebull_test_conn.rollback()
+
+        assert result.orphan == 1
+        assert result.no_key == 1
+        # Orphan excluded; only the live operator was notified.
+        assert str(orphan_op) not in result.notified_operators
+        assert result.notified_operators == (str(live_op),)
 
 
 # ---------------------------------------------------------------------------

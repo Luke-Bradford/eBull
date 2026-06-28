@@ -240,6 +240,14 @@ bash scripts/check_etl_source_docs.sh
 echo "==> Pre-push gate: bounded Anthropic client construction"
 bash scripts/check_anthropic_timeout.sh
 
+# #990 — frontend skip-test accumulation gate. Fails if the
+# describe.skip / it.skip count under frontend/src exceeds the stored
+# baseline (scripts/frontend_skip_baseline.txt). Stops silent coverage
+# debt from #989-style "skip pending cleanup" blocks piling up. Pure
+# shell + grep; skips cleanly when frontend/ is absent. ~30ms.
+echo "==> Pre-push gate: frontend skip-test accumulation"
+bash scripts/check_frontend_skip_count.sh
+
 # #1329 — parity guard: every chokepoint lint here MUST also run in
 # .github/workflows/ci.yml (and vice versa), so a --no-verify push
 # cannot dodge a lint that exists only in the hook. ~20ms.

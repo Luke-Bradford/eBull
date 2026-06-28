@@ -230,11 +230,19 @@ def _key_decrypts_row(row: dict[str, object], candidate_key: bytes) -> bool:
 
 @dataclass(frozen=True)
 class _RevokeBreakdown:
-    """Per-class counts for a stale-cipher soft-revoke pass."""
+    """Per-class counts for a stale-cipher soft-revoke pass.
+
+    ``notified_operators`` is the distinct set of operator ids that
+    received a ``ebull_credential_health`` NOTIFY — the **non-orphan**
+    affected operators only (#990). Orphan-class operator ids are absent
+    from ``operators`` so notifying them just makes the listener resolve
+    empty health (noise); they are excluded.
+    """
 
     orphan: int
     no_key: int
     mismatch: int
+    notified_operators: tuple[str, ...] = ()
 
     @property
     def total(self) -> int:
@@ -260,11 +268,14 @@ def _revoke_stale_ciphertext(
     Idempotent: a second pass finds zero stale rows because the
     ``revoked_at IS NULL`` filter excludes already-revoked rows.
 
-    For each affected operator, issues one ``NOTIFY
+    For each affected **non-orphan** operator, issues one ``NOTIFY
     ebull_credential_health`` so live credential-health caches refresh
-    without waiting for a per-row event.
+    without waiting for a per-row event. Orphan-class operators (absent
+    from ``operators``) are not notified — the listener would resolve
+    empty health, which is noise (#990).
 
-    Returns a per-class breakdown for logging/test assertions.
+    Returns a per-class breakdown (incl. the notified operator set) for
+    logging/test assertions.
     """
     import psycopg.rows
 
@@ -297,41 +308,44 @@ def _revoke_stale_ciphertext(
         if not _key_decrypts_row(row, derived_key):
             mismatch_ids.append(UUID(str(row["id"])))
 
-    breakdown = _RevokeBreakdown(
-        orphan=len(orphan_ids),
-        no_key=len(no_key_ids),
-        mismatch=len(mismatch_ids),
-    )
-    if breakdown.total == 0:
-        return breakdown
+    if not (orphan_ids or no_key_ids or mismatch_ids):
+        return _RevokeBreakdown(orphan=0, no_key=0, mismatch=0)
 
     stale_ids = orphan_ids + no_key_ids + mismatch_ids
+    notify_ops: set[str] = set()
     with conn.cursor() as cur:
+        # Revoke + derive the NOTIFY target set atomically from the SAME
+        # statement: ``operator_exists`` is evaluated against the rows we
+        # actually update, so an operator deleted between the
+        # classification SELECT above and this UPDATE (ON DELETE CASCADE
+        # drops their credential ⇒ the row is no longer matched) cannot
+        # leak a NOTIFY. Orphan-class rows (operator absent from
+        # ``operators``) likewise resolve ``operator_exists = FALSE`` and
+        # are excluded — the credential-health listener is never woken
+        # for an operator it would only resolve empty health for (#990).
         cur.execute(
             """
-            UPDATE broker_credentials
+            UPDATE broker_credentials bc
                SET revoked_at = NOW()
-             WHERE id = ANY(%s)
+             WHERE bc.id = ANY(%s)
+            RETURNING bc.operator_id,
+                      EXISTS (
+                          SELECT 1 FROM operators o
+                           WHERE o.operator_id = bc.operator_id
+                      ) AS operator_exists
             """,
             (stale_ids,),
         )
-        # One NOTIFY per affected operator so the existing
-        # ``ebull_credential_health`` listener (payload contract:
-        # JSON with ``operator_id`` key) refreshes per-operator
-        # aggregate health. Bulk single NOTIFY would be ignored by
-        # the listener.
-        cur.execute(
-            """
-            SELECT DISTINCT operator_id
-              FROM broker_credentials
-             WHERE id = ANY(%s)
-            """,
-            (stale_ids,),
-        )
-        affected_ops: list[str] = []
         for r in cur.fetchall():
             row_tuple: tuple[object, ...] = r  # type: ignore[assignment]
-            affected_ops.append(str(row_tuple[0]))
+            if bool(row_tuple[1]):
+                notify_ops.add(str(row_tuple[0]))
+
+        affected_ops = sorted(notify_ops)
+        # One NOTIFY per affected non-orphan operator so the existing
+        # ``ebull_credential_health`` listener (payload contract: JSON
+        # with ``operator_id`` key) refreshes per-operator aggregate
+        # health. Bulk single NOTIFY would be ignored by the listener.
         for op_id in affected_ops:
             payload = json.dumps({"operator_id": op_id, "reason": "stale_cipher_revoke"})
             cur.execute(
@@ -339,6 +353,12 @@ def _revoke_stale_ciphertext(
                 (_CREDENTIAL_HEALTH_NOTIFY_CHANNEL, payload),
             )
 
+    breakdown = _RevokeBreakdown(
+        orphan=len(orphan_ids),
+        no_key=len(no_key_ids),
+        mismatch=len(mismatch_ids),
+        notified_operators=tuple(affected_ops),
+    )
     logger.warning(
         "stale-cipher soft-revoke: orphan=%d no_key=%d mismatch=%d affected_operators=%d",
         breakdown.orphan,
