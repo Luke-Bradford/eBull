@@ -442,7 +442,13 @@ for helper in $HELPERS; do
       if (!in_using) next
       if (!in_ob && index(stripped, "ORDER BY") == 1) { in_ob = 1 }
       if (!in_ob) next
-      if (index(stripped, ") AS src") == 1) exit
+      # Terminate at the first line that opens with ")": for helpers whose USING
+      # subquery is a bare SELECT this is ") AS src"; for insiders (#1805) the
+      # DISTINCT-ON is wrapped in a `winners` CTE so the ORDER BY is closed first
+      # by the CTE-closing ")" (then "SELECT w.* FROM winners w {filter} ) AS src"
+      # follows). No ORDER BY tuple line starts with ")", so this captures the
+      # full tuple in both shapes.
+      if (index(stripped, ")") == 1) exit
       print stripped
     }
   ')
