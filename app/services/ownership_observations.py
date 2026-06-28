@@ -59,7 +59,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal, TypeGuard
+from typing import Any, Final, Literal, TypeGuard
 from uuid import UUID
 
 import psycopg
@@ -229,6 +229,42 @@ def record_insider_observation(
         )
 
 
+# Dual-pipeline insider de-collision (#1805). The same Form 4/3 accession is written
+# to ``ownership_insiders_observations`` by BOTH the XML manifest parser
+# (bare-accession ``source_document_id``, Table-II ``direct``/``indirect``) AND the
+# bulk SEC insider dataset (``:NDT:``/``:NDH:`` marker, relationship-relabelled
+# nature). Because nature is in the DISTINCT-ON key the two survive as distinct
+# ``_current`` rows — one stake stored twice. This filter relocates #1804 read-path
+# fix B (``ownership_rollup._collect_canonical_holders_from_current``) to storage so
+# ``_current`` carries one authoritative row set instead of leaving every reader to
+# re-de-collide.
+#
+# CRITICAL: it filters the ``winners`` CTE — the post-DISTINCT-ON survivor set that
+# IS the future ``_current`` — NOT the raw observations. Fix B keys on the rows that
+# actually land in ``_current``; a pre-DISTINCT-ON filter on observations would also
+# drop a ``:NDT:`` row whose plain sibling LOST its own ``ownership_nature`` slot to a
+# newer filing (so the plain row is in observations but not ``_current``) — a row fix
+# B keeps and the rollup counts, changing operator figures in BOTH directions (dev:
+# JPM/PFE down, TM up). Mirrors fix B exactly (``holder_cik IS NOT DISTINCT FROM`` +
+# same accession), so the removed set is provably identical to fix B's read-path drop
+# (full-pop 3082 == 3082, symmetric diff 0). Source rule: prevention-log 1835 / #905 /
+# Rule 13d-3. Used in both refresh functions after a CTE named ``winners`` exposing
+# ``instrument_id, holder_cik, source_accession, source_document_id``.
+# Spec: docs/specs/etl/2026-06-28-insider-dual-pipeline-decollision-refresh.md.
+_INSIDER_DUAL_PIPELINE_DECOLLISION: Final[str] = """
+            WHERE NOT (
+                w.source_document_id ~ ':(NDT|NDH):'
+                AND EXISTS (
+                    SELECT 1 FROM winners p
+                     WHERE p.instrument_id = w.instrument_id
+                       AND p.holder_cik IS NOT DISTINCT FROM w.holder_cik
+                       AND p.source_accession = w.source_accession
+                       AND p.source_document_id !~ ':(NDT|NDH):'
+                )
+            )
+"""
+
+
 def refresh_insiders_current(
     conn: psycopg.Connection[Any],
     *,
@@ -272,36 +308,40 @@ def refresh_insiders_current(
         wm_row = cur.fetchone()
         watermark = wm_row[0] if wm_row else None
         cur.execute(
-            """
+            f"""
             MERGE INTO ownership_insiders_current AS tgt
             USING (
-                SELECT DISTINCT ON (holder_identity_key, ownership_nature)
-                    instrument_id, holder_cik, holder_name, holder_identity_key,
-                    ownership_nature, source, source_document_id, source_accession,
-                    source_url, filed_at, period_start, period_end, shares
-                FROM ownership_insiders_observations
-                WHERE instrument_id = %(iid)s AND known_to IS NULL
-                ORDER BY
-                    holder_identity_key,
-                    ownership_nature,
-                    CASE source
-                        WHEN 'form4'    THEN 1
-                        WHEN 'form3'    THEN 2
-                        WHEN '13d'      THEN 3
-                        WHEN '13g'      THEN 3
-                        WHEN 'def14a'   THEN 4
-                        WHEN '13f'      THEN 5
-                        WHEN 'nport'    THEN 6
-                        WHEN 'ncsr'     THEN 6
-                        WHEN 'xbrl_dei' THEN 7
-                        WHEN '10k_note' THEN 8
-                        WHEN 'finra_si' THEN 9
-                        ELSE 10
-                    END ASC,
-                    period_end DESC,
-                    filed_at DESC,
-                    source ASC,
-                    source_document_id ASC
+                WITH winners AS (
+                    SELECT DISTINCT ON (holder_identity_key, ownership_nature)
+                        instrument_id, holder_cik, holder_name, holder_identity_key,
+                        ownership_nature, source, source_document_id, source_accession,
+                        source_url, filed_at, period_start, period_end, shares
+                    FROM ownership_insiders_observations
+                    WHERE instrument_id = %(iid)s AND known_to IS NULL
+                    ORDER BY
+                        holder_identity_key,
+                        ownership_nature,
+                        CASE source
+                            WHEN 'form4'    THEN 1
+                            WHEN 'form3'    THEN 2
+                            WHEN '13d'      THEN 3
+                            WHEN '13g'      THEN 3
+                            WHEN 'def14a'   THEN 4
+                            WHEN '13f'      THEN 5
+                            WHEN 'nport'    THEN 6
+                            WHEN 'ncsr'     THEN 6
+                            WHEN 'xbrl_dei' THEN 7
+                            WHEN '10k_note' THEN 8
+                            WHEN 'finra_si' THEN 9
+                            ELSE 10
+                        END ASC,
+                        period_end DESC,
+                        filed_at DESC,
+                        source ASC,
+                        source_document_id ASC
+                )
+                SELECT w.* FROM winners w
+                {_INSIDER_DUAL_PIPELINE_DECOLLISION}
             ) AS src
             ON tgt.instrument_id = %(iid)s
                AND tgt.holder_identity_key = src.holder_identity_key
@@ -1933,37 +1973,41 @@ def refresh_insiders_current_batch(
         )
         watermarks: dict[int, datetime | None] = {int(r[0]): r[1] for r in cur.fetchall()}
         cur.execute(
-            """
+            f"""
             MERGE INTO ownership_insiders_current AS tgt
             USING (
-                SELECT DISTINCT ON (instrument_id, holder_identity_key, ownership_nature)
-                    instrument_id, holder_cik, holder_name, holder_identity_key,
-                    ownership_nature, source, source_document_id, source_accession,
-                    source_url, filed_at, period_start, period_end, shares
-                FROM ownership_insiders_observations
-                WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
-                ORDER BY
-                    instrument_id,
-                    holder_identity_key,
-                    ownership_nature,
-                    CASE source
-                        WHEN 'form4'    THEN 1
-                        WHEN 'form3'    THEN 2
-                        WHEN '13d'      THEN 3
-                        WHEN '13g'      THEN 3
-                        WHEN 'def14a'   THEN 4
-                        WHEN '13f'      THEN 5
-                        WHEN 'nport'    THEN 6
-                        WHEN 'ncsr'     THEN 6
-                        WHEN 'xbrl_dei' THEN 7
-                        WHEN '10k_note' THEN 8
-                        WHEN 'finra_si' THEN 9
-                        ELSE 10
-                    END ASC,
-                    period_end DESC,
-                    filed_at DESC,
-                    source ASC,
-                    source_document_id ASC
+                WITH winners AS (
+                    SELECT DISTINCT ON (instrument_id, holder_identity_key, ownership_nature)
+                        instrument_id, holder_cik, holder_name, holder_identity_key,
+                        ownership_nature, source, source_document_id, source_accession,
+                        source_url, filed_at, period_start, period_end, shares
+                    FROM ownership_insiders_observations
+                    WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
+                    ORDER BY
+                        instrument_id,
+                        holder_identity_key,
+                        ownership_nature,
+                        CASE source
+                            WHEN 'form4'    THEN 1
+                            WHEN 'form3'    THEN 2
+                            WHEN '13d'      THEN 3
+                            WHEN '13g'      THEN 3
+                            WHEN 'def14a'   THEN 4
+                            WHEN '13f'      THEN 5
+                            WHEN 'nport'    THEN 6
+                            WHEN 'ncsr'     THEN 6
+                            WHEN 'xbrl_dei' THEN 7
+                            WHEN '10k_note' THEN 8
+                            WHEN 'finra_si' THEN 9
+                            ELSE 10
+                        END ASC,
+                        period_end DESC,
+                        filed_at DESC,
+                        source ASC,
+                        source_document_id ASC
+                )
+                SELECT w.* FROM winners w
+                {_INSIDER_DUAL_PIPELINE_DECOLLISION}
             ) AS src
             ON tgt.instrument_id = src.instrument_id
                AND tgt.holder_identity_key = src.holder_identity_key

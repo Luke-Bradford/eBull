@@ -663,3 +663,164 @@ def test_known_to_expiry_watermark_alignment(conn, seeded_instrument_id, helper)
     conn.commit()
     drifted = _drifted_instruments(conn, helper.current_table, helper.observations_table, helper.category_literal)
     assert seeded_instrument_id not in drifted
+
+
+# ----------------------------------------------------------------------
+# #1805: dual-pipeline insider de-collision at the _current refresh layer.
+# ----------------------------------------------------------------------
+def _seed_insider_obs(
+    conn,
+    instrument_id: int,
+    *,
+    accession: str,
+    doc_id: str,
+    nature: oo.OwnershipNature,
+    period_end: date = date(2024, 12, 31),
+    holder_cik: str = "0000000042",
+    holder_name: str = "Decollision Holder",
+) -> None:
+    """Seed one insider observation through the production writer.
+
+    The colliding XML + dataset rows share ``holder_cik``/name (so they share
+    ``holder_identity_key``, the de-collision key); ``source_accession`` is the
+    de-collision's other key, so each row carries a real accession (the
+    PR12 ``_seed_one_observation`` passes None and cannot exercise this).
+    ``holder_cik`` is settable so a dataset-only row can use a DISTINCT holder —
+    else two ``beneficial`` rows for the same holder collapse into one DISTINCT-ON
+    slot before the de-collision even runs. ``period_end`` is settable so a test can
+    make one ``direct`` filing supersede another within its DISTINCT-ON slot."""
+    oo.record_insider_observation(
+        conn,
+        instrument_id=instrument_id,
+        holder_cik=holder_cik,
+        holder_name=holder_name,
+        ownership_nature=nature,
+        source="form4",
+        source_document_id=doc_id,
+        source_accession=accession,
+        source_field=None,
+        source_url=None,
+        filed_at=datetime(2025, 1, 1, tzinfo=UTC),
+        period_start=None,
+        period_end=period_end,
+        ingest_run_id=uuid4(),
+        shares=Decimal("100"),
+    )
+
+
+def _current_docs(conn, instrument_id: int) -> set[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_document_id FROM ownership_insiders_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        return {r[0] for r in cur.fetchall()}
+
+
+def test_dual_pipeline_decollision_single(conn, seeded_instrument_id):
+    """A dataset ``:NDT:`` row collides with the XML (plain) row on the same
+    ``(holder, accession)``; refresh drops the dataset row from ``_current``. A
+    dataset-only ``:NDT:`` row (no plain sibling) is retained (#1805)."""
+    iid = seeded_instrument_id
+    # Collision: same accession A — XML 'direct' + dataset ':NDT:' 'beneficial'.
+    _seed_insider_obs(conn, iid, accession="0000000000-25-000001", doc_id="0000000000-25-000001", nature="direct")
+    _seed_insider_obs(
+        conn, iid, accession="0000000000-25-000001", doc_id="0000000000-25-000001:NDT:7", nature="beneficial"
+    )
+    # Dataset-only: a DIFFERENT holder, accession B, no XML sibling — must survive.
+    _seed_insider_obs(
+        conn,
+        iid,
+        accession="0000000000-25-000002",
+        doc_id="0000000000-25-000002:NDT:3",
+        nature="beneficial",
+        holder_cik="0000000099",
+        holder_name="Dataset Only Holder",
+    )
+    conn.commit()
+
+    oo.refresh_insiders_current(conn, instrument_id=iid)
+    conn.commit()
+
+    docs = _current_docs(conn, iid)
+    assert "0000000000-25-000001" in docs  # XML row kept
+    assert "0000000000-25-000001:NDT:7" not in docs  # colliding dataset row dropped
+    assert "0000000000-25-000002:NDT:3" in docs  # dataset-only row retained
+
+
+def test_dual_pipeline_decollision_batch_matches_single(conn, two_seeded_instrument_ids):
+    """The batch refresh applies the identical de-collision — pins both paths so
+    neither can drift from the read-path predicate (#1805)."""
+    a, b = two_seeded_instrument_ids
+    for iid in (a, b):
+        _seed_insider_obs(conn, iid, accession="0000000000-25-000001", doc_id="0000000000-25-000001", nature="direct")
+        _seed_insider_obs(
+            conn, iid, accession="0000000000-25-000001", doc_id="0000000000-25-000001:NDT:7", nature="beneficial"
+        )
+        _seed_insider_obs(
+            conn,
+            iid,
+            accession="0000000000-25-000002",
+            doc_id="0000000000-25-000002:NDT:3",
+            nature="beneficial",
+            holder_cik="0000000099",
+            holder_name="Dataset Only Holder",
+        )
+    conn.commit()
+
+    oo.refresh_insiders_current_batch(conn, instrument_ids=[a, b])
+    conn.commit()
+
+    for iid in (a, b):
+        docs = _current_docs(conn, iid)
+        assert "0000000000-25-000001" in docs
+        assert "0000000000-25-000001:NDT:7" not in docs
+        assert "0000000000-25-000002:NDT:3" in docs
+
+
+def test_dual_pipeline_decollision_keeps_ndt_when_plain_sibling_superseded(conn, seeded_instrument_id):
+    """REGRESSION (Codex ckpt-2): the de-collision filters the post-DISTINCT-ON
+    ``winners`` set (= the future ``_current``), NOT raw observations. A ``:NDT:``
+    ``beneficial`` row whose same-accession plain ``direct`` sibling lost its
+    DISTINCT-ON slot to a NEWER ``direct`` filing has no plain sibling IN ``_current``,
+    so it must be KEPT — exactly as #1804 read-path fix B keeps it. Dropping it (an
+    observations-keyed predicate would) changed real insider figures in both
+    directions on the dev population (#1805)."""
+    iid = seeded_instrument_id
+    # Accession A: plain 'direct' (older period) + dataset ':NDT:' 'beneficial'.
+    _seed_insider_obs(
+        conn,
+        iid,
+        accession="0000000000-24-000001",
+        doc_id="0000000000-24-000001",
+        nature="direct",
+        period_end=date(2024, 9, 30),
+    )
+    _seed_insider_obs(
+        conn,
+        iid,
+        accession="0000000000-24-000001",
+        doc_id="0000000000-24-000001:NDT:7",
+        nature="beneficial",
+        period_end=date(2024, 9, 30),
+    )
+    # Accession B: a NEWER plain 'direct' for the same holder — wins the 'direct'
+    # DISTINCT-ON slot, so accession A's plain 'direct' is NOT in _current.
+    _seed_insider_obs(
+        conn,
+        iid,
+        accession="0000000000-24-000002",
+        doc_id="0000000000-24-000002",
+        nature="direct",
+        period_end=date(2024, 12, 31),
+    )
+    conn.commit()
+
+    oo.refresh_insiders_current(conn, instrument_id=iid)
+    conn.commit()
+
+    docs = _current_docs(conn, iid)
+    assert "0000000000-24-000002" in docs  # newer plain 'direct' won its slot
+    assert "0000000000-24-000001" not in docs  # older plain 'direct' superseded out
+    # No plain sibling for accession A survives into _current → keep its ':NDT:'.
+    assert "0000000000-24-000001:NDT:7" in docs
