@@ -61,8 +61,12 @@ describe("CalendarPage", () => {
     );
     await waitFor(() => expect(screen.getByText("US equity")).toBeInTheDocument());
     expect(fetchCalendarEvents).toHaveBeenCalledWith("portfolio", 7);
+    // Default window phrasing tracks the 1-week horizon.
+    expect(screen.getByText("Market status — this week")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "4 weeks" }));
     await waitFor(() => expect(fetchCalendarEvents).toHaveBeenCalledWith("portfolio", 28));
+    // Section title + intro now reflect the wider horizon, not a stale "this week".
+    await waitFor(() => expect(screen.getByText("Market status — next 4 weeks")).toBeInTheDocument());
   });
 });
