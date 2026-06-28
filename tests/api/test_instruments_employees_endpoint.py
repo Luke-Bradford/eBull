@@ -75,8 +75,12 @@ def test_employees_endpoint_404_unknown_symbol() -> None:
     assert resp.status_code == 404
 
 
-def test_employees_endpoint_404_when_no_fact() -> None:
-    """Instrument exists but has no DEI EntityNumberOfEmployees row."""
+def test_employees_endpoint_200_null_when_no_fact() -> None:
+    """Instrument exists but has no DEI EntityNumberOfEmployees row.
+
+    Absent optional datum → 200 + null body, not 404 (#1813): the FE
+    fetches this on every instrument page and a 404 polluted the console
+    for the ~99.7% of instruments that don't XBRL-tag headcount."""
     conn = MagicMock()
     conn.cursor.return_value = _cursor_with(
         [
@@ -87,4 +91,5 @@ def test_employees_endpoint_404_when_no_fact() -> None:
     app = _build_app(conn)
     with TestClient(app) as client:
         resp = client.get("/instruments/BTC/employees")
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json() is None

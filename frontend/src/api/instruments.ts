@@ -406,7 +406,9 @@ export async function fetchInstrumentEmployees(
   symbol: string,
 ): Promise<InstrumentHeadcount | null> {
   try {
-    return await apiFetch<InstrumentHeadcount>(
+    // 200 + null when the instrument has no headcount fact (#1813); the
+    // 404 catch is retained for an unknown symbol.
+    return await apiFetch<InstrumentHeadcount | null>(
       `/instruments/${encodeURIComponent(symbol)}/employees`,
     );
   } catch (err) {

@@ -136,12 +136,17 @@ _THESIS_COLUMNS = """
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{instrument_id}", response_model=ThesisDetail)
+@router.get("/{instrument_id}", response_model=ThesisDetail | None)
 def get_latest_thesis(
     instrument_id: int,
     conn: psycopg.Connection[object] = Depends(get_conn),
-) -> ThesisDetail:
-    """Latest thesis for an instrument, ordered by created_at then version."""
+) -> ThesisDetail | None:
+    """Latest thesis for an instrument, ordered by created_at then version.
+
+    Returns **200 with a null body** when no thesis exists yet — the
+    normal pre-thesis state, not an error. The instrument page fetches
+    this on every load, so a 404 here meant a console error on every
+    not-yet-analysed instrument (#1813)."""
     sql = f"""
         SELECT {_THESIS_COLUMNS}
         FROM theses t
@@ -155,11 +160,24 @@ def get_latest_thesis(
         cur.execute(sql, params)
         row = cur.fetchone()
 
-    if row is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No thesis found for instrument {instrument_id}",
-        )
+        if row is None:
+            # Distinguish "unknown instrument" (404) from "known
+            # instrument, no thesis yet" (200 + null) — same contract as
+            # get_thesis_history. The null case is the normal pre-analysis
+            # state and lets the research page render its Generate-thesis
+            # affordance without a console error on every un-analysed
+            # instrument (#1813). Existence check only on the no-thesis
+            # path, so the common (thesis-present) read stays single-query.
+            cur.execute(
+                "SELECT 1 FROM instruments WHERE instrument_id = %(instrument_id)s",
+                {"instrument_id": instrument_id},
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Instrument {instrument_id} not found",
+                )
+            return None
 
     return _parse_thesis(row)
 
