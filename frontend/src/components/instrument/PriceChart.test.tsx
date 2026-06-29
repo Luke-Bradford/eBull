@@ -191,6 +191,28 @@ describe("PriceChart — range picker", () => {
   });
 });
 
+describe("PriceChart — native-currency label (#1845)", () => {
+  it("renders the native currency when provided", async () => {
+    mockedFetch.mockResolvedValue(bars([]));
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="GME" currency="USD" />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("chart-currency")).toHaveTextContent("USD");
+  });
+
+  it("omits the label when no currency is provided", async () => {
+    mockedFetch.mockResolvedValue(bars([]));
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="GME" />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByTestId("chart-currency")).not.toBeInTheDocument();
+  });
+});
+
 describe("PriceChart — type toggle (#587)", () => {
   it("renders three type buttons defaulting to Candle", async () => {
     mockedFetch.mockResolvedValue(bars([]));
