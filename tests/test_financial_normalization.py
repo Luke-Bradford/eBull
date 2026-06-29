@@ -205,10 +205,6 @@ class TestDerivePeriodsFromFacts:
             ),
         ]
         periods = _derive_periods_from_facts(facts, reported_currency="USD")
-        # The quarter-duration fact is rejected for the FY group; it was the only
-        # fact, so no FY row is anchored at all. Assert emptiness explicitly — a
-        # vacuous `all(... for p in fy)` over an empty list would pass even if the
-        # quarter fact had wrongly bound, proving nothing about the rejection.
         # The lone quarter-duration fact is rejected for the FY group and there
         # is no other fact to anchor any row, so NO period is produced at all.
         # Assert the full emptiness (not a vacuous `all(... for p in periods)`
