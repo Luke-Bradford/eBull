@@ -241,6 +241,29 @@ describe("PriceChart — type toggle (#587)", () => {
   });
 });
 
+describe("PriceChart — native-currency label (#1845)", () => {
+  it("renders the native-currency label when a currency is provided", async () => {
+    mockedFetch.mockResolvedValue(bars([]));
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" currency="USD" />
+      </MemoryRouter>,
+    );
+    const label = screen.getByTestId("chart-native-currency");
+    expect(label).toHaveTextContent("USD");
+  });
+
+  it("omits the label when currency is null (default)", async () => {
+    mockedFetch.mockResolvedValue(bars([]));
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByTestId("chart-native-currency")).not.toBeInTheDocument();
+  });
+});
+
 describe("PriceChart — log scale toggle (#587)", () => {
   it("renders a Log toggle button defaulting to off", async () => {
     mockedFetch.mockResolvedValue(bars([]));

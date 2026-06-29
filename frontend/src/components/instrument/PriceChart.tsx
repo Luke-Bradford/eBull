@@ -136,6 +136,13 @@ export interface PriceChartProps {
    *  Defaults to `us_equity` (the charted-intraday-dominant case, and the
    *  prior hardcoded behaviour) when the caller has no profile yet. */
   sessionProfile?: SessionProfile;
+  /** Instrument NATIVE currency (`summary.identity.currency`, e.g. "USD").
+   *  The chart always renders native-currency OHLC candles — unlike the
+   *  header price, which is FX-converted to the operator display currency
+   *  (#1845). Labelling the axis with the native currency keeps the chart
+   *  honest where header (e.g. GBP) and axis (e.g. USD) disagree. We do NOT
+   *  spot-convert historical OHLC — that would misrepresent past prices. */
+  currency?: string | null;
 }
 
 export function PriceChart({
@@ -143,6 +150,7 @@ export function PriceChart({
   instrumentId = null,
   initialRange = "1m",
   sessionProfile = "us_equity",
+  currency = null,
 }: PriceChartProps): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const rawChart = searchParams.get("chart");
@@ -366,6 +374,22 @@ export function PriceChart({
                 AH
               </button>
             </>
+          ) : null}
+          {/*
+            Native-currency label (#1845). The chart renders the
+            instrument's native-currency OHLC (USD for US equities); the
+            header price beside it is FX-converted to the operator display
+            currency (e.g. GBP). Without this label the two numbers read as
+            a contradiction. Muted, read-only — not a control.
+          */}
+          {currency ? (
+            <span
+              className="text-xs font-medium text-slate-500 dark:text-slate-400"
+              data-testid="chart-native-currency"
+              title={`Chart prices are in ${currency} (instrument native currency); the header price is converted to your display currency`}
+            >
+              {currency}
+            </span>
           ) : null}
         </div>
       </div>
