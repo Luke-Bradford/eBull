@@ -228,6 +228,25 @@ export interface YoyRow {
   readonly fcf_yoy_pct: number | null;
 }
 
+// A YoY comparison is only valid when the prior row is ~1 calendar year back:
+// both annual (lag 1) and quarterly (lag 4, prior-year same quarter) span ~365
+// days. When the history has a gap the positional prior is years away and
+// `(cur - prior) / prior` is a fabricated jump — e.g. AAPL's FY rows skip from
+// 2012 to 2023 once older raw facts age out (#1835), yielding a bogus +145%
+// "YoY". Mirror peer_comparison's consecutive-year guard (sql/services use
+// 300-430 days) and null the YoY across non-adjacent periods so the chart shows
+// a gap, not a fabricated spike (#1839).
+const _YOY_GAP_DAYS_MIN = 300;
+const _YOY_GAP_DAYS_MAX = 430;
+const _MS_PER_DAY = 86_400_000;
+
+/** True when `priorEnd` is ~1 calendar year before `curEnd` (300-430 days).
+ *  ISO date-only strings parse as UTC midnight, so the diff is exact. */
+function isYearApart(curEnd: string, priorEnd: string): boolean {
+  const days = (Date.parse(curEnd) - Date.parse(priorEnd)) / _MS_PER_DAY;
+  return days >= _YOY_GAP_DAYS_MIN && days <= _YOY_GAP_DAYS_MAX;
+}
+
 /** Year-over-year growth. Lag is determined by the page-level period
  *  the rows were fetched for: quarterly → 4 lag (prior-year quarter),
  *  annual → 1 lag (prior fiscal year). Looking at row-level
@@ -235,14 +254,19 @@ export interface YoyRow {
  *  `Q1`/`Q2`/`Q3`/`Q4` and `FY`, never the literal string `"annual"`,
  *  so a row-level check would silently fall back to the quarterly
  *  branch on annual data. The first `lag` rows are still emitted with
- *  null values so the time axis stays aligned with the other charts. */
+ *  null values so the time axis stays aligned with the other charts.
+ *  A non-adjacent prior (history gap) is also nulled — see the guard above. */
 export function buildYoyGrowth(
   periods: ReadonlyArray<JoinedPeriod>,
   period: "quarterly" | "annual" = "quarterly",
 ): YoyRow[] {
   const lag = period === "annual" ? 1 : 4;
   return periods.map((p, i) => {
-    const prior = i >= lag ? periods[i - lag] : undefined;
+    const candidate = i >= lag ? periods[i - lag] : undefined;
+    const prior =
+      candidate !== undefined && isYearApart(p.period_end, candidate.period_end)
+        ? candidate
+        : undefined;
     const fcf = (cur: JoinedPeriod): number | null => {
       if (cur.operating_cf === null || cur.capex === null) return null;
       // capex is XBRL `us-gaap:PaymentsToAcquirePropertyPlantAndEquipment`,
