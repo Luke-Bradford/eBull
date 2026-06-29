@@ -35,6 +35,30 @@ Stop:
 launchctl unload ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
 ```
 
+## Data daemon — keep ETL fresh with the loop OFF (#1865)
+The jobs daemon (`python -m app.jobs`: SEC manifest worker, per-CIK poll,
+orchestrator sync, fundamentals, portfolio sync) is **independent of the AI
+loop**. Run it under launchd so ingestion survives reboot/crash and data stays
+current while the loop is paused. Config is read from the repo `.env` via the
+plist's `WorkingDirectory`; only PATH (for `uv`) + HOME are injected.
+```bash
+mkdir -p var/autonomy-logs
+# stop any manual `nohup … python -m app.jobs` first (avoid a duplicate; the
+# daemon's PG advisory lock would otherwise idle the second one).
+sed "s#__REPO__#$(pwd)#g; s#__HOME__#$HOME#g" scripts/autonomy/com.ebull.jobs-daemon.plist \
+  > ~/Library/LaunchAgents/com.ebull.jobs-daemon.plist
+launchctl load ~/Library/LaunchAgents/com.ebull.jobs-daemon.plist
+launchctl list | grep jobs-daemon                       # confirm loaded
+tail -f var/autonomy-logs/launchd.jobs-daemon.err.log   # scheduler ticks (stderr)
+```
+Stop:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.ebull.jobs-daemon.plist
+```
+Safe to run this daemon WITHOUT the AI loop and with the kill switch ON — the
+kill switch gates only the trade jobs (`morning_candidate_review`,
+`retry_deferred`), not data ingestion.
+
 ## Simpler alternative: hourly run_loop (no continuous supervisor)
 One fresh session per hour (lock = no overlap). Less tight than the supervisor
 and no smart limit-backoff (a limited hour just retries next hour), but minimal.
