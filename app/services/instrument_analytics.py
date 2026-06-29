@@ -589,7 +589,11 @@ def assemble_instrument_analytics(
             from app.services.insider_transactions import get_insider_summary
 
             summary = get_insider_summary(conn, instrument_id=instrument_id)
-            insider_net = float(summary.open_market_net_shares_90d)
+            # open_market_net_shares_90d is COALESCE'd to 0 by the query (never
+            # None today), but guard the cast: a bare float(None) would escape the
+            # psycopg-only except and crash the whole score.
+            net = summary.open_market_net_shares_90d
+            insider_net = float(net) if net is not None else None
             insider_asof = summary.latest_txn_date
     except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
         insider_net = None
@@ -619,4 +623,9 @@ def assemble_instrument_analytics(
         positioning["short_interest"] = short_interest_signal(None, None)
 
     block["positioning"] = positioning
+    # Default peer_grade so the persisted shape is consistent even when this
+    # assembler runs OUTSIDE compute_rankings (a standalone compute_score has no
+    # run cohort). compute_rankings overwrites this with the real cross-sectional
+    # grade for the batch path.
+    block["peer_grade"] = {"basis": "absolute_only", "reason": "no_run_context", "families": {}}
     return block

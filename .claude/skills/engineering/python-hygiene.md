@@ -213,3 +213,19 @@ Rule: widen the callee to `Connection[Any]`, and if it reads row values
 (not just `rowcount`), open its own cursor with an explicit
 `row_factory=psycopg.rows.tuple_row` / `dict_row` so the row shape is
 locally guaranteed.
+
+## Never bare `float(attr)` on a possibly-None field inside a narrow except
+
+In a savepoint-/try-guarded block whose `except` only catches a specific
+class (e.g. `psycopg.errors.UndefinedTable, UndefinedColumn`), a bare
+`float(some.attr)` where `attr`'s type includes `None` raises `TypeError`,
+which the narrow `except` does NOT catch — it escapes and crashes the whole
+caller. Even when the producing query COALESCEs the column to a non-null
+today, the field's annotation (`Decimal | None`) is the contract; a future
+change re-introduces the None.
+
+Rule: guard the cast — `v = some.attr; out = float(v) if v is not None else
+None` — or `assert v is not None`. Grep self-review: `float\(` / `int\(` /
+`Decimal\(` directly wrapping an attribute access inside a guarded block.
+
+Origin: PR #1853 (#1823) review BLOCKING on the IAR insider assembler.
