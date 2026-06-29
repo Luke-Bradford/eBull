@@ -12,7 +12,11 @@ import psycopg
 import psycopg.errors
 
 from app.security.secrets_crypto import MasterKeyNotLoadedError
-from app.services.sync_orchestrator.layer_types import FailureCategory, LayerRefreshFailed
+from app.services.sync_orchestrator.layer_types import (
+    FailureCategory,
+    LayerRefreshFailed,
+    UpstreamUnreachableError,
+)
 
 
 def classify_exception(exc: BaseException) -> FailureCategory:
@@ -29,6 +33,12 @@ def classify_exception(exc: BaseException) -> FailureCategory:
     # in LayerRefreshFailed(SCHEMA_DRIFT, ...) has strictly more
     # information than this helper can recover from the exception type.
     if isinstance(exc, LayerRefreshFailed):
+        return exc.category
+    # UpstreamUnreachableError (#1833) is a batch circuit-breaker trip that
+    # carries the category of the triggering systemic failure — honour it
+    # so an AUTH_EXPIRED trip stays operator-actionable rather than being
+    # flattened to the catch-all INTERNAL_ERROR.
+    if isinstance(exc, UpstreamUnreachableError):
         return exc.category
     # #643 — broker-encryption key not loaded. Distinct from the
     # generic AUTH_EXPIRED (which means the credential decrypted but

@@ -1101,3 +1101,161 @@ class TestRefreshMarketDataForceBackfill:
 
         assert summary.candle_rows_upserted == 0  # the 5 rolled back — not counted
         assert summary.candles_failed == 1
+
+
+class TestRefreshMarketDataCircuitBreaker:
+    """#1833 — batch circuit-breaker: K consecutive *systemic* candle-fetch
+    failures abort the whole batch with a clear terminal status instead of
+    grinding every instrument through the provider's 30s timeout."""
+
+    @staticmethod
+    def _not_fresh_conn() -> MagicMock:
+        """Conn whose freshness check returns an old date → every instrument
+        attempts a fetch; transaction is a passthrough context manager."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (date(2020, 1, 1),)  # ancient → not fresh
+        conn.execute.return_value = cursor
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = ctx
+        return conn
+
+    @staticmethod
+    def _http_error(status: int) -> httpx.HTTPStatusError:
+        request = httpx.Request("GET", "https://public-api.etoro.com/x")
+        response = httpx.Response(status, request=request)
+        return httpx.HTTPStatusError(f"{status}", request=request, response=response)
+
+    @staticmethod
+    def _instruments(n: int) -> list[tuple[int, str]]:
+        return [(i, f"SYM{i}") for i in range(1, n + 1)]
+
+    def test_trips_after_limit_consecutive_transport_failures(self) -> None:
+        """eToro unreachable → every fetch is a TransportError (SOURCE_DOWN).
+        The breaker raises after `limit` and does NOT walk the remainder."""
+        from app.services.market_data import refresh_market_data
+        from app.services.sync_orchestrator.layer_types import (
+            FailureCategory,
+            UpstreamUnreachableError,
+        )
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = httpx.ConnectTimeout("eToro unreachable")
+
+        with pytest.raises(UpstreamUnreachableError) as excinfo:
+            refresh_market_data(
+                provider,
+                conn,
+                instruments=self._instruments(100),
+                skip_quotes=True,
+                consecutive_failure_limit=10,
+            )
+        # Tripped at exactly the limit — only 10 fetches attempted, not 100.
+        assert provider.get_daily_candles.call_count == 10
+        assert excinfo.value.category == FailureCategory.SOURCE_DOWN
+
+    def test_404s_never_trip_the_breaker(self) -> None:
+        """A 404 (delisted) proves the server responded → per-instrument,
+        not systemic. A whole batch of 404s walks every instrument."""
+        from app.services.market_data import refresh_market_data
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = self._http_error(404)
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=self._instruments(30),
+            skip_quotes=True,
+            consecutive_failure_limit=10,
+        )
+        assert provider.get_daily_candles.call_count == 30
+        assert summary.candles_failed == 30
+
+    def test_interspersed_success_resets_counter(self) -> None:
+        """A reachable success (empty bars) between failures resets the
+        consecutive counter, so the breaker never trips."""
+        from app.services.market_data import refresh_market_data
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        # 9 fails, 1 success (empty bars), repeated — never 10 in a row.
+        cycle = [httpx.ConnectError("down")] * 9 + [[]]
+        provider.get_daily_candles.side_effect = cycle * 5  # 50 instruments
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=self._instruments(50),
+            skip_quotes=True,
+            consecutive_failure_limit=10,
+        )
+        assert provider.get_daily_candles.call_count == 50
+        assert summary.candles_failed == 45
+
+    def test_404_between_failures_resets_counter(self) -> None:
+        """A per-instrument fault (404) also proves reachability → resets."""
+        from app.services.market_data import refresh_market_data
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        cycle = [httpx.ConnectError("down")] * 9 + [self._http_error(404)]
+        provider.get_daily_candles.side_effect = cycle * 5
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=self._instruments(50),
+            skip_quotes=True,
+            consecutive_failure_limit=10,
+        )
+        assert provider.get_daily_candles.call_count == 50
+        assert summary.candles_failed == 50
+
+    def test_trip_carries_triggering_category_auth(self) -> None:
+        """A 401 trip stays AUTH_EXPIRED (operator-actionable, self_heal=False)
+        rather than being flattened to SOURCE_DOWN."""
+        from app.services.market_data import refresh_market_data
+        from app.services.sync_orchestrator.layer_types import (
+            FailureCategory,
+            UpstreamUnreachableError,
+        )
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = self._http_error(401)
+
+        with pytest.raises(UpstreamUnreachableError) as excinfo:
+            refresh_market_data(
+                provider,
+                conn,
+                instruments=self._instruments(20),
+                skip_quotes=True,
+                consecutive_failure_limit=3,
+            )
+        assert excinfo.value.category == FailureCategory.AUTH_EXPIRED
+        assert provider.get_daily_candles.call_count == 3
+
+    def test_limit_zero_disables_breaker(self) -> None:
+        """`consecutive_failure_limit <= 0` walks every instrument even when
+        all fail systemically (matches pre-#1833 behaviour for callers that
+        opt out)."""
+        from app.services.market_data import refresh_market_data
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = httpx.ConnectTimeout("down")
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=self._instruments(25),
+            skip_quotes=True,
+            consecutive_failure_limit=0,
+        )
+        assert provider.get_daily_candles.call_count == 25
+        assert summary.candles_failed == 25

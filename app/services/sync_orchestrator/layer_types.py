@@ -281,6 +281,25 @@ class LayerRefreshFailed(Exception):
         self.detail = detail
 
 
+class UpstreamUnreachableError(Exception):
+    """Batch circuit-breaker trip — a whole-batch upstream/systemic outage.
+
+    Raised by a per-instrument batch loop (e.g. ``refresh_market_data``)
+    after K consecutive *systemic* failures (provider unreachable, session
+    rejected, rate-limited, or DB down) so the run fails FAST with a clear
+    terminal status instead of grinding through hundreds of per-item 30s
+    timeouts (#1833). Carries the category of the triggering failure so
+    ``classify_exception`` records the honest taxonomy — an AUTH_EXPIRED
+    trip stays operator-actionable (``self_heal=False``) rather than being
+    flattened to a retriable SOURCE_DOWN.
+    """
+
+    def __init__(self, category: FailureCategory, detail: str) -> None:
+        super().__init__(f"{category.value}: {detail}")
+        self.category = category
+        self.detail = detail
+
+
 def cadence_display_string(cadence: Cadence) -> str:
     """Short human label used by dashboards where a one-liner is enough."""
     if cadence.calendar_months is not None:
