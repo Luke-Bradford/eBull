@@ -67,6 +67,72 @@ def _seed_for(asset_class: str) -> dict[str, list[str]]:
     return _SEED_BY_ASSET_CLASS.get(asset_class, _EMPTY_SEED)
 
 
+def _dedup(items: list[str]) -> list[str]:
+    """Order-preserving de-duplication. The resolver dedups providers
+    at runtime (``resolve_capabilities``), so a repeated provider is
+    not meaningful drift — collapse it here too, both for the set
+    comparison and so the rendered chips carry unique React keys."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for it in items:
+        if it not in seen:
+            seen.add(it)
+            out.append(it)
+    return out
+
+
+def diff_capabilities(asset_class: str | None, current_raw: Any) -> list[CapabilityCellDiff]:
+    """Pure per-exchange diff: the capabilities whose provider *set*
+    diverges from the seed default for ``asset_class``.
+
+    Ordering and duplicates are not drift — provider order is meaningful
+    at runtime (the resolver renders panels in declared order) but a
+    pure reorder, a JSONB array round-trip reorder, or a repeated
+    provider is not a useful drift signal, so the comparison is
+    set-based (Codex review #531). ``current_raw`` is whatever the JSONB
+    column deserialised to; non-dict / non-list-of-str shapes are
+    treated as empty.
+
+    Capability keys present in the override but absent from the V1
+    schema (operator typos / extra keys the resolver silently ignores)
+    are surfaced as drift against an empty seed so they don't accumulate
+    invisibly — that is exactly the silent-divergence this page exists
+    to catch.
+    """
+    seed = _seed_for(asset_class) if asset_class is not None else _EMPTY_SEED
+    current: dict[str, list[str]] = {}
+    if isinstance(current_raw, dict):
+        for cap_name, cap_value in current_raw.items():
+            if isinstance(cap_value, list):
+                current[str(cap_name)] = _dedup([str(v) for v in cap_value if isinstance(v, str)])
+
+    diffs: list[CapabilityCellDiff] = []
+    for cap in V1_CAPABILITIES:
+        seed_list = list(seed.get(cap, []))
+        current_list = list(current.get(cap, []))
+        if set(seed_list) != set(current_list):
+            diffs.append(
+                CapabilityCellDiff(
+                    capability=cap,
+                    seed_providers=seed_list,
+                    current_providers=current_list,
+                )
+            )
+    # Unknown keys with actual providers — schema drift the seed loop
+    # above cannot see. Empty unknown keys have no runtime effect and
+    # nothing to display, so they are not flagged.
+    for cap, providers in current.items():
+        if cap not in V1_CAPABILITIES and providers:
+            diffs.append(
+                CapabilityCellDiff(
+                    capability=cap,
+                    seed_providers=[],
+                    current_providers=providers,
+                )
+            )
+    return diffs
+
+
 class CapabilityCellDiff(BaseModel):
     """One per-capability diff for an exchange row."""
 
@@ -107,7 +173,7 @@ def list_overrides(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT exchange_id, name, asset_class, capabilities
+            SELECT exchange_id, description, asset_class, capabilities
               FROM exchanges
              ORDER BY exchange_id
             """
@@ -115,42 +181,14 @@ def list_overrides(
         for r in cur.fetchall():
             asset_class_raw = r["asset_class"]
             asset_class = str(asset_class_raw) if asset_class_raw is not None else None
-            seed = _seed_for(asset_class) if asset_class is not None else _EMPTY_SEED
-            current_raw: Any = r["capabilities"]
-            current: dict[str, list[str]] = {}
-            if isinstance(current_raw, dict):
-                for cap_name, cap_value in current_raw.items():
-                    if isinstance(cap_value, list):
-                        current[str(cap_name)] = [str(v) for v in cap_value if isinstance(v, str)]
-
-            diffs: list[CapabilityCellDiff] = []
-            for cap in V1_CAPABILITIES:
-                seed_list = list(seed.get(cap, []))
-                current_list = list(current.get(cap, []))
-                # Drift compares the *set* of providers, not the
-                # ordering. Provider order is meaningful at runtime
-                # (resolver renders panels in declared order), but
-                # reordering without changing the set isn't useful
-                # drift signal — an operator who reordered
-                # intentionally doesn't want to see it as drift, and
-                # JSONB array round-trips can in principle reorder.
-                # Codex review on #531.
-                if sorted(seed_list) != sorted(current_list):
-                    diffs.append(
-                        CapabilityCellDiff(
-                            capability=cap,
-                            seed_providers=seed_list,
-                            current_providers=current_list,
-                        )
-                    )
-
+            diffs = diff_capabilities(asset_class, r["capabilities"])
             if not diffs:
                 continue
 
             rows.append(
                 ExchangeOverrideRow(
                     exchange_id=str(r["exchange_id"]),
-                    exchange_name=str(r["name"]) if r["name"] is not None else None,
+                    exchange_name=str(r["description"]) if r["description"] is not None else None,
                     asset_class=asset_class,
                     diffs=diffs,
                 )
