@@ -143,22 +143,72 @@ class TestDerivePeriodsFromFacts:
         assert q4.fiscal_quarter == 4
 
     def test_skips_ytd_entries(self) -> None:
-        """Entries without frame (YTD cumulative) are excluded -- we only want
-        standalone quarterly or annual values identified by frame."""
+        """#1835 — YTD cumulatives are excluded by DURATION, not by frame. A
+        6-month (Q1+Q2 cumulative) duration fact tagged fp=Q2 falls outside the
+        quarter window [60,120] days and is dropped; the standalone 3-month Q1
+        fact is kept."""
         facts = [
-            _fact(frame="CY2024Q1"),  # standalone quarter -- include
+            _fact(frame="CY2024Q1"),  # standalone 3mo quarter (~90d) -- include
             _fact(
-                frame=None,
+                frame="CY2024Q2",  # frame present, but 6mo duration -- still excluded
                 period_end="2024-06-30",
                 period_start="2024-01-01",
                 fiscal_period="Q2",
                 accession_number="ytd-q2",
-            ),  # YTD Q1+Q2 cumulative -- exclude
+            ),  # YTD Q1+Q2 cumulative (~181d) -- exclude by duration
         ]
         periods = _derive_periods_from_facts(facts, reported_currency="USD")
-        # Only the framed Q1 should produce a period
+        # Only the 3-month Q1 should produce a period
         assert len(periods) == 1
         assert periods[0].period_type == "Q1"
+
+    def test_fy_binds_annual_fact_without_frame(self) -> None:
+        """#1835 regression — an annual (~12-month) flow fact with frame=None is
+        bound to the FY row (the SEC Frames label lands on the next year's
+        comparative re-stamp, so 43% of genuine annual facts carry frame=NULL
+        and were previously dropped, leaving FY revenue NULL)."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("391035000000"),
+                fiscal_period="FY",
+                fiscal_year=2024,
+                period_start="2023-10-01",
+                period_end="2024-09-28",  # ~363 days
+                frame=None,
+                form_type="10-K",
+                accession_number="fy2024",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert len(periods) == 1
+        assert periods[0].period_type == "FY"
+        assert periods[0].revenue == Decimal("391035000000")
+        assert periods[0].months_covered == 12
+
+    def test_fy_rejects_quarter_duration_mislabeled_fy(self) -> None:
+        """#1835 regression (failure mode 2) — a 3-month flow fact mislabeled
+        fp=FY (legacy 8-K facts carry a quarterly frame) must NOT populate the FY
+        flow column. With no annual-duration fact in the group, no FY row with a
+        bound revenue is produced."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("64698000000"),  # a single-quarter magnitude
+                fiscal_period="FY",
+                fiscal_year=2020,
+                period_start="2020-06-28",
+                period_end="2020-09-26",  # ~90 days, mislabeled FY
+                frame="CY2020Q4",
+                form_type="10-K",
+                accession_number="q4-as-fy",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        # The quarter-duration fact is rejected for the FY group; with only that
+        # fact present there is no mapped fact left to anchor an FY row.
+        fy = [p for p in periods if p.period_type == "FY"]
+        assert all(p.revenue is None for p in fy)
 
     def test_dei_fact_does_not_pollute_period_end(self) -> None:
         """Regression for #558.

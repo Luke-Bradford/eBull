@@ -857,6 +857,25 @@ _FP_MAP: dict[str, tuple[str, int | None]] = {
     "FY": ("FY", None),
 }
 
+# #1835 — canonical XBRL context-duration window (days, inclusive) per period
+# type, used to admit a duration fact's value to that period's flow columns.
+# This is the authoritative YTD-disambiguation signal: the SEC Frames-API
+# ``frame`` label is a cross-sectional "one fact per filer, last filed"
+# comparability tag (data.sec.gov/api/xbrl/frames), NOT a per-issuer period
+# key — 43% of genuine annual flow facts carry ``frame=NULL`` (full-pop scan
+# 2026-06-29) and were wrongly dropped, while quarter-duration facts mislabeled
+# fp=FY carried a quarterly frame and polluted FY rows. Quarter window
+# [60,120] is the settled convention (sec_fundamentals._ttm_from_quarters);
+# annual 365±30 = [335,395] is the SEC frames annual tolerance — together they
+# reject 3mo (~91d), 6mo Q2-YTD (~182d) and 9mo Q3-YTD (~273d) durations.
+_FLOW_DURATION_DAYS: dict[str, tuple[int, int]] = {
+    "FY": (335, 395),
+    "Q1": (60, 120),
+    "Q2": (60, 120),
+    "Q3": (60, 120),
+    "Q4": (60, 120),
+}
+
 
 @dataclass
 class PeriodRow:
@@ -979,13 +998,18 @@ def _derive_periods_from_facts(
         if fp not in _FP_MAP:
             continue  # skip unknown periods (e.g. 'H1', '9M')
 
-        is_instant = fact.period_start is None
-        is_duration = not is_instant
-
-        # YTD disambiguation: for duration items, require frame to be set.
-        # Entries without frame are YTD cumulative -- exclude them.
-        if is_duration and fact.frame is None:
-            continue
+        # #1835 — YTD disambiguation by XBRL context DURATION, not the SEC
+        # Frames ``frame`` label (see _FLOW_DURATION_DAYS). For a duration fact
+        # (period_start set), admit it to this fiscal period only when its span
+        # matches the period's canonical window; this drops 6mo/9mo YTD
+        # cumulatives and quarter-duration facts mislabeled fp=FY, while keeping
+        # the genuine annual fact regardless of whether SEC framed it. Instant
+        # (balance-sheet) facts carry no duration and are always kept.
+        if fact.period_start is not None:
+            lo, hi = _FLOW_DURATION_DAYS[_FP_MAP[fp][0]]
+            days = (fact.period_end - fact.period_start).days
+            if not (lo <= days <= hi):
+                continue
 
         grouped[(fact.fiscal_year, fp)].append(fact)
 
@@ -1466,6 +1490,38 @@ def _canonical_merge_instrument(
         {"iid": instrument_id},
     )
 
+    # Phase B2 (#1835): drop STRUCTURALLY-INVALID FY canonical rows — a
+    # ``period_type='FY'`` row whose ``months_covered`` is sub-annual
+    # (< 11 months) can never be a real annual period; it is a 3-month
+    # fact that the pre-fix derivation mislabeled fp=FY (≈2,270 such rows
+    # full-population). The duration guard prevents NEW ones, but the
+    # already-persisted ones must be removed here; the Step-3 periods_raw
+    # rewash guarantees ``best_source`` below will not re-create them
+    # (FY periods_raw rows now always span ≥335 days).
+    #
+    # The predicate is intentionally STRUCTURAL, not "absent from raw":
+    # ``financial_facts_raw`` is retention-swept (only the latest few
+    # 10-K/10-Q accessions survive — financial_facts_retention.py), so a
+    # legitimate older annual row's facts age out of raw while the
+    # canonical row is the durable history. Deleting "labels absent from
+    # raw" would truncate that history; deleting only ``months_covered <
+    # 11`` FY rows touches only the impossible-duration rows and never a
+    # valid ``months_covered≈12`` annual row. (Wrong-VALUE but
+    # correct-duration rows for aged-out years are corrected when a full
+    # ``sec_rebuild`` re-ingests their facts and re-derives — see runbook.)
+    # Scoped to source='sec_edgar' (the only writer of this canonical path).
+    conn.execute(
+        """
+        DELETE FROM financial_periods fp
+        WHERE fp.instrument_id = %(iid)s
+          AND fp.source = 'sec_edgar'
+          AND fp.period_type = 'FY'
+          AND fp.months_covered IS NOT NULL
+          AND fp.months_covered < 11
+        """,
+        {"iid": instrument_id},
+    )
+
     cur = conn.execute(
         """
         WITH best_source AS (
@@ -1761,7 +1817,20 @@ def normalize_financial_periods(
                 # Step 2: Derive periods from facts
                 periods = _derive_periods_from_facts(fact_rows, reported_currency)
 
-                # Step 3: Upsert into financial_periods_raw
+                # Step 3: Rewash financial_periods_raw for this instrument.
+                # #1835 — DELETE-then-INSERT (the established rewash pattern,
+                # cf. refresh_*_current / 13F / DEF14A) so re-normalization is
+                # idempotent-REPLACING, not merely additive. Without this, raw
+                # rows from a superseded derivation (e.g. a 3-month fact
+                # mislabeled fp=FY, now dropped by the duration guard) would
+                # linger in periods_raw and keep re-feeding the canonical merge.
+                # Every row this path writes is source='sec_edgar'; scope the
+                # delete to that source so a future companies_house fundamentals
+                # path is untouched.
+                conn.execute(
+                    "DELETE FROM financial_periods_raw WHERE instrument_id = %(iid)s AND source = 'sec_edgar'",
+                    {"iid": iid},
+                )
                 raw_count = 0
                 for period in periods:
                     if _upsert_period_raw(conn, instrument_id=iid, period=period):

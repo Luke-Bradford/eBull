@@ -26,6 +26,7 @@ import pytest
 
 from app.providers.fundamentals import XbrlFact
 from app.services.fundamentals import (
+    normalize_financial_periods,
     start_ingestion_run,
     upsert_facts_for_instrument,
 )
@@ -239,3 +240,113 @@ def test_batches_across_chunk_boundary(
     ).fetchone()
     assert row is not None
     assert row[0] == 1500
+
+
+def test_normalize_binds_frameless_annual_and_cleans_invalid_fy(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#1835 end-to-end through the real canonical pipeline.
+
+    1. A 12-month annual revenue fact with ``frame=None`` binds the FY revenue
+       (the old Frames-label YTD filter dropped every frameless duration fact,
+       leaving FY revenue NULL for ~43% of annual facts).
+    2. A stale STRUCTURALLY-INVALID FY row (``months_covered=3`` — a 3-month
+       fact mislabeled fp=FY) is removed by the Phase-B2 cleanup.
+    3. SAFETY: a valid ``months_covered=12`` annual row whose facts have aged
+       out of retention-swept ``financial_facts_raw`` is PRESERVED — Phase-B2
+       must not truncate durable canonical history.
+    """
+    _seed_instrument(ebull_test_conn)
+    run_id = start_ingestion_run(
+        ebull_test_conn,
+        source="sec_edgar",
+        endpoint="/test",
+        instrument_count=1,
+    )
+    ebull_test_conn.commit()
+
+    annual = XbrlFact(
+        concept="Revenues",
+        taxonomy="us-gaap",
+        unit="USD",
+        period_start=date(2023, 10, 1),
+        period_end=date(2024, 9, 28),  # ~363 days — inside the [335,395] FY window
+        val=Decimal("391035000000"),
+        frame=None,  # #1835 — frameless annual must still bind
+        accession_number="acc-fy24",
+        form_type="10-K",
+        filed_date=date(2024, 11, 1),
+        fiscal_year=2024,
+        fiscal_period="FY",
+        decimals="-3",
+    )
+    cash = XbrlFact(
+        concept="CashAndCashEquivalentsAtCarryingValue",
+        taxonomy="us-gaap",
+        unit="USD",
+        period_start=None,
+        period_end=date(2024, 9, 28),
+        val=Decimal("30000000000"),
+        frame=None,
+        accession_number="acc-fy24",
+        form_type="10-K",
+        filed_date=date(2024, 11, 1),
+        fiscal_year=2024,
+        fiscal_period="FY",
+        decimals="-3",
+    )
+    upsert_facts_for_instrument(
+        ebull_test_conn,
+        instrument_id=_INSTRUMENT_ID,
+        facts=[annual, cash],
+        ingestion_run_id=run_id,
+    )
+
+    # Stale mislabeled 3-month FY row (months_covered=3) — must be deleted.
+    ebull_test_conn.execute(
+        "INSERT INTO financial_periods (instrument_id, period_end_date, "
+        "period_type, fiscal_year, fiscal_quarter, months_covered, source, "
+        "source_ref, reported_currency, is_restated, is_derived, "
+        "normalization_status) "
+        "VALUES (%s, '2020-09-26', 'FY', 2020, NULL, 3, 'sec_edgar', 'stale', "
+        "'USD', FALSE, FALSE, 'normalized')",
+        (_INSTRUMENT_ID,),
+    )
+    # Valid annual row whose facts have aged out of raw (months_covered=12) —
+    # must be PRESERVED (Phase-B2 must not truncate durable history).
+    ebull_test_conn.execute(
+        "INSERT INTO financial_periods (instrument_id, period_end_date, "
+        "period_type, fiscal_year, fiscal_quarter, months_covered, revenue, "
+        "source, source_ref, reported_currency, is_restated, is_derived, "
+        "normalization_status) "
+        "VALUES (%s, '2015-09-26', 'FY', 2015, NULL, 12, 233715000000, "
+        "'sec_edgar', 'aged-out', 'USD', FALSE, FALSE, 'normalized')",
+        (_INSTRUMENT_ID,),
+    )
+    ebull_test_conn.commit()
+
+    normalize_financial_periods(ebull_test_conn, instrument_ids=[_INSTRUMENT_ID])
+    ebull_test_conn.commit()
+
+    bound = ebull_test_conn.execute(
+        "SELECT revenue, months_covered FROM financial_periods "
+        "WHERE instrument_id = %s AND period_type = 'FY' AND fiscal_year = 2024",
+        (_INSTRUMENT_ID,),
+    ).fetchone()
+    assert bound is not None
+    assert bound[0] == Decimal("391035000000")
+    assert bound[1] == 12
+
+    invalid = ebull_test_conn.execute(
+        "SELECT COUNT(*) FROM financial_periods WHERE instrument_id = %s AND fiscal_year = 2020",
+        (_INSTRUMENT_ID,),
+    ).fetchone()
+    assert invalid is not None
+    assert invalid[0] == 0  # mislabeled 3-month FY row removed
+
+    preserved = ebull_test_conn.execute(
+        "SELECT revenue FROM financial_periods WHERE instrument_id = %s AND fiscal_year = 2015 AND period_type = 'FY'",
+        (_INSTRUMENT_ID,),
+    ).fetchone()
+    assert preserved is not None  # valid aged-out annual history NOT truncated
+    assert preserved[0] == Decimal("233715000000")
