@@ -77,6 +77,41 @@ export function SummaryCards({
   );
 }
 
+/**
+ * Classify the deployment-budget state for display. Pure so it can be
+ * table-tested without React.
+ *
+ * The key honesty distinction: a NEGATIVE `available_for_deployment` is not
+ * "low" — it means cash has fallen below the cash-buffer reserve floor
+ * (`app/services/budget.py`), and the execution guard then blocks every
+ * order as "budget exhausted" the moment `available_for_deployment <= 0`
+ * (`app/services/execution_guard.py`). Surface that buffer-breach distinctly
+ * from a merely-low-but-still-deployable budget.
+ */
+export function classifyDeployment(budget: BudgetStateResponse): {
+  tone: "positive" | "negative" | undefined;
+  hint: string | undefined;
+  isNull: boolean;
+} {
+  const available = budget.available_for_deployment;
+  if (available === null) {
+    return { tone: undefined, hint: "Cash unknown", isNull: true };
+  }
+  // Mirror the execution guard's threshold (`<= 0` → budget exhausted).
+  const isExhausted = available <= 0;
+  const isLow =
+    !isExhausted &&
+    budget.working_budget !== null &&
+    budget.working_budget > 0 &&
+    available / budget.working_budget < 0.05;
+  const hint = isExhausted
+    ? "At or below cash buffer reserve"
+    : isLow
+      ? "Low deployment capital"
+      : undefined;
+  return { tone: isExhausted || isLow ? "negative" : "positive", hint, isNull: false };
+}
+
 function DeploymentCard({
   budget,
   budgetError,
@@ -99,25 +134,13 @@ function DeploymentCard({
   }
 
   const available = budget.available_for_deployment;
-  const isNull = available === null;
-  const isLow =
-    !isNull &&
-    budget.working_budget !== null &&
-    budget.working_budget > 0 &&
-    available / budget.working_budget < 0.05;
-  const isNegative = !isNull && available < 0;
-
-  const tone: "positive" | "negative" | undefined = isNull
-    ? undefined
-    : isNegative || isLow
-      ? "negative"
-      : "positive";
+  const { tone, hint, isNull } = classifyDeployment(budget);
 
   return (
     <StatTile
       label="Available for deployment"
       value={isNull ? "—" : formatMoney(available, currency)}
-      hint={isNull ? "Cash unknown" : isLow ? "Low deployment capital" : undefined}
+      hint={hint}
       tone={tone}
     />
   );
