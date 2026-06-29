@@ -16,10 +16,47 @@ from decimal import Decimal
 import psycopg
 
 from app.providers.market_data import MarketDataProvider, OHLCVBar, Quote
+from app.services.sync_orchestrator.exception_classifier import classify_exception
+from app.services.sync_orchestrator.layer_types import FailureCategory, UpstreamUnreachableError
 from app.services.sync_orchestrator.progress import report_progress
 from app.services.technical_analysis import OHLCVRow, compute_indicators
 
 logger = logging.getLogger(__name__)
+
+# Batch circuit-breaker (#1833). When the eToro market-data API is
+# unreachable, every per-instrument candle fetch hits the provider's 30s
+# timeout and raises — walking all ~775 scoped instruments would burn
+# ≈6.5h grinding through dead requests for a job that normally finishes in
+# ~1 minute. After this many CONSECUTIVE *systemic* failures the candle
+# loop aborts the whole batch with a clear terminal status instead.
+# "Consecutive" counts ATTEMPTED fetches: a freshness-skipped instrument
+# is neutral (no fetch, no reachability evidence) and neither increments
+# nor resets the counter. The counter resets on any fetch that proves the
+# server is still reachable — a clean fetch OR a per-instrument fault that
+# still got a response (e.g. a 404 for a delisted symbol) — so a few
+# genuinely-delisted instruments never trip it.
+_CANDLE_BATCH_ABORT_LIMIT = 10
+
+# Failure categories that indicate a WHOLE-BATCH outage (the next
+# instrument will fail the same way), as opposed to a per-instrument fault
+# (404 delisted → INTERNAL_ERROR, a unique-constraint clash → DB_CONSTRAINT,
+# a feature-compute bug → INTERNAL_ERROR). Sourced from the single failure
+# taxonomy in ``classify_exception`` so this never drifts from it:
+#   * SOURCE_DOWN   — httpx.TransportError (DNS / connect / read timeout),
+#                     5xx after retries, or a psycopg.OperationalError raised
+#                     mid-fetch (transient DB blip inside the transaction).
+#                     A HARD DB outage trips the freshness probe on the first
+#                     instrument (outside the per-item try) and fails the run
+#                     fast on its own — no grind to break.
+#   * AUTH_EXPIRED  — 401/403: the broker session is dead for every call
+#   * RATE_LIMITED  — 429 after the retry budget is exhausted
+_SYSTEMIC_FAILURE_CATEGORIES = frozenset(
+    {
+        FailureCategory.SOURCE_DOWN,
+        FailureCategory.AUTH_EXPIRED,
+        FailureCategory.RATE_LIMITED,
+    }
+)
 
 # Default spread threshold from trading-policy.md.
 # An instrument is flagged if (ask - bid) / mid > this value.
@@ -68,6 +105,7 @@ def refresh_market_data(
     *,
     skip_quotes: bool = False,
     force_backfill: bool = False,
+    consecutive_failure_limit: int = _CANDLE_BATCH_ABORT_LIMIT,
 ) -> MarketRefreshSummary:
     """
     For each instrument: fetch candles, upsert to price_daily, compute
@@ -86,6 +124,15 @@ def refresh_market_data(
 
     instruments is a list of (instrument_id, symbol) tuples — instrument_id
     must already exist in the instruments table. symbol is used for logging.
+
+    ``consecutive_failure_limit`` (#1833) is the batch circuit-breaker
+    threshold: after this many CONSECUTIVE systemic candle-fetch failures
+    (provider unreachable, session dead, rate-limited) the loop raises
+    ``UpstreamUnreachableError`` and aborts the rest of the batch instead
+    of grinding through hundreds of per-instrument 30s timeouts. "Consecutive"
+    counts attempted fetches — a freshness-skipped instrument is neutral; a
+    reachable response (clean fetch or a 404) resets the counter. Pass
+    ``<= 0`` to disable the breaker (walk every instrument regardless).
 
     Raw provider responses are persisted by the provider before being returned.
     """
@@ -117,6 +164,8 @@ def refresh_market_data(
     # rows). The 1000-bar default only fires on initial seed,
     # gap-detect, or the one-shot ``force_backfill=True`` deepening.
     total = len(instruments)
+    # #1833 batch circuit-breaker — consecutive systemic failures.
+    consecutive_systemic_failures = 0
     for idx, (instrument_id, symbol) in enumerate(instruments, start=1):
         if not force_backfill and _candles_are_fresh(conn, instrument_id, today):
             candles_skipped += 1
@@ -141,9 +190,32 @@ def refresh_market_data(
             # — and that same instrument is also counted in ``candles_failed``.
             candle_rows_upserted += upserted
             features_computed += computed
-        except Exception:
+            # A clean fetch proves the provider + DB are reachable → reset.
+            consecutive_systemic_failures = 0
+        except Exception as exc:
             candles_failed += 1
             logger.warning("Failed to refresh candles for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
+            category = classify_exception(exc)
+            if category in _SYSTEMIC_FAILURE_CATEGORIES:
+                consecutive_systemic_failures += 1
+                if 0 < consecutive_failure_limit <= consecutive_systemic_failures:
+                    # Whole-batch outage — fail FAST with the triggering
+                    # category instead of walking the remaining instruments
+                    # through the same 30s-timeout grind (#1833). report_progress
+                    # the partial position first so the run's last heartbeat
+                    # reflects where it stopped.
+                    report_progress(idx, total, force=True)
+                    raise UpstreamUnreachableError(
+                        category,
+                        f"{consecutive_systemic_failures} consecutive systemic candle-fetch "
+                        f"failures (aborted batch of {total} after {idx} instruments; "
+                        f"last failure on {symbol} id={instrument_id})",
+                    ) from exc
+            else:
+                # A per-instrument fault (404 delisted, DB-constraint clash,
+                # feature-compute bug) proves the server still responds →
+                # reset so a sprinkling of dead symbols never trips the breaker.
+                consecutive_systemic_failures = 0
         report_progress(idx, total)
 
     # Final force-tick so items_done lands at the loop boundary even
