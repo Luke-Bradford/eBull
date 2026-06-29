@@ -29,6 +29,7 @@ import { fetchValueHistory } from "@/api/portfolio";
 import type { ValueHistoryEvent, ValueHistoryPoint, ValueHistoryRange } from "@/api/types";
 import { SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { tickFormatter } from "@/lib/chartFormatters";
 import { formatMoney } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { useChartTheme } from "@/lib/useChartTheme";
@@ -258,6 +259,14 @@ function ValueCanvas({
         horzLine: { width: 1, color: theme.crosshair, style: 3 },
       },
     });
+
+    // Adaptive month/day/year tick labels (the rest of the app uses this; the
+    // library default rendered March as a bare "2"). tickMarkFormatter is typed
+    // via DeepPartial which strips function properties, so cast through
+    // `unknown` to keep the contract (PriceChart pattern).
+    chart.timeScale().applyOptions({
+      tickMarkFormatter: tickFormatter,
+    } as unknown as Parameters<ReturnType<IChartApi["timeScale"]>["applyOptions"]>[0]);
 
     const series = chart.addSeries(AreaSeries, {
       lineColor: theme.accent[1],
