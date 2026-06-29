@@ -19,6 +19,16 @@ import type { ReactNode } from "react";
  * layout: the section claims remaining flex space and its body scrolls
  * vertically. Use when the parent is a flex column with `h-full` and
  * the section sits below header/filter chrome that should stay visible.
+ *
+ * The scrollable body is `relative` (#1858): a contained-scroll viewport
+ * must establish a positioning context. Otherwise any `position:absolute`
+ * descendant (e.g. a Tailwind `sr-only` label deep in a tall table) has no
+ * positioned ancestor, resolves its containing block to the initial
+ * containing block (the viewport), and so ESCAPES this body's `overflow`
+ * clipping — extending `documentElement.scrollHeight` past the viewport and
+ * producing dead scroll space below the page. `relative` (no insets → zero
+ * visual change for in-flow content) scopes such descendants to the scroll
+ * area. See docs/review-prevention-log.md.
  */
 export function Section({
   title,
@@ -36,7 +46,9 @@ export function Section({
   const sectionClass = scrollable
     ? "flex min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-200 pt-3 dark:border-slate-800"
     : "border-t border-slate-200 pt-3 dark:border-slate-800";
-  const bodyClass = scrollable ? "min-h-0 flex-1 overflow-auto pt-3" : "pt-3";
+  const bodyClass = scrollable
+    ? "relative min-h-0 flex-1 overflow-auto pt-3"
+    : "pt-3";
   return (
     <section className={sectionClass}>
       <header className="flex flex-shrink-0 items-baseline justify-between gap-2">
