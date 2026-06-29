@@ -188,6 +188,63 @@ describe("buildYoyGrowth", () => {
     expect(yoy[1]!.eps_yoy_pct).toBe(150);
   });
 
+  it("nulls annual YoY across a multi-year gap instead of fabricating a spike (#1839)", () => {
+    // AAPL-shaped: FY2012 then FY2023 (FY2013-2022 aged out). The positional
+    // prior is 11 years back, so (383285-156508)/156508 ≈ +145% — bogus.
+    const periods = joinStatements(
+      [
+        row("2012-09-29", { revenue: "156508", eps_diluted: "1" }, "FY"),
+        row("2023-09-30", { revenue: "383285", eps_diluted: "6" }, "FY"),
+        row("2024-09-28", { revenue: "391035", eps_diluted: "6.5" }, "FY"),
+      ],
+      [],
+      [],
+    );
+    const yoy = buildYoyGrowth(periods, "annual");
+    expect(yoy[0]!.revenue_yoy_pct).toBeNull(); // no prior
+    expect(yoy[1]!.revenue_yoy_pct).toBeNull(); // 11-year gap → not adjacent
+    expect(yoy[1]!.eps_yoy_pct).toBeNull();
+    // 2024 vs 2023 is a real consecutive year → computes normally.
+    expect(yoy[2]!.revenue_yoy_pct).toBeCloseTo(2.02, 1);
+  });
+
+  it("nulls quarterly YoY when the prior-year quarter is missing (#1839)", () => {
+    // 4 lags back lands on a quarter ~2 years away (a year of quarters is
+    // missing), so the 300-430 day guard rejects it.
+    const periods = joinStatements(
+      [
+        row("2023-03-31", { revenue: "100" }, "Q1"),
+        row("2023-06-30", { revenue: "100" }, "Q2"),
+        row("2023-09-30", { revenue: "100" }, "Q3"),
+        row("2023-12-31", { revenue: "100" }, "Q4"),
+        row("2025-03-31", { revenue: "150" }, "Q1"),
+      ],
+      [],
+      [],
+    );
+    const yoy = buildYoyGrowth(periods, "quarterly");
+    // periods[4] vs periods[0]: 2025-03-31 − 2023-03-31 ≈ 731 days → nulled.
+    expect(yoy[4]!.revenue_yoy_pct).toBeNull();
+  });
+
+  it("accepts a 53-week fiscal quarterly gap (~371 days) within the guard (#1839)", () => {
+    // 53-week filers shift the prior-year quarter ~371 days back — must stay
+    // inside the 300-430 window so legit YoY still computes.
+    const periods = joinStatements(
+      [
+        row("2024-02-03", { revenue: "100" }, "Q1"),
+        row("2024-05-04", { revenue: "100" }, "Q2"),
+        row("2024-08-03", { revenue: "100" }, "Q3"),
+        row("2024-11-02", { revenue: "100" }, "Q4"),
+        row("2025-02-08", { revenue: "120" }, "Q1"), // 371 days after 2024-02-03
+      ],
+      [],
+      [],
+    );
+    const yoy = buildYoyGrowth(periods, "quarterly");
+    expect(yoy[4]!.revenue_yoy_pct).toBe(20);
+  });
+
   it("computes FCF-YoY from operating_cf - capex", () => {
     const cashflow = [
       row("2025-12-31", { operating_cf: "100", capex: "30" }, "FY"),
