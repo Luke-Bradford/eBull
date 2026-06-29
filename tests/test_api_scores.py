@@ -110,6 +110,47 @@ def _make_history_row(
     }
 
 
+def _make_verdict_row(
+    scored_at: datetime = _NOW,
+    model_version: str = "v1.1-balanced",
+    rank: int | None = 1,
+    rank_delta: int | None = -2,
+    total_score: float | None = 0.82,
+    raw_total: float | None = 0.87,
+    quality_score: float | None = 0.90,
+    value_score: float | None = 0.75,
+    turnaround_score: float | None = 0.60,
+    momentum_score: float | None = 0.70,
+    sentiment_score: float | None = 0.50,
+    confidence_score: float | None = 0.85,
+    data_completeness: float | None = 0.91,
+    completeness_tier: str | None = "high",
+    penalties_json: list[dict[str, object]] | None = None,
+    explanation: str | None = "Strong quality + value",
+    analytics_json: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a dict matching the single-instrument verdict query shape."""
+    return {
+        "scored_at": scored_at,
+        "model_version": model_version,
+        "rank": rank,
+        "rank_delta": rank_delta,
+        "total_score": total_score,
+        "raw_total": raw_total,
+        "quality_score": quality_score,
+        "value_score": value_score,
+        "turnaround_score": turnaround_score,
+        "momentum_score": momentum_score,
+        "sentiment_score": sentiment_score,
+        "confidence_score": confidence_score,
+        "data_completeness": data_completeness,
+        "completeness_tier": completeness_tier,
+        "penalties_json": penalties_json,
+        "explanation": explanation,
+        "analytics_json": analytics_json,
+    }
+
+
 def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
     """Build a mock psycopg.Connection.
 
@@ -483,3 +524,101 @@ class TestGetScoreHistory:
         cur = conn.cursor.return_value
         sql: str = cur.execute.call_args_list[0][0][0]
         assert "order by s.scored_at desc" in sql.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestGetVerdict
+# ---------------------------------------------------------------------------
+
+
+class TestGetVerdict:
+    """GET /rankings/verdict/{instrument_id} — latest per-instrument score + IAR."""
+
+    def teardown_method(self) -> None:
+        _cleanup()
+
+    def test_happy_path_returns_score_with_analytics(self) -> None:
+        iar = {
+            "schema": "iar_v1",
+            "piotroski": {"score": 7, "components_available": 9, "band": "strong"},
+            "altman_z": {"z": 5.81, "band": "safe", "suppressed": False},
+            "positioning": {"insider_net_90d": {"signal": 0.62}},
+            "peer_grade": {
+                "peer_key": "4",
+                "peer_n": 412,
+                "basis": "run_eligible_sector",
+                "families": {"quality": {"absolute": 0.71, "percentile": 0.88, "hybrid": 0.76}},
+            },
+        }
+        row = _make_verdict_row(analytics_json=iar)
+        _with_conn([[row]])
+        resp = client.get("/rankings/verdict/1")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["instrument_id"] == 1
+        score = body["score"]
+        assert score is not None
+        assert score["total_score"] == 0.82
+        assert score["rank"] == 1
+        assert score["completeness_tier"] == "high"
+        # analytics_json passed through verbatim.
+        assert score["analytics_json"]["piotroski"]["score"] == 7
+        assert score["analytics_json"]["peer_grade"]["peer_n"] == 412
+
+    def test_never_scored_returns_null_score(self) -> None:
+        _with_conn([[]])
+        resp = client.get("/rankings/verdict/999")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["instrument_id"] == 999
+        assert body["score"] is None
+
+    def test_scored_but_no_iar_returns_null_analytics(self) -> None:
+        # Pre-#1823 row: headline present, analytics_json NULL.
+        row = _make_verdict_row(analytics_json=None)
+        _with_conn([[row]])
+        resp = client.get("/rankings/verdict/1")
+
+        assert resp.status_code == 200
+        score = resp.json()["score"]
+        assert score is not None
+        assert score["total_score"] == 0.82
+        assert score["analytics_json"] is None
+
+    def test_nullable_headline_fields_returned_as_null(self) -> None:
+        row = _make_verdict_row(
+            rank=None,
+            rank_delta=None,
+            total_score=None,
+            data_completeness=None,
+            completeness_tier=None,
+            explanation=None,
+        )
+        _with_conn([[row]])
+        resp = client.get("/rankings/verdict/1")
+
+        assert resp.status_code == 200
+        score = resp.json()["score"]
+        assert score["rank"] is None
+        assert score["total_score"] is None
+        assert score["completeness_tier"] is None
+
+    def test_query_orders_by_scored_at_desc_limit_one(self) -> None:
+        conn = _with_conn([[]])
+        client.get("/rankings/verdict/1")
+
+        cur = conn.cursor.return_value
+        sql: str = cur.execute.call_args_list[0][0][0]
+        lowered = sql.lower()
+        assert "order by s.scored_at desc" in lowered
+        assert "limit 1" in lowered
+
+    def test_custom_model_version(self) -> None:
+        conn = _with_conn([[]])
+        client.get("/rankings/verdict/1", params={"model_version": "v1-conservative"})
+
+        cur = conn.cursor.return_value
+        params = cur.execute.call_args_list[0][0][1]
+        assert params["mv"] == "v1-conservative"
