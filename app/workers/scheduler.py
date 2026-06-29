@@ -2261,8 +2261,19 @@ _T3_BOOTSTRAP_BATCH_SIZE = 200
 # (#591) has a benchmark series for beta/excess. Keyed by symbol
 # (env-agnostic; resolved to ids at runtime). Candle-scope only — NOT
 # promoted into scoring/ranking/thesis universe.
+#
+# SPX500 (eToro S&P 500 price-index instrument) is the REPORTING benchmark
+# (`reporting.py::BENCHMARK_SYMBOL`, spec docs/proposals/ui/2026-06-12-report-ia.md
+# §"Benchmark basis" — deliberately a price index, dividend-excluding). It is a
+# tier-3, never-held instrument, so without this entry NO refresh scope covers it
+# and its closes froze at 2026-06-04 (#1818) — the spec's "2022-07→present in
+# price_daily" assumption was a dev-data observation, not a maintained invariant.
+# Listing it here makes that invariant real. It is DISTINCT from SPY (the risk
+# layer's beta benchmark, a tradable ETF): the two S&P 500 series serve separately
+# specced purposes (beta regression vs the report comparison line) and are not
+# interchangeable.
 BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
-    {"SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+    {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
 )
 
 # T3 candle bootstrap eligibility query.

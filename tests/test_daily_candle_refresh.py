@@ -384,6 +384,24 @@ class TestDailyCandleRefreshEmptyFetchDisambiguation:
 def test_benchmark_symbols_constant_is_the_expected_set() -> None:
     from app.workers.scheduler import BENCHMARK_SYMBOLS
 
+    # SPX500 = the reporting benchmark (reporting.py::BENCHMARK_SYMBOL); it must
+    # be in the always-fresh set or its closes freeze (#1818). SPY = the risk
+    # layer's beta benchmark — distinct purpose, both kept fresh here.
     assert BENCHMARK_SYMBOLS == frozenset(
-        {"SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+        {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
     )
+
+
+def test_reporting_benchmark_symbol_is_always_refreshed() -> None:
+    """The reporting benchmark must be in the always-fresh candle set (#1818).
+
+    The report compares portfolio vs ``reporting.BENCHMARK_SYMBOL``. That symbol
+    is tier-3 and never held, so the ONLY scope that keeps its closes current is
+    ``BENCHMARK_SYMBOLS``. If the two diverge, the benchmark silently freezes and
+    the report renders "benchmark unavailable" (#1817 null-guard) — pin the
+    invariant so a future symbol change to either constant can't recur the freeze.
+    """
+    from app.services.reporting import BENCHMARK_SYMBOL
+    from app.workers.scheduler import BENCHMARK_SYMBOLS
+
+    assert BENCHMARK_SYMBOL in BENCHMARK_SYMBOLS
