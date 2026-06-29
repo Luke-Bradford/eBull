@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent for the JOBS DAEMON (the ETL / ingest + scheduler runner,
+  `python -m app.jobs`). Independent of the autonomy loop supervisor — this keeps
+  DATA fresh unattended (SEC manifest worker, per-CIK poll, orchestrator sync,
+  fundamentals, portfolio sync) with the AI loop OFF.
+
+  KeepAlive + RunAtLoad: starts on load, restarted if it ever exits (crash,
+  reboot, OOM) — so ingestion survives a machine restart while you're away
+  (#1865). Config is read from the repo `.env` via WorkingDirectory; only PATH
+  (for `uv`) + HOME (uv cache) are injected. The daemon's own PG advisory lock
+  prevents a duplicate if a manual daemon is still running — stop that first.
+
+  Install: substitute __REPO__ with the repo root, copy to
+  ~/Library/LaunchAgents/, `launchctl load` it. See scripts/autonomy/setup.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ebull.jobs-daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>python</string>
+    <string>-m</string>
+    <string>app.jobs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/var/autonomy-logs/launchd.jobs-daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/var/autonomy-logs/launchd.jobs-daemon.err.log</string>
+</dict>
+</plist>
