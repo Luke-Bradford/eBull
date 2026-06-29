@@ -58,6 +58,19 @@ branches, no unpushed WIP).
      **bug / ux / tech-debt** tickets with the screenshot + the exact route, one
      issue per distinct problem. Site review needs vite (`:5173`) + API
      (`:8000`) up; if down, skip FE-QA this iteration and note it.
+     - **Layout integrity, not just function (do NOT skip — this is how
+       #1858's dead-space-below-pagination shipped: a functional QA pass
+       confirmed pagination/sort/search/numbers but never scrolled).** A
+       top-of-viewport screenshot HIDES layout overflow. For every route:
+       **scroll the full page top-to-bottom and screenshot the BOTTOM, not
+       just the top.** Then assert the page actually bounds to the viewport:
+       evaluate `document.scrollingElement.scrollHeight` vs `innerHeight` and
+       confirm there is **no dead/empty scroll-space below the content** (a
+       page you can scroll well past its last element is a bug). Check this on
+       a **tall viewport** (e.g. 1400px) where slack is most visible, and on
+       list/paginated/table pages specifically (the footer must sit at the
+       bottom of the content, not float above a void). "Looks fine at the top"
+       is NOT an FE-QA pass.
 5. Update memory (the index + topic files) as you land work, per the memory rules.
 6. Next ticket.
 
