@@ -280,8 +280,13 @@ uv run pytest -m "not db" --tb=short -q
 # drift) that mocked-cursor unit tests silently miss. Runs against the running
 # dev stack (ebull cluster); if the stack is down the gate fails loudly, which
 # is correct — a broken server should not ship.
+# -n 0 (serial): pyproject addopts forces -n 4 --dist=loadgroup, but the smoke
+# tier pulls real dev-DB fixtures (FastAPI lifespan) and 4 workers contend on DB
+# connections -> intermittent ERRORs on random parametrized cases (#1843). Smoke
+# is small (~135 tests, ~31s serial); the parallelism buys nothing and costs
+# determinism. The fast tier above keeps -n 4 (no DB => no contention).
 echo "==> Pre-push gate: smoke (app boots against dev DB)"
-uv run pytest tests/smoke --tb=short -q
+uv run pytest tests/smoke -n 0 --tb=short -q
 
 # Frontend dark-mode class hygiene (#708). Skipped if frontend/ is
 # absent (e.g. backend-only worktrees) or if `pnpm` is not on PATH —
