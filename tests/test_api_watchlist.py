@@ -68,6 +68,7 @@ def test_list_returns_items_sorted_newest_first(client: TestClient) -> None:
             "currency": "USD",
             "sector": "8",  # eToro numeric industry id (provider contract)
             "sector_name": "Technology",  # resolved via etoro_stocks_industries join
+            "sic": "3571",  # SEC SIC → GICS "Information Technology" (#1851)
             "added_at": datetime(2026, 4, 15),
             "notes": "core holding",
         },
@@ -81,6 +82,8 @@ def test_list_returns_items_sorted_newest_first(client: TestClient) -> None:
             # the join yields NULL; sector_name must surface as None, not the id.
             "sector": "99",
             "sector_name": None,
+            # Non-SEC instrument: no SIC row → gics_sector fails closed to None.
+            "sic": None,
             "added_at": datetime(2026, 4, 10),
             "notes": None,
         },
@@ -98,6 +101,9 @@ def test_list_returns_items_sorted_newest_first(client: TestClient) -> None:
     assert body["items"][0]["sector"] == "8"
     assert body["items"][0]["sector_name"] == "Technology"
     assert body["items"][1]["sector_name"] is None
+    # #1851: gics_sector resolved from the SEC SIC, fail-closed None for non-SEC.
+    assert body["items"][0]["gics_sector"] == "Information Technology"
+    assert body["items"][1]["gics_sector"] is None
 
 
 def test_add_happy_path(client: TestClient) -> None:
@@ -111,6 +117,7 @@ def test_add_happy_path(client: TestClient) -> None:
             "currency": "USD",
             "sector": "8",
             "sector_name": "Technology",
+            "sic": "3571",
         },
         {"added_at": datetime(2026, 4, 19), "notes": "watch for earnings"},
     ]
@@ -125,6 +132,7 @@ def test_add_happy_path(client: TestClient) -> None:
     assert body["symbol"] == "AAPL"
     assert body["notes"] == "watch for earnings"
     assert body["sector_name"] == "Technology"  # #1599 resolved on add
+    assert body["gics_sector"] == "Information Technology"  # #1851 resolved on add
 
 
 def test_add_without_notes_preserves_existing_notes(client: TestClient) -> None:
@@ -139,6 +147,7 @@ def test_add_without_notes_preserves_existing_notes(client: TestClient) -> None:
             "currency": "USD",
             "sector": "8",
             "sector_name": "Technology",
+            "sic": "3571",
         },
         # Server returns the PRESERVED note, not NULL.
         {"added_at": datetime(2026, 4, 10), "notes": "core holding"},
