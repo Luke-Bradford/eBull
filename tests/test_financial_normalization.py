@@ -205,10 +205,14 @@ class TestDerivePeriodsFromFacts:
             ),
         ]
         periods = _derive_periods_from_facts(facts, reported_currency="USD")
-        # The quarter-duration fact is rejected for the FY group; with only that
-        # fact present there is no mapped fact left to anchor an FY row.
+        # The quarter-duration fact is rejected for the FY group; it was the only
+        # fact, so no FY row is anchored at all. Assert emptiness explicitly — a
+        # vacuous `all(... for p in fy)` over an empty list would pass even if the
+        # quarter fact had wrongly bound, proving nothing about the rejection.
         fy = [p for p in periods if p.period_type == "FY"]
-        assert all(p.revenue is None for p in fy)
+        assert fy == []
+        # And the quarter magnitude must never surface as revenue on any period.
+        assert all(p.revenue != Decimal("64698000000") for p in periods)
 
     def test_dei_fact_does_not_pollute_period_end(self) -> None:
         """Regression for #558.

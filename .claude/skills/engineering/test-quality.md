@@ -242,3 +242,23 @@ not a cross-day pair that passes before the closed check is ever reached.
 
 Origin: PR #1763 (#1754) review WARNING — the "closed window" gap test passed
 because the two bars were different NY dates, never reaching the closed guard.
+
+### Vacuous `all(pred for x in seq)` when the empty case is the expected outcome
+
+`assert all(pred for p in seq)` is `True` for an empty `seq` — so when the
+DOCUMENTED expected outcome is "no rows are produced", the `all(...)` proves
+nothing (it passes whether the bad row was rejected or was simply never built).
+When emptiness is the expected result, assert it directly:
+
+```python
+assert fy == []            # not: assert all(p.revenue is None for p in fy)
+```
+
+If a non-empty result is also valid (some rows survive, none carrying the bad
+value), pair an emptiness/length assertion with a value assertion that does not
+quantify over a possibly-empty set — e.g. `assert all(p.revenue != BAD for p in periods)`
+guarded by a prior `assert len(periods) >= 1`.
+
+Origin: PR #1837 (#1835) review WARNING — `test_fy_rejects_quarter_duration_mislabeled_fy`
+asserted `all(p.revenue is None for p in fy)` where the expected outcome was an
+empty `fy`, so the assertion was vacuously true and did not cover the rejection.
