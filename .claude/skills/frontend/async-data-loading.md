@@ -196,3 +196,17 @@ implementation staying that way. Grep before push:
 ```bash
 grep -nE 'use[A-Z][A-Za-z]+\([^)]*\[\{' frontend/src/**/*.tsx   # literal array-of-object hook args
 ```
+
+## Charting-lib mocks + the full test tier (#1841)
+
+A chart component that hand-rolls `vi.mock("lightweight-charts")` mocks only
+the lib subset it used at authoring time. When you make the component call a
+NEW lib method (`chart.timeScale().applyOptions(...)`, a new series/scale
+method), the mock throws `X is not a function` — and `pnpm --dir frontend
+test:unit` will NOT catch it: chart render harnesses (`ValueCanvas`,
+`ChartPage`, …) live in the **full** tier that `test:unit` excludes. So:
+
+1. Update that chart's `vi.mock` to expose the new method (mirror
+   `PriceChart.test.tsx`: `timeScale: vi.fn(() => ({ …, applyOptions: vi.fn() }))`).
+2. Run the FULL `pnpm --dir frontend test` before pushing whenever you touch a
+   chart's lightweight-charts API surface — not just `test:unit`.
