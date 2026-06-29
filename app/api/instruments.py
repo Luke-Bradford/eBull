@@ -59,11 +59,11 @@ from app.services.operators import (
     sole_operator_id,
 )
 from app.services.peer_comparison import (
-    DEV_LIMITED_FACTORS,
     FACTOR_BETTER_WHEN,
     FACTOR_KEYS,
     FACTOR_LABELS,
     compute_peer_comparison,
+    is_factor_thin,
 )
 from app.services.portfolio_risk import (
     PortfolioRiskStatus,
@@ -286,7 +286,7 @@ class PeerFactor(BaseModel):
     instrument_value: float | None
     sector_median: float | None
     sector_n: int  # # sector members with a non-null value for this factor
-    dev_limited: bool  # True for price-gated factors (P/E) — thin on dev
+    dev_limited: bool  # True when thin: price-gated (P/E) OR sector coverage <20% (#1836)
     better_when: Literal["higher", "lower"]
 
 
@@ -928,9 +928,10 @@ def get_instrument_peer_comparison(
     Per instrument: the radar factors (P/E, ROE, revenue growth YoY, operating
     margin, debt/equity, net margin), their sector medians, and a size-proximity
     peer set — all derived server-side from existing fundamentals (no new
-    ingest). P/E is ``dev_limited`` (price-gated). 404 when the instrument has no
+    ingest). A factor is ``dev_limited`` (thin: greyed + ⚠) when price-gated
+    (P/E) OR its sector coverage is <20% (#1836). 404 when the instrument has no
     sector classification or no complete-TTM fundamentals. Policy lives in
-    app/services/peer_comparison.py.
+    app/services/peer_comparison.py (``is_factor_thin``).
     """
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -970,7 +971,7 @@ def get_instrument_peer_comparison(
                 instrument_value=result.self_factors.get(key),
                 sector_median=result.medians[key].median,
                 sector_n=result.medians[key].n,
-                dev_limited=key in DEV_LIMITED_FACTORS,
+                dev_limited=is_factor_thin(key, result.medians[key].n, result.sector_member_count),
                 better_when=FACTOR_BETTER_WHEN[key],  # type: ignore[arg-type]
             )
             for key in FACTOR_KEYS

@@ -120,7 +120,7 @@ function PeersBody({ data }: { data: PeersData }): JSX.Element {
         Sector {pc.sector} · {pc.sector_member_count.toLocaleString()} members · {pc.peers.length}{" "}
         size-matched peers.
         {coverage.devLimitedKeys.length > 0
-          ? ` ${coverage.devLimitedKeys.length} factor${coverage.devLimitedKeys.length === 1 ? "" : "s"} dev-limited (greyed).`
+          ? ` ${coverage.devLimitedKeys.length} factor${coverage.devLimitedKeys.length === 1 ? "" : "s"} thin-coverage (greyed; median noisy).`
           : ""}
         {coverage.minSectorN < 50
           ? ` Some sector medians rest on as few as ${coverage.minSectorN.toLocaleString()} members — read them as noisy.`
