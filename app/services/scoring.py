@@ -32,6 +32,11 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
+from app.services.instrument_analytics import (
+    assemble_instrument_analytics,
+    compute_peer_grades,
+)
+from app.services.sector_classification import resolve_sector_spdr
 from app.services.xbrl_derived_stats import (
     MarketCapResolution,
     resolve_market_cap_basis,
@@ -305,6 +310,12 @@ class ScoreResult:
     # total_score; surfaced to the action layer + LLM record as a gate.
     data_completeness: float | None = None
     completeness_tier: str | None = None
+    # IAR evidence block (#1823, P2 of #1815) — Piotroski/Altman/positioning +
+    # (injected by compute_rankings) the cross-sectional peer grade. Persisted to
+    # scores.analytics_json. EVIDENCE-ONLY: never enters raw_total/total_score.
+    analytics: dict[str, Any] | None = None
+    # eToro sector code, carried for the compute_rankings peer-grade pass.
+    sector: str | None = None
     # Set after ranking pass
     rank: int | None = None
     rank_delta: int | None = None
@@ -1326,7 +1337,29 @@ def _load_instrument_data(
             resolution = MarketCapResolution(basis="not_multiclass")
         valuation_row = _apply_market_cap_basis(valuation_row, resolution)
 
+    # Sector code (eToro, for the peer-grade cohort) + SEC SIC (→ GICS sector,
+    # for the F/Z financials suppression). #1823. Own cursor — the dict_row
+    # cursor above is closed by this point.
+    sector_code: str | None = None
+    sic: str | None = None
+    with conn.cursor() as sec_cur:
+        sec_cur.execute(
+            """
+            SELECT i.sector, p.sic
+            FROM instruments i
+            LEFT JOIN instrument_sec_profile p ON p.instrument_id = i.instrument_id
+            WHERE i.instrument_id = %(id)s
+            """,
+            {"id": instrument_id},
+        )
+        sec_row = sec_cur.fetchone()
+        if sec_row is not None:
+            sector_code = sec_row[0]
+            sic = sec_row[1]
+
     return {
+        "sector_code": sector_code,
+        "sic": sic,
         "fund_rows": fund_rows,
         "price_row": price_row,
         "quote_row": quote_row,
@@ -1608,6 +1641,20 @@ def compute_score(
         news_90d_count=int(data.get("news_90d_count", 0)),
     )
 
+    # ------------------------------------------------------------------
+    # IAR evidence signals (#1823 §P2). Additive — never enters the
+    # total_score math above. Piotroski/Altman + positioning are per-
+    # instrument; the cross-sectional peer_grade is injected by
+    # compute_rankings from the run population.
+    # ------------------------------------------------------------------
+    fund_rows_for_shares = data["fund_rows"]
+    shares_out = _to_float(fund_rows_for_shares[0]["shares_outstanding"]) if fund_rows_for_shares else None
+    sic_cls = resolve_sector_spdr(data.get("sic"))  # type: ignore[arg-type]
+    gics_sector = sic_cls.gics_sector if sic_cls is not None else None
+    analytics = assemble_instrument_analytics(
+        instrument_id, conn, gics_sector=gics_sector, shares_outstanding=shares_out
+    )
+
     return ScoreResult(
         instrument_id=instrument_id,
         model_version=model_version,
@@ -1621,6 +1668,8 @@ def compute_score(
         total_reward=total_reward,
         data_completeness=data_completeness,
         completeness_tier=completeness_tier,
+        analytics=analytics,
+        sector=data.get("sector_code"),  # type: ignore[arg-type]
     )
 
 
@@ -1726,6 +1775,27 @@ def compute_rankings(
     # Sort descending by total_score, assign rank (1 = best)
     results.sort(key=lambda r: r.total_score, reverse=True)
 
+    # Cross-sectional hybrid peer grade (#1823 §P2) — computed from this run's
+    # absolute family scores grouped by eToro sector. Evidence-only; injected into
+    # each instrument's analytics block. Percentile cohort is the run-eligible
+    # population (basis records this).
+    peer_run_items = [
+        (
+            r.instrument_id,
+            r.sector,
+            {
+                "quality": r.family_scores.quality,
+                "value": r.family_scores.value,
+                "turnaround": r.family_scores.turnaround,
+                "momentum": r.family_scores.momentum,
+                "sentiment": r.family_scores.sentiment,
+                "confidence": r.family_scores.confidence,
+            },
+        )
+        for r in results
+    ]
+    peer_grades = compute_peer_grades(peer_run_items)
+
     # Read prior ranks and write new rows inside a single transaction.
     # Keeping _fetch_prior_ranks inside the transaction prevents a TOCTOU race
     # where a concurrent scoring run commits between the prior-rank read and our
@@ -1740,6 +1810,8 @@ def compute_rankings(
         for position, result in enumerate(results, start=1):
             prior_rank = prior_ranks.get(result.instrument_id)
             rank_delta = (prior_rank - position) if prior_rank is not None else None
+            analytics = dict(result.analytics) if result.analytics is not None else {}
+            analytics["peer_grade"] = peer_grades.get(result.instrument_id)
             scored = ScoreResult(
                 instrument_id=result.instrument_id,
                 model_version=result.model_version,
@@ -1753,6 +1825,8 @@ def compute_rankings(
                 total_reward=result.total_reward,
                 data_completeness=result.data_completeness,
                 completeness_tier=result.completeness_tier,
+                analytics=analytics,
+                sector=result.sector,
                 rank=position,
                 rank_delta=rank_delta,
             )
@@ -1801,7 +1875,8 @@ def _insert_score(
             raw_total, total_score, model_version,
             penalties_json, explanation,
             rank, rank_delta,
-            data_completeness, completeness_tier
+            data_completeness, completeness_tier,
+            analytics_json
         )
         VALUES (
             %(instrument_id)s, %(scored_at)s,
@@ -1810,7 +1885,8 @@ def _insert_score(
             %(raw_total)s, %(total_score)s, %(model_version)s,
             %(penalties_json)s, %(explanation)s,
             %(rank)s, %(rank_delta)s,
-            %(data_completeness)s, %(completeness_tier)s
+            %(data_completeness)s, %(completeness_tier)s,
+            %(analytics_json)s
         )
         """,
         {
@@ -1831,5 +1907,6 @@ def _insert_score(
             "rank_delta": result.rank_delta,
             "data_completeness": result.data_completeness,
             "completeness_tier": result.completeness_tier,
+            "analytics_json": Jsonb(result.analytics) if result.analytics is not None else None,
         },
     )

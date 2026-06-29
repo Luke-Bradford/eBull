@@ -985,6 +985,9 @@ def _make_fake_conn(
         ("fetchone", {"news_90d": news_90d}),
         ("fetchone", valuation_row),
         ("fetchone", risk_row),  # #1633 realized-risk metrics (risk_v1 3y)
+        # #1823 sector/sic read (eToro sector code + SEC SIC -> GICS). Plain
+        # cursor, indexed access: (sector_code, sic).
+        ("fetchone", ("1", None)),
     ]
     response_iter = iter(responses)
 
@@ -1007,6 +1010,17 @@ def _make_fake_conn(
 
 
 class TestComputeScore:
+    @pytest.fixture(autouse=True)
+    def _stub_analytics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The IAR evidence assembler (#1823) is exercised by the pure-logic suite
+        # (test_instrument_analytics.py) + the dev smoke; here it is stubbed so the
+        # MagicMock fake-conn (a fixed query sequence) doesn't have to model its
+        # extra savepoint-guarded reads. compute_score's scoring math is the SUT.
+        monkeypatch.setattr(
+            "app.services.scoring.assemble_instrument_analytics",
+            lambda *a, **k: {"schema": "iar_v1"},
+        )
+
     def test_full_fixture_produces_valid_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # compute_score reads wall-clock via scoring._utcnow(); pin it to
         # the fixture's anchor so thesis-age math is deterministic. Without
