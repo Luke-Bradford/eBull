@@ -106,6 +106,48 @@ class ScoreHistoryResponse(BaseModel):
     items: list[ScoreHistoryItem]
 
 
+class VerdictScore(BaseModel):
+    scored_at: datetime
+    model_version: str
+    rank: int | None
+    rank_delta: int | None
+    total_score: float | None
+    raw_total: float | None
+    quality_score: float | None
+    value_score: float | None
+    turnaround_score: float | None
+    momentum_score: float | None
+    sentiment_score: float | None
+    confidence_score: float | None
+    data_completeness: float | None
+    completeness_tier: str | None
+    penalties_json: list[dict[str, object]] | None
+    explanation: str | None
+    analytics_json: dict[str, object] | None
+
+
+class VerdictResponse(BaseModel):
+    """Latest score row for a single instrument — the per-instrument Verdict
+    payload (#1824, P3 of #1815).
+
+    ``score`` is ``None`` when the instrument has never been scored (200 +
+    null, mirroring the instrument-404→200+null convention of #1813). When
+    present it carries the full headline breakdown plus the Instrument
+    Analytical Record (``analytics_json``, #1823) passed through verbatim.
+
+    ``analytics_json`` is typed loosely as a passthrough dict: the ``iar_v1``
+    shape is self-describing and every signal is independently nullable/sparse
+    (a suppressed F/Z emits only ``{suppressed, reason}``; a standalone
+    ``peer_grade`` omits ``peer_key``/``peer_n``). Strict Pydantic modelling
+    would hit the validation cliff (#932) and couple the read endpoint to the
+    evidence schema; the FE owns the display-side typing. Pre-#1823 score rows
+    keep ``analytics_json = null`` — the headline still renders.
+    """
+
+    instrument_id: int
+    score: VerdictScore | None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -356,3 +398,70 @@ def get_score_history(
 
     items = [_parse_history_item(r) for r in rows]
     return ScoreHistoryResponse(instrument_id=instrument_id, items=items)
+
+
+@router.get("/verdict/{instrument_id}", response_model=VerdictResponse)
+def get_verdict(
+    instrument_id: int,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+    model_version: str = Query(default=_DEFAULT_MODEL_VERSION),
+) -> VerdictResponse:
+    """Latest score row for a single instrument — the Verdict tab payload (#1824).
+
+    Returns *this instrument's* most recent score (``ORDER BY scored_at DESC
+    LIMIT 1``), including the IAR (``analytics_json``, #1823). This deliberately
+    diverges from the run-coherent ``MAX(scored_at)`` semantics of the rankings
+    list: the list is a cross-sectional ranking that must be coherent within one
+    run, whereas a single-instrument verdict wants this instrument's most recent
+    analysis even if it was dropped from the very latest run. Staleness is made
+    visible by returning ``scored_at``.
+
+    200 with ``score = null`` when the instrument has never been scored
+    (mirrors the instrument-404→200+null convention of #1813). Pre-#1823 rows
+    keep ``analytics_json = null`` — the headline still renders.
+    """
+    sql = """
+        SELECT s.scored_at, s.model_version,
+               s.rank, s.rank_delta,
+               s.total_score, s.raw_total,
+               s.quality_score, s.value_score, s.turnaround_score,
+               s.momentum_score, s.sentiment_score, s.confidence_score,
+               s.data_completeness, s.completeness_tier,
+               s.penalties_json, s.explanation, s.analytics_json
+        FROM scores s
+        WHERE s.instrument_id = %(instrument_id)s
+          AND s.model_version = %(mv)s
+        ORDER BY s.scored_at DESC
+        LIMIT 1
+    """
+    params = {"instrument_id": instrument_id, "mv": model_version}
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+
+    if row is None:
+        return VerdictResponse(instrument_id=instrument_id, score=None)
+
+    return VerdictResponse(
+        instrument_id=instrument_id,
+        score=VerdictScore(
+            scored_at=row["scored_at"],  # type: ignore[arg-type]
+            model_version=row["model_version"],  # type: ignore[arg-type]
+            rank=_parse_optional_int(row, "rank"),
+            rank_delta=_parse_optional_int(row, "rank_delta"),
+            total_score=_parse_optional_float(row, "total_score"),
+            raw_total=_parse_optional_float(row, "raw_total"),
+            quality_score=_parse_optional_float(row, "quality_score"),
+            value_score=_parse_optional_float(row, "value_score"),
+            turnaround_score=_parse_optional_float(row, "turnaround_score"),
+            momentum_score=_parse_optional_float(row, "momentum_score"),
+            sentiment_score=_parse_optional_float(row, "sentiment_score"),
+            confidence_score=_parse_optional_float(row, "confidence_score"),
+            data_completeness=_parse_optional_float(row, "data_completeness"),
+            completeness_tier=row["completeness_tier"],  # type: ignore[arg-type]
+            penalties_json=row["penalties_json"],  # type: ignore[arg-type]
+            explanation=row["explanation"],  # type: ignore[arg-type]
+            analytics_json=row["analytics_json"],  # type: ignore[arg-type]
+        ),
+    )

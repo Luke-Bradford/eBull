@@ -47,6 +47,7 @@ import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { ResearchTab } from "@/components/instrument/ResearchTab";
+import { VerdictTab } from "@/components/instrument/VerdictTab";
 import { RightRail } from "@/components/instrument/RightRail";
 import { SummaryStrip } from "@/components/instrument/SummaryStrip";
 import { useAsync } from "@/lib/useAsync";
@@ -69,10 +70,17 @@ function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void })
   );
 }
 
-type TabId = "research" | "financials" | "positions" | "news" | "filings";
+type TabId =
+  | "research"
+  | "verdict"
+  | "financials"
+  | "positions"
+  | "news"
+  | "filings";
 
 const ALL_TABS: { id: TabId; label: string }[] = [
   { id: "research", label: "Research" },
+  { id: "verdict", label: "Verdict" },
   { id: "financials", label: "Financials" },
   { id: "positions", label: "Positions" },
   { id: "news", label: "News" },
@@ -719,6 +727,13 @@ function InstrumentPageBody({
               ))}
             </nav>
 
+            {activeTab === "verdict" && (
+              <VerdictTab
+                instrumentId={summary.instrument_id}
+                thesis={thesisAsync.data}
+                thesisErrored={thesisErrSticky}
+              />
+            )}
             {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
             {activeTab === "positions" && (
               <PositionsTab symbol={symbol} instrumentId={summary.instrument_id} />

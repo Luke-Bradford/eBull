@@ -1075,6 +1075,102 @@ export interface ScoreHistoryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /rankings/verdict/{instrument_id} (app/api/scores.py — #1824, P3 of #1815)
+//
+// The Instrument Analytical Record (IAR, `iar_v1`) shipped by #1823 as the
+// nullable JSONB `scores.analytics_json`. EVERY field below is OPTIONAL, not
+// merely nullable: the real branches are sparse — a suppressed F/Z emits only
+// `{suppressed, reason}` (no `score`/`components`), a missing-input F/Z emits
+// `{score:null, reason}`, a standalone `peer_grade` omits `peer_key`/`peer_n`.
+// The renderer guards each field's PRESENCE, never assumes a key. Absent /
+// null signals render honestly ("not available") — never neutral-filled.
+// ---------------------------------------------------------------------------
+
+export interface IarPiotroski {
+  score?: number | null;
+  components_available?: number;
+  band?: string | null;
+  components?: Record<string, boolean>;
+  suppressed?: boolean;
+  reason?: string | null;
+}
+
+export interface IarAltmanZ {
+  z?: number | null;
+  band?: string | null;
+  suppressed?: boolean;
+  reason?: string | null;
+}
+
+export interface IarPositioningSignal {
+  signal?: number | null;
+  reason?: string | null;
+  caveat?: string | null;
+  source?: string;
+  asof?: string;
+  // insider
+  net_shares?: number | null;
+  shares_outstanding?: number;
+  // 13F
+  delta_shares_pct?: number;
+  // short interest
+  short_pct?: number;
+  days_to_cover?: number;
+  falling?: boolean;
+}
+
+export interface IarPeerFamily {
+  absolute?: number;
+  percentile?: number | null;
+  hybrid?: number;
+}
+
+export interface IarPeerGrade {
+  peer_key?: string;
+  peer_n?: number;
+  basis?: string;
+  reason?: string;
+  families?: Record<string, IarPeerFamily>;
+}
+
+export interface IarAnalytics {
+  schema?: string;
+  piotroski?: IarPiotroski;
+  altman_z?: IarAltmanZ;
+  positioning?: {
+    insider_net_90d?: IarPositioningSignal;
+    inst_13f_qoq?: IarPositioningSignal;
+    short_interest?: IarPositioningSignal;
+  };
+  peer_grade?: IarPeerGrade;
+}
+
+export interface VerdictScore {
+  scored_at: string;
+  model_version: string;
+  rank: number | null;
+  rank_delta: number | null;
+  total_score: number | null;
+  raw_total: number | null;
+  quality_score: number | null;
+  value_score: number | null;
+  turnaround_score: number | null;
+  momentum_score: number | null;
+  sentiment_score: number | null;
+  confidence_score: number | null;
+  data_completeness: number | null;
+  completeness_tier: string | null;
+  penalties_json: Record<string, unknown>[] | null;
+  explanation: string | null;
+  analytics_json: IarAnalytics | null;
+}
+
+export interface VerdictResponse {
+  instrument_id: number;
+  score: VerdictScore | null;
+}
+
+// ---------------------------------------------------------------------------
 // /theses/{instrument_id} (app/api/theses.py)
 // ---------------------------------------------------------------------------
 
