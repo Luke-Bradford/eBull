@@ -20,7 +20,7 @@ All formatting goes through `frontend/src/lib/format.ts`. Adding parallel format
 
 Rules:
 
-- Currency is GBP for v1. Multi-currency is out of scope until a non-GBP account exists.
+- Currency is GBP for v1. Multi-currency is out of scope until a non-GBP account exists. **Exception — price charts render the instrument's NATIVE currency** (the OHLC candle endpoints return native, un-FX'd OHLC; spot-converting historical candles would misrepresent past prices). The header price beside the chart IS FX-converted to the operator display currency, so a native chart + converted header disagree numerically (GME: header `GBP 16.64`, axis `~22.10` USD). Any price chart must therefore carry a native-currency label so the two numbers reconcile (#1845: `PriceChart` `currency` prop fed from `summary.identity.currency`).
 - Percentages are **always** computed from fractions, not pre-multiplied numbers. Backend returns `0.0123`, not `1.23`.
 - Aggregate percentages are **capital-weighted** (`Σ pnl / Σ cost_basis`), never an average of per-row percentages.
 - Timestamps are en-GB, short month, 24h. Never raw ISO in the DOM.
