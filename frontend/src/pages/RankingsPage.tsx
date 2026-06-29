@@ -1,108 +1,113 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ApiError } from "@/api/client";
-import { fetchRankings, RANKINGS_PAGE_LIMIT, type RankingsQuery } from "@/api/rankings";
+import {
+  fetchRankings,
+  RANKINGS_PAGE_SIZE,
+  type RankingsQuery,
+  type RankingsSortField,
+} from "@/api/rankings";
 import { useAsync } from "@/lib/useAsync";
 import { Section } from "@/components/dashboard/Section";
 import { RankingsFilters } from "@/components/rankings/RankingsFilters";
 import { RankingsTable, type RankingsView } from "@/components/rankings/RankingsTable";
 import { formatDateTime } from "@/lib/format";
-import type { RankingItem, RankingsListResponse } from "@/api/types";
+import type { RankingsListResponse } from "@/api/types";
 
 /**
- * Rankings / candidates view (#61).
+ * Rankings / candidates view (#61, #1825 server-authoritative).
  *
- * Single async source: GET /rankings. The endpoint already joins instrument
- * metadata server-side (symbol, company_name, sector, coverage_tier), so
- * this page does NOT call /instruments — calling it would be a redundant
- * round-trip for data already in hand.
+ * Single async source: GET /rankings. EVERY control — filters, search,
+ * min-score, sort, pagination — is a server query param, so one page is a
+ * correct slice of the whole filtered, sorted population. The page no longer
+ * filters/sorts/truncates a 200-row client buffer.
  *
- * Server-side filters: coverage_tier, sector_spdr (real GICS sector, #1675),
- * stance — included in the query string and therefore in the useAsync deps so
- * a refetch fires when they change.
- *
- * Client-side filters / controls: minimum total_score, column sort. These
- * never trigger a refetch.
- *
- * Auth (#58 backend exists; frontend login route does not yet):
- *   401 → render an "Authentication required" state on this page only.
- *   No global redirect — see follow-up issue linked in the PR description.
- *
- * Strictly read-only: no mutations, no write actions.
+ * Offset is reset to 0 in the same handler as any query change (never in a
+ * useEffect reacting to `query`, which would double-fetch the new query at the
+ * stale offset — #1825 / Codex ckpt-1).
  */
+
+const DEFAULT_QUERY: RankingsQuery = {
+  coverage_tier: null,
+  sector_spdr: null,
+  stance: null,
+  q: null,
+  min_total_score: null,
+  sort: "rank",
+  sort_dir: "asc",
+};
+
 export function RankingsPage() {
-  const [query, setQuery] = useState<RankingsQuery>({
-    coverage_tier: null,
-    sector_spdr: null,
-    stance: null,
-  });
-  const [scoreThreshold, setScoreThreshold] = useState<number | null>(null);
-  // #194 — debounced symbol/name search; client-side filter over the
-  // current response (server-side `search` is not supported on the
-  // rankings endpoint and the page caps at RANKINGS_PAGE_LIMIT rows).
+  const [query, setQuery] = useState<RankingsQuery>(DEFAULT_QUERY);
+  const [offset, setOffset] = useState(0);
+
+  // #194 — debounced symbol/name search. The debounced value feeds query.q
+  // (server-side); searchInput drives the controlled input + dirty state.
   const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
   useEffect(() => {
-    const timer = setTimeout(() => setSearch(searchInput.trim().toLowerCase()), 300);
+    const timer = setTimeout(() => {
+      const next = searchInput.trim() === "" ? null : searchInput.trim();
+      // No-op when q is unchanged so an identical-search settle doesn't refetch.
+      setQuery((q) => (q.q === next ? q : { ...q, q: next }));
+      // Reset to page 1 on a search (harmless no-op when already at offset 0).
+      setOffset(0);
+    }, 300);
     return () => clearTimeout(timer);
   }, [searchInput]);
 
-  // useAsync captures fn via a ref — fresh arrow per render is fine.
   const rankings = useAsync(
-    () => fetchRankings(query),
-    [query.coverage_tier, query.sector_spdr, query.stance],
+    () => fetchRankings(query, RANKINGS_PAGE_SIZE, offset),
+    [
+      query.coverage_tier,
+      query.sector_spdr,
+      query.stance,
+      query.q,
+      query.min_total_score,
+      query.sort,
+      query.sort_dir,
+      offset,
+    ],
   );
+
+  // Any query change resets paging to the first page (atomic with the change).
+  const updateQuery = (next: RankingsQuery) => {
+    setQuery(next);
+    setOffset(0);
+  };
+
+  const onSortChange = (field: RankingsSortField, dir: "asc" | "desc") => {
+    updateQuery({ ...query, sort: field, sort_dir: dir });
+  };
+
+  const onClearAll = () => {
+    setQuery(DEFAULT_QUERY);
+    setOffset(0);
+    setSearchInput("");
+  };
 
   const filtersDirty =
     query.coverage_tier !== null ||
     query.sector_spdr !== null ||
     query.stance !== null ||
-    scoreThreshold !== null ||
-    // Use the un-debounced searchInput so Clear All shows immediately
-    // on first keystroke rather than 300 ms later (#634 NITPICK).
-    searchInput !== "";
-
-  const filteredItems = useMemo(() => {
-    if (rankings.data === null) return [];
-    let items: ReadonlyArray<RankingItem> = rankings.data.items;
-    if (scoreThreshold !== null) {
-      items = items.filter((i) => i.total_score !== null && i.total_score >= scoreThreshold);
-    }
-    if (search !== "") {
-      items = items.filter(
-        (i) =>
-          i.symbol.toLowerCase().includes(search) ||
-          i.company_name.toLowerCase().includes(search),
-      );
-    }
-    return items;
-  }, [rankings.data, scoreThreshold, search]);
-
-  // Surface the single edge case where the universe outgrew our single-page
-  // assumption (>200 Tier 1+2 instruments). Loud in dev, harmless in prod.
-  useEffect(() => {
-    if (rankings.data !== null && rankings.data.total > rankings.data.items.length) {
-      console.warn(
-        `[rankings] total=${rankings.data.total} exceeds page limit ${RANKINGS_PAGE_LIMIT}; showing the first ${rankings.data.items.length} rows. Pagination is tracked as a follow-up.`,
-      );
-    }
-  }, [rankings.data]);
-
-  const onClearAll = () => {
-    setQuery({ coverage_tier: null, sector_spdr: null, stance: null });
-    setScoreThreshold(null);
-    setSearchInput("");
-    setSearch("");
-  };
+    query.min_total_score != null ||
+    searchInput !== "" ||
+    query.sort !== "rank" ||
+    query.sort_dir !== "asc";
 
   const view: RankingsView = computeView({
     loading: rankings.loading,
     error: rankings.error,
     data: rankings.data,
-    filteredItems,
     filtersDirty,
     onRetry: rankings.refetch,
     onClearFilters: onClearAll,
   });
+
+  const total = rankings.data?.total ?? 0;
+  const pageCount = rankings.data?.items.length ?? 0;
+  const rangeStart = total === 0 ? 0 : offset + 1;
+  const rangeEnd = offset + pageCount;
+  const hasPrev = offset > 0;
+  const hasNext = offset + RANKINGS_PAGE_SIZE < total;
 
   return (
     <div className="flex h-full flex-col gap-6 pt-6">
@@ -128,36 +133,54 @@ export function RankingsPage() {
             placeholder="Symbol or company name…"
             className="w-full rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
           />
-          {/* Search is client-side over the page-bounded response.
-              When the universe outgrows RANKINGS_PAGE_LIMIT a match
-              outside the first page would silently fail to surface;
-              warn the operator so they don't read a false-negative
-              empty state as authoritative. Server-side search is the
-              proper fix and is tracked under the same paginated-
-              rankings follow-up referenced at line 92. */}
-          {search !== "" &&
-            rankings.data !== null &&
-            rankings.data.total > rankings.data.items.length && (
-              <p className="mt-1 text-xs text-amber-700">
-                Search covers the first {rankings.data.items.length} of {rankings.data.total} ranked
-                rows; matches outside the page are not shown.
-              </p>
-            )}
         </div>
 
         <RankingsFilters
           query={query}
-          onQueryChange={setQuery}
-          scoreThreshold={scoreThreshold}
-          onScoreThresholdChange={setScoreThreshold}
+          onQueryChange={updateQuery}
+          scoreThreshold={query.min_total_score ?? null}
+          onScoreThresholdChange={(next) =>
+            updateQuery({ ...query, min_total_score: next })
+          }
           onClearAll={onClearAll}
           filtersDirty={filtersDirty}
         />
       </div>
 
       <Section title="Candidates" scrollable>
-        <RankingsTable view={view} />
+        <RankingsTable
+          view={view}
+          sort={query.sort ?? "rank"}
+          sortDir={query.sort_dir ?? "asc"}
+          onSortChange={onSortChange}
+        />
       </Section>
+
+      {view.kind === "data" && (
+        <div className="flex flex-shrink-0 items-center justify-between border-t border-slate-200 dark:border-slate-800 pt-3 text-xs text-slate-500">
+          <span className="tabular-nums">
+            Showing {rangeStart}–{rangeEnd} of {total}
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setOffset((o) => Math.max(0, o - RANKINGS_PAGE_SIZE))}
+              disabled={!hasPrev}
+              className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1 font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              ‹ Prev
+            </button>
+            <button
+              type="button"
+              onClick={() => setOffset((o) => o + RANKINGS_PAGE_SIZE)}
+              disabled={!hasNext}
+              className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1 font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Next ›
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -166,29 +189,27 @@ interface ComputeViewArgs {
   loading: boolean;
   error: unknown;
   data: RankingsListResponse | null;
-  filteredItems: ReadonlyArray<RankingItem>;
   filtersDirty: boolean;
   onRetry: () => void;
   onClearFilters: () => void;
 }
 
 /**
- * Map the {loading, error, data, filteredItems, filtersDirty} state set
- * to the discriminated `RankingsView` consumed by RankingsTable.
+ * Map the {loading, error, data} state set to the discriminated `RankingsView`.
+ * The server already filtered + sorted + paged, so this operates on
+ * `data.items` directly — no client filtering layer.
  *
- * Branch order matters and is enforced by the frontend skills:
+ * Branch order (enforced by the frontend skills):
  *   1. loading        — useAsync clears data to null on every refetch start
- *   2. error 401      — auth-required, no retry button (retry is pointless
- *                       without credentials; global redirect is a follow-up)
+ *   2. error 401      — auth-required, no retry button
  *   3. error other    — generic retryable error
- *   4. empty no data  — backend returned [] before any client filter applied
- *   5. empty filtered — server returned rows but the client-side score
- *                       threshold removed them all (or the server-side
- *                       filters did and the user can clear them)
- *   6. data           — render rows
+ *   4. empty no runs  — scored_at null (engine never ran)
+ *   5. empty filtered — server returned [] for a dirty filter/search set
+ *   6. empty run      — server returned [] with no dirty filters
+ *   7. data           — render the page
  */
 function computeView(args: ComputeViewArgs): RankingsView {
-  const { loading, error, data, filteredItems, filtersDirty, onRetry, onClearFilters } = args;
+  const { loading, error, data, filtersDirty, onRetry, onClearFilters } = args;
 
   if (loading) return { kind: "loading" };
 
@@ -200,21 +221,12 @@ function computeView(args: ComputeViewArgs): RankingsView {
   }
 
   if (data === null) {
-    // Should not happen post-loading without an error, but the type
-    // narrowing demands a branch — surface as a generic error.
     return { kind: "error", onRetry };
   }
 
-  // Distinguish "engine has never run" from "engine ran but produced
-  // nothing for this filter set". The backend sets scored_at=None only
-  // when MAX(scored_at) is NULL — i.e. there are zero rows in the
-  // `scores` table for this model_version (see app/api/scores.py
-  // list_rankings step 1). The `&& items.length === 0` belt-and-braces
-  // guard defends against a hypothetical malformed payload where the
-  // backend serves rows with a null scored_at — without it, real rows
-  // would be hidden behind the "no runs yet" message. fetchRankings
-  // also console.warns on the same invariant violation so contract
-  // drift surfaces immediately.
+  // "Engine never ran" vs "engine ran but this filter set is empty". The
+  // backend sets scored_at=None only when there are zero rows for this
+  // model_version (app/api/scores.py list_rankings step 1).
   if (data.scored_at === null && data.items.length === 0) {
     return {
       kind: "empty",
@@ -224,19 +236,7 @@ function computeView(args: ComputeViewArgs): RankingsView {
     };
   }
 
-  if (filteredItems.length === 0) {
-    // Two distinct sub-cases:
-    //   - filtersDirty: a filter combination produced zero rows. The
-    //     clear-filters button is the operator's escape hatch.
-    //     (The filter bar above already exposes the same control, but
-    //     the issue spec requires the affordance inside the empty
-    //     state itself so the operator never has to hunt for the next
-    //     action.)
-    //   - !filtersDirty: the unfiltered request returned zero rows
-    //     even though a scoring run exists (an unusual but possible
-    //     state — e.g. a run that scored every candidate as filtered
-    //     out by penalties). The title must NOT imply user action
-    //     caused the empty set, since no filter is dirty.
+  if (data.items.length === 0) {
     if (filtersDirty) {
       return {
         kind: "empty",
@@ -253,7 +253,7 @@ function computeView(args: ComputeViewArgs): RankingsView {
     };
   }
 
-  return { kind: "data", items: filteredItems.slice() };
+  return { kind: "data", items: data.items.slice() };
 }
 
 function ClearFiltersButton({ onClick }: { onClick: () => void }) {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -24,6 +24,8 @@ function _item(overrides: Partial<RankingItem>): RankingItem {
     momentum_score: 40,
     sentiment_score: 30,
     confidence_score: 20,
+    data_completeness: 0.91,
+    completeness_tier: "full",
     penalties_json: null,
     explanation: null,
     model_version: "v1-balanced",
@@ -32,111 +34,138 @@ function _item(overrides: Partial<RankingItem>): RankingItem {
   };
 }
 
-describe("RankingsPage — #194 search", () => {
-  it("filters rows by symbol substring (debounced)", async () => {
-    const response: RankingsListResponse = {
-      items: [
-        _item({ instrument_id: 1, symbol: "AAA", company_name: "Alpha Co" }),
-        _item({ instrument_id: 2, symbol: "BBB", company_name: "Beta Inc" }),
-        _item({ instrument_id: 3, symbol: "CCC", company_name: "Charlie Ltd" }),
-      ],
-      total: 3,
-      offset: 0,
-      limit: 200,
-      model_version: "v1-balanced",
-      scored_at: "2026-04-28T12:00:00Z",
-    };
-    vi.spyOn(rankingsApi, "fetchRankings").mockResolvedValue(response);
+function _response(
+  items: RankingItem[],
+  total: number,
+  offset = 0,
+): RankingsListResponse {
+  return {
+    items,
+    total,
+    offset,
+    limit: 50,
+    model_version: "v1-balanced",
+    scored_at: "2026-04-28T12:00:00Z",
+  };
+}
 
+/** Last (query, limit, offset) the page passed to fetchRankings. */
+function lastCall(spy: ReturnType<typeof vi.spyOn>) {
+  const calls = spy.mock.calls;
+  return calls[calls.length - 1] as unknown as [rankingsApi.RankingsQuery, number, number];
+}
+
+describe("RankingsPage — server-authoritative (#1825)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("renders rows + the completeness chip", async () => {
+    const spy = vi
+      .spyOn(rankingsApi, "fetchRankings")
+      .mockResolvedValue(_response([_item({ completeness_tier: "thin_data" })], 1));
     render(
       <MemoryRouter>
         <RankingsPage />
       </MemoryRouter>,
     );
-
-    // Initial render shows all three rows.
     expect(await screen.findByText("AAA")).toBeInTheDocument();
-    expect(screen.getByText("BBB")).toBeInTheDocument();
-    expect(screen.getByText("CCC")).toBeInTheDocument();
-
-    const searchInput = screen.getByLabelText(/search/i);
-    await userEvent.type(searchInput, "BBB");
-
-    // 300ms debounce — wait for filter to apply.
-    await waitFor(
-      () => {
-        expect(screen.queryByText("AAA")).not.toBeInTheDocument();
-      },
-      { timeout: 1000 },
-    );
-    expect(screen.getByText("BBB")).toBeInTheDocument();
-    expect(screen.queryByText("CCC")).not.toBeInTheDocument();
+    expect(screen.getByText(/thin data/i)).toBeInTheDocument();
+    expect(spy).toHaveBeenCalled();
   });
 
-  it("warns when search runs over a truncated page (#194 Codex)", async () => {
-    const response: RankingsListResponse = {
-      items: [_item({ instrument_id: 1, symbol: "AAA", company_name: "Alpha Co" })],
-      // total > items.length triggers the truncation banner once the
-      // user starts searching. Otherwise an out-of-page match would
-      // silently appear as "No instruments match the current filters".
-      total: 250,
-      offset: 0,
-      limit: 200,
-      model_version: "v1-balanced",
-      scored_at: "2026-04-28T12:00:00Z",
-    };
-    vi.spyOn(rankingsApi, "fetchRankings").mockResolvedValue(response);
-
+  it("search drives a server query param (q) and resets to offset 0", async () => {
+    const spy = vi
+      .spyOn(rankingsApi, "fetchRankings")
+      .mockResolvedValue(_response([_item({})], 1));
     render(
       <MemoryRouter>
         <RankingsPage />
       </MemoryRouter>,
     );
+    await screen.findByText("AAA");
 
-    expect(await screen.findByText("AAA")).toBeInTheDocument();
-    // No banner before search.
-    expect(screen.queryByText(/matches outside the page/i)).not.toBeInTheDocument();
-
-    await userEvent.type(screen.getByLabelText(/search/i), "foo");
+    await userEvent.type(screen.getByLabelText(/search/i), "BBB");
     await waitFor(
       () => {
-        expect(screen.getByText(/matches outside the page/i)).toBeInTheDocument();
+        expect(lastCall(spy)[0].q).toBe("BBB");
       },
       { timeout: 1000 },
     );
+    // offset (3rd positional arg) is 0 after a search.
+    expect(lastCall(spy)[2]).toBe(0);
   });
 
-  it("filters by company-name substring (case-insensitive)", async () => {
-    const response: RankingsListResponse = {
-      items: [
-        _item({ instrument_id: 1, symbol: "AAA", company_name: "Alpha Co" }),
-        _item({ instrument_id: 2, symbol: "BBB", company_name: "Beta Inc" }),
-      ],
-      total: 2,
-      offset: 0,
-      limit: 200,
-      model_version: "v1-balanced",
-      scored_at: "2026-04-28T12:00:00Z",
-    };
-    vi.spyOn(rankingsApi, "fetchRankings").mockResolvedValue(response);
-
+  it("pagination Next advances the server offset", async () => {
+    // 120 total, page size 50 → Next is enabled.
+    const spy = vi
+      .spyOn(rankingsApi, "fetchRankings")
+      .mockResolvedValue(_response([_item({})], 120));
     render(
       <MemoryRouter>
         <RankingsPage />
       </MemoryRouter>,
     );
+    await screen.findByText("AAA");
+    expect(screen.getByText(/showing 1–1 of 120/i)).toBeInTheDocument();
 
-    expect(await screen.findByText("AAA")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /next/i }));
+    await waitFor(() => {
+      expect(lastCall(spy)[2]).toBe(50);
+    });
+  });
 
-    const searchInput = screen.getByLabelText(/search/i);
-    await userEvent.type(searchInput, "alpha");
+  it("Prev is disabled on the first page", async () => {
+    vi.spyOn(rankingsApi, "fetchRankings").mockResolvedValue(
+      _response([_item({})], 120),
+    );
+    render(
+      <MemoryRouter>
+        <RankingsPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText("AAA");
+    expect(screen.getByRole("button", { name: /prev/i })).toBeDisabled();
+  });
 
+  it("sort header click drives the server sort param", async () => {
+    const spy = vi
+      .spyOn(rankingsApi, "fetchRankings")
+      .mockResolvedValue(_response([_item({})], 1));
+    render(
+      <MemoryRouter>
+        <RankingsPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText("AAA");
+
+    await userEvent.click(screen.getByRole("button", { name: /value/i }));
+    await waitFor(() => {
+      expect(lastCall(spy)[0].sort).toBe("value_score");
+      expect(lastCall(spy)[0].sort_dir).toBe("desc");
+    });
+  });
+
+  it("shows the dirty-filter empty state when a search returns nothing", async () => {
+    vi.spyOn(rankingsApi, "fetchRankings").mockResolvedValue(
+      _response([], 0),
+    );
+    render(
+      <MemoryRouter>
+        <RankingsPage />
+      </MemoryRouter>,
+    );
+    // No dirty filter yet → "produced no ranked instruments".
+    expect(
+      await screen.findByText(/produced no ranked instruments/i),
+    ).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/search/i), "zzz");
     await waitFor(
       () => {
-        expect(screen.queryByText("BBB")).not.toBeInTheDocument();
+        expect(
+          screen.getByText(/no instruments match the current filters/i),
+        ).toBeInTheDocument();
       },
       { timeout: 1000 },
     );
-    expect(screen.getByText("AAA")).toBeInTheDocument();
   });
 });

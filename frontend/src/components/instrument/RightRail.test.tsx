@@ -32,7 +32,7 @@ vi.mock("@/api/filings", () => ({ fetchFilings: vi.fn() }));
 vi.mock("@/api/news", () => ({ fetchNews: vi.fn() }));
 vi.mock("@/api/rankings", () => ({
   fetchRankings: vi.fn(),
-  RANKINGS_PAGE_LIMIT: 200,
+  RANKINGS_PAGE_SIZE: 50,
 }));
 vi.mock("@/api/copyTrading", () => ({ fetchCopyTrading: vi.fn() }));
 
@@ -124,6 +124,8 @@ function rankingsWith(currentSymbol: string): RankingsListResponse {
         momentum_score: null,
         sentiment_score: null,
         confidence_score: null,
+        data_completeness: null,
+        completeness_tier: null,
         penalties_json: null,
         explanation: null,
         model_version: "v1",
@@ -146,6 +148,8 @@ function rankingsWith(currentSymbol: string): RankingsListResponse {
         momentum_score: null,
         sentiment_score: null,
         confidence_score: null,
+        data_completeness: null,
+        completeness_tier: null,
         penalties_json: null,
         explanation: null,
         model_version: "v1",
@@ -277,6 +281,8 @@ describe("RightRail", () => {
           momentum_score: null,
           sentiment_score: null,
           confidence_score: null,
+          data_completeness: null,
+          completeness_tier: null,
           penalties_json: null,
           explanation: null,
           model_version: "v1",

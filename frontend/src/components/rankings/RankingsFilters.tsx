@@ -4,15 +4,13 @@ import { SECTOR_OPTIONS } from "@/lib/sectors";
 /**
  * Filter bar for the rankings page.
  *
- * Server-side filters (sent to /rankings as query params):
+ * All filters are server-side query params (#1825 — fully server-authoritative):
  *   - coverage_tier (1 / 2 / 3)
  *   - sector_spdr (real GICS sector, #1675)
  *   - stance (buy / hold / watch / avoid)
+ *   - score threshold → query.min_total_score (sent to /rankings)
  *
- * Client-side filter (applied to the in-memory result set):
- *   - score threshold (minimum total_score)
- *
- * Sort is also client-side and lives on the table component, not here.
+ * Sort lives on the table header (also server-side now); pagination on the page.
  *
  * Sector options are the fixed 11 GICS sectors (#1675, SECTOR_OPTIONS) — value
  * is the SPDR symbol sent to the API, label is the GICS name. No longer derived
