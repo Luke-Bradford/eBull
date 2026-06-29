@@ -1033,6 +1033,10 @@ export interface RankingItem {
   momentum_score: number | null;
   sentiment_score: number | null;
   confidence_score: number | null;
+  // #1825: data-completeness surfaced so high-ranked thin-coverage names are
+  // visibly flagged (on `scores` since #1820).
+  data_completeness: number | null;
+  completeness_tier: string | null;
   penalties_json: Record<string, unknown>[] | null;
   explanation: string | null;
   model_version: string;

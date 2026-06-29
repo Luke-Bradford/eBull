@@ -40,6 +40,45 @@ MAX_PAGE_LIMIT = 200
 
 Stance = Literal["buy", "hold", "watch", "avoid"]
 
+# Server-side sort allowlist (#1825). The request value is a Literal (FastAPI
+# 422s anything off-list) AND only ever used as a dict KEY here — the SQL column
+# fragment comes exclusively from this hardcoded map, so the user value never
+# reaches the ORDER BY string. `gics_sector` is deliberately absent: the column
+# displays a Python-resolved GICS label while the only SQL expression is the
+# SPDR-symbol CASE, so a SQL sort would not match the visible order (sector is a
+# filter, not a sort).
+SortField = Literal[
+    "rank",
+    "rank_delta",
+    "symbol",
+    "coverage_tier",
+    "total_score",
+    "quality_score",
+    "value_score",
+    "turnaround_score",
+    "momentum_score",
+    "sentiment_score",
+    "confidence_score",
+    "data_completeness",
+]
+
+_SORT_COLUMNS: dict[str, str] = {
+    "rank": "s.rank",
+    "rank_delta": "s.rank_delta",
+    "symbol": "i.symbol",
+    "coverage_tier": "c.coverage_tier",
+    "total_score": "s.total_score",
+    "quality_score": "s.quality_score",
+    "value_score": "s.value_score",
+    "turnaround_score": "s.turnaround_score",
+    "momentum_score": "s.momentum_score",
+    "sentiment_score": "s.sentiment_score",
+    "confidence_score": "s.confidence_score",
+    "data_completeness": "s.data_completeness",
+}
+
+_SORT_DIR: dict[str, str] = {"asc": "ASC", "desc": "DESC"}
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
@@ -67,6 +106,10 @@ class RankingItem(BaseModel):
     momentum_score: float | None
     sentiment_score: float | None
     confidence_score: float | None
+    # #1825: data-completeness surfaced so a high-ranked thin-coverage name is
+    # visibly flagged (on `scores` since #1820).
+    data_completeness: float | None
+    completeness_tier: str | None
     penalties_json: list[dict[str, object]] | None
     explanation: str | None
     model_version: str
@@ -187,6 +230,8 @@ def _parse_ranking_item(row: dict[str, object]) -> RankingItem:
         momentum_score=_parse_optional_float(row, "momentum_score"),
         sentiment_score=_parse_optional_float(row, "sentiment_score"),
         confidence_score=_parse_optional_float(row, "confidence_score"),
+        data_completeness=_parse_optional_float(row, "data_completeness"),
+        completeness_tier=row.get("completeness_tier"),  # type: ignore[arg-type]
         penalties_json=row["penalties_json"],  # type: ignore[arg-type]
         explanation=row["explanation"],  # type: ignore[arg-type]
         model_version=row["model_version"],  # type: ignore[arg-type]
@@ -226,6 +271,10 @@ def list_rankings(
     sector: str | None = Query(default=None),
     sector_spdr: str | None = Query(default=None),
     stance: Stance | None = Query(default=None),
+    q: str | None = Query(default=None),
+    min_total_score: float | None = Query(default=None),
+    sort: SortField = Query(default="rank"),
+    sort_dir: Literal["asc", "desc"] = Query(default="asc"),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=MAX_PAGE_LIMIT),
 ) -> RankingsListResponse:
@@ -244,6 +293,15 @@ def list_rankings(
       - sector: DEPRECATED — exact match on the opaque ``instruments.sector``
         1-9 code (no GICS meaning). Retained for back-compat; use ``sector_spdr``.
       - stance: latest thesis stance for each instrument (adds LATERAL join only when used)
+      - q: case-insensitive substring match on symbol OR company_name (#1825 search)
+      - min_total_score: keep only rows with ``total_score >= min_total_score`` (#1825)
+
+    Sorting (#1825): ``sort`` (column allowlist) + ``sort_dir`` (asc/desc), both
+    Literals resolved through hardcoded maps so the user value never reaches the
+    SQL string. A stable ``s.rank, s.instrument_id`` tiebreak makes every page a
+    deterministic, drift-free slice. Server-authoritative pagination
+    (``offset``/``limit``/``total``) lets the client page the WHOLE filtered,
+    sorted population — no client-side truncation.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         # Step 1: find the latest run timestamp for this model_version.
@@ -312,6 +370,18 @@ def list_rankings(
             where_clauses.append("lt.stance = %(stance)s")
             filter_params["stance"] = stance
 
+        # Search: case-insensitive substring on symbol OR company_name (#1825).
+        if q is not None and q.strip() != "":
+            where_clauses.append("(i.symbol ILIKE %(q)s OR i.company_name ILIKE %(q)s)")
+            filter_params["q"] = f"%{q.strip()}%"
+
+        # Minimum total score (#1825). NULL total_score rows are excluded by the
+        # >= comparison, which is correct — an unscored row has no score to clear
+        # the bar.
+        if min_total_score is not None:
+            where_clauses.append("s.total_score >= %(min_total_score)s")
+            filter_params["min_total_score"] = min_total_score
+
         where_sql = " WHERE " + " AND ".join(where_clauses)
         joins_sql = "\n".join(extra_joins)
 
@@ -333,12 +403,22 @@ def list_rankings(
             "limit": limit,
             "offset": offset,
         }
+        # ORDER BY: column + direction come ONLY from the hardcoded allowlist
+        # maps (the request values are Literals, used as dict keys), so the
+        # user-controlled value never reaches the SQL string. The
+        # ``s.rank, s.instrument_id`` suffix is a stable, unique tiebreak so
+        # every page is a deterministic slice even when the sort value (and
+        # rank) tie (#1825 / Codex ckpt-1).
+        order_col = _SORT_COLUMNS[sort]
+        order_dir = _SORT_DIR[sort_dir]
+        order_sql = f"ORDER BY {order_col} {order_dir} NULLS LAST, s.rank ASC NULLS LAST, s.instrument_id ASC"
         items_sql = f"""SELECT s.instrument_id, i.symbol, i.company_name, i.sector, p.sic,
                    c.coverage_tier,
                    s.rank, s.rank_delta,
                    s.total_score, s.raw_total,
                    s.quality_score, s.value_score, s.turnaround_score,
                    s.momentum_score, s.sentiment_score, s.confidence_score,
+                   s.data_completeness, s.completeness_tier,
                    s.penalties_json, s.explanation,
                    s.model_version, s.scored_at
             FROM scores s
@@ -346,7 +426,7 @@ def list_rankings(
             LEFT JOIN coverage c USING (instrument_id)
             {joins_sql}
             {where_sql}
-            ORDER BY s.rank ASC NULLS LAST, s.total_score DESC
+            {order_sql}
             LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — hardcoded fragments only
 
         cur.execute(items_sql, items_params)  # type: ignore[arg-type]

@@ -47,6 +47,8 @@ def _make_ranking_row(
     momentum_score: float | None = 0.70,
     sentiment_score: float | None = 0.50,
     confidence_score: float | None = 0.85,
+    data_completeness: float | None = 0.91,
+    completeness_tier: str | None = "full",
     penalties_json: list[dict[str, object]] | None = None,
     explanation: str | None = "Strong quality + value",
     model_version: str = "v1.1-balanced",
@@ -69,6 +71,8 @@ def _make_ranking_row(
         "momentum_score": momentum_score,
         "sentiment_score": sentiment_score,
         "confidence_score": confidence_score,
+        "data_completeness": data_completeness,
+        "completeness_tier": completeness_tier,
         "penalties_json": penalties_json,
         "explanation": explanation,
         "model_version": model_version,
@@ -342,6 +346,114 @@ class TestListRankings:
         items_params = cur.execute.call_args_list[2][0][1]
         assert items_params["offset"] == 10
         assert items_params["limit"] == 25
+
+    def test_search_q_adds_ilike_predicate(self) -> None:
+        conn = _with_conn(
+            [
+                [{"latest": _NOW}],
+                [{"cnt": 1}],
+                [_make_ranking_row()],
+            ]
+        )
+        resp = client.get("/rankings", params={"q": "appl"})
+        assert resp.status_code == 200
+
+        cur = conn.cursor.return_value
+        count_sql: str = cur.execute.call_args_list[1][0][0]
+        count_params = cur.execute.call_args_list[1][0][1]
+        assert "ilike" in count_sql.lower()
+        # Bound with %% wildcards, trimmed.
+        assert count_params["q"] == "%appl%"
+
+    def test_blank_q_omits_predicate(self) -> None:
+        conn = _with_conn(
+            [
+                [{"latest": _NOW}],
+                [{"cnt": 1}],
+                [_make_ranking_row()],
+            ]
+        )
+        resp = client.get("/rankings", params={"q": "   "})
+        assert resp.status_code == 200
+
+        cur = conn.cursor.return_value
+        count_sql: str = cur.execute.call_args_list[1][0][0]
+        count_params = cur.execute.call_args_list[1][0][1]
+        assert "ilike" not in count_sql.lower()
+        assert "q" not in count_params
+
+    def test_min_total_score_predicate(self) -> None:
+        conn = _with_conn(
+            [
+                [{"latest": _NOW}],
+                [{"cnt": 1}],
+                [_make_ranking_row()],
+            ]
+        )
+        resp = client.get("/rankings", params={"min_total_score": 0.5})
+        assert resp.status_code == 200
+
+        cur = conn.cursor.return_value
+        count_sql: str = cur.execute.call_args_list[1][0][0]
+        count_params = cur.execute.call_args_list[1][0][1]
+        assert "s.total_score >=" in count_sql.lower()
+        assert count_params["min_total_score"] == 0.5
+
+    def test_sort_maps_to_order_by_column(self) -> None:
+        conn = _with_conn(
+            [
+                [{"latest": _NOW}],
+                [{"cnt": 1}],
+                [_make_ranking_row()],
+            ]
+        )
+        resp = client.get("/rankings", params={"sort": "value_score", "sort_dir": "desc"})
+        assert resp.status_code == 200
+
+        cur = conn.cursor.return_value
+        # items query is execute index 2
+        items_sql: str = cur.execute.call_args_list[2][0][0].lower()
+        assert "order by s.value_score desc nulls last" in items_sql
+        # stable unique tiebreak preserved
+        assert "s.instrument_id asc" in items_sql
+
+    def test_default_sort_is_rank_asc(self) -> None:
+        conn = _with_conn(
+            [
+                [{"latest": _NOW}],
+                [{"cnt": 1}],
+                [_make_ranking_row()],
+            ]
+        )
+        resp = client.get("/rankings")
+        assert resp.status_code == 200
+
+        cur = conn.cursor.return_value
+        items_sql: str = cur.execute.call_args_list[2][0][0].lower()
+        assert "order by s.rank asc nulls last" in items_sql
+
+    def test_invalid_sort_rejected(self) -> None:
+        resp = client.get("/rankings", params={"sort": "; DROP TABLE scores"})
+        assert resp.status_code == 422
+
+    def test_invalid_sort_dir_rejected(self) -> None:
+        resp = client.get("/rankings", params={"sort_dir": "sideways"})
+        assert resp.status_code == 422
+
+    def test_completeness_fields_surfaced(self) -> None:
+        row = _make_ranking_row(data_completeness=0.42, completeness_tier="thin_data")
+        _with_conn(
+            [
+                [{"latest": _NOW}],
+                [{"cnt": 1}],
+                [row],
+            ]
+        )
+        resp = client.get("/rankings")
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["data_completeness"] == 0.42
+        assert item["completeness_tier"] == "thin_data"
 
     def test_count_query_receives_no_limit_offset(self) -> None:
         """COUNT query params must not contain limit/offset keys."""

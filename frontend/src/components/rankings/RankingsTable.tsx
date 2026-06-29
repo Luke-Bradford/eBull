@@ -1,62 +1,48 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import type { RankingsSortField } from "@/api/rankings";
 import type { RankingItem } from "@/api/types";
 import { formatNumber } from "@/lib/format";
 import { RankDeltaCell } from "@/components/rankings/RankDeltaCell";
 
 /**
- * Rankings table.
+ * Rankings table (#1825 — server-authoritative sort + pagination).
  *
  * One component, five render branches, one stable `<table>` element. The
  * `<thead>` column set is defined exactly once in COLUMNS and rendered in
  * every branch so the layout does not shift between loading / empty /
- * error / data states (the loading-error-empty-states skill rule, plus
- * the #89 / #90 prevention finding).
+ * error / data states.
  *
- * Non-data branches render their content as a single `<tr><td colSpan>`
- * row inside the same `<tbody>` so the markup stays valid HTML — never a
- * `<div>` swapped in alongside the table.
- *
- * Sort state lives in this component, not the page. Sorting is purely
- * client-side; changing sort never triggers a refetch. The dataset is
- * capped at 200 rows by RANKINGS_PAGE_LIMIT so an in-memory sort is fine.
+ * Sorting is now SERVER-side: a header click calls `onSortChange(field, dir)`
+ * and the page refetches the WHOLE filtered population reordered — the table
+ * no longer sorts the current page in memory (which would only reorder the
+ * visible slice). `sort` / `sortDir` come from props (the page's query state).
  */
 
-type SortKey =
-  | "rank"
-  | "symbol"
-  | "gics_sector"
-  | "coverage_tier"
-  | "total_score"
-  | "quality_score"
-  | "value_score"
-  | "turnaround_score"
-  | "momentum_score"
-  | "sentiment_score"
-  | "rank_delta";
-
 interface ColumnDef {
-  key: SortKey;
+  // null = not server-sortable (display-only, like Company; or the GICS sector
+  // label which has no matching SQL sort expression — #1825 / Codex ckpt-1).
+  sortKey: RankingsSortField | null;
   label: string;
   align: "left" | "right";
-  // Default sort direction when this column is first clicked. For numeric
-  // score columns we want highest first; for rank we want best (lowest)
-  // first.
+  // Default sort direction when this column is first clicked. Numeric score
+  // columns want highest-first; rank/symbol/tier want ascending-first.
   defaultDir: "asc" | "desc";
 }
 
 const COLUMNS: ReadonlyArray<ColumnDef> = [
-  { key: "rank", label: "Rank", align: "right", defaultDir: "asc" },
-  { key: "rank_delta", label: "Δ", align: "right", defaultDir: "asc" },
-  { key: "symbol", label: "Symbol", align: "left", defaultDir: "asc" },
-  { key: "gics_sector", label: "Sector", align: "left", defaultDir: "asc" },
-  { key: "coverage_tier", label: "Tier", align: "right", defaultDir: "asc" },
-  { key: "total_score", label: "Total", align: "right", defaultDir: "desc" },
-  { key: "quality_score", label: "Quality", align: "right", defaultDir: "desc" },
-  { key: "value_score", label: "Value", align: "right", defaultDir: "desc" },
-  { key: "turnaround_score", label: "Turn.", align: "right", defaultDir: "desc" },
-  { key: "momentum_score", label: "Mom.", align: "right", defaultDir: "desc" },
-  { key: "sentiment_score", label: "Sent.", align: "right", defaultDir: "desc" },
+  { sortKey: "rank", label: "Rank", align: "right", defaultDir: "asc" },
+  { sortKey: "rank_delta", label: "Δ", align: "right", defaultDir: "asc" },
+  { sortKey: "symbol", label: "Symbol", align: "left", defaultDir: "asc" },
+  { sortKey: null, label: "Sector", align: "left", defaultDir: "asc" },
+  { sortKey: "coverage_tier", label: "Tier", align: "right", defaultDir: "asc" },
+  { sortKey: "total_score", label: "Total", align: "right", defaultDir: "desc" },
+  { sortKey: "quality_score", label: "Quality", align: "right", defaultDir: "desc" },
+  { sortKey: "value_score", label: "Value", align: "right", defaultDir: "desc" },
+  { sortKey: "turnaround_score", label: "Turn.", align: "right", defaultDir: "desc" },
+  { sortKey: "momentum_score", label: "Mom.", align: "right", defaultDir: "desc" },
+  { sortKey: "sentiment_score", label: "Sent.", align: "right", defaultDir: "desc" },
+  { sortKey: "data_completeness", label: "Compl.", align: "right", defaultDir: "desc" },
 ];
 
 const COLUMN_COUNT = COLUMNS.length + 1; // +1 for the company-name column
@@ -68,22 +54,26 @@ export type RankingsView =
   | { kind: "error401" }
   | { kind: "error"; onRetry: () => void };
 
-export function RankingsTable({ view }: { view: RankingsView }) {
-  const [sortKey, setSortKey] = useState<SortKey>("rank");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+export interface RankingsTableProps {
+  readonly view: RankingsView;
+  readonly sort: RankingsSortField;
+  readonly sortDir: "asc" | "desc";
+  readonly onSortChange: (field: RankingsSortField, dir: "asc" | "desc") => void;
+}
 
-  const sortedItems = useMemo(() => {
-    if (view.kind !== "data") return [];
-    return sortItems(view.items, sortKey, sortDir);
-  }, [view, sortKey, sortDir]);
-
+export function RankingsTable({
+  view,
+  sort,
+  sortDir,
+  onSortChange,
+}: RankingsTableProps) {
   const onHeaderClick = (col: ColumnDef) => {
-    if (col.key === sortKey) {
-      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setSortKey(col.key);
-      setSortDir(col.defaultDir);
-    }
+    if (col.sortKey === null) return;
+    // Toggle direction when re-clicking the active column; otherwise apply the
+    // column's default direction.
+    const nextDir =
+      col.sortKey === sort ? (sortDir === "asc" ? "desc" : "asc") : col.defaultDir;
+    onSortChange(col.sortKey, nextDir);
   };
 
   return (
@@ -92,23 +82,29 @@ export function RankingsTable({ view }: { view: RankingsView }) {
         <thead className="text-xs uppercase text-slate-500 dark:text-slate-400">
           <tr>
             {COLUMNS.map((col) => {
-              const active = col.key === sortKey;
+              const active = col.sortKey !== null && col.sortKey === sort;
               const indicator = active ? (sortDir === "asc" ? " ↑" : " ↓") : "";
               return (
                 <th
-                  key={col.key}
+                  key={col.label}
                   scope="col"
                   className={`px-2 py-2 ${col.align === "right" ? "text-right" : "text-left"}`}
                   aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
                 >
-                  <button
-                    type="button"
-                    onClick={() => onHeaderClick(col)}
-                    className="font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
-                  >
-                    {col.label}
-                    {indicator}
-                  </button>
+                  {col.sortKey === null ? (
+                    <span className="font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      {col.label}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onHeaderClick(col)}
+                      className="font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+                    >
+                      {col.label}
+                      {indicator}
+                    </button>
+                  )}
                 </th>
               );
             })}
@@ -155,7 +151,7 @@ export function RankingsTable({ view }: { view: RankingsView }) {
               </div>
             </MessageRow>
           ) : (
-            sortedItems.map((item) => <RankingRow key={item.instrument_id} item={item} />)
+            view.items.map((item) => <RankingRow key={item.instrument_id} item={item} />)
           )}
         </tbody>
       </table>
@@ -218,46 +214,49 @@ function RankingRow({ item }: { item: RankingItem }) {
       <td className="px-2 py-2 text-right tabular-nums">{formatScore(item.turnaround_score)}</td>
       <td className="px-2 py-2 text-right tabular-nums">{formatScore(item.momentum_score)}</td>
       <td className="px-2 py-2 text-right tabular-nums">{formatScore(item.sentiment_score)}</td>
+      <td className="px-2 py-2 text-right">
+        <CompletenessChip tier={item.completeness_tier} pct={item.data_completeness} />
+      </td>
       <td className="px-2 py-2 text-slate-600">{item.company_name}</td>
     </tr>
   );
 }
 
-function formatScore(value: number | null): string {
-  // Scores are unitless heuristic numbers in the 0..100-ish range; show two
-  // decimals via the existing formatNumber helper rather than hand-rolling
-  // a toFixed (operator-ui-conventions: never hand-format numerics).
-  return formatNumber(value, 2);
+/**
+ * Completeness chip (#1825). Surfaces the scoring run's data-completeness tier
+ * so a high-ranked thin-coverage name is visibly flagged. `full` is muted
+ * (the expected good state); `thin_data` / `insufficient_data` are warning-
+ * coloured. The fraction sits in the title for the exact figure on hover.
+ */
+function CompletenessChip({
+  tier,
+  pct,
+}: {
+  tier: string | null;
+  pct: number | null;
+}) {
+  if (tier === null) return <span className="text-slate-400">—</span>;
+  const cls =
+    tier === "insufficient_data"
+      ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+      : tier === "thin_data"
+        ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+        : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
+  const label = tier.replace(/_/g, " ");
+  const title = pct === null ? label : `${label} · ${(pct * 100).toFixed(0)}% complete`;
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${cls}`}
+      title={title}
+    >
+      {label}
+    </span>
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Sort
-// ---------------------------------------------------------------------------
-
-/**
- * Sort RankingItems by the given key. NULL values always sort to the end
- * regardless of direction — this matches the server's `ORDER BY rank ASC
- * NULLS LAST` and means an unscored instrument never displaces a scored
- * one to the top of the table.
- */
-function sortItems(
-  items: ReadonlyArray<RankingItem>,
-  key: SortKey,
-  dir: "asc" | "desc",
-): RankingItem[] {
-  const copy = items.slice();
-  const mult = dir === "asc" ? 1 : -1;
-  copy.sort((a, b) => {
-    const av = a[key];
-    const bv = b[key];
-    if (av === null && bv === null) return 0;
-    if (av === null) return 1;
-    if (bv === null) return -1;
-    if (typeof av === "number" && typeof bv === "number") {
-      return (av - bv) * mult;
-    }
-    // String compare for symbol / sector.
-    return String(av).localeCompare(String(bv)) * mult;
-  });
-  return copy;
+function formatScore(value: number | null): string {
+  // Scores are unitless heuristic numbers; show two decimals via the existing
+  // formatNumber helper rather than hand-rolling a toFixed (operator-ui-
+  // conventions: never hand-format numerics).
+  return formatNumber(value, 2);
 }
