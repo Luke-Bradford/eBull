@@ -106,7 +106,12 @@ export function DensityGrid({
   // "Open →" button is the only drill affordance now.
   const ChartPane = (
     <Pane title="Price chart" onExpand={drillToWorkspace} fillHeight>
-      <PriceChart symbol={symbol} instrumentId={instrumentId} sessionProfile={summary.session_profile} />
+      <PriceChart
+        symbol={symbol}
+        instrumentId={instrumentId}
+        sessionProfile={summary.session_profile}
+        currency={summary.identity.currency}
+      />
       <div className="mt-2">
         <Link
           to={`/instrument/${encodeURIComponent(symbol)}/risk`}

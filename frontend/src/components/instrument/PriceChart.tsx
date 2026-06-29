@@ -136,6 +136,13 @@ export interface PriceChartProps {
    *  Defaults to `us_equity` (the charted-intraday-dominant case, and the
    *  prior hardcoded behaviour) when the caller has no profile yet. */
   sessionProfile?: SessionProfile;
+  /** Native currency of the charted OHLC candles (#1845), e.g. `"USD"`.
+   *  Rendered as a muted toolbar label so the operator can see the chart
+   *  axis is denominated in the instrument's native currency — distinct
+   *  from the GBP-converted header price (`SummaryStrip`). The candles are
+   *  NOT FX-converted (today's spot would misrepresent historical prices),
+   *  so labelling is the honest minimal fix. Omitted → no label. */
+  currency?: string | null;
 }
 
 export function PriceChart({
@@ -143,6 +150,7 @@ export function PriceChart({
   instrumentId = null,
   initialRange = "1m",
   sessionProfile = "us_equity",
+  currency = null,
 }: PriceChartProps): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const rawChart = searchParams.get("chart");
@@ -366,6 +374,21 @@ export function PriceChart({
                 AH
               </button>
             </>
+          ) : null}
+          {/*
+            Native-currency label (#1845), aligned with the right price
+            axis. The candles are raw native OHLC (no FX conversion), so
+            the axis can differ from the GBP-converted header price; the
+            label reconciles the two for the operator.
+          */}
+          {currency ? (
+            <span
+              className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500"
+              data-testid="chart-currency"
+              title={`Chart axis in the instrument's native currency (${currency}); the header price is converted to your display currency`}
+            >
+              {currency}
+            </span>
           ) : null}
         </div>
       </div>
