@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
+from app.services.sector_classification import resolve_sector_spdr
 
 router = APIRouter(
     prefix="/watchlist",
@@ -41,8 +42,14 @@ class WatchlistItem(BaseModel):
     currency: str | None
     sector: str | None  # eToro numeric industry id, as text (provider contract)
     # Resolved eToro industry name via etoro_stocks_industries (sql/070); None when
-    # sector is NULL or the id has no dictionary row. The operator-facing label.
+    # sector is NULL or the id has no dictionary row. The non-SEC fallback label.
     sector_name: str | None
+    # #1851: real GICS sector derived from the SEC SIC (resolve_sector_spdr, #1634),
+    # fail-closed None when no SIC / no confident mapping. Preferred display label so
+    # the watchlist agrees with the instrument page / rankings (which already prefer
+    # gics_sector). eToro sector_name is coarse + frequently wrong (AAPL → "Consumer
+    # Goods"); fall back to it only when gics_sector is None.
+    gics_sector: str | None
     added_at: datetime
     notes: str | None
 
@@ -50,6 +57,16 @@ class WatchlistItem(BaseModel):
 class WatchlistListResponse(BaseModel):
     items: list[WatchlistItem]
     total: int
+
+
+def _resolve_gics(sic: str | int | None) -> str | None:
+    """GICS sector label from the SEC SIC (#1634), fail-closed None.
+
+    Mirrors the /instruments/{symbol}/summary identity path so the watchlist
+    sector column agrees with the instrument page (#1851).
+    """
+    cls = resolve_sector_spdr(sic)
+    return cls.gics_sector if cls is not None else None
 
 
 class WatchlistAddRequest(BaseModel):
@@ -78,12 +95,13 @@ def list_watchlist(
         cur.execute(
             """
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
-                   i.currency, i.sector, esi.name AS sector_name,
+                   i.currency, i.sector, esi.name AS sector_name, p.sic,
                    w.added_at, w.notes
             FROM watchlist w
             JOIN instruments i USING (instrument_id)
             LEFT JOIN etoro_stocks_industries esi
               ON esi.industry_id::text = i.sector
+            LEFT JOIN instrument_sec_profile p USING (instrument_id)
             WHERE w.operator_id = %(op)s
             ORDER BY w.added_at DESC
             """,
@@ -99,6 +117,7 @@ def list_watchlist(
             currency=r["currency"],  # type: ignore[union-attr]
             sector=r["sector"],  # type: ignore[union-attr]
             sector_name=r["sector_name"],  # type: ignore[union-attr]
+            gics_sector=_resolve_gics(r["sic"]),  # type: ignore[arg-type]
             added_at=r["added_at"],  # type: ignore[arg-type]
             notes=r["notes"],  # type: ignore[union-attr]
         )
@@ -120,9 +139,10 @@ def add_to_watchlist(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT i.instrument_id, i.symbol, i.company_name, i.exchange, "
-            "i.currency, i.sector, esi.name AS sector_name "
+            "i.currency, i.sector, esi.name AS sector_name, p.sic "
             "FROM instruments i "
             "LEFT JOIN etoro_stocks_industries esi ON esi.industry_id::text = i.sector "
+            "LEFT JOIN instrument_sec_profile p USING (instrument_id) "
             "WHERE UPPER(i.symbol) = %(s)s LIMIT 1",
             {"s": symbol_clean},
         )
@@ -162,6 +182,7 @@ def add_to_watchlist(
         currency=inst["currency"],  # type: ignore[union-attr]
         sector=inst["sector"],  # type: ignore[union-attr]
         sector_name=inst["sector_name"],  # type: ignore[union-attr]
+        gics_sector=_resolve_gics(inst["sic"]),  # type: ignore[arg-type]
         added_at=wl_row["added_at"],  # type: ignore[arg-type]
         notes=wl_row["notes"],  # type: ignore[union-attr]
     )

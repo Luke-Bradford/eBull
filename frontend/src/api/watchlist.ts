@@ -7,7 +7,8 @@ export interface WatchlistItem {
   exchange: string | null;
   currency: string | null;
   sector: string | null; // eToro numeric industry id (provider contract)
-  sector_name: string | null; // resolved eToro industry name — the display label
+  sector_name: string | null; // resolved eToro industry name — non-SEC fallback label
+  gics_sector: string | null; // #1851: SEC-SIC-derived GICS sector — preferred label
   added_at: string;
   notes: string | null;
 }
