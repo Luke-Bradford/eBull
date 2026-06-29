@@ -110,6 +110,14 @@ Mutating elements must look unmistakably interactive. Read-only data must not lo
 
 If the operator can't tell at a glance whether a piece of UI is clickable, the styling is wrong.
 
+## Contained-scroll viewports must be `position:relative` (#1858)
+
+A scroll container (`overflow-auto`/`overflow-hidden` claiming flex space — e.g. `Section scrollable`) that may hold any `position:absolute` descendant **must itself be `relative`**. An absolutely-positioned element is only clipped by an ancestor's `overflow` if that ancestor is its containing block (i.e. positioned). With no positioned ancestor, an `sr-only` label / tooltip anchor / absolute badge deep in a tall list resolves its containing block to the viewport, escapes the clip, and sits at its static y-position — inflating `documentElement.scrollHeight` and producing dead page-scroll below the footer.
+
+- Use the `Section scrollable` primitive (its body is already `relative`) rather than hand-rolling an `overflow-auto` div.
+- If you do hand-roll one, add `relative` (no insets → zero visual change).
+- FE-QA a tall list at a tall viewport: after `window.scrollTo(0, 99999)`, `window.scrollY` must be `0`, and `documentElement.scrollHeight` must equal `body.scrollHeight`. A gap means out-of-flow escape.
+
 ## What this file is not
 
 - Not a design system
