@@ -7,7 +7,7 @@ from __future__ import annotations
 import psycopg
 import pytest
 
-from app.services.peer_comparison import compute_peer_comparison
+from app.services.peer_comparison import compute_peer_comparison, is_factor_thin
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 (fixture re-export)
 
 __all__ = ["ebull_test_conn"]
@@ -135,6 +135,17 @@ def test_compute_peer_comparison_db(ebull_test_conn: psycopg.Connection[tuple]) 
     # median of revenue_growth_yoy: only self has a value → median 0.1, n=1.
     assert result.medians["revenue_growth_yoy"].n == 1
     assert result.medians["revenue_growth_yoy"].median == pytest.approx(0.1)
+
+    # Thin-factor policy applied to the REAL result coverage (#1836): the API
+    # serializer feeds these exact fields to is_factor_thin. pe_ratio has no
+    # price on dev → n=0 → thin; revenue_growth_yoy n=1/3 (33%) clears the 20%
+    # cut in this tiny fixture → NOT thin (it is only thin on the full pop where
+    # coverage is ~4%). Guards the mapping from regressing to a static set.
+    mc = result.sector_member_count
+    assert result.medians["pe_ratio"].n == 0
+    assert is_factor_thin("pe_ratio", result.medians["pe_ratio"].n, mc) is True
+    assert is_factor_thin("revenue_growth_yoy", result.medians["revenue_growth_yoy"].n, mc) is False
+    assert is_factor_thin("roe", result.medians["roe"].n, mc) is False
 
 
 @pytest.mark.db

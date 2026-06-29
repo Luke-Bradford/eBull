@@ -457,7 +457,7 @@ export interface PeerFactor {
   sector_median: number | null;
   /** # sector members with a non-null value (low n → noisy median). */
   sector_n: number;
-  /** True for price-gated factors (P/E) — thin on dev. */
+  /** True when thin (greyed + ⚠): price-gated (P/E) OR sector coverage <20% (#1836). */
   dev_limited: boolean;
   better_when: "higher" | "lower";
 }

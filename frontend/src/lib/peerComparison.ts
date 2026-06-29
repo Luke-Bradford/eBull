@@ -258,7 +258,7 @@ export function buildScatter(
 // ---------------------------------------------------------------------------
 
 export interface PeerCoverage {
-  /** Factors flagged dev_limited (e.g. P/E) — greyed in the UI. */
+  /** Factors flagged thin (price-gated like P/E, or <20% sector coverage) — greyed in the UI. */
   readonly devLimitedKeys: string[];
   /** Min sector_n across factors — low n means a noisy median. */
   readonly minSectorN: number;

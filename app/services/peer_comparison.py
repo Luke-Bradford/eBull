@@ -56,8 +56,35 @@ FACTOR_BETTER_WHEN: dict[str, str] = {
     "debt_equity_ratio": "lower",
     "net_margin": "higher",
 }
-# pe_ratio is price-gated (instrument_valuation live-price join) → dev-limited.
+# pe_ratio is price-gated (instrument_valuation live-price join) → structurally
+# thin on dev regardless of how many sector members exist.
 DEV_LIMITED_FACTORS: frozenset[str] = frozenset({"pe_ratio"})
+
+# A factor is "thin" (greyed + ⚠ in the UI, its sector median read as noisy) when
+# it is either structurally dev-limited OR its sector coverage is below this
+# fraction of the complete-TTM sector base. Below ~20% the median rests on too
+# small a non-null base to be meaningful (#1836). The cut is a visual-taste call
+# the operator pre-approved at ~20%; the dev DB separates cleanly — thin factors
+# (pe_ratio, revenue_growth_yoy) peak at 12.5% coverage, healthy factors floor at
+# 24.6%, so 0.20 flags the former without catching the latter.
+THIN_COVERAGE_RATIO: float = 0.20
+
+
+def is_factor_thin(key: str, sector_n: int, sector_member_count: int) -> bool:
+    """
+    True when a factor should be disclosed as thin/unreliable for a sector.
+
+    Pure policy (no I/O) — table-tested. ``sector_n`` is the count of sector
+    members with a non-null value for the factor; ``sector_member_count`` is the
+    complete-TTM sector base (the median denominator). Structurally dev-limited
+    factors are always thin; an empty base is treated as thin (no signal).
+    """
+    if key in DEV_LIMITED_FACTORS:
+        return True
+    if sector_member_count <= 0:
+        return True
+    return sector_n / sector_member_count < THIN_COVERAGE_RATIO
+
 
 # Per-instrument factor CTE, parameterised by ``%(sector)s``. Mirrors the
 # instrument_valuation formulas (sql/201) for the price-free factors; LEFT JOINs
