@@ -1340,22 +1340,30 @@ def _load_instrument_data(
     # Sector code (eToro, for the peer-grade cohort) + SEC SIC (→ GICS sector,
     # for the F/Z financials suppression). #1823. Own cursor — the dict_row
     # cursor above is closed by this point.
+    # Savepoint-guarded: instrument_sec_profile may be absent in a partial schema
+    # (e.g. a thin test DB) → degrade to no sector/sic rather than failing the
+    # whole score, mirroring the valuation/risk savepoint pattern above.
     sector_code: str | None = None
     sic: str | None = None
-    with conn.cursor() as sec_cur:
-        sec_cur.execute(
-            """
-            SELECT i.sector, p.sic
-            FROM instruments i
-            LEFT JOIN instrument_sec_profile p ON p.instrument_id = i.instrument_id
-            WHERE i.instrument_id = %(id)s
-            """,
-            {"id": instrument_id},
-        )
-        sec_row = sec_cur.fetchone()
-        if sec_row is not None:
-            sector_code = sec_row[0]
-            sic = sec_row[1]
+    try:
+        with conn.transaction():
+            with conn.cursor() as sec_cur:
+                sec_cur.execute(
+                    """
+                    SELECT i.sector, p.sic
+                    FROM instruments i
+                    LEFT JOIN instrument_sec_profile p ON p.instrument_id = i.instrument_id
+                    WHERE i.instrument_id = %(id)s
+                    """,
+                    {"id": instrument_id},
+                )
+                sec_row = sec_cur.fetchone()
+                if sec_row is not None:
+                    sector_code = sec_row[0]
+                    sic = sec_row[1]
+    except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+        sector_code = None
+        sic = None
 
     return {
         "sector_code": sector_code,

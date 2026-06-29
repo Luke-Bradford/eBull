@@ -106,6 +106,14 @@ def _gross_profit(facts: dict[str, float]) -> float | None:
 # Piotroski F-score (0-9) — Piotroski (2000).
 # 7 of 9 points need a prior FY. A component whose inputs are absent is NOT
 # awarded AND NOT counted toward components_available — never imputed.
+#
+# Documented variant (evidence-only): ROA / asset-turnover use END-of-period
+# total assets, not Piotroski's beginning-of-year assets — the canonical
+# beginning-asset basis for ΔROA needs THREE consecutive FYs (TA_{t-2}); we read
+# two. `roa_positive` is denominator-sign-invariant (Assets>0 ⇒ sign(ROA)=sign(NI)),
+# so only the ΔROA / Δasset-turnover trend points use the end-asset basis — applied
+# consistently to both years. A common provider variant (Gray & Carlisle), not the
+# strict original; the sign rarely flips and this is non-headline evidence.
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class PiotroskiResult:
@@ -239,6 +247,10 @@ def altman_z2(facts: dict[str, float]) -> AltmanResult:
     ca = _pick(facts, _ASSETS_CURRENT)
     cl = _pick(facts, _LIABILITIES_CURRENT)
     re = _pick(facts, _RETAINED_EARNINGS)
+    # X3 EBIT proxy = OperatingIncomeLoss. Operating income is the standard
+    # XBRL-available EBIT proxy (Damodaran / common screeners); it omits non-
+    # operating items, so it is a proxy, not exact EBIT. Acceptable for non-
+    # headline evidence — the result carries no claim of being exact EBIT.
     ebit = _pick(facts, _OPERATING_INCOME)
     equity = _pick(facts, _EQUITY)
 
@@ -425,9 +437,11 @@ def _read_latest_two_fy_facts(
     """Latest two fiscal years of annual (10-K, fiscal_period='FY') us-gaap facts
     for the F/Z concepts, one ``{concept: float}`` dict per FY (current, prior).
 
-    DISTINCT ON (concept, fiscal_year) ORDER BY filed_date DESC collapses
-    restatements/amendments to the latest filing. Returns (None, None) when no
-    annual facts are on file.
+    DISTINCT ON (concept, fiscal_year) collapses to ONE value per concept per FY,
+    preferring the canonical FY-end (``period_end DESC``) then the latest filing
+    (``filed_date DESC``). The period_end tie-break guards against a comparative
+    prior-year line carried in a later 10-K being mistaken for the FY value.
+    Returns (None, None) when no annual facts are on file.
     """
     rows: list[tuple[int, str, float]]
     with conn.cursor() as cur:
@@ -444,7 +458,7 @@ def _read_latest_two_fy_facts(
                   AND concept = ANY(%(concepts)s)
                   AND fiscal_year IS NOT NULL
                   AND val IS NOT NULL
-                ORDER BY concept, fiscal_year, filed_date DESC, accession_number DESC
+                ORDER BY concept, fiscal_year, period_end DESC, filed_date DESC, accession_number DESC
             ) latest
             WHERE fiscal_year IN (
                 SELECT DISTINCT fiscal_year

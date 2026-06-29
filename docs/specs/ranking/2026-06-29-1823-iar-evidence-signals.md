@@ -23,7 +23,14 @@ backtest + operator sign-off).
 - **Altman Z″ (non-manufacturer / EM recalibration), Altman 2000:**
   `Z″ = 6.56·X1 + 3.26·X2 + 6.72·X3 + 1.05·X4`, X1=(CA−CL)/TA, X2=RE/TA,
   X3=EBIT/TA, X4=Equity/TL. Bands: >2.60 safe / 1.10–2.60 grey / <1.10 distress.
-  Single-period (no lag).
+  Single-period (no lag). **X3 EBIT proxy = `OperatingIncomeLoss`** — the standard
+  XBRL-available EBIT proxy (Damodaran / common screeners); a proxy, not exact
+  EBIT, and labelled as such (non-headline evidence).
+- **Piotroski ROA basis (documented variant):** ROA / asset-turnover use END-of-
+  period total assets, not the strict beginning-of-year basis — canonical ΔROA
+  needs THREE consecutive FYs (TA_{t-2}); we read two. `roa_positive` is
+  denominator-sign-invariant, so only the trend points use the end-asset basis,
+  applied consistently to both years (Gray & Carlisle variant).
 - **Financials/insurance suppression:** F & Z assume a current/non-current split
   and inventory turnover that banks/insurers do not report. Suppress when the
   SEC-SIC-derived GICS sector (`resolve_sector_spdr`, #1634) is exactly
