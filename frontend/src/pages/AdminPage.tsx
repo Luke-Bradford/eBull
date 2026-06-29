@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { fetchBootstrapStatus } from "@/api/bootstrap";
+import { fetchCapabilityOverrides } from "@/api/capabilityOverrides";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
@@ -58,6 +59,7 @@ export function AdminPage() {
   const v2 = useAsync(fetchSyncLayersV2, []);
   const status = useAsync(fetchSyncStatus, []);
   const coverage = useAsync(fetchCoverageSummary, []);
+  const capabilityOverrides = useAsync(fetchCapabilityOverrides, []);
   const jobs = useAsync(fetchJobsOverview, []);
   // /system/status carries the operator credential health summary used
   // by the Problems banner (#979 / #974/E). Fetched alongside the
@@ -92,6 +94,7 @@ export function AdminPage() {
   const refetchV2 = v2.refetch;
   const refetchStatus = status.refetch;
   const refetchCoverage = coverage.refetch;
+  const refetchCapabilityOverrides = capabilityOverrides.refetch;
   const refetchJobs = jobs.refetch;
   const refetchRecs = recs.refetch;
   // PR3a #1064 — re-poll bootstrap status on every refresh so a
@@ -104,6 +107,7 @@ export function AdminPage() {
     refetchV2();
     refetchStatus();
     refetchCoverage();
+    refetchCapabilityOverrides();
     refetchJobs();
     refetchRecs();
     refetchBootstrap();
@@ -111,6 +115,7 @@ export function AdminPage() {
     refetchV2,
     refetchStatus,
     refetchCoverage,
+    refetchCapabilityOverrides,
     refetchJobs,
     refetchRecs,
     refetchBootstrap,
@@ -270,6 +275,43 @@ export function AdminPage() {
           <SectionError onRetry={coverage.refetch} />
         ) : coverage.data ? (
           <CoverageSummaryCard summary={coverage.data} />
+        ) : null}
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Capability overrides"
+        summary={
+          capabilityOverrides.data
+            ? capabilityOverrides.data.total_overrides === 0
+              ? "all at seed default"
+              : `${capabilityOverrides.data.total_overrides} exchange${
+                  capabilityOverrides.data.total_overrides === 1 ? "" : "s"
+                } diverging`
+            : undefined
+        }
+      >
+        {capabilityOverrides.loading ? (
+          <SectionSkeleton rows={1} />
+        ) : capabilityOverrides.error !== null ? (
+          <SectionError onRetry={capabilityOverrides.refetch} />
+        ) : capabilityOverrides.data ? (
+          capabilityOverrides.data.total_overrides === 0 ? (
+            <p className="text-xs text-slate-500">
+              Every exchange is at its seed default — no capability overrides
+              in effect.
+            </p>
+          ) : (
+            <p className="text-xs text-slate-600 dark:text-slate-300">
+              <Link
+                to="/admin/capability-overrides"
+                className="font-medium text-blue-700 hover:underline"
+              >
+                Review {capabilityOverrides.data.total_overrides} exchange
+                {capabilityOverrides.data.total_overrides === 1 ? "" : "s"}{" "}
+                diverging from seed defaults →
+              </Link>
+            </p>
+          )
         ) : null}
       </CollapsibleSection>
     </div>

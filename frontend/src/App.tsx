@@ -26,6 +26,7 @@ import { AdminJobDetailPage } from "@/pages/AdminJobDetailPage";
 import { ProcessDetailPage } from "@/pages/ProcessDetailPage";
 import { IngestHealthPage } from "@/pages/IngestHealthPage";
 import { CoverageInsufficientPage } from "@/pages/CoverageInsufficientPage";
+import { CapabilityOverridesPage } from "@/pages/CapabilityOverridesPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { BrokerSetupPage } from "@/pages/BrokerSetupPage";
@@ -142,6 +143,10 @@ export function App() {
           <Route
             path="admin/coverage/insufficient"
             element={<CoverageInsufficientPage />}
+          />
+          <Route
+            path="admin/capability-overrides"
+            element={<CapabilityOverridesPage />}
           />
           <Route path="operators" element={<OperatorsPage />} />
           <Route path="settings" element={<SettingsPage />} />

@@ -1459,6 +1459,28 @@ export interface InsufficientListResponse {
   rows: InsufficientRow[];
 }
 
+// Capability-override drift (#531). Wraps GET /admin/capability-overrides —
+// exchange rows whose ``capabilities`` JSONB diverges from the migration-071
+// seed default for their asset_class.
+export interface CapabilityCellDiff {
+  capability: string;
+  seed_providers: string[];
+  current_providers: string[];
+}
+
+export interface ExchangeOverrideRow {
+  exchange_id: string;
+  exchange_name: string | null;
+  asset_class: string | null;
+  diffs: CapabilityCellDiff[];
+}
+
+export interface OverridesListResponse {
+  checked_at: string;
+  total_overrides: number;
+  rows: ExchangeOverrideRow[];
+}
+
 // ---------------------------------------------------------------------------
 // /sync/layers/v2 (app/api/sync.py — A.5 chunk 0+)
 // ---------------------------------------------------------------------------
