@@ -43,7 +43,10 @@ check "epoch-millis 'resetAt' → seconds" 4102444800 "$(extract_reset_epoch "$f
 
 now="$(date +%s)"
 f="$(mklog '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","retryAfter":1800}}')"
-between "relative 'retryAfter' → now+secs" "$((now + 1790))" "$((now + 1815))" "$(extract_reset_epoch "$f")"
+between "relative 'retryAfter' (number) → now+secs" "$((now + 1790))" "$((now + 1815))" "$(extract_reset_epoch "$f")"
+
+f="$(mklog '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","retryAfter":"1800"}}')"
+between "relative 'retryAfter' (string) → now+secs" "$((now + 1790))" "$((now + 1815))" "$(extract_reset_epoch "$f")"
 
 # --- extract_reset_epoch: must IGNORE non-blocking / irrelevant events ---
 f="$(mklog '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","isUsingOverage":true,"resetsAt":"2030-06-30T12:00:00Z"}}')"

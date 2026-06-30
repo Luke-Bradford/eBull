@@ -232,8 +232,16 @@ for line in open(sys.argv[1], errors="replace"):
     for k, val in rli.items():
         kl = k.lower()
         if kl in ("retryafter", "retry_after"):
+            secs = None
             if isinstance(val, (int, float)) and not isinstance(val, bool):
-                reset = int(time.time() + float(val))
+                secs = float(val)
+            elif isinstance(val, str):
+                try:                              # string-valued seconds, e.g. "1800"
+                    secs = float(val.strip())
+                except ValueError:
+                    secs = None
+            if secs is not None:
+                reset = int(time.time() + secs)
         elif "reset" in kl:
             e = to_epoch(val)
             if e is not None:
