@@ -19,8 +19,12 @@
 #
 # Kept alive across crashes/reboots by launchd KeepAlive (com.ebull.autonomy.
 # supervisor.plist). Single instance via lock. Each session starts on clean
-# latest main (preflight); a dirty tree from a crash aborts that iteration
-# rather than building on half-done work.
+# latest origin/main in DETACHED HEAD (preflight); a dirty tree from a crash
+# aborts that iteration rather than building on half-done work.
+#
+# Runs in its OWN dedicated git worktree (scripts/autonomy/setup_worktree.sh) so
+# it never shares a working tree with the operator's interactive checkout — two
+# agents on one tree race on branch/index state (#1874).
 #
 # Run:  bash scripts/autonomy/supervisor.sh   (or via launchd — see setup.md)
 
@@ -53,9 +57,10 @@ SAFETY="Unattended run. HARD RULES: never execute/approve/simulate a trade, neve
 
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$SUPLOG"; }
 
-# Preflight: put the tree on clean, latest main — or return 2 to skip this
-# iteration. Extracted as its own function so the dirty-tree recovery is unit-
-# testable against a throwaway repo (test_preflight_recovery.sh) without the loop.
+# Preflight: put the tree on clean, latest origin/main (detached HEAD — see the
+# git switch below) or return 2 to skip this iteration. Extracted as its own
+# function so the dirty-tree recovery is unit-testable against a throwaway repo
+# (test_preflight_recovery.sh) without the loop.
 preflight() {
   # GUARD an in-progress git operation FIRST: a `git checkout`/`git stash` could
   # discard or mask that work (review #1768). These are NEVER auto-recovered — a
@@ -93,9 +98,14 @@ preflight() {
   dirty_skips=0   # clean tree (or just recovered) — reset BEFORE fetch so a one-off fetch fail keeps no stale count
 
   git fetch origin -q 2>>"$SUPLOG" || { log "preflight: fetch failed"; return 2; }
-  git checkout main -q 2>>"$SUPLOG" || { log "preflight: checkout main failed"; return 2; }
-  git pull -q --ff-only 2>>"$SUPLOG" || { log "preflight: main not fast-forward"; return 2; }
-  [ -z "$(git status --porcelain)" ] || { log "preflight: tree dirty on main — skip"; return 2; }
+  # Detached HEAD at origin/main — NOT the local `main` branch ref. The loop runs
+  # in its own dedicated git worktree (scripts/autonomy/setup_worktree.sh): a
+  # linked worktree may not check out a branch already checked out in another
+  # worktree (e.g. the operator's primary checkout sitting on main), and the loop
+  # wants the latest PUSHED main regardless. Sessions still cut their feature
+  # branches off this commit, so nothing downstream changes.
+  git switch --detach origin/main -q 2>>"$SUPLOG" || { log "preflight: switch to origin/main failed"; return 2; }
+  [ -z "$(git status --porcelain)" ] || { log "preflight: tree dirty on origin/main — skip"; return 2; }
   return 0
 }
 

@@ -35,11 +35,15 @@ git branch -M main
 git remote add origin "$origin"
 git push -q -u origin main 2>/dev/null
 
-# Scenario 1: clean tree → proceed (0), counter stays 0.
+# Scenario 1: clean tree → proceed (0), counter stays 0, HEAD detached @ origin/main.
 dirty_skips=0
 preflight; rc=$?
 check "clean tree proceeds" 0 "$rc"
 check "clean tree leaves counter 0" 0 "$dirty_skips"
+# Worktree isolation (#1874): preflight must DETACH HEAD at origin/main, never
+# check out the `main` branch ref (which a sibling worktree may already hold).
+check "preflight detaches HEAD (no branch ref)" "" "$(git symbolic-ref -q --short HEAD || echo '')"
+check "preflight HEAD == origin/main" "$(git rev-parse origin/main)" "$(git rev-parse HEAD)"
 
 # Scenario 2: first dirty skip is grace (return 2, no stash).
 dirty_skips=0
