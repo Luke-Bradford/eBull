@@ -12,12 +12,12 @@
 #
 # Run:  bash scripts/autonomy/worktree_gc.sh
 
-set -uo pipefail
+set -euo pipefail   # fire-and-forget utility: abort loudly on any unhandled failure
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO" || exit 1
 
 echo "== prune stale worktree admin entries =="
-git worktree prune -v   # always safe — only drops admin entries for vanished dirs
+git worktree prune -v   # -e aborts if prune itself fails (don't proceed as if it worked)
 
 # Branch deletion (`-D`, force) is gated ENTIRELY on a CURRENT origin/main: the
 # only safety proof is `--is-ancestor <branch> origin/main`. If the fetch fails
@@ -39,7 +39,11 @@ while IFS= read -r b; do
   # alone can refuse when the branch's upstream was already deleted by
   # safe_merge; the ancestor check is the real safety gate.)
   if git merge-base --is-ancestor "$b" origin/main 2>/dev/null; then
-    git branch -D "$b" >/dev/null && { echo "  deleted merged branch: $b"; deleted=$((deleted + 1)); }
+    # `if` consumes the exit code so a refused delete (e.g. branch checked out in
+    # another worktree — git forbids it) doesn't trip `set -e` and abort the run.
+    if git branch -D "$b" >/dev/null 2>&1; then
+      echo "  deleted merged branch: $b"; deleted=$((deleted + 1))
+    fi
   fi
 done < <(git for-each-ref --format='%(refname:short)' refs/heads)
 echo "  ($deleted merged branch(es) removed)"
