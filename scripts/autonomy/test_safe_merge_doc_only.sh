@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/safe_merge.sh"
 
 fails=0
-check() { # check <desc> <expected: doc|strict> <files-list>
+check() { # check <expected: doc|strict> <desc> <files-list>
   local want="$1" desc="$2" files="$3" got
   if is_doc_only "$files"; then got=doc; else got=strict; fi
   if [ "$got" = "$want" ]; then echo "ok   - $desc"; else
