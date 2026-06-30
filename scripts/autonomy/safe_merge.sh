@@ -67,6 +67,9 @@ if [ "$n_listed" = "$n_changed" ] && is_doc_only "$files"; then
   fi
   echo "safe_merge: doc-only PR #$PR (every changed file .md), CI green, no blocking comment — merging."
   gh pr merge "$PR" --squash --delete-branch
+  # Best-effort: notify any open ticket "blocked by" an issue this PR closed
+  # (#1866). Self-guards to exit 0 — never fail the merge.
+  "$REPO/scripts/autonomy/unblock_dependents.sh" "$PR" || true
   exit 0
 fi
 
@@ -94,3 +97,6 @@ fi
 
 echo "safe_merge: gates pass on #$PR (review $review_time ≥ head $head_time) — merging."
 gh pr merge "$PR" --squash --delete-branch
+# Best-effort: notify any open ticket "blocked by" an issue this PR closed
+# (#1866). Self-guards to exit 0 — never fail the merge.
+"$REPO/scripts/autonomy/unblock_dependents.sh" "$PR" || true
