@@ -48,6 +48,12 @@ between "relative 'retryAfter' (number) → now+secs" "$((now + 1790))" "$((now 
 f="$(mklog '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","retryAfter":"1800"}}')"
 between "relative 'retryAfter' (string) → now+secs" "$((now + 1790))" "$((now + 1815))" "$(extract_reset_epoch "$f")"
 
+# Non-finite values must yield no reset (not crash int() with OverflowError).
+f="$(mklog '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","retryAfter":"inf"}}')"
+check "non-finite 'retryAfter' inf → no reset (no crash)" "" "$(extract_reset_epoch "$f" 2>/dev/null)"
+f="$(mklog '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","reset":"NaN"}}')"
+check "non-finite 'reset' NaN → no reset" "" "$(extract_reset_epoch "$f" 2>/dev/null)"
+
 # --- extract_reset_epoch: must IGNORE non-blocking / irrelevant events ---
 f="$(mklog '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","isUsingOverage":true,"resetsAt":"2030-06-30T12:00:00Z"}}')"
 check "overage-covered rejection yields no reset" "" "$(extract_reset_epoch "$f")"

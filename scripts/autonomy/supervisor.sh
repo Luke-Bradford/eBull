@@ -183,7 +183,7 @@ PY
 # by the bash caller (compute_limit_wait), not here.
 extract_reset_epoch() {
   python3 - "$1" <<'PY'
-import json, sys, time
+import json, math, sys, time
 from datetime import datetime, timezone
 
 def to_epoch(v):
@@ -192,6 +192,8 @@ def to_epoch(v):
         return None
     if isinstance(v, (int, float)):
         x = float(v)
+        if not math.isfinite(x):              # inf/nan → int() would OverflowError
+            return None
         if x > 1e12:      # milliseconds
             x /= 1000.0
         return int(x) if x > 1e9 else None   # plausibly an absolute epoch
@@ -201,10 +203,11 @@ def to_epoch(v):
             return None
         try:                                  # bare numeric string?
             x = float(s)
-            if x > 1e12:
-                x /= 1000.0
-            if x > 1e9:
-                return int(x)
+            if math.isfinite(x):
+                if x > 1e12:
+                    x /= 1000.0
+                if x > 1e9:
+                    return int(x)
         except ValueError:
             pass
         try:                                  # ISO-8601 (tolerate trailing Z)
@@ -240,7 +243,7 @@ for line in open(sys.argv[1], errors="replace"):
                     secs = float(val.strip())
                 except ValueError:
                     secs = None
-            if secs is not None:
+            if secs is not None and math.isfinite(secs):
                 reset = int(time.time() + secs)
         elif "reset" in kl:
             e = to_epoch(val)
