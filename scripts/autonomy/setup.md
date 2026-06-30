@@ -18,21 +18,33 @@ lock auto-clears on exit.
 
 ## Walk-away-for-days mode (RECOMMENDED): the supervisor
 Runs sessions back-to-back forever with **usage-limit backoff** — hits a limit →
-backs off to the reset window → retries when capacity returns; board empty →
-idle-polls; kept alive across crashes/reboots by launchd `KeepAlive`. Start it
+sleeps until the API-reported reset → retries when capacity returns; board empty
+→ idle-polls; kept alive across crashes/reboots by launchd `KeepAlive`. Start it
 once and leave for days.
+
+The supervisor runs in its **own dedicated git worktree** (`#1874`), NOT this
+primary checkout — two agents on one working tree race on branch/index state
+(the loop's `git switch` can yank the tree out from under your interactive
+session). `setup_worktree.sh` creates a persistent, loop-specific worktree
+(default `../.eBull-autonomy`, a dotted sibling — pass a path to override) and
+installs the launchd plist pointed there:
 ```bash
-mkdir -p var/autonomy-logs   # must exist before launchd opens its log paths
-# substitute __REPO__ with this checkout's path (plists ship path-agnostic):
-sed "s#__REPO__#$(pwd)#g" scripts/autonomy/com.ebull.autonomy.supervisor.plist \
-  > ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
-launchctl load ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
-launchctl list | grep ebull          # confirm loaded
-tail -f var/autonomy-logs/supervisor.log
+bash scripts/autonomy/setup_worktree.sh          # creates worktree + installs plist
+# then load it (survives reboot via the plist's RunAtLoad):
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
+launchctl list | grep autonomy.supervisor        # confirm loaded
+tail -f ../.eBull-autonomy/var/autonomy-logs/supervisor.log   # logs live in the worktree
 ```
-Stop:
+Stop (use `bootout`, NOT `unload` — `unload` does **not** survive a reboot; the
+plist's `RunAtLoad` re-launches the loop on next login):
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.ebull.autonomy.supervisor.plist
+launchctl bootout gui/$(id -u)/com.ebull.autonomy.supervisor   # stop now
+# to also keep it from relaunching after a reboot:
+launchctl disable gui/$(id -u)/com.ebull.autonomy.supervisor
+```
+Tidy merged branches + stale worktrees anytime (loop/agent worktree is KEPT):
+```bash
+bash scripts/autonomy/worktree_gc.sh
 ```
 
 ## Data daemon — keep ETL fresh with the loop OFF (#1865)
