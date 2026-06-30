@@ -16,8 +16,11 @@ when the caller supplies the richer ``http_get_with_meta`` callable
 this job rounds the SEC ``Last-Modified`` header through
 ``external_data_watermarks`` under source-key
 ``sec.last_modified.per_cik_poll`` and short-circuits on HTTP 304 —
-skipping payload parse + scheduler UPSERT entirely while bumping
-``watermark_at`` so the watermark row stays fresh.
+skipping the manifest UPSERT + payload parse, but STILL writing a
+scheduler outcome (``current``/``never``) and re-stamping
+``watermark_at`` so the recheck timing rolls forward and the
+watermark row stays fresh. A 304 is a budget-conserving success,
+not a noop.
 
 Distinct source-key namespace from ``sec.submissions`` (which stores
 top-accession at ``app/services/fundamentals/__init__.py:2030``) to
@@ -93,11 +96,19 @@ def _probe_subject(
     Item 7 (#1233): when ``http_get_with_meta`` is supplied, this
     function reads any prior ``sec.last_modified.per_cik_poll`` /
     ``<cik>`` watermark, sends it as ``If-Modified-Since``, and on
-    HTTP 304 short-circuits without scheduler-outcome write (the
-    payload didn't change so neither did the freshness state). On
-    200 with a ``Last-Modified`` header the watermark is upserted
-    inside the same transaction as the manifest writes so a crash
-    mid-ingest cannot leave the watermark ahead of the data.
+    HTTP 304 short-circuits the PAYLOAD work — skips manifest writes
+    + parse — but STILL writes a scheduler outcome inside one
+    transaction: ``current`` (rolls ``expected_next_at`` forward) for
+    a filer, or ``never`` (next recheck at now+cadence) for a
+    ``never_filed`` subject; and re-stamps ``watermark_at`` when a
+    prior ``If-Modified-Since`` exists. So a 304 advances
+    freshness/recheck state with zero upserts — a budget-conserving
+    success, not a noop — and it does NOT touch ``attempt_count``
+    (see the ``delta.not_modified`` branch in the body). On 200 with
+    a ``Last-Modified``
+    header the watermark is upserted inside the same transaction as
+    the manifest writes so a crash mid-ingest cannot leave the
+    watermark ahead of the data.
 
     Backwards compat: ``http_get`` legacy path is preserved for
     existing tests (``tests/test_sec_per_cik_poll.py``) that don't
