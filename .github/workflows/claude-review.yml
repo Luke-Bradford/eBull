@@ -274,13 +274,17 @@ jobs:
           # Adaptive thinking gives the model room to triage findings (reject
           # hallucinations, rebutted-already, code-not-in-diff) before
           # emitting. Sonnet 5 dropped the fixed budget_tokens knob in favor
-          # of output_config.effort — "low" mirrors the modest ~3k-token
-          # thinking budget the prior (Sonnet 4.6) config used.
+          # of output_config.effort — "medium" is the closer match to the
+          # prior (Sonnet 4.6) budget_tokens=3000/max_tokens=5000 config;
+          # per Anthropic's migration notes, Sonnet 5 at "medium" is roughly
+          # comparable in depth to Sonnet 4.6 at "high". "low" undershot the
+          # triage work this bot needs to do (catching hallucinated/
+          # already-rebutted/out-of-diff findings before posting).
           payload = {
               "model": "claude-sonnet-5",
               "max_tokens": 5000,
               "thinking": {"type": "adaptive"},
-              "output_config": {"effort": "low"},
+              "output_config": {"effort": "medium"},
               "system": [
                   {
                       "type": "text",
