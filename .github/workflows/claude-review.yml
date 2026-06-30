@@ -271,15 +271,16 @@ jobs:
 
           user_prompt += "## Full diff\n```diff\n" + diff + "\n```"
 
-          # Extended thinking with a mid budget — gives the model room to
-          # triage findings (reject hallucinations, rebutted-already, code-not-in-diff)
-          # before emitting. Cheap vs the cost of a bad review round.
-          # budget_tokens must be strictly less than max_tokens; keep a 2k
-          # response cap on top of 3k thinking so findings stay terse.
+          # Adaptive thinking gives the model room to triage findings (reject
+          # hallucinations, rebutted-already, code-not-in-diff) before
+          # emitting. Sonnet 5 dropped the fixed budget_tokens knob in favor
+          # of output_config.effort — "low" mirrors the modest ~3k-token
+          # thinking budget the prior (Sonnet 4.6) config used.
           payload = {
-              "model": "claude-sonnet-4-6",
+              "model": "claude-sonnet-5",
               "max_tokens": 5000,
-              "thinking": {"type": "enabled", "budget_tokens": 3000},
+              "thinking": {"type": "adaptive"},
+              "output_config": {"effort": "low"},
               "system": [
                   {
                       "type": "text",
