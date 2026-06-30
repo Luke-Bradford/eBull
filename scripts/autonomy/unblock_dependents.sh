@@ -89,14 +89,15 @@ for X in $closed; do
     # body (or #X as a parent / table-row subject) is not a dependency.
     confirms_block "$body" "$X" || continue
 
-    # Idempotency belt-and-suspenders: skip if we already posted a notice for
-    # this blocker. Structurally a given #X closes exactly ONCE and the loop
-    # merges serially, so a duplicate is near-impossible regardless of comment
-    # pagination (Codex ckpt-2 F3 — rebutted as immaterial); this only guards a
-    # manual safe_merge re-run on the same PR. `>/dev/null` not `-q` (F2).
+    # Idempotency: skip if we already posted a notice for this blocker. The scan
+    # MUST paginate — `gh issue view --json comments` caps at the first GraphQL
+    # page (≤100), so on a busy ticket the marker could be missed and a manual
+    # safe_merge re-run would double-post (bot WARNING + Codex F3). `--paginate`
+    # over the REST comments endpoint reads them all (same pattern safe_merge
+    # uses for the file list). `>/dev/null` not `-q` (F2).
     marker="<!-- autonomy:unblock-notice blocker=#$X -->"
-    if gh issue view "$D" --json comments -q '.comments[].body' 2>/dev/null \
-        | grep -F "$marker" >/dev/null; then
+    if gh api --paginate "repos/{owner}/{repo}/issues/$D/comments" \
+        --jq '.[].body' 2>/dev/null | grep -F "$marker" >/dev/null; then
       warn "#$D already notified for blocker #$X (skip)"
       continue
     fi
