@@ -119,6 +119,12 @@ agent:
   model:
     primary: claude-sonnet-5       # optional override; the claude adapter has its own sane default
     fallback: claude-sonnet-4-6      # claude-specific: native --fallback-model support
+  config: {}                        # opaque, adapter-owned pass-through — the claude adapter
+                                     # ignores it; a future local-LLM adapter reads whatever it
+                                     # needs from here (endpoint, context size, tool policy,
+                                     # timeout, concurrency class) without changing agent_invoke's
+                                     # signature. Adapters read config.yaml directly; this map is
+                                     # not threaded through as a separate parameter.
 
 merge_gate:
   strategy: bot_comment          # manual | ci_only | bot_comment | gh_review  (see below)
@@ -135,6 +141,16 @@ worktree:
 
 Every value above is either optional-with-an-engine-default or required-only-for-the-strategy-that-
 uses-it. Nothing in the engine hardcodes eBull's actual values — they all come from this file.
+
+**Pack config is per-repo *defaults*, not per-instance state (Codex strategic-fit finding):** this
+matters for the deferred registry/multi-role work, which will want to run more than one loop
+instance against the same repo (e.g. a PM lane and a Coder lane, different agents/models/labels).
+`supervisor.sh` accepts CLI overrides — `--agent-type`, `--model`, `--label` — that take precedence
+over `config.yaml`'s values for that one invocation. `config.yaml` stays the single committed
+source of truth for *project policy* (merge-gate strategy, board identity, requires_claude_md —
+things that don't vary by which instance is running); anything that could legitimately differ
+per-running-instance is override-able without editing the pack. Not implementing multi-instance
+here — just making sure this spec's CLI contract doesn't foreclose it.
 
 `{repo-slug}` (used in `worktree.default_path` and the launchd label) = `engine.label` if set,
 else the target repo's directory basename, lowercased, any non-alphanumeric run collapsed to a
@@ -313,6 +329,13 @@ live process to disrupt, low-risk moment to do this once):
 - `bin/agents/codex.sh` — a Codex adapter, once someone validates its rate-limit signal shape and
   safety-prompt-injection approach against real usage. The interface (`agent_invoke` /
   `agent_classify_outcome`) is already shaped to accept it without touching `supervisor.sh`.
+- **Shared usage-limit state, once multiple loops share one Claude account (Codex strategic-fit
+  finding).** `.last_usage_reset` is persisted per-target-repo today — correct for this spec's
+  single-instance scope, but the underlying constraint (one Anthropic account's rate limit) is
+  account-global, not repo-specific. With N loops each independently discovering the same wall, each
+  would sleep and retry on its own schedule, all piling back in around the same reset time (a
+  stampede) instead of one shared wait. The registry spec should replace the per-repo file with a
+  shared, engine-level reset marker keyed by account/credential, not by repo.
 - Registry/control-unit: multi-repo launch/stop, one control surface.
 - Dashboard control-lever API: an operator's own Claude/Codex session talking to the supervisor
   through the dashboard (pause, change model, query "why did you skip X") — needs a control API on
