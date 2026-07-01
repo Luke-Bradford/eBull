@@ -1996,9 +1996,11 @@ git push
 - Consumes: `python3 lib/config_parser.py` (Task 2) for `engine.label`.
 - Produces: CLI `bin/setup_worktree.sh <target-repo-path> [worktree-path]` — creates/reuses the
   target repo's dedicated worktree and installs its launchd plist. Defines `derive_slug()` as a
-  testable function (given `$TARGET_REPO` in scope).
+  testable function (given `$TARGET_REPO` in scope) — sourceable directly, per this plan's Global
+  Constraint that every script's executable body is guarded by
+  `[ "${BASH_SOURCE[0]}" = "${0}" ] || return 0`.
 
-- [ ] **Step 1: Write the failing test (for the slug-derivation logic)**
+- [ ] **Step 1: Write the failing test (sourcing the real script, not a copy)**
 
 ```bash
 # tests/test_setup_worktree_slug.sh
@@ -2008,6 +2010,9 @@ git push
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# shellcheck source=/dev/null
+source "$HERE/../bin/setup_worktree.sh"
+
 fails=0
 check() {
   if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1 (expected '$2', got '$3')"; fails=$((fails + 1)); fi
@@ -2015,17 +2020,6 @@ check() {
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-
-# Source the real script for its derive_slug() function only. The main body
-# is guarded by requiring $1 (a real path argument) -- this test never invokes
-# it directly, only calls derive_slug() after setting TARGET_REPO + ENGINE_HOME.
-ENGINE_HOME="$(cd "$HERE/.." && pwd)"
-CONFIG_GET() { python3 "$ENGINE_HOME/lib/config_parser.py" "$1" "$2" 2>/dev/null; }
-derive_slug() {
-  local label; label="$(CONFIG_GET "$TARGET_REPO/.autonomy/config.yaml" engine.label)"
-  if [ -n "$label" ]; then printf '%s' "$label"; return; fi
-  basename "$TARGET_REPO" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
-}
 
 mkdir -p "$tmp/eBull/.autonomy"
 TARGET_REPO="$tmp/eBull"
@@ -2055,19 +2049,17 @@ echo "---"
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
 ```
 
-- [ ] **Step 2: Run to verify it fails (or rather, verify the standalone re-declaration works; the
-  real regression coverage comes once `bin/setup_worktree.sh` exists and Step 5 confirms both agree)**
+- [ ] **Step 2: Run to verify it fails**
 
 ```bash
 chmod +x tests/test_setup_worktree_slug.sh
 bash tests/test_setup_worktree_slug.sh
 ```
-Expected: all 3 checks pass already (this test defines its own copy of `derive_slug` to pin the
-behavior down before `bin/setup_worktree.sh` exists). This is intentional — Step 3 below implements
-`bin/setup_worktree.sh` with the identical `derive_slug` body, and Step 5 is a text-diff sanity
-check that the two copies haven't drifted.
+Expected: fails (`bin/setup_worktree.sh` doesn't exist yet).
 
-- [ ] **Step 3: Implement `bin/setup_worktree.sh`**
+- [ ] **Step 3: Implement `bin/setup_worktree.sh`** — functions defined unconditionally at the top
+  (so sourcing exposes them), the executable body guarded exactly like every other script in this
+  plan (`board.sh`, `safe_merge.sh`, `unblock_dependents.sh`)
 
 ```bash
 #!/usr/bin/env bash
@@ -2082,6 +2074,18 @@ check that the two copies haven't drifted.
 # directory basename, lowercased, non-alphanumeric runs collapsed to '-'.
 set -euo pipefail
 ENGINE_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_GET() { python3 "$ENGINE_HOME/lib/config_parser.py" "$1" "$2" 2>/dev/null; }
+
+# Derive the repo-slug for $TARGET_REPO -- the caller sets that variable
+# first (the guarded main body below sets it after resolving $1; tests set it
+# directly to a fixture path before calling this function).
+derive_slug() {
+  local label; label="$(CONFIG_GET "$TARGET_REPO/.autonomy/config.yaml" engine.label)"
+  if [ -n "$label" ]; then printf '%s' "$label"; return; fi
+  basename "$TARGET_REPO" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+[ "${BASH_SOURCE[0]}" = "${0}" ] || return 0
 
 TARGET="${1:?usage: setup_worktree.sh <target-repo-path> [worktree-path]}"
 case "$TARGET" in
@@ -2091,14 +2095,6 @@ case "$TARGET" in
     ;;
 esac
 TARGET_REPO="$(cd "$TARGET" && pwd)"
-
-CONFIG_GET() { python3 "$ENGINE_HOME/lib/config_parser.py" "$1" "$2" 2>/dev/null; }
-
-derive_slug() {
-  local label; label="$(CONFIG_GET "$TARGET_REPO/.autonomy/config.yaml" engine.label)"
-  if [ -n "$label" ]; then printf '%s' "$label"; return; fi
-  basename "$TARGET_REPO" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
-}
 
 SLUG="$(derive_slug)"
 [ -n "$SLUG" ] || { echo "setup_worktree.sh: could not derive a repo-slug for $TARGET_REPO" >&2; exit 1; }
@@ -2198,29 +2194,21 @@ EOF
 </plist>
 ```
 
-- [ ] **Step 5: Confirm the test's inline `derive_slug` matches the shipped one (manual diff check)**
-
-```bash
-diff <(sed -n '/^derive_slug()/,/^}/p' bin/setup_worktree.sh) \
-     <(sed -n '/^derive_slug()/,/^}/p' tests/test_setup_worktree_slug.sh)
-```
-Expected: no output (identical).
-
-- [ ] **Step 6: Re-run the slug test**
+- [ ] **Step 5: Run the test to verify it passes**
 
 ```bash
 bash tests/test_setup_worktree_slug.sh
 ```
 Expected: `ALL PASS`.
 
-- [ ] **Step 7: shellcheck**
+- [ ] **Step 6: shellcheck**
 
 ```bash
 shellcheck -S warning bin/setup_worktree.sh
 ```
 Expected: no output.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add bin/setup_worktree.sh templates/supervisor.plist.tmpl tests/test_setup_worktree_slug.sh
