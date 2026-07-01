@@ -19,11 +19,13 @@ branches, no unpushed WIP).
    population BEFORE speccing** → spec → Codex ckpt-1 → implement (schema →
    service → tests → glue) → local gates → Codex ckpt-2 → branch + PR → poll the
    Claude review bot + CI → resolve EVERY comment (FIXED/EXTRACTED/REBUTTED) →
-   **merge ONLY via `scripts/autonomy/safe_merge.sh <pr>`** (mechanically
+   **merge ONLY via `"$AUTONOMY_ENGINE_HOME/bin/safe_merge.sh" <pr>`** (mechanically
    verifies bot-APPROVE-on-latest-SHA + CI-green; never `gh pr merge` directly).
    If the latest round is **rebuttal-only** (no code change, you think the bot is
    wrong), do NOT merge unattended — that needs Codex ckpt-3 + human judgment;
-   leave the PR open with your reasoning and move on.
+   leave the PR open with your reasoning and move on. If `safe_merge.sh` reports
+   manual-mode (the repo's merge gate is `manual`), leave the PR open and move to
+   the next ticket — do not attempt to merge it yourself.
 
    **Push discipline — run the terminal push/PR step in the FOREGROUND, never
    background it (#1771).** The pre-push gate is slow (full fast tier + smoke +
@@ -78,16 +80,16 @@ branches, no unpushed WIP).
 
 The board ("eBull engineering board") is the operator's at-a-glance view of live
 task state. Keep it truthful by updating it inline via
-`scripts/autonomy/board.sh` — it uses your existing `gh` auth (the token already
+`"$AUTONOMY_ENGINE_HOME/bin/board.sh"` — it uses your existing `gh` auth (the token already
 carries `project` scope; no PAT/Action/secret). It is **best-effort**: a board
 hiccup warns and exits 0, so it can NEVER block or fail the real engineering work.
 Run it at each lifecycle transition for the issue # you are working:
 
-- Pick a ticket #N (start work)        → `scripts/autonomy/board.sh status N "In Progress"`
-- Open its PR                          → `scripts/autonomy/board.sh status N "In Review"`
-- After `safe_merge.sh <pr>` succeeds  → `scripts/autonomy/board.sh status N "Done"`
-- File a NEW ticket #M                 → `scripts/autonomy/board.sh add M` (lands in the backlog)
-- Park a ticket (blocked / operator-hold) → `scripts/autonomy/board.sh status N "Blocked"`
+- Pick a ticket #N (start work)        → `"$AUTONOMY_ENGINE_HOME/bin/board.sh" status N "In Progress"`
+- Open its PR                          → `"$AUTONOMY_ENGINE_HOME/bin/board.sh" status N "In Review"`
+- After `safe_merge.sh <pr>` succeeds  → `"$AUTONOMY_ENGINE_HOME/bin/board.sh" status N "Done"`
+- File a NEW ticket #M                 → `"$AUTONOMY_ENGINE_HOME/bin/board.sh" add M` (lands in the backlog)
+- Park a ticket (blocked / operator-hold) → `"$AUTONOMY_ENGINE_HOME/bin/board.sh" status N "Blocked"`
 
 **Future (NOT active yet — do NOT gate merges on this until the operator says the
 product is polished):** a "QA" column between In Review and Done, gated by a QA
