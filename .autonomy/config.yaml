@@ -1,0 +1,18 @@
+board:
+  owner: Luke-Bradford
+  project_title: "eBull engineering board"
+
+engine:
+  requires_claude_md: true
+
+agent:
+  type: claude
+  model:
+    primary: claude-sonnet-5
+    fallback: claude-sonnet-4-6
+
+merge_gate:
+  strategy: bot_comment
+  author_login: github-actions
+  marker: "Claude Code Review"
+  doc_only_extensions: [".md"]
