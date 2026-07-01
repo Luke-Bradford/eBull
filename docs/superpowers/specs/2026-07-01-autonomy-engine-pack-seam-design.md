@@ -336,10 +336,19 @@ live process to disrupt, low-risk moment to do this once):
   would sleep and retry on its own schedule, all piling back in around the same reset time (a
   stampede) instead of one shared wait. The registry spec should replace the per-repo file with a
   shared, engine-level reset marker keyed by account/credential, not by repo.
-- Registry/control-unit: multi-repo launch/stop, one control surface.
+- **Revised per `2026-07-01-managed-agents-vs-hand-rolled-comparison.md`:** #1876 (dashboard) and
+  #1877 (multi-role org) are NOT default hand-builds anymore. Anthropic's Managed Agents platform
+  (native Console dashboard, scheduled deployments, multiagent coordinator+roster+threads, vaults,
+  webhooks) covers most of what those two follow-ups originally described, for periodic/bounded
+  work specifically (PM triage sweeps, QA regression sweeps). The continuous Coder loop stays on
+  *this* spec's hand-rolled engine — Managed Agents' scheduled-deployment model doesn't cleanly fit
+  the continuous back-to-back-for-days pattern (see the comparison doc's rate-limit mismatch
+  section). Read that doc before writing the #1876/#1877 specs for real.
+- Registry/control-unit: multi-repo launch/stop, one control surface. Still needed regardless of
+  which substrate PM/QA/dashboard end up on — the Coder loop is still `--repo`-parameterized here.
 - Dashboard control-lever API: an operator's own Claude/Codex session talking to the supervisor
-  through the dashboard (pause, change model, query "why did you skip X") — needs a control API on
-  the supervisor side, not just log-tailing.
+  through the dashboard (pause, change model, query "why did you skip X") — for the hand-rolled
+  Coder-loop side specifically; Managed-Agents-run roles get this via the native Console instead.
 - Auto-provisioning of cold-repo GitHub state (review workflow file, branch protection, board,
   secrets) — `doctor.sh` diagnoses today; provisioning is a later, separate decision (mutates
   GitHub state, needs its own security review).
