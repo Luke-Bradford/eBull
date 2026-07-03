@@ -4550,7 +4550,7 @@ class _HolderModel(BaseModel):
 
 
 class _SliceModel(BaseModel):
-    category: Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds"]
+    category: Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"]
     label: str
     total_shares: Decimal
     pct_outstanding: Decimal
@@ -5155,7 +5155,7 @@ def get_instrument_ownership_rollup(
 # not a holders slice. Treated as a valid filter value below: it
 # scopes the CSV to the treasury memo + residual rows only.
 _ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
-    {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds"},
+    {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"},
 )
 _ROLLUP_CSV_CATEGORIES: frozenset[str] = _ROLLUP_CSV_SLICE_CATEGORIES | {"treasury"}
 
@@ -5190,13 +5190,14 @@ def get_instrument_ownership_rollup_csv(
         default=None,
         description=(
             "Optional category filter: insiders | blockholders | institutions "
-            "| etfs | def14a_unmatched | funds | treasury. Slice categories "
-            "scope the export to that slice's holders; ``treasury`` drops all "
-            "slice holders and emits only the treasury + residual memo rows. "
-            "``funds`` is a memo-overlay slice — its rows render with the "
-            "``__memo:funds__`` category prefix in the output CSV so they are "
-            "outside the additive (treasury + residual + Σ pie-wedge) "
-            "reconciliation. Without ``category``, every slice is exported."
+            "| etfs | def14a_unmatched | funds | esop | treasury. Slice "
+            "categories scope the export to that slice's holders; ``treasury`` "
+            "drops all slice holders and emits only the treasury + residual "
+            "memo rows. ``funds`` and ``esop`` are memo-overlay slices — their "
+            "rows render with the ``__memo:<category>__`` prefix in the output "
+            "CSV so they are outside the additive (treasury + residual + "
+            "Σ pie-wedge) reconciliation. Without ``category``, every slice "
+            "is exported."
         ),
     ),
     conn: psycopg.Connection[object] = Depends(get_conn),

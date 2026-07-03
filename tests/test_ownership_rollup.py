@@ -24,12 +24,14 @@ from app.services import ownership_rollup
 from app.services.ownership_observations import (
     record_blockholder_observation,
     record_def14a_observation,
+    record_esop_observation,
     record_fund_observation,
     record_insider_observation,
     record_institution_observation,
     record_treasury_observation,
     refresh_blockholders_current,
     refresh_def14a_current,
+    refresh_esop_current,
     refresh_funds_current,
     refresh_insiders_current,
     refresh_institutions_current,
@@ -1517,6 +1519,41 @@ def _seed_funds_holding(
     refresh_funds_current(conn, instrument_id=instrument_id)
 
 
+def _seed_esop_holding(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    plan_name: str,
+    accession: str,
+    shares: str,
+    percent_of_class: str | None = None,
+    plan_trustee_name: str | None = None,
+    period_end: date = date(2026, 3, 31),
+) -> None:
+    """Seed a DEF-14A ESOP / employee-benefit-plan holding via the
+    canonical write-through helpers — mirrors what
+    ``app.services.def14a_ingest`` does in production for a
+    ``holder_role='esop'`` row. Used by #961 esop-slice tests."""
+    record_esop_observation(
+        conn,
+        instrument_id=instrument_id,
+        plan_name=plan_name,
+        plan_trustee_name=plan_trustee_name,
+        plan_trustee_cik=None,
+        source_document_id=accession,
+        source_accession=accession,
+        source_field=None,
+        source_url=None,
+        filed_at=datetime(period_end.year, period_end.month, 1, tzinfo=UTC),
+        period_start=None,
+        period_end=period_end,
+        ingest_run_id=uuid4(),
+        shares=Decimal(shares),
+        percent_of_class=Decimal(percent_of_class) if percent_of_class is not None else None,
+    )
+    refresh_esop_current(conn, instrument_id=instrument_id)
+
+
 class TestFundsSlice:
     """Funds slice (#919): N-PORT mutual-fund holdings render as a
     memo-overlay slice with ``denominator_basis='institution_subset'``.
@@ -1744,6 +1781,130 @@ class TestFundsSlice:
             "Vanguard 500 Index Fund",
             "iShares Core S&P 500",
         ]
+
+
+class TestEsopSlice:
+    """ESOP / employee-benefit-plan slice (#961): DEF 14A-disclosed plan
+    holdings render as their own memo-overlay slice with
+    ``denominator_basis='proxy_disclosure'`` — same basis as
+    ``def14a_unmatched`` (SEC Item 403 beneficial-ownership disclosure),
+    NOT ``institution_subset``. #843's original spec called for tagging
+    ``ownership_funds_current`` rows via a ``plan_trustee_cik =
+    fund_filer_cik`` join, but a full-population check of every
+    populated ``ownership_esop_current`` row (2026-07-03) found
+    ``plan_trustee_cik`` is NULL on all of them — the DEF 14A table
+    gives free-text trustee names, never a resolvable CIK, so that join
+    can never match. Rendering ESOP as its own slice (this class)
+    surfaces the same data without depending on that dead join."""
+
+    def test_esop_slice_renders_with_memo_overlay_basis(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_070, symbol="ESOP1")
+        _seed_outstanding(conn, instrument_id=789_070, shares="10000000")
+        _seed_esop_holding(
+            conn,
+            instrument_id=789_070,
+            plan_name="ESOP1 Employee Stock Ownership Plan",
+            accession="0001234500-26-000200",
+            shares="500000",
+            percent_of_class="5.0000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="ESOP1",
+            instrument_id=789_070,
+        )
+
+        esop = [s for s in rollup.slices if s.category == "esop"]
+        assert len(esop) == 1, "esop slice must surface when DEF 14A ESOP data exists"
+        esop_slice = esop[0]
+        assert esop_slice.denominator_basis == "proxy_disclosure"
+        assert esop_slice.label == "Employee benefit plans (ESOP)"
+        assert esop_slice.total_shares == Decimal("500000")
+        assert esop_slice.filer_count == 1
+        holder = esop_slice.holders[0]
+        assert holder.filer_name == "ESOP1 Employee Stock Ownership Plan"
+        assert holder.filer_cik is None
+        assert holder.winning_source == "def14a"
+        assert holder.shares == Decimal("500000")
+
+    def test_esop_slice_excluded_from_residual_math(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Critical invariant: esop slice is a memo overlay, NOT
+        additive in the pie. Residual must equal outstanding minus
+        pie-wedge slices only (insiders here), with the esop total NOT
+        subtracted."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_071, symbol="ESOP2")
+        _seed_outstanding(conn, instrument_id=789_071, shares="10000000")
+        _seed_form4(
+            conn,
+            accession="0001234500-26-000201",
+            instrument_id=789_071,
+            filer_cik="0001234569",
+            filer_name="Founder Holder",
+            txn_date=date(2026, 2, 1),
+            post_transaction_shares="1000000",
+        )
+        _seed_esop_holding(
+            conn,
+            instrument_id=789_071,
+            plan_name="ESOP2 Employee Stock Ownership Plan",
+            accession="0001234500-26-000202",
+            shares="500000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="ESOP2",
+            instrument_id=789_071,
+        )
+
+        esop = [s for s in rollup.slices if s.category == "esop"]
+        assert len(esop) == 1
+        assert esop[0].total_shares == Decimal("500000")
+
+        # Residual = outstanding - insiders only. Esop slice NOT subtracted.
+        assert rollup.residual.shares == Decimal("9000000")
+        assert not rollup.residual.oversubscribed
+        assert rollup.concentration.pct_outstanding_known == Decimal("0.1")
+
+    def test_no_esop_slice_when_no_def14a_esop_data(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Esop slice is omitted entirely (not zero-row) when no DEF
+        14A ESOP data exists — ``if esop_holders:`` in the bucket
+        router means an empty list yields no slice in the payload."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_072, symbol="ESOP3")
+        _seed_outstanding(conn, instrument_id=789_072, shares="5000000")
+        _seed_form4(
+            conn,
+            accession="0001234500-26-000203",
+            instrument_id=789_072,
+            filer_cik="0001234570",
+            filer_name="Lone Insider",
+            txn_date=date(2026, 2, 1),
+            post_transaction_shares="100000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="ESOP3",
+            instrument_id=789_072,
+        )
+        esop = [s for s in rollup.slices if s.category == "esop"]
+        assert esop == [], "no esop slice when DEF 14A ESOP data is empty"
 
 
 class TestEmptyStates:
