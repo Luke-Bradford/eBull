@@ -100,9 +100,9 @@ const CATEGORY_LABELS: Record<CategoryKey, string> = {
 
 /** Rollup slice category → chart/table category. ``def14a_unmatched``
  *  is its own ``def14a`` category (#1627 — un-folded from insiders so
- *  the L2 filer rows match the un-folded wedges 1:1); ``funds`` is a
- *  non-additive N-PORT memo overlay (#919) and is excluded from the
- *  filer table entirely. */
+ *  the L2 filer rows match the un-folded wedges 1:1); ``funds`` and
+ *  ``esop`` (#961) are non-additive memo overlays and are excluded
+ *  from the filer table entirely. */
 const SLICE_TO_TABLE_CATEGORY: Record<
   OwnershipSliceCategory,
   CategoryKey | null
@@ -113,6 +113,7 @@ const SLICE_TO_TABLE_CATEGORY: Record<
   blockholders: "blockholders",
   def14a_unmatched: "def14a",
   funds: null,
+  esop: null,
 };
 
 export function OwnershipPage(): JSX.Element {

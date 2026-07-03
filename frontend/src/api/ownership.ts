@@ -41,7 +41,8 @@ export type OwnershipSliceCategory =
   | "institutions"
   | "etfs"
   | "def14a_unmatched"
-  | "funds";
+  | "funds"
+  | "esop";
 
 /**
  * Tags whether a slice contributes to the pie wedges that sum to

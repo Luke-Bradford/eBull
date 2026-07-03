@@ -480,6 +480,7 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
   const { shown, remaining } = topHoldersByShares(slice.holders, _OVERLAY_TOP_N);
   const isFunds = slice.category === "funds";
   const isProxy = slice.category === "def14a_unmatched";
+  const isEsop = slice.category === "esop";
   const unit = isFunds ? "fund series" : "holders";
   return (
     <div
@@ -492,7 +493,9 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
           ? "fund-level detail of positions already counted in Institutions via 13F-HR. "
           : isProxy
             ? "DEF 14A beneficial ownership (Rule 13d-3): the same shares may be listed under multiple owners (control groups, parent/sub, “all officers as a group”), so it is shown as a cross-check, not added to the pie. The real holders are counted via 13D/G, 13F and Form 4. "
-            : "non-additive overlay. "}
+            : isEsop
+              ? "ESOP / employee-benefit-plan holdings disclosed in DEF 14A (Rule 13d-3, SEC Item 403) — a proxy cross-check, not added to the pie. "
+              : "non-additive overlay. "}
         Does not contribute to the pie or residual math.
       </p>
       <table className="w-full">

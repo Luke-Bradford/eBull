@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-SliceCategory = Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds"]
+SliceCategory = Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"]
 SourceTag = Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"]
 CoverageState = Literal["no_data", "red", "unknown_universe", "amber", "green"]
 
@@ -69,17 +69,20 @@ CoverageState = Literal["no_data", "red", "unknown_universe", "amber", "green"]
 # §"Target chart decomposition". `pie_wedge` slices contribute to the
 # residual / concentration math (sum to ≤ shares_outstanding). Memo
 # overlays render as additional surface area without affecting the
-# pie — used by the funds slice today (N-PORT rows are fund-level
-# detail INSIDE the 13F-HR institutional aggregate; counting them
-# additively would double-count). Future ESOP / DRS / short-interest
-# overlays land here too (#961, etc.).
+# pie — used by the funds slice (N-PORT rows are fund-level detail
+# INSIDE the 13F-HR institutional aggregate; counting them additively
+# would double-count) and the esop slice (#961; DEF 14A plan-trustee
+# rows are a Rule 13d-3 deemed-ownership disclosure, same basis as
+# def14a_unmatched — not a distinct institutional holding). Future
+# DRS / short-interest overlays land here too.
 #   * ``institution_subset`` — fund-level detail inside the 13F-HR
 #     institutional aggregate (funds / N-PORT, #919).
 #   * ``proxy_disclosure`` — DEF 14A "Security Ownership of Certain
-#     Beneficial Owners" rows (#1659). A Rule 13d-3 deemed-ownership
-#     disclosure (SEC Item 403) where the same securities are listed
-#     under multiple owners (control groups, parent/sub, spouse
-#     attribution, "all officers as a group" aggregates) — overlapping,
+#     Beneficial Owners" rows (#1659), including ESOP/employee-benefit-
+#     plan rows (#961). A Rule 13d-3 deemed-ownership disclosure (SEC
+#     Item 403) where the same securities are listed under multiple
+#     owners (control groups, parent/sub, spouse attribution, "all
+#     officers as a group" aggregates, plan trustees) — overlapping,
 #     NOT additive. The real holders are already counted + de-duplicated
 #     via 13D/G, 13F, Form 4; the proxy is a cross-check, not a wedge
 #     (reverses #1627's additive treatment — see data-engineer I14/I16).
@@ -947,6 +950,61 @@ def _collect_funds_from_current(conn: psycopg.Connection[Any], instrument_id: in
     return holders
 
 
+def _collect_esop_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[Holder]:
+    """Build the esop-slice holder set from ``ownership_esop_current`` (#961).
+
+    Each row is one (instrument, plan_name) DEF 14A-disclosed ESOP /
+    employee-benefit-plan holding — PK-deduped at the table level
+    (``ownership_esop_current`` PK is ``(instrument_id, plan_name)``),
+    same shape as :func:`_collect_funds_from_current`.
+
+    #843's spec (`docs/proposals/etl/def14a-bene-table-extension.md`)
+    originally called for tagging matching ``ownership_funds_current``
+    rows via ``plan_trustee_cik = fund_filer_cik``. Full-population
+    check (2026-07-03, all 15 populated rows) found ``plan_trustee_cik``
+    is NULL on every row — the DEF 14A beneficial-ownership table gives
+    free-text trustee names ("Kearny Bank ESOP Trust c/o Pentegra
+    Services, Inc."), never a resolvable CIK, so that join can never
+    match. Rendering ESOP as its own memo-overlay slice (mirroring
+    funds/def14a_unmatched) surfaces the same already-validated data
+    without depending on a join key that doesn't exist.
+
+    Holders surface ``filer_name = plan_name`` (the operator-visible
+    plan identity) with ``filer_cik=None`` (no resolvable trustee CIK)
+    and ``winning_source='def14a'`` (the schema's fixed source value).
+    ``pct_outstanding`` is filled in by :func:`_build_slice`.
+    """
+    holders: list[Holder] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT plan_name, shares, source_accession, period_end
+            FROM ownership_esop_current
+            WHERE instrument_id = %s
+              AND shares IS NOT NULL
+              AND shares > 0
+            """,
+            (instrument_id,),
+        )
+        for row in cur.fetchall():
+            accession = str(row.get("source_accession") or "")
+            holders.append(
+                Holder(
+                    filer_cik=None,
+                    filer_name=str(row["plan_name"]),
+                    shares=Decimal(row["shares"]),
+                    pct_outstanding=Decimal(0),  # filled by _build_slice
+                    winning_source="def14a",
+                    winning_accession=accession,
+                    winning_edgar_url=edgar_archive_url(accession),
+                    as_of_date=row.get("period_end"),  # type: ignore[arg-type]
+                    filer_type=None,
+                    dropped_sources=(),
+                )
+            )
+    return holders
+
+
 def _read_treasury_from_current(
     conn: psycopg.Connection[Any], instrument_id: int
 ) -> tuple[Decimal | None, date | None]:
@@ -1153,6 +1211,7 @@ _SLICE_LABELS: dict[SliceCategory, str] = {
     "etfs": "ETFs",
     "def14a_unmatched": "Proxy-only (DEF 14A)",
     "funds": "Mutual funds (N-PORT)",
+    "esop": "Employee benefit plans (ESOP)",
 }
 
 
@@ -2137,6 +2196,7 @@ def _bucket_into_slices(
     outstanding: Decimal,
     *,
     funds_holders: list[Holder] | None = None,
+    esop_holders: list[Holder] | None = None,
 ) -> list[OwnershipSlice]:
     """Build slices from the per-category holder lists produced by
     :func:`_reconcile_owner_once` (each owner already in exactly one
@@ -2148,7 +2208,14 @@ def _bucket_into_slices(
     slice but does NOT contribute to residual / concentration math —
     N-PORT rows are fund-level detail of holdings already aggregated
     in the institutions slice via 13F-HR, so additive accounting would
-    double-count."""
+    double-count.
+
+    ``esop_holders`` (#961) arrives pre-deduped from
+    :func:`_collect_esop_from_current` (PK-deduped at table level) and
+    lands in its own ``esop`` memo-overlay slice, ``denominator_basis=
+    "proxy_disclosure"`` — same basis as ``def14a_unmatched``, since
+    ESOP rows are DEF 14A beneficial-ownership disclosure (SEC Item
+    403), not a distinct institutional holding."""
     slices: list[OwnershipSlice] = []
     for category in _CATEGORY_ORDER:
         holders = by_category.get(category)
@@ -2193,6 +2260,16 @@ def _bucket_into_slices(
                 list(funds_holders),
                 outstanding,
                 denominator_basis="institution_subset",
+            )
+        )
+
+    if esop_holders:
+        slices.append(
+            _build_slice(
+                "esop",
+                list(esop_holders),
+                outstanding,
+                denominator_basis="proxy_disclosure",
             )
         )
     return slices
@@ -3274,6 +3351,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # so no cross-source dedup needed; lands in a memo-overlay slice
     # via _bucket_into_slices.
     funds_holders = _collect_funds_from_current(conn, instrument_id)
+    # DEF-14A-disclosed ESOP / employee-benefit-plan holdings (#961). PK-deduped
+    # at the table level; lands in its own memo-overlay slice via _bucket_into_slices.
+    esop_holders = _collect_esop_from_current(conn, instrument_id)
 
     # Dedup in two stages: (1) per-source winner selection — Form 4 amendment
     # chains and 13D/G amendment chains each collapse to their latest filing;
@@ -3341,9 +3421,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     class_row = _read_class_shares_outstanding(conn, instrument_id)
     if class_row is not None:
         # Largest single pie-wedge holder. Only ADDITIVE pie wedges (the
-        # by_category holders) count: funds (institution_subset) and DEF 14A
-        # (proxy_disclosure, #1659) are non-additive memo overlays — a deemed /
-        # overlapping figure must not veto the per-class denominator.
+        # by_category holders) count: funds (institution_subset) and DEF 14A /
+        # esop (proxy_disclosure, #1659/#961) are non-additive memo overlays —
+        # a deemed / overlapping figure must not veto the per-class denominator.
         # Denominator-independent.
         _pie_shares = [h.shares for _hs in by_category.values() for h in _hs]
         max_pie_holder_shares = max(_pie_shares, default=Decimal(0))
@@ -3389,6 +3469,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         unmatched_def14a,
         effective_outstanding,
         funds_holders=funds_holders,
+        esop_holders=esop_holders,
     )
     residual = _compute_residual(effective_outstanding, slices, treasury)
     concentration = _compute_concentration(effective_outstanding, slices)
@@ -3495,7 +3576,7 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
 
     # Emit pie-wedge slices first so the additive-sum invariant holds
     # against (treasury_shares + residual.shares + Σ pie-wedge holders)
-    # = shares_outstanding. Memo-overlay slices (funds, future ESOP /
+    # = shares_outstanding. Memo-overlay slices (funds, esop, future
     # DRS / short-interest) are emitted in a trailing block with the
     # ``__memo:<category>__`` prefix so spreadsheet consumers can
     # filter them OUT of any SUM(shares) reconciliation. Codex
