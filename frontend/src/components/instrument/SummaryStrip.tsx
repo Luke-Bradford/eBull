@@ -10,7 +10,11 @@
  * Action gating:
  *   - Close — only when `heldUnits > 0`.
  *   - Generate thesis — when no thesis, or thesis is > 30d old.
- *   - Add — always enabled on tradable instruments.
+ *   - Add/Buy — always enabled on tradable instruments. Labeled "Buy" only
+ *     once the position fetch has resolved and confirmed no holding;
+ *     "Add" is the default (loading, error, or held), matching the action
+ *     OrderEntryModal actually submits (#316) and avoiding a wrong CTA
+ *     flash while position state is still unknown.
  */
 import type {
   InstrumentSummary,
@@ -253,7 +257,7 @@ export function SummaryStrip({
               onClick={onAdd}
               className="rounded border border-blue-300 bg-white dark:bg-slate-900 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50"
             >
-              Add
+              {positionLoaded && !positionError && !isHeld ? "Buy" : "Add"}
             </button>
           ) : null}
           {canCloseFromStrip ? (

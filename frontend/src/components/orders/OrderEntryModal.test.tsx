@@ -1,5 +1,5 @@
 /**
- * Tests for OrderEntryModal (#313).
+ * Tests for OrderEntryModal (#313, #316).
  *
  * Pins the contract defined in the spec:
  *   - Happy path: valid amount -> onFilled -> onRequestClose (in that order)
@@ -9,6 +9,7 @@
  *   - Network error: fixed phrase surfaced
  *   - Price-source flag: amber rendering when valuation_source != "quote"
  *   - Unmount-during-submit: no unhandled rejection
+ *   - Action selection: BUY when total_units=0, ADD when total_units>0 (#316)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
@@ -87,6 +88,22 @@ function detailFor(instrumentId: number): InstrumentPositionDetail {
         total_fees: 0,
       },
     ],
+  };
+}
+
+function unheldDetailFor(instrumentId: number): InstrumentPositionDetail {
+  return {
+    instrument_id: instrumentId,
+    symbol: "MSFT",
+    company_name: "Microsoft Corp.",
+    currency: "USD",
+    current_price: 400,
+    total_units: 0,
+    avg_entry: null,
+    total_invested: 0,
+    total_value: 0,
+    total_pnl: 0,
+    trades: [],
   };
 }
 
@@ -284,6 +301,77 @@ describe("OrderEntryModal", () => {
     expect(
       screen.getByText(/may not reflect fill price/i),
     ).toBeInTheDocument();
+  });
+
+  it("submits action=BUY (not ADD) and shows a Buy title when the instrument has no existing position", async () => {
+    mockedFetchDetail.mockReset();
+    // Not `.mockResolvedValueOnce` — handleSubmit re-fetches the position
+    // right before submit (#316 TOCTOU fix), so both the mount-time load
+    // and the submit-time refetch must resolve unheld here.
+    mockedFetchDetail.mockResolvedValue(unheldDetailFor(9));
+    mockedPlaceOrder.mockResolvedValueOnce(orderFilled());
+    const user = userEvent.setup();
+    renderModal({ instrumentId: 9, symbol: "MSFT", companyName: "Microsoft Corp." });
+
+    await waitFor(() => screen.getByText(/Latest price:/));
+    expect(screen.getByRole("heading", { name: "Buy — MSFT" })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/Notional/), "500");
+    await user.click(screen.getByRole("button", { name: /Place demo order/ }));
+
+    await waitFor(() => expect(mockedPlaceOrder).toHaveBeenCalled());
+    expect(mockedPlaceOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "BUY" }),
+    );
+  });
+
+  it("re-fetches the position at submit time and uses the fresh action, not the mount-time snapshot (#316 TOCTOU)", async () => {
+    // Instrument was unheld when the modal mounted (title says "Buy"),
+    // but a fill lands elsewhere while the operator is still looking at
+    // the modal — by submit time the instrument IS held. The submitted
+    // action must be ADD (matching reality), not the stale BUY.
+    mockedFetchDetail.mockReset();
+    mockedFetchDetail.mockResolvedValueOnce(unheldDetailFor(9));
+    mockedFetchDetail.mockResolvedValueOnce(detailFor(9)); // held by submit time
+    mockedPlaceOrder.mockResolvedValueOnce(orderFilled());
+    const user = userEvent.setup();
+    renderModal({ instrumentId: 9, symbol: "MSFT", companyName: "Microsoft Corp." });
+
+    await waitFor(() => screen.getByText(/Latest price:/));
+    expect(screen.getByRole("heading", { name: "Buy — MSFT" })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/Notional/), "500");
+    await user.click(screen.getByRole("button", { name: /Place demo order/ }));
+
+    await waitFor(() => expect(mockedPlaceOrder).toHaveBeenCalled());
+    expect(mockedPlaceOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "ADD" }),
+    );
+    expect(mockedFetchDetail).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to the last-known action if the submit-time re-fetch fails", async () => {
+    mockedFetchDetail.mockReset();
+    mockedFetchDetail.mockResolvedValueOnce(unheldDetailFor(9));
+    mockedFetchDetail.mockRejectedValueOnce(new Error("network blip"));
+    mockedPlaceOrder.mockResolvedValueOnce(orderFilled());
+    const user = userEvent.setup();
+    renderModal({ instrumentId: 9, symbol: "MSFT", companyName: "Microsoft Corp." });
+
+    await waitFor(() => screen.getByText(/Latest price:/));
+    await user.type(screen.getByLabelText(/Notional/), "500");
+    await user.click(screen.getByRole("button", { name: /Place demo order/ }));
+
+    await waitFor(() => expect(mockedPlaceOrder).toHaveBeenCalled());
+    expect(mockedPlaceOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "BUY" }),
+    );
+  });
+
+  it("shows an Add title when the instrument has an existing position", async () => {
+    renderModal();
+    await waitFor(() => screen.getByText(/Latest price:/));
+    expect(screen.getByRole("heading", { name: "Add — AAPL" })).toBeInTheDocument();
   });
 
   it("still calls onFilled when unmounted mid-submit if the order actually filled", async () => {

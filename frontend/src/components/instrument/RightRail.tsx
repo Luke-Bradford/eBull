@@ -11,6 +11,9 @@
  *      exposure. Placeholder scaffold; deeper design deferred to a
  *      follow-up spec if scope grows.
  *   4. Recent news (last 3) — headline + sentiment badge
+ *   5. Recommendation history (last 5) — action/status badges + date;
+ *      remaining slice of #316 (portfolio-manager output for this
+ *      instrument, alongside the thesis/score already on the strip)
  */
 import { Link } from "react-router-dom";
 
@@ -18,11 +21,13 @@ import { fetchCopyTrading } from "@/api/copyTrading";
 import { fetchFilings } from "@/api/filings";
 import { fetchNews } from "@/api/news";
 import { fetchRankings } from "@/api/rankings";
+import { fetchRecommendations } from "@/api/recommendations";
 import type {
   CopyTraderSummary,
   FilingItem,
   NewsItem,
   RankingItem,
+  RecommendationListItem,
 } from "@/api/types";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { useAsync } from "@/lib/useAsync";
@@ -67,6 +72,7 @@ export function RightRail({
       />
       <CopyExposure instrumentId={instrumentId} />
       <RecentNews instrumentId={instrumentId} />
+      <RecommendationHistory instrumentId={instrumentId} />
     </aside>
   );
 }
@@ -367,6 +373,69 @@ function NewsRow({ n }: { n: NewsItem }) {
         <span>{new Date(n.event_time).toLocaleDateString()}</span>
         {n.source ? <span>· {n.source}</span> : null}
       </div>
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recommendation history
+// ---------------------------------------------------------------------------
+
+const RECOMMENDATION_ACTION_TONE: Record<string, string> = {
+  BUY: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300",
+  ADD: "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300",
+  HOLD: "bg-slate-100 dark:bg-slate-800 text-slate-600",
+  EXIT: "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300",
+  CONSIDERED: "bg-slate-100 dark:bg-slate-800 text-slate-600",
+};
+
+function RecommendationHistory({ instrumentId }: { instrumentId: number }) {
+  const { data, error, loading, refetch } = useAsync(
+    () =>
+      fetchRecommendations(
+        { action: null, status: null, instrument_id: instrumentId },
+        0,
+        5,
+      ),
+    [instrumentId],
+  );
+  return (
+    <Section title="Recommendation history">
+      {loading && <SectionSkeleton rows={3} />}
+      {error !== null && <SectionError onRetry={refetch} />}
+      {!loading && error === null && (data?.items.length ?? 0) === 0 && (
+        <div className="text-xs text-slate-500">
+          No recommendations for this instrument yet.
+        </div>
+      )}
+      {!loading && error === null && (data?.items.length ?? 0) > 0 && (
+        <ul className="space-y-1.5 text-xs">
+          {(data?.items ?? []).map((r) => (
+            <RecommendationRow key={r.recommendation_id} r={r} />
+          ))}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
+function RecommendationRow({ r }: { r: RecommendationListItem }) {
+  const tone =
+    RECOMMENDATION_ACTION_TONE[r.action] ??
+    "bg-slate-100 dark:bg-slate-800 text-slate-600";
+  return (
+    <li className="flex items-baseline justify-between gap-2">
+      <span className="flex items-baseline gap-2 truncate">
+        <span
+          className={`inline-block min-w-[40px] rounded px-1 py-0.5 text-center text-[10px] font-semibold ${tone}`}
+        >
+          {r.action}
+        </span>
+        <span className="truncate text-slate-600">{r.status}</span>
+      </span>
+      <span className="shrink-0 text-[10px] text-slate-500">
+        {new Date(r.created_at).toLocaleDateString()}
+      </span>
     </li>
   );
 }

@@ -26,6 +26,7 @@ import type {
   FilingsListResponse,
   NewsListResponse,
   RankingsListResponse,
+  RecommendationsListResponse,
 } from "@/api/types";
 
 vi.mock("@/api/filings", () => ({ fetchFilings: vi.fn() }));
@@ -35,16 +36,19 @@ vi.mock("@/api/rankings", () => ({
   RANKINGS_PAGE_SIZE: 50,
 }));
 vi.mock("@/api/copyTrading", () => ({ fetchCopyTrading: vi.fn() }));
+vi.mock("@/api/recommendations", () => ({ fetchRecommendations: vi.fn() }));
 
 import { fetchFilings } from "@/api/filings";
 import { fetchNews } from "@/api/news";
 import { fetchRankings } from "@/api/rankings";
 import { fetchCopyTrading } from "@/api/copyTrading";
+import { fetchRecommendations } from "@/api/recommendations";
 
 const mockedFilings = vi.mocked(fetchFilings);
 const mockedNews = vi.mocked(fetchNews);
 const mockedRankings = vi.mocked(fetchRankings);
 const mockedCopyTrading = vi.mocked(fetchCopyTrading);
+const mockedRecommendations = vi.mocked(fetchRecommendations);
 
 function filingsEmpty(instrumentId: number): FilingsListResponse {
   return {
@@ -172,15 +176,48 @@ function copyTradingEmpty(): CopyTradingResponse {
   };
 }
 
+function recommendationsEmpty(): RecommendationsListResponse {
+  return { items: [], total: 0, offset: 0, limit: 5 };
+}
+
+function recommendationsWith(instrumentId: number): RecommendationsListResponse {
+  return {
+    items: [
+      {
+        recommendation_id: 1,
+        instrument_id: instrumentId,
+        symbol: "AAPL",
+        company_name: "Apple Inc.",
+        action: "BUY",
+        status: "executed",
+        rationale: "Strong momentum.",
+        score_id: 1,
+        model_version: "v1.2-balanced",
+        suggested_size_pct: 5,
+        target_entry: null,
+        cash_balance_known: true,
+        data_completeness: 0.9,
+        completeness_tier: "full",
+        created_at: "2026-06-01T00:00:00Z",
+      },
+    ],
+    total: 1,
+    offset: 0,
+    limit: 5,
+  };
+}
+
 beforeEach(() => {
   mockedFilings.mockReset();
   mockedNews.mockReset();
   mockedRankings.mockReset();
   mockedCopyTrading.mockReset();
+  mockedRecommendations.mockReset();
   mockedFilings.mockResolvedValue(filingsEmpty(42));
   mockedNews.mockResolvedValue(newsEmpty(42));
   mockedRankings.mockResolvedValue(rankingsEmpty());
   mockedCopyTrading.mockResolvedValue(copyTradingEmpty());
+  mockedRecommendations.mockResolvedValue(recommendationsEmpty());
 });
 
 function renderRail(props: {
@@ -209,13 +246,14 @@ function renderRail(props: {
 }
 
 describe("RightRail", () => {
-  it("renders all three section headers", async () => {
+  it("renders all section headers", async () => {
     renderRail();
     expect(
       await screen.findByText(/Recent filings/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/Peer snapshot/i)).toBeInTheDocument();
     expect(screen.getByText(/Recent news/i)).toBeInTheDocument();
+    expect(screen.getByText(/Recommendation history/i)).toBeInTheDocument();
   });
 
   it("renders filing rows when data arrives", async () => {
@@ -312,6 +350,37 @@ describe("RightRail", () => {
     const [query, limit] = mockedRankings.mock.calls[0]!;
     expect(query).toMatchObject({ sector_spdr: "XLV" });
     expect(limit).toBe(6);
+  });
+});
+
+describe("RightRail — recommendation history (#316)", () => {
+  it("shows an empty state when the instrument has no recommendations", async () => {
+    renderRail();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/No recommendations for this instrument yet/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("renders action + status badges when recommendations exist", async () => {
+    mockedRecommendations.mockResolvedValue(recommendationsWith(42));
+    renderRail({ instrumentId: 42 });
+    await waitFor(() => {
+      expect(screen.getByText("BUY")).toBeInTheDocument();
+    });
+    expect(screen.getByText("executed")).toBeInTheDocument();
+  });
+
+  it("scopes the fetch to instrument_id", async () => {
+    renderRail({ instrumentId: 99 });
+    await waitFor(() => {
+      expect(mockedRecommendations).toHaveBeenCalledWith(
+        { action: null, status: null, instrument_id: 99 },
+        0,
+        5,
+      );
+    });
   });
 });
 

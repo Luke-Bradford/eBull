@@ -1,14 +1,19 @@
 /**
- * OrderEntryModal — ADD-to-existing-position flow (issue #313).
+ * OrderEntryModal — BUY / ADD order-entry flow (issues #313, #316).
  *
- * Launches from PortfolioPage. Renders:
+ * Launches from PortfolioPage and InstrumentPage. Renders:
  *   - DemoLivePill (safety-state-ui pattern)
  *   - Native-currency price context from /portfolio/instruments/:id
  *   - Amount / Units toggle + numeric input with live preview
- *   - Submit -> POST /portfolio/orders with action=ADD
+ *   - Submit -> POST /portfolio/orders with action=BUY (no existing position)
+ *     or action=ADD (position.total_units > 0) — the position fetch this
+ *     modal already makes for price context also decides the action, so the
+ *     audit trail (orders/decision_audit) correctly distinguishes a new
+ *     position from a top-up, matching the BUY/ADD split the execution
+ *     guard and portfolio manager already use (docs/settled-decisions.md
+ *     "Action-specific behaviour").
  *
  * Intentionally minimal vs the spec:
- *   - Action is always "ADD" in this PR (new-instrument BUY ships in #316).
  *   - No SL / TP / TSL / leverage UI. Payload sends the backend defaults
  *     explicitly for readability.
  *
@@ -70,6 +75,10 @@ export function OrderEntryModal({
   const [rawInput, setRawInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Set from the submit-time re-fetch so the title can't say "Buy" while
+  // the order actually submitted is ADD (or vice versa) — see handleSubmit.
+  const [resolvedAction, setResolvedAction] =
+    useState<PlaceOrderRequest["action"] | null>(null);
 
   // mountedRef: guard setState against the "user escapes the modal
   // mid-submit then the parent unmounts us" race (prevention #127).
@@ -85,6 +94,7 @@ export function OrderEntryModal({
   const priceIsUsable =
     detail.data?.current_price != null && detail.data.current_price > 0;
   const detailLoaded = detail.data !== null;
+  const isAdd = (detail.data?.total_units ?? 0) > 0;
   const canSubmit =
     detailLoaded &&
     !detail.loading &&
@@ -96,9 +106,24 @@ export function OrderEntryModal({
     if (parsedValue === null) return;
     setSubmitting(true);
     setErrorMessage(null);
+    // Re-fetch the position right before submit rather than trusting the
+    // snapshot from mount time — the operator may sit on an open modal
+    // while another order fills elsewhere, and a stale BUY/ADD call here
+    // would mislabel the audit trail (orders / decision_audit) even
+    // though the backend fills identically either way.
+    let action: PlaceOrderRequest["action"];
+    try {
+      const fresh = await fetchInstrumentPositions(instrumentId);
+      action = fresh.total_units > 0 ? "ADD" : "BUY";
+    } catch {
+      // Re-fetch failure: fall back to the last-known snapshot rather
+      // than blocking submission on a transient network hiccup.
+      action = isAdd ? "ADD" : "BUY";
+    }
+    if (mountedRef.current) setResolvedAction(action);
     const body: PlaceOrderRequest = {
       instrument_id: instrumentId,
-      action: "ADD",
+      action,
       amount: mode === "amount" ? parsedValue : null,
       units: mode === "units" ? parsedValue : null,
       stop_loss_rate: null,
@@ -141,7 +166,8 @@ export function OrderEntryModal({
     }
   }
 
-  const title = `Add — ${symbol}`;
+  const displayIsAdd = resolvedAction === null ? isAdd : resolvedAction === "ADD";
+  const title = `${displayIsAdd ? "Add" : "Buy"} — ${symbol}`;
 
   return (
     <Modal isOpen={isOpen} onRequestClose={onRequestClose} label={title}>
