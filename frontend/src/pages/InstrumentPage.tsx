@@ -416,10 +416,13 @@ function redFlagBadge(score: number | null) {
   );
 }
 
+const FILINGS_PAGE_SIZE = 25;
+
 function FilingsTab({ instrumentId }: { instrumentId: number }) {
+  const [offset, setOffset] = useState(0);
   const { data, error, loading } = useAsync<FilingsListResponse>(
-    () => fetchFilings(instrumentId, 0, 25),
-    [instrumentId],
+    () => fetchFilings(instrumentId, offset, FILINGS_PAGE_SIZE),
+    [instrumentId, offset],
   );
 
   if (loading) return <SectionSkeleton rows={5} />;
@@ -434,6 +437,13 @@ function FilingsTab({ instrumentId }: { instrumentId: number }) {
       </Section>
     );
   }
+
+  const total = data.total;
+  const pageCount = data.items.length;
+  const rangeStart = total === 0 ? 0 : offset + 1;
+  const rangeEnd = offset + pageCount;
+  const hasPrev = offset > 0;
+  const hasNext = offset + FILINGS_PAGE_SIZE < total;
 
   return (
     <Section title={`Filings (${data.total})`}>
@@ -476,6 +486,29 @@ function FilingsTab({ instrumentId }: { instrumentId: number }) {
           </li>
         ))}
       </ul>
+      <div className="mt-3 flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-3 text-xs text-slate-500">
+        <span className="tabular-nums">
+          Showing {rangeStart}–{rangeEnd} of {total}
+        </span>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setOffset((o) => Math.max(0, o - FILINGS_PAGE_SIZE))}
+            disabled={!hasPrev}
+            className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1 font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            ‹ Prev
+          </button>
+          <button
+            type="button"
+            onClick={() => setOffset((o) => o + FILINGS_PAGE_SIZE)}
+            disabled={!hasNext}
+            className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1 font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Next ›
+          </button>
+        </div>
+      </div>
     </Section>
   );
 }
