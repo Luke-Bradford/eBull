@@ -270,6 +270,52 @@ describe("SummaryStrip — action gating", () => {
     expect(screen.getByTestId("thesis-badge").textContent).toContain("stale");
   });
 
+  it("labels the action Buy when unheld and Add when held (#316)", () => {
+    const { rerender } = render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={freshThesis()}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByTestId("action-add").textContent).toBe("Buy");
+
+    rerender(
+      <SummaryStrip
+        summary={summary()}
+        thesis={freshThesis()}
+        position={heldPosition()}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByTestId("action-add").textContent).toBe("Add");
+  });
+
+  it("defaults the action label to Add (not Buy) while position state is loading or errored (#316)", () => {
+    const { rerender } = render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={freshThesis()}
+        position={null}
+        {...noopProps()}
+        positionLoaded={false}
+      />,
+    );
+    expect(screen.getByTestId("action-add").textContent).toBe("Add");
+
+    rerender(
+      <SummaryStrip
+        summary={summary()}
+        thesis={freshThesis()}
+        position={null}
+        {...noopProps()}
+        positionError={true}
+      />,
+    );
+    expect(screen.getByTestId("action-add").textContent).toBe("Add");
+  });
+
   it("hides Add when instrument is not tradable", () => {
     render(
       <SummaryStrip
