@@ -75,6 +75,10 @@ export function OrderEntryModal({
   const [rawInput, setRawInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Set from the submit-time re-fetch so the title can't say "Buy" while
+  // the order actually submitted is ADD (or vice versa) — see handleSubmit.
+  const [resolvedAction, setResolvedAction] =
+    useState<PlaceOrderRequest["action"] | null>(null);
 
   // mountedRef: guard setState against the "user escapes the modal
   // mid-submit then the parent unmounts us" race (prevention #127).
@@ -116,6 +120,7 @@ export function OrderEntryModal({
       // than blocking submission on a transient network hiccup.
       action = isAdd ? "ADD" : "BUY";
     }
+    if (mountedRef.current) setResolvedAction(action);
     const body: PlaceOrderRequest = {
       instrument_id: instrumentId,
       action,
@@ -161,7 +166,8 @@ export function OrderEntryModal({
     }
   }
 
-  const title = `${isAdd ? "Add" : "Buy"} — ${symbol}`;
+  const displayIsAdd = resolvedAction === null ? isAdd : resolvedAction === "ADD";
+  const title = `${displayIsAdd ? "Add" : "Buy"} — ${symbol}`;
 
   return (
     <Modal isOpen={isOpen} onRequestClose={onRequestClose} label={title}>
