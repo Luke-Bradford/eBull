@@ -420,6 +420,9 @@ const FILINGS_PAGE_SIZE = 25;
 
 function FilingsTab({ instrumentId }: { instrumentId: number }) {
   const [offset, setOffset] = useState(0);
+  useEffect(() => {
+    setOffset(0);
+  }, [instrumentId]);
   const { data, error, loading } = useAsync<FilingsListResponse>(
     () => fetchFilings(instrumentId, offset, FILINGS_PAGE_SIZE),
     [instrumentId, offset],
