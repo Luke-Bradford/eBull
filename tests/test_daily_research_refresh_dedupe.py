@@ -23,7 +23,7 @@ def _stub_cik_rows() -> list[tuple[str, str]]:
 
 
 def _base_mocks(monkeypatch) -> tuple[MagicMock, MagicMock, MagicMock]:
-    """Stub the global settings + _tracked_job + psycopg.connect chain.
+    """Stub the global settings + _tracked_job + connect_job chain.
 
     Returns the patched SEC filings provider, refresh_filings callable,
     and refresh_fundamentals callable so each test can assert on them.
@@ -45,11 +45,14 @@ def _base_mocks(monkeypatch) -> tuple[MagicMock, MagicMock, MagicMock]:
     conn_cm = MagicMock()
     conn_cm.__enter__.return_value = fake_conn
     conn_cm.__exit__.return_value = False
-    monkeypatch.setattr(
-        scheduler.psycopg,
-        "connect",
-        MagicMock(return_value=conn_cm),
-    )
+    # daily_research_refresh opens connections via ``connect_job()``
+    # (app.jobs.job_connection, imported by name into scheduler — #1690),
+    # not ``psycopg.connect`` directly. Patching ``scheduler.psycopg``
+    # instead is a no-op: the real connect_job() reads its own
+    # ``app.config.settings`` import (unaffected by the ``scheduler.settings``
+    # patch below) and silently hits the operator's real dev DB — the #1887
+    # bug this mock prevents.
+    monkeypatch.setattr(scheduler, "connect_job", MagicMock(return_value=conn_cm))
 
     # Stub provider factories — they're context managers.
     sec_fund_cm = MagicMock()
@@ -215,11 +218,14 @@ def test_cik_lookup_query_filters_to_primary_cik(monkeypatch) -> None:
 
     scheduler.daily_research_refresh()
 
-    # ``scheduler.psycopg.connect`` is monkeypatched with a MagicMock
-    # at the top of this test (via _base_mocks), but pyright sees
-    # the real function signature; cast through Any.
-    connect_mock: Any = scheduler.psycopg.connect
-    connect_call = connect_mock.call_args_list[0]
+    # ``scheduler.connect_job`` is monkeypatched with a MagicMock at the
+    # top of this test (via _base_mocks), but pyright sees the real
+    # function signature; cast through Any. ``connect_job()`` is
+    # keyword-only and takes no URL argument (it resolves
+    # ``app.config.settings.database_url`` internally) — unlike the old
+    # ``psycopg.connect(url)`` call this replaced, so there is no URL to
+    # sanity-check here.
+    connect_mock: Any = scheduler.connect_job
     fake_conn = connect_mock.return_value.__enter__.return_value
     # Content filter rather than positional index: a future refactor
     # that inserts another conn.execute() earlier in the flow would
@@ -230,5 +236,3 @@ def test_cik_lookup_query_filters_to_primary_cik(monkeypatch) -> None:
     assert "ei.provider = 'sec'" in cik_query
     assert "ei.identifier_type = 'cik'" in cik_query
     assert "ei.is_primary = TRUE" in cik_query
-    # Sanity: the connect call argument is the configured DB URL.
-    assert connect_call.args[0] == "postgresql://test"

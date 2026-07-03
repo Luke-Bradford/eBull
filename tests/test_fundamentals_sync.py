@@ -17,16 +17,20 @@ from app.services.coverage import AuditSummary, BackfillOutcome, BackfillResult,
 from app.workers import scheduler
 
 
-def _stub_two_connect_ctxes(psycopg_mod: MagicMock, phase1_conn: MagicMock, phase2_conn: MagicMock) -> None:
-    """Wire psycopg.connect to return the ingest-gate connection plus two
+def _stub_two_connect_ctxes(connect_job_mock: MagicMock, phase1_conn: MagicMock, phase2_conn: MagicMock) -> None:
+    """Wire connect_job to return the ingest-gate connection plus two
     distinct phase connections in sequence (gate → phase 2 audit → phase
     3 review).
 
-    fundamentals_sync opens ``psycopg.connect(...)`` once up-front for
-    the layer_enabled[fundamentals_ingest] gate (#414) and then once per
-    audit/review phase. A shared MagicMock would alias all three calls
-    to the same connection, hiding any test that a phase uses the wrong
-    one.
+    fundamentals_sync opens ``connect_job(...)`` (``app.jobs.job_connection``,
+    imported by name into ``scheduler`` — NOT ``psycopg.connect`` directly,
+    #1690) once up-front for the layer_enabled[fundamentals_ingest] gate
+    (#414) and then once per audit/review phase. A shared MagicMock would
+    alias all three calls to the same connection, hiding any test that a
+    phase uses the wrong one. Patching ``scheduler.psycopg`` instead of
+    ``scheduler.connect_job`` is a no-op — the real ``connect_job()`` would
+    silently hit the operator's real DB via its own ``app.config.settings``
+    import, which is exactly the #1887 bug this fixture prevents.
     """
     gate_cm = MagicMock()
     gate_cm.__enter__.return_value = MagicMock()
@@ -37,7 +41,7 @@ def _stub_two_connect_ctxes(psycopg_mod: MagicMock, phase1_conn: MagicMock, phas
     cm2 = MagicMock()
     cm2.__enter__.return_value = phase2_conn
     cm2.__exit__.return_value = None
-    psycopg_mod.connect.side_effect = [gate_cm, cm1, cm2]
+    connect_job_mock.side_effect = [gate_cm, cm1, cm2]
 
 
 def _stub_backfill_result(
@@ -97,7 +101,7 @@ def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
         patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
@@ -112,7 +116,7 @@ def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
         ) as backfill_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        _stub_two_connect_ctxes(connect_job_mock, phase1_conn, phase2_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         scheduler.fundamentals_sync()
@@ -164,7 +168,7 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
         patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
@@ -179,7 +183,7 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
         ) as backfill_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        _stub_two_connect_ctxes(connect_job_mock, phase1_conn, phase2_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         scheduler.fundamentals_sync()
@@ -214,7 +218,7 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "review_coverage") as review_mock,
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
         patch.object(scheduler, "daily_financial_facts") as facts_mock,
@@ -232,7 +236,7 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
         cm1 = MagicMock()
         cm1.__enter__.return_value = phase1_conn
         cm1.__exit__.return_value = None
-        psycopg_mod.connect.side_effect = [gate_cm, cm1]
+        connect_job_mock.side_effect = [gate_cm, cm1]
 
         try:
             scheduler.fundamentals_sync()
@@ -246,7 +250,7 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
     cik_mock.assert_called_once()
     facts_mock.assert_called_once()
     # Gate connect + phase-2 audit connect = 2; phase-3 never opens.
-    assert psycopg_mod.connect.call_count == 2
+    assert connect_job_mock.call_count == 2
 
 
 def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
@@ -284,7 +288,7 @@ def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
         patch.object(
             scheduler,
@@ -303,7 +307,7 @@ def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
         ) as backfill_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        _stub_two_connect_ctxes(connect_job_mock, phase1_conn, phase2_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         # Raises at the end so health surfaces record the job as failed.
@@ -357,7 +361,7 @@ def test_fundamentals_sync_phase0_cik_failure_isolated() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
         patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
         patch.object(scheduler, "daily_cik_refresh", side_effect=RuntimeError("cik pull failed")) as cik_mock,
@@ -368,7 +372,7 @@ def test_fundamentals_sync_phase0_cik_failure_isolated() -> None:
         ) as audit_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, audit_conn, review_conn)
+        _stub_two_connect_ctxes(connect_job_mock, audit_conn, review_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         # Raises at the end — phase 0 failure is isolated but surfaced.
@@ -413,7 +417,7 @@ def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
         patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
@@ -424,7 +428,7 @@ def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
         ) as audit_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, audit_conn, review_conn)
+        _stub_two_connect_ctxes(connect_job_mock, audit_conn, review_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         with pytest.raises(RuntimeError, match="phase 1"):
@@ -489,7 +493,7 @@ def test_fundamentals_sync_phase1b_runs_when_dedupe_enabled() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fund_cls,
         patch.object(scheduler, "refresh_fundamentals", return_value=refresh_summary) as refresh_mock,
@@ -502,7 +506,7 @@ def test_fundamentals_sync_phase1b_runs_when_dedupe_enabled() -> None:
         ),
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        psycopg_mod.connect.side_effect = [
+        connect_job_mock.side_effect = [
             _ctx(MagicMock()),  # ingest gate
             _ctx(cik_conn),
             _ctx(snapshot_conn),
@@ -538,7 +542,7 @@ def test_fundamentals_sync_short_circuits_when_ingest_disabled() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
         patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch.object(scheduler, "review_coverage") as review_mock,
@@ -548,7 +552,7 @@ def test_fundamentals_sync_short_circuits_when_ingest_disabled() -> None:
         cm = MagicMock()
         cm.__enter__.return_value = gate_conn
         cm.__exit__.return_value = None
-        psycopg_mod.connect.side_effect = [cm]
+        connect_job_mock.side_effect = [cm]
 
         scheduler.fundamentals_sync()
 
@@ -566,7 +570,7 @@ def test_fundamentals_sync_short_circuits_when_ingest_disabled() -> None:
     review_mock.assert_not_called()
     # Connection opened with autocommit=True so record_job_skip's
     # explicit transaction block issues a real BEGIN/COMMIT.
-    _, kwargs = psycopg_mod.connect.call_args
+    _, kwargs = connect_job_mock.call_args
     assert kwargs.get("autocommit") is True
 
 
@@ -618,7 +622,7 @@ def test_fundamentals_sync_gate_read_failure_falls_open() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
         patch.object(scheduler, "record_job_skip") as skip_mock,
@@ -630,7 +634,7 @@ def test_fundamentals_sync_gate_read_failure_falls_open() -> None:
         ) as audit_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        psycopg_mod.connect.side_effect = _connect
+        connect_job_mock.side_effect = _connect
         filings_cls.return_value.__enter__.return_value = MagicMock()
 
         scheduler.fundamentals_sync()
@@ -686,7 +690,7 @@ def test_fundamentals_sync_phase1b_query_filters_primary_cik() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "review_coverage", return_value=review),
         patch.object(scheduler, "daily_cik_refresh"),
@@ -697,7 +701,7 @@ def test_fundamentals_sync_phase1b_query_filters_primary_cik() -> None:
         ),
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        psycopg_mod.connect.side_effect = [
+        connect_job_mock.side_effect = [
             _ctx(MagicMock()),  # ingest gate
             _ctx(cik_conn),
             _ctx(audit_conn),
@@ -760,7 +764,7 @@ def test_fundamentals_sync_phase1b_row_count_contributes_to_tracker() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fund_cls,
         patch.object(scheduler, "refresh_fundamentals", return_value=refresh_summary),
@@ -773,7 +777,7 @@ def test_fundamentals_sync_phase1b_row_count_contributes_to_tracker() -> None:
         ),
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        psycopg_mod.connect.side_effect = [
+        connect_job_mock.side_effect = [
             _ctx(MagicMock()),  # ingest gate
             _ctx(cik_conn),
             _ctx(snapshot_conn),
@@ -829,7 +833,7 @@ def test_fundamentals_sync_phase1b_failure_surfaces_at_end() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fund_cls,
         patch.object(
@@ -846,7 +850,7 @@ def test_fundamentals_sync_phase1b_failure_surfaces_at_end() -> None:
         ) as audit_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        psycopg_mod.connect.side_effect = [
+        connect_job_mock.side_effect = [
             _ctx(MagicMock()),  # ingest gate
             _ctx(cik_conn),
             _ctx(MagicMock()),  # phase 1b snapshot conn (refresh raises)
@@ -892,7 +896,7 @@ def test_fundamentals_sync_phase1b_skipped_when_dedupe_disabled() -> None:
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fund_cls,
         patch.object(scheduler, "refresh_fundamentals") as refresh_mock,
@@ -905,7 +909,7 @@ def test_fundamentals_sync_phase1b_skipped_when_dedupe_disabled() -> None:
         ),
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, audit_conn, review_conn)
+        _stub_two_connect_ctxes(connect_job_mock, audit_conn, review_conn)
         filings_cls.return_value.__enter__.return_value = MagicMock()
 
         scheduler.fundamentals_sync()
