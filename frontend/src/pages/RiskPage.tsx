@@ -41,6 +41,7 @@ import { formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
 import {
   parseDecimal,
   pickWindow,
+  rebaseDrawdownToWindowPeak,
   RISK_RANGES,
   type RiskRange,
   riskStatusCopy,
@@ -314,10 +315,11 @@ export function RiskPage(): JSX.Element {
 
   // Time-series charts slice the full series to the picked range; the
   // histogram + scatter are full-history (no date axis to slice).
-  const ddPoints = sliceByRange(
-    series?.drawdown_curve ?? [],
-    data?.as_of_date ?? null,
-    range,
+  // Slice to the range, then re-anchor the underwater curve to the window's
+  // own peak so it agrees with the window-local max/current drawdown tiles
+  // (#1963). The backend emits one all-time-anchored curve for every range.
+  const ddPoints = rebaseDrawdownToWindowPeak(
+    sliceByRange(series?.drawdown_curve ?? [], data?.as_of_date ?? null, range),
   );
   const volPoints = sliceByRange(
     series?.rolling_vol ?? [],

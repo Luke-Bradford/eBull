@@ -7,7 +7,7 @@
  * pick and slice the already-computed payload for presentation.
  */
 
-import type { RiskStatus, RiskWindowMetrics } from "@/api/types";
+import type { DrawdownPoint, RiskStatus, RiskWindowMetrics } from "@/api/types";
 
 /** The range picker tokens. 5Y ≡ full given the ~4yr data ceiling, so both
  *  5Y and All map to the persisted `full` window (spec: no separate 5Y row). */
@@ -75,6 +75,45 @@ export function sliceByRange<T extends { readonly date: string }>(
   end.setUTCDate(end.getUTCDate() - days);
   const cutoff = end.toISOString().slice(0, 10);
   return points.filter((p) => p.date >= cutoff);
+}
+
+/**
+ * Re-baseline a range-sliced underwater curve to the SELECTED window's own
+ * high-water mark, so the chart agrees with the window-local `max_drawdown` /
+ * `current_drawdown` tiles.
+ *
+ * The backend emits ONE full-history curve keyed to the ALL-TIME running peak
+ * (`risk_metrics.py::drawdown_curve`); {@link sliceByRange} only cuts the
+ * x-axis, so a window that opens below the all-time high shows all-time-relative
+ * drawdown while the scalar tiles reset their peak at the window start. This
+ * pure transform re-anchors the sliced series to the window peak using ONLY the
+ * drawdown series — prices cancel:
+ *
+ *   d'(t) = (1 + d(t)) / (1 + max_{s≤t} d(s)) − 1
+ *
+ * `max_{s≤t} d(s)` is the running maximum (least-negative) drawdown so far in
+ * the slice — the point closest to the window's own peak. It resets to 0 at
+ * each fresh all-time high (where d(t)=0), so this reproduces the window-local
+ * peak/trough math exactly. Display-only normalization, NOT a new estimator
+ * (settled-decisions §Risk-metrics: `instrument_risk_metrics` is display/
+ * evidence, no `metric_version` bump for presentation).
+ *
+ * Points whose drawdown fails to parse pass through unchanged and do not
+ * advance the running peak. The denominator `1 + peak` is always > 0: the
+ * backend curve only includes valid closes (> 0, `risk_metrics.py::_valid_close`)
+ * so every `d = close/peak − 1 > −1`, hence the running max `peak > −1`.
+ */
+export function rebaseDrawdownToWindowPeak(
+  points: ReadonlyArray<DrawdownPoint>,
+): DrawdownPoint[] {
+  let peak: number | null = null; // running max of parsed drawdown (≤ 0)
+  return points.map((p) => {
+    const d = parseDecimal(p.drawdown);
+    if (d === null) return p;
+    if (peak === null || d > peak) peak = d;
+    const rebased = (1 + d) / (1 + peak) - 1;
+    return { ...p, drawdown: String(rebased) };
+  });
 }
 
 /**

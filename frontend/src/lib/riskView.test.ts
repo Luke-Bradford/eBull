@@ -6,6 +6,7 @@ import {
   pickWindow,
   rangeDays,
   rangeToWindowKey,
+  rebaseDrawdownToWindowPeak,
   riskStatusCopy,
   sliceByRange,
 } from "./riskView";
@@ -108,6 +109,59 @@ describe("sliceByRange", () => {
   });
   it("returns the whole series when asOf is null", () => {
     expect(sliceByRange(points, null, "1Y")).toHaveLength(4);
+  });
+});
+
+describe("rebaseDrawdownToWindowPeak", () => {
+  const dp = (date: string, drawdown: string) => ({ date, drawdown });
+
+  it("returns [] for an empty slice", () => {
+    expect(rebaseDrawdownToWindowPeak([])).toEqual([]);
+  });
+
+  it("re-anchors to the window peak; the least-negative point becomes 0", () => {
+    // Slice opens 40% underwater relative to the all-time peak, recovers to
+    // −30% (the window's own high-water mark), then falls to the trough.
+    const sliced = [dp("d1", "-0.40"), dp("d2", "-0.30"), dp("d3", "-0.55")];
+    const out = rebaseDrawdownToWindowPeak(sliced);
+    const v = out.map((p) => Number(p.drawdown));
+    // Window peak = d2 (−0.30). d'(d2) = (1−0.30)/(1−0.30) − 1 = 0.
+    expect(v[1]).toBeCloseTo(0, 10);
+    // d'(d1) = (1−0.40)/(1−0.40) − 1 = 0 (d1 is the running peak until d2).
+    expect(v[0]).toBeCloseTo(0, 10);
+    // d'(d3) = (1−0.55)/(1−0.30) − 1 = 0.45/0.70 − 1 ≈ −0.357143.
+    expect(v[2]).toBeCloseTo(0.45 / 0.7 - 1, 10);
+  });
+
+  it("matches the GME 1Y trough example from #1963 (−0.2798)", () => {
+    // Curve minimum sits at −0.5940 against an all-time peak; the window's own
+    // high-water mark within the slice is −0.4364, so re-basing the trough
+    // yields −0.2798 == the Max drawdown tile.
+    const sliced = [dp("a", "-0.4364"), dp("b", "-0.5940")];
+    const out = rebaseDrawdownToWindowPeak(sliced);
+    expect(Number(out[1]!.drawdown)).toBeCloseTo(
+      (1 - 0.594) / (1 - 0.4364) - 1,
+      6,
+    );
+    expect(Number(out[1]!.drawdown)).toBeCloseTo(-0.2798, 3);
+  });
+
+  it("resets the anchor at a fresh all-time high (drawdown returns to 0)", () => {
+    const sliced = [dp("a", "-0.20"), dp("b", "0"), dp("c", "-0.10")];
+    const out = rebaseDrawdownToWindowPeak(sliced).map((p) =>
+      Number(p.drawdown),
+    );
+    expect(out[0]).toBeCloseTo(0, 10); // running peak until the true high
+    expect(out[1]).toBeCloseTo(0, 10); // new all-time high resets the anchor
+    expect(out[2]).toBeCloseTo(-0.1, 10); // −10% below that fresh peak
+  });
+
+  it("passes unparseable points through unchanged without advancing the peak", () => {
+    const sliced = [dp("a", "-0.30"), dp("b", "nope"), dp("c", "-0.50")];
+    const out = rebaseDrawdownToWindowPeak(sliced);
+    expect(out[1]!.drawdown).toBe("nope");
+    // Peak is still −0.30 (the bad point did not advance it).
+    expect(Number(out[2]!.drawdown)).toBeCloseTo((1 - 0.5) / (1 - 0.3) - 1, 10);
   });
 });
 
