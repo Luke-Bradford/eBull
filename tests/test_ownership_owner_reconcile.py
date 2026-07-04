@@ -31,6 +31,7 @@ def _h(
     filer_type: str | None = None,
     accession: str = "0000000000-00-000000",
     nature: str | None = None,
+    as_of: date = date(2026, 1, 1),
 ) -> Holder:
     return Holder(
         filer_cik=cik,
@@ -40,7 +41,7 @@ def _h(
         winning_source=source,
         winning_accession=accession,
         winning_edgar_url=f"https://sec.gov/{accession}",
-        as_of_date=date(2026, 1, 1),
+        as_of_date=as_of,
         filer_type=filer_type,
         dropped_sources=(),
         ownership_nature=nature,
@@ -117,6 +118,81 @@ def test_form4_direct_plus_indirect_preserved_single_source() -> None:
     assert len(rows) == 2
     assert sum((h.shares for h in rows), Decimal(0)) == Decimal("38000000")
     assert all(h.dropped_sources == () for h in rows)
+
+
+def test_form3_indirect_plus_form4_direct_summed_not_maxed() -> None:
+    """#1941: an owner's ``direct`` lot on Form 4 and ``indirect`` lot on Form 3
+    are distinct Section-16 holdings → SUM across the two forms, not MAX-drop the
+    smaller form. Mirrors AAPL / Khan Sabih (direct 1,073,895 F4 + indirect 31,632
+    F3 = 1,105,527)."""
+    out = _reconcile_owner_once(
+        [
+            _h("0002078476", "Khan Sabih", "form4", "1073895", accession="f4", nature="direct"),
+            _h("0002078476", "Khan Sabih", "form3", "31632", accession="f3", nature="indirect"),
+        ]
+    )
+    rows = out["insiders"]
+    assert len(rows) == 2
+    assert {h.winning_source for h in rows} == {"form4", "form3"}
+    assert sum((h.shares for h in rows), Decimal(0)) == Decimal("1105527")
+    # Neither lot is dropped — both are genuine additive holdings.
+    assert all(h.dropped_sources == () for h in rows)
+
+
+def test_section16_pooled_forms_then_max_against_def14a() -> None:
+    """Cross-form additive channel first pools (form4 direct 100 + form3 indirect
+    50 = 150), THEN MAXes against an overlapping def14a beneficial restatement.
+    When the pooled additive (150) beats def14a (120), the additive lots win and
+    def14a is folded to dropped_sources (not summed on top)."""
+    out = _reconcile_owner_once(
+        [
+            _h("c1", "Owner Ada", "form4", "100", accession="f4", nature="direct"),
+            _h("c1", "Owner Ada", "form3", "50", accession="f3", nature="indirect"),
+            _h("c1", "Owner Ada", "def14a", "120", accession="dA", nature="beneficial"),
+        ]
+    )
+    rows = out["insiders"]
+    assert sum((h.shares for h in rows), Decimal(0)) == Decimal("150")
+    dropped = {d.source for h in rows for d in h.dropped_sources}
+    assert dropped == {"def14a"}
+
+
+def test_section16_pooled_loses_to_def14a_provenance_labelled_by_form() -> None:
+    """When an overlapping def14a restatement (300) EXCEEDS the pooled Section-16
+    additive channel (form4 direct 100 + form3 indirect 50 = 150), def14a is the
+    figure and the Section-16 channel is dropped. The dropped entry must be
+    stamped with the rep row's OWN form (form4, its true accession), not the
+    ``form4`` merge-bucket label smeared onto a form3 filing (#1941 / Codex
+    ckpt-2)."""
+    out = _reconcile_owner_once(
+        [
+            _h("c3", "Owner Cai", "form4", "100", accession="f4acc", nature="direct"),
+            _h("c3", "Owner Cai", "form3", "50", accession="f3acc", nature="indirect"),
+            _h("c3", "Owner Cai", "def14a", "300", accession="dAcc", nature="beneficial"),
+        ]
+    )
+    holder = _only(out["insiders"])
+    assert holder.shares == Decimal("300") and holder.winning_source == "def14a"
+    dropped = {(d.source, d.accession_number, d.shares) for d in holder.dropped_sources}
+    # One Section-16 channel entry at the pooled subtotal (150), labelled by the
+    # largest lot's real form (form4 / f4acc) — never a form4 tag on f3acc.
+    assert ("form4", "f4acc", Decimal("150")) in dropped
+    assert not any(src == "form4" and acc == "f3acc" for src, acc, _ in dropped)
+
+
+def test_section16_same_nature_across_forms_latest_wins_not_summed() -> None:
+    """Defensive: if a degenerate identity merge lands the SAME nature on both
+    forms, the later observation supersedes (Form 4 transaction over the Form 3
+    snapshot) — never SUM the same nature twice."""
+    out = _reconcile_owner_once(
+        [
+            _h("c2", "Owner Ben", "form3", "500", accession="f3", nature="direct", as_of=date(2025, 1, 1)),
+            _h("c2", "Owner Ben", "form4", "800", accession="f4", nature="direct", as_of=date(2026, 1, 1)),
+        ]
+    )
+    rows = out["insiders"]
+    assert sum((h.shares for h in rows), Decimal(0)) == Decimal("800")
+    assert {h.winning_source for h in rows} == {"form4"}
 
 
 def test_13f_managed_assets_never_added_to_insider() -> None:
