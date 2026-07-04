@@ -18,6 +18,8 @@ Latest-run semantics:
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal
 
@@ -33,6 +35,8 @@ from app.db import get_conn
 # rankings page shows stale rows of a version no longer produced.
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.services.sector_classification import resolve_sector_spdr, sector_spdr_case_sql
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rankings", tags=["rankings"])
 
@@ -123,6 +127,120 @@ class RankingsListResponse(BaseModel):
     limit: int
     model_version: str
     scored_at: datetime | None
+
+
+class RankingsCoverageBucket(BaseModel):
+    """One rank-exclusion cause with its operator label and instrument count."""
+
+    reason: str
+    label: str
+    count: int
+
+
+class RankingsCoverage(BaseModel):
+    """Explicit ranked-vs-universe denominator for the Rankings header (#1918).
+
+    ``universe`` = tradable instruments. ``ranked`` = the exact count the
+    ``GET /rankings`` list returns unfiltered for this run. ``not_ranked`` is
+    a MECE breakdown of ``universe - ranked`` by cause, so an operator can tell
+    "not ranked" from "ranked low" instead of reading absence as a bug.
+    """
+
+    model_version: str
+    scored_at: datetime | None
+    universe: int
+    ranked: int
+    not_ranked: list[RankingsCoverageBucket]
+
+
+# Operator labels per rank-exclusion reason. The non-`analysable` keys are
+# `coverage.filings_status` values whose meaning is the classifier's own rule
+# (app/services/coverage.py — probe_status / _finalise / _is_structurally_young,
+# coverage.py:1844-1893), not inferred here. `analysable_unranked` and `other`
+# are computed buckets. Labels avoid the stronger "US-GAAP" claim: the
+# classifier keys on SEC form families/counts, not accounting basis.
+_NOT_RANKED_LABELS: dict[str, str] = {
+    "no_primary_sec_cik": "No SEC filer (non-US listing)",
+    "fpi": "Foreign private issuer (20-F/6-K filer)",
+    "insufficient": "Insufficient filing history",
+    "structurally_young": "Recently listed — too little history",
+    "analysable_unranked": "Analysable — not in latest ranking run",
+    "other": "Unclassified coverage",
+}
+
+# Emission order for not_ranked buckets: raw filing-status causes first (largest
+# classes), computed buckets last.
+_NOT_RANKED_ORDER: tuple[str, ...] = (
+    "no_primary_sec_cik",
+    "fpi",
+    "insufficient",
+    "structurally_young",
+    "analysable_unranked",
+    "other",
+)
+
+
+def build_coverage(
+    *,
+    model_version: str,
+    scored_at: datetime | None,
+    universe: int,
+    ranked: int,
+    status_counts: Mapping[str, int],
+) -> RankingsCoverage:
+    """Assemble the coverage breakdown from raw full-population counts.
+
+    Pure (no DB) so it is table-testable. ``status_counts`` maps
+    ``coverage.filings_status`` -> count over the *tradable* universe (a NULL /
+    missing status is simply absent from the map — it falls into ``other``).
+
+    Buckets are mutually exclusive; ``other`` is the residual
+    (``universe - Σ known statuses``, i.e. tradable rows with a NULL/unknown
+    coverage status), so ``ranked + Σ not_ranked == universe`` holds
+    definitionally. ``analysable`` splits into ``ranked`` +
+    ``analysable_unranked``. A negative computed bucket signals a data anomaly
+    (e.g. duplicate score rows making ranked > analysable); it is clamped to 0
+    and logged rather than shown as a nonsense negative.
+    """
+    analysable = status_counts.get("analysable", 0)
+    known_status_sum = sum(
+        status_counts.get(s, 0)
+        for s in ("analysable", "no_primary_sec_cik", "fpi", "insufficient", "structurally_young")
+    )
+
+    counts: dict[str, int] = {
+        "no_primary_sec_cik": status_counts.get("no_primary_sec_cik", 0),
+        "fpi": status_counts.get("fpi", 0),
+        "insufficient": status_counts.get("insufficient", 0),
+        "structurally_young": status_counts.get("structurally_young", 0),
+        "analysable_unranked": analysable - ranked,
+        "other": universe - known_status_sum,
+    }
+
+    for key in ("analysable_unranked", "other"):
+        if counts[key] < 0:
+            logger.warning(
+                "rankings coverage: negative %s bucket (%d) — clamping to 0; universe=%d ranked=%d status_counts=%s",
+                key,
+                counts[key],
+                universe,
+                ranked,
+                dict(status_counts),
+            )
+            counts[key] = 0
+
+    not_ranked = [
+        RankingsCoverageBucket(reason=r, label=_NOT_RANKED_LABELS[r], count=counts[r])
+        for r in _NOT_RANKED_ORDER
+        if counts[r] > 0
+    ]
+    return RankingsCoverage(
+        model_version=model_version,
+        scored_at=scored_at,
+        universe=universe,
+        ranked=ranked,
+        not_ranked=not_ranked,
+    )
 
 
 class ScoreHistoryItem(BaseModel):
@@ -329,9 +447,15 @@ def list_rankings(
         # rows for instruments that fell out of the analysable pool
         # between the last scoring run and now (e.g. audit regressed
         # them to insufficient / fpi / no_primary_sec_cik).
+        # is_tradable gate (#1918): a delisted/non-tradable instrument with a
+        # stale analysable score must never surface, and this makes the list
+        # `total` exactly equal the /rankings/coverage `ranked` count (both gate
+        # tradable+analysable over the latest run). Full-pop check 2026-07-04: 0
+        # ranked rows are non-tradable today, so a no-op now — a forward guard.
         where_clauses: list[str] = [
             "s.model_version = %(mv)s",
             "s.scored_at = %(scored_at)s",
+            "i.is_tradable = TRUE",
             "c.filings_status = 'analysable'",
         ]
         filter_params: dict[str, object] = {
@@ -440,6 +564,88 @@ def list_rankings(
         limit=limit,
         model_version=model_version,
         scored_at=latest_scored_at,  # type: ignore[arg-type]
+    )
+
+
+@router.get("/coverage", response_model=RankingsCoverage)
+def get_rankings_coverage(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+    model_version: str = Query(default=_DEFAULT_MODEL_VERSION),
+) -> RankingsCoverage:
+    """Ranked-vs-universe denominator + why-not-ranked breakdown (#1918).
+
+    Makes the Rankings surface honest: it renders only the scored subset of a
+    ~12.6k tradable universe, and without this an operator reads the ~8.7k
+    absent instruments as a bug rather than a correct exclusion (no SEC
+    fundamentals to score).
+
+    ``ranked`` is gated identically to ``GET /rankings`` (latest run of
+    ``model_version``, ``is_tradable AND filings_status='analysable'``,
+    ``COUNT(DISTINCT instrument_id)``), so the header count equals the table
+    ``total``. The whole payload is computed in one SQL statement (atomic
+    snapshot — two READ COMMITTED reads would not be). If no scoring run exists,
+    ``scored_at`` is null and ``ranked`` is 0.
+    """
+    sql = """
+        WITH latest AS (
+            SELECT MAX(scored_at) AS scored_at
+            FROM scores
+            WHERE model_version = %(mv)s
+        ),
+        uni AS (
+            SELECT c.filings_status
+            FROM instruments i
+            LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
+            WHERE i.is_tradable = TRUE
+        ),
+        ranked AS (
+            -- COUNT(DISTINCT instrument_id): defensive. Within one run
+            -- (a single scored_at) compute_rankings writes exactly one row per
+            -- distinct instrument, so this equals the list endpoint's COUNT(*)
+            -- today (full-pop check: 0 dup triples across all score rows). The
+            -- DB-level UNIQUE(instrument_id, model_version, scored_at) that would
+            -- make the equality unbreakable is tracked in #1933.
+            SELECT COUNT(DISTINCT s.instrument_id) AS n
+            FROM scores s
+            JOIN instruments i USING (instrument_id)
+            JOIN coverage c USING (instrument_id)
+            WHERE s.model_version = %(mv)s
+              AND s.scored_at = (SELECT scored_at FROM latest)
+              AND i.is_tradable = TRUE
+              AND c.filings_status = 'analysable'
+        )
+        SELECT
+            (SELECT scored_at FROM latest) AS scored_at,
+            (SELECT COUNT(*) FROM uni) AS universe,
+            (SELECT n FROM ranked) AS ranked,
+            COALESCE(
+                (
+                    SELECT jsonb_object_agg(filings_status, cnt)
+                    FROM (
+                        SELECT filings_status, COUNT(*) AS cnt
+                        FROM uni
+                        WHERE filings_status IS NOT NULL
+                        GROUP BY filings_status
+                    ) g
+                ),
+                '{}'::jsonb
+            ) AS status_counts
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, {"mv": model_version})
+        row = cur.fetchone()
+
+    # The SELECT always returns exactly one row (scalar subqueries).
+    assert row is not None  # noqa: S101 — narrows the dict_row Optional for type checkers
+    raw_status = row["status_counts"] or {}
+    status_counts = {str(k): int(v) for k, v in raw_status.items()}
+
+    return build_coverage(
+        model_version=model_version,
+        scored_at=row["scored_at"],
+        universe=int(row["universe"] or 0),
+        ranked=int(row["ranked"] or 0),
+        status_counts=status_counts,
     )
 
 
