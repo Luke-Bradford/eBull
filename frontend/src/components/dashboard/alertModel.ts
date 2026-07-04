@@ -139,6 +139,10 @@ export const GUARD_REASON_META: Record<string, GuardReasonMeta> = {
   },
 };
 
+// Must match the literal the backend emits: `app/services/execution_guard.py:593`
+// `return "FAIL — " + "; ".join(parts)` (note the em-dash, U+2014). If that
+// format ever changes, `parseGuardReason` still degrades gracefully — it just
+// skips the strip and reads the code before the first ":".
 const GUARD_PREFIX = "FAIL — ";
 
 /**
