@@ -63,7 +63,11 @@ export function CopyTradingPage() {
       ) : (
         <>
           <MirrorStats mirror={detail.data.mirror} currency={currency} />
-          <Section title="Positions">
+          <Section title="Open positions">
+            <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+              Mirrors the trader's current open book. When they close a copied position it drops
+              off here; its realised result rolls into the Closed P&L total above.
+            </p>
             <GroupedPositionsTable positions={detail.data.mirror.positions} currency={currency} />
           </Section>
         </>
