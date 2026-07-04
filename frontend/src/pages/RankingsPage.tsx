@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { ApiError } from "@/api/client";
 import {
   fetchRankings,
+  fetchRankingsCoverage,
   RANKINGS_PAGE_SIZE,
   type RankingsQuery,
   type RankingsSortField,
 } from "@/api/rankings";
 import { useAsync } from "@/lib/useAsync";
 import { Section } from "@/components/dashboard/Section";
+import { RankingsCoverageBanner } from "@/components/rankings/RankingsCoverageBanner";
 import { RankingsFilters } from "@/components/rankings/RankingsFilters";
 import { RankingsTable, type RankingsView } from "@/components/rankings/RankingsTable";
 import { formatDateTime } from "@/lib/format";
@@ -68,6 +70,10 @@ export function RankingsPage() {
     ],
   );
 
+  // Ranked-vs-universe denominator (#1918). Loaded once, independent of the
+  // table query — a coverage failure hides the line, never blocks the table.
+  const coverage = useAsync(() => fetchRankingsCoverage(), []);
+
   // Any query change resets paging to the first page (atomic with the change).
   const updateQuery = (next: RankingsQuery) => {
     setQuery(next);
@@ -111,8 +117,11 @@ export function RankingsPage() {
 
   return (
     <div className="flex h-full flex-col gap-6 pt-6">
-      <div className="flex flex-shrink-0 items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Rankings</h1>
+      <div className="flex flex-shrink-0 items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Rankings</h1>
+          <RankingsCoverageBanner coverage={coverage.data ?? null} />
+        </div>
         <span className="text-xs text-slate-500">
           {rankings.data?.scored_at
             ? `Latest run: ${formatDateTime(rankings.data.scored_at)}`

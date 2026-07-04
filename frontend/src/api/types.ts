@@ -1066,6 +1066,27 @@ export interface RankingsListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /rankings/coverage (app/api/scores.py) — ranked-vs-universe denominator (#1918)
+// ---------------------------------------------------------------------------
+
+export interface RankingsCoverageBucket {
+  reason: string;
+  label: string;
+  count: number;
+}
+
+export interface RankingsCoverage {
+  model_version: string;
+  scored_at: string | null;
+  // Tradable universe.
+  universe: number;
+  // Exactly the count `GET /rankings` returns unfiltered for this run.
+  ranked: number;
+  // MECE breakdown of (universe - ranked) by exclusion cause.
+  not_ranked: RankingsCoverageBucket[];
+}
+
+// ---------------------------------------------------------------------------
 // /rankings/history/{instrument_id} (app/api/scores.py)
 // ---------------------------------------------------------------------------
 

@@ -547,6 +547,59 @@ class TestListRankings:
 
 
 # ---------------------------------------------------------------------------
+# TestGetRankingsCoverage
+# ---------------------------------------------------------------------------
+
+
+class TestGetRankingsCoverage:
+    """GET /rankings/coverage — ranked-vs-universe denominator (#1918)."""
+
+    def teardown_method(self) -> None:
+        _cleanup()
+
+    def test_happy_path_reconciles_and_labels(self) -> None:
+        # One coverage SELECT row: the single atomic snapshot query.
+        row = {
+            "scored_at": _NOW,
+            "universe": 12597,
+            "ranked": 3904,
+            "status_counts": {
+                "analysable": 3914,
+                "no_primary_sec_cik": 7254,
+                "fpi": 1088,
+                "insufficient": 185,
+                "structurally_young": 156,
+            },
+        }
+        _with_conn([[row]])
+        resp = client.get("/rankings/coverage")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["universe"] == 12597
+        assert body["ranked"] == 3904
+        # MECE: header count + every bucket reconciles to the universe.
+        assert body["ranked"] + sum(b["count"] for b in body["not_ranked"]) == 12597
+        by_reason = {b["reason"]: b for b in body["not_ranked"]}
+        assert by_reason["analysable_unranked"]["count"] == 10
+        assert by_reason["fpi"]["label"] == "Foreign private issuer (20-F/6-K filer)"
+
+    def test_no_run_returns_null_scored_at_zero_ranked(self) -> None:
+        row = {
+            "scored_at": None,
+            "universe": 12597,
+            "ranked": 0,
+            "status_counts": {"analysable": 3914, "no_primary_sec_cik": 8683},
+        }
+        _with_conn([[row]])
+        resp = client.get("/rankings/coverage")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["scored_at"] is None
+        assert body["ranked"] == 0
+        assert body["ranked"] + sum(b["count"] for b in body["not_ranked"]) == 12597
+
+
+# ---------------------------------------------------------------------------
 # TestGetScoreHistory
 # ---------------------------------------------------------------------------
 

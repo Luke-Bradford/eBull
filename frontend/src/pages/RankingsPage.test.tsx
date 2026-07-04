@@ -56,7 +56,18 @@ function lastCall(spy: ReturnType<typeof vi.spyOn>) {
 }
 
 describe("RankingsPage — server-authoritative (#1825)", () => {
-  beforeEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    // #1918: the header's independent coverage fetch — stub so it never hits
+    // the network. Its failure/absence must not affect the table assertions.
+    vi.spyOn(rankingsApi, "fetchRankingsCoverage").mockResolvedValue({
+      model_version: "v1.3-balanced",
+      scored_at: null,
+      universe: 12597,
+      ranked: 1,
+      not_ranked: [{ reason: "no_primary_sec_cik", label: "No SEC filer (non-US listing)", count: 12596 }],
+    });
+  });
 
   it("renders rows + the completeness chip", async () => {
     const spy = vi

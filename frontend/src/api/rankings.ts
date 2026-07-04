@@ -1,5 +1,5 @@
 import { apiFetch } from "@/api/client";
-import type { RankingsListResponse } from "@/api/types";
+import type { RankingsCoverage, RankingsListResponse } from "@/api/types";
 
 /**
  * Server-side query set for /rankings (#1825 — fully server-authoritative).
@@ -93,4 +93,13 @@ export async function fetchRankings(
   }
 
   return response;
+}
+
+/**
+ * Fetch the ranked-vs-universe coverage denominator (#1918). Independent of the
+ * table page query — the header renders "Ranked N of M" plus a why-not-ranked
+ * breakdown so absence reads as a correct exclusion, not a bug.
+ */
+export async function fetchRankingsCoverage(): Promise<RankingsCoverage> {
+  return apiFetch<RankingsCoverage>("/rankings/coverage");
 }
