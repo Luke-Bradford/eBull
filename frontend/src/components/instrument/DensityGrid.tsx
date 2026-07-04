@@ -47,6 +47,7 @@ import { activeProviders } from "@/lib/capabilityProviders";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
+import { ExecCompensationPanel } from "@/components/instrument/ExecCompensationPanel";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
 import { FundamentalsPane } from "@/components/instrument/FundamentalsPane";
 import { InsiderActivitySummary } from "@/components/instrument/InsiderActivitySummary";
@@ -215,6 +216,13 @@ export function DensityGrid({
         <div className="col-span-12">
           <OwnershipPanel symbol={symbol} />
         </div>
+        {/* Zone E2 — Governance: executive compensation (#1969). Sits
+            next to Ownership — both are proxy-derived (DEF 14A)
+            governance surfaces. Self-gates to an honest empty state for
+            issuers with no parsed SCT, so it's harmless pre-backfill. */}
+        <div className="col-span-12">
+          <ExecCompensationPanel symbol={symbol} />
+        </div>
         {/* Zone F — Operator */}
         {thesis !== null || thesisErrored ? (
           <div className="col-span-12">
@@ -264,6 +272,12 @@ export function DensityGrid({
         ) : null}
         {/* Zone D — Activity (Insider + Recent news 6+6) */}
         {ActivityRow}
+        {/* Zone D2 — Governance: executive compensation (#1969). DEF 14A
+            proxy data is available to any SEC filer; self-gates to an
+            honest empty state when no SCT is parsed for the issuer. */}
+        <div className="col-span-12">
+          <ExecCompensationPanel symbol={symbol} />
+        </div>
         {/* Zone E — Operator */}
         {thesis !== null || thesisErrored ? (
           <div className="col-span-12">
