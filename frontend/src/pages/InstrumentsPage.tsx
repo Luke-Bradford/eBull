@@ -53,6 +53,12 @@ const INITIAL_FILTERS: Filters = {
 type SortKey = "symbol" | "gics_sector" | "exchange" | "coverage_tier" | "last";
 type SortDir = "asc" | "desc";
 
+// The server's default ordering (#1904): coverage_tier ASC (NULLS LAST), then
+// symbol. The client's initial sort mirrors it exactly, so the default view is
+// globally tier-ordered (not page-scoped) and the "sorted within this page"
+// caveat is only shown once the operator picks a different column.
+const SERVER_SORT: { key: SortKey; dir: SortDir } = { key: "coverage_tier", dir: "asc" };
+
 function compare(a: unknown, b: unknown, dir: SortDir): number {
   if (a == null && b == null) return 0;
   if (a == null) return 1;
@@ -74,7 +80,9 @@ function sortValue(item: InstrumentListItem, key: SortKey): unknown {
     case "gics_sector":
       return item.gics_sector;
     case "exchange":
-      return item.exchange;
+      // Sort by the visible label, not the raw eToro id (#1904) — otherwise
+      // clicking "Exchange" orders by invisible numeric ids.
+      return item.exchange_name ?? item.exchange;
     case "coverage_tier":
       return item.coverage_tier;
     case "last":
@@ -113,10 +121,7 @@ function TierBadge({ tier }: { tier: number | null }) {
 export function InstrumentsPage() {
   const [filters, setFilters] = useState<Filters>(INITIAL_FILTERS);
   const [page, setPage] = useState(0);
-  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({
-    key: "symbol",
-    dir: "asc",
-  });
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>(SERVER_SORT);
 
   // Debounced search: apply after 300ms of inactivity.
   const [searchInput, setSearchInput] = useState("");
@@ -146,8 +151,12 @@ export function InstrumentsPage() {
 
   // Sector dropdown uses the fixed 11 GICS sectors (#1675, SECTOR_OPTIONS), so
   // only exchange is still derived from the current page's data. A full enum
-  // endpoint would be better but is not in scope.
-  const [knownExchanges, setKnownExchanges] = useState<string[]>([]);
+  // endpoint would be better but is not in scope. Each option carries the raw
+  // exchangeId as `value` (the filter key) and the human name as `label`
+  // (#1904 — never surface the raw numeric id in the dropdown).
+  const [knownExchanges, setKnownExchanges] = useState<
+    { value: string; label: string }[]
+  >([]);
 
   // Reset accumulated exchange options when filters change (prevents stale
   // options from prior queries lingering in the dropdown).
@@ -158,11 +167,15 @@ export function InstrumentsPage() {
   useEffect(() => {
     if (!result.data) return;
     setKnownExchanges((prev) => {
-      const next = new Set(prev);
+      const byId = new Map(prev.map((o) => [o.value, o.label]));
       for (const item of result.data!.items) {
-        if (item.exchange) next.add(item.exchange);
+        if (item.exchange) {
+          byId.set(item.exchange, item.exchange_name ?? item.exchange);
+        }
       }
-      return Array.from(next).sort();
+      return Array.from(byId, ([value, label]) => ({ value, label })).sort(
+        (a, b) => a.label.localeCompare(b.label),
+      );
     });
   }, [result.data]);
 
@@ -345,7 +358,7 @@ function FilterSelect({
 }: {
   label: string;
   value: string;
-  options: string[];
+  options: { value: string; label: string }[];
   onChange: (value: string | null) => void;
 }) {
   return (
@@ -360,8 +373,8 @@ function FilterSelect({
       >
         <option value="">All</option>
         {options.map((opt) => (
-          <option key={opt} value={opt}>
-            {opt}
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
           </option>
         ))}
       </select>
@@ -381,12 +394,41 @@ const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
   { key: "last", label: "Last price", align: "right" },
 ];
 
+// Inline chevron SVGs (#1904): the previous unicode arrows (↕ / ↑ / ↓)
+// rendered as tofu / "odd blue squares" in fonts lacking those glyphs. SVGs
+// render identically everywhere and inherit the header's text colour.
 function SortIndicator({ active, dir }: { active: boolean; dir: SortDir }) {
-  if (!active) return <span className="ml-1 text-slate-300">↕</span>;
+  if (!active) {
+    // Inactive: faint up/down stack so every column reads as sortable.
+    return (
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 16 16"
+        className="ml-1 inline-block h-3 w-3 text-slate-300"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      >
+        <path d="M5 6.5 8 3.5l3 3" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M5 9.5 8 12.5l3-3" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
   return (
-    <span className="ml-1 text-slate-600">
-      {dir === "asc" ? "↑" : "↓"}
-    </span>
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 16 16"
+      className="ml-1 inline-block h-3 w-3 text-slate-600 dark:text-slate-300"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+    >
+      {dir === "asc" ? (
+        <path d="M4 10 8 6l4 4" strokeLinecap="round" strokeLinejoin="round" />
+      ) : (
+        <path d="M4 6l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+      )}
+    </svg>
   );
 }
 
@@ -421,13 +463,15 @@ function InstrumentsTable({
               </th>
             ))}
           </tr>
-          {pageScopedSort && sort.key !== "symbol" && (
-            <tr>
-              <td colSpan={COLUMNS.length} className="pb-1 text-[10px] normal-case tracking-normal text-slate-400">
-                Sorted within this page only. Server order is by symbol.
-              </td>
-            </tr>
-          )}
+          {pageScopedSort &&
+            !(sort.key === SERVER_SORT.key && sort.dir === SERVER_SORT.dir) && (
+              <tr>
+                <td colSpan={COLUMNS.length} className="pb-1 text-[10px] normal-case tracking-normal text-slate-400">
+                  Sorted within this page only. Server order is by coverage
+                  tier, then symbol.
+                </td>
+              </tr>
+            )}
         </thead>
         <tbody className="divide-y divide-slate-100">
           {items.map((item) => (
@@ -445,7 +489,7 @@ function InstrumentsTable({
                 {item.gics_sector ?? "—"}
               </td>
               <td className="py-2 pr-4 text-xs text-slate-600">
-                {item.exchange ?? "—"}
+                {item.exchange_name ?? item.exchange ?? "—"}
               </td>
               <td className="py-2 pr-4">
                 <TierBadge tier={item.coverage_tier} />

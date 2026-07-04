@@ -147,7 +147,14 @@ class InstrumentListItem(BaseModel):
     instrument_id: int
     symbol: str
     company_name: str
+    # Raw eToro exchangeId (opaque numeric text, e.g. "21"). Retained as the
+    # filter key; NEVER render directly — use ``exchange_name`` (#1904).
     exchange: str | None
+    # Human exchange label resolved from ``exchanges.description`` (the
+    # eToro-provided name, per settled decision "etoro/exchanges"). NULL when
+    # the id has no row yet (a newly-observed exchange not in the table); the
+    # FE then falls back to the raw id (#1904).
+    exchange_name: str | None
     currency: str | None
     sector: str | None
     # #1675: real GICS sector + its sector-SPDR, resolved on-read from the SEC
@@ -561,7 +568,11 @@ def list_instruments(
         quarters); False matches instruments with no such signal. Backed by
         the ``instrument_dividend_summary`` view (sql/050).
 
-    Ordering: symbol ASC, instrument_id ASC (deterministic tiebreak).
+    Ordering: coverage_tier ASC (NULLS LAST), then symbol ASC, instrument_id
+    ASC (deterministic tiebreak). Most-covered instruments surface first so
+    the default view opens on rich rows (Tier-1 US names) rather than the
+    empty non-US tail whose numeric symbols sort to the front alphabetically
+    (#1904).
     """
     # -- WHERE clause fragments (parameterised) ----------------------------
     where_clauses: list[str] = []
@@ -622,6 +633,7 @@ def list_instruments(
     # real GICS sector for display (#1675), independent of whether the
     # sector_spdr filter is active. PK join — trivial cost.
     items_sql = f"""SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
+               ex.description AS exchange_name,
                i.currency, i.sector, p.sic, i.is_tradable,
                c.coverage_tier,
                q.bid, q.ask, q.last, q.spread_pct, q.quoted_at
@@ -629,9 +641,10 @@ def list_instruments(
         LEFT JOIN quotes q USING (instrument_id)
         LEFT JOIN coverage c USING (instrument_id)
         LEFT JOIN instrument_sec_profile p USING (instrument_id)
+        LEFT JOIN exchanges ex ON ex.exchange_id = i.exchange
         {items_dividend_join}
         {where_sql}
-        ORDER BY i.symbol, i.instrument_id
+        ORDER BY c.coverage_tier ASC NULLS LAST, i.symbol ASC, i.instrument_id
         LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — hardcoded fragments only
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -651,6 +664,7 @@ def list_instruments(
                 symbol=r["symbol"],  # type: ignore[arg-type]
                 company_name=r["company_name"],  # type: ignore[arg-type]
                 exchange=r["exchange"],  # type: ignore[arg-type]
+                exchange_name=r["exchange_name"],  # type: ignore[arg-type]
                 currency=r["currency"],  # type: ignore[arg-type]
                 sector=r["sector"],  # type: ignore[arg-type]
                 gics_sector=sc.gics_sector if sc is not None else None,

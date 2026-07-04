@@ -38,7 +38,8 @@ function makeResponse(
         instrument_id: 1,
         symbol: "AAPL",
         company_name: "Apple Inc.",
-        exchange: "NASDAQ",
+        exchange: "4",
+        exchange_name: "Nasdaq",
         currency: "USD",
         sector: "Technology",
         gics_sector: "Information Technology",
@@ -57,7 +58,8 @@ function makeResponse(
         instrument_id: 2,
         symbol: "MSFT",
         company_name: "Microsoft Corp.",
-        exchange: "NASDAQ",
+        exchange: "4",
+        exchange_name: "Nasdaq",
         currency: "USD",
         sector: "Technology",
         gics_sector: "Information Technology",
@@ -76,7 +78,8 @@ function makeResponse(
         instrument_id: 3,
         symbol: "JPM",
         company_name: "JPMorgan Chase",
-        exchange: "NYSE",
+        exchange: "5",
+        exchange_name: "NYSE",
         currency: "USD",
         sector: "Financial Services",
         gics_sector: "Financials",
@@ -325,22 +328,82 @@ describe("InstrumentsPage — pagination", () => {
 // ---------------------------------------------------------------------------
 
 describe("InstrumentsPage — sorting", () => {
-  it("clicking a column header toggles sort direction", async () => {
+  it("defaults to coverage-tier order (#1904 — rich rows first)", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("AAPL")).toBeInTheDocument();
+    });
+    // Default sort mirrors the server order: coverage_tier ASC, NULLs last.
+    // AAPL (tier 1) → MSFT (tier 2) → JPM (null).
+    const rows = screen.getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("AAPL");
+    expect(rows[2]).toHaveTextContent("MSFT");
+    expect(rows[3]).toHaveTextContent("JPM");
+  });
+
+  it("clicking a column header sorts asc then toggles to desc", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText("AAPL")).toBeInTheDocument();
     });
 
     const user = userEvent.setup();
-    // Symbol column is default asc — click to toggle to desc
     const symbolHeader = screen.getByText("Instrument");
+    // First click on a non-active column → symbol ASC (AAPL, JPM, MSFT).
     await user.click(symbolHeader);
-
-    // After clicking default asc column, should be desc — MSFT first
     await waitFor(() => {
-      const rows = screen.getAllByRole("row");
-      // Row 0 is header; row 1 should be MSFT (desc order)
-      expect(rows[1]).toHaveTextContent("MSFT");
+      expect(screen.getAllByRole("row")[1]).toHaveTextContent("AAPL");
     });
+    // Second click toggles to DESC — MSFT first.
+    await user.click(symbolHeader);
+    await waitFor(() => {
+      expect(screen.getAllByRole("row")[1]).toHaveTextContent("MSFT");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Exchange label (#1904)
+// ---------------------------------------------------------------------------
+
+describe("InstrumentsPage — exchange label", () => {
+  it("renders the human exchange name, not the raw eToro id", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("AAPL")).toBeInTheDocument();
+    });
+    const table = screen.getByRole("table");
+    // exchange_name "Nasdaq" is shown; the raw id "4" never appears.
+    expect(within(table).getAllByText("Nasdaq").length).toBeGreaterThanOrEqual(1);
+    expect(within(table).queryByText("4")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the raw id when exchange_name is null", async () => {
+    mockedFetch.mockResolvedValue(
+      makeResponse({
+        items: [
+          {
+            instrument_id: 9,
+            symbol: "NEWX",
+            company_name: "Newly Listed Co.",
+            exchange: "99",
+            exchange_name: null,
+            currency: "USD",
+            sector: null,
+            gics_sector: null,
+            sector_spdr: null,
+            is_tradable: true,
+            coverage_tier: 3,
+            latest_quote: null,
+          },
+        ],
+        total: 1,
+      }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("NEWX")).toBeInTheDocument();
+    });
+    expect(within(screen.getByRole("table")).getByText("99")).toBeInTheDocument();
   });
 });
