@@ -7,8 +7,9 @@
  * modelled); continuous (crypto/FX/…) is not modelled. The live "now" session
  * is computed client-side via `classifySession` (no server duplication).
  *
- * Forward earnings + filing dates are intentionally absent — we ingest no
- * forward earnings calendar or filing-due dates (stated on-page, not faked).
+ * Expected filings (10-Q/10-K due-windows, #1788/#677 poller) ARE surfaced as
+ * "expected" date ranges. Forward earnings dates remain absent — we ingest no
+ * forward earnings calendar (stated on-page, not faked).
  */
 import { useCallback, useMemo, useState } from "react";
 
@@ -64,6 +65,14 @@ function weekdayShort(isoDate: string): string {
   });
 }
 
+function dayMonth(isoDate: string): string {
+  // Compact "30 Jul" — UTC noon avoids a TZ date-shift on the label.
+  return new Date(`${isoDate}T12:00:00Z`).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 function nowSession(
   profile: SessionProfile,
   epochSeconds: number,
@@ -99,7 +108,7 @@ export function CalendarPage(): JSX.Element {
       <header className="border-b border-slate-200 pb-3 dark:border-slate-800">
         <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Calendar</h1>
         <p className="mt-1 text-xs text-slate-500">
-          Market status for {windowLabel} + upcoming ex-dividends across your{" "}
+          Market status for {windowLabel} + expected filings and ex-dividends across your{" "}
           {scope === "all" ? "portfolio & watchlist" : scope}. US markets are NYSE-precise;
           foreign exchanges show weekday/weekend only (holidays not modelled).
         </p>
@@ -190,6 +199,30 @@ export function CalendarPage(): JSX.Element {
             </div>
           </Section>
 
+          <Section title="Expected filings">
+            {events.data.expected_filings.length === 0 ? (
+              <p className="px-2 py-4 text-xs text-slate-500">
+                No expected filings for instruments in scope.
+              </p>
+            ) : (
+              <ul className="divide-y divide-slate-100 text-sm dark:divide-slate-800">
+                {events.data.expected_filings.map((f) => (
+                  <li
+                    key={`${f.instrument_id}-${f.filing_type}-${f.window_start}`}
+                    className="flex items-baseline justify-between py-1.5"
+                  >
+                    <span className="font-medium text-slate-700 dark:text-slate-200">
+                      {f.symbol} <span className="text-slate-500">{f.filing_type}</span>
+                    </span>
+                    <span className="tabular-nums text-slate-500">
+                      expected {dayMonth(f.window_start)} – {dayMonth(f.window_end)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+
           <Section title="Upcoming ex-dividends">
             {events.data.ex_dividends.length === 0 ? (
               <p className="px-2 py-4 text-xs text-slate-500">
@@ -211,8 +244,8 @@ export function CalendarPage(): JSX.Element {
           </Section>
 
           <p className="px-1 text-[10px] text-slate-400">
-            Earnings &amp; filing dates are not yet shown — eBull does not ingest forward earnings
-            calendars or filing-due dates.
+            Expected filings are SEC-deadline-anchored estimates, not exact dates. Forward earnings
+            dates are not shown — eBull ingests no forward earnings calendar.
           </p>
         </>
       )}

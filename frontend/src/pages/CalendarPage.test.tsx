@@ -23,6 +23,15 @@ const sample: CalendarEvents = {
     },
   ],
   ex_dividends: [{ symbol: "FOO", instrument_id: 1, ex_date: "2026-07-01", pay_date: "2026-07-15" }],
+  expected_filings: [
+    {
+      symbol: "GME",
+      instrument_id: 2,
+      filing_type: "10-Q",
+      window_start: "2026-07-30",
+      window_end: "2026-08-24",
+    },
+  ],
 };
 
 vi.mock("@/api/calendar", () => ({
@@ -47,8 +56,12 @@ describe("CalendarPage", () => {
     // upcoming ex-dividend row.
     expect(screen.getByText("FOO")).toBeInTheDocument();
     expect(screen.getByText(/ex 2026-07-01/)).toBeInTheDocument();
-    // the honest "not ingested" note about earnings/filings.
-    expect(screen.getByText(/does not ingest forward earnings/i)).toBeInTheDocument();
+    // expected-filing row (#1907) renders as an "expected" date range.
+    expect(screen.getByText("Expected filings")).toBeInTheDocument();
+    expect(screen.getByText("GME")).toBeInTheDocument();
+    expect(screen.getByText(/expected .*Jul.*–.*Aug/)).toBeInTheDocument();
+    // the honest note: earnings still not ingested.
+    expect(screen.getByText(/ingests no forward earnings calendar/i)).toBeInTheDocument();
     // closure reason (#1766) renders on the closed tile.
     expect(screen.getByText("Independence Day")).toBeInTheDocument();
   });

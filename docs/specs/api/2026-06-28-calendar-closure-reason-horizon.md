@@ -64,9 +64,12 @@ the API just was not carrying a reason. Confirmed — the only gap is plumbing.
 
 ## Out of scope (no source / tracked elsewhere)
 
-Foreign-exchange holiday set, futures session model, forward earnings + filing
-dates. The on-page note already states earnings/filings are not ingested; leave
-it.
+Foreign-exchange holiday set, futures session model, forward earnings dates.
+
+> Update (#1907, 2026-07-04): expected **filing** dates ARE now surfaced — the
+> `expected_filings` poller (#1788/#677) 10-Q/10-K due-windows render as an
+> "Expected filings" section (expected date *range*, not an exact date). Only
+> forward *earnings* remain unmodelled; the on-page note reflects that.
 
 ## Tests (pure)
 

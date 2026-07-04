@@ -1327,11 +1327,20 @@ export interface UpcomingExDividend {
   pay_date: string | null;
 }
 
+export interface UpcomingExpectedFiling {
+  symbol: string;
+  instrument_id: number;
+  filing_type: string; // "10-Q" | "10-K"
+  window_start: string; // YYYY-MM-DD — expected-window start (not an exact date)
+  window_end: string; // YYYY-MM-DD
+}
+
 export interface CalendarEvents {
   scope: CalendarScope;
   as_of: string; // YYYY-MM-DD
   market_status: MarketStatusRow[];
   ex_dividends: UpcomingExDividend[];
+  expected_filings: UpcomingExpectedFiling[];
 }
 
 // ---------------------------------------------------------------------------
