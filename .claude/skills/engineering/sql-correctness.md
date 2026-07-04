@@ -60,6 +60,7 @@ Pattern: do all I/O first, then open the transaction for the writes only.
 - Never f-strings or `.format()` in SQL strings — SQL injection vector
 - `IN` clauses: `= ANY(%s)` with a list, not `IN %s` with a tuple
 - Literal `%` in LIKE patterns: `%%`
+- **Nullable-filter param must be cast to its column type.** A `None` binds as an untyped NULL (OID 0); psycopg3's extended-protocol send gives Postgres no type, and `%(x)s IS NULL OR col = %(x)s` can leave the planner unable to infer it — `psycopg.errors.AmbiguousParameter: could not determine data type of parameter $N`. Cast every occurrence: `%(x)s::bigint IS NULL OR col = %(x)s::bigint`. The trap hides when the only exercised path always passes a concrete value (which *does* give Postgres the type) — the no-filter/`None` path never gets tested. (#1961: `get_activity` optional `instrument_id` filter added by #1926 500'd the whole Portfolio Activity tab.)
 
 ## Conditional JOINs in filter-aware list queries
 
