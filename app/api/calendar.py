@@ -13,8 +13,16 @@ Scope of the data (premise-checked on dev, #1754):
     not assert an open/closed for it.
   * **Upcoming ex-dividends** — ``dividend_events.ex_date >= today``. Real
     (sparse) data.
-  * Forward earnings + filing dates are deliberately NOT here: we ingest no
-    forward earnings calendar and no filing-due dates (verified absent).
+  * **Expected filings** — ``expected_filings`` 10-Q/10-K due-windows for the
+    scope (#1788/#677 poller). An "expected" polling *window* anchored on the
+    SEC statutory filing deadlines, NOT a legal due-date and NOT an earnings
+    date (earnings often land earlier via a release / 8-K).
+  * Forward *earnings* dates are deliberately NOT here: we ingest no forward
+    earnings calendar (no new paid provider, #609 posture).
+
+Scope is OPEN holdings only — ``positions`` rows with ``current_units > 0``
+(a closed position persists with ``current_units = 0``) plus this operator's
+watchlist. This mirrors the expected_filings poller's own scope.
 
 ``is_open_now`` / the current intraday session is computed on the FRONTEND
 via the existing ``classifySession`` over these rows + the market specials
@@ -89,11 +97,27 @@ class UpcomingExDividend(BaseModel):
     pay_date: date | None
 
 
+class UpcomingExpectedFiling(BaseModel):
+    """A predicted upcoming periodic filing (10-Q / 10-K) for a scope instrument.
+
+    ``window_start``/``window_end`` bound the poller's expected filing *window*
+    (SEC-deadline-anchored heuristic, not a legal due-date). The UI renders it as
+    an "expected" date range, never an exact date.
+    """
+
+    symbol: str
+    instrument_id: int
+    filing_type: str
+    window_start: date
+    window_end: date
+
+
 class CalendarEvents(BaseModel):
     scope: CalendarScope
     as_of: date
     market_status: list[MarketStatusRow]
     ex_dividends: list[UpcomingExDividend]
+    expected_filings: list[UpcomingExpectedFiling]
 
 
 def _day_type(profile: str, d: date) -> DayType:
@@ -149,13 +173,17 @@ def _scope_instruments(conn: psycopg.Connection[object], scope: CalendarScope) -
                 detail="multiple operators present — calendar requires a per-session operator context",
             ) from exc
 
+    # Portfolio legs gate on current_units > 0: a closed position persists in
+    # `positions` with current_units = 0, and surfacing calendar events for a
+    # name you no longer hold is wrong. This mirrors the expected_filings
+    # poller's own scope (positions WHERE current_units > 0).
     if scope == "watchlist":
         source = "JOIN watchlist src ON src.instrument_id = i.instrument_id AND src.operator_id = %(op)s"
     elif scope == "portfolio":
-        source = "JOIN positions src ON src.instrument_id = i.instrument_id"
-    else:  # all — positions (global) ∪ this operator's watchlist
+        source = "JOIN positions src ON src.instrument_id = i.instrument_id AND src.current_units > 0"
+    else:  # all — open positions (global) ∪ this operator's watchlist
         source = (
-            "JOIN (SELECT instrument_id FROM positions "
+            "JOIN (SELECT instrument_id FROM positions WHERE current_units > 0 "
             "UNION SELECT instrument_id FROM watchlist WHERE operator_id = %(op)s"
             ") src ON src.instrument_id = i.instrument_id"
         )
@@ -223,4 +251,41 @@ def calendar_events(
                 for r in cur.fetchall()
             ]
 
-    return CalendarEvents(scope=scope, as_of=today_ny, market_status=market_status, ex_dividends=ex_dividends)
+    # Expected filings — unfulfilled 10-Q/10-K due-windows still open (window_end
+    # >= today), ordered by the earliest expected date. Unbounded by the `days`
+    # horizon (corporate events look weeks out; the horizon only governs the
+    # market-status grid), mirroring the ex-dividends behaviour.
+    expected_filings: list[UpcomingExpectedFiling] = []
+    if instrument_ids:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT i.symbol, ef.instrument_id, ef.expected_filing_type,
+                       ef.expected_window_start, ef.expected_window_end
+                FROM expected_filings ef
+                JOIN instruments i ON i.instrument_id = ef.instrument_id
+                WHERE ef.instrument_id = ANY(%(ids)s)
+                  AND ef.fulfilled_at IS NULL
+                  AND ef.expected_window_end >= %(today)s
+                ORDER BY ef.expected_window_start, i.symbol, ef.instrument_id
+                """,
+                {"ids": instrument_ids, "today": today_ny},
+            )
+            expected_filings = [
+                UpcomingExpectedFiling(
+                    symbol=str(r["symbol"]),
+                    instrument_id=int(r["instrument_id"]),
+                    filing_type=str(r["expected_filing_type"]),
+                    window_start=r["expected_window_start"],
+                    window_end=r["expected_window_end"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    return CalendarEvents(
+        scope=scope,
+        as_of=today_ny,
+        market_status=market_status,
+        ex_dividends=ex_dividends,
+        expected_filings=expected_filings,
+    )
