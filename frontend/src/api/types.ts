@@ -60,14 +60,10 @@ export interface ConfigResponse {
 
 export type LayerStatus = "ok" | "stale" | "empty" | "error";
 export type OverallStatus = "ok" | "degraded" | "down";
-export type JobLastStatus = "running" | "success" | "failure" | "skipped" | null;
+export type JobLastStatus =
+  "running" | "success" | "failure" | "skipped" | null;
 export type CadenceKind =
-  | "hourly"
-  | "daily"
-  | "weekly"
-  | "monthly"
-  | "yearly"
-  | "every_n_minutes";
+  "hourly" | "daily" | "weekly" | "monthly" | "yearly" | "every_n_minutes";
 
 export interface LayerHealthResponse {
   layer: string;
@@ -94,10 +90,7 @@ export interface JobHealthResponse {
 }
 
 export type CredentialHealthState =
-  | "valid"
-  | "untested"
-  | "rejected"
-  | "missing";
+  "valid" | "untested" | "rejected" | "missing";
 
 export interface CredentialHealthSummary {
   state: CredentialHealthState;
@@ -260,6 +253,13 @@ export interface InstrumentListItem {
   is_tradable: boolean;
   coverage_tier: number | null;
   latest_quote: QuoteSnapshot | null;
+  /** #1924: close-to-close day-change from `price_daily` (last two positive
+   *  closes) — a SEPARATE source from `latest_quote`. A FRACTION (-0.015 =
+   *  -1.5%), fed straight to `formatPct`. `day_change_as_of` is the latest
+   *  close's date (ISO), stamped so a stale close reads honestly. Both null
+   *  when <2 positive closes exist. */
+  day_change_pct: string | null;
+  day_change_as_of: string | null;
 }
 
 export interface InstrumentListResponse {
@@ -292,7 +292,8 @@ export interface InstrumentDetail {
 
 /** Session-shading profile for the intraday chart (#609 Phase A). Mirrors
  *  `app/api/instruments.py::SessionProfile`. */
-export type SessionProfile = "us_equity" | "us_equity_rth" | "foreign_equity" | "continuous";
+export type SessionProfile =
+  "us_equity" | "us_equity_rth" | "foreign_equity" | "continuous";
 
 // Phase 2.2 — per-ticker research summary
 export interface InstrumentIdentity {
@@ -332,6 +333,10 @@ export interface InstrumentPrice {
   current: string | null;
   day_change: string | null;
   day_change_pct: string | null;
+  /** #1924: date (ISO) of the latest `price_daily` close the day-change is
+   *  computed from — stamped so a stale close reads honestly, not as "today".
+   *  Null when no day-change is available. */
+  day_change_as_of: string | null;
   week_52_high: string | null;
   week_52_low: string | null;
   currency: string | null;
@@ -430,14 +435,7 @@ export interface InstrumentSummary {
 // for `5d` served by the intraday endpoint). Kept on the backend Literal
 // so any external consumer that still passes `?range=1w` keeps working.
 export type CandleRange =
-  | "1w"
-  | "1m"
-  | "3m"
-  | "6m"
-  | "ytd"
-  | "1y"
-  | "5y"
-  | "max";
+  "1w" | "1m" | "3m" | "6m" | "ytd" | "1y" | "5y" | "max";
 
 export interface CandleBar {
   date: string;
@@ -649,15 +647,7 @@ export interface PortfolioRelativeRisk {
 // boundary keeps two separate shapes; the chart consumes a unified
 // normalised stream.
 export type ChartRange =
-  | "1d"
-  | "5d"
-  | "1m"
-  | "3m"
-  | "6m"
-  | "ytd"
-  | "1y"
-  | "5y"
-  | "max";
+  "1d" | "5d" | "1m" | "3m" | "6m" | "ytd" | "1y" | "5y" | "max";
 
 // Phase 2.3 — financials
 export interface InstrumentFinancialRow {
@@ -904,7 +894,8 @@ export interface OrderResponse {
 // /recommendations (app/api/recommendations.py)
 // ---------------------------------------------------------------------------
 
-export type RecommendationAction = "BUY" | "ADD" | "HOLD" | "EXIT" | "CONSIDERED";
+export type RecommendationAction =
+  "BUY" | "ADD" | "HOLD" | "EXIT" | "CONSIDERED";
 export type RecommendationStatus =
   | "proposed"
   | "approved"
@@ -1623,7 +1614,7 @@ export type GuardRejectionAction = "BUY" | "ADD" | "HOLD" | "EXIT";
 
 export interface GuardRejection {
   decision_id: number;
-  decision_time: string;  // ISO TIMESTAMPTZ
+  decision_time: string; // ISO TIMESTAMPTZ
   instrument_id: number | null;
   symbol: string | null;
   action: GuardRejectionAction | null;
@@ -1734,11 +1725,7 @@ export type HealthVerdict =
   | "stale_manual";
 
 export type ProcessRunStatus =
-  | "success"
-  | "failure"
-  | "partial"
-  | "cancelled"
-  | "skipped";
+  "success" | "failure" | "partial" | "cancelled" | "skipped";
 
 export type CursorKind =
   | "filed_at"
@@ -1784,10 +1771,7 @@ export interface ActiveRunSummaryResponse {
  * means the row is not stale.
  */
 export type StaleReason =
-  | "schedule_missed"
-  | "watermark_gap"
-  | "queue_stuck"
-  | "mid_flight_stuck";
+  "schedule_missed" | "watermark_gap" | "queue_stuck" | "mid_flight_stuck";
 
 export interface ProcessWatermarkResponse {
   cursor_kind: CursorKind;
@@ -1904,11 +1888,7 @@ export type TriggerConflictReason =
 // so non-orchestrator detail pages never hit the endpoint.
 
 export type OrchestratorSyncRunStatus =
-  | "running"
-  | "complete"
-  | "partial"
-  | "failed"
-  | "cancelled";
+  "running" | "complete" | "partial" | "failed" | "cancelled";
 
 export type OrchestratorLayerStatus =
   | "pending"
@@ -1965,10 +1945,7 @@ export interface OrchestratorDagResponse {
 // detail pages never hit the endpoint.
 
 export type BootstrapRunStatus =
-  | "running"
-  | "complete"
-  | "partial_error"
-  | "cancelled";
+  "running" | "complete" | "partial_error" | "cancelled";
 
 export type BootstrapStageStatus =
   | "pending"

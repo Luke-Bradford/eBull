@@ -22,6 +22,7 @@ import type {
   ThesisDetail,
 } from "@/api/types";
 import { Term } from "@/components/Term";
+import { formatCloseDate } from "@/lib/format";
 import {
   liveTickDisplayCompanion,
   liveTickNativePrice,
@@ -140,7 +141,9 @@ export function SummaryStrip({
     companion !== null &&
     primaryCurrency !== null &&
     companion.currency !== primaryCurrency;
-  const changeNum = price?.day_change_pct != null ? Number(price.day_change_pct) : null;
+  const changeNum =
+    price?.day_change_pct != null ? Number(price.day_change_pct) : null;
+  const dayChangeAsOf = formatCloseDate(price?.day_change_as_of ?? null);
   const changeColor =
     changeNum === null
       ? "text-slate-500"
@@ -212,8 +215,19 @@ export function SummaryStrip({
               {price?.day_change != null && Number(price.day_change) >= 0
                 ? "+"
                 : ""}
-              {price?.day_change ?? "—"} ({formatPct(price?.day_change_pct, true)})
+              {price?.day_change ?? "—"} (
+              {formatPct(price?.day_change_pct, true)})
             </span>
+            {/* #1924: stamp the day-change with its close date so a stale close
+                (common in the loop) reads honestly rather than as "today". */}
+            {dayChangeAsOf ? (
+              <span
+                className="text-xs tabular-nums text-slate-400 dark:text-slate-500"
+                title="Close-to-close change, as of this close"
+              >
+                as of {dayChangeAsOf}
+              </span>
+            ) : null}
           </>
         ) : null}
       </div>

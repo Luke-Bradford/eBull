@@ -65,6 +65,21 @@ export function formatPct(fraction: number | null | undefined): string {
   return PCT.format(fraction);
 }
 
+/** Compact "day month" close date (e.g. "12 Jun") for as-of stamps (#1924).
+ *  Formatted in UTC: `new Date("YYYY-MM-DD")` is UTC midnight, so a local-TZ
+ *  format would render the prior day west of UTC and shift the close date.
+ *  Returns null on an absent/unparseable date. */
+export function formatCloseDate(iso: string | null | undefined): string | null {
+  if (iso === null || iso === undefined) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    timeZone: "UTC",
+  });
+}
+
 const PCT_UNSIGNED = new Intl.NumberFormat("en-GB", {
   style: "percent",
   minimumFractionDigits: 2,
@@ -79,7 +94,10 @@ export function formatUnsignedPct(fraction: number | null | undefined): string {
   return PCT_UNSIGNED.format(fraction);
 }
 
-export function formatNumber(value: number | null | undefined, fractionDigits = 4): string {
+export function formatNumber(
+  value: number | null | undefined,
+  fractionDigits = 4,
+): string {
   if (value === null || value === undefined) return "—";
   return value.toLocaleString("en-GB", {
     minimumFractionDigits: 0,

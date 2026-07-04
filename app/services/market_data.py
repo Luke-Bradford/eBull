@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
 import psycopg
+from psycopg.rows import dict_row
 
 from app.providers.market_data import MarketDataProvider, OHLCVBar, Quote
 from app.services.sync_orchestrator.exception_classifier import classify_exception
@@ -73,6 +75,96 @@ _RETURN_WINDOWS: dict[str, int] = {
     "return_1y": 365,
 }
 _VOLATILITY_WINDOW_DAYS = 30
+
+
+@dataclass(frozen=True)
+class DayChange:
+    """Close-to-close day-change for one instrument, from ``price_daily``.
+
+    Built from an instrument's two most recent **strictly-positive** closes.
+    ``as_of`` is the latest close's ``price_date`` — the metric is stamped with
+    it (settled-decisions.md:767 "latest closed session" as-of convention) so a
+    stale close reads honestly rather than as "today". ``change_pct`` is a
+    FRACTION (``-0.015`` = −1.5%), matching the ``formatPct`` frontend contract.
+    """
+
+    as_of: date
+    last_close: Decimal
+    prior_close: Decimal
+    change_abs: Decimal
+    change_pct: Decimal
+
+
+def compute_day_change(last_close: Decimal, prior_close: Decimal) -> Decimal | None:
+    """Fractional close-to-close change, or ``None`` when ``prior_close <= 0``.
+
+    A non-positive prior close is a non-price sentinel (``price_daily`` holds
+    real ``close = 0`` rows — the same cross-surface invariant prevention-log
+    #1428 documents for ``quotes.last``), so no meaningful change exists.
+    """
+    if prior_close <= 0:
+        return None
+    return (last_close - prior_close) / prior_close
+
+
+def load_day_changes(
+    conn: psycopg.Connection[object],
+    instrument_ids: Sequence[int],
+) -> dict[int, DayChange]:
+    """Batch day-change over an instrument's two most-recent positive closes.
+
+    One window query ranks ``close > 0`` rows per instrument (strictly-positive
+    skips ``price_daily``'s real zero-close sentinels) and keeps the top two.
+    Instruments with fewer than two positive closes are omitted (caller renders
+    "—"). Fan-out-safe: PK ``(instrument_id, price_date)`` guarantees one row
+    per date.
+    """
+    ids = list({int(i) for i in instrument_ids})
+    if not ids:
+        return {}
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            WITH ranked AS (
+                SELECT instrument_id, price_date, close,
+                       row_number() OVER (
+                           PARTITION BY instrument_id ORDER BY price_date DESC
+                       ) AS rn
+                FROM price_daily
+                WHERE instrument_id = ANY(%(ids)s) AND close > 0
+            )
+            SELECT instrument_id,
+                   max(close)      FILTER (WHERE rn = 1) AS last_close,
+                   max(price_date) FILTER (WHERE rn = 1) AS as_of,
+                   max(close)      FILTER (WHERE rn = 2) AS prior_close
+            FROM ranked
+            WHERE rn <= 2
+            GROUP BY instrument_id
+            HAVING count(*) = 2
+            """,
+            {"ids": ids},
+        )
+        rows = cur.fetchall()
+
+    out: dict[int, DayChange] = {}
+    for r in rows:
+        last_close = r["last_close"]  # type: ignore[assignment]
+        prior_close = r["prior_close"]  # type: ignore[assignment]
+        # ``prior_close > 0`` is guaranteed by the ``WHERE close > 0`` filter, so
+        # this is never None in practice — the guard narrows the type for the
+        # checker and routes the formula through the single tested source
+        # (``compute_day_change``) rather than duplicating it inline.
+        pct = compute_day_change(last_close, prior_close)
+        if pct is None:  # pragma: no cover — defensive; filter guarantees prior_close > 0
+            continue
+        out[int(r["instrument_id"])] = DayChange(  # type: ignore[arg-type]
+            as_of=r["as_of"],  # type: ignore[arg-type]
+            last_close=last_close,
+            prior_close=prior_close,
+            change_abs=last_close - prior_close,
+            change_pct=pct,
+        )
+    return out
 
 
 @dataclass(frozen=True)
