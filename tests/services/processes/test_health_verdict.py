@@ -27,9 +27,11 @@ from app.services.processes import (
     ProcessRow,
     ProcessRunSummary,
     ProcessStatus,
+    RunStatus,
     StaleReason,
 )
 from app.services.processes.health_verdict import (
+    _REASON_LABEL,
     ACTIONABLE_STALE,
     STALE_MANUAL_WINDOW,
     compute_verdict,
@@ -71,17 +73,52 @@ def test_total_and_single_valued(status: ProcessStatus, reasons: tuple[StaleReas
     assert self_healing == (verdict == "self_healing")
 
 
-@pytest.mark.parametrize("status", _ALL_STATUSES)
-def test_disabled_always_attention(
-    status: ProcessStatus,
-) -> None:
-    """Kill switch (disabled) outranks everything — incl. a stale reason."""
-    if status != "disabled":
-        pytest.skip("only disabled relevant here")
-    for reasons in _all_reason_subsets():
-        verdict, _, reason = compute_verdict(status="disabled", stale_reasons=reasons)
+_HALT_EXPECTED: tuple[StaleReason, ...] = ("schedule_missed", "watermark_gap")
+_WEDGES: tuple[StaleReason, ...] = ("queue_stuck", "mid_flight_stuck")
+
+
+def test_disabled_reads_paused_when_only_halt_expected_stale() -> None:
+    """#1831: a merely-disabled (kill-switch) row is neutral ``paused`` — even
+    when behind cadence. ``schedule_missed`` / ``watermark_gap`` are EXPECTED
+    while halted (nothing fires/ingests), so they never repaint it red.
+    """
+    halt_expected_subsets: tuple[tuple[StaleReason, ...], ...] = (
+        (),
+        ("schedule_missed",),
+        ("watermark_gap",),
+        _HALT_EXPECTED,
+    )
+    for reasons in halt_expected_subsets:
+        verdict, self_healing, reason = compute_verdict(status="disabled", stale_reasons=reasons)
+        assert (verdict, self_healing, reason) == ("paused", False, ""), reasons
+
+
+@pytest.mark.parametrize("wedge", _WEDGES)
+def test_disabled_wedge_stays_attention(wedge: StaleReason) -> None:
+    """#1831 / ckpt-1: a genuine wedge is NEVER masked by the halt — a stuck
+    queue / no-progress run needs the operator regardless of the switch."""
+    verdict, self_healing, reason = compute_verdict(status="disabled", stale_reasons=(wedge,))
+    assert verdict == "attention"
+    assert self_healing is False
+    assert reason == _REASON_LABEL[wedge]
+
+
+def test_disabled_wedge_outranks_halt_expected_headline() -> None:
+    """A wedge wins the headline over co-present halt-expected reasons."""
+    verdict, _, reason = compute_verdict(status="disabled", stale_reasons=("schedule_missed", "queue_stuck"))
+    assert (verdict, reason) == ("attention", "queue stuck")
+
+
+def test_disabled_with_failed_last_run_keeps_attention() -> None:
+    """#1831: a real failure is never hidden behind the switch — a halted
+    job whose last terminal run genuinely failed still reads ``attention``.
+    """
+    non_wedge_subsets: tuple[tuple[StaleReason, ...], ...] = ((), ("schedule_missed",))
+    for reasons in non_wedge_subsets:
+        verdict, self_healing, reason = compute_verdict(status="disabled", stale_reasons=reasons, last_run_failed=True)
         assert verdict == "attention"
-        assert reason == "kill switch active"
+        assert self_healing is False
+        assert reason == "last run failed"
 
 
 @pytest.mark.parametrize(
@@ -102,7 +139,7 @@ def test_actionable_stale_never_masked(status: ProcessStatus, reason: StaleReaso
 def test_no_stale_status_mapping() -> None:
     """Pin the status-only column (no actionable stale reason)."""
     expected: dict[ProcessStatus, tuple[HealthVerdict, bool]] = {
-        "disabled": ("attention", False),
+        "disabled": ("paused", False),
         "running": ("working", False),
         "pending_retry": ("self_healing", True),
         "failed": ("attention", False),
@@ -325,10 +362,13 @@ def test_liveness_kick_on_recovered_row_reads_honest_status() -> None:
 
 
 def test_disabled_outranks_liveness_kick() -> None:
-    """Kill switch still wins over an in-flight kick."""
+    """Kill switch still wins over an in-flight kick — the disabled branch is
+    evaluated first. #1831: the verdict is now neutral ``paused`` (the halt is
+    the loop's normal state), not the old red "kill switch active"."""
     v, sh, reason = compute_verdict(status="disabled", stale_reasons=("schedule_missed",), liveness_kick_in_flight=True)
-    assert v == "attention"
-    assert reason == "kill switch active"
+    assert v == "paused"
+    assert sh is False
+    assert reason == ""
 
 
 @pytest.mark.parametrize("status", _ALL_STATUSES)
@@ -453,8 +493,14 @@ def _row(
     next_retry_at: datetime | None = None,
     finished_ago: timedelta = timedelta(days=2),
     stale_reasons: tuple[StaleReason, ...] = (),
+    last_run_status: RunStatus | None = None,
 ) -> ProcessRow:
-    """Minimal ProcessRow for verdict_for_row tests (most fields default)."""
+    """Minimal ProcessRow for verdict_for_row tests (most fields default).
+
+    ``last_run_status`` overrides the terminal run's own status — needed to
+    exercise the #1831 kill-switch path, where ``row.status`` is masked to
+    ``disabled`` but ``last_run.status`` still carries the genuine failure.
+    """
     last_run = ProcessRunSummary(
         run_id=1,
         started_at=_NOW - finished_ago - timedelta(minutes=5),
@@ -463,7 +509,7 @@ def _row(
         rows_processed=0,
         rows_skipped_by_reason={},
         rows_errored=0,
-        status="failure" if status == "failed" else "success",
+        status=last_run_status if last_run_status is not None else ("failure" if status == "failed" else "success"),
         cancelled_by_operator_id=None,
     )
     return ProcessRow(
@@ -532,6 +578,24 @@ def test_verdict_for_row_recent_one_shot_failure_is_attention() -> None:
     """Within STALE_MANUAL_WINDOW the operator still sees their triggered job failed (red)."""
     row = _row(role="backfill", status="failed", finished_ago=timedelta(hours=1))
     assert verdict_for_row(row, now=_NOW)[0] == "attention"
+
+
+def test_verdict_for_row_disabled_succeeding_job_is_paused() -> None:
+    """#1831: kill switch on + last run succeeded → neutral ``paused`` (grey),
+    not a red "problem". This is the flood the reversal kills."""
+    row = _row(role="steady_state", status="disabled", last_run_status="success")
+    verdict, self_healing, reason = verdict_for_row(row, now=_NOW)
+    assert (verdict, self_healing, reason) == ("paused", False, "")
+
+
+@pytest.mark.parametrize("terminal", ["failure", "partial"])
+def test_verdict_for_row_disabled_with_actionable_last_run_stays_red(terminal: RunStatus) -> None:
+    """#1831: kill switch on but the last terminal run genuinely failed (or a
+    ``partial`` that surfaces as failure) → ``attention``. The real failure is
+    never masked behind the halt."""
+    row = _row(role="steady_state", status="disabled", last_run_status=terminal)
+    verdict, self_healing, reason = verdict_for_row(row, now=_NOW)
+    assert (verdict, self_healing, reason) == ("attention", False, "last run failed")
 
 
 def test_verdict_for_row_one_shot_with_retry_in_flight_is_self_healing() -> None:

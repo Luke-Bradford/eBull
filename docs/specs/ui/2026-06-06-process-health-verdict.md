@@ -1,6 +1,8 @@
 # #1512 — single health verdict (computed layer over status + stale_reasons)
 
 > **Status:** SPEC v1 2026-06-06. Child of epic #1508. Evolves `docs/proposals/ui/admin-processes-self-healing-health.md` §1. Subsumes #1489; folds #1230.
+>
+> **Reversal 2026-07-04 (#1831):** the original v1 mapped `disabled` (kill switch) → `attention` and *rejected* a neutral `paused` verdict (see §Alternatives, now overturned). In the unattended autonomy loop the kill switch is the NORMAL steady state, so painting every halted job red flooded Admin with ~42 false "problems" and buried the genuinely-failed rows. **`disabled` now reads a 5th neutral `paused` (grey) verdict**, EXCEPT a row whose last terminal run genuinely failed, which stays `attention` ("last run failed") so a real failure is never masked behind the halt. The #1513 banner conveys the global halt. Seam: `health_verdict.py::compute_verdict` (kill-switch branch) + `verdict_for_row` (passes `last_run_failed`).
 
 ## 1. Problem
 
@@ -52,7 +54,8 @@ Called once centrally in `app/api/processes.py::_convert_row` (the single choke 
 
 | # | Condition | verdict | self_healing | reason |
 |---|---|---|---|---|
-| 1 | `status == disabled` | attention | F | "kill switch active" |
+| 1 | `status == disabled` **and** last terminal run failed | attention | F | "last run failed" *(#1831: a real failure is never masked behind the halt)* |
+| 1b | `status == disabled` (otherwise) | **paused** | F | "" *(#1831 reversal — neutral grey; the halt is the loop's normal state, banner conveys it)* |
 | 2 | any reason in `ACTIONABLE_STALE` | attention | F | *headline* (see below) |
 | 3 | `status == running` | working | F | "" |
 | 4 | `status == pending_retry` | self_healing | T | "retry scheduled" |
@@ -72,7 +75,7 @@ Called once centrally in `app/api/processes.py::_convert_row` (the single choke 
 
 Notes on judgment cells (Codex ckpt-1 confirmed sound):
 
-- **disabled (kill switch)** → `attention`. Global kill-switch is deliberate, but per-row it is the honest "this is not running and won't until you act" signal. #1513 header dedupes it into one banner; the per-row verdict stays honest. *(Alternative: a 5th neutral `paused` verdict — rejected to keep the agreed 4-bucket model.)*
+- **disabled (kill switch)** → **`paused`** (grey), UNLESS the last terminal run genuinely failed → `attention` ("last run failed"). **#1831 (2026-07-04) OVERTURNED the original decision below.** Original text: *"→ `attention`. Global kill-switch is deliberate, but per-row it is the honest 'this is not running and won't until you act' signal. (Alternative: a 5th neutral `paused` verdict — rejected to keep the agreed 4-bucket model.)"* — Why overturned: in the unattended loop the kill switch is the normal steady state, so `attention` on every halted job floods Admin with false problems and hides the real failures. The 5th `paused` verdict (grey) is now adopted; the #1513 header still dedupes the global halt into one banner.
 - **cancelled** → `attention`. A cancelled run left no fresh data and nothing is re-running it; operator chose to cancel, so surfacing it is honest, not noise.
 - **pending_first_run** → `working` (not `current`: it has no data yet; not `attention`: it is expected to fire at its first slot). T5 look-through will flip bootstrap-covered rows whose source watermark is fresh → `current`.
 - **idle** (last terminal = `skipped`/gated) → `current` when no actionable stale. The contradictory `idle`+`schedule_missed` combo is resolved by row 6 (→ attention) *before* row 10 is reached. This is the catch-up-trap surface; #1511 fixes the underlying stuck-ness, after which the row stops being `schedule_missed`.

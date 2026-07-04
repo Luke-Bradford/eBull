@@ -243,6 +243,15 @@ export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
     toneClass: MUTED_TONE,
     pulse: false,
   },
+  paused: {
+    // #1831 — grey: disabled by the global kill switch. The halt is the normal
+    // unattended-loop state, so a paused job is neutral, not a red "problem".
+    // The kill-switch banner conveys the halt; a genuinely-failed halted job
+    // still reads `attention` (its verdict is computed server-side).
+    label: "paused",
+    toneClass: MUTED_TONE,
+    pulse: false,
+  },
 };
 
 /**
@@ -258,6 +267,9 @@ export const VERDICT_SORT_PRIORITY: Record<HealthVerdict, number> = {
   working: 1,
   self_healing: 1,
   stale_manual: 2,
+  // #1831 — paused (kill switch) is neutral, not attention: sinks below live
+  // jobs alongside aged history so a halt does not crowd the actionable top.
+  paused: 2,
 };
 
 /**

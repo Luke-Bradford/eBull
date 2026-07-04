@@ -193,8 +193,15 @@ export function ProcessesTable({
   const collapsedWorking = collapsedRows.filter(
     (r) => r.health_verdict === "working",
   ).length;
+  // #1831 — count paused (kill-switch) rows distinctly so a global halt reads
+  // "N paused" honestly, not silently rolled into "N current". During a halt
+  // every steady-state row is paused, so mislabelling them current would be
+  // exactly the dishonest-state trap this fix exists to remove.
+  const collapsedPaused = collapsedRows.filter(
+    (r) => r.health_verdict === "paused",
+  ).length;
   const collapsedCurrent =
-    collapsedRows.length - collapsedSelfHealing - collapsedWorking;
+    collapsedRows.length - collapsedSelfHealing - collapsedWorking - collapsedPaused;
   const [showCollapsed, setShowCollapsed] = useState(false);
   // #1530 C7 — the "Bootstrap & backfill" section is a SECOND, distinct
   // disclosure (separate from the C3 in-view collapse above) and defaults
@@ -408,6 +415,7 @@ export function ProcessesTable({
                         collapsedCurrent,
                         collapsedWorking,
                         collapsedSelfHealing,
+                        collapsedPaused,
                       )}
                       {" — "}
                       {showCollapsed ? "hide" : "show"}
@@ -489,11 +497,14 @@ function collapsedLabel(
   current: number,
   working: number,
   selfHealing: number,
+  paused: number,
 ): string {
   const parts: string[] = [];
   if (current > 0) parts.push(`${current} current`);
   if (working > 0) parts.push(`${working} working`);
   if (selfHealing > 0) parts.push(`${selfHealing} self-healing`);
+  // #1831 — surface paused (kill-switch) rows explicitly in the collapsed label.
+  if (paused > 0) parts.push(`${paused} paused`);
   return parts.join(" · ");
 }
 
