@@ -1379,6 +1379,62 @@ def _fold_overlap_into(rep: Holder, folded: list[Holder]) -> Holder:
     return replace(rep, dropped_sources=tuple(dropped))
 
 
+def _section16_row_supersedes(new: Holder, cur: Holder) -> bool:
+    """True when ``new`` should replace ``cur`` as the latest row for a *repeated*
+    Section-16 additive nature: newer ``as_of_date`` wins (NULL last), tie-broken
+    to the higher-priority form (Form 4 transaction over Form 3 snapshot). Only
+    exercised in a degenerate identity merge — the ``ownership_insiders_current``
+    PK ``(instrument, holder, nature)`` gives one form per nature on the real
+    population — so this is a defensive dedup, never the common path."""
+    new_key = (new.as_of_date or date.min, -_PRIORITY_RANK[new.winning_source])
+    cur_key = (cur.as_of_date or date.min, -_PRIORITY_RANK[cur.winning_source])
+    return new_key > cur_key
+
+
+def _merge_section16_forms(by_source: dict[SourceTag, list[Holder]]) -> None:
+    """Pool an owner's Form 3 + Form 4 rows into ONE Section-16 additive channel.
+
+    Form 3 (initial-holdings snapshot) and Form 4 (subsequent transactions) carry
+    DISTINCT additive natures for one owner — the latest ``direct`` may sit on a
+    Form 4 while the latest ``indirect`` sits on a Form 3, because each nature
+    keeps its own latest observation in ``ownership_insiders_current`` (PK
+    ``(instrument, holder, nature)``, so ``source`` is a per-nature provenance
+    stamp). Those are distinct Section-16 holdings that SUM (#905, prevention-log
+    "Same owner across reporting channels"), NOT overlapping restatements. The
+    prior read path kept form4/form3 as separate ``by_source`` buckets, so
+    :func:`_reconcile_owner_once` MAXed the two form subtotals and dropped the
+    smaller-form lot (#1941: AAPL / Khan Sabih — ``direct`` 1,073,895 on Form 4 +
+    ``indirect`` 31,632 on Form 3, the indirect silently folded to
+    ``dropped_sources`` instead of summed).
+
+    Collapse both forms' rows under one representative key (``form4`` if present,
+    else ``form3``) so the shared :func:`_source_rows_and_total` additive path SUMs
+    them. Keep only the latest row per additive nature across the two forms (Form 4
+    supersedes the Form 3 snapshot for a repeated nature — a defensive dedup; the
+    real population has exactly one form per nature). Overlap ``beneficial`` rows
+    from either form are retained for the within-channel MAX. Rows keep their own
+    ``winning_source`` so provenance / EDGAR links stay per-filing accurate; the
+    dict key is only a grouping label."""
+    forms: list[SourceTag] = [s for s in ("form4", "form3") if s in by_source]
+    if len(forms) < 2:
+        return
+    pooled = [h for s in forms for h in by_source[s]]
+    latest_additive: dict[str, Holder] = {}
+    overlap: list[Holder] = []
+    for h in pooled:
+        nature = h.ownership_nature or "direct"
+        if nature not in _ADDITIVE_NATURES:
+            overlap.append(h)
+            continue
+        cur = latest_additive.get(nature)
+        if cur is None or _section16_row_supersedes(h, cur):
+            latest_additive[nature] = h
+    rep = forms[0]
+    for s in forms:
+        del by_source[s]
+    by_source[rep] = list(latest_additive.values()) + overlap
+
+
 def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Holder]]:
     """Collapse each beneficial owner to a single pie-wedge contribution.
 
@@ -1415,6 +1471,11 @@ def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Hol
         by_source: dict[SourceTag, list[Holder]] = {}
         for h in group:
             by_source.setdefault(h.winning_source, []).append(h)
+        # Form 3 + Form 4 are ONE Section-16 additive channel, not two competing
+        # restatements — pool them before the per-source subtotal so a ``direct``
+        # on Form 4 and an ``indirect`` on Form 3 SUM instead of the smaller form
+        # losing the cross-source MAX (#1941).
+        _merge_section16_forms(by_source)
         # Per-source display rows + subtotal (additive vs overlapping natures).
         src_rows: dict[SourceTag, list[Holder]] = {}
         src_total: dict[SourceTag, Decimal] = {}
@@ -1458,13 +1519,20 @@ def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Hol
             seen = {(d.source, d.accession_number) for d in dropped}
             for s in losing_sources:
                 rep = max(by_source[s], key=lambda h: h.shares)  # link target for the channel
-                key = (s, rep.winning_accession)
+                # Stamp the dropped entry with the rep row's OWN source, not the
+                # bucket key: after ``_merge_section16_forms`` folds Form 3 rows
+                # under the ``form4`` key, ``s`` no longer names the rep's filing —
+                # using it would emit a form4 label on a form3 accession/URL. For
+                # every un-merged bucket ``rep.winning_source == s`` so this is a
+                # no-op there.
+                rep_source = rep.winning_source
+                key = (rep_source, rep.winning_accession)
                 if key in seen:
                     continue
                 seen.add(key)
                 dropped.append(
                     DroppedSource(
-                        source=s,
+                        source=rep_source,
                         accession_number=rep.winning_accession,
                         shares=src_total[s],  # the channel's owner subtotal, not one row
                         as_of_date=rep.as_of_date,
