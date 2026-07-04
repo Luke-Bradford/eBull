@@ -22,6 +22,7 @@ import type {
   ThesisDetail,
 } from "@/api/types";
 import { Term } from "@/components/Term";
+import { formatCloseDate } from "@/lib/format";
 import {
   liveTickDisplayCompanion,
   liveTickNativePrice,
@@ -51,21 +52,6 @@ function formatPct(value: string | null | undefined, signed = false): string {
   const pct = (num * 100).toFixed(2);
   const sign = signed && num > 0 ? "+" : "";
   return `${sign}${pct}%`;
-}
-
-/** #1924: compact "as of" close date (e.g. "12 Jun") for the day-change stamp.
- *  Returns null on an absent/unparseable date. */
-function formatDayChangeAsOf(iso: string | null): string | null {
-  if (iso === null) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  // Format in UTC: `new Date("YYYY-MM-DD")` is UTC midnight, so a local-TZ
-  // format would render the prior day west of UTC and shift the close date.
-  return d.toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    timeZone: "UTC",
-  });
 }
 
 function isThesisStale(thesis: ThesisDetail | null): boolean {
@@ -157,7 +143,7 @@ export function SummaryStrip({
     companion.currency !== primaryCurrency;
   const changeNum =
     price?.day_change_pct != null ? Number(price.day_change_pct) : null;
-  const dayChangeAsOf = formatDayChangeAsOf(price?.day_change_as_of ?? null);
+  const dayChangeAsOf = formatCloseDate(price?.day_change_as_of ?? null);
   const changeColor =
     changeNum === null
       ? "text-slate-500"

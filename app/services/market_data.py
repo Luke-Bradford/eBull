@@ -150,8 +150,12 @@ def load_day_changes(
     for r in rows:
         last_close = r["last_close"]  # type: ignore[assignment]
         prior_close = r["prior_close"]  # type: ignore[assignment]
+        # ``prior_close > 0`` is guaranteed by the ``WHERE close > 0`` filter, so
+        # this is never None in practice — the guard narrows the type for the
+        # checker and routes the formula through the single tested source
+        # (``compute_day_change``) rather than duplicating it inline.
         pct = compute_day_change(last_close, prior_close)
-        if pct is None:  # prior_close somehow non-positive — skip, don't emit noise
+        if pct is None:  # pragma: no cover — defensive; filter guarantees prior_close > 0
             continue
         out[int(r["instrument_id"])] = DayChange(  # type: ignore[arg-type]
             as_of=r["as_of"],  # type: ignore[arg-type]

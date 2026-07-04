@@ -24,7 +24,7 @@ import {
 } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Pagination } from "@/components/ui/Pagination";
-import { formatMoney, formatPct } from "@/lib/format";
+import { formatCloseDate, formatMoney, formatPct } from "@/lib/format";
 import { SECTOR_OPTIONS } from "@/lib/sectors";
 import { useAsync } from "@/lib/useAsync";
 
@@ -112,22 +112,6 @@ function sortValue(item: InstrumentListItem, key: SortKey): unknown {
   }
 }
 
-/** Compact "as of" close date, e.g. "12 Jun" (#1924). Honest under the loop's
- *  uneven candle freshness — the day-change is stamped to its close date, not
- *  "today". Returns null on an unparseable/absent date. */
-function formatAsOf(iso: string | null): string | null {
-  if (iso == null) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  // Format in UTC: `new Date("YYYY-MM-DD")` is UTC midnight, so a local-TZ
-  // format would render the prior day west of UTC and shift the close date.
-  return d.toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    timeZone: "UTC",
-  });
-}
-
 /** A displayable last price: present and strictly positive (prevention-log #1428). */
 function isUsablePrice(last: number | null | undefined): last is number {
   return last != null && last > 0;
@@ -190,7 +174,7 @@ function DayChangeCell({ item }: { item: InstrumentListItem }) {
     );
   }
   const tone = pct >= 0 ? "text-emerald-600" : "text-red-600";
-  const asOf = formatAsOf(item.day_change_as_of);
+  const asOf = formatCloseDate(item.day_change_as_of);
   return (
     <td className="py-2 pr-0 text-right tabular-nums">
       <div className={`text-xs ${tone}`}>{formatPct(pct)}</div>
