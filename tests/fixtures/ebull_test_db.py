@@ -270,6 +270,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # copy_* listed child→parent: copy_mirror_positions FK→copy_mirrors
     # FK→copy_traders (copy_mirror_positions.instrument_id is a bare
     # BIGINT, not an FK, so instruments' CASCADE never reaches it).
+    # copy_mirror_closed_positions (#1927) has NO FK to the copy cluster
+    # (bare LIKE) → a CASCADE truncate of copy_mirror_positions never
+    # reaches it; listed explicitly so archive rows do not leak.
+    "copy_mirror_closed_positions",
     "copy_mirror_positions",
     "copy_mirrors",
     "copy_traders",

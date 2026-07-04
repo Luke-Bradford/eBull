@@ -8,7 +8,7 @@ import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/S
 import { EmptyState } from "@/components/states/EmptyState";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
-import type { MirrorSummary, MirrorPositionItem } from "@/api/types";
+import type { MirrorSummary, MirrorPositionItem, MirrorClosedPositionItem } from "@/api/types";
 
 /**
  * Mirror detail page (#221 — mirrors as positions).
@@ -69,6 +69,14 @@ export function CopyTradingPage() {
               off here; its realised result rolls into the Closed P&L total above.
             </p>
             <GroupedPositionsTable positions={detail.data.mirror.positions} currency={currency} />
+          </Section>
+          <Section title="Recent exits">
+            <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+              Copied positions the trader has closed since we began tracking. These are exit
+              events — we observe the close, not the trader's exit price, so no per-position P&L
+              is shown (the realised result is in the Closed P&L total above).
+            </p>
+            <ClosedExitsTable exits={detail.data.closed_positions} currency={currency} />
           </Section>
         </>
       )}
@@ -223,6 +231,84 @@ function GroupedPositionsTable({
       </table>
     </div>
     </LiveQuoteProvider>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recent exits (#1927) — closed copied positions as events (no MTM/P&L)
+// ---------------------------------------------------------------------------
+
+// Keep in sync with the LIMIT in copy_trading.py::get_mirror_detail. The
+// list is an activity feed, not a full ledger; when it fills we say so
+// rather than silently truncating older exits.
+const CLOSED_EXITS_CAP = 100;
+
+function ClosedExitsTable({
+  exits,
+  currency,
+}: {
+  exits: MirrorClosedPositionItem[];
+  currency: string;
+}) {
+  if (exits.length === 0) {
+    return (
+      <p className="text-xs text-slate-500 dark:text-slate-400">
+        No copied-position exits observed yet.
+      </p>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-left text-sm">
+        <thead className="text-xs uppercase text-slate-500">
+          <tr>
+            <th className="px-2 py-2 text-left">Instrument</th>
+            <th className="px-2 py-2 text-left">Direction</th>
+            <th className="px-2 py-2 text-right">Units</th>
+            <th className="px-2 py-2 text-right">Size</th>
+            <th className="px-2 py-2 text-right">Opened</th>
+            <th className="px-2 py-2 text-right">Closed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {exits.map((e) => (
+            <tr key={`${e.position_id}-${e.closed_detected_at}`} className="border-t border-slate-100 dark:border-slate-800">
+              <td className="px-2 py-2 text-left">
+                <span className="font-medium text-slate-800 dark:text-slate-100">
+                  {e.symbol ?? `#${e.instrument_id}`}
+                </span>
+                {e.company_name ? (
+                  <span className="ml-1.5 text-xs text-slate-500">{e.company_name}</span>
+                ) : null}
+              </td>
+              <td className="px-2 py-2 text-left">
+                <span className={e.is_buy ? "text-emerald-600" : "text-rose-600"}>
+                  {e.is_buy ? "Buy" : "Sell"}
+                </span>
+              </td>
+              <td className="px-2 py-2 text-right tabular-nums text-slate-700 dark:text-slate-200">
+                {formatNumber(e.units)}
+              </td>
+              <td className="px-2 py-2 text-right tabular-nums text-slate-700 dark:text-slate-200">
+                {formatMoney(e.amount, currency)}
+              </td>
+              <td className="px-2 py-2 text-right tabular-nums text-xs text-slate-500">
+                {formatDateTime(e.open_date_time)}
+              </td>
+              <td className="px-2 py-2 text-right tabular-nums text-xs text-slate-500">
+                {formatDateTime(e.closed_detected_at)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {exits.length >= CLOSED_EXITS_CAP ? (
+        <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
+          Showing the {CLOSED_EXITS_CAP} most recent exits.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
