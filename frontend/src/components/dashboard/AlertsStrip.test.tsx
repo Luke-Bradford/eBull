@@ -587,15 +587,18 @@ describe("AlertsStrip — Mark all read", () => {
         unseen_count: 2,
       },
       position: { alerts: [makePosition({ alert_id: 710 })], unseen_count: 1 },
+      rank: { moves: [makeRankMove({ score_id: 104061 })], unseen_count: 1 },
     });
     mockedMarkGuard.mockResolvedValue(undefined);
     mockedMarkPosition.mockResolvedValue(undefined);
+    mockedMarkRank.mockResolvedValue(undefined);
     renderStrip();
     const btn = await screen.findByRole("button", { name: /Mark all read/i });
     await userEvent.click(btn);
     await vi.waitFor(() => {
       expect(mockedMarkGuard).toHaveBeenCalledWith(510);
       expect(mockedMarkPosition).toHaveBeenCalledWith(710);
+      expect(mockedMarkRank).toHaveBeenCalledWith(104061);
     });
     expect(mockedMarkCoverage).not.toHaveBeenCalled();
   });
@@ -631,6 +634,7 @@ describe("AlertsStrip — Dismiss all", () => {
     });
     mockedDismissPosition.mockResolvedValue(undefined);
     mockedDismissCoverage.mockResolvedValue(undefined);
+    mockedDismissRank.mockResolvedValue(undefined);
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     renderStrip();
@@ -641,6 +645,8 @@ describe("AlertsStrip — Dismiss all", () => {
     });
     expect(mockedDismissGuard).not.toHaveBeenCalled();
     expect(mockedDismissCoverage).toHaveBeenCalled();
+    // rank feed loaded ok (empty) → dismiss fans out to it too
+    expect(mockedDismissRank).toHaveBeenCalled();
     confirmSpy.mockRestore();
     errSpy.mockRestore();
   });
