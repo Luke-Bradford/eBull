@@ -1670,6 +1670,25 @@ export interface CoverageStatusDropsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// #1922 rank moves on held instruments (app/api/alerts.py)
+// ---------------------------------------------------------------------------
+
+export interface RankMove {
+  score_id: number;
+  instrument_id: number;
+  symbol: string;
+  scored_at: string;
+  rank: number;
+  rank_delta: number; // prior_rank - new_rank: positive = moved up the board
+}
+
+export interface RankMovesResponse {
+  alerts_last_seen_rank_event_id: number | null;
+  unseen_count: number;
+  moves: RankMove[];
+}
+
+// ---------------------------------------------------------------------------
 // #1076 / #1064 admin control hub (app/api/processes.py)
 // ---------------------------------------------------------------------------
 //

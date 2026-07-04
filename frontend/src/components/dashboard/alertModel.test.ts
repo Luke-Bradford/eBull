@@ -4,6 +4,7 @@ import type {
   CoverageStatusDrop,
   GuardRejection,
   PositionAlert,
+  RankMove,
 } from "@/api/types";
 
 import {
@@ -13,9 +14,15 @@ import {
   type Cursors,
   type CoverageGroupItem,
   type GuardGroupItem,
+  type RankMoveItem,
 } from "./alertModel";
 
-const NO_CURSORS: Cursors = { guard: null, position: null, coverage: null };
+const NO_CURSORS: Cursors = {
+  guard: null,
+  position: null,
+  coverage: null,
+  rank: null,
+};
 
 function guard(o: Partial<GuardRejection> = {}): GuardRejection {
   return {
@@ -51,6 +58,18 @@ function coverage(o: Partial<CoverageStatusDrop> = {}): CoverageStatusDrop {
     changed_at: "2026-07-04T10:00:00Z",
     old_status: "analysable",
     new_status: "insufficient",
+    ...o,
+  };
+}
+
+function rankMove(o: Partial<RankMove> = {}): RankMove {
+  return {
+    score_id: 1,
+    instrument_id: 4,
+    symbol: "GME",
+    scored_at: "2026-07-04T10:00:00Z",
+    rank: 40,
+    rank_delta: -30, // moved down 30 places
     ...o,
   };
 }
@@ -96,7 +115,7 @@ describe("buildAlertModel — guard grouping", () => {
         rejections.push(guard({ decision_id: id++, symbol: s }));
       }
     }
-    const items = buildAlertModel(rejections, [], [], NO_CURSORS);
+    const items = buildAlertModel(rejections, [], [], [], NO_CURSORS);
     expect(items).toHaveLength(1);
     const g = items[0] as GuardGroupItem;
     expect(g.kind).toBe("guardGroup");
@@ -116,6 +135,7 @@ describe("buildAlertModel — guard grouping", () => {
       ],
       [],
       [],
+      [],
       NO_CURSORS,
     );
     expect(items).toHaveLength(2);
@@ -131,6 +151,7 @@ describe("buildAlertModel — guard grouping", () => {
       ],
       [],
       [],
+      [],
       NO_CURSORS,
     );
     const g = items[0] as GuardGroupItem;
@@ -141,6 +162,7 @@ describe("buildAlertModel — guard grouping", () => {
   it("group is seen when maxId <= cursor", () => {
     const items = buildAlertModel(
       [guard({ decision_id: 400 }), guard({ decision_id: 399 })],
+      [],
       [],
       [],
       { ...NO_CURSORS, guard: 400 },
@@ -159,6 +181,7 @@ describe("buildAlertModel — coverage grouping", () => {
         coverage({ event_id: 2, symbol: "NIO", new_status: "insufficient" }),
         coverage({ event_id: 3, symbol: "F", new_status: null }),
       ],
+      [],
       NO_CURSORS,
     );
     const cov = items.filter((i) => i.kind === "coverageGroup") as CoverageGroupItem[];
@@ -172,12 +195,50 @@ describe("buildAlertModel — coverage grouping", () => {
   });
 });
 
+describe("buildAlertModel — rank moves", () => {
+  it("groups moves by instrument; latest (highest score_id) drives display, rest counted", () => {
+    const items = buildAlertModel(
+      [],
+      [],
+      [],
+      [
+        rankMove({ score_id: 10, instrument_id: 4, symbol: "GME", rank: 40, rank_delta: -30 }),
+        rankMove({ score_id: 12, instrument_id: 4, symbol: "GME", rank: 55, rank_delta: -25 }),
+        rankMove({ score_id: 11, instrument_id: 7, symbol: "BBBY", rank: 8, rank_delta: 22 }),
+      ],
+      NO_CURSORS,
+    );
+    const ranks = items.filter((i) => i.kind === "rankMove") as RankMoveItem[];
+    expect(ranks).toHaveLength(2);
+    const gme = ranks.find((r) => r.symbol === "GME")!;
+    expect(gme.count).toBe(2);
+    expect(gme.maxId).toBe(12); // highest score_id
+    expect(gme.rank).toBe(55); // latest row's rank
+    expect(gme.rankDelta).toBe(-25); // latest row's delta
+    expect(gme.tier).toBe("informational");
+    expect(gme.id).toBe("rank:4");
+    expect(gme.unseen).toBe(true); // cursor null
+  });
+
+  it("card is seen when maxId <= rank cursor", () => {
+    const items = buildAlertModel(
+      [],
+      [],
+      [],
+      [rankMove({ score_id: 500 }), rankMove({ score_id: 499 })],
+      { ...NO_CURSORS, rank: 500 },
+    );
+    expect((items[0] as RankMoveItem).unseen).toBe(false);
+  });
+});
+
 describe("buildAlertModel — severity ordering", () => {
   it("orders actionable → informational → housekeeping regardless of timestamp", () => {
     const items = buildAlertModel(
       [guard({ decision_time: "2026-07-04T12:00:00Z" })], // newest, but informational
       [position({ opened_at: "2026-07-04T09:00:00Z" })], // oldest, but actionable
       [coverage({ changed_at: "2026-07-04T11:00:00Z" })],
+      [],
       NO_CURSORS,
     );
     expect(items.map((i) => i.tier)).toEqual([
@@ -193,6 +254,7 @@ describe("buildAlertModel — severity ordering", () => {
         guard({ decision_id: 1, explanation: "FAIL — kill_switch: x", decision_time: "2026-07-04T08:00:00Z" }),
         guard({ decision_id: 2, explanation: "FAIL — auto_trading: y", decision_time: "2026-07-04T12:00:00Z" }),
       ],
+      [],
       [],
       [],
       NO_CURSORS,

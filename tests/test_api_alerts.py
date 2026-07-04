@@ -1778,3 +1778,140 @@ class TestCoverageStatusDropsDismissAll:
             from app.db import get_conn
 
             app.dependency_overrides.pop(get_conn, None)
+
+
+# ---------------------------------------------------------------------------
+# #1922 — rank-move alert feed (held instrument's rank moved materially)
+# ---------------------------------------------------------------------------
+
+
+def _rank_move_row(
+    score_id: int = 104061,
+    instrument_id: int = 45,
+    symbol: str = "BBBY",
+    rank: int = 3679,
+    rank_delta: int = -43,
+) -> dict[str, object]:
+    return {
+        "score_id": score_id,
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "scored_at": datetime(2026, 7, 4, 1, 44, 23, tzinfo=UTC),
+        "rank": rank,
+        "rank_delta": rank_delta,
+    }
+
+
+def test_rank_moves_get_returns_shape_and_unseen_count(client: TestClient) -> None:
+    rows = [
+        _rank_move_row(score_id=104061, symbol="BBBY", rank=3679, rank_delta=-43),
+        _rank_move_row(score_id=104000, symbol="GME", instrument_id=44, rank=12, rank_delta=30),
+    ]
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_rank_event_id": 103000},
+                {"unseen_count": 2},
+            ],
+            fetchall_returns=rows,
+        )
+        resp = client.get("/alerts/rank-moves")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["alerts_last_seen_rank_event_id"] == 103000
+    assert body["unseen_count"] == 2
+    assert len(body["moves"]) == 2
+    assert body["moves"][0]["symbol"] == "BBBY"
+    assert body["moves"][0]["rank_delta"] == -43
+    assert body["moves"][1]["rank_delta"] == 30
+
+
+def test_rank_moves_get_null_cursor_serialises(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_rank_event_id": None},
+                {"unseen_count": 0},
+            ],
+            fetchall_returns=[],
+        )
+        resp = client.get("/alerts/rank-moves")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["alerts_last_seen_rank_event_id"] is None
+    assert body["moves"] == []
+
+
+def test_rank_moves_get_sql_shape_pins_predicate(client: TestClient) -> None:
+    """The window predicate must pin the invariants the contract depends on:
+    - held-instrument scope (EXISTS positions WHERE current_units > 0)
+    - materiality threshold (abs(rank_delta) >= threshold, rank_delta NOT NULL)
+    - single model_version scope + 7-day window
+    - ORDER BY score_id DESC, LIMIT 500
+    - unseen count uses strict > on score_id
+    """
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_rank_event_id": None},
+                {"unseen_count": 0},
+            ],
+            fetchall_returns=[],
+        )
+        resp = client.get("/alerts/rank-moves")
+    assert resp.status_code == 200
+    list_sql = next(c.args[0] for c in cur.execute.call_args_list if "JOIN instruments i" in c.args[0])
+    assert "current_units > 0" in list_sql
+    assert "abs(s.rank_delta) >= %(threshold)s" in list_sql
+    assert "s.rank_delta IS NOT NULL" in list_sql
+    assert "s.model_version = %(mv)s" in list_sql
+    assert "INTERVAL '7 days'" in list_sql
+    assert "ORDER BY s.score_id DESC" in list_sql
+    assert "LIMIT 500" in list_sql
+    count_sql = next(c.args[0] for c in cur.execute.call_args_list if "COUNT(*) AS unseen_count" in c.args[0])
+    assert "s.score_id > %(last_id)s" in count_sql
+    # threshold + model_version bound in the params, not string-interpolated
+    params = next(c.args[1] for c in cur.execute.call_args_list if "JOIN instruments i" in c.args[0])
+    assert params["threshold"] == 20
+    assert params["mv"]
+
+
+def test_rank_moves_post_seen_writes_update(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(rowcount=1)
+        resp = client.post("/alerts/rank-moves/seen", json={"seen_through_rank_event_id": 104061})
+    assert resp.status_code == 204
+    calls = cur.execute.call_args_list
+    sql = next(c.args[0] for c in calls if "UPDATE operators" in c.args[0])
+    assert "GREATEST" in sql
+    assert "LEAST" in sql
+    assert "SELECT MAX(s.score_id)" in sql
+    assert "current_units > 0" in sql
+    params = next(c.args[1] for c in calls if "UPDATE operators" in c.args[0])
+    assert params["seen_through_rank_event_id"] == 104061
+    assert params["op"] == _OP_ID
+    cur._parent_conn.commit.assert_called_once()
+
+
+def test_rank_moves_post_seen_rejects_non_positive(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn()
+        resp = client.post("/alerts/rank-moves/seen", json={"seen_through_rank_event_id": 0})
+    assert resp.status_code == 422
+
+
+def test_rank_moves_post_dismiss_all_issues_update(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(rowcount=1)
+        resp = client.post("/alerts/rank-moves/dismiss-all")
+    assert resp.status_code == 204
+    calls = cur.execute.call_args_list
+    assert any("UPDATE operators" in c.args[0] and "SELECT MAX(s.score_id)" in c.args[0] for c in calls)
+    cur._parent_conn.commit.assert_called_once()
+
+
+def test_rank_moves_get_returns_503_when_no_operator(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", side_effect=NoOperatorError()):
+        _install_conn()
+        resp = client.get("/alerts/rank-moves")
+    assert resp.status_code == 503

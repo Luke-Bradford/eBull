@@ -24,18 +24,22 @@ import {
   dismissAllAlerts,
   dismissAllCoverageStatusDrops,
   dismissAllPositionAlerts,
+  dismissAllRankMoves,
   fetchCoverageStatusDrops,
   fetchGuardRejections,
   fetchPositionAlerts,
+  fetchRankMoves,
   markAlertsSeen,
   markCoverageStatusDropsSeen,
   markPositionAlertsSeen,
+  markRankMovesSeen,
 } from "@/api/alerts";
 import type {
   CoverageStatusDropsResponse,
   GuardRejectionsResponse,
   PositionAlert,
   PositionAlertsResponse,
+  RankMovesResponse,
 } from "@/api/types";
 import { formatRelativeTime } from "@/lib/format";
 
@@ -45,6 +49,7 @@ import {
   type Cursors,
   type GuardGroupItem,
   type CoverageGroupItem,
+  type RankMoveItem,
   type Tier,
 } from "./alertModel";
 
@@ -77,12 +82,16 @@ function tierBorder(tier: Tier, unseen: boolean): string {
   return "border-l-4 border-slate-200 dark:border-slate-800";
 }
 
-function TierPill({ tier }: { tier: Tier }) {
+// `label` overrides the tier-derived pill text. The pill doubles as a
+// kind/category badge (ACTION/GUARD/COVERAGE), so a feed that shares a tier
+// with another kind (rank moves are informational, like guard) must supply its
+// own label to stay legible.
+function TierPill({ tier, label }: { tier: Tier; label?: string }) {
   return (
     <span
       className={`w-20 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase ${TIER_PILL[tier]}`}
     >
-      {TIER_LABEL[tier]}
+      {label ?? TIER_LABEL[tier]}
     </span>
   );
 }
@@ -90,10 +99,12 @@ function TierPill({ tier }: { tier: Tier }) {
 function CardShell({
   tier,
   unseen,
+  label,
   children,
 }: {
   tier: Tier;
   unseen: boolean;
+  label?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -102,7 +113,7 @@ function CardShell({
       role="listitem"
       className={`flex items-start gap-3 px-3 py-2 text-sm ${tierBorder(tier, unseen)} bg-white dark:bg-slate-900`}
     >
-      <TierPill tier={tier} />
+      <TierPill tier={tier} label={label} />
       {children}
     </div>
   );
@@ -221,6 +232,49 @@ function CoverageGroupCard({ item }: { item: CoverageGroupItem }) {
   );
 }
 
+function RankMoveCard({ item }: { item: RankMoveItem }) {
+  // rankDelta: positive = moved UP the board (better), negative = down.
+  const up = item.rankDelta > 0;
+  const magnitude = Math.abs(item.rankDelta);
+  return (
+    <Link
+      to={`/instruments/${item.instrumentId}`}
+      className="block hover:bg-slate-50 dark:hover:bg-slate-800/40"
+    >
+      <CardShell tier={item.tier} unseen={item.unseen} label="RANK">
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex items-baseline gap-2">
+            <span className="font-semibold text-slate-800 dark:text-slate-100">
+              {item.symbol}
+            </span>
+            <span
+              className={`tabular-nums font-medium ${
+                up
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-red-600 dark:text-red-400"
+              }`}
+            >
+              {up ? "▲" : "▼"}
+              {magnitude}
+            </span>
+            {item.count > 1 ? (
+              <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+                ×{item.count}
+              </span>
+            ) : null}
+          </div>
+          <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+            {up ? "Up" : "Down"} {magnitude} to rank #{item.rank}
+          </span>
+        </div>
+        <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
+          {formatRelativeTime(item.latestTs)}
+        </span>
+      </CardShell>
+    </Link>
+  );
+}
+
 function ItemView({ item }: { item: AlertItem }) {
   switch (item.kind) {
     case "guardGroup":
@@ -229,6 +283,8 @@ function ItemView({ item }: { item: AlertItem }) {
       return <PositionCard row={item.row} unseen={item.unseen} />;
     case "coverageGroup":
       return <CoverageGroupCard item={item} />;
+    case "rankMove":
+      return <RankMoveCard item={item} />;
   }
 }
 
@@ -242,6 +298,9 @@ export function AlertsStrip(): JSX.Element | null {
   const [coverage, setCoverage] = useState<FeedState<CoverageStatusDropsResponse>>({
     status: "loading",
   });
+  const [rank, setRank] = useState<FeedState<RankMovesResponse>>({
+    status: "loading",
+  });
   const [refetchKey, setRefetchKey] = useState(0);
 
   useEffect(() => {
@@ -249,6 +308,7 @@ export function AlertsStrip(): JSX.Element | null {
     setGuard({ status: "loading" });
     setPosition({ status: "loading" });
     setCoverage({ status: "loading" });
+    setRank({ status: "loading" });
 
     fetchGuardRejections()
       .then((d) => {
@@ -280,6 +340,16 @@ export function AlertsStrip(): JSX.Element | null {
           setCoverage({ status: "err" });
         }
       });
+    fetchRankMoves()
+      .then((d) => {
+        if (!cancelled) setRank({ status: "ok", data: d });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error("[AlertsStrip] fetchRankMoves failed", err);
+          setRank({ status: "err" });
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -291,14 +361,16 @@ export function AlertsStrip(): JSX.Element | null {
   if (
     guard.status === "loading" ||
     position.status === "loading" ||
-    coverage.status === "loading"
+    coverage.status === "loading" ||
+    rank.status === "loading"
   ) {
     return null;
   }
   if (
     guard.status === "err" &&
     position.status === "err" &&
-    coverage.status === "err"
+    coverage.status === "err" &&
+    rank.status === "err"
   ) {
     return null;
   }
@@ -308,6 +380,7 @@ export function AlertsStrip(): JSX.Element | null {
   const rejections = guard.status === "ok" ? guard.data.rejections : [];
   const positionAlerts = position.status === "ok" ? position.data.alerts : [];
   const drops = coverage.status === "ok" ? coverage.data.drops : [];
+  const moves = rank.status === "ok" ? rank.data.moves : [];
 
   const cursors: Cursors = {
     guard: guard.status === "ok" ? guard.data.alerts_last_seen_decision_id : null,
@@ -319,9 +392,10 @@ export function AlertsStrip(): JSX.Element | null {
       coverage.status === "ok"
         ? coverage.data.alerts_last_seen_coverage_event_id
         : null,
+    rank: rank.status === "ok" ? rank.data.alerts_last_seen_rank_event_id : null,
   };
 
-  const items = buildAlertModel(rejections, positionAlerts, drops, cursors);
+  const items = buildAlertModel(rejections, positionAlerts, drops, moves, cursors);
 
   if (items.length === 0) {
     return null;
@@ -330,19 +404,22 @@ export function AlertsStrip(): JSX.Element | null {
   const unseenGuard = guard.status === "ok" ? guard.data.unseen_count : 0;
   const unseenPosition = position.status === "ok" ? position.data.unseen_count : 0;
   const unseenCoverage = coverage.status === "ok" ? coverage.data.unseen_count : 0;
+  const unseenRank = rank.status === "ok" ? rank.data.unseen_count : 0;
 
   // Overflow math compares backend unseen counts to RAW fetched row counts (each feed caps
   // at LIMIT 500) — NOT to the grouped card count.
   const renderedGuard = rejections.length;
   const renderedPosition = positionAlerts.length;
   const renderedCoverage = drops.length;
+  const renderedRank = moves.length;
 
-  const totalUnseen = unseenGuard + unseenPosition + unseenCoverage;
+  const totalUnseen = unseenGuard + unseenPosition + unseenCoverage + unseenRank;
 
   const anyOverflow =
     unseenGuard > renderedGuard ||
     unseenPosition > renderedPosition ||
-    unseenCoverage > renderedCoverage;
+    unseenCoverage > renderedCoverage ||
+    unseenRank > renderedRank;
 
   const overflowAck = anyOverflow;
   const normalAck = totalUnseen > 0 && !anyOverflow;
@@ -352,11 +429,13 @@ export function AlertsStrip(): JSX.Element | null {
     const guardMax = Math.max(0, ...rejections.map((r) => r.decision_id));
     const positionMax = Math.max(0, ...positionAlerts.map((r) => r.alert_id));
     const coverageMax = Math.max(0, ...drops.map((r) => r.event_id));
+    const rankMax = Math.max(0, ...moves.map((r) => r.score_id));
 
     const promises: Promise<void>[] = [];
     if (guardMax > 0) promises.push(markAlertsSeen(guardMax));
     if (positionMax > 0) promises.push(markPositionAlertsSeen(positionMax));
     if (coverageMax > 0) promises.push(markCoverageStatusDropsSeen(coverageMax));
+    if (rankMax > 0) promises.push(markRankMovesSeen(rankMax));
 
     const results = await Promise.allSettled(promises);
     for (const r of results) {
@@ -371,7 +450,8 @@ export function AlertsStrip(): JSX.Element | null {
     const hiddenCount =
       Math.max(0, unseenGuard - renderedGuard) +
       Math.max(0, unseenPosition - renderedPosition) +
-      Math.max(0, unseenCoverage - renderedCoverage);
+      Math.max(0, unseenCoverage - renderedCoverage) +
+      Math.max(0, unseenRank - renderedRank);
     const msg = `Dismiss all ${totalUnseen} unseen alerts? ${hiddenCount} are not shown above. Review them at /recommendations before dismissing if they might matter.`;
     if (!window.confirm(msg)) return;
 
@@ -379,6 +459,7 @@ export function AlertsStrip(): JSX.Element | null {
     if (guard.status === "ok") promises.push(dismissAllAlerts());
     if (position.status === "ok") promises.push(dismissAllPositionAlerts());
     if (coverage.status === "ok") promises.push(dismissAllCoverageStatusDrops());
+    if (rank.status === "ok") promises.push(dismissAllRankMoves());
 
     const results = await Promise.allSettled(promises);
     for (const r of results) {

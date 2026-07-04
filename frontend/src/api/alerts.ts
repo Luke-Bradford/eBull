@@ -3,6 +3,7 @@ import type {
   CoverageStatusDropsResponse,
   GuardRejectionsResponse,
   PositionAlertsResponse,
+  RankMovesResponse,
 } from "@/api/types";
 
 /**
@@ -80,4 +81,23 @@ export function dismissAllCoverageStatusDrops(): Promise<void> {
   return apiFetch<void>("/alerts/coverage-status-drops/dismiss-all", {
     method: "POST",
   });
+}
+
+// --- #1922 rank-move endpoints ----------------------------------------------
+
+export function fetchRankMoves(): Promise<RankMovesResponse> {
+  return apiFetch<RankMovesResponse>("/alerts/rank-moves");
+}
+
+export function markRankMovesSeen(
+  seenThroughRankEventId: number,
+): Promise<void> {
+  return apiFetch<void>("/alerts/rank-moves/seen", {
+    method: "POST",
+    body: JSON.stringify({ seen_through_rank_event_id: seenThroughRankEventId }),
+  });
+}
+
+export function dismissAllRankMoves(): Promise<void> {
+  return apiFetch<void>("/alerts/rank-moves/dismiss-all", { method: "POST" });
 }
