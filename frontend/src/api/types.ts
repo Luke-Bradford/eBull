@@ -322,12 +322,18 @@ export interface InstrumentIdentity {
 }
 
 export interface InstrumentPrice {
+  /** Native listing price + currency — the tradable number, primary in the
+   *  header. Never flips by quote path (#1906, operator decision 2026-07-04). */
   current: string | null;
   day_change: string | null;
   day_change_pct: string | null;
   week_52_high: string | null;
   week_52_low: string | null;
   currency: string | null;
+  /** FX-converted companion in the operator's display currency (secondary,
+   *  muted). Null when no FX rate is available or native === display. */
+  display_current: string | null;
+  display_currency: string | null;
 }
 
 // Closed set of values emitted in InstrumentKeyStats.field_source.
@@ -798,9 +804,10 @@ export interface ValueHistoryResponse {
 }
 
 // /portfolio/activity — broker-observed trade ledger (#1593 PR-2).
-// fees_usd / realized_pnl_usd are USD account-currency; price is in the
-// instrument's NATIVE currency. symbol null = instrument absent from the
-// current universe (deep history) — render `#${etoro_instrument_id}`.
+// fees / realized_pnl are FX-converted to ActivityResponse.display_currency
+// (#1906); price is in the instrument's NATIVE currency (unrelated to
+// account currency). symbol null = instrument absent from the current
+// universe (deep history) — render `#${etoro_instrument_id}`.
 export interface ActivityEventItem {
   event_id: number;
   position_id: number;
@@ -811,8 +818,8 @@ export interface ActivityEventItem {
   units: number;
   price: number | null;
   executed_at: string;
-  fees_usd: number | null;
-  realized_pnl_usd: number | null;
+  fees: number | null;
+  realized_pnl: number | null;
   holding_period_days: number | null; // closes only; fractional days
   source: "etoro_sync" | "etoro_history";
   is_mirror: boolean;
@@ -822,6 +829,7 @@ export interface ActivityResponse {
   events: ActivityEventItem[];
   total: number; // rows matching the filter; events capped at `limit`
   include_mirrors: boolean;
+  display_currency: string; // currency of every event's fees / realized_pnl
 }
 
 // /portfolio/instruments/:instrumentId — native currency drill-through

@@ -7,8 +7,8 @@
  *   - Generate thesis visible when no thesis OR thesis > 30d old.
  *   - Add visible when `summary.is_tradable === true`.
  */
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { SummaryStrip } from "@/components/instrument/SummaryStrip";
@@ -46,6 +46,8 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
       week_52_high: "250.00",
       week_52_low: "140.00",
       currency: "USD",
+      display_current: null,
+      display_currency: null,
     },
     key_stats: null,
     source: { identity: "local_db", price: "quotes", key_stats: "unavailable" },
@@ -154,6 +156,47 @@ describe("SummaryStrip — action gating", () => {
     expect(screen.getByText("AAPL")).toBeInTheDocument();
     expect(screen.getByText("Apple Inc.")).toBeInTheDocument();
     expect(screen.getByText(/Technology/)).toBeInTheDocument();
+  });
+
+  it("shows native price primary + display-currency companion (#1906)", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          price: {
+            current: "200.50",
+            day_change: "1.50",
+            day_change_pct: "0.00753",
+            week_52_high: "250.00",
+            week_52_low: "140.00",
+            currency: "USD",
+            display_current: "156.39",
+            display_currency: "GBP",
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    // Native is the primary (tradable) number.
+    expect(screen.getByText("USD 200.50")).toBeInTheDocument();
+    // Display-currency worth rides along as the muted companion.
+    expect(screen.getByTestId("price-companion")).toHaveTextContent(
+      "≈ GBP 156.39",
+    );
+  });
+
+  it("omits the companion when there is no display-currency conversion (#1906)", () => {
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByText("USD 200.50")).toBeInTheDocument();
+    expect(screen.queryByTestId("price-companion")).not.toBeInTheDocument();
   });
 
   it("prefers the real GICS sector + SPDR over the opaque sector code (#1634)", () => {
@@ -466,5 +509,117 @@ describe("SummaryStrip — action gating", () => {
       />,
     );
     expect(screen.queryByTestId("action-close")).not.toBeInTheDocument();
+  });
+});
+
+// A minimal EventSource stub so we can drive the useLiveQuote SSE overlay
+// and verify the header's native-primary + companion sourcing (#1906).
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSED = 2;
+  url: string;
+  readyState = FakeEventSource.CONNECTING;
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  constructor(url: string) {
+    this.url = url;
+    FakeEventSource.instances.push(this);
+  }
+  close(): void {
+    this.readyState = FakeEventSource.CLOSED;
+  }
+  fireMessage(data: string): void {
+    this.onmessage?.(new MessageEvent("message", { data }));
+  }
+}
+
+describe("SummaryStrip — live-tick currency sourcing (#1906)", () => {
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("overrides REST native with the live tick and drops a stale REST companion when the tick has no display block", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          price: {
+            current: "100.00",
+            day_change: null,
+            day_change_pct: null,
+            week_52_high: null,
+            week_52_low: null,
+            currency: "USD",
+            // Stale companion computed for the 100.00 REST snapshot.
+            display_current: "78.00",
+            display_currency: "GBP",
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    // Live tick: new native price, NO display block (no FX rate this tick).
+    act(() => {
+      FakeEventSource.instances[0]!.fireMessage(
+        JSON.stringify({
+          instrument_id: 42,
+          native_currency: "USD",
+          bid: "109",
+          ask: "111",
+          last: "110",
+          quoted_at: "2026-07-04T12:00:00+00:00",
+          display: null,
+        }),
+      );
+    });
+    // Native primary follows the live tick…
+    expect(screen.getByText("USD 110.00")).toBeInTheDocument();
+    // …and the stale REST companion (GBP 78, for the old 100.00) is NOT shown.
+    expect(screen.queryByTestId("price-companion")).not.toBeInTheDocument();
+  });
+
+  it("shows the live tick's own display companion beside the live native price", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          price: {
+            current: "100.00",
+            day_change: null,
+            day_change_pct: null,
+            week_52_high: null,
+            week_52_low: null,
+            currency: "USD",
+            display_current: null,
+            display_currency: null,
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    act(() => {
+      FakeEventSource.instances[0]!.fireMessage(
+        JSON.stringify({
+          instrument_id: 42,
+          native_currency: "USD",
+          bid: "109",
+          ask: "111",
+          last: "110",
+          quoted_at: "2026-07-04T12:00:00+00:00",
+          display: { currency: "GBP", bid: "85", ask: "87", last: "86" },
+        }),
+      );
+    });
+    expect(screen.getByText("USD 110.00")).toBeInTheDocument();
+    expect(screen.getByTestId("price-companion")).toHaveTextContent("≈ GBP 86.00");
   });
 });

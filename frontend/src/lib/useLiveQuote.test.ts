@@ -9,7 +9,13 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
-import { liveTickDisplayPrice, useLiveQuote, type LiveTickPayload } from "@/lib/useLiveQuote";
+import {
+  liveTickDisplayCompanion,
+  liveTickDisplayPrice,
+  liveTickNativePrice,
+  useLiveQuote,
+  type LiveTickPayload,
+} from "@/lib/useLiveQuote";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -236,5 +242,50 @@ describe("liveTickDisplayPrice", () => {
 
   it("returns null for a null tick", () => {
     expect(liveTickDisplayPrice(null)).toBeNull();
+  });
+});
+
+describe("liveTickNativePrice (#1906 native primary)", () => {
+  it("always returns the native triple, even when a display block exists", () => {
+    const out = liveTickNativePrice(
+      makeTick({
+        last: "100.5",
+        display: { currency: "GBP", bid: "75", ask: "76", last: "75.5" },
+      }),
+    );
+    expect(out).toEqual({ value: "100.5", currency: "USD" });
+  });
+
+  it("falls back to native bid when last is null", () => {
+    const out = liveTickNativePrice(makeTick({ last: null, bid: "100" }));
+    expect(out).toEqual({ value: "100", currency: "USD" });
+  });
+
+  it("returns null for a null tick", () => {
+    expect(liveTickNativePrice(null)).toBeNull();
+  });
+});
+
+describe("liveTickDisplayCompanion (#1906 display companion)", () => {
+  it("returns the display block when present", () => {
+    const out = liveTickDisplayCompanion(
+      makeTick({ display: { currency: "GBP", bid: "75", ask: "76", last: "75.5" } }),
+    );
+    expect(out).toEqual({ value: "75.5", currency: "GBP" });
+  });
+
+  it("falls back to display.bid when display.last is null", () => {
+    const out = liveTickDisplayCompanion(
+      makeTick({ display: { currency: "GBP", bid: "75", ask: "76", last: null } }),
+    );
+    expect(out?.value).toBe("75");
+  });
+
+  it("returns null when there is no display block (header shows native only)", () => {
+    expect(liveTickDisplayCompanion(makeTick({ display: null }))).toBeNull();
+  });
+
+  it("returns null for a null tick", () => {
+    expect(liveTickDisplayCompanion(null)).toBeNull();
   });
 });

@@ -14,13 +14,38 @@ the response carries the right values from the right source.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.runtime_config import RuntimeConfig
+
+_NOW = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+
+# Default RuntimeConfig for tests: display_currency="USD" makes the #1906 FX
+# conversion in get_instrument_summary a no-op for every existing USD-row
+# fixture in this file, so autouse-patching it here means those tests don't
+# need to know FX conversion exists (matches test_api_portfolio.py's
+# _DEFAULT_CONFIG pattern). Tests that exercise conversion mock a non-USD
+# display_currency + load_live_fx_rates explicitly instead.
+_DEFAULT_CONFIG = RuntimeConfig(
+    enable_auto_trading=False,
+    enable_live_trading=False,
+    display_currency="USD",
+    updated_at=_NOW,
+    updated_by="test",
+    reason="test",
+)
+
+
+@pytest.fixture(autouse=True)
+def _default_runtime_config():
+    with patch("app.api.instruments.get_runtime_config", return_value=_DEFAULT_CONFIG):
+        yield
 
 
 @pytest.fixture
@@ -550,3 +575,108 @@ def test_canonical_symbol_null_for_canonical_instrument(client: TestClient) -> N
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["identity"]["canonical_symbol"] is None
+
+
+def test_price_native_primary_with_display_companion(client: TestClient) -> None:
+    """#1906 (operator decision 2026-07-04): price.current / price.currency
+    stay NATIVE (the tradable number, primary in the header), and the
+    FX-converted display-currency worth rides along as a secondary companion
+    in display_current / display_currency. identity.currency also stays
+    NATIVE (the #1845 chart-axis contract)."""
+    row = {
+        "instrument_id": 1699,
+        "symbol": "GME",
+        "company_name": "GameStop Corp",
+        "exchange": "4",
+        "currency": "USD",
+        "sector": None,
+        "sector_name": None,
+        "industry": None,
+        "country": "US",
+        "is_tradable": True,
+        "session_profile": "us_equity",
+        "coverage_tier": 1,
+        "bid": None,
+        "ask": None,
+        "last": Decimal("100.00"),
+    }
+    conn = _make_conn(row=row)
+    gbp_config = RuntimeConfig(
+        enable_auto_trading=False,
+        enable_live_trading=False,
+        display_currency="GBP",
+        updated_at=_NOW,
+        updated_by="test",
+        reason="test",
+    )
+    _install_conn(conn)
+    try:
+        with (
+            patch("app.api.instruments.get_runtime_config", return_value=gbp_config),
+            patch(
+                "app.api.instruments.load_live_fx_rates",
+                return_value={("USD", "GBP"): Decimal("0.78")},
+            ),
+        ):
+            resp = client.get("/instruments/GME/summary")
+    finally:
+        _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Native primary — the tradable number.
+    assert body["price"]["current"] == "100.0"
+    assert body["price"]["currency"] == "USD"
+    # Display companion: 100.0 USD * 0.78 = 78.000 GBP (Decimal mult, no rounding).
+    assert body["price"]["display_current"] == "78.000"
+    assert body["price"]["display_currency"] == "GBP"
+    # identity.currency stays NATIVE — the price chart's axis (#1845).
+    assert body["identity"]["currency"] == "USD"
+
+
+def test_price_companion_null_when_fx_rate_missing(client: TestClient) -> None:
+    """No FX rate available: native price + native currency label stand alone
+    and the display companion is null (never a converted number under a
+    display-currency label; the header simply shows native only)."""
+    row = {
+        "instrument_id": 1699,
+        "symbol": "GME",
+        "company_name": "GameStop Corp",
+        "exchange": "4",
+        "currency": "USD",
+        "sector": None,
+        "sector_name": None,
+        "industry": None,
+        "country": "US",
+        "is_tradable": True,
+        "session_profile": "us_equity",
+        "coverage_tier": 1,
+        "bid": None,
+        "ask": None,
+        "last": Decimal("100.00"),
+    }
+    conn = _make_conn(row=row)
+    gbp_config = RuntimeConfig(
+        enable_auto_trading=False,
+        enable_live_trading=False,
+        display_currency="GBP",
+        updated_at=_NOW,
+        updated_by="test",
+        reason="test",
+    )
+    _install_conn(conn)
+    try:
+        with (
+            patch("app.api.instruments.get_runtime_config", return_value=gbp_config),
+            patch("app.api.instruments.load_live_fx_rates", return_value={}),
+        ):
+            resp = client.get("/instruments/GME/summary")
+    finally:
+        _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["price"]["current"] == "100.0"
+    assert body["price"]["currency"] == "USD"
+    assert body["price"]["display_current"] is None
+    assert body["price"]["display_currency"] is None

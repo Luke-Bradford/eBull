@@ -151,6 +151,9 @@ export function useLiveQuote(instrumentId: number | null | undefined): LiveQuote
  * Pick the best "current price" string from a live tick, preferring
  * display currency when available and falling back to native. Returns
  * null when no useful value exists.
+ *
+ * Used by compact table cells (LivePriceCell) where a single
+ * display-currency figure is the convention.
  */
 export function liveTickDisplayPrice(tick: LiveTickPayload | null): {
   value: string;
@@ -163,4 +166,33 @@ export function liveTickDisplayPrice(tick: LiveTickPayload | null): {
   }
   const v = tick.last ?? tick.bid;
   return { value: v, currency: tick.native_currency };
+}
+
+/**
+ * Native price from a live tick — the tradable number, primary in the
+ * instrument header (#1906, operator decision 2026-07-04: native primary).
+ * Returns null when no useful value exists.
+ */
+export function liveTickNativePrice(tick: LiveTickPayload | null): {
+  value: string;
+  currency: string | null;
+} | null {
+  if (tick === null) return null;
+  const v = tick.last ?? tick.bid;
+  return { value: v, currency: tick.native_currency };
+}
+
+/**
+ * Display-currency companion from a live tick — the secondary, muted figure
+ * shown alongside the native header price. Null when the tick carries no
+ * display block (unknown native currency / no FX rate), in which case the
+ * header shows native only.
+ */
+export function liveTickDisplayCompanion(tick: LiveTickPayload | null): {
+  value: string;
+  currency: string;
+} | null {
+  if (tick === null || tick.display === null) return null;
+  const v = tick.display.last ?? tick.display.bid;
+  return { value: v, currency: tick.display.currency };
 }

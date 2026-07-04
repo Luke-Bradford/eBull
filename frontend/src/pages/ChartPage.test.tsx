@@ -115,7 +115,7 @@ function makeSummary(): InstrumentSummary {
     is_tradable: true,
     coverage_tier: 1,
     identity: { symbol: "AAPL", display_name: "Apple Inc.", market_cap: null, sector: null },
-    price: { current: "189.50", day_change: null, day_change_pct: null, week_52_high: null, week_52_low: null, currency: "USD" },
+    price: { current: "189.50", day_change: null, day_change_pct: null, week_52_high: null, week_52_low: null, currency: "USD", display_current: null, display_currency: null },
     key_stats: null,
     source: {},
     has_sec_cik: true,

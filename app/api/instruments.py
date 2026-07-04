@@ -52,6 +52,7 @@ from app.services.broker_credentials import (
 from app.services.dimensional_facts import DimensionalAxis
 from app.services.dimensional_facts_store import read_segments
 from app.services.fcf_yield import fcf_yield_series
+from app.services.fx import FxRateNotFound, convert, load_live_fx_rates
 from app.services.intraday_candles import fetch_intraday_candles
 from app.services.operators import (
     AmbiguousOperatorError,
@@ -77,6 +78,7 @@ from app.services.risk_metrics import (
     ols_beta,
     simple_returns,
 )
+from app.services.runtime_config import get_runtime_config
 from app.services.sector_classification import resolve_sector_spdr, sector_spdr_case_sql
 
 logger = logging.getLogger(__name__)
@@ -206,12 +208,24 @@ class InstrumentIdentity(BaseModel):
 
 
 class InstrumentPrice(BaseModel):
+    """``current`` + ``currency`` are the instrument's NATIVE listing price —
+    the tradable number — and never flip by which path (REST snapshot vs SSE
+    live tick) answers first (#1906, operator decision 2026-07-04: native is
+    PRIMARY everywhere). ``display_current`` + ``display_currency`` carry the
+    FX-converted companion in the operator's display currency (a secondary,
+    muted figure in the UI); both are ``None`` when no FX rate is available or
+    the native currency already equals the display currency — the native price
+    still renders. Matches ``InstrumentIdentity.currency`` (also native, the
+    price chart's axis per the #1845 convention)."""
+
     current: Decimal | None
     day_change: Decimal | None
     day_change_pct: Decimal | None
     week_52_high: Decimal | None
     week_52_low: Decimal | None
     currency: str | None
+    display_current: Decimal | None = None
+    display_currency: str | None = None
 
 
 # Closed set of values for `InstrumentKeyStats.field_source` entries. Mirror
@@ -3695,6 +3709,33 @@ def get_instrument_summary(
         float(row["ask"]) if row.get("ask") is not None else None,
     )
     current_price: Decimal | None = Decimal(str(mark)) if mark is not None else None
+    native_ccy = row["currency"]  # type: ignore[assignment]
+    # #1906 (operator decision 2026-07-04): NATIVE price is primary — the
+    # tradable number — and never flips by which path (REST snapshot vs SSE
+    # live tick) answers first. ``current``/``currency`` therefore stay
+    # native. ``display_current``/``display_currency`` carry the FX-converted
+    # companion in the operator's display currency (rendered secondary +
+    # muted). The companion stays ``None`` when no FX rate is available (the
+    # native price still shows — never a converted number under a wrong
+    # label) or when native already equals the display currency. Mirrors the
+    # SSE live-tick path, which emits both a native triple and a ``display``
+    # block (app/api/sse_quotes.py ``_format_tick``).
+    display_price: Decimal | None = None
+    display_ccy_for_price: str | None = None
+    if current_price is not None and native_ccy is not None:
+        display_currency = get_runtime_config(conn).display_currency
+        if native_ccy != display_currency:
+            try:
+                rates = load_live_fx_rates(conn)
+                display_price = convert(current_price, native_ccy, display_currency, rates)
+                display_ccy_for_price = display_currency
+            except FxRateNotFound:
+                logger.warning(
+                    "get_instrument_summary: FX rate %s->%s not found for %s; showing native price only",
+                    native_ccy,
+                    display_currency,
+                    symbol_clean,
+                )
     price_block = (
         InstrumentPrice(
             current=current_price,
@@ -3702,7 +3743,9 @@ def get_instrument_summary(
             day_change_pct=None,
             week_52_high=None,
             week_52_low=None,
-            currency=row["currency"],  # type: ignore[arg-type]
+            currency=native_ccy,  # type: ignore[arg-type]
+            display_current=display_price,
+            display_currency=display_ccy_for_price,
         )
         if current_price is not None
         else None
