@@ -2217,11 +2217,19 @@ def _bucket_into_slices(
     ESOP rows are DEF 14A beneficial-ownership disclosure (SEC Item
     403), not a distinct institutional holding."""
     slices: list[OwnershipSlice] = []
+
+    def _add(built: OwnershipSlice) -> None:
+        # A slice whose holders are all zero-share becomes empty after
+        # ``_build_slice`` drops them (#1916 Finding A) — skip it, mirroring
+        # the "no holders → no slice" convention below.
+        if built.holders:
+            slices.append(built)
+
     for category in _CATEGORY_ORDER:
         holders = by_category.get(category)
         if not holders:
             continue
-        slices.append(_build_slice(category, holders, outstanding))
+        _add(_build_slice(category, holders, outstanding))
 
     if unmatched_def14a:
         unmatched_holders = [
@@ -2244,7 +2252,7 @@ def _bucket_into_slices(
         # so it does NOT contribute to the pie / residual / concentration. Renders as
         # a cross-check overlay (the additive math filters denominator_basis ==
         # "pie_wedge"; the memo paths filter != "pie_wedge").
-        slices.append(
+        _add(
             _build_slice(
                 "def14a_unmatched",
                 unmatched_holders,
@@ -2254,7 +2262,7 @@ def _bucket_into_slices(
         )
 
     if funds_holders:
-        slices.append(
+        _add(
             _build_slice(
                 "funds",
                 list(funds_holders),
@@ -2264,7 +2272,7 @@ def _bucket_into_slices(
         )
 
     if esop_holders:
-        slices.append(
+        _add(
             _build_slice(
                 "esop",
                 list(esop_holders),
@@ -2316,6 +2324,29 @@ def _build_slice(
     *,
     denominator_basis: DenominatorBasis = "pie_wedge",
 ) -> OwnershipSlice:
+    # Drop zero-share holders (#1916 Finding A): a holder whose reconciled
+    # current holding is 0 is not a holder of the issuer — rendering it produces
+    # a duplicate-looking row (a live ``direct`` lot beside a stale 0-share
+    # ``indirect`` lot showed the same person twice, e.g. AAPL / Katherine
+    # Adams). Figure-neutral: zero-share rows contribute 0 to ``total`` /
+    # ``pct`` / residual, and no ``ownership_*_current`` row is strictly
+    # negative (full-population check on the dev DB). Corrects ``filer_count``.
+    #
+    # ``> 0`` also drops any strictly-negative row. That is impossible today,
+    # but a negative row would silently INCREASE the slice total when removed
+    # (it was reducing it), so surface it rather than dropping it silently —
+    # the invariant is asserted by data, not code, so a regression must be
+    # visible, not swallowed (Claude review NITPICK, PR #1940).
+    negatives = [h for h in holders if h.shares < Decimal(0)]
+    if negatives:
+        logger.warning(
+            "ownership_rollup %s slice: dropping %d negative-share holder(s) "
+            "(unexpected — ownership_*_current should never be negative): %s",
+            category,
+            len(negatives),
+            [(h.filer_cik or h.filer_name, str(h.shares)) for h in negatives],
+        )
+    holders = [h for h in holders if h.shares > Decimal(0)]
     holders.sort(key=lambda h: h.shares, reverse=True)
     total = sum((h.shares for h in holders), Decimal(0))
     pct_total = total / outstanding if outstanding > 0 else Decimal(0)
