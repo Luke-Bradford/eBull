@@ -577,11 +577,12 @@ def test_canonical_symbol_null_for_canonical_instrument(client: TestClient) -> N
     assert resp.json()["identity"]["canonical_symbol"] is None
 
 
-def test_price_converted_to_display_currency(client: TestClient) -> None:
-    """#1906: price.current / price.currency are FX-converted to the
-    operator's display currency, matching the SSE live-tick 'display'
-    block, so the header never depends on which of the two paths answers
-    first. identity.currency stays NATIVE (the #1845 chart-axis contract)."""
+def test_price_native_primary_with_display_companion(client: TestClient) -> None:
+    """#1906 (operator decision 2026-07-04): price.current / price.currency
+    stay NATIVE (the tradable number, primary in the header), and the
+    FX-converted display-currency worth rides along as a secondary companion
+    in display_current / display_currency. identity.currency also stays
+    NATIVE (the #1845 chart-axis contract)."""
     row = {
         "instrument_id": 1699,
         "symbol": "GME",
@@ -623,16 +624,20 @@ def test_price_converted_to_display_currency(client: TestClient) -> None:
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # 100.0 USD * 0.78 = 78.000 GBP (Decimal multiplication, no rounding).
-    assert body["price"]["current"] == "78.000"
-    assert body["price"]["currency"] == "GBP"
+    # Native primary — the tradable number.
+    assert body["price"]["current"] == "100.0"
+    assert body["price"]["currency"] == "USD"
+    # Display companion: 100.0 USD * 0.78 = 78.000 GBP (Decimal mult, no rounding).
+    assert body["price"]["display_current"] == "78.000"
+    assert body["price"]["display_currency"] == "GBP"
     # identity.currency stays NATIVE — the price chart's axis (#1845).
     assert body["identity"]["currency"] == "USD"
 
 
-def test_price_falls_back_to_native_when_fx_rate_missing(client: TestClient) -> None:
-    """No FX rate available: keep the native price + native currency label
-    (never a converted number under a display-currency label)."""
+def test_price_companion_null_when_fx_rate_missing(client: TestClient) -> None:
+    """No FX rate available: native price + native currency label stand alone
+    and the display companion is null (never a converted number under a
+    display-currency label; the header simply shows native only)."""
     row = {
         "instrument_id": 1699,
         "symbol": "GME",
@@ -673,3 +678,5 @@ def test_price_falls_back_to_native_when_fx_rate_missing(client: TestClient) -> 
     body = resp.json()
     assert body["price"]["current"] == "100.0"
     assert body["price"]["currency"] == "USD"
+    assert body["price"]["display_current"] is None
+    assert body["price"]["display_currency"] is None

@@ -22,7 +22,11 @@ import type {
   ThesisDetail,
 } from "@/api/types";
 import { Term } from "@/components/Term";
-import { liveTickDisplayPrice, useLiveQuote } from "@/lib/useLiveQuote";
+import {
+  liveTickDisplayCompanion,
+  liveTickNativePrice,
+  useLiveQuote,
+} from "@/lib/useLiveQuote";
 
 const THESIS_STALE_DAYS = 30;
 
@@ -110,9 +114,27 @@ export function SummaryStrip({
   // stream on mount (triggering a dynamic eToro Subscribe per #487)
   // and closes on unmount.
   const live = useLiveQuote(summary.instrument_id);
-  const livePrice = liveTickDisplayPrice(live.tick);
-  const displayCurrent = livePrice?.value ?? price?.current ?? null;
-  const displayCurrency = livePrice?.currency ?? price?.currency ?? null;
+  // #1906 (operator decision 2026-07-04): NATIVE price is primary — the
+  // tradable number — with the display-currency (e.g. GBP) worth shown as a
+  // secondary muted companion. The header previously FLIPPED currency between
+  // tabs because it merged whichever of two sources answered first (REST
+  // snapshot vs SSE live tick) and they disagreed on currency semantics. Both
+  // sources now expose a native triple + a display companion, so the primary
+  // is always native regardless of which resolves first.
+  const liveNative = liveTickNativePrice(live.tick);
+  const primaryCurrent = liveNative?.value ?? price?.current ?? null;
+  const primaryCurrency = liveNative?.currency ?? price?.currency ?? null;
+  // Source-couple the companion to the primary: when a live tick drives the
+  // primary, ITS OWN display block (or null) drives the companion — never the
+  // REST snapshot's stale conversion. Otherwise the header could show a live
+  // native price beside a companion computed for a different (older) price.
+  const companion = liveNative
+    ? liveTickDisplayCompanion(live.tick)
+    : price?.display_current != null && price?.display_currency != null
+      ? { value: price.display_current, currency: price.display_currency }
+      : null;
+  const showCompanion =
+    companion !== null && companion.currency !== primaryCurrency;
   const changeNum = price?.day_change_pct != null ? Number(price.day_change_pct) : null;
   const changeColor =
     changeNum === null
@@ -160,10 +182,10 @@ export function SummaryStrip({
             Tier {summary.coverage_tier}
           </Term>
         ) : null}
-        {price || livePrice ? (
+        {price || liveNative ? (
           <>
             <span className="ml-auto flex items-baseline gap-1.5 text-2xl font-semibold tabular-nums text-slate-800 dark:text-slate-100">
-              {formatPrice(displayCurrent, displayCurrency)}
+              {formatPrice(primaryCurrent, primaryCurrency)}
               {live.connected ? (
                 <span
                   data-testid="live-pulse"
@@ -172,6 +194,15 @@ export function SummaryStrip({
                 />
               ) : null}
             </span>
+            {showCompanion ? (
+              <span
+                data-testid="price-companion"
+                title="Approximate worth in your display currency"
+                className="text-sm tabular-nums text-slate-400 dark:text-slate-500"
+              >
+                ≈ {formatPrice(companion!.value, companion!.currency)}
+              </span>
+            ) : null}
             <span className={`text-sm tabular-nums ${changeColor}`}>
               {price?.day_change != null && Number(price.day_change) >= 0
                 ? "+"

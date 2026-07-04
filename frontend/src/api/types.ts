@@ -322,12 +322,18 @@ export interface InstrumentIdentity {
 }
 
 export interface InstrumentPrice {
+  /** Native listing price + currency — the tradable number, primary in the
+   *  header. Never flips by quote path (#1906, operator decision 2026-07-04). */
   current: string | null;
   day_change: string | null;
   day_change_pct: string | null;
   week_52_high: string | null;
   week_52_low: string | null;
   currency: string | null;
+  /** FX-converted companion in the operator's display currency (secondary,
+   *  muted). Null when no FX rate is available or native === display. */
+  display_current: string | null;
+  display_currency: string | null;
 }
 
 // Closed set of values emitted in InstrumentKeyStats.field_source.
