@@ -42,6 +42,7 @@ import type {
   ThesisDetail,
 } from "@/api/types";
 import { InstrumentTradesTable } from "@/components/instrument/InstrumentTradesTable";
+import { InstrumentTradeHistory } from "@/components/instrument/InstrumentTradeHistory";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
@@ -284,6 +285,12 @@ function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: 
           title="Not held"
           description={`You don't currently hold ${symbol}.`}
         />
+        {/* #1926: a fully closed-out instrument has no current holding but may
+            still have realised round-trips worth showing. `data.currency` is
+            the instrument's native currency (present even at zero units). */}
+        {data && (
+          <InstrumentTradeHistory instrumentId={instrumentId} currency={data.currency} />
+        )}
       </Section>
     );
   }
@@ -319,6 +326,9 @@ function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: 
       {/* #1899 slice 1: the individual trades behind the aggregate, not just
           a count. Data already loaded above — no extra fetch. */}
       <InstrumentTradesTable trades={data.trades} currency={data.currency} />
+      {/* #1926 slice 2: closed round-trips for this instrument (realised P&L,
+          holding period) from the trade ledger, scoped via ?instrument_id. */}
+      <InstrumentTradeHistory instrumentId={instrumentId} currency={data.currency} />
     </Section>
   );
 }

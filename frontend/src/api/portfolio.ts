@@ -28,7 +28,15 @@ export function fetchValueHistory(
   );
 }
 
-export function fetchActivity(includeMirrors: boolean): Promise<ActivityResponse> {
+export function fetchActivity(
+  includeMirrors: boolean,
+  instrumentId?: number,
+  limit?: number,
+): Promise<ActivityResponse> {
   const params = new URLSearchParams({ include_mirrors: String(includeMirrors) });
+  // Scope the ledger to one instrument for the per-instrument Positions tab
+  // trade-history section (#1926).
+  if (instrumentId !== undefined) params.set("instrument_id", String(instrumentId));
+  if (limit !== undefined) params.set("limit", String(limit));
   return apiFetch<ActivityResponse>(`/portfolio/activity?${params}`);
 }

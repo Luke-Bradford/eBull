@@ -824,6 +824,38 @@ class TestGetActivity:
             assert event["fees"] == 10.0
             assert event["realized_pnl"] == 1910.47
 
+    def test_instrument_id_filter_passed_to_both_queries(self) -> None:
+        """?instrument_id scopes the ledger to one instrument (#1926). The
+        filter must reach BOTH the COUNT and the SELECT so `total` and
+        `events` stay consistent — a filtered feed with an unfiltered total
+        would mislabel the row count."""
+        row = _make_activity_row(fees_usd=10.0, realized_pnl_usd=1910.47)
+        conn = _with_chained_conn([{"total": 1}, [row]])
+
+        resp = client.get("/portfolio/activity?instrument_id=4077")
+        assert resp.status_code == 200
+
+        # Two execute() calls: COUNT then SELECT. Both carry instrument_id.
+        cur = conn.cursor.return_value
+        calls = cur.execute.call_args_list
+        assert len(calls) == 2
+        for call in calls:
+            params = call.args[1]
+            assert params["instrument_id"] == 4077
+
+    def test_no_instrument_id_passes_none(self) -> None:
+        """Default (unfiltered) feed passes instrument_id=None so the SQL
+        `IS NULL` branch disables the filter."""
+        row = _make_activity_row()
+        conn = _with_chained_conn([{"total": 1}, [row]])
+
+        resp = client.get("/portfolio/activity")
+        assert resp.status_code == 200
+
+        cur = conn.cursor.return_value
+        for call in cur.execute.call_args_list:
+            assert call.args[1]["instrument_id"] is None
+
 
 # ---------------------------------------------------------------------------
 # TestPortfolioMirrors — mirrors field in portfolio response (#221)
