@@ -41,6 +41,7 @@ import type {
   NewsListResponse,
   ThesisDetail,
 } from "@/api/types";
+import { InstrumentTradesTable } from "@/components/instrument/InstrumentTradesTable";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
@@ -314,9 +315,10 @@ function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: 
           {data.total_pnl >= 0 ? "+" : ""}
           {data.total_pnl.toFixed(2)}
         </dd>
-        <dt className="text-slate-500">Trades</dt>
-        <dd>{data.trades.length}</dd>
       </dl>
+      {/* #1899 slice 1: the individual trades behind the aggregate, not just
+          a count. Data already loaded above — no extra fetch. */}
+      <InstrumentTradesTable trades={data.trades} currency={data.currency} />
     </Section>
   );
 }
