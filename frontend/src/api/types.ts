@@ -244,7 +244,12 @@ export interface InstrumentListItem {
   instrument_id: number;
   symbol: string;
   company_name: string;
+  // Raw eToro exchangeId (opaque numeric text, e.g. "21"); the filter key.
+  // Render `exchange_name`, not this (#1904).
   exchange: string | null;
+  // Human exchange label from `exchanges.description`; null when the id has no
+  // row yet — fall back to the raw `exchange` (#1904).
+  exchange_name: string | null;
   currency: string | null;
   sector: string | null;
   // #1675: real GICS sector + sector-SPDR resolved on-read from the SEC SIC.

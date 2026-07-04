@@ -52,7 +52,8 @@ def _make_instrument_row(
     instrument_id: int = 1,
     symbol: str = "AAPL",
     company_name: str = "Apple Inc",
-    exchange: str | None = "NASDAQ",
+    exchange: str | None = "4",
+    exchange_name: str | None = "Nasdaq",
     currency: str | None = "USD",
     sector: str | None = "Technology",
     industry: str | None = "Consumer Electronics",
@@ -73,6 +74,7 @@ def _make_instrument_row(
         "symbol": symbol,
         "company_name": company_name,
         "exchange": exchange,
+        "exchange_name": exchange_name,
         "currency": currency,
         "sector": sector,
         "industry": industry,
@@ -184,6 +186,22 @@ class TestListInstruments:
         assert item["coverage_tier"] == 1
         assert item["latest_quote"]["bid"] == 185.50
         assert item["latest_quote"]["ask"] == 185.60
+        # #1904: raw eToro exchangeId is echoed for the filter, but the human
+        # label from exchanges.description is surfaced separately.
+        assert item["exchange"] == "4"
+        assert item["exchange_name"] == "Nasdaq"
+
+    def test_exchange_name_null_when_unmapped(self) -> None:
+        # A newly-observed exchangeId with no exchanges row → NULL label; the
+        # FE falls back to the raw id (#1904).
+        row = _make_instrument_row(exchange="99", exchange_name=None)
+        _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments")
+
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["exchange"] == "99"
+        assert item["exchange_name"] is None
 
     def test_empty_table_returns_empty_list(self) -> None:
         _with_conn([[{"cnt": 0}], []])
