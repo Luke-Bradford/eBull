@@ -28,12 +28,12 @@ detail.
 from __future__ import annotations
 
 import html
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 PARSER_VERSION = 1
 
@@ -97,9 +97,28 @@ _FIRST_ITEM_WINDOW = 600
 
 _REVERSE_SPLIT_RE = re.compile(r"reverse\s+(?:stock\s+)?split", re.IGNORECASE)
 
-# Item 11 (17 CFR 240.14a-101, Schedule 14A) — authorization/increase of
-# securities. Requires "increase" AND "authoriz*" AND "share"/"stock" all
-# within the single (already-bounded) agenda item, in either phrase order.
+# Item 11 (17 CFR 240.14a-101, Schedule 14A) — authorization/issuance of
+# securities via a CHARTER-LEVEL increase to the corporation's total
+# authorized share count. Requires "increase" AND "authoriz*" AND
+# "share"/"stock" all within the single (already-bounded) agenda item, in
+# either phrase order.
+#
+# A textually-similar but DIFFERENT proposal is increasing the share pool
+# reserved for an equity/incentive/option PLAN ("increase the number of
+# shares of common stock authorized for issuance under the 2020 Equity
+# Incentive Plan") — that is Schedule 14A Item 10 (compensation plans), not
+# the Item 11 charter amendment this category targets. The two can use
+# near-identical "authorized ... shares ... common stock" phrasing, so the
+# regex alone can't distinguish them; ``parse_pre14a_proposals`` additionally
+# excludes any item whose text contains "plan" (Codex ckpt-2 finding, #1892)
+# — the conservative choice (fails toward NOT flagging a charter-increase
+# signal, per the project's established policy for structurally ambiguous
+# signals). This is a plain substring check, not folded into the regex: a
+# negative lookahead here would only anchor the "no plan ahead" assertion at
+# the match's OWN start position, and ``re.search`` tries every start
+# position in the string — once the scan advances past the word "plan", a
+# later start position sees no "plan" ahead and the lookahead trivially
+# passes, silently defeating the exclusion.
 _SHARE_INCREASE_RE = re.compile(
     r"(?=.*\bincreas\w*\b)(?=.*\bauthoriz\w*\b)(?=.*\b(?:share|stock)s?\b)",
     re.IGNORECASE | re.DOTALL,
@@ -206,7 +225,7 @@ def parse_pre14a_proposals(body: str) -> Pre14aProposalSignal | None:
     return Pre14aProposalSignal(
         proposal_count=len(items),
         reverse_stock_split_proposal=any(_REVERSE_SPLIT_RE.search(i) for i in items),
-        authorized_share_increase_proposal=any(_SHARE_INCREASE_RE.search(i) for i in items),
+        authorized_share_increase_proposal=any(_SHARE_INCREASE_RE.search(i) and "plan" not in i.lower() for i in items),
         say_on_pay_advisory_vote=any(_SAY_ON_PAY_RE.search(i) for i in items),
         agenda_items=tuple(items),
     )
@@ -248,7 +267,7 @@ def upsert_pre14a_proposal_signal(
             "reverse_split": signal.reverse_stock_split_proposal,
             "share_increase": signal.authorized_share_increase_proposal,
             "say_on_pay": signal.say_on_pay_advisory_vote,
-            "agenda_items": json.dumps(list(signal.agenda_items)),
+            "agenda_items": Jsonb(list(signal.agenda_items)),
             "parser_version": PARSER_VERSION,
         },
     )

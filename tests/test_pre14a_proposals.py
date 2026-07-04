@@ -164,6 +164,28 @@ def test_authorized_share_increase_proposal_detected_in_item() -> None:
     assert signal.reverse_stock_split_proposal is False
 
 
+def test_equity_plan_share_increase_not_classified_as_authorized_share_increase() -> None:
+    """Codex ckpt-2 finding (#1892): "increase the number of shares ...
+    authorized for issuance under the [Equity Incentive] Plan" is a Schedule
+    14A Item 10 compensation-plan proposal, not the Item 11 charter
+    amendment this category targets -- despite near-identical "authorized
+    ... shares ... common stock" phrasing. Must NOT flag true."""
+    body = """
+    <html><body>
+    The meeting will be held for the purpose of voting on the following
+    proposals:
+    1. To approve an amendment to the Company's 2020 Equity Incentive Plan
+    to increase the number of shares of common stock authorized for
+    issuance thereunder by 5,000,000 shares.
+    2. To approve one or more adjournments of the meeting.
+    Each Proposal is more fully described in the accompanying proxy statement.
+    </body></html>
+    """
+    signal = parse_pre14a_proposals(body)
+    assert signal is not None
+    assert signal.authorized_share_increase_proposal is False
+
+
 def test_reverse_stock_split_proposal_detected_in_item() -> None:
     body = """
     <html><body>
