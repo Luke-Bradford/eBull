@@ -4,31 +4,12 @@ import { MemoryRouter } from "react-router-dom";
 
 import type {
   CoverageSummaryResponse,
-  JobOverviewResponse,
-  JobsListResponse,
+  ProcessListResponse,
   SyncLayersV2Response,
 } from "@/api/types";
 
+import { makeProcessList, makeProcessRow } from "./__fixtures__/processes";
 import { ProblemsPanel } from "./ProblemsPanel";
-
-// #1689 — JobOverviewResponse gained six verdict fields. These fixtures don't
-// exercise them; spread sane defaults so the literals stay type-complete.
-const JOB_VERDICT_DEFAULTS: Pick<
-  JobOverviewResponse,
-  | "health_verdict"
-  | "self_healing"
-  | "verdict_reason"
-  | "role"
-  | "attempt"
-  | "next_retry_at"
-> = {
-  health_verdict: "current",
-  self_healing: false,
-  verdict_reason: "",
-  role: "steady_state",
-  attempt: null,
-  next_retry_at: null,
-};
 
 
 function emptyV2(): SyncLayersV2Response {
@@ -47,8 +28,8 @@ function emptyV2(): SyncLayersV2Response {
 }
 
 
-function emptyJobs(): JobsListResponse {
-  return { checked_at: new Date().toISOString(), jobs: [] };
+function emptyProcesses(): ProcessListResponse {
+  return makeProcessList([]);
 }
 
 
@@ -72,10 +53,10 @@ function renderPanel(
 ): ReturnType<typeof render> {
   const defaults: React.ComponentProps<typeof ProblemsPanel> = {
     v2: emptyV2(),
-    jobs: emptyJobs(),
+    processes: emptyProcesses(),
     coverage: emptyCoverage(),
     v2Error: false,
-    jobsError: false,
+    processesError: false,
     coverageError: false,
     onOpenOrchestrator: () => {},
   };
@@ -270,7 +251,7 @@ describe("ProblemsPanel", () => {
   });
 
   it("renders Checking skeleton when v2 is null and has no cached snapshot", () => {
-    renderPanel({ v2: null, jobs: null, coverage: null });
+    renderPanel({ v2: null, processes: null, coverage: null });
     expect(screen.getByText(/Checking for problems/i)).toBeInTheDocument();
   });
 
@@ -293,10 +274,10 @@ describe("ProblemsPanel", () => {
       <MemoryRouter>
         <ProblemsPanel
           v2={v2}
-          jobs={emptyJobs()}
+          processes={emptyProcesses()}
           coverage={emptyCoverage()}
           v2Error={false}
-          jobsError={false}
+          processesError={false}
           coverageError={false}
           onOpenOrchestrator={() => {}}
         />
@@ -307,10 +288,10 @@ describe("ProblemsPanel", () => {
       <MemoryRouter>
         <ProblemsPanel
           v2={null}
-          jobs={emptyJobs()}
+          processes={emptyProcesses()}
           coverage={emptyCoverage()}
           v2Error={false}
-          jobsError={false}
+          processesError={false}
           coverageError={false}
           onOpenOrchestrator={() => {}}
         />
@@ -340,106 +321,98 @@ describe("ProblemsPanel", () => {
     expect(onOpen).toHaveBeenCalledWith("cik_mapping");
   });
 
-  it("carries over failing jobs from v1 behaviour", () => {
-    const jobs: JobsListResponse = {
-      checked_at: new Date().toISOString(),
-      jobs: [
-        {
-          name: "test_job",
-          display_name: null,
-          description: "test job",
-          cadence: "daily",
-          cadence_kind: "daily",
-          next_run_time: new Date().toISOString(),
-          next_run_time_source: "declared",
-          last_status: "failure",
-          last_started_at: null,
-          last_finished_at: new Date().toISOString(),
-          detail: "",
-          ...JOB_VERDICT_DEFAULTS,
-          // #1689 — a genuinely-failing job reads `attention`; that is what the
-          // ProblemsPanel now keys off (not raw last_status). verdict_reason
-          // carries the inline copy the panel renders.
-          health_verdict: "attention",
-          verdict_reason: "last run failed",
-        },
-      ],
-    };
-    renderPanel({ jobs });
-    // `test_job` now appears in both the alert title and the
-    // "Clears when the next run of test_job succeeds." line — use a
-    // non-greedy matcher scoped to the title row.
-    expect(screen.getByText(/test_job — last run failed/i)).toBeInTheDocument();
+  it("surfaces a failing steady-state process (attention verdict)", () => {
+    const processes = makeProcessList([
+      makeProcessRow({
+        process_id: "test_job",
+        display_name: "Test job",
+        status: "failed", // derives health_verdict "attention", reason "last run failed"
+      }),
+    ]);
+    renderPanel({ processes });
+    expect(screen.getByText(/Test job — last run failed/i)).toBeInTheDocument();
   });
 
-  it("renders a drill-through link to /admin/jobs/<name> for a failing job", () => {
-    const jobs: JobsListResponse = {
-      checked_at: new Date().toISOString(),
-      jobs: [
-        {
-          name: "fundamentals_sync",
-          display_name: null,
-          description: "",
-          cadence: "weekly",
-          cadence_kind: "weekly",
-          next_run_time: new Date().toISOString(),
-          next_run_time_source: "declared",
-          last_status: "failure",
-          last_started_at: null,
-          last_finished_at: new Date().toISOString(),
-          detail: "",
-          ...JOB_VERDICT_DEFAULTS,
-          // #1689 — a genuinely-failing job reads `attention`; that is what the
-          // ProblemsPanel now keys off (not raw last_status). verdict_reason
-          // carries the inline copy the panel renders.
-          health_verdict: "attention",
-          verdict_reason: "last run failed",
-        },
-      ],
-    };
-    renderPanel({ jobs });
+  it("counts an ingest_sweep process the legacy jobs list omitted (#1959)", () => {
+    // The whole point of #1959: nport_sweep is a `mechanism=ingest_sweep`
+    // steady-state process that /system/jobs never carried, so the top
+    // banner under-counted. It must now surface here.
+    const processes = makeProcessList([
+      makeProcessRow({
+        process_id: "nport_sweep",
+        display_name: "N-PORT (fund holdings) sweep",
+        mechanism: "ingest_sweep",
+        lane: "ownership",
+        role: "steady_state",
+        status: "failed",
+      }),
+    ]);
+    renderPanel({ processes });
+    expect(
+      screen.getByText(/N-PORT \(fund holdings\) sweep — last run failed/i),
+    ).toBeInTheDocument();
     const link = screen.getByRole("link", {
-      name: /View runs for fundamentals_sync/i,
+      name: /View runs for N-PORT \(fund holdings\) sweep/i,
     });
-    expect(link).toHaveAttribute("href", "/admin/jobs/fundamentals_sync");
+    expect(link).toHaveAttribute("href", "/admin/processes/nport_sweep");
   });
 
-  it("URL-encodes job names containing special characters in the drill link", () => {
-    // Defensive: job_name is a plain string in the DB; if an operator
-    // ever names a job with `/`, space, or `?`, the drill link must
-    // stay unambiguous. encodeURIComponent at link-construction time.
-    const jobs: JobsListResponse = {
-      checked_at: new Date().toISOString(),
-      jobs: [
-        {
-          name: "etl/fundamentals_sync",
-          display_name: null,
-          description: "",
-          cadence: "weekly",
-          cadence_kind: "weekly",
-          next_run_time: new Date().toISOString(),
-          next_run_time_source: "declared",
-          last_status: "failure",
-          last_started_at: null,
-          last_finished_at: new Date().toISOString(),
-          detail: "",
-          ...JOB_VERDICT_DEFAULTS,
-          // #1689 — a genuinely-failing job reads `attention`; that is what the
-          // ProblemsPanel now keys off (not raw last_status). verdict_reason
-          // carries the inline copy the panel renders.
-          health_verdict: "attention",
-          verdict_reason: "last run failed",
-        },
-      ],
-    };
-    renderPanel({ jobs });
+  it("does NOT count bootstrap / backfill attention rows (matches control-hub scope)", () => {
+    // #1530 C7 — the control-hub "N need attention" count operates on
+    // steady-state rows only; bootstrap/backfill one-shots fold into a
+    // separate section. The top banner now matches that scope so the two
+    // counts agree (#1959). A freshly-failed backfill must NOT raise the
+    // top red banner.
+    const processes = makeProcessList([
+      makeProcessRow({
+        process_id: "ownership_observations_backfill",
+        display_name: "Ownership observations backfill",
+        role: "backfill",
+        status: "failed",
+      }),
+      makeProcessRow({
+        process_id: "bootstrap",
+        display_name: "Bootstrap",
+        role: "bootstrap",
+        mechanism: "bootstrap",
+        status: "failed",
+      }),
+    ]);
+    const { container } = renderPanel({ processes });
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("does NOT count a non-attention steady-state process (self-healing / paused)", () => {
+    const processes = makeProcessList([
+      makeProcessRow({
+        process_id: "retrying_job",
+        display_name: "Retrying job",
+        status: "pending_retry", // → self_healing, not attention
+      }),
+      makeProcessRow({
+        process_id: "paused_job",
+        display_name: "Paused job",
+        status: "disabled", // → paused (kill switch), not attention
+      }),
+    ]);
+    const { container } = renderPanel({ processes });
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders a drill-through link to /admin/processes/<id> for a failing process", () => {
+    const processes = makeProcessList([
+      makeProcessRow({
+        process_id: "fundamentals_sync",
+        display_name: "Fundamentals research refresh",
+        lane: "fundamentals",
+        status: "failed",
+      }),
+    ]);
+    renderPanel({ processes });
     const link = screen.getByRole("link", {
-      name: /View runs for etl\/fundamentals_sync/i,
+      name: /View runs for Fundamentals research refresh/i,
     });
-    expect(link).toHaveAttribute(
-      "href",
-      "/admin/jobs/etl%2Ffundamentals_sync",
-    );
+    expect(link).toHaveAttribute("href", "/admin/processes/fundamentals_sync");
   });
 
   it("renders a 'Clears when' hint on each alert type", () => {
@@ -465,35 +438,19 @@ describe("ProblemsPanel", () => {
         operator_fix: "Set ANTHROPIC_API_KEY in Settings → Providers",
       },
     ];
-    const jobs: JobsListResponse = {
-      checked_at: new Date().toISOString(),
-      jobs: [
-        {
-          name: "fundamentals_sync",
-          display_name: null,
-          description: "",
-          cadence: "weekly",
-          cadence_kind: "weekly",
-          next_run_time: new Date().toISOString(),
-          next_run_time_source: "declared",
-          last_status: "failure",
-          last_started_at: null,
-          last_finished_at: new Date().toISOString(),
-          detail: "",
-          ...JOB_VERDICT_DEFAULTS,
-          // #1689 — a genuinely-failing job reads `attention`; that is what the
-          // ProblemsPanel now keys off (not raw last_status). verdict_reason
-          // carries the inline copy the panel renders.
-          health_verdict: "attention",
-          verdict_reason: "last run failed",
-        },
-      ],
-    };
+    const processes = makeProcessList([
+      makeProcessRow({
+        process_id: "fundamentals_sync",
+        display_name: "fundamentals_sync",
+        lane: "fundamentals",
+        status: "failed",
+      }),
+    ]);
     const coverage: CoverageSummaryResponse = {
       ...emptyCoverage(),
       null_rows: 7,
     };
-    renderPanel({ v2, jobs, coverage });
+    renderPanel({ v2, processes, coverage });
     expect(
       screen.getByText(/Clears when the next run of cik_mapping succeeds/i),
     ).toBeInTheDocument();
@@ -576,10 +533,10 @@ describe("ProblemsPanel", () => {
       <MemoryRouter>
         <ProblemsPanel
           v2={initialV2}
-          jobs={emptyJobs()}
+          processes={emptyProcesses()}
           coverage={initialCoverage}
           v2Error={false}
-          jobsError={false}
+          processesError={false}
           coverageError={false}
           onOpenOrchestrator={() => {}}
         />
@@ -609,10 +566,10 @@ describe("ProblemsPanel", () => {
       <MemoryRouter>
         <ProblemsPanel
           v2={updatedV2}
-          jobs={emptyJobs()}
+          processes={emptyProcesses()}
           coverage={initialCoverage}
           v2Error={false}
-          jobsError={false}
+          processesError={false}
           coverageError={true}
           onOpenOrchestrator={() => {}}
         />
@@ -623,33 +580,24 @@ describe("ProblemsPanel", () => {
     expect(screen.getByText(/5 instrument/)).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(/coverage/i);
     expect(screen.getByRole("status")).not.toHaveTextContent(/layers/i);
-    expect(screen.getByRole("status")).not.toHaveTextContent(/jobs/i);
+    expect(screen.getByRole("status")).not.toHaveTextContent(/processes/i);
   });
 
   it("uses a combined-count header when carry-over rows contribute problems but v2 is clean", () => {
     // Regression guard: previously the header text came from
     // v2.system_summary ("All layers healthy") even when a failed
-    // job was rendered underneath. Must say "N problem(s) need
-    // attention" whenever jobs/coverage contribute.
-    const jobs: JobsListResponse = {
-      checked_at: new Date().toISOString(),
-      jobs: [
-        {
-          name: "test_job",
-          description: "test job",
-          cadence: "daily",
-          next_run_time: new Date().toISOString(),
-          next_run_time_source: "declared",
-          last_status: "failure",
-          last_finished_at: new Date().toISOString(),
-          // #1689 — genuine failure → attention is what the panel now counts.
-          health_verdict: "attention",
-        } as unknown as JobsListResponse["jobs"][number],
-      ],
-    };
-    renderPanel({ v2: emptyV2(), jobs });
+    // process was rendered underneath. Must say "N problem(s) need
+    // attention" whenever processes/coverage contribute.
+    const processes = makeProcessList([
+      makeProcessRow({
+        process_id: "test_job",
+        display_name: "test_job",
+        status: "failed",
+      }),
+    ]);
+    renderPanel({ v2: emptyV2(), processes });
     // v2 is clean; v2.system_summary = "All layers healthy".
-    // Header MUST reflect the one failed job, not parrot the v2 summary.
+    // Header MUST reflect the one failed process, not parrot the v2 summary.
     expect(screen.queryByText(/All layers healthy/)).toBeNull();
     expect(screen.getByText(/1 problem.*need.*attention/i)).toBeInTheDocument();
   });

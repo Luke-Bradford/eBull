@@ -80,6 +80,10 @@ import { fetchRecommendations } from "@/api/recommendations";
 import { fetchConfig } from "@/api/config";
 import { fetchSystemStatus } from "@/api/system";
 import { fetchProcesses } from "@/api/processes";
+import {
+  makeProcessList,
+  makeProcessRow,
+} from "@/components/admin/__fixtures__/processes";
 
 const mockedJobs = vi.mocked(fetchJobsOverview);
 const mockedRun = vi.mocked(runJob);
@@ -233,7 +237,19 @@ beforeEach(() => {
     },
     engine_down: false,
   });
-  mockedProcesses.mockResolvedValue({ rows: [], partial: false });
+  // #1959 — the ProblemsPanel now derives failing jobs from the processes
+  // catalogue (the superset that carries ingest_sweeps like nport_sweep), not
+  // the legacy /system/jobs list. Default snapshot carries one failing
+  // steady-state process so the "shows problems panel" case still fires.
+  mockedProcesses.mockResolvedValue(
+    makeProcessList([
+      makeProcessRow({
+        process_id: "attribution_summary",
+        display_name: "attribution_summary",
+        status: "failed", // → health_verdict "attention", reason "last run failed"
+      }),
+    ]),
+  );
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -261,30 +277,14 @@ describe("AdminPage — top-level composition", () => {
   });
 
   it("hides the problems panel when no sources surface any problem", async () => {
-    mockedJobs.mockReset();
-    mockedJobs.mockResolvedValue({
-      checked_at: "2026-04-16T01:00:00Z",
-      jobs: [
-        {
-          name: "execute_approved_orders",
-          display_name: "Execute approved orders",
-          description: "execute orders",
-          cadence: "every 1 minutes",
-          cadence_kind: "every_n_minutes",
-          next_run_time: "2026-04-20T00:00:00Z",
-          next_run_time_source: "declared",
-          last_status: "success",
-          last_started_at: null,
-          last_finished_at: null,
-          detail: "",
-          ...JOB_VERDICT_DEFAULTS,
-        },
-      ],
-    });
+    // Clean processes catalogue (#1959) → the ProblemsPanel's process
+    // sub-source contributes nothing; v2/coverage are healthy by default.
+    mockedProcesses.mockReset();
+    mockedProcesses.mockResolvedValue(makeProcessList([]));
     renderPage();
     await waitFor(() => {
       expect(mockedV2).toHaveBeenCalled();
-      expect(mockedJobs).toHaveBeenCalled();
+      expect(mockedProcesses).toHaveBeenCalled();
       expect(mockedCoverage).toHaveBeenCalled();
     });
     await waitFor(() => {
@@ -294,7 +294,7 @@ describe("AdminPage — top-level composition", () => {
     });
   });
 
-  it("shows problems panel when a job has failed", async () => {
+  it("shows problems panel when a process has failed", async () => {
     renderPage();
     expect(
       await screen.findByText(/attribution_summary — last run failed/),

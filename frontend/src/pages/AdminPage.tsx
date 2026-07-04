@@ -188,11 +188,11 @@ export function AdminPage() {
 
       <ProblemsPanel
         v2={v2.data}
-        jobs={jobs.data}
+        processes={processes.data}
         coverage={coverage.data}
         credentialHealth={systemStatus.data?.credential_health ?? null}
         v2Error={v2.error !== null}
-        jobsError={jobs.error !== null}
+        processesError={processes.error !== null}
         coverageError={coverage.error !== null}
         onOpenOrchestrator={openOrchestratorFor}
       />
