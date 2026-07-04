@@ -635,8 +635,10 @@ def get_rankings_coverage(
         cur.execute(sql, {"mv": model_version})
         row = cur.fetchone()
 
-    # The SELECT always returns exactly one row (scalar subqueries).
-    assert row is not None  # noqa: S101 — narrows the dict_row Optional for type checkers
+    # The SELECT always returns exactly one row (scalar subqueries). Raise
+    # explicitly rather than assert (assert is stripped under `python -O`).
+    if row is None:  # pragma: no cover — unreachable given scalar-subquery SELECT
+        raise RuntimeError("rankings coverage query returned no row")
     raw_status = row["status_counts"] or {}
     status_counts = {str(k): int(v) for k, v in raw_status.items()}
 
