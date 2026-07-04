@@ -5288,6 +5288,120 @@ def get_instrument_ownership_rollup(
     return _rollup_to_response(rollup)
 
 
+class ExecCompRow(BaseModel):
+    """One (executive, fiscal_year) row of the Item 402(c) Summary
+    Compensation Table (#1945). Dollar fields are ``None`` when the column
+    is absent (SRC scaled table) or the cell was an explicit null."""
+
+    executive_name: str
+    principal_position: str | None
+    fiscal_year: int
+    salary: Decimal | None
+    bonus: Decimal | None
+    stock_awards: Decimal | None
+    option_awards: Decimal | None
+    non_equity_incentive: Decimal | None
+    pension_nqdc: Decimal | None
+    other_comp: Decimal | None
+    total_comp: Decimal | None
+
+
+class ExecCompensationResponse(BaseModel):
+    """Response for GET /instruments/{symbol}/exec-compensation. ``rows`` is
+    the latest proxy's SCT (all NEOs, up to three fiscal years each), ordered
+    fiscal_year DESC then total_comp DESC. Empty ``rows`` (no SCT parsed for
+    this issuer yet) renders 200 with the source accession null."""
+
+    symbol: str
+    accession_number: str | None
+    rows: list[ExecCompRow]
+
+
+@router.get(
+    "/{symbol}/exec-compensation",
+    response_model=ExecCompensationResponse,
+)
+def get_instrument_exec_compensation(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ExecCompensationResponse:
+    """Executive compensation (DEF 14A Item 402(c) SCT) for an instrument.
+
+    Returns the LATEST proxy's Summary Compensation Table — the accession
+    with the most recent fiscal year — so the operator/thesis engine reads
+    one coherent snapshot rather than an interleaving of multiple proxies.
+    404 for an unknown symbol; 200 + empty rows when no SCT has been parsed
+    for the issuer yet (many issuers file no comp-voting proxy).
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with snapshot_read(conn):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_id FROM instruments
+                WHERE UPPER(symbol) = %(s)s
+                ORDER BY is_primary_listing DESC, instrument_id ASC
+                LIMIT 1
+                """,
+                {"s": symbol_clean},
+            )
+            inst_row = cur.fetchone()
+            if inst_row is None:
+                raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+            instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+            cur.execute(
+                """
+                WITH latest AS (
+                    -- Tie-break on accession_number (stable, roughly
+                    -- chronological) NOT fetched_at: _upsert_comp refreshes
+                    -- fetched_at on every reparse, so a rewashed older proxy
+                    -- would otherwise masquerade as the latest.
+                    SELECT accession_number
+                    FROM def14a_exec_compensation
+                    WHERE instrument_id = %(iid)s
+                    ORDER BY fiscal_year DESC, accession_number DESC
+                    LIMIT 1
+                )
+                SELECT executive_name, principal_position, fiscal_year,
+                       salary, bonus, stock_awards, option_awards,
+                       non_equity_incentive, pension_nqdc, other_comp, total_comp,
+                       accession_number
+                FROM def14a_exec_compensation
+                WHERE instrument_id = %(iid)s
+                  AND accession_number = (SELECT accession_number FROM latest)
+                ORDER BY fiscal_year DESC, total_comp DESC NULLS LAST
+                """,
+                {"iid": instrument_id},
+            )
+            comp_rows = cur.fetchall()
+
+    accession = str(comp_rows[0]["accession_number"]) if comp_rows else None
+    return ExecCompensationResponse(
+        symbol=symbol_clean,
+        accession_number=accession,
+        rows=[
+            ExecCompRow(
+                executive_name=str(r["executive_name"]),
+                principal_position=r["principal_position"],
+                fiscal_year=int(r["fiscal_year"]),
+                salary=r["salary"],
+                bonus=r["bonus"],
+                stock_awards=r["stock_awards"],
+                option_awards=r["option_awards"],
+                non_equity_incentive=r["non_equity_incentive"],
+                pension_nqdc=r["pension_nqdc"],
+                other_comp=r["other_comp"],
+                total_comp=r["total_comp"],
+            )
+            for r in comp_rows
+        ],
+    )
+
+
 # Slice categories present on ``OwnershipSlice.category``. The
 # frontend's ``CATEGORY_LABELS`` set also includes ``treasury`` —
 # treasury is a memo row in the CSV (additive wedge on the chart),

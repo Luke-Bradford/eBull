@@ -192,6 +192,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "def14a_drift_alerts",
     "def14a_ingest_log",
     "def14a_beneficial_holdings",
+    "def14a_exec_compensation",
     "filing_events",
     "instrument_cik_history",
     "instrument_symbol_history",

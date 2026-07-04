@@ -357,7 +357,7 @@ class TestIngestDef14a:
             document_kind="def14a_body",
         )
         assert doc is not None
-        assert doc.parser_version == "def14a-v1"
+        assert doc.parser_version == "def14a-v2"
         assert doc.source_url == url
         assert len(doc.require_payload()) > 0
 
@@ -782,3 +782,101 @@ class TestBootstrapDef14a:
         # Loop body never executed (deadline was 0); no work done.
         assert summary.accessions_seen == 0
         assert summary.exit_reason == "deadline"
+
+
+class TestExecCompensation:
+    """Item 402(c) Summary Compensation Table write path (#1945) —
+    ``apply_exec_comp_best_effort`` + ``_upsert_comp`` against the real DB.
+    Covers the one genuinely-new SQL mechanism (the def14a_exec_compensation
+    table + its ON CONFLICT upsert + sibling fan-out); the parser itself is
+    covered by pure tests in test_sec_def14a_sct_parser.py."""
+
+    # Minimal real-shape SCT: name-rowspan first row + a continuation year row.
+    _SCT_HTML = (
+        "<html><body><h2>Summary Compensation Table</h2><table>"
+        "<tr><td>Name and Principal Position</td><td>Year</td><td>Salary ($)</td>"
+        "<td>Bonus ($)</td><td>Stock Awards ($)</td><td>Total ($)</td></tr>"
+        "<tr><td>Jane Roe\nChief Executive Officer</td><td>2025</td><td>1,000,000</td>"
+        "<td>500,000</td><td>4,000,000</td><td>5,500,000</td></tr>"
+        "<tr><td>2024</td><td>950,000</td><td>400,000</td><td>3,500,000</td><td>4,850,000</td></tr>"
+        "</table></body></html>"
+    )
+
+    def test_apply_exec_comp_inserts_then_upserts(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.def14a_ingest import apply_exec_comp_best_effort
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=1_945_001, symbol="COMP")
+        acc = "0001945001-26-000001"
+
+        written = apply_exec_comp_best_effort(
+            conn,
+            accession_number=acc,
+            issuer_cik="0001945001",
+            body=self._SCT_HTML,
+            instrument_ids=[1_945_001],
+        )
+        assert written == 2  # two fiscal-year rows for the one NEO
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT executive_name, principal_position, fiscal_year, salary, "
+                "total_comp FROM def14a_exec_compensation "
+                "WHERE accession_number = %s ORDER BY fiscal_year DESC",
+                (acc,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        assert rows[0]["executive_name"] == "Jane Roe"
+        assert rows[0]["principal_position"] == "Chief Executive Officer"
+        assert rows[0]["fiscal_year"] == 2025
+        assert rows[0]["salary"] == Decimal("1000000")
+        assert rows[0]["total_comp"] == Decimal("5500000")
+        assert rows[1]["fiscal_year"] == 2024
+        assert rows[1]["total_comp"] == Decimal("4850000")
+
+        # Re-apply: the (instrument, accession, exec, fiscal_year) unique key
+        # UPSERTs in place — no duplicate rows.
+        again = apply_exec_comp_best_effort(
+            conn,
+            accession_number=acc,
+            issuer_cik="0001945001",
+            body=self._SCT_HTML,
+            instrument_ids=[1_945_001],
+        )
+        assert again == 2
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM def14a_exec_compensation WHERE accession_number = %s",
+                (acc,),
+            )
+            count = cur.fetchone()
+        assert count is not None and count[0] == 2  # still 2, not 4
+
+    def test_apply_exec_comp_no_sct_writes_nothing(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.def14a_ingest import apply_exec_comp_best_effort
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=1_945_002, symbol="NOSCT")
+        acc = "0001945002-26-000001"
+        written = apply_exec_comp_best_effort(
+            conn,
+            accession_number=acc,
+            issuer_cik="0001945002",
+            body="<html><body><h2>Notice of Meeting</h2><p>Vote.</p></body></html>",
+            instrument_ids=[1_945_002],
+        )
+        assert written == 0
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM def14a_exec_compensation WHERE accession_number = %s",
+                (acc,),
+            )
+            count = cur.fetchone()
+        assert count is not None and count[0] == 0
