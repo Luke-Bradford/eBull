@@ -255,7 +255,9 @@ export function SummaryStrip({
           ? ` (${identity.sector_spdr})`
           : ""}
         {identity.industry ? ` · ${identity.industry}` : ""}
-        {identity.exchange ? ` · ${identity.exchange}` : ""}
+        {/* #1955: render the human exchange label, never the opaque numeric
+            `exchange` id (which leaked as "· 4 ·"). */}
+        {identity.exchange_name ? ` · ${identity.exchange_name}` : ""}
         {identity.country ? ` · ${identity.country}` : ""}
       </div>
 

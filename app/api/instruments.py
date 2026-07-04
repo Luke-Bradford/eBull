@@ -201,7 +201,14 @@ class InstrumentIdentity(BaseModel):
     # the TS `string | null` exactly (Codex ckpt-2).
     gics_sector: str | None
     sector_spdr: str | None
+    # Raw eToro numeric exchange id (filter key); NEVER render directly — use
+    # ``exchange_name`` (#1904/#1955). Kept for back-compat with the list model.
     exchange: str | None
+    # Human exchange label from ``exchanges.description`` (join on ``exchange``);
+    # null only if the id has no row. Required-nullable to mirror the TS
+    # ``string | null`` exactly. #1955: the summary header must render this, not
+    # the opaque numeric ``exchange``.
+    exchange_name: str | None
     country: str | None
     currency: str | None
     market_cap: Decimal | None
@@ -3660,6 +3667,7 @@ def get_instrument_summary(
         # ORDER BY / LIMIT needed.
         lookup_sql = f"""
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
+                   e.description AS exchange_name,
                    i.currency, i.sector, esi.name AS sector_name,
                    i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
@@ -3682,6 +3690,7 @@ def get_instrument_summary(
     else:
         lookup_sql = f"""
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
+                   e.description AS exchange_name,
                    i.currency, i.sector, esi.name AS sector_name,
                    i.industry, i.country,
                    i.is_tradable, c.coverage_tier,
@@ -3724,6 +3733,7 @@ def get_instrument_summary(
         gics_sector=sector_cls.gics_sector if sector_cls is not None else None,
         sector_spdr=sector_cls.spdr_symbol if sector_cls is not None else None,
         exchange=row["exchange"],  # type: ignore[arg-type]
+        exchange_name=row["exchange_name"],  # type: ignore[arg-type]
         country=row["country"],  # type: ignore[arg-type]
         currency=row["currency"],  # type: ignore[arg-type]
         market_cap=None,

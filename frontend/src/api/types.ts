@@ -309,7 +309,12 @@ export interface InstrumentIdentity {
    * no SIC (ETFs / non-filers) or no confident mapping. */
   gics_sector: string | null;
   sector_spdr: string | null;
+  /** Raw eToro numeric exchange id (filter key); NEVER render — use
+   * `exchange_name` (#1904/#1955). */
   exchange: string | null;
+  /** #1955: human exchange label from `exchanges.description`; the summary
+   * header renders this, never the opaque numeric `exchange`. */
+  exchange_name: string | null;
   country: string | null;
   currency: string | null;
   market_cap: string | null;

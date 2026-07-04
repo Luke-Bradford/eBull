@@ -118,6 +118,7 @@ def test_happy_path_with_quote_and_no_sec(client: TestClient) -> None:
         "symbol": "BTC",
         "company_name": "Bitcoin",
         "exchange": "8",
+        "exchange_name": "Digital Currency",
         "currency": "USD",
         "sector": None,
         "sector_name": None,
@@ -144,6 +145,10 @@ def test_happy_path_with_quote_and_no_sec(client: TestClient) -> None:
     assert body["identity"]["symbol"] == "BTC"
     assert body["identity"]["display_name"] == "Bitcoin"
     assert body["identity"]["currency"] == "USD"
+    # #1955: the human exchange label (exchanges.description) rides on the
+    # identity so the header renders it instead of the raw numeric id.
+    assert body["identity"]["exchange"] == "8"
+    assert body["identity"]["exchange_name"] == "Digital Currency"
     # No yfinance fill-in for sector/industry/country.
     assert body["identity"]["sector"] is None
     assert body["identity"]["sector_name"] is None
@@ -172,6 +177,7 @@ def test_no_quote_returns_null_price_block(client: TestClient) -> None:
         "symbol": "LRC",
         "company_name": "Loopring",
         "exchange": "8",
+        "exchange_name": "Digital Currency",
         "currency": "USD",
         "sector": None,
         "sector_name": None,
@@ -207,6 +213,7 @@ def test_bid_ask_mid_when_last_missing(client: TestClient) -> None:
         "symbol": "FOO",
         "company_name": "Foo Inc",
         "exchange": "NYSE",
+        "exchange_name": "NYSE",
         "currency": "USD",
         "sector": None,
         "sector_name": None,
@@ -241,6 +248,7 @@ def test_zero_last_uses_bid_ask_mid(client: TestClient) -> None:
         "symbol": "VOO",
         "company_name": "Vanguard S&P 500 ETF",
         "exchange": "NYSE",
+        "exchange_name": "NYSE",
         "currency": "USD",
         "sector": None,
         "sector_name": None,
@@ -274,6 +282,7 @@ def test_local_company_name_authoritative(client: TestClient) -> None:
         "symbol": "AAPL",
         "company_name": "Apple Inc.",
         "exchange": "NMS",
+        "exchange_name": "Nasdaq",
         "currency": "USD",
         "sector": "8",
         "sector_name": "Technology",
@@ -400,6 +409,7 @@ def test_id_override_pinned_lookup(client: TestClient) -> None:
         "symbol": "BTC.US",
         "company_name": "Grayscale Bitcoin Mini Trust",
         "exchange": "5",
+        "exchange_name": "NYSE",
         "currency": "USD",
         # #1599: prove the ?id= lookup branch also carries the resolved
         # sector_name (raw eToro id preserved, name resolved via the join).
@@ -451,6 +461,7 @@ def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
         "symbol": "DIV",
         "company_name": "Dividend Co",
         "exchange": "NYSE",
+        "exchange_name": "NYSE",
         "currency": "USD",
         "sector": None,
         "sector_name": None,
@@ -518,6 +529,7 @@ def test_canonical_symbol_surfaced_for_rth_variant(client: TestClient) -> None:
         "symbol": "AAPL.RTH",
         "company_name": "Apple (RTH)",
         "exchange": "33",
+        "exchange_name": "Regular Trading Hours - RTH",
         "currency": None,
         "sector": None,
         "sector_name": None,
@@ -553,6 +565,7 @@ def test_canonical_symbol_null_for_canonical_instrument(client: TestClient) -> N
         "symbol": "AAPL",
         "company_name": "Apple Inc",
         "exchange": "4",
+        "exchange_name": "Nasdaq",
         "currency": "USD",
         "sector": "8",  # eToro numeric industry id (provider contract)
         "sector_name": "Technology",
@@ -588,6 +601,7 @@ def test_price_native_primary_with_display_companion(client: TestClient) -> None
         "symbol": "GME",
         "company_name": "GameStop Corp",
         "exchange": "4",
+        "exchange_name": "Nasdaq",
         "currency": "USD",
         "sector": None,
         "sector_name": None,
@@ -643,6 +657,7 @@ def test_price_companion_null_when_fx_rate_missing(client: TestClient) -> None:
         "symbol": "GME",
         "company_name": "GameStop Corp",
         "exchange": "4",
+        "exchange_name": "Nasdaq",
         "currency": "USD",
         "sector": None,
         "sector_name": None,
