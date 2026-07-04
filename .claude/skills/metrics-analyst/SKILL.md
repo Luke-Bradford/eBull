@@ -32,7 +32,9 @@
 | Bootstrap stage cohort fingerprint | Pipeline | `bootstrap_stages.target_cohort_fingerprint` | `/processes/bootstrap/timeline` (tooltip) |
 | Bootstrap state + run status | Pipeline | `bootstrap_state`, `bootstrap_runs`, `bootstrap_archive_results` | `/system/bootstrap/status`, `/processes/bootstrap/*` |
 | Buyback authorisation | Capital returns | (deferred) | — |
+| Calmar reward (v1.3 scoring input) | Scoring | `_calmar_reward` on `instrument_risk_metrics_current.tr_calmar` (fallback `calmar`) | (scoring input; visible via `penalties_json`/explanation) |
 | Capital event (deposit / withdraw) | Risk + portfolio | `capital_events` | `/budget/events` |
+| Completeness (C-score + tier) | Scoring | `scores.data_completeness` + `scores.completeness_tier` (`sql/209`, #1820) | `/rankings` (COMPL. column), per-instrument verdict |
 | Cash + equivalents | Fundamentals | `financial_periods.cash` | `/instruments/{symbol}/financials?statement=balance` |
 | Cash balance (operator) | Risk + portfolio | `cash_ledger` SUM | `/portfolio` |
 | Cash buffer reserve | Risk + portfolio | `budget_config.cash_buffer_pct` | `/budget`, `/budget/config` |
@@ -77,6 +79,9 @@
 | Operating margin | Fundamentals | derived | `instrument_valuation.operating_margin` |
 | Ownership freshness chips | Ownership | `data_freshness_index` per source | `/instruments/{symbol}/ownership-rollup` |
 | P/E (TTM) | Fundamentals | `key_stats.pe_ratio`, `instrument_valuation.pe_ratio` | `/instruments/{symbol}/summary.key_stats` |
+| Piotroski F-score (IAR, evidence-only) | Scoring evidence | `scores.analytics_json.iar_v1` (`instrument_analytics.piotroski_f`) | per-instrument verdict (`/rankings/...` latest-score passthrough, #1823/#1824) |
+| Altman Z″ (IAR, evidence-only) | Scoring evidence | `scores.analytics_json.iar_v1` (`instrument_analytics.altman_z2`, non-manufacturer Z″) | per-instrument verdict (same passthrough) |
+| Insider / 13F / short positioning (IAR) | Scoring evidence | `scores.analytics_json.iar_v1` (insider net-90d, 13F QoQ, FINRA short interest) | per-instrument verdict (same passthrough) |
 | P/B | Fundamentals | `key_stats.pb_ratio` | `/instruments/{symbol}/summary.key_stats` |
 | Payout ratio (Div/FCF) | Capital returns | derived FE | `/instrument/{symbol}/dividends` page |
 | Position cost basis | Risk + portfolio | `positions.cost_basis` | `/portfolio` |
@@ -265,6 +270,7 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Debt-to-equity = `total_debt / shareholders_equity` (NULL when equity ≤ 0).
 - Cash = `us-gaap:CashAndCashEquivalentsAtCarryingValue` + tag fallbacks.
 - Storage: `financial_periods.{long_term_debt, short_term_debt, cash}`; legacy `fundamentals_snapshot.{net_debt, debt}` for `key_stats`.
+- ⚠ `fundamentals_snapshot.as_of_date` = the FISCAL PERIOD END of the latest filed statement, NOT a fetch/ingest timestamp. Comparing it to `CURRENT_DATE` to judge pipeline freshness is meaningless (AAPL legitimately sits months "old" between quarters) — freshness of the PIPELINE is `job_runs` for `fundamentals_sync`; freshness of the DATA is as_of_date vs the company's expected filing cadence.
 - Endpoint: `/instruments/{symbol}/financials?statement=balance` + `/summary.key_stats.debt_to_equity`.
 - Chart: `FundamentalsPane.tsx` cell 4 (Total Debt); `fundamentalsCharts.tsx buildDebtStructure` (LTD + STD + interest coverage).
 
@@ -486,6 +492,21 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - `trade_recommendations` table.
 - Endpoint: `/recommendations`, `/recommendations/{id}`.
 - Settled: append-oriented persistence, no spam HOLDs. Default HOLD unless EXIT fires.
+
+### Scoring evidence — IAR signals (`analytics_json`, #1823) — EVIDENCE-ONLY, weight 0
+- **Definition:** the Instrument Analytical Record: Piotroski F (0–9 with component breakdown, `instrument_analytics.piotroski_f`), Altman Z″ (non-manufacturer, `altman_z2`, banded safe/grey/distress), insider net-shares 90d, 13F QoQ holdings delta, FINRA short-interest signal, hybrid peer grade + per-family peer percentiles. All normalized to [0,1] where applicable.
+- **Storage:** `scores.analytics_json` (`iar_v1` block, `sql/210`). ⚠ SPARSE — guard on key presence, not just null (populates only when `compute_rankings` runs).
+- **Endpoint:** passed through VERBATIM on the per-instrument latest-score read (`app/api/scores.py` — typed as loose dict; absent block ⇒ `analytics_json = null`, headline still renders). Renders on the instrument **Verdict tab** (#1824).
+- **Caveats:** weight 0 in the composite until the #1822 backtest signs off (P5, operator-gated). Piotroski/Altman read FY facts — `_read_latest_two_fy_facts` MUST `ORDER BY period_end DESC` (a (concept, fiscal_year) bucket holds current FY + restated prior-year comparative; see prevention log).
+
+### Completeness — C-score + tier (#1820)
+- **Definition:** per-score data-completeness fraction + tier `∈ {insufficient_data, thin_data, full}` (CHECK-constrained).
+- **Storage:** `scores.data_completeness`, `scores.completeness_tier` (`sql/209`).
+- **Endpoint:** `/rankings` (sortable COMPL. column + pill in the FE table); per-instrument verdict header ("completeness: full (85%)").
+
+### Calmar reward (v1.3 scoring input, #1635)
+- **Definition:** `_calmar_reward` maps the risk drill's total-return Calmar (`tr_calmar`, fallback price-only `calmar`) into a bounded scoring reward — the only risk-drill value that feeds the composite.
+- **Where visible:** not a standalone endpoint field; shows up via `scores.penalties_json` / explanation text and the model-version notes (`v1.3-balanced`).
 
 ## 8. Pipeline / system metrics (operator-visible)
 

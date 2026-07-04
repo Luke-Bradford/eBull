@@ -705,6 +705,11 @@ Notable triggers: `POST /jobs/sec_rebuild/run`, `POST /jobs/ownership_observatio
 - Producing accession + form_type enriched via re-query in `_read_shares_outstanding` (`app/services/ownership_rollup.py:1138-1200`).
 - EDGAR archive URL computed backend-side (not frontend) to prevent the wrong endpoint shape (Claude-PR-800 caught a `filenum=`-using FE URL bug).
 
+### Q13b. Where do the scores completeness columns + IAR live?
+- `scores.data_completeness` (fraction) + `scores.completeness_tier` CHECK `∈ {insufficient_data, thin_data, full}` — `sql/209` (#1820). Computed in `app/services/scoring.py` at score time; rendered as the `/rankings` COMPL. column + verdict header.
+- `scores.analytics_json` (`iar_v1` evidence block: Piotroski F, Altman Z″, insider/13F/short positioning, peer grades) — `sql/210` (#1823), weight 0 in the composite, passed through verbatim on the per-instrument latest-score read. SPARSE: populates only on `compute_rankings` runs — guard key presence.
+- Note: the autonomy loop scripts formerly under `scripts/autonomy/` moved to the standalone `autonomy-engine` repo (#1884, 2026-07-01); `scripts/autonomy/` now holds only the jobs-daemon plist + README.
+
 ### Q14. Where is the kill switch?
 - `runtime_config` row keyed by name. Read by `get_kill_switch_status` (`app/services/ops_monitor.py`).
 - Toggle: `POST /system/config/kill-switch` (`app/api/config.py:233`).
