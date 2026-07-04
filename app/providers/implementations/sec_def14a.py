@@ -1068,9 +1068,14 @@ _DASH_NULLS: Final[frozenset[str]] = frozenset({"-", "—", "–", "n/a", "na"})
 # leaves "Senior" glued to the name and "Bradford L. Smith Vice Chair" splits
 # at "Chair" (#1967). ``vice\s+chair`` is listed explicitly (before bare
 # ``chair``) so "Vice Chair" splits at "Vice", not "Chair".
+#
+# The modifier prefix is bounded ``{0,3}`` (real titles carry at most one or two
+# leading modifiers, e.g. "Former Senior") rather than ``*`` — an unbounded
+# repeat is quadratic on a long adversarial modifier run with no trailing role
+# ("Senior Senior … X"), and this parser runs on untrusted SEC filing HTML.
 _POSITION_ROLE_RE: Final[re.Pattern[str]] = re.compile(
     r"\b("
-    r"(?:(?:senior|former|acting|interim)\s+|co-?\s*)*"
+    r"(?:(?:senior|former|acting|interim)\s+|co-?\s*){0,3}"
     r"(?:"
     r"chief\s+\w+|"
     r"executive\s+vice\s+president|senior\s+vice\s+president|vice\s+president|"

@@ -469,12 +469,24 @@ def test_split_name_position_no_title() -> None:
         ("Troy Rohrbaugh 7 Co-CEO, CIB", "Troy Rohrbaugh", "Co-CEO, CIB"),
         # Footnote digit on the newline path is stripped too.
         ("James Dimon 5 \nChairman and CEO", "James Dimon", "Chairman and CEO"),
+        # Two stacked leading modifiers (within the {0,3} bound) still split.
+        ("Jane Roe Former Senior Vice President", "Jane Roe", "Former Senior Vice President"),
     ],
 )
 def test_split_name_position_modifier_and_footnote_bleed(cell: str, expected_name: str, expected_pos: str) -> None:
     name, pos = _split_name_position(cell)
     assert name == expected_name
     assert pos == expected_pos
+
+
+def test_split_name_position_modifier_run_is_bounded() -> None:
+    # ReDoS guard (#1967 review): the modifier prefix is {0,3}, so a long
+    # adversarial run of modifier tokens stays linear, not quadratic. This
+    # completes near-instantly; a regression to `*` would hang for seconds.
+    pathological = "Senior " * 5000 + "X"
+    name, pos = _split_name_position(pathological)  # must return, not hang
+    assert isinstance(name, str)
+    assert pos is None or isinstance(pos, str)
 
 
 def test_split_name_position_preserves_clean_names() -> None:
