@@ -588,14 +588,23 @@ def test_verdict_for_row_disabled_succeeding_job_is_paused() -> None:
     assert (verdict, self_healing, reason) == ("paused", False, "")
 
 
-@pytest.mark.parametrize("terminal", ["failure", "partial"])
-def test_verdict_for_row_disabled_with_actionable_last_run_stays_red(terminal: RunStatus) -> None:
-    """#1831: kill switch on but the last terminal run genuinely failed (or a
-    ``partial`` that surfaces as failure) → ``attention``. The real failure is
-    never masked behind the halt."""
-    row = _row(role="steady_state", status="disabled", last_run_status=terminal)
+def test_verdict_for_row_disabled_with_failed_last_run_stays_red() -> None:
+    """#1831: kill switch on but the last terminal run genuinely failed →
+    ``attention``. The real failure is never masked behind the halt."""
+    row = _row(role="steady_state", status="disabled", last_run_status="failure")
     verdict, self_healing, reason = verdict_for_row(row, now=_NOW)
     assert (verdict, self_healing, reason) == ("attention", False, "last run failed")
+
+
+def test_verdict_for_row_disabled_with_partial_last_run_is_paused() -> None:
+    """#1831 (bot review): a ``partial`` last-run is benign — the only adapter
+    that surfaces a raw ``partial`` under the switch is ingest_sweep, whose
+    non-disabled path reads it green (``has_failures`` counts only
+    ``ingest_status='failed'``). Painting it red under the halt would be
+    false-red flooding, so a disabled + partial row reads ``paused``."""
+    row = _row(role="steady_state", status="disabled", last_run_status="partial")
+    verdict, self_healing, reason = verdict_for_row(row, now=_NOW)
+    assert (verdict, self_healing, reason) == ("paused", False, "")
 
 
 def test_verdict_for_row_one_shot_with_retry_in_flight_is_self_healing() -> None:

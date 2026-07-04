@@ -25,10 +25,12 @@ the halt is the unattended loop's normal state, so flagging every halted
 job red buried the real failures. Two exceptions still read ``attention``
 so nothing genuine is hidden behind the switch: (a) a genuine WEDGE
 (``queue_stuck`` / ``mid_flight_stuck`` — a halt does not un-stick a
-wedged queue; ckpt-1 invariant), and (b) a last terminal run that
-genuinely failed (``failure`` / actionable ``partial``). Only the
-halt-EXPECTED reasons (``schedule_missed`` / ``watermark_gap`` — nothing
-is firing/ingesting while halted) demote to ``paused``. Without this, ``running +
+wedged queue; ckpt-1 invariant), and (b) a last terminal run whose status
+is ``failure`` — mirroring exactly what the non-disabled path reddens (a
+benign ingest-sweep ``partial`` reads green when un-halted, so it stays
+``paused``). Only the halt-EXPECTED reasons (``schedule_missed`` /
+``watermark_gap`` — nothing is firing/ingesting while halted) demote to
+``paused``. Without this, ``running +
 queue_stuck`` would render blue "working" while a worker is wedged, and
 ``pending_retry + queue_stuck`` would render "self-healing" while a
 dispatched request is stuck — re-introducing the masking the verdict
@@ -320,7 +322,16 @@ def verdict_for_row(row: ProcessRow, *, now: datetime) -> tuple[HealthVerdict, b
         # ``last_run`` from the last terminal job_run independent of the
         # switch). Lets ``compute_verdict`` keep a genuinely-failed halted job
         # red instead of painting it neutral ``paused``.
-        last_run_failed=row.last_run is not None and row.last_run.status in ("failure", "partial"),
+        # Mirror EXACTLY what the non-disabled path reddens: ``status == failure``.
+        # A scheduled/sync ``partial`` is already normalized to ``failure`` before
+        # the summary is built (scheduled_adapter._RUN_STATUS_TO_SUMMARY has no
+        # ``partial`` key; the sync path maps partial → failure first), and the
+        # only adapter that surfaces a raw ``partial`` last-run under the kill
+        # switch is ingest_sweep, whose non-disabled path treats ``partial`` as
+        # benign green (``has_failures`` counts ``ingest_status='failed'`` only).
+        # So keeping ``partial`` red here would paint a row red that reads green
+        # when the switch is off — false-red flooding, the #1831 bug (bot review).
+        last_run_failed=row.last_run is not None and row.last_run.status == "failure",
     )
 
 
