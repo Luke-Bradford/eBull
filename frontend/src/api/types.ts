@@ -1741,7 +1741,11 @@ export type HealthVerdict =
   | "attention"
   // #1689 — muted: an aged, exhausted one-shot (bootstrap/backfill) failure.
   // Folds into the collapsed Manual & backfill section; not a steady-state red.
-  | "stale_manual";
+  | "stale_manual"
+  // #1831 — grey: disabled by the global kill switch. The halt is the normal
+  // unattended-loop state, so a paused job is NOT a "problem" (the banner
+  // conveys the halt); a genuinely-failed halted job still reads `attention`.
+  | "paused";
 
 export type ProcessRunStatus =
   "success" | "failure" | "partial" | "cancelled" | "skipped";

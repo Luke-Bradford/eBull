@@ -55,6 +55,18 @@ describe("VERDICT_SORT_PRIORITY (#1689)", () => {
     expect(VERDICT_SORT_PRIORITY.attention).toBeLessThan(VERDICT_SORT_PRIORITY.current);
     expect(VERDICT_SORT_PRIORITY.stale_manual).toBeGreaterThan(VERDICT_SORT_PRIORITY.current);
   });
+
+  test("#1831 — paused is neutral, never pinned to the attention top", () => {
+    expect(VERDICT_SORT_PRIORITY.paused).toBeGreaterThan(VERDICT_SORT_PRIORITY.attention);
+  });
+});
+
+describe("VERDICT_VISUAL — paused (#1831)", () => {
+  test("paused reads 'paused', is muted-grey (not red), and does not pulse", () => {
+    expect(VERDICT_VISUAL.paused.label).toBe("paused");
+    expect(VERDICT_VISUAL.paused.toneClass).not.toBe(VERDICT_VISUAL.attention.toneClass);
+    expect(VERDICT_VISUAL.paused.pulse).toBe(false);
+  });
 });
 
 describe("STALE_REASON_LABEL — watermark_gap matches backend (Task 2)", () => {

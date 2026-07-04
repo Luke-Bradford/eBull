@@ -19,7 +19,18 @@ all three adapters' rows flow through, so no adapter changes are needed.
 **Load-bearing invariant (Codex ckpt-1):** an actionable stale reason
 must NEVER be masked by a status. Only the global kill switch
 (``status == "disabled"``) outranks a stale reason; every other status
-is evaluated *after* the stale check. Without this, ``running +
+is evaluated *after* the stale check. #1831 (spec reversal 2026-07-04):
+a disabled row now reads neutral ``paused`` (grey), not ``attention`` —
+the halt is the unattended loop's normal state, so flagging every halted
+job red buried the real failures. Two exceptions still read ``attention``
+so nothing genuine is hidden behind the switch: (a) a genuine WEDGE
+(``queue_stuck`` / ``mid_flight_stuck`` — a halt does not un-stick a
+wedged queue; ckpt-1 invariant), and (b) a last terminal run whose status
+is ``failure`` — mirroring exactly what the non-disabled path reddens (a
+benign ingest-sweep ``partial`` reads green when un-halted, so it stays
+``paused``). Only the halt-EXPECTED reasons (``schedule_missed`` /
+``watermark_gap`` — nothing is firing/ingesting while halted) demote to
+``paused``. Without this, ``running +
 queue_stuck`` would render blue "working" while a worker is wedged, and
 ``pending_retry + queue_stuck`` would render "self-healing" while a
 dispatched request is stuck — re-introducing the masking the verdict
@@ -62,6 +73,15 @@ ACTIONABLE_STALE: Final[frozenset[StaleReason]] = frozenset(
     {"schedule_missed", "watermark_gap", "queue_stuck", "mid_flight_stuck"}
 )
 
+# #1831 — genuine WEDGES: a request/run that is actually stuck, not merely
+# behind cadence. These stay ``attention`` even under the kill switch (a halt
+# does not un-stick a wedged queue), preserving the Codex-ckpt-1 invariant
+# "an actionable wedge is never masked". By contrast ``schedule_missed`` /
+# ``watermark_gap`` are EXPECTED while halted (nothing is firing / ingesting),
+# so they demote to neutral ``paused`` — that expected-drift flood was the #1831
+# bug (~42 halted jobs painted red).
+_WEDGE_STALE: Final[frozenset[StaleReason]] = frozenset({"queue_stuck", "mid_flight_stuck"})
+
 # Stable order for picking the headline reason when several fire at once.
 _REASON_ORDER: Final[tuple[StaleReason, ...]] = (
     "schedule_missed",
@@ -89,6 +109,7 @@ def compute_verdict(
     never_started: bool = False,
     cancel_was_operator_initiated: bool = False,
     manual_aged_exhausted: bool = False,
+    last_run_failed: bool = False,
 ) -> tuple[HealthVerdict, bool, str]:
     """Collapse ``status`` + ``stale_reasons`` into one verdict.
 
@@ -97,7 +118,8 @@ def compute_verdict(
     * ``verdict`` — ``current`` (green, fresh) / ``working`` (blue,
       progressing) / ``self_healing`` (amber, auto-recovering, no action
       needed) / ``attention`` (red, operator must act) / ``stale_manual``
-      (muted, aged one-shot bootstrap/backfill failure — #1689).
+      (muted, aged one-shot bootstrap/backfill failure — #1689) /
+      ``paused`` (grey, disabled by the global kill switch — #1831).
     * ``self_healing`` — convenience boolean (``verdict == "self_healing"``
       today; kept distinct so T3/T4 can flag a row that is *both*
       surfaced and recovering).
@@ -137,10 +159,30 @@ def compute_verdict(
     if liveness_kick_in_flight:
         actionable = [r for r in actionable if r != "schedule_missed"]
 
-    # 1. Kill switch — global, deliberate, outranks everything (incl. a
-    #    stale reason that may still compute on a halted job).
+    # 1. Kill switch — global, deliberate halt. #1831 (settled-spec reversal
+    #    2026-07-04): the halt is the NORMAL state of the unattended loop, so a
+    #    merely-disabled row is neutral ``paused`` (grey), NOT ``attention`` —
+    #    otherwise every succeeding/idle job floods Admin with false "problems"
+    #    and masks the real failures. A row whose LAST TERMINAL run genuinely
+    #    failed keeps red ("last run failed"): that failure predates the halt
+    #    and still needs the operator, so it is never hidden behind the switch.
+    #    Placed before the actionable-stale block (unchanged precedence): a
+    #    halted job is EXPECTED to be overdue (``schedule_missed`` et al.), so
+    #    those reasons must not repaint it red while the switch is on. The
+    #    #1513 header dedupes the halt into one banner (spec §Alternatives).
     if status == "disabled":
-        return ("attention", False, "kill switch active")
+        # A genuine wedge is never masked by the halt (ckpt-1 invariant): a
+        # stuck/no-progress request needs the operator regardless of the switch.
+        wedges: list[StaleReason] = [r for r in _REASON_ORDER if r in stale_reasons and r in _WEDGE_STALE]
+        if wedges:
+            return ("attention", False, _REASON_LABEL[wedges[0]])
+        # A last terminal run that genuinely failed predates the halt and still
+        # needs the operator — never hidden behind the switch.
+        if last_run_failed:
+            return ("attention", False, "last run failed")
+        # Merely halted (+ at most halt-expected ``schedule_missed`` /
+        # ``watermark_gap``) → neutral ``paused``; the #1513 banner conveys it.
+        return ("paused", False, "")
 
     # 2. Any actionable stale reason — surfaced before any non-disabled
     #    status so it can never be masked. Verdict is attention; only the
@@ -275,6 +317,21 @@ def verdict_for_row(row: ProcessRow, *, now: datetime) -> tuple[HealthVerdict, b
         never_started=row.never_started,
         cancel_was_operator_initiated=row.cancel_was_operator_initiated,
         manual_aged_exhausted=manual_aged_exhausted,
+        # #1831 — the last terminal run's OWN status, read even when the kill
+        # switch has masked ``row.status`` to ``disabled`` (adapters build
+        # ``last_run`` from the last terminal job_run independent of the
+        # switch). Lets ``compute_verdict`` keep a genuinely-failed halted job
+        # red instead of painting it neutral ``paused``.
+        # Mirror EXACTLY what the non-disabled path reddens: ``status == failure``.
+        # A scheduled/sync ``partial`` is already normalized to ``failure`` before
+        # the summary is built (scheduled_adapter._RUN_STATUS_TO_SUMMARY has no
+        # ``partial`` key; the sync path maps partial → failure first), and the
+        # only adapter that surfaces a raw ``partial`` last-run under the kill
+        # switch is ingest_sweep, whose non-disabled path treats ``partial`` as
+        # benign green (``has_failures`` counts ``ingest_status='failed'`` only).
+        # So keeping ``partial`` red here would paint a row red that reads green
+        # when the switch is off — false-red flooding, the #1831 bug (bot review).
+        last_run_failed=row.last_run is not None and row.last_run.status == "failure",
     )
 
 

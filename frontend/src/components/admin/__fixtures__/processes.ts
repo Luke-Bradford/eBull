@@ -38,10 +38,22 @@ const REASON_ORDER: StaleReason[] = [
 export function deriveVerdict(
   status: ProcessStatus,
   staleReasons: StaleReason[],
+  lastRunFailed = false,
 ): { health_verdict: HealthVerdict; self_healing: boolean; verdict_reason: string } {
   const actionable = REASON_ORDER.filter((r) => staleReasons.includes(r));
-  if (status === "disabled")
-    return { health_verdict: "attention", self_healing: false, verdict_reason: "kill switch active" };
+  // #1831 — kill switch (disabled) is neutral `paused` (the halt is the loop's
+  // normal state). Two exceptions stay red so nothing genuine is masked: a
+  // WEDGE (queue_stuck / mid_flight_stuck — a halt does not un-stick a queue),
+  // and a last terminal run that genuinely failed. Only the halt-expected
+  // reasons (schedule_missed / watermark_gap) demote to paused.
+  if (status === "disabled") {
+    const wedge = actionable.find((r) => r === "queue_stuck" || r === "mid_flight_stuck");
+    if (wedge !== undefined)
+      return { health_verdict: "attention", self_healing: false, verdict_reason: REASON_LABEL[wedge] };
+    return lastRunFailed
+      ? { health_verdict: "attention", self_healing: false, verdict_reason: "last run failed" }
+      : { health_verdict: "paused", self_healing: false, verdict_reason: "" };
+  }
   const headline = actionable[0];
   if (headline !== undefined) {
     const reason =

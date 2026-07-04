@@ -63,7 +63,7 @@ ProcessStatus = Literal[
 # see rendered side-by-side as contradictory chips. Derived (not stored)
 # at the API layer (``app/api/processes.py::_convert_row`` →
 # ``health_verdict.compute_verdict``). The FE renders ONE verdict pill.
-HealthVerdict = Literal["current", "working", "self_healing", "attention", "stale_manual"]
+HealthVerdict = Literal["current", "working", "self_healing", "attention", "stale_manual", "paused"]
 
 RunStatus = Literal["success", "failure", "partial", "cancelled", "skipped"]
 
