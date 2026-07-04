@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.instruments import _distinct_ordered
 from app.api.instruments import router as instruments_router
 from app.db import get_conn
 from app.services.sec_entity_profile import SecEntityProfile
@@ -114,3 +116,32 @@ def test_sec_profile_endpoint_blank_symbol_rejected() -> None:
     # FastAPI path-param routing treats " " as a valid symbol, so the
     # 400 short-circuit inside the handler fires.
     assert resp.status_code == 400
+
+
+# --- #1957: SEC submissions ``exchanges[]`` is per-ticker, not per-venue ------
+# Pure-logic test (no DB / no TestClient → fast tier). GME lists common stock
+# + a warrant on the same venue, so EDGAR returns ['NYSE','NYSE']; the display
+# list must collapse to distinct venues while preserving first-seen order.
+def test_distinct_ordered_dedupes_preserving_order() -> None:
+    assert _distinct_ordered(["NYSE", "NYSE"]) == ["NYSE"]
+    assert _distinct_ordered(["NYSE", "NASDAQ", "NYSE"]) == ["NYSE", "NASDAQ"]
+    assert _distinct_ordered(["NASDAQ"]) == ["NASDAQ"]
+    assert _distinct_ordered([]) == []
+
+
+def test_sec_profile_endpoint_dedupes_exchanges() -> None:
+    """Boundary wiring: a per-ticker duplicate venue (GME-shape) collapses."""
+    conn = MagicMock()
+    conn.cursor.return_value = _cursor_with([{"instrument_id": 1, "symbol": "GME"}])
+    app = _build_app(conn)
+
+    profile = replace(_sample_profile(), exchanges=["NYSE", "NYSE"])
+    with (
+        patch("app.services.sec_entity_profile.get_entity_profile", return_value=profile),
+        patch("app.services.business_summary.get_business_summary", return_value=None),
+        TestClient(app) as client,
+    ):
+        resp = client.get("/instruments/GME/sec_profile")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["exchanges"] == ["NYSE"]

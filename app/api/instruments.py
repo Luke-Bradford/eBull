@@ -1360,6 +1360,20 @@ class InstrumentSecProfile(BaseModel):
     has_insider_owner: bool | None
 
 
+def _distinct_ordered(items: list[str]) -> list[str]:
+    """Order-preserving de-dup for display lists.
+
+    SEC ``submissions.json`` publishes ``exchanges[]`` index-aligned with
+    ``tickers[]`` — one entry per listed security, NOT a distinct-venue list
+    (GME: tickers ``['GME','GME-WT']`` → exchanges ``['NYSE','NYSE']``). We
+    drop the parallel ``tickers`` array, so the per-security alignment carries
+    no meaning downstream and the raw array renders as a duplicated venue list
+    (#1957). The service layer stays faithful to the raw SEC payload; the
+    API boundary presents distinct venues for display.
+    """
+    return list(dict.fromkeys(items))
+
+
 @router.get("/{symbol}/sec_profile", response_model=InstrumentSecProfile)
 def get_instrument_sec_profile(
     symbol: str,
@@ -1431,7 +1445,7 @@ def get_instrument_sec_profile(
         state_of_incorporation_desc=profile.state_of_incorporation_desc,
         fiscal_year_end=profile.fiscal_year_end,
         category=profile.category,
-        exchanges=profile.exchanges,
+        exchanges=_distinct_ordered(profile.exchanges),
         former_names=[
             FormerNameModel(
                 name=str(fn["name"]),
