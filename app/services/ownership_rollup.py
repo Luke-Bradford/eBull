@@ -2331,6 +2331,21 @@ def _build_slice(
     # Adams). Figure-neutral: zero-share rows contribute 0 to ``total`` /
     # ``pct`` / residual, and no ``ownership_*_current`` row is strictly
     # negative (full-population check on the dev DB). Corrects ``filer_count``.
+    #
+    # ``> 0`` also drops any strictly-negative row. That is impossible today,
+    # but a negative row would silently INCREASE the slice total when removed
+    # (it was reducing it), so surface it rather than dropping it silently —
+    # the invariant is asserted by data, not code, so a regression must be
+    # visible, not swallowed (Claude review NITPICK, PR #1940).
+    negatives = [h for h in holders if h.shares < Decimal(0)]
+    if negatives:
+        logger.warning(
+            "ownership_rollup %s slice: dropping %d negative-share holder(s) "
+            "(unexpected — ownership_*_current should never be negative): %s",
+            category,
+            len(negatives),
+            [(h.filer_cik or h.filer_name, str(h.shares)) for h in negatives],
+        )
     holders = [h for h in holders if h.shares > Decimal(0)]
     holders.sort(key=lambda h: h.shares, reverse=True)
     total = sum((h.shares for h in holders), Decimal(0))

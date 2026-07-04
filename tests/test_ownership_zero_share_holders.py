@@ -13,6 +13,7 @@ Pure-logic — no DB (see test-tiering guidance).
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from decimal import Decimal
 
@@ -73,6 +74,23 @@ def test_bucket_drops_zero_share_memo_fund_holder() -> None:
     assert len(funds) == 1
     assert funds[0].filer_count == 1
     assert [h.filer_name for h in funds[0].holders] == ["Real Fund"]
+
+
+def test_negative_share_holder_is_dropped_and_logged(caplog: object) -> None:
+    """Negatives are impossible today but must not be swallowed if they appear —
+    dropping one silently increases the total. Surface via a warning."""
+    import pytest  # local import keeps the module's pure-logic import list lean
+
+    assert isinstance(caplog, pytest.LogCaptureFixture)
+    with caplog.at_level(logging.WARNING, logger="app.services.ownership_rollup"):
+        s = _build_slice(
+            "insiders",
+            [_h("1", "Good", "form4", "500"), _h("2", "Bad", "form4", "-100")],
+            OUT,
+        )
+    assert [h.filer_name for h in s.holders] == ["Good"]
+    assert s.total_shares == Decimal("500")
+    assert any("negative-share holder" in r.message for r in caplog.records)
 
 
 def test_zero_share_drop_is_figure_neutral_for_nonzero_holders() -> None:
