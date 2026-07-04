@@ -221,7 +221,9 @@ function FinancialsTab({ symbol }: { symbol: string }) {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-xs text-slate-500">
-                <th className="px-2 py-1">Metric</th>
+                <th className="sticky left-0 z-20 border-r border-slate-200 bg-white px-2 py-1 dark:border-slate-800 dark:bg-slate-950">
+                  Metric
+                </th>
                 {rows.map((row) => (
                   <th key={row.period_end} className="px-2 py-1 text-right">
                     {row.period_type}
@@ -233,8 +235,10 @@ function FinancialsTab({ symbol }: { symbol: string }) {
             </thead>
             <tbody>
               {columns.map((col) => (
-                <tr key={col} className="border-b border-slate-100 last:border-0">
-                  <td className="px-2 py-1 font-medium">{col}</td>
+                <tr key={col} className="border-b border-slate-100 last:border-0 dark:border-slate-800">
+                  <td className="sticky left-0 z-10 border-r border-slate-200 bg-white px-2 py-1 font-medium dark:border-slate-800 dark:bg-slate-950">
+                    {col}
+                  </td>
                   {rows.map((row) => (
                     <td key={row.period_end} className="px-2 py-1 text-right">
                       {formatDecimal(row.values[col] ?? null)}
