@@ -169,8 +169,14 @@ export function InstrumentsPage() {
     setKnownExchanges((prev) => {
       const byId = new Map(prev.map((o) => [o.value, o.label]));
       for (const item of result.data!.items) {
-        if (item.exchange) {
-          byId.set(item.exchange, item.exchange_name ?? item.exchange);
+        if (!item.exchange) continue;
+        // Once a real name has been seen for an id, keep it — a later page
+        // whose row happens to carry a null exchange_name must not revert the
+        // dropdown label to the raw id (bot NITPICK, PR #1923).
+        if (item.exchange_name != null) {
+          byId.set(item.exchange, item.exchange_name);
+        } else if (!byId.has(item.exchange)) {
+          byId.set(item.exchange, item.exchange);
         }
       }
       return Array.from(byId, ([value, label]) => ({ value, label })).sort(
