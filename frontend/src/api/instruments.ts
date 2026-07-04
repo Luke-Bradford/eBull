@@ -391,6 +391,44 @@ export function fetchInsiderTransactions(
   );
 }
 
+/** One (executive, fiscal_year) row of the DEF 14A Item 402(c) Summary
+ *  Compensation Table (#1945). Mirrors app/api/instruments.py::ExecCompRow.
+ *  Dollar fields are Decimal-as-string, or null when the SCT column is
+ *  absent (scaled SRC table) or the cell was an explicit null. Figures
+ *  are USD (SEC proxy filings are USD-denominated). */
+export interface ExecCompRow {
+  executive_name: string;
+  principal_position: string | null;
+  fiscal_year: number;
+  salary: string | null;
+  bonus: string | null;
+  stock_awards: string | null;
+  option_awards: string | null;
+  non_equity_incentive: string | null;
+  pension_nqdc: string | null;
+  other_comp: string | null;
+  total_comp: string | null;
+}
+
+/** GET /instruments/{symbol}/exec-compensation — the latest proxy's SCT
+ *  (all NEOs, up to three fiscal years each), ordered fiscal_year DESC
+ *  then total_comp DESC. Empty `rows` (no SCT parsed for this issuer yet)
+ *  is a 200 with `accession_number` null. Mirrors
+ *  app/api/instruments.py::ExecCompensationResponse. */
+export interface ExecCompensationResponse {
+  symbol: string;
+  accession_number: string | null;
+  rows: ExecCompRow[];
+}
+
+export function fetchExecCompensation(
+  symbol: string,
+): Promise<ExecCompensationResponse> {
+  return apiFetch<ExecCompensationResponse>(
+    `/instruments/${encodeURIComponent(symbol)}/exec-compensation`,
+  );
+}
+
 
 export interface InstrumentHeadcount {
   symbol: string;
