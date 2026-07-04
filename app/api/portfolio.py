@@ -1193,6 +1193,7 @@ class ActivityResponse(BaseModel):
 def get_activity(
     limit: int = Query(default=100, ge=1, le=500),
     include_mirrors: bool = False,
+    instrument_id: int | None = Query(default=None, ge=1),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> ActivityResponse:
     """Trade ledger feed, newest first.
@@ -1200,6 +1201,11 @@ def get_activity(
     Mirror-originated rows (``social_trade_id != 0``) are excluded by
     default, consistent with the value-history chart's own-portfolio
     basis; ``include_mirrors=true`` widens the filter.
+
+    ``instrument_id`` scopes the ledger to a single instrument (its internal
+    ``instruments.instrument_id``) — used by the per-instrument Positions tab
+    to render that symbol's closed round-trips (#1926). ``total`` reflects the
+    same filter.
 
     ``fees`` / ``realized_pnl`` are FX-converted from their at-rest USD
     figures (``trade_events.fees_usd`` / ``.realized_pnl_usd``) to the
@@ -1234,9 +1240,10 @@ def get_activity(
             """
             SELECT COUNT(*) AS total
             FROM trade_events
-            WHERE %(include_mirrors)s OR COALESCE(social_trade_id, 0) = 0
+            WHERE (%(include_mirrors)s OR COALESCE(social_trade_id, 0) = 0)
+              AND (%(instrument_id)s IS NULL OR instrument_id = %(instrument_id)s)
             """,
-            {"include_mirrors": include_mirrors},
+            {"include_mirrors": include_mirrors, "instrument_id": instrument_id},
         ).fetchone()
         total = int(total_row["total"]) if total_row else 0
 
@@ -1260,11 +1267,12 @@ def get_activity(
                 FROM trade_events
                 WHERE event_kind = 'open'
             ) o ON o.position_id = te.position_id AND te.event_kind = 'close'
-            WHERE %(include_mirrors)s OR COALESCE(te.social_trade_id, 0) = 0
+            WHERE (%(include_mirrors)s OR COALESCE(te.social_trade_id, 0) = 0)
+              AND (%(instrument_id)s IS NULL OR te.instrument_id = %(instrument_id)s)
             ORDER BY te.executed_at DESC, te.event_id DESC
             LIMIT %(limit)s
             """,
-            {"include_mirrors": include_mirrors, "limit": limit},
+            {"include_mirrors": include_mirrors, "limit": limit, "instrument_id": instrument_id},
         ).fetchall()
 
     events = []
