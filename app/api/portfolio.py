@@ -1208,23 +1208,26 @@ def get_activity(
     """
     runtime = get_runtime_config(conn)
     target_currency = runtime.display_currency
-    rates_meta = load_live_fx_rates_with_metadata(conn)
-    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
     # Every trade_events money field is USD at rest (eToro account currency).
-    # `_convert_value` silently returns the ORIGINAL (USD) value when no FX
-    # rate is available — so `display_currency` on the response must reflect
-    # that fallback too, or a missing-rate response would mislabel USD
-    # numbers as the target currency (Codex ckpt-2 HIGH finding, #1906).
-    # Checked once, not per-row: the source currency is always USD here.
-    rate_available = target_currency == "USD" or (
-        ("USD", target_currency) in rates or (target_currency, "USD") in rates
-    )
-    display_currency = target_currency if rate_available else "USD"
+    # `_convert_value` short-circuits USD->USD without touching `rates`, so we
+    # only pay the FX load when the display currency actually differs from USD.
+    rates: dict[tuple[str, str], Decimal] = {}
+    rate_available = target_currency == "USD"
     if not rate_available:
-        logger.warning(
-            "get_activity: FX rate USD->%s not found; fees/realized_pnl stay USD",
-            target_currency,
-        )
+        rates_meta = load_live_fx_rates_with_metadata(conn)
+        rates = {k: v["rate"] for k, v in rates_meta.items()}
+        # `_convert_value` silently returns the ORIGINAL (USD) value when no FX
+        # rate is available — so `display_currency` on the response must reflect
+        # that fallback too, or a missing-rate response would mislabel USD
+        # numbers as the target currency (Codex ckpt-2 HIGH finding, #1906).
+        # Checked once, not per-row: the source currency is always USD here.
+        rate_available = ("USD", target_currency) in rates or (target_currency, "USD") in rates
+        if not rate_available:
+            logger.warning(
+                "get_activity: FX rate USD->%s not found; fees/realized_pnl stay USD",
+                target_currency,
+            )
+    display_currency = target_currency if rate_available else "USD"
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         total_row = cur.execute(
