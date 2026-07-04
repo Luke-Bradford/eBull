@@ -8,7 +8,7 @@ engine:
 agent:
   type: claude
   model:
-    primary: claude-sonnet-5
+    primary: claude-opus-4-8
     fallback: claude-sonnet-4-6
 
 merge_gate:
