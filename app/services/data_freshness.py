@@ -109,6 +109,11 @@ _CADENCE: dict[ManifestSource, timedelta] = {
     # an instrument that simply has nothing to file. NT rows piggyback on the
     # per-CIK submissions poll for discovery, same as every other SEC form.
     "sec_nt": timedelta(days=400),
+    # PRE 14A / PRER14A (#1892, #1015 item 3) — episodic like NT: a proxy
+    # season fires once (or twice, if a preliminary revision is filed) a
+    # year, so a generous ceiling avoids painting the source overdue between
+    # meetings. Mirrors sec_nt's rationale.
+    "sec_pre14a": timedelta(days=400),
 }
 
 

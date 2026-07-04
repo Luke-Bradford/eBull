@@ -200,6 +200,12 @@ SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
         # is already set at ingest (filings_risk); the body is the new content.
         "NT 10-K",
         "NT 10-Q",
+        # Proxy variants — contested votes / dilution authorisations. #1892
+        # (#1015 item 3) — sec_pre14a parser extracts the Rule 14a-4(a)(3)
+        # numbered meeting-agenda proposals list. Does NOT touch DEF 14A /
+        # the ownership pipeline (#1320).
+        "PRE 14A",
+        "PRER14A",
     }
 )
 
@@ -250,9 +256,6 @@ SEC_METADATA_ONLY: frozenset[str] = frozenset(
         "424B5",
         "424B7",
         "424B8",
-        # Proxy variants — contested votes / dilution authorisations.
-        "PRE 14A",
-        "PRER14A",
         # Tender offers + going-private — M&A / take-out signal.
         "SC TO-T",
         "SC TO-T/A",

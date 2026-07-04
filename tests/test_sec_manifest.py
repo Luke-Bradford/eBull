@@ -847,8 +847,6 @@ class TestFormMapping:
             "F-4",
             "424B3",
             "424B5",
-            "PRE 14A",
-            "PRER14A",
             "13F-NT",
             "13F-NT/A",
             "144",
@@ -864,15 +862,18 @@ class TestFormMapping:
         offenders = {f: src for f, src in mapped.items() if src is not None}
         assert offenders == {}, f"forms documented as unmapped in README now map to a source: {offenders}"
 
-    def test_pre_14a_is_not_mapped(self) -> None:
-        """#1320: PRE 14A (preliminary proxy) is a metadata-only draft — it
-        must NOT route to sec_def14a. Mapping it seeded 6k+ preliminary
-        drafts into the sec_def14a manifest namespace which the parser then
-        tombstoned pre-fetch (wasted worker cycles + polluted coverage). It
-        is now skipped at discovery, consistent with its metadata-only
-        classification (test_filings_form_allowlist). The definitive DEF 14A
-        that follows is what we ingest."""
-        assert map_form_to_source("PRE 14A") is None
+    def test_pre_14a_is_not_mapped_to_def14a(self) -> None:
+        """#1320: PRE 14A / PRER14A (preliminary proxy) must NOT route to
+        sec_def14a. Mapping it there seeded 6k+ preliminary drafts into the
+        sec_def14a manifest namespace which the parser then tombstoned
+        pre-fetch (wasted worker cycles + polluted coverage). The definitive
+        DEF 14A that follows is what the ownership pipeline ingests.
+
+        #1892 (#1015 item 3) maps PRE 14A / PRER14A instead to the wholly
+        separate ``sec_pre14a`` proposal-signal source — #1320's concern
+        (no ownership-pipeline pollution) is unaffected."""
+        assert map_form_to_source("PRE 14A") == "sec_pre14a"
+        assert map_form_to_source("PRER14A") == "sec_pre14a"
 
     def test_whitespace_tolerant(self) -> None:
         assert map_form_to_source("13F-HR  ") == "sec_13f_hr"
