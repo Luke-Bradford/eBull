@@ -186,6 +186,28 @@ def test_equity_plan_share_increase_not_classified_as_authorized_share_increase(
     assert signal.authorized_share_increase_proposal is False
 
 
+def test_plan_exclusion_is_word_boundary_not_substring() -> None:
+    """Bot review WARNING (#1910): a raw substring check for "plan" would
+    false-positive-exclude a real charter share-increase item whose text
+    happens to contain "plan" inside an unrelated word (e.g.
+    "explanation") -- must still flag True."""
+    body = """
+    <html><body>
+    The meeting will be held for the purpose of voting on the following
+    proposals:
+    1. To approve an amendment to the Certificate of Incorporation to
+    increase the number of authorized shares of common stock from
+    100,000,000 to 500,000,000, as further explanation of the rationale
+    is set forth in the accompanying proxy statement.
+    2. To approve one or more adjournments of the meeting.
+    Each Proposal is more fully described in the accompanying proxy statement.
+    </body></html>
+    """
+    signal = parse_pre14a_proposals(body)
+    assert signal is not None
+    assert signal.authorized_share_increase_proposal is True
+
+
 def test_reverse_stock_split_proposal_detected_in_item() -> None:
     body = """
     <html><body>

@@ -131,7 +131,7 @@ def _parse_pre14a(
                 accession_number=accession,
                 document_kind="pre14a_body",
                 payload=body,
-                parser_version=str(_PARSER_VERSION_PRE14A),
+                parser_version=_PARSER_VERSION_PRE14A,
                 source_url=url,
             )
     except Exception as exc:  # noqa: BLE001
