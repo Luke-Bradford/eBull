@@ -17,10 +17,14 @@ import {
   type InstrumentsQuery,
 } from "@/api/instruments";
 import type { InstrumentListItem } from "@/api/types";
-import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import {
+  Section,
+  SectionError,
+  SectionSkeleton,
+} from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Pagination } from "@/components/ui/Pagination";
-import { formatMoney } from "@/lib/format";
+import { formatMoney, formatPct } from "@/lib/format";
 import { SECTOR_OPTIONS } from "@/lib/sectors";
 import { useAsync } from "@/lib/useAsync";
 
@@ -50,14 +54,23 @@ const INITIAL_FILTERS: Filters = {
 // Sort state (client-side within the fetched page)
 // ---------------------------------------------------------------------------
 
-type SortKey = "symbol" | "gics_sector" | "exchange" | "coverage_tier" | "last";
+type SortKey =
+  | "symbol"
+  | "gics_sector"
+  | "exchange"
+  | "coverage_tier"
+  | "last"
+  | "day_change";
 type SortDir = "asc" | "desc";
 
 // The server's default ordering (#1904): coverage_tier ASC (NULLS LAST), then
 // symbol. The client's initial sort mirrors it exactly, so the default view is
 // globally tier-ordered (not page-scoped) and the "sorted within this page"
 // caveat is only shown once the operator picks a different column.
-const SERVER_SORT: { key: SortKey; dir: SortDir } = { key: "coverage_tier", dir: "asc" };
+const SERVER_SORT: { key: SortKey; dir: SortDir } = {
+  key: "coverage_tier",
+  dir: "asc",
+};
 
 function compare(a: unknown, b: unknown, dir: SortDir): number {
   if (a == null && b == null) return 0;
@@ -89,8 +102,30 @@ function sortValue(item: InstrumentListItem, key: SortKey): unknown {
       // A usable mark is strictly positive (prevention-log #1428): eToro
       // persists `quotes.last = 0.00` for un-freshly-traded instruments, so a
       // non-null zero must sort with the blanks, not ahead of them.
-      return isUsablePrice(item.latest_quote?.last) ? item.latest_quote!.last : null;
+      return isUsablePrice(item.latest_quote?.last)
+        ? item.latest_quote!.last
+        : null;
+    case "day_change":
+      // #1924: sort by the fractional close-to-close change; nulls (no
+      // day-change) sort with the blanks.
+      return item.day_change_pct != null ? Number(item.day_change_pct) : null;
   }
+}
+
+/** Compact "as of" close date, e.g. "12 Jun" (#1924). Honest under the loop's
+ *  uneven candle freshness — the day-change is stamped to its close date, not
+ *  "today". Returns null on an unparseable/absent date. */
+function formatAsOf(iso: string | null): string | null {
+  if (iso == null) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  // Format in UTC: `new Date("YYYY-MM-DD")` is UTC midnight, so a local-TZ
+  // format would render the prior day west of UTC and shift the close date.
+  return d.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    timeZone: "UTC",
+  });
 }
 
 /** A displayable last price: present and strictly positive (prevention-log #1428). */
@@ -127,13 +162,47 @@ function TierBadge({ tier }: { tier: number | null }) {
   if (tier === null) {
     return <span className="text-xs text-slate-400">—</span>;
   }
-  const tone = TIER_TONE[tier] ?? "bg-slate-50 dark:bg-slate-900/40 text-slate-600 border-slate-200 dark:border-slate-800";
+  const tone =
+    TIER_TONE[tier] ??
+    "bg-slate-50 dark:bg-slate-900/40 text-slate-600 border-slate-200 dark:border-slate-800";
   return (
     <span
       className={`inline-block rounded border px-1.5 py-0.5 text-[10px] font-medium ${tone}`}
     >
       Tier {tier}
     </span>
+  );
+}
+
+/**
+ * Day-change cell (#1924): colored fractional close-to-close change from
+ * `price_daily`, with a muted "as of <close date>" caption so a stale close
+ * (common in the loop when eToro candles under-write) reads honestly rather
+ * than as "today". Renders "—" when no day-change is available.
+ */
+function DayChangeCell({ item }: { item: InstrumentListItem }) {
+  const pct = item.day_change_pct != null ? Number(item.day_change_pct) : null;
+  if (pct == null || Number.isNaN(pct)) {
+    return (
+      <td className="py-2 pr-0 text-right text-xs tabular-nums text-slate-400">
+        —
+      </td>
+    );
+  }
+  const tone = pct >= 0 ? "text-emerald-600" : "text-red-600";
+  const asOf = formatAsOf(item.day_change_as_of);
+  return (
+    <td className="py-2 pr-0 text-right tabular-nums">
+      <div className={`text-xs ${tone}`}>{formatPct(pct)}</div>
+      {asOf ? (
+        <div
+          className="text-[10px] text-slate-400"
+          title="Close-to-close change, as of this close"
+        >
+          as of {asOf}
+        </div>
+      ) : null}
+    </td>
   );
 }
 
@@ -215,16 +284,13 @@ export function InstrumentsPage() {
     );
   }, [result.data, sort]);
 
-  const toggleSort = useCallback(
-    (key: SortKey) => {
-      setSort((prev) =>
-        prev.key === key
-          ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
-          : { key, dir: "asc" },
-      );
-    },
-    [],
-  );
+  const toggleSort = useCallback((key: SortKey) => {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: "asc" },
+    );
+  }, []);
 
   const totalPages = result.data
     ? Math.ceil(result.data.total / INSTRUMENTS_PAGE_LIMIT)
@@ -244,7 +310,9 @@ export function InstrumentsPage() {
   return (
     <div className="flex h-full flex-col gap-6 pt-6">
       <div className="flex flex-shrink-0 items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Instruments</h1>
+        <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">
+          Instruments
+        </h1>
         {result.data && (
           <span className="text-xs text-slate-500">
             {result.data.total.toLocaleString()} instruments
@@ -421,6 +489,7 @@ const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
   { key: "exchange", label: "Exchange" },
   { key: "coverage_tier", label: "Tier" },
   { key: "last", label: "Last price", align: "right" },
+  { key: "day_change", label: "Day change", align: "right" },
 ];
 
 // Inline chevron SVGs (#1904): the previous unicode arrows (↕ / ↑ / ↓)
@@ -438,8 +507,16 @@ function SortIndicator({ active, dir }: { active: boolean; dir: SortDir }) {
         stroke="currentColor"
         strokeWidth="1.5"
       >
-        <path d="M5 6.5 8 3.5l3 3" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M5 9.5 8 12.5l3-3" strokeLinecap="round" strokeLinejoin="round" />
+        <path
+          d="M5 6.5 8 3.5l3 3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M5 9.5 8 12.5l3-3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
       </svg>
     );
   }
@@ -482,20 +559,22 @@ function InstrumentsTable({
                 key={col.key}
                 className={`cursor-pointer select-none py-2 pr-4 ${col.align === "right" ? "text-right" : ""}`}
                 onClick={() => onToggleSort(col.key)}
-                title={pageScopedSort ? "Sorts within this page only" : undefined}
+                title={
+                  pageScopedSort ? "Sorts within this page only" : undefined
+                }
               >
                 {col.label}
-                <SortIndicator
-                  active={sort.key === col.key}
-                  dir={sort.dir}
-                />
+                <SortIndicator active={sort.key === col.key} dir={sort.dir} />
               </th>
             ))}
           </tr>
           {pageScopedSort &&
             !(sort.key === SERVER_SORT.key && sort.dir === SERVER_SORT.dir) && (
               <tr>
-                <td colSpan={COLUMNS.length} className="pb-1 text-[10px] normal-case tracking-normal text-slate-400">
+                <td
+                  colSpan={COLUMNS.length}
+                  className="pb-1 text-[10px] normal-case tracking-normal text-slate-400"
+                >
                   Sorted within this page only. Server order is by coverage
                   tier, then symbol.
                 </td>
@@ -537,7 +616,9 @@ function InstrumentsTable({
                   >
                     <span className="font-medium">{item.symbol}</span>
                   </Link>
-                  <div className="text-xs text-slate-500">{item.company_name}</div>
+                  <div className="text-xs text-slate-500">
+                    {item.company_name}
+                  </div>
                 </td>
                 <td className="py-2 pr-4 text-xs text-slate-600">
                   {item.gics_sector ?? "—"}
@@ -548,11 +629,15 @@ function InstrumentsTable({
                 <td className="py-2 pr-4">
                   <TierBadge tier={item.coverage_tier} />
                 </td>
-                <td className="py-2 pr-0 text-right text-xs tabular-nums text-slate-600">
+                <td className="py-2 pr-4 text-right text-xs tabular-nums text-slate-600">
                   {isUsablePrice(item.latest_quote?.last)
-                    ? formatMoney(item.latest_quote.last, item.currency ?? "USD")
+                    ? formatMoney(
+                        item.latest_quote.last,
+                        item.currency ?? "USD",
+                      )
                     : "—"}
                 </td>
+                <DayChangeCell item={item} />
               </tr>
             ),
           )}

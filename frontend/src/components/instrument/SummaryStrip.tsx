@@ -53,6 +53,21 @@ function formatPct(value: string | null | undefined, signed = false): string {
   return `${sign}${pct}%`;
 }
 
+/** #1924: compact "as of" close date (e.g. "12 Jun") for the day-change stamp.
+ *  Returns null on an absent/unparseable date. */
+function formatDayChangeAsOf(iso: string | null): string | null {
+  if (iso === null) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  // Format in UTC: `new Date("YYYY-MM-DD")` is UTC midnight, so a local-TZ
+  // format would render the prior day west of UTC and shift the close date.
+  return d.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    timeZone: "UTC",
+  });
+}
+
 function isThesisStale(thesis: ThesisDetail | null): boolean {
   if (thesis === null) return true;
   const created = new Date(thesis.created_at);
@@ -140,7 +155,9 @@ export function SummaryStrip({
     companion !== null &&
     primaryCurrency !== null &&
     companion.currency !== primaryCurrency;
-  const changeNum = price?.day_change_pct != null ? Number(price.day_change_pct) : null;
+  const changeNum =
+    price?.day_change_pct != null ? Number(price.day_change_pct) : null;
+  const dayChangeAsOf = formatDayChangeAsOf(price?.day_change_as_of ?? null);
   const changeColor =
     changeNum === null
       ? "text-slate-500"
@@ -212,8 +229,19 @@ export function SummaryStrip({
               {price?.day_change != null && Number(price.day_change) >= 0
                 ? "+"
                 : ""}
-              {price?.day_change ?? "—"} ({formatPct(price?.day_change_pct, true)})
+              {price?.day_change ?? "—"} (
+              {formatPct(price?.day_change_pct, true)})
             </span>
+            {/* #1924: stamp the day-change with its close date so a stale close
+                (common in the loop) reads honestly rather than as "today". */}
+            {dayChangeAsOf ? (
+              <span
+                className="text-xs tabular-nums text-slate-400 dark:text-slate-500"
+                title="Close-to-close change, as of this close"
+              >
+                as of {dayChangeAsOf}
+              </span>
+            ) : null}
           </>
         ) : null}
       </div>

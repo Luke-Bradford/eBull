@@ -35,6 +35,7 @@ from app.services.market_data import (
     _compute_rolling_returns,
     _compute_volatility_30d,
     _most_recent_trading_day,
+    compute_day_change,
     compute_spread_pct,
 )
 
@@ -621,6 +622,30 @@ class TestComputeSpreadPct:
         spread = compute_spread_pct(Decimal("100"), Decimal("100.50"))
         assert spread is not None
         assert spread < DEFAULT_MAX_SPREAD_PCT
+
+
+class TestComputeDayChange:
+    """#1924 — close-to-close fractional day-change (pure)."""
+
+    def test_gain_is_positive_fraction(self) -> None:
+        # 102 from 100 → +0.02 (a fraction, not 2.0)
+        assert compute_day_change(Decimal("102"), Decimal("100")) == Decimal("0.02")
+
+    def test_loss_is_negative_fraction(self) -> None:
+        # AAPL 291.22 from 295.65 → ≈ -1.50%
+        pct = compute_day_change(Decimal("291.22"), Decimal("295.65"))
+        assert pct is not None
+        assert abs(float(pct) - (-0.014984)) < 1e-6
+
+    def test_flat_is_zero(self) -> None:
+        assert compute_day_change(Decimal("50"), Decimal("50")) == Decimal("0")
+
+    def test_zero_prior_close_returns_none(self) -> None:
+        # A zero close is a non-price sentinel — no meaningful change.
+        assert compute_day_change(Decimal("10"), Decimal("0")) is None
+
+    def test_negative_prior_close_returns_none(self) -> None:
+        assert compute_day_change(Decimal("10"), Decimal("-5")) is None
 
 
 # ---------------------------------------------------------------------------

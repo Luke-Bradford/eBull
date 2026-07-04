@@ -37,7 +37,15 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 // Stub RawOhlcvTable to avoid testing its internals in ChartPage tests.
 vi.mock("@/pages/components/RawOhlcvTable", () => ({
-  RawOhlcvTable: ({ rows, symbol, range }: { rows: unknown[]; symbol: string; range: string }) => (
+  RawOhlcvTable: ({
+    rows,
+    symbol,
+    range,
+  }: {
+    rows: unknown[];
+    symbol: string;
+    range: string;
+  }) => (
     <div
       data-testid="raw-ohlcv-table-stub"
       data-row-count={rows.length}
@@ -79,7 +87,8 @@ vi.mock("@/api/instruments", () => ({
 }));
 
 vi.mock("@/lib/chartData", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/chartData")>("@/lib/chartData");
+  const actual =
+    await vi.importActual<typeof import("@/lib/chartData")>("@/lib/chartData");
   return {
     ...actual,
     fetchChartCandles: vi.fn(),
@@ -88,7 +97,11 @@ vi.mock("@/lib/chartData", async () => {
 
 import { fetchInstrumentSummary } from "@/api/instruments";
 import type { InstrumentSummary, ChartRange } from "@/api/types";
-import { fetchChartCandles, type NormalisedBar, type NormalisedChartCandles } from "@/lib/chartData";
+import {
+  fetchChartCandles,
+  type NormalisedBar,
+  type NormalisedChartCandles,
+} from "@/lib/chartData";
 import { ChartPage } from "./ChartPage";
 
 const mockSummary = vi.mocked(fetchInstrumentSummary);
@@ -114,8 +127,23 @@ function makeSummary(): InstrumentSummary {
     instrument_id: 1,
     is_tradable: true,
     coverage_tier: 1,
-    identity: { symbol: "AAPL", display_name: "Apple Inc.", market_cap: null, sector: null },
-    price: { current: "189.50", day_change: null, day_change_pct: null, week_52_high: null, week_52_low: null, currency: "USD", display_current: null, display_currency: null },
+    identity: {
+      symbol: "AAPL",
+      display_name: "Apple Inc.",
+      market_cap: null,
+      sector: null,
+    },
+    price: {
+      current: "189.50",
+      day_change: null,
+      day_change_pct: null,
+      day_change_as_of: null,
+      week_52_high: null,
+      week_52_low: null,
+      currency: "USD",
+      display_current: null,
+      display_currency: null,
+    },
     key_stats: null,
     source: {},
     has_sec_cik: true,
@@ -282,7 +310,9 @@ describe("ChartPage — chart body", () => {
     mockCandles.mockRejectedValue(new Error("network down"));
     renderPage();
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /retry/i }),
+      ).toBeInTheDocument();
     });
     expect(screen.queryByTestId("chart-canvas-stub")).not.toBeInTheDocument();
   });
@@ -321,11 +351,15 @@ describe("ChartPage — indicator toggles", () => {
     });
     await user.click(screen.getByTestId("indicator-sma20"));
     await waitFor(() => {
-      expect(screen.getByTestId("chart-canvas-stub").getAttribute("data-indicators")).toBe("sma20");
+      expect(
+        screen.getByTestId("chart-canvas-stub").getAttribute("data-indicators"),
+      ).toBe("sma20");
     });
     await user.click(screen.getByTestId("indicator-sma20"));
     await waitFor(() => {
-      expect(screen.getByTestId("chart-canvas-stub").getAttribute("data-indicators")).toBe("");
+      expect(
+        screen.getByTestId("chart-canvas-stub").getAttribute("data-indicators"),
+      ).toBe("");
     });
   });
 
@@ -443,11 +477,16 @@ describe("ChartPage — compare fetch error handling", () => {
     await waitFor(() => {
       expect(screen.getByTestId("compare-chip-MSFT")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("compare-chip-MSFT")).not.toHaveAttribute("data-error");
+    expect(screen.getByTestId("compare-chip-MSFT")).not.toHaveAttribute(
+      "data-error",
+    );
 
     // BAD chip renders with error styling (data-error="true").
     expect(screen.getByTestId("compare-chip-BAD")).toBeInTheDocument();
-    expect(screen.getByTestId("compare-chip-BAD")).toHaveAttribute("data-error", "true");
+    expect(screen.getByTestId("compare-chip-BAD")).toHaveAttribute(
+      "data-error",
+      "true",
+    );
   });
 });
 
@@ -483,13 +522,17 @@ describe("ChartPage — Phase 3 trend toggles", () => {
     await user.click(screen.getByTestId("trend-regression"));
     await waitFor(() => {
       expect(
-        screen.getByTestId("chart-canvas-stub").getAttribute("data-show-regression"),
+        screen
+          .getByTestId("chart-canvas-stub")
+          .getAttribute("data-show-regression"),
       ).toBe("true");
     });
     await user.click(screen.getByTestId("trend-regression"));
     await waitFor(() => {
       expect(
-        screen.getByTestId("chart-canvas-stub").getAttribute("data-show-regression"),
+        screen
+          .getByTestId("chart-canvas-stub")
+          .getAttribute("data-show-regression"),
       ).toBe("false");
     });
   });
@@ -528,7 +571,9 @@ describe("ChartPage — Phase 4 view toggle", () => {
     await waitFor(() => {
       expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
     });
-    expect(screen.queryByTestId("raw-ohlcv-table-stub")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("raw-ohlcv-table-stub"),
+    ).not.toBeInTheDocument();
   });
 
   it("clicking 'Raw data' button shows raw table and hides chart canvas", async () => {
@@ -554,7 +599,9 @@ describe("ChartPage — Phase 4 view toggle", () => {
     await waitFor(() => {
       expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
     });
-    expect(screen.queryByTestId("raw-ohlcv-table-stub")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("raw-ohlcv-table-stub"),
+    ).not.toBeInTheDocument();
   });
 
   it("pre-set ?view=raw renders raw table directly", async () => {

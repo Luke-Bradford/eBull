@@ -53,6 +53,8 @@ function makeResponse(
           spread_pct: 0.054,
           quoted_at: "2026-04-08T12:00:00Z",
         },
+        day_change_pct: "0.0152",
+        day_change_as_of: "2026-04-08",
       },
       {
         instrument_id: 2,
@@ -73,6 +75,8 @@ function makeResponse(
           spread_pct: 0.024,
           quoted_at: "2026-04-08T12:00:00Z",
         },
+        day_change_pct: "-0.0093",
+        day_change_as_of: "2026-04-07",
       },
       {
         instrument_id: 3,
@@ -87,6 +91,10 @@ function makeResponse(
         is_tradable: true,
         coverage_tier: null,
         latest_quote: null,
+        // #1924: change present from price_daily while the live quote is
+        // absent — the list shows the % with a "—" price (as-of dated).
+        day_change_pct: "0.0021",
+        day_change_as_of: "2026-04-08",
       },
     ],
     total: 3,
@@ -127,6 +135,21 @@ describe("InstrumentsPage — data rendering", () => {
     expect(screen.getByText("MSFT")).toBeInTheDocument();
     expect(screen.getByText("Microsoft Corp.")).toBeInTheDocument();
     expect(screen.getByText("JPM")).toBeInTheDocument();
+  });
+
+  it("renders the day-change column with colored pct + as-of close date (#1924)", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("AAPL")).toBeInTheDocument();
+    });
+    // AAPL +1.52% (day_change_pct 0.0152), stamped with its close date.
+    expect(screen.getByText("+1.52%")).toBeInTheDocument();
+    // MSFT negative change.
+    expect(screen.getByText("-0.93%")).toBeInTheDocument();
+    // JPM has a change from price_daily but no live quote → the % shows while
+    // the price cell stays "—" (change is dated so it reads honestly).
+    expect(screen.getByText("+0.21%")).toBeInTheDocument();
+    expect(screen.getAllByText(/^as of /).length).toBeGreaterThanOrEqual(3);
   });
 
   it("renders coverage tier badges in the table", async () => {
@@ -374,7 +397,9 @@ describe("InstrumentsPage — exchange label", () => {
     });
     const table = screen.getByRole("table");
     // exchange_name "Nasdaq" is shown; the raw id "4" never appears.
-    expect(within(table).getAllByText("Nasdaq").length).toBeGreaterThanOrEqual(1);
+    expect(within(table).getAllByText("Nasdaq").length).toBeGreaterThanOrEqual(
+      1,
+    );
     expect(within(table).queryByText("4")).not.toBeInTheDocument();
   });
 
@@ -395,6 +420,8 @@ describe("InstrumentsPage — exchange label", () => {
             is_tradable: true,
             coverage_tier: 3,
             latest_quote: null,
+            day_change_pct: null,
+            day_change_as_of: null,
           },
         ],
         total: 1,
@@ -404,7 +431,9 @@ describe("InstrumentsPage — exchange label", () => {
     await waitFor(() => {
       expect(screen.getByText("NEWX")).toBeInTheDocument();
     });
-    expect(within(screen.getByRole("table")).getByText("99")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("table")).getByText("99"),
+    ).toBeInTheDocument();
   });
 });
 
@@ -427,6 +456,8 @@ describe("InstrumentsPage — uncovered rows", () => {
       is_tradable: true,
       coverage_tier: null,
       latest_quote: null,
+      day_change_pct: null,
+      day_change_as_of: null,
       ...overrides,
     };
   }

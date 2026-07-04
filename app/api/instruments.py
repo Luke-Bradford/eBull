@@ -54,6 +54,7 @@ from app.services.dimensional_facts_store import read_segments
 from app.services.fcf_yield import fcf_yield_series
 from app.services.fx import FxRateNotFound, convert, load_live_fx_rates
 from app.services.intraday_candles import fetch_intraday_candles
+from app.services.market_data import load_day_changes
 from app.services.operators import (
     AmbiguousOperatorError,
     NoOperatorError,
@@ -167,6 +168,14 @@ class InstrumentListItem(BaseModel):
     is_tradable: bool
     coverage_tier: int | None
     latest_quote: QuoteSnapshot | None
+    # #1924: close-to-close day-change from ``price_daily`` (last two positive
+    # closes), a SEPARATE source from ``latest_quote`` (the thin live-tick
+    # table). ``day_change_pct`` is a FRACTION (``-0.015`` = −1.5%);
+    # ``day_change_as_of`` is the latest close's date, stamped so a stale close
+    # reads honestly (settled-decisions.md:767). Both NULL when <2 positive
+    # closes exist.
+    day_change_pct: Decimal | None = None
+    day_change_as_of: date | None = None
 
 
 class InstrumentListResponse(BaseModel):
@@ -228,6 +237,10 @@ class InstrumentPrice(BaseModel):
     current: Decimal | None
     day_change: Decimal | None
     day_change_pct: Decimal | None
+    # #1924: date of the latest ``price_daily`` close the day-change is computed
+    # from — stamped so a stale close reads honestly rather than as "today"
+    # (settled-decisions.md:767). NULL when no day-change is available.
+    day_change_as_of: date | None = None
     week_52_high: Decimal | None
     week_52_low: Decimal | None
     currency: str | None
@@ -655,9 +668,14 @@ def list_instruments(
         cur.execute(items_sql, items_params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
         rows = cur.fetchall()
 
+    # #1924: batch day-change for only this page's instruments (not the whole
+    # universe) from ``price_daily`` last-two-positive-closes.
+    day_changes = load_day_changes(conn, [int(r["instrument_id"]) for r in rows])  # type: ignore[arg-type]
+
     items: list[InstrumentListItem] = []
     for r in rows:
         sc = resolve_sector_spdr(r.get("sic"))  # type: ignore[arg-type]
+        dc = day_changes.get(int(r["instrument_id"]))  # type: ignore[arg-type]
         items.append(
             InstrumentListItem(
                 instrument_id=r["instrument_id"],  # type: ignore[arg-type]
@@ -672,6 +690,8 @@ def list_instruments(
                 is_tradable=r["is_tradable"],  # type: ignore[arg-type]
                 coverage_tier=r["coverage_tier"],  # type: ignore[arg-type]
                 latest_quote=_parse_quote(r),
+                day_change_pct=dc.change_pct if dc is not None else None,
+                day_change_as_of=dc.as_of if dc is not None else None,
             )
         )
 
@@ -3715,8 +3735,8 @@ def get_instrument_summary(
     # live trade ``last`` (>0) → bid/ask mid → none — so the instrument
     # summary current price matches the position mark on the same
     # instrument. A non-positive last is not a valid price (eToro persists
-    # last=0.00 for un-freshly-traded instruments). Day change + 52w range
-    # stay null until a SEC-derived computation lands; the frontend renders "—".
+    # last=0.00 for un-freshly-traded instruments). 52w range stays null until
+    # a SEC-derived computation lands; the frontend renders "—".
     mark = resolve_quote_price(
         float(row["last"]) if row.get("last") is not None else None,
         float(row["bid"]) if row.get("bid") is not None else None,
@@ -3750,22 +3770,32 @@ def get_instrument_summary(
                     display_currency,
                     symbol_clean,
                 )
+    instrument_id_int = int(row["instrument_id"])  # type: ignore[arg-type]
+
+    # #1924: day-change from ``price_daily`` last-two-positive-closes — a
+    # SEPARATE source from the ``quotes`` mark above. Emit ``price_block`` when
+    # EITHER a quote price OR a day-change is present, so the detail page shows
+    # the change for the ~5k quote-less names too (list↔detail parity; the list
+    # surfaces it from the same helper). ``current`` stays quote-sourced and is
+    # ``None`` when there is no live quote — the frontend renders "—" for the
+    # price while still showing the dated change.
+    dc = load_day_changes(conn, [instrument_id_int]).get(instrument_id_int)
     price_block = (
         InstrumentPrice(
             current=current_price,
-            day_change=None,
-            day_change_pct=None,
+            day_change=dc.change_abs if dc is not None else None,
+            day_change_pct=dc.change_pct if dc is not None else None,
+            day_change_as_of=dc.as_of if dc is not None else None,
             week_52_high=None,
             week_52_low=None,
             currency=native_ccy,  # type: ignore[arg-type]
             display_current=display_price,
             display_currency=display_ccy_for_price,
         )
-        if current_price is not None
+        if current_price is not None or dc is not None
         else None
     )
 
-    instrument_id_int = int(row["instrument_id"])  # type: ignore[arg-type]
     local_fundamentals: dict[str, Decimal | None] = {}
     use_local_sec = _has_sec_cik(conn, instrument_id_int)
     if use_local_sec:

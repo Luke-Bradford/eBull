@@ -18,7 +18,9 @@ import type {
   ThesisDetail,
 } from "@/api/types";
 
-function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary {
+function summary(
+  overrides: Partial<InstrumentSummary> = {},
+): InstrumentSummary {
   return {
     instrument_id: 42,
     is_tradable: true,
@@ -43,6 +45,7 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
       current: "200.50",
       day_change: "1.50",
       day_change_pct: "0.00753",
+      day_change_as_of: "2026-04-08",
       week_52_high: "250.00",
       week_52_low: "140.00",
       currency: "USD",
@@ -166,6 +169,7 @@ describe("SummaryStrip — action gating", () => {
             current: "200.50",
             day_change: "1.50",
             day_change_pct: "0.00753",
+            day_change_as_of: "2026-04-08",
             week_52_high: "250.00",
             week_52_low: "140.00",
             currency: "USD",
@@ -501,8 +505,12 @@ describe("SummaryStrip — action gating", () => {
         position={{
           ...heldPosition(),
           trades: [
-            { position_id: 1 } as unknown as InstrumentPositionDetail["trades"][0],
-            { position_id: 2 } as unknown as InstrumentPositionDetail["trades"][0],
+            {
+              position_id: 1,
+            } as unknown as InstrumentPositionDetail["trades"][0],
+            {
+              position_id: 2,
+            } as unknown as InstrumentPositionDetail["trades"][0],
           ],
         }}
         {...noopProps()}
@@ -553,6 +561,7 @@ describe("SummaryStrip — live-tick currency sourcing (#1906)", () => {
             current: "100.00",
             day_change: null,
             day_change_pct: null,
+            day_change_as_of: null,
             week_52_high: null,
             week_52_low: null,
             currency: "USD",
@@ -594,6 +603,7 @@ describe("SummaryStrip — live-tick currency sourcing (#1906)", () => {
             current: "100.00",
             day_change: null,
             day_change_pct: null,
+            day_change_as_of: null,
             week_52_high: null,
             week_52_low: null,
             currency: "USD",
@@ -620,6 +630,8 @@ describe("SummaryStrip — live-tick currency sourcing (#1906)", () => {
       );
     });
     expect(screen.getByText("USD 110.00")).toBeInTheDocument();
-    expect(screen.getByTestId("price-companion")).toHaveTextContent("≈ GBP 86.00");
+    expect(screen.getByTestId("price-companion")).toHaveTextContent(
+      "≈ GBP 86.00",
+    );
   });
 });
