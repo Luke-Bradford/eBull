@@ -52,6 +52,7 @@ from app.services.broker_credentials import (
 from app.services.dimensional_facts import DimensionalAxis
 from app.services.dimensional_facts_store import read_segments
 from app.services.fcf_yield import fcf_yield_series
+from app.services.fx import FxRateNotFound, convert, load_live_fx_rates
 from app.services.intraday_candles import fetch_intraday_candles
 from app.services.operators import (
     AmbiguousOperatorError,
@@ -77,6 +78,7 @@ from app.services.risk_metrics import (
     ols_beta,
     simple_returns,
 )
+from app.services.runtime_config import get_runtime_config
 from app.services.sector_classification import resolve_sector_spdr, sector_spdr_case_sql
 
 logger = logging.getLogger(__name__)
@@ -206,6 +208,14 @@ class InstrumentIdentity(BaseModel):
 
 
 class InstrumentPrice(BaseModel):
+    """``current`` + ``currency`` are FX-converted to the operator's display
+    currency (#1906) — matching the SSE live-tick ``display`` block, so the
+    header price is never dependent on which of the two paths answers
+    first. Falls back to the native price + native currency only when no
+    FX rate is available. Contrast ``InstrumentIdentity.currency``, which
+    stays the instrument's NATIVE listing currency (the price chart's axis
+    per the #1845 settled convention)."""
+
     current: Decimal | None
     day_change: Decimal | None
     day_change_pct: Decimal | None
@@ -3695,14 +3705,38 @@ def get_instrument_summary(
         float(row["ask"]) if row.get("ask") is not None else None,
     )
     current_price: Decimal | None = Decimal(str(mark)) if mark is not None else None
+    native_ccy = row["currency"]  # type: ignore[assignment]
+    # #1906: FX-convert to the operator's display currency, mirroring the
+    # SSE live-tick path's ``display`` block (app/api/sse_quotes.py
+    # ``_format_tick``) so the header price never depends on which of the
+    # two paths (REST snapshot vs live tick) answers first. Falls back to
+    # the native price + native currency (never a converted number under
+    # a display-currency label) when no FX rate is available — same
+    # graceful-degrade contract as ``convert_quote_fields``.
+    display_price = current_price
+    display_ccy_for_price = native_ccy
+    if current_price is not None and native_ccy is not None:
+        display_currency = get_runtime_config(conn).display_currency
+        if native_ccy != display_currency:
+            try:
+                rates = load_live_fx_rates(conn)
+                display_price = convert(current_price, native_ccy, display_currency, rates)
+                display_ccy_for_price = display_currency
+            except FxRateNotFound:
+                logger.warning(
+                    "get_instrument_summary: FX rate %s->%s not found for %s; showing native price",
+                    native_ccy,
+                    display_currency,
+                    symbol_clean,
+                )
     price_block = (
         InstrumentPrice(
-            current=current_price,
+            current=display_price,
             day_change=None,
             day_change_pct=None,
             week_52_high=None,
             week_52_low=None,
-            currency=row["currency"],  # type: ignore[arg-type]
+            currency=display_ccy_for_price,  # type: ignore[arg-type]
         )
         if current_price is not None
         else None

@@ -1,8 +1,8 @@
 /**
  * Render-state tests for the Activity tab (#1593 PR-2): loading / error /
  * empty / table, mirror-toggle refetch param, symbol fallback, and the
- * USD money + holding-period rendering — the state contract per
- * loading-error-empty-states.md.
+ * display-currency money (#1906) + holding-period rendering — the state
+ * contract per loading-error-empty-states.md.
  */
 
 import { render, screen, waitFor } from "@testing-library/react";
@@ -37,8 +37,8 @@ function event(over: Partial<ActivityEventItem> = {}): ActivityEventItem {
     units: 82.135523,
     price: 120.56,
     executed_at: "2025-11-14T19:24:35.307Z",
-    fees_usd: 0,
-    realized_pnl_usd: 1910.47,
+    fees: 0,
+    realized_pnl: 1910.47,
     holding_period_days: 94.1,
     source: "etoro_history",
     is_mirror: false,
@@ -46,8 +46,12 @@ function event(over: Partial<ActivityEventItem> = {}): ActivityEventItem {
   };
 }
 
-function response(events: ActivityEventItem[], total?: number): ActivityResponse {
-  return { events, total: total ?? events.length, include_mirrors: false };
+function response(
+  events: ActivityEventItem[],
+  total?: number,
+  displayCurrency = "GBP",
+): ActivityResponse {
+  return { events, total: total ?? events.length, include_mirrors: false, display_currency: displayCurrency };
 }
 
 describe("ActivitySection states", () => {
@@ -76,16 +80,24 @@ describe("ActivitySection states", () => {
     expect(screen.getByText(/portfolio sync/)).toBeInTheDocument();
   });
 
-  it("renders a close row with USD P&L, side pill and holding period", async () => {
-    fetchMock.mockResolvedValue(response([event()]));
+  it("renders a close row with display-currency P&L, side pill and holding period", async () => {
+    fetchMock.mockResolvedValue(response([event()], undefined, "GBP"));
     render(<ActivitySection />);
     await waitFor(() => {
       expect(screen.getByText("ILMN")).toBeInTheDocument();
     });
     expect(screen.getByText("SELL")).toBeInTheDocument();
-    // en-GB locale renders USD as "US$…"
-    expect(screen.getByText("US$1,910.47")).toBeInTheDocument();
+    expect(screen.getByText("£1,910.47")).toBeInTheDocument();
     expect(screen.getByText("94 d")).toBeInTheDocument();
+  });
+
+  it("renders money in whatever display_currency the response carries (#1906)", async () => {
+    fetchMock.mockResolvedValue(response([event()], undefined, "USD"));
+    render(<ActivitySection />);
+    await waitFor(() => {
+      // en-GB locale renders USD as "US$…"
+      expect(screen.getByText("US$1,910.47")).toBeInTheDocument();
+    });
   });
 
   it("falls back to #etoro_id when the symbol is unresolved", async () => {

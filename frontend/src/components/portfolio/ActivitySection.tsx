@@ -13,8 +13,9 @@ import { useAsync } from "@/lib/useAsync";
  * excluded by default, consistent with the value-history chart's
  * own-portfolio basis; the toggle widens the server-side filter.
  *
- * Money columns (fees, realised P&L) are USD account-currency; price is
- * the instrument's native-currency rate, so it renders as a plain
+ * Money columns (fees, realised P&L) are converted to the operator's
+ * display currency (#1906, server-side via `ActivityResponse.display_currency`);
+ * price is the instrument's native-currency rate, so it renders as a plain
  * number, not money.
  */
 export function ActivitySection() {
@@ -53,38 +54,43 @@ export function ActivitySection() {
             description="Events appear once the portfolio sync observes a position open or close — place an order or wait for the next sync."
           />
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:text-slate-400">
-                <th className="px-3 py-2 font-medium">When</th>
-                <th className="px-3 py-2 font-medium">Action</th>
-                <th className="px-3 py-2 font-medium">Symbol</th>
-                <th className="px-3 py-2 text-right font-medium">Units</th>
-                <th className="px-3 py-2 text-right font-medium">Price</th>
-                <th className="px-3 py-2 text-right font-medium">Fees</th>
-                <th className="px-3 py-2 text-right font-medium">Realised P&amp;L</th>
-                <th className="px-3 py-2 text-right font-medium">Held</th>
-              </tr>
-            </thead>
-            <tbody>
-              {activity.data.events.map((e) => (
-                <ActivityRow key={e.event_id} event={e} />
-              ))}
-            </tbody>
-          </table>
+          (() => {
+            const { events, display_currency: displayCurrency } = activity.data;
+            return (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                    <th className="px-3 py-2 font-medium">When</th>
+                    <th className="px-3 py-2 font-medium">Action</th>
+                    <th className="px-3 py-2 font-medium">Symbol</th>
+                    <th className="px-3 py-2 text-right font-medium">Units</th>
+                    <th className="px-3 py-2 text-right font-medium">Price</th>
+                    <th className="px-3 py-2 text-right font-medium">Fees</th>
+                    <th className="px-3 py-2 text-right font-medium">Realised P&amp;L</th>
+                    <th className="px-3 py-2 text-right font-medium">Held</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.map((e) => (
+                    <ActivityRow key={e.event_id} event={e} currency={displayCurrency} />
+                  ))}
+                </tbody>
+              </table>
+            );
+          })()
         )}
       </div>
     </div>
   );
 }
 
-function ActivityRow({ event }: { event: ActivityEventItem }) {
+function ActivityRow({ event, currency }: { event: ActivityEventItem; currency: string }) {
   const sideLabel = event.side === "buy" ? "BUY" : "SELL";
   const sidePill =
     event.side === "buy"
       ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
       : "bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-400";
-  const pnl = event.realized_pnl_usd;
+  const pnl = event.realized_pnl;
   const pnlClass =
     pnl === null
       ? "text-slate-400"
@@ -117,10 +123,10 @@ function ActivityRow({ event }: { event: ActivityEventItem }) {
         {formatNumber(event.price, 2)}
       </td>
       <td className="px-3 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
-        {formatMoney(event.fees_usd, "USD")}
+        {formatMoney(event.fees, currency)}
       </td>
       <td className={`px-3 py-2 text-right tabular-nums font-medium ${pnlClass}`}>
-        {formatMoney(pnl, "USD")}
+        {formatMoney(pnl, currency)}
       </td>
       <td className="px-3 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
         {event.holding_period_days === null ? "—" : `${Math.round(event.holding_period_days)} d`}

@@ -651,6 +651,181 @@ class TestPortfolioFxConversion:
 
 
 # ---------------------------------------------------------------------------
+# TestGetActivity — GET /portfolio/activity FX conversion (#1906)
+# ---------------------------------------------------------------------------
+
+
+def _make_activity_row(
+    *,
+    event_id: int = 1,
+    position_id: int = 100,
+    event_kind: str = "close",
+    side: str = "sell",
+    symbol: str | None = "AAPL",
+    etoro_instrument_id: int = 1,
+    units: float = 10.0,
+    price: float | None = 150.0,
+    fees_usd: float | None = 0.0,
+    realized_pnl_usd: float | None = 1910.47,
+    holding_period_days: float | None = 94.1,
+    source: str = "etoro_history",
+    social_trade_id: int = 0,
+) -> dict[str, Any]:
+    return {
+        "event_id": event_id,
+        "position_id": position_id,
+        "event_kind": event_kind,
+        "side": side,
+        "units": units,
+        "price": price,
+        "executed_at": _NOW,
+        "fees_usd": fees_usd,
+        "realized_pnl_usd": realized_pnl_usd,
+        "source": source,
+        "etoro_instrument_id": etoro_instrument_id,
+        "social_trade_id": social_trade_id,
+        "symbol": symbol,
+        "holding_period_days": holding_period_days,
+    }
+
+
+def _with_chained_conn(cursor_results: list[Any]) -> MagicMock:
+    """Like ``_with_conn``, but for handlers that chain
+    ``cur.execute(...).fetchone()`` / ``.fetchall()`` in a single ``with
+    conn.cursor()`` block (real psycopg3 cursors return ``self`` from
+    ``execute()``, enabling this) — ``get_activity`` does this, unlike the
+    other endpoints in this file that call ``cur.execute()`` then
+    ``cur.fetchone()``/``cur.fetchall()`` as separate statements.
+
+    ``cursor_results`` supplies one entry per ``execute()`` call, already
+    shaped for whichever of ``fetchone``/``fetchall`` the call site invokes
+    (a single dict, or a list of dicts)."""
+    cur = MagicMock()
+    result_iter = iter(cursor_results)
+
+    def _on_execute(*_args: Any, **_kwargs: Any) -> MagicMock:
+        cur._last_result = next(result_iter)
+        return cur
+
+    cur.execute.side_effect = _on_execute
+    cur.fetchone.side_effect = lambda: cur._last_result
+    cur.fetchall.side_effect = lambda: cur._last_result
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+
+    def _override() -> Iterator[MagicMock]:
+        yield conn
+
+    app.dependency_overrides[get_conn] = _override
+    return conn
+
+
+class TestGetActivity:
+    """GET /portfolio/activity — fees / realized_pnl FX-converted to
+    display_currency (#1906). trade_events.fees_usd / .realized_pnl_usd are
+    USD at rest; the response converts them, mirroring GET /portfolio's
+    unrealized_pnl conversion."""
+
+    def setup_method(self) -> None:
+        gbp_config = RuntimeConfig(
+            enable_auto_trading=False,
+            enable_live_trading=False,
+            display_currency="GBP",
+            updated_at=_NOW,
+            updated_by="test",
+            reason="test",
+        )
+        self._patch_config = patch(
+            "app.api.portfolio.get_runtime_config",
+            return_value=gbp_config,
+        )
+        self._patch_fx_meta = patch(
+            "app.api.portfolio.load_live_fx_rates_with_metadata",
+            return_value={
+                ("USD", "GBP"): {
+                    "rate": Decimal("0.78"),
+                    "quoted_at": _FX_QUOTED_AT,
+                },
+            },
+        )
+        self._patch_config.start()
+        self._patch_fx_meta.start()
+
+    def teardown_method(self) -> None:
+        self._patch_config.stop()
+        self._patch_fx_meta.stop()
+        _cleanup()
+
+    def test_fees_and_realized_pnl_converted_to_display_currency(self) -> None:
+        row = _make_activity_row(fees_usd=10.0, realized_pnl_usd=1910.47)
+        _with_chained_conn([{"total": 1}, [row]])
+
+        resp = client.get("/portfolio/activity")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["display_currency"] == "GBP"
+        event = body["events"][0]
+        assert event["fees"] == pytest.approx(7.8)  # 10 USD * 0.78
+        assert event["realized_pnl"] == pytest.approx(1490.1666)  # 1910.47 * 0.78
+        # price is native currency — never converted.
+        assert event["price"] == 150.0
+
+    def test_null_fees_and_pnl_stay_null(self) -> None:
+        row = _make_activity_row(fees_usd=None, realized_pnl_usd=None)
+        _with_chained_conn([{"total": 1}, [row]])
+
+        resp = client.get("/portfolio/activity")
+        assert resp.status_code == 200
+        event = resp.json()["events"][0]
+        assert event["fees"] is None
+        assert event["realized_pnl"] is None
+
+    def test_usd_display_currency_is_a_no_op(self) -> None:
+        usd_config = RuntimeConfig(
+            enable_auto_trading=False,
+            enable_live_trading=False,
+            display_currency="USD",
+            updated_at=_NOW,
+            updated_by="test",
+            reason="test",
+        )
+        with patch("app.api.portfolio.get_runtime_config", return_value=usd_config):
+            row = _make_activity_row(fees_usd=10.0, realized_pnl_usd=1910.47)
+            _with_chained_conn([{"total": 1}, [row]])
+
+            resp = client.get("/portfolio/activity")
+            assert resp.status_code == 200
+            body = resp.json()
+
+            assert body["display_currency"] == "USD"
+            event = body["events"][0]
+            assert event["fees"] == 10.0
+            assert event["realized_pnl"] == 1910.47
+
+    def test_missing_fx_rate_reports_usd_not_the_target_currency(self) -> None:
+        """Codex ckpt-2 HIGH finding (#1906): `_convert_value` silently
+        returns the original USD value when no FX rate is available, so a
+        missing-rate response MUST report `display_currency: "USD"` — never
+        the target currency label over an unconverted USD number."""
+        with patch("app.api.portfolio.load_live_fx_rates_with_metadata", return_value={}):
+            row = _make_activity_row(fees_usd=10.0, realized_pnl_usd=1910.47)
+            _with_chained_conn([{"total": 1}, [row]])
+
+            resp = client.get("/portfolio/activity")
+            assert resp.status_code == 200
+            body = resp.json()
+
+            assert body["display_currency"] == "USD"
+            event = body["events"][0]
+            assert event["fees"] == 10.0
+            assert event["realized_pnl"] == 1910.47
+
+
+# ---------------------------------------------------------------------------
 # TestPortfolioMirrors — mirrors field in portfolio response (#221)
 # ---------------------------------------------------------------------------
 

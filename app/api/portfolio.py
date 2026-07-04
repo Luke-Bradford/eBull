@@ -1150,10 +1150,15 @@ def get_value_history(
 class ActivityEventItem(BaseModel):
     """One trade_events row, render-ready.
 
-    Money fields (fees_usd, realized_pnl_usd) are USD account-currency;
-    price is in the instrument's native currency. ``symbol`` is None
-    when the instrument is absent from the current universe (deep
-    history) — the FE falls back to ``#<etoro_instrument_id>``.
+    ``fees`` / ``realized_pnl`` are FX-converted to the operator's display
+    currency (#1906 — matching every other money figure on Portfolio, e.g.
+    ``unrealized_pnl`` above); see ``ActivityResponse.display_currency``.
+    Stored at rest as USD (``trade_events.fees_usd`` / ``.realized_pnl_usd``
+    — eToro's raw account-currency figures); converted here, not persisted
+    converted, so the native amount stays auditable in the DB. ``price`` is
+    in the instrument's native currency (unrelated to account currency).
+    ``symbol`` is None when the instrument is absent from the current
+    universe (deep history) — the FE falls back to ``#<etoro_instrument_id>``.
     """
 
     event_id: int
@@ -1165,8 +1170,8 @@ class ActivityEventItem(BaseModel):
     units: float
     price: float | None
     executed_at: datetime
-    fees_usd: float | None
-    realized_pnl_usd: float | None
+    fees: float | None
+    realized_pnl: float | None
     # Close events only: days between this position's open event and
     # the close (fractional). None for opens or when no open is on file.
     holding_period_days: float | None
@@ -1179,6 +1184,9 @@ class ActivityResponse(BaseModel):
     # Total rows matching the filter (events is capped at `limit`).
     total: int
     include_mirrors: bool
+    # Currency `fees` / `realized_pnl` on every event are converted to
+    # (#1906) — the operator's runtime `display_currency`.
+    display_currency: str
 
 
 @router.get("/activity", response_model=ActivityResponse)
@@ -1192,7 +1200,32 @@ def get_activity(
     Mirror-originated rows (``social_trade_id != 0``) are excluded by
     default, consistent with the value-history chart's own-portfolio
     basis; ``include_mirrors=true`` widens the filter.
+
+    ``fees`` / ``realized_pnl`` are FX-converted from their at-rest USD
+    figures (``trade_events.fees_usd`` / ``.realized_pnl_usd``) to the
+    operator's display currency (#1906) — same conversion path as
+    ``unrealized_pnl`` above.
     """
+    runtime = get_runtime_config(conn)
+    target_currency = runtime.display_currency
+    rates_meta = load_live_fx_rates_with_metadata(conn)
+    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
+    # Every trade_events money field is USD at rest (eToro account currency).
+    # `_convert_value` silently returns the ORIGINAL (USD) value when no FX
+    # rate is available — so `display_currency` on the response must reflect
+    # that fallback too, or a missing-rate response would mislabel USD
+    # numbers as the target currency (Codex ckpt-2 HIGH finding, #1906).
+    # Checked once, not per-row: the source currency is always USD here.
+    rate_available = target_currency == "USD" or (
+        ("USD", target_currency) in rates or (target_currency, "USD") in rates
+    )
+    display_currency = target_currency if rate_available else "USD"
+    if not rate_available:
+        logger.warning(
+            "get_activity: FX rate USD->%s not found; fees/realized_pnl stay USD",
+            target_currency,
+        )
+
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         total_row = cur.execute(
             """
@@ -1231,23 +1264,30 @@ def get_activity(
             {"include_mirrors": include_mirrors, "limit": limit},
         ).fetchall()
 
-    events = [
-        ActivityEventItem(
-            event_id=row["event_id"],
-            position_id=row["position_id"],
-            event_kind=row["event_kind"],
-            side=row["side"],
-            symbol=row["symbol"],
-            etoro_instrument_id=row["etoro_instrument_id"],
-            units=float(row["units"]),
-            price=parse_optional_float(row, "price"),
-            executed_at=row["executed_at"],
-            fees_usd=parse_optional_float(row, "fees_usd"),
-            realized_pnl_usd=parse_optional_float(row, "realized_pnl_usd"),
-            holding_period_days=parse_optional_float(row, "holding_period_days"),
-            source=row["source"],
-            is_mirror=bool(row["social_trade_id"]),
+    events = []
+    for row in rows:
+        fees_native = parse_optional_float(row, "fees_usd")
+        pnl_native = parse_optional_float(row, "realized_pnl_usd")
+        fees = _convert_value(fees_native, "USD", display_currency, rates) if fees_native is not None else None
+        realized_pnl = _convert_value(pnl_native, "USD", display_currency, rates) if pnl_native is not None else None
+        events.append(
+            ActivityEventItem(
+                event_id=row["event_id"],
+                position_id=row["position_id"],
+                event_kind=row["event_kind"],
+                side=row["side"],
+                symbol=row["symbol"],
+                etoro_instrument_id=row["etoro_instrument_id"],
+                units=float(row["units"]),
+                price=parse_optional_float(row, "price"),
+                executed_at=row["executed_at"],
+                fees=fees,
+                realized_pnl=realized_pnl,
+                holding_period_days=parse_optional_float(row, "holding_period_days"),
+                source=row["source"],
+                is_mirror=bool(row["social_trade_id"]),
+            )
         )
-        for row in rows
-    ]
-    return ActivityResponse(events=events, total=total, include_mirrors=include_mirrors)
+    return ActivityResponse(
+        events=events, total=total, include_mirrors=include_mirrors, display_currency=display_currency
+    )

@@ -389,6 +389,7 @@ describe("PortfolioPage — keyboard", () => {
       events: [],
       total: 0,
       include_mirrors: false,
+      display_currency: "GBP",
     });
     const user = userEvent.setup();
     renderPage();
