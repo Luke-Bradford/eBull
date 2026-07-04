@@ -101,7 +101,11 @@ export function InstrumentTradeHistory({
                 <td className={`py-2 pr-4 text-right tabular-nums ${pnlColor}`}>
                   {pnl === null
                     ? "—"
-                    : `${pnl >= 0 ? "+" : ""}${formatMoney(pnl, data.display_currency)}`}
+                    : // `> 0` (not `>= 0`) so an exactly-zero P&L reads a plain
+                      // "US$0.00" — matching the neutral colour above — rather
+                      // than a misleading "+US$0.00". formatMoney supplies the
+                      // "-" for negatives itself.
+                      `${pnl > 0 ? "+" : ""}${formatMoney(pnl, data.display_currency)}`}
                 </td>
                 <td className="py-2 pr-0 text-right tabular-nums text-slate-500">
                   {e.holding_period_days === null
