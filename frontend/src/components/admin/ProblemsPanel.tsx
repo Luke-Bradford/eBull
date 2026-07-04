@@ -14,18 +14,25 @@ import type {
   ActionNeededItem,
   CoverageSummaryResponse,
   CredentialHealthSummary,
-  JobsListResponse,
+  ProcessListResponse,
   SecretMissingItem,
   SyncLayersV2Response,
 } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
+import { steadyStateAttentionRows } from "@/lib/processHealth";
 
 
 export interface ProblemsPanelProps {
   /** v2 payload. Null on first mount + while refetch is in flight. */
   readonly v2: SyncLayersV2Response | null;
-  /** Jobs payload (unchanged from v1; failing jobs still surface here). */
-  readonly jobs: JobsListResponse | null;
+  /**
+   * Processes catalogue (#1959). Steady-state rows with
+   * `health_verdict === "attention"` surface here as failing processes.
+   * This replaced the legacy `/system/jobs` source, which omitted
+   * `ingest_sweep` processes (e.g. `nport_sweep`) and so under-counted
+   * problems relative to the Processes control-hub below.
+   */
+  readonly processes: ProcessListResponse | null;
   /** Coverage payload (unchanged from v1; null_rows still surface here). */
   readonly coverage: CoverageSummaryResponse | null;
   /**
@@ -41,7 +48,7 @@ export interface ProblemsPanelProps {
    */
   readonly credentialHealth?: CredentialHealthSummary | null;
   readonly v2Error: boolean;
-  readonly jobsError: boolean;
+  readonly processesError: boolean;
   readonly coverageError: boolean;
   /** Called with the root layer name when the operator clicks drill-through. */
   readonly onOpenOrchestrator: (layerName: string) => void;
@@ -72,7 +79,7 @@ const CREDENTIAL_REJECTED_BANNER: ActionNeededItem = {
 
 interface SourceCache {
   v2: SyncLayersV2Response | null;
-  jobs: JobsListResponse | null;
+  processes: ProcessListResponse | null;
   coverage: CoverageSummaryResponse | null;
 }
 
@@ -89,34 +96,34 @@ function mentionsSettings(text: string): boolean {
 
 export function ProblemsPanel({
   v2,
-  jobs,
+  processes,
   coverage,
   credentialHealth,
   v2Error,
-  jobsError,
+  processesError,
   coverageError,
   onOpenOrchestrator,
 }: ProblemsPanelProps): JSX.Element | null {
-  const [cache, setCache] = useState<SourceCache>({ v2: null, jobs: null, coverage: null });
+  const [cache, setCache] = useState<SourceCache>({ v2: null, processes: null, coverage: null });
 
   useEffect(() => {
     if (v2 !== null) setCache((prev) => ({ ...prev, v2 }));
   }, [v2]);
   useEffect(() => {
-    if (jobs !== null) setCache((prev) => ({ ...prev, jobs }));
-  }, [jobs]);
+    if (processes !== null) setCache((prev) => ({ ...prev, processes }));
+  }, [processes]);
   useEffect(() => {
     if (coverage !== null) setCache((prev) => ({ ...prev, coverage }));
   }, [coverage]);
 
   const pendingSources: string[] = [];
   if (cache.v2 === null) pendingSources.push("layers");
-  if (cache.jobs === null) pendingSources.push("jobs");
+  if (cache.processes === null) pendingSources.push("processes");
   if (cache.coverage === null) pendingSources.push("coverage");
 
   const erroredSources: string[] = [];
   if (v2Error && cache.v2 !== null) erroredSources.push("layers");
-  if (jobsError && cache.jobs !== null) erroredSources.push("jobs");
+  if (processesError && cache.processes !== null) erroredSources.push("processes");
   if (coverageError && cache.coverage !== null) erroredSources.push("coverage");
 
   const allPending = pendingSources.length === 3;
@@ -130,12 +137,17 @@ export function ProblemsPanel({
 
   const baseActionNeeded = cache.v2?.action_needed ?? [];
   const secretMissing = cache.v2?.secret_missing ?? [];
-  // #1689 — a job is a "problem" only when its COMPUTED verdict says the
-  // operator must act (`attention`). A retrying (`self_healing`), aged one-shot
-  // (`stale_manual`), `working`, or `current` job is NOT a problem. Keying off
-  // raw `last_status === "failure"` here re-introduced the exact false-red the
-  // verdict model exists to kill (a transient/reaped failure raised a red banner).
-  const failingJobs = (cache.jobs?.jobs ?? []).filter((j) => j.health_verdict === "attention");
+  // #1959 — count failing PROCESSES from the same catalogue + predicate the
+  // control-hub "N need attention" uses (steady-state rows with
+  // `health_verdict === "attention"`; see `steadyStateAttentionRows`). This
+  // replaced the legacy `/system/jobs` source, which omitted `ingest_sweep`
+  // processes (e.g. `nport_sweep`) so the top banner under-counted vs the
+  // Processes section below.
+  // #1689 — `attention` is the COMPUTED verdict: a retrying (`self_healing`),
+  // aged one-shot (`stale_manual`), kill-switch-disabled (`paused`, #1831),
+  // `working`, or `current` row is NOT a problem, so a transient/reaped
+  // failure does not raise a false red banner.
+  const failingProcesses = steadyStateAttentionRows(cache.processes?.rows ?? []);
   const coverageNullRows = cache.coverage?.null_rows ?? 0;
 
   // Inject the credential-rejected banner when the operator's aggregate
@@ -148,7 +160,7 @@ export function ProblemsPanel({
     ? [CREDENTIAL_REJECTED_BANNER, ...baseActionNeeded]
     : baseActionNeeded;
 
-  const totalProblems = actionNeeded.length + secretMissing.length + failingJobs.length + (coverageNullRows > 0 ? 1 : 0);
+  const totalProblems = actionNeeded.length + secretMissing.length + failingProcesses.length + (coverageNullRows > 0 ? 1 : 0);
 
   if (totalProblems === 0 && pendingSources.length === 0 && erroredSources.length === 0) {
     return null;
@@ -203,25 +215,26 @@ export function ProblemsPanel({
         {secretMissing.map((item) => (
           <SecretMissingRow key={item.layer} item={item} />
         ))}
-        {failingJobs.map((job) => {
-          const label = job.display_name ?? job.name;
+        {failingProcesses.map((proc) => {
+          const label = proc.display_name || proc.process_id;
+          const failedAt = proc.last_run?.finished_at ?? null;
           return (
-            <li key={`job-${job.name}`} className="px-4 py-2 text-sm">
+            <li key={`process-${proc.process_id}`} className="px-4 py-2 text-sm">
               <div className="flex items-start gap-2">
                 <span aria-hidden className="mt-1 inline-block h-2 w-2 rounded-full bg-red-500" />
                 <div className="flex-1">
                   <div className="font-medium text-red-800">
-                    {label} — {job.verdict_reason || "needs attention"}
+                    {label} — {proc.verdict_reason || "needs attention"}
                   </div>
-                  {job.last_finished_at !== null ? (
-                    <div className="text-xs text-slate-600">Failed at {formatDateTime(job.last_finished_at)}</div>
+                  {failedAt !== null ? (
+                    <div className="text-xs text-slate-600">Failed at {formatDateTime(failedAt)}</div>
                   ) : null}
                   <div className="text-xs text-slate-600">
                     Clears when the next run of {label} succeeds.
                   </div>
                 </div>
                 <Link
-                  to={`/admin/jobs/${encodeURIComponent(job.name)}`}
+                  to={`/admin/processes/${encodeURIComponent(proc.process_id)}`}
                   className="shrink-0 text-xs font-medium text-blue-700 hover:underline"
                   aria-label={`View runs for ${label}`}
                 >

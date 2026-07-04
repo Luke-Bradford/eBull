@@ -34,6 +34,7 @@ import {
   VERDICT_SORT_PRIORITY,
   reasonTooltip,
 } from "@/components/admin/processStatus";
+import { isSteadyStateProcess } from "@/lib/processHealth";
 
 export interface ProcessesTableProps {
   readonly snapshot: ProcessListResponse;
@@ -132,8 +133,9 @@ export function ProcessesTable({
     return snapshot.rows;
   }, [snapshot.rows, bootstrapOnly]);
 
-  const isBootstrapOrBackfill = (r: ProcessRowResponse) =>
-    r.role !== "steady_state" || r.mechanism === "bootstrap";
+  // #1959 — shared with ProblemsPanel so the top-banner attention count and
+  // the control-hub count derive from ONE scope predicate and cannot drift.
+  const isBootstrapOrBackfill = (r: ProcessRowResponse) => !isSteadyStateProcess(r);
 
   const steadyStateRows = useMemo(
     () => (bootstrapOnly ? baseRows : baseRows.filter((r) => !isBootstrapOrBackfill(r))),
