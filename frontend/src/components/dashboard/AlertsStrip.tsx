@@ -1,20 +1,21 @@
 /**
- * AlertsStrip — unified dashboard alert feed (#399).
+ * AlertsStrip — unified dashboard alert feed (#399), grouped + severity-tiered (#1898).
  *
- * Renders three independent alert streams in a single timestamp-sorted list:
+ * Renders three independent alert streams collapsed to root-cause groups and ordered by
+ * severity tier (actionable → informational → housekeeping), so a shared root cause
+ * (e.g. kill-switch active) shows as ONE card with the affected symbols instead of N×M
+ * near-identical rows. Grouping lives in ./alertModel (pure, unit-tested).
  *
- *   1. Guard rejections (#394)
- *   2. Position alerts — SL/TP/thesis breach episodes (#401)
- *   3. Coverage status drops from 'analysable' (#402)
+ *   1. Guard rejections (#394) — grouped by leading rule code (informational).
+ *   2. Position alerts — SL/TP/thesis breach episodes (#401) — per-instrument (actionable).
+ *   3. Coverage status drops from 'analysable' (#402) — grouped by transition (housekeeping).
  *
- * Each feed keeps its own BIGSERIAL cursor column on `operators`. Partial
- * failure is tolerated: one feed GET erroring does not hide the others; one
- * POST failing does not block the siblings (Promise.allSettled).
- *
- * Overflow math is per-feed — each backend query caps at LIMIT 500 so
- * global `totalUnseen > merged.length` would conflate feed-A hidden rows
- * with feed-B seen padding. See spec
- * docs/superpowers/specs/2026-04-22-alerts-strip-unified.md for rationale.
+ * Seen/unseen + overflow accounting is UNCHANGED and operates on the RAW feed arrays by
+ * BIGSERIAL id (clocks can skew): each feed keeps its own cursor column on `operators`,
+ * the header pill counts backend `unseen_count`, and mark-read/dismiss use per-feed max ids.
+ * Partial failure is tolerated (Promise.allSettled). See spec
+ * docs/specs/ui/2026-07-04-alerts-strip-grouping.md and the original
+ * docs/superpowers/specs/2026-04-22-alerts-strip-unified.md.
  */
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
@@ -31,205 +32,203 @@ import {
   markPositionAlertsSeen,
 } from "@/api/alerts";
 import type {
-  CoverageStatusDrop,
   CoverageStatusDropsResponse,
-  GuardRejection,
   GuardRejectionsResponse,
   PositionAlert,
   PositionAlertsResponse,
 } from "@/api/types";
 import { formatRelativeTime } from "@/lib/format";
 
+import {
+  buildAlertModel,
+  type AlertItem,
+  type Cursors,
+  type GuardGroupItem,
+  type CoverageGroupItem,
+  type Tier,
+} from "./alertModel";
+
 type FeedState<T> =
   | { status: "loading" }
   | { status: "ok"; data: T }
   | { status: "err" };
 
-type AlertRow =
-  | { kind: "guard"; ts: string; sortKey: number; row: GuardRejection }
-  | { kind: "position"; ts: string; sortKey: number; row: PositionAlert }
-  | { kind: "coverage"; ts: string; sortKey: number; row: CoverageStatusDrop };
-
-type Cursors = {
-  guard: number | null;
-  position: number | null;
-  coverage: number | null;
+const TIER_LABEL: Record<Tier, string> = {
+  actionable: "ACTION",
+  informational: "GUARD",
+  housekeeping: "COVERAGE",
 };
 
-function buildRows(
-  guard: FeedState<GuardRejectionsResponse>,
-  position: FeedState<PositionAlertsResponse>,
-  coverage: FeedState<CoverageStatusDropsResponse>,
-): AlertRow[] {
-  const rows: AlertRow[] = [];
-  if (guard.status === "ok") {
-    for (const r of guard.data.rejections) {
-      rows.push({
-        kind: "guard",
-        ts: r.decision_time,
-        sortKey: Date.parse(r.decision_time),
-        row: r,
-      });
-    }
+const TIER_PILL: Record<Tier, string> = {
+  actionable: "bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200",
+  informational:
+    "bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200",
+  housekeeping: "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300",
+};
+
+function tierBorder(tier: Tier, unseen: boolean): string {
+  if (unseen) {
+    return {
+      actionable: "border-l-4 border-red-400",
+      informational: "border-l-4 border-amber-400",
+      housekeeping: "border-l-4 border-slate-300 dark:border-slate-600",
+    }[tier];
   }
-  if (position.status === "ok") {
-    for (const r of position.data.alerts) {
-      rows.push({
-        kind: "position",
-        ts: r.opened_at,
-        sortKey: Date.parse(r.opened_at),
-        row: r,
-      });
-    }
-  }
-  if (coverage.status === "ok") {
-    for (const r of coverage.data.drops) {
-      rows.push({
-        kind: "coverage",
-        ts: r.changed_at,
-        sortKey: Date.parse(r.changed_at),
-        row: r,
-      });
-    }
-  }
-  rows.sort((a, b) => b.sortKey - a.sortKey);
-  return rows;
+  return "border-l-4 border-slate-200 dark:border-slate-800";
 }
 
-function isUnseen(r: AlertRow, c: Cursors): boolean {
-  switch (r.kind) {
-    case "guard":
-      return c.guard === null || r.row.decision_id > c.guard;
-    case "position":
-      return c.position === null || r.row.alert_id > c.position;
-    case "coverage":
-      return c.coverage === null || r.row.event_id > c.coverage;
-  }
-}
-
-function KindPill({ kind }: { kind: AlertRow["kind"] }) {
-  const style = {
-    guard: "bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200",
-    position: "bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200",
-    coverage: "bg-slate-100 dark:bg-slate-800 text-slate-700",
-  }[kind];
-  const label = { guard: "GUARD", position: "POSITION", coverage: "COVERAGE" }[kind];
+function TierPill({ tier }: { tier: Tier }) {
   return (
     <span
-      className={`w-20 rounded px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase ${style}`}
+      className={`w-20 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase ${TIER_PILL[tier]}`}
     >
-      {label}
+      {TIER_LABEL[tier]}
     </span>
   );
 }
 
-function RowShell({
-  kind,
+function CardShell({
+  tier,
   unseen,
-  instrumentId,
   children,
 }: {
-  kind: AlertRow["kind"];
+  tier: Tier;
   unseen: boolean;
-  instrumentId: number | null;
   children: React.ReactNode;
 }) {
-  const border = unseen
-    ? "border-l-4 border-amber-400"
-    : "border-l-4 border-slate-200 dark:border-slate-800";
-  const content = (
+  return (
     <div
       data-testid="alerts-row"
       role="listitem"
-      className={`flex items-center gap-3 px-3 py-2 text-sm ${border} bg-white dark:bg-slate-900`}
+      className={`flex items-start gap-3 px-3 py-2 text-sm ${tierBorder(tier, unseen)} bg-white dark:bg-slate-900`}
     >
-      <KindPill kind={kind} />
+      <TierPill tier={tier} />
       {children}
     </div>
   );
-  if (instrumentId !== null) {
-    return (
-      <Link
-        to={`/instruments/${instrumentId}`}
- className="block hover:bg-slate-50 dark:hover:bg-slate-800/40"
-      >
-        {content}
-      </Link>
-    );
-  }
-  return content;
 }
 
-function GuardRow({ row, unseen }: { row: GuardRejection; unseen: boolean }) {
+function SymbolSummary({ symbols, count }: { symbols: string[]; count: number }) {
+  if (symbols.length === 0) {
+    return (
+      <span className="text-xs text-slate-500 dark:text-slate-400">
+        {count} {count === 1 ? "occurrence" : "occurrences"}
+      </span>
+    );
+  }
+  const noun = symbols.length === 1 ? "symbol" : "symbols";
   return (
-    <RowShell kind="guard" unseen={unseen} instrumentId={row.instrument_id}>
-      <span className="w-16 font-semibold tabular-nums">{row.symbol ?? "—"}</span>
-      <span className="w-16 text-xs uppercase text-slate-500 dark:text-slate-400">{row.action ?? "—"}</span>
-      <span className="flex-1 truncate text-slate-700" title={row.explanation}>
-        {row.explanation}
+    <span className="text-xs text-slate-600 dark:text-slate-300">
+      <span className="text-slate-400 dark:text-slate-500">
+        {symbols.length} {noun}:{" "}
       </span>
-      <span className="w-20 text-right text-xs text-slate-400 dark:text-slate-500">
-        {formatRelativeTime(row.decision_time)}
-      </span>
-    </RowShell>
+      {symbols.join(", ")}
+    </span>
   );
 }
 
-function PositionRow({ row, unseen }: { row: PositionAlert; unseen: boolean }) {
+function GuardGroupCard({ item }: { item: GuardGroupItem }) {
+  return (
+    <CardShell tier={item.tier} unseen={item.unseen}>
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex items-baseline gap-2">
+          <span className="font-semibold text-slate-800 dark:text-slate-100">
+            {item.label}
+          </span>
+          {item.count > 1 ? (
+            <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+              ×{item.count}
+            </span>
+          ) : null}
+        </div>
+        <span className="text-xs text-slate-500 dark:text-slate-400">
+          {item.consequence}
+        </span>
+        <SymbolSummary symbols={item.symbols} count={item.count} />
+      </div>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <span className="text-xs text-slate-400 dark:text-slate-500">
+          {formatRelativeTime(item.latestTs)}
+        </span>
+        <Link
+          to={item.action.to}
+          className="text-xs font-medium text-sky-600 dark:text-sky-400 underline hover:text-sky-800 dark:hover:text-sky-300"
+        >
+          {item.action.label}
+        </Link>
+      </div>
+    </CardShell>
+  );
+}
+
+function PositionCard({
+  row,
+  unseen,
+}: {
+  row: PositionAlert;
+  unseen: boolean;
+}) {
   const alertLabel = {
     sl_breach: "SL",
     tp_breach: "TP",
     thesis_break: "THESIS",
   }[row.alert_type];
   return (
-    <RowShell kind="position" unseen={unseen} instrumentId={row.instrument_id}>
-      <span className="w-16 font-semibold tabular-nums">{row.symbol}</span>
-      <span className="w-16 text-xs uppercase text-slate-500 dark:text-slate-400">{alertLabel}</span>
-      <span className="flex-1 truncate text-slate-700" title={row.detail}>
-        {row.detail}
-      </span>
-      <span className="w-20 text-right text-xs text-slate-400 dark:text-slate-500">
-        {formatRelativeTime(row.opened_at)}
-      </span>
-    </RowShell>
+    <Link
+      to={`/instruments/${row.instrument_id}`}
+      className="block hover:bg-slate-50 dark:hover:bg-slate-800/40"
+    >
+      <CardShell tier="actionable" unseen={unseen}>
+        <div className="flex min-w-0 flex-1 items-baseline gap-2">
+          <span className="w-16 shrink-0 font-semibold tabular-nums">
+            {row.symbol}
+          </span>
+          <span className="w-16 shrink-0 text-xs uppercase text-slate-500 dark:text-slate-400">
+            {alertLabel}
+          </span>
+          <span className="flex-1 truncate text-slate-700 dark:text-slate-200" title={row.detail}>
+            {row.detail}
+          </span>
+        </div>
+        <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
+          {formatRelativeTime(row.opened_at)}
+        </span>
+      </CardShell>
+    </Link>
   );
 }
 
-function CoverageRow({ row, unseen }: { row: CoverageStatusDrop; unseen: boolean }) {
-  const transition = `${row.old_status} → ${row.new_status ?? "—"}`;
+function CoverageGroupCard({ item }: { item: CoverageGroupItem }) {
   return (
-    <RowShell kind="coverage" unseen={unseen} instrumentId={row.instrument_id}>
-      <span className="w-16 font-semibold tabular-nums">{row.symbol}</span>
-      <span className="flex-1 truncate text-slate-700" title={transition}>
-        {transition}
+    <CardShell tier={item.tier} unseen={item.unseen}>
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex items-baseline gap-2">
+          <span className="font-semibold text-slate-800 dark:text-slate-100">
+            Coverage {item.transition}
+          </span>
+          {item.count > 1 ? (
+            <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+              ×{item.count}
+            </span>
+          ) : null}
+        </div>
+        <SymbolSummary symbols={item.symbols} count={item.count} />
+      </div>
+      <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
+        {formatRelativeTime(item.latestTs)}
       </span>
-      <span className="w-20 text-right text-xs text-slate-400 dark:text-slate-500">
-        {formatRelativeTime(row.changed_at)}
-      </span>
-    </RowShell>
+    </CardShell>
   );
 }
 
-function RowView({ row, cursors }: { row: AlertRow; cursors: Cursors }) {
-  const unseen = isUnseen(row, cursors);
-  switch (row.kind) {
-    case "guard":
-      return <GuardRow row={row.row} unseen={unseen} />;
+function ItemView({ item }: { item: AlertItem }) {
+  switch (item.kind) {
+    case "guardGroup":
+      return <GuardGroupCard item={item} />;
     case "position":
-      return <PositionRow row={row.row} unseen={unseen} />;
-    case "coverage":
-      return <CoverageRow row={row.row} unseen={unseen} />;
-  }
-}
-
-function rowId(row: AlertRow): number {
-  switch (row.kind) {
-    case "guard":
-      return row.row.decision_id;
-    case "position":
-      return row.row.alert_id;
-    case "coverage":
-      return row.row.event_id;
+      return <PositionCard row={item.row} unseen={item.unseen} />;
+    case "coverageGroup":
+      return <CoverageGroupCard item={item} />;
   }
 }
 
@@ -304,29 +303,11 @@ export function AlertsStrip(): JSX.Element | null {
     return null;
   }
 
-  const merged = buildRows(guard, position, coverage);
-
-  if (merged.length === 0) {
-    return null;
-  }
-
-  const unseenGuard = guard.status === "ok" ? guard.data.unseen_count : 0;
-  const unseenPosition = position.status === "ok" ? position.data.unseen_count : 0;
-  const unseenCoverage = coverage.status === "ok" ? coverage.data.unseen_count : 0;
-
-  const renderedGuard = guard.status === "ok" ? guard.data.rejections.length : 0;
-  const renderedPosition = position.status === "ok" ? position.data.alerts.length : 0;
-  const renderedCoverage = coverage.status === "ok" ? coverage.data.drops.length : 0;
-
-  const totalUnseen = unseenGuard + unseenPosition + unseenCoverage;
-
-  const anyOverflow =
-    unseenGuard > renderedGuard ||
-    unseenPosition > renderedPosition ||
-    unseenCoverage > renderedCoverage;
-
-  const overflowAck = anyOverflow;
-  const normalAck = totalUnseen > 0 && !anyOverflow;
+  // Raw feed arrays — the source of truth for BOTH the grouped body and the
+  // seen/unseen + overflow accounting (grouping never feeds the counts).
+  const rejections = guard.status === "ok" ? guard.data.rejections : [];
+  const positionAlerts = position.status === "ok" ? position.data.alerts : [];
+  const drops = coverage.status === "ok" ? coverage.data.drops : [];
 
   const cursors: Cursors = {
     guard: guard.status === "ok" ? guard.data.alerts_last_seen_decision_id : null,
@@ -340,25 +321,37 @@ export function AlertsStrip(): JSX.Element | null {
         : null,
   };
 
+  const items = buildAlertModel(rejections, positionAlerts, drops, cursors);
+
+  if (items.length === 0) {
+    return null;
+  }
+
+  const unseenGuard = guard.status === "ok" ? guard.data.unseen_count : 0;
+  const unseenPosition = position.status === "ok" ? position.data.unseen_count : 0;
+  const unseenCoverage = coverage.status === "ok" ? coverage.data.unseen_count : 0;
+
+  // Overflow math compares backend unseen counts to RAW fetched row counts (each feed caps
+  // at LIMIT 500) — NOT to the grouped card count.
+  const renderedGuard = rejections.length;
+  const renderedPosition = positionAlerts.length;
+  const renderedCoverage = drops.length;
+
+  const totalUnseen = unseenGuard + unseenPosition + unseenCoverage;
+
+  const anyOverflow =
+    unseenGuard > renderedGuard ||
+    unseenPosition > renderedPosition ||
+    unseenCoverage > renderedCoverage;
+
+  const overflowAck = anyOverflow;
+  const normalAck = totalUnseen > 0 && !anyOverflow;
+
   async function onMarkAllRead() {
-    const guardMax = Math.max(
-      0,
-      ...merged
-        .filter((r): r is Extract<AlertRow, { kind: "guard" }> => r.kind === "guard")
-        .map((r) => r.row.decision_id),
-    );
-    const positionMax = Math.max(
-      0,
-      ...merged
-        .filter((r): r is Extract<AlertRow, { kind: "position" }> => r.kind === "position")
-        .map((r) => r.row.alert_id),
-    );
-    const coverageMax = Math.max(
-      0,
-      ...merged
-        .filter((r): r is Extract<AlertRow, { kind: "coverage" }> => r.kind === "coverage")
-        .map((r) => r.row.event_id),
-    );
+    // Advance each cursor to the max id in its RAW feed array (BIGSERIAL id, not timestamp).
+    const guardMax = Math.max(0, ...rejections.map((r) => r.decision_id));
+    const positionMax = Math.max(0, ...positionAlerts.map((r) => r.alert_id));
+    const coverageMax = Math.max(0, ...drops.map((r) => r.event_id));
 
     const promises: Promise<void>[] = [];
     if (guardMax > 0) promises.push(markAlertsSeen(guardMax));
@@ -446,10 +439,10 @@ export function AlertsStrip(): JSX.Element | null {
         tabIndex={0}
         role="list"
         aria-labelledby="alerts-strip-heading"
-        className="max-h-96 overflow-y-auto divide-y divide-slate-100"
+        className="max-h-96 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800"
       >
-        {merged.map((row) => (
-          <RowView key={`${row.kind}-${rowId(row)}`} row={row} cursors={cursors} />
+        {items.map((item) => (
+          <ItemView key={item.id} item={item} />
         ))}
       </div>
     </section>
