@@ -11,6 +11,8 @@ import type {
   GuardRejectionsResponse,
   PositionAlert,
   PositionAlertsResponse,
+  RankMove,
+  RankMovesResponse,
 } from "@/api/types";
 
 vi.mock("@/api/alerts", () => ({
@@ -23,6 +25,9 @@ vi.mock("@/api/alerts", () => ({
   fetchCoverageStatusDrops: vi.fn(),
   markCoverageStatusDropsSeen: vi.fn(),
   dismissAllCoverageStatusDrops: vi.fn(),
+  fetchRankMoves: vi.fn(),
+  markRankMovesSeen: vi.fn(),
+  dismissAllRankMoves: vi.fn(),
 }));
 
 import * as alertsApi from "@/api/alerts";
@@ -30,14 +35,17 @@ import * as alertsApi from "@/api/alerts";
 const mockedGuardFetch = vi.mocked(alertsApi.fetchGuardRejections);
 const mockedPositionFetch = vi.mocked(alertsApi.fetchPositionAlerts);
 const mockedCoverageFetch = vi.mocked(alertsApi.fetchCoverageStatusDrops);
+const mockedRankFetch = vi.mocked(alertsApi.fetchRankMoves);
 
 const mockedMarkGuard = vi.mocked(alertsApi.markAlertsSeen);
 const mockedMarkPosition = vi.mocked(alertsApi.markPositionAlertsSeen);
 const mockedMarkCoverage = vi.mocked(alertsApi.markCoverageStatusDropsSeen);
+const mockedMarkRank = vi.mocked(alertsApi.markRankMovesSeen);
 
 const mockedDismissGuard = vi.mocked(alertsApi.dismissAllAlerts);
 const mockedDismissPosition = vi.mocked(alertsApi.dismissAllPositionAlerts);
 const mockedDismissCoverage = vi.mocked(alertsApi.dismissAllCoverageStatusDrops);
+const mockedDismissRank = vi.mocked(alertsApi.dismissAllRankMoves);
 
 const EMPTY_GUARD: GuardRejectionsResponse = {
   alerts_last_seen_decision_id: null,
@@ -54,12 +62,18 @@ const EMPTY_COVERAGE: CoverageStatusDropsResponse = {
   unseen_count: 0,
   drops: [],
 };
+const EMPTY_RANK: RankMovesResponse = {
+  alerts_last_seen_rank_event_id: null,
+  unseen_count: 0,
+  moves: [],
+};
 
 function stubAll(
   overrides: {
     guard?: Partial<GuardRejectionsResponse> | Error;
     position?: Partial<PositionAlertsResponse> | Error;
     coverage?: Partial<CoverageStatusDropsResponse> | Error;
+    rank?: Partial<RankMovesResponse> | Error;
   } = {},
 ) {
   if (overrides.guard instanceof Error) {
@@ -76,6 +90,11 @@ function stubAll(
     mockedCoverageFetch.mockRejectedValue(overrides.coverage);
   } else {
     mockedCoverageFetch.mockResolvedValue({ ...EMPTY_COVERAGE, ...overrides.coverage });
+  }
+  if (overrides.rank instanceof Error) {
+    mockedRankFetch.mockRejectedValue(overrides.rank);
+  } else {
+    mockedRankFetch.mockResolvedValue({ ...EMPTY_RANK, ...overrides.rank });
   }
 }
 
@@ -117,6 +136,18 @@ function makeCoverage(overrides: Partial<CoverageStatusDrop> = {}): CoverageStat
   };
 }
 
+function makeRankMove(overrides: Partial<RankMove> = {}): RankMove {
+  return {
+    score_id: 104061,
+    instrument_id: 45,
+    symbol: "BBBY",
+    scored_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
+    rank: 3679,
+    rank_delta: -43, // moved down 43 places
+    ...overrides,
+  };
+}
+
 function renderStrip() {
   return render(
     <MemoryRouter>
@@ -127,6 +158,10 @@ function renderStrip() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default the rank feed empty so tests that stub the other three feeds
+  // individually (not via stubAll) don't hit an unmocked fetch. Tests that
+  // exercise rank moves override this.
+  mockedRankFetch.mockResolvedValue(EMPTY_RANK);
 });
 
 // ---------------------------------------------------------------------------
@@ -281,11 +316,42 @@ describe("AlertsStrip — per-kind rendering", () => {
       guard: { rejections: [makeGuard()], unseen_count: 1 },
       position: { alerts: [makePosition()], unseen_count: 1 },
       coverage: { drops: [makeCoverage()], unseen_count: 1 },
+      rank: { moves: [makeRankMove()], unseen_count: 1 },
     });
     renderStrip();
     expect(await screen.findByText("ACTION")).toBeInTheDocument();
     expect(screen.getByText("GUARD")).toBeInTheDocument();
     expect(screen.getByText("COVERAGE")).toBeInTheDocument();
+    expect(screen.getByText("RANK")).toBeInTheDocument();
+  });
+
+  it("rank card shows symbol, direction arrow, magnitude and new rank; links to instrument", async () => {
+    stubAll({
+      rank: {
+        moves: [makeRankMove({ instrument_id: 45, symbol: "BBBY", rank: 3679, rank_delta: -43 })],
+        unseen_count: 1,
+      },
+    });
+    renderStrip();
+    const row = await screen.findByTestId("alerts-row");
+    expect(row.textContent).toContain("BBBY");
+    expect(row.textContent).toContain("▼43"); // moved down
+    expect(row.textContent).toContain("rank #3679");
+    const links = screen.getAllByRole("link").map((l) => l.getAttribute("href"));
+    expect(links).toContain("/instruments/45");
+  });
+
+  it("rank card shows an up arrow for a positive (improved) move", async () => {
+    stubAll({
+      rank: {
+        moves: [makeRankMove({ symbol: "GME", rank: 12, rank_delta: 30 })],
+        unseen_count: 1,
+      },
+    });
+    renderStrip();
+    const row = await screen.findByTestId("alerts-row");
+    expect(row.textContent).toContain("▲30");
+    expect(row.textContent).toContain("rank #12");
   });
 
   it("position card links to /instruments/<id>", async () => {
@@ -521,15 +587,18 @@ describe("AlertsStrip — Mark all read", () => {
         unseen_count: 2,
       },
       position: { alerts: [makePosition({ alert_id: 710 })], unseen_count: 1 },
+      rank: { moves: [makeRankMove({ score_id: 104061 })], unseen_count: 1 },
     });
     mockedMarkGuard.mockResolvedValue(undefined);
     mockedMarkPosition.mockResolvedValue(undefined);
+    mockedMarkRank.mockResolvedValue(undefined);
     renderStrip();
     const btn = await screen.findByRole("button", { name: /Mark all read/i });
     await userEvent.click(btn);
     await vi.waitFor(() => {
       expect(mockedMarkGuard).toHaveBeenCalledWith(510);
       expect(mockedMarkPosition).toHaveBeenCalledWith(710);
+      expect(mockedMarkRank).toHaveBeenCalledWith(104061);
     });
     expect(mockedMarkCoverage).not.toHaveBeenCalled();
   });
@@ -565,6 +634,7 @@ describe("AlertsStrip — Dismiss all", () => {
     });
     mockedDismissPosition.mockResolvedValue(undefined);
     mockedDismissCoverage.mockResolvedValue(undefined);
+    mockedDismissRank.mockResolvedValue(undefined);
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     renderStrip();
@@ -575,6 +645,8 @@ describe("AlertsStrip — Dismiss all", () => {
     });
     expect(mockedDismissGuard).not.toHaveBeenCalled();
     expect(mockedDismissCoverage).toHaveBeenCalled();
+    // rank feed loaded ok (empty) → dismiss fans out to it too
+    expect(mockedDismissRank).toHaveBeenCalled();
     confirmSpy.mockRestore();
     errSpy.mockRestore();
   });

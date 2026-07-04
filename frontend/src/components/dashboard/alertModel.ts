@@ -20,6 +20,7 @@ import type {
   CoverageStatusDrop,
   GuardRejection,
   PositionAlert,
+  RankMove,
 } from "@/api/types";
 
 export type Tier = "actionable" | "informational" | "housekeeping";
@@ -34,6 +35,7 @@ export type Cursors = {
   guard: number | null;
   position: number | null;
   coverage: number | null;
+  rank: number | null;
 };
 
 export interface GuardReasonMeta {
@@ -211,7 +213,26 @@ export interface CoverageGroupItem {
   unseen: boolean;
 }
 
-export type AlertItem = GuardGroupItem | PositionItem | CoverageGroupItem;
+export interface RankMoveItem {
+  kind: "rankMove";
+  tier: Tier;
+  id: string;
+  symbol: string;
+  instrumentId: number;
+  rank: number;
+  rankDelta: number; // latest move; positive = moved up
+  count: number;
+  latestTs: string;
+  sortKey: number;
+  maxId: number;
+  unseen: boolean;
+}
+
+export type AlertItem =
+  | GuardGroupItem
+  | PositionItem
+  | CoverageGroupItem
+  | RankMoveItem;
 
 function uniqueSorted(values: (string | null)[]): string[] {
   return Array.from(new Set(values.filter((v): v is string => !!v))).sort();
@@ -225,6 +246,7 @@ export function buildAlertModel(
   rejections: GuardRejection[],
   positions: PositionAlert[],
   drops: CoverageStatusDrop[],
+  moves: RankMove[],
   cursors: Cursors,
 ): AlertItem[] {
   const items: AlertItem[] = [];
@@ -297,6 +319,35 @@ export function buildAlertModel(
       sortKey: Date.parse(latest.changed_at),
       maxId,
       unseen: cursors.coverage === null || maxId > cursors.coverage,
+    });
+  }
+
+  // Rank moves → one card per held instrument (informational tier). A single
+  // instrument may have several in-window move rows (one per re-score); show
+  // the latest (highest score_id) and count the rest. maxId drives the unseen
+  // highlight, consistent with the BIGSERIAL cursor accounting.
+  const rankGroups = new Map<number, RankMove[]>();
+  for (const m of moves) {
+    const arr = rankGroups.get(m.instrument_id);
+    if (arr) arr.push(m);
+    else rankGroups.set(m.instrument_id, [m]);
+  }
+  for (const [instrumentId, members] of rankGroups) {
+    const maxId = Math.max(...members.map((m) => m.score_id));
+    const latest = members.reduce((a, b) => (b.score_id > a.score_id ? b : a));
+    items.push({
+      kind: "rankMove",
+      tier: "informational",
+      id: `rank:${instrumentId}`,
+      symbol: latest.symbol,
+      instrumentId,
+      rank: latest.rank,
+      rankDelta: latest.rank_delta,
+      count: members.length,
+      latestTs: latest.scored_at,
+      sortKey: Date.parse(latest.scored_at),
+      maxId,
+      unseen: cursors.rank === null || maxId > cursors.rank,
     });
   }
 

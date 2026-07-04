@@ -17,6 +17,11 @@ Provides three independent alert feeds sharing the same dashboard strip shape:
    - POST /alerts/coverage-status-drops/seen    (body: {seen_through_event_id})
    - POST /alerts/coverage-status-drops/dismiss-all
 
+4. Rank moves on held instruments (#1922):
+   - GET  /alerts/rank-moves
+   - POST /alerts/rank-moves/seen               (body: {seen_through_rank_event_id})
+   - POST /alerts/rank-moves/dismiss-all
+
 Each feed maintains its own BIGSERIAL cursor column on ``operators`` and a
 7-day window. Cursor semantics are identical across feeds: strict ``>``
 comparison, GREATEST+COALESCE monotonicity, LEAST clamp on /seen, MAX
@@ -49,6 +54,7 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.db.snapshot import snapshot_read
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
+from app.services.scoring import _DEFAULT_MODEL_VERSION
 
 router = APIRouter(
     prefix="/alerts",
@@ -57,6 +63,31 @@ router = APIRouter(
 )
 
 GuardAction = Literal["BUY", "ADD", "HOLD", "EXIT"]
+
+# #1922 — a HELD instrument's rank must move by at least this many places
+# between scoring runs to surface as a dashboard alert. Product threshold
+# (not a source rule): tuned so only material moves on a position break
+# through, not the ±1-2 rank jitter every re-score produces. `rank_delta`
+# is `prior_rank - new_rank` (positive = moved up), computed within a single
+# model_version (app/services/scoring.py:1820), so the feed is scoped to
+# _DEFAULT_MODEL_VERSION to avoid double-counting cross-model rows.
+_RANK_MOVE_THRESHOLD = 20
+
+# Canonical in-window rank-move predicate, shared verbatim by the GET count,
+# the GET list, /seen and /dismiss-all so the four can never drift (the
+# divergence trap called out in docs/review-prevention-log.md). Parameters:
+# %(mv)s model_version, %(threshold)s magnitude. `s` = scores alias.
+_RANK_MOVE_WHERE = """
+    s.model_version = %(mv)s
+    AND s.rank_delta IS NOT NULL
+    AND abs(s.rank_delta) >= %(threshold)s
+    AND s.scored_at >= now() - INTERVAL '7 days'
+    AND EXISTS (
+        SELECT 1 FROM positions p
+        WHERE p.instrument_id = s.instrument_id
+          AND p.current_units > 0
+    )
+"""
 
 
 class GuardRejection(BaseModel):
@@ -119,6 +150,25 @@ class CoverageStatusDropsResponse(BaseModel):
 
 class CoverageStatusDropsMarkSeenRequest(BaseModel):
     seen_through_event_id: int = Field(gt=0)
+
+
+class RankMove(BaseModel):
+    score_id: int
+    instrument_id: int
+    symbol: str
+    scored_at: datetime
+    rank: int
+    rank_delta: int  # prior_rank - new_rank: positive = moved up the board
+
+
+class RankMovesResponse(BaseModel):
+    alerts_last_seen_rank_event_id: int | None
+    unseen_count: int
+    moves: list[RankMove]
+
+
+class RankMovesMarkSeenRequest(BaseModel):
+    seen_through_rank_event_id: int = Field(gt=0)
 
 
 def _resolve_operator(conn: psycopg.Connection[object]) -> UUID:
@@ -500,5 +550,151 @@ def dismiss_all_coverage_status_drops(
               AND m.max_id IS NOT NULL
             """,
             {"op": operator_id},
+        )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# #1922 — rank-move alert feed (held instrument's rank moved materially)
+#
+#   GET  /alerts/rank-moves
+#   POST /alerts/rank-moves/seen         (body: {seen_through_rank_event_id})
+#   POST /alerts/rank-moves/dismiss-all
+#
+# Same cursor semantics as the coverage feed: BIGSERIAL cursor (score_id),
+# strict '>' comparison, 7-day window, GREATEST+COALESCE monotonicity, LEAST
+# clamp on /seen, MAX advance on /dismiss-all, m.max_id IS NOT NULL empty-
+# window guard (preserves NULL = never acknowledged). The window predicate is
+# the single shared _RANK_MOVE_WHERE fragment so GET/seen/dismiss cannot drift.
+#
+# Two accepted properties of a DERIVED feed (vs the coverage feed's immutable
+# event log), both by design:
+#   1. The predicate reads live position state (current_units > 0). Closing a
+#      held position removes its moves from GET/seen/dismiss alike — you no
+#      longer hold it, so the alert legitimately disappears. If reopened within
+#      the 7-day window its recent rank trajectory resurfaces as unseen, which
+#      is the desired "here's how it moved while you were out" behaviour, not a
+#      leak (GET/seen share the predicate, so you never ack what you can't see).
+#   2. The cursor is global but the feed is scoped to _DEFAULT_MODEL_VERSION.
+#      A default-model change is an operator-gated deploy event (#1815/#1822)
+#      whose fresh scoring run inserts the NEWEST score_ids, so post-bump moves
+#      always sort above any week-old cursor and surface normally.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/rank-moves", response_model=RankMovesResponse)
+def get_rank_moves(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> RankMovesResponse:
+    operator_id = _resolve_operator(conn)
+    params = {"mv": _DEFAULT_MODEL_VERSION, "threshold": _RANK_MOVE_THRESHOLD}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # 1. Read operator's cursor.
+        cur.execute(
+            "SELECT alerts_last_seen_rank_event_id FROM operators WHERE operator_id = %(op)s",
+            {"op": operator_id},
+        )
+        op_row = cur.fetchone()
+        last_seen: int | None = op_row["alerts_last_seen_rank_event_id"] if op_row else None
+
+        # 2. Count unseen in-window moves (uncapped).
+        cur.execute(
+            f"""
+            SELECT COUNT(*) AS unseen_count
+            FROM scores s
+            WHERE {_RANK_MOVE_WHERE}
+              AND (%(last_id)s::BIGINT IS NULL OR s.score_id > %(last_id)s::BIGINT)
+            """,
+            {**params, "last_id": last_seen},
+        )
+        count_row = cur.fetchone()
+        assert count_row is not None, "COUNT(*) always returns a row"
+        unseen_count: int = int(count_row["unseen_count"])
+
+        # 3. Fetch list capped at 500, newest first. score_id is a monotonic
+        # BIGSERIAL PK so ORDER BY score_id DESC is race-safe.
+        cur.execute(
+            f"""
+            SELECT
+                s.score_id,
+                s.instrument_id,
+                i.symbol,
+                s.scored_at,
+                s.rank,
+                s.rank_delta
+            FROM scores s
+            JOIN instruments i ON i.instrument_id = s.instrument_id
+            WHERE {_RANK_MOVE_WHERE}
+            ORDER BY s.score_id DESC
+            LIMIT 500
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    return RankMovesResponse(
+        alerts_last_seen_rank_event_id=last_seen,
+        unseen_count=unseen_count,
+        moves=[RankMove.model_validate(r) for r in rows],
+    )
+
+
+@router.post("/rank-moves/seen", status_code=status.HTTP_204_NO_CONTENT)
+def mark_rank_moves_seen(
+    body: RankMovesMarkSeenRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> None:
+    operator_id = _resolve_operator(conn)
+    params = {"mv": _DEFAULT_MODEL_VERSION, "threshold": _RANK_MOVE_THRESHOLD}
+    with conn.cursor() as cur:
+        # m.max_id IS NOT NULL guard preserves NULL cursor on empty window
+        # (matches the coverage / position /seen shape, not guard's pre-#395).
+        cur.execute(
+            f"""
+            UPDATE operators AS op
+            SET alerts_last_seen_rank_event_id = GREATEST(
+                COALESCE(op.alerts_last_seen_rank_event_id, 0),
+                LEAST(%(seen_through_rank_event_id)s, m.max_id)
+            )
+            FROM (
+                SELECT MAX(s.score_id) AS max_id
+                FROM scores s
+                WHERE {_RANK_MOVE_WHERE}
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {
+                **params,
+                "seen_through_rank_event_id": body.seen_through_rank_event_id,
+                "op": operator_id,
+            },
+        )
+    conn.commit()
+
+
+@router.post("/rank-moves/dismiss-all", status_code=status.HTTP_204_NO_CONTENT)
+def dismiss_all_rank_moves(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> None:
+    operator_id = _resolve_operator(conn)
+    params = {"mv": _DEFAULT_MODEL_VERSION, "threshold": _RANK_MOVE_THRESHOLD}
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE operators AS op
+            SET alerts_last_seen_rank_event_id = GREATEST(
+                COALESCE(op.alerts_last_seen_rank_event_id, 0),
+                m.max_id
+            )
+            FROM (
+                SELECT MAX(s.score_id) AS max_id
+                FROM scores s
+                WHERE {_RANK_MOVE_WHERE}
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {**params, "op": operator_id},
         )
     conn.commit()
