@@ -34,7 +34,8 @@ function summary(
       industry: "Consumer Electronics",
       gics_sector: null,
       sector_spdr: null,
-      exchange: "NMS",
+      exchange: "4",
+      exchange_name: "Nasdaq",
       country: "United States",
       currency: "USD",
       market_cap: "3000000000000",
@@ -159,6 +160,38 @@ describe("SummaryStrip — action gating", () => {
     expect(screen.getByText("AAPL")).toBeInTheDocument();
     expect(screen.getByText("Apple Inc.")).toBeInTheDocument();
     expect(screen.getByText(/Technology/)).toBeInTheDocument();
+  });
+
+  it("renders the exchange name, never the raw numeric id (#1955)", () => {
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    const strip = screen.getByTestId("summary-strip");
+    expect(strip).toHaveTextContent("Nasdaq");
+    // The opaque numeric exchange id ("4") must not leak into the sector strip.
+    expect(strip).not.toHaveTextContent(/·\s*4\s*·/);
+  });
+
+  it("drops the exchange segment when exchange_name is null (#1955)", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          identity: { ...summary().identity, exchange_name: null },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    // Falls back to nothing, never the raw id.
+    expect(screen.getByTestId("summary-strip")).not.toHaveTextContent(
+      /·\s*4\s*·/,
+    );
   });
 
   it("shows native price primary + display-currency companion (#1906)", () => {
