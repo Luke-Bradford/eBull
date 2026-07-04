@@ -49,6 +49,11 @@ _CGT_RATE_PERIODS: list[tuple[date, date, Decimal, Decimal]] = [
     (date(2025, 4, 6), date(2099, 4, 5), _D("0.18"), _D("0.24")),
 ]
 
+# First tax-year the engine can price a disposal for — derived from the CGT
+# rate table so the API's accepted-year floor tracks rate coverage (a request
+# for an earlier year is a 422, never a 500 from ``_cgt_rates_for_disposal``).
+_MIN_SUPPORTED_TAX_YEAR_START = _CGT_RATE_PERIODS[0][0].year
+
 # Annual exempt amount, 2024/25 onwards
 ANNUAL_EXEMPT = _D("3000")
 
@@ -139,6 +144,11 @@ class TaxYearSummary:
     disposals_same_day: int
     disposals_bed_and_breakfast: int
     disposals_s104: int
+    # Annual exempt amount (£3,000) and how much of it is unused after this
+    # year's net gain. Computed here — never in the API handler — so the CGT
+    # treatment stays owned by the engine (source rule).
+    annual_exempt_gbp: Decimal
+    exempt_remaining_gbp: Decimal
     # Scenario estimates — actual CGT depends on taxpayer's income and band
     estimated_cgt_basic_scenario: Decimal
     estimated_cgt_higher_scenario: Decimal
@@ -158,6 +168,41 @@ class DisposalMatchDetail:
     disposal_uk_date: date
     tax_year: str
     matched_at: datetime
+
+
+@dataclass(frozen=True)
+class TaxDisposalRow:
+    """A disposal match for a whole tax year, with the instrument symbol.
+
+    Same engine output as ``DisposalMatchDetail`` but tax-year-scoped (not
+    per-instrument) and carrying ``symbol`` for the disposal table UI.
+    """
+
+    match_id: int
+    instrument_id: int
+    symbol: str
+    matching_rule: str
+    matched_units: Decimal
+    acquisition_cost_gbp: Decimal
+    disposal_proceeds_gbp: Decimal
+    gain_or_loss_gbp: Decimal
+    disposal_uk_date: date
+    tax_year: str
+    disposal_tax_lot_id: int
+    acquisition_tax_lot_id: int | None
+    matched_at: datetime
+
+
+@dataclass(frozen=True)
+class S104PoolRow:
+    """Current s104 pool state for an instrument, with the symbol."""
+
+    instrument_id: int
+    symbol: str
+    pool_units: Decimal
+    pool_cost_gbp: Decimal
+    pool_avg_cost_gbp: Decimal
+    updated_at: datetime
 
 
 # ---------------------------------------------------------------------------
@@ -878,6 +923,10 @@ def tax_year_summary(
         est_basic = _D("0")
         est_higher = _D("0")
 
+    # Unused annual exemption: the allowance offsets positive net gains only
+    # (losses do not restore it). Complement of ``taxable_net``.
+    exempt_remaining = max(ANNUAL_EXEMPT - max(net_gain, _D("0")), _D("0"))
+
     return TaxYearSummary(
         tax_year=tax_year,
         total_gains_gbp=total_gains,
@@ -887,6 +936,8 @@ def tax_year_summary(
         disposals_same_day=int(agg["cnt_same_day"]),
         disposals_bed_and_breakfast=int(agg["cnt_bnb"]),
         disposals_s104=int(agg["cnt_s104"]),
+        annual_exempt_gbp=ANNUAL_EXEMPT,
+        exempt_remaining_gbp=exempt_remaining,
         estimated_cgt_basic_scenario=est_basic,
         estimated_cgt_higher_scenario=est_higher,
     )
@@ -930,6 +981,130 @@ def disposal_audit_trail(
             disposal_uk_date=row["disposal_uk_date"],
             tax_year=row["tax_year"],
             matched_at=row["matched_at"],
+        )
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Tax-year helpers + tax-year-scoped read surface (#1905 — Tax & CGT API)
+# ---------------------------------------------------------------------------
+
+
+def current_tax_year() -> str:
+    """The UK tax year containing the current instant, e.g. ``2026/27``."""
+    return _compute_tax_year(_to_uk_date(_utcnow()))
+
+
+def valid_tax_year(tax_year: str) -> bool:
+    """True iff ``tax_year`` is a well-formed, engine-priceable UK tax-year label.
+
+    Shape ``\\d{4}/\\d{2}`` alone is not enough — the two-digit suffix must be
+    the arithmetic successor ``(start_year + 1) % 100`` (rejects impossible
+    labels like ``2026/99``). ``start_year`` must be in
+    ``[MIN_SUPPORTED_TAX_YEAR_START, current+1]``: the lower bound is the first
+    year the engine has CGT rate coverage for (``_CGT_RATE_PERIODS[0]``), so a
+    year the engine cannot price is a clean rejection rather than a later
+    ``_cgt_rates_for_disposal`` RuntimeError (→ 500) on any positive-gain row.
+    """
+    parts = tax_year.split("/")
+    if len(parts) != 2 or len(parts[0]) != 4 or len(parts[1]) != 2:
+        return False
+    start_s, suffix_s = parts
+    if not (start_s.isdigit() and suffix_s.isdigit()):
+        return False
+    start_year = int(start_s)
+    if int(suffix_s) != (start_year + 1) % 100:
+        return False
+    current_start = int(current_tax_year().split("/")[0])
+    return _MIN_SUPPORTED_TAX_YEAR_START <= start_year <= current_start + 1
+
+
+def available_tax_years(conn: psycopg.Connection[Any]) -> list[str]:
+    """Distinct tax years with any tax data, newest first.
+
+    Union across ``tax_lots`` and ``disposal_matches`` so a year with only
+    dividend lots (no disposals) still appears. The current tax year is always
+    included so the UI selector is never empty on a fresh account.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT tax_year FROM tax_lots
+            UNION
+            SELECT DISTINCT tax_year FROM disposal_matches
+            """
+        )
+        years = {row["tax_year"] for row in cur.fetchall()}
+    years.add(current_tax_year())
+    return sorted(years, reverse=True)
+
+
+def disposals_for_tax_year(
+    conn: psycopg.Connection[Any],
+    tax_year: str,
+) -> list[TaxDisposalRow]:
+    """Read-only: every disposal match in a tax year, with instrument symbol."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT dm.match_id, dm.instrument_id, i.symbol,
+                   dm.disposal_tax_lot_id, dm.acquisition_tax_lot_id,
+                   dm.matching_rule, dm.matched_units,
+                   dm.acquisition_cost_gbp, dm.disposal_proceeds_gbp,
+                   dm.gain_or_loss_gbp, dm.disposal_uk_date, dm.tax_year,
+                   dm.matched_at
+            FROM disposal_matches dm
+            JOIN instruments i ON i.instrument_id = dm.instrument_id
+            WHERE dm.tax_year = %(ty)s
+            ORDER BY dm.disposal_uk_date ASC, dm.match_id ASC
+            """,
+            {"ty": tax_year},
+        )
+        rows = cur.fetchall()
+
+    return [
+        TaxDisposalRow(
+            match_id=row["match_id"],
+            instrument_id=row["instrument_id"],
+            symbol=row["symbol"],
+            matching_rule=row["matching_rule"],
+            matched_units=Decimal(str(row["matched_units"])),
+            acquisition_cost_gbp=Decimal(str(row["acquisition_cost_gbp"])),
+            disposal_proceeds_gbp=Decimal(str(row["disposal_proceeds_gbp"])),
+            gain_or_loss_gbp=Decimal(str(row["gain_or_loss_gbp"])),
+            disposal_uk_date=row["disposal_uk_date"],
+            tax_year=row["tax_year"],
+            disposal_tax_lot_id=row["disposal_tax_lot_id"],
+            acquisition_tax_lot_id=row["acquisition_tax_lot_id"],
+            matched_at=row["matched_at"],
+        )
+        for row in rows
+    ]
+
+
+def s104_pool_rows(conn: psycopg.Connection[Any]) -> list[S104PoolRow]:
+    """Read-only: current s104 pool state per instrument, largest cost first."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT sp.instrument_id, i.symbol, sp.pool_units,
+                   sp.pool_cost_gbp, sp.pool_avg_cost_gbp, sp.updated_at
+            FROM s104_pool sp
+            JOIN instruments i ON i.instrument_id = sp.instrument_id
+            ORDER BY sp.pool_cost_gbp DESC, i.symbol ASC
+            """
+        )
+        rows = cur.fetchall()
+
+    return [
+        S104PoolRow(
+            instrument_id=row["instrument_id"],
+            symbol=row["symbol"],
+            pool_units=Decimal(str(row["pool_units"])),
+            pool_cost_gbp=Decimal(str(row["pool_cost_gbp"])),
+            pool_avg_cost_gbp=Decimal(str(row["pool_avg_cost_gbp"])),
+            updated_at=row["updated_at"],
         )
         for row in rows
     ]
