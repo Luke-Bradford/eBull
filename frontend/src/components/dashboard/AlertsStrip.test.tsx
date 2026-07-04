@@ -85,8 +85,8 @@ function makeGuard(overrides: Partial<GuardRejection> = {}): GuardRejection {
     decision_time: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
     instrument_id: 42,
     symbol: "AAPL",
-    action: "BUY",
-    explanation: "FAIL — cash_available: need £200, have £50",
+    action: "HOLD",
+    explanation: "FAIL — kill_switch: kill switch active since 2026-06-28",
     ...overrides,
   };
 }
@@ -183,14 +183,71 @@ describe("AlertsStrip — basic rendering", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Merge + ordering
+// #1898 grouping — collapse the flood
 // ---------------------------------------------------------------------------
 
-describe("AlertsStrip — merge + ordering", () => {
-  it("merges three feeds into a single list DESC by timestamp", async () => {
+describe("AlertsStrip — grouping (#1898)", () => {
+  it("collapses many same-reason guard rejections into ONE card with a symbol summary", async () => {
+    // The real dev flood: kill_switch across 4 symbols on several days.
+    const symbols = ["BBBY", "IEP", "GME", "VOO"];
+    const rejections: GuardRejection[] = [];
+    let id = 600;
+    for (let day = 0; day < 3; day += 1) {
+      for (const s of symbols) {
+        rejections.push(
+          makeGuard({
+            decision_id: id++,
+            symbol: s,
+            explanation: "FAIL — kill_switch: kill switch active since 2026-06-28",
+          }),
+        );
+      }
+    }
+    stubAll({ guard: { rejections, unseen_count: rejections.length } });
+    renderStrip();
+    const rows = await screen.findAllByTestId("alerts-row");
+    // 12 emissions → a single grouped card.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.textContent).toContain("Kill switch active");
+    expect(rows[0]!.textContent).toContain("×12");
+    // All four affected symbols surfaced once each.
+    expect(rows[0]!.textContent).toContain("4 symbols:");
+    for (const s of symbols) expect(rows[0]!.textContent).toContain(s);
+  });
+
+  it("splits guard rejections into one card per distinct reason code", async () => {
+    stubAll({
+      guard: {
+        rejections: [
+          makeGuard({ decision_id: 611, symbol: "GME", explanation: "FAIL — kill_switch: active" }),
+          makeGuard({ decision_id: 610, symbol: "IEP", explanation: "FAIL — kill_switch: active" }),
+          makeGuard({
+            decision_id: 609,
+            symbol: "GME",
+            explanation: "FAIL — auto_trading: enable_auto_trading is False",
+          }),
+        ],
+        unseen_count: 3,
+      },
+    });
+    renderStrip();
+    const rows = await screen.findAllByTestId("alerts-row");
+    expect(rows).toHaveLength(2);
+    expect(screen.getByText("Kill switch active")).toBeInTheDocument();
+    expect(screen.getByText("Auto-trading disabled")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Severity-tier ordering
+// ---------------------------------------------------------------------------
+
+describe("AlertsStrip — severity ordering", () => {
+  it("orders actionable (position) above informational (guard) above housekeeping (coverage), regardless of timestamp", async () => {
+    // Give the LOWEST-priority feed the NEWEST timestamp to prove tier wins over time.
     const coverage = makeCoverage({
       symbol: "TSLA",
-      changed_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      changed_at: new Date(Date.now() - 1 * 60 * 1000).toISOString(), // newest
     });
     const guard = makeGuard({
       symbol: "AAPL",
@@ -198,7 +255,7 @@ describe("AlertsStrip — merge + ordering", () => {
     });
     const position = makePosition({
       symbol: "MSFT",
-      opened_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
+      opened_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(), // oldest
     });
     stubAll({
       guard: { rejections: [guard], unseen_count: 1 },
@@ -208,9 +265,9 @@ describe("AlertsStrip — merge + ordering", () => {
     renderStrip();
     const rows = await screen.findAllByTestId("alerts-row");
     expect(rows).toHaveLength(3);
-    expect(rows[0]!.textContent).toContain("AAPL"); // 5 min ago (newest)
-    expect(rows[1]!.textContent).toContain("MSFT"); // 15 min ago
-    expect(rows[2]!.textContent).toContain("TSLA"); // 30 min ago
+    expect(rows[0]!.textContent).toContain("MSFT"); // actionable
+    expect(rows[1]!.textContent).toContain("Kill switch active"); // informational
+    expect(rows[2]!.textContent).toContain("Coverage analysable → insufficient"); // housekeeping
   });
 });
 
@@ -219,54 +276,51 @@ describe("AlertsStrip — merge + ordering", () => {
 // ---------------------------------------------------------------------------
 
 describe("AlertsStrip — per-kind rendering", () => {
-  it("renders kind pill badge for each row type", async () => {
+  it("renders the tier pill for each kind", async () => {
     stubAll({
       guard: { rejections: [makeGuard()], unseen_count: 1 },
       position: { alerts: [makePosition()], unseen_count: 1 },
       coverage: { drops: [makeCoverage()], unseen_count: 1 },
     });
     renderStrip();
-    expect(await screen.findByText("GUARD")).toBeInTheDocument();
-    expect(screen.getByText("POSITION")).toBeInTheDocument();
+    expect(await screen.findByText("ACTION")).toBeInTheDocument();
+    expect(screen.getByText("GUARD")).toBeInTheDocument();
     expect(screen.getByText("COVERAGE")).toBeInTheDocument();
   });
 
-  it("links rows with non-null instrument_id to /instruments/<id>", async () => {
+  it("position card links to /instruments/<id>", async () => {
     stubAll({
-      guard: { rejections: [makeGuard({ instrument_id: 42 })], unseen_count: 1 },
       position: { alerts: [makePosition({ instrument_id: 43 })], unseen_count: 1 },
-      coverage: { drops: [makeCoverage({ instrument_id: 44 })], unseen_count: 1 },
     });
     renderStrip();
     await screen.findAllByTestId("alerts-row");
-    const links = screen
-      .getAllByRole("link")
-      .map((l) => l.getAttribute("href"));
-    expect(links).toEqual(
-      expect.arrayContaining(["/instruments/42", "/instruments/43", "/instruments/44"]),
-    );
+    const links = screen.getAllByRole("link").map((l) => l.getAttribute("href"));
+    expect(links).toContain("/instruments/43");
   });
 
-  it("renders guard row with null instrument_id inline (no link)", async () => {
+  it("guard card links to its remediation action (kill-switch → /admin, not deactivate)", async () => {
     stubAll({
       guard: {
-        rejections: [makeGuard({ instrument_id: null, symbol: null })],
+        rejections: [makeGuard({ explanation: "FAIL — kill_switch: active" })],
         unseen_count: 1,
       },
     });
     renderStrip();
-    const row = await screen.findByTestId("alerts-row");
-    expect(row.closest("a")).toBeNull();
+    await screen.findAllByTestId("alerts-row");
+    const link = screen.getByRole("link", { name: /Manage in Admin/i });
+    expect(link.getAttribute("href")).toBe("/admin");
   });
 
-  it("guard row shows symbol / action / explanation", async () => {
+  it("guard card shows the human label + consequence, not the raw rule string", async () => {
     stubAll({
-      guard: { rejections: [makeGuard()], unseen_count: 1 },
+      guard: {
+        rejections: [makeGuard({ explanation: "FAIL — kill_switch: active since 2026-06-28" })],
+        unseen_count: 1,
+      },
     });
     renderStrip();
-    expect(await screen.findByText("AAPL")).toBeInTheDocument();
-    expect(screen.getByText("BUY")).toBeInTheDocument();
-    expect(screen.getByText(/cash_available: need £200/)).toBeInTheDocument();
+    expect(await screen.findByText("Kill switch active")).toBeInTheDocument();
+    expect(screen.getByText(/All order paths blocked/)).toBeInTheDocument();
   });
 
   it("position row shows symbol / alert_type label / detail", async () => {
@@ -282,49 +336,72 @@ describe("AlertsStrip — per-kind rendering", () => {
     expect(screen.getByText("bid=320 < sl=330")).toBeInTheDocument();
   });
 
-  it("coverage row shows symbol and old → new transition", async () => {
+  it("coverage card shows the transition and affected symbols", async () => {
     stubAll({
       coverage: {
-        drops: [makeCoverage({ old_status: "analysable", new_status: "insufficient" })],
+        drops: [
+          makeCoverage({ symbol: "TSLA", old_status: "analysable", new_status: "insufficient" }),
+          makeCoverage({
+            event_id: 302,
+            symbol: "NIO",
+            old_status: "analysable",
+            new_status: "insufficient",
+          }),
+        ],
+        unseen_count: 2,
+      },
+    });
+    renderStrip();
+    expect(await screen.findByText("Coverage analysable → insufficient")).toBeInTheDocument();
+    const row = screen.getByTestId("alerts-row");
+    expect(row.textContent).toContain("TSLA");
+    expect(row.textContent).toContain("NIO");
+  });
+
+  it("coverage card renders a null new_status as a dash", async () => {
+    stubAll({
+      coverage: {
+        drops: [makeCoverage({ old_status: "analysable", new_status: null })],
         unseen_count: 1,
       },
     });
     renderStrip();
-    expect(await screen.findByText("TSLA")).toBeInTheDocument();
-    expect(screen.getByText("analysable → insufficient")).toBeInTheDocument();
+    expect(await screen.findByText("Coverage analysable → —")).toBeInTheDocument();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Unseen cursor math (per-kind)
+// Unseen cursor math (group-level)
 // ---------------------------------------------------------------------------
 
-describe("AlertsStrip — per-kind unseen cursor", () => {
-  it("applies amber border for unseen guard rows and slate for seen", async () => {
+describe("AlertsStrip — unseen cursor", () => {
+  it("guard group is unseen when its MAX member id exceeds the cursor, seen otherwise", async () => {
     stubAll({
       guard: {
         alerts_last_seen_decision_id: 500,
         unseen_count: 1,
         rejections: [
-          makeGuard({ decision_id: 501 }), // unseen
-          makeGuard({ decision_id: 499 }), // seen
+          // unseen group: max id 501 > 500
+          makeGuard({ decision_id: 501, explanation: "FAIL — kill_switch: active" }),
+          // seen group: max id 499 < 500 (distinct reason so it forms its own card)
+          makeGuard({ decision_id: 499, explanation: "FAIL — auto_trading: off" }),
         ],
       },
     });
     renderStrip();
     const rows = await screen.findAllByTestId("alerts-row");
-    expect(rows[0]!.className).toMatch(/border-amber/);
-    expect(rows[1]!.className).toMatch(/border-slate/);
+    const killRow = rows.find((r) => r.textContent?.includes("Kill switch active"))!;
+    const autoRow = rows.find((r) => r.textContent?.includes("Auto-trading disabled"))!;
+    expect(killRow.className).toMatch(/border-amber/);
+    expect(autoRow.className).toMatch(/border-slate/);
   });
 
-  it("per-kind cursor: position cursor only affects position rows", async () => {
+  it("per-kind cursor: position + coverage cursors drive their own rows", async () => {
     stubAll({
       position: {
         alerts_last_seen_position_alert_id: 700,
         unseen_count: 1,
-        alerts: [
-          makePosition({ alert_id: 701 }), // unseen (701 > 700)
-        ],
+        alerts: [makePosition({ alert_id: 701 })], // unseen (701 > 700)
       },
       coverage: {
         alerts_last_seen_coverage_event_id: null,
@@ -335,7 +412,8 @@ describe("AlertsStrip — per-kind unseen cursor", () => {
     renderStrip();
     const rows = await screen.findAllByTestId("alerts-row");
     for (const r of rows) {
-      expect(r.className).toMatch(/border-amber/);
+      // unseen position → red accent; unseen coverage (null cursor) → slate accent.
+      expect(r.className).toMatch(/border-(red|slate)-/);
     }
   });
 });
@@ -345,7 +423,7 @@ describe("AlertsStrip — per-kind unseen cursor", () => {
 // ---------------------------------------------------------------------------
 
 describe("AlertsStrip — header totals", () => {
-  it("header badge is sum of per-feed unseen_count", async () => {
+  it("header badge is sum of per-feed unseen_count (honest emission count)", async () => {
     stubAll({
       guard: { rejections: [makeGuard()], unseen_count: 3 },
       position: { alerts: [makePosition()], unseen_count: 2 },
@@ -364,7 +442,7 @@ describe("AlertsStrip — header totals", () => {
       },
     });
     renderStrip();
-    await screen.findByText("AAPL");
+    await screen.findByText("Kill switch active");
     expect(screen.queryByText(/\bnew\b/)).toBeNull();
   });
 
@@ -378,17 +456,29 @@ describe("AlertsStrip — header totals", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Per-feed overflow + ack-button gating
+// Per-feed overflow + ack-button gating (raw counts, not grouped)
 // ---------------------------------------------------------------------------
 
 describe("AlertsStrip — per-feed overflow", () => {
-  it("shows Dismiss-all when any feed has unseen > rendered (per-feed overflow)", async () => {
+  it("shows Dismiss-all when a feed's backend unseen_count exceeds its RAW fetched rows", async () => {
+    // unseen_count 2 > rejections.length 1 → overflow, even though the card collapses.
     stubAll({
-      guard: { rejections: [makeGuard()], unseen_count: 2 }, // overflow (2 > 1)
+      guard: { rejections: [makeGuard()], unseen_count: 2 },
     });
     renderStrip();
     expect(await screen.findByRole("button", { name: /Dismiss all/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Mark all read/i })).toBeNull();
+  });
+
+  it("grouping alone (unseen_count == raw rows) does NOT trigger overflow", async () => {
+    // 12 collapsed emissions, all fetched (unseen_count == 12 == rejections.length): normal ack.
+    const rejections = Array.from({ length: 12 }, (_, i) =>
+      makeGuard({ decision_id: 600 + i, explanation: "FAIL — kill_switch: active" }),
+    );
+    stubAll({ guard: { rejections, unseen_count: 12 } });
+    renderStrip();
+    expect(await screen.findByRole("button", { name: /Mark all read/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Dismiss all/i })).toBeNull();
   });
 
   it("shows Mark-all-read when no feed overflows and totalUnseen > 0", async () => {
@@ -410,20 +500,26 @@ describe("AlertsStrip — per-feed overflow", () => {
       },
     });
     renderStrip();
-    await screen.findByText("AAPL");
+    await screen.findByText("Kill switch active");
     expect(screen.queryByRole("button", { name: /Mark all read/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /Dismiss all/i })).toBeNull();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Mark-all-read fan-out
+// Mark-all-read fan-out (raw feed MAX id, not group latestTs)
 // ---------------------------------------------------------------------------
 
 describe("AlertsStrip — Mark all read", () => {
-  it("fans out to each non-empty feed with its MAX id", async () => {
+  it("fans out to each non-empty feed with its MAX raw id", async () => {
     stubAll({
-      guard: { rejections: [makeGuard({ decision_id: 510 })], unseen_count: 1 },
+      guard: {
+        rejections: [
+          makeGuard({ decision_id: 505, explanation: "FAIL — kill_switch: active" }),
+          makeGuard({ decision_id: 510, explanation: "FAIL — kill_switch: active" }),
+        ],
+        unseen_count: 2,
+      },
       position: { alerts: [makePosition({ alert_id: 710 })], unseen_count: 1 },
     });
     mockedMarkGuard.mockResolvedValue(undefined);
