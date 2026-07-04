@@ -122,6 +122,19 @@ def test_representative_keeps_max_row_provenance() -> None:
     assert rows[0].dropped_sources == dropped
 
 
+def test_equal_share_tiebreak_is_deterministic_by_form_priority() -> None:
+    """On equal shares the representative (winning source/accession) must be
+    picked deterministically — Form 4 over Form 3 — regardless of input row
+    order (Claude review NITPICK, PR #1946)."""
+    a = _h("1", "Tie", "form3", "100", nature="indirect", accession="f3")
+    b = _h("1", "Tie", "form4", "100", nature="direct", accession="f4")
+    # Same identity, equal shares, opposite input orders → same representative.
+    r1 = _collapse_owner_lots([a, b])
+    r2 = _collapse_owner_lots([b, a])
+    assert r1[0].winning_source == r2[0].winning_source == "form4"
+    assert r1[0].winning_accession == r2[0].winning_accession == "f4"
+
+
 def test_non_primary_lot_dropped_sources_are_merged() -> None:
     """A non-primary lot's provenance (a superseded amendment folded within its
     own nature) must survive the collapse, not be discarded with the row."""

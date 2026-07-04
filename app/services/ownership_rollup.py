@@ -2449,7 +2449,17 @@ def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
         if len(rows) == 1:
             out.append(rows[0])
             continue
-        rows_desc = sorted(rows, key=lambda h: h.shares, reverse=True)
+        # Deterministic representative on equal shares: shares DESC, then the
+        # higher-priority form (Form 4 over Form 3 via ``_PRIORITY_RANK``), then
+        # accession — so the winning source/accession/provenance carried onto the
+        # collapsed row does NOT depend on the upstream DB row order (Claude review
+        # NITPICK, PR #1946). ``-_PRIORITY_RANK`` because ``reverse=True`` wants the
+        # preferred (lower-rank) form to sort largest.
+        rows_desc = sorted(
+            rows,
+            key=lambda h: (h.shares, -_PRIORITY_RANK[h.winning_source], h.winning_accession),
+            reverse=True,
+        )
         primary = rows_desc[0]
         total = sum((h.shares for h in rows_desc), Decimal(0))
         lots = tuple(
