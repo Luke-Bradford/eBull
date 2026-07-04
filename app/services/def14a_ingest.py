@@ -44,8 +44,10 @@ import psycopg.rows
 from app.providers.implementations.sec_def14a import (
     Def14ABeneficialHolder,
     Def14ABeneficialOwnershipTable,
+    Def14AExecCompRow,
     extract_plan_name_and_trustee,
     parse_beneficial_ownership_table,
+    parse_summary_compensation_table,
 )
 from app.services import raw_filings
 from app.services.bootstrap_state import (
@@ -63,7 +65,15 @@ from app.services.ownership_observations import (
 )
 from app.services.sec_identity import siblings_for_issuer_cik
 
-_PARSER_VERSION_DEF14A = "def14a-v1"
+# v2 (#1945): body pass now also extracts the Item 402(c) Summary
+# Compensation Table into def14a_exec_compensation, alongside the Item 403
+# beneficial-ownership holdings. Bumping this string is the backfill vehicle:
+# per settled-decisions.md:96 it flows through known_to supersession so the
+# manifest re-evaluates the def14a_body cohort against the new version and the
+# SCT-bearing bodies rewash + backfill comp automatically (no separate
+# backfill script). ``rewash_filings`` imports THIS literal for its ParserSpec
+# current_version so the two can't drift.
+_PARSER_VERSION_DEF14A = "def14a-v2"
 
 logger = logging.getLogger(__name__)
 
@@ -671,6 +681,149 @@ def _upsert_holding(
     return "inserted" if row["inserted"] else "updated"
 
 
+def _upsert_comp(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession_number: str,
+    issuer_cik: str,
+    instrument_id: int,
+    row: Def14AExecCompRow,
+) -> str:
+    """UPSERT one ``def14a_exec_compensation`` row (#1945).
+
+    Returns ``'inserted'`` / ``'updated'``. The UNIQUE index is keyed on
+    ``(instrument_id, accession_number, executive_name, fiscal_year)`` and
+    excludes ``principal_position`` (heuristic free-text, like
+    ``holder_role`` in :func:`_upsert_holding`) so a re-parse with better
+    title inference flows through the conflict path cleanly.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            INSERT INTO def14a_exec_compensation (
+                instrument_id, accession_number, issuer_cik,
+                executive_name, principal_position, fiscal_year,
+                salary, bonus, stock_awards, option_awards,
+                non_equity_incentive, pension_nqdc, other_comp, total_comp
+            ) VALUES (
+                %(iid)s, %(accession)s, %(cik)s,
+                %(name)s, %(position)s, %(fy)s,
+                %(salary)s, %(bonus)s, %(stock)s, %(option)s,
+                %(neq)s, %(pension)s, %(other)s, %(total)s
+            )
+            ON CONFLICT (instrument_id, accession_number, executive_name, fiscal_year) DO UPDATE SET
+                issuer_cik = EXCLUDED.issuer_cik,
+                principal_position = EXCLUDED.principal_position,
+                salary = EXCLUDED.salary,
+                bonus = EXCLUDED.bonus,
+                stock_awards = EXCLUDED.stock_awards,
+                option_awards = EXCLUDED.option_awards,
+                non_equity_incentive = EXCLUDED.non_equity_incentive,
+                pension_nqdc = EXCLUDED.pension_nqdc,
+                other_comp = EXCLUDED.other_comp,
+                total_comp = EXCLUDED.total_comp,
+                fetched_at = NOW()
+            RETURNING (xmax = 0) AS inserted
+            """,
+            {
+                "iid": instrument_id,
+                "accession": accession_number,
+                "cik": issuer_cik,
+                "name": row.executive_name,
+                "position": row.principal_position,
+                "fy": row.fiscal_year,
+                "salary": row.salary,
+                "bonus": row.bonus,
+                "stock": row.stock_awards,
+                "option": row.option_awards,
+                "neq": row.non_equity_incentive,
+                "pension": row.pension_nqdc,
+                "other": row.other_comp,
+                "total": row.total_comp,
+            },
+        )
+        result = cur.fetchone()
+    assert result is not None
+    return "inserted" if result["inserted"] else "updated"
+
+
+# A plausible-SCT score floor used only for the "addressable but unparsed"
+# yield-gap log (mirrors the provider's internal ``_SCT_SCORE_FLOOR``): a best
+# table scoring at/above this that still produced zero rows is a real
+# extraction gap worth surfacing; below it there was simply no SCT (a
+# non-comp-voting proxy), which is expected and not logged.
+_SCT_PLAUSIBLE_SCORE: int = 6
+
+
+def apply_exec_comp_best_effort(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession_number: str,
+    issuer_cik: str,
+    body: str,
+    instrument_ids: list[int],
+) -> int:
+    """Parse the Item 402(c) Summary Compensation Table from ``body`` and
+    upsert one ``def14a_exec_compensation`` row per (instrument, exec, FY),
+    fanned out across share-class siblings (#1945).
+
+    SAVEPOINT-isolated + best-effort: the entire parse+upsert runs inside its
+    own ``conn.transaction()`` so a comp failure rolls back comp ONLY and
+    never poisons the caller's connection or aborts the already-applied Item
+    403 holdings write (#1700 per-section failure isolation). Comp is a v1
+    augment, not a gate on the holdings outcome. Comp absence is EXPECTED for
+    many bodies (non-comp-voting proxies carry no SCT) — not an error.
+
+    Returns the number of comp rows written. Emits a structured ``log()`` of
+    the yield so the parsed-vs-addressable gap is never silent (spec).
+    """
+    try:
+        comp = parse_summary_compensation_table(body)
+    except Exception:  # noqa: BLE001 — best-effort augment; never propagate
+        logger.exception("def14a exec-comp: parse raised accession=%s", accession_number)
+        return 0
+
+    if not comp.rows:
+        if comp.raw_table_score >= _SCT_PLAUSIBLE_SCORE:
+            # A plausible SCT scored but no rows extracted — the real yield
+            # gap against heterogeneous HTML. Surface it (no silent truncation).
+            logger.info(
+                "def14a exec-comp: addressable body yielded 0 SCT rows accession=%s (score=%d)",
+                accession_number,
+                comp.raw_table_score,
+            )
+        return 0
+
+    written = 0
+    try:
+        with conn.transaction():
+            # Serialise against a concurrent rewash DELETE+INSERT on the same
+            # accession (same xact-lock key the holdings writers use).
+            raw_filings.acquire_filing_accession_write_lock(conn, accession_number)
+            for instrument_id in instrument_ids:
+                for comp_row in comp.rows:
+                    _upsert_comp(
+                        conn,
+                        accession_number=accession_number,
+                        issuer_cik=issuer_cik,
+                        instrument_id=instrument_id,
+                        row=comp_row,
+                    )
+                    written += 1
+    except Exception:  # noqa: BLE001 — savepoint rolls back comp; holdings survive
+        logger.exception("def14a exec-comp: upsert raised accession=%s", accession_number)
+        return 0
+
+    logger.info(
+        "def14a exec-comp: wrote %d comp rows accession=%s (%d execs x %d instruments)",
+        written,
+        accession_number,
+        len(comp.rows),
+        len(instrument_ids),
+    )
+    return written
+
+
 # ---------------------------------------------------------------------------
 # Per-accession driver
 # ---------------------------------------------------------------------------
@@ -838,6 +991,16 @@ def _ingest_single_accession(
             )
             if esop_rows_written > 0:
                 refresh_esop_current(conn, instrument_id=sibling_iid)
+
+    # Item 402(c) exec-comp augment (#1945). Best-effort + savepoint-isolated
+    # so a comp failure cannot abort the holdings write above.
+    apply_exec_comp_best_effort(
+        conn,
+        accession_number=ref.accession_number,
+        issuer_cik=issuer_cik,
+        body=body,
+        instrument_ids=siblings,
+    )
 
     return _AccessionOutcome(
         status="success",

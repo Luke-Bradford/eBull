@@ -69,6 +69,7 @@ from app.services.def14a_ingest import (
     _record_ingest_attempt,
     _resolve_issuer_cik,
     _upsert_holding,
+    apply_exec_comp_best_effort,
     def14a_within_cap,
 )
 from app.services.manifest_parsers._classify import (
@@ -450,6 +451,21 @@ def _parse_def14a(
             raw_status="stored",
             error=format_upsert_error(exc),
         )
+
+    # Item 402(c) exec-comp augment (#1945) — runs AFTER the holdings txn has
+    # committed, in its OWN savepoint (inside apply_exec_comp_best_effort), so
+    # a comp parse/upsert failure rolls back comp only; the committed holdings
+    # write + this accession's fairness tick are unaffected. ``siblings`` is
+    # bound here because the holdings try-block succeeded (a failure would have
+    # returned above). Comp is a best-effort augment — its outcome never
+    # changes the ParseOutcome (still ``parsed``).
+    apply_exec_comp_best_effort(
+        conn,
+        accession_number=accession,
+        issuer_cik=issuer_cik,
+        body=body,
+        instrument_ids=siblings,
+    )
 
     return ParseOutcome(
         status="parsed",

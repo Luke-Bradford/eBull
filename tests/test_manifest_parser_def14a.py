@@ -192,7 +192,7 @@ def test_happy_path_parses_and_stores_raw_and_holdings(
     assert row is not None
     assert row.ingest_status == "parsed"
     assert row.raw_status == "stored"
-    assert row.parser_version == "def14a-v1"
+    assert row.parser_version == "def14a-v2"
 
     # def14a_beneficial_holdings rows exist for the parsed table.
     with ebull_test_conn.cursor() as cur:

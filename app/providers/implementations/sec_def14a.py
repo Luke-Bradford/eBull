@@ -931,3 +931,441 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
         rows=rows,
         raw_table_score=best_score,
     )
+
+
+# ===========================================================================
+# Item 402(c) — Summary Compensation Table (exec comp) — #1945
+# ===========================================================================
+#
+# Governed by Regulation S-K Item 402 (17 CFR § 229.402). The Summary
+# Compensation Table (SCT) columns are prescribed and ORDERED by
+# § 229.402(c)(2)(i)–(x); the scaled SRC variant (§ 229.402(n)) simply omits
+# some columns but preserves the order. We therefore resolve the PRESENT
+# dollar columns from the header (by matched text, never fixed positional
+# index) into their reg order, then zip data-row values against that ordered
+# subset. This survives the wildly heterogeneous real-world markup (verified
+# on AAPL / HD / JPM / MSFT full-proxy fixtures):
+#   * name-cell ``rowspan`` → continuation-year rows are index-shifted (AAPL/MSFT)
+#   * year folded into the name column, ``—`` for null bonus (HD)
+#   * lone ``$`` spacer cells + a bare footnote-superscript cell mid-row (JPM)
+#   * empty layout-spacer columns interleaved between values (AAPL/MSFT)
+# Positional header→column mapping cannot survive these; token classification
+# + reg-fixed ordering can.
+
+
+@dataclass(frozen=True)
+class Def14AExecCompRow:
+    """One (executive, fiscal_year) row of the Item 402(c) SCT.
+
+    Dollar fields are ``None`` when the column is absent (SRC scaled
+    table drops pension/NQDC) OR the cell is an explicit ``—`` / ``N/A``
+    null. ``principal_position`` is stored raw free-text (v1; the
+    thesis consumer canonicalises CEO/CFO — open-question #1 in the spec).
+    """
+
+    executive_name: str
+    principal_position: str | None
+    fiscal_year: int
+    salary: Decimal | None
+    bonus: Decimal | None
+    stock_awards: Decimal | None
+    option_awards: Decimal | None
+    non_equity_incentive: Decimal | None
+    pension_nqdc: Decimal | None
+    other_comp: Decimal | None
+    total_comp: Decimal | None
+
+
+@dataclass(frozen=True)
+class Def14ASummaryCompTable:
+    """Parsed Item 402(c) SCT payload. ``rows`` empty = no SCT
+    confidently identified (log, don't guess). ``raw_table_score`` is
+    the chosen table's header score for audit diagnostics (mirror
+    :class:`Def14ABeneficialOwnershipTable`)."""
+
+    rows: tuple[Def14AExecCompRow, ...]
+    raw_table_score: int
+
+
+# Section anchor for the SCT. Kept SEPARATE from ``_SECTION_HEADING_RE`` so
+# the ownership parser is unaffected; passed into ``_find_section_windows``.
+_SCT_SECTION_HEADING_RE: Final[re.Pattern[str]] = re.compile(r"Summary\s+Compensation\s+Table", re.IGNORECASE)
+
+# Header keywords that identify the SCT specifically (vs the Director
+# Compensation table 402(k) or Grants-of-Plan-Based-Awards table, which
+# share layout but lack the salary+total+name/position combination).
+_SCT_HEADER_KEYWORDS: Final[tuple[tuple[str, int], ...]] = (
+    ("name and principal position", 4),
+    ("named executive", 3),
+    ("principal position", 3),
+    ("salary", 3),
+    ("stock award", 3),
+    ("option award", 3),
+    ("all other compensation", 3),
+    ("non-equity", 2),
+    ("nonequity", 2),
+    ("non equity", 2),
+    ("bonus", 2),
+    ("change in pension", 2),
+    ("total", 1),
+    ("year", 1),
+)
+
+# SCT dollar fields in reg (c)(2)(iii)–(x) order. Each carries the header
+# substrings that identify its column. Matchers are tested per header cell
+# in THIS order (most specific first) so e.g. "Change in Pension Value and
+# Nonqualified Deferred Compensation Earnings" claims ``pension_nqdc`` and
+# never leaks into ``other_comp``. ``total`` is last (most generic).
+_SCT_FIELD_MATCHERS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
+    ("pension_nqdc", ("change in pension", "pension value", "nqdc", "deferred compensation earnings")),
+    ("non_equity_incentive", ("non-equity", "nonequity", "non equity")),
+    ("stock_awards", ("stock award",)),
+    ("option_awards", ("option award",)),
+    ("other_comp", ("all other compensation", "all other")),
+    ("bonus", ("bonus",)),
+    ("salary", ("salary",)),
+    ("total_comp", ("total",)),
+)
+
+_SCT_ALL_FIELDS: Final[tuple[str, ...]] = tuple(f for f, _ in _SCT_FIELD_MATCHERS)
+
+# Zero-width chars (ZWSP/ZWNJ/ZWJ/WORD-JOINER/BOM) used as layout spacers in
+# iXBRL-rendered proxies — Python ``str.strip()`` does NOT treat these as
+# whitespace, so a ``​``-filled spacer cell reads as "non-empty" and
+# hides the real name/value cells unless scrubbed first.
+_ZERO_WIDTH_RE: Final[re.Pattern[str]] = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
+# Non-breaking / unicode spaces normalised to a plain space so tokenisation
+# (year detection, dash-null detection) is uniform.
+_UNICODE_SPACE_RE: Final[re.Pattern[str]] = re.compile(
+    "[\xa0\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u202f\u205f\u3000]"
+)
+
+
+def _sct_norm(cell: str) -> str:
+    """Normalise an SCT cell: drop zero-width spacers, fold unicode spaces
+    to plain spaces, collapse inline whitespace. Preserves ``\\n`` so the
+    name/title split (line 1 = name, line 2 = title) still works."""
+    s = _ZERO_WIDTH_RE.sub("", cell)
+    s = _UNICODE_SPACE_RE.sub(" ", s)
+    return _INLINE_WHITESPACE_RE.sub(" ", s).strip()
+
+
+_YEAR_RE: Final[re.Pattern[str]] = re.compile(r"^(?:19|20)\d{2}$")
+# Bare 1–2 digit non-zero integer = footnote superscript in its own cell
+# (JPM's stray ``'6'``), never a real dollar amount (no exec is paid $6).
+# ``0`` is preserved (legitimate zero salary/bonus/option — MSFT's bonus).
+_BARE_FOOTNOTE_INT_RE: Final[re.Pattern[str]] = re.compile(r"^[1-9]\d?$")
+_DASH_NULLS: Final[frozenset[str]] = frozenset({"-", "—", "–", "n/a", "na"})
+
+# Role keywords marking where a position title begins inside a combined
+# "Name  Title" cell (used to split executive_name from principal_position
+# when no newline delimiter is present). Ordered longest-first so
+# "executive vice president" wins over "president".
+_POSITION_ROLE_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b("
+    r"chief\s+\w+|"
+    r"executive\s+vice\s+president|senior\s+vice\s+president|vice\s+president|"
+    r"president|chair(?:man|woman|person)?|"
+    r"general\s+counsel|chief|ceo|cfo|coo|cto|"
+    r"executive\s+officer|principal\s+\w+|treasurer|secretary|"
+    r"director|founder"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _score_sct_headers(headers: tuple[str, ...]) -> int:
+    """Score a candidate table by SCT header keywords. Higher = better."""
+    if not headers:
+        return 0
+    joined = " ".join(headers).lower()
+    return sum(weight for keyword, weight in _SCT_HEADER_KEYWORDS if keyword in joined)
+
+
+def _resolve_sct_fields(headers: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the PRESENT dollar fields in HEADER (document) order.
+
+    Walk header cells left→right; map each to at most one field (first
+    matcher wins per cell). Dedup keeping first occurrence. For a
+    reg-compliant filing this equals reg (c)(2) order because
+    § 229.402(c)(2) fixes the column ORDER; the parser's correctness in the
+    equal-length zip relies on header order == data-row order (always true
+    within one table), NOT on reg order per se. Only :func:`_map_sct_values`'s
+    Total anchor (mismatch branch) assumes the reg's Total-is-last rule, and it
+    guards for it explicitly.
+    """
+    ordered: list[str] = []
+    for cell in headers:
+        low = cell.lower()
+        for field, needles in _SCT_FIELD_MATCHERS:
+            if field in ordered:
+                continue
+            if any(n in low for n in needles):
+                ordered.append(field)
+                break
+    return tuple(ordered)
+
+
+def _parse_dollar(raw: str) -> Decimal | None:
+    """Parse an SCT dollar cell. Strips footnote markers, ``$``,
+    thousands separators, NBSP; ``()`` → negative; dash/``N/A``/empty →
+    ``None``. (Share parser strips commas but not ``$`` — hence a
+    dedicated dollar variant per the spec.)"""
+    if not raw:
+        return None
+    cleaned = _FOOTNOTE_RE.sub("", raw).replace("$", "").replace("\xa0", "").replace(",", "").strip()
+    negative = False
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        negative = True
+        cleaned = cleaned[1:-1].strip()
+    if cleaned == "" or cleaned.lower() in _DASH_NULLS:
+        return None
+    try:
+        value = Decimal(cleaned)
+    except InvalidOperation:
+        return None
+    if value.is_nan() or value.is_infinite():
+        return None
+    return -value if negative else value
+
+
+def _split_name_position(cell: str) -> tuple[str, str | None]:
+    """Split a "Name / Title" SCT first cell into (name, position).
+
+    Prefers a newline delimiter (AAPL/MSFT put the name on line 1, the
+    title on line 2 — ``_strip_inline_html`` preserves ``\\n``). Falls
+    back to splitting at the first position-role keyword (JPM/HD render
+    "James Dimon Chairman and CEO" on one line). Footnote markers are
+    stripped from the name. Position is raw free-text (v1)."""
+    text = _clean_holder_name(cell).replace("\xa0", " ").strip()
+    text = _INLINE_WHITESPACE_RE.sub(" ", text)
+    if not text:
+        return "", None
+    # Newline delimiter → line 1 is the name, remainder is the title.
+    if "\n" in text:
+        name, _, position = text.partition("\n")
+        pos = _INLINE_WHITESPACE_RE.sub(" ", position.replace("\n", " ")).strip()
+        return name.strip(), (pos or None)
+    # Otherwise split at the first role keyword.
+    m = _POSITION_ROLE_RE.search(text)
+    if m and m.start() > 0:
+        return text[: m.start()].strip().rstrip(",").strip(), text[m.start() :].strip() or None
+    return text, None
+
+
+def _looks_like_name_cell(cell: str) -> bool:
+    """True when a cell is a NEO name/title (has letters, is not a bare
+    year or a pure number/footnote)."""
+    stripped = _clean_holder_name(cell).strip()
+    if not stripped:
+        return False
+    if _YEAR_RE.match(stripped):
+        return False
+    # Needs an alphabetic run of 2+ (filters "$", "(1)", "2,500,000").
+    return bool(re.search(r"[A-Za-z]{2,}", stripped))
+
+
+def _extract_sct_row_values(cells_after_year: list[str]) -> list[Decimal | None]:
+    """Compact the post-year cells into ordered value slots.
+
+    Drops layout spacers ('' / lone '$' / footnote-only / bare
+    footnote-superscript integers) but KEEPS explicit ``—``/``N/A`` nulls
+    (they are real columns with no value). Returns the value list to zip
+    against the reg-ordered present fields."""
+    values: list[Decimal | None] = []
+    for cell in cells_after_year:
+        s = cell.strip()
+        if s == "" or s == "$":
+            continue
+        # Footnote-only cell (e.g. "(3)(4)") strips to empty → spacer.
+        stripped_fn = _FOOTNOTE_RE.sub("", s).strip()
+        if stripped_fn == "":
+            continue
+        low = stripped_fn.lower()
+        if low in _DASH_NULLS:
+            values.append(None)  # explicit null column
+            continue
+        # Bare footnote superscript ('6') — not a dollar amount.
+        if _BARE_FOOTNOTE_INT_RE.match(stripped_fn):
+            continue
+        parsed = _parse_dollar(s)
+        if parsed is not None:
+            values.append(parsed)
+    return values
+
+
+def _map_sct_values(fields: tuple[str, ...], values: list[Decimal | None]) -> dict[str, Decimal | None]:
+    """Map extracted values onto the reg-ordered present fields.
+
+    Clean case (``len(values) == len(fields)``) zips directly. When the
+    counts differ — a filer rendered an interior null column as a BLANK
+    cell (dropped as a spacer) rather than ``—``, or emitted an extra
+    stray cell — the interior mapping is ambiguous. Rather than emit
+    WRONG middle components, trust only the reg-anchored ends: Total is
+    always the last SCT column (§ 229.402(c)(2)(x)) and Salary the first
+    dollar column ((c)(2)(iii)), so those two are read off the ends and
+    the ambiguous middle is left NULL. This keeps the headline thesis
+    figure (total_comp) correct on every emitted row."""
+    mapped: dict[str, Decimal | None] = dict.fromkeys(_SCT_ALL_FIELDS, None)
+    if not values:
+        return mapped
+    if len(values) == len(fields):
+        for field, value in zip(fields, values, strict=True):
+            mapped[field] = value
+        return mapped
+    mapped[fields[0]] = values[0]
+    # Anchor Total to the last value ONLY when Total is the last resolved field
+    # — reg § 229.402(c)(2)(x) mandates Total as the rightmost SCT column, so a
+    # compliant header resolves total_comp last. If a non-compliant header put
+    # Total elsewhere, we do NOT mis-anchor (leave total NULL) rather than emit
+    # a wrong figure.
+    if fields[-1] == "total_comp":
+        mapped["total_comp"] = values[-1]
+    return mapped
+
+
+def _find_sct_windows(html_text: str) -> list[tuple[int, int]]:
+    """Candidate byte windows for the SCT — ONE per "Summary Compensation
+    Table" heading occurrence (not inside a table), each capped to
+    ``_SECTION_SCAN_BYTES``, with overlapping/adjacent windows merged into
+    contiguous ranges. Occurrences arrive in document order (finditer), so a
+    single left-to-right merge pass suffices. Falls back to the whole document
+    only when the phrase never appears (a non-SCT proxy — parse returns 0 rows
+    fast anyway)."""
+    windows: list[tuple[int, int]] = []
+    for match in _SCT_SECTION_HEADING_RE.finditer(html_text):
+        start = match.start()
+        if _is_inside_table(html_text, start):
+            continue
+        end = min(start + _SECTION_SCAN_BYTES, len(html_text))
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((start, end))
+    if not windows:
+        windows.append((0, len(html_text)))
+    return windows
+
+
+# Score floor: a genuine SCT (name/position + salary + stock/option + total)
+# scores well above this; the director-comp / plan-awards look-alikes lack
+# the salary keyword and score below it.
+_SCT_SCORE_FLOOR: Final[int] = 6
+
+
+def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
+    """Parse a DEF 14A body and extract the Item 402(c) Summary
+    Compensation Table.
+
+    Returns empty rows when no candidate table scores above the floor
+    (many proxies carry no SCT — DEFA14A soliciting material, merger
+    proxies, notice-only meetings; expected, not a defect). Best-effort:
+    does not raise on malformed HTML."""
+    if not html_text:
+        return Def14ASummaryCompTable(rows=(), raw_table_score=0)
+
+    # The phrase "Summary Compensation Table" recurs MANY times in a proxy
+    # (TOC, CD&A cross-references, Pay-vs-Performance footnotes, the table
+    # caption itself) — HD's proxy has 22 hits. The real table sits at an
+    # arbitrary MIDDLE occurrence, so first/last-window heuristics miss it.
+    # Evaluate a window at EVERY occurrence (merged; each capped to
+    # _SECTION_SCAN_BYTES) and pick the GLOBAL highest-scoring table that is a
+    # VALID SCT (has both the mandatory Salary § 229.402(c)(2)(iii) and Total
+    # (c)(2)(x) columns). Folding the salary+total requirement into SELECTION
+    # — not just a post-hoc gate — is what stops a higher-scoring
+    # Pay-versus-Performance look-alike (Total but no Salary; negative
+    # "Compensation Actually Paid" values) from beating the real SCT.
+    best_score = 0
+    best_table: _RawTable | None = None
+    for window_start, window_end in _find_sct_windows(html_text):
+        for start, end in _scan_outer_tables(html_text, start=window_start, end=window_end):
+            parsed = _parse_table_html(html_text[start:end])
+            if parsed is None:
+                continue
+            score = _score_sct_headers(parsed.score_headers)
+            if score < _SCT_SCORE_FLOOR or score <= best_score:
+                continue
+            # Require a NAME column header (§ 229.402(c)(2)(i) "Name and
+            # Principal Position") — some filers header it just "Name" with the
+            # title shown inline in the data cells, so match the broad "name"
+            # substring rather than the full phrase (requiring "principal
+            # position" cost ~14pp of real yield). Combined with the
+            # salary+total requirement below this discriminates the SCT from
+            # adjacent look-alikes: the Pay-vs-Performance table has no "name"
+            # column (Year / PEO / Non-PEO), and the Director Compensation table
+            # has no Salary column.
+            header_join = " ".join(parsed.score_headers).lower()
+            if "name" not in header_join:
+                continue
+            candidate_fields = _resolve_sct_fields(parsed.column_headers)
+            if "salary" not in candidate_fields or "total_comp" not in candidate_fields:
+                continue
+            best_score = score
+            best_table = parsed
+
+    if best_table is None:
+        logger.debug("DEF 14A: no valid SCT met score floor; best_score=%d", best_score)
+        return Def14ASummaryCompTable(rows=(), raw_table_score=best_score)
+
+    fields = _resolve_sct_fields(best_table.column_headers)
+
+    rows: list[Def14AExecCompRow] = []
+    current_name = ""
+    current_position: str | None = None
+
+    for raw_row in best_table.rows:
+        cells = [_sct_norm(c) for c in raw_row]
+        if not any(cells):
+            continue
+
+        # Leading name cell? (present on the first row per NEO; absent on
+        # rowspan continuation rows.)
+        first_nonempty_idx = next((i for i, c in enumerate(cells) if c), None)
+        if first_nonempty_idx is None:
+            continue
+        if _looks_like_name_cell(cells[first_nonempty_idx]):
+            current_name, current_position = _split_name_position(cells[first_nonempty_idx])
+
+        # Locate the fiscal-year token.
+        year_idx = None
+        for i, c in enumerate(cells):
+            if _YEAR_RE.match(_FOOTNOTE_RE.sub("", c).strip()):
+                year_idx = i
+                break
+        if year_idx is None:
+            # Name-only header row (HD) or a prose row — nothing to emit.
+            continue
+        if not current_name:
+            continue  # values with no NEO context yet — skip defensively.
+
+        fiscal_year = int(_FOOTNOTE_RE.sub("", cells[year_idx]).strip())
+        values = _extract_sct_row_values(cells[year_idx + 1 :])
+        if not values:
+            continue
+
+        mapped = _map_sct_values(fields, values)
+
+        # Defensive: an SCT total is non-negative by construction. A negative
+        # here means a Pay-vs-Performance "Compensation Actually Paid" row
+        # slipped through — drop it rather than store a wrong figure.
+        total = mapped["total_comp"]
+        if total is not None and total < 0:
+            continue
+
+        rows.append(
+            Def14AExecCompRow(
+                executive_name=current_name,
+                principal_position=current_position,
+                fiscal_year=fiscal_year,
+                salary=mapped["salary"],
+                bonus=mapped["bonus"],
+                stock_awards=mapped["stock_awards"],
+                option_awards=mapped["option_awards"],
+                non_equity_incentive=mapped["non_equity_incentive"],
+                pension_nqdc=mapped["pension_nqdc"],
+                other_comp=mapped["other_comp"],
+                total_comp=mapped["total_comp"],
+            )
+        )
+
+    return Def14ASummaryCompTable(rows=tuple(rows), raw_table_score=best_score)
