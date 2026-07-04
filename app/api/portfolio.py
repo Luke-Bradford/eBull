@@ -1241,7 +1241,7 @@ def get_activity(
             SELECT COUNT(*) AS total
             FROM trade_events
             WHERE (%(include_mirrors)s OR COALESCE(social_trade_id, 0) = 0)
-              AND (%(instrument_id)s IS NULL OR instrument_id = %(instrument_id)s)
+              AND (%(instrument_id)s::bigint IS NULL OR instrument_id = %(instrument_id)s::bigint)
             """,
             {"include_mirrors": include_mirrors, "instrument_id": instrument_id},
         ).fetchone()
@@ -1268,7 +1268,7 @@ def get_activity(
                 WHERE event_kind = 'open'
             ) o ON o.position_id = te.position_id AND te.event_kind = 'close'
             WHERE (%(include_mirrors)s OR COALESCE(te.social_trade_id, 0) = 0)
-              AND (%(instrument_id)s IS NULL OR te.instrument_id = %(instrument_id)s)
+              AND (%(instrument_id)s::bigint IS NULL OR te.instrument_id = %(instrument_id)s::bigint)
             ORDER BY te.executed_at DESC, te.event_id DESC
             LIMIT %(limit)s
             """,
