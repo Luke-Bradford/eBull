@@ -238,6 +238,11 @@ function GroupedPositionsTable({
 // Recent exits (#1927) — closed copied positions as events (no MTM/P&L)
 // ---------------------------------------------------------------------------
 
+// Keep in sync with the LIMIT in copy_trading.py::get_mirror_detail. The
+// list is an activity feed, not a full ledger; when it fills we say so
+// rather than silently truncating older exits.
+const CLOSED_EXITS_CAP = 100;
+
 function ClosedExitsTable({
   exits,
   currency,
@@ -298,6 +303,11 @@ function ClosedExitsTable({
           ))}
         </tbody>
       </table>
+      {exits.length >= CLOSED_EXITS_CAP ? (
+        <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
+          Showing the {CLOSED_EXITS_CAP} most recent exits.
+        </p>
+      ) : null}
     </div>
   );
 }

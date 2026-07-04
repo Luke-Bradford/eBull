@@ -36,6 +36,13 @@ router = APIRouter(
     dependencies=[Depends(require_session_or_service_token)],
 )
 
+# Max closed-position exits returned by get_mirror_detail — an activity
+# feed, not a full ledger. Kept in sync with CLOSED_EXITS_CAP in
+# frontend/src/pages/CopyTradingPage.tsx, which surfaces "Showing the N
+# most recent exits" when the list fills so the cap is never silent (#1927
+# review nitpick).
+CLOSED_EXITS_LIMIT = 100
+
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -411,7 +418,9 @@ def get_mirror_detail(
 
     # Closed copied positions — the trader's exits observed since we began
     # archiving (#1927). Most-recent first, capped: this is an activity
-    # feed, not a full ledger. No MTM join — the position is gone.
+    # feed, not a full ledger. No MTM join — the position is gone. The FE
+    # surfaces "Showing the N most recent exits" when the list fills, so
+    # the cap is not silent (CopyTradingPage CLOSED_EXITS_CAP mirrors this).
     closed_sql = """
         SELECT cmcp.position_id, cmcp.instrument_id,
                i.symbol, i.company_name,
@@ -421,7 +430,7 @@ def get_mirror_detail(
         LEFT JOIN instruments i ON i.instrument_id = cmcp.instrument_id
         WHERE cmcp.mirror_id = %(mirror_id)s
         ORDER BY cmcp.closed_detected_at DESC
-        LIMIT 100
+        LIMIT %(limit)s
     """
 
     with conn.transaction():
@@ -437,7 +446,7 @@ def get_mirror_detail(
             position_rows = cur.fetchall()
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(closed_sql, {"mirror_id": mirror_id})
+            cur.execute(closed_sql, {"mirror_id": mirror_id, "limit": CLOSED_EXITS_LIMIT})
             closed_rows = cur.fetchall()
 
     position_items = [_compute_position_mtm(p, display_currency, rates) for p in position_rows]
