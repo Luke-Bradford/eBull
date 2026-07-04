@@ -133,8 +133,13 @@ export function SummaryStrip({
     : price?.display_current != null && price?.display_currency != null
       ? { value: price.display_current, currency: price.display_currency }
       : null;
+  // Also require a labelled primary: never show a companion beside an
+  // unlabelled native price. (Backend + SSE both guarantee null native
+  // currency ⟹ null companion, so this is defensive against contract drift.)
   const showCompanion =
-    companion !== null && companion.currency !== primaryCurrency;
+    companion !== null &&
+    primaryCurrency !== null &&
+    companion.currency !== primaryCurrency;
   const changeNum = price?.day_change_pct != null ? Number(price.day_change_pct) : null;
   const changeColor =
     changeNum === null
