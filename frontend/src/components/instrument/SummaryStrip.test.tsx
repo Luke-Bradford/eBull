@@ -190,6 +190,81 @@ describe("SummaryStrip — action gating", () => {
     );
   });
 
+  it("formats the day-change to 2dp price precision, not the raw native value (#1953)", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          price: {
+            current: "22.77",
+            // native feed carries 6dp; must render as +0.13, not +0.130000
+            day_change: "0.130000",
+            day_change_pct: "0.0057",
+            day_change_as_of: "2026-07-03",
+            week_52_high: "40.00",
+            week_52_low: "10.00",
+            currency: "USD",
+            display_current: null,
+            display_currency: null,
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByText("+0.13 (+0.57%)")).toBeInTheDocument();
+    expect(screen.queryByText(/0\.130000/)).not.toBeInTheDocument();
+  });
+
+  it("renders a negative day-change with a single leading sign at 2dp (#1953)", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          price: {
+            current: "22.77",
+            day_change: "-0.250000",
+            day_change_pct: "-0.011",
+            day_change_as_of: "2026-07-03",
+            week_52_high: "40.00",
+            week_52_low: "10.00",
+            currency: "USD",
+            display_current: null,
+            display_currency: null,
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByText("-0.25 (-1.10%)")).toBeInTheDocument();
+  });
+
+  it("renders a negative change that rounds to zero as +0.00, not -0.00 (#1953)", () => {
+    render(
+      <SummaryStrip
+        summary={summary({
+          price: {
+            current: "22.77",
+            day_change: "-0.004",
+            day_change_pct: "-0.0001",
+            day_change_as_of: "2026-07-03",
+            week_52_high: "40.00",
+            week_52_low: "10.00",
+            currency: "USD",
+            display_current: null,
+            display_currency: null,
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByText(/\+0\.00 \(/)).toBeInTheDocument();
+    expect(screen.queryByText(/-0\.00/)).not.toBeInTheDocument();
+  });
+
   it("omits the companion when there is no display-currency conversion (#1906)", () => {
     render(
       <SummaryStrip

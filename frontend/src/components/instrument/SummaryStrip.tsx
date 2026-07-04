@@ -45,6 +45,23 @@ function formatPrice(
   return currency ? `${currency} ${formatted}` : formatted;
 }
 
+// Absolute day-change, formatted to the same 2dp precision as the price
+// (formatPrice) with an explicit sign. The native price triple (#1906) can
+// carry >2dp, so rendering day_change raw leaks e.g. `+0.130000` (#1953).
+function formatChange(value: string | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  // Sign off the rounded value so a magnitude that rounds to zero
+  // (e.g. -0.004 → -0.00) reads as "+0.00", not a bare "-0.00".
+  const rounded = Number(num.toFixed(2));
+  const formatted = Math.abs(rounded).toLocaleString(undefined, {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2,
+  });
+  return `${rounded >= 0 ? "+" : "-"}${formatted}`;
+}
+
 function formatPct(value: string | null | undefined, signed = false): string {
   if (value === null || value === undefined) return "—";
   const num = Number(value);
@@ -212,10 +229,7 @@ export function SummaryStrip({
               </span>
             ) : null}
             <span className={`text-sm tabular-nums ${changeColor}`}>
-              {price?.day_change != null && Number(price.day_change) >= 0
-                ? "+"
-                : ""}
-              {price?.day_change ?? "—"} (
+              {formatChange(price?.day_change)} (
               {formatPct(price?.day_change_pct, true)})
             </span>
             {/* #1924: stamp the day-change with its close date so a stale close
