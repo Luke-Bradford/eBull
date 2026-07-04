@@ -650,6 +650,13 @@ def _apply_def14a(
     # typed rows. (Comp absence on an accession that never had comp is expected
     # — many bodies carry no SCT — so the first-time v1→v2 backfill never
     # raises.)
+    # Function-local imports match this file's convention for the def14a
+    # parser/upsert helpers (see the Item 403 holdings path at the
+    # parse_beneficial_ownership_table / _upsert_holding imports above): the
+    # heavy sec_def14a + def14a_ingest modules are pulled in only when a
+    # def14a_body actually reaches rewash, keeping this module's import graph
+    # light. _PARSER_VERSION_DEF14A stays module-level because register_parser
+    # consumes it at import time.
     from app.providers.implementations.sec_def14a import parse_summary_compensation_table
     from app.services.def14a_ingest import _upsert_comp
 
@@ -669,6 +676,11 @@ def _apply_def14a(
                     f"{raw_doc.accession_number} (best_score={comp.raw_table_score}); "
                     f"previous parser found comp rows"
                 )
+            # DELETE before the per-row upserts (not upsert-only): _upsert_comp's
+            # ON CONFLICT replaces rows still present in the new parse, but a
+            # named-exec-officer/year row that DROPPED OUT of the re-parsed SCT
+            # would otherwise linger. The scoped DELETE clears those stale execs
+            # so the stored comp set exactly mirrors the latest parse.
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM def14a_exec_compensation WHERE accession_number = %s AND instrument_id = %s",
