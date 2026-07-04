@@ -305,6 +305,51 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     expect(rollupToFilerRows(rollup)[0]!.family_members).toBeUndefined();
   });
 
+  it("carries a collapsed owner's direct/indirect lot breakdown (#1942), sorted desc", () => {
+    const rollup = _baseRollup({
+      slices: [
+        _slice({
+          category: "insiders",
+          holders: [
+            _holder({
+              filer_name: "Jane Director",
+              shares: "350",
+              lots: [
+                {
+                  ownership_nature: "indirect",
+                  shares: "50",
+                  source: "form3",
+                  accession_number: "b",
+                  edgar_url: null,
+                  as_of_date: "2026-01-01",
+                },
+                {
+                  ownership_nature: "direct",
+                  shares: "300",
+                  source: "form4",
+                  accession_number: "a",
+                  edgar_url: null,
+                  as_of_date: "2026-01-01",
+                },
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+    const row = rollupToFilerRows(rollup).find((r) => r.label === "Jane Director")!;
+    expect(row.shares).toBe(350);
+    expect(row.lots?.map((l) => [l.nature, l.shares, l.source])).toEqual([
+      ["direct", 300, "form4"], // 300 sorted before 50
+      ["indirect", 50, "form3"],
+    ]);
+  });
+
+  it("omits lots for a single-lot holder", () => {
+    const rollup = _baseRollup({ slices: [_slice()] });
+    expect(rollupToFilerRows(rollup)[0]!.lots).toBeUndefined();
+  });
+
   it("skips zero / unparseable share counts (same predicate as the chart)", () => {
     const rollup = _baseRollup({
       slices: [
