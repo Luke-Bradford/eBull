@@ -56,6 +56,7 @@ from app.api.scores import router as scores_router
 from app.api.sse_quotes import router as sse_quotes_router
 from app.api.sync import router as sync_router
 from app.api.system import router as system_router
+from app.api.tax import router as tax_router
 from app.api.theses import instrument_thesis_router
 from app.api.theses import router as theses_router
 from app.api.watchlist import router as watchlist_router
@@ -556,6 +557,7 @@ app.include_router(scores_router)
 app.include_router(sse_quotes_router)
 app.include_router(sync_router)
 app.include_router(system_router)
+app.include_router(tax_router)
 app.include_router(bootstrap_router)
 app.include_router(theses_router)
 app.include_router(instrument_thesis_router)

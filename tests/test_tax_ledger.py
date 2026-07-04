@@ -17,9 +17,14 @@ from app.services.tax_ledger import (
     _compute_tax_year,
     _match_disposals_for_instrument,
     _to_uk_date,
+    available_tax_years,
+    current_tax_year,
+    disposals_for_tax_year,
     ingest_tax_events,
     run_disposal_matching,
+    s104_pool_rows,
     tax_year_summary,
+    valid_tax_year,
 )
 
 _D = Decimal
@@ -1036,6 +1041,10 @@ class TestTaxYearSummary:
         assert result.disposals_bed_and_breakfast == 1
         assert result.disposals_s104 == 3
 
+        # Annual exempt fully consumed: net 4000 > 3000 allowance -> 0 left.
+        assert result.annual_exempt_gbp == _D("3000")
+        assert result.exempt_remaining_gbp == _D("0")
+
         # CGT: net=4000, taxable=4000-3000=1000
         # Weighted basic: 3000*0.18 + 2000*0.18 = 900
         # Scale: 1000/5000 = 0.2
@@ -1067,6 +1076,8 @@ class TestTaxYearSummary:
         assert result.net_gain_gbp == _D("0")
         assert result.estimated_cgt_basic_scenario == _D("0")
         assert result.estimated_cgt_higher_scenario == _D("0")
+        # No gains -> the full £3,000 allowance is unused.
+        assert result.exempt_remaining_gbp == _D("3000")
 
     def test_2024_25_split_year_cgt_estimate(self) -> None:
         """Disposals spanning the 30 Oct 2024 rate change use different rates."""
@@ -1107,3 +1118,128 @@ class TestTaxYearSummary:
         # Weighted higher: 5000*0.20 + 5000*0.24 = 1000+1200 = 2200
         # est_higher = 2200 * 0.7 = 1540
         assert result.estimated_cgt_higher_scenario == _D("1540")
+
+
+# ===========================================================================
+# TestTaxYearHelpers (#1905) — pure, fast tier
+# ===========================================================================
+
+
+class TestValidTaxYear:
+    def test_current_and_supported_floor_valid(self) -> None:
+        assert valid_tax_year(current_tax_year()) is True
+        # 2024/25 is the first year the engine has CGT rate coverage for.
+        assert valid_tax_year("2024/25") is True
+
+    def test_impossible_suffix_rejected(self) -> None:
+        # Shape passes \d{4}/\d{2} but 99 != (2026+1) % 100.
+        assert valid_tax_year("2026/99") is False
+        assert valid_tax_year("2026/28") is False
+
+    def test_malformed_shape_rejected(self) -> None:
+        for bad in ["202627", "26/27", "2026/7", "abcd/ef", "2026-27", "2026/2027", ""]:
+            assert valid_tax_year(bad) is False
+
+    def test_out_of_range_start_rejected(self) -> None:
+        # Suffix arithmetic is correct, but the start year is out of bounds.
+        assert valid_tax_year("2023/24") is False  # below the engine's rate-coverage floor
+        assert valid_tax_year("1999/00") is False  # far below
+        assert valid_tax_year("2099/00") is False  # far future
+
+
+class TestCurrentTaxYear:
+    def test_format_and_self_consistency(self) -> None:
+        ty = current_tax_year()
+        assert valid_tax_year(ty) is True
+        start, suffix = ty.split("/")
+        assert len(start) == 4 and len(suffix) == 2
+        assert int(suffix) == (int(start) + 1) % 100
+
+
+class TestDisposalsForTaxYear:
+    def test_maps_rows_with_symbol_and_null_acquisition(self) -> None:
+        cur = _make_cursor(
+            [
+                {
+                    "match_id": 7,
+                    "instrument_id": 100,
+                    "symbol": "AAPL",
+                    "disposal_tax_lot_id": 55,
+                    "acquisition_tax_lot_id": 40,
+                    "matching_rule": "s104_pool",
+                    "matched_units": _D("10"),
+                    "acquisition_cost_gbp": _D("800"),
+                    "disposal_proceeds_gbp": _D("1200"),
+                    "gain_or_loss_gbp": _D("400"),
+                    "disposal_uk_date": date(2025, 7, 1),
+                    "tax_year": "2025/26",
+                    "matched_at": datetime(2025, 7, 2, 9, 0, 0, tzinfo=UTC),
+                },
+                {
+                    "match_id": 8,
+                    "instrument_id": 101,
+                    "symbol": "TSLA",
+                    "disposal_tax_lot_id": 56,
+                    "acquisition_tax_lot_id": None,  # s104 disposal with no single acquisition lot
+                    "matching_rule": "s104_pool",
+                    "matched_units": _D("5"),
+                    "acquisition_cost_gbp": _D("500"),
+                    "disposal_proceeds_gbp": _D("450"),
+                    "gain_or_loss_gbp": _D("-50"),
+                    "disposal_uk_date": date(2025, 8, 1),
+                    "tax_year": "2025/26",
+                    "matched_at": datetime(2025, 8, 2, 9, 0, 0, tzinfo=UTC),
+                },
+            ]
+        )
+        conn = _make_conn([cur])
+        rows = disposals_for_tax_year(conn, "2025/26")
+
+        assert [r.symbol for r in rows] == ["AAPL", "TSLA"]
+        assert rows[0].gain_or_loss_gbp == _D("400")
+        assert rows[0].acquisition_tax_lot_id == 40
+        assert rows[1].acquisition_tax_lot_id is None
+        assert rows[1].gain_or_loss_gbp == _D("-50")
+
+    def test_empty_year_returns_empty_list(self) -> None:
+        conn = _make_conn([_make_cursor([])])
+        assert disposals_for_tax_year(conn, "2025/26") == []
+
+
+class TestS104PoolRows:
+    def test_maps_pool_rows(self) -> None:
+        cur = _make_cursor(
+            [
+                {
+                    "instrument_id": 100,
+                    "symbol": "AAPL",
+                    "pool_units": _D("30"),
+                    "pool_cost_gbp": _D("2400"),
+                    "pool_avg_cost_gbp": _D("80"),
+                    "updated_at": datetime(2025, 9, 1, 12, 0, 0, tzinfo=UTC),
+                }
+            ]
+        )
+        conn = _make_conn([cur])
+        rows = s104_pool_rows(conn)
+        assert len(rows) == 1
+        assert rows[0].symbol == "AAPL"
+        assert rows[0].pool_avg_cost_gbp == _D("80")
+
+    def test_empty_returns_empty_list(self) -> None:
+        conn = _make_conn([_make_cursor([])])
+        assert s104_pool_rows(conn) == []
+
+
+class TestAvailableTaxYears:
+    def test_union_includes_current_and_sorts_desc(self) -> None:
+        cur = _make_cursor([{"tax_year": "2024/25"}, {"tax_year": "2023/24"}])
+        conn = _make_conn([cur])
+        years = available_tax_years(conn)
+        assert years == sorted(set(years), reverse=True)  # sorted desc, deduped
+        assert current_tax_year() in years  # current always present
+        assert "2024/25" in years and "2023/24" in years
+
+    def test_empty_tables_yield_current_only(self) -> None:
+        conn = _make_conn([_make_cursor([])])
+        assert available_tax_years(conn) == [current_tax_year()]
