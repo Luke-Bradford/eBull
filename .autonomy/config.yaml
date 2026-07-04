@@ -16,3 +16,13 @@ merge_gate:
   author_login: github-actions
   marker: "Claude Code Review"
   doc_only_extensions: [".md"]
+  # Required by safe_merge.sh's bot_comment gate: it computes
+  # doc_only_paths="$(CONFIG_GET merge_gate.doc_only_paths | paste -sd, -)"
+  # under `set -euo pipefail`, so a MISSING key makes CONFIG_GET exit
+  # non-zero, the pipeline fail, and the whole merge gate abort silently
+  # (exit 1, no message) BEFORE the `:-docs/` default or any gate check
+  # runs — blocking every merge. Set it explicitly to the engine's
+  # intended default. Only affects the doc-only fast-path classification
+  # (a PR whose every file is doc-only); non-doc PRs still require the
+  # full bot-APPROVE-on-latest-commit gate.
+  doc_only_paths: ["docs/"]
