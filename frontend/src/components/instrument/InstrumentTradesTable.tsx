@@ -67,7 +67,7 @@ export function InstrumentTradesTable({
             return (
               <tr key={t.position_id} className="text-slate-700 dark:text-slate-200">
                 <td className="py-2 pr-4 text-xs text-slate-500">
-                  {t.open_date_time.slice(0, 10)}
+                  {t.open_date_time ? t.open_date_time.slice(0, 10) : "—"}
                 </td>
                 <td className="py-2 pr-4">
                   <SideBadge isBuy={t.is_buy} />
