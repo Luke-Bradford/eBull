@@ -407,3 +407,88 @@ describe("InstrumentsPage — exchange label", () => {
     expect(within(screen.getByRole("table")).getByText("99")).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Uncovered-row treatment (#1924 dir #3)
+// ---------------------------------------------------------------------------
+
+describe("InstrumentsPage — uncovered rows", () => {
+  function uncoveredItem(overrides = {}) {
+    return {
+      instrument_id: 42,
+      symbol: "ZZZ",
+      company_name: "Unmapped Co.",
+      exchange: "12",
+      exchange_name: null,
+      currency: "USD",
+      sector: null,
+      gics_sector: null,
+      sector_spdr: null,
+      is_tradable: true,
+      coverage_tier: null,
+      latest_quote: null,
+      ...overrides,
+    };
+  }
+
+  it("collapses an all-dashes row into a muted 'No coverage yet' note", async () => {
+    mockedFetch.mockResolvedValue(
+      makeResponse({ items: [uncoveredItem()], total: 1 }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("ZZZ")).toBeInTheDocument();
+    });
+    // Symbol still links; the trailing columns collapse to one note.
+    expect(screen.getByText("No coverage yet")).toBeInTheDocument();
+    expect(screen.getByText("ZZZ").closest("a")).toHaveAttribute(
+      "href",
+      "/instrument/ZZZ",
+    );
+  });
+
+  it("treats a persisted last=0 quote as no usable price (prevention-log #1428)", async () => {
+    mockedFetch.mockResolvedValue(
+      makeResponse({
+        items: [
+          uncoveredItem({
+            latest_quote: {
+              bid: 0,
+              ask: 0,
+              last: 0,
+              spread_pct: null,
+              quoted_at: "2026-04-08T12:00:00Z",
+            },
+          }),
+        ],
+        total: 1,
+      }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("ZZZ")).toBeInTheDocument();
+    });
+    // A non-null zero must not render a fake "US$0.00"; the row is uncovered.
+    expect(screen.getByText("No coverage yet")).toBeInTheDocument();
+    expect(screen.queryByText(/0\.00/)).not.toBeInTheDocument();
+  });
+
+  it("does NOT collapse a row that still has a sector (partial coverage)", async () => {
+    mockedFetch.mockResolvedValue(
+      makeResponse({
+        items: [
+          uncoveredItem({ gics_sector: "Financials", sector_spdr: "XLF" }),
+        ],
+        total: 1,
+      }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("ZZZ")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("No coverage yet")).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole("table")).getByText("Financials"),
+    ).toBeInTheDocument();
+  });
+});
