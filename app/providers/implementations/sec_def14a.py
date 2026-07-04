@@ -1061,17 +1061,33 @@ _DASH_NULLS: Final[frozenset[str]] = frozenset({"-", "—", "–", "n/a", "na"})
 # "Name  Title" cell (used to split executive_name from principal_position
 # when no newline delimiter is present). Ordered longest-first so
 # "executive vice president" wins over "president".
+#
+# The leading-modifier prefix (``senior``/``former``/``acting``/``interim``/
+# ``co-``) pulls those title words into the MATCH so the split boundary lands
+# before them — otherwise "Ann-Marie Campbell Senior Executive Vice President"
+# leaves "Senior" glued to the name and "Bradford L. Smith Vice Chair" splits
+# at "Chair" (#1967). ``vice\s+chair`` is listed explicitly (before bare
+# ``chair``) so "Vice Chair" splits at "Vice", not "Chair".
 _POSITION_ROLE_RE: Final[re.Pattern[str]] = re.compile(
     r"\b("
+    r"(?:(?:senior|former|acting|interim)\s+|co-?\s*)*"
+    r"(?:"
     r"chief\s+\w+|"
     r"executive\s+vice\s+president|senior\s+vice\s+president|vice\s+president|"
+    r"vice\s+chair(?:man|woman|person)?|"
     r"president|chair(?:man|woman|person)?|"
     r"general\s+counsel|chief|ceo|cfo|coo|cto|"
     r"executive\s+officer|principal\s+\w+|treasurer|secretary|"
     r"director|founder"
+    r")"
     r")\b",
     re.IGNORECASE,
 )
+
+# Bare 1–2 digit footnote reference left inline between a name and its title
+# (JPM's "Daniel Pinto 11 Vice Chair"). Stripped from the trailing edge of the
+# extracted name — NEO names never end in a bare integer (#1967).
+_TRAILING_FOOTNOTE_RE: Final[re.Pattern[str]] = re.compile(r"\s+[1-9]\d?$")
 
 
 def _score_sct_headers(headers: tuple[str, ...]) -> int:
@@ -1141,16 +1157,24 @@ def _split_name_position(cell: str) -> tuple[str, str | None]:
     text = _INLINE_WHITESPACE_RE.sub(" ", text)
     if not text:
         return "", None
-    # Newline delimiter → line 1 is the name, remainder is the title.
+    # Newline delimiter → line 1 is the name, remainder is the title. (Keep the
+    # \n check BEFORE the role split — some filers put a footnote digit at the
+    # end of the name line, stripped by _clean_name_footnote below.)
     if "\n" in text:
         name, _, position = text.partition("\n")
         pos = _INLINE_WHITESPACE_RE.sub(" ", position.replace("\n", " ")).strip()
-        return name.strip(), (pos or None)
+        return _clean_name_footnote(name), (pos or None)
     # Otherwise split at the first role keyword.
     m = _POSITION_ROLE_RE.search(text)
     if m and m.start() > 0:
-        return text[: m.start()].strip().rstrip(",").strip(), text[m.start() :].strip() or None
-    return text, None
+        return _clean_name_footnote(text[: m.start()].rstrip(",")), text[m.start() :].strip() or None
+    return _clean_name_footnote(text), None
+
+
+def _clean_name_footnote(name: str) -> str:
+    """Strip a trailing inline footnote reference digit from an executive name
+    (JPM's "Daniel Pinto 11" → "Daniel Pinto")."""
+    return _TRAILING_FOOTNOTE_RE.sub("", name.strip()).strip()
 
 
 def _looks_like_name_cell(cell: str) -> bool:

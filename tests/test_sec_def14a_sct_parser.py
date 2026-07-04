@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from app.providers.implementations.sec_def14a import (
     _parse_dollar,
     _resolve_sct_fields,
@@ -442,3 +444,45 @@ def test_split_name_position_no_title() -> None:
     name, pos = _split_name_position("Jane Doe")
     assert name == "Jane Doe"
     assert pos is None
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected_name", "expected_pos"),
+    [
+        # Leading title modifiers must go to the position, not the name (#1967).
+        ("Ann-Marie Campbell Senior Executive Vice President", "Ann-Marie Campbell", "Senior Executive Vice President"),
+        (
+            "Fahim Siddiqui Former Executive Vice President and CIO",
+            "Fahim Siddiqui",
+            "Former Executive Vice President and CIO",
+        ),
+        ("Hector A. Padilla Former Executive Vice President", "Hector A. Padilla", "Former Executive Vice President"),
+        # "Vice Chair" must split at Vice, not Chair.
+        ("Bradford L. Smith Vice Chair and President", "Bradford L. Smith", "Vice Chair and President"),
+        # Inline footnote reference digit between name and title is stripped.
+        (
+            "Daniel Pinto 11 Vice Chair; Former President and COO",
+            "Daniel Pinto",
+            "Vice Chair; Former President and COO",
+        ),
+        ("Douglas Petno 9 Co-CEO, CIB", "Douglas Petno", "Co-CEO, CIB"),
+        ("Troy Rohrbaugh 7 Co-CEO, CIB", "Troy Rohrbaugh", "Co-CEO, CIB"),
+        # Footnote digit on the newline path is stripped too.
+        ("James Dimon 5 \nChairman and CEO", "James Dimon", "Chairman and CEO"),
+    ],
+)
+def test_split_name_position_modifier_and_footnote_bleed(cell: str, expected_name: str, expected_pos: str) -> None:
+    name, pos = _split_name_position(cell)
+    assert name == expected_name
+    assert pos == expected_pos
+
+
+def test_split_name_position_preserves_clean_names() -> None:
+    # Regression guard: modifier/footnote stripping must not corrupt clean cells.
+    assert _split_name_position("Tim Cook \nChief Executive Officer") == ("Tim Cook", "Chief Executive Officer")
+    assert _split_name_position("James Dimon Chairman and CEO") == ("James Dimon", "Chairman and CEO")
+    assert _split_name_position("Satya Nadella Chairman and Chief Executive Officer") == (
+        "Satya Nadella",
+        "Chairman and Chief Executive Officer",
+    )
+    assert _split_name_position("Jane Doe") == ("Jane Doe", None)
