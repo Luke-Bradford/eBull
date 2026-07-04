@@ -129,14 +129,14 @@ Codex runs at exactly three points in the workflow. Non-negotiable.
 1. **Before writing code** — two Codex passes:
    - **After spec is written, before user final-approves:** `codex exec "Review this spec for <feature>. Path: docs/specs/<area>/<topic>.md (live spec) OR docs/proposals/<area>/<topic>.md (unshipped). Focus on correctness gaps, invariant violations, missing edge cases. For any ownership/filings/metric data-treatment decision: FLAG it if the spec infers the treatment from first principles where a documented source rule exists (SEC reg/Item, EDGAR, form spec) and is not cited; FLAG any signal whose safety rests on a sample rather than a full-population check. Reply terse."` Fix issues before presenting spec to user for sign-off.
    - **After implementation plan is written, before first task dispatch:** same invocation against the plan doc. Catches plan-shape bugs (bad task decomposition, missing dependency, wrong contract) before any subagent starts coding.
-2. **Before first push** — after self-review + local gates pass, run `codex.cmd exec review` on the branch. Fix anything real before pushing.
+2. **Before first push** — after self-review + local gates pass, run `codex exec review` on the branch. Fix anything real before pushing.
 3. **Before merging on a rebuttal-only round** — if the latest review's findings are all rebuttals (no code changes pending), run Codex to confirm the rebuttals are sound. Without this step, rebuttals are unverified and may hide real bugs the review bot *did* catch in disguise.
 
 When Codex is NOT required:
 - Follow-up pushes that fix review comments (the review bot will re-check).
 - Routine edits after Codex already reviewed the plan + first diff and there is no rebuttal-only round pending.
 
-Invocation rule: always use `codex.cmd exec` (non-interactive). Never bare `codex` (requires terminal).
+Invocation rule: always use `codex exec` (non-interactive). Never bare `codex` with no subcommand (requires interactive terminal).
 
 ## Review decision tree — who to consult in what order
 
@@ -273,6 +273,7 @@ Read and apply these before pushing:
 ### Data foundation skills (read before SEC ingest / schema / parser / metric work)
 
 - `.claude/skills/data-sources/sec-edgar.md` — source-of-truth: endpoints, formats, identifiers, gotchas (DD-MMM-YYYY dates, 13F PRN/SH, VALUE-cutover 2023-01-03, 13D/G XML mandate, etc.), rate-limit discipline, reference impls.
+- `.claude/skills/data-sources/etoro-api.md` — MANDATORY before citing any eToro API capability: live-portal verification protocol (llms.txt + per-endpoint .md, WebFetch not curl), known spec drift. Never claim "not supported by the public API" from memory.
 - `.claude/skills/data-sources/edgartools.md` — library reference: coverage matrix, API cheat-sheet, Pydantic validation cliff (#932), version pinning, decision tree for use-vs-roll-our-own.
 - `.claude/skills/data-engineer/SKILL.md` — what we own: schema invariants, two-layer ownership model, write-through pattern, settled-decisions cross-reference, "where does X come from?" FAQ, admin-page operator UX FAQ. Discoverable as the `data-engineer` skill.
 - `.claude/skills/metrics-analyst/SKILL.md` — every operator-visible metric: source → transform → table → endpoint → chart, with caveats and validation steps. Discoverable as the `metrics-analyst` skill.
