@@ -8,6 +8,7 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
   { to: "/rankings", label: "Rankings" },
   { to: "/recommendations", label: "Recommendations" },
   { to: "/reports", label: "Reports" },
+  { to: "/tax", label: "Tax" },
   { to: "/admin", label: "Admin" },
   { to: "/operators", label: "Operators" },
   { to: "/settings", label: "Settings" },
