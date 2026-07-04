@@ -86,8 +86,31 @@ function sortValue(item: InstrumentListItem, key: SortKey): unknown {
     case "coverage_tier":
       return item.coverage_tier;
     case "last":
-      return item.latest_quote?.last ?? null;
+      // A usable mark is strictly positive (prevention-log #1428): eToro
+      // persists `quotes.last = 0.00` for un-freshly-traded instruments, so a
+      // non-null zero must sort with the blanks, not ahead of them.
+      return isUsablePrice(item.latest_quote?.last) ? item.latest_quote!.last : null;
   }
+}
+
+/** A displayable last price: present and strictly positive (prevention-log #1428). */
+function isUsablePrice(last: number | null | undefined): last is number {
+  return last != null && last > 0;
+}
+
+/**
+ * An "uncovered" row — an unmapped instrument (typically non-US) with no
+ * sector, no coverage tier, and no usable price. Rather than render a row of
+ * bare "—" cells, collapse the trailing columns into a single muted
+ * "No coverage yet" note (#1924 dir #3). Tier-first ordering already sinks
+ * these to the back of the list.
+ */
+function isUncovered(item: InstrumentListItem): boolean {
+  return (
+    item.gics_sector == null &&
+    item.coverage_tier == null &&
+    !isUsablePrice(item.latest_quote?.last)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -480,33 +503,59 @@ function InstrumentsTable({
             )}
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {items.map((item) => (
- <tr key={item.instrument_id} className="align-top hover:bg-slate-50 dark:hover:bg-slate-800/40">
-              <td className="py-2 pr-4">
-                <Link
-                  to={`/instrument/${encodeURIComponent(item.symbol)}`}
-                  className="text-blue-600 hover:underline"
+          {items.map((item) =>
+            isUncovered(item) ? (
+              <tr
+                key={item.instrument_id}
+                className="align-top text-slate-400 hover:bg-slate-50 dark:text-slate-500 dark:hover:bg-slate-800/40"
+              >
+                <td className="py-2 pr-4">
+                  <Link
+                    to={`/instrument/${encodeURIComponent(item.symbol)}`}
+                    className="hover:underline"
+                  >
+                    <span className="font-medium">{item.symbol}</span>
+                  </Link>
+                  <div className="text-xs">{item.company_name}</div>
+                </td>
+                <td
+                  colSpan={COLUMNS.length - 1}
+                  className="py-2 pr-0 text-xs italic"
                 >
-                  <span className="font-medium">{item.symbol}</span>
-                </Link>
-                <div className="text-xs text-slate-500">{item.company_name}</div>
-              </td>
-              <td className="py-2 pr-4 text-xs text-slate-600">
-                {item.gics_sector ?? "—"}
-              </td>
-              <td className="py-2 pr-4 text-xs text-slate-600">
-                {item.exchange_name ?? item.exchange ?? "—"}
-              </td>
-              <td className="py-2 pr-4">
-                <TierBadge tier={item.coverage_tier} />
-              </td>
-              <td className="py-2 pr-0 text-right text-xs tabular-nums text-slate-600">
-                {item.latest_quote?.last != null
-                  ? formatMoney(item.latest_quote.last, item.currency ?? "USD")
-                  : "—"}
-              </td>
-            </tr>
-          ))}
+                  No coverage yet
+                </td>
+              </tr>
+            ) : (
+              <tr
+                key={item.instrument_id}
+                className="align-top hover:bg-slate-50 dark:hover:bg-slate-800/40"
+              >
+                <td className="py-2 pr-4">
+                  <Link
+                    to={`/instrument/${encodeURIComponent(item.symbol)}`}
+                    className="text-blue-600 hover:underline"
+                  >
+                    <span className="font-medium">{item.symbol}</span>
+                  </Link>
+                  <div className="text-xs text-slate-500">{item.company_name}</div>
+                </td>
+                <td className="py-2 pr-4 text-xs text-slate-600">
+                  {item.gics_sector ?? "—"}
+                </td>
+                <td className="py-2 pr-4 text-xs text-slate-600">
+                  {item.exchange_name ?? item.exchange ?? "—"}
+                </td>
+                <td className="py-2 pr-4">
+                  <TierBadge tier={item.coverage_tier} />
+                </td>
+                <td className="py-2 pr-0 text-right text-xs tabular-nums text-slate-600">
+                  {isUsablePrice(item.latest_quote?.last)
+                    ? formatMoney(item.latest_quote.last, item.currency ?? "USD")
+                    : "—"}
+                </td>
+              </tr>
+            ),
+          )}
         </tbody>
       </table>
     </div>
