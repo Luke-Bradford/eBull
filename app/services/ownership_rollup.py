@@ -184,6 +184,24 @@ class CorrectionApplied:
 
 
 @dataclass(frozen=True)
+class HolderLot:
+    """One additive Section-16 lot (``direct`` / ``indirect``) of an owner
+    collapsed to a single display line (#1942). Display-only drilldown breakdown:
+    the lots SUM to the parent :class:`Holder`'s ``shares`` (Form 4 General
+    Instruction 4(b) reports direct/indirect on separate lines; #905 keeps them
+    additive), so they are NOT counted again. Distinct from ``family_members``
+    (13F sub-CIKs of one manager family) and ``dropped_sources`` (channels NOT
+    counted in the figure)."""
+
+    ownership_nature: str | None
+    shares: Decimal
+    source: SourceTag
+    accession_number: str
+    edgar_url: str | None
+    as_of_date: date | None
+
+
+@dataclass(frozen=True)
 class Holder:
     """A canonical holder after cross-channel dedup. ``winning_source``
     decides which slice this holder lands in (insiders /
@@ -207,6 +225,10 @@ class Holder:
     # additive-vs-overlapping regime (#905 / prevention-log 1835). ``None`` for
     # holders where nature is not meaningful (13F / family reps / treasury).
     ownership_nature: str | None = None
+    # Per-lot breakdown when this owner's additive Section-16 lots (direct +
+    # indirect) were collapsed to one display line (#1942). Display-only; the
+    # lots SUM to ``shares`` (already counted once). Empty for single-lot owners.
+    lots: tuple[HolderLot, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2378,11 +2400,95 @@ def _slice_coherence(holders: Sequence[Holder]) -> tuple[date | None, date | Non
         for m in h.family_members:
             if m.as_of_date is not None:
                 dates.append(m.as_of_date)
+        # A collapsed owner's lots (#1942) can span quarters (direct on a Form 4,
+        # indirect on a Form 3) — gather them so the coherence envelope reflects
+        # the real span rather than only the representative lot's date.
+        for lot in h.lots:
+            if lot.as_of_date is not None:
+                dates.append(lot.as_of_date)
     if not dates:
         return (None, None, 0, False)
     quarters = {_calendar_quarter(d) for d in dates}
     distinct = len(quarters)
     return (min(dates), max(dates), distinct, distinct > 1)
+
+
+def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
+    """Collapse each owner's multiple additive lots into ONE display line at the
+    summed shares, preserving the per-lot split in ``lots`` for the drilldown
+    (#1942). Item 403 (17 CFR 229.403) shows one beneficial owner on one line at
+    total beneficial ownership; Form 4 General Instruction 4(b) splits direct /
+    indirect onto separate lines, which ``_source_rows_and_total`` keeps additive
+    (#905) — this denormalises them back to one row for display, figure-neutral.
+
+    CALLER CONTRACT: only invoke for the ``insiders`` slice. Identity =
+    :func:`_identity_key` — the SAME key :func:`_reconcile_owner_once` grouped by,
+    so every same-key insider row here came from one reconcile group and is
+    genuinely one owner's lot (never two distinct owners; no new merge risk). Only
+    the insiders additive path yields multi-row same-identity groups (13F / 13D /
+    13G survivors are a single rep, and those rows are pure ``direct`` /
+    ``indirect`` — ``beneficial`` overlaps are folded to ``dropped_sources``
+    upstream). The ``funds`` / ``def14a_unmatched`` slices must NOT be passed
+    here: they bypass reconcile and are intentionally one row per fund_series / per
+    proxy nature while sharing a filer CIK, so the CIK-first identity key would
+    wrongly merge them (Codex ckpt-2 HIGH). Single-row owners pass through
+    untouched with no ``lots``. Representative = the max-shares row, keeping the
+    cross-source provenance :func:`_reconcile_owner_once` stamped on the largest
+    row; each lot's own ``dropped_sources`` are merged in (de-duped)."""
+    groups: dict[str, list[Holder]] = {}
+    order: list[str] = []
+    for h in holders:
+        k = _identity_key(h.filer_cik, h.filer_name)
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(h)
+    out: list[Holder] = []
+    for k in order:
+        rows = groups[k]
+        if len(rows) == 1:
+            out.append(rows[0])
+            continue
+        # Deterministic representative on equal shares: shares DESC, then the
+        # higher-priority form (Form 4 over Form 3 via ``_PRIORITY_RANK``), then
+        # accession — so the winning source/accession/provenance carried onto the
+        # collapsed row does NOT depend on the upstream DB row order (Claude review
+        # NITPICK, PR #1946). ``-_PRIORITY_RANK`` because ``reverse=True`` wants the
+        # preferred (lower-rank) form to sort largest.
+        rows_desc = sorted(
+            rows,
+            key=lambda h: (h.shares, -_PRIORITY_RANK[h.winning_source], h.winning_accession),
+            reverse=True,
+        )
+        primary = rows_desc[0]
+        total = sum((h.shares for h in rows_desc), Decimal(0))
+        lots = tuple(
+            HolderLot(
+                ownership_nature=h.ownership_nature,
+                shares=h.shares,
+                source=h.winning_source,
+                accession_number=h.winning_accession,
+                edgar_url=h.winning_edgar_url,
+                as_of_date=h.as_of_date,
+            )
+            for h in rows_desc
+        )
+        # Merge every lot's ``dropped_sources`` onto the representative so a
+        # non-primary lot's provenance (a superseded amendment folded within its
+        # own nature by the upstream dedup) stays auditable — ``replace`` would
+        # otherwise keep only the primary's (Codex ckpt-2 MED). De-dup on
+        # (source, accession, shares), preserving the primary's entries first.
+        merged_dropped = list(primary.dropped_sources)
+        seen = {(d.source, d.accession_number, d.shares) for d in merged_dropped}
+        for h in rows_desc[1:]:
+            for d in h.dropped_sources:
+                dkey = (d.source, d.accession_number, d.shares)
+                if dkey in seen:
+                    continue
+                seen.add(dkey)
+                merged_dropped.append(d)
+        out.append(replace(primary, shares=total, lots=lots, dropped_sources=tuple(merged_dropped)))
+    return out
 
 
 def _build_slice(
@@ -2418,12 +2524,30 @@ def _build_slice(
     holders.sort(key=lambda h: h.shares, reverse=True)
     total = sum((h.shares for h in holders), Decimal(0))
     pct_total = total / outstanding if outstanding > 0 else Decimal(0)
+    # ``sources`` / ``dominant`` are computed from the PRE-collapse per-lot rows
+    # (sorted shares-desc, as before) so the slice source-mix — and the tie order
+    # of ``dominant`` — is unchanged by the #1942 display collapse: folding a Form
+    # 3 indirect lot's shares under a Form 4 representative would otherwise skew
+    # which source dominates (Codex ckpt-1 HIGH; ckpt-2 LOW on tie determinism).
     sources: dict[SourceTag, Decimal] = {}
     for h in holders:
         sources[h.winning_source] = sources.get(h.winning_source, Decimal(0)) + h.shares
     dominant: SourceTag | None = None
     if sources:
         dominant = max(sources.keys(), key=lambda s: sources[s])
+    # Collapse an owner's additive direct/indirect lots to one display line at the
+    # summed shares (#1942, Item 403). Figure-neutral: ``total`` == the summed
+    # per-lot shares. INSIDERS ONLY: only the Section-16 additive path produces
+    # multi-row same-identity groups that reached here via _reconcile_owner_once
+    # (13F / 13D / 13G survivors are one rep per identity). The ``funds`` and
+    # ``def14a_unmatched`` slices bypass reconcile and are intentionally one row
+    # per fund_series / per proxy nature while SHARING a filer CIK
+    # (``fund_filer_cik`` — 221,540 dev instrument×CIK groups have ≥2 distinct
+    # series), so a CIK-keyed collapse there would wrongly merge distinct holders
+    # and undercount ``filer_count`` (Codex ckpt-2 HIGH).
+    if category == "insiders":
+        holders = _collapse_owner_lots(holders)
+        holders.sort(key=lambda h: h.shares, reverse=True)
     enriched_holders = tuple(
         Holder(
             filer_cik=h.filer_cik,
@@ -2437,12 +2561,15 @@ def _build_slice(
             filer_type=h.filer_type,
             dropped_sources=h.dropped_sources,
             family_members=h.family_members,  # display breakdown of a collapsed family (#1644/#1649)
+            lots=h.lots,  # per-lot breakdown of a collapsed direct/indirect owner (#1942)
         )
         for h in holders
     )
     # Count a collapsed family as its constituent filers (the family_members ARE
     # the underlying filers), not as one row, so coverage % is not deflated by the
-    # collapse (#1644/#1649). Ordinary holders (no members) count as 1.
+    # collapse (#1644/#1649). A collapsed owner's direct/indirect lots (#1942) are
+    # ONE filer (empty ``family_members`` → counts 1), correcting the prior
+    # over-count of one person's two lots as two filers.
     filer_count = sum(len(h.family_members) or 1 for h in holders)
     as_of_min, as_of_max, distinct_quarters, mixed_period = _slice_coherence(enriched_holders)
     return OwnershipSlice(

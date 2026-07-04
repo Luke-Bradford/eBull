@@ -4622,6 +4622,20 @@ class _FamilyMemberModel(BaseModel):
     as_of_date: date | None
 
 
+class _HolderLotModel(BaseModel):
+    """One additive Section-16 lot (direct / indirect) of an owner collapsed to a
+    single display line (#1942). Display-only breakdown; the lots SUM to the
+    holder's ``shares`` (already counted once). Distinct from ``family_members``
+    (13F sub-CIKs) and ``dropped_sources`` (channels NOT counted)."""
+
+    ownership_nature: str | None
+    shares: Decimal
+    source: Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"]
+    accession_number: str
+    edgar_url: str | None
+    as_of_date: date | None
+
+
 class _HolderModel(BaseModel):
     filer_cik: str | None
     filer_name: str
@@ -4634,6 +4648,9 @@ class _HolderModel(BaseModel):
     filer_type: str | None
     dropped_sources: list[_DroppedSourceModel]
     family_members: list[_FamilyMemberModel] = []
+    # Per-lot breakdown when an owner's additive direct/indirect lots were
+    # collapsed to one line (#1942). Empty for single-lot holders.
+    lots: list[_HolderLotModel] = []
 
 
 class _SliceModel(BaseModel):
@@ -4892,6 +4909,17 @@ def _rollup_to_response(
                                 as_of_date=m.as_of_date,
                             )
                             for m in h.family_members
+                        ],
+                        lots=[
+                            _HolderLotModel(
+                                ownership_nature=lot.ownership_nature,
+                                shares=lot.shares,
+                                source=lot.source,
+                                accession_number=lot.accession_number,
+                                edgar_url=lot.edgar_url,
+                                as_of_date=lot.as_of_date,
+                            )
+                            for lot in h.lots
                         ],
                     )
                     for h in s.holders

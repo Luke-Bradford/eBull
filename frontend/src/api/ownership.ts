@@ -114,6 +114,27 @@ export interface OwnershipHolder {
    * holders.
    */
   readonly family_members?: readonly OwnershipFamilyMember[];
+  /**
+   * Per-lot breakdown when an owner's additive Section-16 lots (direct +
+   * indirect) were collapsed to one display line (#1942). Item 403 shows one
+   * beneficial owner on one line at total ownership; Form 4 reports direct /
+   * indirect on separate lines, which we SUM (#905) and split here for the
+   * drilldown. Display-only; already counted once in this holder's ``shares``.
+   * Empty/absent for single-lot holders.
+   */
+  readonly lots?: readonly OwnershipLot[];
+}
+
+/** One additive Section-16 lot (direct / indirect) of a collapsed owner
+ *  (#1942). Display-only; NOT additive (summed into the holder's ``shares``). */
+export interface OwnershipLot {
+  readonly ownership_nature: string | null;
+  /** Decimal-as-string. */
+  readonly shares: string;
+  readonly source: OwnershipSourceTag;
+  readonly accession_number: string;
+  readonly edgar_url: string | null;
+  readonly as_of_date: string | null;
 }
 
 /** One constituent row inside a collapsed institutional family

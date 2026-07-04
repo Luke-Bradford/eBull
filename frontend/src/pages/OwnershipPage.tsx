@@ -76,11 +76,25 @@ export interface FilerRow {
    *  institutional family (#1644 / #1649). Display-only breakdown —
    *  already counted once in ``shares``. Empty/absent for ordinary rows. */
   readonly family_members?: readonly FilerMemberRow[];
+  /** Per-lot direct/indirect breakdown when this owner's additive Section-16
+   *  lots were collapsed to one line (#1942). Display-only — already summed
+   *  into ``shares``. Empty/absent for single-lot rows. */
+  readonly lots?: readonly FilerLotRow[];
 }
 
 /** One sub-CIK breakdown row under a collapsed family (#1644 / #1649). */
 export interface FilerMemberRow {
   readonly label: string;
+  readonly shares: number;
+  readonly source: OwnershipSourceTag;
+  readonly source_url: string | null;
+  readonly as_of_date: string | null;
+}
+
+/** One direct/indirect lot under a collapsed owner (#1942). */
+export interface FilerLotRow {
+  /** ``direct`` / ``indirect`` (or null when nature is absent). */
+  readonly nature: string | null;
   readonly shares: number;
   readonly source: OwnershipSourceTag;
   readonly source_url: string | null;
@@ -555,6 +569,33 @@ function FilerTable({
                         ))}
                       </ul>
                     </details>
+                  ) : row.lots && row.lots.length > 0 ? (
+                    // Collapsed owner (#1942): one line at total beneficial
+                    // ownership (Item 403); the direct/indirect lots (Form 4
+                    // General Instruction 4(b)) live in the drilldown.
+                    <details>
+                      <summary className="cursor-pointer list-none">
+                        <span className="select-none text-slate-400">▸ </span>
+                        {row.label}
+                        <span className="ml-1 text-xs text-slate-400">
+                          ({row.lots.length} lots)
+                        </span>
+                      </summary>
+                      <ul className="mt-1 ml-4 space-y-0.5 border-l border-slate-200 pl-3 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                        {row.lots.map((l, li) => (
+                          <li
+                            key={`${l.nature ?? "lot"}-${l.source}-${li}`}
+                            className="flex justify-between gap-4"
+                          >
+                            <span>
+                              {l.nature ?? "—"}
+                              <span className="ml-1 text-slate-400">({l.source})</span>
+                            </span>
+                            <span className="font-mono">{formatShares(l.shares)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
                   ) : (
                     row.label
                   )}
@@ -652,6 +693,20 @@ export function rollupToFilerRows(
         })
         .filter((m): m is FilerMemberRow => m !== null)
         .sort((a, b) => b.shares - a.shares);
+      const lots = (h.lots ?? [])
+        .map((l): FilerLotRow | null => {
+          const lShares = parseShareCount(l.shares);
+          if (lShares === null || lShares <= 0) return null;
+          return {
+            nature: l.ownership_nature,
+            shares: lShares,
+            source: l.source,
+            source_url: l.edgar_url,
+            as_of_date: l.as_of_date,
+          };
+        })
+        .filter((l): l is FilerLotRow => l !== null)
+        .sort((a, b) => b.shares - a.shares);
       rows.push({
         key: h.filer_cik ?? `name:${h.filer_name}`,
         label: h.filer_name,
@@ -663,6 +718,7 @@ export function rollupToFilerRows(
         source_url: h.winning_edgar_url,
         as_of_date: h.as_of_date,
         ...(members.length > 0 ? { family_members: members } : {}),
+        ...(lots.length > 0 ? { lots } : {}),
       });
     }
   }
