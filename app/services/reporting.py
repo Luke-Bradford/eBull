@@ -24,6 +24,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.budget import FxRateUnavailable, compute_budget_state
 from app.services.fx import FxRateNotFound, convert
+from app.services.sector_classification import resolve_sector_spdr
 from app.services.valuation import PortfolioValuation, compute_portfolio_valuation
 
 logger = logging.getLogger(__name__)
@@ -1260,11 +1261,42 @@ def _cover_and_performance(
     return cover, performance
 
 
+def _gics_sectors(
+    conn: psycopg.Connection[Any],
+    instrument_ids: list[int],
+) -> dict[int, str]:
+    """Resolve each instrument's canonical GICS sector from its SEC SIC.
+
+    The report holdings/exposure surface must show the same sector as the
+    rest of the app — the instrument page, watchlist, and rankings all
+    prefer the SIC-derived GICS label over eToro's coarse numeric-industry
+    name (#1634/#1851; e.g. AAPL eToro="Consumer Goods" → GICS="Information
+    Technology"; GME eToro="Services" → "Consumer Discretionary"). SIC lives
+    in `instrument_sec_profile`, not `instruments`. Instruments with no SIC
+    (ETFs, non-SEC lines) are absent from the map so callers fall back to
+    the eToro label — matching the app-wide convention.
+    """
+    if not instrument_ids:
+        return {}
+    out: dict[int, str] = {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT instrument_id, sic FROM instrument_sec_profile WHERE instrument_id = ANY(%(ids)s)",
+            {"ids": instrument_ids},
+        )
+        for r in cur.fetchall():
+            cls = resolve_sector_spdr(r["sic"])
+            if cls is not None:
+                out[int(r["instrument_id"])] = cls.gics_sector
+    return out
+
+
 def _holdings_section(
     valuation: PortfolioValuation,
     prior_positions: list[dict[str, Any]] | None,
     realized_now: dict[int, dict[str, Any]],
     opening_value: Decimal | None,
+    gics_by_id: dict[int, str],
 ) -> list[dict[str, Any]]:
     """Holdings-at-generation table rows (spec §4.5).
 
@@ -1300,10 +1332,12 @@ def _holdings_section(
                 "instrument_id": h.instrument_id,
                 "symbol": h.symbol,
                 "company_name": h.company_name,
-                # Resolved name, not the raw numeric industry id (#1598).
-                # None when the instrument has no sector or the id is
-                # unmapped — the FE renders its nil treatment.
-                "sector": h.sector_name,
+                # Canonical GICS sector (SIC-derived) to match the instrument
+                # page / watchlist / rankings (#1634/#1851); falls back to the
+                # resolved eToro industry name (#1598) when no SIC → no GICS
+                # (ETFs, non-SEC lines). None when neither is available — the
+                # FE renders its nil treatment.
+                "sector": gics_by_id.get(h.instrument_id) or h.sector_name,
                 "units": _dec_f(h.current_units),
                 "price": _dec_f(h.current_price),
                 "market_value": _dec_f(h.market_value),
@@ -1412,6 +1446,7 @@ def _risk_section(
     current_period_return: Decimal | None,
     *,
     observation_label: str,
+    gics_by_id: dict[int, str],
 ) -> dict[str, Any]:
     """Concentration + sector exposure (point-in-time, always
     computable) and volatility / max drawdown over the FULL snapshot
@@ -1426,17 +1461,20 @@ def _risk_section(
 
     sector_weights: dict[str, Decimal] = {}
     for h in valuation.holdings:
-        # instruments.sector stores eToro's numeric industry id; the name
-        # is resolved in the valuation query via etoro_stocks_industries
-        # (#1598). An id with no catalogue row folds into "Unknown" — warn
-        # so catalogue drift surfaces before it skews the exposure table.
-        if h.sector is not None and h.sector_name is None:
+        # Group by the canonical GICS sector (SIC-derived) so exposure bars
+        # match the holdings table and the instrument page (#1634/#1851).
+        # Fall back to the eToro industry name resolved in the valuation
+        # query via etoro_stocks_industries (#1598) when no SIC → no GICS
+        # (ETFs, non-SEC lines). An eToro id with no catalogue row folds into
+        # "Unknown" — warn so catalogue drift surfaces before it skews the
+        # exposure table.
+        if h.instrument_id not in gics_by_id and h.sector is not None and h.sector_name is None:
             logger.warning(
                 "sector id %s on %s has no etoro_stocks_industries row; grouped as Unknown",
                 h.sector,
                 h.symbol,
             )
-        sector = h.sector_name or "Unknown"
+        sector = gics_by_id.get(h.instrument_id) or h.sector_name or "Unknown"
         sector_weights[sector] = sector_weights.get(sector, Decimal(0)) + Decimal(str(h.market_value))
     sector_exposure = (
         {s: _dec_q(w / total_aum) for s, w in sorted(sector_weights.items(), key=lambda kv: kv[1], reverse=True)}
@@ -1633,11 +1671,13 @@ def generate_weekly_report(
         period_start=period_start,
         period_end=period_end,
     )
+    gics_by_id = _gics_sectors(conn, [h.instrument_id for h in valuation.holdings])
     holdings = _holdings_section(
         valuation,
         prior_positions,
         realized_now,
         _parse_dec(cover["opening_value"]),
+        gics_by_id,
     )
 
     return {
@@ -1720,11 +1760,13 @@ def generate_monthly_report(
         period_start=period_start,
         period_end=period_end,
     )
+    gics_by_id = _gics_sectors(conn, [h.instrument_id for h in valuation.holdings])
     holdings = _holdings_section(
         valuation,
         prior_positions,
         realized_now,
         _parse_dec(cover["opening_value"]),
+        gics_by_id,
     )
     current_period_return = _parse_dec(cover["period_return"])
     risk = _risk_section(
@@ -1732,6 +1774,7 @@ def generate_monthly_report(
         chain,
         current_period_return,
         observation_label="since inception, monthly observations",
+        gics_by_id=gics_by_id,
     )
     rolling_returns = _rolling_returns(
         conn,

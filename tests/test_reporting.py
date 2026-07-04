@@ -818,7 +818,7 @@ class TestThesisSummary:
 class TestRiskSection:
     def test_insufficient_history_below_min_observations(self) -> None:
         val = _valuation_with((_holding(),))
-        risk = _risk_section(val, [], Decimal("0.05"), observation_label="test")
+        risk = _risk_section(val, [], Decimal("0.05"), observation_label="test", gics_by_id={})
         assert risk["insufficient_history"] is True
         assert risk["volatility"] is None
         assert risk["max_drawdown"] is None
@@ -831,7 +831,7 @@ class TestRiskSection:
             _holding(instrument_id=3, symbol="XOM", market_value=100.0, sector=None, sector_name=None),
         )
         val = _valuation_with(holdings, cash=0.0)
-        risk = _risk_section(val, [], None, observation_label="test")
+        risk = _risk_section(val, [], None, observation_label="test", gics_by_id={})
         assert risk["holding_count"] == 3
         # 3 holdings → top-5 = everything = 100%.
         assert Decimal(risk["concentration_top5_pct"]) == Decimal("1")
@@ -844,9 +844,41 @@ class TestRiskSection:
         holdings = (_holding(sector="99", sector_name=None),)
         val = _valuation_with(holdings, cash=0.0)
         with caplog.at_level(logging.WARNING, logger="app.services.reporting"):
-            risk = _risk_section(val, [], None, observation_label="test")
+            risk = _risk_section(val, [], None, observation_label="test", gics_by_id={})
         assert Decimal(risk["sector_exposure"]["Unknown"]) == Decimal("1")
         assert any("no etoro_stocks_industries row" in r.getMessage() for r in caplog.records)
+
+    def test_gics_sector_preferred_over_etoro_label_in_exposure(self) -> None:
+        """Exposure groups by the canonical GICS sector (#1634/#1851), not
+        the coarse eToro label. AAPL eToro="Consumer Goods" → GICS groups it
+        under "Information Technology"; an instrument absent from the GICS
+        map (ETF, no SIC) falls back to its eToro label."""
+        holdings = (
+            _holding(instrument_id=1, symbol="AAPL", market_value=600.0, sector_name="Consumer Goods"),
+            _holding(instrument_id=2, symbol="VOO", market_value=400.0, sector_name="Financial"),
+        )
+        val = _valuation_with(holdings, cash=0.0)
+        risk = _risk_section(
+            val,
+            [],
+            None,
+            observation_label="test",
+            gics_by_id={1: "Information Technology"},
+        )
+        assert Decimal(risk["sector_exposure"]["Information Technology"]) == Decimal("0.6")
+        # VOO has no GICS mapping → keeps its eToro label.
+        assert Decimal(risk["sector_exposure"]["Financial"]) == Decimal("0.4")
+        assert "Consumer Goods" not in risk["sector_exposure"]
+
+    def test_gics_present_suppresses_unmapped_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """When GICS resolves, an unmapped eToro id must NOT warn — the row
+        is correctly grouped by GICS, not "Unknown"."""
+        holdings = (_holding(instrument_id=7, sector="99", sector_name=None),)
+        val = _valuation_with(holdings, cash=0.0)
+        with caplog.at_level(logging.WARNING, logger="app.services.reporting"):
+            risk = _risk_section(val, [], None, observation_label="test", gics_by_id={7: "Health Care"})
+        assert Decimal(risk["sector_exposure"]["Health Care"]) == Decimal("1")
+        assert not any("no etoro_stocks_industries row" in r.getMessage() for r in caplog.records)
 
     def test_drawdown_and_volatility_over_full_chain(self) -> None:
         chain = [
@@ -854,7 +886,7 @@ class TestRiskSection:
             for v in ("0.10", "-0.20", "0.05", "0.05", "0.05")
         ]
         val = _valuation_with((_holding(),))
-        risk = _risk_section(val, chain, Decimal("0.05"), observation_label="test")
+        risk = _risk_section(val, chain, Decimal("0.05"), observation_label="test", gics_by_id={})
         assert risk["observations"] == 6
         assert risk["insufficient_history"] is False
         # Max drawdown: peak after +10% = 1.1, trough after −20% = 0.88
@@ -868,7 +900,7 @@ class TestRiskSection:
             for _ in range(10)
         ]
         val = _valuation_with((_holding(),))
-        risk = _risk_section(val, chain, None, observation_label="test")
+        risk = _risk_section(val, chain, None, observation_label="test", gics_by_id={})
         assert risk["observations"] == 0
         assert risk["insufficient_history"] is True
 
@@ -962,7 +994,7 @@ class TestHoldingsSection:
             }
         ]
         realized_now = {1: {"symbol": "AAPL", "realized_pnl": Decimal("0")}}
-        rows = _holdings_section(val, prior_positions, realized_now, Decimal("1000"))
+        rows = _holdings_section(val, prior_positions, realized_now, Decimal("1000"), {})
         assert [r["symbol"] for r in rows] == ["AAPL", "JPM"]
         aapl = rows[0]
         assert aapl["weight_pct"] == "0.900000"
@@ -977,10 +1009,25 @@ class TestHoldingsSection:
     def test_no_prior_and_zero_cost_are_null_safe(self) -> None:
         holdings = (_holding(cost_basis=0.0, market_value=0.0, units=0.0),)
         val = _valuation_with(holdings, cash=0.0)
-        rows = _holdings_section(val, None, {}, None)
+        rows = _holdings_section(val, None, {}, None, {})
         assert rows[0]["since_entry_return_pct"] is None
         assert rows[0]["weight_pct"] is None
         assert rows[0]["period_contribution"] is None
+
+    def test_holdings_sector_prefers_gics_then_falls_back(self) -> None:
+        """Row `sector` is the GICS label when resolved (#1634/#1851),
+        else the eToro name, else None."""
+        holdings = (
+            _holding(instrument_id=1, symbol="GME", sector_name="Services"),
+            _holding(instrument_id=2, symbol="VOO", sector_name="Financial"),
+            _holding(instrument_id=3, symbol="X", sector=None, sector_name=None),
+        )
+        val = _valuation_with(holdings, cash=0.0)
+        rows = _holdings_section(val, None, {}, None, {1: "Consumer Discretionary"})
+        by_sym = {r["symbol"]: r["sector"] for r in rows}
+        assert by_sym["GME"] == "Consumer Discretionary"  # GICS wins over "Services"
+        assert by_sym["VOO"] == "Financial"  # no GICS → eToro label
+        assert by_sym["X"] is None  # neither → nil
 
 
 class TestRollingWindowContiguity:

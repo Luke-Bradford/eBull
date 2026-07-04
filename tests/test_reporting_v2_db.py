@@ -64,6 +64,18 @@ def _seed_portfolio(conn: psycopg.Connection[tuple]) -> None:
         ON CONFLICT (instrument_id) DO NOTHING
         """
     )
+    # Reports show the canonical SIC-derived GICS sector, not the coarse
+    # eToro label (#1634/#1851/#1951). SIC 3571 (Electronic Computers)
+    # crosswalks to GICS "Information Technology" — so the report must emit
+    # that, NOT the eToro id-42 "Technology" name (which is the fallback
+    # only when no SIC → no GICS).
+    conn.execute(
+        """
+        INSERT INTO instrument_sec_profile (instrument_id, cik, sic)
+        VALUES (789801, '0000789801', '3571')
+        ON CONFLICT (instrument_id) DO UPDATE SET sic = EXCLUDED.sic
+        """
+    )
     conn.execute(
         """
         INSERT INTO positions (instrument_id, open_date, avg_cost, current_units,
@@ -289,11 +301,15 @@ def test_v2_fixture_is_backend_emitted(ebull_test_conn: psycopg.Connection[tuple
         (_FIXTURE_DIR / "weekly.json").write_text(json.dumps(weekly, indent=2, sort_keys=True) + "\n")
         (_FIXTURE_DIR / "monthly.json").write_text(json.dumps(monthly, indent=2, sort_keys=True) + "\n")
 
-    # The id→name join must actually resolve (#1598): a broken
-    # etoro_stocks_industries lookup would silently emit sector=None /
-    # group everything as "Unknown" while the key-structure checks pass.
-    assert monthly["holdings"][0]["sector"] == "Technology"
-    assert "Technology" in monthly["risk"]["sector_exposure"]
+    # Sector must resolve to the canonical SIC-derived GICS label
+    # (#1634/#1851/#1951) end-to-end through the real generator + the
+    # `_gics_sectors` query, NOT the coarse eToro id-42 "Technology" name
+    # (which the seed keeps as the fallback source). A broken
+    # instrument_sec_profile join or crosswalk would regress to
+    # "Technology"/"Unknown" while the key-structure checks still pass.
+    assert monthly["holdings"][0]["sector"] == "Information Technology"
+    assert "Information Technology" in monthly["risk"]["sector_exposure"]
+    assert weekly["holdings"][0]["sector"] == "Information Technology"
 
     for name, generated in (("weekly", weekly), ("monthly", monthly)):
         fixture = json.loads((_FIXTURE_DIR / f"{name}.json").read_text())
