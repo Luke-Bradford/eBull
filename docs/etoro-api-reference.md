@@ -2,10 +2,13 @@
 
 Source of truth for how eBull integrates with eToro. Derived from the
 official OpenAPI spec at `https://api-portal.etoro.com/api-reference/openapi.json`
-(v1.158.0, 57 paths, 128 schemas — last verified 2026-04-14).
+(v1.279.0 — last verified 2026-07-04; the portal drifts fast, re-verify
+before citing capabilities: `.claude/skills/data-sources/etoro-api.md`).
 
 Portal: `https://api-portal.etoro.com/`
-LLM index: `https://api-portal.etoro.com/llms.txt`
+LLM index: `https://api-portal.etoro.com/llms.txt` (per-endpoint markdown at
+`api-reference/<section>/<slug>.md`). Cloudflare-fronted — CLI `curl` gets
+403; fetch with a browser-agent tool (WebFetch).
 
 ---
 
@@ -138,8 +141,9 @@ GET+POST requests cannot exceed the API limit.
 | POST | `/api/v1/trading/execution/market-open-orders/by-amount` | Open position by USD amount | **Active** |
 | POST | `/api/v1/trading/execution/market-open-orders/by-units` | Open position by unit count | **Active** |
 | DELETE | `/api/v1/trading/execution/market-open-orders/{orderId}` | Cancel pending open order | Not used (v1) |
-| POST | `/api/v1/trading/execution/market-close-orders/positions/{positionId}` | Close position | **Active** |
+| POST | `/api/v1/trading/execution/market-close-orders/positions/{positionId}` | Close position — body `UnitsToDeduct` nullable → partial close (omit = full). Live doc also lists `InstrumentID` required; our impl omits it — verify on demo before relying | **Active** (full close; partial plumbed in provider, unexposed) |
 | DELETE | `/api/v1/trading/execution/market-close-orders/{orderId}` | Cancel pending close order | Not used (v1) |
+| PATCH | `/api/v2/trading/positions/{positionId}` | Edit TP/SL on open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). **202 async** `{operationId, positionId, referenceId}` — re-sync before treating as landed. Added between v1.158 and v1.279 (was orphaned `putTradeRequest` schema) | Planned — position detail page (spec 2026-07-04) |
 | POST | `/api/v1/trading/execution/limit-orders` | Limit/MIT order | Not used (v1 is market-only) |
 | DELETE | `/api/v1/trading/execution/limit-orders/{orderId}` | Cancel limit order | Not used (v1) |
 | GET | `/api/v1/trading/info/portfolio` | Full portfolio: positions, orders, mirrors, credit | **Active** — portfolio sync |
@@ -149,7 +153,7 @@ GET+POST requests cannot exceed the API limit.
 
 ### Trading — Demo
 
-Same operations as Real, all prefixed with `/demo/` (e.g., `/api/v1/trading/execution/demo/market-open-orders/by-amount`).
+Same operations as Real, all prefixed with `/demo/` (e.g., `/api/v1/trading/execution/demo/market-open-orders/by-amount`; v2 TP/SL edit: `/api/v2/trading/demo/positions/{positionId}`).
 
 ### Agent portfolios (copy-trading management)
 
