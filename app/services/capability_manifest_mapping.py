@@ -114,6 +114,15 @@ _UNMAPPED_MANIFEST_SOURCES: dict[ManifestSource, str] = {
         "coverage capability — absence is the healthy default, so it has no "
         "per-instrument capability cell."
     ),
+    # PRE 14A / PRER14A proposal signals (#1892, #1015 item 3) — a proxy-
+    # season signal, not a standing data-coverage capability: an issuer
+    # between annual meetings has no PRE 14A, so absence is the norm. Same
+    # scope as sec_nt above — no capability cell applies.
+    "sec_pre14a": (
+        "Meeting-agenda proposal signal (PRE 14A / PRER14A, #1892). Not a "
+        "coverage capability — absence between proxy seasons is the healthy "
+        "default, so it has no per-instrument capability cell."
+    ),
 }
 
 

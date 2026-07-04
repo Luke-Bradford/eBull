@@ -50,6 +50,20 @@ class NtNoticeSummary(BaseModel):
     results_change_anticipated: bool | None
 
 
+class Pre14aSignalSummary(BaseModel):
+    """Parsed PRE 14A / PRER14A meeting-agenda proposal signal (#1892).
+
+    Attached to ``FilingItem.pre14a_signal`` for PRE 14A / PRER14A rows;
+    ``None`` for every other form.
+    """
+
+    proposal_count: int
+    reverse_stock_split_proposal: bool
+    authorized_share_increase_proposal: bool
+    say_on_pay_advisory_vote: bool
+    agenda_items: list[str]
+
+
 class FilingItem(BaseModel):
     """Single filing event for an instrument.
 
@@ -76,6 +90,9 @@ class FilingItem(BaseModel):
     created_at: datetime
     # Form 12b-25 detail for NT 10-K / NT 10-Q rows (#1015); None otherwise.
     nt_notice: NtNoticeSummary | None = None
+    # Meeting-agenda proposal signal for PRE 14A / PRER14A rows (#1892);
+    # None otherwise.
+    pre14a_signal: Pre14aSignalSummary | None = None
 
 
 class FilingsListResponse(BaseModel):
@@ -141,6 +158,23 @@ def _parse_nt_notice(row: dict[str, object]) -> NtNoticeSummary | None:
     )
 
 
+def _parse_pre14a_signal(row: dict[str, object]) -> Pre14aSignalSummary | None:
+    """Build the PRE 14A detail sub-object from a LEFT-JOINed
+    ``pre14a_proposal_signals`` row. Returns ``None`` when the join produced
+    no row (non-PRE-14A filings, or a tombstoned accession).
+    """
+    proposal_count = row.get("pre14a_proposal_count")
+    if proposal_count is None:
+        return None
+    return Pre14aSignalSummary(
+        proposal_count=proposal_count,  # type: ignore[arg-type]
+        reverse_stock_split_proposal=row["pre14a_reverse_stock_split_proposal"],  # type: ignore[arg-type]
+        authorized_share_increase_proposal=row["pre14a_authorized_share_increase_proposal"],  # type: ignore[arg-type]
+        say_on_pay_advisory_vote=row["pre14a_say_on_pay_advisory_vote"],  # type: ignore[arg-type]
+        agenda_items=row.get("pre14a_agenda_items") or [],  # type: ignore[arg-type]
+    )
+
+
 def _parse_filing_item(row: dict[str, object]) -> FilingItem:
     return FilingItem(
         filing_event_id=row["filing_event_id"],  # type: ignore[arg-type]
@@ -155,6 +189,7 @@ def _parse_filing_item(row: dict[str, object]) -> FilingItem:
         red_flag_score=parse_optional_float(row, "red_flag_score"),
         created_at=row["created_at"],  # type: ignore[arg-type]
         nt_notice=_parse_nt_notice(row),
+        pre14a_signal=_parse_pre14a_signal(row),
     )
 
 
@@ -228,10 +263,18 @@ def list_filings(
                        nn.period_of_report        AS nt_period_of_report,
                        nn.grace_period_days       AS nt_grace_period_days,
                        nn.reason_text             AS nt_reason_text,
-                       nn.results_change_anticipated AS nt_results_change_anticipated
+                       nn.results_change_anticipated AS nt_results_change_anticipated,
+                       ps.proposal_count                     AS pre14a_proposal_count,
+                       ps.reverse_stock_split_proposal       AS pre14a_reverse_stock_split_proposal,
+                       ps.authorized_share_increase_proposal AS pre14a_authorized_share_increase_proposal,
+                       ps.say_on_pay_advisory_vote            AS pre14a_say_on_pay_advisory_vote,
+                       ps.agenda_items                        AS pre14a_agenda_items
                 FROM filing_events fe
                 LEFT JOIN nt_filing_notices nn
                        ON nn.accession_number = fe.provider_filing_id
+                      AND fe.provider = 'sec'
+                LEFT JOIN pre14a_proposal_signals ps
+                       ON ps.accession_number = fe.provider_filing_id
                       AND fe.provider = 'sec'
                 WHERE {where_sql}
                 ORDER BY fe.filing_date DESC, fe.filing_event_id DESC

@@ -120,6 +120,10 @@ MANIFEST_SOURCE_SINKS: dict[str, tuple[tuple[str, ...], str]] = {
         ("nt_filing_notices",),
         "nt_notice",
     ),
+    "sec_pre14a": (
+        ("pre14a_proposal_signals",),
+        "pre14a_proposal_signal",
+    ),
 }
 
 # Closure check enforced at import-time + by the smoke test.

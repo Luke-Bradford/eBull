@@ -125,7 +125,6 @@ def test_metadata_only_forms_have_no_parser_today() -> None:
         "F-4",
         "424B2",
         "424B3",
-        "PRE 14A",
         "SC TO-T",
         "SC 14D9",
         "DEF 13E-3",
@@ -138,6 +137,7 @@ def test_metadata_only_forms_have_no_parser_today() -> None:
         "11-K",
         # NT 10-K / NT 10-Q PROMOTED to SEC_PARSE_AND_RAW (#1015 — sec_nt).
         # NT 20-F stays metadata-only (foreign deadline regime).
+        # PRE 14A / PRER14A PROMOTED to SEC_PARSE_AND_RAW (#1892 — sec_pre14a).
         "NT 20-F",
         "20-F",
         "40-F",

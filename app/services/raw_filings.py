@@ -75,6 +75,9 @@ DocumentKind = Literal[
     # #1015 — SEC Form 12b-25 late-filing notice body (NT 10-K / NT 10-Q).
     # Small HTML (~3-8 KB); retained, not swept. sql/208.
     "nt_body",
+    # #1892 — SEC PRE 14A / PRER14A proposal-signal body. Small HTML;
+    # retained, not swept. sql/211.
+    "pre14a_body",
 ]
 # submissions.json / companyfacts.json are keyed by CIK, not by SEC
 # accession number — they belong in their own per-CIK store, not in
@@ -133,6 +136,10 @@ KEPT_NEGLIGIBLE_DOCUMENT_KINDS: dict[DocumentKind, str] = {
     # wired), so it has no payload reader. Reuse-on-redrain deferred (negligible
     # volume), mirroring nport_xml's #1731 rationale.
     "nt_body": "write-only ~3-8KB; sec_nt re-fetches from EDGAR, no payload reader (reuse deferred by volume #1015)",
+    # #1892 — PRE 14A / PRER14A proposal-signal body. Stored for the #938
+    # raw-before-parse invariant; the sec_pre14a parser always re-fetches on
+    # re-drain (no stored-body reuse wired), mirroring nt_body's rationale.
+    "pre14a_body": ("write-only; sec_pre14a re-fetches from EDGAR, no payload reader (reuse deferred by volume #1892)"),
 }
 
 
