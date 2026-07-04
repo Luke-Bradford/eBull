@@ -1408,9 +1408,28 @@ export interface CopyTradingResponse {
   display_currency: string;
 }
 
+/** A copied position the trader closed while we copied them (#1927).
+ *  Surfaced as an exit event, not a valuation — we hold entry size +
+ *  observed-close time but NOT the trader's exit price, so there is no
+ *  current_price / realized_pnl. `amount` is in display currency;
+ *  `open_rate` is intentionally absent. Mirrors
+ *  app/api/copy_trading.py::MirrorClosedPositionItem. */
+export interface MirrorClosedPositionItem {
+  position_id: number;
+  instrument_id: number;
+  symbol: string | null;
+  company_name: string | null;
+  is_buy: boolean;
+  units: number;
+  amount: number;
+  open_date_time: string;
+  closed_detected_at: string;
+}
+
 export interface MirrorDetailResponse {
   parent_username: string;
   mirror: MirrorSummary;
+  closed_positions: MirrorClosedPositionItem[];
   display_currency: string;
 }
 

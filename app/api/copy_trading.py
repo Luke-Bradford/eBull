@@ -58,6 +58,30 @@ class MirrorPositionItem(BaseModel):
     unrealized_pnl: float
 
 
+class MirrorClosedPositionItem(BaseModel):
+    """A copied position the trader closed while we were copying them
+    (#1927). Archived at eviction from ``copy_mirror_closed_positions``.
+
+    Surfaced as an EVENT, not a valuation: we hold the entry size + the
+    time we observed the close, but NOT the trader's exit price — so
+    there is deliberately no current_price / realized_pnl (we never
+    fabricate a P&L we cannot source). ``amount`` is converted to the
+    display currency exactly as open positions are; ``open_rate`` (a
+    native price) is intentionally omitted to avoid mixing native and
+    display figures in one row.
+    """
+
+    position_id: int
+    instrument_id: int
+    symbol: str | None
+    company_name: str | None
+    is_buy: bool
+    units: float
+    amount: float
+    open_date_time: datetime
+    closed_detected_at: datetime
+
+
 class MirrorSummary(BaseModel):
     mirror_id: int
     active: bool
@@ -89,6 +113,7 @@ class CopyTradingResponse(BaseModel):
 class MirrorDetailResponse(BaseModel):
     parent_username: str
     mirror: MirrorSummary
+    closed_positions: list[MirrorClosedPositionItem]
     display_currency: str
 
 
@@ -384,6 +409,21 @@ def get_mirror_detail(
         ORDER BY cmp.amount DESC
     """
 
+    # Closed copied positions — the trader's exits observed since we began
+    # archiving (#1927). Most-recent first, capped: this is an activity
+    # feed, not a full ledger. No MTM join — the position is gone.
+    closed_sql = """
+        SELECT cmcp.position_id, cmcp.instrument_id,
+               i.symbol, i.company_name,
+               cmcp.is_buy, cmcp.units, cmcp.amount,
+               cmcp.open_date_time, cmcp.closed_detected_at
+        FROM copy_mirror_closed_positions cmcp
+        LEFT JOIN instruments i ON i.instrument_id = cmcp.instrument_id
+        WHERE cmcp.mirror_id = %(mirror_id)s
+        ORDER BY cmcp.closed_detected_at DESC
+        LIMIT 100
+    """
+
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(mirror_sql, {"mirror_id": mirror_id})
@@ -396,7 +436,25 @@ def get_mirror_detail(
             cur.execute(positions_sql, {"mirror_id": mirror_id})
             position_rows = cur.fetchall()
 
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(closed_sql, {"mirror_id": mirror_id})
+            closed_rows = cur.fetchall()
+
     position_items = [_compute_position_mtm(p, display_currency, rates) for p in position_rows]
+    closed_items = [
+        MirrorClosedPositionItem(
+            position_id=c["position_id"],
+            instrument_id=c["instrument_id"],
+            symbol=c["symbol"],
+            company_name=c["company_name"],
+            is_buy=c["is_buy"],
+            units=float(c["units"]),
+            amount=_convert_usd(float(c["amount"]), display_currency, rates),
+            open_date_time=c["open_date_time"],
+            closed_detected_at=c["closed_detected_at"],
+        )
+        for c in closed_rows
+    ]
 
     # Per-mirror equity = available_amount + sum(position market values)
     available_usd = float(mr["available_amount"])
@@ -422,5 +480,6 @@ def get_mirror_detail(
     return MirrorDetailResponse(
         parent_username=mr["parent_username"],
         mirror=mirror_summary,
+        closed_positions=closed_items,
         display_currency=display_currency,
     )

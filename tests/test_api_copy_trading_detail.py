@@ -95,6 +95,30 @@ def _make_position_row(
     }
 
 
+def _make_closed_row(
+    position_id: int = 6001,
+    instrument_id: int = 42,
+    symbol: str | None = "AAPL",
+    company_name: str | None = "Apple Inc.",
+    is_buy: bool = True,
+    units: float = 4.0,
+    amount: float = 3000.0,
+    open_date_time: datetime = _NOW,
+    closed_detected_at: datetime = _NOW,
+) -> dict[str, Any]:
+    return {
+        "position_id": position_id,
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "company_name": company_name,
+        "is_buy": is_buy,
+        "units": units,
+        "amount": amount,
+        "open_date_time": open_date_time,
+        "closed_detected_at": closed_detected_at,
+    }
+
+
 def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
     """Build a mock psycopg.Connection supporting transaction context."""
     cur = MagicMock()
@@ -173,13 +197,14 @@ class TestMirrorDetail:
         """Returns mirror stats and positions for a valid mirror_id."""
         mirror = _make_mirror_row()
         position = _make_position_row()
-        _with_conn([[mirror], [position]])
+        _with_conn([[mirror], [position], []])  # mirror, positions, closed
 
         resp = client.get("/portfolio/copy-trading/1001")
         assert resp.status_code == 200
         body = resp.json()
 
         assert body["parent_username"] == "thomaspj"
+        assert body["closed_positions"] == []
         assert body["mirror"]["mirror_id"] == 1001
         assert body["mirror"]["active"] is True
         assert len(body["mirror"]["positions"]) == 1
@@ -196,7 +221,7 @@ class TestMirrorDetail:
     def test_empty_positions(self) -> None:
         """Mirror with no positions returns empty positions list."""
         mirror = _make_mirror_row()
-        _with_conn([[mirror], []])
+        _with_conn([[mirror], [], []])  # mirror, positions, closed
 
         resp = client.get("/portfolio/copy-trading/1001")
         assert resp.status_code == 200
@@ -217,7 +242,7 @@ class TestMirrorDetail:
             quote_last=160.0,
             open_conversion_rate=1.0,
         )
-        _with_conn([[mirror], [position]])
+        _with_conn([[mirror], [position], []])  # mirror, positions, closed
 
         resp = client.get("/portfolio/copy-trading/1001")
         assert resp.status_code == 200
@@ -225,3 +250,26 @@ class TestMirrorDetail:
 
         # 500 + 7100 = 7600
         assert body["mirror"]["mirror_equity"] == 7600.0
+
+    def test_closed_positions_surfaced(self) -> None:
+        """#1927: archived exits render as closed_positions events — no
+        current_price / P&L field, just the entry + observed-close."""
+        mirror = _make_mirror_row()
+        position = _make_position_row()
+        closed = _make_closed_row(position_id=6001, symbol="TSLA", units=4.0)
+        _with_conn([[mirror], [position], [closed]])
+
+        resp = client.get("/portfolio/copy-trading/1001")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert len(body["closed_positions"]) == 1
+        item = body["closed_positions"][0]
+        assert item["position_id"] == 6001
+        assert item["symbol"] == "TSLA"
+        assert item["units"] == 4.0
+        assert "closed_detected_at" in item
+        # Event, not valuation — no fabricated price/P&L fields.
+        assert "current_price" not in item
+        assert "unrealized_pnl" not in item
+        assert "open_rate" not in item

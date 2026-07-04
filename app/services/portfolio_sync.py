@@ -309,6 +309,19 @@ def _sync_mirrors(
     mirror_positions_upserted = 0
     mirrors_closed = 0
 
+    # Snapshot which mirrors are active BEFORE any upsert. Step 2 flips a
+    # re-copied mirror back to active=TRUE, so we must capture pre-sync
+    # state now to gate the step-3a archive (#1927 re-copy guard): only a
+    # mirror that was ALREADY active can have a genuine same-episode close.
+    # A newly-appearing / reactivated mirror's step-3a evictions are either
+    # nothing or stale audit residue retained from a prior copy episode —
+    # archiving them at re-copy time would mislabel them as fresh exits and
+    # stamp a wrong closed_detected_at, since we do not hold their true
+    # close time.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT mirror_id FROM copy_mirrors WHERE active = TRUE")
+        active_before = {int(r["mirror_id"]) for r in cur.fetchall()}
+
     for mirror in mirrors:
         # 1. Upsert the trader row (parent_cid is the identity spine).
         conn.execute(
@@ -396,6 +409,40 @@ def _sync_mirrors(
         #     to correctly delete every existing row when the payload
         #     has zero positions for this mirror.
         current_position_ids = [int(p.position_id) for p in mirror.positions]
+
+        # Archive the about-to-be-evicted rows before the DELETE, in the
+        # same transaction, so a copied trader's exits become durable
+        # history instead of vanishing (#1927). Mirrors the own-positions
+        # archive (broker_positions_closed, portfolio_sync.py ~235-256).
+        # Gated on the pre-sync active set: only a mirror already active
+        # this cycle can log a genuine close — see active_before above.
+        if int(mirror.mirror_id) in active_before:
+            conn.execute(
+                """
+                INSERT INTO copy_mirror_closed_positions
+                    (mirror_id, position_id, parent_position_id, instrument_id,
+                     is_buy, units, amount, initial_amount_in_dollars, open_rate,
+                     open_conversion_rate, open_date_time, take_profit_rate,
+                     stop_loss_rate, total_fees, leverage, raw_payload,
+                     updated_at, closed_detected_at)
+                SELECT mirror_id, position_id, parent_position_id, instrument_id,
+                       is_buy, units, amount, initial_amount_in_dollars, open_rate,
+                       open_conversion_rate, open_date_time, take_profit_rate,
+                       stop_loss_rate, total_fees, leverage, raw_payload,
+                       updated_at, %(now)s
+                FROM copy_mirror_positions
+                WHERE mirror_id = %(mirror_id)s
+                  AND position_id <> ALL(%(position_ids)s::bigint[])
+                ON CONFLICT (mirror_id, position_id, closed_detected_at)
+                    DO NOTHING
+                """,
+                {
+                    "mirror_id": mirror.mirror_id,
+                    "position_ids": current_position_ids,
+                    "now": now,
+                },
+            )
+
         conn.execute(
             """
             DELETE FROM copy_mirror_positions

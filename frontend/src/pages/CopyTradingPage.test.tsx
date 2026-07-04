@@ -81,6 +81,7 @@ function makeDetailResponse(overrides: Partial<MirrorDetailResponse> = {}): Mirr
       started_copy_date: "2026-01-15T10:00:00Z",
       closed_at: null,
     },
+    closed_positions: [],
     display_currency: "GBP",
     ...overrides,
   };
