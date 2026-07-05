@@ -1075,13 +1075,15 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     # NT 20-F (foreign deadline regime) stay metadata-only, out of scope.
     "NT 10-K": "sec_nt",
     "NT 10-Q": "sec_nt",
-    # 424B prospectuses, tier-1 (equity-likely) subtypes (#1816). The subtype
-    # is a Rule 424(b) filing-trigger bucket, not a taxonomy — economic facts
-    # come from the parsed Item 501(b)(3) cover. 424B2/424B8 deliberately
-    # unmapped: B2 volume here is bank/ETN structured-note shelf takedowns
-    # (deferred on yield; targeted equity-issuer B2 backfill = child ticket),
-    # B8 duplicates the underlying 424(b) paragraph's filing.
+    # 424B prospectuses (#1816). The subtype is a Rule 424(b) filing-trigger
+    # bucket, not a taxonomy — economic facts come from the parsed Item
+    # 501(b)(3) cover. 424B2 is volume-gated (#1975): mapped here, but the
+    # parser's pre-fetch gate tombstones B2 rows for filers with >100 lifetime
+    # B2 filings (bank/ETN structured-note factories — a fetch-cost bound, not
+    # a classification). 424B8 stays unmapped: it duplicates the underlying
+    # 424(b) paragraph's filing.
     "424B1": "sec_424b",
+    "424B2": "sec_424b",
     "424B3": "sec_424b",
     "424B4": "sec_424b",
     "424B5": "sec_424b",

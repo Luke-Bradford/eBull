@@ -209,6 +209,133 @@ def test_unrecognized_body_tombstones_with_raw_stored(
     assert raw_count_row is not None and raw_count_row[0] == 1
 
 
+def _seed_b2_filing_events(conn: psycopg.Connection[tuple], instrument_id: int, n: int) -> None:
+    """Seed *n* 424B2 filing_events rows for the volume-gate COUNT."""
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type,
+            provider, provider_filing_id, primary_document_url
+        )
+        SELECT %s, DATE '2026-01-01', '424B2', 'sec',
+               'B2-' || %s || '-' || g, 'https://example.test/doc.htm'
+        FROM generate_series(1, %s) AS g
+        ON CONFLICT (provider, provider_filing_id, instrument_id) DO NOTHING
+        """,
+        (instrument_id, instrument_id, n),
+    )
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [(99, True), (100, True), (101, False)],
+)
+def test_b2_volume_cap_helper_boundary(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    count: int,
+    expected: bool,
+) -> None:
+    """#1975 gate predicate: cap is inclusive at 100 (≤100 allowed)."""
+    from app.services.manifest_parsers.sec_424b import _424b2_within_volume_cap
+
+    iid = 9161000 + count
+    _seed_instrument(ebull_test_conn, iid=iid, symbol=f"CAP{count}")
+    _seed_b2_filing_events(ebull_test_conn, iid, count)
+    ebull_test_conn.commit()
+
+    assert _424b2_within_volume_cap(ebull_test_conn, iid) is expected
+
+
+def test_b2_over_cap_tombstones_without_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1975: >cap B2 row → tombstoned with the cap error, NO SEC request."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    iid = 9162001
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="NOTEFAC")
+    _seed_b2_filing_events(ebull_test_conn, iid, 101)
+    _seed_pending_424b(ebull_test_conn, accession="0002080126-26-000005", instrument_id=iid, form="424B2")
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    def _must_not_fetch(self, url):  # noqa: ANN001, ANN201
+        raise AssertionError("volume-gated B2 must not reach the SEC fetch")
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _must_not_fetch)
+
+    run_manifest_worker(ebull_test_conn, source="sec_424b", max_rows=10)
+    ebull_test_conn.commit()
+
+    row = get_manifest_row(ebull_test_conn, "0002080126-26-000005")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.error == "424B2 volume cap: high-volume structured-note filer"
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM filing_raw_documents WHERE accession_number = '0002080126-26-000005'")
+        raw_count = cur.fetchone()
+    assert raw_count is not None and raw_count[0] == 0
+
+
+def test_b2_under_cap_parses(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1975: ≤cap B2 row fetches + parses like any tier-1 subtype."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    iid = 9162002
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="SMALLB2")
+    _seed_b2_filing_events(ebull_test_conn, iid, 5)
+    _seed_pending_424b(ebull_test_conn, accession="0002080126-26-000006", instrument_id=iid, form="424B2")
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _FAKE_424B_HTML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_424b", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.parsed == 1
+    row = get_manifest_row(ebull_test_conn, "0002080126-26-000006")
+    assert row is not None
+    assert row.ingest_status == "parsed"
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT subtype FROM prospectus_offerings WHERE accession_number = '0002080126-26-000006'")
+        po = cur.fetchone()
+    assert po is not None and po[0] == "424B2"
+
+
+def test_b2_fetch_url_gate_parity(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """#1975: the #1591 prefetch hook applies the SAME volume gate as the
+    parser — URL for an under-cap B2, None for an over-cap B2."""
+    from app.services.manifest_parsers.sec_424b import _424b_fetch_url
+
+    over_iid, under_iid = 9162003, 9162004
+    _seed_instrument(ebull_test_conn, iid=over_iid, symbol="OVRCAP")
+    _seed_instrument(ebull_test_conn, iid=under_iid, symbol="UNDCAP")
+    _seed_b2_filing_events(ebull_test_conn, over_iid, 101)
+    _seed_b2_filing_events(ebull_test_conn, under_iid, 5)
+    _seed_pending_424b(ebull_test_conn, accession="0002080126-26-000007", instrument_id=over_iid, form="424B2")
+    _seed_pending_424b(ebull_test_conn, accession="0002080126-26-000008", instrument_id=under_iid, form="424B2")
+    ebull_test_conn.commit()
+
+    over_row = get_manifest_row(ebull_test_conn, "0002080126-26-000007")
+    under_row = get_manifest_row(ebull_test_conn, "0002080126-26-000008")
+    assert over_row is not None and under_row is not None
+    assert _424b_fetch_url(ebull_test_conn, over_row) is None
+    assert _424b_fetch_url(ebull_test_conn, under_row) == under_row.primary_document_url
+
+
 def test_fetch_exception_marks_failed(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

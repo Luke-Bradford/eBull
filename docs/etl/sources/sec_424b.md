@@ -1,10 +1,10 @@
-# sec_424b — SEC 424B prospectus offerings (tier-1 subtypes)
+# sec_424b — SEC 424B prospectus offerings
 
 Manifest source for Rule 424(b) final prospectuses. Issue #1816 (child of
 #1015 item 2). Upgrades the tier-1 (equity-likely) subtypes 424B1 / 424B3 /
 424B4 / 424B5 / 424B7 from metadata-only to PARSE+RAW: fetches the prospectus
 body and extracts the Reg S-K Item 501(b)(3) cover offering disclosure into
-`prospectus_offerings`.
+`prospectus_offerings`. #1975 adds 424B2 as **volume-gated** (see §1).
 
 ## 1. Origin
 
@@ -16,13 +16,26 @@ subtype. Discovered via the same per-CIK submissions poll / daily index / Atom
 feeds as every other SEC form; mapped to ``sec_424b`` in
 ``app/services/sec_manifest.py::_FORM_TO_SOURCE`` (424B1/B3/B4/B5/B7).
 
-**424B2 / 424B8 are deliberately unmapped** (stay ``SEC_METADATA_ONLY``): in
-our population B2 (149k rows, 77% of all 424B) is dominated by bank/ETN
-structured-note shelf takedowns (JPM/MS/GS/BAC/C + ETNs) with ~0
-equity-dilution value — deferred on **yield**, not by rule; a targeted
-equity-issuer B2 backfill is a child ticket. B8 is a late filing of a
-prospectus otherwise required under another 424(b) paragraph — parsing it
-mostly duplicates that paragraph's filing.
+| subtype | treatment |
+|---|---|
+| 424B1 / B3 / B4 / B5 / B7 | PARSE+RAW (tier-1, #1816) |
+| 424B2 | **volume-gated** PARSE+RAW (#1975) |
+| 424B8 | metadata-only (late-filing duplicate of another 424(b) paragraph) |
+
+**424B2 volume gate (#1975):** B2 is mapped to ``sec_424b``, but the parser's
+pre-fetch gate tombstones a B2 row (error ``"424B2 volume cap: high-volume
+structured-note filer"``) when the filer's lifetime B2 count in
+``filing_events`` exceeds ``_424B2_VOLUME_CAP = 100``. Full-population scan
+(149,555 B2 rows / 739 instruments, 2026-07-05): every filer above 100 is a
+bank/ETN/credit vehicle (JPM 30,268 … PRU 106); the ≤100 tail is 718
+instruments / ~4,252 filings. The cap is a **fetch-cost bound, not a
+classification** — Rule 424(b)(2) covers equity and debt alike, and
+equity-vs-debt is read only from the parsed Item 501(b)(3) cover. Evaluated
+against the live ``filing_events`` horizon at parse time (self-updating, no
+allowlist); deliberately non-idempotent across rebuilds — a filer crossing the
+cap self-excludes on later re-drains. Gated rows cost one COUNT query and no
+SEC request; the #1591 prefetch hook applies the same gate (parity — otherwise
+the pipelined prefetcher would fetch bodies the parser refuses).
 
 ## 2. Watermarking model
 
@@ -75,14 +88,15 @@ tick. No dedicated scheduler lane — 424B shares the SEC manifest worker.
 
 ``record_manifest_entry(..., source='sec_424b', subject_type='issuer',
 subject_id=instrument_id, instrument_id=instrument_id,
-form='424B1'|'424B3'|'424B4'|'424B5'|'424B7', primary_document_url=...)``.
+form='424B1'|'424B2'|'424B3'|'424B4'|'424B5'|'424B7',
+primary_document_url=...)``.
 Source allowed by ``sec_filing_manifest_source_check`` (widened in sql/216).
 
 ## 7. Parser
 
 ``app/services/manifest_parsers/sec_424b.py::_parse_424b`` orchestrates:
-pre-fetch gates (unexpected form / missing url / missing instrument_id →
-tombstone) → ``SecFilingsProvider.fetch_document_text`` →
+pre-fetch gates (unexpected form / missing url / missing instrument_id /
+#1975 B2 volume cap → tombstone) → ``SecFilingsProvider.fetch_document_text`` →
 ``store_raw(document_kind='prospectus_body')`` in a savepoint (born-compacted:
 sha only, bytes never stored — see §13) →
 ``app.services.prospectus_offerings.parse_prospectus_offering`` (pure
@@ -142,6 +156,12 @@ ORDER BY parsed_at DESC;
 -- manifest drain state for the source
 SELECT ingest_status, raw_status, count(*)
 FROM sec_filing_manifest WHERE source = 'sec_424b' GROUP BY 1, 2;
+
+-- #1975: B2 rows retired by the volume cap (auditable tombstone reason)
+SELECT count(*)
+FROM sec_filing_manifest
+WHERE source = 'sec_424b' AND ingest_status = 'tombstoned'
+  AND error = '424B2 volume cap: high-volume structured-note filer';
 
 -- money-fill rate by subtype (dry-run acceptance shape)
 SELECT subtype, count(*) AS n,

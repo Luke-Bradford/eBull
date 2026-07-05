@@ -67,7 +67,8 @@ class Pre14aSignalSummary(BaseModel):
 class OfferingSummary(BaseModel):
     """Parsed 424B cover offering (Reg S-K Item 501(b)(3)) — #1816.
 
-    Attached to ``FilingItem.offering`` for tier-1 424B rows (B1/B3/B4/B5/B7);
+    Attached to ``FilingItem.offering`` for parsed 424B rows (B1/B3/B4/B5/B7 +
+    volume-gated B2, #1975);
     ``None`` for every other form. Every money field is nullable: NULL means
     the cover presentation was not resolvable (percent-of-principal notes,
     resale shelves, non-tabular covers) — never a guessed value.
@@ -114,7 +115,7 @@ class FilingItem(BaseModel):
     # Meeting-agenda proposal signal for PRE 14A / PRER14A rows (#1892);
     # None otherwise.
     pre14a_signal: Pre14aSignalSummary | None = None
-    # Parsed 424B cover offering for tier-1 424B rows (#1816); None otherwise.
+    # Parsed 424B cover offering for parsed 424B rows (#1816/#1975); None otherwise.
     offering: OfferingSummary | None = None
 
 
