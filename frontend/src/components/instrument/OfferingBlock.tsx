@@ -60,9 +60,8 @@ export function OfferingBlock({ offering }: OfferingBlockProps): JSX.Element {
         <span className="font-medium text-slate-700 dark:text-slate-200">
           {offering.security_type ?? "Security"}
         </span>
-        <span className="text-slate-500 dark:text-slate-400">{offeringKindLabel(offering)}</span>
-        <span className="text-slate-400 dark:text-slate-500">
-          {offering.currency}
+        <span className="text-slate-500 dark:text-slate-400">
+          {offeringKindLabel(offering)}
         </span>
       </div>
       {moneyRows.length > 0 ? (
