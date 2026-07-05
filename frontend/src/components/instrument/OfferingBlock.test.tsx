@@ -42,17 +42,17 @@ describe("OfferingBlock", () => {
     render(<OfferingBlock offering={pricedOffering()} />);
     expect(screen.getByText("Common Stock")).toBeInTheDocument();
     expect(screen.getByText("issuer offering")).toBeInTheDocument();
-    // price via formatMoney(49, "USD"), magnitudes via formatBigNumber
+    // price via formatMoney(49, "USD"), magnitudes via formatBigMoney
     expect(screen.getByText("Per Share")).toBeInTheDocument();
     expect(screen.getByText(/\$49\.00/)).toBeInTheDocument();
     expect(screen.getByText("Aggregate")).toBeInTheDocument();
-    expect(screen.getByText("2.14B")).toBeInTheDocument();
+    expect(screen.getByText("US$2.14B")).toBeInTheDocument();
     expect(screen.getByText("Underwriting discount")).toBeInTheDocument();
-    expect(screen.getByText("53.47M")).toBeInTheDocument();
+    expect(screen.getByText("US$53.47M")).toBeInTheDocument();
     expect(screen.getByText("Net to issuer")).toBeInTheDocument();
-    expect(screen.getByText("695.41M")).toBeInTheDocument();
+    expect(screen.getByText("US$695.41M")).toBeInTheDocument();
     expect(screen.getByText("To selling holders")).toBeInTheDocument();
-    expect(screen.getByText("1.39B")).toBeInTheDocument();
+    expect(screen.getByText("US$1.39B")).toBeInTheDocument();
   });
 
   it("renders the honest no-priced-cover line when all money fields are null", () => {

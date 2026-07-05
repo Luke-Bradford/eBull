@@ -9,7 +9,7 @@
  */
 
 import type { OfferingSummary } from "@/api/types";
-import { formatBigNumber, formatMoney } from "@/lib/format";
+import { formatBigMoney, formatMoney } from "@/lib/format";
 
 function offeringKindLabel(offering: OfferingSummary): string {
   if (offering.is_issuer_offering === true) return "issuer offering";
@@ -32,25 +32,25 @@ export function OfferingBlock({ offering }: OfferingBlockProps): JSX.Element {
   if (offering.aggregate_offering_amount !== null) {
     moneyRows.push({
       label: "Aggregate",
-      value: formatBigNumber(offering.aggregate_offering_amount),
+      value: formatBigMoney(offering.aggregate_offering_amount, offering.currency),
     });
   }
   if (offering.underwriting_discount !== null) {
     moneyRows.push({
       label: "Underwriting discount",
-      value: formatBigNumber(offering.underwriting_discount),
+      value: formatBigMoney(offering.underwriting_discount, offering.currency),
     });
   }
   if (offering.net_proceeds_to_issuer !== null) {
     moneyRows.push({
       label: "Net to issuer",
-      value: formatBigNumber(offering.net_proceeds_to_issuer),
+      value: formatBigMoney(offering.net_proceeds_to_issuer, offering.currency),
     });
   }
   if (offering.proceeds_to_selling_holders !== null) {
     moneyRows.push({
       label: "To selling holders",
-      value: formatBigNumber(offering.proceeds_to_selling_holders),
+      value: formatBigMoney(offering.proceeds_to_selling_holders, offering.currency),
     });
   }
 

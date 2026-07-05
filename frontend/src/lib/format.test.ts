@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  formatBigMoney,
   formatEta,
   formatHeartbeatAge,
   formatRate,
@@ -120,5 +121,17 @@ describe("formatHeartbeatAge", () => {
 
   it("renders hours past an hour", () => {
     expect(formatHeartbeatAge(7200)).toBe("updated 2h ago");
+  });
+});
+
+describe("formatBigMoney", () => {
+  it("prefixes the currency symbol on abbreviated magnitudes", () => {
+    expect(formatBigMoney(2_138_850_000, "USD")).toBe("US$2.14B");
+    expect(formatBigMoney(53_471_250, "USD")).toBe("US$53.47M");
+  });
+
+  it("defaults to GBP and renders null as em dash", () => {
+    expect(formatBigMoney(1_500, undefined)).toBe("\u00a31.50K");
+    expect(formatBigMoney(null, "USD")).toBe("\u2014");
   });
 });
