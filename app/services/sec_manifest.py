@@ -1094,7 +1094,7 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
 def map_form_to_source(form: str) -> ManifestSource | None:
     """Map an SEC form code to the manifest's ``source`` enum value.
 
-    Returns ``None`` for unsupported forms (e.g. ``S-1``, ``424B5``,
+    Returns ``None`` for unsupported forms (e.g. ``S-1``, ``424B8``,
     ``CORRESP``) — the discovery paths skip these. Matching is exact;
     callers must canonicalise spacing first (SEC sometimes emits
     ``13F-HR`` and sometimes ``13F-HR  `` with trailing whitespace).

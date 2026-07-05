@@ -818,10 +818,13 @@ class TestFormMapping:
         assert map_form_to_source("SC 13G") == "sec_13g"
         assert map_form_to_source("DEF 14A") == "sec_def14a"
         assert map_form_to_source("10-K") == "sec_10k"
+        # 424B prospectuses: tier-1 (#1816) + volume-gated B2 (#1975).
+        for subtype in ("424B1", "424B2", "424B3", "424B4", "424B5", "424B7"):
+            assert map_form_to_source(subtype) == "sec_424b"
 
     def test_unknown_form_maps_to_none(self) -> None:
         assert map_form_to_source("S-1") is None
-        assert map_form_to_source("424B5") is None
+        assert map_form_to_source("424B8") is None
         assert map_form_to_source("CORRESP") is None
         assert map_form_to_source("") is None
 
@@ -845,8 +848,7 @@ class TestFormMapping:
             "F-1",
             "F-3",
             "F-4",
-            "424B3",
-            "424B5",
+            "424B8",
             "13F-NT",
             "13F-NT/A",
             "144",
