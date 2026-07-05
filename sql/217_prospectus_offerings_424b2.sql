@@ -18,4 +18,12 @@ ALTER TABLE prospectus_offerings
     ADD CONSTRAINT prospectus_offerings_subtype_check
     CHECK (subtype IN ('424B1', '424B2', '424B3', '424B4', '424B5', '424B7'));
 
+-- The gate COUNTs a filer's lifetime B2s once per manifest B2 row (parser +
+-- prefetch hook). Without a targeted index the whale drains (JPM 30k rows)
+-- re-scan the issuer's whole filing_events history per row. Partial index
+-- keeps the COUNT an index-only scan on exactly the gated predicate.
+CREATE INDEX IF NOT EXISTS idx_filing_events_424b2_by_instrument
+    ON filing_events (instrument_id)
+    WHERE filing_type = '424B2';
+
 COMMIT;
