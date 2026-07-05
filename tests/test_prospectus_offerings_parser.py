@@ -218,5 +218,22 @@ def test_unrecognizable_body_tombstones() -> None:
 
 
 def test_out_of_scope_subtype_raises() -> None:
+    # 424B2 was admitted in #1975 (volume-gated at the manifest parser);
+    # B8 remains the out-of-scope subtype.
     with pytest.raises(ValueError, match="subtype"):
-        parse_prospectus_offering("<html>prospectus</html>", "424B2")
+        parse_prospectus_offering("<html>prospectus</html>", "424B8")
+
+
+def test_424b2_subtype_in_scope() -> None:
+    """#1975: B2 no longer raises — the extractor already handles B2-style
+    covers (the JEF/TD fixtures ARE B2 shapes)."""
+    body = _cover(
+        "Per Share Total "
+        "Public offering price $ 10.00 $ 10,000,000 "
+        "Underwriting discounts and commissions $ 0.70 $ 700,000 "
+        "Proceeds, before expenses, to us $ 9.30 $ 9,300,000 "
+    )
+    o = parse_prospectus_offering(body, "424B2")
+    assert o is not None
+    assert o.subtype == "424B2"
+    assert o.price_per_unit == Decimal("10.00")

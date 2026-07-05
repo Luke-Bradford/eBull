@@ -42,7 +42,10 @@ import psycopg
 
 PARSER_VERSION = 1
 
-IN_SCOPE_SUBTYPES: frozenset[str] = frozenset({"424B1", "424B3", "424B4", "424B5", "424B7"})
+# 424B2 admitted in #1975 (volume-gated at the manifest parser — the extractor
+# itself already handles B2-style covers; the JEF/TD fixtures ARE B2 shapes).
+# B8 stays out (late-filing duplicate of another 424(b) paragraph).
+IN_SCOPE_SUBTYPES: frozenset[str] = frozenset({"424B1", "424B2", "424B3", "424B4", "424B5", "424B7"})
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")

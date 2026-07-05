@@ -9,11 +9,14 @@ sha256 recorded, bytes never stored; prospectus bodies run 100 KB-12 MB), then
 run the pure extractor (``app.services.prospectus_offerings``) on the in-memory
 body and upsert ``prospectus_offerings``.
 
-424B2 / 424B8 are NOT routed here (``_FORM_TO_SOURCE`` maps only the tier-1
-subtypes) — B2 volume in our population is bank/ETN structured-note shelf
-takedowns, deferred on yield; B8 is a late-filing duplicate of another 424(b)
-paragraph. An unexpected form reaching this parser is an upstream misroute →
-tombstone.
+424B2 is volume-gated (#1975): routed here, but tombstoned WITHOUT fetch when
+the filer's lifetime B2 count exceeds ``_424B2_VOLUME_CAP`` — in our population
+every filer above the cap is a bank/ETN/credit-vehicle structured-note factory
+(JPM 30k … PRU 106; full-population scan 2026-07-05). The cap is a fetch-cost
+bound, NOT a classification — equity-vs-debt comes only from the parsed Item
+501(b)(3) cover. 424B8 is NOT routed here (late-filing duplicate of another
+424(b) paragraph). An unexpected form reaching this parser is an upstream
+misroute → tombstone.
 
 All field logic lives in ``prospectus_offerings`` (single-chokepoint
 discipline); this module only orchestrates fetch / store / transition.
@@ -43,6 +46,18 @@ logger = logging.getLogger(__name__)
 
 _FAILED_RETRY_DELAY = timedelta(hours=1)
 
+# #1975: max lifetime 424B2 filings per instrument before the parser stops
+# fetching that filer's B2 bodies. Full-population scan (149,555 B2 rows / 739
+# instruments, 2026-07-05): all 21 filers above 100 are banks/ETNs/credit
+# vehicles; the ≤100 tail is 718 instruments / ~4,252 filings. Evaluated
+# against the live ``filing_events`` horizon at parse time (self-updating —
+# a new note factory crossing the cap self-excludes; no allowlist to rot).
+# Deliberately non-idempotent across rebuilds: a fetch-cost policy, not a
+# filing-time fact.
+_424B2_VOLUME_CAP = 100
+
+_424B2_CAP_ERROR = "424B2 volume cap: high-volume structured-note filer"
+
 # ParseOutcome.parser_version and store_raw.parser_version are TEXT; the
 # prospectus_offerings.parser_version column is INT (set by the upsert).
 _PARSER_VERSION_424B = str(_424B_PARSER_VERSION)
@@ -59,6 +74,22 @@ def _failed_outcome(error: str, raw_status: Any = None) -> Any:
         error=error,
         next_retry_at=datetime.now(tz=UTC) + _FAILED_RETRY_DELAY,
     )
+
+
+def _424b2_within_volume_cap(conn: psycopg.Connection[Any], instrument_id: int) -> bool:
+    """#1975 pre-fetch gate predicate: does this filer's lifetime 424B2 count
+    sit within ``_424B2_VOLUME_CAP``? Exact-match ``'424B2'`` (the canonical
+    EDGAR form string stored by discovery; no ``/A`` variants exist in
+    ``filing_events`` — full-pop check 2026-07-05).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM filing_events WHERE filing_type = '424B2' AND instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+    count = int(row[0]) if row is not None else 0
+    return count <= _424B2_VOLUME_CAP
 
 
 def _parse_424b(
@@ -105,6 +136,15 @@ def _parse_424b(
             status="tombstoned",
             parser_version=_PARSER_VERSION_424B,
             error="missing instrument_id",
+        )
+
+    if subtype == "424B2" and not _424b2_within_volume_cap(conn, instrument_id):
+        # #1975 volume gate — one COUNT query, no SEC request. Same placement
+        # class as the 13D/G retention + DEF 14A latest-N pre-fetch gates.
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_424B,
+            error=_424B2_CAP_ERROR,
         )
 
     try:
@@ -181,17 +221,21 @@ def _parse_424b(
     )
 
 
-def _424b_fetch_url(conn: Any, row: Any) -> str | None:  # conn unused; row: ManifestRow
+def _424b_fetch_url(conn: Any, row: Any) -> str | None:  # row: ManifestRow
     """#1591 prefetch hook — the single primary-document URL the 424B parser
     GETs, returned only when the parser would actually fetch it (mirrors
-    ``_parse_424b``'s pre-fetch tombstone gates). All gates are row-local so
-    ``conn`` is unused. ``prospectus_body`` is born-compacted (swept kind), so
+    ``_parse_424b``'s pre-fetch tombstone gates, including the #1975 B2 volume
+    gate — without parity the prefetcher would fetch bodies the parser then
+    refuses to parse). ``prospectus_body`` is born-compacted (swept kind), so
     the parser always re-fetches on re-drain — no reuse gate.
     """
-    if row.form.strip() not in IN_SCOPE_SUBTYPES:
+    subtype = row.form.strip()
+    if subtype not in IN_SCOPE_SUBTYPES:
         return None
     url = row.primary_document_url
     if not url or row.instrument_id is None:
+        return None
+    if subtype == "424B2" and not _424b2_within_volume_cap(conn, row.instrument_id):
         return None
     return url
 
