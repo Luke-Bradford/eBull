@@ -386,6 +386,7 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
                 # PR); sec_424b added with its source (#1816).
                 "sec_pre14a",
                 "sec_424b",
+                "sec_tender",
             ),
             default=None,
             advanced_group=False,

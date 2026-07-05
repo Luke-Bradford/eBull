@@ -86,6 +86,31 @@ class OfferingSummary(BaseModel):
     security_type: str | None
 
 
+class TenderEventSummary(BaseModel):
+    """Parsed tender / going-private schedule event (Reg M-A) — #1982.
+
+    Attached to ``FilingItem.tender`` for parsed SC TO-T / TO-I / 14D9 / 13E3
+    (+ /A) rows; ``None`` for every other form. ``role`` says which party THIS
+    instrument is (a dual-attributed accession renders 'subject' on the
+    target's feed and 'offeror' on the acquirer's). Every extracted field is
+    nullable: NULL means not resolvable from the cover/body — never guessed.
+    """
+
+    role: str  # 'subject' | 'offeror'
+    subject_company_name: str
+    offeror_names: list[str] | None
+    is_third_party_tender: bool | None
+    is_issuer_tender: bool | None
+    is_going_private: bool | None
+    is_final_amendment: bool | None
+    amendment_no: int | None
+    offer_price_per_unit: float | None
+    unit_label: str | None
+    currency: str | None
+    expiration_date: date | None
+    board_recommendation: str | None
+
+
 class FilingItem(BaseModel):
     """Single filing event for an instrument.
 
@@ -117,6 +142,8 @@ class FilingItem(BaseModel):
     pre14a_signal: Pre14aSignalSummary | None = None
     # Parsed 424B cover offering for parsed 424B rows (#1816/#1975); None otherwise.
     offering: OfferingSummary | None = None
+    # Parsed tender / going-private event for schedule rows (#1982); None otherwise.
+    tender: TenderEventSummary | None = None
 
 
 class FilingsListResponse(BaseModel):
@@ -222,6 +249,33 @@ def _parse_offering(row: dict[str, object]) -> OfferingSummary | None:
     )
 
 
+def _parse_tender(row: dict[str, object]) -> TenderEventSummary | None:
+    """Build the tender sub-object from a LEFT-JOINed ``tender_offer_events``
+    row. Returns ``None`` when the join produced no row (non-schedule filings,
+    or a tombstoned accession). Keyed on ``te_role`` being present (NOT NULL
+    in the table). The join is composite (accession AND instrument) — a
+    dual-attributed accession has one typed row per party.
+    """
+    role = row.get("te_role")
+    if role is None:
+        return None
+    return TenderEventSummary(
+        role=role,  # type: ignore[arg-type]
+        subject_company_name=row["te_subject_company_name"],  # type: ignore[arg-type]
+        offeror_names=row.get("te_offeror_names"),  # type: ignore[arg-type]
+        is_third_party_tender=row.get("te_is_third_party_tender"),  # type: ignore[arg-type]
+        is_issuer_tender=row.get("te_is_issuer_tender"),  # type: ignore[arg-type]
+        is_going_private=row.get("te_is_going_private"),  # type: ignore[arg-type]
+        is_final_amendment=row.get("te_is_final_amendment"),  # type: ignore[arg-type]
+        amendment_no=row.get("te_amendment_no"),  # type: ignore[arg-type]
+        offer_price_per_unit=parse_optional_float(row, "te_offer_price_per_unit"),
+        unit_label=row.get("te_unit_label"),  # type: ignore[arg-type]
+        currency=row.get("te_currency"),  # type: ignore[arg-type]
+        expiration_date=row.get("te_expiration_date"),  # type: ignore[arg-type]
+        board_recommendation=row.get("te_board_recommendation"),  # type: ignore[arg-type]
+    )
+
+
 def _parse_filing_item(row: dict[str, object]) -> FilingItem:
     return FilingItem(
         filing_event_id=row["filing_event_id"],  # type: ignore[arg-type]
@@ -238,6 +292,7 @@ def _parse_filing_item(row: dict[str, object]) -> FilingItem:
         nt_notice=_parse_nt_notice(row),
         pre14a_signal=_parse_pre14a_signal(row),
         offering=_parse_offering(row),
+        tender=_parse_tender(row),
     )
 
 
@@ -326,7 +381,20 @@ def list_filings(
                        po.net_proceeds_to_issuer     AS po_net_proceeds_to_issuer,
                        po.proceeds_to_selling_holders AS po_proceeds_to_selling_holders,
                        po.currency                   AS po_currency,
-                       po.security_type              AS po_security_type
+                       po.security_type              AS po_security_type,
+                       te.role                       AS te_role,
+                       te.subject_company_name       AS te_subject_company_name,
+                       te.offeror_names              AS te_offeror_names,
+                       te.is_third_party_tender      AS te_is_third_party_tender,
+                       te.is_issuer_tender           AS te_is_issuer_tender,
+                       te.is_going_private           AS te_is_going_private,
+                       te.is_final_amendment         AS te_is_final_amendment,
+                       te.amendment_no               AS te_amendment_no,
+                       te.offer_price_per_unit       AS te_offer_price_per_unit,
+                       te.unit_label                 AS te_unit_label,
+                       te.currency                   AS te_currency,
+                       te.expiration_date            AS te_expiration_date,
+                       te.board_recommendation      AS te_board_recommendation
                 FROM filing_events fe
                 LEFT JOIN nt_filing_notices nn
                        ON nn.accession_number = fe.provider_filing_id
@@ -336,6 +404,10 @@ def list_filings(
                       AND fe.provider = 'sec'
                 LEFT JOIN prospectus_offerings po
                        ON po.accession_number = fe.provider_filing_id
+                      AND fe.provider = 'sec'
+                LEFT JOIN tender_offer_events te
+                       ON te.accession_number = fe.provider_filing_id
+                      AND te.instrument_id = fe.instrument_id
                       AND fe.provider = 'sec'
                 WHERE {where_sql}
                 ORDER BY fe.filing_date DESC, fe.filing_event_id DESC

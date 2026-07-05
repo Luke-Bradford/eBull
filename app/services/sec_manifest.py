@@ -123,6 +123,7 @@ ManifestSource = Literal[
     "sec_nt",
     "sec_pre14a",
     "sec_424b",
+    "sec_tender",
 ]
 
 # Sources intentionally absent from ``_FORM_TO_SOURCE``:
@@ -1088,6 +1089,22 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     "424B4": "sec_424b",
     "424B5": "sec_424b",
     "424B7": "sec_424b",
+    # Tender / going-private schedules (#1982, #1015 item 4). Roles
+    # (subject vs offeror) come from the accession's SGML header CIK blocks
+    # at parse time — the manifest row's instrument_id is arbitrary between
+    # the parties of a dual-attributed accession (accession is the PK;
+    # record_manifest_entry is last-discovery-wins). SC TO-C stays unmapped
+    # (Rule 14d-2(b)(1) pre-commencement communications — no Item 1004 terms
+    # attach); PREM14C / DEFM14C stay unmapped (Schedule 14A Item 14 prose,
+    # the #1659 free-text trap — the companion SC 13E3 carries the signal).
+    "SC TO-T": "sec_tender",
+    "SC TO-T/A": "sec_tender",
+    "SC TO-I": "sec_tender",
+    "SC TO-I/A": "sec_tender",
+    "SC 14D9": "sec_tender",
+    "SC 14D9/A": "sec_tender",
+    "SC 13E3": "sec_tender",
+    "SC 13E3/A": "sec_tender",
 }
 
 
