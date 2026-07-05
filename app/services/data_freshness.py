@@ -114,6 +114,10 @@ _CADENCE: dict[ManifestSource, timedelta] = {
     # year, so a generous ceiling avoids painting the source overdue between
     # meetings. Mirrors sec_nt's rationale.
     "sec_pre14a": timedelta(days=400),
+    # 424B offerings (#1816) — episodic, event-driven: most issuers never
+    # file one, so a generous ceiling keeps a non-issuing name from ever
+    # reading "stale". Mirrors sec_nt's rationale.
+    "sec_424b": timedelta(days=400),
 }
 
 

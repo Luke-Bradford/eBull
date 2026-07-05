@@ -235,6 +235,7 @@ _PARSER_MODULE_BY_SOURCE: dict[str, str] = {
     "finra_regsho_daily": "app.services.manifest_parsers.finra_regsho_daily",
     "sec_nt": "app.services.manifest_parsers.sec_nt",
     "sec_pre14a": "app.services.manifest_parsers.sec_pre14a",
+    "sec_424b": "app.services.manifest_parsers.sec_424b",
 }
 
 # #1322 PR #1354 bot iter-1 WARNING fold — parallel-dict drift guard.

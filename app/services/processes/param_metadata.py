@@ -376,6 +376,10 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
                 "sec_xbrl_facts",
                 "finra_short_interest",
                 "sec_nt",
+                # sec_pre14a was missed when #1892 landed (drift fix, #1816
+                # PR); sec_424b added with its source (#1816).
+                "sec_pre14a",
+                "sec_424b",
             ),
             default=None,
             advanced_group=False,

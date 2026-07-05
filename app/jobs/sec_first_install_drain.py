@@ -275,9 +275,12 @@ def seed_manifest_from_filing_events(
                 # view: seed these 'deferred' so the post-bootstrap
                 # catch_up_on_boot manifest worker (iter_pending /
                 # iter_retryable select only pending/failed) never eagerly
-                # drains the body backlog. Other issuer sources stay
-                # 'pending' for the worker to fetch eagerly.
-                initial_ingest_status="deferred" if source in ("sec_10k", "sec_8k") else "pending",
+                # drains the body backlog. sec_424b joins the deferred tier
+                # (#1816): prospectus bodies are 100 KB-12 MB, same weight
+                # class — the historical ~43.7k backfill is its own drive
+                # ticket. Other issuer sources stay 'pending' for the worker
+                # to fetch eagerly.
+                initial_ingest_status=("deferred" if source in ("sec_10k", "sec_8k", "sec_424b") else "pending"),
             )
             upserted += 1
             if seeded_triples is not None:
