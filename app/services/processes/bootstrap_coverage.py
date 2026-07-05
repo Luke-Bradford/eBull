@@ -85,8 +85,11 @@ _BOOTSTRAP_STAGE_FRESHNESS_SOURCES: Final[dict[str, frozenset[ManifestSource]]] 
 
 # Union of every covered source. Excluded by construction (NOT bootstrap-
 # covered): ``finra_short_interest`` / ``finra_regsho_daily`` (steady-state
-# FINRA lanes) and ``sec_n_csr`` (steady-state discovery) — their freshness
-# rows are seeded post-complete, not by a bootstrap stage.
+# FINRA lanes), ``sec_n_csr`` (steady-state discovery), and the episodic
+# signal sources ``sec_nt`` / ``sec_pre14a`` / ``sec_424b`` (#1816 —
+# going-forward discovery + their own backfill drives seed them; leaving them
+# uncovered keeps a never-run poll from reading a false green) — their
+# freshness rows are seeded post-complete, not by a bootstrap stage.
 BOOTSTRAP_COVERED_FRESHNESS_SOURCES: Final[frozenset[ManifestSource]] = frozenset(
     src for srcs in _BOOTSTRAP_STAGE_FRESHNESS_SOURCES.values() for src in srcs
 )

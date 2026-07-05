@@ -64,6 +64,27 @@ class Pre14aSignalSummary(BaseModel):
     agenda_items: list[str]
 
 
+class OfferingSummary(BaseModel):
+    """Parsed 424B cover offering (Reg S-K Item 501(b)(3)) — #1816.
+
+    Attached to ``FilingItem.offering`` for tier-1 424B rows (B1/B3/B4/B5/B7);
+    ``None`` for every other form. Every money field is nullable: NULL means
+    the cover presentation was not resolvable (percent-of-principal notes,
+    resale shelves, non-tabular covers) — never a guessed value.
+    """
+
+    subtype: str
+    is_issuer_offering: bool | None
+    price_per_unit: float | None
+    unit_label: str | None
+    aggregate_offering_amount: float | None
+    underwriting_discount: float | None
+    net_proceeds_to_issuer: float | None
+    proceeds_to_selling_holders: float | None
+    currency: str
+    security_type: str | None
+
+
 class FilingItem(BaseModel):
     """Single filing event for an instrument.
 
@@ -93,6 +114,8 @@ class FilingItem(BaseModel):
     # Meeting-agenda proposal signal for PRE 14A / PRER14A rows (#1892);
     # None otherwise.
     pre14a_signal: Pre14aSignalSummary | None = None
+    # Parsed 424B cover offering for tier-1 424B rows (#1816); None otherwise.
+    offering: OfferingSummary | None = None
 
 
 class FilingsListResponse(BaseModel):
@@ -175,6 +198,29 @@ def _parse_pre14a_signal(row: dict[str, object]) -> Pre14aSignalSummary | None:
     )
 
 
+def _parse_offering(row: dict[str, object]) -> OfferingSummary | None:
+    """Build the 424B offering sub-object from a LEFT-JOINed
+    ``prospectus_offerings`` row. Returns ``None`` when the join produced no
+    row (non-424B filings, or a tombstoned accession). Keyed on ``po_subtype``
+    being present (NOT NULL in the table).
+    """
+    subtype = row.get("po_subtype")
+    if subtype is None:
+        return None
+    return OfferingSummary(
+        subtype=subtype,  # type: ignore[arg-type]
+        is_issuer_offering=row.get("po_is_issuer_offering"),  # type: ignore[arg-type]
+        price_per_unit=parse_optional_float(row, "po_price_per_unit"),
+        unit_label=row.get("po_unit_label"),  # type: ignore[arg-type]
+        aggregate_offering_amount=parse_optional_float(row, "po_aggregate_offering_amount"),
+        underwriting_discount=parse_optional_float(row, "po_underwriting_discount"),
+        net_proceeds_to_issuer=parse_optional_float(row, "po_net_proceeds_to_issuer"),
+        proceeds_to_selling_holders=parse_optional_float(row, "po_proceeds_to_selling_holders"),
+        currency=row["po_currency"],  # type: ignore[arg-type]
+        security_type=row.get("po_security_type"),  # type: ignore[arg-type]
+    )
+
+
 def _parse_filing_item(row: dict[str, object]) -> FilingItem:
     return FilingItem(
         filing_event_id=row["filing_event_id"],  # type: ignore[arg-type]
@@ -190,6 +236,7 @@ def _parse_filing_item(row: dict[str, object]) -> FilingItem:
         created_at=row["created_at"],  # type: ignore[arg-type]
         nt_notice=_parse_nt_notice(row),
         pre14a_signal=_parse_pre14a_signal(row),
+        offering=_parse_offering(row),
     )
 
 
@@ -268,13 +315,26 @@ def list_filings(
                        ps.reverse_stock_split_proposal       AS pre14a_reverse_stock_split_proposal,
                        ps.authorized_share_increase_proposal AS pre14a_authorized_share_increase_proposal,
                        ps.say_on_pay_advisory_vote            AS pre14a_say_on_pay_advisory_vote,
-                       ps.agenda_items                        AS pre14a_agenda_items
+                       ps.agenda_items                        AS pre14a_agenda_items,
+                       po.subtype                    AS po_subtype,
+                       po.is_issuer_offering         AS po_is_issuer_offering,
+                       po.price_per_unit             AS po_price_per_unit,
+                       po.unit_label                 AS po_unit_label,
+                       po.aggregate_offering_amount  AS po_aggregate_offering_amount,
+                       po.underwriting_discount      AS po_underwriting_discount,
+                       po.net_proceeds_to_issuer     AS po_net_proceeds_to_issuer,
+                       po.proceeds_to_selling_holders AS po_proceeds_to_selling_holders,
+                       po.currency                   AS po_currency,
+                       po.security_type              AS po_security_type
                 FROM filing_events fe
                 LEFT JOIN nt_filing_notices nn
                        ON nn.accession_number = fe.provider_filing_id
                       AND fe.provider = 'sec'
                 LEFT JOIN pre14a_proposal_signals ps
                        ON ps.accession_number = fe.provider_filing_id
+                      AND fe.provider = 'sec'
+                LEFT JOIN prospectus_offerings po
+                       ON po.accession_number = fe.provider_filing_id
                       AND fe.provider = 'sec'
                 WHERE {where_sql}
                 ORDER BY fe.filing_date DESC, fe.filing_event_id DESC

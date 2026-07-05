@@ -206,6 +206,17 @@ SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
         # the ownership pipeline (#1320).
         "PRE 14A",
         "PRER14A",
+        # 424B prospectuses, tier-1 (equity-likely) subtypes only. #1816 —
+        # sec_424b parser extracts the Reg S-K Item 501(b)(3) cover offering
+        # disclosure. 424B2/424B8 stay metadata-only below (B2 volume in our
+        # population is bank/ETN structured-note shelf takedowns — deferred on
+        # yield, not by rule; B8 is a late-filing duplicate of another 424(b)
+        # paragraph).
+        "424B1",
+        "424B3",
+        "424B4",
+        "424B5",
+        "424B7",
     }
 )
 
@@ -250,11 +261,16 @@ SEC_METADATA_ONLY: frozenset[str] = frozenset(
         "F-3/A",
         "F-4",
         "F-4/A",
+        # 424B1/B3/B4/B5/B7 PROMOTED to PARSE+RAW (#1816 — sec_424b parser,
+        # Item 501(b)(3) cover offering extraction). See SEC_PARSE_AND_RAW
+        # above. B2/B8 stay metadata-only: our B2 population (149k rows, 77%
+        # of all 424B) is dominated by bank/ETN structured-note shelf
+        # takedowns (JPM/MS/GS/BAC/C + ETNs) with ~0 equity-dilution value —
+        # deferred on yield, not by rule; a targeted equity-issuer B2 backfill
+        # is a child ticket. B8 (late filing of a prospectus otherwise
+        # required under another 424(b) paragraph) duplicates the underlying
+        # paragraph's filing.
         "424B2",
-        "424B3",
-        "424B4",
-        "424B5",
-        "424B7",
         "424B8",
         # Tender offers + going-private — M&A / take-out signal.
         "SC TO-T",

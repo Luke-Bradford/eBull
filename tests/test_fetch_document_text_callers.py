@@ -66,6 +66,7 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "app/services/manifest_parsers/sec_13f_hr.py",
         "app/services/manifest_parsers/sec_n_port.py",
         "app/services/manifest_parsers/sec_nt.py",
+        "app/services/manifest_parsers/sec_424b.py",
         "app/services/manifest_parsers/sec_pre14a.py",
         # Bounded pipelined fetcher (#1045) — concurrent transport
         # wrapper used by ``ingest_business_summaries`` to prefetch
@@ -103,6 +104,7 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "tests/test_manifest_parser_sec_13f_hr.py",
         "tests/test_manifest_parser_sec_n_port.py",
         "tests/test_manifest_parser_sec_nt.py",
+        "tests/test_manifest_parser_sec_424b.py",
         "tests/test_manifest_parser_sec_pre14a.py",
         "tests/test_sec_pipelined_fetcher.py",
         # Synth no-op manifest parser (#1168). NOT a caller — the
