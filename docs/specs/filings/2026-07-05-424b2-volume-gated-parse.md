@@ -74,8 +74,9 @@ without fetch when the filer's lifetime B2 count exceeds `_424B2_VOLUME_CAP =
   current DB horizon, so a B2 that parsed when the issuer had 90 filings can
   tombstone on a later re-drain once the issuer crosses 100. Accepted: the
   cap is a fetch-cost policy, monotone toward excluding note factories, and
-  the parsed rows it would retire are exactly the ones re-classified as
-  note-program output. Not a filing-time fact, and not claimed to be one.
+  rows it retires are treated as note-program output for fetch-cost policy
+  (their economics were, and remain, whatever the cover parse said). Not a
+  filing-time fact, and not claimed to be one.
 - Tombstone error string: `"424B2 volume cap: high-volume structured-note
   filer"` — auditable, distinguishable from parse tombstones.
 - Fetch budget at today's population: **≤ 4,252 bodies** (buckets ≤100:
