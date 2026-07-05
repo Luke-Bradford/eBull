@@ -280,9 +280,16 @@ jobs:
           # comparable in depth to Sonnet 4.6 at "high". "low" undershot the
           # triage work this bot needs to do (catching hallucinated/
           # already-rebutted/out-of-diff findings before posting).
+          #
+          # max_tokens caps thinking + text COMBINED: on a large diff
+          # (PR #1973: 279k input tokens) adaptive thinking consumed the
+          # whole 5000-token cap and the response carried zero text blocks,
+          # failing the workflow before any review posted. 16000 leaves
+          # thinking room plus the full review text while staying inside
+          # non-streaming HTTP-timeout guidance.
           payload = {
               "model": "claude-sonnet-5",
-              "max_tokens": 5000,
+              "max_tokens": 16000,
               "thinking": {"type": "adaptive"},
               "output_config": {"effort": "medium"},
               "system": [
@@ -298,6 +305,15 @@ jobs:
           with open('request.json', 'w') as f:
               json.dump(payload, f)
 
+          # Fallback payload: identical prompt at effort "low". Used only if
+          # the primary call returns zero text blocks (thinking consumed the
+          # whole max_tokens on a huge diff) — low effort thinks far less,
+          # leaving room for the review text.
+          payload_low = dict(payload)
+          payload_low["output_config"] = {"effort": "low"}
+          with open('request_low.json', 'w') as f:
+              json.dump(payload_low, f)
+
           print(f"Request written: {len(diff)} chars of diff, {len(user_prompt)} chars user prompt, {len(system_rules)} chars cached system")
           PYEOF
           python3 build_prompt.py
@@ -305,24 +321,9 @@ jobs:
       - name: Call Claude API
         if: steps.docs_only.outputs.docs_only != 'true'
         run: |
-          HTTP_STATUS=$(curl -s -w "%{http_code}" \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            --data-binary @request.json \
-            -o response.json \
-            https://api.anthropic.com/v1/messages)
-
-          echo "HTTP status: $HTTP_STATUS"
-          cat response.json
-
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "API returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-          python3 -c "
+          cat > extract.py <<'PYEOF'
           import json, sys
+
           data = json.load(open('response.json'))
           if 'content' not in data or not data['content']:
               print('Unexpected response shape:', json.dumps(data, indent=2))
@@ -333,8 +334,10 @@ jobs:
           # are internal and must not be posted to the PR.
           text_blocks = [b for b in data['content'] if b.get('type') == 'text']
           if not text_blocks:
-              print('No text block in response content:', json.dumps(data, indent=2))
-              sys.exit(1)
+              # Exit 42 = thinking consumed the whole max_tokens and no text
+              # was emitted. The caller retries once at effort "low".
+              print('No text block in response content (stop_reason=%r)' % stop_reason)
+              sys.exit(42)
           text = text_blocks[0]['text']
           with open('stop_reason.txt', 'w') as f:
               f.write(stop_reason)
@@ -348,7 +351,39 @@ jobs:
               f.write(text)
           usage = data.get('usage', {})
           print(f'Review extracted (stop_reason={stop_reason!r}, usage={usage})')
-          "
+          PYEOF
+
+          call_api() {
+            HTTP_STATUS=$(curl -s -w "%{http_code}" \
+              -H "x-api-key: $ANTHROPIC_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              --data-binary @"$1" \
+              -o response.json \
+              https://api.anthropic.com/v1/messages)
+
+            echo "HTTP status: $HTTP_STATUS"
+            cat response.json
+
+            if [ "$HTTP_STATUS" != "200" ]; then
+              echo "API returned HTTP $HTTP_STATUS"
+              return 1
+            fi
+            return 0
+          }
+
+          call_api request.json
+          set +e
+          python3 extract.py
+          EXTRACT_RC=$?
+          set -e
+          if [ "$EXTRACT_RC" = "42" ]; then
+            echo "Zero text blocks — retrying once at effort=low (less thinking, room for text)"
+            call_api request_low.json
+            python3 extract.py   # any failure here, incl. a second 42, fails the job
+          elif [ "$EXTRACT_RC" != "0" ]; then
+            exit "$EXTRACT_RC"
+          fi
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
