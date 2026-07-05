@@ -105,6 +105,19 @@ export function formatNumber(
   });
 }
 
+/** Currency-symbol prefix for abbreviated magnitudes:
+ *  `formatBigMoney(2_138_850_000, "USD") → "US$2.14B"` (en-GB locale). Keeps the currency
+ *  context that bare `formatBigNumber` drops, without the full-precision
+ *  noise of `formatMoney` on billion-scale figures (#1978 review). */
+export function formatBigMoney(n: number | null, currency = "GBP"): string {
+  if (n === null) return "—";
+  const sym =
+    getFormatter(currency)
+      .formatToParts(0)
+      .find((p) => p.type === "currency")?.value ?? currency;
+  return `${sym}${formatBigNumber(n)}`;
+}
+
 /** Abbreviated large magnitudes for financial-statement values:
  *  `416161000000 → "416.16B"`. Canonical home of the helper that
  *  previously lived privately in FundamentalsPane (#554). */
