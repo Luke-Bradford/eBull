@@ -280,9 +280,15 @@ jobs:
           # comparable in depth to Sonnet 4.6 at "high". "low" undershot the
           # triage work this bot needs to do (catching hallucinated/
           # already-rebutted/out-of-diff findings before posting).
+          #
+          # max_tokens must leave headroom for thinking + text: adaptive
+          # thinking shares the max_tokens budget, and on a large diff
+          # (PR #1973, 279k input tokens) it consumed all 5000 tokens as
+          # thinking, emitting NO text block at all (#1976). 16000 is a
+          # cap, not a spend — billing is on actual output tokens only.
           payload = {
               "model": "claude-sonnet-5",
-              "max_tokens": 5000,
+              "max_tokens": 16000,
               "thinking": {"type": "adaptive"},
               "output_config": {"effort": "medium"},
               "system": [
@@ -333,7 +339,11 @@ jobs:
           # are internal and must not be posted to the PR.
           text_blocks = [b for b in data['content'] if b.get('type') == 'text']
           if not text_blocks:
-              print('No text block in response content:', json.dumps(data, indent=2))
+              if stop_reason == 'max_tokens':
+                  usage = data.get('usage', {})
+                  print(f'Thinking consumed the entire max_tokens budget before any text was emitted (usage={usage}). Raise max_tokens in claude-review.yml (#1976).')
+              else:
+                  print('No text block in response content:', json.dumps(data, indent=2))
               sys.exit(1)
           text = text_blocks[0]['text']
           with open('stop_reason.txt', 'w') as f:
