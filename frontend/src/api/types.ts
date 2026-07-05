@@ -1244,6 +1244,44 @@ export interface GenerateThesisResponse {
 // /filings/{instrument_id} (app/api/filings.py)
 // ---------------------------------------------------------------------------
 
+/** Parsed Form 12b-25 fields for an NT 10-K / NT 10-Q row (#1015).
+ *  Mirrors app/api/filings.py NtNoticeSummary. */
+export interface NtNoticeSummary {
+  late_form: string; // '10-K' | '10-Q'
+  period_of_report: string | null;
+  grace_period_days: number; // 15 for 10-K, 5 for 10-Q (Rule 12b-25(b))
+  reason_excerpt: string | null;
+  results_change_anticipated: boolean | null;
+}
+
+/** Parsed PRE 14A / PRER14A meeting-agenda proposal signal (#1892).
+ *  Mirrors app/api/filings.py Pre14aSignalSummary. */
+export interface Pre14aSignalSummary {
+  proposal_count: number;
+  reverse_stock_split_proposal: boolean;
+  authorized_share_increase_proposal: boolean;
+  say_on_pay_advisory_vote: boolean;
+  agenda_items: string[];
+}
+
+/** Parsed 424B cover offering (Reg S-K Item 501(b)(3)) — #1816.
+ *  Mirrors app/api/filings.py OfferingSummary. Every money field is
+ *  nullable: NULL means the cover presentation was not resolvable
+ *  (percent-of-principal notes, resale shelves, non-tabular covers) —
+ *  never a guessed value. */
+export interface OfferingSummary {
+  subtype: string;
+  is_issuer_offering: boolean | null;
+  price_per_unit: number | null;
+  unit_label: string | null;
+  aggregate_offering_amount: number | null;
+  underwriting_discount: number | null;
+  net_proceeds_to_issuer: number | null;
+  proceeds_to_selling_holders: number | null;
+  currency: string;
+  security_type: string | null;
+}
+
 export interface FilingItem {
   filing_event_id: number;
   instrument_id: number;
@@ -1262,6 +1300,13 @@ export interface FilingItem {
   extracted_summary: string | null;
   red_flag_score: number | null;
   created_at: string;
+  /** Form 12b-25 detail for NT 10-K / NT 10-Q rows (#1015); null otherwise. */
+  nt_notice: NtNoticeSummary | null;
+  /** Meeting-agenda proposal signal for PRE 14A / PRER14A rows (#1892);
+   *  null otherwise. */
+  pre14a_signal: Pre14aSignalSummary | null;
+  /** Parsed 424B cover offering for tier-1 424B rows (#1816); null otherwise. */
+  offering: OfferingSummary | null;
 }
 
 export interface FilingsListResponse {

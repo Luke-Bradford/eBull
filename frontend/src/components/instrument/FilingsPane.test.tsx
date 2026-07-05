@@ -118,6 +118,9 @@ describe("FilingsPane", () => {
         primary_document_url: null,
         source_url: null,
         created_at: "2026-03-01T00:00:00Z",
+        nt_notice: null,
+        pre14a_signal: null,
+        offering: null,
       })),
     });
     render(
@@ -169,6 +172,9 @@ describe("FilingsPane", () => {
           primary_document_url: null,
           source_url: null,
           created_at: "2026-03-20T00:00:00Z",
+          nt_notice: null,
+          pre14a_signal: null,
+          offering: null,
         },
         {
           filing_event_id: 2,
@@ -182,6 +188,9 @@ describe("FilingsPane", () => {
           primary_document_url: null,
           source_url: null,
           created_at: "2024-04-01T00:00:00Z",
+          nt_notice: null,
+          pre14a_signal: null,
+          offering: null,
         },
       ],
     });
@@ -232,6 +241,9 @@ describe("FilingsPane", () => {
           primary_document_url: null,
           source_url: null,
           created_at: "2026-03-05T00:00:00Z",
+          nt_notice: null,
+          pre14a_signal: null,
+          offering: null,
         },
         {
           filing_event_id: 2,
@@ -245,6 +257,9 @@ describe("FilingsPane", () => {
           primary_document_url: null,
           source_url: null,
           created_at: "2026-02-26T00:00:00Z",
+          nt_notice: null,
+          pre14a_signal: null,
+          offering: null,
         },
       ],
     });

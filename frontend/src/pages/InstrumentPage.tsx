@@ -41,6 +41,7 @@ import type {
   NewsListResponse,
   ThesisDetail,
 } from "@/api/types";
+import { OfferingBlock } from "@/components/instrument/OfferingBlock";
 import { InstrumentTradesTable } from "@/components/instrument/InstrumentTradesTable";
 import { InstrumentTradeHistory } from "@/components/instrument/InstrumentTradeHistory";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
@@ -480,6 +481,7 @@ function FilingsTab({ instrumentId }: { instrumentId: number }) {
             {f.extracted_summary && (
               <p className="mt-1 text-xs text-slate-600">{f.extracted_summary}</p>
             )}
+            {f.offering !== null && <OfferingBlock offering={f.offering} />}
             <div className="mt-1 flex gap-3 text-xs">
               {f.primary_document_url && (
                 <a
