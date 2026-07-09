@@ -25,9 +25,26 @@ export interface RuntimeFlagsResponse {
   enable_auto_trading: boolean;
   enable_live_trading: boolean;
   display_currency: string;
+  llm_provider: string;
+  llm_base_url: string;
+  llm_model: string;
   updated_at: string;
   updated_by: string;
   reason: string;
+}
+
+// Request body for PATCH /config (ConfigPatchRequest in app/api/config.py).
+// Partial: omit any field to leave it unchanged. `updated_by` and `reason`
+// are required on every mutation so runtime_config_audit always carries
+// attribution. (Trading flags are intentionally NOT exposed here — the
+// kill-switch/trading surfaces own those flows.)
+export interface ConfigPatchRequest {
+  updated_by: string;
+  reason: string;
+  display_currency?: string;
+  llm_provider?: string;
+  llm_base_url?: string;
+  llm_model?: string;
 }
 
 export interface KillSwitchResponse {

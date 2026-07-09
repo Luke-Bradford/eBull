@@ -1,15 +1,16 @@
 """
 Unit tests for the thesis engine service.
 
-No network calls, no database, no live Claude API.
+No network calls, no database, no live LLM API.
 All external dependencies are stubbed or mocked.
 
 Coverage:
   - stale detection: no thesis, missing/unknown frequency, in-window, past threshold
   - writer output validation: valid, missing fields, bad thesis_type, bad stance, out-of-range score
   - critic output validation: valid, missing fields, bad verdict
+  - writer/critic retry-once + finish_reason propagation (#1919)
   - generate_thesis wiring: correct DB writes, version from DB, critic-fail isolation,
-    last_reviewed_at update
+    last_reviewed_at update, thesis_runs recording
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.services.llm_client import LLMCompletion
 from app.services.thesis import (
     ThesisResult,
     _call_critic,
@@ -66,16 +68,24 @@ def _make_conn(
     *,
     stale_rows: list[tuple] | None = None,
     insert_returns_version: int = 1,
+    insert_returns_thesis_id: int = 901,
     inst_row: tuple | None = None,
 ) -> MagicMock:
     """
     Build a minimal psycopg connection mock.
 
-    stale_rows:             rows returned by find_stale_instruments query
-    insert_returns_version: the thesis_version value returned by the INSERT ... RETURNING
-    inst_row:               row returned by the instruments SELECT
+    stale_rows:               rows returned by find_stale_instruments query
+    insert_returns_version:   the thesis_version returned by the INSERT ... RETURNING
+    insert_returns_thesis_id: the thesis_id returned by the INSERT ... RETURNING
+    inst_row:                 row returned by the instruments SELECT
+
+    Every executed statement (whitespace-normalised, lowercase) is
+    appended to ``conn.sql_log`` so tests can assert on the write
+    sequence (thesis_runs recording, coverage update).
     """
     conn = MagicMock()
+    sql_log: list[str] = []
+    conn.sql_log = sql_log
 
     def execute_side_effect(sql, params: dict | None = None):  # type: ignore[no-untyped-def]
         # sql may be a str OR a psycopg.sql.SQL/Composed object.
@@ -84,8 +94,13 @@ def _make_conn(
         cursor = MagicMock()
         sql_str = sql if isinstance(sql, str) else str(sql)
         sql_strip = " ".join(sql_str.split()).lower()
+        sql_log.append(sql_strip)
 
-        if "insert into theses" in sql_strip:
+        if "insert into thesis_runs" in sql_strip:
+            cursor.fetchone.return_value = (77,)
+        elif sql_strip.startswith("update thesis_runs"):
+            cursor.rowcount = 1
+        elif "insert into theses" in sql_strip:
             # Branch priority note: this check must come before any branch that
             # matches "from theses", because the atomic INSERT contains a scalar
             # subquery "FROM theses WHERE instrument_id = ..." — that substring
@@ -93,10 +108,10 @@ def _make_conn(
             # first. Correct today; document the assumption explicitly.
             #
             # The mock bypasses real SQL entirely: it always returns the
-            # configured version regardless of prior thesis state.
+            # configured (thesis_id, version) regardless of prior thesis state.
             # The correctness of the scalar subquery on the first-thesis
             # (no-prior-rows) path requires integration tests against a real DB.
-            cursor.fetchone.return_value = (insert_returns_version,)
+            cursor.fetchone.return_value = (insert_returns_thesis_id, insert_returns_version)
         elif "max(t.created_at)" in sql_strip:
             cursor.fetchall.return_value = stale_rows or []
         elif sql_strip.startswith("update coverage"):
@@ -121,6 +136,37 @@ def _make_conn(
     conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
     conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Fake LLM client (#1919 — replaces the pre-provider Anthropic mock)
+# ---------------------------------------------------------------------------
+
+
+class _FakeLLMClient:
+    """Scripted LLMClient: pops one completion (or raises one exception)
+    per complete() call, recording every call's kwargs."""
+
+    provider_name = "openai_compatible"
+    model = "test-model"
+
+    def __init__(self, completions: list[LLMCompletion | Exception]) -> None:
+        self._completions = list(completions)
+        self.calls: list[dict[str, object]] = []
+
+    def complete(self, *, system: str, user: str, max_tokens: int) -> LLMCompletion:
+        self.calls.append({"system": system, "user": user, "max_tokens": max_tokens})
+        if not self._completions:
+            raise AssertionError("FakeLLMClient exhausted — test scripted too few completions")
+        item = self._completions.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _completion(payload: dict | str, finish_reason: str = "stop") -> LLMCompletion:
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    return LLMCompletion(text=text, finish_reason=finish_reason, model="test-model-resolved")
 
 
 # ---------------------------------------------------------------------------
@@ -306,101 +352,78 @@ class TestValidateCriticOutput:
 
 
 # ---------------------------------------------------------------------------
-# _call_writer / _call_critic with mocked Anthropic client
+# _call_writer / _call_critic with the fake LLM client
 # ---------------------------------------------------------------------------
-
-
-def _make_anthropic_client(response_json: dict) -> MagicMock:
-    """Build a minimal anthropic.Anthropic mock that returns response_json as text."""
-    import anthropic
-
-    client = MagicMock(spec=anthropic.Anthropic)
-    block = MagicMock(spec=["text"])
-    block.text = json.dumps(response_json)
-    msg = MagicMock()
-    msg.content = [block]
-    client.messages.create.return_value = msg
-    return client
 
 
 class TestCallWriter:
     def test_returns_parsed_dict_on_valid_response(self) -> None:
-        client = _make_anthropic_client(_VALID_WRITER)
-        result = _call_writer(client, context={})
+        client = _FakeLLMClient([_completion(_VALID_WRITER)])
+        result, completion = _call_writer(client, context={})
         assert result["thesis_type"] == "compounder"
         assert result["stance"] == "buy"
+        assert completion.model == "test-model-resolved"
+        assert len(client.calls) == 1
 
-    def test_raises_on_invalid_json(self) -> None:
-        import anthropic
-
-        client = MagicMock(spec=anthropic.Anthropic)
-        block = MagicMock(spec=["text"])
-        block.text = "not json {"
-        msg = MagicMock()
-        msg.content = [block]
-        client.messages.create.return_value = msg
+    def test_raises_on_invalid_json_after_retry(self) -> None:
+        # Retry-once (#1919): BOTH attempts must fail before the raise.
+        client = _FakeLLMClient(
+            [_completion("not json {", finish_reason="stop"), _completion("still not json {", finish_reason="stop")]
+        )
         with pytest.raises(ValueError, match="unparseable JSON"):
             _call_writer(client, context={})
+        assert len(client.calls) == 2
 
-    def test_raises_on_schema_violation(self) -> None:
+    def test_retry_recovers_from_first_bad_attempt(self) -> None:
+        client = _FakeLLMClient([_completion("garbage"), _completion(_VALID_WRITER)])
+        result, _ = _call_writer(client, context={})
+        assert result["stance"] == "buy"
+        assert len(client.calls) == 2
+
+    def test_raises_on_schema_violation_after_retry(self) -> None:
         bad = {**_VALID_WRITER, "stance": "liquidate"}
-        client = _make_anthropic_client(bad)
+        client = _FakeLLMClient([_completion(bad), _completion(bad)])
         with pytest.raises(ValueError, match="invalid stance"):
             _call_writer(client, context={})
+        assert len(client.calls) == 2
 
-    def test_raises_on_missing_text_attribute(self) -> None:
-        import anthropic
-
-        client = MagicMock(spec=anthropic.Anthropic)
-        block = MagicMock(spec=[])  # no 'text' attribute
-        msg = MagicMock()
-        msg.content = [block]
-        client.messages.create.return_value = msg
-        with pytest.raises(ValueError, match="unexpected content block type"):
+    def test_error_carries_finish_reason(self) -> None:
+        # A truncated response must be distinguishable from a malformed
+        # one — the ValueError text carries finish_reason for
+        # thesis_runs.error (#1919).
+        client = _FakeLLMClient(
+            [_completion('{"trunc', finish_reason="length"), _completion('{"trunc', finish_reason="length")]
+        )
+        with pytest.raises(ValueError, match="finish_reason=length"):
             _call_writer(client, context={})
 
 
 class TestCallCritic:
     def test_returns_parsed_dict_on_valid_response(self) -> None:
-        client = _make_anthropic_client(_VALID_CRITIC)
+        client = _FakeLLMClient([_completion(_VALID_CRITIC)])
         result = _call_critic(client, memo_markdown="## memo", context={})
         assert result["verdict"] == "Moderate challenge"
         assert "key_risks" in result
 
     def test_returns_empty_dict_on_json_error(self) -> None:
-        import anthropic
-
-        client = MagicMock(spec=anthropic.Anthropic)
-        block = MagicMock(spec=["text"])
-        block.text = "not json {"
-        msg = MagicMock()
-        msg.content = [block]
-        client.messages.create.return_value = msg
+        client = _FakeLLMClient([_completion("not json {"), _completion("not json {")])
         result = _call_critic(client, memo_markdown="## memo", context={})
         assert result == {}
+        assert len(client.calls) == 2  # retried once before giving up
+
+    def test_retry_recovers_from_first_bad_attempt(self) -> None:
+        client = _FakeLLMClient([_completion("garbage"), _completion(_VALID_CRITIC)])
+        result = _call_critic(client, memo_markdown="## memo", context={})
+        assert result["verdict"] == "Moderate challenge"
 
     def test_returns_empty_dict_on_schema_violation(self) -> None:
         bad = {**_VALID_CRITIC, "verdict": "Unknown"}
-        client = _make_anthropic_client(bad)
+        client = _FakeLLMClient([_completion(bad), _completion(bad)])
         result = _call_critic(client, memo_markdown="## memo", context={})
         assert result == {}
 
     def test_returns_empty_dict_on_api_exception(self) -> None:
-        import anthropic
-
-        client = MagicMock(spec=anthropic.Anthropic)
-        client.messages.create.side_effect = Exception("rate limit")
-        result = _call_critic(client, memo_markdown="## memo", context={})
-        assert result == {}
-
-    def test_returns_empty_dict_on_missing_text_attribute(self) -> None:
-        import anthropic
-
-        client = MagicMock(spec=anthropic.Anthropic)
-        block = MagicMock(spec=[])  # no 'text' attribute
-        msg = MagicMock()
-        msg.content = [block]
-        client.messages.create.return_value = msg
+        client = _FakeLLMClient([RuntimeError("rate limit")])
         result = _call_critic(client, memo_markdown="## memo", context={})
         assert result == {}
 
@@ -410,21 +433,9 @@ class TestCallCritic:
 # ---------------------------------------------------------------------------
 
 
-def _make_two_call_client(writer_json: dict, critic_json: dict) -> MagicMock:
-    """Build a mock client whose first call returns writer_json and second returns critic_json."""
-    import anthropic
-
-    client = MagicMock(spec=anthropic.Anthropic)
-    writer_block = MagicMock(spec=["text"])
-    writer_block.text = json.dumps(writer_json)
-    critic_block = MagicMock(spec=["text"])
-    critic_block.text = json.dumps(critic_json)
-    writer_msg = MagicMock()
-    writer_msg.content = [writer_block]
-    critic_msg = MagicMock()
-    critic_msg.content = [critic_block]
-    client.messages.create.side_effect = [writer_msg, critic_msg]
-    return client
+def _make_two_call_client(writer_json: dict, critic_json: dict) -> _FakeLLMClient:
+    """Build a fake client whose first call returns writer_json and second returns critic_json."""
+    return _FakeLLMClient([_completion(writer_json), _completion(critic_json)])
 
 
 class TestGenerateThesis:
@@ -448,7 +459,7 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client)
+        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
 
         assert isinstance(result, ThesisResult)
         assert result.thesis_version == 1
@@ -463,90 +474,123 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=3)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client)
+        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
 
         assert result.thesis_version == 3
 
-    def test_commits_read_tx_before_claude_calls(self) -> None:
+    def test_commits_read_tx_before_llm_calls(self) -> None:
         """Regression guard for #293: the implicit read tx opened by
-        _assemble_context's SELECTs must be committed BEFORE the Claude
+        _assemble_context's SELECTs must be committed BEFORE the LLM
         writer/critic calls. Otherwise the connection sits
-        'idle in transaction' for 2-10s per Claude round-trip, violating
-        the CLAUDE.md 'no HTTP inside DB tx' invariant."""
+        'idle in transaction' for the duration of each LLM round-trip
+        (minutes on a local 14B), violating the CLAUDE.md 'no HTTP
+        inside DB tx' invariant."""
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
-        # Track the order commit vs Claude calls land on their respective
-        # mocks. A MagicMock on the parent captures every child attribute
-        # call, so recording `mock_calls` on conn and client separately
-        # gives us the interleaving we need without a manual parent mock.
         call_log: list[str] = []
         original_commit = conn.commit
-        original_create = client.messages.create
+        original_complete = client.complete
 
         def tracked_commit() -> None:
             call_log.append("commit")
             return original_commit()
 
-        def tracked_create(*args: object, **kwargs: object) -> object:
-            call_log.append("claude")
-            return original_create(*args, **kwargs)
+        def tracked_complete(**kwargs: Any) -> LLMCompletion:
+            call_log.append("llm")
+            return original_complete(**kwargs)
 
         conn.commit = tracked_commit
-        client.messages.create = tracked_create
+        client.complete = tracked_complete  # type: ignore[method-assign]
 
-        generate_thesis(instrument_id=1, conn=conn, client=client)
+        generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
 
-        # First event must be the commit. Every Claude call must come
+        # First event must be the commit. Every LLM call must come
         # after it — guards both writer AND critic, not just the first
-        # Claude call. A pre-commit Claude would land at call_log[0].
+        # LLM call. A pre-commit LLM call would land at call_log[0].
         assert "commit" in call_log, "expected conn.commit() to be called"
-        assert "claude" in call_log, "expected client.messages.create to be called"
+        assert "llm" in call_log, "expected client.complete to be called"
         assert call_log[0] == "commit", f"commit must be the first event; got order: {call_log}"
-        # Guard every Claude call, not just the first — a regression
+        # Guard every LLM call, not just the first — a regression
         # that inserted _call_critic before the commit would still
         # satisfy an index-based check on the writer call alone.
-        last_claude_idx = max(i for i, v in enumerate(call_log) if v == "claude")
-        assert last_claude_idx > call_log.index("commit"), (
-            f"every Claude call must follow the commit; got order: {call_log}"
-        )
+        last_llm_idx = max(i for i, v in enumerate(call_log) if v == "llm")
+        assert last_llm_idx > call_log.index("commit"), f"every LLM call must follow the commit; got order: {call_log}"
 
     def test_critic_failure_does_not_block_insert(self) -> None:
-        import anthropic
-
         conn = _make_conn(insert_returns_version=1)
-        client = MagicMock(spec=anthropic.Anthropic)
-        writer_block = MagicMock(spec=["text"])
-        writer_block.text = json.dumps(_VALID_WRITER)
-        writer_msg = MagicMock()
-        writer_msg.content = [writer_block]
         # First call (writer) succeeds; second call (critic) raises
-        client.messages.create.side_effect = [writer_msg, Exception("timeout")]
+        client = _FakeLLMClient([_completion(_VALID_WRITER), RuntimeError("timeout")])
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client)
+        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
 
         assert result.thesis_version == 1
         assert result.critic_json is None
 
     def test_last_reviewed_at_updated_on_success(self) -> None:
-        update_calls: list[str] = []
         conn = _make_conn(insert_returns_version=1)
-
-        original_side_effect = conn.execute.side_effect
-
-        def tracking_side_effect(sql: str, params: dict | None = None):
-            if "update coverage" in " ".join(sql.split()).lower():
-                update_calls.append(sql)
-                return MagicMock()
-            return original_side_effect(sql, params)
-
-        conn.execute.side_effect = tracking_side_effect
-
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
-        generate_thesis(instrument_id=1, conn=conn, client=client)
+        generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
 
+        update_calls = [s for s in conn.sql_log if s.startswith("update coverage")]
         assert len(update_calls) == 1
-        assert "last_reviewed_at" in update_calls[0].lower()
+        assert "last_reviewed_at" in update_calls[0]
+
+    def test_records_thesis_run_ok(self) -> None:
+        """#1919: every successful generation inserts a 'running'
+        thesis_runs row BEFORE the LLM calls and marks it ok inside the
+        thesis-insert transaction."""
+        conn = _make_conn(insert_returns_version=1)
+        client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
+
+        generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+
+        run_inserts = [s for s in conn.sql_log if "insert into thesis_runs" in s]
+        assert len(run_inserts) == 1
+        ok_updates = [s for s in conn.sql_log if s.startswith("update thesis_runs") and "'ok'" in s]
+        assert len(ok_updates) == 1
+        # The run row must exist before the thesis row lands.
+        assert conn.sql_log.index(run_inserts[0]) < conn.sql_log.index(
+            next(s for s in conn.sql_log if "insert into theses" in s)
+        )
+
+    def test_db_failure_after_llm_records_failed_run(self) -> None:
+        """Codex ckpt-2 HIGH: a failure inside the final write transaction
+        (e.g. UniqueViolation from a racing generation) must mark the run
+        row failed — never strand it at 'running' — and re-raise."""
+        conn = _make_conn(insert_returns_version=1)
+        original = conn.execute.side_effect
+
+        def failing_side_effect(sql, params: dict | None = None):  # type: ignore[no-untyped-def]
+            sql_str = sql if isinstance(sql, str) else str(sql)
+            sql_strip = " ".join(sql_str.split()).lower()
+            if "insert into theses (" in sql_strip:
+                conn.sql_log.append(sql_strip)
+                raise RuntimeError("duplicate key value violates unique constraint")
+            return original(sql, params)
+
+        conn.execute.side_effect = failing_side_effect
+        client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
+
+        with pytest.raises(RuntimeError, match="unique constraint"):
+            generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+
+        failed_updates = [s for s in conn.sql_log if s.startswith("update thesis_runs") and "'failed'" in s]
+        assert len(failed_updates) == 1
+
+    def test_writer_failure_records_failed_run_and_reraises(self) -> None:
+        """#1919: a writer failure (after its retry) must mark the run
+        row failed — with the error text — and re-raise."""
+        conn = _make_conn(insert_returns_version=1)
+        client = _FakeLLMClient([_completion("bad json {"), _completion("bad json {", finish_reason="length")])
+
+        with pytest.raises(ValueError, match="unparseable JSON"):
+            generate_thesis(instrument_id=1, conn=conn, client=client, trigger="scheduled")
+
+        failed_updates = [s for s in conn.sql_log if s.startswith("update thesis_runs") and "'failed'" in s]
+        assert len(failed_updates) == 1
+        # No thesis row was inserted on the failure path.
+        assert not [s for s in conn.sql_log if "insert into theses (" in s]
 
     def test_float_fields_consistent_between_db_and_result(self) -> None:
         """
@@ -557,7 +601,7 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client)
+        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
 
         assert result.buy_zone_low == _to_float(_VALID_WRITER["buy_zone_low"])
         assert result.buy_zone_high == _to_float(_VALID_WRITER["buy_zone_high"])
@@ -578,7 +622,7 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(writer_no_targets, _VALID_CRITIC)
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client)
+        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
 
         assert result.buy_zone_low is None
         assert result.buy_zone_high is None

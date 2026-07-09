@@ -4,9 +4,10 @@ Thesis engine service.
 Responsibilities:
   - Assemble a compact research context from filings, fundamentals, news,
     and the prior thesis for a given instrument.
-  - Call Claude Sonnet (writer) to produce a structured investment memo.
-  - Call Claude Sonnet (critic) to produce a counter-thesis / challenge.
+  - Call the configured LLM writer to produce a structured investment memo.
+  - Call the configured LLM critic to produce a counter-thesis / challenge.
   - Insert a new versioned row into the `theses` table.
+  - Record every generation attempt in `thesis_runs` (all trigger paths).
   - Update coverage.last_reviewed_at on success.
   - Identify stale instruments (no thesis, or thesis older than review_frequency).
 
@@ -18,7 +19,12 @@ Context caps (v1 hard limits):
   - analyst estimates:    latest 1 snapshot
   - news events:          latest 10 from last 30 days, importance desc → recency desc
 
-Claude model: claude-sonnet-4-6 for both writer and critic calls.
+LLM provider: resolved from `runtime_config` via
+`app.services.llm_client.make_llm_client` (#1919 — local-first default;
+Anthropic by configuration). Both writer and critic go through the same
+`LLMClient` and get one retry on schema/parse failure, with
+`finish_reason` recorded so truncation is distinguishable from malformed
+output.
 
 Versioning contract:
   thesis_version is computed atomically inside the INSERT via a subquery:
@@ -32,15 +38,16 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-import anthropic
 import psycopg
 from psycopg import sql as psql
 from psycopg.types.json import Jsonb
+
+from app.services.llm_client import LLMClient, LLMCompletion
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +77,19 @@ _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
 }
 
 # ---------------------------------------------------------------------------
-# Claude model
+# LLM call budgets + prompt version
 # ---------------------------------------------------------------------------
 
-_MODEL = "claude-sonnet-4-6"
 _MAX_TOKENS_WRITER = 2048
 _MAX_TOKENS_CRITIC = 1024
+
+# Stamped onto every stored thesis row (theses.prompt_version). Bump
+# whenever _WRITER_SYSTEM / _CRITIC_SYSTEM or the _assemble_context shape
+# changes — memos from different prompt versions are not comparable.
+_PROMPT_VERSION = "v1"
+
+# thesis_runs.trigger — matches the table CHECK in sql/218.
+RunTrigger = Literal["manual", "cascade", "scheduled"]
 
 # ---------------------------------------------------------------------------
 # Context caps
@@ -645,33 +659,75 @@ def _build_critic_prompt(memo_markdown: str, context: dict[str, object]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Claude calls
+# LLM calls
 # ---------------------------------------------------------------------------
 
 
-def _call_writer(client: anthropic.Anthropic, context: dict[str, object]) -> dict[str, object]:
+def _complete_json_validated(
+    client: LLMClient,
+    *,
+    label: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    validate: Callable[[dict[str, object]], None],
+) -> tuple[dict[str, object], LLMCompletion]:
+    """One LLM completion, JSON-parsed and schema-validated.
+
+    Every ValueError raised here carries the completion's finish_reason
+    so a truncated response (``length``) is distinguishable from a
+    malformed one (``stop``) in logs and thesis_runs.error.
     """
-    Call the Claude writer and parse the structured thesis JSON.
-    Raises ValueError on unparseable or schema-invalid response.
-    """
-    message = client.messages.create(
-        model=_MODEL,
-        max_tokens=_MAX_TOKENS_WRITER,
-        system=_WRITER_SYSTEM,
-        messages=[{"role": "user", "content": _build_writer_prompt(context)}],
-    )
-    block = message.content[0]
-    text: str | None = getattr(block, "text", None)
-    if text is None:
-        raise ValueError(f"Writer: unexpected content block type {type(block)!r}")
+    completion = client.complete(system=system, user=user, max_tokens=max_tokens)
+    try:
+        parsed: dict[str, object] = json.loads(completion.text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label}: unparseable JSON (finish_reason={completion.finish_reason}): {exc}") from exc
 
     try:
-        parsed: dict[str, object] = json.loads(text.strip())
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Writer: unparseable JSON: {exc}") from exc
+        validate(parsed)
+    except ValueError as exc:
+        raise ValueError(f"{exc} (finish_reason={completion.finish_reason})") from exc
+    return parsed, completion
 
-    _validate_writer_output(parsed)
-    return parsed
+
+def _call_with_one_retry(
+    client: LLMClient,
+    *,
+    label: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    validate: Callable[[dict[str, object]], None],
+) -> tuple[dict[str, object], LLMCompletion]:
+    """Retry ONCE on schema/parse ValueError (spec §1) — local models
+    intermittently emit near-miss JSON; a single re-roll recovers most
+    of them without masking a systematically broken model."""
+    try:
+        return _complete_json_validated(
+            client, label=label, system=system, user=user, max_tokens=max_tokens, validate=validate
+        )
+    except ValueError as exc:
+        logger.warning("%s attempt 1 failed (%s); retrying once", label, exc)
+        return _complete_json_validated(
+            client, label=label, system=system, user=user, max_tokens=max_tokens, validate=validate
+        )
+
+
+def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[str, object], LLMCompletion]:
+    """
+    Call the LLM writer and parse the structured thesis JSON.
+    Raises ValueError on unparseable or schema-invalid response
+    (after one retry).
+    """
+    return _call_with_one_retry(
+        client,
+        label="Writer",
+        system=_WRITER_SYSTEM,
+        user=_build_writer_prompt(context),
+        max_tokens=_MAX_TOKENS_WRITER,
+        validate=_validate_writer_output,
+    )
 
 
 def _validate_writer_output(data: dict[str, object]) -> None:
@@ -714,27 +770,21 @@ def _validate_writer_output(data: dict[str, object]) -> None:
         raise ValueError("Writer output memo_markdown must be a non-empty string")
 
 
-def _call_critic(client: anthropic.Anthropic, memo_markdown: str, context: dict[str, object]) -> dict[str, object]:
+def _call_critic(client: LLMClient, memo_markdown: str, context: dict[str, object]) -> dict[str, object]:
     """
-    Call the Claude critic and parse the structured counter-thesis JSON.
-    Returns an empty dict on any failure — critic is best-effort and must
-    never block the thesis insert.
+    Call the LLM critic and parse the structured counter-thesis JSON.
+    Returns an empty dict on any failure (after one schema/parse retry) —
+    critic is best-effort and must never block the thesis insert.
     """
     try:
-        message = client.messages.create(
-            model=_MODEL,
-            max_tokens=_MAX_TOKENS_CRITIC,
+        parsed, _completion = _call_with_one_retry(
+            client,
+            label="Critic",
             system=_CRITIC_SYSTEM,
-            messages=[{"role": "user", "content": _build_critic_prompt(memo_markdown, context)}],
+            user=_build_critic_prompt(memo_markdown, context),
+            max_tokens=_MAX_TOKENS_CRITIC,
+            validate=_validate_critic_output,
         )
-        block = message.content[0]
-        text: str | None = getattr(block, "text", None)
-        if text is None:
-            logger.warning("Critic: unexpected content block type %r, storing without critic_json", type(block))
-            return {}
-
-        parsed: dict[str, object] = json.loads(text.strip())
-        _validate_critic_output(parsed)
         return parsed
     except Exception:
         logger.warning("Critic call failed; thesis will be stored without critic_json", exc_info=True)
@@ -762,14 +812,21 @@ def _insert_thesis_atomic(
     instrument_id: int,
     writer: dict[str, object],
     critic: dict[str, object] | None,
-) -> int:
+    *,
+    model: str,
+    provider: str,
+) -> tuple[int, int]:
     """
-    Insert a new thesis row and return the assigned thesis_version.
+    Insert a new thesis row and return (thesis_id, thesis_version).
 
     thesis_version is computed atomically inside the INSERT via a subquery
     (COALESCE(MAX(thesis_version), 0) + 1) so two concurrent inserts for the
     same instrument cannot produce the same version number. The
     UNIQUE(instrument_id, thesis_version) constraint is the final guard.
+
+    ``model`` is the model string AS REPORTED by the provider response
+    (not the configured knob) and ``provider`` the resolved provider name —
+    stored with ``_PROMPT_VERSION`` so every memo is attributable (#1919).
 
     Must be called inside an open transaction.
     """
@@ -782,7 +839,8 @@ def _insert_thesis_atomic(
             thesis_type, confidence_score, stance,
             buy_zone_low, buy_zone_high,
             base_value, bull_value, bear_value,
-            break_conditions_json, memo_markdown, critic_json
+            break_conditions_json, memo_markdown, critic_json,
+            model, provider, prompt_version
         )
         VALUES (
             %(instrument_id)s,
@@ -791,9 +849,10 @@ def _insert_thesis_atomic(
             %(thesis_type)s, %(confidence_score)s, %(stance)s,
             %(buy_zone_low)s, %(buy_zone_high)s,
             %(base_value)s, %(bull_value)s, %(bear_value)s,
-            %(break_conditions_json)s, %(memo_markdown)s, %(critic_json)s
+            %(break_conditions_json)s, %(memo_markdown)s, %(critic_json)s,
+            %(model)s, %(provider)s, %(prompt_version)s
         )
-        RETURNING thesis_version
+        RETURNING thesis_id, thesis_version
         """,
         {
             "instrument_id": instrument_id,
@@ -808,12 +867,15 @@ def _insert_thesis_atomic(
             "break_conditions_json": Jsonb(break_conditions),
             "memo_markdown": writer["memo_markdown"],
             "critic_json": Jsonb(critic) if critic else None,
+            "model": model,
+            "provider": provider,
+            "prompt_version": _PROMPT_VERSION,
         },
     ).fetchone()
 
     if row is None:
         raise RuntimeError(f"INSERT INTO theses did not RETURN a row for instrument_id={instrument_id}")
-    return int(row[0])
+    return int(row[0]), int(row[1])
 
 
 def _update_last_reviewed(
@@ -827,6 +889,94 @@ def _update_last_reviewed(
 
 
 # ---------------------------------------------------------------------------
+# thesis_runs — one row per generation attempt (#1919, all trigger paths)
+# ---------------------------------------------------------------------------
+
+
+def _insert_thesis_run(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    trigger: RunTrigger,
+    *,
+    provider: str,
+    model: str,
+) -> int:
+    """Insert a 'running' thesis_runs row and return its run_id.
+
+    ``model`` here is the CONFIGURED model (the run may fail before any
+    provider response exists); the stored thesis row carries the model as
+    reported by the response.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO thesis_runs (instrument_id, trigger, provider, model)
+        VALUES (%(instrument_id)s, %(trigger)s, %(provider)s, %(model)s)
+        RETURNING run_id
+        """,
+        {
+            "instrument_id": instrument_id,
+            "trigger": trigger,
+            "provider": provider,
+            "model": model,
+        },
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"INSERT INTO thesis_runs did not RETURN a row for instrument_id={instrument_id}")
+    return int(row[0])
+
+
+def _finish_thesis_run_ok(
+    conn: psycopg.Connection[Any],
+    run_id: int,
+    thesis_id: int,
+) -> None:
+    """Mark a run ok, linking the inserted thesis row.
+
+    Must be called inside the same transaction as the thesis INSERT so
+    the run row can never claim success for a rolled-back thesis.
+    """
+    result = conn.execute(
+        """
+        UPDATE thesis_runs
+        SET status = 'ok', finished_at = NOW(), thesis_id = %(thesis_id)s
+        WHERE run_id = %(run_id)s
+        """,
+        {"thesis_id": thesis_id, "run_id": run_id},
+    )
+    # prevention-log: single-row UPDATE silent no-op on missing row.
+    if result.rowcount == 0:
+        raise RuntimeError(f"thesis_runs run_id={run_id} vanished before ok-finish")
+
+
+def _record_thesis_run_failure(
+    conn: psycopg.Connection[Any],
+    run_id: int,
+    exc: Exception,
+) -> None:
+    """Best-effort failure record — must never mask the original exception.
+
+    Called from the except path of generate_thesis, OUTSIDE any open
+    transaction (the pre-LLM commit closed it), so the UPDATE + commit
+    here open and close their own short implicit transaction.
+    """
+    error_text = f"{type(exc).__name__}: {exc}"[:2000]
+    try:
+        result = conn.execute(
+            """
+            UPDATE thesis_runs
+            SET status = 'failed', finished_at = NOW(), error = %(error)s
+            WHERE run_id = %(run_id)s
+            """,
+            {"error": error_text, "run_id": run_id},
+        )
+        if result.rowcount == 0:
+            logger.error("thesis_runs run_id=%d vanished while recording failure", run_id)
+        conn.commit()
+    except Exception:
+        logger.exception("failed to record thesis_runs failure for run_id=%d", run_id)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -834,28 +984,37 @@ def _update_last_reviewed(
 def generate_thesis(
     instrument_id: int,
     conn: psycopg.Connection[Any],
-    client: anthropic.Anthropic,
+    client: LLMClient,
+    *,
+    trigger: RunTrigger,
 ) -> ThesisResult:
     """
     Generate and persist a new versioned thesis for an instrument.
 
     Steps:
       1. Assemble context from DB (capped research inputs).
-      2. Call Claude writer → structured memo. Raises on failure.
-      3. Call Claude critic → counter-thesis (best-effort; failure is logged only).
-      4. Open a transaction, INSERT a new thesis row with an atomically-computed
-         thesis_version, update coverage.last_reviewed_at, commit.
+      2. Insert a 'running' thesis_runs row (in-flight indicator) and
+         commit — this same commit closes the context-read transaction.
+      3. Call the LLM writer → structured memo. Raises on failure (after
+         one retry), recording the failure on the run row first.
+      4. Call the LLM critic → counter-thesis (best-effort; failure is
+         logged only).
+      5. Open a transaction, INSERT a new thesis row with an
+         atomically-computed thesis_version (+ model/provider/
+         prompt_version), update coverage.last_reviewed_at, mark the run
+         row ok, commit.
 
-    Returns ThesisResult. Claude calls are made outside any DB transaction
+    Returns ThesisResult. LLM calls are made outside any DB transaction
     to avoid holding a connection open during network I/O.
 
     The explicit ``conn.commit()`` after ``_assemble_context`` is
-    load-bearing: on a non-autocommit connection the context SELECTs
-    open an implicit transaction that would otherwise stay open through
-    both Claude calls (2-5s each, sometimes 10s+). Holding a DB tx
-    across HTTP is the anti-pattern called out in CLAUDE.md Architecture
-    invariants; the commit closes the read tx so the connection is
-    ``idle`` (not ``idle in transaction``) while Claude runs.
+    load-bearing (#293): on a non-autocommit connection the context
+    SELECTs open an implicit transaction that would otherwise stay open
+    through both LLM calls (seconds on cloud, minutes on a local 14B).
+    Holding a DB tx across HTTP is the anti-pattern called out in
+    CLAUDE.md Architecture invariants; the commit closes the read tx so
+    the connection is ``idle`` (not ``idle in transaction``) while the
+    LLM runs. It also makes the 'running' run row visible to readers.
 
     **Caller contract:** do NOT wrap this call in ``with conn.transaction():``.
     psycopg3 forbids explicit ``commit()`` inside an outer transaction
@@ -864,22 +1023,47 @@ def generate_thesis(
     dedicated connection.
     """
     context = _assemble_context(conn, instrument_id)
+    run_id = _insert_thesis_run(conn, instrument_id, trigger, provider=client.provider_name, model=client.model)
     # Close the implicit read tx opened by _assemble_context SELECTs
-    # BEFORE the Claude calls below. Without this, the connection stays
-    # ``idle in transaction`` for the duration of the Claude round-trips.
+    # (and publish the 'running' run row) BEFORE the LLM calls below.
+    # Without this, the connection stays ``idle in transaction`` for the
+    # duration of the LLM round-trips.
     conn.commit()
 
-    # Claude calls — outside any DB transaction; these can take seconds
-    writer_output = _call_writer(client, context)
-    critic_output = _call_critic(client, str(writer_output.get("memo_markdown", "")), context)
+    # LLM calls — outside any DB transaction; these can take seconds
+    # (cloud) to minutes (local 14B).
+    try:
+        writer_output, writer_completion = _call_writer(client, context)
+        critic_output = _call_critic(client, str(writer_output.get("memo_markdown", "")), context)
+    except Exception as exc:
+        _record_thesis_run_failure(conn, run_id, exc)
+        raise
 
     # Validated by _validate_writer_output; cast once and reuse.
     confidence = float(writer_output["confidence_score"])  # type: ignore[arg-type]
 
-    with conn.transaction():
-        # critic_output is {} on failure — treat empty dict as no critic data
-        version = _insert_thesis_atomic(conn, instrument_id, writer_output, critic_output if critic_output else None)
-        _update_last_reviewed(conn, instrument_id)
+    # Codex ckpt-2 HIGH: a failure INSIDE this write transaction (e.g. a
+    # UniqueViolation when a concurrent generation raced the versioning
+    # subquery — the UNIQUE(instrument_id, thesis_version) final guard)
+    # must not strand the run row at 'running' forever. The transaction
+    # CM rolls the writes back; record the failure in its own short tx,
+    # then re-raise.
+    try:
+        with conn.transaction():
+            # critic_output is {} on failure — treat empty dict as no critic data
+            thesis_id, version = _insert_thesis_atomic(
+                conn,
+                instrument_id,
+                writer_output,
+                critic_output if critic_output else None,
+                model=writer_completion.model,
+                provider=client.provider_name,
+            )
+            _update_last_reviewed(conn, instrument_id)
+            _finish_thesis_run_ok(conn, run_id, thesis_id)
+    except Exception as exc:
+        _record_thesis_run_failure(conn, run_id, exc)
+        raise
 
     logger.info(
         "Thesis generated: instrument_id=%d version=%d stance=%s confidence=%.2f",

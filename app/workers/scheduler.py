@@ -51,6 +51,7 @@ from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
+from app.services.llm_client import ANTHROPIC_DEFAULT_MODEL, AnthropicProvider
 from app.services.market_data import refresh_market_data
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
@@ -2962,7 +2963,10 @@ def daily_financial_facts() -> None:
                 # returns the empty-noop CascadeOutcome when both
                 # the retry queue and instrument_ids are empty.
                 changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
-                cascade_client = make_anthropic_client(settings.anthropic_api_key)
+                cascade_client = AnthropicProvider(
+                    make_anthropic_client(settings.anthropic_api_key),
+                    model=ANTHROPIC_DEFAULT_MODEL,
+                )
                 cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
                 # Persist any cascade-side writes before the
                 # failure-surfacing raise below. compute_rankings
@@ -3108,7 +3112,10 @@ def daily_thesis_refresh() -> None:
             len(stale_t2),
         )
 
-        claude_client = make_anthropic_client(settings.anthropic_api_key)
+        claude_client = AnthropicProvider(
+            make_anthropic_client(settings.anthropic_api_key),
+            model=ANTHROPIC_DEFAULT_MODEL,
+        )
 
         generated = 0
         skipped = 0
@@ -3130,6 +3137,7 @@ def daily_thesis_refresh() -> None:
                                 instrument_id=item.instrument_id,
                                 conn=conn,
                                 client=claude_client,
+                                trigger="scheduled",
                             )
                             # Increment BEFORE demote so a demote
                             # failure can't silently under-count

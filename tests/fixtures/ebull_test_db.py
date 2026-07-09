@@ -162,6 +162,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "fx_rates_daily",
     "positions",
     "quotes",
+    # #1919 — thesis generation attempts (FK → instruments + theses).
+    "thesis_runs",
     "instruments",
     "job_runs",
     "financial_periods_raw",

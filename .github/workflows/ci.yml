@@ -144,6 +144,12 @@ jobs:
         # SDK default that wedged the jobs boot ~43min on 2026-06-04.
         run: bash scripts/check_anthropic_timeout.sh
 
+      - name: LLM completion chokepoint lint (#1919)
+        # Every OpenAI-compatible LLM completion under app/ MUST go
+        # through app/services/llm_client.py (bounded httpx timeout +
+        # per-process semaphore) — same #1479 hang class as above.
+        run: bash scripts/check_llm_chokepoint.sh
+
       - name: frontend skip-test accumulation gate (#990)
         # Fails if the describe.skip / it.skip count under frontend/src
         # exceeds scripts/frontend_skip_baseline.txt. Stops silent

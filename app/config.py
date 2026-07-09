@@ -83,6 +83,13 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str | None = None
 
+    # BYO-LLM (#1919): optional bearer key for the OpenAI-compatible
+    # provider (runtime_config.llm_provider='openai_compatible'). Sent as
+    # ``Authorization: Bearer`` when set; Ollama ignores it. Keys stay
+    # env-only — never in runtime_config (its audit table stores old/new
+    # values in plaintext).
+    llm_api_key: str | None = None
+
     # OpenFIGI free fallback CUSIP→ticker resolver (#1233 PR-1b + SD-1).
     # Optional. Without a key the resolver runs unkeyed (25 req/min,
     # max 10 jobs/POST = 250 mappings/min — ~48 min on a 12k unresolved
