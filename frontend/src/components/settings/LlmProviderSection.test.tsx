@@ -113,6 +113,33 @@ describe("LlmProviderSection", () => {
     });
   });
 
+  it("drops a pending base-url override when switching provider to anthropic", async () => {
+    // Review round 2 WARNING: an edited Base URL must not ride along as a
+    // silent llm_base_url audit row once the provider switch disables it.
+    mockedPatchConfig.mockResolvedValue({
+      ...configResponse().runtime,
+      llm_provider: "anthropic",
+    });
+    const user = userEvent.setup();
+    renderSection();
+
+    const urlInput = screen.getByDisplayValue("http://localhost:11434/v1");
+    await user.clear(urlInput);
+    await user.type(urlInput, "http://other-host:8080/v1");
+    await user.selectOptions(screen.getByRole("combobox"), "anthropic");
+    await user.type(screen.getByPlaceholderText("Why are you changing this?"), "flip to cloud");
+    await user.click(screen.getByRole("button", { name: /save llm config/i }));
+
+    await waitFor(() => expect(mockedPatchConfig).toHaveBeenCalledOnce());
+    expect(mockedPatchConfig).toHaveBeenCalledWith({
+      updated_by: "operator",
+      reason: "flip to cloud",
+      llm_provider: "anthropic",
+      llm_base_url: undefined,
+      llm_model: undefined,
+    });
+  });
+
   it("surfaces an alert when save fails", async () => {
     mockedPatchConfig.mockRejectedValue(new Error("422"));
     const user = userEvent.setup();

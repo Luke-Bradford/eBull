@@ -92,9 +92,17 @@ export function LlmProviderSection(): JSX.Element {
                 <span className="text-xs text-slate-500">Provider</span>
                 <select
                   value={displayedProvider}
-                  onChange={(e) =>
-                    setProvider(e.target.value === runtime.llm_provider ? null : e.target.value)
-                  }
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setProvider(next === runtime.llm_provider ? null : next);
+                    // Review round 2 WARNING: switching to anthropic disables
+                    // the Base URL input — drop any pending override so Save
+                    // can't silently submit a stale llm_base_url change (and
+                    // an unintended audit row) alongside the provider switch.
+                    if (next === "anthropic") {
+                      setBaseUrl(null);
+                    }
+                  }}
                   disabled={saving}
                   className="mt-1 block rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
                 >
