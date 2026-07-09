@@ -163,7 +163,7 @@ cur.executemany("INSERT ... ON CONFLICT DO NOTHING", [1 conflict, 1 new]) # cur.
 ```
 
 So using `cur.rowcount` as a batch insert/affected total after `executemany` is correct for this driver. Two caveats:
-- It is **driver/version-specific** (DB-API leaves it implementation-defined; some drivers/older psycopg return -1 or the last count). When the total matters across a version bump, **pin it with a regression test** that inserts N distinct rows and asserts the count == N (e.g. `tests/test_sec_13f_dataset_ingest.py::...test_multiple_distinct_figis_counted_cumulatively`), rather than trusting the doc.
+- It is **driver/version-specific** (DB-API leaves it implementation-defined; some drivers/older psycopg return -1 or the last count). When the total matters across a version bump, **pin it with a regression test** that inserts N distinct rows and asserts the count == N (e.g. `tests/test_sec_13f_dataset_ingest.py::TestPersistFigiExternalIdentifiers::test_multiple_distinct_figis_counted_cumulatively`), rather than trusting the doc.
 - It does NOT hold for `executemany(..., returning=True)` — that path iterates result sets differently.
 
 Origin: PR #1468 (#1302) review WARNING claimed the FIGI counter "will be at most 1"; rebutted by empirical probe + the pinned regression test.

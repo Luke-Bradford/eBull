@@ -1,6 +1,6 @@
 # EdgarTools — library reference
 
-> Read this before adding any new SEC parser. EdgarTools (`edgartools` on PyPI, `dgunning/edgartools` on GitHub) is the most active SEC-data library in the Python ecosystem (~2-3 patch releases / week). eBull pins **`edgartools==5.30.2`** (exact pin, no ceiling) at [pyproject.toml:21](../../../pyproject.toml#L21). Internal module paths are not part of the library's public stability contract — pin tight, keep golden-file replays, audit on every minor bump.
+> Read this before adding any new SEC parser. EdgarTools (`edgartools` on PyPI, `dgunning/edgartools` on GitHub) is the most active SEC-data library in the Python ecosystem (~2-3 patch releases / week). eBull pins **`edgartools==5.30.2`** (exact pin, no ceiling) at [pyproject.toml:27](../../../pyproject.toml#L27). Internal module paths are not part of the library's public stability contract — pin tight, keep golden-file replays, audit on every minor bump.
 
 ## Coverage matrix
 
@@ -114,7 +114,7 @@ configure_http(timeout=30.0, proxy="http://...")
 ## Gotchas
 
 ### G1 — Filesystem mkdir at module import
-`HOME=/nonexistent python -c "import edgar"` → `PermissionError`. Workaround: lazy-import inside a factory. Pattern at [app/providers/implementations/sec_13f.py:69-80](../../../app/providers/implementations/sec_13f.py#L69-L80):
+`HOME=/nonexistent python -c "import edgar"` → `PermissionError`. Workaround: lazy-import inside a factory. Pattern at [app/providers/implementations/sec_13f.py:76-80](../../../app/providers/implementations/sec_13f.py#L76-L80):
 
 ```python
 def _edgar_parsers() -> tuple[Any, Any]:
@@ -133,18 +133,18 @@ def _edgar_parsers() -> tuple[Any, Any]:
 1. **Structural cliff (observed on synthetic fixtures)**: the parser unconditionally dereferences `<filerInfo>` + `<fundInfo>` + `<returnInfo>` + `<monthlyTotReturns>` blocks. Missing any block → `AttributeError: 'NoneType' object has no attribute 'find'`. Hand-trimmed fixtures must include all four blocks plus `GeneralInfo` non-Optional text fields (`<regName>`, `<regCik>`, `<regFileNumber>`, `<regStreet1>` with non-empty content), `<fundInfo>` 9 required Decimal fields, and empty `<othMon1/2/3/>` tags under `<returnInfo>`.
 2. **Internal Pydantic cliff (latent on real-world payloads)**: `InvestmentOrSecurity.value_usd: Decimal` is non-Optional at `edgar/funds/reports.py:346`. An NPORT-P row that omits `<valUSD>` raises `pydantic.ValidationError` mid-iteration, aborting the whole-accession parse. Unobserved on the Vanguard probe sample but theoretically possible.
 
-**Rule of thumb**: if a form's module imports `from pydantic import BaseModel`, expect a validation cliff for synthetic fixtures AND for real-world payloads with missing required Decimal cells. Wrap the parser call AND the post-parse dict-key dereferences in `try/except (AttributeError, KeyError, decimal.InvalidOperation, ValueError, TypeError, pydantic.ValidationError)` and convert to a parser-specific error type so accession-level tombstones fire. `KeyError` defends against dict-shape drift on pin bump.
+**Rule of thumb**: if a form's module imports `from pydantic import BaseModel`, expect a validation cliff for synthetic fixtures AND for real-world payloads with missing required Decimal cells. Wrap the parser call AND the post-parse dict-key dereferences in `try/except (AttributeError, KeyError, decimal.InvalidOperation, ValueError, TypeError, pydantic.ValidationError, lxml.etree.XMLSyntaxError)` and convert to a parser-specific error type so accession-level tombstones fire. `KeyError` defends against dict-shape drift on pin bump. `lxml.etree.XMLSyntaxError` covers the edge case where both `parse_fund_xml`'s primary `etree.fromstring` AND its `recover=True` fallback fail (empty / null-byte body) and the raw exception escapes unclassified.
 
-Pinned at edgartools 5.30.2 by `pyproject.toml:21` (#925). Live wrapper at `app/services/n_port_ingest.py::parse_n_port_payload` (#932). See `docs/_archive/2026-05/spike-n-port-edgartools.md` for the full empirical analysis.
+Pinned at edgartools 5.30.2 by `pyproject.toml:27` (#925). Live wrapper at `app/services/n_port_ingest.py::parse_n_port_payload` (#932). See `docs/_archive/2026-05/spike-n-port-edgartools.md` for the full empirical analysis.
 
 ### G4 — Type-label rewrite (`SH` → `Shares`, `PRN` → `Principal`)
-`parse_infotable_xml` output's `Type` column has values `"Shares"` / `"Principal"`, NOT the SEC two-letter codes. eBull maps back at [app/providers/implementations/sec_13f.py:210-213](../../../app/providers/implementations/sec_13f.py#L210-L213) (`_TYPE_CODE_FROM_LABEL`).
+`parse_infotable_xml` output's `Type` column has values `"Shares"` / `"Principal"`, NOT the SEC two-letter codes. eBull maps back via `_TYPE_CODE_FROM_LABEL` ([app/providers/implementations/sec_13f.py:231-234](../../../app/providers/implementations/sec_13f.py#L231-L234), applied at L383).
 
 ### G5–G6 — Empty `<value>` and empty `<cusip>` rows tolerated
-Empty value/sshPrnamt rows land as `0`/`0` (not dropped). Empty CUSIP row lands as `Cusip=""`. Filter both at the boundary ([app/providers/implementations/sec_13f.py:316-328](../../../app/providers/implementations/sec_13f.py#L316-L328)).
+Empty value/sshPrnamt rows land as `0`/`0` (not dropped). Empty CUSIP row lands as `Cusip=""`. Filter both at the boundary ([app/providers/implementations/sec_13f.py:368-378](../../../app/providers/implementations/sec_13f.py#L368-L378)).
 
 ### G7 — `Decimal(float)` vulnerability
-EdgarTools constructs `total_value = Decimal(child_text(summary_page_el, "tableValueTotal"))` at `edgar/thirteenf/parsers/primary_xml.py:80` — the input is already a string (XML text from `child_text`). A future regression to `Decimal(<float-or-non-str>)` would silently introduce IEEE-754 rounding. Defense-in-depth: re-wrap with `Decimal(str(...))` at the boundary. See [app/providers/implementations/sec_13f.py:251-263](../../../app/providers/implementations/sec_13f.py#L251-L263).
+EdgarTools constructs `total_value = Decimal(child_text(summary_page_el, "tableValueTotal"))` at `edgar/thirteenf/parsers/primary_xml.py:80` — the input is already a string (XML text from `child_text`). A future regression to `Decimal(<float-or-non-str>)` would silently introduce IEEE-754 rounding. Defense-in-depth: re-wrap with `Decimal(str(...))` at the boundary. See [app/providers/implementations/sec_13f.py:274-284](../../../app/providers/implementations/sec_13f.py#L274-L284).
 
 ### G8 — Signature date timezone naivety
 `parsed.signature.date` is a string `"MM-DD-YYYY"`. Attach UTC explicitly:
@@ -170,7 +170,7 @@ OEF iXBRL N-CSR taxonomy publishes fund-level + class-level + sector-axis facts 
 ### G14 — Process-local rate limiter
 Default `requests_per_second=9` (`edgar/httpclient.py:142`). Spawning N processes each calling `get_filings(...)` collectively hits SEC at N×9 r/s. SEC threshold is ~10 r/s per IP. Lower `EDGAR_RATE_LIMIT_PER_SEC=9/N` per process or centralise SEC fetches.
 
-### G15 — `Schedule13D / Schedule13G` `.parse_xml()` returns a dict; the Pydantic constructor needs 7 positional args
+### G15 — `Schedule13D / Schedule13G` `.parse_xml()` returns a dict; the `__init__` constructor needs 7 positional args
 Verified at `.venv/lib/python3.14/site-packages/edgar/beneficial_ownership/schedule13.py` + `models.py` (pinned `edgartools==5.30.2`, 2026-05-21).
 
 ```python
@@ -179,7 +179,7 @@ from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 parsed = Schedule13D.parse_xml(xml)   # @staticmethod -> dict (NOT a Schedule13D instance)
 parsed = Schedule13G.parse_xml(xml)   # @staticmethod -> dict
 
-# DO NOT do this — Schedule13D.__init__ requires 7 positional args incl. a `filing` ref
+# DO NOT do this — Schedule13D is a plain class; __init__ requires 7 positional args incl. a `filing` ref
 # filing = Schedule13D(**parsed)        # TypeError: missing 7 required positional args
 # filing = Schedule13D(filing=None, **parsed)  # technically works but a `filing` ref the worker rarely has
 ```
@@ -213,7 +213,7 @@ for person in parsed["reporting_persons"]:
 parsed["signatures"]                   # list[Signature dataclass]
 ```
 
-**Recommended adapter pattern**: skip Pydantic-instance construction entirely; read from the dict + nested dataclass attrs directly. PR11 (#1233 SC 13D/G activation) uses this pattern in both the manifest-worker `_parse_13dg` and rewash `_apply_blockholders`.
+**Recommended adapter pattern**: skip constructor instantiation entirely; read from the dict + nested dataclass attrs directly. PR11 (#1233 SC 13D/G activation) uses this pattern in both the manifest-worker `_parse_13dg` and rewash `_apply_blockholders`.
 
 **Pin against drift**: a contract test (e.g. `tests/test_edgartools_schedule13_shape.py`) that exercises BOTH top-level dict keys AND nested dataclass attribute access on a real EDGAR fixture catches any `edgartools` upgrade that renames either layer at CI time.
 
@@ -256,7 +256,7 @@ Need to parse SEC data?
 - Endpoint is well-known and stable (`data.sec.gov/submissions/...`, `companyfacts/...`, archive `index.json`). 20-50 LoC.
 - Need control over UA / retry / cache TTL / psycopg-friendly types.
 - Pydantic validation cliff (N-PORT).
-- Throughput must be coordinated across processes (eBull's shared throttle is at [app/providers/concurrent_fetch.py:74](../../../app/providers/concurrent_fetch.py#L74)).
+- Throughput must ride eBull's shared SEC rate floor — `SEC_MIN_REQUEST_INTERVAL_S` at [app/providers/rate_gate.py:23](../../../app/providers/rate_gate.py#L23), enforced by the process-wide clock in `app/providers/implementations/sec_edgar.py`. edgartools carries its own per-process limiter (G14), not this one.
 
 ## Comparison
 
@@ -278,10 +278,10 @@ Confirmed via `grep -rn "from edgar\b\|import edgar\b" app/ tests/`:
 
 | Where | What |
 |---|---|
-| [app/providers/implementations/sec_13f.py:77-80](../../../app/providers/implementations/sec_13f.py#L77-L80) | lazy `_edgar_parsers()` factory imports both static parsers |
-| [app/providers/implementations/sec_13f.py:237](../../../app/providers/implementations/sec_13f.py#L237) | `parse_primary_doc()` calls `edgar_parse_primary(xml)` |
-| [app/providers/implementations/sec_13f.py:308-309](../../../app/providers/implementations/sec_13f.py#L308-L309) | `parse_infotable()` calls `edgar_parse_infotable(xml)` |
-| `app/services/n_port_ingest.py::parse_n_port_payload` (#932) | lazy `_edgar_fund_report()` + `_pydantic_validation_error()` factories; wraps `FundReport.parse_fund_xml(xml)` with `try/except` over all 6 failure classes (AttributeError / KeyError / InvalidOperation / ValueError / TypeError / pydantic.ValidationError) |
+| [app/providers/implementations/sec_13f.py:76-80](../../../app/providers/implementations/sec_13f.py#L76-L80) | lazy `_edgar_parsers()` factory imports both static parsers |
+| [app/providers/implementations/sec_13f.py:258-259](../../../app/providers/implementations/sec_13f.py#L258-L259) | `parse_primary_doc()` calls `edgar_parse_primary(xml)` |
+| [app/providers/implementations/sec_13f.py:360-361](../../../app/providers/implementations/sec_13f.py#L360-L361) | `parse_infotable()` calls `edgar_parse_infotable(xml)` |
+| `app/services/n_port_ingest.py::parse_n_port_payload` (#932) | lazy `_edgar_fund_report()` + `_pydantic_validation_error()` + `_lxml_syntax_error()` factories; wraps `FundReport.parse_fund_xml(xml)` with `try/except` over 7 failure classes (AttributeError / KeyError / InvalidOperation / ValueError / TypeError / pydantic.ValidationError / lxml.etree.XMLSyntaxError) |
 
 All other SEC paths (`sec_edgar.py`, `sec_submissions.py`, `sec_daily_index.py`, `sec_13dg.py`, `sec_fundamentals.py`, `sec_getcurrent.py`) remain direct httpx/lxml.
 
@@ -302,6 +302,6 @@ All other SEC paths (`sec_edgar.py`, `sec_submissions.py`, `sec_daily_index.py`,
 - PyPI: <https://pypi.org/project/edgartools/>
 - GitHub: <https://github.com/dgunning/edgartools>
 - Source files (installed venv): `.venv/lib/python*/site-packages/edgar/` (relative to repo root)
-- `pyproject.toml:21` — pin
+- `pyproject.toml:27` — pin
 - Specs: `docs/specs/bootstrap/bulk-datasets.md` (edgartools dependency boundary)
 - Memory: `feedback_pydantic_validation_cliff.md`

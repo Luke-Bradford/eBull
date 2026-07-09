@@ -53,14 +53,13 @@ If the Pydantic field is `field: SomeType` (no `| None`), the TS field must **no
 
 ## Auth lives in the client, never in pages
 
-`setAuthToken` / `hasAuthToken` are the only auth-touching functions. Page components must not:
+Auth is cookie-based (issue #98): the backend sets an HttpOnly session cookie on `/auth/login`, and `apiFetch` sends `credentials: "include"` so it travels with every request. JS never reads or writes the token — there is no token in JS to touch. Session state lives in `SessionProvider` (`frontend/src/lib/session.tsx`), read via the `useSession` hook. On any 401, `apiFetch` invokes the handler registered through `setUnauthorizedHandler` (in `frontend/src/api/client.ts`); `SessionProvider` is the sole registrant and clears state + redirects to `/login`.
 
-- Read the token
-- Set the token
-- Pass the token as a prop
-- Branch on token presence
+Page components must not:
 
-If a page needs to know "am I authenticated?", that's a sign the auth flow needs to expose a reactive store — open a tech-debt issue rather than reading the in-memory slot ad hoc.
+- Read, set, or pass an auth token (there is none)
+- Call `setUnauthorizedHandler` — only `SessionProvider` registers the 401 handler
+- Re-derive "am I authenticated?" ad hoc — consume `useSession`, which already exposes it as a reactive store
 
 ## Fetcher file shape
 
@@ -86,4 +85,4 @@ If your diff touches `app/api/*.py` response models or `frontend/src/api/types.t
 - [ ] Nullability matches: every `| None` has a `| null`, every `| null` has a `| None`
 - [ ] New endpoint has its own fetcher file under `frontend/src/api/`
 - [ ] Page consumes via `useAsync`, not via raw `apiFetch`
-- [ ] No page component reads or sets the auth token
+- [ ] No page component touches auth outside `useSession` (no manual token handling; no `setUnauthorizedHandler` calls)

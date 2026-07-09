@@ -1,31 +1,108 @@
+---
+name: valuation-analyst
+description: eBull valuation ranges + entry bands — the thesis-produced bear/base/bull per-share targets and buy zone on the `theses` table, the fundamentals `instrument_valuation` VIEW, and how both feed the scoring value family + portfolio entry logic.
+---
+
 # valuation-analyst
 
-## Purpose
+## When to use
 
-Generate bear/base/bull valuation ranges and entry bands.
+Any change to how bear/base/bull per-share targets or the buy zone are
+produced, stored, read, or scored. Concretely: the valuation fields on the
+`theses` table (`app/services/thesis.py`), the scoring value family
+(`app/services/scoring.py::_value_score`), the fundamentals-derived
+`instrument_valuation` VIEW (`sql/201`, `sql/080`, `sql/032`, `sql/024`),
+the portfolio entry-price logic (`app/services/portfolio.py::_target_entry`,
+`_evaluate_add`), take-profit (`app/services/entry_timing.py::_compute_take_profit`),
+or the `/theses` / `/instruments` valuation fields (`app/api/theses.py`).
 
-## Inputs
+There is **no standalone valuation service** — these ranges are a *thesis
+surface* consumed downstream. Owning skills: `thesis-writer` (produces),
+`ranking-engine` (scores), `portfolio-manager` (acts). Note:
+`app/services/valuation.py` is unrelated — it is portfolio AUM
+(`compute_portfolio_valuation`), NOT bear/base/bull.
 
-- price\n- fundamentals\n- thesis type\n- market context
+## What it is
 
-## Outputs
+**Produced by the thesis writer.** The Claude thesis prompt
+(`app/services/thesis.py`, prompt spec ~L570-584) emits five per-share
+figures, stored on the `theses` table (`sql/001_init.sql:95-99`, all
+`NUMERIC(18,6)`): `buy_zone_low`, `buy_zone_high`, `base_value`,
+`bull_value`, `bear_value`. Prompt rules: base/bull/bear are per-share
+price targets in the instrument currency, null if insufficient data;
+`buy_zone_low/high` are populated only when `stance == "buy"`, null
+otherwise. Rows are append-only (`UNIQUE(instrument_id, thesis_version)`).
 
-- bear/base/bull values\n- buy zone\n- upside/downside estimates
+**Fundamentals fallback surface.** `instrument_valuation` is a VIEW
+(`CREATE VIEW`, `sql/201_instrument_valuation_dual_class_suppress.sql:45`,
+latest revision) joining latest quote + TTM fundamentals. It NULLs
+shares-distorted columns for curated dual-class instruments (#1664 /
+#1623). Scoring reads it (`scoring.py:1285`) only when no thesis
+`base_value` exists.
 
-## Rules
+**Consumed by the scoring value family** — weight `0.25`
+(`scoring.py:70`, held constant across all model versions).
+`_value_score` (`scoring.py:526`):
+- Primary path (thesis `base_value` present):
+  `upside_to_base = (base_value − price)/price`, clipped so 50% upside ⇒ 1.0;
+  `downside_to_bear = (price − bear_value)/price`;
+  `score = 0.75·upside + 0.25·(1 − downside_penalty)` (`scoring.py:563-573`).
+- Fallback path (no `base_value`): blends P/E (35%), FCF yield (35%),
+  price-target upside (30%) from `instrument_valuation`, renormalised over
+  available components (`scoring.py:588-599`).
 
-- Match valuation style to company type\n- Deep value and turnarounds need explicit survivability thinking\n- Surface key assumptions
+**Consumed by the portfolio manager + entry timing.**
+- `_target_entry` (`portfolio.py:836`) = buy-zone midpoint when
+  `buy_zone_low/high` both present and `high > low`, else current price.
+- `_evaluate_exit` treats `current_price >= base_value` as
+  "valuation target reached" — an EXIT signal (`portfolio.py:627-631`;
+  documented at :609). `_evaluate_add` has no `current_price` input.
+- `_compute_take_profit` (`entry_timing.py:239`) sets TP = `base_value`,
+  guarded to null when `base_value` is missing or at/below entry.
+
+**Exposed** via `app/api/theses.py` (`ThesisDetail`, L72-76) on routes
+`GET /theses/{instrument_id}` and the `/instruments` thesis router (L32-37).
+
+## Invariants
+
+- **`docs/settled-decisions.md` → "Thesis semantics".** Each generation
+  inserts a new `theses` row; never overwrite. Stance ∈ {buy, hold, watch,
+  avoid}; buy zone is populated only on a `buy` stance. Freshness derives
+  from `coverage.review_frequency`, not `last_reviewed_at`.
+- **`docs/settled-decisions.md` → "Scoring and ranking".** The value family
+  is heuristic, explicit, auditable — no ML, no cohort-relative
+  normalization, penalties additive only. The bear/base bands drive the
+  score deterministically; the same input always yields the same value
+  score (auditable trade path).
+- **Long only v1, no leverage.** These ranges drive BUY/ADD/HOLD/trim only;
+  a `bear_value` breach is downside *context*, never a short signal.
+- **Protective exits never gated.** `entry_timing` may defer entries on TA
+  but must never let a valuation target block a protective EXIT (settled
+  decision, `entry_timing.py` module header).
+- Family weight `0.25` is fixed across model versions; changing the value
+  *computation* bumps `model_version` (append-only score history).
 
 ## Failure conditions
 
-- Missing critical source data
-- Stale timestamps beyond allowed threshold
-- Contradictory evidence without explicit uncertainty handling
+Missing critical source data, stale timestamps, or contradictory evidence
+must surface as explicit signals — never be papered over with a neutral
+default:
 
-## Deliverable format
-
-Return:
-- status
-- summary
-- structured fields
-- confidence / uncertainty note where relevant
+- **Missing `bear_value` (base present):** `_value_score` applies an
+  explicit 0.5 downside penalty AND records `"bear_value missing"` in the
+  returned notes (`scoring.py:557,570-571`) — the gap is logged, not hidden.
+- **Missing `current_price`:** returns 0.5 *with* a `"current_price missing
+  or zero"` note (`scoring.py:550-551,561,584`); the absence is stamped on
+  the row, not silently absorbed.
+- **⚠ #1857 (OPEN, operator-gated):** the fundamentals fallback returns a
+  bare `0.5` when no P/E, FCF, or price-target component is available
+  (`scoring.py:601-603`). Because `instrument_valuation` gates on `quotes`
+  (not `price_daily`), this fires for ~97% of the universe — a neutral
+  default masking absent data, exactly the anti-pattern above. Fix =
+  `COALESCE` quotes → `price_daily`; it bumps `model_version`, so it is
+  operator-gated, not a silent patch.
+- **Stale thesis:** additive `_PENALTY_STALE_THESIS = 0.15`
+  (`scoring.py:175`); staleness is measured against `coverage.review_frequency`.
+- **Contradictory evidence:** the `thesis-critic` attacks every memo
+  (`critic_json`) and `break_conditions_json` records what falsifies the
+  thesis — reconcile against those, do not average the conflict away.

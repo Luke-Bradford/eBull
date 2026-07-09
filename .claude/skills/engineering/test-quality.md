@@ -132,10 +132,10 @@ If a function both writes to the DB and returns a result object, there must be a
 
 ## Integration-marker discipline
 
-Any test that uses the `clean_client` fixture (or any fixture that touches a real DB) MUST be decorated with `@pytest.mark.integration`. Unit-only CI passes deselect integration tests by marker; an unmarked integration test will either be silently skipped or error during fixture setup.
+Any test that uses the `clean_client` fixture (or any fixture that touches a real DB) MUST be decorated with `@pytest.mark.integration` (registered in `pyproject.toml`). Since the 2026-06-07 test-tiering decision this marker is documentation, not the gate: push-gate exclusion is automatic via the `db` marker, auto-applied at collection (`tests/conftest.py::pytest_collection_modifyitems`) to any test pulling a real-DB fixture or whose module source references a real-DB entrypoint (`TestClient`, `ebull_test_conn`, `settings.database_url`, `run_migrations(`, …). Keep the explicit decoration anyway — it declares the tier boundary at the test site instead of leaving it to the collection-time source scan.
 
 ```python
-# Wrong — silently runs against whichever DB mode CI picked
+# Wrong — real-DB test with no tier declaration at the test site
 def test_post_ingest_enabled_unknown_key_404(clean_client: TestClient) -> None:
     ...
 
@@ -145,7 +145,7 @@ def test_post_ingest_enabled_unknown_key_404(clean_client: TestClient) -> None:
     ...
 ```
 
-Self-check before pushing: `grep -n "def test_.*\(clean_client" tests/` and assert each match is preceded by `@pytest.mark.integration`.
+Self-check before pushing: `grep -rn "def test_.*(clean_client" tests/` and assert each match is decorated `@pytest.mark.integration` (or its module sets `pytestmark = pytest.mark.integration`).
 
 ## Dev-DB isolation invariant
 
@@ -154,11 +154,11 @@ The test suite MUST point at `ebull_test_*` databases, never the operator dev DB
 1. **Singleton-row drops** — a test that `TRUNCATE`s or `DELETE`s from a singleton table (e.g. `runtime_config`, `kill_switch`) takes the live system into a fail-closed 503 state until an operator re-seeds. 2026-05-18 is on record.
 2. **Test pollution** — fixtures that mutate state run against a moving target, hiding non-determinism behind cross-suite interference.
 
-Defense in depth (four rails, in order of how often they fire):
+Defense in depth (six rails, in order of how often they fire):
 
 1. **Primary:** `tests/fixtures/ebull_test_db.py::_assert_test_db` rejects any destructive op against a DB whose name does not match `ebull_test_*`. Every cursor obtained through `ebull_test_conn` goes through this guard.
 2. **Tripwire:** `tests/conftest.py::_dev_db_size_tripwire` records `pg_database_size('ebull')` at session start + asserts <1 MB growth at session end. Catches the residual case where a test opens a raw `psycopg.connect(settings.database_url)` outside the fixture. Tripwire only — misses deletes and HOT updates; can false-positive on idle autovacuum.
-3. **Orphan sweep** (#1208 Phase 2): `_drop_orphan_workers_older_than` runs on every controller-start inside `build_template_if_stale()`. Catches the residue of `ebull_test_<epoch>_<hex>_<gw>` databases left behind when a worker SIGSEGV's, the operator force-quits pytest, or the OS reboots mid-run — failure modes that `pytest_sessionfinish` cannot reach because it only fires on graceful exit. Three-rail safety model (activity guard via `pg_stat_activity`, age backstop via parsed epoch, hard-coded `_NEVER_DROP` literal); plain `DROP DATABASE` without `WITH (FORCE)` to eliminate the TOCTOU race against a sibling pytest worker. CI is short-circuited (`os.getenv("CI") == "true"`).
+3. **Orphan sweep** (#1208 Phase 2): `_drop_orphan_workers_older_than` runs on every controller-start inside `build_template_if_stale()`. (Sweep logic + `_NEVER_DROP` protect-set now live in `app/db/dev_test_db_reaper.py`; `tests/fixtures/ebull_test_db.py` wraps/re-exports them.) Catches the residue of `ebull_test_<epoch>_<hex>_<gw>` databases left behind when a worker SIGSEGV's, the operator force-quits pytest, or the OS reboots mid-run — failure modes that `pytest_sessionfinish` cannot reach because it only fires on graceful exit. Three-rail safety model (activity guard via `pg_stat_activity`, age backstop via parsed epoch, hard-coded `_NEVER_DROP` literal); plain `DROP DATABASE` without `WITH (FORCE)` to eliminate the TOCTOU race against a sibling pytest worker. CI is short-circuited (`os.getenv("CI") == "true"`).
 4. **Invalid-DB force-reaper** (#1401): `_force_drop_invalid_test_dbs` runs alongside the orphan sweep at controller-start. It force-drops every `ebull_test_*` **and `ebull_mig*`** database marked `datconnlimit = -2` — the "interrupted-drop corpse" state PG sets when a `kill -9`'d worker (or a wedged `DROP ... WITH (FORCE)`) dies mid-drop. The age-gated, plain-DROP orphan sweep above **cannot** clear these: PG refuses all new connections to a `-2` DB so plain DROP is blocked by the wedged backend, and the corpse has no parseable epoch. Because a `-2` DB is connection-refused there is no concurrent-invocation race — force-drop is unconditionally safe (no age gate, no activity rail). This is the rail that actually clears the leak: the 13.1M-file dev-PG bloat (2026-05-30) was `-2` worker/mig corpses the old sweep matched only by `ebull_test%` and never force-dropped.
 5. **Session-lifetime keepalive** (`_worker_db_keepalive`, autouse from `conftest.py`): each worker holds one autocommit connection to its private DB for the whole pytest session, so the worker DB appears in `pg_stat_activity` even between tests — the load-bearing input to the orphan-sweep activity rail.
 6. **Worker-DB relation-count tripwire** (#1401): `_assert_worker_relations_under_ceiling` runs in `ebull_test_conn` teardown. The worker DB is **reused across every test on the worker** and per-test cleanup is `TRUNCATE` only — it wipes rows but **never drops relations**. Any test (or app code under test) that `CREATE`s a table/index/partition without dropping it leaks relations that accumulate for the whole session; one such runaway ballooned a worker DB past ~2.1M relations and bloated the data dir to 13.1M files. The tripwire fails the first test that pushes `count(*) FROM pg_class` past `_WORKER_DB_RELATION_CEILING` (50k; template baseline ≈9.6k), so a relation leak surfaces as a named failing test instead of a silent disk disaster.
@@ -193,7 +193,7 @@ A clean template returns ONLY `schema_migrations` (= count of applied migration 
 Operationally:
 
 - Test fixtures seed 1–5 rows per-test through `ebull_test_conn`.
-- Bulk-data tests (e.g. ranking-engine integration over 10k rows) opt out of the default suite with `@pytest.mark.slow` + run in a separate CI job.
+- Bulk-data tests (e.g. ranking-engine integration over 10k rows) are auto-`db`-marked, so they never run on the push gate; genuinely long-wall-clock ones also take `@pytest.mark.perf` (registered nightly-tier marker; deselect with `-m "not perf"`). There is no `slow` marker, and CI runs no pytest — no separate CI job to punt them to.
 - Reference data that genuinely belongs in a migration must be flat (`INSERT VALUES (...)` only, no DML loops); a future migration cannot start growing the seed without showing up in the audit above.
 
 Audited 2026-05-19 against #1208 Phase 2 — fresh template returned exactly `schema_migrations | 133`, no other non-zero tables. Codebase already honours this rule; the audit + this skill are the prevention against drift.

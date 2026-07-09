@@ -1,3 +1,8 @@
+---
+name: data-engineer
+description: eBull data engineer — what we own, how we store it, how we read it. Schema invariants, the two-layer ownership model, the write-through pattern, the "where does X come from?" FAQ, and the admin-page operator UX FAQ. Read before any ingest path, schema migration, or operator-visible read endpoint.
+---
+
 # eBull data engineer — what we own, how we store it, how we read it
 
 > Read this when adding a new ingest path, schema migration, or operator-visible read endpoint. The non-negotiable directive from the operator: future agents must use this file to answer "where does X come from?" without guessing. Cross-reference: `docs/settled-decisions.md` for the decisions; `docs/review-prevention-log.md` for the recurring traps; `.claude/skills/data-sources/sec-edgar.md` for the source-of-truth knowledge.
@@ -266,7 +271,7 @@ Service modules under `app/services/` (~96 modules). Canonical entry points by d
 |---|---|---|
 | [app/services/ownership_observations.py](../../../app/services/ownership_observations.py) | Two-layer write side: `record_*_observation()` + `refresh_*_current()` | record_insider:110, record_institution:292, record_blockholder:483, record_treasury:631, record_def14a:747, record_fund:913, record_esop:1104; refresh_*_current at 181/390/568/689/843/1040/1194 |
 | [app/services/ownership_observations_sync.py](../../../app/services/ownership_observations_sync.py) | Legacy → observations backfill (`sync_all`); `JOB_OWNERSHIP_OBSERVATIONS_BACKFILL` weekly Sun 03:00 UTC | |
-| [app/services/ownership_rollup.py](../../../app/services/ownership_rollup.py) | **Canonical Tier 0 read service**: `get_ownership_rollup(conn, symbol, instrument_id) -> OwnershipRollup` | line 1222 |
+| [app/services/ownership_rollup.py](../../../app/services/ownership_rollup.py) | **Canonical Tier 0 read service**: `get_ownership_rollup(conn, symbol, instrument_id) -> OwnershipRollup` | line 3531 |
 | [app/services/ownership_history.py](../../../app/services/ownership_history.py) | Time-series payload for chart | |
 | [app/services/ownership_drillthrough.py](../../../app/services/ownership_drillthrough.py) | Per-slice drill detail | |
 | [app/services/holder_name_resolver.py](../../../app/services/holder_name_resolver.py) | DEF 14A holder_name → filer_cik via `external_identifiers` | called from rollup `_enrich_and_union_def14a` |
@@ -308,7 +313,7 @@ Service modules under `app/services/` (~96 modules). Canonical entry points by d
 Ownership rollup read flow:
 ```
 GET /instruments/{symbol}/ownership-rollup
-  └─ app/api/instruments.py:4069
+  └─ app/api/instruments.py:5244
        resolve symbol → instrument_id (instruments + is_primary_listing tiebreaker)
        with snapshot_read(conn):                    # REPEATABLE READ snapshot
          get_ownership_rollup(conn, symbol, instrument_id)
@@ -334,7 +339,7 @@ GET /instruments/{symbol}/ownership-rollup
        _rollup_to_response(rollup) → Pydantic OwnershipRollupResponse
 ```
 
-**No-data path returns 200 with empty slices + red banner — never 503** (`OwnershipRollup.no_data` at line 207).
+**No-data path returns 200 with empty slices + red banner — never 503** (`OwnershipRollup.no_data` at line 551).
 
 ### 2.10 Write paths — canonical examples
 
@@ -550,7 +555,7 @@ Spec: `docs/_archive/2026-05/superseded-bootstrap-etl-optimisation-v2.md` §7. T
 
 ### 2.11 Worker / job entry points
 
-[app/workers/scheduler.py:453](../../../app/workers/scheduler.py#L453) — `SCHEDULED_JOBS` declaration. [app/jobs/](../../../app/jobs/) package owns runtime side:
+[app/workers/scheduler.py:654](../../../app/workers/scheduler.py#L654) — `SCHEDULED_JOBS` declaration. [app/jobs/](../../../app/jobs/) package owns runtime side:
 - `__main__.py` boots singleton-fenced jobs process (advisory lock, `JOBS_PROCESS_LOCK_KEY`).
 - `runtime.py` invokes.
 - `listener.py` consumes `pending_job_requests` + pg_notify.
@@ -712,7 +717,7 @@ Notable triggers: `POST /jobs/sec_rebuild/run`, `POST /jobs/ownership_observatio
 
 ### Q14. Where is the kill switch?
 - `runtime_config` row keyed by name. Read by `get_kill_switch_status` (`app/services/ops_monitor.py`).
-- Toggle: `POST /system/config/kill-switch` (`app/api/config.py:233`).
+- Toggle: `POST /config/kill-switch` (`app/api/config.py:233`).
 
 ### Q15. How do share-class siblings on a shared CIK (GOOG/GOOGL, BRK.A/BRK.B) flow through ETL?
 
@@ -758,7 +763,7 @@ Until the per-class denominator lands (#1590 DERA FSDS `segments`), the rollup s
 - Ops + auth: `sql/014`, `sql/015`, `sql/016`, `sql/018`, `sql/084`, `sql/087`, `sql/128`.
 
 **Services (canonical entry points)**:
-- Read: `app/services/ownership_rollup.py:1222` (`get_ownership_rollup`).
+- Read: `app/services/ownership_rollup.py:3531` (`get_ownership_rollup`).
 - Write/refresh: `app/services/ownership_observations.py`.
 - Manifest: `app/services/sec_manifest.py`.
 - Freshness: `app/services/data_freshness.py`.
@@ -766,7 +771,7 @@ Until the per-class denominator lands (#1590 DERA FSDS `segments`), the rollup s
 - Holder name: `app/services/holder_name_resolver.py`.
 
 **Workers**:
-- Schedule: `app/workers/scheduler.py:453` (`SCHEDULED_JOBS`).
+- Schedule: `app/workers/scheduler.py:654` (`SCHEDULED_JOBS`).
 - Jobs runtime: `app/jobs/__main__.py`, `app/jobs/runtime.py`, `app/jobs/listener.py`.
 - Singleton fence: `app/jobs/locks.py` (`JOBS_PROCESS_LOCK_KEY`).
 - DB pool: `app/db/pool.py:open_pool`.
@@ -1270,7 +1275,7 @@ For daily-index (04:00 UTC): scheduled-fire confirmation is the registration che
 | `insider_filings` (sql/057) | `(accession_number)` | n/a | `insider_filers.accession_number → insider_filings.accession_number ON DELETE CASCADE` (UNIQUE on `(accession_number, filer_cik)`); `insider_transaction_footnotes.accession_number → insider_filings.accession_number ON DELETE CASCADE` (UNIQUE on `(accession_number, footnote_id)`); `insider_transactions.accession_number → insider_filings.accession_number` (PK on `(accession_number, txn_row_num)`); `insider_initial_holdings.accession_number → insider_filings.accession_number` (PK on `(accession_number, row_num)`) | n/a |
 | `def14a_ingest_log` (sql/097) | `(accession_number)` | n/a | n/a | `status IN ('success','partial','failed')` |
 | `n_port_ingest_log` (sql/125) | `(accession_number)` | n/a | n/a | (status enum — verify before write) |
-| `sec_filing_manifest` (sql/118) | `(accession_number)` | n/a | self-FK `amends_accession → sec_filing_manifest.accession_number ON DELETE SET NULL` | `source IN ('sec_form3','sec_form4','sec_form5','sec_13d','sec_13g','sec_13f_hr','sec_def14a','sec_n_port','sec_n_csr','sec_10k','sec_10q','sec_8k','sec_xbrl_facts','finra_short_interest')`; `subject_type IN ('issuer','institutional_filer','blockholder_filer','fund_series','finra_universe')`; `ingest_status IN ('pending','fetched','parsed','tombstoned','failed')`; `raw_status IN ('absent','stored','compacted')`; CHECK `(subject_type='issuer' AND instrument_id IS NOT NULL) OR (subject_type<>'issuer' AND instrument_id IS NULL)` |
+| `sec_filing_manifest` (sql/118) | `(accession_number)` | n/a | self-FK `amends_accession → sec_filing_manifest.accession_number ON DELETE SET NULL` | `source IN ('sec_form3','sec_form4','sec_form5','sec_13d','sec_13g','sec_13f_hr','sec_def14a','sec_n_port','sec_n_csr','sec_10k','sec_10q','sec_8k','sec_xbrl_facts','finra_short_interest','finra_regsho_daily','sec_nt','sec_pre14a','sec_424b')` (current enum per sql/216; matrix originally captured only through `finra_short_interest`); `subject_type IN ('issuer','institutional_filer','blockholder_filer','fund_series','finra_universe')`; `ingest_status IN ('pending','fetched','parsed','tombstoned','failed')`; `raw_status IN ('absent','stored','compacted')`; CHECK `(subject_type='issuer' AND instrument_id IS NOT NULL) OR (subject_type<>'issuer' AND instrument_id IS NULL)` |
 | `filing_raw_documents` (sql/107) | `(accession_number, document_kind)` | n/a | n/a | `document_kind` enum (extended in sql/122 to add `nport_xml` etc.) |
 | `cik_raw_documents` (sql/109) | (verify before write) | (verify) | (verify) | (verify) |
 | `sec_reference_documents` (sql/121) | `(document_kind, period_year, period_quarter)` | n/a | n/a | (verify) |

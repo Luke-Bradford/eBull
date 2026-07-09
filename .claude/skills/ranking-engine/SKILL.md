@@ -9,7 +9,8 @@ description: eBull deterministic scoring + ranking — the v1.3 model (families,
 
 Any change to `app/services/scoring.py`, the `scores` table, the ranked-candidate
 read path (`app/services/portfolio.py::_load_ranked_scores`), or the
-`/recommendations` / score endpoints. Also read it before touching how the
+`/recommendations` (`app/api/recommendations.py`) / `/rankings`
+(`app/api/scores.py`) endpoints. Also read it before touching how the
 portfolio action layer consumes a score.
 
 ## What it is

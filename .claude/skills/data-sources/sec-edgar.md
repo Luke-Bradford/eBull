@@ -69,7 +69,7 @@ def fetch_all_filings(cik_padded: str):
         yield from _rows(page)
 ```
 
-Pattern at [app/services/institutional_holdings.py:189-220](../../../app/services/institutional_holdings.py#L189-L220), rebuild at [app/jobs/sec_rebuild.py:335](../../../app/jobs/sec_rebuild.py#L335).
+Pattern in `parse_submissions_index` at [app/services/institutional_holdings.py:292-389](../../../app/services/institutional_holdings.py#L292-L389), rebuild at [app/jobs/sec_rebuild.py:335](../../../app/jobs/sec_rebuild.py#L335).
 
 `recent` columnar keys: `accessionNumber, filingDate, reportDate, acceptanceDateTime, act, form, fileNumber, filmNumber, items, core_type, size, isXBRL, isInlineXBRL, isXBRLNumeric, primaryDocument, primaryDocDescription`. **All arrays must be same length, aligned by index** — pull row `i` by reading `recent[k][i]` for every `k`.
 
@@ -145,7 +145,7 @@ Source: <https://www.sec.gov/files/form_13f.pdf> §5.7.
 | `OTHERMANAGER` | VARCHAR2(100) | comma-sep seq numbers |
 | `VOTING_AUTH_SOLE` / `_SHARED` / `_NONE` | NUMBER | voting authority |
 
-**SSHPRNAMTTYPE = PRN** rows hold bond principal **in dollars**, not share counts. Filter `WHERE SSHPRNAMTTYPE = 'SH'` before any share aggregation. PRN belongs to a separate fixed-income rollup if surfaced at all. Pattern at [app/services/sec_13f_dataset_ingest.py:307-315](../../../app/services/sec_13f_dataset_ingest.py#L307-L315).
+**SSHPRNAMTTYPE = PRN** rows hold bond principal **in dollars**, not share counts. Filter `WHERE SSHPRNAMTTYPE = 'SH'` before any share aggregation. PRN belongs to a separate fixed-income rollup if surfaced at all. Filter at [app/services/sec_13f_dataset_ingest.py:730-733](../../../app/services/sec_13f_dataset_ingest.py#L730-L733) (canonical PRN/SH + cutover logic lives in `normalise_13f_holdings`, [app/services/thirteen_f_normalise.py:81](../../../app/services/thirteen_f_normalise.py#L81)).
 
 13F filed within **45 days after each calendar quarter end**.
 
@@ -154,7 +154,7 @@ form.idx exposes both `13F-HR` (holdings) and `13F-NT` (notice; another manager
 files our holdings). NT entries contribute **zero** infotable rows, so iterating
 an NT-only filer in `sec_13f_quarterly_sweep` costs the submissions.json roundtrip
 and writes nothing. `institutional_filers.last_13f_hr_at` (#1010,
-[sec_13f_filer_directory.py:42](../../../app/services/sec_13f_filer_directory.py#L42))
+[sec_13f_filer_directory.py:48](../../../app/services/sec_13f_filer_directory.py#L48))
 is the HR-only recency signal — distinct from `last_filing_at` which mixes both.
 Bootstrap stage 21 filters cohort on this column (cohort drops 11k → ~3-5k);
 the manual / sweep-adapter / Admin "Run now" path keeps the full cohort as a
@@ -347,7 +347,7 @@ Conversion: `str.replace("-", "")`. **The first 10 digits of an accession number
 
 Archive-URL CIK varies by form type:
 - **Form 4 / Form 3 / Form 5** — `/Archives/edgar/data/{ISSUER_CIK}/{acc_no_dashes}/...`. Insider Form 4 filings for AAPL are submitted by various filer-agent CIKs but stored under Apple's CIK 0000320193.
-- **13F-HR / 13G/D / N-PORT-P** — `/Archives/edgar/data/{FILER_CIK}/{acc_no_dashes}/...`. The filing-manager / blockholder / fund-trust IS the filer; there is no separate "issuer" in those forms. eBull's 13F builder uses the filer CIK at [app/services/sec_13f_dataset_ingest.py:334](../../../app/services/sec_13f_dataset_ingest.py#L334).
+- **13F-HR / 13G/D / N-PORT-P** — `/Archives/edgar/data/{FILER_CIK}/{acc_no_dashes}/...`. The filing-manager / blockholder / fund-trust IS the filer; there is no separate "issuer" in those forms. eBull's 13F builder uses the filer CIK at [app/services/sec_13f_dataset_ingest.py:670](../../../app/services/sec_13f_dataset_ingest.py#L670).
 
 ### 3.4 LEI (Legal Entity Identifier) + FIGI
 
@@ -397,7 +397,7 @@ A subset of SEC CIKs belong to **registered filing agents** — third-party subm
 - `https://www.sec.gov/Archives/edgar/data/{issuer_or_filer_cik_int}/{accession_no_dashes}/...` is the correct URL.
 - SEC's web archive ALSO serves the directory index under any CIK in the filing's `ciks[]` list (empirically verified — GET on `/index.json` returns 200 under issuer + filer CIKs, 404 under agent), but the file-level GET (`primary_doc.xml`, `infotable.xml`) only succeeds under non-agent CIKs.
 
-The canonical eBull defense lives at [app/providers/implementations/sec_edgar.py:97-104](../../../app/providers/implementations/sec_edgar.py#L97-L104) as `KNOWN_FILING_AGENT_CIKS`:
+The canonical eBull defense lives at [app/providers/implementations/sec_edgar.py:142](../../../app/providers/implementations/sec_edgar.py#L142) as `KNOWN_FILING_AGENT_CIKS`:
 
 ```python
 KNOWN_FILING_AGENT_CIKS: frozenset[str] = frozenset({
@@ -417,7 +417,7 @@ This list is intentionally **maintained as a code constant rather than a DB-conf
 
 **Two enforcement points** every SEC ingest path must satisfy:
 
-1. **`fetch_filing_index` legacy-fallback short-circuit** (sec_edgar.py:397-417). When a caller invokes `fetch_filing_index(accession)` without passing `issuer_cik`, the provider derives `cik_for_url` from the accession-number prefix; if that prefix is in `KNOWN_FILING_AGENT_CIKS`, it returns `None` immediately rather than generating a guaranteed-404 GET. Operator action on the warning: pass `issuer_cik` from `external_identifiers`.
+1. **`fetch_filing_index` legacy-fallback short-circuit** (`fetch_filing_index` at sec_edgar.py:403; agent-CIK guard at sec_edgar.py:478-492). When a caller invokes `fetch_filing_index(accession)` without passing `issuer_cik`, the provider derives `cik_for_url` from the accession-number prefix; if that prefix is in `KNOWN_FILING_AGENT_CIKS`, it returns `None` immediately rather than generating a guaranteed-404 GET. Operator action on the warning: pass `issuer_cik` from `external_identifiers`.
 
 2. **Manifest-worker parser guard** (post-#1249/#1250 cleanup). Every parser under `app/services/manifest_parsers/sec_*.py` that calls `_archive_file_url(row.cik, ...)` MUST check `row.cik` against `KNOWN_FILING_AGENT_CIKS` BEFORE the URL construction. The guard tombstones loudly so an upstream discovery bug (which mistakenly enqueued an agent CIK as the manifest's `cik` field) surfaces instead of generating thousands of silent 404s. Pinned by `scripts/check_archive_url_agent_guard.sh` lint with an issuer-CIK ALLOW_LIST for parsers whose `subject_type='issuer'` contract excludes agent collisions by construction.
 
@@ -431,11 +431,11 @@ This list is intentionally **maintained as a code constant rather than a DB-conf
 >
 > Current guidelines limit each user to a total of **no more than 10 requests per second, regardless of the number of machines used to submit requests**.
 
-The "regardless of the number of machines" phrasing means horizontal scaling does not buy headroom — the budget is per-User-Agent identity. eBull enforces 10 r/s **per-IP across processes** via the `sec_rate_gate` GCRA gate (#1484 — a single Postgres-row virtual floor that the API + jobs processes both reserve against). The in-process `_PROCESS_RATE_LIMIT_CLOCK` (below) bounds only ONE process and is now the test/fallback path, NOT the cross-process authority — pre-#1484 each process throttled to ≤9 r/s independently and the sum could breach the per-IP ceiling. Empirical sustained ceiling is **5–7 r/s** to avoid transient 429/503; pattern at [app/services/sec_pipelined_fetcher.py:43](../../../app/services/sec_pipelined_fetcher.py#L43). See `docs/specs/ops/2026-06-09-sec-cross-process-rate-limiter.md`.
+The "regardless of the number of machines" phrasing means horizontal scaling does not buy headroom — the budget is per-User-Agent identity. eBull enforces 10 r/s **per-IP across processes** via the `sec_rate_gate` GCRA gate (#1484 — a single Postgres-row virtual floor that the API + jobs processes both reserve against). The in-process `_PROCESS_RATE_LIMIT_CLOCK` (below) bounds only ONE process and is now the test/fallback path, NOT the cross-process authority — pre-#1484 each process throttled to ≤9 r/s independently and the sum could breach the per-IP ceiling. Empirical sustained ceiling is **5–7 r/s** to avoid transient 429/503; `DEFAULT_TARGET_RPS = 7.0` at [app/services/sec_pipelined_fetcher.py:49](../../../app/services/sec_pipelined_fetcher.py#L49). See `docs/specs/ops/2026-06-09-sec-cross-process-rate-limiter.md`.
 
 ### Multi-host shared clock
 
-The 10 req/s budget is **per-IP, not per-host**. All four SEC hosts — `data.sec.gov`, `www.sec.gov`, `efts.sec.gov`, and the `Archives/...` paths under `www.sec.gov` — share **one** rolling counter at our IP. eBull enforces this **across processes** via the `sec_rate_gate` GCRA gate (#1484): a single Postgres-row virtual floor injected as a process-global `RateGate` (`app/providers/sec_rate_gate_holder.py::get_sec_rate_gate`) into every SEC consumer — sync `ResilientClient`, async `_AsyncRateLimiter`/`PipelinedSecFetcher`, and the bulk refresh/download paths. The in-process `_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK` in [app/providers/implementations/sec_edgar.py:72](../../../app/providers/implementations/sec_edgar.py#L72) is now the **per-process test/fallback** path only (used when no gate is installed, e.g. unit tests, or when the gate's DB is unreachable) — it is NOT the cross-process authority.
+The 10 req/s budget is **per-IP, not per-host**. All four SEC hosts — `data.sec.gov`, `www.sec.gov`, `efts.sec.gov`, and the `Archives/...` paths under `www.sec.gov` — share **one** rolling counter at our IP. eBull enforces this **across processes** via the `sec_rate_gate` GCRA gate (#1484): a single Postgres-row virtual floor injected as a process-global `RateGate` (`app/providers/sec_rate_gate_holder.py::get_sec_rate_gate`) into every SEC consumer — sync `ResilientClient`, async `_AsyncRateLimiter`/`PipelinedSecFetcher`, and the bulk refresh/download paths. The in-process `_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK` in [app/providers/implementations/sec_edgar.py:77](../../../app/providers/implementations/sec_edgar.py#L77) is now the **per-process test/fallback** path only (used when no gate is installed, e.g. unit tests, or when the gate's DB is unreachable) — it is NOT the cross-process authority.
 
 | Host | Serves | Conditional-GET support |
 | --- | --- | --- |
@@ -450,7 +450,7 @@ The 10 req/s budget is **per-IP, not per-host**. All four SEC hosts — `data.se
 
 ### User-Agent header
 
-Required format: `<Name> <email>`. Email must be syntactically valid and routable. eBull config at [app/config.py:29](../../../app/config.py#L29) (`sec_user_agent`). **Default `eBull dev@example.com` is unacceptable for production** — every operator install must override.
+Required format: `<Name> <email>`. Email must be syntactically valid and routable. eBull config at [app/config.py:51](../../../app/config.py#L51) (`sec_user_agent`). **Default `eBull dev@example.com` is unacceptable for production** — every operator install must override.
 
 ### What gets you blocked
 
@@ -463,13 +463,13 @@ Required format: `<Name> <email>`. Email must be syntactically valid and routabl
 ### Strategies
 
 1. **Bulk archives over per-filing scrapes.** `submissions.zip` + `companyfacts.zip` replace ~10k requests with 1.
-2. **`If-Modified-Since` against `Last-Modified`** for any per-CIK or per-filing endpoint. Server returns 304 (no body) for unchanged. Pattern at [app/providers/implementations/sec_edgar.py:497-529](../../../app/providers/implementations/sec_edgar.py#L497-L529).
-3. **`If-None-Match` against `ETag`** — works for some non-SEC archives (Frankfurter pattern at [app/providers/implementations/frankfurter.py:98-144](../../../app/providers/implementations/frankfurter.py#L98-L144) is the cleanest in-repo template). **Does NOT work for SEC bulk archives** — empirical probe 2026-05-22 returned `200 + full body` even with the exact ETag echoed back. For SEC bulk files use the client-side HEAD-compare reuse contract in the "Bulk-archive reuse contract" subsection below.
+2. **`If-Modified-Since` against `Last-Modified`** for any per-CIK or per-filing endpoint. Server returns 304 (no body) for unchanged. Pattern in `fetch_submissions_page_conditional` at [app/providers/implementations/sec_edgar.py:830-868](../../../app/providers/implementations/sec_edgar.py#L830-L868).
+3. **`If-None-Match` against `ETag`** — works for some non-SEC archives (Frankfurter pattern in `fetch_latest_rates_conditional` at [app/providers/implementations/frankfurter.py:156-210](../../../app/providers/implementations/frankfurter.py#L156-L210) is the cleanest in-repo template). **Does NOT work for SEC bulk archives** — empirical probe 2026-05-22 returned `200 + full body` even with the exact ETag echoed back. For SEC bulk files use the client-side HEAD-compare reuse contract in the "Bulk-archive reuse contract" subsection below.
 4. **Three-tier polling**:
    - **Hot**: Atom `getcurrent` for 8-K. Poll every 5–10 min during business hours.
    - **Warm**: `daily-index/master.{YYYYMMDD}.idx` early-morning batch.
    - **Cold**: per-CIK submissions JSON re-pull weekly or per-event.
-5. **Cache fetched bytes** in `raw_filings` table so re-wash is local. [app/services/raw_filings.py:11](../../../app/services/raw_filings.py#L11).
+5. **Cache fetched bytes** in the `filing_raw_documents` table (migration 107) so re-wash is local — via [app/services/raw_filings.py](../../../app/services/raw_filings.py).
 6. **Backoff on 429 / 503**. Exponential, max 8 attempts. Many transient blocks clear within 60s.
 
 ### Bulk-archive reuse contract (PR-5b, #1233)
@@ -566,7 +566,7 @@ else:
     value_dollars = value_raw * 1000
 ```
 
-Pattern at [app/services/sec_13f_dataset_ingest.py:316-326](../../../app/services/sec_13f_dataset_ingest.py#L316-L326). SUMMARYPAGE.TABLEVALUETOTAL **also** flips on this date.
+Pattern at [app/services/sec_13f_dataset_ingest.py:748-755](../../../app/services/sec_13f_dataset_ingest.py#L748-L755) (shared logic in `normalise_13f_holdings`, [app/services/thirteen_f_normalise.py:81-98](../../../app/services/thirteen_f_normalise.py#L81-L98)). SUMMARYPAGE.TABLEVALUETOTAL **also** flips on this date.
 
 ### 7.2 13F PRN rows are bond principals
 
@@ -681,7 +681,7 @@ Before writing code that hits SEC EDGAR:
 7. ✅ Implement branch-on-type (INFOTABLE SH vs PRN, NPORT NS vs PA, Form 4 D vs I).
 8. ✅ Implement VALUE unit cutover (date(2023,1,3) by filing date) for any 13F-derived figure.
 9. ✅ Use explicit identifier bridges (`company_tickers.json`, 13F Official List, GLEIF). Never fuzzy-name match without bound + coverage gate.
-10. ✅ Cache fetched bytes in `raw_filings` so re-wash is local.
+10. ✅ Cache fetched bytes via `raw_filings.py` into `filing_raw_documents` so re-wash is local.
 11. ✅ Smoke-test against canonical 5-instrument panel: AAPL, GME, MSFT, JPM, HD. Verify operator-visible figure on live endpoint after backfill (CLAUDE.md ETL clauses 8-12).
 
 ## 9. eBull-internal entry points
@@ -693,12 +693,12 @@ Where this knowledge already lives in code:
 | CIK / ticker discovery | `daily_cik_refresh` scheduled job in [app/workers/scheduler.py](../../../app/workers/scheduler.py) + [app/services/filings.py](../../../app/services/filings.py)::`upsert_cik_mapping` |
 | 13F XML per-filing parse | [app/providers/implementations/sec_13f.py](../../../app/providers/implementations/sec_13f.py) (EdgarTools, #925) |
 | 13F dataset bulk TSV | [app/services/sec_13f_dataset_ingest.py](../../../app/services/sec_13f_dataset_ingest.py) |
-| 13F filer directory walk | [app/services/sec_13f_quarterly_sweep.py](../../../app/services/sec_13f_quarterly_sweep.py) |
+| 13F filer directory walk | `sec_13f_quarterly_sweep` in [app/workers/scheduler.py:5470](../../../app/workers/scheduler.py#L5470) |
 | 13F Official List | [app/services/sec_13f_securities_list.py](../../../app/services/sec_13f_securities_list.py) |
 | Submissions JSON walker | [app/providers/implementations/sec_submissions.py](../../../app/providers/implementations/sec_submissions.py) |
 | Submissions overflow paging | [app/jobs/sec_rebuild.py:335](../../../app/jobs/sec_rebuild.py#L335) |
-| Companyfacts ingest | [app/providers/implementations/sec_fundamentals.py](../../../app/providers/implementations/sec_fundamentals.py), [app/services/fundamentals.py](../../../app/services/fundamentals.py) |
-| Conditional fetch | [app/providers/implementations/sec_edgar.py:497-529](../../../app/providers/implementations/sec_edgar.py#L497-L529) |
+| Companyfacts ingest | [app/providers/implementations/sec_fundamentals.py](../../../app/providers/implementations/sec_fundamentals.py), [app/services/fundamentals/](../../../app/services/fundamentals) (package) |
+| Conditional fetch | `fetch_submissions_page_conditional` at [app/providers/implementations/sec_edgar.py:830-868](../../../app/providers/implementations/sec_edgar.py#L830-L868) |
 | Daily-index walker | [app/providers/implementations/sec_daily_index.py](../../../app/providers/implementations/sec_daily_index.py) |
 | Atom getcurrent | [app/providers/implementations/sec_getcurrent.py](../../../app/providers/implementations/sec_getcurrent.py) |
 | N-PORT XML parse + ingest | [app/services/n_port_ingest.py](../../../app/services/n_port_ingest.py) (stdlib `xml.etree.ElementTree`, #917) |
@@ -709,7 +709,7 @@ Where this knowledge already lives in code:
 | Filing-folder manifest | [app/services/filing_documents.py](../../../app/services/filing_documents.py) |
 | Bulk download orchestrator | [app/services/sec_bulk_download.py](../../../app/services/sec_bulk_download.py) |
 | Raw-filing cache | [app/services/raw_filings.py](../../../app/services/raw_filings.py) |
-| Schedulers (conditional fetch) | [app/workers/scheduler.py:1460-1574](../../../app/workers/scheduler.py#L1460-L1574) |
+| Schedulers (conditional fetch) | `daily_cik_refresh` at [app/workers/scheduler.py:2512](../../../app/workers/scheduler.py#L2512) |
 
 ## 11. Manifest-worker parser onboarding
 
@@ -772,7 +772,7 @@ Every manifest parser MUST follow this contract on its upsert except: block. The
 | Form 5 (`app/services/manifest_parsers/insider_345.py`, `_parse_form5`) | `_write_tombstone(document_type='5')` row in `insider_filings`; observations land as `source='form4'` (enum lacks `form5`) — provenance preserved via `insider_filings.document_type='5'` JOIN |
 | 13D/G (`app/services/manifest_parsers/sec_13dg.py`) | `_record_ingest_attempt(status='failed')` in `blockholder_filings_ingest_log` |
 | DEF 14A (`app/services/manifest_parsers/def14a.py`) | `_record_ingest_attempt(status='failed')` in `def14a_ingest_log` |
-| 13F-HR (`app/services/manifest_parsers/sec_13f_hr.py`) | `_record_ingest_attempt(status='failed')` in `institutional_holdings_ingest_log`; PRN drop at `sec_13f_hr.py:415-417`; 2023-01-03 VALUE cutover applied service-side at `sec_13f_hr.py:103, 397, 419-421` (manifest adapter) — the parser at `app/providers/implementations/sec_13f.py` is a pure EdgarTools wrapper that preserves raw values per the #931 contract |
+| 13F-HR (`app/services/manifest_parsers/sec_13f_hr.py`) | `_record_ingest_attempt(status='failed')` in `institutional_holdings_ingest_log`; PRN drop + 2023-01-03 VALUE cutover both delegated to the shared `normalise_13f_holdings` (`thirteen_f_normalise.py:81`) called at `sec_13f_hr.py:487`; the PRN-drop count for the ingest-log line is computed at `sec_13f_hr.py:471` — the parser at `app/providers/implementations/sec_13f.py` is a pure EdgarTools wrapper that preserves raw values per the #931 contract |
 | NPORT-P (`app/services/manifest_parsers/sec_n_port.py`) | `_record_ingest_attempt(status='failed')` in `n_port_ingest_log` |
 | 10-K (`app/services/manifest_parsers/sec_10k.py`) | Returns `ParseOutcome(status='tombstoned')` only; manifest path does NOT call `record_parse_attempt` (the legacy helper mutates `source_accession` on UPDATE and would corrupt incumbent provenance). Manifest row's `tombstoned` state owns retry semantics. |
 
@@ -810,7 +810,7 @@ Adopted in #1152 (`instrument_business_summary` + `filed_at` column added by sql
 
 ### 11.5 ManifestSource entries with no real parser (synth no-op or out-of-band path)
 
-`ManifestSource` enum (sql/118 CHECK + `app/services/sec_manifest.py:106`) lists 14 values. As of 2026-05-14, every SEC source EITHER has a real parser registered (drains via the manifest worker) OR adopts the §11.5.1 synth no-op shape (drains as `parsed` without DB or fetch work because another path covers the SQL surface) OR is intentionally out-of-band (bulk API path, not manifest-dispatched). Catalogue:
+`ManifestSource` enum (`app/services/sec_manifest.py:107`; sql/118 CHECK, widened by later migrations) lists 18 values (incl. `sec_nt`, `sec_pre14a`, `sec_424b`, `finra_regsho_daily` added since). As of 2026-05-14, every SEC source EITHER has a real parser registered (drains via the manifest worker) OR adopts the §11.5.1 synth no-op shape (drains as `parsed` without DB or fetch work because another path covers the SQL surface) OR is intentionally out-of-band (bulk API path, not manifest-dispatched). Catalogue:
 
 | Source | Status | Why no real parser |
 |---|---|---|
@@ -850,9 +850,9 @@ Eligible adoptions for the same shape: `sec_xbrl_facts` (companyfacts API is the
 
 The #863-#873 freshness redesign's three steady-state discovery layers shipped wiring via **#1155 / PR #1157 (2026-05-13)**:
 
-- `run_atom_fast_lane` at `app/jobs/sec_atom_fast_lane.py:104` — Layer 1 (5-min Atom). Wiring: `_INVOKERS[JOB_SEC_ATOM_FAST_LANE]` at `app/jobs/runtime.py:333` + `ScheduledJob` at `app/workers/scheduler.py:1051`.
-- `run_daily_index_reconcile` at `app/jobs/sec_daily_index_reconcile.py:46` — Layer 2 (daily-index 04:00 UTC; exempt from universal-bootstrap gate per #1181). Wiring: `_INVOKERS[JOB_SEC_DAILY_INDEX_RECONCILE]` at `app/jobs/runtime.py:334` + `ScheduledJob` at `app/workers/scheduler.py:1072`.
-- `run_per_cik_poll` at `app/jobs/sec_per_cik_poll.py:39` — Layer 3 (per-CIK cadence). Wiring: `_INVOKERS[JOB_SEC_PER_CIK_POLL]` at `app/jobs/runtime.py:335` + `ScheduledJob` at `app/workers/scheduler.py:1103`.
+- `run_atom_fast_lane` at `app/jobs/sec_atom_fast_lane.py:104` — Layer 1 (5-min Atom). Wiring: `_INVOKERS[JOB_SEC_ATOM_FAST_LANE]` at `app/jobs/runtime.py:441` + `ScheduledJob` at `app/workers/scheduler.py:1533`.
+- `run_daily_index_reconcile` at `app/jobs/sec_daily_index_reconcile.py:46` — Layer 2 (daily-index 04:00 UTC; exempt from universal-bootstrap gate per #1181). Wiring: `_INVOKERS[JOB_SEC_DAILY_INDEX_RECONCILE]` at `app/jobs/runtime.py:442` + `ScheduledJob` at `app/workers/scheduler.py:1554`.
+- `run_per_cik_poll` at `app/jobs/sec_per_cik_poll.py:302` — Layer 3 (per-CIK cadence). Wiring: `_INVOKERS[JOB_SEC_PER_CIK_POLL]` at `app/jobs/runtime.py:443` + `ScheduledJob` at `app/workers/scheduler.py:1608`.
 
 Tickets #867 / #868 / #870 CLOSED 2026-05-13; umbrella #1155 CLOSED in same PR. Operator-facing runbooks live under `app/runbooks/` (NOT `app/cli/runbooks/` — Stream A PR-D / #1311).
 
