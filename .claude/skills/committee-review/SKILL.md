@@ -76,7 +76,7 @@ Each lens MUST be briefed with: identity ("You are X"), target doc path, predece
    - Top N must-fix list.
    - File index linking raw reviews.
 
-6. **Write handoff prompt** for next session — self-contained, reads findings + revises the plan or splits into streams. See `references/handoff-template.md` (if needed).
+6. **Write handoff prompt** for next session — self-contained, reads findings + revises the plan or splits into streams.
 
 7. **Update MEMORY.md index** with links to all new memos.
 

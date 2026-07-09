@@ -1,19 +1,36 @@
 # pre-push-checklist
 
-Run before every push. No exceptions. No bypassing CI to "let it catch things."
+Run before every push. No exceptions. CI does not run pytest (removed 2026-05-05) — this gate is the only test gate. `--no-verify` is for genuine emergencies only (precedent: #1387).
 
-## Gate — all four must be green
+## Gate — all must be green
 
-```
+```bash
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
-uv run pytest
+uv run pytest -m "not db"        # fast tier: pure-logic, no Postgres (~25s)
+uv run pytest tests/smoke        # app boots against the dev DB
+```
+
+If the PR touches `frontend/`, also:
+
+```bash
+pnpm --dir frontend typecheck
+pnpm --dir frontend test:unit
+```
+
+The repo hook `.githooks/pre-push` enforces the five commands above plus the chokepoint-lint scripts (`scripts/check_*.sh`) and the frontend `dark:check`. It does NOT run frontend typecheck/test:unit — run those manually; CI runs the full frontend `test` script on push. Wire once per clone: `git config core.hooksPath .githooks`.
+
+The DB-backed integration tier is OFF the push gate (operator decision 2026-06-07; `db` marker auto-applied at collection by `tests/conftest.py::pytest_collection_modifyitems`). If the diff touches DB/SQL/ingest/schema code, run it deliberately:
+
+```bash
+docker compose --profile test up -d postgres-test   # once per session
+uv run pytest -m db                                  # full integration tier
 ```
 
 Fix failures before pushing. If `uv` is not on PATH, run `where uv` to find it and add to shell config.
 
-## Then read `git diff origin/HEAD` top to bottom
+## Then read `git diff origin/main...HEAD` top to bottom
 
 Adopt the reviewer's posture: read what is there, not what you intended.
 
@@ -61,7 +78,7 @@ For every query in the diff:
 ## Same-class scan — after any fix
 
 | Found | Grep for |
-|---|---|
+| --- | --- |
 | `fetchone()` without ORDER BY | every `fetchone()` in the file |
 | Positional `row[0]` | `\[[0-9]\]` on cursor results |
 | `json.dumps` into jsonb | `json.dumps` in services/ |
@@ -79,7 +96,7 @@ After the review posts — read the **full body**, not just the verdict.
 - BLOCKING: fix before any further push
 - WARNING: fix on this PR, or open a `tech-debt` issue and put the number in the reply
 - NITPICK: fix if trivial; otherwise open a `tech-debt` issue and put the number in the reply
-- PREVENTION: extract each note to this file or the relevant skill before merging
+- PREVENTION: resolve each note before merging as `EXTRACTED {file}` (the relevant skill or `docs/review-prevention-log.md`), `ALREADY_COVERED {file}`, or `REBUTTED {reason}`
 - Nothing silently discarded — every comment gets a reply
 
 **Merge gate:** APPROVE + all WARNINGs and NITPICKs resolved or issued + all PREVENTION notes extracted + CI green on the most recent commit.

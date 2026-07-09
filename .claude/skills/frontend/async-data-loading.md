@@ -57,9 +57,11 @@ Two sources fetching from two endpoints must render independently. A combined ga
 
 The same rule applies to `error` flags: don't gate on `a.error && b.error`. Inline per-endpoint partial errors instead.
 
-### `data` must be cleared on refetch start
+### `data` must be cleared on refetch start (default)
 
-When a refetch begins, `useAsync` must set `data = null` alongside `loading = true` and `error = null`. Otherwise a successful fetch followed by a failing retry leaves the stale prior payload visible while `loading=true` and `error=null`, and callers cannot distinguish "first load in progress" from "retry in flight after success".
+By default (`preserveOnRefetch: false`), a starting refetch sets `data = null` alongside `loading = true` and `error = null`. Otherwise a successful fetch followed by a failing retry leaves the stale prior payload visible while `loading=true` and `error=null`, and callers cannot distinguish "first load in progress" from "retry in flight after success".
+
+Exception: `{ preserveOnRefetch: true }` (#1016, used by `useProcesses`) keeps `data` visible during a poll-driven revalidation (tracked via `isRevalidating`; `loading` stays `false`) but STILL clears `data` if the refetch lands in error. Opt in only for cadence-triggered polls, never for filter-driven refetches where the prior payload is semantically wrong.
 
 If you write a new async hook, verify this contract.
 
@@ -134,10 +136,11 @@ const refetchAll = useCallback(() => {
 ```
 
 The `useAsync` `refetch` identity invariant is pinned by
-`src/lib/useAsync.test.ts` ("refetch identity is stable across renders") —
+`src/lib/useAsync.test.ts` ("returns the same refetch function across
+re-renders", under the "useAsync — refetch reference stability" block) —
 this destructuring pattern is what lets ESLint see the contract.
 
-`AdminPage.tsx` is the canonical example (lines 91-95 — "Extract the refetch
+`AdminPage.tsx` is the canonical example (lines 89-104 — "Extract the refetch
 refs as local const bindings so ESLint can see their identity..."). Mirror it
 on every page that aggregates multiple `useAsync` calls.
 
@@ -163,7 +166,7 @@ Every effect that resolves async data must check a `cancelled` flag before calli
 
 ## When to promote past `useAsync`
 
-`@tanstack/react-query` is in `package.json` but currently unused. Default = stay on `useAsync`. Promote to react-query only when **at least one** of the following is true:
+`@tanstack/react-query` is in `package.json` and its `QueryClientProvider` is mounted at the app root (`main.tsx`), but no page fetches through it yet — every read still goes through `useAsync`. Default = stay on `useAsync`. Promote to react-query only when **at least one** of the following is true:
 
 - Two pages need to share the same fetched data (cache).
 - A fetch needs background refetch on focus / interval / mutation invalidation.
@@ -197,16 +200,20 @@ implementation staying that way. Grep before push:
 grep -nE 'use[A-Z][A-Za-z]+\([^)]*\[\{' frontend/src/**/*.tsx   # literal array-of-object hook args
 ```
 
-## Charting-lib mocks + the full test tier (#1841)
+## Charting-lib mocks + the test suite (#1841)
 
 A chart component that hand-rolls `vi.mock("lightweight-charts")` mocks only
 the lib subset it used at authoring time. When you make the component call a
 NEW lib method (`chart.timeScale().applyOptions(...)`, a new series/scale
-method), the mock throws `X is not a function` — and `pnpm --dir frontend
-test:unit` will NOT catch it: chart render harnesses (`ValueCanvas`,
-`ChartPage`, …) live in the **full** tier that `test:unit` excludes. So:
+method), that chart's own test mock throws `X is not a function`. The two
+files that stub the lib are `PriceChart.test.tsx` and
+`PortfolioValueChart.test.tsx` (the latter covers the `ValueCanvas` render);
+both run under `test:unit` (which excludes only `SetupPage.test.tsx`), so the
+break surfaces there — and CI gates on the full `test` script too.
+(`ChartPage.test.tsx` stubs `ChartWorkspaceCanvas`, so it never exercises the
+real lib.) So:
 
 1. Update that chart's `vi.mock` to expose the new method (mirror
    `PriceChart.test.tsx`: `timeScale: vi.fn(() => ({ …, applyOptions: vi.fn() }))`).
-2. Run the FULL `pnpm --dir frontend test` before pushing whenever you touch a
-   chart's lightweight-charts API surface — not just `test:unit`.
+2. Run `pnpm --dir frontend test` before pushing whenever you touch a chart's
+   lightweight-charts API surface.

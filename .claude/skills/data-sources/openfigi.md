@@ -92,18 +92,19 @@ Important: the 429 body is plain text, NOT JSON. The PR-1b resolver MUST:
 }
 ```
 
-**Gotcha:** the `data` array can be ENORMOUS. AAPL `037833100` returns 255 entries — every regional listing, every depositary receipt, every share-class FIGI. The first entry is empirically the US-primary common-stock listing (`exchCode='US'`, `securityType='Common Stock'`). PR-1b's defensive filter:
+**Gotcha:** the `data` array can be ENORMOUS. AAPL `037833100` returns 255 entries — every regional listing, every depositary receipt, every share-class FIGI. The first entry is empirically the US-primary common-stock listing (`exchCode='US'`, `securityType='Common Stock'`). The resolver's defensive filter (`_pick_us_primary`, `openfigi_resolver.py`):
 
 ```python
-def _pick_primary(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-    # Prefer US common stock by composite FIGI; fall back to first entry.
-    for e in entries:
-        if e.get("exchCode") == "US" and e.get("securityType") == "Common Stock":
-            return e
-    return entries[0] if entries else None
+def _pick_us_primary(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    # US common stock only. NO fallback — if no US-primary row exists the
+    # CUSIP stays unresolved (see §7.5), never bound to an OTC/foreign mirror.
+    for entry in entries:
+        if entry.get("exchCode") == "US" and entry.get("securityType") == "Common Stock":
+            return entry
+    return None
 ```
 
-Do NOT trust `data[0]` blindly without the filter — future API changes may reorder.
+Do NOT trust `data[0]` blindly without the filter — future API changes may reorder. Note the filter returns `None` (unresolved) rather than falling back to `entries[0]`.
 
 ### 4.2 Not-found
 
@@ -115,20 +116,20 @@ Single key `warning`. No `error` key. No `data` key. Probed against `000000000`.
 
 ### 4.3 Other observed entry shapes
 
-(None in the probe set. SEC has documented behaviour for malformed `idType` values returning `{"error": "..."}` — PR-1b should defensively check for `error` AND `warning` AND missing `data` and treat any of those three as "no result".)
+(None in the probe set. OpenFIGI has documented behaviour for malformed `idType` values returning `{"error": "..."}` — the resolver defensively checks for `error` AND `warning` AND missing `data` and treats any of those three as "no result" (`_entry_to_mapping` in `openfigi_resolver.py`).)
 
 ## 5. eBull integration points (post PR-1b)
 
 | Concern | Location |
 |---|---|
 | Resolver class | `app/services/openfigi_resolver.py` (PR-1b) |
-| API-key env var | `OPENFIGI_API_KEY` (read by resolver `__init__`) |
+| API-key env var | `OPENFIGI_API_KEY` — read via `OpenFigiResolver.from_env()` → `settings.openfigi_api_key` (`app/config.py`), not directly in `__init__` |
 | Lane | `Lane = Literal[..., "openfigi"]` in `app/jobs/sources.py` (PR-1b) |
 | Sweep job | `cusip_resolver_post_bulk_sweep` stage S13 (PR-1b) |
 | Persistence | `external_identifiers (provider='openfigi', identifier_type='cusip', is_primary=FALSE)` |
-| `_load_cusip_map` filter | `WHERE provider IN ('sec', 'openfigi') AND identifier_type='cusip'` (PR-1b extension to `sec_13f_dataset_ingest.py` + `sec_nport_dataset_ingest.py` + `bootstrap_preconditions.py`) |
+| CUSIP-map reader | `load_bulk_cusip_map` in `app/services/cusip_resolver.py`: `WHERE provider IN ('sec', 'openfigi') AND identifier_type='cusip'`. Called by `sec_13f_dataset_ingest.py` + `sec_nport_dataset_ingest.py`; `bootstrap_preconditions.py` applies the same filter inline. |
 
-OpenFIGI-derived rows go into `external_identifiers` with `provider='openfigi'`, **not** `provider='sec'`. The two-provider union pattern in `_load_cusip_map` is the canonical reader gate.
+OpenFIGI-derived rows go into `external_identifiers` with `provider='openfigi'`, **not** `provider='sec'`. The two-provider union pattern in `load_bulk_cusip_map` is the canonical reader gate (SEC `is_primary=TRUE` wins over an OpenFIGI `is_primary=FALSE` row for the same CUSIP via `ORDER BY is_primary DESC`).
 
 ## 6. Sample payload
 
@@ -138,7 +139,7 @@ Request (1 item):
 [{"idType": "ID_CUSIP", "idValue": "037833100"}]
 ```
 
-Response (`single_aapl.json` truncated; full file in `tests/fixtures/openfigi/`):
+Response body (the API's `[{"data": [...]}]` shape, truncated). On disk the fixture `tests/fixtures/openfigi/single_aapl.json` nests this under `response.body`, alongside `request` / `response.headers` / `response.status_code` / `scenario`:
 
 ```json
 [
@@ -155,7 +156,7 @@ Response (`single_aapl.json` truncated; full file in `tests/fixtures/openfigi/`)
 
 ### 7.1 The probe burns rate-limit budget
 
-`scripts/probe_openfigi.py` issues 4 + 30 = up to 34 POSTs unkeyed. After a full run the unkeyed account is rate-limited for ~60s. CI must NOT run the probe; only operator-driven refreshes are appropriate. Tests under `tests/test_openfigi_fixtures.py` validate stored fixtures with zero HTTP calls.
+`scripts/probe_openfigi.py` issues 3 scenario POSTs (single_aapl, batch_known_5, batch_with_invalid) + up to 30 saturation POSTs = up to 33 POSTs unkeyed (plus a preflight GET). After a full run the unkeyed account is rate-limited for ~60s. CI must NOT run the probe; only operator-driven refreshes are appropriate. Tests under `tests/test_openfigi_fixtures.py` validate stored fixtures with zero HTTP calls.
 
 ### 7.2 ToS posture
 
@@ -178,13 +179,13 @@ A CUSIP can map to several FIGI rows that share `compositeFIGI` (e.g. one row pe
 
 ### 7.5 Pink-sheet / OTC tickers
 
-OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. Operator action if no `US`-row exists: the sweep records `name` + `cusip` to `unresolved_13f_cusips` with a follow-up `partial_data_reason='openfigi_no_us_listing'`.
+OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_us_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. When no `US`-row exists the sweep tombstones the `unresolved_13f_cusips` row with `resolution_status='openfigi_unknown'` (sql/192, #740 — terminal in v1; `SET resolution_status=NULL` is the manual retry escape hatch). The sibling `openfigi_no_instrument` status is written when OpenFIGI returns a ticker but it has no unique `is_tradable` `instruments.symbol` match.
 
 ### 7.6 Per-instance limiter — single-process only
 
-`_RateLimiter` is **per-instance**, NOT module-global ([`openfigi_resolver.py:148-176`](../../../app/services/openfigi_resolver.py#L148-L176); contrast with sec-edgar's `_PROCESS_RATE_LIMIT_CLOCK` module-global pattern). Multiple `OpenFigiResolver` instances in the same process do NOT coordinate budget. Two consequences:
+`_RateLimiter` is **per-instance**, NOT module-global ([`openfigi_resolver.py:148-202`](../../../app/services/openfigi_resolver.py#L148-L202); contrast with sec-edgar's `_PROCESS_RATE_LIMIT_CLOCK` module-global pattern in `app/providers/implementations/sec_edgar.py`). Multiple `OpenFigiResolver` instances in the same process do NOT coordinate budget. Two consequences:
 
-- **Single-process safety:** the bootstrap-orchestrator `openfigi` lane is cap=1 (`.claude/skills/data-engineer/SKILL.md` §6.5.1), so only one `cusip_resolver_post_bulk_sweep` runs at a time. Combined with "instantiate once per sweep" ([`openfigi_resolver.py:258`](../../../app/services/openfigi_resolver.py#L258)), the lane cap is the effective budget gate within a process.
+- **Single-process safety:** the bootstrap-orchestrator `openfigi` lane is cap=1 (`.claude/skills/data-engineer/SKILL.md` §6.5.1), so only one `cusip_resolver_post_bulk_sweep` runs at a time. Combined with "instantiate once per sweep" ([`openfigi_resolver.py:257`](../../../app/services/openfigi_resolver.py#L257)), the lane cap is the effective budget gate within a process.
 - **Cross-process / multi-worker:** N workers = N independent budgets = total budget × N at the OpenFIGI account level. Either (a) keep a single worker for OpenFIGI work, or (b) move the budget gate to Redis / Postgres before scaling out. eBull's current topology is single-worker so the per-instance pattern is correct; document any future scale-out as breaking this invariant.
 
 When ADDING a new caller (e.g. a future on-demand resolver from the API layer), reuse a shared module-global `OpenFigiResolver` instance per process — do NOT instantiate per-request. The token bucket starts empty on construction and would silently burn the unkeyed 25/min budget after ~25 requests.
@@ -212,7 +213,7 @@ curl -s -X POST https://api.openfigi.com/v3/mapping \
 
 ### 8.3 Obtain an API key
 
-Sign up at <https://www.openfigi.com/api> and provision an API key. Set `OPENFIGI_API_KEY` in eBull's environment to switch the resolver to the keyed tier (250× the unkeyed throughput).
+Sign up at <https://www.openfigi.com/api> and provision an API key. Set `OPENFIGI_API_KEY` in eBull's environment to switch the resolver to the keyed tier (25,000 vs 250 mappings/min = 100× the unkeyed throughput).
 
 ## 9. Cross-references
 

@@ -261,6 +261,8 @@ Read and apply these before pushing:
 - `.claude/skills/engineering/python-hygiene.md`
 - `.claude/skills/engineering/sql-correctness.md`
 - `.claude/skills/engineering/test-quality.md`
+- `.claude/skills/engineering/pre-push-checklist.md` — the canonical pre-push gate list (SQL/Python/test checks + review-comment handling); mirrors `.githooks/pre-push`.
+- `.claude/skills/engineering/bash-script-hygiene.md` — read when editing any `scripts/*.sh`, especially the chokepoint-lint guards (shellcheck `-S warning` floor, `set -e` in `$(…)`).
 
 ### Frontend skills (read on any ticket touching `frontend/`)
 

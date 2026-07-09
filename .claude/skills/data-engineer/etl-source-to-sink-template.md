@@ -8,7 +8,7 @@ Every ETL source — SEC manifest, SEC ad-hoc, SEC bulk reference, FINRA caller-
 
 **Three independent gates enforce this:**
 
-1. **Pre-push lint guard** — `scripts/check_etl_source_docs.sh` (wired into `.githooks/pre-push`). Fails if any source in `ManifestSource` Literal, ad-hoc list, or bulk-reference list is missing its spec file or missing a required section header. Runs in <100ms.
+1. **Pre-push lint guard** — `scripts/check_etl_source_docs.sh` (wired into `.githooks/pre-push`). Fails if any source in `ManifestSource` Literal, ad-hoc list, or bulk-reference list is missing its spec file or missing a required section header. Runs in ~0.3s (three `uv run python -m scripts._etl_source_inventory` forks to read the canonical lists).
 2. **CI lint** — same script invoked in `.github/workflows/ci.yml` so a push that bypasses the local hook still trips at the cloud gate.
 3. **Pytest smoke** — `tests/smoke/test_etl_source_to_sink.py` parametrizes over every source: spec-file-exists / required-sections-present / ad-hoc-architectural-exception-section-present / registered-parser-exists. Runs in seconds; integration-marker keeps it cheap.
 
@@ -16,15 +16,15 @@ A source that lacks a spec file is, by definition, not done. The integrity-frame
 
 ## How to add a new source
 
-1. **Manifest source**: add the source string to `ManifestSource` Literal at `app/services/sec_manifest.py:106-122`. The smoke test derives `_MANIFEST_SOURCES` automatically via `get_args(ManifestSource)`; no test/lint edit needed.
+1. **Manifest source**: add the source string to `ManifestSource` Literal at `app/services/sec_manifest.py:107-126`. `MANIFEST_SOURCES` in `scripts/_etl_source_inventory.py` is derived via `get_args(ManifestSource)`, so the smoke test AND lint pick it up automatically; no test/lint edit needed.
 2. **Non-manifest (ad-hoc / bulk-reference) source**: add the source string to `AD_HOC_SOURCES` or `BULK_REFERENCE_SOURCES` in `scripts/_etl_source_inventory.py` (single source of truth — the smoke test AND the lint script both read from there; do NOT edit either file directly).
 3. Copy the template from `docs/etl/sources/README.md § Template` into `docs/etl/sources/<source>.md`.
 4. Fill in all 13 sections. Every concrete claim MUST cite `path:line` from live code. The skill enforces grounding via section grep; the smoke test enforces section presence.
-5. Add the matching manifest parser at `app/services/manifest_parsers/<source>.py` (or `_<source>_*.py` per existing naming). Register it in `app/services/manifest_parsers/__init__.py:register_all_parsers`.
+5. Add the manifest parser module under `app/services/manifest_parsers/`, named by form-family: a dedicated source gets its own `<source>.py` (e.g. `sec_424b.py`), while a family module can register several sources (`insider_345.py` registers sec_form3/sec_form4/sec_form5; `sec_13dg.py` registers sec_13d + sec_13g). Expose a `register()` and wire it into `register_all_parsers()` in `app/services/manifest_parsers/__init__.py`.
 6. Run `bash scripts/check_etl_source_docs.sh` locally — must exit 0.
 7. Run `uv run pytest tests/smoke/test_etl_source_to_sink.py -v` — every parametrize-case for the new source must pass.
 
-If any of (1)–(6) is skipped, the PR will not push (pre-push hook blocks) or will not merge (CI fail).
+Steps (6)–(7) just run the gates locally; the wiring in (1)–(5) is what's enforced. Skip a spec file or a required section and the lint guard blocks both the push (pre-push hook) and the merge (CI). Skip the parser registration in (5) and `tests/smoke` fails the push — note CI does NOT run pytest, so the pre-push hook is the only gate on parser registration.
 
 ## How to MODIFY an existing source
 

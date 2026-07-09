@@ -6,7 +6,7 @@
 
 Mandatory before push for any PR touching:
 
-- Filings ETL (Form 4 / Form 3 / 13D/G / 13F-HR / DEF 14A / N-PORT / N-CSR / 10-K / 10-Q / 8-K / SBR / S-1).
+- Filings ETL — any form parser: Form 3/4/5, 13D/G, 13F-HR, DEF 14A / PRE 14A, N-PORT, N-CSR, 10-K / 10-Q / 8-K, NT notices, 424B, or any newly added form (authoritative map: `_FORM_TO_SOURCE` in `app/services/sec_manifest.py`).
 - Ownership rollup or any per-category observations / current table.
 - Schema migrations on any ownership / fundamentals / share-count surface.
 - Identity resolution (filer_cik, holder_name, CUSIP, ISIN).
@@ -43,8 +43,10 @@ Codex generic review is too neutral. Brief it with explicit role lenses so it ap
 
 ## Standard prompt template
 
+Run from the repo root:
+
 ```bash
-codex.cmd exec --output-last-message /tmp/<branch>-codex.txt "Review <branch> in d:/Repos/eBull. Diff: <list files + one-line each>.
+codex exec --output-last-message /tmp/<branch>-codex.txt "Review <branch> in this repo. Diff: <list files + one-line each>.
 
 Acceptance: <issue criterion 1>; <criterion 2>; ...
 
@@ -71,6 +73,8 @@ Push only after every finding reaches a terminal state. The bot will then have l
 ## EdgarTools alignment
 
 For ownership-related PRs, cross-reference what `dgunning/edgartools` (MIT, the canonical open-source SEC parser) extracts per form. If our schema captures fewer fields than EdgarTools exposes for the same form, surface the gap — operator wants every available field digested even when the rollup doesn't render it yet, so future expansions don't need re-wash.
+
+Authoritative EdgarTools coverage matrix + API cheat-sheet + gotchas: `.claude/skills/data-sources/edgartools.md` — prefer it over the quick-reference below if the two disagree.
 
 Quick-reference of what EdgarTools provides per form (cross-check before extending observations tables):
 

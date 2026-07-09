@@ -4,10 +4,7 @@ Mandatory self-review skill to run before every push.
 
 ## Goal
 
-Catch the review agent's likely objections **before** opening another review round.
-
-This is not optional.
-Run this against the actual diff before every push.
+Catch the review agent's likely objections **before** opening another review round. Not optional — run it against the actual diff before every push.
 
 ## Process
 
@@ -35,7 +32,7 @@ For every changed function that reads or writes DB state:
 - if this is the first row for a key, does versioning / insert logic still work?
 
 ### B. SQL correctness
-Check for:
+Check for (full rules + fix patterns: `.claude/skills/engineering/sql-correctness.md`):
 - two-step `MAX(...) + 1` versioning
 - `fetchone()` without `ORDER BY ... LIMIT 1`
 - positional row access like `row[0]`
@@ -48,7 +45,7 @@ Check for:
 If any of these appear, stop and fix them.
 
 ### C. Python hygiene
-Check for:
+Check for (full rules: `.claude/skills/engineering/python-hygiene.md`):
 - missing `from __future__ import annotations`
 - mutable parameter types where `Sequence[...]` is correct
 - magic string action names instead of shared `Literal` aliases
@@ -58,7 +55,7 @@ Check for:
 - misleading logs after dedup/filtering
 
 ### D. Test quality
-For every changed public function or behaviour:
+For every changed public function or behaviour (full rules: `.claude/skills/engineering/test-quality.md`):
 - is there a test for the happy path?
 - is there a test for the empty/first-row case?
 - is there a test for missing optional data?
@@ -141,12 +138,9 @@ If the diff touches `frontend/`, also read and apply these before pushing:
 - `.claude/skills/frontend/api-shape-and-types.md` — `types.ts` mirrors Pydantic `response_model` in the same PR; `apiFetch` path contract; auth stays in the client
 - `.claude/skills/frontend/operator-ui-conventions.md` — formatters, color semantics, density, status pill vocabulary
 
-- **encoding-comment vs test:** a comment that states a numeric encoding (gradient
-  offset, sign convention, index→meaning) must match the sign-regime tests in the
-  same file. After writing one, read the test that pins it. (PR #1758: an inverted
-  `splitOffset` JSDoc claimed `1 = full red` when the tests prove `1 = full emerald`.)
+**Encoding-comment vs test:** a comment that states a numeric encoding (gradient offset, sign convention, index→meaning) must match the sign-regime tests in the same file. After writing one, read the test that pins it. (PR #1758: an inverted `splitOffset` JSDoc claimed `1 = full red` when the tests prove `1 = full emerald` — `frontend/src/lib/newsAnalytics.test.ts`.)
 
-For frontend pages, also grep:
+For frontend pages, also grep (same commands as `async-data-loading.md` §"Pre-push checklist for async code"):
 
 ```bash
 grep -nE '\.loading\s*\|\|' frontend/src/pages/*.tsx     # combined loading gates

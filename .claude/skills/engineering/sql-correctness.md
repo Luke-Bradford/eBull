@@ -7,12 +7,14 @@ Engineering standard for writing correct SQL in this stack (psycopg3 + PostgreSQ
 Never compute a sequence value as a separate SELECT then INSERT. That's a TOCTOU race: two concurrent writers can read the same MAX and produce duplicate versions.
 
 **Wrong:**
+
 ```python
 version = conn.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM t WHERE id = %s", [id]).fetchone()[0]
 conn.execute("INSERT INTO t (id, version) VALUES (%s, %s)", [id, version])
 ```
 
 **Correct — scalar subquery inside VALUES:**
+
 ```sql
 INSERT INTO t (id, version, ...)
 VALUES (
@@ -30,7 +32,7 @@ This is atomic. COALESCE handles NULL from MAX on an empty table — always trac
 
 ## fetchone() requires ORDER BY
 
-Any `fetchone()` without an explicit `ORDER BY` returns a non-deterministic row. Any query for "the latest" row needs both `ORDER BY <timestamp> DESC` and `LIMIT 1`.
+Any `fetchone()` on a query whose predicate can match more than one row needs an explicit `ORDER BY` — without it the row returned is non-deterministic. (Unique-key/singleton lookups, e.g. `WHERE id = TRUE` on `kill_switch`, are exempt.) Any query for "the latest" row needs both `ORDER BY <timestamp> DESC` and `LIMIT 1`.
 
 After fixing a missing ORDER BY: grep the whole file for every `fetchone()` call — a partial fix is worse than none.
 
@@ -49,6 +51,7 @@ Pattern: do all I/O first, then open the transaction for the writes only.
 ## NULL in comparisons
 
 `col != 'value'` excludes NULLs silently — they are neither equal nor not-equal. Decide whether NULLs should be included and use the right form:
+
 - Include NULLs: `col IS DISTINCT FROM 'value'`
 - Parameterised NULL equality: `col IS NOT DISTINCT FROM %s`
 - Never: `col IS %s` — illegal in psycopg3
@@ -60,7 +63,7 @@ Pattern: do all I/O first, then open the transaction for the writes only.
 - Never f-strings or `.format()` in SQL strings — SQL injection vector
 - `IN` clauses: `= ANY(%s)` with a list, not `IN %s` with a tuple
 - Literal `%` in LIKE patterns: `%%`
-- **Nullable-filter param must be cast to its column type.** A `None` binds as an untyped NULL (OID 0); psycopg3's extended-protocol send gives Postgres no type, and `%(x)s IS NULL OR col = %(x)s` can leave the planner unable to infer it — `psycopg.errors.AmbiguousParameter: could not determine data type of parameter $N`. Cast every occurrence: `%(x)s::bigint IS NULL OR col = %(x)s::bigint`. The trap hides when the only exercised path always passes a concrete value (which *does* give Postgres the type) — the no-filter/`None` path never gets tested. (#1961: `get_activity` optional `instrument_id` filter added by #1926 500'd the whole Portfolio Activity tab.)
+- **Nullable-filter param must be cast to its column type.** A `None` binds as an untyped NULL (OID 0); psycopg3's extended-protocol send gives Postgres no type, and `%(x)s IS NULL OR col = %(x)s` can leave the planner unable to infer it — `psycopg.errors.AmbiguousParameter: could not determine data type of parameter $N`. Cast every occurrence: `%(x)s::bigint IS NULL OR col = %(x)s::bigint`. The trap hides when the only exercised path always passes a concrete value (which *does* give Postgres the type) — the no-filter/`None` path never gets tested. (#1961: `get_activity` in `app/api/portfolio.py` — optional `instrument_id` filter added by #1926 500'd the whole Portfolio Activity tab.)
 
 ## Conditional JOINs in filter-aware list queries
 
@@ -104,7 +107,7 @@ Without this, the caller believes the mutation succeeded while the row is unchan
 ## Same-class scan after any fix
 
 | Found | Grep for |
-|---|---|
+| --- | --- |
 | `fetchone()` missing ORDER BY | every `fetchone()` in the file |
 | Positional `row[0]` | `\[[0-9]\]` on cursor results |
 | `MAX(` in a two-step sequence | `MAX(` in service files |
@@ -133,9 +136,10 @@ rg -n "ADD CONSTRAINT.*<column>" sql/
 ```
 
 Worked example (Codex 2 catch, 2026-05-27 PR phase-0-new-b-c-bundle):
-* `sql/114_ownership_institutions_observations.sql` creates `ownership_institutions_current` with `filer_cik TEXT NOT NULL` — looks unconstrained.
-* `sql/134_ownership_identifier_check_constraints.sql:54-58` adds `CHECK (filer_cik ~ '^[0-9]{10}$')`.
-* A seeder that grepped only the CREATE TABLE saw "NOT NULL TEXT" and emitted `SYN00000000` → COPY aborted on first row.
+
+- `sql/114_ownership_institutions_observations.sql` creates `ownership_institutions_current` with `filer_cik TEXT NOT NULL` — looks unconstrained.
+- `sql/134_ownership_identifier_check_constraints.sql:57-59` adds `CHECK (filer_cik ~ '^[0-9]{10}$')` (`chk_institutions_cur_filer_cik`).
+- A seeder that grepped only the CREATE TABLE saw "NOT NULL TEXT" and emitted `SYN00000000` → COPY aborted on first row.
 
 The lesson lives in `feedback_grep_alter_constraints` (memory) and `docs/review-prevention-log.md`.
 
@@ -153,8 +157,8 @@ Do NOT "simplify" to `ts_col <= %(end)s::date` — comparing a timestamp
 to a date coerces the date to midnight, silently dropping every
 intraday row on the last day. (PR #1597 review suggested exactly that
 rewrite; it would have excluded the whole final day of each report
-period.) `reporting.py` uses the half-open form at every period-bounded
-query — keep new queries consistent with it.
+period.) `app/services/reporting.py` uses the half-open form at every
+period-bounded query — keep new queries consistent with it.
 
 ## Two date-resolved lookups can collapse to one row → a fake zero
 
