@@ -1,0 +1,186 @@
+{
+  "symbol": "MSFT",
+  "instrument_id": 1004,
+  "context": {
+    "instrument": {
+      "symbol": "MSFT",
+      "company_name": "Microsoft",
+      "sector": "8",
+      "industry": null,
+      "country": "US",
+      "currency": "USD"
+    },
+    "fundamentals": [
+      {
+        "as_of_date": "2026-03-31",
+        "revenue_ttm": 281724000000.0,
+        "gross_margin": 0.6882,
+        "operating_margin": 0.4562,
+        "fcf": 71611000000.0,
+        "cash": 32105000000.0,
+        "debt": 40262000000.0,
+        "net_debt": 8157000000.0,
+        "eps": 13.64,
+        "book_value": 55.777
+      }
+    ],
+    "filings": [],
+    "news": [
+      {
+        "event_time": "2026-06-28T02:32:14+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Capex boom threatens to crowd out buybacks, key equity demand driver",
+        "category": "earnings",
+        "sentiment_score": 1.0,
+        "importance_score": 0.8297
+      },
+      {
+        "event_time": "2026-07-09T01:14:34+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Commvault (CVLT) Stock Has Cheap Cash Flow But Expensive Earnings",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.8233
+      },
+      {
+        "event_time": "2026-06-29T20:26:15+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Consumer Internet Stocks Q1 Teardown: Expedia (NASDAQ:EXPE) Vs The Rest",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.7998
+      },
+      {
+        "event_time": "2026-07-08T20:14:46+00:00",
+        "source": "Yahoo Finance",
+        "headline": "SAP (XTRA:SAP) Stock Looks Below Fair Value Despite AI Hopes",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.7988
+      },
+      {
+        "event_time": "2026-07-08T20:05:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Microsoft announces quarterly earnings release date",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.798
+      },
+      {
+        "event_time": "2026-06-29T20:05:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Big tech faces AI spending scrutiny ahead of Q2 earnings: Wedbush",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.798
+      },
+      {
+        "event_time": "2026-07-04T13:16:18+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Meta (META) Launches Meta Compute To Sell AI Power Beyond Advertising",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.7646
+      },
+      {
+        "event_time": "2026-06-30T01:08:41+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Wall Street Tech Analyst: Micron Could 4x If the AI Cycle Lasts Through 2030",
+        "category": "analyst_note",
+        "sentiment_score": 0.0,
+        "importance_score": 0.6895
+      },
+      {
+        "event_time": "2026-07-06T19:41:19+00:00",
+        "source": "Yahoo Finance",
+        "headline": "JPMorgan Cuts Wix.com (WIX) Target to $62 in a Sector-Wide Recalibration",
+        "category": "analyst_note",
+        "sentiment_score": -0.6667,
+        "importance_score": 0.6628
+      },
+      {
+        "event_time": "2026-07-08T15:35:24+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Microsoft (MSFT) Unifies Copilot Strategy to Challenge ChatGPT and Claude",
+        "category": "analyst_note",
+        "sentiment_score": 0.0,
+        "importance_score": 0.6427
+      }
+    ],
+    "prior_thesis": null,
+    "risk_metrics": {
+      "metric_version": "risk_v1",
+      "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
+      "windows": [
+        {
+          "window_key": "1y",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": -0.220326848336744,
+          "excess_cagr_vs_spy": -0.42621865482350124,
+          "vol_annualized": 0.26751618485012296,
+          "beta": 0.9095865680948223,
+          "beta_r2": 0.19330783397713108,
+          "calmar": -0.6163412625157717,
+          "max_drawdown": -0.35747541457376625,
+          "current_drawdown": -0.2959310108538488,
+          "var_5": -0.0275769,
+          "worst_day": -0.05007533492259659,
+          "cagr_status": "partial_window",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "partial_window"
+        },
+        {
+          "window_key": "3y",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.05360041083669935,
+          "excess_cagr_vs_spy": -0.14097446346441952,
+          "vol_annualized": 0.24388012420342062,
+          "beta": 1.012192288353806,
+          "beta_r2": 0.3614378826660817,
+          "calmar": 0.14994153066612842,
+          "max_drawdown": -0.35747541457376625,
+          "current_drawdown": -0.2959310108538488,
+          "var_5": -0.02523972,
+          "worst_day": -0.06250042430778993,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        },
+        {
+          "window_key": "full",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.09127375757342471,
+          "excess_cagr_vs_spy": -0.07158685916727008,
+          "vol_annualized": 0.268805583128706,
+          "beta": 1.1227676649426084,
+          "beta_r2": 0.4727346440628069,
+          "calmar": 0.25532876906305413,
+          "max_drawdown": -0.35747541457376625,
+          "current_drawdown": -0.2959310108538488,
+          "var_5": -0.02619969,
+          "worst_day": -0.08009421298459037,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        }
+      ]
+    },
+    "earnings_history": [],
+    "analyst_estimates": null
+  }
+}

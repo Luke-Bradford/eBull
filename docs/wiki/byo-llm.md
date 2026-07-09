@@ -35,11 +35,32 @@ curl -s -X POST -H "Authorization: Bearer $EBULL_SERVICE_TOKEN" \
 - **qwen3 thinking mode** burns the whole completion budget
   (`finish_reason=length`, empty content). The provider layer appends
   `/no_think` to the system prompt and strips any `<think>…</think>`
-  block defensively — but pick models with the eval harness (#1919
-  PR-C) before switching `llm_model`.
+  block defensively — but pick models with the eval harness before
+  switching `llm_model`:
+
+  ```bash
+  # Replay the house-panel fixtures (AAPL/GME/MSFT/JPM/HD) against a
+  # candidate model; go-live gate = >=9/10 writer passes with retry.
+  PYTHONPATH=. uv run python scripts/llm_eval_thesis.py run \
+    --models qwen3:14b <candidate-model> --gate-model <candidate-model>
+  # Re-capture fixtures from the dev DB (dev-guarded):
+  PYTHONPATH=. uv run python scripts/llm_eval_thesis.py capture
+  ```
+
 - A failed generation records `finish_reason` in `thesis_runs.error` —
   `length` means truncation (context/output window too small), `stop`
   with a JSON error means the model can't hold the schema.
+- **deepseek-r1 needs the fence normalization** (benchmark 2026-07-09,
+  #1919 PR-C): Ollama does not enforce `response_format=json_object`
+  for it, and it often wraps otherwise schema-valid JSON in a
+  ` ```json ` fence. Since PR-C the provider strips one whole-text code
+  fence (model-neutral, lossless — same class as the `<think>` strip),
+  which flipped deepseek-r1:14b's writer gate from 4/10 FAIL to 10/10
+  PASS. It also intermittently answers with a free-prose markdown memo
+  (no JSON at all) — deliberately NOT recovered; the retry absorbs it.
+  qwen3:14b stays the default: critic reliability 10/10 vs 9/10 and
+  enum validity 100% vs 87%, though deepseek is ~2.5× faster on this
+  hardware (7.9 vs 3.1 tok/s).
 
 The full operator guide (model choice, Ollama install, context-window
 sizing, quantisation tips) lives outside this repo — seeded from the

@@ -1,0 +1,198 @@
+{
+  "symbol": "GME",
+  "instrument_id": 1699,
+  "context": {
+    "instrument": {
+      "symbol": "GME",
+      "company_name": "GameStop Corp.",
+      "sector": "7",
+      "industry": null,
+      "country": "US",
+      "currency": "USD"
+    },
+    "fundamentals": [
+      {
+        "as_of_date": "2026-05-02",
+        "revenue_ttm": 3629900000.0,
+        "gross_margin": 0.3295,
+        "operating_margin": 0.0639,
+        "fcf": 597300000.0,
+        "cash": 7397600000.0,
+        "debt": 4164300000.0,
+        "net_debt": -3233300000.0,
+        "eps": 0.77,
+        "book_value": 13.0201
+      },
+      {
+        "as_of_date": "2026-01-31",
+        "revenue_ttm": 3629900000.0,
+        "gross_margin": 0.3295,
+        "operating_margin": 0.0639,
+        "fcf": 597300000.0,
+        "cash": 6304700000.0,
+        "debt": 4164300000.0,
+        "net_debt": -2140400000.0,
+        "eps": 0.77,
+        "book_value": 12.1445
+      }
+    ],
+    "filings": [],
+    "news": [
+      {
+        "event_time": "2026-06-27T00:01:54+00:00",
+        "source": "Yahoo Finance",
+        "headline": "GME Stock Jumps After-Hours \u2014 GameStop Hikes FY26 EBITDA Outlook To $600M, Nearly Double Of FY25",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.7826
+      },
+      {
+        "event_time": "2026-07-03T19:15:48+00:00",
+        "source": "Yahoo Finance",
+        "headline": "GameStop (GME) Stock Looks Undervalued On Earnings But Mixed On Fair Value",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.7723
+      },
+      {
+        "event_time": "2026-06-28T04:15:16+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Ryan Cohen passes on GameStop payday to keep pushing one acquisition",
+        "category": "general",
+        "sentiment_score": 0.0,
+        "importance_score": 0.6
+      },
+      {
+        "event_time": "2026-06-27T11:30:01+00:00",
+        "source": "Yahoo Finance",
+        "headline": "eBay vs. Macy's: Which Consumer Stock Is a Better Buy in 2026?",
+        "category": "general",
+        "sentiment_score": 0.0,
+        "importance_score": 0.6
+      },
+      {
+        "event_time": "2026-07-04T05:07:24+00:00",
+        "source": "Yahoo Finance",
+        "headline": "GameStop (GME) Keeps Chasing EBay As Ryan Cohen Drops Award And Targets Rise",
+        "category": "general",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.5873
+      },
+      {
+        "event_time": "2026-07-07T21:41:20+00:00",
+        "source": "Yahoo Finance",
+        "headline": "GME Stock Rises After Hours \u2014 GameStop Shareholders Back Bigger Share Count To Support Proposed eBay Acquisition",
+        "category": "general",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.5726
+      },
+      {
+        "event_time": "2026-07-01T20:15:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Sony to cease physical PlayStation disc production in 2028",
+        "category": "general",
+        "sentiment_score": 0.0,
+        "importance_score": 0.5655
+      },
+      {
+        "event_time": "2026-07-07T20:05:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "GameStop Stockholders Approve Proposals at 2026 Annual Meeting, Including Increased Share Authorization",
+        "category": "general",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.5647
+      },
+      {
+        "event_time": "2026-07-01T20:01:24+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Is The Jack In The Box Short Squeeze Back On?",
+        "category": "general",
+        "sentiment_score": 0.0,
+        "importance_score": 0.5644
+      },
+      {
+        "event_time": "2026-07-01T19:41:56+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Musk Meme Traders Rush Back Into Tesla When the Stock Hits $420",
+        "category": "general",
+        "sentiment_score": 0.0,
+        "importance_score": 0.5628
+      }
+    ],
+    "prior_thesis": null,
+    "risk_metrics": {
+      "metric_version": "risk_v1",
+      "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
+      "windows": [
+        {
+          "window_key": "1y",
+          "as_of_date": "2026-07-08",
+          "benchmark_symbol": "SPY",
+          "cagr": -0.027536984396588898,
+          "excess_cagr_vs_spy": -0.23430709787736095,
+          "vol_annualized": 0.3573222522612717,
+          "beta": 0.8706198671839803,
+          "beta_r2": 0.09926023083103817,
+          "calmar": -0.09840719988059501,
+          "max_drawdown": -0.27982692760287486,
+          "current_drawdown": -0.19981172040480114,
+          "var_5": -0.03146602,
+          "worst_day": -0.11542814032440589,
+          "cagr_status": "partial_window",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "partial_window"
+        },
+        {
+          "window_key": "3y",
+          "as_of_date": "2026-07-08",
+          "benchmark_symbol": "SPY",
+          "cagr": -0.02007152584554343,
+          "excess_cagr_vs_spy": -0.2146655247426728,
+          "vol_annualized": 0.9699439723267196,
+          "beta": 1.1457343658656036,
+          "beta_r2": 0.02923732520893266,
+          "calmar": -0.0320399984667502,
+          "max_drawdown": -0.6264521475047147,
+          "current_drawdown": -0.5489464532088072,
+          "var_5": -0.05366101,
+          "worst_day": -0.388901451569417,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        },
+        {
+          "window_key": "full",
+          "as_of_date": "2026-07-08",
+          "benchmark_symbol": "SPY",
+          "cagr": -0.06920117231217202,
+          "excess_cagr_vs_spy": -0.1755267342882932,
+          "vol_annualized": 0.9471661519822387,
+          "beta": 1.4054810780076457,
+          "beta_r2": 0.059746805881421665,
+          "calmar": -0.08994326183595776,
+          "max_drawdown": -0.7693869546157218,
+          "current_drawdown": -0.5489464532088072,
+          "var_5": -0.06505815,
+          "worst_day": -0.388901451569417,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        }
+      ]
+    },
+    "earnings_history": [],
+    "analyst_estimates": null
+  }
+}
