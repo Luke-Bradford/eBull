@@ -1042,18 +1042,28 @@ def generate_thesis(
     # Validated by _validate_writer_output; cast once and reuse.
     confidence = float(writer_output["confidence_score"])  # type: ignore[arg-type]
 
-    with conn.transaction():
-        # critic_output is {} on failure — treat empty dict as no critic data
-        thesis_id, version = _insert_thesis_atomic(
-            conn,
-            instrument_id,
-            writer_output,
-            critic_output if critic_output else None,
-            model=writer_completion.model,
-            provider=client.provider_name,
-        )
-        _update_last_reviewed(conn, instrument_id)
-        _finish_thesis_run_ok(conn, run_id, thesis_id)
+    # Codex ckpt-2 HIGH: a failure INSIDE this write transaction (e.g. a
+    # UniqueViolation when a concurrent generation raced the versioning
+    # subquery — the UNIQUE(instrument_id, thesis_version) final guard)
+    # must not strand the run row at 'running' forever. The transaction
+    # CM rolls the writes back; record the failure in its own short tx,
+    # then re-raise.
+    try:
+        with conn.transaction():
+            # critic_output is {} on failure — treat empty dict as no critic data
+            thesis_id, version = _insert_thesis_atomic(
+                conn,
+                instrument_id,
+                writer_output,
+                critic_output if critic_output else None,
+                model=writer_completion.model,
+                provider=client.provider_name,
+            )
+            _update_last_reviewed(conn, instrument_id)
+            _finish_thesis_run_ok(conn, run_id, thesis_id)
+    except Exception as exc:
+        _record_thesis_run_failure(conn, run_id, exc)
+        raise
 
     logger.info(
         "Thesis generated: instrument_id=%d version=%d stance=%s confidence=%.2f",

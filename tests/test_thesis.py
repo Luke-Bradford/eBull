@@ -554,6 +554,30 @@ class TestGenerateThesis:
             next(s for s in conn.sql_log if "insert into theses" in s)
         )
 
+    def test_db_failure_after_llm_records_failed_run(self) -> None:
+        """Codex ckpt-2 HIGH: a failure inside the final write transaction
+        (e.g. UniqueViolation from a racing generation) must mark the run
+        row failed — never strand it at 'running' — and re-raise."""
+        conn = _make_conn(insert_returns_version=1)
+        original = conn.execute.side_effect
+
+        def failing_side_effect(sql, params: dict | None = None):  # type: ignore[no-untyped-def]
+            sql_str = sql if isinstance(sql, str) else str(sql)
+            sql_strip = " ".join(sql_str.split()).lower()
+            if "insert into theses (" in sql_strip:
+                conn.sql_log.append(sql_strip)
+                raise RuntimeError("duplicate key value violates unique constraint")
+            return original(sql, params)
+
+        conn.execute.side_effect = failing_side_effect
+        client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
+
+        with pytest.raises(RuntimeError, match="unique constraint"):
+            generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+
+        failed_updates = [s for s in conn.sql_log if s.startswith("update thesis_runs") and "'failed'" in s]
+        assert len(failed_updates) == 1
+
     def test_writer_failure_records_failed_run_and_reraises(self) -> None:
         """#1919: a writer failure (after its retry) must mark the run
         row failed — with the error text — and re-raise."""
