@@ -1,0 +1,123 @@
+{
+  "symbol": "AAPL",
+  "instrument_id": 1001,
+  "context": {
+    "instrument": {
+      "symbol": "AAPL",
+      "company_name": "Apple",
+      "sector": "3",
+      "industry": null,
+      "country": "US",
+      "currency": "USD"
+    },
+    "fundamentals": [
+      {
+        "as_of_date": "2026-03-28",
+        "revenue_ttm": 416161000000.0,
+        "gross_margin": 0.4691,
+        "operating_margin": 0.3197,
+        "fcf": 98767000000.0,
+        "cash": 45572000000.0,
+        "debt": 82700000000.0,
+        "net_debt": 37128000000.0,
+        "eps": 7.46,
+        "book_value": 7.2602
+      }
+    ],
+    "filings": [],
+    "news": [],
+    "prior_thesis": {
+      "version": 1,
+      "thesis_type": "compounder",
+      "stance": "buy",
+      "confidence_score": 0.9,
+      "buy_zone_low": null,
+      "buy_zone_high": null,
+      "base_value": null,
+      "bull_value": null,
+      "bear_value": null,
+      "break_conditions": [
+        "Material disruption in iPhone demand due to macroeconomic collapse",
+        "Regulatory clampdown on AI innovation (core growth driver)",
+        "Breakdown in supply chain resilience (Taiwan/China)",
+        "Sustained failure to innovate in wearables/cloud services"
+      ],
+      "memo_markdown": "### Business Quality\nApple (AAPL) demonstrates textbook compounder attributes with $416B TTM revenue, 46.9% gross margins, and $98.8B free cash flow. Strong balance sheet (net debt/EBITDA < 1x) supports reinvestment. Innovation moats in hardware-software integration and ecosystem lock-in remain intact despite saturation risks in core markets.\n\n### Key Financials\nRecent fundamental snapshot shows 31.97% operating margin, $45.6B cash reserves, and robust 7.46 EPS. While 1Y CAGR appears inflated by partial_window data, 3Y and full-window metrics show 16.7% CAGR vs S&P 500 (benchmark_symbol: SPY). Beta of 1.06 (3Y) reflects moderate volatility, though max drawdown of -33% underscores tail risk exposure.\n\n### Valuation & Risks\nAbsence of current price data limits precise valuation analysis, but book value of $7.26 provides a floor. Risk profile shows 25.5% annualized volatility (3Y) and 2.57% VaR_5, with worst daily loss of -9.4%. While Calmar ratio of 0.51 suggests underperformance during drawdowns, the 1Y window (status: partial_window) shows exceptional risk-adjusted returns (3.36x). Thesis hinges on sustained margin power and services growth, with critical break conditions centered on innovation stagnation or regulatory overreach.",
+      "created_at": "2026-07-09T20:14:19.817578+00:00"
+    },
+    "risk_metrics": {
+      "metric_version": "risk_v1",
+      "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
+      "windows": [
+        {
+          "window_key": "1y",
+          "as_of_date": "2026-06-12",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.46487975682251576,
+          "excess_cagr_vs_spy": 0.23383038558839503,
+          "vol_annualized": 0.2383939836441898,
+          "beta": 0.8059824016272022,
+          "beta_r2": 0.19153537264563955,
+          "calmar": 3.3644804893634817,
+          "max_drawdown": -0.13817281993228775,
+          "current_drawdown": -0.07508098837578607,
+          "var_5": -0.02018961,
+          "worst_day": -0.050552377910690435,
+          "cagr_status": "partial_window",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "partial_window",
+          "calmar_status": "partial_window"
+        },
+        {
+          "window_key": "3y",
+          "as_of_date": "2026-06-12",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.1673613024549521,
+          "excess_cagr_vs_spy": -0.026443618506396416,
+          "vol_annualized": 0.25512502230697137,
+          "beta": 1.056877999461826,
+          "beta_r2": 0.35953079703056423,
+          "calmar": 0.5056743820657363,
+          "max_drawdown": -0.33096654367038025,
+          "current_drawdown": -0.07508098837578607,
+          "var_5": -0.02566866,
+          "worst_day": -0.0941561519132231,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        },
+        {
+          "window_key": "full",
+          "as_of_date": "2026-06-12",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.15835160261821715,
+          "excess_cagr_vs_spy": 0.003998661510856258,
+          "vol_annualized": 0.275704522361128,
+          "beta": 1.1582279625633967,
+          "beta_r2": 0.49093652466569204,
+          "calmar": 0.4784519935523283,
+          "max_drawdown": -0.33096654367038025,
+          "current_drawdown": -0.07508098837578607,
+          "var_5": -0.02798701,
+          "worst_day": -0.0941561519132231,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        }
+      ]
+    },
+    "earnings_history": [],
+    "analyst_estimates": null
+  }
+}

@@ -1,0 +1,186 @@
+{
+  "symbol": "JPM",
+  "instrument_id": 1023,
+  "context": {
+    "instrument": {
+      "symbol": "JPM",
+      "company_name": "JPMorgan Chase & Co",
+      "sector": "4",
+      "industry": null,
+      "country": "US",
+      "currency": "USD"
+    },
+    "fundamentals": [
+      {
+        "as_of_date": "2018-12-31",
+        "revenue_ttm": 182447000000.0,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -147782000000.0,
+        "cash": 278793000000.0,
+        "debt": 269929000000.0,
+        "net_debt": -8864000000.0,
+        "eps": 20.02,
+        "book_value": 135.0189
+      }
+    ],
+    "filings": [],
+    "news": [
+      {
+        "event_time": "2026-06-30T04:30:55+00:00",
+        "source": "Yahoo Finance",
+        "headline": "NKE Stock In Focus: JPMorgan Doubts Nike\u2019s Turnaround Potential, But Retail Disagrees",
+        "category": "earnings",
+        "sentiment_score": -0.6667,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-08T22:45:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "A Positive Outlook as Q2 Earnings Season Gets Underway",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8111
+      },
+      {
+        "event_time": "2026-07-01T21:53:03+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Cboe Seeks to List Prediction Market Type Options on Earnings Metrics",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8069
+      },
+      {
+        "event_time": "2026-07-06T20:28:42+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Bank Stocks Rally Ahead Of Earnings. Why Bullishness Is Growing.",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.8
+      },
+      {
+        "event_time": "2026-06-29T20:17:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "UBS, JPMorgan Lower Lennar (LEN) Targets on Softer Housing Demand and Revised Guidance",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.799
+      },
+      {
+        "event_time": "2026-07-01T20:09:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Wells Fargo Stock Has Lagged Other Banks. Earnings Can Change That.",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.7984
+      },
+      {
+        "event_time": "2026-07-01T19:24:53+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Passive Indexers Are Shuffling Billions Into the Russell 2000 Just in Time for a Brutal Fed Reality Check",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.7948
+      },
+      {
+        "event_time": "2026-07-06T18:35:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Navigating the Prospects for Bank ETFs as Q2 Earnings Season Kicks Off",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.7907
+      },
+      {
+        "event_time": "2026-07-08T17:12:11+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Wise (LSE:WISE) Stock Sees Split Analyst Revisions As Growth Outlook Improves",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.7839
+      },
+      {
+        "event_time": "2026-06-29T16:52:42+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Major Banks Poised for Strong Quarterly Results, Outlook, Deutsche Bank Says",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.7823
+      }
+    ],
+    "prior_thesis": null,
+    "risk_metrics": {
+      "metric_version": "risk_v1",
+      "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
+      "windows": [
+        {
+          "window_key": "1y",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.15894761297354207,
+          "excess_cagr_vs_spy": -0.04694419351321514,
+          "vol_annualized": 0.21814391192250301,
+          "beta": 0.80103831921444,
+          "beta_r2": 0.22546643179207818,
+          "calmar": 1.0327470319636198,
+          "max_drawdown": -0.15390759600763615,
+          "current_drawdown": 0.0,
+          "var_5": -0.02323215,
+          "worst_day": -0.04707043563508619,
+          "cagr_status": "partial_window",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "partial_window"
+        },
+        {
+          "window_key": "3y",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.32644104783713007,
+          "excess_cagr_vs_spy": 0.13186617353601118,
+          "vol_annualized": 0.22615820942406473,
+          "beta": 0.8821838436161393,
+          "beta_r2": 0.3192669193195257,
+          "calmar": 1.3158817442863586,
+          "max_drawdown": -0.24807779973736824,
+          "current_drawdown": 0.0,
+          "var_5": -0.01977911,
+          "worst_day": -0.0800965227368612,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        },
+        {
+          "window_key": "full",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.2853130357289001,
+          "excess_cagr_vs_spy": 0.1224524189882053,
+          "vol_annualized": 0.24101433606305742,
+          "beta": 0.8976909370165466,
+          "beta_r2": 0.3760669303947472,
+          "calmar": 1.1500949945176535,
+          "max_drawdown": -0.24807779973736824,
+          "current_drawdown": 0.0,
+          "var_5": -0.02158441,
+          "worst_day": -0.0800965227368612,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        }
+      ]
+    },
+    "earnings_history": [],
+    "analyst_estimates": null
+  }
+}

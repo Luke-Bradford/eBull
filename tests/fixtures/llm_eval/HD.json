@@ -1,0 +1,105 @@
+{
+  "symbol": "HD",
+  "instrument_id": 1018,
+  "context": {
+    "instrument": {
+      "symbol": "HD",
+      "company_name": "Home Depot Inc",
+      "sector": "7",
+      "industry": null,
+      "country": "US",
+      "currency": "USD"
+    },
+    "fundamentals": [
+      {
+        "as_of_date": "2026-05-03",
+        "revenue_ttm": 164683000000.0,
+        "gross_margin": 0.3332,
+        "operating_margin": 0.1268,
+        "fcf": 16325000000.0,
+        "cash": 1601000000.0,
+        "debt": 49397000000.0,
+        "net_debt": 47796000000.0,
+        "eps": 14.23,
+        "book_value": 13.9157
+      }
+    ],
+    "filings": [],
+    "news": [],
+    "prior_thesis": null,
+    "risk_metrics": {
+      "metric_version": "risk_v1",
+      "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
+      "windows": [
+        {
+          "window_key": "1y",
+          "as_of_date": "2026-06-09",
+          "benchmark_symbol": "SPY",
+          "cagr": -0.12917136052300188,
+          "excess_cagr_vs_spy": -0.3598954596444884,
+          "vol_annualized": 0.2338787766064057,
+          "beta": 0.6604808091368554,
+          "beta_r2": 0.12846312141311686,
+          "calmar": -0.4370623924078255,
+          "max_drawdown": -0.29554444117550915,
+          "current_drawdown": -0.24795537571673776,
+          "var_5": -0.02229095,
+          "worst_day": -0.05844735526178898,
+          "cagr_status": "partial_window",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "partial_window",
+          "calmar_status": "partial_window"
+        },
+        {
+          "window_key": "3y",
+          "as_of_date": "2026-06-09",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.01876443997184751,
+          "excess_cagr_vs_spy": -0.17532923017420582,
+          "vol_annualized": 0.22098294458018697,
+          "beta": 0.7497327975566291,
+          "beta_r2": 0.2392361968719255,
+          "calmar": 0.06061411328199549,
+          "max_drawdown": -0.3095721269492068,
+          "current_drawdown": -0.2629306932440034,
+          "var_5": -0.02205912,
+          "worst_day": -0.05844735526178898,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        },
+        {
+          "window_key": "full",
+          "as_of_date": "2026-06-09",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.01893171732419339,
+          "excess_cagr_vs_spy": -0.14062210119102275,
+          "vol_annualized": 0.2387681998153244,
+          "beta": 0.8490812457929523,
+          "beta_r2": 0.34425117553936596,
+          "calmar": 0.06115446345497255,
+          "max_drawdown": -0.3095721269492068,
+          "current_drawdown": -0.2629306932440034,
+          "var_5": -0.02320607,
+          "worst_day": -0.07089362804433208,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        }
+      ]
+    },
+    "earnings_history": [],
+    "analyst_estimates": null
+  }
+}

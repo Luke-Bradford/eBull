@@ -21,6 +21,8 @@ from app.services.llm_client import (
     LLMProviderNotConfigured,
     OpenAICompatProvider,
     make_llm_client,
+    normalize_completion_text,
+    strip_code_fence,
     strip_think_block,
 )
 
@@ -65,6 +67,45 @@ class TestStripThinkBlock:
         # A <think> string INSIDE the JSON payload must survive.
         text = '<think>x</think>{"memo": "<think>quoted</think>"}'
         assert strip_think_block(text) == '{"memo": "<think>quoted</think>"}'
+
+
+class TestStripCodeFence:
+    def test_plain_json_unchanged(self) -> None:
+        assert strip_code_fence('{"a": 1}') == '{"a": 1}'
+
+    def test_json_fence_unwrapped(self) -> None:
+        assert strip_code_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
+
+    def test_bare_fence_unwrapped(self) -> None:
+        assert strip_code_fence('```\n{"a": 1}\n```') == '{"a": 1}'
+
+    def test_unclosed_fence_not_stripped(self) -> None:
+        # Truncated at max_tokens mid-payload: parse failure +
+        # finish_reason='length' must stay honest (same contract as the
+        # unclosed <think> case).
+        text = '```json\n{"a": 1}'
+        assert strip_code_fence(text) == text
+
+    def test_fence_not_wrapping_whole_text_not_stripped(self) -> None:
+        text = "prose then ```json\n{}\n```"
+        assert strip_code_fence(text) == text
+
+    def test_backticks_inside_json_string_survive(self) -> None:
+        # \Z anchor forces the match to the LAST fence, so a fenced code
+        # block INSIDE memo_markdown survives the unwrap.
+        text = '```json\n{"memo": "use ``` for code"}\n```'
+        assert strip_code_fence(text) == '{"memo": "use ``` for code"}'
+
+
+class TestNormalizeCompletionText:
+    def test_think_then_fence_both_stripped(self) -> None:
+        # deepseek-r1 shape (#1919 PR-C tilt-check): think block first,
+        # then a fenced JSON object.
+        text = '<think>reasoning</think>\n```json\n{"a": 1}\n```'
+        assert normalize_completion_text(text) == '{"a": 1}'
+
+    def test_plain_json_passthrough(self) -> None:
+        assert normalize_completion_text('{"a": 1}') == '{"a": 1}'
 
 
 # ---------------------------------------------------------------------------

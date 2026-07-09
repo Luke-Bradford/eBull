@@ -84,6 +84,16 @@ _NO_THINK_SUFFIX = "\n/no_think"
 # recorded finish_reason distinguishes truncation from malformed output.
 _THINK_BLOCK_RE = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
 
+# Markdown code fence wrapping the ENTIRE completion (```json ... ``` or
+# bare ```). Empirical (#1919 PR-C tilt-check, 2026-07-09): deepseek-r1
+# intermittently fences an otherwise schema-valid JSON object — Ollama
+# does not enforce response_format=json_object for it. Stripping is
+# lossless for compliant output (no-op unless the fence wraps everything)
+# and model-neutral, same class as the <think> strip. A truncated fence
+# (no closing ```) intentionally does NOT match — the parse failure +
+# finish_reason stay honest.
+_CODE_FENCE_RE = re.compile(r"\A```[a-zA-Z]*\s*\n?(.*?)\n?\s*```\s*\Z", re.DOTALL)
+
 # Per-process serialisation of LLM calls (spec §1 concurrency layer (a)).
 _LLM_CALL_SEMAPHORE = threading.Semaphore(1)
 
@@ -104,6 +114,10 @@ class LLMCompletion:
     text: str  # leading <think>...</think> stripped defensively
     finish_reason: str  # "stop" | "length" | provider-mapped passthrough
     model: str  # as reported by the provider response
+    # Provider-reported token usage; None when the provider omits it.
+    # Consumed by the eval harness (scripts/llm_eval_thesis.py) for tok/s.
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class LLMClient(Protocol):
@@ -118,6 +132,21 @@ class LLMClient(Protocol):
 def strip_think_block(text: str) -> str:
     """Strip one leading ``<think>...</think>`` block and surrounding whitespace."""
     return _THINK_BLOCK_RE.sub("", text, count=1).strip()
+
+
+def strip_code_fence(text: str) -> str:
+    """Unwrap one markdown code fence when it wraps the whole text."""
+    match = _CODE_FENCE_RE.match(text.strip())
+    return match.group(1).strip() if match else text
+
+
+def normalize_completion_text(text: str) -> str:
+    """Defensive normalization applied to every provider completion.
+
+    Order matters: thinking models emit the ``<think>`` block first, so
+    strip it before checking for a whole-text code fence.
+    """
+    return strip_code_fence(strip_think_block(text))
 
 
 class OpenAICompatProvider:
@@ -167,10 +196,13 @@ class OpenAICompatProvider:
         choice = choices[0]
         text = (choice.get("message") or {}).get("content") or ""
         finish_reason = choice.get("finish_reason") or "unknown"
+        usage = body.get("usage") or {}
         return LLMCompletion(
-            text=strip_think_block(text),
+            text=normalize_completion_text(text),
             finish_reason=finish_reason,
             model=body.get("model") or self.model,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
         )
 
 
@@ -206,9 +238,11 @@ class AnthropicProvider:
             raise ValueError(f"Anthropic: unexpected content block type {type(block)!r}")
         stop_reason = message.stop_reason or "unknown"
         return LLMCompletion(
-            text=strip_think_block(text),
+            text=normalize_completion_text(text),
             finish_reason=self._FINISH_REASON_MAP.get(stop_reason, stop_reason),
             model=message.model,
+            prompt_tokens=message.usage.input_tokens,
+            completion_tokens=message.usage.output_tokens,
         )
 
 
