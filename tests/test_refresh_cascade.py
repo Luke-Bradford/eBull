@@ -366,7 +366,7 @@ class TestCascadeRefresh:
             StaleInstrument(instrument_id=2, symbol="GOOD", reason="event_new_10q"),
         ]
 
-        def gen_side_effect(iid, conn_, client_):  # type: ignore[no-untyped-def]
+        def gen_side_effect(iid, conn_, client_, *, trigger):  # type: ignore[no-untyped-def]
             if iid == 1:
                 raise RuntimeError("boom")
             return MagicMock()
@@ -631,7 +631,7 @@ class TestCascadeRefresh:
             StaleInstrument(instrument_id=2, symbol="GOOD", reason="event_new_10q"),
         ]
 
-        def gen_side_effect(iid, conn_, client_):  # type: ignore[no-untyped-def]
+        def gen_side_effect(iid, conn_, client_, *, trigger):  # type: ignore[no-untyped-def]
             if iid == 1:
                 raise RuntimeError("thesis failed")
             return MagicMock()

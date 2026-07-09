@@ -88,6 +88,9 @@ class TestEnsureRuntimeConfigSingleton:
             "display_currency",
             "enable_auto_trading",
             "enable_live_trading",
+            "llm_base_url",
+            "llm_model",
+            "llm_provider",
         ]
         assert all(r["old_value"] is None for r in audit_rows)
         assert all(r["changed_by"] == BOOT_RECOVERY_CHANGED_BY for r in audit_rows)
@@ -95,6 +98,9 @@ class TestEnsureRuntimeConfigSingleton:
         by_field = {r["field"]: r["new_value"] for r in audit_rows}
         assert by_field == {
             "display_currency": "GBP",
+            "llm_provider": "openai_compatible",
+            "llm_base_url": "http://localhost:11434/v1",
+            "llm_model": "qwen3:14b",
             "enable_auto_trading": "false",
             "enable_live_trading": "false",
         }

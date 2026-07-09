@@ -51,11 +51,21 @@ def _make_conn(cursors: list[MagicMock]) -> MagicMock:
     return conn
 
 
-def _row(auto: bool = False, live: bool = False, currency: str = "USD") -> dict[str, Any]:
+def _row(
+    auto: bool = False,
+    live: bool = False,
+    currency: str = "USD",
+    llm_provider: str = "openai_compatible",
+    llm_base_url: str = "http://localhost:11434/v1",
+    llm_model: str = "qwen3:14b",
+) -> dict[str, Any]:
     return {
         "enable_auto_trading": auto,
         "enable_live_trading": live,
         "display_currency": currency,
+        "llm_provider": llm_provider,
+        "llm_base_url": llm_base_url,
+        "llm_model": llm_model,
         "updated_at": _NOW,
         "updated_by": "seed",
         "reason": "seed",
@@ -208,6 +218,55 @@ class TestUpdateRuntimeConfig:
                 updated_by="op",
                 reason="noop",
                 display_currency="USD",
+                now=_NOW,
+            )
+
+    def test_llm_knob_update_writes_audit_rows(self) -> None:
+        conn = _make_conn(
+            [
+                _make_cursor([_row()]),
+                _make_cursor([{"updated_at": _NOW}]),
+            ]
+        )
+        updated = update_runtime_config(
+            conn,
+            updated_by="op",
+            reason="flip to anthropic",
+            llm_provider="anthropic",
+            llm_model="claude-sonnet-4-6",
+            now=_NOW,
+        )
+        assert updated.llm_provider == "anthropic"
+        assert updated.llm_model == "claude-sonnet-4-6"
+        assert updated.llm_base_url == "http://localhost:11434/v1"
+
+        assert conn.execute.call_count == 2
+        fields = {c[0][1]["field"] for c in conn.execute.call_args_list}
+        assert fields == {"llm_provider", "llm_model"}
+
+    def test_llm_provider_invalid_value_raises(self) -> None:
+        conn = _make_conn([])
+        with pytest.raises(ValueError, match="llm_provider must be one of"):
+            update_runtime_config(conn, updated_by="op", reason="r", llm_provider="gemini")
+
+    def test_llm_base_url_must_be_http(self) -> None:
+        conn = _make_conn([])
+        with pytest.raises(ValueError, match="llm_base_url must start with"):
+            update_runtime_config(conn, updated_by="op", reason="r", llm_base_url="localhost:11434/v1")
+
+    def test_llm_model_must_be_non_empty(self) -> None:
+        conn = _make_conn([])
+        with pytest.raises(ValueError, match="non-empty"):
+            update_runtime_config(conn, updated_by="op", reason="r", llm_model="  ")
+
+    def test_llm_noop_raises(self) -> None:
+        conn = _make_conn([_make_cursor([_row()])])
+        with pytest.raises(RuntimeConfigNoOp, match="not change"):
+            update_runtime_config(
+                conn,
+                updated_by="op",
+                reason="noop",
+                llm_provider="openai_compatible",
                 now=_NOW,
             )
 

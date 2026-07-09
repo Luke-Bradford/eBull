@@ -240,6 +240,12 @@ bash scripts/check_etl_source_docs.sh
 echo "==> Pre-push gate: bounded Anthropic client construction"
 bash scripts/check_anthropic_timeout.sh
 
+# #1919 — every OpenAI-compatible LLM completion under app/ MUST go
+# through app/services/llm_client.py (bounded httpx timeout + per-process
+# semaphore). Same #1479 hang class as the Anthropic guard above. ~20ms.
+echo "==> Pre-push gate: LLM completion chokepoint"
+bash scripts/check_llm_chokepoint.sh
+
 # #990 — frontend skip-test accumulation gate. Fails if the
 # describe.skip / it.skip count under frontend/src exceeds the stored
 # baseline (scripts/frontend_skip_baseline.txt). Stops silent coverage

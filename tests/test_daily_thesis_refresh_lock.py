@@ -34,6 +34,7 @@ def mocked_env():  # type: ignore[no-untyped-def]
         patch.object(scheduler, "find_stale_instruments") as find_stale,
         patch.object(scheduler, "make_anthropic_client") as make_client,
         patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "generate_thesis") as gen,
         patch.object(scheduler, "report_progress"),
     ):
@@ -50,6 +51,11 @@ def mocked_env():  # type: ignore[no-untyped-def]
 
         conn_mock = MagicMock()
         psycopg_mod.connect.return_value.__enter__.return_value = conn_mock
+        # daily_thesis_refresh opens per-instrument conns via connect_job
+        # (app.jobs.job_connection), NOT scheduler.psycopg — the psycopg
+        # patch above alone left the loop on a REAL DB conn (broken-on-main
+        # until #1919 PR-A; db tier never runs on push).
+        connect_job_mock.return_value.__enter__.return_value = conn_mock
 
         yield {
             "stale_item": stale_item,

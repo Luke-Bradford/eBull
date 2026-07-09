@@ -57,6 +57,39 @@ vi.mock("@/lib/session", () => ({
   }),
 }));
 
+// Config mock — LlmProviderSection consumes the shared useConfig() hook
+// (#1919); these tests render <SettingsPage /> directly without a
+// ConfigProvider, so stub the hook with resolved runtime flags.
+vi.mock("@/lib/ConfigContext", () => ({
+  useConfig: () => ({
+    data: {
+      app_env: "dev",
+      etoro_env: "demo",
+      runtime: {
+        enable_auto_trading: false,
+        enable_live_trading: false,
+        display_currency: "GBP",
+        llm_provider: "openai_compatible",
+        llm_base_url: "http://localhost:11434/v1",
+        llm_model: "qwen3:14b",
+        updated_at: "2026-07-09T10:00:00Z",
+        updated_by: "seed",
+        reason: "seed",
+      },
+      kill_switch: {
+        active: false,
+        activated_at: null,
+        activated_by: null,
+        reason: null,
+      },
+    },
+    error: null,
+    loading: false,
+    isRevalidating: false,
+    refetch: vi.fn(),
+  }),
+}));
+
 // Budget API mock — prevents BudgetConfigSection from making real fetch
 // calls, which would produce extra role="alert" elements and break the
 // broker-credential test assertions that use getByRole("alert").
