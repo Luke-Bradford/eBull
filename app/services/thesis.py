@@ -612,6 +612,9 @@ def _shape_ta_state(price_row: tuple[object, ...] | None) -> dict[str, object] |
 
     price_vs_sma200: str | None = None
     if close is not None and sma_200 is not None:
+        # Tie (close == sma_200) is "below" by design — strict >, mirroring
+        # technical_analysis.py compute_indicators so the two derivations
+        # can never disagree on the same row.
         price_vs_sma200 = "above" if close > sma_200 else "below"
 
     regime: str | None = None
