@@ -33,4 +33,42 @@ describe("ThesisPane", () => {
     render(<ThesisPane thesis={null} errored={true} />);
     expect(screen.getByText(/temporarily unavailable/i)).toBeInTheDocument();
   });
+
+  it("renders the buy zone alongside bear/base/bull (#1902)", () => {
+    const thesis = {
+      ...FIXTURE,
+      buy_zone_low: 15,
+      buy_zone_high: 18,
+    } as unknown as ThesisDetail;
+    render(<ThesisPane thesis={thesis} errored={false} />);
+    expect(screen.getByText("Buy zone")).toBeInTheDocument();
+    expect(screen.getByText("15 – 18")).toBeInTheDocument();
+  });
+
+  it("renders the critic verdict, summary and key risks (#1902)", () => {
+    const thesis = {
+      ...FIXTURE,
+      critic_json: {
+        verdict: "Strong challenge",
+        summary: "Margins are cyclical, not structural.",
+        key_risks: ["Customer concentration", "Refinancing wall in 2027"],
+      },
+    } as unknown as ThesisDetail;
+    render(<ThesisPane thesis={thesis} errored={false} />);
+    expect(screen.getByText("Critic")).toBeInTheDocument();
+    expect(screen.getByText("Strong challenge")).toBeInTheDocument();
+    expect(
+      screen.getByText("Margins are cyclical, not structural."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Customer concentration")).toBeInTheDocument();
+  });
+
+  it("says 'no critic' when critic_json exists without a verdict", () => {
+    const thesis = {
+      ...FIXTURE,
+      critic_json: { summary: "partial payload" },
+    } as unknown as ThesisDetail;
+    render(<ThesisPane thesis={thesis} errored={false} />);
+    expect(screen.getByText("no critic")).toBeInTheDocument();
+  });
 });

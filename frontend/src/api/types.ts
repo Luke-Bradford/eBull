@@ -1241,11 +1241,49 @@ export interface ThesisDetail {
   memo_markdown: string;
   critic_json: Record<string, unknown> | null;
   created_at: string;
+  /** Server-computed staleness (#1902 single source: find_stale_instruments).
+   *  Populated only on the latest-thesis GET; null on history/POST payloads. */
+  is_stale?: boolean | null;
+  stale_reason?: string | null;
 }
 
 export interface ThesisHistoryResponse {
   instrument_id: number;
   items: ThesisDetail[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// #1902 — GET /theses (library: latest thesis per instrument + context).
+// Thesis fields are null on the "held but no thesis yet" rows the library
+// prepends so the dashboard staleness alert always lands on visible rows.
+export interface ThesisLibraryItem {
+  instrument_id: number;
+  symbol: string;
+  company_name: string;
+  thesis_id: number | null;
+  thesis_version: number | null;
+  thesis_type: string | null;
+  stance: string | null;
+  confidence_score: number | null;
+  buy_zone_low: number | null;
+  buy_zone_high: number | null;
+  created_at: string | null;
+  critic_verdict: string | null;
+  /** null = fresh, or outside refresh scope (not tradable / not analysable). */
+  stale_reason: string | null;
+  is_held: boolean;
+  latest_score: number | null;
+  latest_rank: number | null;
+  run_status: string | null; // 'running' | 'ok' | 'failed' (DB CHECK) | null pre-#1919
+  run_error: string | null;
+  run_trigger: string | null;
+  run_started_at: string | null;
+}
+
+export interface ThesisLibraryResponse {
+  items: ThesisLibraryItem[];
   total: number;
   offset: number;
   limit: number;
@@ -1772,6 +1810,23 @@ export interface RankMovesResponse {
   alerts_last_seen_rank_event_id: number | null;
   unseen_count: number;
   moves: RankMove[];
+}
+
+// ---------------------------------------------------------------------------
+// #1902 thesis-staleness snapshot (app/api/alerts.py)
+// ---------------------------------------------------------------------------
+
+/** Standing-condition snapshot — no cursor/seen semantics. The card clears
+ *  when the thesis regenerates, not when the operator acknowledges it. */
+export interface ThesisStalenessItem {
+  instrument_id: number;
+  symbol: string;
+  reason: string; // find_stale_instruments StaleReason (open string)
+  latest_thesis_at: string | null; // null = held instrument has no thesis at all
+}
+
+export interface ThesisStalenessResponse {
+  items: ThesisStalenessItem[];
 }
 
 // ---------------------------------------------------------------------------

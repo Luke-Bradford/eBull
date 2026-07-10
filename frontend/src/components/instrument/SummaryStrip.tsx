@@ -29,8 +29,6 @@ import {
   useLiveQuote,
 } from "@/lib/useLiveQuote";
 
-const THESIS_STALE_DAYS = 30;
-
 function formatPrice(
   value: string | null | undefined,
   currency: string | null | undefined,
@@ -71,12 +69,14 @@ function formatPct(value: string | null | undefined, signed = false): string {
   return `${sign}${pct}%`;
 }
 
+// Staleness single-source (#1902): the latest-thesis GET carries the
+// server verdict (`is_stale` via find_stale_instruments — coverage
+// cadence + filing-event triggers). The FE never re-derives it from a
+// local day constant; a missing thesis is trivially stale (nothing to
+// act on), which is an existence check, not a threshold.
 function isThesisStale(thesis: ThesisDetail | null): boolean {
   if (thesis === null) return true;
-  const created = new Date(thesis.created_at);
-  if (Number.isNaN(created.getTime())) return true;
-  const ageDays = (Date.now() - created.getTime()) / (1000 * 60 * 60 * 24);
-  return ageDays > THESIS_STALE_DAYS;
+  return thesis.is_stale === true;
 }
 
 function thesisTone(stance: string): string {

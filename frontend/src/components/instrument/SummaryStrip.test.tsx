@@ -92,13 +92,22 @@ function freshThesis(): ThesisDetail {
     memo_markdown: "Fresh thesis memo.",
     critic_json: null,
     created_at: now.toISOString(),
+    is_stale: false,
+    stale_reason: null,
   };
 }
 
 function staleThesis(): ThesisDetail {
+  // Staleness single-source (#1902): the server verdict drives the strip;
+  // created_at is display-only. An old date alone must NOT read as stale.
   const old = new Date();
   old.setDate(old.getDate() - 45);
-  return { ...freshThesis(), created_at: old.toISOString() };
+  return {
+    ...freshThesis(),
+    created_at: old.toISOString(),
+    is_stale: true,
+    stale_reason: "stale",
+  };
 }
 
 function heldPosition(): InstrumentPositionDetail {
@@ -412,7 +421,7 @@ describe("SummaryStrip — action gating", () => {
     expect(screen.getByTestId("thesis-badge-missing")).toBeInTheDocument();
   });
 
-  it("shows Generate thesis + (stale) marker when thesis is > 30d old", () => {
+  it("shows Generate thesis + (stale) marker when the server marks the thesis stale", () => {
     render(
       <SummaryStrip
         summary={summary()}
@@ -423,6 +432,21 @@ describe("SummaryStrip — action gating", () => {
     );
     expect(screen.getByTestId("action-generate-thesis")).toBeInTheDocument();
     expect(screen.getByTestId("thesis-badge").textContent).toContain("stale");
+  });
+
+  it("does NOT mark an old thesis stale unless the server says so (#1902 single source)", () => {
+    const old = new Date();
+    old.setDate(old.getDate() - 45);
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={{ ...freshThesis(), created_at: old.toISOString() }}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByTestId("thesis-badge").textContent).not.toContain("stale");
+    expect(screen.queryByTestId("action-generate-thesis")).not.toBeInTheDocument();
   });
 
   it("labels the action Buy when unheld and Add when held (#316)", () => {

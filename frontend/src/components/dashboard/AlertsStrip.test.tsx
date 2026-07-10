@@ -13,6 +13,7 @@ import type {
   PositionAlertsResponse,
   RankMove,
   RankMovesResponse,
+  ThesisStalenessResponse,
 } from "@/api/types";
 
 vi.mock("@/api/alerts", () => ({
@@ -28,6 +29,7 @@ vi.mock("@/api/alerts", () => ({
   fetchRankMoves: vi.fn(),
   markRankMovesSeen: vi.fn(),
   dismissAllRankMoves: vi.fn(),
+  fetchThesisStaleness: vi.fn(),
 }));
 
 import * as alertsApi from "@/api/alerts";
@@ -36,6 +38,7 @@ const mockedGuardFetch = vi.mocked(alertsApi.fetchGuardRejections);
 const mockedPositionFetch = vi.mocked(alertsApi.fetchPositionAlerts);
 const mockedCoverageFetch = vi.mocked(alertsApi.fetchCoverageStatusDrops);
 const mockedRankFetch = vi.mocked(alertsApi.fetchRankMoves);
+const mockedThesisStaleFetch = vi.mocked(alertsApi.fetchThesisStaleness);
 
 const mockedMarkGuard = vi.mocked(alertsApi.markAlertsSeen);
 const mockedMarkPosition = vi.mocked(alertsApi.markPositionAlertsSeen);
@@ -67,6 +70,9 @@ const EMPTY_RANK: RankMovesResponse = {
   unseen_count: 0,
   moves: [],
 };
+const EMPTY_THESIS_STALE: ThesisStalenessResponse = {
+  items: [],
+};
 
 function stubAll(
   overrides: {
@@ -74,6 +80,7 @@ function stubAll(
     position?: Partial<PositionAlertsResponse> | Error;
     coverage?: Partial<CoverageStatusDropsResponse> | Error;
     rank?: Partial<RankMovesResponse> | Error;
+    thesisStale?: Partial<ThesisStalenessResponse> | Error;
   } = {},
 ) {
   if (overrides.guard instanceof Error) {
@@ -95,6 +102,14 @@ function stubAll(
     mockedRankFetch.mockRejectedValue(overrides.rank);
   } else {
     mockedRankFetch.mockResolvedValue({ ...EMPTY_RANK, ...overrides.rank });
+  }
+  if (overrides.thesisStale instanceof Error) {
+    mockedThesisStaleFetch.mockRejectedValue(overrides.thesisStale);
+  } else {
+    mockedThesisStaleFetch.mockResolvedValue({
+      ...EMPTY_THESIS_STALE,
+      ...overrides.thesisStale,
+    });
   }
 }
 
@@ -158,10 +173,11 @@ function renderStrip() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Default the rank feed empty so tests that stub the other three feeds
-  // individually (not via stubAll) don't hit an unmocked fetch. Tests that
-  // exercise rank moves override this.
+  // Default the rank + thesis-staleness feeds empty so tests that stub the
+  // other three feeds individually (not via stubAll) don't hit an unmocked
+  // fetch. Tests that exercise those feeds override this.
   mockedRankFetch.mockResolvedValue(EMPTY_RANK);
+  mockedThesisStaleFetch.mockResolvedValue(EMPTY_THESIS_STALE);
 });
 
 // ---------------------------------------------------------------------------
@@ -681,5 +697,45 @@ describe("AlertsStrip — Dismiss all", () => {
     expect(errSpy).toHaveBeenCalled();
     confirmSpy.mockRestore();
     errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1902 thesis-staleness card (standing condition, no cursor)
+// ---------------------------------------------------------------------------
+
+describe("AlertsStrip — thesis staleness", () => {
+  it("renders one grouped card with count + symbols, linking to the library", async () => {
+    stubAll({
+      thesisStale: {
+        items: [
+          { instrument_id: 1, symbol: "GME", reason: "stale", latest_thesis_at: "2026-06-01T00:00:00Z" },
+          { instrument_id: 2, symbol: "AAPL", reason: "event_new_10k", latest_thesis_at: "2026-06-02T00:00:00Z" },
+        ],
+      },
+    });
+    renderStrip();
+    expect(
+      await screen.findByText("2 held instruments have a stale thesis"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/AAPL, GME/)).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /Review in Theses/i });
+    expect(link).toHaveAttribute("href", "/theses?held=true&stale=true");
+    // Standing condition: never counted as unseen — no "new" pill.
+    expect(screen.queryByText(/new$/)).not.toBeInTheDocument();
+  });
+
+  it("does not participate in the unseen count or mark-all-read", async () => {
+    stubAll({
+      guard: { rejections: [makeGuard()], unseen_count: 1 },
+      thesisStale: {
+        items: [
+          { instrument_id: 1, symbol: "GME", reason: "stale", latest_thesis_at: null },
+        ],
+      },
+    });
+    renderStrip();
+    // Pill counts only the cursor feeds (guard's 1), not the stale thesis.
+    expect(await screen.findByText("1 new")).toBeInTheDocument();
   });
 });

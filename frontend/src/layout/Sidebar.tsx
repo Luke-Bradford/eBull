@@ -6,6 +6,7 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
   { to: "/calendar", label: "Calendar" },
   { to: "/instruments", label: "Instruments" },
   { to: "/rankings", label: "Rankings" },
+  { to: "/theses", label: "Theses" },
   { to: "/recommendations", label: "Recommendations" },
   { to: "/reports", label: "Reports" },
   { to: "/tax", label: "Tax" },
