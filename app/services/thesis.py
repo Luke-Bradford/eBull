@@ -52,6 +52,11 @@ import psycopg
 from psycopg import sql as psql
 from psycopg.types.json import Jsonb
 
+# Safe at module scope: instrument_analytics has no app-module imports at
+# top level (its insider_transactions read is function-lazy), so this does
+# NOT re-enter the risk_metrics -> scheduler -> refresh_cascade cycle that
+# forces the lazy import inside _assemble_context.
+from app.services.instrument_analytics import SCHEMA_VERSION as _IAR_SCHEMA_VERSION
 from app.services.llm_client import LLMClient, LLMCompletion
 
 logger = logging.getLogger(__name__)
@@ -526,6 +531,13 @@ def _shape_analytics_evidence(
         return None
     if not isinstance(analytics, dict):
         return dict(_MALFORMED)
+    schema = analytics.get("schema")
+    if schema != _IAR_SCHEMA_VERSION:
+        # A future iar_v2 must not be silently compacted under v1
+        # assumptions — surface it as unsupported (absent evidence to the
+        # writer) until this shaper is deliberately migrated (bot review
+        # NITPICK, PR #1999).
+        return {"reason": "unsupported_schema", "schema": schema}
 
     out: dict[str, object] = {
         "schema": analytics.get("schema"),

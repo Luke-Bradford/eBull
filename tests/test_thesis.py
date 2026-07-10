@@ -961,6 +961,13 @@ class TestShapeAnalyticsEvidence:
         assert out is not None
         assert out["as_of"] is None
 
+    def test_unknown_schema_fails_closed(self) -> None:
+        # A future iar_v2 must not be compacted under v1 assumptions.
+        analytics = _analytics()
+        analytics["schema"] = "iar_v2"
+        out = _shape_analytics_evidence(analytics, _SCORED_AT, "v1.3")
+        assert out == {"reason": "unsupported_schema", "schema": "iar_v2"}
+
     def test_bool_signal_fails_closed(self) -> None:
         # bool is an int subclass — {"signal": true} must be malformed, not 1.0.
         analytics = _analytics()
