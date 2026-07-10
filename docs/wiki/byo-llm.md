@@ -63,6 +63,18 @@ default always runs. Manual fire: Admin → Processes → Run now, or
 - A failed generation records `finish_reason` in `thesis_runs.error` —
   `length` means truncation (context/output window too small), `stop`
   with a JSON error means the model can't hold the schema.
+- **⚠ Ollama serves a 4,096-token context by default** — far below the
+  #1987 enriched writer input (~3-3.5k prompt tokens + ~1.2k system +
+  2,048 output budget), and with `--context-shift` it silently DROPS the
+  oldest prompt tokens instead of erroring: the writer loses the context
+  head with `finish_reason: stop` and no visible failure. Set
+  `OLLAMA_CONTEXT_LENGTH=16384` on the serve process (brew launchd:
+  `EnvironmentVariables` in `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`,
+  then `launchctl unload`/`load` — NOT `brew services restart`, which
+  regenerates the plist and wipes custom env). Verify live via
+  `curl -s localhost:11434/api/ps` → `context_length` after any request
+  (found 2026-07-10: llama-server ran `-c 4096` while fixtures already
+  exceeded it pre-#1987).
 - **deepseek-r1 needs the fence normalization** (benchmark 2026-07-09,
   #1919 PR-C): Ollama does not enforce `response_format=json_object`
   for it, and it often wraps otherwise schema-valid JSON in a

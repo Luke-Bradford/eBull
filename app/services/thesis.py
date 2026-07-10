@@ -11,13 +11,18 @@ Responsibilities:
   - Update coverage.last_reviewed_at on success.
   - Identify stale instruments (no thesis, or thesis older than review_frequency).
 
-Context caps (v1 hard limits):
+Context caps (v2 — settled-decisions "Thesis prompt budget", amended #1987):
   - prior thesis:         latest 1
   - filing events:        latest 3
   - fundamentals:         latest snapshot + up to 4 prior snapshots
   - earnings events:      latest 4 quarters (confirmed only)
   - analyst estimates:    latest 1 snapshot
   - news events:          latest 10 from last 30 days, importance desc → recency desc
+  - risk metrics (#1632): instrument_risk_metrics_current scalars, statused
+  - price anchor (#1987): latest price_daily close (native ccy) + 52w range + returns
+  - valuation (#1987):    instrument_valuation row when present; statused absence
+  - analytics (#1987):    latest scores.analytics_json, shaped compact, scored_at-stamped
+  - ta_state (#1987):     latest price_daily indicators + derived regime signals
 
 LLM provider: resolved from `runtime_config` via
 `app.services.llm_client.make_llm_client` (#1919 — local-first default;
@@ -40,13 +45,18 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 import psycopg
 from psycopg import sql as psql
 from psycopg.types.json import Jsonb
 
+# Safe at module scope: instrument_analytics has no app-module imports at
+# top level (its insider_transactions read is function-lazy), so this does
+# NOT re-enter the risk_metrics -> scheduler -> refresh_cascade cycle that
+# forces the lazy import inside _assemble_context.
+from app.services.instrument_analytics import SCHEMA_VERSION as _IAR_SCHEMA_VERSION
 from app.services.llm_client import LLMClient, LLMCompletion
 
 logger = logging.getLogger(__name__)
@@ -81,12 +91,15 @@ _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
 # ---------------------------------------------------------------------------
 
 _MAX_TOKENS_WRITER = 2048
-_MAX_TOKENS_CRITIC = 1024
+# 1024 length-failed live on IEP (2026-07-10, thesis stored without critic_json);
+# the #1987 context growth makes recurrence more likely. Local-first default
+# makes the cost delta negligible.
+_MAX_TOKENS_CRITIC = 2048
 
 # Stamped onto every stored thesis row (theses.prompt_version). Bump
 # whenever _WRITER_SYSTEM / _CRITIC_SYSTEM or the _assemble_context shape
 # changes — memos from different prompt versions are not comparable.
-_PROMPT_VERSION = "v1"
+_PROMPT_VERSION = "v2"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -100,6 +113,10 @@ _MAX_FILING_EVENTS = 3
 _MAX_FUNDAMENTALS_SNAPSHOTS = 5  # latest + 4 prior
 _MAX_NEWS_EVENTS = 10
 _NEWS_LOOKBACK_DAYS = 30
+# 52w range window for the price anchor (#1987), measured back from the
+# LATEST close's price_date (not today) so a stale price series yields an
+# honest historical range rather than a shrunken one.
+_PRICE_ANCHOR_LOOKBACK_DAYS = 365
 
 # ---------------------------------------------------------------------------
 # Public result types
@@ -379,6 +396,243 @@ def _shape_risk_metrics(
     }
 
 
+# ---------------------------------------------------------------------------
+# #1987 context blocks — pure row-shaping (spec:
+# docs/specs/thesis/2026-07-10-thesis-context-enrichment.md). All four follow
+# the #1632 evidence discipline: statuses verbatim, as-of stamps, missing data
+# stays missing (None, never a fabricated zero).
+# ---------------------------------------------------------------------------
+
+# Column order of the shared price_daily latest-row SELECT (13 cols), consumed
+# by _shape_price_anchor (0-6) and _shape_ta_state (0, 7-12):
+#   0 close, 1 price_date, 2 return_1w, 3 return_1m, 4 return_3m,
+#   5 return_6m, 6 return_1y, 7 sma_50, 8 sma_200, 9 rsi_14,
+#   10 macd_histogram, 11 atr_14, 12 volatility_30d
+
+
+def _shape_price_anchor(
+    price_row: tuple[object, ...] | None,
+    agg_row: tuple[object, ...] | None,
+    currency: object,
+) -> dict[str, object] | None:
+    """Block A: latest native-currency close + 52w range + persisted returns.
+
+    agg_row = (high_52w, low_52w, window_days) over the trailing
+    _PRICE_ANCHOR_LOOKBACK_DAYS from the latest price_date. No price history
+    -> None (never a fabricated anchor); NULL returns stay None.
+    """
+    if price_row is None:
+        return None
+    high_52w = low_52w = None
+    window_days = 0
+    if agg_row is not None:
+        high_52w = _to_float(agg_row[0])
+        low_52w = _to_float(agg_row[1])
+        window_count = _to_float(agg_row[2])
+        window_days = int(window_count) if window_count is not None else 0
+    return {
+        "close": _to_float(price_row[0]),
+        "price_date": str(price_row[1]) if price_row[1] is not None else None,
+        "currency": currency,
+        "high_52w": high_52w,
+        "low_52w": low_52w,
+        "window_days_52w": window_days,
+        "return_1w": _to_float(price_row[2]),
+        "return_1m": _to_float(price_row[3]),
+        "return_3m": _to_float(price_row[4]),
+        "return_6m": _to_float(price_row[5]),
+        "return_1y": _to_float(price_row[6]),
+    }
+
+
+# Column order of the instrument_valuation SELECT (18 cols):
+#   0 current_price, 1 price_as_of, 2 market_cap_live, 3 enterprise_value,
+#   4 pe_ratio, 5 pb_ratio, 6 p_fcf_ratio, 7 fcf_yield, 8 ev_revenue,
+#   9 ev_ebitda, 10 debt_equity_ratio, 11 net_margin, 12 gross_margin,
+#   13 operating_margin, 14 roa, 15 roe, 16 dividend_yield, 17 is_complete_ttm
+_VALUATION_FIELDS: tuple[str, ...] = (
+    "current_price",
+    "price_as_of",
+    "market_cap_live",
+    "enterprise_value",
+    "pe_ratio",
+    "pb_ratio",
+    "p_fcf_ratio",
+    "fcf_yield",
+    "ev_revenue",
+    "ev_ebitda",
+    "debt_equity_ratio",
+    "net_margin",
+    "gross_margin",
+    "operating_margin",
+    "roa",
+    "roe",
+    "dividend_yield",
+    "is_complete_ttm",
+)
+
+
+def _shape_valuation(row: tuple[object, ...] | None) -> dict[str, object]:
+    """Block B: instrument_valuation row, statused absence.
+
+    The view is quotes-gated (sql/201 `priced` CTE reads FROM quotes; #1857
+    class) so a missing row is STRUCTURAL for most of the universe — statused,
+    not an error. #1664 dual-class NULLs pass through as None (honest
+    suppression).
+    """
+    if row is None:
+        return {"available": False, "reason": "no_live_quote"}
+    shaped: dict[str, object] = {"available": True}
+    for idx, field_name in enumerate(_VALUATION_FIELDS):
+        val = row[idx]
+        if field_name == "price_as_of":
+            shaped[field_name] = val.isoformat() if isinstance(val, (datetime, date)) else None
+        elif field_name == "is_complete_ttm":
+            shaped[field_name] = bool(val) if val is not None else None
+        else:
+            shaped[field_name] = _to_float(val)
+    return shaped
+
+
+def _signal_entry_ok(entry: object) -> bool:
+    """A positioning entry is forwardable iff it is a dict whose `signal` is
+    None or a number in [0, 1] — grounded by the 2026-07-10 full-population
+    shape scan (3,906/3,906 conforming). Anything else fails closed."""
+    if not isinstance(entry, dict):
+        return False
+    sig = entry.get("signal")
+    if sig is None:
+        return True
+    # bool is an int subclass — {"signal": true} is malformed, not 1.0.
+    if isinstance(sig, bool):
+        return False
+    return isinstance(sig, (int, float)) and 0.0 <= float(sig) <= 1.0
+
+
+_MALFORMED: dict[str, object] = {"reason": "malformed"}
+
+
+def _shape_analytics_evidence(
+    analytics: object,
+    scored_at: datetime | None,
+    model_version: object,
+) -> dict[str, object] | None:
+    """Block C: latest scores.analytics_json (#1823 iar_v1) shaped compact.
+
+    None analytics (scores row exists, analytics_json NULL) -> None (absent
+    evidence). Present-but-non-dict -> {"reason": "malformed"} — the
+    absent-vs-malformed distinction is deliberate (spec §Block C). Fail-closed
+    per sub-block: unexpected types are dropped to {"reason": "malformed"},
+    never forwarded. Drops piotroski.components + peer families' `absolute`
+    (token noise); positioning passes verbatim (`asof` optional upstream —
+    818/3,906 undated insider signals on dev).
+    """
+    if analytics is None:
+        return None
+    if not isinstance(analytics, dict):
+        return dict(_MALFORMED)
+    schema = analytics.get("schema")
+    if schema != _IAR_SCHEMA_VERSION:
+        # A future iar_v2 must not be silently compacted under v1
+        # assumptions — surface it as unsupported (absent evidence to the
+        # writer) until this shaper is deliberately migrated (bot review
+        # NITPICK, PR #1999).
+        return {"reason": "unsupported_schema", "schema": schema}
+
+    out: dict[str, object] = {
+        "schema": analytics.get("schema"),
+        "as_of": scored_at.isoformat() if scored_at is not None else None,
+        "model_version": model_version,
+    }
+
+    piotroski = analytics.get("piotroski")
+    if isinstance(piotroski, dict):
+        out["piotroski"] = {
+            k: piotroski.get(k) for k in ("score", "band", "components_available", "suppressed", "reason")
+        }
+    else:
+        out["piotroski"] = dict(_MALFORMED)
+
+    altman = analytics.get("altman_z")
+    out["altman_z"] = dict(altman) if isinstance(altman, dict) else dict(_MALFORMED)
+
+    positioning = analytics.get("positioning")
+    if isinstance(positioning, dict):
+        out["positioning"] = {
+            key: (dict(entry) if _signal_entry_ok(entry) else dict(_MALFORMED)) for key, entry in positioning.items()
+        }
+    else:
+        out["positioning"] = dict(_MALFORMED)
+
+    peer = analytics.get("peer_grade")
+    if isinstance(peer, dict):
+        # `families` may be legitimately EMPTY ({} — absolute_only rows
+        # persisted outside a run cohort) but must be a dict; a non-dict
+        # families or family entry is corruption, not missing evidence —
+        # mark it malformed rather than silently degrading to {} (Codex
+        # ckpt-2, 2026-07-10).
+        families = peer.get("families")
+        if isinstance(families, dict):
+            shaped_families: dict[str, object] = {
+                fam: (
+                    {"hybrid": grades.get("hybrid"), "percentile": grades.get("percentile")}
+                    if isinstance(grades, dict)
+                    else dict(_MALFORMED)
+                )
+                for fam, grades in families.items()
+            }
+            out["peer_grade"] = {
+                "peer_key": peer.get("peer_key"),
+                "peer_n": peer.get("peer_n"),
+                "basis": peer.get("basis"),
+                "families": shaped_families,
+            }
+        else:
+            out["peer_grade"] = dict(_MALFORMED)
+    else:
+        out["peer_grade"] = dict(_MALFORMED)
+
+    return out
+
+
+def _shape_ta_state(price_row: tuple[object, ...] | None) -> dict[str, object] | None:
+    """Block D: latest persisted TA indicators + derived-at-read signals.
+
+    `sma_50_200_regime` is the CURRENT 50-vs-200 relation (golden/death), NOT
+    a crossover event — same comparison as technical_analysis.py
+    compute_indicators, but equal-or-missing SMAs yield None (missing
+    evidence, not a third regime; the internal "none" string is not
+    forwarded). #1989 will persist the derived signals; the context key stays.
+    """
+    if price_row is None:
+        return None
+    close = _to_float(price_row[0])
+    sma_50 = _to_float(price_row[7])
+    sma_200 = _to_float(price_row[8])
+
+    price_vs_sma200: str | None = None
+    if close is not None and sma_200 is not None:
+        # Tie (close == sma_200) is "below" by design — strict >, mirroring
+        # technical_analysis.py compute_indicators so the two derivations
+        # can never disagree on the same row.
+        price_vs_sma200 = "above" if close > sma_200 else "below"
+
+    regime: str | None = None
+    if sma_50 is not None and sma_200 is not None and sma_50 != sma_200:
+        regime = "golden" if sma_50 > sma_200 else "death"
+
+    return {
+        "sma_50": sma_50,
+        "sma_200": sma_200,
+        "rsi_14": _to_float(price_row[9]),
+        "macd_histogram": _to_float(price_row[10]),
+        "atr_14": _to_float(price_row[11]),
+        "volatility_30d": _to_float(price_row[12]),
+        "price_vs_sma200": price_vs_sma200,
+        "sma_50_200_regime": regime,
+    }
+
+
 def _assemble_context(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -540,6 +794,78 @@ def _assemble_context(
     ).fetchall()
     risk_metrics = _shape_risk_metrics(risk_rows, RISK_METRICS_VERSION)
 
+    # #1987 Block A + D: one price_daily latest-row read serves both the
+    # price anchor and the TA state. Native currency close — matches the
+    # writer's targets-in-instrument-currency contract (#1845/#1906).
+    # Quotes are deliberately NOT read here (85 rows on dev; a second
+    # price source/currency would undermine the anchor contract).
+    price_row = conn.execute(
+        """
+        SELECT close, price_date, return_1w, return_1m, return_3m,
+               return_6m, return_1y, sma_50, sma_200, rsi_14,
+               macd_histogram, atr_14, volatility_30d
+        FROM price_daily
+        WHERE instrument_id = %(id)s
+          AND close IS NOT NULL
+        ORDER BY price_date DESC
+        LIMIT 1
+        """,
+        {"id": instrument_id},
+    ).fetchone()
+    agg_row: tuple[object, ...] | None = None
+    if price_row is not None and price_row[1] is not None:
+        # 52w window measured back from the LATEST price_date (not today)
+        # so a stale series yields an honest historical range.
+        agg_row = conn.execute(
+            """
+            SELECT MAX(COALESCE(high, close)) AS high_52w,
+                   MIN(COALESCE(low, close)) AS low_52w,
+                   COUNT(*) AS window_days
+            FROM price_daily
+            WHERE instrument_id = %(id)s
+              AND close IS NOT NULL
+              AND price_date >= %(cutoff)s
+            """,
+            {
+                "id": instrument_id,
+                "cutoff": price_row[1] - timedelta(days=_PRICE_ANCHOR_LOOKBACK_DAYS),
+            },
+        ).fetchone()
+    price_anchor = _shape_price_anchor(price_row, agg_row, instrument.get("currency"))
+    ta_state = _shape_ta_state(price_row)
+
+    # #1987 Block B: quotes-gated view (#1857 class) — absence is
+    # structural for most of the universe, statused not errored.
+    val_row = conn.execute(
+        """
+        SELECT current_price, price_as_of, market_cap_live, enterprise_value,
+               pe_ratio, pb_ratio, p_fcf_ratio, fcf_yield, ev_revenue,
+               ev_ebitda, debt_equity_ratio, net_margin, gross_margin,
+               operating_margin, roa, roe, dividend_yield, is_complete_ttm
+        FROM instrument_valuation
+        WHERE instrument_id = %(id)s
+        """,
+        {"id": instrument_id},
+    ).fetchone()
+    valuation = _shape_valuation(val_row)
+
+    # #1987 Block C: latest persisted IAR evidence (#1823). Refreshes only
+    # on compute_rankings — staleness is allowed and stamped (scored_at),
+    # mirroring risk_v1's as_of_date discipline.
+    score_row = conn.execute(
+        """
+        SELECT analytics_json, scored_at, model_version
+        FROM scores
+        WHERE instrument_id = %(id)s
+        ORDER BY scored_at DESC
+        LIMIT 1
+        """,
+        {"id": instrument_id},
+    ).fetchone()
+    analytics_evidence: dict[str, object] | None = None
+    if score_row is not None:
+        analytics_evidence = _shape_analytics_evidence(score_row[0], score_row[1], score_row[2])
+
     # #539: earnings_events + analyst_estimates retired with FMP. The
     # writer prompt's optional contextual fields fall back to None;
     # the writer system prompt already tolerates absent enrichment.
@@ -550,6 +876,10 @@ def _assemble_context(
         "news": news,
         "prior_thesis": prior_thesis,
         "risk_metrics": risk_metrics,
+        "price_anchor": price_anchor,
+        "valuation": valuation,
+        "analytics_evidence": analytics_evidence,
+        "ta_state": ta_state,
         "earnings_history": [],
         "analyst_estimates": None,
     }
@@ -574,6 +904,32 @@ You will be given a research context including:
   not percent); drawdown / var_5 / worst_day are SIGNED losses (negative). Basis
   is PRICE-RETURN (no dividends) — do not over-read CAGR for high-yield names.
   May be null when no metrics are computed.
+- `price_anchor`: latest persisted daily close in the instrument's NATIVE
+  currency (the same currency your per-share targets must use), its as-of
+  date (`price_date` — may lag; treat a stale anchor as approximate), the
+  trailing-52-week high/low with the observed window size
+  (`window_days_52w` — a small window means a short history; treat the
+  range as partial), and persisted simple returns (1w/1m/3m/6m/1y,
+  fractions). Null when no price history exists.
+- `valuation`: fundamentals-derived multiples (P/E, P/B, P/FCF, FCF yield,
+  EV/revenue, EV/EBITDA, margins, ROA/ROE, dividend yield) with their own
+  `price_as_of`. `available: false` with a reason means the surface is
+  structurally absent for this instrument — not a data error. Null fields
+  inside an available row are honest gaps (e.g. dual-class suppression) —
+  never invent multiples.
+- `analytics_evidence`: quality + positioning evidence — Piotroski F
+  (score/band), Altman Z (z/band), positioning signals (insider net 90d,
+  institutional 13F QoQ, short interest) and a sector peer grade — stamped
+  `as_of` (the scoring-run date; may lag — treat stale stamps as
+  approximate). `signal` fields are 0-1 normalized (higher = more
+  supportive of a long). A positioning entry without `asof` is undated —
+  cite it only as approximate. Any sub-block with `reason: "malformed"` is
+  absent evidence.
+- `ta_state`: latest persisted technical indicators (SMA 50/200, RSI-14,
+  MACD histogram, ATR-14, 30d volatility) plus `price_vs_sma200` and
+  `sma_50_200_regime`. The regime is the CURRENT 50d-vs-200d SMA relation
+  ("golden" = 50d above 200d), NOT a recent crossover event. Null
+  indicators mean insufficient history.
 
 Produce a JSON object with EXACTLY these fields:
 
@@ -605,6 +961,18 @@ Rules:
   number (a `benchmark_missing` beta is absent, not 0; a `partial_window` CAGR
   is provisional). When you cite a risk figure, name its {window_key,
   as_of_date, metric_version} so the claim stays reproducible.
+- Sanity-check buy_zone_low/high and base/bull/bear_value against
+  `price_anchor.close` and the 52-week range. State the implied
+  upside/downside from the current price to base_value explicitly in the
+  memo. A "buy" stance whose buy zone lies wholly above the current price,
+  or targets far outside the 52-week range, must be corrected or explicitly
+  justified in the memo.
+- Do NOT mechanically anchor targets to the current price — the anchor
+  grounds your numbers; valuation judgement produces them.
+- When `price_anchor` is null: leave buy_zone_low/high null regardless of
+  stance (an entry band is meaningless without a market price), and emit
+  base/bull/bear_value only if fundamentals give a defensible per-share
+  basis.
 - Separate facts from judgement. Be explicit about what must go right.
 - Respond with ONLY valid JSON. No explanation outside the JSON object.
 """
@@ -645,6 +1013,14 @@ Rules:
   basis is price-return. Respect status flags (a non-`ok` metric is not precise;
   `benchmark_missing` beta is absent, not 0) and cite {window_key, as_of_date,
   metric_version}.
+- Attack target-vs-price inconsistency: a buy zone away from the current
+  `price_anchor.close`, an implied upside to base_value that is implausible
+  against the 52-week range, or targets that ignore the anchor entirely.
+- Flag adverse `analytics_evidence` (weak Piotroski or Altman band,
+  distressed positioning signals, poor peer grade) and adverse `ta_state`
+  (death regime, price below the 200d SMA) that the memo glossed over.
+  Respect the as-of stamps — stale evidence is approximate, and a
+  `reason: "malformed"` sub-block is absent, not adverse.
 - verdict must be exactly one of: "Strong challenge", "Moderate challenge", "Weak challenge"
 - Respond with ONLY valid JSON. No explanation outside the JSON object.
 """

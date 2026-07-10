@@ -180,6 +180,124 @@
         }
       ]
     },
+    "price_anchor": {
+      "close": 331.2,
+      "price_date": "2026-07-09",
+      "currency": "USD",
+      "high_52w": 343.16,
+      "low_52w": 279.0,
+      "window_days_52w": 252,
+      "return_1w": -0.007284,
+      "return_1m": 0.064952,
+      "return_3m": 0.070459,
+      "return_6m": 0.005662,
+      "return_1y": 0.171911
+    },
+    "valuation": {
+      "available": true,
+      "current_price": 336.12,
+      "price_as_of": "2026-07-10T10:34:30.970861+00:00",
+      "market_cap_live": null,
+      "enterprise_value": null,
+      "pe_ratio": 16.089995213020583,
+      "pb_ratio": null,
+      "p_fcf_ratio": null,
+      "fcf_yield": null,
+      "ev_revenue": null,
+      "ev_ebitda": null,
+      "debt_equity_ratio": 0.1869255407402524,
+      "net_margin": null,
+      "gross_margin": null,
+      "operating_margin": null,
+      "roa": 0.012019038970712022,
+      "roe": 0.16179354902510176,
+      "dividend_yield": 1.7553254789955968,
+      "is_complete_ttm": true
+    },
+    "analytics_evidence": {
+      "schema": "iar_v1",
+      "as_of": "2026-07-09T03:37:43.108188+00:00",
+      "model_version": "v1.3-balanced",
+      "piotroski": {
+        "score": null,
+        "band": null,
+        "components_available": null,
+        "suppressed": true,
+        "reason": "quality_signal_na_financials"
+      },
+      "altman_z": {
+        "z": null,
+        "reason": "quality_signal_na_financials",
+        "suppressed": true
+      },
+      "positioning": {
+        "inst_13f_qoq": {
+          "asof": "2026-06-30",
+          "caveat": "<=135d stale",
+          "signal": 0.0,
+          "source": "ownership_institutions_observations",
+          "delta_shares_pct": -0.997
+        },
+        "short_interest": {
+          "asof": "2026-06-15",
+          "caveat": "% shares outstanding (public float not ingested); bi-monthly",
+          "signal": 1.0,
+          "source": "finra_short_interest_current",
+          "falling": false,
+          "short_pct": 0.0112,
+          "days_to_cover": 3.55
+        },
+        "insider_net_90d": {
+          "asof": "2026-06-02",
+          "caveat": null,
+          "signal": 0.4593,
+          "source": "insider_transactions",
+          "net_shares": -219769.0,
+          "shares_outstanding": 2696200000.0
+        }
+      },
+      "peer_grade": {
+        "peer_key": "4",
+        "peer_n": 616,
+        "basis": "run_eligible_sector",
+        "families": {
+          "value": {
+            "hybrid": 0.8953,
+            "percentile": 0.9992
+          },
+          "quality": {
+            "hybrid": 0.2913,
+            "percentile": 0.1542
+          },
+          "momentum": {
+            "hybrid": 0.5855,
+            "percentile": 0.5544
+          },
+          "sentiment": {
+            "hybrid": 0.6528,
+            "percentile": 0.8693
+          },
+          "confidence": {
+            "hybrid": 0.5,
+            "percentile": 0.5
+          },
+          "turnaround": {
+            "hybrid": 0.6876,
+            "percentile": 0.892
+          }
+        }
+      }
+    },
+    "ta_state": {
+      "sma_50": 314.925,
+      "sma_200": 308.435779,
+      "rsi_14": 56.8793,
+      "macd_histogram": -0.694331,
+      "atr_14": 7.800537,
+      "volatility_30d": 0.212164,
+      "price_vs_sma200": "above",
+      "sma_50_200_regime": "golden"
+    },
     "earnings_history": [],
     "analyst_estimates": null
   }

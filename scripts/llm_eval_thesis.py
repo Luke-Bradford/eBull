@@ -119,6 +119,11 @@ class ModelReport:
     critic_rounds: int = 0
     critic_pass_first: int = 0
     critic_pass_retry: int = 0
+    # #1987 gate: critic truncations counted per-role — the shared
+    # finish_reasons Counter aggregates writer+critic and cannot gate on
+    # a critic-only "length" (a truncated critic stores a thesis WITHOUT
+    # critic_json in production, silently degrading the audit trail).
+    critic_length_failures: int = 0
     finish_reasons: Counter[str] = field(default_factory=Counter)
     enum_checked: int = 0
     enum_ok: int = 0
@@ -130,7 +135,11 @@ class ModelReport:
         return self.writer_pass_retry / self.writer_rounds if self.writer_rounds else 0.0
 
     def gate_passes(self) -> bool:
-        return self.writer_rounds >= GATE_MIN_ROUNDS and self.writer_pass_retry_rate >= GATE_MIN_PASS_RATE
+        return (
+            self.writer_rounds >= GATE_MIN_ROUNDS
+            and self.writer_pass_retry_rate >= GATE_MIN_PASS_RATE
+            and self.critic_length_failures == 0
+        )
 
 
 def _writer_enums_ok(data: dict[str, object]) -> bool:
@@ -277,6 +286,7 @@ def aggregate(model: str, rounds: list[RoundResult]) -> ModelReport:
             report.critic_rounds += 1
             report.critic_pass_first += rnd.pass_first
             report.critic_pass_retry += rnd.pass_with_retry
+            report.critic_length_failures += sum(1 for a in rnd.attempts if a.finish_reason == "length")
         for attempt in rnd.attempts:
             if attempt.finish_reason is not None:
                 report.finish_reasons[attempt.finish_reason] += 1
@@ -411,6 +421,7 @@ def print_report(report: ModelReport) -> None:
     print(f"critic pass (with retry):    {_fmt_rate(report.critic_pass_retry, report.critic_rounds)}")
     print(f"enum validity (parsed outputs): {_fmt_rate(report.enum_ok, report.enum_checked)}")
     print(f"finish_reason mix: {dict(report.finish_reasons)}")
+    print(f"critic length-failures: {report.critic_length_failures}")
     if report.durations_s:
         print(
             f"wall-clock per call: mean {statistics.mean(report.durations_s):.0f}s, "
@@ -422,7 +433,12 @@ def print_report(report: ModelReport) -> None:
     gate = "PASS" if report.gate_passes() else "FAIL"
     if report.writer_rounds < GATE_MIN_ROUNDS:
         gate = f"FAIL (insufficient sample: {report.writer_rounds} < {GATE_MIN_ROUNDS} writer rounds)"
-    print(f"go-live gate (writer with-retry >= {GATE_MIN_PASS_RATE:.0%} over >= {GATE_MIN_ROUNDS} rounds): {gate}")
+    elif report.critic_length_failures > 0:
+        gate = f"FAIL ({report.critic_length_failures} critic length-failure(s))"
+    print(
+        f"go-live gate (writer with-retry >= {GATE_MIN_PASS_RATE:.0%} over >= {GATE_MIN_ROUNDS} rounds"
+        f" AND critic length-failures == 0): {gate}"
+    )
 
 
 def _round_to_json(rnd: RoundResult) -> dict[str, object]:
@@ -484,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
                     "critic_rounds": r.critic_rounds,
                     "critic_pass_first": r.critic_pass_first,
                     "critic_pass_retry": r.critic_pass_retry,
+                    "critic_length_failures": r.critic_length_failures,
                     "finish_reasons": dict(r.finish_reasons),
                     "enum_ok": r.enum_ok,
                     "enum_checked": r.enum_checked,
@@ -497,7 +514,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nfull results -> {args.json_out}")
 
     if args.gate_model is not None and not reports[args.gate_model].gate_passes():
-        print(f"\nGATE FAIL: {args.gate_model} writer with-retry below {GATE_MIN_PASS_RATE:.0%}")
+        gate_report = reports[args.gate_model]
+        if gate_report.critic_length_failures > 0:
+            reason = f"{gate_report.critic_length_failures} critic length-failure(s)"
+        else:
+            reason = f"writer with-retry below {GATE_MIN_PASS_RATE:.0%}"
+        print(f"\nGATE FAIL: {args.gate_model} — {reason}")
         return 1
     return 0
 

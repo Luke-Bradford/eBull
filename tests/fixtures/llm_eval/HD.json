@@ -99,6 +99,108 @@
         }
       ]
     },
+    "price_anchor": {
+      "close": 317.48,
+      "price_date": "2026-06-09",
+      "currency": "USD",
+      "high_52w": 425.8402,
+      "low_52w": 289.0,
+      "window_days_52w": 248,
+      "return_1w": 0.021296,
+      "return_1m": -0.00022,
+      "return_3m": -0.108202,
+      "return_6m": -0.078466,
+      "return_1y": -0.129171
+    },
+    "valuation": {
+      "available": false,
+      "reason": "no_live_quote"
+    },
+    "analytics_evidence": {
+      "schema": "iar_v1",
+      "as_of": "2026-07-09T03:37:43.108188+00:00",
+      "model_version": "v1.3-balanced",
+      "piotroski": {
+        "score": 4,
+        "band": "neutral",
+        "components_available": 9,
+        "suppressed": false,
+        "reason": null
+      },
+      "altman_z": {
+        "z": 4.5368,
+        "band": "safe",
+        "reason": null,
+        "suppressed": false
+      },
+      "positioning": {
+        "inst_13f_qoq": {
+          "asof": "2026-06-30",
+          "caveat": "<=135d stale",
+          "signal": 0.0,
+          "source": "ownership_institutions_observations",
+          "delta_shares_pct": -0.9954
+        },
+        "short_interest": {
+          "asof": "2026-06-15",
+          "caveat": "% shares outstanding (public float not ingested); bi-monthly",
+          "signal": 1.0,
+          "source": "finra_short_interest_current",
+          "falling": false,
+          "short_pct": 0.0136,
+          "days_to_cover": 3.05
+        },
+        "insider_net_90d": {
+          "asof": "2026-05-21",
+          "caveat": null,
+          "signal": 0.5,
+          "source": "insider_transactions",
+          "net_shares": 0.0,
+          "shares_outstanding": 997000000.0
+        }
+      },
+      "peer_grade": {
+        "peer_key": "7",
+        "peer_n": 312,
+        "basis": "run_eligible_sector",
+        "families": {
+          "value": {
+            "hybrid": 0.5043,
+            "percentile": 0.5144
+          },
+          "quality": {
+            "hybrid": 0.6647,
+            "percentile": 0.726
+          },
+          "momentum": {
+            "hybrid": 0.4175,
+            "percentile": 0.367
+          },
+          "sentiment": {
+            "hybrid": 0.4779,
+            "percentile": 0.4263
+          },
+          "confidence": {
+            "hybrid": 0.5,
+            "percentile": 0.5
+          },
+          "turnaround": {
+            "hybrid": 0.4865,
+            "percentile": 0.4551
+          }
+        }
+      }
+    },
+    "ta_state": {
+      "sma_50": 321.9824,
+      "sma_200": 360.491066,
+      "rsi_14": 52.4555,
+      "macd_histogram": 1.222096,
+      "atr_14": 8.762203,
+      "volatility_30d": 0.263767,
+      "price_vs_sma200": "below",
+      "sma_50_200_regime": "death"
+    },
     "earnings_history": [],
     "analyst_estimates": null
   }

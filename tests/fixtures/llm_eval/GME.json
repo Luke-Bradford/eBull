@@ -119,7 +119,26 @@
         "importance_score": 0.5628
       }
     ],
-    "prior_thesis": null,
+    "prior_thesis": {
+      "version": 2,
+      "thesis_type": "turnaround",
+      "stance": "watch",
+      "confidence_score": 0.75,
+      "buy_zone_low": 20.0,
+      "buy_zone_high": 25.0,
+      "base_value": 22.5,
+      "bull_value": 30.0,
+      "bear_value": 15.0,
+      "break_conditions": [
+        "Failure to achieve FY26 EBITDA guidance (>$1.5B)",
+        "Material delay or underperformance in eBay integration",
+        "Sony PlayStation 5 launch cannibalizing digital content revenues",
+        "Shareholder approval not secured for $8B merger",
+        "3Y volatility exceeds 100% annualized"
+      ],
+      "memo_markdown": "### Business Quality & Catalysts\nGameStop's FY25 results demonstrate a structural turnaround, with revenue (+75% YoY) and EBITDA ($1.05B) nearing FY26 guidance. The merger with eBay, now shareholder-approved, positions the company to dominate physical-digital convergence. Management's focus on optimizing 20K+ stores while leveraging eBay's 200M active buyers creates a dual-channel growth engine. Improved gross margin (37% vs 18% in 2022) and operating margin (12% vs -60% in 2022) signal operational discipline.\n\n### Valuation & Metrics\nWith shares currently trading at 1.2x FY26 EBITDA (vs 0.4x in early 2023), the stock appears fairly valued relative to its earnings trajectory. Risk metrics highlight extreme volatility (3Y annualized vol: 97%, beta: 1.14), with 5% VaR at -32% (3Y window). Historical max drawdown of -78% (2022) remains a critical risk, though current fundamentals suggest improved resiliency versus the 2022-2023 collapse. Free cash flow of $1.2B and $2.1B net cash provide downside protection.\n\n### Risks & Stance\nDespite progress, execution risks remain: eBay integration (Q1 2025 target), PlayStation 5 lifecycle risks (2025-2026), and potential regulatory scrutiny of the merger. The 3Y volatility and 16% Calmar ratio (annualized return of 22%) suggest high-risk/high-reward dynamics. We maintain a 'watch' stance, with a tighter buy zone ($20-25) reflecting recent strength. Conviction increases to 75% from 65% due to EBITDA upgrades and merger approval, but we await Q1 2025 results before escalating to 'buy' status.",
+      "created_at": "2026-07-10T09:10:48.587112+00:00"
+    },
     "risk_metrics": {
       "metric_version": "risk_v1",
       "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
@@ -191,6 +210,125 @@
           "calmar_status": "ok"
         }
       ]
+    },
+    "price_anchor": {
+      "close": 21.89,
+      "price_date": "2026-07-10",
+      "currency": "USD",
+      "high_52w": 29.65,
+      "low_52w": 19.8501,
+      "window_days_52w": 252,
+      "return_1w": -0.038647,
+      "return_1m": -0.020143,
+      "return_3m": -0.05809,
+      "return_6m": 0.03264,
+      "return_1y": -0.050544
+    },
+    "valuation": {
+      "available": true,
+      "current_price": 21.89,
+      "price_as_of": "2026-07-10T10:34:34.447923+00:00",
+      "market_cap_live": 9822043000.0,
+      "enterprise_value": 2424443000.0,
+      "pe_ratio": 16.33582089552239,
+      "pb_ratio": 1.6812521182451516,
+      "p_fcf_ratio": 29.504484830279363,
+      "fcf_yield": 0.03389315237166036,
+      "ev_revenue": 0.6494971603086155,
+      "ev_ebitda": 6.277687726566546,
+      "debt_equity_ratio": 0.0,
+      "net_margin": 0.20445777968281184,
+      "gross_margin": 0.3438705529361337,
+      "operating_margin": 0.1034612087441063,
+      "roa": 0.0695442989530084,
+      "roe": 0.13063795552968965,
+      "dividend_yield": null,
+      "is_complete_ttm": true
+    },
+    "analytics_evidence": {
+      "schema": "iar_v1",
+      "as_of": "2026-07-09T03:37:43.108188+00:00",
+      "model_version": "v1.3-balanced",
+      "piotroski": {
+        "score": 6,
+        "band": "neutral",
+        "components_available": 9,
+        "suppressed": false,
+        "reason": null
+      },
+      "altman_z": {
+        "z": 7.2796,
+        "band": "safe",
+        "reason": null,
+        "suppressed": false
+      },
+      "positioning": {
+        "inst_13f_qoq": {
+          "asof": "2026-06-30",
+          "caveat": "<=135d stale",
+          "signal": 0.0,
+          "source": "ownership_institutions_observations",
+          "delta_shares_pct": -0.9996
+        },
+        "short_interest": {
+          "asof": "2026-06-15",
+          "caveat": "% shares outstanding (public float not ingested); bi-monthly",
+          "signal": 0.7914,
+          "source": "finra_short_interest_current",
+          "falling": true,
+          "short_pct": 0.1272,
+          "days_to_cover": 8.34
+        },
+        "insider_net_90d": {
+          "asof": "2026-04-13",
+          "caveat": null,
+          "signal": 0.4956,
+          "source": "insider_transactions",
+          "net_shares": -3912.0,
+          "shares_outstanding": 448700000.0
+        }
+      },
+      "peer_grade": {
+        "peer_key": "7",
+        "peer_n": 312,
+        "basis": "run_eligible_sector",
+        "families": {
+          "value": {
+            "hybrid": 0.7302,
+            "percentile": 0.9984
+          },
+          "quality": {
+            "hybrid": 0.6516,
+            "percentile": 0.7099
+          },
+          "momentum": {
+            "hybrid": 0.4983,
+            "percentile": 0.4952
+          },
+          "sentiment": {
+            "hybrid": 0.6608,
+            "percentile": 0.8798
+          },
+          "confidence": {
+            "hybrid": 0.5,
+            "percentile": 0.5
+          },
+          "turnaround": {
+            "hybrid": 0.2613,
+            "percentile": 0.0545
+          }
+        }
+      }
+    },
+    "ta_state": {
+      "sma_50": 22.2382,
+      "sma_200": 22.882361,
+      "rsi_14": 48.1195,
+      "macd_histogram": 0.044977,
+      "atr_14": 0.664324,
+      "volatility_30d": 0.268541,
+      "price_vs_sma200": "below",
+      "sma_50_200_regime": "death"
     },
     "earnings_history": [],
     "analyst_estimates": null
