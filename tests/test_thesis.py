@@ -27,7 +27,11 @@ from app.services.thesis import (
     ThesisResult,
     _call_critic,
     _call_writer,
+    _shape_analytics_evidence,
+    _shape_price_anchor,
     _shape_risk_metrics,
+    _shape_ta_state,
+    _shape_valuation,
     _to_float,
     _validate_critic_output,
     _validate_writer_output,
@@ -438,6 +442,25 @@ def _make_two_call_client(writer_json: dict, critic_json: dict) -> _FakeLLMClien
     return _FakeLLMClient([_completion(writer_json), _completion(critic_json)])
 
 
+class TestAssembleContextEnrichment:
+    """#1987: the four new context keys must be present with honest defaults
+    when the underlying surfaces are empty (the _make_conn mock returns no
+    rows for price_daily / instrument_valuation / scores). The populated
+    paths are covered by the shaper table-tests above; the real queries are
+    exercised on dev by the eval-harness fixture recapture (spec §Eval gate).
+    """
+
+    def test_empty_surfaces_yield_honest_absences(self) -> None:
+        from app.services.thesis import _assemble_context
+
+        context = _assemble_context(_make_conn(), instrument_id=1)
+
+        assert context["price_anchor"] is None
+        assert context["ta_state"] is None
+        assert context["valuation"] == {"available": False, "reason": "no_live_quote"}
+        assert context["analytics_evidence"] is None
+
+
 class TestGenerateThesis:
     """
     All tests in this class patch `_utcnow` to a fixed value so that
@@ -731,3 +754,282 @@ class TestShapeRiskMetrics:
     def test_as_of_none_tolerated(self) -> None:
         out = _shape_risk_metrics([_risk_row(as_of=None)], "risk_v1")
         assert _windows(out)[0]["as_of_date"] is None
+
+
+# ---------------------------------------------------------------------------
+# #1987 context blocks — pure row-shaping
+# (spec: docs/specs/thesis/2026-07-10-thesis-context-enrichment.md)
+# ---------------------------------------------------------------------------
+
+# Shared price_daily latest-row shape (13 cols) — see thesis.py column-order
+# comment: 0 close, 1 price_date, 2-6 returns 1w/1m/3m/6m/1y, 7 sma_50,
+# 8 sma_200, 9 rsi_14, 10 macd_histogram, 11 atr_14, 12 volatility_30d.
+
+
+def _price_row(
+    *,
+    close: object = 24.5,
+    price_date: object = date(2026, 7, 9),
+    sma_50: object = 23.0,
+    sma_200: object = 21.0,
+) -> tuple[object, ...]:
+    return (close, price_date, 0.01, 0.03, -0.05, 0.12, 0.40, sma_50, sma_200, 55.2, 0.4, 1.1, 0.02)
+
+
+class TestShapePriceAnchor:
+    def test_no_price_history_returns_none(self) -> None:
+        # No rows → None — never a fabricated anchor.
+        assert _shape_price_anchor(None, None, "USD") is None
+
+    def test_shapes_anchor_with_52w_range(self) -> None:
+        out = _shape_price_anchor(_price_row(), (30.0, 15.5, 251), "USD")
+        assert out is not None
+        assert out["close"] == pytest.approx(24.5)
+        assert out["price_date"] == "2026-07-09"
+        assert out["currency"] == "USD"
+        assert out["high_52w"] == pytest.approx(30.0)
+        assert out["low_52w"] == pytest.approx(15.5)
+        assert out["window_days_52w"] == 251
+        assert out["return_1y"] == pytest.approx(0.40)
+
+    def test_thin_window_stays_honest(self) -> None:
+        # 133-row history (WLYB class): range present, window size tells the
+        # writer the range is partial — never padded to a full year.
+        out = _shape_price_anchor(_price_row(), (12.0, 8.0, 133), "USD")
+        assert out is not None
+        assert out["window_days_52w"] == 133
+
+    def test_missing_agg_row_keeps_nulls(self) -> None:
+        out = _shape_price_anchor(_price_row(), None, "USD")
+        assert out is not None
+        assert out["high_52w"] is None
+        assert out["low_52w"] is None
+        assert out["window_days_52w"] == 0
+
+    def test_null_returns_stay_none(self) -> None:
+        row = (24.5, date(2026, 7, 9), None, None, None, None, None, None, None, None, None, None, None)
+        out = _shape_price_anchor(row, (25.0, 20.0, 40), "GBP")
+        assert out is not None
+        assert out["return_1w"] is None
+        assert out["return_1y"] is None
+
+
+# instrument_valuation row shape (18 cols) — see thesis.py _VALUATION_FIELDS.
+
+
+def _valuation_row(**overrides: object) -> tuple[object, ...]:
+    base: list[object] = [
+        212.4,  # current_price
+        datetime(2026, 7, 9, 20, 0, tzinfo=UTC),  # price_as_of
+        3.1e12,
+        3.2e12,
+        32.1,
+        45.0,
+        28.0,
+        0.035,
+        8.1,
+        24.0,
+        1.8,
+        0.25,
+        0.46,
+        0.30,
+        0.28,
+        1.5,
+        0.005,
+        True,  # is_complete_ttm
+    ]
+    row = dict(enumerate(base))
+    for name, val in overrides.items():
+        idx = {"current_price": 0, "pe_ratio": 4, "fcf_yield": 7, "market_cap_live": 2}[name]
+        row[idx] = val
+    return tuple(row[i] for i in range(18))
+
+
+class TestShapeValuation:
+    def test_absent_row_is_statused_not_errored(self) -> None:
+        # Quotes-gated view (#1857 class): absence is structural.
+        out = _shape_valuation(None)
+        assert out == {"available": False, "reason": "no_live_quote"}
+
+    def test_present_row_shapes_all_fields(self) -> None:
+        out = _shape_valuation(_valuation_row())
+        assert out["available"] is True
+        assert out["current_price"] == pytest.approx(212.4)
+        assert out["pe_ratio"] == pytest.approx(32.1)
+        assert out["price_as_of"] == "2026-07-09T20:00:00+00:00"
+        assert out["is_complete_ttm"] is True
+
+    def test_dual_class_nulls_pass_through(self) -> None:
+        # #1664 suppression: NULL shares-distorted columns stay None.
+        out = _shape_valuation(_valuation_row(market_cap_live=None, fcf_yield=None))
+        assert out["available"] is True
+        assert out["market_cap_live"] is None
+        assert out["fcf_yield"] is None
+
+
+# analytics_json (iar_v1) fixture mirroring the persisted shape.
+
+
+def _analytics() -> dict[str, Any]:
+    return {
+        "schema": "iar_v1",
+        "piotroski": {
+            "score": 6,
+            "band": "neutral",
+            "reason": None,
+            "suppressed": False,
+            "components_available": 9,
+            "components": {"cfo_positive": True},
+        },
+        "altman_z": {"z": 7.28, "band": "safe", "reason": None, "suppressed": False},
+        "positioning": {
+            "insider_net_90d": {"signal": 0.4956, "net_shares": -3912.0, "asof": "2026-04-13"},
+            "inst_13f_qoq": {"signal": 0.0, "delta_shares_pct": -0.9996, "asof": "2026-06-30"},
+            "short_interest": {"signal": 0.7914, "short_pct": 0.1272, "falling": True},
+        },
+        "peer_grade": {
+            "peer_key": "7",
+            "peer_n": 312,
+            "basis": "run_eligible_sector",
+            "families": {"value": {"hybrid": 0.73, "absolute": 0.62, "percentile": 0.99}},
+        },
+    }
+
+
+_SCORED_AT = datetime(2026, 7, 9, 3, 37, tzinfo=UTC)
+
+
+class TestShapeAnalyticsEvidence:
+    def test_null_analytics_is_absent_not_malformed(self) -> None:
+        # scores row exists, analytics_json NULL → absent evidence.
+        assert _shape_analytics_evidence(None, _SCORED_AT, "v1.3") is None
+
+    def test_non_dict_analytics_is_malformed_not_absent(self) -> None:
+        # Present-but-wrong-type ≠ absent (spec §Block C distinction).
+        assert _shape_analytics_evidence(["not", "a", "dict"], _SCORED_AT, "v1.3") == {"reason": "malformed"}
+
+    def test_compaction_drops_components_and_absolute(self) -> None:
+        out = _shape_analytics_evidence(_analytics(), _SCORED_AT, "v1.3-balanced")
+        assert out is not None
+        assert out["as_of"] == "2026-07-09T03:37:00+00:00"
+        assert out["model_version"] == "v1.3-balanced"
+        piotroski = out["piotroski"]
+        assert isinstance(piotroski, dict)
+        assert piotroski["score"] == 6
+        assert "components" not in piotroski
+        peer = out["peer_grade"]
+        assert isinstance(peer, dict)
+        families = peer["families"]
+        assert isinstance(families, dict)
+        assert families["value"] == {"hybrid": 0.73, "percentile": 0.99}
+
+    def test_undated_positioning_entry_kept(self) -> None:
+        # 818/3,906 dev rows: non-null insider signal, no asof — forwarded.
+        out = _shape_analytics_evidence(_analytics(), _SCORED_AT, "v1.3")
+        assert out is not None
+        positioning = out["positioning"]
+        assert isinstance(positioning, dict)
+        assert positioning["short_interest"]["signal"] == pytest.approx(0.7914)
+        assert "asof" not in positioning["short_interest"]
+
+    def test_out_of_range_signal_fails_closed(self) -> None:
+        analytics = _analytics()
+        analytics["positioning"]["insider_net_90d"]["signal"] = 1.2
+        out = _shape_analytics_evidence(analytics, _SCORED_AT, "v1.3")
+        assert out is not None
+        positioning = out["positioning"]
+        assert isinstance(positioning, dict)
+        assert positioning["insider_net_90d"] == {"reason": "malformed"}
+        # Sibling entries unaffected.
+        assert positioning["inst_13f_qoq"]["signal"] == pytest.approx(0.0)
+
+    def test_malformed_sub_block_fails_closed(self) -> None:
+        analytics = _analytics()
+        analytics["piotroski"] = "garbage"
+        analytics["peer_grade"] = 42
+        out = _shape_analytics_evidence(analytics, _SCORED_AT, "v1.3")
+        assert out is not None
+        assert out["piotroski"] == {"reason": "malformed"}
+        assert out["peer_grade"] == {"reason": "malformed"}
+        # Well-formed siblings still forwarded.
+        altman = out["altman_z"]
+        assert isinstance(altman, dict)
+        assert altman["band"] == "safe"
+
+    def test_scored_at_none_tolerated(self) -> None:
+        out = _shape_analytics_evidence(_analytics(), None, "v1.3")
+        assert out is not None
+        assert out["as_of"] is None
+
+    def test_bool_signal_fails_closed(self) -> None:
+        # bool is an int subclass — {"signal": true} must be malformed, not 1.0.
+        analytics = _analytics()
+        analytics["positioning"]["short_interest"]["signal"] = True
+        out = _shape_analytics_evidence(analytics, _SCORED_AT, "v1.3")
+        assert out is not None
+        positioning = out["positioning"]
+        assert isinstance(positioning, dict)
+        assert positioning["short_interest"] == {"reason": "malformed"}
+
+    def test_non_dict_families_marks_peer_grade_malformed(self) -> None:
+        # Corruption ≠ missing evidence: families must be a dict (empty OK).
+        analytics = _analytics()
+        analytics["peer_grade"]["families"] = "corrupt"
+        out = _shape_analytics_evidence(analytics, _SCORED_AT, "v1.3")
+        assert out is not None
+        assert out["peer_grade"] == {"reason": "malformed"}
+
+    def test_non_dict_family_entry_marked_malformed(self) -> None:
+        analytics = _analytics()
+        analytics["peer_grade"]["families"]["quality"] = 0.7
+        out = _shape_analytics_evidence(analytics, _SCORED_AT, "v1.3")
+        assert out is not None
+        peer = out["peer_grade"]
+        assert isinstance(peer, dict)
+        families = peer["families"]
+        assert isinstance(families, dict)
+        assert families["quality"] == {"reason": "malformed"}
+        assert families["value"] == {"hybrid": 0.73, "percentile": 0.99}
+
+    def test_empty_families_dict_is_not_malformed(self) -> None:
+        # absolute_only rows persisted outside a run cohort have families={}.
+        analytics = _analytics()
+        analytics["peer_grade"]["families"] = {}
+        out = _shape_analytics_evidence(analytics, _SCORED_AT, "v1.3")
+        assert out is not None
+        peer = out["peer_grade"]
+        assert isinstance(peer, dict)
+        assert peer["families"] == {}
+
+
+class TestShapeTaState:
+    def test_no_price_history_returns_none(self) -> None:
+        assert _shape_ta_state(None) is None
+
+    def test_golden_regime_and_price_above(self) -> None:
+        out = _shape_ta_state(_price_row(close=24.5, sma_50=23.0, sma_200=21.0))
+        assert out is not None
+        assert out["sma_50_200_regime"] == "golden"
+        assert out["price_vs_sma200"] == "above"
+        assert out["rsi_14"] == pytest.approx(55.2)
+
+    def test_death_regime_and_price_below(self) -> None:
+        out = _shape_ta_state(_price_row(close=18.0, sma_50=20.0, sma_200=22.0))
+        assert out is not None
+        assert out["sma_50_200_regime"] == "death"
+        assert out["price_vs_sma200"] == "below"
+
+    def test_equal_smas_yield_none_not_a_third_regime(self) -> None:
+        # Internal compute_indicators emits "none" here; the context contract
+        # is golden/death/null only (spec §Block D).
+        out = _shape_ta_state(_price_row(sma_50=21.0, sma_200=21.0))
+        assert out is not None
+        assert out["sma_50_200_regime"] is None
+
+    def test_missing_smas_yield_none_signals(self) -> None:
+        # <200d history: sma_200 NULL → both derived signals absent.
+        out = _shape_ta_state(_price_row(sma_50=None, sma_200=None))
+        assert out is not None
+        assert out["sma_50_200_regime"] is None
+        assert out["price_vs_sma200"] is None
+        assert out["sma_50"] is None

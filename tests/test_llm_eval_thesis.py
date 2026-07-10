@@ -253,3 +253,29 @@ def test_gate_requires_minimum_sample() -> None:
     report = aggregate("m", rounds)
     assert report.writer_pass_retry_rate == 1.0
     assert not report.gate_passes()
+
+
+def test_gate_fails_on_critic_length_failure() -> None:
+    # #1987: a truncated critic stores a thesis WITHOUT critic_json in
+    # production — the gate must fail on ANY critic finish_reason == "length",
+    # even with a perfect writer score.
+    rounds = [RoundResult("AAPL", "writer", [_attempt(True)])] * 10 + [
+        RoundResult("IEP", "critic", [_attempt(False, category="schema_fail", finish="length")])
+    ]
+    report = aggregate("m", rounds)
+    assert report.writer_pass_retry_rate == 1.0
+    assert report.critic_length_failures == 1
+    assert not report.gate_passes()
+
+
+def test_writer_length_does_not_trip_critic_gate() -> None:
+    # Writer truncations are covered by the writer pass-rate gate; the
+    # critic-length counter must count CRITIC attempts only.
+    rounds = (
+        [RoundResult("AAPL", "writer", [_attempt(True)])] * 9
+        + [RoundResult("GME", "writer", [_attempt(False, category="schema_fail", finish="length"), _attempt(True)])]
+        + [RoundResult("AAPL", "critic", [_attempt(True)])]
+    )
+    report = aggregate("m", rounds)
+    assert report.critic_length_failures == 0
+    assert report.gate_passes()
