@@ -3217,9 +3217,11 @@ def thesis_refresh() -> None:
     # marker-wrapped for the scheduled path — _record_prereq_skip wraps
     # again). A raised RuntimeConfigCorrupt propagates — fail closed,
     # never a silent skip.
+    # The guard's client is reused for the whole run — providers hold no
+    # connection after construction (make_llm_client only reads config).
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         try:
-            make_llm_client(conn)
+            client = make_llm_client(conn)
         except LLMProviderNotConfigured as exc:
             logger.error("thesis_refresh: %s, skipping", exc)
             _record_prereq_skip(JOB_THESIS_REFRESH, str(exc))
@@ -3227,7 +3229,6 @@ def thesis_refresh() -> None:
 
     with _tracked_job(JOB_THESIS_REFRESH) as tracker:
         with connect_job() as conn:
-            client = make_llm_client(conn)
             candidates = _thesis_refresh_candidates(conn)
             stale = find_stale_instruments(conn, tier=None, instrument_ids=candidates) if candidates else []
 
