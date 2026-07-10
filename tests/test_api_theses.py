@@ -556,6 +556,8 @@ class TestCriticVerdictExtraction:
 
 
 class TestListTheses:
+    # Cursor result sets in execute order: [held-no-thesis rows], [library rows].
+
     def test_returns_enriched_items(self) -> None:
         row = _make_library_row(
             100,
@@ -564,7 +566,7 @@ class TestListTheses:
             critic_json={"verdict": "Moderate challenge"},
             run_status="failed",
         )
-        conn = _with_conn([[row]])
+        conn = _with_conn([[], [row]])
         conn.execute.return_value.fetchall.return_value = [
             (100, "AAPL", "monthly", _EARLIER, None, None),
         ]
@@ -582,12 +584,82 @@ class TestListTheses:
         assert item["run_status"] == "failed"
         assert item["latest_rank"] == 7
 
+    def test_held_no_thesis_row_prepended(self) -> None:
+        gap_row = {
+            "thesis_id": None,
+            "instrument_id": 200,
+            "thesis_version": None,
+            "thesis_type": None,
+            "stance": None,
+            "confidence_score": None,
+            "buy_zone_low": None,
+            "buy_zone_high": None,
+            "critic_json": None,
+            "created_at": None,
+            "symbol": "GME",
+            "company_name": "GameStop",
+            "is_held": True,
+            "latest_score": None,
+            "latest_rank": None,
+            "run_status": None,
+            "run_error": None,
+            "run_trigger": None,
+            "run_started_at": None,
+        }
+        conn = _with_conn([[gap_row], [_make_library_row(100, "AAPL")]])
+        conn.execute.return_value.fetchall.return_value = [
+            (200, "GME", None, None, None, None),  # no_thesis via find_stale
+        ]
+        resp = client.get("/theses")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 2
+        # Gap row first — a held name without a memo outranks memo age.
+        assert body["items"][0]["symbol"] == "GME"
+        assert body["items"][0]["thesis_id"] is None
+        assert body["items"][0]["stale_reason"] == "no_thesis"
+        assert body["items"][1]["symbol"] == "AAPL"
+
+    def test_stance_filter_excludes_thesis_less_rows(self) -> None:
+        gap_row = {
+            "thesis_id": None,
+            "instrument_id": 200,
+            "thesis_version": None,
+            "thesis_type": None,
+            "stance": None,
+            "confidence_score": None,
+            "buy_zone_low": None,
+            "buy_zone_high": None,
+            "critic_json": None,
+            "created_at": None,
+            "symbol": "GME",
+            "company_name": "GameStop",
+            "is_held": True,
+            "latest_score": None,
+            "latest_rank": None,
+            "run_status": None,
+            "run_error": None,
+            "run_trigger": None,
+            "run_started_at": None,
+        }
+        conn = _with_conn([[gap_row], [_make_library_row(100, "AAPL", stance="buy")]])
+        conn.execute.return_value.fetchall.return_value = []
+        resp = client.get("/theses?stance=buy")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["items"][0]["symbol"] == "AAPL"
+
     def test_stance_param_validated(self) -> None:
         resp = client.get("/theses?stance=exit")
         assert resp.status_code == 422
 
     def test_empty_library_returns_empty_page(self) -> None:
-        conn = _with_conn([[]])
+        conn = _with_conn([[], []])
         conn.execute.return_value.fetchall.return_value = []
         resp = client.get("/theses")
         _cleanup()

@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 import psycopg.rows
 import pytest
 
-from app.api.theses import _LIBRARY_SQL
+from app.api.theses import _HELD_NO_THESIS_SQL, _LIBRARY_SQL
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 
 _T1 = datetime(2026, 6, 1, tzinfo=UTC)
@@ -105,3 +105,37 @@ class TestLibrarySql:
             cur.execute(_LIBRARY_SQL, {"mv": _DEFAULT_MODEL_VERSION})
             ordered = [r["instrument_id"] for r in cur.fetchall() if r["instrument_id"] in (a, b)]
         assert ordered == [a, b]
+
+    def test_held_without_thesis_surfaces_as_gap_row(self, conn) -> None:
+        a, b = _seed(conn)
+        # C: held, but no thesis row at all — must come back from the
+        # gap query with typed-NULL thesis columns, and must NOT appear
+        # in the library query.
+        c = 8103
+        conn.execute(
+            "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable)"
+            " VALUES (%s, 'LIBC', 'Library C Co', TRUE)",
+            (c,),
+        )
+        conn.execute(
+            "INSERT INTO positions (instrument_id, current_units, cost_basis, source)"
+            " VALUES (%s, 5, 50, 'broker_sync')",
+            (c,),
+        )
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(_HELD_NO_THESIS_SQL, {"mv": _DEFAULT_MODEL_VERSION})
+            gap_rows = {r["instrument_id"]: r for r in cur.fetchall() if r["instrument_id"] in (a, b, c)}
+            cur.execute(_LIBRARY_SQL, {"mv": _DEFAULT_MODEL_VERSION})
+            lib_ids = {r["instrument_id"] for r in cur.fetchall() if r["instrument_id"] in (a, b, c)}
+
+        # A is held WITH a thesis → library only. C is held WITHOUT → gap only.
+        assert set(gap_rows) == {c}
+        assert lib_ids == {a, b}
+        row_c = gap_rows[c]
+        assert row_c["thesis_id"] is None
+        assert row_c["stance"] is None
+        assert row_c["created_at"] is None
+        assert row_c["is_held"] is True
+        assert row_c["symbol"] == "LIBC"

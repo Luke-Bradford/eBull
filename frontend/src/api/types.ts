@@ -1255,19 +1255,21 @@ export interface ThesisHistoryResponse {
   limit: number;
 }
 
-// #1902 — GET /theses (library: latest thesis per instrument + context)
+// #1902 — GET /theses (library: latest thesis per instrument + context).
+// Thesis fields are null on the "held but no thesis yet" rows the library
+// prepends so the dashboard staleness alert always lands on visible rows.
 export interface ThesisLibraryItem {
   instrument_id: number;
   symbol: string;
   company_name: string;
-  thesis_id: number;
-  thesis_version: number;
-  thesis_type: string;
-  stance: string;
+  thesis_id: number | null;
+  thesis_version: number | null;
+  thesis_type: string | null;
+  stance: string | null;
   confidence_score: number | null;
   buy_zone_low: number | null;
   buy_zone_high: number | null;
-  created_at: string;
+  created_at: string | null;
   critic_verdict: string | null;
   /** null = fresh, or outside refresh scope (not tradable / not analysable). */
   stale_reason: string | null;

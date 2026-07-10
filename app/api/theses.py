@@ -123,6 +123,12 @@ class ThesisLibraryItem(BaseModel):
     plus display context (held flag, latest score, latest generation-run
     status, server-computed staleness).
 
+    HELD instruments WITHOUT any thesis also get a row (thesis fields
+    null, ``stale_reason='no_thesis'`` when analysable) — the dashboard
+    staleness alert includes them, so the library it links to must too
+    (Codex ckpt-2 finding 1). Unheld instruments without theses stay out:
+    the library is a thesis surface, not the instrument universe.
+
     ``run_status`` is the latest ``thesis_runs`` row for the instrument —
     'running' | 'ok' | 'failed' (DB CHECK-constrained), None when the
     instrument predates thesis_runs (#1919). ``stale_reason`` is None when
@@ -137,14 +143,14 @@ class ThesisLibraryItem(BaseModel):
     instrument_id: int
     symbol: str
     company_name: str
-    thesis_id: int
-    thesis_version: int
-    thesis_type: str
-    stance: str
+    thesis_id: int | None
+    thesis_version: int | None
+    thesis_type: str | None
+    stance: str | None
     confidence_score: float | None
     buy_zone_low: float | None
     buy_zone_high: float | None
-    created_at: datetime
+    created_at: datetime | None
     critic_verdict: str | None
     stale_reason: str | None
     is_held: bool
@@ -309,6 +315,59 @@ _LIBRARY_SQL = """
     ORDER BY t.created_at DESC, t.thesis_id DESC
 """
 
+# Held instruments with NO thesis at all — the actionable gap the dashboard
+# staleness alert surfaces, so the library must show them too (Codex ckpt-2).
+# Same LATERAL context as _LIBRARY_SQL; thesis columns are typed NULLs so both
+# result sets share one row shape. Prepended above the thesis rows by the
+# endpoint: a missing memo on money outranks any existing memo's age.
+_HELD_NO_THESIS_SQL = """
+    SELECT
+        NULL::bigint      AS thesis_id,
+        i.instrument_id,
+        NULL::int         AS thesis_version,
+        NULL::text        AS thesis_type,
+        NULL::text        AS stance,
+        NULL::numeric     AS confidence_score,
+        NULL::numeric     AS buy_zone_low,
+        NULL::numeric     AS buy_zone_high,
+        NULL::jsonb       AS critic_json,
+        NULL::timestamptz AS created_at,
+        i.symbol, i.company_name,
+        TRUE AS is_held,
+        s.total_score AS latest_score,
+        s.rank        AS latest_rank,
+        r.status      AS run_status,
+        r.error       AS run_error,
+        r.trigger     AS run_trigger,
+        r.started_at  AS run_started_at
+    FROM instruments i
+    LEFT JOIN LATERAL (
+        SELECT s.total_score, s.rank
+        FROM scores s
+        WHERE s.instrument_id = i.instrument_id
+          AND s.model_version = %(mv)s
+        ORDER BY s.scored_at DESC
+        LIMIT 1
+    ) s ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT r.status, r.error, r.trigger, r.started_at
+        FROM thesis_runs r
+        WHERE r.instrument_id = i.instrument_id
+        ORDER BY r.started_at DESC, r.run_id DESC
+        LIMIT 1
+    ) r ON TRUE
+    WHERE EXISTS (
+            SELECT 1 FROM positions p
+            WHERE p.instrument_id = i.instrument_id
+              AND p.current_units > 0
+          )
+      AND NOT EXISTS (
+            SELECT 1 FROM theses t
+            WHERE t.instrument_id = i.instrument_id
+          )
+    ORDER BY i.symbol
+"""
+
 
 @router.get("", response_model=ThesisLibraryResponse)
 def list_theses(
@@ -330,8 +389,12 @@ def list_theses(
     in-memory filter + slice — see ``filter_and_page_library``).
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Held-but-thesis-less rows first: a missing memo on money is the
+        # most actionable gap the library can show (Codex ckpt-2).
+        cur.execute(_HELD_NO_THESIS_SQL, {"mv": _DEFAULT_MODEL_VERSION})
+        rows: list[dict[str, object]] = list(cur.fetchall())
         cur.execute(_LIBRARY_SQL, {"mv": _DEFAULT_MODEL_VERSION})
-        rows = cur.fetchall()
+        rows.extend(cur.fetchall())
 
     stale_reasons: dict[int, str] = {}
     if rows:
@@ -341,7 +404,7 @@ def list_theses(
         }
 
     total, page = filter_and_page_library(
-        list(rows),
+        rows,
         stale_reasons,
         held_only=held_only,
         stale_only=stale,

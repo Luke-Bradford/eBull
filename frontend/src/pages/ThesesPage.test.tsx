@@ -136,4 +136,43 @@ describe("ThesesPage", () => {
     const btn = await screen.findByRole("button", { name: "Generating…" });
     expect(btn).toBeDisabled();
   });
+
+  it("renders a held-no-thesis gap row with a Generate action", async () => {
+    mockedFetch.mockResolvedValue(
+      respond([
+        makeItem({
+          thesis_id: null,
+          thesis_version: null,
+          thesis_type: null,
+          stance: null,
+          confidence_score: null,
+          buy_zone_low: null,
+          buy_zone_high: null,
+          created_at: null,
+          critic_verdict: null,
+          stale_reason: "no_thesis",
+          latest_score: null,
+          latest_rank: null,
+          run_status: null,
+        }),
+      ]),
+    );
+    renderPage();
+    expect(await screen.findByText("no thesis yet")).toBeInTheDocument();
+    expect(screen.getByText("missing")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Generate" })).toBeEnabled();
+  });
+
+  it("clamps an out-of-range offset back to page one instead of stranding an empty state", async () => {
+    // offset=9999 with total=1: server returns an empty page — the page
+    // must reset offset and refetch rather than show a dead empty state.
+    mockedFetch
+      .mockResolvedValueOnce({ items: [], total: 1, offset: 9999, limit: 50 })
+      .mockResolvedValue(respond([makeItem()]));
+    renderPage("/theses?offset=9999");
+    expect(await screen.findByText("AAPL")).toBeInTheDocument();
+    expect(mockedFetch).toHaveBeenLastCalledWith(
+      expect.objectContaining({ offset: 0 }),
+    );
+  });
 });
