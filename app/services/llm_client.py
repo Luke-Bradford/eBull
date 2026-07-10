@@ -255,19 +255,6 @@ class LLMClientPair:
     critic: LLMClient
 
 
-def _build_client(provider: str, base_url: str, model: str) -> LLMClient:
-    if provider == "anthropic":
-        api_key = settings.anthropic_api_key
-        if not api_key:
-            raise LLMProviderNotConfigured("llm_provider='anthropic' but ANTHROPIC_API_KEY is not set")
-        return AnthropicProvider(make_anthropic_client(api_key), model=model)
-    return OpenAICompatProvider(
-        base_url=base_url,
-        model=model,
-        api_key=settings.llm_api_key,
-    )
-
-
 def make_llm_clients(conn: psycopg.Connection[Any]) -> LLMClientPair:
     """Resolve the configured writer + critic clients from ``runtime_config``.
 
@@ -284,7 +271,22 @@ def make_llm_clients(conn: psycopg.Connection[Any]) -> LLMClientPair:
     callers fail closed, never substitute defaults.
     """
     cfg = get_runtime_config(conn)
+    if cfg.llm_provider == "anthropic":
+        api_key = settings.anthropic_api_key
+        if not api_key:
+            raise LLMProviderNotConfigured("llm_provider='anthropic' but ANTHROPIC_API_KEY is not set")
+        # One SDK client shared by both roles (review #2004 NITPICK) —
+        # the per-role split is the model string, not the transport.
+        sdk = make_anthropic_client(api_key)
+        return LLMClientPair(
+            writer=AnthropicProvider(sdk, model=cfg.llm_model_writer),
+            critic=AnthropicProvider(sdk, model=cfg.llm_model_critic),
+        )
     return LLMClientPair(
-        writer=_build_client(cfg.llm_provider, cfg.llm_base_url, cfg.llm_model_writer),
-        critic=_build_client(cfg.llm_provider, cfg.llm_base_url, cfg.llm_model_critic),
+        writer=OpenAICompatProvider(
+            base_url=cfg.llm_base_url, model=cfg.llm_model_writer, api_key=settings.llm_api_key
+        ),
+        critic=OpenAICompatProvider(
+            base_url=cfg.llm_base_url, model=cfg.llm_model_critic, api_key=settings.llm_api_key
+        ),
     )
