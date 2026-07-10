@@ -553,7 +553,12 @@ def _llm_provider_resolvable(conn: psycopg.Connection[Any]) -> PrerequisiteResul
     try:
         make_llm_client(conn)
     except LLMProviderNotConfigured as exc:
-        return (False, str(exc))
+        # Marker-wrapped so the scheduled-fire path's record_job_skip row
+        # classifies as PREREQ_SKIP (fresh_by_audit counts ONLY marked
+        # skips — types.py:PREREQ_SKIP_MARKER) — identical classification
+        # to the in-body manual-path guard, which applies the same marker
+        # via _record_prereq_skip. Codex ckpt-2 finding.
+        return (False, prereq_skip_reason(str(exc)))
     return (True, "")
 
 
@@ -3131,9 +3136,12 @@ def _thesis_refresh_candidates(conn: psycopg.Connection[Any]) -> list[int]:
 
     Held = ``positions.current_units > 0`` — the portfolio manager needs
     held theses fresh first (thesis-break monitoring + EXIT evaluation).
-    Top-N = latest score row per instrument for the default
-    model_version, rank ascending — the same latest-row shape as
-    ``portfolio._load_ranked``. Order is the batch priority order.
+    Top-N = the current ranked cohort: rows from the LATEST scoring run
+    (``MAX(scored_at)``) for the default model_version, rank ascending —
+    the same cohort definition as ``GET /scores``
+    (``app/api/scores.py``). A per-instrument latest-row shape would
+    resurrect names from older runs that are no longer ranked (Codex
+    ckpt-2 finding). Order is the batch priority order.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -3148,18 +3156,14 @@ def _thesis_refresh_candidates(conn: psycopg.Connection[Any]) -> list[int]:
         held = [int(row[0]) for row in cur.fetchall()]
         cur.execute(
             """
-            WITH latest AS (
-                SELECT DISTINCT ON (s.instrument_id)
-                    s.instrument_id,
-                    s.rank
-                FROM scores s
-                WHERE s.model_version = %(mv)s
-                  AND s.rank IS NOT NULL
-                ORDER BY s.instrument_id, s.scored_at DESC
-            )
-            SELECT instrument_id
-            FROM latest
-            ORDER BY rank
+            SELECT s.instrument_id
+            FROM scores s
+            WHERE s.model_version = %(mv)s
+              AND s.rank IS NOT NULL
+              AND s.scored_at = (
+                  SELECT MAX(scored_at) FROM scores WHERE model_version = %(mv)s
+              )
+            ORDER BY s.rank
             LIMIT %(top_n)s
             """,
             {"mv": _DEFAULT_MODEL_VERSION, "top_n": _THESIS_REFRESH_TOP_N},
@@ -3208,14 +3212,18 @@ def thesis_refresh() -> None:
     # covers the manual-trigger path, which does not run
     # ScheduledJob.prerequisite. Raw autocommit connect, matching
     # _record_prereq_skip's own style (#1690: runs before _tracked_job
-    # sets the statement-timeout var). A raised RuntimeConfigCorrupt
-    # propagates — fail closed, never a silent skip.
+    # sets the statement-timeout var). Catches the exception directly
+    # (not via _llm_provider_resolvable, whose reason is already
+    # marker-wrapped for the scheduled path — _record_prereq_skip wraps
+    # again). A raised RuntimeConfigCorrupt propagates — fail closed,
+    # never a silent skip.
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
-        ready, reason = _llm_provider_resolvable(conn)
-    if not ready:
-        logger.error("thesis_refresh: %s, skipping", reason)
-        _record_prereq_skip(JOB_THESIS_REFRESH, reason)
-        return
+        try:
+            make_llm_client(conn)
+        except LLMProviderNotConfigured as exc:
+            logger.error("thesis_refresh: %s, skipping", exc)
+            _record_prereq_skip(JOB_THESIS_REFRESH, str(exc))
+            return
 
     with _tracked_job(JOB_THESIS_REFRESH) as tracker:
         with connect_job() as conn:
