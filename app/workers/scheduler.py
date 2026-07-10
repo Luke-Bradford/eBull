@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -39,7 +39,6 @@ from app.providers.implementations.companies_house import CompaniesHouseFilingsP
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
-from app.services.anthropic_client import make_anthropic_client
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.canonical_instrument_redirects import JOB_POPULATE_CANONICAL_REDIRECTS
 from app.services.coverage import bootstrap_missing_coverage_rows, review_coverage, seed_coverage
@@ -51,7 +50,7 @@ from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
-from app.services.llm_client import ANTHROPIC_DEFAULT_MODEL, AnthropicProvider
+from app.services.llm_client import LLMProviderNotConfigured, make_llm_client
 from app.services.market_data import refresh_market_data
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
@@ -77,12 +76,12 @@ from app.services.return_attribution import (
     compute_attribution_summary,
     persist_attribution_summary,
 )
-from app.services.scoring import compute_rankings
+from app.services.scoring import _DEFAULT_MODEL_VERSION, compute_rankings
 from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.sync_orchestrator.progress import report_progress
 from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
-from app.services.thesis import find_stale_instruments, generate_thesis
+from app.services.thesis import StaleInstrument, find_stale_instruments, generate_thesis
 from app.services.trade_events import compute_history_min_date, fetch_trade_history_safely
 from app.services.universe import sync_universe
 from app.services.watermarks import get_watermark, set_watermark
@@ -325,7 +324,10 @@ JOB_DAILY_CANDLE_REFRESH = "daily_candle_refresh"
 JOB_DAILY_CIK_REFRESH = "daily_cik_refresh"
 JOB_DAILY_RESEARCH_REFRESH = "daily_research_refresh"
 JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
-JOB_DAILY_THESIS_REFRESH = "daily_thesis_refresh"
+# #1919 PR-B — revived from the dormant ``daily_thesis_refresh`` (never in
+# SCHEDULED_JOBS/_INVOKERS, zero job_runs rows ever recorded), renamed at
+# re-registration. Hourly, held ∪ top-ranked scope, batch-bounded.
+JOB_THESIS_REFRESH = "thesis_refresh"
 JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
@@ -536,6 +538,28 @@ def _has_scoreable_instruments(conn: psycopg.Connection[Any]) -> PrerequisiteRes
     ):
         return (True, "")
     return (False, "no scoreable instruments")
+
+
+def _llm_provider_resolvable(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True when the configured LLM provider can be constructed (#1919 PR-B).
+
+    The local-first ``openai_compatible`` default always resolves (no key
+    needed — Ollama ignores it); only ``llm_provider='anthropic'`` with no
+    ``ANTHROPIC_API_KEY`` fails. Construction is pure config resolution —
+    no network I/O. ``RuntimeConfigCorrupt`` deliberately propagates so a
+    corrupt config surfaces as a failure, never a silent skip (fail
+    closed, PR-A contract).
+    """
+    try:
+        make_llm_client(conn)
+    except LLMProviderNotConfigured as exc:
+        # Marker-wrapped so the scheduled-fire path's record_job_skip row
+        # classifies as PREREQ_SKIP (fresh_by_audit counts ONLY marked
+        # skips — types.py:PREREQ_SKIP_MARKER) — identical classification
+        # to the in-body manual-path guard, which applies the same marker
+        # via _record_prereq_skip. Codex ckpt-2 finding.
+        return (False, prereq_skip_reason(str(exc)))
+    return (True, "")
 
 
 def _all_of(*prereqs: PrerequisiteFn) -> PrerequisiteFn:
@@ -759,6 +783,33 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.hourly(minute=15),
         prerequisite=_has_open_positions,
         catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_THESIS_REFRESH,
+        display_name="Thesis refresh (LLM writer + critic)",
+        # #1919 PR-B — own single-job lane (#1526/#1527 class): a batch of
+        # ≤5 local-LLM generations holds the lane ~20+ min (≈260s/thesis on
+        # a local 14B), which would starve any lanemate. Its write set
+        # (theses / thesis_runs / coverage.last_reviewed_at / rankings
+        # retry-queue demote) is shared only with the filing cascade and
+        # the manual POST path — all three serialise per-instrument via
+        # the K.3 ``instrument_lock`` advisory lock, not via the lane.
+        source="llm_thesis",
+        description=(
+            "Hourly LLM thesis generation (#1919): held ∪ top-20-ranked "
+            "instruments, filtered by the #273 staleness predicate (no "
+            "thesis / review_frequency elapsed / superseding 10-K, 10-Q, "
+            "8-K), bounded to 5 generations per run. The hourly cadence × "
+            "batch bound is the bounded bootstrap drain — no separate "
+            "bulk job (spec §6)."
+        ),
+        # :07 — not 5-min-aligned (daily_news_refresh precedent hygiene);
+        # the dedicated lane already removes any tick-race exposure.
+        cadence=Cadence.hourly(minute=7),
+        # A missed slot is re-covered within the hour; a boot catch-up
+        # would fire a multi-minute LLM batch on every dev-stack restart.
+        catch_up_on_boot=False,
+        prerequisite=_llm_provider_resolvable,
     ),
     ScheduledJob(
         name=JOB_PORTFOLIO_EOD_SNAPSHOT,
@@ -2951,22 +3002,30 @@ def daily_financial_facts() -> None:
             # context update) as long as there were successful
             # non-seed CIKs.
             conn.commit()
-            if settings.anthropic_api_key:
+            # #1919 PR-B — the cascade client now comes from the
+            # ``make_llm_client`` chokepoint (config-resolved, local-first
+            # default) instead of a hardcoded Anthropic construction.
+            cascade_failures: list[tuple[int, str]]
+            try:
+                cascade_client = make_llm_client(conn)
+            except LLMProviderNotConfigured as exc:
+                logger.info(
+                    "daily_financial_facts: %s — skipping cascade refresh (facts + normalization still committed)",
+                    exc,
+                )
+                cascade_failures = []
+            else:
                 from app.services.refresh_cascade import (
                     cascade_refresh,
                     changed_instruments_from_outcome,
                 )
 
-                # Cascade fires unconditionally when the API key is
-                # set so the retry outbox (K.2) gets drained even on
-                # days with zero new SEC work. ``cascade_refresh``
-                # returns the empty-noop CascadeOutcome when both
-                # the retry queue and instrument_ids are empty.
+                # Cascade fires whenever the configured provider resolves
+                # (always, on the local-first default) so the retry outbox
+                # (K.2) gets drained even on days with zero new SEC work.
+                # ``cascade_refresh`` returns the empty-noop CascadeOutcome
+                # when both the retry queue and instrument_ids are empty.
                 changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
-                cascade_client = AnthropicProvider(
-                    make_anthropic_client(settings.anthropic_api_key),
-                    model=ANTHROPIC_DEFAULT_MODEL,
-                )
                 cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
                 # Persist any cascade-side writes before the
                 # failure-surfacing raise below. compute_rankings
@@ -2994,13 +3053,7 @@ def daily_financial_facts() -> None:
                     cascade_outcome.rankings_recomputed,
                     len(cascade_outcome.failed),
                 )
-                cascade_failures: list[tuple[int, str]] = list(cascade_outcome.failed)
-            else:
-                logger.info(
-                    "daily_financial_facts: ANTHROPIC_API_KEY not set — "
-                    "skipping cascade refresh (facts + normalization still committed)"
-                )
-                cascade_failures = []
+                cascade_failures = list(cascade_outcome.failed)
 
             # Surface every partial-failure channel in a single combined raise
             # AFTER all commits so successful CIKs' facts, rankings, and
@@ -3069,65 +3122,148 @@ def daily_news_refresh() -> None:
         )
 
 
-def daily_thesis_refresh() -> None:
+# #1919 PR-B — thesis_refresh scope + batch bounds (spec §6). Volume on dev
+# (2026-07-09): held=5, top-20 ranked → ≤25 candidates; ≈260s per generation
+# on a local 14B ⇒ a full batch ≈ 22 min/run worst case. Naive T1+T2
+# enablement (674 theses ≈ 17-40h serial) is exactly what the candidate
+# scope exists to avoid.
+_THESIS_REFRESH_TOP_N = 20
+_THESIS_REFRESH_BATCH_LIMIT = 5
+
+
+def _thesis_refresh_candidates(conn: psycopg.Connection[Any]) -> list[int]:
+    """Candidate instrument_ids: held first, then top-N ranked (deduped).
+
+    Held = ``positions.current_units > 0`` — the portfolio manager needs
+    held theses fresh first (thesis-break monitoring + EXIT evaluation).
+    Top-N = the current ranked cohort: rows from the LATEST scoring run
+    (``MAX(scored_at)``) for the default model_version, rank ascending —
+    the same cohort definition as ``GET /scores``
+    (``app/api/scores.py``). A per-instrument latest-row shape would
+    resurrect names from older runs that are no longer ranked (Codex
+    ckpt-2 finding). Order is the batch priority order.
     """
-    Regenerate theses for stale Tier 1 instruments.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.instrument_id
+            FROM positions p
+            JOIN instruments i ON i.instrument_id = p.instrument_id
+            WHERE p.current_units > 0
+            ORDER BY i.symbol
+            """
+        )
+        held = [int(row[0]) for row in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT s.instrument_id
+            FROM scores s
+            WHERE s.model_version = %(mv)s
+              AND s.rank IS NOT NULL
+              AND s.scored_at = (
+                  SELECT MAX(scored_at) FROM scores WHERE model_version = %(mv)s
+              )
+            ORDER BY s.rank
+            LIMIT %(top_n)s
+            """,
+            {"mv": _DEFAULT_MODEL_VERSION, "top_n": _THESIS_REFRESH_TOP_N},
+        )
+        ranked = [int(row[0]) for row in cur.fetchall()]
+    held_set = set(held)
+    return held + [iid for iid in ranked if iid not in held_set]
 
-    An instrument is stale when:
-      - it has no thesis row, or
-      - its most recent thesis is older than coverage.review_frequency allows.
 
-    Requires ANTHROPIC_API_KEY. Skips silently if not set.
-    Each instrument is processed independently — a failure on one does not
-    abort the rest of the batch.
+def _select_thesis_batch(
+    candidate_ids: Sequence[int],
+    stale: Sequence[StaleInstrument],
+) -> tuple[list[StaleInstrument], int]:
+    """Order stale items by candidate priority and apply the batch bound.
+
+    Returns ``(batch, deferred_count)``. Pure — table-tested without a
+    DB. Candidates that ``find_stale_instruments`` did not return (fresh
+    thesis, or filtered by the #268 analysability gate) drop out here.
     """
-    if not settings.anthropic_api_key:
-        logger.error("daily_thesis_refresh: ANTHROPIC_API_KEY not set, skipping")
-        _record_prereq_skip(JOB_DAILY_THESIS_REFRESH, "anthropic api key missing")
-        return
+    by_id = {item.instrument_id: item for item in stale}
+    queue = [by_id[iid] for iid in candidate_ids if iid in by_id]
+    batch = queue[:_THESIS_REFRESH_BATCH_LIMIT]
+    return batch, len(queue) - len(batch)
 
-    with _tracked_job(JOB_DAILY_THESIS_REFRESH) as tracker:
-        logger.info("daily_thesis_refresh: checking for stale Tier 1/2 instruments")
-        # Previously: except Exception: log + return silent-success.
-        # That left the layer looking fresh after a DB failure. Now:
-        # let the exception propagate — _tracked_job records failure.
+
+def thesis_refresh() -> None:
+    """
+    Hourly LLM thesis generation for held ∪ top-ranked stale instruments
+    (#1919 PR-B, spec §6 of docs/specs/thesis/2026-07-09-byo-llm-thesis-live.md).
+
+    Scope: held positions ∪ top-N ranked, intersected with the existing
+    staleness predicate (``find_stale_instruments``: no thesis /
+    review_frequency elapsed / superseding 10-K, 10-Q, 8-K per #273),
+    bounded to ≤5 generations per run, serial, per-instrument
+    advisory-locked (K.3). The hourly cadence × batch bound IS the
+    bounded bootstrap drain — a 25-name first load drains in <1 day
+    with no separate bulk job.
+
+    Gate: configured LLM provider resolvable via ``make_llm_client`` —
+    no longer ANTHROPIC_API_KEY-gated; the local-first default needs no
+    key. Each instrument is processed independently — a failure on one
+    does not abort the rest of the batch, and every attempt lands on a
+    ``thesis_runs`` row (trigger='scheduled') via ``generate_thesis``.
+    """
+    # PREREQ_SKIP before _tracked_job (prevention-log rule) — this also
+    # covers the manual-trigger path, which does not run
+    # ScheduledJob.prerequisite. Raw autocommit connect, matching
+    # _record_prereq_skip's own style (#1690: runs before _tracked_job
+    # sets the statement-timeout var). Catches the exception directly
+    # (not via _llm_provider_resolvable, whose reason is already
+    # marker-wrapped for the scheduled path — _record_prereq_skip wraps
+    # again). A raised RuntimeConfigCorrupt propagates — fail closed,
+    # never a silent skip.
+    # The guard's client is reused for the whole run — providers hold no
+    # connection after construction (make_llm_client only reads config).
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        try:
+            client = make_llm_client(conn)
+        except LLMProviderNotConfigured as exc:
+            logger.error("thesis_refresh: %s, skipping", exc)
+            _record_prereq_skip(JOB_THESIS_REFRESH, str(exc))
+            return
+
+    with _tracked_job(JOB_THESIS_REFRESH) as tracker:
         with connect_job() as conn:
-            # Generate theses for T1 and T2 instruments.  T2 instruments
-            # need theses to be promoted to T1 (coverage.py requires
-            # thesis for T2→T1).  The portfolio manager also requires a
-            # thesis with stance="buy" before recommending a BUY.
-            stale_t1 = find_stale_instruments(conn, tier=1)
-            stale_t2 = find_stale_instruments(conn, tier=2)
-            stale = stale_t1 + stale_t2
+            candidates = _thesis_refresh_candidates(conn)
+            stale = find_stale_instruments(conn, tier=None, instrument_ids=candidates) if candidates else []
 
-        if not stale:
-            logger.info("daily_thesis_refresh: no stale Tier 1/2 instruments found")
+        batch, deferred = _select_thesis_batch(candidates, stale)
+        if not batch:
+            logger.info(
+                "thesis_refresh: no stale candidates (candidates=%d)",
+                len(candidates),
+            )
             tracker.row_count = 0
             return
 
+        # No silent caps: everything past the batch bound is counted in
+        # the log + note and picked up on the next hourly fire.
         logger.info(
-            "daily_thesis_refresh: %d stale instrument(s) to refresh (T1=%d T2=%d)",
+            "thesis_refresh: candidates=%d stale=%d batch=%d deferred_to_next_run=%d provider=%s model=%s",
+            len(candidates),
             len(stale),
-            len(stale_t1),
-            len(stale_t2),
-        )
-
-        claude_client = AnthropicProvider(
-            make_anthropic_client(settings.anthropic_api_key),
-            model=ANTHROPIC_DEFAULT_MODEL,
+            len(batch),
+            deferred,
+            client.provider_name,
+            client.model,
         )
 
         generated = 0
         skipped = 0
         locked_skipped = 0
-        total = len(stale)
-        for idx, item in enumerate(stale, start=1):
+        total = len(batch)
+        for idx, item in enumerate(batch, start=1):
             try:
                 with connect_job() as conn:
                     with instrument_lock(conn, item.instrument_id) as acquired:
                         if not acquired:
                             logger.info(
-                                "daily_thesis_refresh: LOCKED_BY_SIBLING symbol=%s instrument_id=%d",
+                                "thesis_refresh: LOCKED_BY_SIBLING symbol=%s instrument_id=%d",
                                 item.symbol,
                                 item.instrument_id,
                             )
@@ -3136,7 +3272,7 @@ def daily_thesis_refresh() -> None:
                             generate_thesis(
                                 instrument_id=item.instrument_id,
                                 conn=conn,
-                                client=claude_client,
+                                client=client,
                                 trigger="scheduled",
                             )
                             # Increment BEFORE demote so a demote
@@ -3147,9 +3283,9 @@ def daily_thesis_refresh() -> None:
                             # call is a separate queue-mutation
                             # side-effect we want to best-effort.
                             generated += 1
-                            # Daily's thesis write resolves any pending
-                            # cascade thesis signal but does not run
-                            # compute_rankings, so demote rather than
+                            # The scheduled thesis write resolves any
+                            # pending cascade thesis signal but does not
+                            # run compute_rankings, so demote rather than
                             # delete — preserves RERANK_NEEDED rows
                             # untouched and converts thesis-failure /
                             # LOCKED_BY_SIBLING rows to RERANK_NEEDED.
@@ -3157,13 +3293,13 @@ def daily_thesis_refresh() -> None:
                                 demote_to_rerank_needed(conn, item.instrument_id)
                             except Exception:
                                 logger.exception(
-                                    "daily_thesis_refresh: demote_to_rerank_needed failed "
+                                    "thesis_refresh: demote_to_rerank_needed failed "
                                     "for instrument_id=%d — queue signal stale until next run",
                                     item.instrument_id,
                                 )
             except Exception:
                 logger.warning(
-                    "daily_thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
+                    "thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
                     item.symbol,
                     item.instrument_id,
                     exc_info=True,
@@ -3173,12 +3309,18 @@ def daily_thesis_refresh() -> None:
 
         report_progress(total, total, force=True)
         tracker.row_count = generated
+        tracker.note = (
+            f"candidates={len(candidates)} stale={len(stale)} "
+            f"generated={generated} failed={skipped} "
+            f"locked_skipped={locked_skipped} deferred={deferred}"
+        )
 
     logger.info(
-        "daily_thesis_refresh complete: generated=%d skipped=%d locked_skipped=%d",
+        "thesis_refresh complete: generated=%d failed=%d locked_skipped=%d deferred=%d",
         generated,
         skipped,
         locked_skipped,
+        deferred,
     )
 
 

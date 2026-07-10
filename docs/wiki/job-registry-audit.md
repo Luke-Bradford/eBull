@@ -18,6 +18,7 @@ Locked decision in [`bootstrap_orchestrator.py:_LANE_MAX_CONCURRENCY`](../../app
 | `sec_manifest` | 1 | `sec_manifest_worker` only (#1478) | Extracted from `sec_rate` so the heavy DB-bound drainer stops starving the producers; runs concurrently with them |
 | `sec_bulk_download` | 1 | Fixed-URL SEC archive downloads | Disjoint budget — large fixed downloads, no per-issuer iteration |
 | `db` | 5 | DB-only ingest of pre-staged bulk data | Parallel-safe (no SEC HTTP, only psycopg I/O) |
+| `llm_thesis` | 1 | `thesis_refresh` only (#1919 PR-B) | Hourly LLM batch holds the lane ~20+ min (≈260s/thesis local 14B); write set serialised per-instrument via the K.3 `instrument_lock`, cross-process at the Ollama server-side queue |
 
 Source-level `JobLock` (PR1): same-source jobs serialise; cross-source run parallel. **A lane is a job-overlap bucket, not a request-rate limiter (#1478).** The SEC 10 req/s per-IP budget is enforced at the HTTP layer by `app/providers/implementations/sec_edgar.py` (`_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK`, a process-wide atomic inter-request floor safe under concurrent fetchers) — so `sec_rate` + `sec_manifest` jobs running concurrently still cannot exceed it. Do NOT collapse SEC lanes back together believing the lane bounds the rate.
 
@@ -79,6 +80,15 @@ For every entry: registry `name`, proposed `display_name`, proposed `description
 - **Prerequisite:** `_has_open_positions`
 - **Current params:** zero-arg.
 - **Proposed PR1 params:** none operator-exposable.
+
+#### `thesis_refresh` (added #1919 PR-B)
+- **Display name:** Thesis refresh (LLM writer + critic)
+- **Description:** Hourly LLM thesis generation: held ∪ top-20-ranked instruments, filtered by the #273 staleness predicate, bounded to 5 generations per run. Revives the dormant `daily_thesis_refresh` body (which was never registered and never fired).
+- **Source:** `llm_thesis` (own single-job lane — a batch holds the lane ~20+ min on a local 14B)
+- **Cadence:** hourly :07; `catch_up_on_boot=False` (a boot catch-up would fire a multi-minute LLM batch on every dev-stack restart)
+- **Prerequisite:** `_llm_provider_resolvable` (make_llm_client resolves — the local-first `openai_compatible` default always does; only `anthropic` without `ANTHROPIC_API_KEY` skips)
+- **Current params:** zero-arg. Scope/batch constants `_THESIS_REFRESH_TOP_N=20` / `_THESIS_REFRESH_BATCH_LIMIT=5` in `scheduler.py`.
+- **Proposed params:** none operator-exposable yet — promote the two constants if operator tuning materialises.
 
 ### 2.3 Fundamentals + research
 
@@ -346,7 +356,6 @@ For completeness, the following job-name constants exist in [`scheduler.py`](../
 |---|---|---|
 | `daily_research_refresh` | Tier-1/2 thesis research | Now part of `orchestrator_full_sync` DAG; standalone retained for manual triage |
 | `daily_news_refresh` | News pipeline | Same — DAG layer |
-| `daily_thesis_refresh` | Thesis re-evaluation | Same — DAG layer |
 | `morning_candidate_review` | Pre-trading-window scoring run | Same — DAG layer |
 | `daily_tax_reconciliation` | Tax lot ledger reconciliation | On-demand only — operator runs manually |
 | `daily_portfolio_sync` | eToro portfolio sync | High-freq orchestrator layer |

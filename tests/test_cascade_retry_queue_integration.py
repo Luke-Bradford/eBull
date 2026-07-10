@@ -293,7 +293,7 @@ class TestDemoteToRerankNeededIntegration:
 class TestCascadeObservabilityRun:
     """K.4 — cascade_refresh must write its own data_ingestion_runs
     row so sync_orchestrator/freshness.py can detect recent cascade
-    activity independently of daily_thesis_refresh."""
+    activity independently of thesis_refresh."""
 
     def test_clean_run_writes_success_row(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_instrument(ebull_test_conn, 1, "A")

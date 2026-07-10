@@ -1,7 +1,7 @@
 """Progress reporting for long-running layer refreshes (spec §2.7).
 
 Legacy job functions (``daily_candle_refresh``, ``daily_financial_facts``,
-``daily_thesis_refresh``) have the signature ``() -> None`` and are also
+``thesis_refresh``) have the signature ``() -> None`` and are also
 invoked directly by APScheduler. To avoid forking their signatures or
 plumbing an extra argument through multiple service-layer calls, the
 orchestrator stashes the active ``ProgressCallback`` in a ``ContextVar``

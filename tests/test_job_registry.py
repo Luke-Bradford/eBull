@@ -121,6 +121,12 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # @02:00 rehash and skip a day (the #1526/#1527 starvation class). See
         # app/jobs/sources.py::Lane.
         "db_size_sample",
+        # #1919 PR-B — thesis_refresh single-job lane. A batch of ≤5 local-LLM
+        # generations holds the lane ~20+ min; on any shared lane that hold is
+        # the #1526/#1527 starvation class. Cross-path writes serialise
+        # per-instrument via the K.3 instrument_lock, not the lane. See
+        # app/jobs/sources.py::Lane.
+        "llm_thesis",
     }
 )
 

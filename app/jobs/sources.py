@@ -84,6 +84,7 @@ Lane = Literal[
     "db_ownership_obs",
     "db_raw_sweep",
     "db_size_sample",
+    "llm_thesis",
     "risk_metrics",
     "bootstrap",
     "finra",
@@ -271,6 +272,19 @@ when one overruns). Scheduled-only, so NOT added to the
   for a once-daily job. Write-disjoint: sole writer of ``pg_size_sample``, no
   other job touches it. Scheduled-only, so NOT added to the
   ``bootstrap_stages.lane`` CHECK (matches ``db_liveness`` / ``db_raw_sweep``).
+
+* ``llm_thesis`` — ``thesis_refresh`` (#1919 PR-B) only. Hourly LLM
+  thesis generation: a batch of ≤5 local-LLM generations holds the lane
+  ~20+ min (≈260s/thesis on a local 14B) — on any shared lane that hold
+  is the #1526/#1527 starvation class. Write set (``theses`` /
+  ``thesis_runs`` / ``coverage.last_reviewed_at`` / the rankings
+  retry-queue demote) is shared only with the filing cascade (``db``
+  lane, inside ``fundamentals_sync``) and the manual
+  ``POST /instruments/{symbol}/thesis`` path — all three serialise
+  per-instrument via the K.3 ``instrument_lock`` session advisory lock
+  (the lane is not the guard), and the LLM endpoint itself serialises
+  cross-process at the Ollama server-side queue (spec §1). Scheduled-only,
+  so NOT added to the ``bootstrap_stages.lane`` CHECK.
 
 * ``risk_metrics`` — ``risk_metrics_refresh`` (#591 PR-B) only. The
   orchestrator-driven weekly risk-metric recompute. DB-only producer (no
