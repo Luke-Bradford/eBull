@@ -666,3 +666,24 @@ class TestListTheses:
 
         assert resp.status_code == 200
         assert resp.json() == {"items": [], "total": 0, "offset": 0, "limit": 50}
+
+
+class TestLibraryOrderKey:
+    def test_gap_rows_first_then_newest_thesis(self) -> None:
+        from app.api.theses import library_order_key
+
+        gap = {"created_at": None, "thesis_id": None}
+        older = {"created_at": _EARLIER, "thesis_id": 1}
+        newer = {"created_at": _NOW, "thesis_id": 2}
+        rows = [older, newer, gap]
+        rows.sort(key=library_order_key)
+        assert rows == [gap, newer, older]
+
+    def test_same_timestamp_breaks_on_thesis_id_desc(self) -> None:
+        from app.api.theses import library_order_key
+
+        first = {"created_at": _NOW, "thesis_id": 5}
+        second = {"created_at": _NOW, "thesis_id": 9}
+        rows = [first, second]
+        rows.sort(key=library_order_key)
+        assert rows == [second, first]

@@ -220,6 +220,22 @@ def _critic_verdict(critic_json: object) -> str | None:
     return verdict if isinstance(verdict, str) else None
 
 
+def library_order_key(row: dict[str, object]) -> tuple[int, float, int]:
+    """Deterministic library ordering, independent of per-query ORDER BYs.
+
+    Gap rows (held, no thesis — ``created_at`` is None) sort first: a
+    missing memo on money is the most actionable row. Thesis rows follow
+    newest-first, thesis_id tiebreak. One sort key in one place so the
+    page order can't silently change if either SQL constant's ORDER BY
+    is edited independently (review NITPICK).
+    """
+    created = row.get("created_at")
+    if not isinstance(created, datetime):
+        return (0, 0.0, 0)
+    thesis_id = row.get("thesis_id")
+    return (1, -created.timestamp(), -int(thesis_id) if isinstance(thesis_id, int) else 0)
+
+
 def filter_and_page_library(
     rows: list[dict[str, object]],
     stale_reasons: dict[int, str],
@@ -244,8 +260,10 @@ def filter_and_page_library(
     """
     filtered: list[dict[str, object]] = []
     for row in rows:
-        instrument_id = row["instrument_id"]
-        assert isinstance(instrument_id, int)
+        # int() cast, not assert — asserts are stripped under `python -O`
+        # so they can't gate response shape (review WARNING; same rule as
+        # python-hygiene.md "never assert production invariants").
+        instrument_id = int(row["instrument_id"])  # type: ignore[arg-type]
         row["stale_reason"] = stale_reasons.get(instrument_id)
         if held_only and not row["is_held"]:
             continue
@@ -389,12 +407,15 @@ def list_theses(
     in-memory filter + slice — see ``filter_and_page_library``).
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        # Held-but-thesis-less rows first: a missing memo on money is the
-        # most actionable gap the library can show (Codex ckpt-2).
+        # Held-but-thesis-less gap rows + latest-thesis rows (Codex ckpt-2),
+        # merged under ONE explicit sort key (gap rows first, then newest
+        # thesis) so page order never depends on concat order of the two
+        # queries. Stable sort preserves each query's own tiebreak order.
         cur.execute(_HELD_NO_THESIS_SQL, {"mv": _DEFAULT_MODEL_VERSION})
         rows: list[dict[str, object]] = list(cur.fetchall())
         cur.execute(_LIBRARY_SQL, {"mv": _DEFAULT_MODEL_VERSION})
         rows.extend(cur.fetchall())
+        rows.sort(key=library_order_key)
 
     stale_reasons: dict[int, str] = {}
     if rows:

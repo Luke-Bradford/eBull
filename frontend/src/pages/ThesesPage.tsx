@@ -127,6 +127,10 @@ export function ThesesPage(): JSX.Element {
   // FE-local generation state dies on navigation, so nothing beyond the
   // button disable relies on this).
   const [busyIds, setBusyIds] = useState<ReadonlySet<number>>(new Set());
+  // Fixed-phrase notice for a failed regeneration REQUEST (transport /
+  // HTTP error) — the durable failure state still comes from thesis_runs,
+  // but that can lag a poll cycle behind the click (review NITPICK).
+  const [actionError, setActionError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -181,6 +185,7 @@ export function ThesesPage(): JSX.Element {
 
   async function onRequestFresh(row: ThesisLibraryItem): Promise<void> {
     setBusyIds((prev) => new Set(prev).add(row.instrument_id));
+    setActionError(null);
     // Surface the server's 'running' row shortly after firing — the POST
     // itself only resolves when generation completes (minutes on a local
     // model), and the poll loop only starts once a running row is visible.
@@ -190,9 +195,15 @@ export function ThesesPage(): JSX.Element {
     try {
       await generateInstrumentThesis(row.symbol, true);
     } catch (err) {
-      // Failure detail lands in the row's status column via thesis_runs;
-      // log the transport error for the console trail.
+      // Fixed phrase to the surface, full detail to the console (never
+      // exception text in the DOM); the durable per-row failure state
+      // arrives via thesis_runs on the next poll.
       console.error("[ThesesPage] force generation failed", err);
+      if (mountedRef.current) {
+        setActionError(
+          `Generation request for ${row.symbol} failed — check the browser console; the row's status column carries the server-side failure detail.`,
+        );
+      }
     } finally {
       if (mountedRef.current) {
         setBusyIds((prev) => {
@@ -248,6 +259,14 @@ export function ThesesPage(): JSX.Element {
           </label>
         </div>
 
+        {actionError !== null ? (
+          <div
+            role="status"
+            className="mt-3 rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-1.5 text-xs text-red-700 dark:text-red-300"
+          >
+            {actionError}
+          </div>
+        ) : null}
         {state.loading ? (
           <div className="mt-3">
             <SectionSkeleton rows={6} />

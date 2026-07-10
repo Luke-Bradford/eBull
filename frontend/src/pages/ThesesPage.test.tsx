@@ -128,6 +128,20 @@ describe("ThesesPage", () => {
     expect(mockedGenerate).toHaveBeenCalledWith("AAPL", true);
   });
 
+  it("shows a fixed-phrase notice when the regeneration request fails", async () => {
+    mockedFetch.mockResolvedValue(respond([makeItem()]));
+    mockedGenerate.mockRejectedValue(new Error("boom"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+    expect(
+      await screen.findByText(/Generation request for AAPL failed/),
+    ).toBeInTheDocument();
+    // Fixed phrase only — never exception text in the DOM.
+    expect(screen.queryByText(/boom/)).not.toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
   it("disables the row action while a run is in flight", async () => {
     mockedFetch.mockResolvedValue(
       respond([makeItem({ run_status: "running" })]),

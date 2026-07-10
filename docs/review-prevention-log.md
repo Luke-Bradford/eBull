@@ -359,8 +359,8 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 ### `assert` as a runtime guard in service code
 - First seen in: #109
 - Symptom: A service function used `assert row is not None` after a `RETURNING` INSERT (or after a transaction block) to enforce a DB-contract invariant. `python -O` strips assertions, so the guard vanishes in any optimised build and the next line crashes with a confusing `TypeError: 'NoneType' object is not subscriptable` (or similar) instead of the intended structured error.
-- Prevention: In service code, every guard that enforces a DB-contract or post-commit invariant must be `if x is None: raise RuntimeError(...)` (or a typed exception), not `assert`. `assert` is acceptable only for in-test fixtures and developer-only invariants that are clearly not on a production code path. Grep `^\s*assert ` in `app/services/` during pre-flight review.
-- Enforced in: this prevention log
+- Prevention: In service code, every guard that enforces a DB-contract or post-commit invariant must be `if x is None: raise RuntimeError(...)` (or a typed exception), not `assert`. `assert` is acceptable only for in-test fixtures and developer-only invariants that are clearly not on a production code path. Grep `^\s*assert ` in `app/` (services AND api — a request-serving type-narrowing assert recurred in `app/api/theses.py`, PR #1997 review) during pre-flight review.
+- Enforced in: this prevention log; `.claude/skills/engineering/python-hygiene.md` ("Never use `assert` for a condition that must hold in production")
 
 ---
 
