@@ -445,10 +445,11 @@ class TestProductionInvokerRegistry:
             # triggers them manually:
             "daily_cik_refresh",
             "daily_financial_facts",
-            # daily_news_refresh + daily_thesis_refresh retired from _INVOKERS
-            # in Phase 1.2 — thesis is now on-demand via
-            # POST /instruments/{symbol}/thesis; news is deferred pending
-            # a concrete NewsProvider wiring.
+            # daily_news_refresh retired from _INVOKERS in Phase 1.2 —
+            # news is deferred pending a concrete NewsProvider wiring.
+            # (daily_thesis_refresh was also retired then; #1919 PR-B
+            # revived it as the SCHEDULED ``thesis_refresh``, so it is
+            # no longer on-demand-only and does not belong in this set.)
             # #1020 / #1027 / #1029 — bulk-archive Phase A3/C ingesters.
             # Registered in _INVOKERS so the bootstrap orchestrator can
             # dispatch them; NOT in SCHEDULED_JOBS (only fire via

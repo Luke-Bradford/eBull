@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.fundamentals import RefreshOutcome, RefreshPlan
+from app.services.llm_client import LLMProviderNotConfigured
 
 
 def _install_tracked_job_cm() -> MagicMock:
@@ -63,9 +64,6 @@ def test_daily_financial_facts_raises_when_outcome_has_failures() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://stub/"
     stub_settings.sec_user_agent = "test"
-    # No anthropic key → cascade block skipped, so the partial-failure raise
-    # is the only thing standing between success and RuntimeError.
-    stub_settings.anthropic_api_key = None
 
     with (
         patch.object(scheduler, "settings", stub_settings),
@@ -73,6 +71,10 @@ def test_daily_financial_facts_raises_when_outcome_has_failures() -> None:
         patch.object(scheduler.psycopg, "connect", return_value=fake_connect_cm),
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fundamentals_cls,
+        # Provider unresolvable → cascade block skipped (#1919 PR-B gate),
+        # so the partial-failure raise is the only thing standing between
+        # success and RuntimeError.
+        patch.object(scheduler, "make_llm_client", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
         patch(
@@ -92,7 +94,7 @@ def test_daily_financial_facts_raises_when_outcome_has_failures() -> None:
 
     # Committed state: facts for successful CIK + normalization landed
     # BEFORE the raise. Verify by counting commits: one after Phase 2
-    # (normalization), zero after cascade (no anthropic key).
+    # (normalization), zero after cascade (provider unresolvable).
     assert conn.commit.call_count >= 1
 
 
@@ -128,7 +130,6 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://stub/"
     stub_settings.sec_user_agent = "test"
-    stub_settings.anthropic_api_key = None
 
     with (
         patch.object(scheduler, "settings", stub_settings),
@@ -136,6 +137,8 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
         patch.object(scheduler.psycopg, "connect", return_value=fake_connect_cm),
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fundamentals_cls,
+        # Provider unresolvable → cascade block skipped (#1919 PR-B gate).
+        patch.object(scheduler, "make_llm_client", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
     ):
@@ -175,7 +178,6 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://stub/"
     stub_settings.sec_user_agent = "test"
-    stub_settings.anthropic_api_key = "sk-ant-stub"  # enable cascade
 
     # Stub a cascade that reports one per-instrument failure.
     cascade_outcome = MagicMock(
@@ -204,7 +206,8 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
         ),
         patch("app.services.refresh_cascade.cascade_refresh", return_value=cascade_outcome),
         patch("app.services.refresh_cascade.changed_instruments_from_outcome", return_value=[42]),
-        patch("app.workers.scheduler.make_anthropic_client"),
+        # Resolvable provider → cascade enabled (#1919 PR-B gate).
+        patch.object(scheduler, "make_llm_client", return_value=MagicMock()),
     ):
         filings_cls.return_value.__enter__.return_value = MagicMock()
         fundamentals_cls.return_value.__enter__.return_value = MagicMock()
@@ -234,7 +237,6 @@ def test_daily_financial_facts_no_raise_when_outcome_clean() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://stub/"
     stub_settings.sec_user_agent = "test"
-    stub_settings.anthropic_api_key = None
 
     with (
         patch.object(scheduler, "settings", stub_settings),
@@ -242,6 +244,8 @@ def test_daily_financial_facts_no_raise_when_outcome_clean() -> None:
         patch.object(scheduler.psycopg, "connect", return_value=fake_connect_cm),
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fundamentals_cls,
+        # Provider unresolvable → cascade block skipped (#1919 PR-B gate).
+        patch.object(scheduler, "make_llm_client", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
     ):

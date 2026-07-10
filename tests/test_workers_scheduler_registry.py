@@ -52,13 +52,10 @@ class TestRegistryShape:
         INTERNAL_ONLY = {
             "daily_cik_refresh",
             "daily_financial_facts",
-            # Phase 1.2: news + thesis are on-demand; both functions
-            # remain as internal helpers (news is a no-op stub pending
-            # a concrete NewsProvider; thesis body is called from the
-            # POST /instruments/{symbol}/thesis endpoint via
-            # generate_thesis).
+            # Phase 1.2: news stays on-demand (no-op stub pending a
+            # concrete NewsProvider). Thesis left this set in #1919
+            # PR-B — ``thesis_refresh`` is a registered scheduled job.
             "daily_news_refresh",
-            "daily_thesis_refresh",
         }
 
         constants = {
@@ -68,6 +65,27 @@ class TestRegistryShape:
         invoker_names = set(_INVOKERS.keys())
         unaccounted = constants - registry_names - invoker_names - INTERNAL_ONLY
         assert not unaccounted, f"JOB_* constants not in SCHEDULED_JOBS or _INVOKERS: {sorted(unaccounted)}"
+
+
+class TestThesisRefreshRegistration:
+    """#1919 PR-B — thesis_refresh scheduled hourly on its own lane."""
+
+    def _job(self) -> scheduler.ScheduledJob:
+        return next(job for job in SCHEDULED_JOBS if job.name == scheduler.JOB_THESIS_REFRESH)
+
+    def test_registered_hourly_own_lane(self) -> None:
+        job = self._job()
+        assert job.cadence.kind == "hourly"
+        assert job.source == "llm_thesis"
+        # A boot catch-up would fire a multi-minute LLM batch on every
+        # dev-stack restart.
+        assert job.catch_up_on_boot is False
+        assert job.prerequisite is scheduler._llm_provider_resolvable
+
+    def test_manual_trigger_registered(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+
+        assert scheduler.JOB_THESIS_REFRESH in _INVOKERS
 
 
 # ---------------------------------------------------------------------------

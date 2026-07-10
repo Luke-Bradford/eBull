@@ -61,12 +61,6 @@ LLM_REQUEST_TIMEOUT: httpx.Timeout = httpx.Timeout(
     pool=10.0,
 )
 
-# Model used when the operator flips llm_provider='anthropic' historically
-# defaulted here; also the PR-A model for the still-Anthropic-gated cascade
-# path (scheduler + refresh_cascade construct AnthropicProvider directly
-# until PR-B switches them to make_llm_client).
-ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
-
 # Empirical (spec "Empirical verification", 2026-07-09): qwen3's default
 # thinking mode burned the entire completion budget (`finish: length`,
 # EMPTY content, invalid JSON); with `/no_think` in the system prompt the

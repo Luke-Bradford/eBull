@@ -30,6 +30,19 @@ curl -s -X POST -H "Authorization: Bearer $EBULL_SERVICE_TOKEN" \
 # SELECT * FROM thesis_runs ORDER BY run_id DESC LIMIT 5;
 ```
 
+## Scheduled generation (#1919 PR-B)
+
+The `thesis_refresh` job runs **hourly at :07** (jobs daemon): held
+positions ∪ top-20 ranked, filtered by the staleness predicate (no
+thesis / `review_frequency` elapsed / superseding 10-K/10-Q/8-K),
+**≤5 generations per run**, serial. The hourly cadence × batch bound is
+the bounded bootstrap drain — a 25-name first load drains in under a
+day; there is no separate bulk job. Skips (PREREQ_SKIP) only when
+`llm_provider='anthropic'` with no `ANTHROPIC_API_KEY`; the local-first
+default always runs. Manual fire: Admin → Processes → Run now, or
+`POST /jobs/thesis_refresh/run`. Every attempt lands in `thesis_runs`
+(`trigger='scheduled'`).
+
 ## Model gotchas (empirical, 2026-07-09)
 
 - **qwen3 thinking mode** burns the whole completion budget

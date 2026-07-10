@@ -122,6 +122,7 @@ from app.workers.scheduler import (
     JOB_SEC_N_PORT_INGEST,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
+    JOB_THESIS_REFRESH,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
     Cadence,
@@ -178,6 +179,7 @@ from app.workers.scheduler import (
     sec_n_port_ingest,
     sec_nport_filer_directory_sync,
     seed_cost_models,
+    thesis_refresh,
     weekly_report,
 )
 
@@ -296,6 +298,10 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_DAILY_TAX_RECONCILIATION: _adapt_zero_arg(daily_tax_reconciliation),
     JOB_RETRY_DEFERRED: _adapt_zero_arg(retry_deferred_recommendations_job),
     JOB_MONITOR_POSITIONS: _adapt_zero_arg(monitor_positions_job),
+    # #1919 PR-B — hourly scheduled + Admin "Run now". The body carries its
+    # own provider-resolvable PREREQ_SKIP guard so the manual path (which
+    # bypasses ScheduledJob.prerequisite) is equally gated.
+    JOB_THESIS_REFRESH: _adapt_zero_arg(thesis_refresh),
     JOB_PORTFOLIO_EOD_SNAPSHOT: _adapt_zero_arg(portfolio_eod_snapshot_job),
     JOB_FX_HISTORY_BACKFILL: _adapt_zero_arg(fx_history_backfill_job),
     # #591 PR-B — risk-metrics recompute. Orchestrator-driven (DAG layer

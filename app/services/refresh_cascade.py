@@ -27,8 +27,9 @@ assigns global rank and per-instrument score rows without the full
 pool would have NULL / mismatched rank values.
 
 Per-instrument thesis failures are isolated — one bad CIK does not
-abort the loop or the subsequent rerank. Future K.3 adds session-
-level advisory locking against ``daily_thesis_refresh``.
+abort the loop or the subsequent rerank. K.3 session-level advisory
+locking serialises this against ``thesis_refresh`` (revived hourly,
+#1919 PR-B).
 """
 
 from __future__ import annotations
@@ -226,7 +227,7 @@ def clear_retry_success(
     """DELETE the retry row for an instrument whose cascade resolved
     both thesis and rerank this cycle. Idempotent — no-op if the
     row is absent. Called ONLY by cascade's own post-rerank-success
-    path; other resolution paths (e.g. daily_thesis_refresh success)
+    path; other resolution paths (e.g. thesis_refresh success)
     must use ``demote_to_rerank_needed`` to preserve the rankings-
     recompute signal.
 
@@ -286,7 +287,7 @@ def demote_to_rerank_needed(
     conn: psycopg.Connection[Any],
     instrument_id: int,
 ) -> None:
-    """On daily_thesis_refresh per-instrument SUCCESS, convert any
+    """On thesis_refresh per-instrument SUCCESS, convert any
     pending thesis-failure / LOCKED_BY_SIBLING row to
     RERANK_NEEDED / ``attempt_count=0``. Daily's write resolves
     the pending thesis signal but does NOT run compute_rankings,
