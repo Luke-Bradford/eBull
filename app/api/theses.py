@@ -106,6 +106,12 @@ class ThesisDetail(BaseModel):
     memo_markdown: str
     critic_json: dict[str, object] | None
     created_at: datetime
+    # Provenance (#2000): stamped at insert since #1919 PR-A; nullable —
+    # pre-#1919 rows have no attribution. Surfaced so the operator can
+    # tell an anchored v2 memo from a blind-priced v1 on the page.
+    prompt_version: str | None = None
+    model: str | None = None
+    provider: str | None = None
     is_stale: bool | None = None
     stale_reason: str | None = None
 
@@ -199,6 +205,9 @@ def _parse_thesis(row: dict[str, object]) -> ThesisDetail:
         memo_markdown=row["memo_markdown"],  # type: ignore[arg-type]
         critic_json=row["critic_json"],  # type: ignore[arg-type]
         created_at=row["created_at"],  # type: ignore[arg-type]
+        prompt_version=row.get("prompt_version"),  # type: ignore[arg-type]
+        model=row.get("model"),  # type: ignore[arg-type]
+        provider=row.get("provider"),  # type: ignore[arg-type]
     )
 
 
@@ -208,7 +217,7 @@ _THESIS_COLUMNS = """
     t.buy_zone_low, t.buy_zone_high,
     t.base_value, t.bull_value, t.bear_value,
     t.break_conditions_json, t.memo_markdown, t.critic_json,
-    t.created_at
+    t.created_at, t.prompt_version, t.model, t.provider
 """
 
 

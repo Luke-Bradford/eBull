@@ -38,6 +38,10 @@ export interface VerdictTabProps {
   readonly instrumentId: number;
   readonly thesis: ThesisDetail | null;
   readonly thesisErrored?: boolean;
+  /** Native header price + currency, forwarded to the ThesisPane value
+   *  band (#2000). Optional — older callers degrade to "—". */
+  readonly currentPrice?: string | null;
+  readonly currency?: string | null;
 }
 
 const FAMILIES: { key: string; label: string; scoreKey: keyof FamilyScores }[] = [
@@ -97,6 +101,8 @@ export function VerdictTab({
   instrumentId,
   thesis,
   thesisErrored = false,
+  currentPrice = null,
+  currency = null,
 }: VerdictTabProps): JSX.Element {
   const verdict = useAsync<VerdictResponse>(
     () => fetchScoreVerdict(instrumentId),
@@ -308,7 +314,12 @@ export function VerdictTab({
       </Section>
 
       {/* 6. Thesis narrative + valuation (reuses the existing pane) */}
-      <ThesisPane thesis={thesis} errored={thesisErrored} />
+      <ThesisPane
+        thesis={thesis}
+        errored={thesisErrored}
+        currentPrice={currentPrice}
+        currency={currency}
+      />
     </div>
   );
 }

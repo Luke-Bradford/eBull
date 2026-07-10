@@ -786,6 +786,8 @@ function InstrumentPageBody({
                 instrumentId={summary.instrument_id}
                 thesis={thesisAsync.data}
                 thesisErrored={thesisErrSticky}
+                currentPrice={summary.price?.current ?? null}
+                currency={summary.identity.currency}
               />
             )}
             {activeTab === "financials" && <FinancialsTab symbol={symbol} />}

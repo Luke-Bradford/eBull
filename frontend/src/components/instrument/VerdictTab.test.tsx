@@ -132,9 +132,10 @@ describe("VerdictTab", () => {
     );
     // headline
     expect(await screen.findByText("0.82")).toBeInTheDocument();
-    // Exact match: the ThesisPane now also renders a "Buy zone" label
-    // (#1902), so a loose /buy/i regex would double-match.
-    expect(screen.getByText("buy")).toBeInTheDocument();
+    // Exact match: the ThesisPane also renders a "Buy zone" label (#1902)
+    // AND a stance badge with the literal stance (#2000) — assert presence,
+    // not uniqueness.
+    expect(screen.getAllByText("buy").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/rank #5/)).toBeInTheDocument();
     // Piotroski 7/9 strong + Altman safe
     expect(screen.getByText("7")).toBeInTheDocument();
