@@ -1241,6 +1241,12 @@ export interface ThesisDetail {
   memo_markdown: string;
   critic_json: Record<string, unknown> | null;
   created_at: string;
+  /** Provenance (#2000): stamped at insert since #1919 PR-A; null on
+   *  pre-#1919 rows. prompt_version "v1" memos priced targets with NO
+   *  current price in context (#1987) — the pane surfaces this. */
+  prompt_version?: string | null;
+  model?: string | null;
+  provider?: string | null;
   /** Server-computed staleness (#1902 single source: find_stale_instruments).
    *  Populated only on the latest-thesis GET; null on history/POST payloads. */
   is_stale?: boolean | null;

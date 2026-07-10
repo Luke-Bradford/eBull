@@ -38,6 +38,10 @@ export interface VerdictTabProps {
   readonly instrumentId: number;
   readonly thesis: ThesisDetail | null;
   readonly thesisErrored?: boolean;
+  /** Native header price + currency, forwarded to the ThesisPane value
+   *  band (#2000). Optional — older callers degrade to "—". */
+  readonly currentPrice?: string | null;
+  readonly currency?: string | null;
 }
 
 const FAMILIES: { key: string; label: string; scoreKey: keyof FamilyScores }[] = [
@@ -97,6 +101,8 @@ export function VerdictTab({
   instrumentId,
   thesis,
   thesisErrored = false,
+  currentPrice = null,
+  currency = null,
 }: VerdictTabProps): JSX.Element {
   const verdict = useAsync<VerdictResponse>(
     () => fetchScoreVerdict(instrumentId),
@@ -189,6 +195,12 @@ export function VerdictTab({
         {score.explanation !== null && (
           <p className="mt-2 max-w-prose text-xs text-slate-600 dark:text-slate-400">
             {score.explanation}
+          </p>
+        )}
+        {thesis !== null && new Date(thesis.created_at) > new Date(score.scored_at) && (
+          <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+            The latest thesis (v{thesis.thesis_version}) postdates this score — thesis-fed
+            families (value, confidence) refresh on the next ranking run.
           </p>
         )}
       </Section>
@@ -308,7 +320,12 @@ export function VerdictTab({
       </Section>
 
       {/* 6. Thesis narrative + valuation (reuses the existing pane) */}
-      <ThesisPane thesis={thesis} errored={thesisErrored} />
+      <ThesisPane
+        thesis={thesis}
+        errored={thesisErrored}
+        currentPrice={currentPrice}
+        currency={currency}
+      />
     </div>
   );
 }

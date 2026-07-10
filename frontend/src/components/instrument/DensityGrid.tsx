@@ -226,7 +226,12 @@ export function DensityGrid({
         {/* Zone F — Operator */}
         {thesis !== null || thesisErrored ? (
           <div className="col-span-12">
-            <ThesisPane thesis={thesis} errored={thesisErrored} />
+            <ThesisPane
+              thesis={thesis}
+              errored={thesisErrored}
+              currentPrice={summary.price?.current ?? null}
+              currency={summary.identity.currency}
+            />
           </div>
         ) : null}
       </div>
@@ -281,7 +286,12 @@ export function DensityGrid({
         {/* Zone E — Operator */}
         {thesis !== null || thesisErrored ? (
           <div className="col-span-12">
-            <ThesisPane thesis={thesis} errored={thesisErrored} />
+            <ThesisPane
+              thesis={thesis}
+              errored={thesisErrored}
+              currentPrice={summary.price?.current ?? null}
+              currency={summary.identity.currency}
+            />
           </div>
         ) : null}
       </div>
@@ -299,7 +309,12 @@ export function DensityGrid({
       </div>
       {(thesis !== null || thesisErrored) && (
         <div className="col-span-12 lg:col-span-4">
-          <ThesisPane thesis={thesis} errored={thesisErrored} />
+          <ThesisPane
+            thesis={thesis}
+            errored={thesisErrored}
+            currentPrice={summary.price?.current ?? null}
+            currency={summary.identity.currency}
+          />
         </div>
       )}
       {dividendProviders.length > 0 && (

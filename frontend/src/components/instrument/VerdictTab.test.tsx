@@ -132,9 +132,10 @@ describe("VerdictTab", () => {
     );
     // headline
     expect(await screen.findByText("0.82")).toBeInTheDocument();
-    // Exact match: the ThesisPane now also renders a "Buy zone" label
-    // (#1902), so a loose /buy/i regex would double-match.
-    expect(screen.getByText("buy")).toBeInTheDocument();
+    // Exact match: the ThesisPane also renders a "Buy zone" label (#1902)
+    // AND a stance badge with the literal stance (#2000) — assert presence,
+    // not uniqueness.
+    expect(screen.getAllByText("buy").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/rank #5/)).toBeInTheDocument();
     // Piotroski 7/9 strong + Altman safe
     expect(screen.getByText("7")).toBeInTheDocument();
@@ -145,6 +146,22 @@ describe("VerdictTab", () => {
     expect(screen.getByText("88%")).toBeInTheDocument();
     // thesis narrative reused
     expect(screen.getByText(/bull case rests on services/i)).toBeInTheDocument();
+    // thesis created_at == scored_at -> no lag hint
+    expect(screen.queryByText(/postdates this score/)).not.toBeInTheDocument();
+  });
+
+  it("flags a thesis newer than the score row (#2000 lag hint)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({}, FULL_IAR),
+    );
+    const fresher = { ...THESIS, created_at: "2026-07-10T12:00:00Z" };
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={fresher} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("0.82")).toBeInTheDocument();
+    expect(screen.getByText(/postdates this score/)).toBeInTheDocument();
   });
 
   it("renders scored-but-no-IAR honestly (pre-#1823 row)", async () => {
