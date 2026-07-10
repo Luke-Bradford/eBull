@@ -310,11 +310,11 @@ export function DensityGrid({
       {(thesis !== null || thesisErrored) && (
         <div className="col-span-12 lg:col-span-4">
           <ThesisPane
-              thesis={thesis}
-              errored={thesisErrored}
-              currentPrice={summary.price?.current ?? null}
-              currency={summary.identity.currency}
-            />
+            thesis={thesis}
+            errored={thesisErrored}
+            currentPrice={summary.price?.current ?? null}
+            currency={summary.identity.currency}
+          />
         </div>
       )}
       {dividendProviders.length > 0 && (
