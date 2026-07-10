@@ -86,7 +86,7 @@ For every entry: registry `name`, proposed `display_name`, proposed `description
 - **Description:** Hourly LLM thesis generation: held ∪ top-20-ranked instruments, filtered by the #273 staleness predicate, bounded to 5 generations per run. Revives the dormant `daily_thesis_refresh` body (which was never registered and never fired).
 - **Source:** `llm_thesis` (own single-job lane — a batch holds the lane ~20+ min on a local 14B)
 - **Cadence:** hourly :07; `catch_up_on_boot=False` (a boot catch-up would fire a multi-minute LLM batch on every dev-stack restart)
-- **Prerequisite:** `_llm_provider_resolvable` (make_llm_client resolves — the local-first `openai_compatible` default always does; only `anthropic` without `ANTHROPIC_API_KEY` skips)
+- **Prerequisite:** `_llm_provider_resolvable` (make_llm_clients resolves — the local-first `openai_compatible` default always does; only `anthropic` without `ANTHROPIC_API_KEY` skips)
 - **Current params:** zero-arg. Scope/batch constants `_THESIS_REFRESH_TOP_N=20` / `_THESIS_REFRESH_BATCH_LIMIT=5` in `scheduler.py`.
 - **Proposed params:** none operator-exposable yet — promote the two constants if operator tuning materialises.
 

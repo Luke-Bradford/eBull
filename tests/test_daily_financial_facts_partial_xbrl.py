@@ -74,7 +74,7 @@ def test_daily_financial_facts_raises_when_outcome_has_failures() -> None:
         # Provider unresolvable → cascade block skipped (#1919 PR-B gate),
         # so the partial-failure raise is the only thing standing between
         # success and RuntimeError.
-        patch.object(scheduler, "make_llm_client", side_effect=LLMProviderNotConfigured("no key")),
+        patch.object(scheduler, "make_llm_clients", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
         patch(
@@ -138,7 +138,7 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fundamentals_cls,
         # Provider unresolvable → cascade block skipped (#1919 PR-B gate).
-        patch.object(scheduler, "make_llm_client", side_effect=LLMProviderNotConfigured("no key")),
+        patch.object(scheduler, "make_llm_clients", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
     ):
@@ -207,7 +207,7 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
         patch("app.services.refresh_cascade.cascade_refresh", return_value=cascade_outcome),
         patch("app.services.refresh_cascade.changed_instruments_from_outcome", return_value=[42]),
         # Resolvable provider → cascade enabled (#1919 PR-B gate).
-        patch.object(scheduler, "make_llm_client", return_value=MagicMock()),
+        patch.object(scheduler, "make_llm_clients", return_value=MagicMock()),
     ):
         filings_cls.return_value.__enter__.return_value = MagicMock()
         fundamentals_cls.return_value.__enter__.return_value = MagicMock()
@@ -245,7 +245,7 @@ def test_daily_financial_facts_no_raise_when_outcome_clean() -> None:
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fundamentals_cls,
         # Provider unresolvable → cascade block skipped (#1919 PR-B gate).
-        patch.object(scheduler, "make_llm_client", side_effect=LLMProviderNotConfigured("no key")),
+        patch.object(scheduler, "make_llm_clients", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
     ):

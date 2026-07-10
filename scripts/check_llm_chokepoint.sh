@@ -42,7 +42,7 @@ if [[ -n "$HITS" ]]; then
   echo "FAIL (#1919): OpenAI-compatible LLM call outside app/services/llm_client.py:" >&2
   printf '%s\n' "$HITS" >&2
   echo >&2
-  echo "Route all LLM completions through app.services.llm_client.make_llm_client(...)" >&2
+  echo "Route all LLM completions through app.services.llm_client.make_llm_clients(...)" >&2
   echo "so the bounded timeout + per-process semaphore (#1919 / #1479 class) are" >&2
   echo "applied — never a raw httpx call with a default timeout." >&2
   exit 1

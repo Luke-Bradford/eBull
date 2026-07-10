@@ -57,7 +57,8 @@ def _row(
     currency: str = "USD",
     llm_provider: str = "openai_compatible",
     llm_base_url: str = "http://localhost:11434/v1",
-    llm_model: str = "qwen3:14b",
+    llm_model_writer: str = "qwen3:14b",
+    llm_model_critic: str = "qwen3:14b",
 ) -> dict[str, Any]:
     return {
         "enable_auto_trading": auto,
@@ -65,7 +66,8 @@ def _row(
         "display_currency": currency,
         "llm_provider": llm_provider,
         "llm_base_url": llm_base_url,
-        "llm_model": llm_model,
+        "llm_model_writer": llm_model_writer,
+        "llm_model_critic": llm_model_critic,
         "updated_at": _NOW,
         "updated_by": "seed",
         "reason": "seed",
@@ -233,16 +235,39 @@ class TestUpdateRuntimeConfig:
             updated_by="op",
             reason="flip to anthropic",
             llm_provider="anthropic",
-            llm_model="claude-sonnet-4-6",
+            llm_model_writer="claude-sonnet-4-6",
             now=_NOW,
         )
         assert updated.llm_provider == "anthropic"
-        assert updated.llm_model == "claude-sonnet-4-6"
+        assert updated.llm_model_writer == "claude-sonnet-4-6"
+        assert updated.llm_model_critic == "qwen3:14b"
         assert updated.llm_base_url == "http://localhost:11434/v1"
 
         assert conn.execute.call_count == 2
         fields = {c[0][1]["field"] for c in conn.execute.call_args_list}
-        assert fields == {"llm_provider", "llm_model"}
+        assert fields == {"llm_provider", "llm_model_writer"}
+
+    def test_llm_split_knobs_audit_independently(self) -> None:
+        # #1995: writer and critic changed together → one audit row EACH.
+        conn = _make_conn(
+            [
+                _make_cursor([_row()]),
+                _make_cursor([{"updated_at": _NOW}]),
+            ]
+        )
+        updated = update_runtime_config(
+            conn,
+            updated_by="op",
+            reason="deepseek writer, qwen critic",
+            llm_model_writer="deepseek-r1:14b",
+            llm_model_critic="qwen3:14b-q8",
+            now=_NOW,
+        )
+        assert updated.llm_model_writer == "deepseek-r1:14b"
+        assert updated.llm_model_critic == "qwen3:14b-q8"
+
+        fields = {c[0][1]["field"] for c in conn.execute.call_args_list}
+        assert fields == {"llm_model_writer", "llm_model_critic"}
 
     def test_llm_provider_invalid_value_raises(self) -> None:
         conn = _make_conn([])
@@ -254,10 +279,15 @@ class TestUpdateRuntimeConfig:
         with pytest.raises(ValueError, match="llm_base_url must start with"):
             update_runtime_config(conn, updated_by="op", reason="r", llm_base_url="localhost:11434/v1")
 
-    def test_llm_model_must_be_non_empty(self) -> None:
+    def test_llm_model_writer_must_be_non_empty(self) -> None:
         conn = _make_conn([])
-        with pytest.raises(ValueError, match="non-empty"):
-            update_runtime_config(conn, updated_by="op", reason="r", llm_model="  ")
+        with pytest.raises(ValueError, match="llm_model_writer must be a non-empty"):
+            update_runtime_config(conn, updated_by="op", reason="r", llm_model_writer="  ")
+
+    def test_llm_model_critic_must_be_non_empty(self) -> None:
+        conn = _make_conn([])
+        with pytest.raises(ValueError, match="llm_model_critic must be a non-empty"):
+            update_runtime_config(conn, updated_by="op", reason="r", llm_model_critic="  ")
 
     def test_llm_noop_raises(self) -> None:
         conn = _make_conn([_make_cursor([_row()])])

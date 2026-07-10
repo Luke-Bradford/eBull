@@ -1,19 +1,28 @@
-"""Pure-logic tests for the thesis LLM eval harness (#1919 PR-C).
+"""Pure-logic tests for the thesis LLM eval harness (#1919 PR-C, judge #1995).
 
 No DB, no network: a fake ``LLMClient`` drives the retry/classification
-path; aggregation is table-tested on synthetic rounds.
+path; aggregation + the judge stage's pairing/adjudication are
+table-tested on synthetic rounds.
 """
 
 from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.services.llm_client import LLMCompletion
 from scripts.llm_eval_thesis import (
+    JUDGE_DIMENSIONS,
     AttemptResult,
     RoundResult,
+    _judge_call,
+    _validate_judge_output,
+    adjudicate_pair,
     aggregate,
+    aggregate_judgements,
     classify_attempt,
+    pair_writer_outputs,
     run_round,
 )
 
@@ -279,3 +288,194 @@ def test_writer_length_does_not_trip_critic_gate() -> None:
     report = aggregate("m", rounds)
     assert report.critic_length_failures == 0
     assert report.gate_passes()
+
+
+# ---------------------------------------------------------------------------
+# judge stage (#1995) — pure functions
+# ---------------------------------------------------------------------------
+
+
+def _judge_output(
+    winner: str = "A",
+    score: int = 4,
+    rationale: str = "A grounded every figure; B fabricated FY25 EBITDA.",
+) -> dict[str, object]:
+    scores = {dim: score for dim in JUDGE_DIMENSIONS}
+    return {"scores_a": dict(scores), "scores_b": dict(scores), "winner": winner, "rationale": rationale}
+
+
+class TestValidateJudgeOutput:
+    def test_valid_output_passes(self) -> None:
+        _validate_judge_output(_judge_output())
+
+    def test_missing_field_raises(self) -> None:
+        bad = _judge_output()
+        del bad["winner"]
+        with pytest.raises(ValueError, match="missing fields"):
+            _validate_judge_output(bad)
+
+    def test_invalid_winner_raises(self) -> None:
+        with pytest.raises(ValueError, match="invalid winner"):
+            _validate_judge_output(_judge_output(winner="C"))
+
+    def test_out_of_range_score_raises(self) -> None:
+        bad = _judge_output()
+        bad["scores_a"]["numeric_grounding"] = 6  # type: ignore[index]
+        with pytest.raises(ValueError, match="numeric_grounding"):
+            _validate_judge_output(bad)
+
+    def test_bool_score_rejected(self) -> None:
+        # bool is an int subclass — must not sneak through the range check.
+        bad = _judge_output()
+        bad["scores_b"]["specificity"] = True  # type: ignore[index]
+        with pytest.raises(ValueError, match="specificity"):
+            _validate_judge_output(bad)
+
+    def test_empty_rationale_raises(self) -> None:
+        with pytest.raises(ValueError, match="rationale"):
+            _validate_judge_output(_judge_output(rationale="  "))
+
+
+def _results_payload() -> dict[str, object]:
+    """Minimal run --json-out shape: two models, two symbols x two iterations,
+    with one unpaired round (model-b writer failed on GME it2)."""
+
+    def _writer_round(symbol: str, iteration: int, parsed: dict | None) -> dict[str, object]:
+        return {"symbol": symbol, "call": "writer", "iteration": iteration, "parsed": parsed, "attempts": []}
+
+    memo = {"memo_markdown": "## memo"}
+    return {
+        "model-a": {
+            "rounds": [
+                _writer_round("AAPL", 1, memo),
+                _writer_round("AAPL", 2, memo),
+                _writer_round("GME", 1, memo),
+                _writer_round("GME", 2, memo),
+                # critic rounds must be ignored by the pairing.
+                {"symbol": "AAPL", "call": "critic", "iteration": 1, "parsed": {"verdict": "x"}, "attempts": []},
+            ]
+        },
+        "model-b": {
+            "rounds": [
+                _writer_round("AAPL", 1, memo),
+                _writer_round("AAPL", 2, memo),
+                _writer_round("GME", 1, memo),
+                _writer_round("GME", 2, None),  # writer failed — no memo to judge
+            ]
+        },
+    }
+
+
+class TestPairWriterOutputs:
+    def test_pairs_by_symbol_and_iteration(self) -> None:
+        pairs = pair_writer_outputs(_results_payload(), "model-a", "model-b")
+        keys = [(p["symbol"], p["iteration"]) for p in pairs]
+        assert keys == [("AAPL", 1), ("AAPL", 2), ("GME", 1)]  # GME it2 dropped (b failed)
+
+    def test_missing_model_raises(self) -> None:
+        with pytest.raises(SystemExit, match="not present"):
+            pair_writer_outputs(_results_payload(), "model-a", "model-nope")
+
+
+class TestAdjudicatePair:
+    def test_agreement_yields_model_winner(self) -> None:
+        # Pass 1 saw (a, b) and picked A → model a. Pass 2 saw (b, a) and
+        # picked B → also model a. Agreement.
+        verdict = adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)
+        assert verdict.winner == "a"
+        assert verdict.agreed is True
+        assert verdict.error is None
+
+    def test_positional_disagreement_is_tie(self) -> None:
+        # Both passes picked positional A = whichever memo came FIRST →
+        # pure position bias → tie, not a win.
+        verdict = adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="A"), symbol="AAPL", iteration=1)
+        assert verdict.winner == "tie"
+        assert verdict.agreed is False
+
+    def test_scores_average_across_orderings(self) -> None:
+        first = _judge_output(winner="tie")
+        swapped = _judge_output(winner="tie")
+        first["scores_a"] = {dim: 5 for dim in JUDGE_DIMENSIONS}  # a graded as A in pass 1
+        first["scores_b"] = {dim: 1 for dim in JUDGE_DIMENSIONS}
+        swapped["scores_a"] = {dim: 1 for dim in JUDGE_DIMENSIONS}  # b graded as A in pass 2
+        swapped["scores_b"] = {dim: 3 for dim in JUDGE_DIMENSIONS}  # a graded as B in pass 2
+        verdict = adjudicate_pair(first, swapped, symbol="GME", iteration=1)
+        assert verdict.scores_a == {dim: 4.0 for dim in JUDGE_DIMENSIONS}  # (5 + 3) / 2
+        assert verdict.scores_b == {dim: 1.0 for dim in JUDGE_DIMENSIONS}  # (1 + 1) / 2
+
+    def test_failed_call_yields_error_verdict(self) -> None:
+        verdict = adjudicate_pair(None, _judge_output(), symbol="HD", iteration=1, error="ctx_overflow: ...")
+        assert verdict.winner == "tie"
+        assert verdict.scores_a is None
+        assert verdict.error == "ctx_overflow: ..."
+
+
+class TestAggregateJudgements:
+    def test_counts_and_means(self) -> None:
+        v_win_a = adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)
+        v_tie = adjudicate_pair(_judge_output(winner="tie"), _judge_output(winner="tie"), symbol="GME", iteration=1)
+        v_failed = adjudicate_pair(None, None, symbol="HD", iteration=1, error="boom")
+        report = aggregate_judgements([v_win_a, v_tie, v_failed])
+        assert report["pairs"] == 3
+        assert report["judged"] == 2
+        assert report["failed"] == 1
+        assert report["wins_a"] == 1
+        assert report["wins_b"] == 0
+        assert report["ties"] == 2  # the tie verdict + the failed pair
+        assert report["order_agreement_rate"] == 1.0
+        assert report["mean_scores_a"]["numeric_grounding"] == 4.0
+
+    def test_empty_verdicts(self) -> None:
+        report = aggregate_judgements([])
+        assert report["judged"] == 0
+        assert report["order_agreement_rate"] is None
+        assert report["mean_scores_a"] == {}
+
+
+class TestJudgeCall:
+    def test_ctx_overflow_fails_never_grades(self) -> None:
+        # prompt_tokens + judge max_tokens over the limit → the server
+        # silently truncated the prompt; grading it would be dishonest.
+        big = LLMCompletion(
+            text=json.dumps(_judge_output()),
+            finish_reason="stop",
+            model="j",
+            prompt_tokens=16000,
+            completion_tokens=200,
+        )
+        parsed, error = _judge_call(
+            FakeClient([big]),  # type: ignore[arg-type]
+            context_prompt="ctx",
+            memo_first="a",
+            memo_second="b",
+            ctx_limit=16384,
+        )
+        assert parsed is None
+        assert error is not None and error.startswith("ctx_overflow")
+
+    def test_retry_recovers_bad_json(self) -> None:
+        client = FakeClient([_completion("not json {"), _completion(json.dumps(_judge_output()))])
+        parsed, error = _judge_call(
+            client,  # type: ignore[arg-type]
+            context_prompt="ctx",
+            memo_first="a",
+            memo_second="b",
+            ctx_limit=16384,
+        )
+        assert error is None
+        assert parsed is not None and parsed["winner"] == "A"
+        assert client.calls == 2
+
+    def test_transport_error_no_retry(self) -> None:
+        client = FakeClient([RuntimeError("connection refused")])
+        parsed, error = _judge_call(
+            client,  # type: ignore[arg-type]
+            context_prompt="ctx",
+            memo_first="a",
+            memo_second="b",
+            ctx_limit=16384,
+        )
+        assert parsed is None
+        assert error is not None and error.startswith("transport")
+        assert client.calls == 1

@@ -50,7 +50,7 @@ from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
-from app.services.llm_client import LLMProviderNotConfigured, make_llm_client
+from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients
 from app.services.market_data import refresh_market_data
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
@@ -551,7 +551,7 @@ def _llm_provider_resolvable(conn: psycopg.Connection[Any]) -> PrerequisiteResul
     closed, PR-A contract).
     """
     try:
-        make_llm_client(conn)
+        make_llm_clients(conn)
     except LLMProviderNotConfigured as exc:
         # Marker-wrapped so the scheduled-fire path's record_job_skip row
         # classifies as PREREQ_SKIP (fresh_by_audit counts ONLY marked
@@ -3002,12 +3002,12 @@ def daily_financial_facts() -> None:
             # context update) as long as there were successful
             # non-seed CIKs.
             conn.commit()
-            # #1919 PR-B — the cascade client now comes from the
-            # ``make_llm_client`` chokepoint (config-resolved, local-first
+            # #1919 PR-B — the cascade clients come from the
+            # ``make_llm_clients`` chokepoint (config-resolved, local-first
             # default) instead of a hardcoded Anthropic construction.
             cascade_failures: list[tuple[int, str]]
             try:
-                cascade_client = make_llm_client(conn)
+                cascade_clients = make_llm_clients(conn)
             except LLMProviderNotConfigured as exc:
                 logger.info(
                     "daily_financial_facts: %s — skipping cascade refresh (facts + normalization still committed)",
@@ -3026,7 +3026,7 @@ def daily_financial_facts() -> None:
                 # ``cascade_refresh`` returns the empty-noop CascadeOutcome
                 # when both the retry queue and instrument_ids are empty.
                 changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
-                cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
+                cascade_outcome = cascade_refresh(conn, cascade_clients, changed_ids)
                 # Persist any cascade-side writes before the
                 # failure-surfacing raise below. compute_rankings
                 # writes score rows inside a
@@ -3202,7 +3202,7 @@ def thesis_refresh() -> None:
     bounded bootstrap drain — a 25-name first load drains in <1 day
     with no separate bulk job.
 
-    Gate: configured LLM provider resolvable via ``make_llm_client`` —
+    Gate: configured LLM provider resolvable via ``make_llm_clients`` —
     no longer ANTHROPIC_API_KEY-gated; the local-first default needs no
     key. Each instrument is processed independently — a failure on one
     does not abort the rest of the batch, and every attempt lands on a
@@ -3217,11 +3217,11 @@ def thesis_refresh() -> None:
     # marker-wrapped for the scheduled path — _record_prereq_skip wraps
     # again). A raised RuntimeConfigCorrupt propagates — fail closed,
     # never a silent skip.
-    # The guard's client is reused for the whole run — providers hold no
-    # connection after construction (make_llm_client only reads config).
+    # The guard's clients are reused for the whole run — providers hold no
+    # connection after construction (make_llm_clients only reads config).
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         try:
-            client = make_llm_client(conn)
+            clients = make_llm_clients(conn)
         except LLMProviderNotConfigured as exc:
             logger.error("thesis_refresh: %s, skipping", exc)
             _record_prereq_skip(JOB_THESIS_REFRESH, str(exc))
@@ -3244,13 +3244,14 @@ def thesis_refresh() -> None:
         # No silent caps: everything past the batch bound is counted in
         # the log + note and picked up on the next hourly fire.
         logger.info(
-            "thesis_refresh: candidates=%d stale=%d batch=%d deferred_to_next_run=%d provider=%s model=%s",
+            "thesis_refresh: candidates=%d stale=%d batch=%d deferred_to_next_run=%d provider=%s writer=%s critic=%s",
             len(candidates),
             len(stale),
             len(batch),
             deferred,
-            client.provider_name,
-            client.model,
+            clients.writer.provider_name,
+            clients.writer.model,
+            clients.critic.model,
         )
 
         generated = 0
@@ -3272,7 +3273,7 @@ def thesis_refresh() -> None:
                             generate_thesis(
                                 instrument_id=item.instrument_id,
                                 conn=conn,
-                                client=client,
+                                clients=clients,
                                 trigger="scheduled",
                             )
                             # Increment BEFORE demote so a demote

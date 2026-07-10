@@ -1,6 +1,10 @@
 /**
- * LLM provider knobs (#1919) — runtime_config llm_provider / llm_base_url /
- * llm_model, edited via PATCH /config.
+ * LLM provider knobs (#1919, split #1995) — runtime_config llm_provider /
+ * llm_base_url / llm_model_writer / llm_model_critic, edited via PATCH /config.
+ *
+ * Writer and critic are separate model knobs (#1995): the bulk memo writer
+ * and the adversarial critic may run different local models. Provider and
+ * base URL stay shared.
  *
  * Local-first: the default is an operator-local OpenAI-compatible endpoint
  * (Ollama). API keys are env-only (LLM_API_KEY / ANTHROPIC_API_KEY) and
@@ -24,7 +28,8 @@ export function LlmProviderSection(): JSX.Element {
   // means "not edited", so a refetch cleanly repopulates from the server.
   const [provider, setProvider] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState<string | null>(null);
-  const [model, setModel] = useState<string | null>(null);
+  const [writerModel, setWriterModel] = useState<string | null>(null);
+  const [criticModel, setCriticModel] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -33,9 +38,11 @@ export function LlmProviderSection(): JSX.Element {
   const runtime = config.data?.runtime ?? null;
   const displayedProvider = provider ?? runtime?.llm_provider ?? "openai_compatible";
   const displayedBaseUrl = baseUrl ?? runtime?.llm_base_url ?? "";
-  const displayedModel = model ?? runtime?.llm_model ?? "";
+  const displayedWriterModel = writerModel ?? runtime?.llm_model_writer ?? "";
+  const displayedCriticModel = criticModel ?? runtime?.llm_model_critic ?? "";
 
-  const nothingChanged = provider === null && baseUrl === null && model === null;
+  const nothingChanged =
+    provider === null && baseUrl === null && writerModel === null && criticModel === null;
   const reasonMissing = reason.trim().length === 0;
 
   async function handleSave(e: FormEvent) {
@@ -51,11 +58,13 @@ export function LlmProviderSection(): JSX.Element {
         reason,
         llm_provider: provider ?? undefined,
         llm_base_url: baseUrl ?? undefined,
-        llm_model: model ?? undefined,
+        llm_model_writer: writerModel ?? undefined,
+        llm_model_critic: criticModel ?? undefined,
       });
       setProvider(null);
       setBaseUrl(null);
-      setModel(null);
+      setWriterModel(null);
+      setCriticModel(null);
       setReason("");
       setSuccess(true);
       config.refetch();
@@ -115,11 +124,27 @@ export function LlmProviderSection(): JSX.Element {
               </label>
 
               <label className="block">
-                <span className="text-xs text-slate-500">Model</span>
+                <span className="text-xs text-slate-500">Writer model</span>
                 <input
                   type="text"
-                  value={displayedModel}
-                  onChange={(e) => setModel(e.target.value === runtime.llm_model ? null : e.target.value)}
+                  value={displayedWriterModel}
+                  onChange={(e) =>
+                    setWriterModel(e.target.value === runtime.llm_model_writer ? null : e.target.value)
+                  }
+                  disabled={saving}
+                  placeholder="qwen3:14b"
+                  className="mt-1 block w-56 rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-xs text-slate-500">Critic model</span>
+                <input
+                  type="text"
+                  value={displayedCriticModel}
+                  onChange={(e) =>
+                    setCriticModel(e.target.value === runtime.llm_model_critic ? null : e.target.value)
+                  }
                   disabled={saving}
                   placeholder="qwen3:14b"
                   className="mt-1 block w-56 rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"

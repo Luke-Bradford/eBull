@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.theses import get_llm_client
+from app.api.theses import get_llm_clients
 from app.main import app
 
 
@@ -24,14 +24,16 @@ def client() -> TestClient:
 @pytest.fixture(autouse=True)
 def cleanup() -> Iterator[None]:
     yield
-    app.dependency_overrides.pop(get_llm_client, None)
+    app.dependency_overrides.pop(get_llm_clients, None)
 
 
 def _install_llm_stub() -> MagicMock:
     stub = MagicMock()
-    stub.provider_name = "openai_compatible"
-    stub.model = "test-model"
-    app.dependency_overrides[get_llm_client] = lambda: stub
+    stub.writer.provider_name = "openai_compatible"
+    stub.writer.model = "test-model"
+    stub.critic.provider_name = "openai_compatible"
+    stub.critic.model = "test-model"
+    app.dependency_overrides[get_llm_clients] = lambda: stub
     return stub
 
 
@@ -91,7 +93,7 @@ def _thesis_row(**overrides) -> dict:
     return base
 
 
-def test_get_llm_client_maps_unconfigured_provider_to_503() -> None:
+def test_get_llm_clients_maps_unconfigured_provider_to_503() -> None:
     """The dependency maps LLMProviderNotConfigured (anthropic provider
     configured without ANTHROPIC_API_KEY) to a fixed-string 503."""
     from fastapi import HTTPException
@@ -100,25 +102,25 @@ def test_get_llm_client_maps_unconfigured_provider_to_503() -> None:
 
     conn = MagicMock()
     with (
-        patch("app.api.theses.make_llm_client", side_effect=LLMProviderNotConfigured("no key")),
+        patch("app.api.theses.make_llm_clients", side_effect=LLMProviderNotConfigured("no key")),
         pytest.raises(HTTPException) as exc_info,
     ):
-        get_llm_client(conn)
+        get_llm_clients(conn)
     assert exc_info.value.status_code == 503
     assert "LLM provider not configured" in str(exc_info.value.detail)
 
 
-def test_get_llm_client_maps_corrupt_config_to_503() -> None:
+def test_get_llm_clients_maps_corrupt_config_to_503() -> None:
     from fastapi import HTTPException
 
     from app.services.runtime_config import RuntimeConfigCorrupt
 
     conn = MagicMock()
     with (
-        patch("app.api.theses.make_llm_client", side_effect=RuntimeConfigCorrupt("row missing")),
+        patch("app.api.theses.make_llm_clients", side_effect=RuntimeConfigCorrupt("row missing")),
         pytest.raises(HTTPException) as exc_info,
     ):
-        get_llm_client(conn)
+        get_llm_clients(conn)
     assert exc_info.value.status_code == 503
 
 

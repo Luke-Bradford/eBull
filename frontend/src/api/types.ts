@@ -27,7 +27,8 @@ export interface RuntimeFlagsResponse {
   display_currency: string;
   llm_provider: string;
   llm_base_url: string;
-  llm_model: string;
+  llm_model_writer: string;
+  llm_model_critic: string;
   updated_at: string;
   updated_by: string;
   reason: string;
@@ -44,7 +45,8 @@ export interface ConfigPatchRequest {
   display_currency?: string;
   llm_provider?: string;
   llm_base_url?: string;
-  llm_model?: string;
+  llm_model_writer?: string;
+  llm_model_critic?: string;
 }
 
 export interface KillSwitchResponse {

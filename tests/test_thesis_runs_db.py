@@ -35,7 +35,9 @@ def _seed_instrument(conn, instrument_id: int = 9001) -> int:
 class TestThesisRunsLifecycle:
     def test_insert_running_then_finish_ok(self, conn) -> None:
         iid = _seed_instrument(conn)
-        run_id = _insert_thesis_run(conn, iid, "manual", provider="openai_compatible", model="qwen3:14b")
+        run_id = _insert_thesis_run(
+            conn, iid, "manual", provider="openai_compatible", model="qwen3:14b", critic_model="qwen3:14b"
+        )
         conn.commit()
 
         row = conn.execute(
@@ -65,7 +67,9 @@ class TestThesisRunsLifecycle:
 
     def test_record_failure_writes_error(self, conn) -> None:
         iid = _seed_instrument(conn, 9002)
-        run_id = _insert_thesis_run(conn, iid, "scheduled", provider="openai_compatible", model="qwen3:14b")
+        run_id = _insert_thesis_run(
+            conn, iid, "scheduled", provider="openai_compatible", model="qwen3:14b", critic_model="qwen3:14b"
+        )
         conn.commit()
 
         _record_thesis_run_failure(conn, run_id, ValueError("Writer: unparseable JSON (finish_reason=length)"))
@@ -102,7 +106,8 @@ class TestRuntimeConfigLlmKnobs:
         cfg = get_runtime_config(conn)
         assert cfg.llm_provider == "openai_compatible"
         assert cfg.llm_base_url == "http://localhost:11434/v1"
-        assert cfg.llm_model == "qwen3:14b"
+        assert cfg.llm_model_writer == "qwen3:14b"
+        assert cfg.llm_model_critic == "qwen3:14b"
 
     def test_update_writes_audit_rows_per_changed_field(self, conn) -> None:
         updated = update_runtime_config(
@@ -110,20 +115,23 @@ class TestRuntimeConfigLlmKnobs:
             updated_by="test",
             reason="flip to anthropic",
             llm_provider="anthropic",
-            llm_model="claude-sonnet-4-6",
+            llm_model_writer="claude-sonnet-4-6",
         )
         assert updated.llm_provider == "anthropic"
-        assert updated.llm_model == "claude-sonnet-4-6"
+        assert updated.llm_model_writer == "claude-sonnet-4-6"
+        assert updated.llm_model_critic == "qwen3:14b"  # untouched (#1995 split)
         assert updated.llm_base_url == "http://localhost:11434/v1"  # untouched
 
         rows = conn.execute(
             """
             SELECT field, old_value, new_value FROM runtime_config_audit
-            WHERE field IN ('llm_provider', 'llm_base_url', 'llm_model')
+            WHERE field IN ('llm_provider', 'llm_base_url', 'llm_model_writer', 'llm_model_critic')
             ORDER BY field
             """
         ).fetchall()
-        assert ("llm_model", "qwen3:14b", "claude-sonnet-4-6") in rows
+        assert ("llm_model_writer", "qwen3:14b", "claude-sonnet-4-6") in rows
+        # critic untouched → no audit row for it (split knobs audit independently).
+        assert not [r for r in rows if r[0] == "llm_model_critic"]
         assert ("llm_provider", "openai_compatible", "anthropic") in rows
         # base_url unchanged → no audit row for it.
         assert not [r for r in rows if r[0] == "llm_base_url"]
@@ -134,11 +142,14 @@ class TestRuntimeConfigLlmKnobs:
         conn.execute(
             """
             UPDATE runtime_config
-            SET llm_provider = 'openai_compatible', llm_model = 'qwen3:14b'
+            SET llm_provider = 'openai_compatible', llm_model_writer = 'qwen3:14b'
             WHERE id = TRUE
             """
         )
-        conn.execute("DELETE FROM runtime_config_audit WHERE field IN ('llm_provider', 'llm_base_url', 'llm_model')")
+        conn.execute(
+            "DELETE FROM runtime_config_audit"
+            " WHERE field IN ('llm_provider', 'llm_base_url', 'llm_model_writer', 'llm_model_critic')"
+        )
         conn.commit()
 
     def test_provider_column_check_rejects_unknown(self, conn) -> None:
@@ -152,4 +163,4 @@ class TestRuntimeConfigLlmKnobs:
         with pytest.raises(ValueError, match="llm_base_url must start with"):
             update_runtime_config(conn, updated_by="t", reason="r", llm_base_url="localhost:11434")
         with pytest.raises(ValueError, match="non-empty"):
-            update_runtime_config(conn, updated_by="t", reason="r", llm_model="   ")
+            update_runtime_config(conn, updated_by="t", reason="r", llm_model_writer="   ")

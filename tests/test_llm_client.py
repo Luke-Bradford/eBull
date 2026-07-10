@@ -1,8 +1,8 @@
-"""Unit tests for the thesis-scoped LLM provider layer (#1919).
+"""Unit tests for the thesis-scoped LLM provider layer (#1919, split #1995).
 
 No network, no DB: respx intercepts httpx for the OpenAI-compatible
 provider; the Anthropic provider wraps a MagicMock SDK client;
-make_llm_client resolves against a mocked runtime_config connection.
+make_llm_clients resolves against a mocked runtime_config connection.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from app.services.llm_client import (
     AnthropicProvider,
     LLMProviderNotConfigured,
     OpenAICompatProvider,
-    make_llm_client,
+    make_llm_clients,
     normalize_completion_text,
     strip_code_fence,
     strip_think_block,
@@ -237,11 +237,17 @@ class TestAnthropicProvider:
 
 
 # ---------------------------------------------------------------------------
-# make_llm_client — config-driven provider resolution
+# make_llm_clients — config-driven provider resolution (#1995 split knobs)
 # ---------------------------------------------------------------------------
 
 
-def _config_conn(*, provider: str, base_url: str = _BASE_URL, model: str = "qwen3:14b") -> MagicMock:
+def _config_conn(
+    *,
+    provider: str,
+    base_url: str = _BASE_URL,
+    writer_model: str = "qwen3:14b",
+    critic_model: str = "qwen3:14b",
+) -> MagicMock:
     """Mock conn whose runtime_config SELECT returns the given knobs."""
     conn = MagicMock()
     cursor = MagicMock()
@@ -253,7 +259,8 @@ def _config_conn(*, provider: str, base_url: str = _BASE_URL, model: str = "qwen
         "display_currency": "GBP",
         "llm_provider": provider,
         "llm_base_url": base_url,
-        "llm_model": model,
+        "llm_model_writer": writer_model,
+        "llm_model_critic": critic_model,
         "updated_at": MagicMock(),
         "updated_by": "test",
         "reason": "test",
@@ -262,27 +269,46 @@ def _config_conn(*, provider: str, base_url: str = _BASE_URL, model: str = "qwen
     return conn
 
 
-class TestMakeLLMClient:
+class TestMakeLLMClients:
     def test_openai_compatible_default_path(self) -> None:
-        client = make_llm_client(_config_conn(provider="openai_compatible"))
-        assert isinstance(client, OpenAICompatProvider)
-        assert client.provider_name == "openai_compatible"
-        assert client.model == "qwen3:14b"
+        clients = make_llm_clients(_config_conn(provider="openai_compatible"))
+        assert isinstance(clients.writer, OpenAICompatProvider)
+        assert isinstance(clients.critic, OpenAICompatProvider)
+        assert clients.writer.provider_name == "openai_compatible"
+        assert clients.writer.model == "qwen3:14b"
+        assert clients.critic.model == "qwen3:14b"
+
+    def test_split_models_resolve_per_role(self) -> None:
+        clients = make_llm_clients(
+            _config_conn(
+                provider="openai_compatible",
+                writer_model="deepseek-r1:14b",
+                critic_model="qwen3:14b",
+            )
+        )
+        assert clients.writer.model == "deepseek-r1:14b"
+        assert clients.critic.model == "qwen3:14b"
 
     def test_anthropic_path_requires_key(self) -> None:
-        conn = _config_conn(provider="anthropic", model="claude-sonnet-4-6")
+        conn = _config_conn(provider="anthropic", writer_model="claude-sonnet-4-6")
         with patch("app.services.llm_client.settings") as settings_mock:
             settings_mock.anthropic_api_key = None
             with pytest.raises(LLMProviderNotConfigured):
-                make_llm_client(conn)
+                make_llm_clients(conn)
 
     def test_anthropic_path_with_key(self) -> None:
-        conn = _config_conn(provider="anthropic", model="claude-sonnet-4-6")
+        conn = _config_conn(
+            provider="anthropic",
+            writer_model="claude-sonnet-4-6",
+            critic_model="claude-haiku-4-5",
+        )
         with patch("app.services.llm_client.settings") as settings_mock:
             settings_mock.anthropic_api_key = "sk-ant-test"
-            client = make_llm_client(conn)
-        assert isinstance(client, AnthropicProvider)
-        assert client.model == "claude-sonnet-4-6"
+            clients = make_llm_clients(conn)
+        assert isinstance(clients.writer, AnthropicProvider)
+        assert isinstance(clients.critic, AnthropicProvider)
+        assert clients.writer.model == "claude-sonnet-4-6"
+        assert clients.critic.model == "claude-haiku-4-5"
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """Unit tests for thesis_refresh (#1919 PR-B).
 
-Mocks psycopg.connect + make_llm_client + generate_thesis +
+Mocks psycopg.connect + make_llm_clients + generate_thesis +
 instrument_lock + demote_to_rerank_needed to prove the scheduler's
 per-instrument loop behaves per spec: acquired → generate + demote,
 not acquired → skip + count; provider-unresolvable → PREREQ_SKIP
@@ -38,7 +38,7 @@ def mocked_env():  # type: ignore[no-untyped-def]
         patch.object(scheduler, "_record_prereq_skip") as prereq_skip,
         patch.object(scheduler, "_thesis_refresh_candidates") as candidates_mock,
         patch.object(scheduler, "find_stale_instruments") as find_stale,
-        patch.object(scheduler, "make_llm_client") as make_client,
+        patch.object(scheduler, "make_llm_clients") as make_client,
         patch.object(scheduler, "psycopg") as psycopg_mod,
         patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "generate_thesis") as gen,
