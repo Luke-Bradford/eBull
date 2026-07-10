@@ -100,10 +100,14 @@ function ThesisBody({ thesis, currentPrice, currency }: BodyProps): JSX.Element 
     thesis.buy_zone_high !== null &&
     ((price as number) < thesis.buy_zone_low || (price as number) > thesis.buy_zone_high);
 
-  // prompt_version "v1" (or unstamped pre-#1919) memos priced targets with
-  // no current price in context — flag them rather than letting stale blind
-  // numbers pass as considered output (#1987/#2000).
-  const blindPricing = thesis.prompt_version !== "v2";
+  // Explicit blind-list: prompt "v1" and unstamped pre-#1919 rows priced
+  // targets with no current price in context (#1987) — flag those, and only
+  // those. Future prompt versions (v3+) inherit the anchor; an allowlist of
+  // "anchored" versions would mis-flag them (review WARNING, PR #2001).
+  const blindPricing =
+    thesis.prompt_version === null ||
+    thesis.prompt_version === undefined ||
+    thesis.prompt_version === "v1";
 
   return (
     <div className="space-y-3 text-sm">

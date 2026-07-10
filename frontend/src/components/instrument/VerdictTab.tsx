@@ -197,6 +197,12 @@ export function VerdictTab({
             {score.explanation}
           </p>
         )}
+        {thesis !== null && new Date(thesis.created_at) > new Date(score.scored_at) && (
+          <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+            The latest thesis (v{thesis.thesis_version}) postdates this score — thesis-fed
+            families (value, confidence) refresh on the next ranking run.
+          </p>
+        )}
       </Section>
 
       {/* 2. Six graded families */}

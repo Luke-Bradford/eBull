@@ -146,6 +146,22 @@ describe("VerdictTab", () => {
     expect(screen.getByText("88%")).toBeInTheDocument();
     // thesis narrative reused
     expect(screen.getByText(/bull case rests on services/i)).toBeInTheDocument();
+    // thesis created_at == scored_at -> no lag hint
+    expect(screen.queryByText(/postdates this score/)).not.toBeInTheDocument();
+  });
+
+  it("flags a thesis newer than the score row (#2000 lag hint)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({}, FULL_IAR),
+    );
+    const fresher = { ...THESIS, created_at: "2026-07-10T12:00:00Z" };
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={fresher} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("0.82")).toBeInTheDocument();
+    expect(screen.getByText(/postdates this score/)).toBeInTheDocument();
   });
 
   it("renders scored-but-no-IAR honestly (pre-#1823 row)", async () => {

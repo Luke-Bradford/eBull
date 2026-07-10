@@ -107,6 +107,13 @@ describe("ThesisPane", () => {
     expect(screen.getByText("pre-anchor memo")).toBeInTheDocument();
   });
 
+  it("does NOT flag future prompt versions (v3+) as pre-anchor", () => {
+    // Blind-list is explicit {null, v1}; later versions inherit the anchor.
+    const thesis = { ...FIXTURE, prompt_version: "v3" } as unknown as ThesisDetail;
+    render(<ThesisPane thesis={thesis} errored={false} />);
+    expect(screen.queryByText("pre-anchor memo")).not.toBeInTheDocument();
+  });
+
   it("shows current price with currency and implied upside to base", () => {
     render(
       <ThesisPane thesis={FIXTURE} errored={false} currentPrice="16.00" currency="USD" />,

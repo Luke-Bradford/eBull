@@ -1,10 +1,12 @@
 /**
  * Minimal renderer for the thesis writer's prompt-constrained markdown
  * subset (#2000): #/##/### headings, `- `/`* ` bullet lists, **bold**
- * inline, blank-line paragraphs. Deliberately in-house — the memo format
- * is our own prompt contract, not arbitrary markdown, so a dependency
- * (and its sanitisation surface) buys nothing. Everything renders as
- * text nodes; no HTML injection path exists.
+ * inline, blank-line paragraphs. The parser deliberately tolerates ####
+ * (one level beyond the prompt contract) — a model that over-nests should
+ * render a heading, not a literal "####" line. Deliberately in-house —
+ * the memo format is our own prompt contract, not arbitrary markdown, so
+ * a dependency (and its sanitisation surface) buys nothing. Everything
+ * renders as text nodes; no HTML injection path exists.
  */
 
 const BOLD_SPLIT = /(\*\*[^*]+\*\*)/g;
