@@ -175,11 +175,20 @@ Use this constrained set in application code:
 - `monthly` = 30 days
 
 ### Thesis prompt budget
-Use capped context in v1:
+Use capped context in v2 (#1987):
 - latest 1 prior thesis
 - latest 3 filing events
 - latest snapshot + up to 4 prior fundamental snapshots
 - latest 10 news items from the last 30 days
+- risk-evidence block (#1632): instrument_risk_metrics_current scalars, statused, as-of-stamped
+- price anchor (#1987): latest price_daily close (native currency) + 52w range + persisted returns
+- valuation block (#1987): instrument_valuation row when present; structurally-absent otherwise
+  (quotes-gated view — absence is statused, not an error)
+- analytics evidence (#1987): latest scores.analytics_json, shaped compact, scored_at-stamped
+- TA state (#1987): latest price_daily indicator columns + derived sma-cross/price-vs-200d signals
+
+All blocks follow the #1632 evidence discipline: statuses verbatim, as-of stamps, missing data
+stays missing. Context-shape changes bump `_PROMPT_VERSION`.
 
 ### Critic invocation
 - run the critic call for every thesis generation in v1
