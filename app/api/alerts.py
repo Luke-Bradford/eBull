@@ -55,6 +55,7 @@ from app.db import get_conn
 from app.db.snapshot import snapshot_read
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.scoring import _DEFAULT_MODEL_VERSION
+from app.services.thesis import find_stale_instruments
 
 router = APIRouter(
     prefix="/alerts",
@@ -169,6 +170,17 @@ class RankMovesResponse(BaseModel):
 
 class RankMovesMarkSeenRequest(BaseModel):
     seen_through_rank_event_id: int = Field(gt=0)
+
+
+class ThesisStalenessItem(BaseModel):
+    instrument_id: int
+    symbol: str
+    reason: str  # find_stale_instruments StaleReason (open string, #1808)
+    latest_thesis_at: datetime | None  # None = no thesis at all
+
+
+class ThesisStalenessResponse(BaseModel):
+    items: list[ThesisStalenessItem]
 
 
 def _resolve_operator(conn: psycopg.Connection[object]) -> UUID:
@@ -671,6 +683,72 @@ def mark_rank_moves_seen(
             },
         )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# #1902 (folding in #1922 item 3) — thesis-staleness snapshot feed
+#
+#   GET /alerts/thesis-staleness
+#
+# Deliberately NOT a cursor feed: staleness is a STANDING CONDITION, not an
+# event. There is no BIGSERIAL to cursor on and "mark seen" has no meaning —
+# the card clears when the thesis regenerates (thesis_refresh drains it at
+# ≤5/hour, or per-row force from the library). The FE renders it as one
+# grouped card outside the unseen/dismiss accounting. Scope = HELD
+# instruments only (current_units > 0): the operator's money is where a
+# stale thesis is an actionable gap; the full queue lives at /theses?stale.
+# Staleness truth = find_stale_instruments (single source, #1902).
+# ---------------------------------------------------------------------------
+
+
+@router.get("/thesis-staleness", response_model=ThesisStalenessResponse)
+def get_thesis_staleness(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ThesisStalenessResponse:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT p.instrument_id
+            FROM positions p
+            WHERE p.current_units > 0
+            """
+        )
+        held_ids = [int(r["instrument_id"]) for r in cur.fetchall()]  # type: ignore[arg-type]
+
+    if not held_ids:
+        return ThesisStalenessResponse(items=[])
+
+    stale = find_stale_instruments(conn, tier=None, instrument_ids=held_ids)
+    if not stale:
+        return ThesisStalenessResponse(items=[])
+
+    stale_ids = [s.instrument_id for s in stale]
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(created_at) AS latest_thesis_at
+            FROM theses
+            WHERE instrument_id = ANY(%(ids)s)
+            GROUP BY instrument_id
+            """,
+            {"ids": stale_ids},
+        )
+        latest_at = {
+            int(r["instrument_id"]): r["latest_thesis_at"]  # type: ignore[arg-type]
+            for r in cur.fetchall()
+        }
+
+    return ThesisStalenessResponse(
+        items=[
+            ThesisStalenessItem(
+                instrument_id=s.instrument_id,
+                symbol=s.symbol,
+                reason=s.reason,
+                latest_thesis_at=latest_at.get(s.instrument_id),
+            )
+            for s in stale
+        ]
+    )
 
 
 @router.post("/rank-moves/dismiss-all", status_code=status.HTTP_204_NO_CONTENT)

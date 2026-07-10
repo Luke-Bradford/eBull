@@ -21,6 +21,7 @@ import type {
   GuardRejection,
   PositionAlert,
   RankMove,
+  ThesisStalenessItem,
 } from "@/api/types";
 
 export type Tier = "actionable" | "informational" | "housekeeping";
@@ -228,11 +229,28 @@ export interface RankMoveItem {
   unseen: boolean;
 }
 
+/**
+ * Thesis-staleness (#1902) — ONE grouped card for all held instruments whose
+ * thesis is stale. Standing condition, not an event: there is no cursor, no
+ * unseen highlight and no dismiss — the card clears when theses regenerate
+ * (thesis_refresh drains at ≤5/hour, or per-row force from /theses).
+ */
+export interface ThesisStaleItem {
+  kind: "thesisStale";
+  tier: Tier;
+  id: string;
+  symbols: string[];
+  count: number;
+  sortKey: number;
+  unseen: boolean; // always false — excluded from unseen/dismiss accounting
+}
+
 export type AlertItem =
   | GuardGroupItem
   | PositionItem
   | CoverageGroupItem
-  | RankMoveItem;
+  | RankMoveItem
+  | ThesisStaleItem;
 
 function uniqueSorted(values: (string | null)[]): string[] {
   return Array.from(new Set(values.filter((v): v is string => !!v))).sort();
@@ -248,6 +266,7 @@ export function buildAlertModel(
   drops: CoverageStatusDrop[],
   moves: RankMove[],
   cursors: Cursors,
+  staleTheses: ThesisStalenessItem[] = [],
 ): AlertItem[] {
   const items: AlertItem[] = [];
 
@@ -348,6 +367,22 @@ export function buildAlertModel(
       sortKey: Date.parse(latest.scored_at),
       maxId,
       unseen: cursors.rank === null || maxId > cursors.rank,
+    });
+  }
+
+  // Thesis staleness (#1902) → ONE card for all stale held instruments
+  // (informational tier — research hygiene, not an immediate trade action).
+  // sortKey 0: with no event timestamp of its own, a standing condition
+  // sorts below fresh events within its tier rather than pinning to top.
+  if (staleTheses.length > 0) {
+    items.push({
+      kind: "thesisStale",
+      tier: "informational",
+      id: "thesisStale",
+      symbols: uniqueSorted(staleTheses.map((t) => t.symbol)),
+      count: staleTheses.length,
+      sortKey: 0,
+      unseen: false,
     });
   }
 

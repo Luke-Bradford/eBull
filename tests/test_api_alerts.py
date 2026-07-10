@@ -1915,3 +1915,49 @@ def test_rank_moves_get_returns_503_when_no_operator(client: TestClient) -> None
         _install_conn()
         resp = client.get("/alerts/rank-moves")
     assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# #1902 — thesis-staleness snapshot feed (standing condition, no cursor)
+# ---------------------------------------------------------------------------
+
+
+def test_thesis_staleness_empty_when_nothing_held(client: TestClient) -> None:
+    _install_conn(fetchall_returns=[])
+    resp = client.get("/alerts/thesis-staleness")
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}
+
+
+def test_thesis_staleness_reports_stale_held_instrument(client: TestClient) -> None:
+    cur = _install_conn()
+    # cursor fetchalls in call order: held ids, then latest-thesis timestamps.
+    stale_at = datetime(2026, 4, 1, tzinfo=UTC)
+    cur.fetchall.side_effect = [
+        [{"instrument_id": 5}],
+        [{"instrument_id": 5, "latest_thesis_at": stale_at}],
+    ]
+    # find_stale_instruments reads via conn.execute(...).fetchall() — a
+    # monthly cadence + past thesis timestamp is deterministically stale.
+    conn = cur._parent_conn
+    conn.execute.return_value.fetchall.return_value = [
+        (5, "GME", "monthly", stale_at, None, None),
+    ]
+    resp = client.get("/alerts/thesis-staleness")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["instrument_id"] == 5
+    assert items[0]["symbol"] == "GME"
+    assert items[0]["reason"] == "stale"
+    assert items[0]["latest_thesis_at"] is not None
+
+
+def test_thesis_staleness_empty_when_held_theses_fresh(client: TestClient) -> None:
+    cur = _install_conn()
+    cur.fetchall.side_effect = [[{"instrument_id": 5}]]
+    conn = cur._parent_conn
+    conn.execute.return_value.fetchall.return_value = []
+    resp = client.get("/alerts/thesis-staleness")
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}

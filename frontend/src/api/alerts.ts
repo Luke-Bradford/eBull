@@ -4,6 +4,7 @@ import type {
   GuardRejectionsResponse,
   PositionAlertsResponse,
   RankMovesResponse,
+  ThesisStalenessResponse,
 } from "@/api/types";
 
 /**
@@ -100,4 +101,12 @@ export function markRankMovesSeen(
 
 export function dismissAllRankMoves(): Promise<void> {
   return apiFetch<void>("/alerts/rank-moves/dismiss-all", { method: "POST" });
+}
+
+// --- #1902 thesis-staleness snapshot ----------------------------------------
+// Standing condition, no cursor endpoints — clears when the thesis
+// regenerates, not when acknowledged.
+
+export function fetchThesisStaleness(): Promise<ThesisStalenessResponse> {
+  return apiFetch<ThesisStalenessResponse>("/alerts/thesis-staleness");
 }

@@ -381,3 +381,216 @@ class TestGetThesisHistory:
         assert "order by" in sql_lower
         assert "created_at desc" in sql_lower
         assert "thesis_version desc" in sql_lower
+
+
+# ---------------------------------------------------------------------------
+# #1902 — staleness single-source on the latest-thesis GET
+# ---------------------------------------------------------------------------
+
+
+class TestGetLatestThesisStaleness:
+    def test_stale_thesis_carries_server_verdict(self) -> None:
+        """find_stale_instruments (via conn.execute) drives is_stale."""
+        conn = _with_conn([[_make_thesis_row(created_at=_EARLIER)]])
+        # find_stale_instruments reads via conn.execute(...).fetchall() —
+        # monthly cadence + a past created_at is deterministically stale
+        # against the real clock.
+        conn.execute.return_value.fetchall.return_value = [
+            (100, "AAPL", "monthly", _EARLIER, None, None),
+        ]
+        resp = client.get("/theses/100")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_stale"] is True
+        assert body["stale_reason"] == "stale"
+
+    def test_fresh_thesis_reports_not_stale(self) -> None:
+        conn = _with_conn([[_make_thesis_row()]])
+        conn.execute.return_value.fetchall.return_value = []
+        resp = client.get("/theses/100")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_stale"] is False
+        assert body["stale_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# #1902 — theses library: pure helpers + list endpoint
+# ---------------------------------------------------------------------------
+
+
+def _make_library_row(
+    instrument_id: int = 100,
+    symbol: str = "AAPL",
+    stance: str = "buy",
+    is_held: bool = False,
+    critic_json: dict[str, object] | None = None,
+    run_status: str | None = None,
+    created_at: datetime = _NOW,
+) -> dict[str, Any]:
+    return {
+        "thesis_id": instrument_id * 10,
+        "instrument_id": instrument_id,
+        "thesis_version": 1,
+        "thesis_type": "value",
+        "stance": stance,
+        "confidence_score": 0.7,
+        "buy_zone_low": 10.0,
+        "buy_zone_high": 12.0,
+        "critic_json": critic_json,
+        "created_at": created_at,
+        "symbol": symbol,
+        "company_name": f"{symbol} Co",
+        "is_held": is_held,
+        "latest_score": 0.61,
+        "latest_rank": 7,
+        "run_status": run_status,
+        "run_error": None,
+        "run_trigger": None,
+        "run_started_at": None,
+    }
+
+
+class TestFilterAndPageLibrary:
+    """Table tests for the pure filter/pagination helper."""
+
+    def _rows(self) -> list[dict[str, Any]]:
+        from app.api.theses import filter_and_page_library  # noqa: F401
+
+        return [
+            _make_library_row(1, "AAA", stance="buy", is_held=True),
+            _make_library_row(2, "BBB", stance="hold"),
+            _make_library_row(3, "CCC", stance="buy"),
+            _make_library_row(4, "DDD", stance="avoid", is_held=True),
+        ]
+
+    def test_no_filters_returns_all(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {}, held_only=False, stale_only=False, stance=None, offset=0, limit=50
+        )
+        assert total == 4
+        assert [r["instrument_id"] for r in page] == [1, 2, 3, 4]
+
+    def test_stale_reason_merged_onto_every_row(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        _, page = filter_and_page_library(
+            self._rows(),
+            {1: "stale", 3: "event_new_10k"},
+            held_only=False,
+            stale_only=False,
+            stance=None,
+            offset=0,
+            limit=50,
+        )
+        by_id = {r["instrument_id"]: r["stale_reason"] for r in page}
+        assert by_id == {1: "stale", 2: None, 3: "event_new_10k", 4: None}
+
+    def test_held_only_filter(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {}, held_only=True, stale_only=False, stance=None, offset=0, limit=50
+        )
+        assert total == 2
+        assert [r["instrument_id"] for r in page] == [1, 4]
+
+    def test_stale_only_filter(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {2: "stale"}, held_only=False, stale_only=True, stance=None, offset=0, limit=50
+        )
+        assert total == 1
+        assert page[0]["instrument_id"] == 2
+
+    def test_stance_filter(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {}, held_only=False, stale_only=False, stance="buy", offset=0, limit=50
+        )
+        assert total == 2
+        assert [r["instrument_id"] for r in page] == [1, 3]
+
+    def test_filters_compose_and_total_counts_pre_pagination(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        rows = [_make_library_row(i, f"S{i}", stance="buy", is_held=True) for i in range(1, 8)]
+        stale = {i: "stale" for i in range(1, 8)}
+        total, page = filter_and_page_library(
+            rows, stale, held_only=True, stale_only=True, stance="buy", offset=2, limit=3
+        )
+        assert total == 7
+        assert [r["instrument_id"] for r in page] == [3, 4, 5]
+
+    def test_offset_beyond_total_returns_empty_page(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {}, held_only=False, stale_only=False, stance=None, offset=10, limit=5
+        )
+        assert total == 4
+        assert page == []
+
+
+class TestCriticVerdictExtraction:
+    def test_extracts_verdict_string(self) -> None:
+        from app.api.theses import _critic_verdict
+
+        assert _critic_verdict({"verdict": "Strong challenge"}) == "Strong challenge"
+
+    def test_non_dict_and_missing_and_non_string_return_none(self) -> None:
+        from app.api.theses import _critic_verdict
+
+        assert _critic_verdict(None) is None
+        assert _critic_verdict("nope") is None
+        assert _critic_verdict({}) is None
+        assert _critic_verdict({"verdict": 3}) is None
+
+
+class TestListTheses:
+    def test_returns_enriched_items(self) -> None:
+        row = _make_library_row(
+            100,
+            "AAPL",
+            is_held=True,
+            critic_json={"verdict": "Moderate challenge"},
+            run_status="failed",
+        )
+        conn = _with_conn([[row]])
+        conn.execute.return_value.fetchall.return_value = [
+            (100, "AAPL", "monthly", _EARLIER, None, None),
+        ]
+        resp = client.get("/theses")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["symbol"] == "AAPL"
+        assert item["critic_verdict"] == "Moderate challenge"
+        assert item["stale_reason"] == "stale"
+        assert item["is_held"] is True
+        assert item["run_status"] == "failed"
+        assert item["latest_rank"] == 7
+
+    def test_stance_param_validated(self) -> None:
+        resp = client.get("/theses?stance=exit")
+        assert resp.status_code == 422
+
+    def test_empty_library_returns_empty_page(self) -> None:
+        conn = _with_conn([[]])
+        conn.execute.return_value.fetchall.return_value = []
+        resp = client.get("/theses")
+        _cleanup()
+
+        assert resp.status_code == 200
+        assert resp.json() == {"items": [], "total": 0, "offset": 0, "limit": 50}

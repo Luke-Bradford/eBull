@@ -29,6 +29,7 @@ import {
   fetchGuardRejections,
   fetchPositionAlerts,
   fetchRankMoves,
+  fetchThesisStaleness,
   markAlertsSeen,
   markCoverageStatusDropsSeen,
   markPositionAlertsSeen,
@@ -40,6 +41,7 @@ import type {
   PositionAlert,
   PositionAlertsResponse,
   RankMovesResponse,
+  ThesisStalenessResponse,
 } from "@/api/types";
 import { formatRelativeTime } from "@/lib/format";
 
@@ -50,6 +52,7 @@ import {
   type GuardGroupItem,
   type CoverageGroupItem,
   type RankMoveItem,
+  type ThesisStaleItem,
   type Tier,
 } from "./alertModel";
 
@@ -275,6 +278,30 @@ function RankMoveCard({ item }: { item: RankMoveItem }) {
   );
 }
 
+function ThesisStaleCard({ item }: { item: ThesisStaleItem }) {
+  // Standing condition (#1902): no unseen highlight, no dismiss — the card
+  // clears when the theses regenerate. Links to the pre-filtered library.
+  const noun = item.count === 1 ? "instrument has" : "instruments have";
+  return (
+    <CardShell tier={item.tier} unseen={false} label="THESIS">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="font-semibold text-slate-800 dark:text-slate-100">
+          {item.count} held {noun} a stale thesis
+        </span>
+        <SymbolSummary symbols={item.symbols} count={item.count} />
+      </div>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <Link
+          to="/theses?held=true&stale=true"
+          className="text-xs font-medium text-sky-600 dark:text-sky-400 underline hover:text-sky-800 dark:hover:text-sky-300"
+        >
+          Review in Theses
+        </Link>
+      </div>
+    </CardShell>
+  );
+}
+
 function ItemView({ item }: { item: AlertItem }) {
   switch (item.kind) {
     case "guardGroup":
@@ -285,6 +312,8 @@ function ItemView({ item }: { item: AlertItem }) {
       return <CoverageGroupCard item={item} />;
     case "rankMove":
       return <RankMoveCard item={item} />;
+    case "thesisStale":
+      return <ThesisStaleCard item={item} />;
   }
 }
 
@@ -301,6 +330,11 @@ export function AlertsStrip(): JSX.Element | null {
   const [rank, setRank] = useState<FeedState<RankMovesResponse>>({
     status: "loading",
   });
+  const [thesisStale, setThesisStale] = useState<
+    FeedState<ThesisStalenessResponse>
+  >({
+    status: "loading",
+  });
   const [refetchKey, setRefetchKey] = useState(0);
 
   useEffect(() => {
@@ -309,6 +343,7 @@ export function AlertsStrip(): JSX.Element | null {
     setPosition({ status: "loading" });
     setCoverage({ status: "loading" });
     setRank({ status: "loading" });
+    setThesisStale({ status: "loading" });
 
     fetchGuardRejections()
       .then((d) => {
@@ -350,6 +385,16 @@ export function AlertsStrip(): JSX.Element | null {
           setRank({ status: "err" });
         }
       });
+    fetchThesisStaleness()
+      .then((d) => {
+        if (!cancelled) setThesisStale({ status: "ok", data: d });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error("[AlertsStrip] fetchThesisStaleness failed", err);
+          setThesisStale({ status: "err" });
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -362,7 +407,8 @@ export function AlertsStrip(): JSX.Element | null {
     guard.status === "loading" ||
     position.status === "loading" ||
     coverage.status === "loading" ||
-    rank.status === "loading"
+    rank.status === "loading" ||
+    thesisStale.status === "loading"
   ) {
     return null;
   }
@@ -370,7 +416,8 @@ export function AlertsStrip(): JSX.Element | null {
     guard.status === "err" &&
     position.status === "err" &&
     coverage.status === "err" &&
-    rank.status === "err"
+    rank.status === "err" &&
+    thesisStale.status === "err"
   ) {
     return null;
   }
@@ -381,6 +428,10 @@ export function AlertsStrip(): JSX.Element | null {
   const positionAlerts = position.status === "ok" ? position.data.alerts : [];
   const drops = coverage.status === "ok" ? coverage.data.drops : [];
   const moves = rank.status === "ok" ? rank.data.moves : [];
+  // Standing-condition snapshot (#1902): no cursor, so it participates in
+  // the grouped body only — never in unseen/overflow/dismiss accounting.
+  const staleTheses =
+    thesisStale.status === "ok" ? thesisStale.data.items : [];
 
   const cursors: Cursors = {
     guard: guard.status === "ok" ? guard.data.alerts_last_seen_decision_id : null,
@@ -395,7 +446,14 @@ export function AlertsStrip(): JSX.Element | null {
     rank: rank.status === "ok" ? rank.data.alerts_last_seen_rank_event_id : null,
   };
 
-  const items = buildAlertModel(rejections, positionAlerts, drops, moves, cursors);
+  const items = buildAlertModel(
+    rejections,
+    positionAlerts,
+    drops,
+    moves,
+    cursors,
+    staleTheses,
+  );
 
   if (items.length === 0) {
     return null;

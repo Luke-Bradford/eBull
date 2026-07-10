@@ -22,6 +22,7 @@ import { PeersPage } from "@/pages/PeersPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { TaxPage } from "@/pages/TaxPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
+import { ThesesPage } from "@/pages/ThesesPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { AdminJobDetailPage } from "@/pages/AdminJobDetailPage";
 import { ProcessDetailPage } from "@/pages/ProcessDetailPage";
@@ -132,6 +133,7 @@ export function App() {
             element={<PeersPage />}
           />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
+          <Route path="theses" element={<ThesesPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="tax" element={<TaxPage />} />
