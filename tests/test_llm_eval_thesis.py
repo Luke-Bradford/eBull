@@ -422,7 +422,7 @@ class TestAggregateJudgements:
         assert report["failed"] == 1
         assert report["wins_a"] == 1
         assert report["wins_b"] == 0
-        assert report["ties"] == 2  # the tie verdict + the failed pair
+        assert report["ties"] == 1  # real judge ties only — failed pair excluded
         assert report["order_agreement_rate"] == 1.0
         assert report["mean_scores_a"]["numeric_grounding"] == 4.0
 

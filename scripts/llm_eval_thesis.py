@@ -659,7 +659,10 @@ def aggregate_judgements(verdicts: list[JudgeVerdict]) -> dict[str, Any]:
     scored = [v for v in verdicts if v.scores_a is not None and v.scores_b is not None]
     wins_a = sum(1 for v in verdicts if v.winner == "a")
     wins_b = sum(1 for v in verdicts if v.winner == "b")
-    ties = sum(1 for v in verdicts if v.winner == "tie")
+    # Real judge ties only — a failed/ctx-overflowed pair is not evidence
+    # of equivalence and must not inflate the printed tie rate (review
+    # #2004 round 2); it is reported via ``failed`` alone.
+    ties = sum(1 for v in verdicts if v.winner == "tie" and v.error is None)
     failed = sum(1 for v in verdicts if v.error is not None)
     mean_a = (
         {
